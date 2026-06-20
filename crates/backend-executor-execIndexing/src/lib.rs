@@ -155,6 +155,7 @@ pub fn ExecOpenIndices<'mcx>(
         // information required by unique index entries.
         let indisexclusion = index_desc
             .rd_index
+            .as_ref()
             .map(|i| i.indisexclusion)
             .unwrap_or(false);
         if speculative && ii.ii_Unique && !indisexclusion {
@@ -352,8 +353,8 @@ fn insert_one_index<'mcx>(
     let apply_no_dup_err =
         no_dup_err && (arbiter_indexes.is_empty() || arbiter_indexes.contains(&index_relid));
 
-    let indisunique = index_relation.rd_index.map(|i| i.indisunique).unwrap_or(false);
-    let indimmediate = index_relation.rd_index.map(|i| i.indimmediate).unwrap_or(false);
+    let indisunique = index_relation.rd_index.as_ref().map(|i| i.indisunique).unwrap_or(false);
+    let indimmediate = index_relation.rd_index.as_ref().map(|i| i.indimmediate).unwrap_or(false);
 
     // The index AM does the actual insertion plus uniqueness checking.
     let check_unique = if !indisunique {
@@ -527,7 +528,7 @@ fn check_one_index_constraint<'mcx>(
         return Ok(None);
     }
 
-    let indimmediate = index_relation.rd_index.map(|i| i.indimmediate).unwrap_or(false);
+    let indimmediate = index_relation.rd_index.as_ref().map(|i| i.indimmediate).unwrap_or(false);
     let index_relid = index_relation.rd_id;
 
     // When specific arbiter indexes requested, only examine them.

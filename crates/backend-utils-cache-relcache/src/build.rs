@@ -136,6 +136,7 @@ fn project_entry<'mcx>(
         indrelid: ix.indrelid,
         indisvalid: ix.indisvalid,
         indkey0: ix.indkey.first().copied().unwrap_or(0),
+        indkey: ix.indkey.clone(),
     });
     let mut rd_opcintype: PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
     for &t in &r.rd_opcintype {

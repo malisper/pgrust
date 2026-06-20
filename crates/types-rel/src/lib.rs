@@ -97,7 +97,7 @@ pub struct FormData_pg_class<'mcx> {
 
 /// `FormData_pg_index` (`catalog/pg_index.h`), trimmed to the fields ports
 /// consume (the `rd_index` payload of an index's relcache entry).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct FormData_pg_index {
     /// `int16 indnatts` — total number of columns in the index (key + INCLUDE;
     /// `IndexRelationGetNumberOfAttributes`). `0` for a non-index relation's
@@ -138,6 +138,15 @@ pub struct FormData_pg_index {
     /// first key column (`InvalidAttrNumber` for an expression key). `pg_nextoid`
     /// reads only this first entry.
     pub indkey0: types_core::primitive::AttrNumber,
+    /// `int2vector indkey.values[0..indnatts]` — the table column number of
+    /// each index column (`InvalidAttrNumber` for an expression key). The full
+    /// vector, length `indnatts`. `SetIndexStorageProperties` (commands/
+    /// tablecmds.c) walks `indrel->rd_index->indkey.values[i]` to find which
+    /// index column maps to an altered table column, and
+    /// `ATExecSetStatistics` reads `indkey.values[attnum-1]` to reject a
+    /// non-expression index column. `indkey0` is retained as the existing
+    /// `pg_nextoid` fast-path read; this is the additive widening.
+    pub indkey: std::vec::Vec<types_core::primitive::AttrNumber>,
 }
 
 /// `StdRdOptions` (`utils/rel.h`): the parsed heap reloptions the reloptions
@@ -205,7 +214,7 @@ impl<'mcx> RelationData<'mcx> {
     /// `indexRelation->rd_index->indnkeyatts` — the index's number of key
     /// attributes; `0` when this is not an index (`rd_index` is NULL).
     pub fn indnkeyatts(&self) -> i32 {
-        self.rd_index.map(|i| i.indnkeyatts as i32).unwrap_or(0)
+        self.rd_index.as_ref().map(|i| i.indnkeyatts as i32).unwrap_or(0)
     }
 
     /// `TupleDescAttr(rel->rd_att, attnum)->atttypid == CSTRINGOID &&

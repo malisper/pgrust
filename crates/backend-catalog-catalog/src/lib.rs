@@ -683,7 +683,7 @@ fn pg_nextoid_inner(rel: &RelationData, idx: &RelationData, attname: &str) -> Pg
     }
 
     /* idx->rd_index is always populated for an opened index relation. */
-    let rd_index = idx.rd_index.ok_or_else(|| {
+    let rd_index = idx.rd_index.as_ref().ok_or_else(|| {
         ereport(ERROR)
             .errmsg_internal("index relation has no rd_index (Form_pg_index)")
             .into_error()

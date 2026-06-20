@@ -277,7 +277,7 @@ pub fn InitCatCachePhase2(cache_id: i32, touch_index: bool) -> PgResult<()> {
         //     Assert(idesc->rd_index->indisunique && idesc->rd_index->indimmediate);
         #[cfg(debug_assertions)]
         {
-            let idx = idesc.rd_index.expect("index_open returned a non-index");
+            let idx = idesc.rd_index.as_ref().expect("index_open returned a non-index");
             debug_assert!(idx.indisunique && idx.indimmediate);
         }
 

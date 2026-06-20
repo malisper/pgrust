@@ -5,7 +5,12 @@
 //!   - `ATExecColumnDefault` (tablecmds.c:8126) — ALTER COLUMN SET / DROP DEFAULT
 //!   - `ATExecCookedColumnDefault` (tablecmds.c:8210) — add a pre-cooked default
 //!   - `ATExecSetStatistics` (tablecmds.c:8906) — ALTER COLUMN SET STATISTICS
-//!   - `ATExecSetOptions` (tablecmds.c:9050) — ALTER COLUMN SET / RESET OPTIONS
+//!   - `ATExecSetStorage` (tablecmds.c:9192) — ALTER COLUMN SET STORAGE
+//!     (`GetAttributeStorage` validates the mode for the type, writes
+//!     `attstorage`, then `SetIndexStorageProperties` recurses to each index
+//!     whose `indkey` includes the altered column). The `FormData_pg_index`
+//!     carrier now carries the full `indkey` int2vector (additive widen), and
+//!     the recursion opens each index and reads it via `rd_index_indkey`.
 //!   - `ATExecClusterOn` (tablecmds.c) — ALTER TABLE CLUSTER ON `<index>`
 //!     (`get_relname_relid` + `check_index_is_clusterable` +
 //!     `mark_index_clustered`, all landed cluster.c / lsyscache.c seams)
@@ -18,15 +23,8 @@
 //! [`PgAttributeUpdateRow`] carrier and the `catalog_tuple_update_pg_attribute`
 //! seam (the shared pg_attribute write leaf, owner backend-catalog-indexing).
 //!
-//! SEAM-AND-PANIC (faithful, carrier-keystone blocked) — `ATExecSetStorage` and
-//! the relation-level `ATExecSetRelOptions`:
-//!   - `ATExecSetStorage` writes `attstorage` (expressible) *and then* recurses
-//!     into index columns via `SetIndexStorageProperties`, which scans the full
-//!     `indrel->rd_index->indkey.values[0..indnatts]`. The trimmed
-//!     `types_rel::FormData_pg_index` carries only `indkey0` (the first key
-//!     column), so the index recursion cannot be written faithfully; doing the
-//!     main-table write and stopping would leave a partial mutation. Stays a
-//!     loud stop until the `indkey` array is carried (out-of-lane carrier widen).
+//! SEAM-AND-PANIC (faithful, carrier-keystone blocked) — the relation-level
+//! `ATExecSetRelOptions`:
 //!   - `ATExecSetRelOptions` writes the variable `reloptions` (`text[]`) column
 //!     of `pg_class` via `heap_modify_tuple`. The only pg_class write carrier
 //!     (`catalog_tuple_update_pg_class`) takes the fixed-length `PgClassForm`
@@ -66,7 +64,9 @@ use backend_access_common_relation::relation_open;
 use backend_catalog_indexing_seams as indexing_seam;
 use backend_catalog_pg_attrdef::{RemoveAttrDefault, StoreAttrDefault};
 use backend_utils_cache_lsyscache::attribute::get_attnum;
-use backend_utils_cache_syscache::{SearchSysCacheAttName, ATTNAME};
+use backend_utils_cache_syscache::{SearchSysCacheAttName, ATTNAME, ATTNUM};
+use backend_catalog_objectaccess_seams as objaccess_seam;
+use types_core::Oid;
 
 use backend_commands_tablecmds_seams as seam;
 
@@ -635,11 +635,18 @@ pub fn ATExecSetStatistics<'mcx>(
 // ---------------------------------------------------------------------------
 
 use backend_access_common_heaptuple::FormedTuple;
-use types_catalog::pg_attribute::{Anum_pg_attribute_attgenerated, Anum_pg_attribute_attnum};
+use types_catalog::pg_attribute::{
+    Anum_pg_attribute_attgenerated, Anum_pg_attribute_attnum, Anum_pg_attribute_atttypid,
+};
 
 /// `GETSTRUCT(tuple)->field` for a non-null `int2` `pg_attribute` column.
 fn att_field_i16(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) -> PgResult<i16> {
     Ok(backend_utils_cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)?.as_i16())
+}
+
+/// `GETSTRUCT(tuple)->field` for a non-null `oid` `pg_attribute` column.
+fn att_field_oid(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) -> PgResult<Oid> {
+    Ok(backend_utils_cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)?.as_oid())
 }
 
 /// `GETSTRUCT(tuple)->field` for a non-null `char` `pg_attribute` column.
@@ -686,20 +693,221 @@ pub fn ATExecSetOptions<'mcx>(
     );
 }
 
-/// `ATExecSetStorage` (tablecmds.c:9192). See module docs.
+/// `GetAttributeStorage(atttypid, storagemode)` (tablecmds.c:9152) — map a
+/// `SET STORAGE` mode keyword to its `TYPSTORAGE_*` char, validating the mode
+/// is legal for the column type.
+fn GetAttributeStorage(mcx: Mcx<'_>, atttypid: Oid, storagemode: &str) -> PgResult<i8> {
+    use types_tuple::heaptuple::{
+        TYPSTORAGE_EXTENDED, TYPSTORAGE_EXTERNAL, TYPSTORAGE_MAIN, TYPSTORAGE_PLAIN,
+    };
+
+    // pg_strcasecmp — case-insensitive ASCII comparison.
+    let cstorage = if storagemode.eq_ignore_ascii_case("plain") {
+        TYPSTORAGE_PLAIN
+    } else if storagemode.eq_ignore_ascii_case("external") {
+        TYPSTORAGE_EXTERNAL
+    } else if storagemode.eq_ignore_ascii_case("extended") {
+        TYPSTORAGE_EXTENDED
+    } else if storagemode.eq_ignore_ascii_case("main") {
+        TYPSTORAGE_MAIN
+    } else if storagemode.eq_ignore_ascii_case("default") {
+        get_typstorage(atttypid)?
+    } else {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(format!("invalid storage type \"{storagemode}\""))
+            .finish(here("GetAttributeStorage"))
+            .map(|()| unreachable!());
+    };
+
+    // safety check: do not allow toasted storage modes unless column datatype
+    // is TOAST-aware.
+    if !(cstorage == TYPSTORAGE_PLAIN || type_is_toastable(atttypid)?) {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "column data type {} can only have storage PLAIN",
+                format_type_be(mcx, atttypid)?
+            ))
+            .finish(here("GetAttributeStorage"))
+            .map(|()| unreachable!());
+    }
+
+    Ok(cstorage)
+}
+
+/// `get_typstorage(typid)` (lsyscache.c): `typstorage`, or `TYPSTORAGE_PLAIN`.
+fn get_typstorage(typid: Oid) -> PgResult<i8> {
+    Ok(backend_utils_cache_lsyscache_seams::get_typstorage::call(typid)? as i8)
+}
+
+/// `TypeIsToastable(typid)` (catalog/pg_type.h) ==
+/// `get_typstorage(typid) != TYPSTORAGE_PLAIN`.
+fn type_is_toastable(typid: Oid) -> PgResult<bool> {
+    Ok(get_typstorage(typid)? != types_tuple::heaptuple::TYPSTORAGE_PLAIN)
+}
+
+/// `format_type_be(typid)` (format_type.c).
+fn format_type_be(mcx: Mcx<'_>, typid: Oid) -> PgResult<String> {
+    Ok(backend_utils_adt_format_type::format_type_be(mcx, typid)?
+        .as_str()
+        .to_string())
+}
+
+/// `ATExecSetStorage(rel, colName, newValue, lockmode)` (tablecmds.c:9192) —
+/// ALTER COLUMN SET STORAGE. Sets `pg_attribute.attstorage` for the column,
+/// then recurses to the column's index columns via
+/// `SetIndexStorageProperties`.
 pub fn ATExecSetStorage<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _rel: &Relation<'mcx>,
-    _colName: &str,
-    _newValue: Option<&Node<'mcx>>,
-    _lockmode: LOCKMODE,
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    colName: &str,
+    newValue: Option<&Node<'mcx>>,
+    lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
-    unported(
-        "ALTER COLUMN SET STORAGE — the attstorage write is expressible, but the \
-         mandatory SetIndexStorageProperties index recursion scans \
-         indrel->rd_index->indkey.values[0..indnatts] and the trimmed \
-         types_rel::FormData_pg_index carries only indkey0 (out-of-lane carrier widen)",
-    );
+    // strVal(newValue) — the storage-mode keyword carried by the String node.
+    let storagemode = newValue
+        .expect("ALTER COLUMN SET STORAGE requires a storage-mode value")
+        .expect_string()
+        .sval
+        .as_str()
+        .to_string();
+
+    // attrelation = table_open(AttributeRelationId, RowExclusiveLock);
+    let attrelation = relation_open(mcx, AttributeRelationId, RowExclusiveLock)?;
+
+    // tuple = SearchSysCacheCopyAttName(RelationGetRelid(rel), colName);
+    let tuple = match SearchSysCacheAttName(mcx, rel.rd_id, colName)? {
+        Some(t) => t,
+        None => {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_COLUMN)
+                .errmsg(format!(
+                    "column \"{}\" of relation \"{}\" does not exist",
+                    colName,
+                    rel.name()
+                ))
+                .finish(here("ATExecSetStorage"))
+                .map(|()| unreachable!());
+        }
+    };
+
+    // attrtuple = GETSTRUCT(tuple); attnum = attrtuple->attnum;
+    let attnum = att_field_i16(mcx, ATTNAME, &tuple, Anum_pg_attribute_attnum)?;
+    if attnum <= 0 {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("cannot alter system column \"{colName}\""))
+            .finish(here("ATExecSetStorage"))
+            .map(|()| unreachable!());
+    }
+
+    // attrtuple->attstorage = GetAttributeStorage(attrtuple->atttypid, strVal(newValue));
+    let atttypid = att_field_oid(mcx, ATTNAME, &tuple, Anum_pg_attribute_atttypid)?;
+    let newstorage = GetAttributeStorage(mcx, atttypid, &storagemode)?;
+
+    // CatalogTupleUpdate(attrelation, &tuple->t_self, tuple);
+    let row = PgAttributeUpdateRow {
+        attstorage: Some(newstorage),
+        ..Default::default()
+    };
+    indexing_seam::catalog_tuple_update_pg_attribute::call(mcx, &attrelation, &tuple, &row)?;
+
+    // InvokeObjectPostAlterHook(RelationRelationId, RelationGetRelid(rel), attrtuple->attnum);
+    objaccess_seam::invoke_object_post_alter_hook::call(RelationRelationId, rel.rd_id, attnum as i32)?;
+
+    // Apply the change to indexes as well (only for simple index columns,
+    // matching behavior of index.c ConstructTupleDescriptor()).
+    SetIndexStorageProperties(
+        mcx,
+        rel,
+        &attrelation,
+        attnum,
+        true,
+        newstorage,
+        false,
+        0,
+        lockmode,
+    )?;
+
+    // heap_freetuple(tuple) / table_close(attrelation, RowExclusiveLock) — RAII.
+    drop(attrelation);
+
+    // ObjectAddressSubSet(address, RelationRelationId, RelationGetRelid(rel), attnum);
+    Ok(object_address_subset(RelationRelationId, rel.rd_id, attnum as i32))
+}
+
+/// `SetIndexStorageProperties(rel, attrelation, attnum, setstorage, newstorage,
+/// setcompression, newcompression, lockmode)` (tablecmds.c:9098) — push a
+/// storage/compression change from a table column down to every index column
+/// whose `indkey` maps to it (only simple, non-expression index columns).
+#[allow(clippy::too_many_arguments)]
+fn SetIndexStorageProperties<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    attrelation: &Relation<'mcx>,
+    attnum: AttrNumber,
+    setstorage: bool,
+    newstorage: i8,
+    setcompression: bool,
+    newcompression: i8,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    // foreach(lc, RelationGetIndexList(rel))
+    let index_list = backend_utils_cache_relcache_seams::relation_get_index_list::call(mcx, rel)?;
+    for indexoid in index_list.iter().copied() {
+        // indrel = index_open(indexoid, lockmode);
+        let indrel = relation_open(mcx, indexoid, lockmode)?;
+
+        // for (i = 0; i < indrel->rd_index->indnatts; i++)
+        //     if (indrel->rd_index->indkey.values[i] == attnum) { indattnum = i+1; break; }
+        let indkey = backend_utils_cache_relcache_seams::rd_index_indkey::call(&indrel)?
+            .unwrap_or_default();
+        let indnatts =
+            backend_utils_cache_relcache_seams::rd_index_indnatts::call(&indrel)?.unwrap_or(0)
+                as usize;
+        let mut indattnum: AttrNumber = 0;
+        for i in 0..indnatts {
+            if indkey.get(i).copied().unwrap_or(0) == attnum {
+                indattnum = (i + 1) as AttrNumber;
+                break;
+            }
+        }
+
+        if indattnum == 0 {
+            // index_close(indrel, lockmode);
+            drop(indrel);
+            continue;
+        }
+
+        // tuple = SearchSysCacheCopyAttNum(RelationGetRelid(indrel), indattnum);
+        let tuple =
+            backend_utils_cache_syscache::SearchSysCacheAttNum(mcx, indrel.rd_id, indattnum)?;
+        if let Some(tuple) = tuple {
+            let attnum_idx = att_field_i16(mcx, ATTNUM, &tuple, Anum_pg_attribute_attnum)?;
+            // if (setstorage) attrtuple->attstorage = newstorage;
+            // if (setcompression) attrtuple->attcompression = newcompression;
+            let row = PgAttributeUpdateRow {
+                attstorage: if setstorage { Some(newstorage) } else { None },
+                attcompression: if setcompression { Some(newcompression) } else { None },
+                ..Default::default()
+            };
+            // CatalogTupleUpdate(attrelation, &tuple->t_self, tuple);
+            indexing_seam::catalog_tuple_update_pg_attribute::call(mcx, attrelation, &tuple, &row)?;
+
+            // InvokeObjectPostAlterHook(RelationRelationId, RelationGetRelid(rel), attrtuple->attnum);
+            objaccess_seam::invoke_object_post_alter_hook::call(
+                RelationRelationId,
+                rel.rd_id,
+                attnum_idx as i32,
+            )?;
+            // heap_freetuple(tuple) — RAII drop.
+        }
+
+        // index_close(indrel, lockmode) — RAII drop.
+        drop(indrel);
+    }
+    Ok(())
 }
 
 // ===========================================================================
