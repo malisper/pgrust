@@ -2240,27 +2240,92 @@ fn define_index_dispatch_arm<'mcx>(
 /// `None`).
 fn reloptions_view_defel(
     def: &DefElem<'_>,
-) -> backend_access_common_reloptions::DefElem {
+) -> PgResult<backend_access_common_reloptions::DefElem> {
     use backend_commands_define_seams::DefElemArg;
-    let arg = def.arg.as_deref().map(|node| match node.node_tag() {
-        ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
-        ntag::T_Float => DefElemArg::Float(node.expect_float().fval.as_str().to_string()),
-        ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
-        ntag::T_String => DefElemArg::String(node.expect_string().sval.as_str().to_string()),
-        _ => DefElemArg::AStar,
-    });
-    backend_access_common_reloptions::DefElem::new(
+    // Mirror `defGetString`/`defGetBoolean` (define.c): every node form that
+    // those accessors render must round-trip through the `DefElemArg`
+    // projection, not collapse into `A_Star`. Bare identifiers such as
+    // `buffering = off` / `auto` arrive as a `T_TypeName` (the grammar's
+    // `def_arg: func_type` production) and a qualified name as a `T_List`;
+    // both render to their textual form, exactly as `defGetString` does.
+    let arg = match def.arg.as_deref() {
+        None => None,
+        Some(node) => Some(match node.node_tag() {
+            ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
+            ntag::T_Float => DefElemArg::Float(node.expect_float().fval.as_str().to_string()),
+            ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
+            ntag::T_String => DefElemArg::String(node.expect_string().sval.as_str().to_string()),
+            // case T_TypeName: return TypeNameToString((TypeName *) def->arg);
+            ntag::T_TypeName => DefElemArg::TypeName(type_name_to_string(node.expect_typename())?),
+            // case T_List: return NameListToString((List *) def->arg);
+            ntag::T_List => DefElemArg::List(name_list_to_string(node.expect_list())?),
+            // case T_A_Star: return pstrdup("*");
+            ntag::T_A_Star => DefElemArg::AStar,
+            other => {
+                return Err(elog_error(format!("unrecognized node type: {}", other)))
+            }
+        }),
+    };
+    Ok(backend_access_common_reloptions::DefElem::new(
         def.defnamespace.as_deref(),
         def.defname.as_deref().unwrap_or(""),
         arg,
-    )
+    ))
+}
+
+/// `TypeNameToString(typeName)` for the `defGetString` `T_TypeName` case
+/// (parse_type.c). A reloptions `def->arg` `TypeName` is always a parsed
+/// identifier carrying `names` (never an internal `typeOid`-only node), so the
+/// `format_type_be` fallback is unreachable here.
+fn type_name_to_string(tn: &types_nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
+    if tn.names.is_empty() {
+        return Err(elog_error(
+            "reloption TypeName carries no name (internal typeOid-only form unsupported here)",
+        ));
+    }
+    let mut out = String::new();
+    for (i, name) in tn.names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node: &Node = name;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            other => return Err(elog_error(format!("unrecognized node type: {}", other))),
+        }
+    }
+    if tn.pct_type {
+        out.push_str("%TYPE");
+    }
+    if !tn.arrayBounds.is_empty() {
+        out.push_str("[]");
+    }
+    Ok(out)
+}
+
+/// `NameListToString(names)` (namespace.c) for the `defGetString` `T_List` case:
+/// `'.'`-joined `String` cells, `A_Star` rendered as `*`.
+fn name_list_to_string(names: &[types_nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
+    let mut out = String::new();
+    for (i, name) in names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node: &Node = name;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            ntag::T_A_Star => out.push('*'),
+            other => return Err(elog_error(format!("unrecognized node type: {}", other))),
+        }
+    }
+    Ok(out)
 }
 
 /// Build the reloptions-crate `DefElem` view list from a parser option list (a
 /// `List *` of `DefElem` — `IndexStmt.options` or `IndexElem.opclassopts`).
 fn reloptions_view_list(
     options: &[types_nodes::nodes::NodePtr<'_>],
-) -> Vec<backend_access_common_reloptions::DefElem> {
+) -> PgResult<Vec<backend_access_common_reloptions::DefElem>> {
     options
         .iter()
         .map(|opt| {
@@ -2284,7 +2349,7 @@ fn transform_index_reloptions_byref<'mcx>(
     options: &[types_nodes::nodes::NodePtr<'mcx>],
     amhandler: Oid,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    let def_list = reloptions_view_list(options);
+    let def_list = reloptions_view_list(options)?;
     // namspace = NULL, validnsps = NULL, acceptOidsOff = false, isReset = false.
     let bytes = backend_access_common_reloptions::transformRelOptionsBytes(
         mcx, None, &def_list, None, None, false, false,
@@ -2305,7 +2370,7 @@ pub(crate) fn transform_attoptions_byref<'mcx>(
     mcx: Mcx<'mcx>,
     opclassopts: &[types_nodes::nodes::NodePtr<'mcx>],
 ) -> PgResult<PgVec<'mcx, u8>> {
-    let def_list = reloptions_view_list(opclassopts);
+    let def_list = reloptions_view_list(opclassopts)?;
     let bytes = backend_access_common_reloptions::transformRelOptionsBytes(
         mcx, None, &def_list, None, None, false, false,
     )?;
