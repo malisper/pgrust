@@ -202,6 +202,14 @@ pub enum Node<'mcx> {
     MergeWhenClause(crate::rawnodes::MergeWhenClause<'mcx>),
     /// `T_ReturningClause`.
     ReturningClause(crate::rawnodes::ReturningClause<'mcx>),
+    /// `T_ReturningOption`.
+    ReturningOption(crate::rawnodes::ReturningOption<'mcx>),
+    /// `T_TriggerTransition`.
+    TriggerTransition(crate::rawnodes::TriggerTransition<'mcx>),
+    /// `T_RangeTableFunc`.
+    RangeTableFunc(crate::rawnodes::RangeTableFunc<'mcx>),
+    /// `T_RangeTableFuncCol`.
+    RangeTableFuncCol(crate::rawnodes::RangeTableFuncCol<'mcx>),
     // --- raw-grammar `Expr`-deriving expression nodes (rawexprnodes) ---
     // In C, these `Expr`-deriving node types are the same struct in the raw
     // grammar output and the post-analysis tree, but the grammar fills their

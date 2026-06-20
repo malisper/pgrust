@@ -1535,6 +1535,139 @@ impl ReturningClause<'_> {
     }
 }
 
+/// `ReturningOptionKind` (`nodes/parsenodes.h`) — kind of option in a
+/// `RETURNING WITH(...)` list (OLD/NEW alias).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ReturningOptionKind {
+    /// `RETURNING_OPTION_OLD` — specify alias for OLD in RETURNING.
+    Old = 0,
+    /// `RETURNING_OPTION_NEW` — specify alias for NEW in RETURNING.
+    New = 1,
+}
+
+/// `ReturningOption` (`nodes/parsenodes.h`) — an individual option in the
+/// `RETURNING WITH(...)` list.
+#[derive(Debug)]
+pub struct ReturningOption<'mcx> {
+    /// `ReturningOptionKind option` — specified option.
+    pub option: ReturningOptionKind,
+    /// `char *value` — option's value.
+    pub value: Option<PgString<'mcx>>,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: i32,
+}
+
+impl ReturningOption<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `ReturningOption`).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ReturningOption<'b>> {
+        Ok(ReturningOption {
+            option: self.option,
+            value: copy_opt_str(&self.value, mcx)?,
+            location: self.location,
+        })
+    }
+}
+
+/// `TriggerTransition` (`nodes/parsenodes.h`) — a `REFERENCING OLD/NEW TABLE AS`
+/// transition-table clause of a `CREATE TRIGGER`.
+#[derive(Debug)]
+pub struct TriggerTransition<'mcx> {
+    /// `char *name` — transition relation alias.
+    pub name: Option<PgString<'mcx>>,
+    /// `bool isNew` — NEW (vs OLD).
+    pub isNew: bool,
+    /// `bool isTable` — TABLE (vs ROW; only TABLE is supported).
+    pub isTable: bool,
+}
+
+impl TriggerTransition<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `TriggerTransition`).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TriggerTransition<'b>> {
+        Ok(TriggerTransition {
+            name: copy_opt_str(&self.name, mcx)?,
+            isNew: self.isNew,
+            isTable: self.isTable,
+        })
+    }
+}
+
+/// `RangeTableFuncCol` (`nodes/parsenodes.h`) — a single column of an
+/// `XMLTABLE` (raw grammar `RangeTableFunc`).
+#[derive(Debug)]
+pub struct RangeTableFuncCol<'mcx> {
+    /// `char *colname` — name of generated column.
+    pub colname: Option<PgString<'mcx>>,
+    /// `TypeName *typeName` — type of generated column.
+    pub typeName: Option<PgBox<'mcx, TypeName<'mcx>>>,
+    /// `bool for_ordinality` — does it have FOR ORDINALITY?
+    pub for_ordinality: bool,
+    /// `bool is_not_null` — does it have NOT NULL?
+    pub is_not_null: bool,
+    /// `Node *colexpr` — column filter expression (raw parser).
+    pub colexpr: Option<NodePtr<'mcx>>,
+    /// `Node *coldefexpr` — column default value expression (raw parser).
+    pub coldefexpr: Option<NodePtr<'mcx>>,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: i32,
+}
+
+impl RangeTableFuncCol<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `RangeTableFuncCol`).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<RangeTableFuncCol<'b>> {
+        Ok(RangeTableFuncCol {
+            colname: copy_opt_str(&self.colname, mcx)?,
+            typeName: match &self.typeName {
+                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                None => None,
+            },
+            for_ordinality: self.for_ordinality,
+            is_not_null: self.is_not_null,
+            colexpr: copy_opt_node(&self.colexpr, mcx)?,
+            coldefexpr: copy_opt_node(&self.coldefexpr, mcx)?,
+            location: self.location,
+        })
+    }
+}
+
+/// `RangeTableFunc` (`nodes/parsenodes.h`) — a raw-grammar `XMLTABLE`
+/// table-function reference appearing in the FROM clause.
+#[derive(Debug)]
+pub struct RangeTableFunc<'mcx> {
+    /// `bool lateral` — does it have LATERAL prefix?
+    pub lateral: bool,
+    /// `Node *docexpr` — document expression (raw parser).
+    pub docexpr: Option<NodePtr<'mcx>>,
+    /// `Node *rowexpr` — row generator expression (raw parser).
+    pub rowexpr: Option<NodePtr<'mcx>>,
+    /// `List *namespaces` — list of namespaces as ResTarget.
+    pub namespaces: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `List *columns` — list of RangeTableFuncCol.
+    pub columns: PgVec<'mcx, NodePtr<'mcx>>,
+    /// `Alias *alias` — table alias & optional column aliases.
+    pub alias: Option<PgBox<'mcx, Alias<'mcx>>>,
+    /// `ParseLoc location` — token location, or -1 if unknown.
+    pub location: i32,
+}
+
+impl RangeTableFunc<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` over `RangeTableFunc`).
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<RangeTableFunc<'b>> {
+        Ok(RangeTableFunc {
+            lateral: self.lateral,
+            docexpr: copy_opt_node(&self.docexpr, mcx)?,
+            rowexpr: copy_opt_node(&self.rowexpr, mcx)?,
+            namespaces: copy_node_vec(&self.namespaces, mcx)?,
+            columns: copy_node_vec(&self.columns, mcx)?,
+            alias: match &self.alias {
+                Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+                None => None,
+            },
+            location: self.location,
+        })
+    }
+}
+
 // ===========================================================================
 // Raw statement nodes (nodes/parsenodes.h)
 // ===========================================================================

@@ -464,6 +464,70 @@ fn conv_returning<'mcx>(
     })
 }
 
+fn conv_returning_option<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cp::ReturningOption,
+) -> PgResult<tn::ReturningOption<'mcx>> {
+    let r = unsafe { &*p };
+    Ok(tn::ReturningOption {
+        option: returning_option_kind(r.option),
+        value: cstr_opt(mcx, r.value)?,
+        location: r.location,
+    })
+}
+
+fn returning_option_kind(v: cp::ReturningOptionKind) -> tn::ReturningOptionKind {
+    match v {
+        cp::RETURNING_OPTION_OLD => tn::ReturningOptionKind::Old,
+        cp::RETURNING_OPTION_NEW => tn::ReturningOptionKind::New,
+        other => panic!("gram converter: invalid ReturningOptionKind {other}"),
+    }
+}
+
+fn conv_trigger_transition<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cp::TriggerTransition,
+) -> PgResult<tn::TriggerTransition<'mcx>> {
+    let t = unsafe { &*p };
+    Ok(tn::TriggerTransition {
+        name: cstr_opt(mcx, t.name)?,
+        isNew: t.is_new,
+        isTable: t.is_table,
+    })
+}
+
+fn conv_range_table_func<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cs::RangeTableFunc,
+) -> PgResult<tn::RangeTableFunc<'mcx>> {
+    let r = unsafe { &*p };
+    Ok(tn::RangeTableFunc {
+        lateral: r.lateral,
+        docexpr: node_opt(mcx, r.docexpr)?,
+        rowexpr: node_opt(mcx, r.rowexpr)?,
+        namespaces: node_list(mcx, r.namespaces)?,
+        columns: node_list(mcx, r.columns)?,
+        alias: child_opt(mcx, r.alias, conv_alias)?,
+        location: r.location,
+    })
+}
+
+fn conv_range_table_func_col<'mcx>(
+    mcx: Mcx<'mcx>,
+    p: *mut cs::RangeTableFuncCol,
+) -> PgResult<tn::RangeTableFuncCol<'mcx>> {
+    let c = unsafe { &*p };
+    Ok(tn::RangeTableFuncCol {
+        colname: cstr_opt(mcx, c.colname)?,
+        typeName: child_opt(mcx, c.typeName, conv_typename)?,
+        for_ordinality: c.for_ordinality,
+        is_not_null: c.is_not_null,
+        colexpr: node_opt(mcx, c.colexpr)?,
+        coldefexpr: node_opt(mcx, c.coldefexpr)?,
+        location: c.location,
+    })
+}
+
 fn conv_groupingset<'mcx>(
     mcx: Mcx<'mcx>,
     p: *mut cp::GroupingSet,
