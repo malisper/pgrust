@@ -88,16 +88,93 @@ const HEAP_RELOPT_NAMESPACES: &[&str] = &["toast"];
 /// `define.c` `DefElemArg` the reloptions `defGetString`/`defGetBoolean`
 /// dispatch on — the same projection every DDL caller uses (cf.
 /// `backend-commands-vacuum::defel_arg`). `None` mirrors `def->arg == NULL`.
-fn defel_arg(def: &types_nodes::ddlnodes::DefElem<'_>) -> Option<backend_commands_define_seams::DefElemArg> {
+fn defel_arg(
+    def: &types_nodes::ddlnodes::DefElem<'_>,
+) -> PgResult<Option<backend_commands_define_seams::DefElemArg>> {
     use backend_commands_define_seams::DefElemArg;
-    let node = def.arg.as_deref()?;
-    Some(match node.node_tag() {
+    let Some(node) = def.arg.as_deref() else {
+        return Ok(None);
+    };
+    // Mirror `defGetString`'s node switch (define.c). A bare-identifier reloption
+    // value such as `autovacuum_enabled = off` arrives from the grammar's
+    // `def_arg: func_type` production as a `T_TypeName` (and a qualified name as
+    // a `T_List`); both render to their textual form. The prior `_ => AStar`
+    // catch-all collapsed those to `"*"`, so `WITH (autovacuum_enabled = off)`
+    // failed with `invalid value for boolean option "...": *`.
+    Ok(Some(match node.node_tag() {
         ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
         ntag::T_Float => DefElemArg::Float(node.expect_float().fval.as_str().to_string()),
         ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
         ntag::T_String => DefElemArg::String(node.expect_string().sval.as_str().to_string()),
-        _ => DefElemArg::AStar,
-    })
+        // case T_TypeName: return TypeNameToString((TypeName *) def->arg);
+        ntag::T_TypeName => DefElemArg::TypeName(type_name_to_string(node.expect_typename())?),
+        // case T_List: return NameListToString((List *) def->arg);
+        ntag::T_List => DefElemArg::List(name_list_to_string(node.expect_list())?),
+        // case T_A_Star: return pstrdup("*");
+        ntag::T_A_Star => DefElemArg::AStar,
+        other => {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!("unrecognized node type: {}", other))
+                .into_error())
+        }
+    }))
+}
+
+/// `TypeNameToString(typeName)` for the `defGetString` `T_TypeName` case
+/// (parse_type.c). A reloptions `def->arg` `TypeName` is always a parsed
+/// identifier carrying `names` (never an internal `typeOid`-only node), so the
+/// `format_type_be` fallback is unreachable here.
+fn type_name_to_string(tn: &TypeName<'_>) -> PgResult<String> {
+    if tn.names.is_empty() {
+        return Err(ereport(ERROR)
+            .errmsg_internal(
+                "reloption TypeName carries no name (internal typeOid-only form unsupported here)",
+            )
+            .into_error());
+    }
+    let mut out = String::new();
+    for (i, name) in tn.names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node: &Node = name;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            other => {
+                return Err(ereport(ERROR)
+                    .errmsg_internal(format!("unrecognized node type: {}", other))
+                    .into_error())
+            }
+        }
+    }
+    if tn.pct_type {
+        out.push_str("%TYPE");
+    }
+    if !tn.arrayBounds.is_empty() {
+        out.push_str("[]");
+    }
+    Ok(out)
+}
+
+/// `NameListToString(names)` for the `defGetString` `T_List` case (namespace.c).
+fn name_list_to_string(names: &[NodePtr<'_>]) -> PgResult<String> {
+    let mut out = String::new();
+    for (i, name) in names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node: &Node = name;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            ntag::T_A_Star => out.push('*'),
+            other => {
+                return Err(ereport(ERROR)
+                    .errmsg_internal(format!("unrecognized node type: {}", other))
+                    .into_error())
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `transformRelOptions((Datum) 0, stmt->options, NULL, validnsps, true, false)`
@@ -157,7 +234,7 @@ pub(crate) fn transform_and_check_reloptions<'mcx>(
             backend_commands_define_seams::def_get_string::call(
                 mcx,
                 defname.to_string(),
-                defel_arg(def),
+                defel_arg(def)?,
             )?
             .as_str()
             .to_string()
@@ -180,7 +257,7 @@ pub(crate) fn transform_and_check_reloptions<'mcx>(
         if def.defnamespace.is_none() && defname == "oids" {
             if backend_commands_define_seams::def_get_boolean::call(
                 defname.to_string(),
-                defel_arg(def),
+                defel_arg(def)?,
             )? {
                 return ereport(ERROR)
                     .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
@@ -301,7 +378,7 @@ pub fn create_toast_for_relation<'mcx>(
             backend_commands_define_seams::def_get_string::call(
                 mcx,
                 defname.to_string(),
-                defel_arg(def),
+                defel_arg(def)?,
             )?
             .as_str()
             .to_string()
