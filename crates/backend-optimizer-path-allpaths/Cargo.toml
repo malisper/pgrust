@@ -31,6 +31,10 @@ backend-optimizer-path-joinrels = { path = "../backend-optimizer-path-joinrels" 
 backend-optimizer-path-indxpath = { path = "../backend-optimizer-path-indxpath" }
 backend-optimizer-path-small = { path = "../backend-optimizer-path-small" }
 backend-optimizer-rte-seams = { path = "../backend-optimizer-rte-seams" }
+# TABLESAMPLE method dispatch: the pure SampleScanGetSampleSize estimation
+# bodies + the GetTsmRoutine(handlerOid) registry live here (access AM owner).
+backend-access-tablesample-core = { path = "../backend-access-tablesample-core" }
+backend-access-tablesample-core-seams = { path = "../backend-access-tablesample-core-seams" }
 backend-geqo-all = { path = "../backend-geqo-all" }
 backend-geqo-all-seams = { path = "../backend-geqo-all-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

@@ -1244,11 +1244,101 @@ fn subquery_planner_carried<'mcx>(
 
                 match rtekind {
                     RTEKind::RTE_RELATION => {
+                        // planner.c:993-998: rte->tablesample =
+                        //   preprocess_expression(root, (Node *) rte->tablesample,
+                        //                         EXPRKIND_TABLESAMPLE).
+                        // C casts the whole TableSampleClause* to a Node and folds it.
+                        // In the owned model the clause is a `Node::TableSampleClause`
+                        // node pointed at by `rte->tablesample`; the only expression
+                        // subtrees it carries are its `args` list and its optional
+                        // `repeatable` Expr. EXPRKIND_TABLESAMPLE runs
+                        // eval_const_expressions (+ SS_process_sublinks /
+                        // SS_replace_correlation_vars), all per-expression and
+                        // recursive, so preprocessing each `args` element and the
+                        // `repeatable` Expr individually is equivalent to folding the
+                        // whole clause node once.
                         if run.resolve(root.parse).rtable[i].tablesample.is_some() {
-                            panic!(
-                                "subquery_planner: TABLESAMPLE expression preprocessing \
-                                 (planner.c:993-998) is not wired over the owned RTE model"
-                            );
+                            // Pull the args + repeatable Exprs out of the clause node.
+                            let (args, repeatable): (Vec<Expr>, Option<Expr>) = {
+                                let parse = run.resolve(root.parse);
+                                let ts_node = parse.rtable[i]
+                                    .tablesample
+                                    .as_deref()
+                                    .expect("tablesample is_some");
+                                match ts_node {
+                                    Node::TableSampleClause(tsc) => {
+                                        let args: Vec<Expr> = match &tsc.args {
+                                            Some(list) => list.iter().cloned().collect(),
+                                            None => Vec::new(),
+                                        };
+                                        let repeatable =
+                                            tsc.repeatable.as_deref().cloned();
+                                        (args, repeatable)
+                                    }
+                                    _ => {
+                                        return Err(types_error::PgError::error(
+                                            "subquery_planner: RTE_RELATION tablesample \
+                                             is not a TableSampleClause node",
+                                        ))
+                                    }
+                                }
+                            };
+
+                            // Preprocess each args element.
+                            let mut new_args: mcx::PgVec<'mcx, Expr> =
+                                mcx::vec_with_capacity_in(mcx, args.len())?;
+                            for e in args.into_iter() {
+                                let pe = preprocess_expression(
+                                    mcx,
+                                    &mut root,
+                                    run,
+                                    outer_query_ref,
+                                    Some(e),
+                                    EXPRKIND_TABLESAMPLE,
+                                )?;
+                                let pe = pe.ok_or_else(|| {
+                                    types_error::PgError::error(
+                                        "subquery_planner: TABLESAMPLE arg folded to NULL",
+                                    )
+                                })?;
+                                new_args.push(pe);
+                            }
+
+                            // Preprocess the optional repeatable Expr.
+                            let new_repeatable: Option<alloc::boxed::Box<Expr>> =
+                                match repeatable {
+                                    Some(e) => {
+                                        let pe = preprocess_expression(
+                                            mcx,
+                                            &mut root,
+                                            run,
+                                            outer_query_ref,
+                                            Some(e),
+                                            EXPRKIND_TABLESAMPLE,
+                                        )?;
+                                        let pe = pe.ok_or_else(|| {
+                                            types_error::PgError::error(
+                                                "subquery_planner: TABLESAMPLE repeatable \
+                                                 folded to NULL",
+                                            )
+                                        })?;
+                                        Some(alloc::boxed::Box::new(pe))
+                                    }
+                                    None => None,
+                                };
+
+                            // Write the preprocessed expressions back into the clause
+                            // node in place.
+                            if let Node::TableSampleClause(tsc) = &mut **run
+                                .resolve_mut(root.parse)
+                                .rtable[i]
+                                .tablesample
+                                .as_mut()
+                                .expect("tablesample is_some")
+                            {
+                                tsc.args = Some(new_args);
+                                tsc.repeatable = new_repeatable;
+                            }
                         }
                     }
                     RTEKind::RTE_SUBQUERY => {

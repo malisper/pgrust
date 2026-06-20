@@ -81,7 +81,7 @@ pub(crate) fn boolvarsel<'mcx>(
     arg: &Expr,
     var_relid: i32,
 ) -> PgResult<f64> {
-    let arg_id: NodeId = root.alloc_node(arg.clone());
+    let arg_id: NodeId = root.alloc_node(arg.clone_in(mcx)?);
     let vardata = examine_variable(mcx, run, root, arg_id, var_relid)?;
 
     let selec = if vardata.stats_tuple.is_some() {
@@ -124,7 +124,7 @@ pub(crate) fn booltestsel<'mcx>(
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<f64> {
-    let arg_id: NodeId = root.alloc_node(arg.clone());
+    let arg_id: NodeId = root.alloc_node(arg.clone_in(mcx)?);
     let vardata = examine_variable(mcx, run, root, arg_id, var_relid)?;
 
     let mut selec: f64;
@@ -238,7 +238,7 @@ pub(crate) fn nulltestsel<'mcx>(
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<f64> {
-    let arg_id: NodeId = root.alloc_node(arg.clone());
+    let arg_id: NodeId = root.alloc_node(arg.clone_in(mcx)?);
     let vardata = examine_variable(mcx, run, root, arg_id, var_relid)?;
 
     let mut selec: f64;

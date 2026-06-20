@@ -218,7 +218,7 @@ pub fn create_samplescan_path<'mcx>(
     pathnode.parallel_workers = 0;
     pathnode.pathkeys = Vec::new();
     let id = root.alloc_path(PathNode::Path(pathnode));
-    seam::cost_samplescan::call(root, id, rel);
+    seam::cost_samplescan::call(run, root, id, rel);
     Ok(id)
 }
 

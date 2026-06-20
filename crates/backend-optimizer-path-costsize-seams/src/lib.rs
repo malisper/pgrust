@@ -403,7 +403,14 @@ seam_core::seam!(
  *     arithmetic in-crate. -------------------------------------------- */
 seam_core::seam!(
     /// `rte->tablesample->tsmhandler` for the baserel's RTE (cost_samplescan).
-    pub fn rte_tablesample_tsmhandler(root: &PlannerInfo, rel: RelId) -> Oid
+    /// `run` is threaded so the owner can `planner_rt_fetch` the RTE's owned
+    /// `tablesample` clause node (the same RTE-projection contract as
+    /// `rte_relid` / `rte_functions_exprcost`).
+    pub fn rte_tablesample_tsmhandler<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rel: RelId,
+    ) -> Oid
 );
 seam_core::seam!(
     /// `cost_qual_eval_node((Node *) rte->functions, root)` for the baserel's

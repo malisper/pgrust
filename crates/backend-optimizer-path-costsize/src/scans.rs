@@ -85,7 +85,12 @@ pub fn cost_seqscan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
  * ========================================================================== */
 
 /// `cost_samplescan` — fills a sample-scan `Path` (by `PathId`).
-pub fn cost_samplescan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
+pub fn cost_samplescan<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    path_id: PathId,
+    rel: RelId,
+) {
     let mut startup_cost: Cost = 0.0;
     let mut run_cost: Cost = 0.0;
 
@@ -105,7 +110,7 @@ pub fn cost_samplescan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
     debug_assert!(rtekind == RTE_RELATION);
 
     // rte->tablesample->tsmhandler is unreachable in the fabled arena → seam.
-    let tsmhandler = cz::rte_tablesample_tsmhandler::call(root, rel);
+    let tsmhandler = cz::rte_tablesample_tsmhandler::call(run, root, rel);
 
     let param_info = path_param_info(root, path_id);
     let rows = match &param_info {

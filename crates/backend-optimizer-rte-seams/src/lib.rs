@@ -155,6 +155,27 @@ seam_core::seam!(
     pub fn rte_has_tablesample<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> bool
 );
 seam_core::seam!(
+    /// `root->simple_rte_array[rti]->tablesample->tsmhandler` — the OID of the
+    /// TABLESAMPLE method's handler function (tsmapi.h). Returns
+    /// `InvalidOid` (0) if the RTE carries no TABLESAMPLE clause.
+    pub fn rte_tablesample_handler<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rti: Index,
+    ) -> types_core::primitive::Oid
+);
+seam_core::seam!(
+    /// `root->simple_rte_array[rti]->tablesample->args` — the TABLESAMPLE
+    /// argument expression(s), each deep-copied into the planner-run `Mcx` so
+    /// the consumer (`set_tablesample_rel_size` → `SampleScanGetSampleSize`) can
+    /// const-fold them. Empty `Vec` if the RTE carries no TABLESAMPLE clause.
+    pub fn rte_tablesample_args<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rti: Index,
+    ) -> types_error::PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr>>
+);
+seam_core::seam!(
     /// `root->simple_rte_array[rti]->tablefunc != NULL` — does this RTE carry a
     /// `TableFunc`? (costsize.c `cost_tablefuncscan`). Presence only.
     pub fn rte_has_tablefunc<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> bool
@@ -374,6 +395,31 @@ pub fn init_seams() {
     rte_has_tablesample::set(|run, root, rti| {
         planner_rt_fetch(run, root, rti).tablesample.is_some()
     });
+    rte_tablesample_handler::set(|run, root, rti| {
+        use types_nodes::nodes::Node;
+        match planner_rt_fetch(run, root, rti).tablesample.as_deref() {
+            Some(Node::TableSampleClause(tsc)) => tsc.tsmhandler,
+            _ => types_core::primitive::Oid::default(),
+        }
+    });
+    rte_tablesample_args::set(|run, root, rti| {
+        use types_nodes::nodes::Node;
+        let mcx = run.mcx();
+        match planner_rt_fetch(run, root, rti).tablesample.as_deref() {
+            Some(Node::TableSampleClause(tsc)) => match &tsc.args {
+                Some(list) => {
+                    let mut out: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+                        alloc::vec::Vec::with_capacity(list.len());
+                    for a in list.iter() {
+                        out.push(a.clone_in(mcx)?);
+                    }
+                    Ok(out)
+                }
+                None => Ok(alloc::vec::Vec::new()),
+            },
+            _ => Ok(alloc::vec::Vec::new()),
+        }
+    });
     rte_has_tablefunc::set(|run, root, rti| planner_rt_fetch(run, root, rti).tablefunc.is_some());
     rte_security_barrier::set(|run, root, rti| {
         planner_rt_fetch(run, root, rti).security_barrier
@@ -399,6 +445,30 @@ pub fn init_seams() {
     backend_optimizer_path_costsize_seams::rte_relid::set(|run, root, rel| {
         let rti = root.rel(rel).relid;
         planner_rt_fetch(run, root, rti).relid
+    });
+
+    // costsize.c `cost_samplescan` — `rte->tablesample->tsmhandler` from a
+    // RelOptInfo handle. `rel->relid` is the 1-based RT index; navigate the
+    // owned `tablesample` clause node through `planner_rt_fetch`.
+    backend_optimizer_path_costsize_seams::rte_tablesample_tsmhandler::set(|run, root, rel| {
+        use types_nodes::nodes::Node;
+        let rti = root.rel(rel).relid;
+        match planner_rt_fetch(run, root, rti).tablesample.as_deref() {
+            Some(Node::TableSampleClause(tsc)) => tsc.tsmhandler,
+            _ => types_core::primitive::Oid::default(),
+        }
+    });
+
+    // costsize.c `cost_samplescan` — `GetTsmRoutine(tsmhandler)->NextSampleBlock
+    // != NULL`, the random-vs-sequential page-cost probe. The probe carries no
+    // Mcx, so rather than materialize a full TsmRoutine we mirror the built-in
+    // routine table directly: SYSTEM (tsm_system_handler, OID 3314) installs a
+    // NextSampleBlock callback (random access); BERNOULLI (tsm_bernoulli_handler,
+    // OID 3313) leaves it NULL (sequential). Any other handler defaults to
+    // sequential (false).
+    backend_optimizer_path_costsize_seams::tsm_uses_random_access::set(|tsmhandler| {
+        const F_TSM_SYSTEM_HANDLER: types_core::primitive::Oid = 3314;
+        tsmhandler == F_TSM_SYSTEM_HANDLER
     });
 
     // costsize.c `set_cte_size_estimates` — `rte->self_reference` from a

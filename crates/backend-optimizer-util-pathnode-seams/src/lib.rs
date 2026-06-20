@@ -966,7 +966,12 @@ seam_core::seam!(
  *     are written through the same `PathId` (the estimator downcasts the arena
  *     PathNode). ------------------------------------------------------------ */
 seam_core::seam!(pub fn cost_seqscan(root: &mut PlannerInfo, path: PathId, rel: RelId));
-seam_core::seam!(pub fn cost_samplescan(root: &mut PlannerInfo, path: PathId, rel: RelId));
+seam_core::seam!(pub fn cost_samplescan<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    path: PathId,
+    rel: RelId,
+));
 seam_core::seam!(
     /// `cost_index(IndexPath *path, root, loop_count, partial_path)`.
     ///

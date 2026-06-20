@@ -389,7 +389,7 @@ pub fn set_rel_pathlist<'mcx>(
                 if rte::rte_relkind::call(run, root, rti) == RELKIND_FOREIGN_TABLE {
                     set_foreign_pathlist(run, root, rel, rti)?;
                 } else if rte::rte_has_tablesample::call(run, root, rti) {
-                    set_tablesample_rel_pathlist(root, run, rel, rti)?;
+                    set_tablesample_rel_pathlist(mcx, root, run, rel, rti)?;
                 } else {
                     set_plain_rel_pathlist(mcx, root, run, rel)?;
                 }
@@ -594,8 +594,8 @@ pub fn set_tablesample_rel_size<'mcx>(
     // Test partial indexes first.
     check_index_predicates(mcx, root, run, rel)?;
 
-    // Call the sampling method's estimation function. Unported (TSM dispatch).
-    let (pages, tuples) = tablesample_get_sample_size(root, rel, rti)?;
+    // Call the sampling method's estimation function (TSM dispatch).
+    let (pages, tuples) = tablesample_get_sample_size(mcx, run, root, rel, rti)?;
 
     root.rel_mut(rel).pages = pages;
     root.rel_mut(rel).tuples = tuples;
@@ -608,6 +608,7 @@ pub fn set_tablesample_rel_size<'mcx>(
 /// `set_tablesample_rel_pathlist` (allpaths.c:866) — access paths for a sampled
 /// relation.
 pub fn set_tablesample_rel_pathlist<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
     rel: RelId,
@@ -622,7 +623,7 @@ pub fn set_tablesample_rel_pathlist<'mcx>(
     // occur, wrap the SampleScan in a Materialize node.
     let multi = root.query_level > 1
         || bms::relids_membership::call(&root.all_query_rels) != BMS_SINGLETON;
-    if multi && !tablesample_repeatable_across_scans(root, rti)? {
+    if multi && !tablesample_repeatable_across_scans(mcx, run, root, rti)? {
         path = pathnode::create_material_path::call(root, rel, path)?;
     }
 
@@ -784,17 +785,55 @@ fn foreign_scan_parallel_safe(root: &PlannerInfo, rel: RelId, rti: Index) -> boo
     seams::fdw_is_foreign_scan_parallel_safe::call(root, rel, rti)
 }
 
+/// `tsm_system_handler` pg_proc OID (`pg_proc.dat`).
+const F_TSM_SYSTEM_HANDLER: Oid = 3314;
+/// `tsm_bernoulli_handler` pg_proc OID (`pg_proc.dat`).
+const F_TSM_BERNOULLI_HANDLER: Oid = 3313;
+
 /// TABLESAMPLE method `SampleScanGetSampleSize` dispatch (tsmapi.h).
-fn tablesample_get_sample_size(
+///
+/// C: `GetTsmRoutine(rte->tablesample->tsmhandler)->SampleScanGetSampleSize(
+///        root, baserel, rte->tablesample->args, &pages, &tuples)`. The owned
+/// model navigates `rte->tablesample->{tsmhandler,args}` through the rte-seams
+/// (cloning the args into `mcx`), then dispatches on the handler OID to the
+/// faithful estimation body in `backend-access-tablesample-core`, which runs
+/// `estimate_expression_value` over the percent argument and `clamp_row_est`.
+fn tablesample_get_sample_size<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     rel: RelId,
     rti: Index,
 ) -> PgResult<(u32, f64)> {
-    seams::tsm_get_sample_size::call(root, rel, rti)
+    let handler = rte::rte_tablesample_handler::call(run, root, rti);
+    let args = rte::rte_tablesample_args::call(run, root, rti)?;
+    let baserel = root.rel(rel);
+    match handler {
+        F_TSM_SYSTEM_HANDLER => {
+            backend_access_tablesample_core::system_samplescangetsamplesize(mcx, baserel, &args)
+        }
+        F_TSM_BERNOULLI_HANDLER => {
+            backend_access_tablesample_core::bernoulli_samplescangetsamplesize(mcx, baserel, &args)
+        }
+        other => Err(PgError::error(alloc::format!(
+            "tablesample_get_sample_size: unrecognized TABLESAMPLE handler OID {other}"
+        ))),
+    }
 }
 /// TABLESAMPLE `GetTsmRoutine(...)->repeatable_across_scans` (tsmapi.h).
-fn tablesample_repeatable_across_scans(root: &PlannerInfo, rti: Index) -> PgResult<bool> {
-    seams::tsm_repeatable_across_scans::call(root, rti)
+///
+/// C reads the routine's `repeatable_across_scans` flag. Both built-in methods
+/// (SYSTEM, BERNOULLI) set it `true`; dispatch by handler OID through the
+/// `GetTsmRoutine` registry so a future method picks up its own value.
+fn tablesample_repeatable_across_scans<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    rti: Index,
+) -> PgResult<bool> {
+    let handler = rte::rte_tablesample_handler::call(run, root, rti);
+    let routine = backend_access_tablesample_core_seams::get_tsm_routine_oid::call(mcx, handler)?;
+    Ok(routine.repeatable_across_scans)
 }
 /// TABLESAMPLE function + args parallel-safety (`func_parallel` + `is_parallel_safe`).
 fn tablesample_is_parallel_safe(root: &PlannerInfo, rti: Index) -> bool {
