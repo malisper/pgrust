@@ -1390,7 +1390,7 @@ pub fn get_rule_windowspec<'mcx>(
 
 /// `get_window_frame_options(frameOptions, startOffset, endOffset, context)`
 /// (ruleutils.c 6837-6901).
-fn get_window_frame_options<'mcx>(
+pub(crate) fn get_window_frame_options<'mcx>(
     frame_options: i32,
     start_offset: Option<&Node<'mcx>>,
     end_offset: Option<&Node<'mcx>>,
@@ -1460,6 +1460,45 @@ fn get_window_frame_options<'mcx>(
         context.buf.data.pop();
     }
     Ok(())
+}
+
+/// `get_window_frame_options_for_explain(frameOptions, startOffset, endOffset,
+/// dpcontext, forceprefix)` (ruleutils.c 6907-6936). Builds a fresh
+/// `deparse_context` over the supplied namespaces (already pointed at the
+/// WindowAgg plan node by `set_deparse_context_plan`) and renders the frame
+/// options text — the form EXPLAIN appends after a window's PARTITION/ORDER BY
+/// keys. The offset expressions, if present, are deparsed against the plan
+/// context (so OUTER_VAR/PARAM_EXEC references resolve).
+pub(crate) fn get_window_frame_options_for_explain<'mcx>(
+    mcx: Mcx<'mcx>,
+    frame_options: i32,
+    start_offset: Option<&Node<'mcx>>,
+    end_offset: Option<&Node<'mcx>>,
+    dpcontext: PgVec<'mcx, DeparseNamespace<'mcx>>,
+    forceprefix: bool,
+) -> PgResult<PgString<'mcx>> {
+    let mut context = DeparseContext {
+        buf: types_stringinfo::StringInfo::new_in(mcx),
+        namespaces: dpcontext,
+        resultDesc: None,
+        targetList: PgVec::new_in(mcx),
+        windowClause: PgVec::new_in(mcx),
+        prettyFlags: 0,
+        wrapColumn: crate::WRAP_COLUMN_DEFAULT,
+        indentLevel: 0,
+        varprefix: forceprefix,
+        colNamesVisible: true,
+        inGroupBy: false,
+        varInOrderBy: false,
+        appendparents: None,
+    };
+
+    get_window_frame_options(frame_options, start_offset, end_offset, &mut context)?;
+
+    // return buf.data (palloc'd in C; here charged to mcx).
+    let s = core::str::from_utf8(context.buf.data.as_slice())
+        .map_err(|_| elog_error("deparse produced invalid UTF-8".into()))?;
+    PgString::from_str_in(s, mcx)
 }
 
 /* -------------------------------------------------------------------------- *

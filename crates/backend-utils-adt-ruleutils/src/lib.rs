@@ -2683,6 +2683,46 @@ pub fn deparse_expr_for_plan<'mcx, 'p>(
     deparse_expression(mcx, &expr_owned, context, forceprefix, showimplicit)
 }
 
+/// EXPLAIN's `show_window_def` frame-options step folded into one call: build
+/// the plan-tree deparse context, point it at the WindowAgg `plan` node (so any
+/// frame-offset expressions resolve against it), and render the frame-clause
+/// text (e.g. `ROWS UNBOUNDED PRECEDING`). Mirrors C's
+/// `get_window_frame_options_for_explain(frameOptions, startOffset, endOffset,
+/// set_deparse_context_plan(es->deparse_cxt, (Plan *) wagg, ancestors),
+/// useprefix)`. Installs the `deparse_window_frame_for_plan` seam.
+pub fn deparse_window_frame_for_plan<'mcx, 'p>(
+    mcx: Mcx<'mcx>,
+    pstmt: &types_nodes::nodeindexscan::PlannedStmt<'p>,
+    rtable_names: &PgVec<'mcx, Option<PgString<'mcx>>>,
+    plan: &Node<'p>,
+    ancestors: &PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
+    frame_options: i32,
+    start_offset: Option<&Node<'p>>,
+    end_offset: Option<&Node<'p>>,
+    forceprefix: bool,
+) -> PgResult<PgString<'mcx>> {
+    // context = set_deparse_context_plan(deparse_context_for_plan_tree(pstmt,
+    //                                    rtable_names), (Plan *) wagg, ancestors);
+    let base = deparse_context_for_plan_tree(mcx, pstmt, rtable_names)?;
+    let context = set_deparse_context_plan(mcx, base, plan, ancestors)?;
+    let start_owned = match start_offset {
+        Some(n) => Some(n.clone_in(mcx)?),
+        None => None,
+    };
+    let end_owned = match end_offset {
+        Some(n) => Some(n.clone_in(mcx)?),
+        None => None,
+    };
+    query_deparse::get_window_frame_options_for_explain(
+        mcx,
+        frame_options,
+        start_owned.as_ref(),
+        end_owned.as_ref(),
+        context,
+        forceprefix,
+    )
+}
+
 /* -------------------------------------------------------------------------- *
  * Local list/node-clone + bitmapset helpers.
  * -------------------------------------------------------------------------- */

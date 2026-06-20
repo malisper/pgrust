@@ -174,6 +174,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// EXPLAIN's `show_window_def` frame-options step, folded into one
+    /// owner-private call (ruleutils.c `set_deparse_context_plan` +
+    /// `get_window_frame_options_for_explain`).
+    ///
+    /// Like [`deparse_expr_for_plan`], carries the substrate explain owns — the
+    /// `PlannedStmt`, per-RTE display names, the WindowAgg `Plan` node, and the
+    /// ancestor `Plan` list — plus the `frameOptions` bitmask and the optional
+    /// `startOffset`/`endOffset` bound expressions. Ruleutils builds the
+    /// namespace, points it at the WindowAgg, renders the frame clause text
+    /// (e.g. `ROWS UNBOUNDED PRECEDING`), and returns it. Reads the catalog when
+    /// offsets are present, so it can `ereport(ERROR)`; allocated in `mcx`.
+    pub fn deparse_window_frame_for_plan<'mcx, 'p>(
+        mcx: Mcx<'mcx>,
+        pstmt: &PlannedStmt<'p>,
+        rtable_names: &PgVec<'mcx, Option<PgString<'mcx>>>,
+        plan: &Node<'p>,
+        ancestors: &PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
+        frame_options: i32,
+        start_offset: Option<&Node<'p>>,
+        end_offset: Option<&Node<'p>>,
+        forceprefix: bool,
+    ) -> PgResult<PgString<'mcx>>
+);
+
+seam_core::seam!(
     /// `get_rule_expr(expr, context, showimplicit)` (ruleutils.c): the
     /// lower-level expression deparser `deparse_expression` wraps, appending the
     /// SQL text for `expr` to the context's output buffer. Carried here because

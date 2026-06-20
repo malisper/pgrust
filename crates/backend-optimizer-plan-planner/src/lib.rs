@@ -3632,39 +3632,78 @@ fn optimize_window_clauses<'mcx>(
 
     let order = wfa.clause_order.clone();
     for &winref in &order {
+        let wc_id = match wfa.clauses[winref as usize] {
+            Some(id) => id,
+            None => continue,
+        };
         // skip any WindowClauses that have no WindowFuncs.
         if wfa.window_funcs[winref as usize].is_empty() {
             continue;
         }
+
         // For each WindowFunc, check for a support function and, if present, call
         // the SupportRequestOptimizeWindowClause request to optimize the frame
-        // options. That request rides the planner-support fmgr machinery, which
-        // is unported workspace-wide. The optimization it performs is purely an
-        // efficiency one — it can only narrow RANGE/GROUPS frames to equivalent
-        // ROWS frames (e.g. row_number()'s frame to "ROWS UNBOUNDED PRECEDING ..
-        // CURRENT ROW"), which yields identical results, just with fewer peer
-        // checks at execution. So when the support machinery is absent we take
-        // the C "no support / unsupported request" path (`break`): leave the
-        // WindowClause's frame options unchanged. This is a correctness-neutral
-        // skipped optimization, not a hollow stub.
-        for &wfunc_id in &wfa.window_funcs[winref as usize] {
+        // options. The optimization is purely an efficiency one — it narrows
+        // RANGE/GROUPS frames to equivalent ROWS frames (e.g. row_number()'s
+        // frame to "ROWS UNBOUNDED PRECEDING AND CURRENT ROW"), which yields
+        // identical results, just with fewer peer checks at execution.
+        let cur_frame = root.windowclause(wc_id).frameOptions;
+        let mut optimized_frame_options: i32 = 0;
+        let mut all_agree = true;
+        let func_ids = wfa.window_funcs[winref as usize].clone();
+        for (idx, &wfunc_id) in func_ids.iter().enumerate() {
             let Some(w) = root.node(wfunc_id).as_windowfunc() else {
                 panic!("optimize_window_clauses: windowFuncs entry is not a WindowFunc");
             };
             let winfnoid = w.winfnoid;
             let prosupport =
                 backend_utils_cache_lsyscache::function::get_func_support(winfnoid)?;
+
+            // Check if there's a support function for 'wfunc'.
             if prosupport == types_core::primitive::InvalidOid {
+                all_agree = false;
                 break; // can't optimize this WindowClause
             }
-            // prosupport exists, but the SupportRequestOptimizeWindowClause
-            // fmgr dispatch is unported; treat as if the request returned NULL
-            // (the C `res == NULL` break) — frame options stay as-is.
-            break;
+
+            // Call the support function (SupportRequestOptimizeWindowClause).
+            let res = backend_optimizer_util_clauses::support_optimize_window::call_support_optimize_window(
+                prosupport,
+                winfnoid,
+                cur_frame,
+            )?;
+
+            // Skip to next WindowClause if the support function does not support
+            // this request type (the C `res == NULL` path).
+            let new_frame = match res {
+                Some(f) => f,
+                None => {
+                    all_agree = false;
+                    break;
+                }
+            };
+
+            if idx == 0 {
+                // Save these frameOptions for the first WindowFunc.
+                optimized_frame_options = new_frame;
+            } else if optimized_frame_options != new_frame {
+                // Subsequent WindowFuncs must agree, else we can't optimize.
+                all_agree = false;
+                break;
+            }
         }
-        // With no applied support optimization, optimizedFrameOptions stays the
-        // sentinel and the wc->frameOptions reuse step is skipped (matching the
-        // C path where the loop `break`s before completing).
+
+        // Adjust the frameOptions if all WindowFunc's agree that it's ok.
+        if all_agree && cur_frame != optimized_frame_options {
+            // Apply the new frame options.
+            root.windowclause_mut(wc_id).frameOptions = optimized_frame_options;
+
+            // Check whether changing the frameOptions has made this WindowClause
+            // a duplicate of another. This can only happen with multiple
+            // WindowClauses, so don't bother if there's only one.
+            if order.len() > 1 {
+                optimize_window_reuse_duplicate(root, wfa, winref, wc_id)?;
+            }
+        }
     }
 
     // XXX remove any duplicate WindowFuncs from each WindowClause (planner.c:5950).
@@ -3693,6 +3732,113 @@ fn optimize_window_clauses<'mcx>(
 /// `equal((Node *) a, (Node *) b)` over two arena Expr handles, by value.
 fn exprs_equal_by_value(root: &PlannerInfo, a: types_pathnodes::NodeId, b: types_pathnodes::NodeId) -> bool {
     backend_nodes_equalfuncs_seams::equal_expr::call(root.node(a), root.node(b))
+}
+
+/// `equal(a, b)` over two arena handle lists (`List *` of equal length whose
+/// elements compare by value), used by `optimize_window_clauses`'s duplicate
+/// check for `partitionClause`/`orderClause`.
+fn node_lists_equal(
+    root: &PlannerInfo,
+    a: &[types_pathnodes::NodeId],
+    b: &[types_pathnodes::NodeId],
+) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .all(|(&x, &y)| exprs_equal_by_value(root, x, y))
+}
+
+/// `equal(a, b)` over two optional arena handles (`Node *` that may be NULL),
+/// used by `optimize_window_clauses`'s duplicate check for
+/// `startOffset`/`endOffset`.
+fn opt_nodes_equal(
+    root: &PlannerInfo,
+    a: Option<types_pathnodes::NodeId>,
+    b: Option<types_pathnodes::NodeId>,
+) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => exprs_equal_by_value(root, x, y),
+        _ => false,
+    }
+}
+
+/// The duplicate-check-and-reuse branch of `optimize_window_clauses`
+/// (planner.c:5876-5949). After a WindowClause's `frameOptions` have been
+/// optimized, check whether it now matches another WindowClause's
+/// partition/order/frame/offsets; if so, move all of this clause's WindowFuncs
+/// into the existing clause (adjusting their `winref`) and empty this clause's
+/// WindowFunc list. `transformWindowFuncCall` guarantees at most one such
+/// duplicate, so we stop at the first match.
+fn optimize_window_reuse_duplicate(
+    root: &mut PlannerInfo,
+    wfa: &mut WindowFuncListsArena,
+    winref: u32,
+    wc_id: types_pathnodes::NodeId,
+) -> PgResult<()> {
+    // Snapshot this clause's comparison fields.
+    let (wc_part, wc_ord, wc_frame, wc_start, wc_end) = {
+        let wc = root.windowclause(wc_id);
+        (
+            wc.partitionClause.clone(),
+            wc.orderClause.clone(),
+            wc.frameOptions,
+            wc.startOffset,
+            wc.endOffset,
+        )
+    };
+
+    let order = wfa.clause_order.clone();
+    for &other_winref in &order {
+        let Some(existing_id) = wfa.clauses[other_winref as usize] else {
+            continue;
+        };
+        // skip over the WindowClause we're currently editing.
+        if existing_id == wc_id {
+            continue;
+        }
+
+        let (e_part, e_ord, e_frame, e_start, e_end, e_winref) = {
+            let ewc = root.windowclause(existing_id);
+            (
+                ewc.partitionClause.clone(),
+                ewc.orderClause.clone(),
+                ewc.frameOptions,
+                ewc.startOffset,
+                ewc.endOffset,
+                ewc.winref,
+            )
+        };
+
+        // Perform the same duplicate check that is done in
+        // transformWindowFuncCall.
+        if node_lists_equal(root, &wc_part, &e_part)
+            && node_lists_equal(root, &wc_ord, &e_ord)
+            && wc_frame == e_frame
+            && opt_nodes_equal(root, wc_start, e_start)
+            && opt_nodes_equal(root, wc_end, e_end)
+        {
+            // Move each WindowFunc in 'wc' into 'existing_wc': adjust its winref
+            // and append it to existing_wc's WindowFunc list.
+            let moved = wfa.window_funcs[winref as usize].clone();
+            for &wfunc_id in &moved {
+                if let types_nodes::primnodes::Expr::WindowFunc(w) = root.node_mut(wfunc_id) {
+                    w.winref = e_winref;
+                } else {
+                    panic!("optimize_window_clauses: windowFuncs entry is not a WindowFunc");
+                }
+            }
+            // list_concat(existing, wc); wc->list = NIL.
+            wfa.window_funcs[other_winref as usize].extend(moved);
+            wfa.window_funcs[winref as usize].clear();
+
+            // transformWindowFuncCall() ensures no other duplicates exist.
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// `select_active_windows(root, wflists)` (planner.c:5990) — build the ordered

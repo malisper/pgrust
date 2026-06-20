@@ -796,6 +796,44 @@ pub fn ExplainNode<'es, 'p>(
         }
     }
 
+    // T_WindowAgg: `show_window_def(...)` then `show_upper_qual(runConditionOrig,
+    // "Run Condition")` run BEFORE the generic `Filter:` line (explain.c:2203-
+    // 2208), so the `Window:` and `Run Condition:` detail lines precede `Filter`.
+    if plan_node.node_tag() == ntag::T_WindowAgg {
+        show_window_def(es, mcx, plan_node, planstate, ancestors)?;
+
+        // show_upper_qual(((WindowAgg *) plan)->runConditionOrig, "Run Condition",
+        //                 planstate, ancestors, es). useprefix = rtable>1||verbose.
+        let wagg = plan_node.expect_windowagg();
+        if let Some(rc) = wagg.runConditionOrig.as_ref().filter(|q| !q.is_empty()) {
+            let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+                alloc::vec::Vec::with_capacity(rc.len());
+            for e in rc.iter() {
+                exprs.push(e.clone_in(mcx)?);
+            }
+            let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
+            let node = Node::mk_expr(mcx, anded)?;
+
+            let useprefix = es.rtable_names.len() > 1 || es.verbose;
+            let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+            let es_pstmt = es
+                .pstmt
+                .as_deref()
+                .expect("EXPLAIN: es->pstmt must be set before deparse");
+            let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+                mcx,
+                es_pstmt,
+                &es.rtable_names,
+                &plan_owned,
+                ancestors,
+                &node,
+                useprefix,
+                false,
+            )?;
+            fmt::ExplainPropertyText("Run Condition", exprstr.as_str(), es)?;
+        }
+    }
+
     // The per-node "quals, sort keys, etc" switch (explain.c:1952). C emits the
     // scan-specific quals (`Index Cond` / `Recheck Cond` / `Order By`) BEFORE the
     // generic `Filter` line, each in its node's case. The `Filter` itself
@@ -1362,6 +1400,196 @@ fn explain_scan_target_switch<'es, 'p>(
 /// key expressions (the node itself for sort keys, the outer child for group
 /// keys); both refer to the same node, passed split so we needn't re-`plan_head`.
 #[allow(clippy::too_many_arguments)]
+/// `show_window_def(planstate, ancestors, es)` (explain.c:2888). Render the
+/// window definition (`winname AS (...)`) for a WindowAgg node: the PARTITION BY
+/// and ORDER BY key columns (deparsed against the child plan's tlist) plus the
+/// non-default frame clause.
+fn show_window_def<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plan_node: &Node<'p>,
+    planstate: &PlanStateNode<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+) -> PgResult<()> {
+    let wagg = plan_node.expect_windowagg();
+
+    // appendStringInfo(&wbuf, "%s AS (", quote_identifier(wagg->winname));
+    let winname = wagg
+        .winname
+        .as_ref()
+        .map(|s| s.as_str())
+        .expect("show_window_def: WindowAgg has no winname");
+    let quoted = backend_utils_adt_ruleutils::quote_identifier(mcx, winname)?;
+    let mut wbuf = alloc::string::String::new();
+    wbuf.push_str(quoted.as_str());
+    wbuf.push_str(" AS (");
+
+    // ancestors = lcons(wagg, ancestors): prepend the WindowAgg plan node for the
+    // key/frame deparse (so PARAM_EXEC/OUTER_VAR resolution reaches it).
+    let mut child_ancestors: PgVec<'es, PgBox<'es, Node<'es>>> = PgVec::new_in(mcx);
+    child_ancestors
+        .try_reserve(ancestors.len() + 1)
+        .map_err(|_| mcx.oom(0))?;
+    child_ancestors.push(mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?);
+    for a in ancestors.iter() {
+        child_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+    }
+
+    // The key columns refer to the tlist of the child plan.
+    let child_plan = planstate
+        .outer_plan_state()
+        .and_then(|c| c.ps_head().plan)
+        .expect("show_window_def: outerPlanState(planstate)->plan");
+    let child = child_plan.plan_head();
+
+    let mut needspace = false;
+    if wagg.partNumCols > 0 {
+        wbuf.push_str("PARTITION BY ");
+        let cols = wagg
+            .partColIdx
+            .as_ref()
+            .expect("show_window_def: partColIdx with partNumCols>0");
+        show_window_keys(
+            es,
+            mcx,
+            &mut wbuf,
+            child_plan,
+            child,
+            wagg.partNumCols,
+            cols,
+            &child_ancestors,
+        )?;
+        needspace = true;
+    }
+    if wagg.ordNumCols > 0 {
+        if needspace {
+            wbuf.push(' ');
+        }
+        wbuf.push_str("ORDER BY ");
+        let cols = wagg
+            .ordColIdx
+            .as_ref()
+            .expect("show_window_def: ordColIdx with ordNumCols>0");
+        show_window_keys(
+            es,
+            mcx,
+            &mut wbuf,
+            child_plan,
+            child,
+            wagg.ordNumCols,
+            cols,
+            &child_ancestors,
+        )?;
+        needspace = true;
+    }
+
+    // ancestors = list_delete_first(ancestors): the frame deparse uses the
+    // original ancestor list (without the WindowAgg prepended).
+    const FRAMEOPTION_NONDEFAULT: i32 = 0x00001;
+    if wagg.frameOptions & FRAMEOPTION_NONDEFAULT != 0 {
+        let useprefix = es.rtable_names.len() > 1 || es.verbose;
+        // Clone pstmt and the WindowAgg plan node into the 'es formatting arena
+        // so all deparse-seam arguments share one lifetime (the seam's `'p`
+        // unifies to `'es`, matching the `deparse_expr_for_plan` callers).
+        let es_pstmt = es
+            .pstmt
+            .as_deref()
+            .expect("EXPLAIN: es->pstmt must be set before deparse")
+            .clone_in(mcx)?;
+        let es_pstmt: PgBox<'es, PlannedStmt<'es>> = mcx::alloc_in(mcx, es_pstmt)?;
+        let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+        // Wrap the offset Exprs as Nodes for the deparse seam.
+        let start_node = match wagg.startOffset.as_deref() {
+            Some(e) => Some(Node::mk_expr(mcx, e.clone_in(mcx)?)?),
+            None => None,
+        };
+        let end_node = match wagg.endOffset.as_deref() {
+            Some(e) => Some(Node::mk_expr(mcx, e.clone_in(mcx)?)?),
+            None => None,
+        };
+        let framestr = ruleutils_s::deparse_window_frame_for_plan::call(
+            mcx,
+            &es_pstmt,
+            &es.rtable_names,
+            &plan_owned,
+            ancestors,
+            wagg.frameOptions,
+            start_node.as_ref(),
+            end_node.as_ref(),
+            useprefix,
+        )?;
+        if needspace {
+            wbuf.push(' ');
+        }
+        wbuf.push_str(framestr.as_str());
+    }
+
+    wbuf.push(')');
+    fmt::ExplainPropertyText("Window", wbuf.as_str(), es)?;
+    Ok(())
+}
+
+/// `show_window_keys(buf, planstate, nkeys, keycols, ancestors, es)`
+/// (explain.c:2950). Append a window's PARTITION BY / ORDER BY key expressions
+/// (deparsed against the child plan's tlist), comma-separated, to `buf`. Unlike
+/// `show_sort_group_keys` no sort-order is shown (WindowAgg carries equality
+/// operators, not comparison operators).
+#[allow(clippy::too_many_arguments)]
+fn show_window_keys<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    buf: &mut alloc::string::String,
+    context_plan: &Node<'p>,
+    context_plan_head: &Plan<'p>,
+    nkeys: i32,
+    keycols: &PgVec<'p, AttrNumber>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+) -> PgResult<()> {
+    let useprefix = es.rtable_names.len() > 1 || es.verbose;
+
+    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, context_plan.clone_in(mcx)?)?;
+    let es_pstmt = es
+        .pstmt
+        .as_deref()
+        .expect("EXPLAIN: es->pstmt must be set before deparse")
+        .clone_in(mcx)?;
+    let es_pstmt: PgBox<'es, PlannedStmt<'es>> = mcx::alloc_in(mcx, es_pstmt)?;
+
+    let tlist = context_plan_head.targetlist.as_ref();
+
+    for keyno in 0..nkeys as usize {
+        // AttrNumber keyresno = keycols[keyno];
+        let keyresno = keycols[keyno];
+        // TargetEntry *target = get_tle_by_resno(plan->targetlist, keyresno);
+        let target = tlist
+            .and_then(|tl| tl.iter().find(|tle| tle.resno == keyresno))
+            .unwrap_or_else(|| panic!("no tlist entry for key {keyresno}"));
+        let target_expr = target
+            .expr
+            .as_deref()
+            .expect("show_window_keys: TargetEntry has no expr");
+
+        // exprstr = deparse_expression(target->expr, context, useprefix, true);
+        let expr_node = Node::mk_expr(mcx, target_expr.clone_in(mcx)?)?;
+        let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+            mcx,
+            &es_pstmt,
+            &es.rtable_names,
+            &plan_owned,
+            ancestors,
+            &expr_node,
+            useprefix,
+            true,
+        )?;
+
+        if keyno > 0 {
+            buf.push_str(", ");
+        }
+        buf.push_str(exprstr.as_str());
+    }
+    Ok(())
+}
+
 fn show_sort_group_keys<'es, 'p>(
     es: &mut ExplainState<'es>,
     mcx: Mcx<'es>,

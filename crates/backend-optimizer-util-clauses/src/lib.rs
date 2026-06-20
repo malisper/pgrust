@@ -62,6 +62,7 @@ pub mod grounded;
 pub mod leaf;
 pub mod srf_inline;
 pub mod support_cost;
+pub mod support_optimize_window;
 pub mod support_rows;
 pub mod support_simplify;
 
@@ -309,6 +310,14 @@ pub fn init_seams() {
     backend_optimizer_util_clauses_seams::call_support_rows::set(
         support_rows::call_support_rows,
     );
+
+    // `SupportRequestOptimizeWindowClause` dispatch (planner.c:5848), used by
+    // `optimize_window_clauses` to narrow a WindowClause's frame options through
+    // each WindowFunc's `prosupport` support function. Dispatched through the
+    // `support_optimize_window` table; the built-in ranking window functions'
+    // kernels are registered here. An OID with no kernel returns `Ok(None)`, so
+    // the caller leaves the frame options unchanged.
+    support_optimize_window::register_builtin_support_optimize_window();
 
     // `SupportRequestCost` dispatch (plancat.c:2137), used by `add_function_cost`
     // to refine a function's cost through its `prosupport` support function.

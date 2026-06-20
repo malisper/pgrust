@@ -78,6 +78,14 @@ pub fn init_seams() {
         crate::deparse_expr_for_plan,
     );
 
+    // deparse_window_frame_for_plan(...): EXPLAIN's show_window_def frame leg.
+    // Builds the deparse context for the plan tree, points it at the WindowAgg
+    // node, and renders the frame-clause text. Folds set_deparse_context_plan +
+    // get_window_frame_options_for_explain (both ruleutils-private).
+    backend_utils_adt_ruleutils_seams::deparse_window_frame_for_plan::set(
+        crate::deparse_window_frame_for_plan,
+    );
+
     // pg_get_indexdef_columns(indexrelid, pretty) (ruleutils.c): the comma-
     // joined index key column list (plain names + deparsed expression text),
     // used by genam's BuildIndexValueDescription to print the "(key columns)"
