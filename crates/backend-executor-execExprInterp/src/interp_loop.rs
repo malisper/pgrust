@@ -610,17 +610,26 @@ pub fn ExecInterpExpr<'mcx>(
                 //            MakeExpandedObjectReadOnlyInternal(*op->d.make_readonly.value);
                 //    *op->resnull = *op->d.make_readonly.isnull;
                 //
-                // The source cell read (op->d.make_readonly.value/isnull) and the
-                // resnull copy ARE expressible, but the non-null branch applies
-                // MakeExpandedObjectReadOnlyInternal (expandeddatum.c, unported).
-                // Faithfully blocked: the arm's whole job on a non-null value is
-                // that R/O transform.
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_MAKE_READONLY: on a non-null value forces \
-                     MakeExpandedObjectReadOnlyInternal(*op->d.make_readonly.value) \
-                     (expandeddatum.c, unported); blocked until expandeddatum lands"
-                );
+                // Force a varlena value that might be read multiple times to R/O.
+                // The source cell (op->d.make_readonly.value/isnull) is read and the
+                // resnull copied verbatim; the non-null branch dispatches the
+                // R/O transform through the misc2 owner's
+                // `make_expanded_object_read_only_internal_v` seam (expandeddatum.c).
+                // The transform is the identity on any non-R/W-expanded datum (the
+                // only ones the suite produces), exactly as the C function returns
+                // its input unchanged when `!VARATT_IS_EXTERNAL_EXPANDED_RW(d)`.
+                let cell = make_readonly_cell(state, op);
+                let (value, isnull) = read_cell(state, cell);
+                let value = if !isnull {
+                    let mcx = estate.es_query_cxt;
+                    backend_utils_adt_misc2_seams::make_expanded_object_read_only_internal_v::call(
+                        mcx, &value,
+                    )?
+                } else {
+                    value
+                };
+                write_cell(state, resv, value, isnull);
+                op += 1;
             }
 
             EEOP_IOCOERCE => {
@@ -1436,6 +1445,14 @@ fn casetest_cell(state: &ExprState<'_>, op: usize) -> ResultCellId {
     match &state.steps.as_ref().unwrap()[op].d {
         ExprEvalStepData::CaseTest { value } => *value,
         _ => unreachable!("EEOP_CASE_TESTVAL/DOMAIN_TESTVAL: payload is not CaseTest"),
+    }
+}
+
+/// `op->d.make_readonly.value` — the source cell read by `EEOP_MAKE_READONLY`.
+fn make_readonly_cell(state: &ExprState<'_>, op: usize) -> ResultCellId {
+    match &state.steps.as_ref().unwrap()[op].d {
+        ExprEvalStepData::MakeReadOnly { value } => *value,
+        _ => unreachable!("EEOP_MAKE_READONLY: payload is not MakeReadOnly"),
     }
 }
 
