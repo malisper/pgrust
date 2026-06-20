@@ -42,6 +42,23 @@ seam_core::seam!(
     pub fn extract_set_variable_args(sstmt: VariableSetStmt) -> PgResult<Option<String>>
 );
 
+seam_core::seam!(
+    /// `GetConfigOptionFlags(name, missing_ok)` (guc.c) — the `GUC_*` flag word
+    /// for a named GUC variable (0 if unknown and `missing_ok`). Used by
+    /// `pg_get_functiondef`'s proconfig rendering to detect `GUC_LIST_QUOTE`.
+    /// The real body lives in `backend-utils-misc-guc`; it installs this from
+    /// its own `init_seams()`.
+    pub fn get_config_option_flags(name: String, missing_ok: bool) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// `SplitGUCList(rawstring, separator, &namelist)` (varlena.c) — parse a
+    /// `GUC_LIST_QUOTE` value into its identifier elements (already dequoted).
+    /// `Ok(None)` is the C `false` return (invalid list syntax). Owned by
+    /// `backend-utils-adt-varlena`.
+    pub fn split_guc_list(rawstring: String, separator: u8) -> PgResult<Option<Vec<String>>>
+);
+
 // --- process / permission / transaction state -----------------------------
 
 seam_core::seam!(

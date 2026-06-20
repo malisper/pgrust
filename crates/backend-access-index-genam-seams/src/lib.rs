@@ -324,6 +324,46 @@ pub struct ScannedPgTrigger {
     pub tgnewtable: Option<String>,
 }
 
+/// One `pg_trigger` row fetched by trigger OID — `pg_get_triggerdef_worker`'s
+/// `systable_beginscan(TriggerOidIndexId, oid = trigid)` read (ruleutils.c
+/// 899-1163). Carries every scalar `Form_pg_trigger` column the renderer reads
+/// (including `tgrelid`, which the by-`tgrelid` [`ScannedPgTrigger`] omits) plus
+/// the variable-length `tgattr` / `tgargs` / `tgqual` / `tgoldtable` /
+/// `tgnewtable` columns.
+#[derive(Clone, Debug)]
+pub struct TriggerByOid {
+    /// `Form_pg_trigger.tgrelid` — the relation the trigger is on.
+    pub tgrelid: Oid,
+    /// `NameData tgname` — the trigger's name (`NameStr`).
+    pub tgname: String,
+    /// `Oid tgfoid` — OID of the function to call.
+    pub tgfoid: Oid,
+    /// `int16 tgtype` — `TRIGGER_TYPE_*` bitmask.
+    pub tgtype: i16,
+    /// `Oid tgconstrrelid` — referenced relation for a constraint trigger.
+    pub tgconstrrelid: Oid,
+    /// `Oid tgconstraint` — owning constraint OID (0 if none).
+    pub tgconstraint: Oid,
+    /// `bool tgdeferrable`.
+    pub tgdeferrable: bool,
+    /// `bool tginitdeferred`.
+    pub tginitdeferred: bool,
+    /// `int16 tgnargs` — number of `tgargs` strings.
+    pub tgnargs: i16,
+    /// `int2vector tgattr` — the UPDATE OF column numbers (empty when
+    /// `tgattr.dim1 == 0`).
+    pub tgattr: Vec<AttrNumber>,
+    /// `bytea tgargs` — the `tgnargs` textual arguments, already split.
+    pub tgargs: Vec<String>,
+    /// `pg_node_tree tgqual` — the WHEN expression as `nodeToString` text, or
+    /// `None` for the C `isnull` (no WHEN clause).
+    pub tgqual: Option<String>,
+    /// `NameData tgoldtable` — OLD transition-table name, or `None` (NULL).
+    pub tgoldtable: Option<String>,
+    /// `NameData tgnewtable` — NEW transition-table name, or `None` (NULL).
+    pub tgnewtable: Option<String>,
+}
+
 /// One `pg_policy` row as `RelationBuildRowSecurity` (commands/policy.c)
 /// consumes it: the per-policy `Form_pg_policy` scalar columns plus the decoded
 /// `polroles` `Oid[]` and the `polqual`/`polwithcheck` `pg_node_tree` text. The
@@ -453,6 +493,21 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         ruleoid: Oid,
     ) -> PgResult<Option<RuleByOid>>
+);
+
+seam_core::seam!(
+    /// `pg_get_triggerdef_worker`'s by-OID `pg_trigger` read (ruleutils.c
+    /// 899-1163): `table_open(TriggerRelationId) +
+    /// systable_beginscan(TriggerOidIndexId, oid = trigid)` then
+    /// `systable_getnext` + `GETSTRUCT(Form_pg_trigger)` and the
+    /// `fastgetattr` reads of the variable-length columns (`tgattr` int2vector,
+    /// `tgargs` bytea, `tgqual` pg_node_tree, `tgoldtable`/`tgnewtable`
+    /// NameData). `Ok(None)` on a scan miss (C: `!HeapTupleIsValid`). Can
+    /// `ereport(ERROR)` (catalog read failure), carried on `Err`.
+    pub fn trigger_by_oid<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        trigid: Oid,
+    ) -> PgResult<Option<TriggerByOid>>
 );
 
 seam_core::seam!(

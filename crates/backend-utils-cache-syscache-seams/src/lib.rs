@@ -2551,6 +2551,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_get_functiondef`'s `pg_proc` read (ruleutils.c 2926-3170):
+    /// `SearchSysCache1(PROCOID, funcid)` + `GETSTRUCT` for the scalar
+    /// `Form_pg_proc`, plus the `SysCacheGetAttr*` reads of the by-reference
+    /// columns the renderer + `print_function_*` helpers detoast (`proconfig`
+    /// `text[]`, `prosqlbody` / `proargdefaults` `pg_node_tree`, `probin` /
+    /// `prosrc` `text`, `protrftypes` `oid[]`). `Ok(None)` on a cache miss so
+    /// the caller returns NULL (`PG_RETURN_NULL`); the installer owns the
+    /// `ReleaseSysCache`.
+    pub fn search_pg_functiondef_info<'mcx>(
+        mcx: Mcx<'mcx>,
+        funcid: Oid,
+    ) -> PgResult<Option<types_catalog::pg_proc::PgFunctiondefInfo>>
+);
+
+seam_core::seam!(
     /// `SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid))` +
     /// `GETSTRUCT(Form_pg_class)->relchecks` (RemoveConstraintById): the
     /// relation's check-constraint count. `Ok(None)` on a cache miss; the

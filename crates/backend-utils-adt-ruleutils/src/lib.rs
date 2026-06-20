@@ -539,6 +539,22 @@ pub(crate) fn oid_is_valid_pub(oid: Oid) -> bool {
     oid_is_valid(oid)
 }
 
+/// `simple_quote_literal(buf, val)` re-exported for the trigger-def module
+/// (the `tgargs` literals render through the same `String`-accumulating helper).
+pub(crate) fn simple_quote_literal_into_pub(buf: &mut alloc::string::String, val: &str) {
+    simple_quote_literal_into(buf, val)
+}
+
+/// `GET_PRETTY_FLAGS(pretty)` (ruleutils.c 92) — re-exported for the trigger-def
+/// module. `pretty ? (PAREN|INDENT|SCHEMA) : INDENT`.
+pub(crate) fn get_pretty_flags_pub(pretty: bool) -> i32 {
+    if pretty {
+        PRETTYFLAG_PAREN | PRETTYFLAG_INDENT | PRETTYFLAG_SCHEMA
+    } else {
+        PRETTYFLAG_INDENT
+    }
+}
+
 /// `get_reloptions(buf, reloptions)` re-exported for the index deparser (opclass
 /// options rendering).
 pub(crate) fn get_reloptions_pub<'mcx>(
@@ -1175,6 +1191,55 @@ pub fn deparse_context_for<'mcx>(
     set_simple_column_names(mcx, &mut dpns)?;
 
     // Return a one-deep namespace stack.
+    let mut stack = PgVec::new_in(mcx);
+    lappend(mcx, &mut stack, dpns)?;
+    Ok(stack)
+}
+
+/// Build the two-deep `old`/`new` deparse namespace stack
+/// `pg_get_triggerdef_worker` uses for a trigger WHEN qualification
+/// (ruleutils.c 1075-1109): two minimal relation RTEs aliased `old`/`new` over
+/// the same trigger relation, then `set_rtable_names` + `set_simple_column_names`.
+/// Returns the one-deep namespace stack (`list_make1(&dpns)`), used with
+/// `varprefix = true` so Vars render as `old.col` / `new.col`.
+pub(crate) fn deparse_context_for_old_new<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    relkind: i8,
+) -> PgResult<PgVec<'mcx, DeparseNamespace<'mcx>>> {
+    let mut dpns = DeparseNamespace::zeroed(mcx);
+
+    let mut make_rte = |name: &str| -> PgResult<RangeTblEntry<'mcx>> {
+        let mut rte = RangeTblEntry::new_in(mcx);
+        rte.rtekind = RTE_RELATION;
+        rte.relid = relid;
+        rte.relkind = relkind;
+        rte.rellockmode = AccessShareLock;
+        let alias = Alias {
+            aliasname: Some(pstrdup(mcx, name)?),
+            colnames: PgVec::new_in(mcx),
+        };
+        rte.alias = Some(mcx::alloc_in(mcx, alias)?);
+        let eref = Alias {
+            aliasname: Some(pstrdup(mcx, name)?),
+            colnames: PgVec::new_in(mcx),
+        };
+        rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+        rte.lateral = false;
+        rte.inh = false;
+        rte.inFromCl = true;
+        Ok(rte)
+    };
+
+    // dpns.rtable = list_make2(oldrte, newrte);
+    let oldrte = make_rte("old")?;
+    let newrte = make_rte("new")?;
+    lappend(mcx, &mut dpns.rtable, oldrte)?;
+    lappend(mcx, &mut dpns.rtable, newrte)?;
+
+    set_rtable_names(mcx, &mut dpns, &[], None)?;
+    set_simple_column_names(mcx, &mut dpns)?;
+
     let mut stack = PgVec::new_in(mcx);
     lappend(mcx, &mut stack, dpns)?;
     Ok(stack)
@@ -2749,8 +2814,11 @@ mod fmgr_builtins;
 pub use fmgr_builtins::register_ruleutils_builtins;
 
 pub mod constraintdef;
+pub mod functiondef;
 pub mod indexdef;
+pub mod partkeydef;
 pub mod statisticsdef;
+pub mod triggerdef;
 pub mod viewdef;
 
 /// `PRETTYFLAG_PAREN` (ruleutils.c 88).

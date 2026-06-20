@@ -364,6 +364,58 @@ fn fc_pg_get_ruledef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+/// `pg_get_triggerdef(oid) -> text` (oid 1662). pretty = false.
+fn fc_pg_get_triggerdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let trigid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let res = ok(crate::triggerdef::pg_get_triggerdef_worker(m.mcx(), trigid, false));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `pg_get_triggerdef_ext(oid, bool) -> text` (oid 2730). pretty threaded.
+fn fc_pg_get_triggerdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let trigid = arg_oid(fcinfo, 0);
+    let pretty = arg_bool(fcinfo, 1);
+    let m = scratch_mcx();
+    let res = ok(crate::triggerdef::pg_get_triggerdef_worker(m.mcx(), trigid, pretty));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `pg_get_functiondef(oid) -> text` (oid 2098).
+fn fc_pg_get_functiondef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let funcid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let res = ok(crate::functiondef::pg_get_functiondef(m.mcx(), funcid));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `pg_get_partkeydef(oid) -> text` (oid 3352). prettyFlags = PRETTYFLAG_INDENT,
+/// attrsOnly = false, missing_ok = true.
+fn fc_pg_get_partkeydef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let relid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let res = ok(crate::partkeydef::pg_get_partkeydef_worker(
+        m.mcx(),
+        relid,
+        crate::PRETTYFLAG_INDENT,
+        false,
+        true,
+    ));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
 /// `GET_PRETTY_FLAGS(pretty)` (ruleutils.c 92): pretty ?
 /// (PRETTYFLAG_PAREN|PRETTYFLAG_INDENT|PRETTYFLAG_SCHEMA) : PRETTYFLAG_INDENT.
 #[inline]
@@ -478,6 +530,12 @@ pub fn register_ruleutils_builtins() {
         builtin(2505, "pg_get_viewdef_name_ext", 2, true, false, fc_pg_get_viewdef_name_ext),
         builtin(1573, "pg_get_ruledef", 1, true, false, fc_pg_get_ruledef),
         builtin(2504, "pg_get_ruledef_ext", 2, true, false, fc_pg_get_ruledef_ext),
+        // Slice 5: trigger / function / partition-key definition deparse (the
+        // pg_get_triggerdef / pg_get_functiondef / pg_get_partkeydef workers).
+        builtin(1662, "pg_get_triggerdef", 1, true, false, fc_pg_get_triggerdef),
+        builtin(2730, "pg_get_triggerdef_ext", 2, true, false, fc_pg_get_triggerdef_ext),
+        builtin(2098, "pg_get_functiondef", 1, true, false, fc_pg_get_functiondef),
+        builtin(3352, "pg_get_partkeydef", 1, true, false, fc_pg_get_partkeydef),
         builtin(3415, "pg_get_statisticsobjdef", 1, true, false, fc_pg_get_statisticsobjdef),
         builtin(6174, "pg_get_statisticsobjdef_columns", 1, true, false, fc_pg_get_statisticsobjdef_columns),
         builtin(6173, "pg_get_statisticsobjdef_expressions", 1, true, false, fc_pg_get_statisticsobjdef_expressions),
