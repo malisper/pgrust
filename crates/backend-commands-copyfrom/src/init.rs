@@ -157,11 +157,32 @@ pub fn init_seams() {
         },
     );
     s::exec_eval_expr::set(
-        |_cstate: &mut CopyParseState<'_>, _m: i32| -> PgResult<AttrValue> {
-            Err(unsupported(
-                "COPY FROM default-expression evaluation (ExecEvalExpr / build_column_default) \
-                 is the plan-layer keystone and is not yet wired",
-            ))
+        |cstate: &mut CopyParseState<'_>, m: i32| -> PgResult<AttrValue> {
+            // values[m] = ExecEvalExpr(cstate->defexprs[m], cstate->econtext,
+            //                          &nulls[m]);   (copyfromparse.c:1640)
+            //
+            // The compiled `ExprState` lives on `cstate.defexprs[m]`; the
+            // per-tuple `ExprContext` and the owning `EState` are reached through
+            // the back-link wired by `CopyFrom` before the row loop. The EState
+            // lives on `CopyFrom`'s stack, in distinct memory from `cstate`, so
+            // re-deriving `&mut EState` from the link does not alias the `&mut
+            // cstate` we hold.
+            let econtext = cstate
+                .econtext
+                .expect("CopyFrom wires cstate.econtext before any default eval");
+            let estate = cstate
+                .estate
+                .as_mut()
+                .expect("CopyFrom wires cstate.estate before any default eval")
+                .get_mut();
+            let state = cstate.defexprs[m as usize]
+                .as_mut()
+                .expect("defmap entry implies a compiled defexpr");
+            let (datum, isnull) =
+                backend_executor_execExpr_seams::exec_eval_expr_switch_context::call(
+                    state, econtext, estate,
+                )?;
+            Ok(AttrValue { datum, isnull })
         },
     );
     s::notice_skipping_row::set(

@@ -381,6 +381,16 @@ pub struct CopyFromStateData<'mcx> {
     pub where_clause: bool,
     /// `bool is_program`.
     pub is_program: bool,
+    /// Per physical attribute, the *unplanned* default-value `Expr` returned by
+    /// `build_column_default` (`None` ⇒ the column has no default). In C
+    /// `BeginCopyFrom` runs `expression_planner` + `ExecInitExpr(defexpr, NULL)`
+    /// in the copy context immediately; the owned `ExecInitExpr` needs an
+    /// `EState`'s per-query context, which only exists once `CopyFrom` creates
+    /// the executor state. We therefore carry the raw default expressions here
+    /// and compile them into `cstate.defexprs` (+ build `defmap`/`num_defaults`)
+    /// in `CopyFrom`, before the row loop. This is a faithful split of the same
+    /// C steps — no behavior change, only the allocation context differs.
+    pub raw_defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, types_nodes::Expr>>>,
 }
 
 /* ===========================================================================
@@ -424,6 +434,9 @@ pub fn BeginCopyFrom<'mcx>(
     let mut typioparams: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
     let mut defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> =
         mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
+    // Raw (unplanned) default Exprs carried to CopyFrom (see CopyFromStateData).
+    let mut raw_defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, types_nodes::Expr>>> =
+        mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
 
     for attnum in 1..=num_phys_attrs {
         let att = &rel.rd_att.attrs[attnum - 1];
@@ -432,6 +445,7 @@ pub fn BeginCopyFrom<'mcx>(
             in_functions.push(types_fmgr::FmgrInfo::empty());
             typioparams.push(0);
             defexprs.push(None);
+            raw_defexprs.push(None);
             continue;
         }
 
@@ -450,27 +464,32 @@ pub fn BeginCopyFrom<'mcx>(
         in_functions.push(resolved.finfo);
         typioparams.push(typioparam);
 
-        // Default handling: we only need a default for a column not in the
-        // attnumlist (or when DEFAULT was given), and never for generated
-        // columns. Building a default requires expression_planner / ExecInitExpr
-        // (#159). Detect the need and stop loudly rather than insert garbage.
-        let in_list = attnumlist.iter().any(|&a| a as usize == attnum);
-        let need_default = (opts.default_print.is_some() || !in_list) && att.attgenerated == 0;
-        if need_default {
-            // build_column_default may legitimately return NULL (no default),
-            // in which case the column is just NULL on input. We cannot tell
-            // NULL-default from a real default without build_column_default,
-            // which itself needs the plan layer. Only a column genuinely absent
-            // from the column list AND with a real default is a problem; for a
-            // full column list (the common case) `!in_list` is false for every
-            // column, so we never get here.
-            return Err(unsupported(
-                "BeginCopyFrom: a target column is absent from the COPY column list \
-                 and may require a DEFAULT (build_column_default / expression_planner \
-                 is the plan-layer keystone)",
-            ));
-        }
         defexprs.push(None);
+
+        // Get default info if available (copyfrom.c:1769-1819).
+        //
+        // We only need the default values for columns that do not appear in the
+        // column list, unless the DEFAULT option was given. We never need default
+        // values for generated columns.
+        let in_list = attnumlist.iter().any(|&a| a as usize == attnum);
+        let mut raw = None;
+        if (opts.default_print.is_some() || !in_list) && att.attgenerated == 0 {
+            // defexpr = (Expr *) build_column_default(cstate->rel, attnum);
+            //
+            // build_column_default returns NULL when the column has no default
+            // (e.g. `operand_f8` in the numeric `width_bucket_test` COPY): the
+            // column is then simply left NULL on input. A non-NULL result is a
+            // real default to compile and (if not copied from input) record in
+            // defmap. The expression_planner + ExecInitExpr compile is deferred
+            // to CopyFrom (where the EState's per-query context exists); see the
+            // `raw_defexprs` field comment.
+            raw = backend_rewrite_rewritehandler_seams::build_column_default::call(
+                mcx,
+                rel.alias(),
+                attnum as i32,
+            )?;
+        }
+        raw_defexprs.push(raw);
     }
 
     // Look up encoding conversion function (copyfrom.c:1685-1688):
@@ -622,6 +641,7 @@ pub fn BeginCopyFrom<'mcx>(
         volatile_defexprs: false,
         where_clause: has_where,
         is_program,
+        raw_defexprs,
     })
 }
 
@@ -778,7 +798,45 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         let mut bistate = backend_access_heap_heapam::GetBulkInsertState()?;
 
         // GetPerTupleExprContext(estate): make the per-tuple ExprContext.
-        let _econtext = backend_executor_execUtils::MakePerTupleExprContext(estate)?;
+        let econtext = backend_executor_execUtils::MakePerTupleExprContext(estate)?;
+
+        // Compile the default-value expressions (copyfrom.c:1769-1819 deferred
+        // half). In C `BeginCopyFrom` runs expression_planner + ExecInitExpr in
+        // the copy context; in the owned model `ExecInitExpr` needs the EState's
+        // per-query context, which only exists now. For each physical attribute
+        // with a non-NULL `build_column_default` result, compile it via
+        // ExecPrepareExpr (= expression_planner + ExecInitExpr(node, NULL)) and,
+        // if the column is not copied from input, record it in `defmap`.
+        {
+            let raw = core::mem::replace(&mut state.raw_defexprs, mcx::PgVec::new_in(mcx));
+            for (i, maybe) in raw.into_iter().enumerate() {
+                let defexpr = match maybe {
+                    Some(e) => e,
+                    None => continue,
+                };
+                // defexpr = expression_planner(defexpr);
+                // defexprs[i] = ExecInitExpr(defexpr, NULL);
+                let compiled =
+                    backend_executor_execExpr_seams::exec_prepare_expr::call(&defexpr, estate)?;
+                state.cstate.defexprs[i] = Some(compiled);
+                // if (!list_member_int(cstate->attnumlist, attnum)) { defmap... }
+                let attnum = (i + 1) as AttrNumber;
+                if !state.cstate.attnumlist.iter().any(|&a| a == attnum) {
+                    state.cstate.defmap.push(i as i32);
+                    state.cstate.num_defaults += 1;
+                }
+                // volatile_defexprs tracking only governs the (unported)
+                // multi-insert optimization; the single-insert path used here is
+                // unaffected, so we leave state.volatile_defexprs as-is.
+            }
+        }
+
+        // Wire the per-tuple ExprContext and the EState back-link the default
+        // evaluator (exec_eval_expr seam) reads. These are only dereferenced
+        // when `num_defaults > 0` (i.e. a real default exists); the common COPY
+        // with a full column list never touches them.
+        state.cstate.econtext = Some(econtext);
+        state.cstate.estate = Some(types_nodes::execnodes::EStateLink::from_ref(estate));
 
         let result_oid = relation_alias(estate, rri).rd_id;
 
