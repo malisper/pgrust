@@ -869,6 +869,7 @@ pub fn init_seams() {
 
     // tablecmds BuildDescForRelation column type/collation resolution.
     use backend_commands_tablecmds_seams as tc;
+    tc::typename_type_id::set(seam_tc_typename_type_id);
     tc::typename_type_id_and_mod::set(seam_tc_typename_type_id_and_mod);
     tc::get_column_def_collation::set(seam_tc_get_column_def_collation);
 
@@ -905,6 +906,17 @@ fn seam_tc_typename_type_id_and_mod(
 ) -> PgResult<(Oid, i32)> {
     let tn = raw_typename_to_parse(type_name)?;
     typenameTypeIdAndMod(mcx, None, &tn)
+}
+
+/// `typenameTypeId(NULL, typeName)` — tablecmds seam (CREATE TABLE ... OF type).
+/// Bridges the owned `rawnodes::TypeName<'mcx>` to the resolver-facing
+/// `types_parsenodes::TypeName`, discarding the typmod like the C entry point.
+fn seam_tc_typename_type_id(
+    mcx: Mcx<'_>,
+    type_name: &types_nodes::rawnodes::TypeName<'_>,
+) -> PgResult<Oid> {
+    let tn = raw_typename_to_parse(type_name)?;
+    typenameTypeId(mcx, None, &tn)
 }
 
 /// `GetColumnDefCollation(NULL, coldef, typeOid)` — tablecmds seam. Projects the

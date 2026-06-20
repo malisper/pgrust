@@ -251,6 +251,20 @@ pub struct AlterTableUtilityContext<'a> {
     pub query_string: Option<&'a str>,
 }
 
+/// `parser_errposition(pstate, location)` with `pstate->p_sourcetext = query_string`
+/// (parse_node.c): byte offset → 1-based char position; 0 if no location/source.
+fn parser_errposition_src(query_string: Option<&str>, location: i32) -> i32 {
+    if location < 0 {
+        return 0;
+    }
+    let sourcetext = match query_string {
+        Some(s) => s,
+        None => return 0,
+    };
+    let limit = (location as usize).min(sourcetext.len());
+    sourcetext[..limit].chars().count() as i32 + 1
+}
+
 // ===========================================================================
 // CheckAlterTableIsSafe (tablecmds.c:4449)
 // ===========================================================================
@@ -908,6 +922,25 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_COMPOSITE_TYPE | ATT_FOREIGN_TABLE,
             )?;
+            // ATPrepAlterColumnType: if (rel->rd_rel->reloftype && !recursing)
+            //   ereport(ERROR, "cannot alter column type of typed table").
+            let reloftype =
+                backend_utils_cache_syscache_seams::search_relation_reloftype::call(rel.rd_id)?
+                    .unwrap_or(types_core::InvalidOid);
+            if reloftype != types_core::InvalidOid && !recursing {
+                // parser_errposition(pstate, def->location): pstate->p_sourcetext
+                // = context->queryString.
+                let location = cmd
+                    .def
+                    .as_deref()
+                    .map(|d| d.expect_columndef().location)
+                    .unwrap_or(-1);
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .errmsg("cannot alter column type of typed table".to_string())
+                    .errposition(parser_errposition_src(context.query_string, location))
+                    .finish(here("ATPrepCmd"));
+            }
             unported("ALTER COLUMN TYPE (ATParseTransformCmd / ATPrepAlterColumnType)");
         }
         AT_AlterColumnGenericOptions => {
@@ -974,6 +1007,17 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
             )?;
+            // ATPrepAddInherit: if (child_rel->rd_rel->reloftype)
+            //   ereport(ERROR, "cannot change inheritance of typed table").
+            let reloftype =
+                backend_utils_cache_syscache_seams::search_relation_reloftype::call(rel.rd_id)?
+                    .unwrap_or(types_core::InvalidOid);
+            if reloftype != types_core::InvalidOid {
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .errmsg("cannot change inheritance of typed table".to_string())
+                    .finish(here("ATPrepCmd"));
+            }
             unported("INHERIT (ATPrepAddInherit)");
         }
         AT_DropInherit => {
