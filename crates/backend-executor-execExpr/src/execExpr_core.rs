@@ -1965,6 +1965,18 @@ pub fn exec_init_qual<'mcx>(
     // (`PlanStateNode::stamp_expr_parents`) once the node's enum is boxed and
     // address-stable. See `exec_init_expr`.
     let _ = parent;
+    exec_init_qual_no_parent(qual, estate)
+}
+
+/// `ExecInitQual(qual, NULL)` (execExpr.c) — the parent-less variant of
+/// [`exec_init_qual`], used by [`exec_prepare_qual`]. The owned spine already
+/// ignores `parent` (only the non-owning `es_link` back-pointer is threaded, and
+/// that points at `estate` either way), so this compiles the identical program;
+/// kept as a distinct entry to mirror the C `ExecInitQual(qual, NULL)` shape.
+pub fn exec_init_qual_no_parent<'mcx>(
+    qual: Option<&[Expr]>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     let qual = match qual {
         None => return Ok(None),
         Some(q) if q.is_empty() => return Ok(None),
@@ -2021,34 +2033,34 @@ pub fn exec_init_qual<'mcx>(
 ///
 /// An empty qual (the C `NIL`) compiles to `None` (the always-true `NULL`
 /// ExprState) without touching the planner — the index-build path's
-/// non-partial-index case. A non-empty qual reaches `expression_planner`
-/// (optimizer/planner.c, unported, no reachable owner seam) and loud-panics
-/// there, mirror-PG-and-panic; the `ExecInitQual` compile that would follow is
-/// [`exec_init_qual`]'s own logic.
+/// non-partial-index case. A non-empty qual is const-folded element-by-element
+/// through the `expression_planner_value` VALUE seam (eval_const_expressions +
+/// fix_opfuncids — an implicit-AND qual list folds each top-level element
+/// independently), then compiled by the parent-less [`exec_init_qual_no_parent`]
+/// (which sets `EEO_FLAG_IS_QUAL`, so `ExecQual` semantics apply: NULL → FALSE).
 pub fn exec_prepare_qual<'mcx>(
     qual: Option<&[Expr]>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     // MemoryContextSwitchTo(estate->es_query_cxt) is implicit: the compile in
-    // exec_init_qual allocates in estate.es_query_cxt.
-    match qual {
+    // exec_init_qual_no_parent allocates in estate.es_query_cxt.
+    let qual = match qual {
         None => return Ok(None),
         Some(q) if q.is_empty() => return Ok(None),
-        Some(_) => {}
-    }
+        Some(q) => q,
+    };
+    let mcx = estate.es_query_cxt;
 
     // qual = (List *) expression_planner((Expr *) qual);
-    //
-    // expression_planner() (optimizer/planner.c) const-folds / inlines the
-    // standalone qual before compilation. It is unported and has no reachable
-    // owner seam; per mirror-PG-and-panic, a non-empty qual loud-panics naming
-    // that owner. (Non-partial index builds pass NIL and never reach here.)
-    panic!(
-        "execExpr-core: ExecPrepareQual needs expression_planner (optimizer/planner.c, \
-         unported — no reachable owner seam) for a non-empty qual; the ExecInitQual(qual, NULL) \
-         compile that follows it is exec_init_qual's own logic. Partial-index predicates are \
-         blocked on the planner; non-partial index builds (NIL predicate) work."
-    );
+    let mut planned: Vec<Expr> = Vec::with_capacity(qual.len());
+    for q in qual {
+        let owned = q.clone_in(mcx)?;
+        planned
+            .push(backend_optimizer_plan_planner_pc_seams::expression_planner_value::call(mcx, owned)?);
+    }
+
+    // ExecInitQual(qual, NULL);
+    exec_init_qual_no_parent(Some(&planned), estate)
 }
 
 /// `ExecInitExprList(nodes, parent)` (execExpr.c).
@@ -2114,26 +2126,28 @@ pub fn exec_init_expr_list_no_parent<'mcx>(
 /// `parent = NULL` shape is matched by [`exec_init_expr_no_parent`] (which
 /// threads no `PlanState`). The one genuine cross-unit callee is
 /// `expression_planner(node)` (optimizer/planner.c — const-folding /
-/// SQL-function inlining), which has no reachable owner seam in this crate's
-/// dependency set; per mirror-PG-and-panic it loud-panics naming that owner.
+/// SQL-function inlining), reached over the deps-less `expression_planner_value`
+/// VALUE seam (installed by the planner unit) so the executor does not depend on
+/// the optimizer owner directly.
 pub fn exec_prepare_expr<'mcx>(
     node: &Expr,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
+    let mcx = estate.es_query_cxt;
+
     // node = expression_planner(node);
     //
     // expression_planner() (optimizer/planner.c) const-folds and inlines the
-    // standalone expression before compilation. It is unported and has no
-    // reachable owner seam; the rest of ExecPrepareExpr (the parent-less
-    // ExecInitExpr compile, below) is this crate's own logic and is ready.
-    let _ = estate;
-    panic!(
-        "execExpr-core: ExecPrepareExpr needs expression_planner (optimizer/planner.c, \
-         unported — no reachable owner seam); the standalone compile that follows it is \
-         ExecInitExpr(node, NULL), implemented here as exec_init_expr_no_parent. \
-         expr node tag carried for the planner call: {:?}",
-        core::mem::discriminant(node)
-    );
+    // standalone expression before compilation (eval_const_expressions(NULL,
+    // node) + fix_opfuncids). The owning seam consumes the Expr by value and
+    // returns the planned Expr allocated in `mcx`, so we clone the borrowed
+    // `node` into the query context first.
+    let owned = node.clone_in(mcx)?;
+    let planned =
+        backend_optimizer_plan_planner_pc_seams::expression_planner_value::call(mcx, owned)?;
+
+    // result = ExecInitExpr(node, NULL);  — the parent-less compile.
+    exec_init_expr_no_parent(&planned, estate)
 }
 
 /// `ExecPrepareCheck(qual, estate)` (execExpr.c) — compile an implicit-AND
@@ -2143,31 +2157,38 @@ pub fn exec_prepare_expr<'mcx>(
 /// C does `qual = (List *) expression_planner((Expr *) qual)` then
 /// `ExecInitCheck(qual, NULL)` in `estate->es_query_cxt`. An empty `qual` (the
 /// C `NIL`) compiles to `None` (the always-true `NULL` ExprState) without
-/// touching the planner; a non-empty `qual` reaches `expression_planner`
-/// (optimizer/planner.c, unported, no reachable owner seam) and loud-panics
-/// there, mirror-PG-and-panic — the `ExecInitCheck` compile that would follow
-/// (`make_ands_explicit` + the parent-less `exec_init_check`) is this crate's
-/// own logic.
+/// touching the planner; a non-empty `qual` is const-folded element-by-element
+/// through the `expression_planner_value` VALUE seam (eval_const_expressions +
+/// fix_opfuncids; folding an implicit-AND list folds each top-level element
+/// independently — there is no AND wrapper to fold across), then
+/// `ExecInitCheck(make_ands_explicit(qual), NULL)` = `make_ands_explicit` +
+/// the parent-less [`exec_init_expr_no_parent`]. `ExecInitCheck` compiles the
+/// AND-clause with `ExecInitExpr` (NOT `ExecInitQual`), so the `IS_QUAL` flag is
+/// left clear — `ExecCheck` treats a NULL result as TRUE.
 pub fn exec_prepare_check<'mcx>(
     qual: &[Expr],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     // MemoryContextSwitchTo(estate->es_query_cxt) is implicit: the compile in
-    // exec_init_check allocates in estate.es_query_cxt.
-    let _ = estate;
+    // exec_init_expr_no_parent allocates in estate.es_query_cxt.
     if qual.is_empty() {
         // ExecInitCheck(NIL, ...) == NULL
         return Ok(None);
     }
+    let mcx = estate.es_query_cxt;
 
     // qual = (List *) expression_planner((Expr *) qual);
-    panic!(
-        "execExpr-core: ExecPrepareCheck needs expression_planner (optimizer/planner.c, \
-         unported — no reachable owner seam) for a non-empty CHECK qual; the \
-         ExecInitCheck(make_ands_explicit(qual), NULL) compile that follows it is this \
-         crate's own logic. An empty partition/CHECK qual compiles to the always-true NULL \
-         ExprState without the planner."
-    );
+    let mut planned: Vec<Expr> = Vec::with_capacity(qual.len());
+    for q in qual {
+        let owned = q.clone_in(mcx)?;
+        planned
+            .push(backend_optimizer_plan_planner_pc_seams::expression_planner_value::call(mcx, owned)?);
+    }
+
+    // ExecInitCheck(qual, NULL): make_ands_explicit(qual) then
+    // ExecInitExpr(result, NULL).
+    let anded = backend_nodes_core::makefuncs::make_ands_explicit(planned);
+    Ok(Some(exec_init_expr_no_parent(&anded, estate)?))
 }
 
 /// `ExecInitExpr(node, NULL)` (execExpr.c) — the `parent = NULL` shape used by

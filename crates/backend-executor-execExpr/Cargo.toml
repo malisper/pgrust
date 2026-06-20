@@ -73,6 +73,12 @@ backend-optimizer-util-inherit-predtest-seams = { path = "../backend-optimizer-u
 # installed from this executor owner's init_seams() (evaluate_expr runs the expr
 # through the executor: CreateExecutorState → ExecInitExpr → ExecEvalExpr).
 backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
+# ExecPrepareExpr/ExecPrepareQual/ExecPrepareCheck run their standalone expr
+# through expression_planner() (eval_const_expressions + fix_opfuncids) before
+# the parentless ExecInitExpr compile. The planner owns expression_planner; this
+# executor reaches it over the deps-less VALUE seam (installed from the planner
+# unit's init_seams), avoiding a direct executor->optimizer dependency.
+backend-optimizer-plan-planner-pc-seams = { path = "../backend-optimizer-plan-planner-pc-seams" }
 # ExecInitFunc's permission check: object_aclcheck(ProcedureRelationId, funcid,
 # GetUserId(), ACL_EXECUTE) + aclcheck_error (catalog ACL owner), GetUserId
 # (miscinit owner), InvokeFunctionExecuteHook (objectaccess owner). The same
