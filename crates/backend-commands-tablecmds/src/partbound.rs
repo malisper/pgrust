@@ -132,7 +132,7 @@ pub fn transformPartitionBound<'mcx>(
         // Assign the parent's strategy to the default partition bound spec.
         result_spec.strategy = strategy;
         parent.close(types_storage::lock::NoLock)?;
-        return Ok(alloc_in(mcx, Node::PartitionBoundSpec(result_spec))?);
+        return Ok(alloc_in(mcx, Node::mk_partition_bound_spec(mcx, result_spec)?)?);
     }
 
     if strategy == PARTITION_STRATEGY_HASH {
@@ -258,7 +258,7 @@ pub fn transformPartitionBound<'mcx>(
     }
 
     parent.close(types_storage::lock::NoLock)?;
-    Ok(alloc_in(mcx, Node::PartitionBoundSpec(result_spec))?)
+    Ok(alloc_in(mcx, Node::mk_partition_bound_spec(mcx, result_spec)?)?)
 }
 
 /// `transformPartitionRangeBounds(pstate, blist, parent)` (parse_utilcmd.c) —
@@ -342,7 +342,7 @@ fn transformPartitionRangeBounds<'mcx>(
         // prd->location = exprLocation(expr);
         prd.location = backend_nodes_core::nodefuncs::expr_location(expr_node.as_expr())?;
 
-        result.push(alloc_in(mcx, Node::PartitionRangeDatum(prd))?);
+        result.push(alloc_in(mcx, Node::mk_partition_range_datum(mcx, prd)?)?);
     }
 
     // Once we see MINVALUE or MAXVALUE for one column, the rest must match.

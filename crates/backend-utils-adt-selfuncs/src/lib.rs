@@ -116,9 +116,8 @@ pub fn init_seams() {
     // context.
     backend_optimizer_path_costsize_seams::mergejoinscansel::set(
         |run, root, clause, opfamily, cmptype, nulls_first| {
-            let cx = mcx::MemoryContext::new("selfuncs mergejoinscansel");
             mergejoin::mergejoinscansel(
-                cx.mcx(),
+                run.mcx(),
                 run,
                 root,
                 clause,
@@ -130,8 +129,7 @@ pub fn init_seams() {
     );
     backend_optimizer_path_costsize_seams::estimate_hash_bucket_stats::set(
         |run, root, hashkey, nbuckets| {
-            let cx = mcx::MemoryContext::new("selfuncs estimate_hash_bucket_stats");
-            mergejoin::estimate_hash_bucket_stats(cx.mcx(), run, root, hashkey, nbuckets)
+            mergejoin::estimate_hash_bucket_stats(run.mcx(), run, root, hashkey, nbuckets)
         },
     );
     backend_optimizer_path_costsize_seams::estimate_multivariate_bucketsize::set(

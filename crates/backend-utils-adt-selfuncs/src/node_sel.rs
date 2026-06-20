@@ -663,8 +663,10 @@ pub fn seam_boolvarsel<'mcx>(
     arg: &Expr,
     var_relid: i32,
 ) -> PgResult<f64> {
-    let cx = mcx::MemoryContext::new("selfuncs boolvarsel estimate");
-    let mcx = cx.mcx();
+    // OOM/detoast channel = the planner's own `run` arena (`run.mcx()`); with the
+    // now-invariant `Node`/`Expr` carriers a shorter-lived local context no longer
+    // unifies with `run`'s `'mcx`, and the planner cxt is the correct context.
+    let mcx = run.mcx();
     boolvarsel(mcx, run, root, arg, var_relid)
 }
 
@@ -678,8 +680,7 @@ pub fn seam_booltestsel<'mcx>(
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<f64> {
-    let cx = mcx::MemoryContext::new("selfuncs booltestsel estimate");
-    let mcx = cx.mcx();
+    let mcx = run.mcx();
     booltestsel(mcx, run, root, booltesttype, arg, var_relid, jointype, sjinfo)
 }
 
@@ -695,8 +696,7 @@ pub fn seam_nulltestsel<'mcx>(
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<f64> {
-    let cx = mcx::MemoryContext::new("selfuncs nulltestsel estimate");
-    let mcx = cx.mcx();
+    let mcx = run.mcx();
     nulltestsel(mcx, run, root, nulltesttype, arg, var_relid, jointype, sjinfo)
 }
 
@@ -722,8 +722,7 @@ pub fn seam_scalararraysel<'mcx>(
     jointype: JoinType,
     sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<f64> {
-    let cx = mcx::MemoryContext::new("selfuncs scalararraysel estimate");
-    let mcx = cx.mcx();
+    let mcx = run.mcx();
     scalararraysel(
         mcx, run, root, clause, is_join_clause, var_relid, jointype, sjinfo,
     )

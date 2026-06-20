@@ -79,9 +79,10 @@ fn elog(msg: impl Into<String>) -> PgError {
         .into_error()
 }
 
-/// Wrap a freshly built `Expr` as a `Node` (implicit-AND list element).
-fn enode(e: Expr) -> Node<'static> {
-    Node::Expr(e)
+/// Wrap a freshly built `Expr` as a `Node` (implicit-AND list element),
+/// allocating the opaque node in `mcx`.
+fn enode<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
+    Node::mk_expr(mcx, e)
 }
 
 /// Convert a rich parse-node `RangeVar` to the trimmed `types_tuple::access`
@@ -338,7 +339,7 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
         // partConstraint = list_make1(make_ands_explicit(partConstraint)).
         let ands = make_ands_explicit(folded);
         let mut single: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
-        single.push(enode(ands));
+        single.push(enode(mcx, ands)?);
 
         // Adjust to attachrel's attnos.
         let mapped =
