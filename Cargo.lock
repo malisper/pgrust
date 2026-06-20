@@ -17627,6 +17627,7 @@ dependencies = [
 name = "backend-storage-lmgr-predicate-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -19917,6 +19918,7 @@ dependencies = [
  "backend-replication-slot-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-lmgr-lock-seams",
+ "backend-storage-lmgr-predicate-seams",
  "backend-utils-adt-acl-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-datum-seams",

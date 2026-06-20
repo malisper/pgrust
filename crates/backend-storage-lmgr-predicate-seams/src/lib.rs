@@ -218,3 +218,16 @@ seam_core::seam!(
         relation: &types_rel::Relation<'_>,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `GetPredicateLockStatusData()` projected to lockfuncs.c's `pg_locks` rows
+    /// (the SIREAD predicate leg of `pg_lock_status`). The target-tag decode
+    /// (`GET_PREDICATELOCKTARGETTAG_*`) and the holder-`SERIALIZABLEXACT` fields
+    /// are predicate.c-internal, so the seam yields each row already projected to
+    /// the scalar [`types_storage::lock::PredLockStatusRow`] columns the listing
+    /// function emits. The vector lives in `mcx` (the SRF result context). `Err`
+    /// carries OOM / lock-acquisition failure.
+    pub fn predicate_lock_status_rows<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, types_storage::lock::PredLockStatusRow>>
+);

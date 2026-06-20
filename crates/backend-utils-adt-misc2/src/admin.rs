@@ -46,6 +46,7 @@ use backend_common_path_seams as path;
 use backend_libpq_hba_seams as hba;
 use backend_storage_file_fd_seams as fd;
 use backend_storage_lmgr_lock_seams as lock;
+use backend_storage_lmgr_predicate_seams as predicate;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_cache_syscache_seams as syscache;
 use backend_utils_fmgr_funcapi_seams as funcapi;
@@ -563,11 +564,137 @@ pub fn pg_lock_status<'mcx>(
     _mcx: Mcx<'mcx>,
     _fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<Datum<'mcx>> {
-    // The whole-function value-per-call SRF machinery is funcapi-owned and
-    // unported (only the materialize path exists). Mirror-pg-and-panic at the
-    // owner boundary rather than silently degrade the SRF protocol or stub.
+    // `pg_lock_status` is a set-returning function whose by-OID `fcinfo` frame's
+    // `resultinfo` is tag-only (cannot carry the live `ReturnSetInfo`). It is
+    // driven over the executor frame (materialize mode) from
+    // `backend-executor-execSRF`'s `pg_lock_status` wrapper, which calls
+    // [`pg_lock_status_rows`] below and fills the executor's tuplestore — exactly
+    // the dual-home arrangement `pg_prepared_xact` / `generate_series` use. This
+    // by-OID entry point is therefore never the SRF driver; route any direct
+    // by-OID call (there is none for a retset builtin) to the funcapi boundary.
     funcapi::value_srf_unported::call();
-    unreachable!("value_srf_unported panics until the funcapi value-SRF owner lands")
+    unreachable!("pg_lock_status is driven over the executor frame via pg_lock_status_rows")
+}
+
+/// One projected `pg_locks` row: the 16 column Datums + their null flags, in the
+/// `(locktype, database, relation, page, tuple, virtualxid, transactionid,
+/// classid, objid, objsubid, virtualtransaction, pid, mode, granted, fastpath,
+/// waitstart)` order lockfuncs.c lays out.
+pub type LockStatusRow<'mcx> =
+    ([Datum<'mcx>; NUM_LOCK_STATUS_COLUMNS], [bool; NUM_LOCK_STATUS_COLUMNS]);
+
+/// `pg_lock_status` (lockfuncs.c) row producer — the whole-function projection,
+/// hoisted out of the value-per-call SRF protocol so the executor-frame wrapper
+/// can drive it in materialize mode.
+///
+/// Faithfully reproduces the C per-call series as a flat row list: for each
+/// `LockInstanceData` from `GetLockStatusData()`, emit one row per *held* lock
+/// mode (the C `holdMask` walk that destructively clears each reported bit), then
+/// — if the PROCLOCK is waiting — one final row for `waitLockMode`; PROCLOCKs
+/// that are neither holding nor waiting contribute no rows. The SIREAD predicate
+/// locks from `GetPredicateLockStatusData()` are appended after the regular
+/// locks, exactly as C does.
+pub fn pg_lock_status_rows<'mcx>(mcx: Mcx<'mcx>) -> PgResult<alloc::vec::Vec<LockStatusRow<'mcx>>> {
+    let mut rows: alloc::vec::Vec<LockStatusRow<'mcx>> = alloc::vec::Vec::new();
+
+    // C: mystatus->lockData = GetLockStatusData(); the snapshot of every PROCLOCK.
+    let lock_data = lock::get_lock_status_data::call(mcx)?;
+
+    for instance in lock_data.iter() {
+        // The C code mutates `instance->holdMask` in place across calls; here we
+        // copy the mask and walk it locally to enumerate every held mode.
+        let mut hold_mask = instance.holdMask;
+
+        // One row per held lock mode (C: the `holdMask & LOCKBIT_ON(mode)` walk,
+        // breaking after each bit, clearing it, until none remain).
+        loop {
+            let mut granted = false;
+            let mut mode: lk::LOCKMODE = 0;
+            if hold_mask != 0 {
+                let mut m: lk::LOCKMODE = 0;
+                while (m as usize) < lk::MAX_LOCKMODES {
+                    if hold_mask & lk::LOCKBIT_ON(m) != 0 {
+                        granted = true;
+                        hold_mask &= lk::LOCKBIT_OFF(m);
+                        mode = m;
+                        break;
+                    }
+                    m += 1;
+                }
+            }
+
+            if granted {
+                rows.push(fill_lock_row(mcx, instance, true, mode)?);
+                continue;
+            }
+
+            // C: if !granted, report the waited-for mode (if any) once, else stop.
+            if instance.waitLockMode != lk::NoLock {
+                rows.push(fill_lock_row(mcx, instance, false, instance.waitLockMode)?);
+            }
+            break;
+        }
+    }
+
+    // C: SIREAD predicate locks, appended after the regular locks. The decode +
+    // projection is predicate.c-internal (its target-tag macros + xact fields);
+    // the seam yields each already-projected SIREAD row's scalar fields.
+    let pred_rows = predicate::predicate_lock_status_rows::call(mcx)?;
+    for pr in pred_rows.iter() {
+        rows.push(fill_predicate_lock_row(mcx, pr)?);
+    }
+
+    Ok(rows)
+}
+
+/// Project one SIREAD predicate-lock row (lockfuncs.c's predicate leg). All
+/// predicate locks are `SIReadLock`: always held, never waiting, no fast path,
+/// no waitstart. The target fields (db/relation/page/tuple) and holder
+/// (vxid/pid) come pre-decoded from the predicate seam.
+fn fill_predicate_lock_row<'mcx>(
+    mcx: Mcx<'mcx>,
+    pr: &lk::PredLockStatusRow,
+) -> PgResult<LockStatusRow<'mcx>> {
+    let mut values: [Datum<'mcx>; NUM_LOCK_STATUS_COLUMNS] =
+        core::array::from_fn(|_| Datum::null());
+    let mut nulls = [false; NUM_LOCK_STATUS_COLUMNS];
+
+    // locktype = PredicateLockTagTypeNames[lockType]
+    values[0] = text_datum(mcx, pr.locktypename.as_str())?;
+    // database / relation
+    values[1] = Datum::from_u32(pr.database);
+    values[2] = Datum::from_u32(pr.relation);
+    // page (TUPLE or PAGE) / tuple (TUPLE only)
+    if pr.has_page {
+        values[3] = Datum::from_u32(pr.page);
+    } else {
+        nulls[3] = true;
+    }
+    if pr.has_tuple {
+        values[4] = Datum::from_u16(pr.tuple);
+    } else {
+        nulls[4] = true;
+    }
+    // virtualxid/transactionid/classid/objid/objsubid: not applicable.
+    nulls[5] = true;
+    nulls[6] = true;
+    nulls[7] = true;
+    nulls[8] = true;
+    nulls[9] = true;
+    // virtualtransaction = VXIDGetDatum(xact->vxid.procNumber, localXid)
+    values[10] = vxid_datum(mcx, pr.proc_number, pr.local_xid)?;
+    if pr.pid != 0 {
+        values[11] = Datum::from_i32(pr.pid);
+    } else {
+        nulls[11] = true;
+    }
+    // mode = "SIReadLock"; granted = true; fastpath = false; waitstart NULL.
+    values[12] = text_datum(mcx, "SIReadLock")?;
+    values[13] = Datum::from_bool(true);
+    values[14] = Datum::from_bool(false);
+    nulls[15] = true;
+
+    Ok((values, nulls))
 }
 
 /// Map one `LockInstanceData` to a `pg_locks` row (`values`/`nulls`). This is
