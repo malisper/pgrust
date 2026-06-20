@@ -29,6 +29,72 @@ use backend_optimizer_util_plancat_ext_seams as plancat_ext;
 pub(crate) fn init_seams() {
     plancat_ext::set_relation_partition_info::set(set_relation_partition_info);
     plancat_ext::set_baserel_partition_constraint::set(set_baserel_partition_constraint);
+    plancat_ext::process_check_constraint::set(process_check_constraint);
+}
+
+/// `get_relation_constraints`'s per-check-constraint body (plancat.c:1305) over a
+/// single validated CHECK constraint's `pg_constraint.ccbin` text. The caller
+/// (`get_relation_constraints` in plancat) has already applied the `ccvalid` and
+/// (NO INHERIT vs `include_noinherit`) filters; this performs the node-vocabulary
+/// transforms plancat cannot reach without a `planner -> plancat` cycle:
+///
+/// ```text
+/// cexpr = stringToNode(ccbin);
+/// cexpr = eval_const_expressions(root, cexpr);
+/// cexpr = (Node *) canonicalize_qual((Expr *) cexpr, true);
+/// if (varno != 1) ChangeVarNodes(cexpr, 1, varno, 0);
+/// result = list_concat(result, make_ands_implicit((Expr *) cexpr));
+/// ```
+///
+/// The const-fold uses the root-less `eval_const_expressions_expr` variant —
+/// faithful here because (per the C comment) CHECK constraints contain no
+/// subqueries, so the only part of `eval_const_expressions` that needs `root`
+/// (the sublink/Param machinery) cannot fire. Returns the implicit-AND clause
+/// items interned into the planner (`root`) arena, with Vars stamped to `varno`.
+fn process_check_constraint(
+    root: &mut PlannerInfo,
+    ccbin: &str,
+    varno: i32,
+) -> PgResult<Vec<NodeId>> {
+    // The node-tree decode + transforms run in a transient context; the final
+    // clause Exprs are cloned into the durable planner arena via `alloc_node`.
+    let workcx = mcx::MemoryContext::new("process_check_constraint");
+    let mcx = workcx.mcx();
+
+    // cexpr = stringToNode(constr->check[i].ccbin);
+    let node = backend_nodes_read_seams::string_to_node::call(mcx, ccbin)?;
+    let cexpr = mcx::PgBox::into_inner(node)
+        .into_expr()
+        .ok_or_else(|| PgError::error("process_check_constraint: ccbin is not an Expr"))?;
+
+    // cexpr = eval_const_expressions(root, cexpr);  (root-less variant: CHECK
+    // constraints contain no subqueries, so the Param/sublink leg never runs.)
+    let cexpr =
+        backend_optimizer_plan_init_subselect_ext_seams::eval_const_expressions_expr::call(
+            mcx, cexpr,
+        )?;
+
+    // cexpr = (Node *) canonicalize_qual((Expr *) cexpr, true);  (is_check = true)
+    let canon =
+        backend_optimizer_prep_prepqual_seams::canonicalize_qual::call(mcx, Some(cexpr), true)?;
+
+    // make_ands_implicit((Expr *) cexpr): split the canonical boolean into an
+    // implicit-AND list of independent clauses.
+    let items = backend_nodes_core::makefuncs::make_ands_implicit(canon);
+
+    // Intern each clause into the durable planner arena.
+    let mut ids: Vec<NodeId> = Vec::with_capacity(items.len());
+    for e in items {
+        ids.push(root.alloc_node(e));
+    }
+
+    // if (varno != 1) ChangeVarNodes(cexpr, 1, varno, 0);  — restamp the Vars,
+    // which `stringToNode` decoded with the catalog's varno == 1.
+    if varno != 1 {
+        plancat_ext::change_var_nodes::call(root, &ids, 1, varno);
+    }
+
+    Ok(ids)
 }
 
 /// `set_relation_partition_info(root, rel, relation)` (plancat.c:2455).
