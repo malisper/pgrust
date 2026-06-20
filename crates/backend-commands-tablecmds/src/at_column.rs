@@ -55,8 +55,9 @@ use types_storage::lock::{RowExclusiveLock, LOCKMODE};
 use types_nodes::parsenodes::DROP_RESTRICT;
 use types_statistics::MAX_STATISTICS_TARGET;
 use types_tuple::access::{
-    ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_INDEX,
-    RELKIND_PARTITIONED_INDEX,
+    ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_INDEX, RELKIND_MATVIEW,
+    RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_TOASTVALUE,
+    RELKIND_VIEW,
 };
 use types_tuple::backend_access_common_heaptuple::Datum;
 
@@ -583,19 +584,140 @@ pub fn ATExecForceNoForceRowSecurity<'mcx>(
     Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
 }
 
-/// `ATExecSetRelOptions` (tablecmds.c:16645). See module docs.
+/// `HEAP_RELOPT_NAMESPACES` (access/reloptions.h) — `{ "toast", NULL }`.
+const HEAP_RELOPT_NAMESPACES: &[&str] = &["toast"];
+
+/// Validate `new_options` per the relation's `relkind` — the C `switch
+/// (rel->rd_rel->relkind)` block of `ATExecSetRelOptions` (tablecmds.c:16694).
+/// All run with `validate = true`; the parsed struct is discarded (C `(void)
+/// ...`), only the `ereport(ERROR)` matters. `amhandler` is the index AM's
+/// handler OID (the port's `index_reloptions` dispatch key), needed only for the
+/// index relkinds.
+fn validate_setrel_options(
+    mcx: Mcx<'_>,
+    relkind: u8,
+    amhandler: types_core::Oid,
+    new_options: Option<&[u8]>,
+) -> PgResult<()> {
+    if relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW {
+        backend_access_common_reloptions::heap_reloptions(mcx, relkind, new_options, true)?;
+    } else if relkind == RELKIND_PARTITIONED_TABLE {
+        backend_access_common_reloptions::partitioned_table_reloptions(new_options, true)?;
+    } else if relkind == RELKIND_VIEW {
+        backend_access_common_reloptions::view_reloptions(mcx, new_options, true)?;
+    } else if relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX {
+        backend_access_common_reloptions::index_reloptions(mcx, amhandler, new_options, true)?;
+    } else {
+        // RELKIND_TOASTVALUE / default — shouldn't ever get here.
+        return backend_utils_error::ereport(ERROR)
+            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg("cannot set options for this relation")
+            .finish(here("ATExecSetRelOptions"))
+            .map(|()| unreachable!());
+    }
+    Ok(())
+}
+
+/// `ATExecSetRelOptions` (tablecmds.c:16645). Generate the new proposed
+/// `pg_class.reloptions` (`transformRelOptions` over the existing reloptions +
+/// `defList`), validate per relkind, and write the variable reloptions column
+/// via the `update_pg_class_reloptions` carrier (`heap_modify_tuple` +
+/// `CatalogTupleUpdate`). Repeat the whole exercise for the TOAST table, if any.
 pub fn ATExecSetRelOptions<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _rel: &Relation<'mcx>,
-    _def_list: Vec<backend_access_common_reloptions::DefElem>,
-    _operation: AlterTableType,
-    _lockmode: LOCKMODE,
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    def_list: Vec<backend_access_common_reloptions::DefElem>,
+    operation: AlterTableType,
+    lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
-    unported(
-        "SET/RESET/REPLACE relOPTIONS — writes the variable pg_class.reloptions \
-         (text[]) column via heap_modify_tuple, but the only pg_class write carrier \
-         (catalog_tuple_update_pg_class) takes the fixed-length PgClassForm struct, \
-         which has no reloptions field; no pg_class variable-column write carrier exists \
-         (out-of-lane carrier keystone)",
-    );
+    // if (defList == NIL && operation != AT_ReplaceRelOptions) return;
+    if def_list.is_empty() && operation != AlterTableType::AT_ReplaceRelOptions {
+        return Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0));
+    }
+
+    let relid = rel.rd_id;
+    let relkind = rel.rd_rel.relkind;
+    let is_reset = operation == AlterTableType::AT_ResetRelOptions;
+
+    // amhandler dispatch key for the index relkind validation (C reads
+    // rel->rd_indam->amoptions; the port keys on the handler OID).
+    let amhandler = if relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX {
+        backend_utils_cache_syscache_seams::search_am_handler::call(rel.rd_rel.relam)?
+            .unwrap_or(types_core::InvalidOid)
+    } else {
+        types_core::InvalidOid
+    };
+
+    // Get the old reloptions (AT_ReplaceRelOptions pretends there were none).
+    let old_bytes: Option<Vec<u8>> = if operation == AlterTableType::AT_ReplaceRelOptions {
+        None
+    } else {
+        let tok = backend_utils_cache_syscache_seams::fetch_class_reloptions::call(mcx, relid)?;
+        if tok.is_null {
+            None
+        } else {
+            Some(tok.bytes)
+        }
+    };
+
+    // Generate new proposed reloptions (text array). namspace = NULL,
+    // validnsps = HEAP_RELOPT_NAMESPACES, acceptOidsOff = false.
+    let new_options = backend_access_common_reloptions::transformRelOptionsBytes(
+        mcx,
+        old_bytes.as_deref(),
+        &def_list,
+        None,
+        Some(HEAP_RELOPT_NAMESPACES),
+        false,
+        is_reset,
+    )?;
+    let new_options: Option<Vec<u8>> = new_options.map(|v| v.iter().copied().collect());
+
+    // Validate per relkind.
+    validate_setrel_options(mcx, relkind, amhandler, new_options.as_deref())?;
+
+    // Update the pg_class row (the new options propagate via cache inval).
+    indexing_seam::update_pg_class_reloptions::call(mcx, relid, new_options.as_deref())?;
+
+    // InvokeObjectPostAlterHook(RelationRelationId, relid, 0): no-op.
+
+    // Repeat the whole exercise for the toast table, if there's one.
+    let toastid = rel.rd_rel.reltoastrelid;
+    if types_core::OidIsValid(toastid) {
+        let toast_old: Option<Vec<u8>> = if operation == AlterTableType::AT_ReplaceRelOptions {
+            None
+        } else {
+            let tok = backend_utils_cache_syscache_seams::fetch_class_reloptions::call(mcx, toastid)?;
+            if tok.is_null {
+                None
+            } else {
+                Some(tok.bytes)
+            }
+        };
+        // transformRelOptions(datum, defList, "toast", validnsps, false, isReset).
+        let toast_new = backend_access_common_reloptions::transformRelOptionsBytes(
+            mcx,
+            toast_old.as_deref(),
+            &def_list,
+            Some("toast"),
+            Some(HEAP_RELOPT_NAMESPACES),
+            false,
+            is_reset,
+        )?;
+        let toast_new: Option<Vec<u8>> = toast_new.map(|v| v.iter().copied().collect());
+
+        // (void) heap_reloptions(RELKIND_TOASTVALUE, toast_options, true);
+        backend_access_common_reloptions::heap_reloptions(
+            mcx,
+            RELKIND_TOASTVALUE,
+            toast_new.as_deref(),
+            true,
+        )?;
+
+        indexing_seam::update_pg_class_reloptions::call(mcx, toastid, toast_new.as_deref())?;
+        // InvokeObjectPostAlterHook(RelationRelationId, toastid, 0): no-op.
+        let _ = lockmode;
+    }
+
+    Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
 }

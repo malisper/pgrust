@@ -1572,23 +1572,23 @@ pub fn index_create<'mcx>(
 
 /// `CStringGetTextDatum(NULL)` vs the `Datum reloptions` argument — in the owned
 /// model `reloptions` rides as a `types_tuple::Datum`. The C `(Datum) 0` (no
-/// WITH clause) maps to `None` for the `InsertPgClassTuple` carrier. The current
-/// CREATE INDEX call sites supply no reloptions, so this is `None`; a non-null
-/// reloptions varlena would need the Datum→bytea decode the catalog producer
-/// owns. Until a caller exercises it, a present reloptions Datum panics rather
-/// than silently dropping the WITH clause.
+/// WITH clause) maps to `None` for the `InsertPgClassTuple` carrier. A real
+/// reloptions value is always a `text[]` varlena, carried on the by-reference
+/// lane as `Datum::ByRef`; its detoasted on-disk bytes are exactly the
+/// `pg_class.reloptions` image (`DefineIndex` builds it via
+/// `transformRelOptions` → `construct_text_array_bytes`).
 fn reloptions_to_bytes(reloptions: &types_tuple::Datum<'_>) -> Option<alloc::vec::Vec<u8>> {
     use types_tuple::Datum;
     match reloptions {
         // C `(Datum) 0` — no WITH clause.
         Datum::ByVal(0) => None,
-        // A real reloptions varlena: the bytea image. The current CREATE INDEX
-        // call sites never supply WITH options, so this is unreachable; decoding
-        // it would need the bytea→reloptions-bytes path the catalog producer
-        // owns. Panic rather than silently drop the WITH clause.
+        // A real reloptions varlena rides as its detoasted on-disk bytes in the
+        // `ByRef` arm (the same `text[]` image `pg_class.reloptions` stores).
+        Datum::ByRef(bytes) => Some(bytes.to_vec()),
+        // Any other shape is not a valid reloptions image; it cannot arise from
+        // a faithful caller (reloptions is always a text[] varlena or NULL).
         _ => panic!(
-            "index_create: non-null reloptions Datum decode not yet modeled \
-             (no current CREATE INDEX caller supplies WITH options)"
+            "index_create: reloptions Datum is not a text[] varlena image"
         ),
     }
 }

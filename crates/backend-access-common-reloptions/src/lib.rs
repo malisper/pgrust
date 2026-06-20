@@ -49,7 +49,7 @@ mod tests;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use types_datum::datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
@@ -787,11 +787,89 @@ pub fn transformRelOptions(
     accept_oids_off: bool,
     is_reset: bool,
 ) -> PgResult<Option<Datum>> {
+    // Build the element strings, then emit the bare-word `text[]` Datum via the
+    // construct seam. NOTE: this returns a bare in-`mcx` pointer word
+    // (`types_datum::Datum`), which is NOT carried on the `types_tuple::Datum`
+    // by-reference lane the catalog write path deforms; callers that store the
+    // result into a catalog tuple (CREATE INDEX, attoptions) must instead use
+    // [`transformRelOptionsBytes`], which returns the array varlena image so it
+    // can ride a `Datum::ByRef`. This bare-word entry is kept for parity with the
+    // C `Datum`-returning signature.
+    let strings = transform_rel_options_strings(
+        mcx,
+        old_options,
+        def_list,
+        namspace,
+        validnsps,
+        accept_oids_off,
+        is_reset,
+    )?;
+    match strings {
+        None => Ok(None),
+        Some(astate) => {
+            let refs: Vec<&str> = astate.iter().map(|s| s.as_str()).collect();
+            let datum =
+                backend_utils_adt_arrayfuncs_seams::construct_text_array::call(mcx, &refs)?;
+            Ok(Some(datum))
+        }
+    }
+}
+
+/// `transformRelOptions` returning the on-disk `text[]` array varlena image (the
+/// bytes a `types_tuple::Datum::ByRef` / `RefPayload::Varlena` carries), rather
+/// than a bare in-`mcx` pointer word. This is the catalog-write form: the
+/// returned bytes are exactly what `pg_class.reloptions` / `pg_attribute.
+/// attoptions` store, so a consumer lowers them onto the by-reference Datum lane
+/// (`Datum::from_byref_bytes_in`) for `index_create` / the tuple-form path.
+///
+/// `None` mirrors the C `(Datum) 0` no-array case (no options → SQL NULL).
+pub fn transformRelOptionsBytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    old_options: Option<&[u8]>,
+    def_list: &[DefElem],
+    namspace: Option<&str>,
+    validnsps: Option<&[&str]>,
+    accept_oids_off: bool,
+    is_reset: bool,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let strings = transform_rel_options_strings(
+        mcx,
+        old_options,
+        def_list,
+        namspace,
+        validnsps,
+        accept_oids_off,
+        is_reset,
+    )?;
+    match strings {
+        None => Ok(None),
+        Some(astate) => {
+            let refs: Vec<&str> = astate.iter().map(|s| s.as_str()).collect();
+            let bytes =
+                backend_utils_adt_arrayfuncs_seams::construct_text_array_bytes::call(mcx, &refs)?;
+            Ok(Some(bytes))
+        }
+    }
+}
+
+/// Shared element-string build for [`transformRelOptions`] /
+/// [`transformRelOptionsBytes`]: produce the flattened `name=value` `text[]`
+/// element list (`makeArrayResult` input). `None` is the C `(Datum) 0` no-array
+/// case (empty result); `Some(strings)` is the non-empty element set.
+fn transform_rel_options_strings(
+    mcx: Mcx<'_>,
+    old_options: Option<&[u8]>,
+    def_list: &[DefElem],
+    namspace: Option<&str>,
+    validnsps: Option<&[&str]>,
+    accept_oids_off: bool,
+    is_reset: bool,
+) -> PgResult<Option<Vec<String>>> {
     // no change if empty list. C: `return oldOptions;` — the input array
     // verbatim (or `(Datum) 0` when there were none). The port's input is the
-    // raw `text[]` bytes, so re-hand them as a `Datum`: deconstruct then
-    // reconstruct preserves the array content exactly (reloptions are a flat
-    // `text[]`). `None` here mirrors the C `(Datum) 0` no-array case.
+    // raw `text[]` bytes, so re-hand them as the element strings: deconstruct
+    // preserves the array content exactly (reloptions are a flat `text[]`).
+    // `None` here mirrors the C `(Datum) 0` no-array case.
     if def_list.is_empty() {
         match old_options {
             None => return Ok(None),
@@ -801,14 +879,14 @@ pub fn transformRelOptions(
                 if oldoptions.is_empty() {
                     return Ok(None);
                 }
-                let refs: Vec<&str> = oldoptions.iter().map(|s| s.as_str()).collect();
-                let datum = backend_utils_adt_arrayfuncs_seams::construct_text_array::call(mcx, &refs)?;
-                return Ok(Some(datum));
+                let strings: Vec<String> =
+                    oldoptions.iter().map(|s| s.as_str().to_string()).collect();
+                return Ok(Some(strings));
             }
         }
     }
 
-    // We build the new array via the arrayfuncs construct seam.
+    // We build the new array element strings.
     let mut astate: Vec<String> = Vec::new();
 
     // Copy any oldOptions that aren't to be replaced.
@@ -924,9 +1002,7 @@ pub fn transformRelOptions(
     if astate.is_empty() {
         return Ok(None);
     }
-    let refs: Vec<&str> = astate.iter().map(|s| s.as_str()).collect();
-    let datum = backend_utils_adt_arrayfuncs_seams::construct_text_array::call(mcx, &refs)?;
-    Ok(Some(datum))
+    Ok(Some(astate))
 }
 
 /// `untransformRelOptions` -- convert the text-array format of reloptions into
@@ -1742,6 +1818,29 @@ fn build_reloptions_gist_seam(
     build_reloptions(scratch.mcx(), reloptions, validate, RELOPT_KIND_GIST, 12, &tab)
 }
 
+/// Seam target for `brinoptions(reloptions, validate)` (brin.c) — the BRIN AM's
+/// `amoptions` callback. Mirrors the C:
+/// `build_reloptions(reloptions, validate, RELOPT_KIND_BRIN,
+///  sizeof(BrinOptions), tab, lengthof(tab))` where `tab` has the entries
+/// `{"pages_per_range", RELOPT_TYPE_INT, offsetof(BrinOptions, pagesPerRange)}`
+/// and `{"autosummarize", RELOPT_TYPE_BOOL, offsetof(BrinOptions,
+/// autosummarize)}`.
+///
+/// `BrinOptions` is `{ int32 vl_len_; BlockNumber pagesPerRange; bool
+/// autosummarize; }`, so its size is 12, `pagesPerRange` is at offset 4 and
+/// `autosummarize` at offset 8.
+fn build_reloptions_brin_seam(
+    reloptions: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<Vec<u8>>> {
+    let scratch = mcx::MemoryContext::new("brinoptions");
+    let tab = [
+        RelOptParseElt::new("pages_per_range", RELOPT_TYPE_INT, 4),
+        RelOptParseElt::new("autosummarize", RELOPT_TYPE_BOOL, 8),
+    ];
+    build_reloptions(scratch.mcx(), reloptions, validate, RELOPT_KIND_BRIN, 12, &tab)
+}
+
 /// Seam target for `tablespace_reloptions(reloptions, validate)` (see
 /// [`attribute_reloptions_seam`]).
 fn tablespace_reloptions_seam(reloptions: &[u8], validate: bool) -> PgResult<TableSpaceOpts> {
@@ -1817,4 +1916,5 @@ pub fn init_seams() {
         build_reloptions_spgist_seam,
     );
     backend_access_common_reloptions_seams::build_reloptions_gist::set(build_reloptions_gist_seam);
+    backend_access_common_reloptions_seams::build_reloptions_brin::set(build_reloptions_brin_seam);
 }

@@ -266,13 +266,34 @@ fn brincostestimate_am<'mcx>(
     panic!("brincostestimate: index cost estimation (selfuncs.c) not yet reachable from brin (#341)")
 }
 
-/// `amoptions` adapter — `brinoptions` is unported; reached via #341.
+/// `brinoptions(Datum reloptions, bool validate)` (brin.c) — the BRIN AM's
+/// `amoptions` callback. Parse and validate a BRIN index's reloptions
+/// (`pages_per_range`, `autosummarize`). Delegates the relopt-table parse to the
+/// reloptions owner via the `build_reloptions_brin` seam (mirroring how
+/// `btoptions` crosses to `build_reloptions_btree`). The verbatim `reloptions`
+/// varlena bytes are passed through; the result is the serialized `BrinOptions`
+/// `bytea` (`None` when no options apply).
+pub fn brinoptions(
+    reloptions: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<alloc::vec::Vec<u8>>> {
+    backend_access_common_reloptions_seams::build_reloptions_brin::call(reloptions, validate)
+}
+
+/// `amoptions` adapter — decode the reloptions `Datum` to its `text[]` varlena
+/// bytes and run [`brinoptions`]. The C `(Datum) 0` (no WITH clause) is the
+/// `ByVal(0)` arm (`None`).
 fn brinoptions_am<'mcx>(
     _mcx: Mcx<'mcx>,
-    _reloptions: Datum<'mcx>,
-    _validate: bool,
+    reloptions: Datum<'mcx>,
+    validate: bool,
 ) -> PgResult<Option<alloc::vec::Vec<u8>>> {
-    panic!("brinoptions: BRIN reloptions parse (brin.c) not yet ported — reached via #341")
+    let bytes: Option<alloc::vec::Vec<u8>> = match &reloptions {
+        Datum::ByVal(0) => None,
+        Datum::ByRef(b) => Some(b.to_vec()),
+        _ => panic!("brinoptions_am: reloptions Datum is not a text[] varlena image"),
+    };
+    brinoptions(bytes.as_deref(), validate)
 }
 
 // ===========================================================================

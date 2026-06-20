@@ -451,6 +451,49 @@ fn catalog_tuple_update_pg_class<'mcx>(
     update_pg_class_from_form(mcx, &r, tid, form, None)
 }
 
+/// `ATExecSetRelOptions`'s pg_class row write (tablecmds.c:16758-16772): update
+/// only the variable `pg_class.reloptions` (`text[]`) column of `relid`.
+///
+/// `new_reloptions` is the constructed `text[]` varlena image
+/// (`transformRelOptions`), or `None` for the C `(Datum) 0` (store SQL NULL).
+/// Mirrors C: `table_open(RelationRelationId, RowExclusiveLock)` →
+/// `SearchSysCacheLocked1(RELOID)` → set `repl_val[Anum_pg_class_reloptions]` (or
+/// `repl_null`) with `repl_repl = true` → `heap_modify_tuple` →
+/// `CatalogTupleUpdate`. All other columns ride from the old tuple
+/// (`replaces[]` false), exactly as the C `repl_repl` memset-to-false leaves
+/// them. `Err` "cache lookup failed for relation %u" when the tuple is missing.
+fn update_pg_class_reloptions_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    new_reloptions: Option<&[u8]>,
+) -> PgResult<()> {
+    let pg_class = table_open(mcx, cat::pg_class::RelationRelationId, RowExclusiveLock)?;
+    let oldtup = fetch_by_oid(mcx, &pg_class, cat::pg_class::Anum_pg_class_oid, relid)?
+        .ok_or_else(|| PgError::error(format!("cache lookup failed for relation {relid}")))?;
+    let (mut values, mut nulls) = deform(mcx, &pg_class, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+
+    let anum = cat::pg_class::Anum_pg_class_reloptions;
+    match new_reloptions {
+        // repl_val[Anum_pg_class_reloptions - 1] = newOptions: the text[] varlena
+        // rides as a Datum::ByRef carrying its verbatim image.
+        Some(bytes) => {
+            let d = Datum::ByRef(mcx::slice_in(mcx, bytes)?);
+            set_col(&mut values, &mut nulls, &mut replaces, anum, d);
+        }
+        // repl_null[Anum_pg_class_reloptions - 1] = true.
+        None => {
+            let i = (anum - 1) as usize;
+            nulls[i] = true;
+            replaces[i] = true;
+        }
+    }
+
+    modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
+    pg_class.close(RowExclusiveLock)?;
+    Ok(())
+}
+
 /// `CatalogTupleUpdateWithInfo(rel, &tup->t_self, tup, indstate)`. `rel` and
 /// `indstate` are the caller's open pg_class relation and its open index state,
 /// both tied to the caller's `mcx` (so the index state is opened once by the
@@ -2730,6 +2773,7 @@ pub fn install() {
     s::catalog_open_indexes::set(catalog_open_indexes);
     s::catalog_close_indexes::set(catalog_close_indexes);
     s::catalog_tuple_update_pg_class::set(catalog_tuple_update_pg_class);
+    s::update_pg_class_reloptions::set(update_pg_class_reloptions_seam);
     s::catalog_tuple_update_with_info_pg_class::set(catalog_tuple_update_with_info_pg_class);
     s::catalog_tuple_update_pg_index::set(catalog_tuple_update_pg_index);
 
