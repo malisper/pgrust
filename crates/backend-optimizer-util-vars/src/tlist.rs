@@ -520,7 +520,9 @@ pub fn make_tlist_from_pathtarget<'mcx>(
 ) -> PgResult<Vec<TargetEntry<'mcx>>> {
     let mut tlist = Vec::with_capacity(target.exprs.len());
     for (i, &expr_id) in target.exprs.iter().enumerate() {
-        let expr = root.node(expr_id).clone();
+        // Deep-copy via `Expr::clone_in` (C copyObject); the derived
+        // `Expr::clone` panics on `Aggref`/`SubLink`/… payloads.
+        let expr = root.node(expr_id).clone_in(mcx)?;
         let mut tle = make_target_entry(mcx, expr, (i as AttrNumber) + 1, None, false)?;
         if !target.sortgrouprefs.is_empty() {
             tle.ressortgroupref = target.sortgrouprefs[i];
@@ -567,15 +569,42 @@ fn is_srf_call(node: &Expr) -> bool {
 
 /// `split_pathtarget_item` (tlist.c:42) — a subexpression of a PathTarget plus
 /// its sortgroupref (0 if none). We carry an owned, copied `Expr`.
-#[derive(Clone)]
+///
+/// Deliberately *not* `#[derive(Clone)]`: the owned `Expr` deep-copies through
+/// the panicking derived `Expr::clone` for `Aggref`/`SubLink`/… payloads, so
+/// any copy must go through [`SplitPathtargetItem::clone_in`] (`Expr::clone_in`).
 struct SplitPathtargetItem {
     expr: Expr,
     sortgroupref: u32,
 }
 
+impl SplitPathtargetItem {
+    /// Deep-copy via `Expr::clone_in` (never the panicking derived clone).
+    fn clone_in<'mcx>(&self, mcx: Mcx<'mcx>) -> PgResult<SplitPathtargetItem> {
+        Ok(SplitPathtargetItem {
+            expr: self.expr.clone_in(mcx)?,
+            sortgroupref: self.sortgroupref,
+        })
+    }
+}
+
+/// Deep-copy a slice of [`SplitPathtargetItem`] via `clone_in`.
+fn clone_items_in<'mcx>(
+    items: &[SplitPathtargetItem],
+    mcx: Mcx<'mcx>,
+) -> PgResult<Vec<SplitPathtargetItem>> {
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(item.clone_in(mcx)?);
+    }
+    Ok(out)
+}
+
 /// `split_pathtarget_context` (tlist.c:47). The `input_target_exprs` list of
 /// bare expressions is resolved to owned `Expr`s once, up front.
-struct SplitPathtargetContext {
+struct SplitPathtargetContext<'mcx> {
+    /// Arena to deep-copy owned `Expr`s into via `Expr::clone_in`.
+    mcx: Mcx<'mcx>,
     is_grouping_target: bool,
     parse_has_group_rte: bool,
     parse_has_grouping_sets: bool,
@@ -596,6 +625,11 @@ struct SplitPathtargetContext {
     current_depth: i32,
     /// current subexpr's sortgroupref, or 0
     current_sgref: u32,
+    /// First error raised by a deep `Expr::clone_in` inside the walker (e.g.
+    /// allocation failure). `expression_tree_walker`'s closure can only return
+    /// `bool`, so an error is stashed here and the walk aborts (returns `true`);
+    /// the caller propagates it after the top-level walker call.
+    pending_err: Option<PgError>,
 }
 
 /// The `root->parse` grouping flags `split_pathtarget_walker` consults at the
@@ -610,55 +644,64 @@ pub struct SplitGroupingFlags {
 
 /// `split_pathtarget_at_srfs(root, target, input_target, &targets, &flags)`
 /// (tlist.c:843). Both targets on the same side of the grouping boundary.
-pub fn split_pathtarget_at_srfs(
+pub fn split_pathtarget_at_srfs<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     target: &PathTarget,
     input_target: Option<&PathTarget>,
     gflags: SplitGroupingFlags,
-) -> (Vec<PathTarget>, Vec<bool>) {
-    split_pathtarget_at_srfs_extended(root, target, input_target, false, gflags)
+) -> PgResult<(Vec<PathTarget>, Vec<bool>)> {
+    split_pathtarget_at_srfs_extended(mcx, root, target, input_target, false, gflags)
 }
 
 /// `split_pathtarget_at_srfs_grouping(...)` (tlist.c:868). `target` is
 /// post-grouping while `input_target` is pre-grouping; ignore the grouping
 /// nulling bit when matching.
-pub fn split_pathtarget_at_srfs_grouping(
+pub fn split_pathtarget_at_srfs_grouping<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     target: &PathTarget,
     input_target: Option<&PathTarget>,
     gflags: SplitGroupingFlags,
-) -> (Vec<PathTarget>, Vec<bool>) {
-    split_pathtarget_at_srfs_extended(root, target, input_target, true, gflags)
+) -> PgResult<(Vec<PathTarget>, Vec<bool>)> {
+    split_pathtarget_at_srfs_extended(mcx, root, target, input_target, true, gflags)
 }
 
 /// `split_pathtarget_at_srfs_extended(...)` (tlist.c:942). Returns
 /// `(targets, targets_contain_srfs)` in lowest-first evaluation order; the last
 /// `targets` entry is `target` itself.
-fn split_pathtarget_at_srfs_extended(
+fn split_pathtarget_at_srfs_extended<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     target: &PathTarget,
     input_target: Option<&PathTarget>,
     is_grouping_target: bool,
     gflags: SplitGroupingFlags,
-) -> (Vec<PathTarget>, Vec<bool>) {
+) -> PgResult<(Vec<PathTarget>, Vec<bool>)> {
     // Physically identical targets: every expr is available from the input.
     if let Some(it) = input_target {
         if core::ptr::eq(it, target) {
-            return (alloc::vec![target.clone()], alloc::vec![false]);
+            return Ok((alloc::vec![target.clone()], alloc::vec![false]));
         }
         // Same arena handles in same order is also a physical identity in the
         // arena model (the C `target == input_target` pointer test).
         if it.exprs == target.exprs {
-            return (alloc::vec![target.clone()], alloc::vec![false]);
+            return Ok((alloc::vec![target.clone()], alloc::vec![false]));
         }
     }
 
-    let input_target_exprs: Vec<Expr> = match input_target {
-        Some(it) => it.exprs.iter().map(|&id| root.node(id).clone()).collect(),
-        None => Vec::new(),
-    };
+    // Resolve the input target's bare expression handles to owned, deep-copied
+    // `Expr`s (`clone_in` so `Aggref`/`SubLink`/… deep-copy correctly rather
+    // than hitting the panicking derived `Expr::clone`).
+    let mut input_target_exprs: Vec<Expr> = Vec::new();
+    if let Some(it) = input_target {
+        for &id in it.exprs.iter() {
+            input_target_exprs.push(root.node(id).clone_in(mcx)?);
+        }
+    }
 
     let mut context = SplitPathtargetContext {
+        mcx,
         is_grouping_target,
         parse_has_group_rte: gflags.has_group_rte,
         parse_has_grouping_sets: gflags.has_grouping_sets,
@@ -672,6 +715,7 @@ fn split_pathtarget_at_srfs_extended(
         current_input_srfs: Vec::new(),
         current_depth: 0,
         current_sgref: 0,
+        pending_err: None,
     };
 
     let mut max_depth: i32 = 0;
@@ -679,11 +723,14 @@ fn split_pathtarget_at_srfs_extended(
 
     // Scan each expression in the PathTarget looking for SRFs.
     for (lci, &node_id) in target.exprs.iter().enumerate() {
-        let node = root.node(node_id).clone();
+        let node = root.node(node_id).clone_in(mcx)?;
 
         context.current_sgref = get_sortgroupref(target, lci);
         context.current_depth = 0;
         split_pathtarget_walker(&node, &mut context);
+        if let Some(e) = context.pending_err.take() {
+            return Err(e);
+        }
 
         // An expression containing no SRFs is of no further interest.
         if context.current_depth == 0 {
@@ -704,7 +751,7 @@ fn split_pathtarget_at_srfs_extended(
 
     // No SRFs needing evaluation: no ProjectSet needed.
     if max_depth == 0 {
-        return (alloc::vec![target.clone()], alloc::vec![false]);
+        return Ok((alloc::vec![target.clone()], alloc::vec![false]));
     }
 
     // Add top-level Vars / SRF outputs to the last level, or to an extra
@@ -740,22 +787,22 @@ fn split_pathtarget_at_srfs_extended(
             let mut nt = create_empty_pathtarget();
 
             // Evaluate this level's SRFs.
-            let level_srfs = context.level_srfs[lc1].clone();
-            add_sp_items_to_pathtarget(root, &mut nt, &level_srfs);
+            let level_srfs = clone_items_in(&context.level_srfs[lc1], mcx)?;
+            add_sp_items_to_pathtarget(mcx, root, &mut nt, &level_srfs)?;
 
             // Propagate forward Vars needed by later levels.
             for lc in (lc1 + 1)..context.level_input_vars.len() {
-                let input_vars = context.level_input_vars[lc].clone();
-                add_sp_items_to_pathtarget(root, &mut nt, &input_vars);
+                let input_vars = clone_items_in(&context.level_input_vars[lc], mcx)?;
+                add_sp_items_to_pathtarget(mcx, root, &mut nt, &input_vars)?;
             }
 
             // Propagate forward SRFs computed earlier and needed by later
             // levels, but only those present in the previous level's tlist.
             for lc in (lc1 + 1)..context.level_input_srfs.len() {
-                let input_srfs = context.level_input_srfs[lc].clone();
+                let input_srfs = clone_items_in(&context.level_input_srfs[lc], mcx)?;
                 for item in &input_srfs {
                     if expr_list_member(&prev_level_exprs, &item.expr) {
-                        add_sp_item_to_pathtarget(root, &mut nt, item);
+                        add_sp_item_to_pathtarget(mcx, root, &mut nt, item)?;
                     }
                 }
             }
@@ -766,13 +813,16 @@ fn split_pathtarget_at_srfs_extended(
 
         // Remember this level's output exprs for the next pass (resolve the
         // arena handles to owned Exprs for the list_member test).
-        prev_level_exprs = ntarget.exprs.iter().map(|&id| root.node(id).clone()).collect();
+        prev_level_exprs = Vec::with_capacity(ntarget.exprs.len());
+        for &id in ntarget.exprs.iter() {
+            prev_level_exprs.push(root.node(id).clone_in(mcx)?);
+        }
 
         targets.push(ntarget);
         targets_contain_srfs.push(level_srfs_nonempty);
     }
 
-    (targets, targets_contain_srfs)
+    Ok((targets, targets_contain_srfs))
 }
 
 /// `get_pathtarget_sortgroupref(target, i)` — the i-th sortgroupref or 0.
@@ -788,6 +838,23 @@ fn expr_list_member(list: &[Expr], expr: &Expr) -> bool {
 /// `split_pathtarget_walker(node, context)` (tlist.c:1142). Recursively examine
 /// `node`, entering SRFs and Vars/Var-like nodes into the context's lists.
 fn split_pathtarget_walker(node: &Expr, context: &mut SplitPathtargetContext) -> bool {
+    let mcx = context.mcx;
+
+    // Deep-copy `$e` into `mcx` via `Expr::clone_in` (never the panicking derived
+    // `Expr::clone`, which aborts on `Aggref`/`SubLink`/… payloads). On failure
+    // (e.g. OOM) stash the error and abort the walk by returning `true`.
+    macro_rules! clone_expr {
+        ($e:expr) => {
+            match $e.clone_in(mcx) {
+                Ok(v) => v,
+                Err(err) => {
+                    context.pending_err = Some(err);
+                    return true;
+                }
+            }
+        };
+    }
+
     // If crossing the grouping boundary, ignore the grouping nulling bit when
     // checking availability in input_target (aligns with set_upper_references).
     let sanitized: Expr = if context.is_grouping_target
@@ -795,19 +862,20 @@ fn split_pathtarget_walker(node: &Expr, context: &mut SplitPathtargetContext) ->
         && context.parse_has_grouping_sets
     {
         backend_optimizer_path_equivclass_ext_seams::remove_nulling_relids::call(
-            node.clone(),
+            clone_expr!(node),
             bms_make_singleton_relids(context.group_rtindex),
             None,
         )
     } else {
-        node.clone()
+        clone_expr!(node)
     };
 
     // A subexpression matching one already computed in input_target can be
     // treated like a Var even if it's a SRF. Record it and ignore substructure.
     if expr_list_member(&context.input_target_exprs, &sanitized) {
+        let expr = clone_expr!(node);
         context.current_input_vars.push(SplitPathtargetItem {
-            expr: node.clone(),
+            expr,
             sortgroupref: context.current_sgref,
         });
         return false;
@@ -822,8 +890,9 @@ fn split_pathtarget_walker(node: &Expr, context: &mut SplitPathtargetContext) ->
             | Expr::GroupingFunc(_)
             | Expr::WindowFunc(_)
     ) {
+        let expr = clone_expr!(node);
         context.current_input_vars.push(SplitPathtargetItem {
-            expr: node.clone(),
+            expr,
             sortgroupref: context.current_sgref,
         });
         return false;
@@ -832,7 +901,7 @@ fn split_pathtarget_walker(node: &Expr, context: &mut SplitPathtargetContext) ->
     // A SRF: recursively examine its inputs, determine its level, record it.
     if is_srf_call(node) {
         let item = SplitPathtargetItem {
-            expr: node.clone(),
+            expr: clone_expr!(node),
             sortgroupref: context.current_sgref,
         };
 
@@ -859,7 +928,14 @@ fn split_pathtarget_walker(node: &Expr, context: &mut SplitPathtargetContext) ->
         }
 
         // Record this SRF at its level, with its inputs at the same level.
-        context.level_srfs[srf_depth].push(item.clone());
+        let item_copy = match item.clone_in(mcx) {
+            Ok(v) => v,
+            Err(err) => {
+                context.pending_err = Some(err);
+                return true;
+            }
+        };
+        context.level_srfs[srf_depth].push(item_copy);
         let civ = core::mem::take(&mut context.current_input_vars);
         let cis = core::mem::take(&mut context.current_input_srfs);
         context.level_input_vars[srf_depth].extend(civ);
@@ -885,11 +961,12 @@ fn split_pathtarget_walker(node: &Expr, context: &mut SplitPathtargetContext) ->
 /// `target` unless an `equal()` entry without a conflicting sortgroupref
 /// already exists; a zero-sgref item may merge with a labeled one and vice
 /// versa, acquiring the nonzero label. Copies the expr into the arena.
-fn add_sp_item_to_pathtarget(
+fn add_sp_item_to_pathtarget<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     target: &mut PathTarget,
     item: &SplitPathtargetItem,
-) {
+) -> PgResult<()> {
     for lci in 0..target.exprs.len() {
         let sgref = get_sortgroupref(target, lci);
         let matches_sgref =
@@ -902,21 +979,26 @@ fn add_sp_item_to_pathtarget(
                 }
                 target.sortgrouprefs[lci] = item.sortgroupref;
             }
-            return;
+            return Ok(());
         }
     }
-    // No match: add to PathTarget. Copy the expr for safety.
-    let id = root.alloc_node(item.expr.clone());
+    // No match: add to PathTarget. Deep-copy the expr (C copyObject) via
+    // `Expr::clone_in` so an `Aggref`/`SubLink`/… payload deep-copies correctly
+    // rather than hitting the panicking derived `Expr::clone`.
+    let id = root.alloc_node(item.expr.clone_in(mcx)?);
     add_column_to_pathtarget(target, id, item.sortgroupref);
+    Ok(())
 }
 
 /// `add_sp_items_to_pathtarget(target, items)` (tlist.c:1334).
-fn add_sp_items_to_pathtarget(
+fn add_sp_items_to_pathtarget<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     target: &mut PathTarget,
     items: &[SplitPathtargetItem],
-) {
+) -> PgResult<()> {
     for item in items {
-        add_sp_item_to_pathtarget(root, target, item);
+        add_sp_item_to_pathtarget(mcx, root, target, item)?;
     }
+    Ok(())
 }

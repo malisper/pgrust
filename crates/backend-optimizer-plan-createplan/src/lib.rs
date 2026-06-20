@@ -6978,9 +6978,15 @@ fn make_unique_from_pathkeys<'mcx>(
             let em = root.em(ec.ec_members[0]);
             matched = Some((tle.resno, em.em_datatype));
         } else {
+            // The default sentinel for a TargetEntry whose `expr` is NULL (it
+            // can never match an EC member). Borrow `tle.expr` directly rather
+            // than `.cloned()` — a bare `Expr::clone` panics on an `Aggref`
+            // tlist entry (e.g. `SELECT DISTINCT max(x)`), and the matcher only
+            // needs a `&Expr`.
+            let default_expr = Expr::Var(Default::default());
             for tle in plan_tlist.iter() {
-                let tle_expr = tle.expr.as_deref().cloned().unwrap_or_else(|| Expr::Var(Default::default()));
-                if let Some(em) = find_ec_member_matching_expr(root, ec_id, &tle_expr, &None) {
+                let tle_expr: &Expr = tle.expr.as_deref().unwrap_or(&default_expr);
+                if let Some(em) = find_ec_member_matching_expr(root, ec_id, tle_expr, &None) {
                     matched = Some((tle.resno, em.em_datatype));
                     break;
                 }

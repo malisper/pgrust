@@ -2386,35 +2386,37 @@ fn grouping_planner<'mcx>(
         };
         // final_target doesn't recompute any SRFs in sort_input_target.
         let (ft, ftc) =
-            split_pathtarget_at_srfs(root, &final_target, Some(&sort_input_target), gflags);
+            split_pathtarget_at_srfs(mcx, root, &final_target, Some(&sort_input_target), gflags)?;
         final_target = ft[0].clone();
         debug_assert!(!ftc[0]);
         final_targets = ft;
         final_targets_contain_srfs = ftc;
         // likewise for sort_input_target vs. grouping_target.
         let (sit, sitc) = split_pathtarget_at_srfs(
+            mcx,
             root,
             &sort_input_target,
             Some(&grouping_target),
             gflags,
-        );
+        )?;
         sort_input_target = sit[0].clone();
         debug_assert!(!sitc[0]);
         sort_input_targets = sit;
         sort_input_targets_contain_srfs = sitc;
         // likewise for grouping_target vs. scanjoin_target (crosses grouping).
         let (gt, gtc) = split_pathtarget_at_srfs_grouping(
+            mcx,
             root,
             &grouping_target,
             Some(&scanjoin_target),
             gflags,
-        );
+        )?;
         grouping_target = gt[0].clone();
         debug_assert!(!gtc[0]);
         grouping_targets = gt;
         grouping_targets_contain_srfs = gtc;
         // scanjoin_target has no SRFs precomputed for it (input_target = NULL).
-        let (st, stc) = split_pathtarget_at_srfs(root, &scanjoin_target, None, gflags);
+        let (st, stc) = split_pathtarget_at_srfs(mcx, root, &scanjoin_target, None, gflags)?;
         scanjoin_target = st[0].clone();
         debug_assert!(!stc[0]);
         scanjoin_targets = st;
