@@ -18,7 +18,8 @@
 //! (the GIN by-OID support-proc dispatcher), not the fmgr builtin table.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_error::PgResult;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -48,10 +49,10 @@ fn ret_i32(v: i32) -> Datum {
 /// C: `gin_compare_jsonb(PG_FUNCTION_ARGS)`. Two `text` GIN keys → `int32`
 /// comparison result (always under the C collation, i.e. a plain unsigned byte
 /// compare).
-fn fc_gin_compare_jsonb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_gin_compare_jsonb(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let a = arg_text(fcinfo, 0);
     let b = arg_text(fcinfo, 1);
-    ret_i32(crate::gin_compare_jsonb(a, b))
+    Ok(ret_i32(crate::gin_compare_jsonb(a, b)))
 }
 
 // ---------------------------------------------------------------------------
@@ -64,16 +65,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: alloc::string::ToString::to_string(name),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: alloc::string::ToString::to_string(name),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the scalar `jsonb_gin.c` builtins (C: their `fmgr_builtins[]` rows).
@@ -81,7 +85,7 @@ fn builtin(
 /// transcribed from `pg_proc.dat` (`gin_compare_jsonb`: `proargtypes => 'text
 /// text'`, `prorettype => 'int4'`, `proisstrict => 't'`, not retset).
 pub fn register_jsonb_gin_builtins() {
-    backend_utils_fmgr_core::register_builtins([builtin(
+    backend_utils_fmgr_core::register_builtins_native([builtin(
         3480,
         "gin_compare_jsonb",
         2,
