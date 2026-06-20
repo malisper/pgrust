@@ -377,7 +377,7 @@ pub fn StorePartitionBound<'mcx>(
     let mut new_repl: Vec<bool> = vec![false; Natts_pg_class];
 
     // new_val[relpartbound] = CStringGetTextDatum(nodeToString(bound));
-    let bound_node = types_nodes::nodes::Node::PartitionBoundSpec(bound.clone_in(mcx)?);
+    let bound_node = types_nodes::nodes::Node::mk_partition_bound_spec(mcx, bound.clone_in(mcx)?)?;
     let bound_str = backend_nodes_outfuncs::nodeToString(mcx, &bound_node)?;
     new_val[(Anum_pg_class_relpartbound - 1) as usize] =
         cstring_to_text_datum(mcx, bound_str.as_str())?;

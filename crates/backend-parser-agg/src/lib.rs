@@ -365,13 +365,12 @@ pub fn transformGroupingFunc<'mcx>(
 ) -> PgResult<Expr> {
     // C: GroupingFunc *p = (GroupingFunc *) gf; the grammar produces the *raw*
     // `Node::GroupingFunc` (rawexprnodes), whose `args` are raw `NodePtr`s.
-    let p: types_nodes::rawexprnodes::GroupingFunc<'mcx> = match p_node {
-        Node::GroupingFunc(g) => g,
-        _ => {
-            return Err(PgError::error(
-                "transformGroupingFunc: input is not a GroupingFunc node",
-            ))
-        }
+    let Some(p): Option<types_nodes::rawexprnodes::GroupingFunc<'mcx>> =
+        p_node.into_groupingfunc()
+    else {
+        return Err(PgError::error(
+            "transformGroupingFunc: input is not a GroupingFunc node",
+        ));
     };
 
     let mut result = GroupingFunc {
@@ -1674,7 +1673,10 @@ fn substitute_grouped_columns_list<'mcx>(
 }
 
 /// In-place mutator mirror of the C `substitute_grouped_columns_mutator`.
-fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteContext) {
+fn substitute_grouped_columns_mutator<'mcx>(
+    node: &mut Node<'mcx>,
+    context: &mut SubstituteContext<'_, 'mcx>,
+) {
     if context.error.is_some() {
         return;
     }
@@ -1694,7 +1696,13 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
                 context.in_agg_direct_args = true;
                 // Mutate each direct arg in place.
                 for e in agg.aggdirectargs.iter_mut() {
-                    let mut n = Node::Expr(replace_expr_dummy(e));
+                    let mut n = match Node::mk_expr(context.mcx, replace_expr_dummy(e)) {
+                        Ok(n) => n,
+                        Err(err) => {
+                            context.error = Some(err);
+                            break;
+                        }
+                    };
                     substitute_grouped_columns_mutator(&mut n, context);
                     *e = unwrap_node_expr(n);
                     if context.error.is_some() {
@@ -1732,9 +1740,13 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
                 attnum += 1;
                 if let Some(e) = tle.expr.as_deref() {
                     if backend_nodes_equalfuncs_seams::equal_expr::call(this_expr, e) {
+                        let mcx = context.mcx;
                         match build_grouped_var(attnum, tle.ressortgroupref, context) {
                             Ok(v) => {
-                                *node = Node::Expr(Expr::Var(v));
+                                match Node::mk_expr(mcx, Expr::Var(v)) {
+                                    Ok(n) => *node = n,
+                                    Err(err) => context.error = Some(err),
+                                }
                                 return;
                             }
                             Err(err) => {
@@ -1769,9 +1781,13 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
                         && gvar.varattno == var.varattno
                         && gvar.varlevelsup == 0
                     {
+                        let mcx = context.mcx;
                         match build_grouped_var(attnum, tle.ressortgroupref, context) {
                             Ok(v) => {
-                                *node = Node::Expr(Expr::Var(v));
+                                match Node::mk_expr(mcx, Expr::Var(v)) {
+                                    Ok(n) => *node = n,
+                                    Err(err) => context.error = Some(err),
+                                }
                                 return;
                             }
                             Err(err) => {
@@ -1876,6 +1892,7 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
     if let Some(query) = node.as_query_mut() {
         // Recurse into subselects.
         context.sublevels_up += 1;
+        let mcx = context.mcx;
         query_tree_mutator(
             query,
             &mut |n: &mut Node| {
@@ -1883,6 +1900,7 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
                 context.error.is_some()
             },
             0,
+            mcx,
         );
         context.sublevels_up -= 1;
         return;
@@ -1893,7 +1911,7 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
 
 /// `expression_tree_mutator(node, substitute_grouped_columns_mutator, context)`
 /// via the in-place owned-tree walker.
-fn mutate_generic(node: &mut Node, context: &mut SubstituteContext) {
+fn mutate_generic<'mcx>(node: &mut Node<'mcx>, context: &mut SubstituteContext<'_, 'mcx>) {
     let mcx = context.mcx;
     expression_tree_walker_mut(
         node,
@@ -2054,7 +2072,10 @@ fn finalize_grouping_exprs<'mcx>(
 /// Mirror of the C `finalize_grouping_exprs_walker` (in-place: fills
 /// `grp->refs`; descends via the in-place walker). Returns nothing; aborts on
 /// `context.error`.
-fn finalize_grouping_exprs_walker(node: &mut Node, context: &mut FinalizeContext) {
+fn finalize_grouping_exprs_walker<'mcx>(
+    node: &mut Node<'mcx>,
+    context: &mut FinalizeContext<'_, 'mcx>,
+) {
     if context.error.is_some() {
         return;
     }
@@ -2077,7 +2098,13 @@ fn finalize_grouping_exprs_walker(node: &mut Node, context: &mut FinalizeContext
                 // args/ORDER BY/filter; check direct arguments as though not in
                 // an aggregate.
                 for e in agg.aggdirectargs.iter_mut() {
-                    let mut n = Node::Expr(replace_expr_dummy(e));
+                    let mut n = match Node::mk_expr(context.mcx, replace_expr_dummy(e)) {
+                        Ok(n) => n,
+                        Err(err) => {
+                            context.error = Some(err);
+                            break;
+                        }
+                    };
                     finalize_grouping_exprs_walker(&mut n, context);
                     *e = unwrap_node_expr(n);
                     if context.error.is_some() {
@@ -2119,6 +2146,7 @@ fn finalize_grouping_exprs_walker(node: &mut Node, context: &mut FinalizeContext
         // Recurse into subselects.
         let query = node.expect_query_mut();
         context.sublevels_up += 1;
+        let mcx = context.mcx;
         query_tree_mutator(
             query,
             &mut |n: &mut Node| {
@@ -2126,6 +2154,7 @@ fn finalize_grouping_exprs_walker(node: &mut Node, context: &mut FinalizeContext
                 context.error.is_some()
             },
             0,
+            mcx,
         );
         context.sublevels_up -= 1;
         return;
@@ -2210,7 +2239,7 @@ fn compute_grouping_refs(
 }
 
 /// `expression_tree_walker(node, finalize_grouping_exprs_walker, context)`.
-fn finalize_generic(node: &mut Node, context: &mut FinalizeContext) {
+fn finalize_generic<'mcx>(node: &mut Node<'mcx>, context: &mut FinalizeContext<'_, 'mcx>) {
     let mcx = context.mcx;
     expression_tree_walker_mut(
         node,
