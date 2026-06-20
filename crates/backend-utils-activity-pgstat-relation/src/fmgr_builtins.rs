@@ -20,7 +20,7 @@ use types_datum::Datum;
 use types_error::PgResult;
 use types_fmgr::resolution::BuiltinFunction;
 use types_fmgr::{FunctionCallInfoBaseData, PgFnNative};
-use types_pgstat::activity_pgstat::PgStat_StatTabEntry;
+use types_pgstat::activity_pgstat::{PgStat_StatTabEntry, PgStat_TableStatus};
 
 /// `PG_GETARG_OID(0)` → `DatumGetObjectId`: the relation OID argument.
 #[inline]
@@ -176,6 +176,57 @@ fn fc_last_autoanalyze_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum
 }
 
 // ---------------------------------------------------------------------------
+// Transaction-level (xact) accessors.
+//
+// `PG_STAT_GET_XACT_RELENTRY_INT64(stat)`: read the relation's backend-local
+// *pending* `PgStat_TableStatus` via `find_tabstat_entry(relid)` and project
+// `tabentry->counts.stat`, or `0` when there is no pending entry.
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn xact_relentry_int64(
+    fcinfo: &FunctionCallInfoBaseData,
+    f: fn(&PgStat_TableStatus) -> i64,
+) -> PgResult<Datum> {
+    let relid = arg_relid(fcinfo);
+    let result = crate::find_tabstat_entry(relid)
+        .map(|t| f(&t))
+        .unwrap_or(0);
+    Ok(Datum::from_i64(result))
+}
+
+fn fc_xact_numscans(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    xact_relentry_int64(fc, |t| t.counts.numscans)
+}
+fn fc_xact_tuples_returned(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    xact_relentry_int64(fc, |t| t.counts.tuples_returned)
+}
+fn fc_xact_tuples_fetched(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    xact_relentry_int64(fc, |t| t.counts.tuples_fetched)
+}
+fn fc_xact_tuples_inserted(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    xact_relentry_int64(fc, |t| t.counts.tuples_inserted)
+}
+fn fc_xact_tuples_updated(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    xact_relentry_int64(fc, |t| t.counts.tuples_updated)
+}
+fn fc_xact_tuples_deleted(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    xact_relentry_int64(fc, |t| t.counts.tuples_deleted)
+}
+fn fc_xact_tuples_hot_updated(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    xact_relentry_int64(fc, |t| t.counts.tuples_hot_updated)
+}
+fn fc_xact_tuples_newpage_updated(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    xact_relentry_int64(fc, |t| t.counts.tuples_newpage_updated)
+}
+fn fc_xact_blocks_fetched(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    xact_relentry_int64(fc, |t| t.counts.blocks_fetched)
+}
+fn fc_xact_blocks_hit(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    xact_relentry_int64(fc, |t| t.counts.blocks_hit)
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -227,5 +278,20 @@ pub fn register_pgstat_relation_builtins() {
         builtin(2782, "pg_stat_get_last_autovacuum_time", fc_last_autovacuum_time),
         builtin(2783, "pg_stat_get_last_analyze_time", fc_last_analyze_time),
         builtin(2784, "pg_stat_get_last_autoanalyze_time", fc_last_autoanalyze_time),
+        // Transaction-level (xact) INT64
+        builtin(3037, "pg_stat_get_xact_numscans", fc_xact_numscans),
+        builtin(3038, "pg_stat_get_xact_tuples_returned", fc_xact_tuples_returned),
+        builtin(3039, "pg_stat_get_xact_tuples_fetched", fc_xact_tuples_fetched),
+        builtin(3040, "pg_stat_get_xact_tuples_inserted", fc_xact_tuples_inserted),
+        builtin(3041, "pg_stat_get_xact_tuples_updated", fc_xact_tuples_updated),
+        builtin(3042, "pg_stat_get_xact_tuples_deleted", fc_xact_tuples_deleted),
+        builtin(3043, "pg_stat_get_xact_tuples_hot_updated", fc_xact_tuples_hot_updated),
+        builtin(
+            6218,
+            "pg_stat_get_xact_tuples_newpage_updated",
+            fc_xact_tuples_newpage_updated,
+        ),
+        builtin(3044, "pg_stat_get_xact_blocks_fetched", fc_xact_blocks_fetched),
+        builtin(3045, "pg_stat_get_xact_blocks_hit", fc_xact_blocks_hit),
     ]);
 }

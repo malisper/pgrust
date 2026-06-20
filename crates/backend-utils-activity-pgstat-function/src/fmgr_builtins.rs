@@ -15,7 +15,7 @@ use types_datum::Datum;
 use types_error::PgResult;
 use types_fmgr::resolution::BuiltinFunction;
 use types_fmgr::{FunctionCallInfoBaseData, PgFnNative};
-use types_pgstat::activity_pgstat::PgStat_StatFuncEntry;
+use types_pgstat::activity_pgstat::{PgStat_FunctionCounts, PgStat_StatFuncEntry};
 
 /// `PG_GETARG_OID(0)` → `DatumGetObjectId`: the function OID argument.
 #[inline]
@@ -81,6 +81,55 @@ fn fc_force_next_flush(_fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 }
 
 // ---------------------------------------------------------------------------
+// Transaction-level (xact) accessors.
+//
+// These read the function's backend-local *pending* `PgStat_FunctionCounts` via
+// `find_funcstat_entry(funcid)` and return `NULL` when there is no pending entry
+// (C: `if (funcentry == NULL) PG_RETURN_NULL();`). `calls` is `int8` (numcalls);
+// `total_time`/`self_time` are `instr_time` ticks returned as millisecond
+// `float8` via `INSTR_TIME_GET_MILLISEC`.
+// ---------------------------------------------------------------------------
+
+/// `find_funcstat_entry(funcid)` → backend-local pending counts.
+#[inline]
+fn funccounts(funcid: Oid) -> PgResult<Option<PgStat_FunctionCounts>> {
+    crate::find_funcstat_entry(funcid)
+}
+
+fn fc_xact_function_calls(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let funcid = arg_funcid(fcinfo);
+    match funccounts(funcid)? {
+        None => {
+            fcinfo.set_result_null(true);
+            Ok(Datum::from_i64(0))
+        }
+        Some(c) => Ok(Datum::from_i64(c.numcalls)),
+    }
+}
+
+#[inline]
+fn xact_funccounts_float8_ms(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    f: fn(&PgStat_FunctionCounts) -> f64,
+) -> PgResult<Datum> {
+    let funcid = arg_funcid(fcinfo);
+    match funccounts(funcid)? {
+        None => {
+            fcinfo.set_result_null(true);
+            Ok(Datum::from_f64(0.0))
+        }
+        Some(c) => Ok(Datum::from_f64(f(&c))),
+    }
+}
+
+fn fc_xact_function_total_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    xact_funccounts_float8_ms(fc, |c| c.total_time.get_millisec())
+}
+fn fc_xact_function_self_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    xact_funccounts_float8_ms(fc, |c| c.self_time.get_millisec())
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -117,6 +166,18 @@ pub fn register_pgstat_function_builtins() {
                 func: None,
             },
             fc_force_next_flush as PgFnNative,
+        ),
+        // Transaction-level (xact) function counters.
+        builtin(3046, "pg_stat_get_xact_function_calls", fc_xact_function_calls),
+        builtin(
+            3047,
+            "pg_stat_get_xact_function_total_time",
+            fc_xact_function_total_time,
+        ),
+        builtin(
+            3048,
+            "pg_stat_get_xact_function_self_time",
+            fc_xact_function_self_time,
         ),
     ]);
 }
