@@ -76,17 +76,21 @@ fn mk_var_rinfo(root: &mut PlannerInfo, vno: i32) -> RinfoId {
 /// RestrictInfo's clause_relids / required_relids / left_relids from {2} to {1}.
 #[test]
 fn change_relids_rewrites_rinfo_and_clause() {
+    let cx = mcx::MemoryContext::new("change_relids test");
+    let mcx = cx.mcx();
     let mut root = PlannerInfo::default();
     let rid = mk_var_rinfo(&mut root, 2);
 
     change_relids_in_rinfo(
+        mcx,
         &mut root,
         rid,
         ReplaceRelidContext {
             rt_index: 2,
             new_index: 1,
         },
-    );
+    )
+    .expect("change_relids_in_rinfo");
 
     // (a) the clause Var was rewritten in place.
     let clause_id = root.rinfo(rid).clause;
@@ -108,17 +112,21 @@ fn change_relids_rewrites_rinfo_and_clause() {
 /// the member from the sets without adding a replacement.
 #[test]
 fn change_relids_delete_only() {
+    let cx = mcx::MemoryContext::new("change_relids test");
+    let mcx = cx.mcx();
     let mut root = PlannerInfo::default();
     let rid = mk_var_rinfo(&mut root, 3);
 
     change_relids_in_rinfo(
+        mcx,
         &mut root,
         rid,
         ReplaceRelidContext {
             rt_index: 3,
             new_index: -1,
         },
-    );
+    )
+    .expect("change_relids_in_rinfo");
 
     let rinfo = root.rinfo(rid);
     assert!(r::is_empty(&rinfo.clause_relids), "clause_relids should be emptied");
@@ -141,14 +149,18 @@ fn change_relids_rewrites_em_expr() {
     };
     let emid = root.alloc_em(em);
 
+    let cx = mcx::MemoryContext::new("change_relids test");
+    let mcx = cx.mcx();
     change_relids_in_em(
+        mcx,
         &mut root,
         emid,
         ReplaceRelidContext {
             rt_index: 5,
             new_index: 4,
         },
-    );
+    )
+    .expect("change_relids_in_em");
 
     let expr_id = root.em(emid).em_expr;
     match root.node(expr_id) {
