@@ -12,9 +12,9 @@
 
 use types_core::Oid;
 use types_datum::Datum;
-use types_error::PgError;
+use types_error::PgResult;
 use types_fmgr::resolution::BuiltinFunction;
-use types_fmgr::FunctionCallInfoBaseData;
+use types_fmgr::{FunctionCallInfoBaseData, PgFnNative};
 use types_pgstat::activity_pgstat::PgStat_StatFuncEntry;
 
 /// `PG_GETARG_OID(0)` → `DatumGetObjectId`: the function OID argument.
@@ -27,31 +27,22 @@ fn arg_funcid(fcinfo: &FunctionCallInfoBaseData) -> Oid {
         .as_oid()
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 /// Fetch `funcid`'s function-stats entry (C:
 /// `pgstat_fetch_stat_funcentry(funcid)`). `None` ⇒ no stats (`funcentry == NULL`).
 #[inline]
-fn funcentry(funcid: Oid) -> Option<PgStat_StatFuncEntry> {
-    match crate::pgstat_fetch_stat_funcentry(funcid) {
-        Ok(e) => e,
-        Err(e) => raise(e),
-    }
+fn funcentry(funcid: Oid) -> PgResult<Option<PgStat_StatFuncEntry>> {
+    crate::pgstat_fetch_stat_funcentry(funcid)
 }
 
 /// `pg_stat_get_function_calls(oid)` — `int8`, `NULL` when no entry.
-fn fc_function_calls(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_function_calls(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let funcid = arg_funcid(fcinfo);
-    match funcentry(funcid) {
+    match funcentry(funcid)? {
         None => {
             fcinfo.set_result_null(true);
-            Datum::from_i64(0)
+            Ok(Datum::from_i64(0))
         }
-        Some(e) => Datum::from_i64(e.numcalls),
+        Some(e) => Ok(Datum::from_i64(e.numcalls)),
     }
 }
 
@@ -61,21 +52,21 @@ fn fc_function_calls(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn funcentry_float8_ms(
     fcinfo: &mut FunctionCallInfoBaseData,
     f: fn(&PgStat_StatFuncEntry) -> i64,
-) -> Datum {
+) -> PgResult<Datum> {
     let funcid = arg_funcid(fcinfo);
-    match funcentry(funcid) {
+    match funcentry(funcid)? {
         None => {
             fcinfo.set_result_null(true);
-            Datum::from_f64(0.0)
+            Ok(Datum::from_f64(0.0))
         }
-        Some(e) => Datum::from_f64(f(&e) as f64 / 1000.0),
+        Some(e) => Ok(Datum::from_f64(f(&e) as f64 / 1000.0)),
     }
 }
 
-fn fc_function_total_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_function_total_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     funcentry_float8_ms(fc, |e| e.total_time)
 }
-fn fc_function_self_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_function_self_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     funcentry_float8_ms(fc, |e| e.self_time)
 }
 
@@ -83,47 +74,49 @@ fn fc_function_self_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
 /// PG_RETURN_VOID();`. Forces this backend's pending cumulative stats to be
 /// flushed on the next `pgstat_report_stat()` call (used for writing tests).
 /// Takes no arguments and returns `void`.
-fn fc_force_next_flush(_fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_force_next_flush(_fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     backend_utils_activity_pgstat::pgstat_core::pgstat_force_next_flush();
     // PG_RETURN_VOID(): the returned Datum is ignored for a void function.
-    Datum::from_i64(0)
+    Ok(Datum::from_i64(0))
 }
 
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
-fn builtin(
-    foid: u32,
-    name: &str,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs: 1,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+fn builtin(foid: u32, name: &str, native: PgFnNative) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs: 1,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every per-function `pg_stat_get_function_*` builtin (C: their
 /// `fmgr_builtins[]` rows). Called from this crate's `init_seams()`.
 pub fn register_pgstat_function_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(2978, "pg_stat_get_function_calls", fc_function_calls),
         builtin(2979, "pg_stat_get_function_total_time", fc_function_total_time),
         builtin(2980, "pg_stat_get_function_self_time", fc_function_self_time),
         // pg_stat_force_next_flush() — fmgr_builtins[] row { 2137, 0, false,
         // false, ... }: 0 args, non-strict (proisstrict='f'), returns void.
-        BuiltinFunction {
-            foid: 2137,
-            name: "pg_stat_force_next_flush".to_string(),
-            nargs: 0,
-            strict: false,
-            retset: false,
-            func: Some(fc_force_next_flush),
-        },
+        (
+            BuiltinFunction {
+                foid: 2137,
+                name: "pg_stat_force_next_flush".to_string(),
+                nargs: 0,
+                strict: false,
+                retset: false,
+                func: None,
+            },
+            fc_force_next_flush as PgFnNative,
+        ),
     ]);
 }
