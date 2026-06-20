@@ -1460,6 +1460,13 @@ pub fn init_seams() {
         grant_exec::execute_grant_stmt(mcx, stmt)
     });
 
+    // `aclnewowner(...)` + `PointerGetDatum`: the on-disk relacl/objacl owner
+    // rewrite the catalog owner-change paths (ATExecChangeOwner & friends) use
+    // when the ACL column is non-null.
+    seam::acl_change_owner_datum::set(|mcx, acl_on_disk, old_owner, new_owner| {
+        grant_exec::acl_change_owner_datum(mcx, acl_on_disk, old_owner, new_owner)
+    });
+
     // get_user_default_acl: bounded to the empty pg_default_acl fast path
     // (returns None on a fresh cluster; a non-empty entry panics until a real
     // Acl carrier crosses the seam).

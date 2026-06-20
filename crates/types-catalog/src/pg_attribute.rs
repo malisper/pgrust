@@ -177,4 +177,8 @@ pub struct PgAttributeUpdateRow {
     /// SQL NULL (`RelationClearMissing` clears the missing value), `None`
     /// leaves it unchanged.
     pub attmissingval: Option<Option<Vec<u8>>>,
+    /// `attacl` — `Some(Some(image))` stores the built `aclitem[]` varlena
+    /// (`change_owner_fix_column_acls`'s owner-rewrite), `Some(None)` stores SQL
+    /// NULL, `None` leaves the column unchanged.
+    pub attacl: Option<Option<Vec<u8>>>,
 }

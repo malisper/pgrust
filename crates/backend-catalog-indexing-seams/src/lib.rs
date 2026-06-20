@@ -1273,6 +1273,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The `pg_class.relowner`/`relacl`-preserving field-modify path
+    /// (`ATExecChangeOwner`, commands/tablecmds.c): `heap_modify_tuple` replacing
+    /// ONLY the `relowner` column (and the `relacl` column when `new_acl` is
+    /// `Some`) over the original scanned pg_class tuple, then
+    /// `CatalogTupleUpdate`. `class_tuple` is the live `SearchSysCache1(RELOID)`
+    /// tuple (all other columns preserved verbatim); `new_acl` is the owner-fixed
+    /// `aclitem[]` `Datum` computed via `aclnewowner`, or `None` when the existing
+    /// relacl is SQL-null. The owner-shaped analog of
+    /// [`catalog_tuple_update_relchecks_pg_class`]. `Err` carries the heap/index
+    /// mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_relowner_pg_class<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        class_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        new_owner_id: types_core::Oid,
+        new_acl: Option<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `StoreAttrDefault`'s pg_attrdef INSERT (catalog/heap.c): `attrdefOid =
     /// GetNewOidWithIndex(adrel, AttrDefaultOidIndexId, Anum_pg_attrdef_oid)` +
     /// `heap_form_tuple(RelationGetDescr(adrel), values, nulls)` +

@@ -328,6 +328,27 @@ fn acl_to_datum<'mcx>(mcx: Mcx<'mcx>, acl: &[AclItem]) -> PgResult<Datum<'mcx>> 
     Ok(Datum::ByRef(bytes))
 }
 
+/// Owner-rewrite of an on-disk `aclitem[]` varlena: the combination
+/// `aclnewowner(DatumGetAclP(aclDatum), oldOwner, newOwner)` (acl.c) followed by
+/// `PointerGetDatum(newAcl)`, as the catalog owner-change paths
+/// (`ATExecChangeOwner` & friends) perform when the relacl/objacl column is
+/// non-null. Decodes the array into its `AclItem`s, substitutes the new owner
+/// OID wherever the old appears as grantor/grantee, and re-encodes the result
+/// as a fresh `aclitem[]` varlena `Datum`. Kept here because both
+/// [`decode_acl`] and [`acl_to_datum`] (the on-disk codec) live in this unit and
+/// `aclnewowner` is reached through this unit's `backend-utils-adt-acl`
+/// dependency; the bare `&[AclItem]` model never crosses a crate boundary.
+pub fn acl_change_owner_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    acl_on_disk: &[u8],
+    old_owner_id: Oid,
+    new_owner_id: Oid,
+) -> PgResult<Datum<'mcx>> {
+    let old_acl = decode_acl(mcx, acl_on_disk)?;
+    let new_acl = backend_utils_adt_acl::acl_ops::aclnewowner(mcx, old_acl, old_owner_id, new_owner_id)?;
+    acl_to_datum(mcx, new_acl)
+}
+
 /// `recordExtensionInitPriv(objoid, classoid, objsubid, new_acl)` (aclchk.c) —
 /// the early-out half. Outside CREATE EXTENSION / binary upgrade this is a
 /// no-op; the `recordExtensionInitPrivWorker` body (the pg_init_privs writer)

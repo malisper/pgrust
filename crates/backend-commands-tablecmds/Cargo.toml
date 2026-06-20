@@ -131,3 +131,8 @@ backend-access-table-table = { path = "../backend-access-table-table" }
 backend-catalog-pg-constraint-seams = { path = "../backend-catalog-pg-constraint-seams" }
 backend-utils-cache-relcache = { path = "../backend-utils-cache-relcache" }
 types-cache = { path = "../types-cache" }
+# ATExecChangeOwner (at_owner.rs): changeDependencyOnOwner (pg_shdepend writes the
+# owner pg_shdepend row) + InvokeObjectPostAlterHook. Both are cycle-free: shdepend
+# and objectaccess depend only on backend-commands-tablecmds-seams.
+backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
+backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }

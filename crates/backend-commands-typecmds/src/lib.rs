@@ -4633,6 +4633,10 @@ pub fn init_seams() {
         AlterTypeNamespaceInternal,
     );
 
+    // ATExecChangeOwner (tablecmds.c) changes a relation's row type owner via
+    // this seam during ALTER TABLE ... OWNER TO; the body lives here.
+    backend_commands_tablecmds_seams::alter_type_owner_internal::set(AlterTypeOwnerInternal);
+
     // ProcessUtilitySlow dispatch target (utility.c) for CREATE DOMAIN — decode
     // the `CreateDomainStmt` and run the ported `DefineDomain` body.
     backend_tcop_utility_out_seams::define_domain::set(define_domain_seam);

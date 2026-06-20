@@ -1262,7 +1262,7 @@ fn ATExecCmd<'mcx>(
                 }
                 None => unreachable!("AlterTableCmd.newowner must be a Node::RoleSpec"),
             };
-            seam::at_exec_change_owner::call(rel.rd_id, new_owner_id, false, lockmode)?;
+            crate::at_owner::ATExecChangeOwner(mcx, rel.rd_id, new_owner_id, false, lockmode)?;
             // ATExecChangeOwner returns void; address stays Invalid.
             _address = ObjectAddress {
                 classId: InvalidOid,

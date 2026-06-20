@@ -433,6 +433,16 @@ fn catalog_tuple_update_pg_attribute<'mcx>(
             None => isnull[i] = true,
         }
     }
+    // attacl — Some(Some(image)) stores the aclitem[] varlena
+    // (change_owner_fix_column_acls), Some(None) stores SQL NULL.
+    if let Some(acl) = &row.attacl {
+        let i = pa::Anum_pg_attribute_attacl as usize - 1;
+        replaces[i] = true;
+        match acl {
+            Some(image) => values[i] = bytes_datum(mcx, image)?,
+            None => isnull[i] = true,
+        }
+    }
 
     // new_tuple = heap_modify_tuple(attr_tuple, RelationGetDescr(pg_attribute_rel),
     //                               values, isnull, replaces);
@@ -485,6 +495,55 @@ fn catalog_tuple_update_relchecks_pg_class<'mcx>(
         mcx, class_tuple, &tupdesc, &values, &isnull, &replaces,
     )?;
     // CatalogTupleUpdate(pgrel, &relTup->t_self, relTup);
+    crate::keystone::CatalogTupleUpdate(mcx, rel, class_tuple.tuple.t_self, &mut new_tuple)
+}
+
+/// The `pg_class.relowner`/`relacl`-preserving field-modify path
+/// (`ATExecChangeOwner`, commands/tablecmds.c): replace ONLY the `relowner`
+/// column (and, when `new_acl` is `Some`, the `relacl` column) over the original
+/// scanned `pg_class` tuple, then `CatalogTupleUpdate`. The remaining columns are
+/// preserved verbatim (no lossy reform of the fixed-length `Form_pg_class`). The
+/// owner-change path computes `new_acl` via `aclnewowner` only when the existing
+/// relacl is non-null (else `None` leaves the column untouched). This is the
+/// owner-shaped analog of [`catalog_tuple_update_relchecks_pg_class`].
+fn catalog_tuple_update_relowner_pg_class<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    class_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    new_owner_id: types_core::Oid,
+    new_acl: Option<Datum<'mcx>>,
+) -> PgResult<()> {
+    use cat::pg_class as pc;
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut replaces: mcx::PgVec<'mcx, bool> =
+        mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    for _ in 0..pc::Natts_pg_class {
+        values.push(Datum::null());
+        isnull.push(false);
+        replaces.push(false);
+    }
+
+    // repl_repl[Anum_pg_class_relowner - 1] = true;
+    // repl_val[Anum_pg_class_relowner - 1] = ObjectIdGetDatum(newOwnerId);
+    let i = pc::Anum_pg_class_relowner as usize - 1;
+    replaces[i] = true;
+    values[i] = Datum::from_oid(new_owner_id);
+
+    // if (!isNull) { repl_repl[Anum_pg_class_relacl - 1] = true;
+    //               repl_val[Anum_pg_class_relacl - 1] = PointerGetDatum(newAcl); }
+    if let Some(acl_datum) = new_acl {
+        let j = pc::Anum_pg_class_relacl as usize - 1;
+        replaces[j] = true;
+        values[j] = acl_datum;
+    }
+
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut new_tuple = backend_access_common_heaptuple::heap_modify_tuple(
+        mcx, class_tuple, &tupdesc, &values, &isnull, &replaces,
+    )?;
     crate::keystone::CatalogTupleUpdate(mcx, rel, class_tuple.tuple.t_self, &mut new_tuple)
 }
 
@@ -1064,6 +1123,9 @@ pub fn install() {
     );
     backend_catalog_indexing_seams::catalog_tuple_update_relchecks_pg_class::set(
         catalog_tuple_update_relchecks_pg_class,
+    );
+    backend_catalog_indexing_seams::catalog_tuple_update_relowner_pg_class::set(
+        catalog_tuple_update_relowner_pg_class,
     );
     backend_catalog_indexing_seams::catalog_tuple_insert_pg_attrdef::set(
         catalog_tuple_insert_pg_attrdef,

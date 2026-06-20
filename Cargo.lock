@@ -4454,6 +4454,7 @@ dependencies = [
 name = "backend-catalog-aclchk-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-acl",
  "types-array",
@@ -4461,6 +4462,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-snapshot",
+ "types-tuple",
 ]
 
 [[package]]
@@ -7988,6 +7990,7 @@ dependencies = [
  "backend-catalog-index-seams",
  "backend-catalog-indexing-seams",
  "backend-catalog-namespace",
+ "backend-catalog-objectaccess-seams",
  "backend-catalog-objectaddress",
  "backend-catalog-objectaddress-seams",
  "backend-catalog-partition-seams",
@@ -7998,6 +8001,7 @@ dependencies = [
  "backend-catalog-pg-depend-seams",
  "backend-catalog-pg-inherits",
  "backend-catalog-pg-inherits-seams",
+ "backend-catalog-pg-shdepend",
  "backend-catalog-pg-type-seams",
  "backend-catalog-toasting",
  "backend-commands-cluster-seams",

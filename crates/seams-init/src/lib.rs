@@ -1742,12 +1742,10 @@ mod recurrence_guard {
         // AlterTableNamespace, but it is not installed as a standalone seam.
         ("backend_commands_tablecmds", "AlterTableNamespaceInternal"),
         ("backend_commands_tablecmds", "alter_relation_namespace_internal"),
-        // `at_exec_change_owner` retired from this list: the ALTER-phase spine
-        // (FAMILY F1, now landed) `::call`s it from `ATExecCmd`'s AT_ChangeOwner
-        // arm, so the guard classifies it as an OUTWARD dependency seam of
-        // tablecmds (real owner = the still-unported ATExecChangeOwner body),
-        // not an uninstalled inward contract. It loud-panics until that body
-        // lands and installs it.
+        // `at_exec_change_owner` retired from this list: the ATExecChangeOwner
+        // body is now ported (at_owner.rs) and installed in tablecmds'
+        // init_seams() (for the pg_shdepend REASSIGN/DROP OWNED by-OID path); the
+        // direct AT_ChangeOwner phase calls the body in-process.
         // (rename_relation_internal retired — ported + installed in rename.rs.)
         ("backend_commands_tablecmds", "reset_rel_rewrite"),
         // DESIGN_DEBT (TD-INDEXCREATE-BOOTSTRAP-LEGS): catalog/index.c's

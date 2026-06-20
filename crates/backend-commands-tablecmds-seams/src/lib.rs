@@ -806,6 +806,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `AlterTypeOwnerInternal(typeOid, newOwnerId)` (typecmds.c): change a
+    /// type's owner (typowner + typacl rewrite), recursing into its array and
+    /// (for range types) multirange types. `ATExecChangeOwner` calls it for a
+    /// relation's row type (`rd_rel->reltype`). The owner
+    /// (`backend-commands-typecmds`) installs this in its `init_seams()`
+    /// (a direct tablecmds->typecmds dependency would cycle). `Err` carries the
+    /// catalog `ereport(ERROR)`s.
+    pub fn alter_type_owner_internal(type_oid: Oid, new_owner_id: Oid) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// The `OBJECT_DOMCONSTRAINT` resolution leg of `RenameConstraint`
     /// (tablecmds.c:4161-4172): `typid = typenameTypeId(NULL,
     /// makeTypeNameFromNameList(castNode(List, stmt->object)))`, then

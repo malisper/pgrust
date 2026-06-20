@@ -16,3 +16,5 @@ types-acl = { path = "../types-acl" }
 types-array = { path = "../types-array" }
 types-nodes = { path = "../types-nodes" }
 types-snapshot = { path = "../types-snapshot" }
+types-tuple = { path = "../types-tuple" }
+mcx = { path = "../mcx" }

@@ -251,3 +251,20 @@ seam_core::seam!(
         acl: Option<ArrayType>,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `aclnewowner(DatumGetAclP(aclDatum), oldOwner, newOwner)` followed by
+    /// `PointerGetDatum(newAcl)` (acl.c / the catalog owner-change paths): rewrite
+    /// an on-disk `aclitem[]` varlena so the new owner replaces the old wherever
+    /// it appears as grantor/grantee, returning a fresh `aclitem[]` `Datum`.
+    /// `acl_on_disk` is the raw relacl/objacl varlena read off the live catalog
+    /// tuple via `SysCacheGetAttr`. Owned by aclchk (it holds the on-disk
+    /// `aclitem[]` codec and the `aclnewowner` dependency). Can `ereport(ERROR)`
+    /// (a malformed ACL fails `check_acl`), carried on `Err`.
+    pub fn acl_change_owner_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        acl_on_disk: &[u8],
+        old_owner_id: Oid,
+        new_owner_id: Oid,
+    ) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>
+);

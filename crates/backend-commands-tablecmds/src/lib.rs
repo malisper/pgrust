@@ -33,6 +33,7 @@ mod at_column;
 mod at_constraint;
 mod at_dropvalidate;
 mod at_fk;
+mod at_owner;
 mod at_phase;
 mod create;
 mod drop;
@@ -95,6 +96,16 @@ pub fn init_seams() {
     // F1 (RENAME / namespace / owner).
     seam::range_var_callback_owns_relation::set(f1_rename::range_var_callback_owns_relation);
     seam::define_sequence_relation::set(f1_rename::define_sequence_relation);
+
+    // ATExecChangeOwner (at_owner.rs): the ALTER TABLE ... OWNER TO body. The
+    // direct AT_ChangeOwner phase calls it in-process (it has the live `mcx`);
+    // this seam install serves the REASSIGN OWNED / DROP OWNED path that
+    // pg_shdepend's shdepReassignOwned drives by OID (no caller-side `mcx`), so
+    // the closure runs the body in a fresh MemoryContext.
+    seam::at_exec_change_owner::set(|relation_oid, new_owner_id, recursing, lockmode| {
+        let ctx = mcx::MemoryContext::new("ATExecChangeOwner");
+        at_owner::ATExecChangeOwner(ctx.mcx(), relation_oid, new_owner_id, recursing, lockmode)
+    });
 
     // RENAME drivers (rename.rs): ALTER ... RENAME COLUMN / RENAME TO. The
     // writable pg_class / pg_attribute write carriers (PgClassForm.relname /
