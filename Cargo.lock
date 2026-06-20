@@ -18196,9 +18196,13 @@ name = "backend-test-regress"
 version = "0.0.0"
 dependencies = [
  "backend-catalog-catalog",
+ "backend-common-relpath",
  "backend-parser-coerce-seams",
  "backend-utils-adt-geo-ops",
+ "backend-utils-error-elog-seams",
  "backend-utils-fmgr-dfmgr-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-misc-superuser-seams",
  "common-extra-encnames-fgram",
  "common-path-seams",
  "types-core",
