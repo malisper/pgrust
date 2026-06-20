@@ -16395,6 +16395,7 @@ dependencies = [
  "backend-rewrite-core",
  "backend-rewrite-rewriteSearchCycle",
  "backend-rewrite-rewritehandler-seams",
+ "backend-rewrite-rowsecurity",
  "backend-tcop-postgres-seams",
  "backend-utils-adt-format-type",
  "backend-utils-adt-ruleutils-seams",
@@ -16445,6 +16446,28 @@ dependencies = [
  "seam-core",
  "types-core",
  "types-error",
+]
+
+[[package]]
+name = "backend-rewrite-rowsecurity"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table",
+ "backend-nodes-core",
+ "backend-nodes-equalfuncs",
+ "backend-parser-relation",
+ "backend-rewrite-core",
+ "backend-rewrite-rewriteDefine",
+ "backend-utils-adt-acl",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-init-miscinit",
+ "backend-utils-misc-more",
+ "mcx",
+ "types-acl",
+ "types-core",
+ "types-error",
+ "types-nodes",
+ "types-storage",
 ]
 
 [[package]]
