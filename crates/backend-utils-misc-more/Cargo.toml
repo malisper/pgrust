@@ -47,7 +47,14 @@ mcx = { path = "../mcx" }
 
 # fmgr builtin registration (the SQL-callable `Datum fn(PG_FUNCTION_ARGS)` layer).
 types-fmgr = { path = "../types-fmgr" }
+types-tuple = { path = "../types-tuple" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+# Composite/record result build (pg_control_* return composite rows): the
+# anonymous-record `Datum` builder (CreateTemplateTupleDesc + BlessTupleDesc +
+# heap_form_tuple + HeapTupleGetDatum) and the `text` column value builder,
+# reached through their thin seam crates (no cycle).
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "0.2"

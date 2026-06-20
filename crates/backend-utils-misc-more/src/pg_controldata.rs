@@ -9,13 +9,27 @@
 //! arrays the SQL caller's fmgr wrapper would form into a `HeapTuple`.
 
 use backend_access_transam_xlog_seams::wal_segment_size;
+use backend_utils_adt_varlena_seams::cstring_to_text_v;
 use backend_utils_error::ereport;
+use backend_utils_fmgr_funcapi_seams::record_from_values;
 use backend_utils_init_small::globals::DataDir;
 use common_controldata_utils_seams::get_controlfile;
 use mcx::{Mcx, PgString};
 use types_control::ControlFileData;
-use types_core::{TimeLineID, TimestampTz, XLogRecPtr};
+use types_core::{Oid, TimeLineID, TimestampTz, XLogRecPtr};
 use types_error::{PgResult, ERROR};
+use types_tuple::Datum as DatumV;
+
+// Column type OIDs (pg_type_d.h) for the `pg_control_*` OUT-parameter rowtypes,
+// transcribed from pg_proc.dat.
+const INT4OID: Oid = 23;
+const INT8OID: Oid = 20;
+const BOOLOID: Oid = 16;
+const OIDOID: Oid = 26;
+const XIDOID: Oid = 28;
+const TEXTOID: Oid = 25;
+const TIMESTAMPTZOID: Oid = 1184;
+const PG_LSNOID: Oid = 3220;
 
 /// `pg_control_system()` result row.
 pub struct PgControlSystem {
@@ -215,4 +229,126 @@ fn XLogFileName<'mcx>(
 /// `CStringGetTextDatum` materialization), fallibly.
 fn pgstring_format<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<PgString<'mcx>> {
     PgString::from_str_in(s, mcx)
+}
+
+// ===========================================================================
+//  Composite-record `Datum` builders.
+//
+//  C's SQL wrapper forms the projected fields into a `HeapTuple` against the
+//  `get_call_result_type` descriptor and returns `HeapTupleGetDatum(...)`. These
+//  build the same composite/record `Datum` (the `CreateTemplateTupleDesc` +
+//  `BlessTupleDesc` + `heap_form_tuple` + `HeapTupleGetDatum` pipeline behind
+//  `record_from_values`) from the projected struct so the fmgr / executor-frame
+//  adapter layers (`fmgr_builtins.rs` / execSRF's `control_srf`) need only carry
+//  the result onto their respective boundary. A `text` column (`redo_wal_file` /
+//  `next_xid`) is a `cstring_to_text_v` varlena `Datum`.
+// ===========================================================================
+
+/// `CStringGetTextDatum(s)` — a `text` column value as a `Datum::ByRef` varlena.
+#[inline]
+fn text_col<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<DatumV<'mcx>> {
+    cstring_to_text_v::call(mcx, s)
+}
+
+/// `pg_control_system()` composite `Datum` (4 columns).
+pub fn pg_control_system_datum<'mcx>(mcx: Mcx<'mcx>) -> PgResult<DatumV<'mcx>> {
+    let r = pg_control_system()?;
+    let coltypes = [INT4OID, INT4OID, INT8OID, TIMESTAMPTZOID];
+    let values = [
+        DatumV::from_i32(r.pg_control_version),
+        DatumV::from_i32(r.catalog_version_no),
+        DatumV::from_i64(r.system_identifier),
+        DatumV::from_i64(r.pg_control_last_modified),
+    ];
+    let nulls = [false; 4];
+    record_from_values::call(mcx, &coltypes, &values, &nulls)
+}
+
+/// `pg_control_checkpoint()` composite `Datum` (18 columns).
+pub fn pg_control_checkpoint_datum<'mcx>(mcx: Mcx<'mcx>) -> PgResult<DatumV<'mcx>> {
+    let r = pg_control_checkpoint(mcx)?;
+    let redo_wal_file = text_col(mcx, r.redo_wal_file.as_str())?;
+    let next_xid = text_col(mcx, r.next_xid.as_str())?;
+    let coltypes = [
+        PG_LSNOID,      // checkpoint_lsn
+        PG_LSNOID,      // redo_lsn
+        TEXTOID,        // redo_wal_file
+        INT4OID,        // timeline_id
+        INT4OID,        // prev_timeline_id
+        BOOLOID,        // full_page_writes
+        TEXTOID,        // next_xid
+        OIDOID,         // next_oid
+        XIDOID,         // next_multixact_id
+        XIDOID,         // next_multi_offset
+        XIDOID,         // oldest_xid
+        OIDOID,         // oldest_xid_dbid
+        XIDOID,         // oldest_active_xid
+        XIDOID,         // oldest_multi_xid
+        OIDOID,         // oldest_multi_dbid
+        XIDOID,         // oldest_commit_ts_xid
+        XIDOID,         // newest_commit_ts_xid
+        TIMESTAMPTZOID, // checkpoint_time
+    ];
+    let values = [
+        DatumV::from_u64(r.checkpoint_lsn),
+        DatumV::from_u64(r.redo_lsn),
+        redo_wal_file,
+        DatumV::from_i32(r.timeline_id),
+        DatumV::from_i32(r.prev_timeline_id),
+        DatumV::from_bool(r.full_page_writes),
+        next_xid,
+        DatumV::from_oid(r.next_oid),
+        DatumV::from_u32(r.next_multixact_id),
+        DatumV::from_u32(r.next_multi_offset),
+        DatumV::from_u32(r.oldest_xid),
+        DatumV::from_oid(r.oldest_xid_dbid),
+        DatumV::from_u32(r.oldest_active_xid),
+        DatumV::from_u32(r.oldest_multi_xid),
+        DatumV::from_oid(r.oldest_multi_dbid),
+        DatumV::from_u32(r.oldest_commit_ts_xid),
+        DatumV::from_u32(r.newest_commit_ts_xid),
+        DatumV::from_i64(r.checkpoint_time),
+    ];
+    let nulls = [false; 18];
+    record_from_values::call(mcx, &coltypes, &values, &nulls)
+}
+
+/// `pg_control_recovery()` composite `Datum` (5 columns).
+pub fn pg_control_recovery_datum<'mcx>(mcx: Mcx<'mcx>) -> PgResult<DatumV<'mcx>> {
+    let r = pg_control_recovery()?;
+    let coltypes = [PG_LSNOID, INT4OID, PG_LSNOID, PG_LSNOID, BOOLOID];
+    let values = [
+        DatumV::from_u64(r.min_recovery_end_lsn),
+        DatumV::from_i32(r.min_recovery_end_timeline),
+        DatumV::from_u64(r.backup_start_lsn),
+        DatumV::from_u64(r.backup_end_lsn),
+        DatumV::from_bool(r.end_of_backup_record_required),
+    ];
+    let nulls = [false; 5];
+    record_from_values::call(mcx, &coltypes, &values, &nulls)
+}
+
+/// `pg_control_init()` composite `Datum` (12 columns).
+pub fn pg_control_init_datum<'mcx>(mcx: Mcx<'mcx>) -> PgResult<DatumV<'mcx>> {
+    let r = pg_control_init()?;
+    let coltypes = [
+        INT4OID, INT4OID, INT4OID, INT4OID, INT4OID, INT4OID, INT4OID, INT4OID, INT4OID, BOOLOID,
+        INT4OID, BOOLOID,
+    ];
+    let values = [
+        DatumV::from_i32(r.max_data_alignment),
+        DatumV::from_i32(r.database_block_size),
+        DatumV::from_i32(r.blocks_per_segment),
+        DatumV::from_i32(r.wal_block_size),
+        DatumV::from_i32(r.bytes_per_wal_segment),
+        DatumV::from_i32(r.max_identifier_length),
+        DatumV::from_i32(r.max_index_columns),
+        DatumV::from_i32(r.max_toast_chunk_size),
+        DatumV::from_i32(r.large_object_chunk_size),
+        DatumV::from_bool(r.float8_pass_by_value),
+        DatumV::from_i32(r.data_page_checksum_version),
+        DatumV::from_bool(r.default_char_signedness),
+    ];
+    let nulls = [false; 12];
+    record_from_values::call(mcx, &coltypes, &values, &nulls)
 }

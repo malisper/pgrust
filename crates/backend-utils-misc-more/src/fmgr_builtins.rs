@@ -1,17 +1,25 @@
 //! The fmgr builtin layer (`Datum fn(PG_FUNCTION_ARGS)`) for the SQL-callable
-//! functions in `rls.c`: the two `row_security_active` overloads.
+//! functions in `rls.c` (the two `row_security_active` overloads) and
+//! `pg_controldata.c` (the four `pg_control_*` composite-returning functions).
 //!
 //! Each entry is a `fc_<name>` adapter that reads its arguments off the fmgr
-//! call frame, calls the matching value core in [`crate::rls`], and writes back
-//! the result word. [`register_backend_utils_misc_more_builtins`] registers
+//! call frame, calls the matching value core in [`crate::rls`] /
+//! [`crate::pg_controldata`], and writes back the result word (or, for the
+//! `pg_control_*` composite rows, the formed-tuple image on the by-reference
+//! `Composite` lane). [`register_backend_utils_misc_more_builtins`] registers
 //! every row into the fmgr-core builtin table (C: `fmgr_builtins[]`), so by-OID
 //! dispatch resolves them. OIDs / nargs / strict / retset are transcribed
 //! exactly from `pg_proc.dat`.
 
 use types_datum::Datum;
+use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 
 use types_core::Oid;
+use types_error::PgResult;
+// The composite-Datum builder cores produce `types_tuple::Datum` (the `'mcx`
+// column-value carrier), distinct from the bare fmgr ABI word `Datum`.
+use types_tuple::Datum as DatumV;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -84,6 +92,66 @@ fn fc_row_security_active_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+// ===========================================================================
+// pg_controldata.c — pg_control_* composite-returning functions.
+//
+// These are reached in target-list (scalar) position through the by-OID fmgr
+// builtin registry (this layer); the canonical FROM-clause form
+// (`SELECT * FROM pg_control_system()`) is dispatched through the executor-frame
+// SRF table (backend-executor-execSRF's `control_srf`), which calls the same
+// `pg_controldata::pg_control_*_datum` composite builders. Both home the result
+// as a composite `Datum` — here onto the fmgr frame's by-reference `Composite`
+// lane (read back as a `Datum::Composite` row by the dispatch result mapper).
+// ===========================================================================
+
+/// Carry a composite-record `Datum` (built by a `pg_control_*_datum` core) onto
+/// the fmgr frame's by-reference `Composite` lane, returning the `(Datum) 0`
+/// placeholder word. The core's `record_from_values` →
+/// `HeapTupleGetDatum` hands back the self-describing composite image as a
+/// `Datum::ByRef`, which the `Composite` lane carries verbatim.
+fn ret_record(fcinfo: &mut FunctionCallInfoBaseData, built: PgResult<DatumV<'_>>) -> Datum {
+    match built {
+        Ok(DatumV::ByRef(bytes)) => {
+            fcinfo.set_ref_result(RefPayload::Composite(bytes.as_slice().to_vec()));
+            Datum::from_usize(0)
+        }
+        Ok(DatumV::Composite(t)) => {
+            fcinfo.set_ref_result(RefPayload::Composite(t.to_datum_image()));
+            Datum::from_usize(0)
+        }
+        Ok(_) => panic!("pg_control_* fmgr: record_from_values produced a non-composite Datum"),
+        Err(e) => raise(e),
+    }
+}
+
+/// `pg_control_system()` (pg_controldata.c, pg_proc oid 3441) — 4-column row.
+fn fc_pg_control_system(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let ctx = scratch_mcx();
+    let built = crate::pg_controldata::pg_control_system_datum(ctx.mcx());
+    ret_record(fcinfo, built)
+}
+
+/// `pg_control_checkpoint()` (pg_controldata.c, pg_proc oid 3442) — 18-column row.
+fn fc_pg_control_checkpoint(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let ctx = scratch_mcx();
+    let built = crate::pg_controldata::pg_control_checkpoint_datum(ctx.mcx());
+    ret_record(fcinfo, built)
+}
+
+/// `pg_control_recovery()` (pg_controldata.c, pg_proc oid 3443) — 5-column row.
+fn fc_pg_control_recovery(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let ctx = scratch_mcx();
+    let built = crate::pg_controldata::pg_control_recovery_datum(ctx.mcx());
+    ret_record(fcinfo, built)
+}
+
+/// `pg_control_init()` (pg_controldata.c, pg_proc oid 3444) — 12-column row.
+fn fc_pg_control_init(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let ctx = scratch_mcx();
+    let built = crate::pg_controldata::pg_control_init_datum(ctx.mcx());
+    ret_record(fcinfo, built)
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -120,5 +188,10 @@ pub fn register_backend_utils_misc_more_builtins() {
             false,
             fc_row_security_active_name,
         ),
+        // pg_controldata.c — composite-returning, no args, strict, not retset.
+        builtin(3441, "pg_control_system", 0, true, false, fc_pg_control_system),
+        builtin(3442, "pg_control_checkpoint", 0, true, false, fc_pg_control_checkpoint),
+        builtin(3443, "pg_control_recovery", 0, true, false, fc_pg_control_recovery),
+        builtin(3444, "pg_control_init", 0, true, false, fc_pg_control_init),
     ]);
 }

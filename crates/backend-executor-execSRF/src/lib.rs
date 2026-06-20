@@ -73,6 +73,7 @@ mod pg_input_error_info;
 mod regexp_split;
 mod srf_registry;
 mod unnest;
+mod control_srf;
 mod multirange_unnest;
 mod tsvector_unnest;
 mod pg_get_keywords;
@@ -184,6 +185,12 @@ pub fn init_seams() {
     // `InitMaterializedSRF`/`materialized_srf_putvalues` themselves (cores in
     // `backend-foreign-foreign` / `backend-commands-prepare`).
     system_srf::register_system_srfs();
+    // `pg_control_system/checkpoint/recovery/init` (OIDs 3441-3444) and
+    // `pg_stat_file[_1arg]` (OIDs 3307/2623) — the single-composite-row system
+    // builtins reached via the FROM clause (function RTE), dispatched through the
+    // executor-frame SRF table like the `json_to_record` family (cores in
+    // `backend-utils-misc-more` / `backend-utils-adt-misc2`).
+    control_srf::register_control_srfs();
 }
 
 // ===========================================================================

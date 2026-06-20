@@ -144,6 +144,33 @@ fn ret_value_datum(fcinfo: &mut FunctionCallInfoBaseData, d: types_tuple::Datum<
     }
 }
 
+/// Map a composite/record `Datum<'mcx>` value-core result (e.g. `pg_stat_file`'s
+/// 6-column record, built by `funcapi::record_from_values` →
+/// `HeapTupleGetDatum`) onto the fmgr frame's by-reference `Composite` lane.
+///
+/// `HeapTupleGetDatum` hands back the self-describing composite-Datum byte image
+/// as a [`types_tuple::Datum::ByRef`]; the boundary's `RefPayload::Composite`
+/// carries exactly that image and is read back as a `Datum::Composite` (the row,
+/// not raw varlena bytes) by the dispatch result mapper — so a downstream
+/// consumer sees a composite value and routes it to the record output function,
+/// matching C's `PG_RETURN_DATUM(HeapTupleGetDatum(tuple))`. A `Datum::Composite`
+/// arm (a live formed tuple) flattens via `to_datum_image`. `ByVal(0)` is the
+/// cores' `Datum::null()` (the `missing_ok` missing-file path).
+fn ret_composite_datum(fcinfo: &mut FunctionCallInfoBaseData, d: types_tuple::Datum<'_>) -> Datum {
+    match d {
+        types_tuple::Datum::ByRef(bytes) => {
+            fcinfo.set_ref_result(RefPayload::Composite(bytes.as_slice().to_vec()));
+            Datum::from_usize(0)
+        }
+        types_tuple::Datum::Composite(t) => {
+            fcinfo.set_ref_result(RefPayload::Composite(t.to_datum_image()));
+            Datum::from_usize(0)
+        }
+        types_tuple::Datum::ByVal(0) => ret_null(fcinfo),
+        _ => panic!("misc2 fmgr: unexpected Datum arm from composite-returning core"),
+    }
+}
+
 /// A scratch context for cores that allocate their result through `Mcx`.
 fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("misc2 fmgr scratch")
@@ -450,6 +477,33 @@ fn fc_pg_read_binary_file_all_missing(fcinfo: &mut FunctionCallInfoBaseData) -> 
     let res = crate::admin::pg_read_binary_file_all_missing(m.mcx(), filename, missing);
     match res {
         Ok(d) => ret_value_datum(fcinfo, d),
+        Err(e) => raise(e),
+    }
+}
+
+/// `pg_stat_file(filename, missing_ok)` (genfile.c) — the 6-column record
+/// `(size int8, access/modification/change/creation timestamptz, isdir bool)`.
+/// The composite result crosses the by-reference `Composite` lane.
+fn fc_pg_stat_file(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let filename = arg_text(fcinfo, 0);
+    let missing_ok = arg_bool(fcinfo, 1);
+    let m = scratch_mcx();
+    // C: PG_NARGS() == 2 here.
+    let res = crate::admin::pg_stat_file(m.mcx(), filename, missing_ok, true);
+    match res {
+        Ok(d) => ret_composite_datum(fcinfo, d),
+        Err(e) => raise(e),
+    }
+}
+
+/// `pg_stat_file_1arg(filename)` (genfile.c) — the one-argument variant
+/// (`missing_ok == false`).
+fn fc_pg_stat_file_1arg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let filename = arg_text(fcinfo, 0);
+    let m = scratch_mcx();
+    let res = crate::admin::pg_stat_file_1arg(m.mcx(), filename);
+    match res {
+        Ok(d) => ret_composite_datum(fcinfo, d),
         Err(e) => raise(e),
     }
 }
@@ -1276,6 +1330,9 @@ pub fn register_misc2_builtins() {
         builtin(3295, "pg_read_binary_file_off_len_missing", 4, true, false, fc_pg_read_binary_file_off_len_missing),
         builtin(3828, "pg_read_binary_file_all", 1, true, false, fc_pg_read_binary_file_all),
         builtin(6209, "pg_read_binary_file_all_missing", 2, true, false, fc_pg_read_binary_file_all_missing),
+        // ---- genfile.c: pg_stat_file (6-column record result) ----
+        builtin(2623, "pg_stat_file_1arg", 1, true, false, fc_pg_stat_file_1arg),
+        builtin(3307, "pg_stat_file", 2, true, false, fc_pg_stat_file),
         // ---- partitionfuncs.c ----
         builtin(3424, "pg_partition_root", 1, true, false, fc_pg_partition_root),
         // ---- lockfuncs.c: advisory locks (int8) ----

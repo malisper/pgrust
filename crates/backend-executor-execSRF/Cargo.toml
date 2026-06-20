@@ -100,6 +100,14 @@ backend-foreign-foreign = { path = "../backend-foreign-foreign" }
 # mode SRF body (the PREPARED_QUERIES hash scan + materialized_srf_putvalues).
 backend-commands-prepare = { path = "../backend-commands-prepare" }
 
+# pg_control_system/checkpoint/recovery/init (OIDs 3441-3444): the pg_controldata.c
+# control-file projection cores (typed result structs), and pg_stat_file /
+# pg_stat_file_1arg (OIDs 3307/2623): the genfile.c stat → 6-column record core.
+# These return a single composite row through the executor-frame
+# (ExprSingleResult) path, like the json_to_record family.
+backend-utils-misc-more = { path = "../backend-utils-misc-more" }
+backend-utils-adt-misc2 = { path = "../backend-utils-adt-misc2" }
+
 # Shared type stack + allocator + error.
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 backend-utils-error = { path = "../backend-utils-error" }
