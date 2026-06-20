@@ -12,21 +12,12 @@
 
 use mcx::MemoryContext;
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::pg_lsn;
 
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
 fn scratch_mcx() -> MemoryContext {
     MemoryContext::new("pg_lsn fmgr scratch")
 }
@@ -108,86 +99,88 @@ fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, payload: &[u8]) -> Datum {
 
 // --- adapters ---------------------------------------------------------------
 
-fn fc_pg_lsn_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_lsn_in(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // Forward the soft ErrorSaveContext installed on the frame by
     // InputFunctionCallSafe so a recoverable parse failure `ereturn`s into the
     // sink (returning the `InvalidXLogRecPtr` placeholder) instead of throwing
     // past `invoke?`.
     let s = arg_cstring(fcinfo, 0).to_string();
-    let v = ok(pg_lsn::pg_lsn_in(&s, fcinfo.escontext_mut()));
-    ret_lsn(v)
+    let v = pg_lsn::pg_lsn_in(&s, fcinfo.escontext_mut())?;
+    Ok(ret_lsn(v))
 }
-fn fc_pg_lsn_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cstring(fcinfo, pg_lsn::pg_lsn_out(arg_lsn(fcinfo, 0)))
+fn fc_pg_lsn_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_cstring(fcinfo, pg_lsn::pg_lsn_out(arg_lsn(fcinfo, 0))))
 }
-fn fc_pg_lsn_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_lsn_recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let buf = arg_varlena(fcinfo, 0).to_vec();
-    ret_lsn(ok(pg_lsn::pg_lsn_recv(&buf)))
+    Ok(ret_lsn(pg_lsn::pg_lsn_recv(&buf)?))
 }
-fn fc_pg_lsn_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_lsn_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let v = arg_lsn(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(pg_lsn::pg_lsn_send(m.mcx(), v));
-    ret_bytea(fcinfo, bytes.as_slice())
+    let bytes = pg_lsn::pg_lsn_send(m.mcx(), v)?;
+    Ok(ret_bytea(fcinfo, bytes.as_slice()))
 }
 
-fn fc_pg_lsn_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(pg_lsn::pg_lsn_eq(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1)))
+fn fc_pg_lsn_eq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(pg_lsn::pg_lsn_eq(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1))))
 }
-fn fc_pg_lsn_ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(pg_lsn::pg_lsn_ne(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1)))
+fn fc_pg_lsn_ne(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(pg_lsn::pg_lsn_ne(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1))))
 }
-fn fc_pg_lsn_lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(pg_lsn::pg_lsn_lt(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1)))
+fn fc_pg_lsn_lt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(pg_lsn::pg_lsn_lt(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1))))
 }
-fn fc_pg_lsn_gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(pg_lsn::pg_lsn_gt(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1)))
+fn fc_pg_lsn_gt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(pg_lsn::pg_lsn_gt(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1))))
 }
-fn fc_pg_lsn_le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(pg_lsn::pg_lsn_le(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1)))
+fn fc_pg_lsn_le(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(pg_lsn::pg_lsn_le(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1))))
 }
-fn fc_pg_lsn_ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(pg_lsn::pg_lsn_ge(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1)))
+fn fc_pg_lsn_ge(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(pg_lsn::pg_lsn_ge(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1))))
 }
-fn fc_pg_lsn_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_lsn(pg_lsn::pg_lsn_larger(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1)))
+fn fc_pg_lsn_larger(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_lsn(pg_lsn::pg_lsn_larger(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1))))
 }
-fn fc_pg_lsn_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_lsn(pg_lsn::pg_lsn_smaller(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1)))
+fn fc_pg_lsn_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_lsn(pg_lsn::pg_lsn_smaller(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1))))
 }
-fn fc_pg_lsn_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(pg_lsn::pg_lsn_cmp(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1)))
+fn fc_pg_lsn_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_i32(pg_lsn::pg_lsn_cmp(arg_lsn(fcinfo, 0), arg_lsn(fcinfo, 1))))
 }
-fn fc_pg_lsn_hash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(pg_lsn::pg_lsn_hash(arg_lsn(fcinfo, 0)))
+fn fc_pg_lsn_hash(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(pg_lsn::pg_lsn_hash(arg_lsn(fcinfo, 0))))
 }
-fn fc_pg_lsn_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(pg_lsn::pg_lsn_hash_extended(arg_lsn(fcinfo, 0), arg_i64(fcinfo, 1) as u64) as i64)
+fn fc_pg_lsn_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_i64(
+        pg_lsn::pg_lsn_hash_extended(arg_lsn(fcinfo, 0), arg_i64(fcinfo, 1) as u64) as i64,
+    ))
 }
 
-fn fc_pg_lsn_mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_lsn_mi(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let a = arg_lsn(fcinfo, 0);
     let b = arg_lsn(fcinfo, 1);
     let m = scratch_mcx();
-    let image = ok(pg_lsn::pg_lsn_mi(m.mcx(), a, b));
-    ret_numeric(fcinfo, image.as_slice().to_vec())
+    let image = pg_lsn::pg_lsn_mi(m.mcx(), a, b)?;
+    Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
 }
-fn fc_pg_lsn_pli(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_lsn_pli(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let lsn = arg_lsn(fcinfo, 0);
     let nbytes = arg_varlena(fcinfo, 1).to_vec();
     let m = scratch_mcx();
-    ret_lsn(ok(pg_lsn::pg_lsn_pli(m.mcx(), lsn, &nbytes)))
+    Ok(ret_lsn(pg_lsn::pg_lsn_pli(m.mcx(), lsn, &nbytes)?))
 }
-fn fc_pg_lsn_mii(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_lsn_mii(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let lsn = arg_lsn(fcinfo, 0);
     let nbytes = arg_varlena(fcinfo, 1).to_vec();
     let m = scratch_mcx();
-    ret_lsn(ok(pg_lsn::pg_lsn_mii(m.mcx(), lsn, &nbytes)))
+    Ok(ret_lsn(pg_lsn::pg_lsn_mii(m.mcx(), lsn, &nbytes)?))
 }
-fn fc_numeric_pg_lsn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_pg_lsn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let num = arg_varlena(fcinfo, 0).to_vec();
     let m = scratch_mcx();
-    ret_lsn(ok(pg_lsn::numeric_pg_lsn(m.mcx(), &num)))
+    Ok(ret_lsn(pg_lsn::numeric_pg_lsn(m.mcx(), &num)?))
 }
 
 // --- registration -----------------------------------------------------------
@@ -198,23 +191,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `pg_lsn.c` builtin into the fmgr-core builtin table (C:
 /// `fmgr_builtins[]`), so by-OID dispatch resolves them. Called from this
 /// crate's `init_seams()`.
 pub fn register_pg_lsn_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(3229, "pg_lsn_in", 1, true, false, fc_pg_lsn_in),
         builtin(3230, "pg_lsn_out", 1, true, false, fc_pg_lsn_out),
         builtin(3238, "pg_lsn_recv", 1, true, false, fc_pg_lsn_recv),
