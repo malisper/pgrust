@@ -441,8 +441,8 @@ pub fn get_relation_info<'mcx>(
             }
 
             // Fetch the index expressions and predicate, if any; re-stamp varno.
-            info.indexprs = ext::get_index_expressions::call(root, indexoid)?;
-            info.indpred = ext::get_index_predicate::call(root, indexoid)?;
+            info.indexprs = ext::get_index_expressions::call(run.mcx(), root, indexoid)?;
+            info.indpred = ext::get_index_predicate::call(run.mcx(), root, indexoid)?;
             if !info.indexprs.is_empty() && varno != 1 {
                 info.indexprs = ext::change_var_nodes::call(root, &info.indexprs, 1, varno as i32);
             }
@@ -692,7 +692,7 @@ pub fn infer_arbiter_indexes<'mcx>(
         ext::relation_get_index_list_oids::call(relid)?;
 
     for &indexoid in index_list.iter() {
-        let idx = ext::get_infer_index_info::call(root, indexoid, rellockmode)?;
+        let idx = ext::get_infer_index_info::call(run.mcx(), root, indexoid, rellockmode)?;
 
         if !idx.indisvalid {
             continue;

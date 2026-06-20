@@ -13290,6 +13290,7 @@ dependencies = [
 name = "backend-optimizer-util-plancat-ext-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",

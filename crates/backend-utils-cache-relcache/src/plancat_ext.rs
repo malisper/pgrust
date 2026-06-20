@@ -86,6 +86,7 @@ pub fn init_seams() {
 /// expressions/predicate into `root`'s node arena (empty for a plain or non-
 /// partial index — every catalog and plain-column unique index).
 fn get_infer_index_info(
+    mcx: mcx::Mcx<'_>,
     root: &mut types_pathnodes::PlannerInfo,
     indexoid: Oid,
     rellockmode: i32,
@@ -126,8 +127,8 @@ fn get_infer_index_info(
     // no partial predicate (the heap_attisnull quick-exits), and a loud "not
     // modeled" error for the real arena projection of an expression/partial
     // index — exactly mirroring those seams.
-    let idx_exprs = get_index_expressions(root, indexoid)?;
-    let idx_predicate = get_index_predicate(root, indexoid)?;
+    let idx_exprs = get_index_expressions(mcx, root, indexoid)?;
+    let idx_predicate = get_index_predicate(mcx, root, indexoid)?;
 
     Ok(px::InferIndexInfo {
         indexrelid,
@@ -561,14 +562,21 @@ fn build_index_cat_info(rd: &core_entry_store::RelationData) -> PgResult<px::Ind
 }
 
 /// `RelationGetIndexExpressions(indexRelation)` (relcache.c) as fresh arena node
-/// handles in the planner arena, in indkey order. The relcache derived builder
-/// caches the (node-vocabulary) tree behind the node-tree owner seam; an index
-/// with no expression columns yields the empty list (the `indexprs` quick exit).
+/// handles in the planner arena, in indkey order. An index with no expression
+/// columns yields the empty list (the `indexprs` quick exit); for an expression
+/// index the decoded `Expr` list (from the node-tree owner seam) is interned
+/// into `root`'s node arena and returned as `NodeId` handles.
+///
+/// `mcx` is the planner-run arena context (`root->planner_cxt`): the decoded
+/// trees are allocated there (the same arena that backs `root`'s `node_arena`),
+/// so the returned handles outlive this call. This mirrors the C
+/// `RelationGetIndexExpressions`, which builds in `CacheMemoryContext` and the
+/// caller (`get_relation_info`) `copyObject`s the result into `root->planner_cxt`.
 fn get_index_expressions(
+    mcx: mcx::Mcx<'_>,
     root: &mut types_pathnodes::PlannerInfo,
     indexoid: Oid,
 ) -> PgResult<Vec<types_pathnodes::NodeId>> {
-    let _ = root;
     with_index_open(indexoid, || {
         // `RelationGetIndexExpressions(index)` quick-exits to NIL when the index has
         // no expression columns (the C `heap_attisnull(rd_indextuple,
@@ -583,23 +591,35 @@ fn get_index_expressions(
         if !has_exprs {
             return Ok(Vec::new());
         }
-        // The non-empty case builds the raw index-tuple expression tree (node
-        // vocabulary, via the relcache node-transform owner) and materializes it
-        // into the planner arena — not modeled through this read path.
-        crate::derived::RelationGetIndexExpressions(indexoid)?;
-        Err(PgError::error(
-            "get_index_expressions: index expression arena projection not modeled",
-        ))
+        // Decode the raw `pg_index.indexprs` tree (`stringToNode` +
+        // `eval_const_expressions` + `fix_opfuncids`) via the node-tree owner seam,
+        // allocating directly in the planner arena `mcx`, then intern each `Expr`
+        // into `root`'s node arena and return the `NodeId` handles in indkey order.
+        let exprs = backend_utils_cache_relcache_nodexform_seams::index_expressions::call(
+            mcx, indexoid,
+        )?;
+        let exprs = match exprs {
+            Some(v) => v,
+            None => return Ok(Vec::new()),
+        };
+        let mut out = Vec::with_capacity(exprs.len());
+        for e in exprs {
+            out.push(root.alloc_node(e));
+        }
+        Ok(out)
     })
 }
 
 /// `RelationGetIndexPredicate(indexRelation)` (relcache.c) as fresh arena node
-/// handles (empty if the index is not partial).
+/// handles (empty if the index is not partial). For a partial index the decoded
+/// implicit-AND predicate list (from the node-tree owner seam) is interned into
+/// `root`'s node arena. `mcx` is the planner-run arena context (see
+/// `get_index_expressions`).
 fn get_index_predicate(
+    mcx: mcx::Mcx<'_>,
     root: &mut types_pathnodes::PlannerInfo,
     indexoid: Oid,
 ) -> PgResult<Vec<types_pathnodes::NodeId>> {
-    let _ = root;
     with_index_open(indexoid, || {
         // `RelationGetIndexPredicate(index)` quick-exits to NIL unless the index is
         // partial (the C `heap_attisnull(rd_indextuple, Anum_pg_index_indpred)`
@@ -610,10 +630,22 @@ fn get_index_predicate(
         if !has_pred {
             return Ok(Vec::new());
         }
-        crate::derived::RelationGetIndexPredicate(indexoid)?;
-        Err(PgError::error(
-            "get_index_predicate: partial-index predicate arena projection not modeled",
-        ))
+        // Decode the raw `pg_index.indpred` tree (`stringToNode` +
+        // `eval_const_expressions` + `canonicalize_qual` + `make_ands_implicit` +
+        // `fix_opfuncids`) via the node-tree owner seam, allocating in the planner
+        // arena `mcx`, then intern each implicit-AND conjunct into `root`'s arena.
+        let pred = backend_utils_cache_relcache_nodexform_seams::index_predicate::call(
+            mcx, indexoid,
+        )?;
+        let pred = match pred {
+            Some(v) => v,
+            None => return Ok(Vec::new()),
+        };
+        let mut out = Vec::with_capacity(pred.len());
+        for e in pred {
+            out.push(root.alloc_node(e));
+        }
+        Ok(out)
     })
 }
 
