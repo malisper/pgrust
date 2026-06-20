@@ -16,7 +16,8 @@
 
 use mcx::Mcx;
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_error::PgResult;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_ri_triggers::TriggerDataRef;
 
 use crate::triggers;
@@ -30,82 +31,75 @@ use crate::{
 /// value; the trigger-data accessors read the thread-local, not the handle).
 const CURRENT_TRIGGER: TriggerDataRef = TriggerDataRef(1);
 
-/// Raise an RI `ereport(ERROR)` through the one dispatch point every builtin
-/// crosses (`invoke_pgfunction`'s `catch_unwind`, which turns the panicked
-/// `PgError` back into a `PgResult`). This is how the FK-violation error
-/// surfaces to the caller.
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 /// Adapt a `fn(Mcx, TriggerDataRef) -> PgResult<()>` RI core to the fmgr
-/// `PGFunction` shape. The trigger protocol return value is
+/// native shape. The trigger protocol return value is
 /// `PointerGetDatum(NULL)`, i.e. a null `Datum` with the `isnull` flag clear.
 #[inline]
 fn dispatch(
     core: impl FnOnce(Mcx<'_>, TriggerDataRef) -> types_error::PgResult<()>,
-) -> Datum {
+) -> PgResult<Datum> {
     let m = mcx::MemoryContext::new("RI trigger fmgr scratch");
-    match core(m.mcx(), CURRENT_TRIGGER) {
-        Ok(()) => Datum::null(),
-        Err(e) => raise(e),
-    }
+    core(m.mcx(), CURRENT_TRIGGER)?;
+    Ok(Datum::null())
 }
 
-fn fc_ri_fkey_check_ins(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ri_fkey_check_ins(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     dispatch(triggers::ri_fkey_check_ins)
 }
-fn fc_ri_fkey_check_upd(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ri_fkey_check_upd(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     dispatch(triggers::ri_fkey_check_upd)
 }
-fn fc_ri_fkey_noaction_del(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ri_fkey_noaction_del(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     dispatch(triggers::ri_fkey_noaction_del)
 }
-fn fc_ri_fkey_noaction_upd(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ri_fkey_noaction_upd(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     dispatch(triggers::ri_fkey_noaction_upd)
 }
-fn fc_ri_fkey_restrict_del(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ri_fkey_restrict_del(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     dispatch(triggers::ri_fkey_restrict_del)
 }
-fn fc_ri_fkey_restrict_upd(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ri_fkey_restrict_upd(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     dispatch(triggers::ri_fkey_restrict_upd)
 }
-fn fc_ri_fkey_cascade_del(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ri_fkey_cascade_del(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     dispatch(triggers::ri_fkey_cascade_del)
 }
-fn fc_ri_fkey_cascade_upd(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ri_fkey_cascade_upd(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     dispatch(triggers::ri_fkey_cascade_upd)
 }
-fn fc_ri_fkey_setnull_del(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ri_fkey_setnull_del(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     dispatch(triggers::ri_fkey_setnull_del)
 }
-fn fc_ri_fkey_setnull_upd(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ri_fkey_setnull_upd(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     dispatch(triggers::ri_fkey_setnull_upd)
 }
-fn fc_ri_fkey_setdefault_del(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ri_fkey_setdefault_del(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     dispatch(triggers::ri_fkey_setdefault_del)
 }
-fn fc_ri_fkey_setdefault_upd(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ri_fkey_setdefault_upd(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     dispatch(triggers::ri_fkey_setdefault_upd)
 }
 
 fn builtin(
     foid: u32,
     name: &str,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        // All RI trigger procs in pg_proc.dat: proargtypes '' (nargs 0), no
-        // explicit proisstrict (defaults 't' => strict), no proretset (false).
-        // These must match the `fmgr_builtins[]` canonical row so the
-        // completeness guard does not flag a metadata mismatch.
-        nargs: 0,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            // All RI trigger procs in pg_proc.dat: proargtypes '' (nargs 0), no
+            // explicit proisstrict (defaults 't' => strict), no proretset (false).
+            // These must match the `fmgr_builtins[]` canonical row so the
+            // completeness guard does not flag a metadata mismatch.
+            nargs: 0,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `ri_triggers.c` trigger proc (C: their `fmgr_builtins[]`
@@ -113,7 +107,7 @@ fn builtin(
 /// FK-enforcing triggers installed by `ATAddForeignKeyConstraint` would
 /// dispatch to a null `fn_addr` and the FK would not be enforced.
 pub fn register_ri_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(F_RI_FKEY_CHECK_INS, "RI_FKey_check_ins", fc_ri_fkey_check_ins),
         builtin(F_RI_FKEY_CHECK_UPD, "RI_FKey_check_upd", fc_ri_fkey_check_upd),
         builtin(F_RI_FKEY_CASCADE_DEL, "RI_FKey_cascade_del", fc_ri_fkey_cascade_del),
