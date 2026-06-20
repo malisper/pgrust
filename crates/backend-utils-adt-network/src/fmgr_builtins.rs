@@ -27,10 +27,8 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_network::inet_struct;
-
-use types_error::PgError;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -123,21 +121,6 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 /// A scratch context for cores that allocate their result through `Mcx` (the
 /// hash byte-gathering path). The bytes are copied out before drop.
 fn scratch_mcx() -> mcx::MemoryContext {
@@ -148,37 +131,37 @@ fn scratch_mcx() -> mcx::MemoryContext {
 // I/O.
 // ---------------------------------------------------------------------------
 
-fn fc_inet_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inet_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     // Forward `fcinfo->context` (the soft ErrorSaveContext installed by
     // InputFunctionCallSafe); on the soft path the body returns `Ok(None)` and
     // the caller discards this placeholder after `soft_error_occurred()`.
     let escontext = fcinfo.escontext_mut();
-    match ok(crate::inet_in(&s, escontext)) {
-        Some(addr) => ret_inet(fcinfo, addr),
-        None => Datum::null(),
+    match crate::inet_in(&s, escontext)? {
+        Some(addr) => Ok(ret_inet(fcinfo, addr)),
+        None => Ok(Datum::null()),
     }
 }
 
-fn fc_cidr_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cidr_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let escontext = fcinfo.escontext_mut();
-    match ok(crate::cidr_in(&s, escontext)) {
-        Some(addr) => ret_inet(fcinfo, addr),
-        None => Datum::null(),
+    match crate::cidr_in(&s, escontext)? {
+        Some(addr) => Ok(ret_inet(fcinfo, addr)),
+        None => Ok(Datum::null()),
     }
 }
 
-fn fc_inet_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inet_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let addr = arg_inet(fcinfo, 0);
-    let s = String::from_utf8(ok(crate::inet_out(&addr))).expect("inet_out: valid utf8");
-    ret_cstring(fcinfo, s)
+    let s = String::from_utf8(crate::inet_out(&addr)?).expect("inet_out: valid utf8");
+    Ok(ret_cstring(fcinfo, s))
 }
 
-fn fc_cidr_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cidr_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let addr = arg_inet(fcinfo, 0);
-    let s = String::from_utf8(ok(crate::cidr_out(&addr))).expect("cidr_out: valid utf8");
-    ret_cstring(fcinfo, s)
+    let s = String::from_utf8(crate::cidr_out(&addr)?).expect("cidr_out: valid utf8");
+    Ok(ret_cstring(fcinfo, s))
 }
 
 /// Read the raw external binary message body off the by-ref lane. C's
@@ -193,28 +176,28 @@ fn arg_recv_msg<'a>(fcinfo: &'a FunctionCallInfoBaseData) -> &'a [u8] {
         .expect("inet/cidr recv: by-ref message arg missing from by-ref lane")
 }
 
-fn fc_inet_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let addr = ok(crate::inet_recv(arg_recv_msg(fcinfo)));
-    ret_inet(fcinfo, addr)
+fn fc_inet_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let addr = crate::inet_recv(arg_recv_msg(fcinfo))?;
+    Ok(ret_inet(fcinfo, addr))
 }
 
-fn fc_cidr_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let addr = ok(crate::cidr_recv(arg_recv_msg(fcinfo)));
-    ret_inet(fcinfo, addr)
+fn fc_cidr_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let addr = crate::cidr_recv(arg_recv_msg(fcinfo))?;
+    Ok(ret_inet(fcinfo, addr))
 }
 
-fn fc_inet_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inet_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let addr = arg_inet(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(crate::inet_send(m.mcx(), &addr));
-    ret_text(fcinfo, bytes)
+    let bytes = crate::inet_send(m.mcx(), &addr)?;
+    Ok(ret_text(fcinfo, bytes))
 }
 
-fn fc_cidr_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cidr_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let addr = arg_inet(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(crate::cidr_send(m.mcx(), &addr));
-    ret_text(fcinfo, bytes)
+    let bytes = crate::cidr_send(m.mcx(), &addr)?;
+    Ok(ret_text(fcinfo, bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -223,10 +206,10 @@ fn fc_cidr_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 macro_rules! fc_cmp_bool {
     ($name:ident, $core:path) => {
-        fn $name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $name(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let a = arg_inet(fcinfo, 0);
             let b = arg_inet(fcinfo, 1);
-            Datum::from_bool($core(&a, &b))
+            Ok(Datum::from_bool($core(&a, &b)))
         }
     };
 }
@@ -244,154 +227,154 @@ fc_cmp_bool!(fc_network_supeq, crate::network_supeq);
 fc_cmp_bool!(fc_network_overlap, crate::network_overlap);
 fc_cmp_bool!(fc_inet_same_family, crate::inet_same_family);
 
-fn fc_network_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_network_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let b = arg_inet(fcinfo, 1);
-    Datum::from_i32(crate::network_cmp(&a, &b))
+    Ok(Datum::from_i32(crate::network_cmp(&a, &b)))
 }
 
 // ---------------------------------------------------------------------------
 // inet,inet -> inet/cidr.
 // ---------------------------------------------------------------------------
 
-fn fc_network_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_network_larger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let b = arg_inet(fcinfo, 1);
-    ret_inet(fcinfo, crate::network_larger(&a, &b))
+    Ok(ret_inet(fcinfo, crate::network_larger(&a, &b)))
 }
 
-fn fc_network_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_network_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let b = arg_inet(fcinfo, 1);
-    ret_inet(fcinfo, crate::network_smaller(&a, &b))
+    Ok(ret_inet(fcinfo, crate::network_smaller(&a, &b)))
 }
 
-fn fc_inetand(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inetand(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let b = arg_inet(fcinfo, 1);
-    ret_inet(fcinfo, ok(crate::inetand(&a, &b)))
+    Ok(ret_inet(fcinfo, crate::inetand(&a, &b)?))
 }
 
-fn fc_inetor(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inetor(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let b = arg_inet(fcinfo, 1);
-    ret_inet(fcinfo, ok(crate::inetor(&a, &b)))
+    Ok(ret_inet(fcinfo, crate::inetor(&a, &b)?))
 }
 
-fn fc_inet_merge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inet_merge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let b = arg_inet(fcinfo, 1);
-    ret_inet(fcinfo, ok(crate::inet_merge(&a, &b)))
+    Ok(ret_inet(fcinfo, crate::inet_merge(&a, &b)?))
 }
 
 // ---------------------------------------------------------------------------
 // inet -> inet/cidr.
 // ---------------------------------------------------------------------------
 
-fn fc_inetnot(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inetnot(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
-    ret_inet(fcinfo, crate::inetnot(&a))
+    Ok(ret_inet(fcinfo, crate::inetnot(&a)))
 }
 
-fn fc_inet_to_cidr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inet_to_cidr(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
-    ret_inet(fcinfo, ok(crate::inet_to_cidr(&a)))
+    Ok(ret_inet(fcinfo, crate::inet_to_cidr(&a)?))
 }
 
-fn fc_network_broadcast(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_network_broadcast(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
-    ret_inet(fcinfo, crate::network_broadcast(&a))
+    Ok(ret_inet(fcinfo, crate::network_broadcast(&a)))
 }
 
-fn fc_network_network(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_network_network(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
-    ret_inet(fcinfo, crate::network_network(&a))
+    Ok(ret_inet(fcinfo, crate::network_network(&a)))
 }
 
-fn fc_network_netmask(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_network_netmask(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
-    ret_inet(fcinfo, crate::network_netmask(&a))
+    Ok(ret_inet(fcinfo, crate::network_netmask(&a)))
 }
 
-fn fc_network_hostmask(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_network_hostmask(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
-    ret_inet(fcinfo, crate::network_hostmask(&a))
+    Ok(ret_inet(fcinfo, crate::network_hostmask(&a)))
 }
 
 // ---------------------------------------------------------------------------
 // set_masklen (inet/cidr, int4 -> inet/cidr).
 // ---------------------------------------------------------------------------
 
-fn fc_inet_set_masklen(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inet_set_masklen(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let bits = arg_int32(fcinfo, 1);
-    ret_inet(fcinfo, ok(crate::inet_set_masklen(&a, bits)))
+    Ok(ret_inet(fcinfo, crate::inet_set_masklen(&a, bits)?))
 }
 
-fn fc_cidr_set_masklen(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cidr_set_masklen(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let bits = arg_int32(fcinfo, 1);
-    ret_inet(fcinfo, ok(crate::cidr_set_masklen(&a, bits)))
+    Ok(ret_inet(fcinfo, crate::cidr_set_masklen(&a, bits)?))
 }
 
 // ---------------------------------------------------------------------------
 // inet -> int4.
 // ---------------------------------------------------------------------------
 
-fn fc_network_masklen(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_network_masklen(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
-    ret_int32(crate::network_masklen(&a))
+    Ok(ret_int32(crate::network_masklen(&a)))
 }
 
-fn fc_network_family(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_network_family(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
-    ret_int32(crate::network_family(&a))
+    Ok(ret_int32(crate::network_family(&a)))
 }
 
 // ---------------------------------------------------------------------------
 // inet -> text (header-stripped text payload).
 // ---------------------------------------------------------------------------
 
-fn fc_network_host(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_network_host(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
-    ret_text(fcinfo, ok(crate::network_host(&a)))
+    Ok(ret_text(fcinfo, crate::network_host(&a)?))
 }
 
-fn fc_network_show(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_network_show(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
-    ret_text(fcinfo, ok(crate::network_show(&a)))
+    Ok(ret_text(fcinfo, crate::network_show(&a)?))
 }
 
-fn fc_inet_abbrev(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inet_abbrev(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
-    ret_text(fcinfo, ok(crate::inet_abbrev(&a)))
+    Ok(ret_text(fcinfo, crate::inet_abbrev(&a)?))
 }
 
-fn fc_cidr_abbrev(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cidr_abbrev(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
-    ret_text(fcinfo, ok(crate::cidr_abbrev(&a)))
+    Ok(ret_text(fcinfo, crate::cidr_abbrev(&a)?))
 }
 
 // ---------------------------------------------------------------------------
 // inet arithmetic (inet,int8 -> inet ; inet,inet -> int8).
 // ---------------------------------------------------------------------------
 
-fn fc_inetpl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inetpl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let addend = arg_int64(fcinfo, 1);
-    ret_inet(fcinfo, ok(crate::inetpl(&a, addend)))
+    Ok(ret_inet(fcinfo, crate::inetpl(&a, addend)?))
 }
 
-fn fc_inetmi_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inetmi_int8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let addend = arg_int64(fcinfo, 1);
-    ret_inet(fcinfo, ok(crate::inetmi_int8(&a, addend)))
+    Ok(ret_inet(fcinfo, crate::inetmi_int8(&a, addend)?))
 }
 
-fn fc_inetmi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inetmi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let b = arg_inet(fcinfo, 1);
-    Datum::from_i64(ok(crate::inetmi(&a, &b)))
+    Ok(Datum::from_i64(crate::inetmi(&a, &b)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -400,56 +383,54 @@ fn fc_inetmi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // here we apply hash_any over them.
 // ---------------------------------------------------------------------------
 
-fn fc_hashinet(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashinet(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let mcx = scratch_mcx();
-    let bytes = ok(crate::hashinet(mcx.mcx(), &a));
-    Datum::from_i32(common_hashfn::hash_bytes(&bytes) as i32)
+    let bytes = crate::hashinet(mcx.mcx(), &a)?;
+    Ok(Datum::from_i32(common_hashfn::hash_bytes(&bytes) as i32))
 }
 
-fn fc_hashinetextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashinetextended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_inet(fcinfo, 0);
     let seed = arg_int64(fcinfo, 1) as u64;
     let mcx = scratch_mcx();
-    let bytes = ok(crate::hashinetextended(mcx.mcx(), &a));
-    Datum::from_i64(common_hashfn::hash_bytes_extended(&bytes, seed) as i64)
+    let bytes = crate::hashinetextended(mcx.mcx(), &a)?;
+    Ok(Datum::from_i64(
+        common_hashfn::hash_bytes_extended(&bytes, seed) as i64,
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // 0-ary session-info int4 functions (kept from the prior registration).
 // ---------------------------------------------------------------------------
 
-fn fc_inet_client_port(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::inet_client_port() {
-        Ok(Some(p)) => ret_int32(p),
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+fn fc_inet_client_port(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    match crate::inet_client_port()? {
+        Some(p) => Ok(ret_int32(p)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 
-fn fc_inet_server_port(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::inet_server_port() {
-        Ok(Some(p)) => ret_int32(p),
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+fn fc_inet_server_port(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    match crate::inet_server_port()? {
+        Some(p) => Ok(ret_int32(p)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 
 /// `inet_client_addr() -> inet or NULL` (network.c). 0-ary, not strict.
-fn fc_inet_client_addr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::inet_client_addr() {
-        Ok(Some(a)) => ret_inet(fcinfo, a),
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+fn fc_inet_client_addr(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    match crate::inet_client_addr()? {
+        Some(a) => Ok(ret_inet(fcinfo, a)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 
 /// `inet_server_addr() -> inet or NULL` (network.c). 0-ary, not strict.
-fn fc_inet_server_addr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::inet_server_addr() {
-        Ok(Some(a)) => ret_inet(fcinfo, a),
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+fn fc_inet_server_addr(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    match crate::inet_server_addr()? {
+        Some(a) => Ok(ret_inet(fcinfo, a)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 
@@ -463,16 +444,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the `network.c` `inet`/`cidr` builtins (C: their `fmgr_builtins[]`
@@ -481,7 +465,7 @@ fn builtin(
 /// `proisstrict => 't'`, non-retset; the two session-port functions are
 /// `proisstrict => 'f'`, 0-ary).
 pub fn register_network_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // I/O.
         builtin(910, "inet_in", 1, true, false, fc_inet_in),
         builtin(911, "inet_out", 1, true, false, fc_inet_out),
@@ -555,8 +539,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Cstring(s.to_string()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(910).expect("inet_in registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let f = backend_utils_fmgr_core::native_builtin(910).expect("inet_in registered");
+        f(&mut fcinfo).unwrap();
         match fcinfo.take_ref_result().expect("inet_in produced a result") {
             RefPayload::Varlena(b) => b,
             other => panic!("inet_in returned non-varlena: {other:?}"),
@@ -568,8 +552,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(image.to_vec()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(911).expect("inet_out registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let f = backend_utils_fmgr_core::native_builtin(911).expect("inet_out registered");
+        f(&mut fcinfo).unwrap();
         match fcinfo.take_ref_result().expect("inet_out produced a result") {
             RefPayload::Cstring(s) => s,
             other => panic!("inet_out returned non-cstring: {other:?}"),
@@ -586,16 +570,16 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("op registered");
-        (entry.func.unwrap())(&mut fcinfo).as_bool()
+        let f = backend_utils_fmgr_core::native_builtin(oid).expect("op registered");
+        f(&mut fcinfo).unwrap().as_bool()
     }
 
     fn call_unary_inet(oid: u32, a: &[u8]) -> Vec<u8> {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a.to_vec()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("op registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let f = backend_utils_fmgr_core::native_builtin(oid).expect("op registered");
+        f(&mut fcinfo).unwrap();
         match fcinfo.take_ref_result().expect("op produced a result") {
             RefPayload::Varlena(b) => b,
             other => panic!("non-varlena result: {other:?}"),
@@ -606,16 +590,16 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a.to_vec()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("op registered");
-        (entry.func.unwrap())(&mut fcinfo).as_i32()
+        let f = backend_utils_fmgr_core::native_builtin(oid).expect("op registered");
+        f(&mut fcinfo).unwrap().as_i32()
     }
 
     fn call_unary_text(oid: u32, a: &[u8]) -> String {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a.to_vec()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("op registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let f = backend_utils_fmgr_core::native_builtin(oid).expect("op registered");
+        f(&mut fcinfo).unwrap();
         match fcinfo.take_ref_result().expect("op produced a result") {
             RefPayload::Varlena(b) => String::from_utf8(b).unwrap(),
             other => panic!("non-varlena text result: {other:?}"),
@@ -670,8 +654,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a.clone()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(422).unwrap();
-        let h = (entry.func.unwrap())(&mut fcinfo).as_i32();
+        let f = backend_utils_fmgr_core::native_builtin(422).unwrap();
+        let h = f(&mut fcinfo).unwrap().as_i32();
         // hash over family,bits,addr (addrsize+2 bytes).
         let want = common_hashfn::hash_bytes(&[2u8, 24, 192, 168, 1, 226]) as i32;
         assert_eq!(h, want);
@@ -688,8 +672,8 @@ mod tests {
             NullableDatum::value(Datum::from_i64(256)),
         ];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a.clone())), None];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(2630).unwrap();
-        (entry.func.unwrap())(&mut fcinfo);
+        let f = backend_utils_fmgr_core::native_builtin(2630).unwrap();
+        f(&mut fcinfo).unwrap();
         let sum = match fcinfo.take_ref_result().unwrap() {
             RefPayload::Varlena(v) => v,
             o => panic!("{o:?}"),
@@ -706,8 +690,8 @@ mod tests {
             Some(RefPayload::Varlena(lo)),
             Some(RefPayload::Varlena(a)),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(2633).unwrap();
-        let diff = (entry.func.unwrap())(&mut fcinfo).as_i64();
+        let f = backend_utils_fmgr_core::native_builtin(2633).unwrap();
+        let diff = f(&mut fcinfo).unwrap().as_i64();
         assert_eq!(diff, 256);
     }
 }
