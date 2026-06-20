@@ -959,7 +959,19 @@ pub struct EStateData<'mcx> {
     /// `cte_resolve_leader`; `None` is an unclaimed slot. Empty = no CTEs.
     pub es_cte_shared: PgVec<'mcx, Option<CteSharedState<'mcx>>>,
     /// `List *es_auxmodifytables` — not-canSetTag ModifyTableStates.
-    pub es_auxmodifytables: PgVec<'mcx, Opaque>,
+    ///
+    /// In C this is a `List` of `ModifyTableState *` aliases to nodes that are
+    /// *also* reachable as subplan roots in `es_subplanstates` (a data-modifying
+    /// CTE's ModifyTable is always a top-level `plannedstmt->subplans` entry, so
+    /// it lands in `es_subplanstates`). The owned plan-state model has a single
+    /// owner per node, so — exactly like the CTE leader (`es_cte_shared`) and the
+    /// SubPlan child (`SubPlanState.planstate` → `plan_id` index) keystones — the
+    /// alias is replaced by an **index into `es_subplanstates`**. The aux
+    /// ModifyTableState stays owned by its `es_subplanstates` slot; this list only
+    /// records *which* slots are the non-canSetTag (secondary) modify tables, so
+    /// `ExecPostprocessPlan` can take/run/put each to completion by index. The C
+    /// `lcons` prepend order (front-of-list) is preserved by inserting at index 0.
+    pub es_auxmodifytables: PgVec<'mcx, usize>,
     /// `ExprContext *es_per_tuple_exprcontext` — for per-output-tuple work.
     pub es_per_tuple_exprcontext: Option<EcxtId>,
     /// `const char *es_sourceText` — source query text.

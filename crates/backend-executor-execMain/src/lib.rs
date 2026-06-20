@@ -729,15 +729,78 @@ pub fn ExecutorEnd(query_desc: &mut QueryDesc) -> PgResult<()> {
 /// secondary ModifyTable nodes and no AFTER triggers, so this is a no-op; the
 /// non-trivial `ExecPostprocessPlan` / `AfterTriggerEndQuery` body lands with
 /// the ModifyTable + trigger owners.
+/// `ExecPostprocessPlan(estate)` (execMain.c) — run any secondary (non-canSetTag)
+/// ModifyTable nodes to completion, in case the main query did not fetch all rows
+/// from them. This is what makes a data-modifying CTE whose output the outer query
+/// never reads (`WITH t AS (INSERT ... RETURNING *) SELECT 1`) still execute fully.
+///
+/// In C the loop walks `estate->es_auxmodifytables`, a `List` of `ModifyTableState *`
+/// aliases, calling `ExecProcNode(ps)` until `TupIsNull`. The owned plan-state model
+/// stores those nodes once, in `es_subplanstates`; this list holds the **index** of
+/// each (see [`EStateData::es_auxmodifytables`]). For each, we take the owned
+/// plan-state box out of its `es_subplanstates` slot (so it can run with a live
+/// `&mut estate`, no self-alias — the `take_subplanstate`/`put_subplanstate` pattern
+/// `nodeSubplan` uses), drive `ExecProcNode` to end-of-scan, then put it back.
+fn ExecPostprocessPlan(estate: &mut types_nodes::execnodes::EStateData<'_>) -> PgResult<()> {
+    // Make sure nodes run forward.
+    //   estate->es_direction = ForwardScanDirection;
+    estate.es_direction = ScanDirection::ForwardScanDirection;
+
+    // Run any secondary ModifyTable nodes to completion, in case the main query
+    // did not fetch all rows from them.
+    //   foreach(lc, estate->es_auxmodifytables) { ps = lfirst(lc); for(;;) {...} }
+    //
+    // Snapshot the index list: the loop body borrows `estate` mutably (take/run/put)
+    // and the list itself does not change during postprocessing.
+    let aux_indices: alloc::vec::Vec<usize> = estate.es_auxmodifytables.iter().copied().collect();
+    for idx in aux_indices {
+        // ps = (PlanState *) lfirst(lc) — the aux ModifyTableState, owned by its
+        // `es_subplanstates` slot. Take it out so ExecProcNode can run with the
+        // live `&mut estate`.
+        let mut ps = estate
+            .es_subplanstates
+            .get_mut(idx)
+            .and_then(|slot| slot.take())
+            .ok_or_else(|| {
+                types_error::PgError::error(
+                    "ExecPostprocessPlan: es_auxmodifytables index has no es_subplanstates entry",
+                )
+            })?;
+
+        // for (;;) { ResetPerTupleExprContext(estate); slot = ExecProcNode(ps);
+        //            if (TupIsNull(slot)) break; }
+        let run = (|| -> PgResult<()> {
+            loop {
+                // Reset the per-output-tuple exprcontext each time (only if one
+                // has been created).
+                if let Some(ecxt) = estate.es_per_tuple_exprcontext {
+                    execUtils_seams::reset_expr_context::call(estate, ecxt)?;
+                }
+
+                // slot = ExecProcNode(ps).
+                let slot = procnode::exec_proc_node::call(&mut ps, estate)?;
+
+                // if (TupIsNull(slot)) break; — a non-NULL but cleared slot is also
+                // end-of-scan, so test the empty flag too.
+                match slot {
+                    Some(s) if !estate.slot(s).is_empty() => continue,
+                    _ => break,
+                }
+            }
+            Ok(())
+        })();
+
+        // Restore the owned plan-state box even if the run errored.
+        estate.es_subplanstates[idx] = Some(ps);
+        run?;
+    }
+
+    Ok(())
+}
+
 pub fn standard_ExecutorFinish(query_desc: &mut QueryDesc) -> PgResult<()> {
     // ExecPostprocessPlan(estate): run secondary ModifyTable nodes to completion.
-    let has_aux = query_desc.work.with(|w| !w.estate.es_auxmodifytables.is_empty());
-    if has_aux {
-        panic!(
-            "execMain standard_ExecutorFinish: ExecPostprocessPlan over es_auxmodifytables \
-             (secondary ModifyTable nodes) not wired — #167 F0d"
-        );
-    }
+    query_desc.with_estate_mut(ExecPostprocessPlan)?;
     // AfterTriggerEndQuery(estate) unless SKIP_TRIGGERS — fires this query
     // level's AFTER IMMEDIATE events. SKIP_TRIGGERS is set for the plain SELECT,
     // so it is elided there.

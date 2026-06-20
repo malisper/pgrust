@@ -745,16 +745,21 @@ pub fn ExecInitModifyTable<'mcx>(
     //   if (!mtstate->canSetTag)
     //       estate->es_auxmodifytables = lcons(mtstate, estate->es_auxmodifytables);
     //
-    // `es_auxmodifytables` carries opaque `ModifyTableState *` aliases
-    // (`Opaque`) in the trimmed EState; the owned model has no shared alias to
-    // the `mtstate` we are about to return by value, so a non-canSetTag node
-    // cannot be registered. Auxiliary (CTE) ModifyTable nodes land with that
-    // aliasing model.
+    // C `lcons` stores an alias to `mtstate` — a node we are about to return by
+    // value to `InitPlan`, which pushes it into `estate->es_subplanstates` (a
+    // non-canSetTag ModifyTable is a data-modifying CTE, always a top-level
+    // `plannedstmt->subplans` entry → always a direct `es_subplanstates` slot).
+    // The owned model has one owner per node, so — exactly like the CTE leader
+    // (`es_cte_shared`) and the SubPlan child (`SubPlanState.planstate`) — we
+    // register the **future `es_subplanstates` index** of this node rather than
+    // an alias. We are running inside `InitPlan`'s subplan loop and have NOT yet
+    // been pushed, so our slot will be `es_subplanstates.len()`. The leaked
+    // `es_subplanstates` slot keeps owning the `mtstate`; `ExecPostprocessPlan`
+    // reaches it by this index to run it to completion. `lcons` prepends, so we
+    // insert at the front (index 0).
     if !mtstate.canSetTag {
-        return Err(unported(
-            "ExecInitModifyTable: es_auxmodifytables registration of a non-canSetTag \
-             ModifyTableState needs the shared ModifyTableState alias model",
-        ));
+        let aux_idx = estate.es_subplanstates.len();
+        estate.es_auxmodifytables.insert(0, aux_idx);
     }
 
     // return mtstate;
