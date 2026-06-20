@@ -659,8 +659,29 @@ pub fn heap_lock_tuple<'mcx>(
             }
         }
 
-        // result_l3 == TM_Ok and not in the BeingModified branch path that
-        // returned via failed/out.
+        // C's `failed:` label.  We arrive here either from the bottom of the
+        // BeingModified branch (which sets `result_l3` to TM_Ok / TM_Updated /
+        // TM_Deleted) or by falling through from `HeapTupleSatisfiesUpdate`
+        // having returned TM_SelfModified (that skips the whole `else if`
+        // block above).  If the result isn't TM_Ok, fill the failure data and
+        // bail out via out_locked instead of locking.  In particular this is
+        // the path for re-locking a tuple the current command already
+        // deleted/updated (e.g. ri_Check_Pk_Match's `FOR KEY SHARE OF x` over a
+        // just-deleted PK row), which must return TM_SelfModified rather than
+        // re-stamp the xmax (and trip the compute_new_xmax_infomask assert).
+        if result_l3 != TM_Result::TM_Ok {
+            result = result_l3;
+            // `require_sleep` is local to the BeingModified branch; the
+            // fall-through (TM_SelfModified) path never reached it.  It is
+            // unused by finish_failed, so the C default `true` is passed.
+            return finish_failed(
+                mcx, relation, buffer, vmbuffer, &mut tuple, tid, mode,
+                have_tuple_lock, result, true, block, cid,
+                &mut cleared_all_frozen,
+            );
+        }
+
+        // result_l3 == TM_Ok: actually take the lock.
 
         /*
          * If we didn't pin the visibility map page and the page has become all
