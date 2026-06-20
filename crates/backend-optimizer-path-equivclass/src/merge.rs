@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use types_core::primitive::{Index, Oid};
 use types_error::PgResult;
 use types_nodes::primnodes::{CoercionForm, Expr};
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     EcId, EmId, EquivalenceClass, EquivalenceMember, JoinDomain, PlannerInfo, Relids, RinfoId,
     RELOPT_BASEREL,
@@ -211,8 +212,9 @@ pub(crate) fn add_child_eq_member(
 /// `process_equivalence(root, &restrictinfo, jdomain)` — the union-find merge
 /// core. Returns `(matched, restrictinfo)`; `restrictinfo` may differ from the
 /// input (the X=X → X IS NOT NULL conversion).
-pub fn process_equivalence(
+pub fn process_equivalence<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     restrictinfo: RinfoId,
     jdomain: Relids,
 ) -> PgResult<(bool, RinfoId)> {
@@ -225,14 +227,29 @@ pub fn process_equivalence(
     }
 
     /* extract info from the clause */
-    let clause = root.node(root.rinfo(restrictinfo).clause).clone();
-    let opexpr = clause
-        .as_opexpr()
-        .expect("process_equivalence: clause is not an OpExpr");
-    let opno = opexpr.opno;
-    let collation = opexpr.inputcollid;
-    let item1_raw = opexpr.args[0].clone();
-    let item2_raw = opexpr.args[1].clone();
+    // C reads `opno`/`inputcollid` off `restrictinfo->clause` and takes
+    // `get_leftop`/`get_rightop` as bare pointers into that same clause, which
+    // `canonicalize_ec_expression` then reuses (wrapping in a RelabelType only
+    // when a cast is needed). In the owned arena model the two operands must be
+    // re-owned for re-interning via `make_eq_member`'s `alloc_node`; clone them
+    // through `clone_in` into the long-lived planner arena (`run.mcx()`), NOT a
+    // derived `Expr::clone` — an operand may carry a SubPlan (correlated scalar
+    // subselect) whose context-allocated children only deep-copy via `clone_in`
+    // (the derived clone panics by design).
+    let clause_id = root.rinfo(restrictinfo).clause;
+    let (opno, collation, item1_raw, item2_raw) = {
+        let clause = root.node(clause_id);
+        let opexpr = clause
+            .as_opexpr()
+            .expect("process_equivalence: clause is not an OpExpr");
+        let mcx = run.mcx();
+        (
+            opexpr.opno,
+            opexpr.inputcollid,
+            opexpr.args[0].clone_in(mcx)?,
+            opexpr.args[1].clone_in(mcx)?,
+        )
+    };
     let item1_relids = root.rinfo(restrictinfo).left_relids.clone();
     let item2_relids = root.rinfo(restrictinfo).right_relids.clone();
 
@@ -612,9 +629,27 @@ pub fn get_eclass_for_sort_expr(
     Ok(Some(newec))
 }
 
-/// Resolve an [`EmId`]'s `em_expr` node to an owned [`Expr`].
-pub(crate) fn em_expr(root: &PlannerInfo, em: EmId) -> Expr {
-    root.node(root.em(em).em_expr).clone()
+/// Borrow an [`EmId`]'s `em_expr` node as `&Expr` (the deref behind C's
+/// `em->em_expr` pointer read). Use this for read-only inspection — a derived
+/// `Expr::clone` panics on owned-subtree Exprs (SubPlan/SubLink/Aggref whose
+/// children only deep-copy via `clone_in`), e.g. a `var = (correlated subplan)`
+/// equality. Callers that need an owned copy (to move into a new node /
+/// seam-by-value) must use [`em_expr_owned`] with a [`PlannerRun`] mcx.
+pub(crate) fn em_expr_ref(root: &PlannerInfo, em: EmId) -> &Expr {
+    root.node(root.em(em).em_expr)
+}
+
+/// Resolve an [`EmId`]'s `em_expr` node to an owned [`Expr`], deep-copying any
+/// context-allocated children through `clone_in` into the long-lived planner
+/// arena (`run.mcx()`) — NOT a derived `Expr::clone` (which panics on
+/// owned-subtree Exprs). C reuses the `em->em_expr` pointer directly; the owned
+/// arena model must re-own it for re-interning / by-value seam calls.
+pub(crate) fn em_expr_owned<'mcx>(
+    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    em: EmId,
+) -> PgResult<Expr> {
+    root.node(root.em(em).em_expr).clone_in(run.mcx())
 }
 
 /// Strip outer `RelabelType`s from an [`Expr`], returning the inner expr.

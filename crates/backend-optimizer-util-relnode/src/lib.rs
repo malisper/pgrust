@@ -801,7 +801,7 @@ pub fn build_child_join_rel<'mcx>(
      * We might need EquivalenceClass members corresponding to the child join.
      */
     if root.rel(joinrel).has_eclass_joins || ext::has_useful_pathkeys::call(root, parent_joinrel) {
-        ext::add_child_join_rel_equivalences::call(root, appinfos, parent_joinrel, joinrel)?;
+        ext::add_child_join_rel_equivalences::call(root, run, appinfos, parent_joinrel, joinrel)?;
     }
 
     Ok(joinrel)

@@ -140,6 +140,7 @@ pub fn set_append_rel_size<'mcx>(
         if need_ec {
             backend_optimizer_path_equivclass_seams::add_child_rel_equivalences::call(
                 root,
+                run,
                 childrel, // appinfo carried by relid handle: see seam contract
                 rel,
                 childrel,
