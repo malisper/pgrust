@@ -2717,13 +2717,17 @@ mod clone_in_tests {
         let q_static: PgBox<'static, crate::copy_query::Query<'static>> =
             unsafe { core::mem::transmute(q_boxed) };
 
-        let node = Node::Expr(Expr::SubLink(SubLink {
-            subLinkType: SubLinkType::Exists,
-            subLinkId: 0,
-            testexpr: None,
-            subselect: Some(q_static),
-            location: 7,
-        }));
+        let node = Node::mk_expr(
+            mcx,
+            Expr::SubLink(SubLink {
+                subLinkType: SubLinkType::Exists,
+                subLinkId: 0,
+                testexpr: None,
+                subselect: Some(q_static),
+                location: 7,
+            }),
+        )
+        .unwrap();
 
         // Would panic on the SubLink child if the Node::Expr arm used a plain
         // `.clone()`; routing through Expr::clone_in deep-copies it.
