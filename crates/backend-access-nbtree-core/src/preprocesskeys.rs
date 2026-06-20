@@ -270,18 +270,9 @@ fn fmgr_info(cmp_proc: Oid) -> u64 {
     cmp_proc as u64
 }
 
-/// `_bt_binsrch_array_skey(orderproc, false, NoMovementScanDirection, tupdatum,
-/// false, array, arraysk, &cmpresult)` (nbtutils.c, owned by a sibling unit not
-/// yet ported into this crate). Returns `(matchelem, cmpresult)`.
-fn binsrch_array_skey(
-    _cur_elem: i32,
-    _tupdatum: &Datum,
-    _elem_values: &[Datum],
-    _orderproc_handle: u64,
-    _collation: Oid,
-) -> (i32, i32) {
-    panic!("_bt_saoparray_shrink: _bt_binsrch_array_skey (nbtutils) not yet ported")
-}
+// `_bt_binsrch_array_skey()` is ported faithfully in the sibling `utils`
+// module (nbtutils.c lives in the same crate split); `_bt_saoparray_shrink`
+// calls `crate::utils::bt_binsrch_array_skey` directly.
 
 /// `array->sksup->decrement(rel, sk_argument, &underflow)` — opclass skip-support
 /// decrement. Dispatched through the skip-support substrate's `run_skip_decrement`
@@ -1208,18 +1199,23 @@ fn _bt_saoparray_shrink<'mcx>(
 
     let skey_argument = inkeys[skey].sk_argument.clone();
     let skey_strategy = inkeys[skey].sk_strategy;
-    let arraysk_collation = inkeys[arraysk].sk_collation;
 
-    let cur_elem = so.arrayKeys[array].cur_elem;
+    // _bt_binsrch_array_skey(orderproc, false, NoMovementScanDirection,
+    //   skey->sk_argument /*tupdatum*/, false /*tupnull*/, array, arraysk,
+    //   &cmpresult). The array scan key (`arraysk`) is the `cur` argument.
+    let arraysk_key = inkeys[arraysk].clone();
     let (m, c) = {
         let arr = &so.arrayKeys[array];
-        binsrch_array_skey(
-            cur_elem,
-            &skey_argument,
-            arr.elem_values.as_slice(),
+        crate::utils::bt_binsrch_array_skey(
+            *rel.rd_opcintype.allocator(),
             orderproc_handle,
-            arraysk_collation,
-        )
+            false,
+            types_scan::sdir::ScanDirection::NoMovementScanDirection,
+            &skey_argument,
+            false,
+            arr,
+            &arraysk_key,
+        )?
     };
     matchelem = m;
     cmpresult = c;
