@@ -2269,7 +2269,7 @@ fn ReportNotNullViolationError<'mcx>(
 // --- constraint-cluster helpers -------------------------------------------
 
 fn unported_node(msg: &str, node: &types_nodes::nodes::Node<'_>) -> types_error::PgError {
-    unported(&alloc::format!("{msg}: {:?}", core::mem::discriminant(node)))
+    unported(&alloc::format!("{msg}: {:?}", node.node_tag()))
 }
 
 /// Deform `slot` and return its per-attribute null flags (`slot_attisnull`).
