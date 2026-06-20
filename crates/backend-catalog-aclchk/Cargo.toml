@@ -51,3 +51,7 @@ backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-commands-extension-seams = { path = "../backend-commands-extension-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+backend-catalog-dependency-seams = { path = "../backend-catalog-dependency-seams" }
+backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
+backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }

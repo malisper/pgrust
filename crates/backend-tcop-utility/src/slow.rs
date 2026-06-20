@@ -406,7 +406,7 @@ fn process_utility_slow_body<'mcx>(
 
         t if t == ntag::T_AlterDefaultPrivilegesStmt => {
             rt::exec_alter_default_privileges_stmt::call(mcx, pstate, parsetree)?;
-            rt::event_trigger_collect_alter_def_privs::call(parsetree);
+            rt::event_trigger_collect_alter_def_privs::call(parsetree)?;
             command_collected = true;
         }
 

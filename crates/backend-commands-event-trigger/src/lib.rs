@@ -37,7 +37,7 @@ use types_catalog::catalog::{
     AUTH_ID_RELATION_ID, AUTH_MEM_RELATION_ID, DATABASE_RELATION_ID, EVENT_TRIGGER_RELATION_ID,
     PARAMETER_ACL_RELATION_ID, PROCEDURE_RELATION_ID, TABLE_SPACE_RELATION_ID,
 };
-use types_catalog::catalog_dependency::ObjectAddress;
+use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
 use types_catalog::pg_event_trigger::PgEventTriggerInsertRow;
 use types_core::primitive::{InvalidOid, Oid};
 use types_error::{
@@ -450,6 +450,54 @@ pub fn event_trigger_collect_simple_command(
             parsetree: copied,
             address,
             secondary_object,
+        };
+
+        st.command_list
+            .try_reserve(1)
+            .map_err(|_| st.cmd_cxt.oom(core::mem::size_of::<CollectedCommand>()))?;
+        st.command_list.push(command);
+        Ok(())
+    })
+}
+
+/// `EventTriggerCollectAlterDefPrivs(stmt)` (event_trigger.c) — collect an
+/// ALTER DEFAULT PRIVILEGES command so `ddl_command_end` triggers can reach it.
+/// No-op without an active collection state (the standalone / no-trigger case),
+/// matching the C `if (currentEventTriggerState == NULL || ... inhibited)
+/// return;`. The active path deep-copies the `AlterDefaultPrivilegesStmt` into
+/// the state's private `cmd_cxt` arena and appends a `CollectedCommand`, exactly
+/// like [`event_trigger_collect_simple_command`] (an
+/// `AlterDefaultPrivilegesStmt` is an ordinary parse-tree node). The C body also
+/// stashes `d.defprivs.objtype = stmt->action->objtype`, which is recoverable
+/// from the stored parse tree, so no extra field is modelled.
+pub fn event_trigger_collect_alter_def_privs(stmt: &Node) -> PgResult<()> {
+    if !collecting() {
+        return Ok(());
+    }
+
+    let in_extension = extension_seams::creating_extension::call();
+
+    CURRENT_STATE.with(|s| {
+        let mut stack = s.borrow_mut();
+        let st = match stack.last_mut() {
+            Some(st) => st,
+            None => return Ok(()),
+        };
+
+        // copyObject into the state's private arena.
+        let copied = stmt.clone_in(st.cmd_cxt.mcx())?;
+        // SAFETY: `copied` lives in `cmd_cxt`; `command_list` is dropped before
+        // `cmd_cxt` (field order in `EventTriggerQueryState`), so the copy never
+        // outlives the arena it deallocates through. See
+        // [`event_trigger_collect_simple_command`].
+        let copied: Node<'static> =
+            unsafe { core::mem::transmute::<Node<'_>, Node<'static>>(copied) };
+
+        let command = CollectedCommand {
+            in_extension,
+            parsetree: copied,
+            address: InvalidObjectAddress,
+            secondary_object: InvalidObjectAddress,
         };
 
         st.command_list
@@ -1124,6 +1172,9 @@ pub fn init_seams() {
     });
     backend_tcop_utility_out_seams::event_trigger_collect_simple_command::set(
         event_trigger_collect_simple_command,
+    );
+    backend_tcop_utility_out_seams::event_trigger_collect_alter_def_privs::set(
+        event_trigger_collect_alter_def_privs,
     );
     backend_tcop_utility_out_seams::event_trigger_alter_table_start::set(
         event_trigger_alter_table_start,
