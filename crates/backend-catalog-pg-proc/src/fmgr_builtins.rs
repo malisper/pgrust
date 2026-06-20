@@ -16,7 +16,7 @@
 //! `CheckFunctionValidatorAccess`).
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
@@ -53,37 +53,28 @@ fn ret_void() -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 #[inline]
-fn finish(r: PgResult<()>) -> Datum {
-    match r {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
-    }
+fn finish(r: PgResult<()>) -> PgResult<Datum> {
+    r.map(|()| ret_void())
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
-fn fc_fmgr_internal_validator(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_fmgr_internal_validator(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let funcoid = arg_oid(fcinfo, 0);
     let valoid = validator_fn_oid(fcinfo);
     finish(crate::fmgr_internal_validator(valoid, funcoid))
 }
 
-fn fc_fmgr_c_validator(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_fmgr_c_validator(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let funcoid = arg_oid(fcinfo, 0);
     let valoid = validator_fn_oid(fcinfo);
     finish(crate::fmgr_c_validator(valoid, funcoid))
 }
 
-fn fc_fmgr_sql_validator(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_fmgr_sql_validator(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let funcoid = arg_oid(fcinfo, 0);
     let valoid = validator_fn_oid(fcinfo);
     finish(crate::fmgr_sql_validator(valoid, funcoid))
@@ -99,16 +90,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the `pg_proc.c` language-validator builtins (C: their
@@ -116,7 +110,7 @@ fn builtin(
 /// OIDs/nargs/strict/retset transcribed from `pg_proc.dat` (none carry
 /// `proisstrict`, none `proretset`; all take a single `oid` argument).
 pub fn register_pg_proc_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(2246, "fmgr_internal_validator", 1, true, false, fc_fmgr_internal_validator),
         builtin(2247, "fmgr_c_validator", 1, true, false, fc_fmgr_c_validator),
         builtin(2248, "fmgr_sql_validator", 1, true, false, fc_fmgr_sql_validator),
