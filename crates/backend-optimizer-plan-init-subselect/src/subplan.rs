@@ -1841,7 +1841,25 @@ pub fn resolve_worktable_param(
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();
 
-    // levelsup = rte->ctelevelsup; if (levelsup == 0) error; levelsup--; then walk.
+    // C (createplan.c:4055):
+    //   levelsup = rte->ctelevelsup;
+    //   if (levelsup == 0)  /* shouldn't happen */
+    //       elog(ERROR, "bad levelsup for CTE \"%s\"", rte->ctename);
+    //   levelsup--;
+    //   cteroot = root;
+    //   while (levelsup-- > 0) { cteroot = cteroot->parent_root; if (!cteroot) ... }
+    //   return cteroot->wt_param_id;
+    //
+    // The work-table PARAM_EXEC id lives on the recursion-planning root (the
+    // level processing the recursive UNION, one level below where the CTE comes
+    // from). In this owned PlannerInfo model the recursive term's leaf subroot
+    // does NOT retain its `parent_root` at create-plan time (it was taken back
+    // out after the leaf was planned — PlannerInfo is not `Clone`). But the same
+    // `wt_param_id` was stamped onto this leaf subroot when its access paths were
+    // built (recursion_carry in subquery_planner_carried), so when the
+    // parent_root walk cannot complete we read the stamped id off `root` itself —
+    // it is exactly `cteroot->wt_param_id`. (cf. set_worktable_pathlist, which
+    // makes the symmetric accommodation for `non_recursive_path->rows`.)
     let mut levelsup = rte.ctelevelsup;
     if levelsup == 0 {
         return Err(elog_error(alloc::format!(
@@ -1852,10 +1870,20 @@ pub fn resolve_worktable_param(
     let mut cteroot: &PlannerInfo = root;
     while levelsup > 0 {
         levelsup -= 1;
-        cteroot = cteroot
-            .parent_root
-            .as_deref()
-            .ok_or_else(|| elog_error(alloc::format!("bad levelsup for CTE \"{ctename}\"")))?;
+        match cteroot.parent_root.as_deref() {
+            Some(p) => cteroot = p,
+            None => {
+                // Owned-model fallback: parent_root chain is severed at
+                // create-plan time. The work-table param id was stamped onto the
+                // leaf subroot (`root.wt_param_id`); use it.
+                if root.wt_param_id < 0 {
+                    return Err(elog_error(alloc::format!(
+                        "could not find param ID for CTE \"{ctename}\""
+                    )));
+                }
+                return Ok(root.wt_param_id);
+            }
+        }
     }
     if cteroot.wt_param_id < 0 {
         return Err(elog_error(alloc::format!(
