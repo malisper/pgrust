@@ -28,8 +28,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -90,54 +91,39 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("quote fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `Datum quote_ident(PG_FUNCTION_ARGS)` — `quote.c`.
-fn fc_quote_ident(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_quote_ident(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let t = arg_text(fcinfo, 0);
     // C: text_to_cstring(txt) → a NUL-terminated cstring; the input is valid
     // UTF-8 text content. quote_identifier takes &str.
     let s = match core::str::from_utf8(t) {
         Ok(s) => s,
-        Err(_) => raise(types_error::PgError::error("invalid byte sequence for encoding")),
+        Err(_) => return Err(types_error::PgError::error("invalid byte sequence for encoding")),
     };
-    let bytes = match crate::quote_ident(m.mcx(), s) {
-        Ok(out) => out.as_slice().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_text(fcinfo, bytes)
+    let bytes = crate::quote_ident(m.mcx(), s)?.as_slice().to_vec();
+    Ok(ret_text(fcinfo, bytes))
 }
 
 /// `Datum quote_literal(PG_FUNCTION_ARGS)` — `quote.c`.
-fn fc_quote_literal(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_quote_literal(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let t = arg_text(fcinfo, 0);
-    let bytes = match crate::quote_literal(m.mcx(), t) {
-        Ok(out) => out.as_slice().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_text(fcinfo, bytes)
+    let bytes = crate::quote_literal(m.mcx(), t)?.as_slice().to_vec();
+    Ok(ret_text(fcinfo, bytes))
 }
 
 /// `Datum quote_nullable(PG_FUNCTION_ARGS)` — `quote.c` (non-strict: handles
 /// SQL NULL by returning the text `'NULL'`).
-fn fc_quote_nullable(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_quote_nullable(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let arg = arg_text_opt(fcinfo, 0);
-    let bytes = match crate::quote_nullable(m.mcx(), arg) {
-        Ok(out) => out.as_slice().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_text(fcinfo, bytes)
+    let bytes = crate::quote_nullable(m.mcx(), arg)?.as_slice().to_vec();
+    Ok(ret_text(fcinfo, bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -150,23 +136,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: String::from(name),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: String::from(name),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every SQL-callable `quote.c` builtin (C: their `fmgr_builtins[]`
 /// rows). Called from this crate's `init_seams()`. OIDs / nargs / strict /
 /// retset transcribed exactly from `pg_proc.dat`.
 pub fn register_quote_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(1282, "quote_ident", 1, true, false, fc_quote_ident),
         builtin(1283, "quote_literal", 1, true, false, fc_quote_literal),
         // quote_nullable is proisstrict => 'f'.
