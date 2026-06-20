@@ -251,9 +251,14 @@ pub fn reduce_outer_joins<'mcx>(
     // fully-reduced joins in a single pass over the parse tree.
     if !expr_relids_is_empty(&state2.inner_reduced) {
         let empty = ExprRelids { words: Vec::new() };
-        backend_rewrite_core::remove_nulling_relids_in_query(parse, &state2.inner_reduced, &empty);
+        backend_rewrite_core::remove_nulling_relids_in_query(
+            parse,
+            &state2.inner_reduced,
+            &empty,
+            mcx,
+        );
         // There could be references in the append_rel_list, too.
-        remove_nulling_relids_in_append_rel_list(root, &state2.inner_reduced, &empty);
+        remove_nulling_relids_in_append_rel_list(mcx, root, &state2.inner_reduced, &empty)?;
     }
 
     // Partially-reduced full joins have to be done one at a time, since they'll
@@ -264,12 +269,14 @@ pub fn reduce_outer_joins<'mcx>(
             parse,
             &full_join_relids,
             &statep.unreduced_side,
+            mcx,
         );
         remove_nulling_relids_in_append_rel_list(
+            mcx,
             root,
             &full_join_relids,
             &statep.unreduced_side,
-        );
+        )?;
     }
 
     Ok(())
@@ -280,11 +287,12 @@ pub fn reduce_outer_joins<'mcx>(
 /// children are the per-`AppendRelInfo` `translated_vars` (arena `NodeId`
 /// handles). Resolve each to its `Expr`, run the expression-tree
 /// `remove_nulling_relids` over it, and write it back.
-fn remove_nulling_relids_in_append_rel_list(
+fn remove_nulling_relids_in_append_rel_list<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     removable: &ExprRelids,
     except: &ExprRelids,
-) {
+) -> PgResult<()> {
     // Collect the NodeIds first (borrow of append_rel_list) to avoid holding it
     // while we mutate the node_arena.
     let mut ids: Vec<types_pathnodes::NodeId> = Vec::new();
@@ -303,12 +311,13 @@ fn remove_nulling_relids_in_append_rel_list(
         // `Default`, so we can't `mem::take`; the clone is the owned-tree
         // analogue of the C copy-mutator, which copies each Var/PHV before
         // editing its nullingrels anyway.)
-        let mut node = Node::Expr(root.node(id).clone());
-        backend_rewrite_core::remove_nulling_relids(&mut node, removable, except);
+        let mut node = Node::mk_expr(mcx, root.node(id).clone())?;
+        backend_rewrite_core::remove_nulling_relids(&mut node, removable, except, mcx);
         if let Some(e) = node.into_expr() {
             *root.node_mut(id) = e;
         }
     }
+    Ok(())
 }
 
 // ===========================================================================

@@ -787,11 +787,11 @@ fn pull_up_simple_subquery<'mcx>(
     // upper query's. We have to fix the subquery's append_rel_list too.
     let rtoffset = parse.rtable.len() as i32;
     offset_var_nodes_in_query(mcx, &mut subquery, rtoffset, 0)?;
-    offset_var_nodes_in_append_rel_list(&mut subroot, rtoffset, 0);
+    offset_var_nodes_in_append_rel_list(mcx, &mut subroot, rtoffset, 0)?;
 
     // Upper-level vars in subquery are now one level closer to their parent.
     increment_var_sublevels_up_in_query(mcx, &mut subquery, -1, 1)?;
-    increment_var_sublevels_up_in_append_rel_list(&mut subroot, -1, 1)?;
+    increment_var_sublevels_up_in_append_rel_list(mcx, &mut subroot, -1, 1)?;
 
     // The subquery's targetlist items are now in the appropriate form to insert
     // into the top query, except that we may need to wrap them in
@@ -909,7 +909,7 @@ fn pull_up_simple_subquery<'mcx>(
         let subrelids = result_rtes::get_relids_in_jointree(mcx, &sub_jt, true, false)?;
         let sub_expr = pathlike_bms_to_expr_relids(subrelids.as_deref());
         if last_ph_id(root) != 0 {
-            result_rtes::substitute_phv_relids_in_query(parse, varno, &sub_expr);
+            result_rtes::substitute_phv_relids_in_query(mcx, parse, varno, &sub_expr);
         }
         result_rtes::fix_append_rel_relids(mcx, root, varno, subrelids.as_deref(), &sub_expr)?;
     }
@@ -1063,7 +1063,7 @@ fn pull_up_simple_union_all<'mcx>(
     // Upper-level vars in subquery are now one level closer to their parent than
     // before. We don't have to worry about offsetting varnos, though, because the
     // UNION leaf queries can't cross-reference each other.
-    IncrementVarSublevelsUp_rtable(&mut rtable, -1, 1)?;
+    IncrementVarSublevelsUp_rtable(&mut rtable, -1, 1, mcx)?;
 
     // If the UNION ALL subquery had a LATERAL marker, propagate that to all its
     // children.
@@ -2774,7 +2774,7 @@ fn pullup_replace_vars<'mcx>(
     let mut cb = |var: &Var, _ctx: &mut ReplaceRteVariablesContext| -> PgResult<Expr> {
         pullup_replace_vars_callback(mcx, root, rvcontext, var)
     };
-    replace_rte_variables(&mut node, varno, 0, &mut cb, outer_has_sublinks)?;
+    replace_rte_variables(&mut node, varno, 0, &mut cb, outer_has_sublinks, mcx)?;
     Ok(node)
 }
 
@@ -2797,7 +2797,7 @@ fn pullup_replace_vars_subquery<'mcx>(
         let mut cb = |var: &Var, _ctx: &mut ReplaceRteVariablesContext| -> PgResult<Expr> {
             pullup_replace_vars_callback(mcx, root, rvcontext, var)
         };
-        replace_rte_variables(&mut node, varno, 1, &mut cb, &mut none_outer)?;
+        replace_rte_variables(&mut node, varno, 1, &mut cb, &mut none_outer, mcx)?;
     }
     match node.into_query() {
         Some(q) => *query = q,
@@ -2927,6 +2927,7 @@ fn pullup_replace_vars_callback<'mcx>(
                                 &mut newnode,
                                 Some(&expr_relids_make_singleton(lvarno)),
                                 &lnullingrels,
+                                mcx,
                             );
                         }
                     }
@@ -2934,7 +2935,7 @@ fn pullup_replace_vars_callback<'mcx>(
 
                 // Finally, deal with Vars/PHVs of the subquery itself.
                 let subquery_relids = bms_to_expr_relids(rcon.relids.as_deref());
-                add_nulling_relids(&mut newnode, Some(&subquery_relids), &var.varnullingrels);
+                add_nulling_relids(&mut newnode, Some(&subquery_relids), &var.varnullingrels, mcx);
                 // Assert we did put the varnullingrels into the expression.
                 debug_assert!({
                     let after = pull_varnos(Some(root), &newnode);
@@ -2946,7 +2947,7 @@ fn pullup_replace_vars_callback<'mcx>(
 
     // Must adjust varlevelsup if replaced Var is within a subquery.
     if varlevelsup > 0 {
-        IncrementVarSublevelsUp(&mut newnode, varlevelsup as i32, 0)?;
+        IncrementVarSublevelsUp(&mut newnode, varlevelsup as i32, 0, mcx)?;
     }
 
     match newnode.into_expr() {
@@ -3135,7 +3136,7 @@ fn offset_var_nodes_in_query<'mcx>(
 ) -> types_error::PgResult<()> {
     let node = core::mem::replace(subquery, Query::new(mcx));
     let mut qnode = Node::mk_query(mcx, node)?;
-    OffsetVarNodes(&mut qnode, offset, sublevels_up);
+    OffsetVarNodes(&mut qnode, offset, sublevels_up, mcx);
     if let Some(q) = qnode.into_query() {
         *subquery = q;
     } else {
@@ -3153,7 +3154,7 @@ fn increment_var_sublevels_up_in_query<'mcx>(
 ) -> types_error::PgResult<()> {
     let node = core::mem::replace(subquery, Query::new(mcx));
     let mut qnode = Node::mk_query(mcx, node)?;
-    let res = IncrementVarSublevelsUp(&mut qnode, delta, min_sublevels_up);
+    let res = IncrementVarSublevelsUp(&mut qnode, delta, min_sublevels_up, mcx);
     if let Some(q) = qnode.into_query() {
         *subquery = q;
     } else {
@@ -3164,7 +3165,12 @@ fn increment_var_sublevels_up_in_query<'mcx>(
 
 /// `OffsetVarNodes((Node *) subroot->append_rel_list, rtoffset, 0)`: each
 /// AppendRelInfo's relid-bearing children are its translated_vars (arena Exprs).
-fn offset_var_nodes_in_append_rel_list(subroot: &mut PlannerInfo, offset: i32, sublevels_up: i32) {
+fn offset_var_nodes_in_append_rel_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    subroot: &mut PlannerInfo,
+    offset: i32,
+    sublevels_up: i32,
+) -> types_error::PgResult<()> {
     let mut ids: Vec<NodeId> = Vec::new();
     for ai in subroot.append_rel_list.iter() {
         for &id in ai.translated_vars.iter() {
@@ -3174,12 +3180,13 @@ fn offset_var_nodes_in_append_rel_list(subroot: &mut PlannerInfo, offset: i32, s
         }
     }
     for id in ids {
-        let mut node = Node::Expr(subroot.node(id).clone());
-        OffsetVarNodes(&mut node, offset, sublevels_up);
+        let mut node = Node::mk_expr(mcx, subroot.node(id).clone())?;
+        OffsetVarNodes(&mut node, offset, sublevels_up, mcx);
         if let Some(e) = node.into_expr() {
             *subroot.node_mut(id) = e;
         }
     }
+    Ok(())
     // Also adjust the parent_relid/child_relid integer fields? In C,
     // OffsetVarNodes over the append_rel_list list adjusts only the Var nodes
     // within translated_vars (parent_relid/child_relid are plain ints not Vars),
@@ -3187,7 +3194,8 @@ fn offset_var_nodes_in_append_rel_list(subroot: &mut PlannerInfo, offset: i32, s
 }
 
 /// `IncrementVarSublevelsUp((Node *) subroot->append_rel_list, -1, 1)`.
-fn increment_var_sublevels_up_in_append_rel_list(
+fn increment_var_sublevels_up_in_append_rel_list<'mcx>(
+    mcx: Mcx<'mcx>,
     subroot: &mut PlannerInfo,
     delta: i32,
     min_sublevels_up: i32,
@@ -3201,8 +3209,8 @@ fn increment_var_sublevels_up_in_append_rel_list(
         }
     }
     for id in ids {
-        let mut node = Node::Expr(subroot.node(id).clone());
-        IncrementVarSublevelsUp(&mut node, delta, min_sublevels_up)?;
+        let mut node = Node::mk_expr(mcx, subroot.node(id).clone())?;
+        IncrementVarSublevelsUp(&mut node, delta, min_sublevels_up, mcx)?;
         if let Some(e) = node.into_expr() {
             *subroot.node_mut(id) = e;
         }
