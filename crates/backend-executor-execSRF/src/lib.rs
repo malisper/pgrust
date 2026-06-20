@@ -292,6 +292,20 @@ fn init_sexpr<'mcx>(
         fn_expr: None,
     };
 
+    // C: fmgr_info_set_expr((Node *) sexpr->expr, &(sexpr->func));
+    // Stamp the call-expression node onto the resolved FmgrInfo so the later
+    // `get_fn_expr_*` readers (e.g. jsonb_populate_record's
+    // get_record_type_from_argument) can recover the declared argument type.
+    // Without this, `get_fn_expr_argtype` returns InvalidOid and downstream
+    // type lookups raise "cache lookup failed for type 0".
+    if let Some(expr) = sexpr.expr.as_deref() {
+        backend_utils_fmgr_fmgr_seams::fmgr_info_set_expr::call(
+            estate.es_query_cxt,
+            &mut sexpr.func,
+            expr,
+        )?;
+    }
+
     // C: sexpr->fcinfo = palloc(SizeForFunctionCallInfo(numargs));
     //    InitFunctionCallInfoData(*sexpr->fcinfo, &(sexpr->func), numargs,
     //                             input_collation, NULL, NULL);
