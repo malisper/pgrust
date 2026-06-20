@@ -24,6 +24,6 @@ incremental = false
 
 [profile.release]
 debug = 0
-strip = "debuginfo"
+strip = "symbols"
 lto = false
 codegen-units = 1
