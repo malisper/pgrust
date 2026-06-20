@@ -354,6 +354,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MyDatabaseHasLoginEventTriggers` (globals.c) — the cached
+    /// `pg_database.dathasloginevt` flag for the connected database, read by
+    /// `EventTriggerOnLogin`'s fast-exit gate.
+    pub fn my_database_has_login_event_triggers() -> bool
+);
+
+seam_core::seam!(
     /// `MyProcPort->cmdline_options` (globals.c Port): the `-c`-style command
     /// line options string from the startup packet, copied into `mcx`, or
     /// `None` if absent.

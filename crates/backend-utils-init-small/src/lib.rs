@@ -151,6 +151,9 @@ pub fn init_seams() {
     backend_utils_init_small_seams::set_my_database_has_login_event_triggers::set(
         globals::SetMyDatabaseHasLoginEventTriggers,
     );
+    backend_utils_init_small_seams::my_database_has_login_event_triggers::set(
+        globals::MyDatabaseHasLoginEventTriggers,
+    );
     backend_utils_init_small_seams::has_my_proc_port::set(globals::MyProcPortIsSet);
     // Contract-reconcile (init-small owns the real impl): GUC-backed integer
     // globals + per-connection `Port` field copies consumed by postinit and

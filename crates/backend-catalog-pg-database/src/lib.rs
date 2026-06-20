@@ -474,13 +474,18 @@ fn set_database_has_login_event_triggers(mcx: Mcx<'_>) -> PgResult<()> {
     let rel = table_seams::table_open::call(mcx, cat::DatabaseRelationId, RowExclusiveLock)?;
 
     // LockSharedObject(DatabaseRelationId, MyDatabaseId, 0, AccessExclusiveLock).
-    // Held by the returned guard until transaction end (the C default).
-    let _guard = lmgr_seams::lock_shared_object::call(
+    // C never calls UnlockSharedObject here: the lock is transaction-scoped and
+    // released by the lock manager at xact end. Disarm the guard's Drop with
+    // keep() so we do NOT release it at function exit; otherwise the xact-end
+    // release double-frees it -> "you don't own a lock of type
+    // AccessExclusiveLock" WARNING.
+    lmgr_seams::lock_shared_object::call(
         cat::DatabaseRelationId,
         my_database_id,
         0,
         AccessExclusiveLock,
-    )?;
+    )?
+    .keep();
 
     // tuple = SearchSysCacheLockedCopy1(DATABASEOID, ObjectIdGetDatum(MyDatabaseId));
     // (LockTuple(InplaceUpdateTupleLock) + GETSTRUCT, via the locked read.)
@@ -511,6 +516,62 @@ fn set_database_has_login_event_triggers(mcx: Mcx<'_>) -> PgResult<()> {
         // No change: drop the inplace tuple lock taken by the locked read.
         lmgr_seams::unlock_tuple::call(rel.rd_id, otid, InplaceUpdateTupleLock)?;
     }
+
+    // table_close(pg_db, RowExclusiveLock);
+    rel.close(RowExclusiveLock)?;
+    Ok(())
+}
+
+/// `EventTriggerOnLogin`'s stale-flag reset (event_trigger.c:951-985) — clear
+/// `pg_database.dathasloginevt` for the current database in place. The caller
+/// (event-trigger crate) has already taken `ConditionalLockSharedObject` and
+/// rechecked that no login event trigger remains, so this only does the
+/// `table_open(RowExclusiveLock)` + 3-phase in-place update (set the flag false
+/// iff currently true) + `table_close`. Mirrors C's
+/// `systable_inplace_update_begin/finish/cancel` over `DatabaseOidIndexId`.
+fn reset_database_has_login_event_triggers(mcx: Mcx<'_>) -> PgResult<()> {
+    let my_database_id = backend_commands_tablespace_globals_seams::MyDatabaseId::call()?;
+
+    // pg_db = table_open(DatabaseRelationId, RowExclusiveLock);
+    let rel = table_seams::table_open::call(mcx, cat::DatabaseRelationId, RowExclusiveLock)?;
+
+    // ScanKeyInit(Anum_pg_database_oid BTEqual F_OIDEQ MyDatabaseId).
+    let key = oid_key(cat::Anum_pg_database_oid as AttrNumber, my_database_id)?;
+    let keys = [key];
+
+    // The in-place mutate callback receives the live tuple's full user-data
+    // area (C's GETSTRUCT(tup)). C does:
+    //   db = (Form_pg_database) GETSTRUCT(tuple);
+    //   if (db->dathasloginevt) { db->dathasloginevt = false; ...finish }
+    //   else ...cancel
+    // dathasloginevt is a 1-byte bool at a fixed struct offset; every column
+    // before it is fixed-width and NOT NULL:
+    //   oid(4) + datname(NameData = NAMEDATALEN) + datdba(4) + encoding(4)
+    //   + datlocprovider(1) + datistemplate(1) + datallowconn(1)
+    const DATHASLOGINEVT_OFFSET: usize = 4 + NAMEDATALEN as usize + 4 + 4 + 1 + 1 + 1;
+    let mut mutate = |struct_bytes: &mut [u8]| -> PgResult<bool> {
+        if struct_bytes.len() <= DATHASLOGINEVT_OFFSET {
+            return Err(PgError::error(
+                "reset_database_has_login_event_triggers: pg_database tuple shorter than dathasloginevt offset",
+            ));
+        }
+        // Return Ok(false) (cancel — no write) when the flag is already clear,
+        // matching C's systable_inplace_update_cancel branch.
+        if struct_bytes[DATHASLOGINEVT_OFFSET] == 0 {
+            return Ok(false);
+        }
+        struct_bytes[DATHASLOGINEVT_OFFSET] = 0;
+        Ok(true)
+    };
+
+    let _tid = genam_seams::systable_inplace_update::call(
+        mcx,
+        &rel,
+        cat::DatabaseOidIndexId,
+        true,
+        &keys,
+        &mut mutate,
+    )?;
 
     // table_close(pg_db, RowExclusiveLock);
     rel.close(RowExclusiveLock)?;
@@ -629,4 +690,5 @@ pub fn init_seams() {
     s::scan_pg_database_locked_for_update::set(scan_pg_database_locked_for_update);
     s::set_pg_database_invalid_inplace::set(set_pg_database_invalid_inplace);
     s::set_database_has_login_event_triggers::set(set_database_has_login_event_triggers);
+    s::reset_database_has_login_event_triggers::set(reset_database_has_login_event_triggers);
 }

@@ -94,6 +94,7 @@ backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-sea
 backend-main-main-seams = { path = "../backend-main-main-seams" }
 backend-commands-user-seams = { path = "../backend-commands-user-seams" }
 backend-replication-walsender-seams = { path = "../backend-replication-walsender-seams" }
+backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
 port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
 
 # F1 simple-Query pipeline seams.

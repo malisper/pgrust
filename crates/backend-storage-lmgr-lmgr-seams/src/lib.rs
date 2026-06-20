@@ -89,6 +89,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ConditionalLockSharedObject(classid, objid, objsubid, lockmode)`
+    /// (lmgr.c): conditionally lock a shared-catalog object, returning `true`
+    /// iff the lock was acquired (never blocks). On success the lock is held
+    /// until transaction end (the C default — `EventTriggerOnLogin` never
+    /// explicitly unlocks it), so no guard is returned. Can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn conditional_lock_shared_object(
+        classid: Oid,
+        objid: Oid,
+        objsubid: u16,
+        lockmode: LOCKMODE,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `UnlockRelationOid(relid, lockmode)` (lmgr.c). [`LockGuard`] plumbing
     /// — consumers go through the guard, never call this directly. C can
     /// `elog(WARNING/ERROR)` on a lock-table inconsistency, carried on `Err`.

@@ -58,6 +58,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `EventTriggerOnLogin()` (event_trigger.c): fire any login event triggers
+    /// at the start of a backend's main loop. Fast-exits unless a login event
+    /// trigger is present in the connected database (`MyDatabaseHasLoginEventTriggers`);
+    /// runs the triggers in a fresh transaction or, if the flag is stale, clears
+    /// it in place. `Err` carries the fired triggers' / catalog `ereport(ERROR)`s.
+    pub fn event_trigger_on_login() -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `EventTriggerCollectCreateOpClass(stmt, opclassoid, operators,
     /// procedures)` (event_trigger.c): record a CREATE OPERATOR CLASS for
     /// possibly-interested event triggers. `Err` carries any allocation

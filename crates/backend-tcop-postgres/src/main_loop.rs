@@ -1069,11 +1069,6 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
     // RowDescription reuse buffer, postgres.c:4361) — used only by
     // exec_describe_statement_message (unported F2). Not created here.
 
-    // EventTriggerOnLogin(): fire login event triggers. The event-trigger
-    // engine is a separate unported unit; login triggers are an opt-in feature
-    // not present on a fresh cluster, so this is a no-op on the target. Skipped
-    // with note (EventTriggerOnLogin is unported).
-
     // --- The processing loop (postgres.c:4516) ---
     let mut state = LoopState {
         send_ready_for_query: true,
@@ -1084,6 +1079,36 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
     // if (!ignore_till_sync) send_ready_for_query = true; (initially / after error)
     if !globals::ignore_till_sync() {
         state.send_ready_for_query = true;
+    }
+
+    // EventTriggerOnLogin(): fire login event triggers (postgres.c, called just
+    // after the sigsetjmp recovery point is established). Fast-exits unless the
+    // connected database has a login event trigger
+    // (MyDatabaseHasLoginEventTriggers); otherwise runs them in a fresh
+    // transaction. Because C reaches this AFTER arming sigsetjmp, an error must
+    // route to the same recovery handler the loop uses (abort the transaction,
+    // re-issue ReadyForQuery) and NOT abort the backend — so we run it under the
+    // same catch_unwind + run_error_recovery protection as a loop iteration.
+    {
+        let login_cxt = backend_top.new_child("MessageContext");
+        let res = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            backend_commands_event_trigger_seams::event_trigger_on_login::call()
+        })) {
+            Ok(r) => r,
+            Err(payload) => match payload.downcast::<types_error::PgError>() {
+                Ok(err) => Err(*err),
+                Err(_) => Err(types_error::PgError::error(
+                    "login event trigger path panicked",
+                )),
+            },
+        };
+        if let Err(err) = res {
+            run_error_recovery(login_cxt.mcx(), err, &mut state)?;
+            if !globals::ignore_till_sync() {
+                state.send_ready_for_query = true;
+            }
+        }
+        drop(login_cxt);
     }
 
     loop {

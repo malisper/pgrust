@@ -190,3 +190,15 @@ seam_core::seam!(
     /// `table_close`. `Err` carries the catalog-mutation `ereport(ERROR)`s.
     pub fn set_database_has_login_event_triggers(mcx: Mcx<'_>) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `EventTriggerOnLogin`'s stale-flag reset (event_trigger.c:951-985): clear
+    /// `pg_database.dathasloginevt` for the current database in place. The caller
+    /// already holds `ConditionalLockSharedObject(DatabaseRelationId,
+    /// MyDatabaseId, 0, AccessExclusiveLock)` and rechecked the login run-list is
+    /// empty. `table_open(RowExclusiveLock)` +
+    /// `systable_inplace_update_begin/finish/cancel(DatabaseOidIndexId)` (set the
+    /// flag false iff currently true) + `table_close`. `Err` carries the catalog
+    /// `ereport(ERROR)`s.
+    pub fn reset_database_has_login_event_triggers(mcx: Mcx<'_>) -> PgResult<()>
+);

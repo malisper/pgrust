@@ -598,6 +598,93 @@ fn event_trigger_fire_impl(
     Ok(())
 }
 
+/// `EventTriggerCommonSetup(NULL, EVT_Login, "login", &trigdata, ...)` reduced
+/// to the login case — build the run-list of login event-trigger function OIDs.
+/// `EVT_Login`'s tag is `CMDTAG_LOGIN` (no parse tree is consulted), so the
+/// `parsetree == NULL` C call is faithful. Returns `(runlist, tag)`.
+fn event_trigger_login_setup(mcx: Mcx<'_>) -> PgResult<(Vec<Oid>, CommandTag)> {
+    let cachelist = evtcache_seams::event_cache_lookup::call(mcx, EventTriggerEvent::Login)?;
+
+    // EventTriggerGetTag(NULL, EVT_Login) == CMDTAG_LOGIN.
+    let tag = CommandTag(backend_tcop_cmdtag::get_command_tag_enum(b"LOGIN"));
+
+    let mut runlist: Vec<Oid> = Vec::new();
+    for item in cachelist.iter() {
+        if filter_event_trigger(tag, item) {
+            runlist.push(item.fnoid);
+        }
+    }
+    Ok((runlist, tag))
+}
+
+/// `EventTriggerOnLogin()` (event_trigger.c:896-996) — fire login event triggers
+/// at connection start, if any are present.
+///
+/// Mirrors the C driver: fast-exit gate (`!IsUnderPostmaster || !event_triggers
+/// || !OidIsValid(MyDatabaseId) || !MyDatabaseHasLoginEventTriggers`), then a
+/// fresh transaction in which the run-list is built and invoked (under an active
+/// transaction snapshot). When the run-list comes back empty — the
+/// `dathasloginevt` flag is stale because every login trigger was dropped — it
+/// conditionally takes the shared lock, rechecks, and clears the flag in place.
+pub fn EventTriggerOnLogin() -> PgResult<()> {
+    // See EventTriggerDDLCommandStart for why event triggers are disabled in
+    // single-user mode / via GUC; we also need a valid database connection.
+    if !init_small_seams::is_under_postmaster::call()
+        || !vars::event_triggers.read()
+        || !types_core::primitive::OidIsValid(
+            backend_commands_tablespace_globals_seams::MyDatabaseId::call()?,
+        )
+        || !init_small_seams::my_database_has_login_event_triggers::call()
+    {
+        return Ok(());
+    }
+
+    backend_access_transam_xact_seams::start_transaction_command::call()?;
+
+    // EventTriggerCommonSetup(NULL, EVT_Login, "login", &trigdata, false).
+    let setup_cxt = MemoryContext::new("event trigger login-setup");
+    let (runlist, tag) = event_trigger_login_setup(setup_cxt.mcx())?;
+
+    if !runlist.is_empty() {
+        // Event trigger execution may require an active snapshot.
+        backend_utils_time_snapmgr_seams::push_active_snapshot_transaction::call()?;
+
+        // Run the triggers.
+        event_trigger_invoke(&runlist, "login", tag)?;
+
+        backend_utils_time_snapmgr_seams::pop_active_snapshot::call()?;
+    } else {
+        // No active login event trigger, but pg_database.dathasloginevt is set.
+        // Try to unset the flag. Use the lock to prevent a concurrent
+        // SetDatabaseHasLoginEventTriggers(), but don't block the connection —
+        // acquire it conditionally.
+        let my_database_id = backend_commands_tablespace_globals_seams::MyDatabaseId::call()?;
+        let got = backend_storage_lmgr_lmgr_seams::conditional_lock_shared_object::call(
+            types_catalog::catalog::DATABASE_RELATION_ID,
+            my_database_id,
+            0,
+            types_storage::lock::AccessExclusiveLock,
+        )?;
+        if got {
+            // The lock is held. Recheck that the login event trigger list is
+            // still empty. Once empty, even a concurrent backend inserting /
+            // enabling a login trigger will update dathasloginevt *afterwards*.
+            let recheck_cxt = MemoryContext::new("event trigger login-recheck");
+            let (recheck, _tag) = event_trigger_login_setup(recheck_cxt.mcx())?;
+            if recheck.is_empty() {
+                // table_open + 3-phase in-place clear of dathasloginevt + close,
+                // owned by the pg-database unit.
+                backend_catalog_pg_database_seams::reset_database_has_login_event_triggers::call(
+                    setup_cxt.mcx(),
+                )?;
+            }
+        }
+    }
+
+    backend_access_transam_xact_seams::commit_transaction_command::call()?;
+    Ok(())
+}
+
 // ===========================================================================
 // Command collection (event_trigger.c).
 // ===========================================================================
@@ -1620,6 +1707,7 @@ pub fn init_seams() {
     // OID-by-name lookup for ALTER / DROP / COMMENT ON / RENAME EVENT TRIGGER by
     // name (objectaddress.c's get_object_address dispatch).
     backend_commands_event_trigger_seams::get_event_trigger_oid::set(get_event_trigger_oid);
+    backend_commands_event_trigger_seams::event_trigger_on_login::set(EventTriggerOnLogin);
 
     // ALTER EVENT TRIGGER ... OWNER TO (by name) + REASSIGN OWNED (by OID).
     backend_commands_event_trigger_seams::AlterEventTriggerOwner::set(|name, new_owner_id| {
