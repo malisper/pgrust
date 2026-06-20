@@ -138,6 +138,34 @@ pub fn init_seams() {
     sx::gin_lookup_cmp_proc_finfo::set(|mcx, atttypid| gin_lookup_cmp_proc_finfo_impl(mcx, atttypid));
     sx::gin_index_getattr::set(gin_index_getattr_impl);
     sx::gin_get_null_category::set(gin_get_null_category_impl);
+    sx::gin_compare_entries::set(gin_compare_entries_impl);
+}
+
+/// `DatumGetInt32(FunctionCall2Coll(&ginstate->compareFn[attnum-1], collation,
+/// a, b))` (ginCompareEntries, ginutil.c:406): invoke the index key type's
+/// comparison support function for two non-null keys. The comparator is the
+/// type's default btree compare proc (or the opclass `GIN_COMPARE_PROC`); both
+/// args are ordinary by-value/by-reference scalars and the `int4` result crosses
+/// the fmgr lane cleanly (no `internal`-typed parameter), so this is a plain
+/// `FunctionCall2Coll` through the canonical-`Datum` fmgr dispatch — not an
+/// opclass `internal`-out-param support proc.
+fn gin_compare_entries_impl<'mcx>(
+    flinfo: &types_core::fmgr::FmgrInfo,
+    collation: Oid,
+    a: Datum<'mcx>,
+    b: Datum<'mcx>,
+) -> PgResult<i32> {
+    // The result is an `int4` by-value Datum; a transient context suffices for
+    // the call frame (the comparator allocates nothing that outlives it).
+    let scratch = mcx::MemoryContext::new("ginCompareEntries");
+    let res = backend_utils_fmgr_fmgr_seams::function_call2_coll_datum::call(
+        scratch.mcx(),
+        flinfo.fn_oid,
+        collation,
+        a,
+        b,
+    )?;
+    Ok(res.as_i32())
 }
 
 /// `RelationGetDescr(index)` (utils/rel.h) — the index's nominal tuple
