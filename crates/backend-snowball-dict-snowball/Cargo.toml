@@ -20,3 +20,4 @@ backend-tsearch-ts-utils-seams = { path = "../backend-tsearch-ts-utils-seams" }
 backend-utils-adt-formatting-seams = { path = "../backend-utils-adt-formatting-seams" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
+libc = "0.2"

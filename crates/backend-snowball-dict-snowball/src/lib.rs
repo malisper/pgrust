@@ -40,6 +40,8 @@ use types_error::{
 };
 use types_tsearch::{DictSnowball, SnowballEnvHandle, StopList, TSLexeme};
 
+pub mod mem_provider;
+
 /// `DEFAULT_COLLATION_OID` (`pg_collation_d.h`).
 const DEFAULT_COLLATION_OID: types_core::Oid = 100;
 
@@ -220,8 +222,14 @@ pub fn dsnowball_lexize<'mcx>(
     }
 
     // C: *txt == '\0' || searchstoplist(&d->stoplist, txt) → report as stopword.
+    // C ALWAYS returns the `res = palloc0(2 * TSLexeme)` array (never NULL); a
+    // stopword leaves `res[0].lexeme == NULL`, i.e. an EMPTY but non-NULL array.
+    // That distinction is load-bearing: in `parsetext`/`LexizeExec` a non-NULL
+    // empty array means "stopword — consume a position", whereas a NULL means
+    // "dictionary doesn't recognize the word — try the next dictionary".
+    // Snowball recognizes every string, so it must never return NULL here.
     if txt.is_empty() || searchstoplist::call(&d.stoplist, &txt) {
-        return Ok(None);
+        return Ok(Some(PgVec::new_in(mcx)));
     }
 
     // C: recode to UTF-8 if the stemmer is UTF-8 and the server encoding differs.
@@ -303,4 +311,7 @@ fn one_lexeme<'mcx>(
 pub fn init_seams() {
     backend_snowball_dict_snowball_seams::dsnowball_init::set(dsnowball_init);
     backend_snowball_dict_snowball_seams::dsnowball_lexize::set(dsnowball_lexize);
+    // Install the raw-address allocator the libstemmer runtime needs (the
+    // backend `palloc` redefinition in `snowball/header.h`).
+    mem_provider::install_snowball_alloc();
 }
