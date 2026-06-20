@@ -481,6 +481,39 @@ fn fc_pg_get_statisticsobjdef_expressions(
     .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED))
 }
 
+/// `pg_get_function_arguments(oid) -> text` (oid 2162).
+fn fc_pg_get_function_arguments(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let funcid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let res = crate::functiondef::pg_get_function_arguments(m.mcx(), funcid)?;
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `pg_get_function_identity_arguments(oid) -> text` (oid 2232).
+fn fc_pg_get_function_identity_arguments(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let funcid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let res = crate::functiondef::pg_get_function_identity_arguments(m.mcx(), funcid)?;
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `pg_get_function_result(oid) -> text` (oid 2165).
+fn fc_pg_get_function_result(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let funcid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let res = crate::functiondef::pg_get_function_result(m.mcx(), funcid)?;
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -541,6 +574,9 @@ pub fn register_ruleutils_builtins() {
         builtin(1662, "pg_get_triggerdef", 1, true, false, fc_pg_get_triggerdef),
         builtin(2730, "pg_get_triggerdef_ext", 2, true, false, fc_pg_get_triggerdef_ext),
         builtin(2098, "pg_get_functiondef", 1, true, false, fc_pg_get_functiondef),
+        builtin(2162, "pg_get_function_arguments", 1, true, false, fc_pg_get_function_arguments),
+        builtin(2232, "pg_get_function_identity_arguments", 1, true, false, fc_pg_get_function_identity_arguments),
+        builtin(2165, "pg_get_function_result", 1, true, false, fc_pg_get_function_result),
         builtin(3352, "pg_get_partkeydef", 1, true, false, fc_pg_get_partkeydef),
         builtin(3415, "pg_get_statisticsobjdef", 1, true, false, fc_pg_get_statisticsobjdef),
         builtin(6174, "pg_get_statisticsobjdef_columns", 1, true, false, fc_pg_get_statisticsobjdef_columns),

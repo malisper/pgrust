@@ -248,6 +248,63 @@ pub fn pg_get_functiondef<'mcx>(
     Ok(Some(PgString::from_str_in(&buf, mcx)?))
 }
 
+/// `pg_get_function_arguments(funcid)` (ruleutils.c 3179-3196). A
+/// nicely-formatted list of arguments for a function: everything that would go
+/// between the parentheses in `CREATE FUNCTION` (defaults included).
+/// `Ok(None)` (`PG_RETURN_NULL`) when the proc tuple is gone.
+pub fn pg_get_function_arguments<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    let info =
+        match backend_utils_cache_syscache_seams::search_pg_functiondef_info::call(mcx, funcid)? {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+    let mut buf = String::new();
+    print_function_arguments(mcx, &mut buf, &info, false, true)?;
+    Ok(Some(PgString::from_str_in(&buf, mcx)?))
+}
+
+/// `pg_get_function_identity_arguments(funcid)` (ruleutils.c 3205-3221). The
+/// formatted argument list for `ALTER FUNCTION` etc.: like
+/// `pg_get_function_arguments` but without printing defaults.
+/// `Ok(None)` (`PG_RETURN_NULL`) when the proc tuple is gone.
+pub fn pg_get_function_identity_arguments<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    let info =
+        match backend_utils_cache_syscache_seams::search_pg_functiondef_info::call(mcx, funcid)? {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+    let mut buf = String::new();
+    print_function_arguments(mcx, &mut buf, &info, false, false)?;
+    Ok(Some(PgString::from_str_in(&buf, mcx)?))
+}
+
+/// `pg_get_function_result(funcid)` (ruleutils.c 3230-3253). A
+/// nicely-formatted version of the result type of a function: what would appear
+/// after `RETURNS` in `CREATE FUNCTION`. `Ok(None)` (`PG_RETURN_NULL`) when the
+/// proc tuple is gone or the object is a procedure (which has no result type).
+pub fn pg_get_function_result<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    let info =
+        match backend_utils_cache_syscache_seams::search_pg_functiondef_info::call(mcx, funcid)? {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+    if info.form.prokind == PROKIND_PROCEDURE {
+        return Ok(None);
+    }
+    let mut buf = String::new();
+    print_function_rettype(mcx, &mut buf, &info)?;
+    Ok(Some(PgString::from_str_in(&buf, mcx)?))
+}
+
 /// `%g`-style rendering of an `f32` cost/rows value (C `appendStringInfo(..,
 /// "%g", ..)`). `%g` drops trailing zeros and uses the shortest of fixed/exp.
 fn fmt_g(v: f32) -> String {
@@ -330,9 +387,19 @@ fn print_function_arguments<'mcx>(
     }
     let mut nextargdefault: usize = 0;
 
-    // Ordered-set aggregate special-casing is omitted (aggregates are rejected
-    // by the sole caller; insertorderbyat stays -1).
-    let insertorderbyat: i32 = -1;
+    // Check for special treatment of ordered-set aggregates.
+    let mut insertorderbyat: i32 = -1;
+    if proc.prokind == PROKIND_AGGREGATE {
+        // aggtup = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(proc->oid));
+        // if (!HeapTupleIsValid(aggtup)) elog(ERROR, "cache lookup failed ...");
+        let agg = backend_utils_cache_syscache_seams::agg_row_by_oid::call(mcx, proc.oid)?
+            .ok_or_else(|| {
+                PgError::error(format!("cache lookup failed for aggregate {}", proc.oid))
+            })?;
+        if types_catalog::pg_aggregate::AGGKIND_IS_ORDERED_SET(agg.aggkind) {
+            insertorderbyat = agg.aggnumdirectargs;
+        }
+    }
 
     let mut argsprinted = 0i32;
     let mut inputargno = 0i32;
