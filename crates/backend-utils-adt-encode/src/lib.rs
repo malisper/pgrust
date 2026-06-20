@@ -240,7 +240,7 @@ pub fn init_seams() {
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `VARDATA_ANY` payload bytes of a by-ref varlena arg: skip the 1-byte (short)
 /// or 4-byte (long, uncompressed) header. Mirrors `vardata_any_slice` in
@@ -284,63 +284,62 @@ fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: &[u8]) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the dispatch point every builtin
-/// crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: PgError) -> ! {
-    std::panic::panic_any(err)
-}
-
-/// `binary_encode(bytea, text) -> text` (C `binary_encode`).
-fn fc_binary_encode(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+/// `binary_encode(bytea, text) -> text` (C `binary_encode`). Result-native: the
+/// `ereport(ERROR)` of an unrecognized encoding name travels back as
+/// `Err(PgError)` straight to the fmgr dispatch `invoke_builtin`, with no
+/// panic/catch_unwind.
+fn fc_binary_encode(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let scratch = mcx::MemoryContext::new("binary_encode scratch");
     let result: Vec<u8> = {
         let data = arg_varlena_bytes(fcinfo, 0);
         let name = arg_varlena_bytes(fcinfo, 1);
         let name = std::str::from_utf8(name)
             .expect("encode: encoding name is database-encoding text");
-        match binary_encode_bytes(scratch.mcx(), data, name) {
-            Ok(v) => v.as_slice().to_vec(),
-            Err(e) => raise(e),
-        }
+        binary_encode_bytes(scratch.mcx(), data, name)?
+            .as_slice()
+            .to_vec()
     };
-    ret_varlena(fcinfo, &result)
+    Ok(ret_varlena(fcinfo, &result))
 }
 
 /// `binary_decode(text, text) -> bytea` (C `binary_decode`).
-fn fc_binary_decode(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_decode(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let scratch = mcx::MemoryContext::new("binary_decode scratch");
     let result: Vec<u8> = {
         let data = arg_varlena_bytes(fcinfo, 0);
         let name = arg_varlena_bytes(fcinfo, 1);
         let name = std::str::from_utf8(name)
             .expect("decode: encoding name is database-encoding text");
-        match binary_decode_bytes(scratch.mcx(), data, name) {
-            Ok(v) => v.as_slice().to_vec(),
-            Err(e) => raise(e),
-        }
+        binary_decode_bytes(scratch.mcx(), data, name)?
+            .as_slice()
+            .to_vec()
     };
-    ret_varlena(fcinfo, &result)
+    Ok(ret_varlena(fcinfo, &result))
 }
 
 /// Register the `encode.c` SQL builtins (C: their `fmgr_builtins[]` rows).
 fn register_encode_builtins() {
-    backend_utils_fmgr_core::register_builtins([
-        BuiltinFunction {
-            foid: 1946,
-            name: "binary_encode".to_string(),
-            nargs: 2,
-            strict: true,
-            retset: false,
-            func: Some(fc_binary_encode),
-        },
-        BuiltinFunction {
-            foid: 1947,
-            name: "binary_decode".to_string(),
-            nargs: 2,
-            strict: true,
-            retset: false,
-            func: Some(fc_binary_decode),
-        },
+    fn native(
+        foid: u32,
+        name: &str,
+        nargs: i16,
+        f: PgFnNative,
+    ) -> (BuiltinFunction, PgFnNative) {
+        (
+            BuiltinFunction {
+                foid,
+                name: name.to_string(),
+                nargs,
+                strict: true,
+                retset: false,
+                func: None,
+            },
+            f,
+        )
+    }
+    backend_utils_fmgr_core::register_builtins_native([
+        native(1946, "binary_encode", 2, fc_binary_encode),
+        native(1947, "binary_decode", 2, fc_binary_decode),
     ]);
 }
 

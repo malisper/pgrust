@@ -20,7 +20,7 @@ static INSTALL: Once = Once::new();
 /// bytes) expect.
 fn install_mblen_single_byte() {
     INSTALL.call_once(|| {
-        pg_mblen_range::set(|_mbstr| 1);
+        pg_mblen_range::set(|_mbstr| Ok(1));
     });
 }
 
