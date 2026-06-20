@@ -16,7 +16,7 @@
 //! so they are not registered.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -48,33 +48,27 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("slotfuncs fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `pg_drop_replication_slot(name)` (slotfuncs.c) — `void`.
-fn fc_pg_drop_replication_slot(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_drop_replication_slot(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let name = arg_name(fcinfo, 0).to_string();
     let m = scratch_mcx();
-    match crate::pg_drop_replication_slot(m.mcx(), &name) {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
-    }
+    crate::pg_drop_replication_slot(m.mcx(), &name)?;
+    Ok(ret_void())
 }
 
 /// `pg_sync_replication_slots()` (slotfuncs.c) — `void`, no arguments.
-fn fc_pg_sync_replication_slots(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_sync_replication_slots(
+    _fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    match crate::pg_sync_replication_slots(m.mcx()) {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
-    }
+    crate::pg_sync_replication_slots(m.mcx())?;
+    Ok(ret_void())
 }
 
 // ---------------------------------------------------------------------------
@@ -87,16 +81,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the two `void`-returning `slotfuncs.c` fmgr builtins (C: their
@@ -107,7 +104,7 @@ fn builtin(
 /// `proretset`. `pg_drop_replication_slot` takes one `name` argument;
 /// `pg_sync_replication_slots` takes none.
 pub fn register_slotfuncs_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // pg_drop_replication_slot(name) -> void
         builtin(3780, "pg_drop_replication_slot", 1, true, false, fc_pg_drop_replication_slot),
         // pg_sync_replication_slots() -> void
