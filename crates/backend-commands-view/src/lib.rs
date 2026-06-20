@@ -705,7 +705,7 @@ fn make_check_option_defelem<'mcx>(
         StringNode {
             sval: PgString::from_str_in(value, mcx)?,
         },
-    );
+    )?;
     let defelem = DefElem {
         defnamespace: None,
         defname: Some(PgString::from_str_in("check_option", mcx)?),

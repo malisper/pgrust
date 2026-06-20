@@ -555,7 +555,7 @@ fn make_string_node<'mcx>(
         types_nodes::value::StringNode {
             sval: mcx::PgString::from_str_in(s, mcx)?,
         },
-    );
+    )?;
     mcx::alloc_in(mcx, node)
 }
 
@@ -818,7 +818,7 @@ pub fn apply_child_basequals<'mcx>(
         // Might be an AND clause; flatten it.
         for onecq in makefuncs::make_ands_implicit(Some(childqual)) {
             // Pseudoconstant: no Vars at this level and no volatile functions.
-            let node = types_nodes::nodes::Node::mk_expr(run.mcx(), onecq.clone());
+            let node = types_nodes::nodes::Node::mk_expr(run.mcx(), onecq.clone())?;
             let pseudoconstant = !backend_optimizer_util_vars::var::contain_vars_of_level(&node, 0)
                 && !backend_optimizer_util_clauses::grounded::contain_volatile_functions(Some(
                     &onecq,
