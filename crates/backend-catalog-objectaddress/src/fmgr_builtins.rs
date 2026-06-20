@@ -288,28 +288,28 @@ pub fn register_objectaddress_builtins() {
             fc_pg_describe_object,
         ),
         // pg_get_object_address: oid '3954', proargtypes 'text _text _text',
-        // prorettype 'record'; provolatile 's', no proisstrict (=> strict
-        // false), not retset (returns one record, not a set).
+        // prorettype 'record'; provolatile 's', proisstrict default 't', not
+        // retset (returns one record, not a set).
         builtin(
             3954,
             "pg_get_object_address",
             3,
-            false,
+            true,
             false,
             fc_pg_get_object_address,
         ),
         // pg_identify_object: oid '3839', proargtypes 'oid oid int4',
-        // prorettype 'record'; provolatile 's', not strict, not retset.
+        // prorettype 'record'; provolatile 's', proisstrict default 't', not retset.
         builtin(
             3839,
             "pg_identify_object",
             3,
-            false,
+            true,
             false,
             fc_pg_identify_object,
         ),
         // pg_get_acl: oid '6385', proargtypes 'oid oid int4',
-        // prorettype '_aclitem'; provolatile 's', not strict, not retset.
-        builtin(6385, "pg_get_acl", 3, false, false, fc_pg_get_acl),
+        // prorettype '_aclitem'; provolatile 's', proisstrict default 't', not retset.
+        builtin(6385, "pg_get_acl", 3, true, false, fc_pg_get_acl),
     ]);
 }
