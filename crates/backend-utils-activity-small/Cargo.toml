@@ -17,6 +17,9 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-pgstat = { path = "../types-pgstat" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-activity-small-seams = { path = "../backend-utils-activity-small-seams" }
 backend-utils-activity-backend-progress-seams = { path = "../backend-utils-activity-backend-progress-seams" }
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }

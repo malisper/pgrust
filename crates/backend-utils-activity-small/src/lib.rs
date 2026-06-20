@@ -9,6 +9,7 @@
 #![allow(non_upper_case_globals)]
 
 pub mod backend_progress;
+pub mod fmgr_builtins;
 pub mod pgstat_archiver;
 pub mod pgstat_bgwriter;
 pub mod pgstat_checkpointer;
@@ -23,6 +24,10 @@ pub use pgstat_checkpointer::*;
 /// Install this crate's `backend_progress.c` inward seams.
 pub fn init_seams() {
     use types_pgstat::backend_progress::ProgressCommandType;
+
+    // Register the global checkpointer/bgwriter pg_stat_get_* SQL accessors
+    // (pgstatfuncs.c).
+    fmgr_builtins::register_pgstat_checkpointer_bgwriter_builtins();
 
     // `pgstat_progress_start_command(cmdtype, relid)`. The seam carries
     // `cmdtype` as the raw `int` the C `ProgressCommandType` enum value
