@@ -161,6 +161,7 @@ pub fn init_seams() {
 
     // --- rewriteHandler.c per-query rule reader (rd_rules re-projection) ---
     sx::relation_rules::set(relation_rules);
+    sx::relation_row_security::set(relation_row_security);
 
     // --- matview.c RefreshMatViewByOid rd_rules reads (the RuleLock carrier the
     //     relcache owns): the rewrite-rule shape + the stored dataQuery ---
@@ -592,6 +593,53 @@ fn relation_rules(
             });
         }
         Ok(Some(sx::RuleLockImage { rules }))
+    })?
+}
+
+/// `relation_row_security(mcx, reloid)` — the per-query row-security policy
+/// reader for `rowsecurity.c`. Fetch the relcache entry, and if its `rd_rsdesc`
+/// is set re-project every `RowSecurityPolicy` into the caller's `mcx` arena by
+/// deep-copying each policy's `qual`/`with_check_qual` (`Node::clone_in`, the C
+/// `copyObject` the rewriter performs before re-pointing a qual's Vars) and
+/// copying the scalar fields. `Ok(None)` is the C `rd_rsdesc == NULL`.
+fn relation_row_security(
+    mcx: Mcx<'_>,
+    reloid: Oid,
+) -> PgResult<Option<PgVec<sx::RowSecurityPolicyImage<'_>>>> {
+    crate::core_entry_store::with_relation(reloid, |rd| {
+        let rsdesc = match &rd.rd_rsdesc {
+            // C `rd_rsdesc == NULL`: RLS disabled / no policies.
+            None => return Ok(None),
+            Some(d) => d,
+        };
+        let mut policies: PgVec<sx::RowSecurityPolicyImage<'_>> =
+            mcx::vec_with_capacity_in(mcx, rsdesc.policies.len())?;
+        for p in rsdesc.policies.iter() {
+            let policy_name = mcx::PgString::from_str_in(p.policy_name.as_str(), mcx)
+                .map_err(|_| mcx.oom(p.policy_name.as_str().len()))?;
+            let mut roles: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, p.roles.len())?;
+            for &r in p.roles.iter() {
+                roles.push(r);
+            }
+            let qual = match &p.qual {
+                Some(q) => Some(mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
+                None => None,
+            };
+            let with_check_qual = match &p.with_check_qual {
+                Some(q) => Some(mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
+                None => None,
+            };
+            policies.push(sx::RowSecurityPolicyImage {
+                policy_name,
+                polcmd: p.polcmd,
+                roles,
+                permissive: p.permissive,
+                qual,
+                with_check_qual,
+                hassublinks: p.hassublinks,
+            });
+        }
+        Ok(Some(policies))
     })?
 }
 

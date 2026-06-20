@@ -956,6 +956,53 @@ seam_core::seam!(
     ) -> types_error::PgResult<types_core::primitive::Oid>
 );
 
+/// `RowSecurityPolicy` (`rewrite/rowsecurity.h`), re-projected into a per-query
+/// `'mcx` arena — the mcx-bound mirror of the relcache entry's `'static`
+/// [`types_relcache_entry::RowSecurityPolicy`].
+///
+/// The cached entry holds its policy quals in the process-lifetime
+/// CacheMemoryContext (`Node<'static>`), reachable only in-crate to the relcache
+/// owner. `rowsecurity.c` runs on a per-query `'mcx` arena and copies each
+/// policy qual (`copyObject(policy->qual)`) before re-pointing its Vars; the
+/// reader hands it the already-`mcx`-homed copy. `roles`/`polcmd`/`permissive`/
+/// `hassublinks` are the scalar fields `get_policies_for_relation` reads.
+pub struct RowSecurityPolicyImage<'mcx> {
+    /// `char *policy_name`.
+    pub policy_name: mcx::PgString<'mcx>,
+    /// `char polcmd` — `'r'`/`'a'`/`'w'`/`'d'`/`'*'`.
+    pub polcmd: i8,
+    /// `ArrayType *roles`, decoded to element `Oid[]`.
+    pub roles: mcx::PgVec<'mcx, types_core::primitive::Oid>,
+    /// `bool permissive`.
+    pub permissive: bool,
+    /// `Expr *qual` — `copyObject(policy->qual)`, re-homed into `mcx`.
+    pub qual: Option<mcx::PgBox<'mcx, types_nodes::nodes::Node<'mcx>>>,
+    /// `Expr *with_check_qual` — `copyObject(policy->with_check_qual)`.
+    pub with_check_qual: Option<mcx::PgBox<'mcx, types_nodes::nodes::Node<'mcx>>>,
+    /// `bool hassublinks`.
+    pub hassublinks: bool,
+}
+
+seam_core::seam!(
+    /// The per-query row-security policy reader for `rowsecurity.c`. C reads the
+    /// policy list directly off the open relation
+    /// (`relation->rd_rsdesc->policies`), but the policy quals live in the
+    /// relcache entry's process-lifetime CacheMemoryContext (`Node<'static>`),
+    /// reachable only in-crate to the relcache owner — the trimmed cross-unit
+    /// `types_rel::Relation<'mcx>` handle carries no `rd_rsdesc`. This seam
+    /// fetches the relcache entry by `reloid`, and if `rd_rsdesc` is set
+    /// re-projects every policy into the caller's `mcx` arena (`Node::clone_in`,
+    /// the C `copyObject` the rewriter performs before mutating a qual). The
+    /// returned vector preserves `rd_rsdesc->policies` order. `Ok(None)` is the C
+    /// `rd_rsdesc == NULL` (RLS disabled / no policies). Installed from
+    /// relcache's `init_seams()`; can `ereport(ERROR)` (relation not open, OOM
+    /// during the deep copy), carried on `Err`.
+    pub fn relation_row_security<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        reloid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, RowSecurityPolicyImage<'mcx>>>>
+);
+
 seam_core::seam!(
     /// The per-query rewrite-rule reader for `rewriteHandler.c`. C reads the
     /// rule list directly off the open relation (`relation->rd_rules->rules[i]`),
