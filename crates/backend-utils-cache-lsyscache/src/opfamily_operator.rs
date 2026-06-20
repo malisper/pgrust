@@ -125,9 +125,11 @@ pub fn get_commutator(opno: Oid) -> PgResult<Oid> {
 pub fn get_op_opfamily_properties(
     opno: Oid,
     opfamily: Oid,
+    ordering_op: bool,
     missing_ok: bool,
 ) -> PgResult<Option<(i32, Oid, Oid)>> {
-    let amop_tup = syscache::amop_by_opr_purpose_family::call(opno, AMOP_SEARCH, opfamily)?;
+    let purpose = if ordering_op { AMOP_ORDER } else { AMOP_SEARCH };
+    let amop_tup = syscache::amop_by_opr_purpose_family::call(opno, purpose, opfamily)?;
     match amop_tup {
         None => {
             if missing_ok {

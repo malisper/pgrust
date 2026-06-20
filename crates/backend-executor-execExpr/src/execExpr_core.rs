@@ -1251,7 +1251,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 //                            &strategy, &lefttype, &righttype);
                 let (_strategy, lefttype, righttype) =
                     backend_utils_cache_lsyscache_seams::get_op_opfamily_properties::call(
-                        opno, opfamily, false,
+                        opno, opfamily, false, false,
                     )?
                     .expect("get_op_opfamily_properties(missing_ok=false) returns Some");
                 // proc = get_opfamily_proc(opfamily, lefttype, righttype, BTORDER_PROC);

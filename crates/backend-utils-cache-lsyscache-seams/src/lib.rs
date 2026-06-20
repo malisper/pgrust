@@ -367,6 +367,7 @@ seam_core::seam!(
     pub fn get_op_opfamily_properties(
         opno: Oid,
         opfamily: Oid,
+        ordering_op: bool,
         missing_ok: bool,
     ) -> PgResult<Option<(i32, Oid, Oid)>>
 );

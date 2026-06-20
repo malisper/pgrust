@@ -702,6 +702,7 @@ pub fn expand_indexqual_rowcompare(
         expr_op,
         index.opfamily[indexcol],
         false,
+        false,
     )?
     .expect("get_op_opfamily_properties");
 
@@ -766,6 +767,7 @@ pub fn expand_indexqual_rowcompare(
         let (s, lt, rt) = lsyscache::get_op_opfamily_properties::call(
             col_op,
             index.opfamily[i],
+            false,
             false,
         )?
         .expect("get_op_opfamily_properties");

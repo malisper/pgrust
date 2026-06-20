@@ -368,7 +368,7 @@ pub fn mergejoinscansel<'mcx>(
 
     // Extract the operator's declared left/right datatypes.
     let (_op_strategy, op_lefttype, op_righttype) =
-        match lsc::get_op_opfamily_properties::call(opno, opfamily, false)? {
+        match lsc::get_op_opfamily_properties::call(opno, opfamily, false, false)? {
             Some(t) => t,
             None => {
                 // get_op_opfamily_properties(missing_ok=false) elog(ERROR)s in C;

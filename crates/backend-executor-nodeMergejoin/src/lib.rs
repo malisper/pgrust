@@ -173,7 +173,7 @@ fn MJExamineQuals<'mcx>(
         // Extract the operator's declared left/right datatypes.
         //   get_op_opfamily_properties(qual->opno, opfamily, false, ...);
         let (op_strategy, op_lefttype, op_righttype) =
-            lsyscache::get_op_opfamily_properties::call(qual.opno, opfamily, false)?
+            lsyscache::get_op_opfamily_properties::call(qual.opno, opfamily, false, false)?
                 .expect("get_op_opfamily_properties(missing_ok=false) returned None");
 
         // if (IndexAmTranslateStrategy(op_strategy, get_opfamily_method(opfamily),

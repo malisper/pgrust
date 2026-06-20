@@ -276,8 +276,12 @@ pub fn scalararraysel_containment<'mcx>(
         /* qual can't succeed if null on left */
         return Ok(0.0);
     }
-    /* C: `((Const *) leftop)->constvalue` — the by-value/by-ref Datum word. */
-    let constval = Datum::from_usize(leftconst.constvalue.as_usize());
+    /* C: `((Const *) leftop)->constvalue` — the by-value/by-ref Datum word.
+     * Use as_byref_word(): the scalar element type can itself be pass-by-
+     * reference (e.g. text), where as_usize() would panic. as_byref_word
+     * returns the scalar word for by-val and the pointer for by-ref, i.e.
+     * the DatumGetPointer view the downstream codecs consume. */
+    let constval = Datum::from_usize(leftconst.constvalue.as_byref_word());
 
     /* Get element type's default comparison function */
     let typentry = ElemCmpInfo::lookup(elemtype)?;
@@ -541,8 +545,11 @@ pub fn arraycontsel<'mcx>(
     if element_typeid != InvalidOid
         && element_typeid == get_base_element_type::call(vardata.data().vartype)?
     {
-        // C: `((Const *) other)->constvalue` — the raw array varlena Datum word.
-        let constval = Datum::from_usize(other.constvalue.as_usize());
+        // C: `((Const *) other)->constvalue` — the raw array varlena Datum.
+        // Arrays are pass-by-reference, so as_usize() would panic; use
+        // as_byref_word() to get the DatumGetPointer view calc_arraycontsel
+        // (DatumGetArrayTypeP / deconstruct_array) needs.
+        let constval = Datum::from_usize(other.constvalue.as_byref_word());
         selec = calc_arraycontsel(mcx, vardata.data(), constval, element_typeid, operator)?;
     } else {
         selec = default_sel(operator);

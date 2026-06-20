@@ -176,6 +176,13 @@ pub(crate) fn get_variable_numdistinct(
 /// `((Var *) vardata->var)->varattno` when `vardata->var` is a `Var`, else
 /// `None` — the system-column branch of [`get_variable_numdistinct`].
 fn var_attno(root: &PlannerInfo, vardata: &VariableStatData) -> Option<i16> {
+    // C: `if (vardata->var && IsA(vardata->var, Var))`. A zeroed VariableStatData
+    // (e.g. examine_indexcol_variable, which leaves var unset) carries the NULL
+    // node handle NodeId(0); treat it as "not a Var" rather than panicking in the
+    // node-arena resolver, so the caller falls through to stadistinct = 0.0.
+    if vardata.var == types_pathnodes::NodeId(0) {
+        return None;
+    }
     root.node(vardata.var).as_var().map(|v| v.varattno)
 }
 

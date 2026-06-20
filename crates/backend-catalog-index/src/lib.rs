@@ -1148,7 +1148,10 @@ pub fn index_create<'mcx>(
      */
     if OidIsValid(lsyscache::get_relname_relid::call(&index_relation_name, namespace_id)?) {
         if (flags & INDEX_CREATE_IF_NOT_EXISTS) != 0 {
-            // ereport(NOTICE, "relation already exists, skipping")
+            error_seams::ereport::call(PgError::new(
+                types_error::NOTICE,
+                alloc::format!("relation \"{index_relation_name}\" already exists, skipping"),
+            ))?;
             pg_class.close(ROW_EXCLUSIVE_LOCK)?;
             return Ok((InvalidOid, InvalidOid));
         }

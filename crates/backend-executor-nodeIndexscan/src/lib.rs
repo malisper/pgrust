@@ -1833,8 +1833,7 @@ fn require_index_var(leftop: Option<&Expr>, ctx: &'static str) -> PgResult<AttrN
 
 /// `get_op_opfamily_properties(opno, opfamily, false, ...)` — fatal on a miss.
 fn get_op_opfamily_properties(opno: Oid, opfamily: Oid, isorderby: bool) -> PgResult<(i32, Oid, Oid)> {
-    let _ = isorderby;
-    lsyscache::get_op_opfamily_properties::call(opno, opfamily, false)?
+    lsyscache::get_op_opfamily_properties::call(opno, opfamily, isorderby, false)?
         .ok_or_else(|| elog("operator is not a member of opfamily"))
 }
 
