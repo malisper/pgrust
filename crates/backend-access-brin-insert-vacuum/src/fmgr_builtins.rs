@@ -13,7 +13,7 @@
 //! transcribed exactly from `pg_proc.dat`.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::primitive::Oid;
 
@@ -50,49 +50,40 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("brin insert/vacuum fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: backend_utils_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: backend_utils_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `brin_summarize_new_values(regclass)` (OID 3952) → int4.
-fn fc_brin_summarize_new_values(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_brin_summarize_new_values(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> backend_utils_error::PgResult<Datum> {
     let relation = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let n = ok(crate::brin_summarize_new_values(m.mcx(), relation));
-    ret_int32(n)
+    let n = crate::brin_summarize_new_values(m.mcx(), relation)?;
+    Ok(ret_int32(n))
 }
 
 /// `brin_summarize_range(regclass, int8)` (OID 3999) → int4.
-fn fc_brin_summarize_range(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_brin_summarize_range(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> backend_utils_error::PgResult<Datum> {
     let indexoid = arg_oid(fcinfo, 0);
     let heap_blk64 = arg_int64(fcinfo, 1);
     let m = scratch_mcx();
-    let n = ok(crate::brin_summarize_range(m.mcx(), indexoid, heap_blk64));
-    ret_int32(n)
+    let n = crate::brin_summarize_range(m.mcx(), indexoid, heap_blk64)?;
+    Ok(ret_int32(n))
 }
 
 /// `brin_desummarize_range(regclass, int8)` (OID 4014) → void.
-fn fc_brin_desummarize_range(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_brin_desummarize_range(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> backend_utils_error::PgResult<Datum> {
     let indexoid = arg_oid(fcinfo, 0);
     let heap_blk64 = arg_int64(fcinfo, 1);
     let m = scratch_mcx();
-    ok(crate::brin_desummarize_range(m.mcx(), indexoid, heap_blk64));
-    ret_void()
+    crate::brin_desummarize_range(m.mcx(), indexoid, heap_blk64)?;
+    Ok(ret_void())
 }
 
 // ---------------------------------------------------------------------------
@@ -105,16 +96,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register this crate's SQL-callable BRIN range-maintenance builtins (C: their
@@ -122,7 +116,7 @@ fn builtin(
 /// OIDs / nargs / strict / retset transcribed exactly from `pg_proc.dat`
 /// (all `provolatile => 'v'`, all strict, none retset).
 pub fn register_brin_insert_vacuum_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(3952, "brin_summarize_new_values", 1, true, false, fc_brin_summarize_new_values),
         builtin(3999, "brin_summarize_range", 2, true, false, fc_brin_summarize_range),
         builtin(4014, "brin_desummarize_range", 2, true, false, fc_brin_desummarize_range),
