@@ -762,7 +762,7 @@ fn pqe_with_check_options<'mcx>(
             "subquery_planner: withCheckOptions element is not a WithCheckOption node",
         );
         wco.qual = match processed {
-            Some(pe) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?),
+            Some(pe) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe)?)?),
             None => None,
         };
     }
@@ -1230,9 +1230,9 @@ fn pqe_per_rte<'mcx>(
                                 "subquery_planner: VALUES column folded to NULL",
                             )
                         })?;
-                        new_cols.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?);
+                        new_cols.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe)?)?);
                     }
-                    let new_row = mcx::alloc_in(mcx, Node::mk_list(mcx, new_cols))?;
+                    let new_row = mcx::alloc_in(mcx, Node::mk_list(mcx, new_cols)?)?;
                     run.resolve_mut(root.parse).rtable[i].values_lists[r] = new_row;
                 }
             }
@@ -1269,7 +1269,7 @@ fn pqe_per_rte<'mcx>(
                         )
                     })?;
                     run.resolve_mut(root.parse).rtable[i].groupexprs[g] =
-                        mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?;
+                        mcx::alloc_in(mcx, Node::mk_expr(mcx, pe)?)?;
                 }
             }
             RTEKind::RTE_FUNCTION => {
@@ -1324,7 +1324,7 @@ fn pqe_per_rte<'mcx>(
                         if let Some(rtf) =
                             (*run.resolve_mut(root.parse).rtable[i].functions[f]).as_rangetblfunction_mut()
                         {
-                            rtf.funcexpr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?);
+                            rtf.funcexpr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe)?)?);
                         }
                     }
                 }
@@ -1382,7 +1382,7 @@ fn pqe_flatten_group_exprs<'mcx>(
             }
         };
         if let Some(e) = expr_opt {
-            let node = Node::mk_expr(mcx, e);
+            let node = Node::mk_expr(mcx, e)?;
             let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
                 mcx, &mut *root, &ctx_query, node,
             )?;
@@ -1399,7 +1399,7 @@ fn pqe_flatten_group_exprs<'mcx>(
         None => None,
     };
     if let Some(e) = having_opt {
-        let node = Node::mk_expr(mcx, e);
+        let node = Node::mk_expr(mcx, e)?;
         let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
             mcx, &mut *root, &ctx_query, node,
         )?;
@@ -1440,7 +1440,7 @@ fn pqe_expand_grouping_sets<'mcx>(
         for set in sets.iter() {
             let mut intlist: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
             intlist.extend(set.iter().copied());
-            new_gsets.push(mcx::alloc_in(mcx, Node::mk_int_list(mcx, intlist))?);
+            new_gsets.push(mcx::alloc_in(mcx, Node::mk_int_list(mcx, intlist)?)?);
         }
     }
     run.resolve_mut(root.parse).groupingSets = new_gsets;
@@ -1506,7 +1506,7 @@ fn pqe_having_transfer<'mcx>(
             && has_grouping_sets
             && {
                 // bms_is_member(root->group_rtindex, pull_varnos(root, havingclause))
-                let node = Node::mk_expr(mcx, havingclause.clone_in(mcx)?);
+                let node = Node::mk_expr(mcx, havingclause.clone_in(mcx)?)?;
                 let varnos =
                     backend_optimizer_util_vars::var::pull_varnos(Some(&root), &node);
                 bms_is_member_relids(group_rtindex, &varnos)
@@ -1584,7 +1584,7 @@ fn pqe_having_transfer<'mcx>(
             combined.append(&mut moved_to_where);
             f.quals = Some(mcx::alloc_in(
                 mcx,
-                Node::mk_expr(mcx, make_ands_explicit(combined)),
+                Node::mk_expr(mcx, make_ands_explicit(combined))?,
             )?);
             run.resolve_mut(root.parse).jointree = Some(mcx::alloc_in(mcx, f)?);
         } else {
@@ -1594,7 +1594,7 @@ fn pqe_having_transfer<'mcx>(
                 fromlist: mcx::PgVec::new_in(mcx),
                 quals: Some(mcx::alloc_in(
                     mcx,
-                    Node::mk_expr(mcx, make_ands_explicit(moved_to_where)),
+                    Node::mk_expr(mcx, make_ands_explicit(moved_to_where))?,
                 )?),
             };
             run.resolve_mut(root.parse).jointree = Some(mcx::alloc_in(mcx, f)?);
