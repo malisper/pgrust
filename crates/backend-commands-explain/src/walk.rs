@@ -696,6 +696,12 @@ pub fn ExplainNode<'es, 'p>(
         es.str.try_push('\n')?;
     }
 
+    // target list (explain.c:1932): `if (es->verbose) show_plan_tlist(...)`.
+    // The VERBOSE-only `Output:` line deparses the node's targetlist.
+    if es.verbose {
+        show_plan_tlist(es, mcx, plan_node, ancestors)?;
+    }
+
     // T_Result: `show_upper_qual(resconstantqual, "One-Time Filter")` runs
     // BEFORE the generic `Filter:` line (explain.c:2234). `show_upper_qual`
     // uses `useprefix = list_length(es->rtable) > 1 || es->verbose`.
@@ -974,6 +980,84 @@ pub fn ExplainNode<'es, 'p>(
         true,
         es,
     )?;
+    Ok(())
+}
+
+/// `show_plan_tlist(planstate, ancestors, es)` (explain.c:2438): emit the
+/// VERBOSE-only `Output:` line — the node's target list deparsed, one entry per
+/// `TargetEntry` (resjunk ones included, per the C comment "we now include
+/// resjunk ones"). Several node kinds suppress it (empty tlist, Append,
+/// MergeAppend, RecursiveUnion, and a direct-modify ForeignScan). The deparse
+/// runs against the running plan node via the `deparse_expr_for_plan` seam
+/// (= `set_deparse_context_plan` + `deparse_expression`), with
+/// `useprefix = es->rtable_size > 1` (note: NOT `|| es->verbose`, unlike the
+/// qual/key helpers — show_plan_tlist already only runs under VERBOSE).
+fn show_plan_tlist<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plan_node: &Node<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+) -> PgResult<()> {
+    let plan: &Plan<'p> = plan_node.plan_head();
+
+    // No work if empty tlist (this occurs eg in bitmap indexscans).
+    let Some(tlist) = plan.targetlist.as_ref().filter(|t| !t.is_empty()) else {
+        return Ok(());
+    };
+
+    // The tlist of an Append isn't real helpful, so suppress it; likewise for
+    // MergeAppend and RecursiveUnion.
+    match plan_node.node_tag() {
+        ntag::T_Append | ntag::T_MergeAppend | ntag::T_RecursiveUnion => return Ok(()),
+        _ => {}
+    }
+
+    // Likewise for a ForeignScan that executes a direct INSERT/UPDATE/DELETE:
+    // its tlist contains subplan-output / row-identity junk columns confusing
+    // in this context. `IsA(plan, ForeignScan) && operation != CMD_SELECT`.
+    if let Node::ForeignScan(fs) = plan_node {
+        if fs.operation != CmdType::CMD_SELECT {
+            return Ok(());
+        }
+    }
+
+    // Set up deparsing context + deparse each result column. The
+    // deparse_namespace is owner-private to ruleutils, so
+    // set_deparse_context_plan + deparse_expression are folded into the one
+    // `deparse_expr_for_plan` seam (same as show_scan_qual / show_sort_group_keys).
+    let useprefix = es.rtable_size > 1;
+
+    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let es_pstmt = es
+        .pstmt
+        .as_deref()
+        .expect("EXPLAIN: es->pstmt must be set before deparse");
+
+    let mut result: alloc::vec::Vec<alloc::string::String> =
+        alloc::vec::Vec::with_capacity(tlist.len());
+    for tle in tlist.iter() {
+        let expr = tle
+            .expr
+            .as_deref()
+            .expect("show_plan_tlist: TargetEntry has no expr");
+        // node = (Node *) tle->expr.
+        let expr_node = Node::mk_expr(mcx, expr.clone_in(mcx)?);
+        let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+            mcx,
+            es_pstmt,
+            &es.rtable_names,
+            &plan_owned,
+            ancestors,
+            &expr_node,
+            useprefix,
+            false,
+        )?;
+        result.push(alloc::string::String::from(exprstr.as_str()));
+    }
+
+    // Print results: ExplainPropertyList("Output", result, es).
+    let view: alloc::vec::Vec<&str> = result.iter().map(|s| s.as_str()).collect();
+    fmt::ExplainPropertyList("Output", &view, es)?;
     Ok(())
 }
 
