@@ -828,8 +828,8 @@ fn expand_generated_columns_internal<'mcx>(
         if attr.attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
             let mut defexpr = build_generation_expression(mcx, rel, (i + 1) as i32)?;
             // ChangeVarNodes(defexpr, 1, rt_index, 0)
-            let mut defnode = Node::Expr(defexpr);
-            ChangeVarNodes(&mut defnode, 1, rt_index, 0);
+            let mut defnode = Node::mk_expr(mcx, defexpr)?;
+            ChangeVarNodes(&mut defnode, 1, rt_index, 0, mcx);
             defexpr = defnode
                 .into_expr()
                 .unwrap_or_else(|| unreachable!("ChangeVarNodes preserves the node kind"));
@@ -889,7 +889,7 @@ pub fn expand_generated_columns_in_expr<'mcx>(
     rte.rtekind = RTEKind::RTE_RELATION;
     rte.relid = rel.rd_id;
 
-    let mut wrapped = Node::Expr(node);
+    let mut wrapped = Node::mk_expr(mcx, node)?;
     expand_generated_columns_internal(mcx, &mut wrapped, rel, rt_index, &rte, 0)?;
     let out = wrapped
         .into_expr()

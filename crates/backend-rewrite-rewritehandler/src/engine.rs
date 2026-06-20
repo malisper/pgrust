@@ -93,7 +93,7 @@ fn get_generated_columns<'mcx>(
             let defexpr = build_generation_expression(mcx, rel, (i + 1) as i32)?;
             // ChangeVarNodes(defexpr, 1, rt_index, 0)
             let mut defnode = Node::mk_expr(mcx, defexpr)?;
-            ChangeVarNodes(&mut defnode, 1, rt_index, 0);
+            ChangeVarNodes(&mut defnode, 1, rt_index, 0, mcx);
             let defexpr = defnode
                 .into_expr()
                 .unwrap_or_else(|| unreachable!("ChangeVarNodes preserves the node kind"));
@@ -1007,14 +1007,14 @@ pub fn rewriteRuleAction<'mcx>(
 
         // OffsetVarNodes(sub_action, rt_length, 0); OffsetVarNodes(rule_qual, ...)
         let mut sub_node = Node::mk_query(mcx, core_clone(sub_action, mcx)?)?;
-        OffsetVarNodes(&mut sub_node, rt_length, 0);
+        OffsetVarNodes(&mut sub_node, rt_length, 0, mcx);
         // references to OLD should point at original rt_index
-        ChangeVarNodes(&mut sub_node, PRS2_OLD_VARNO + rt_length, rt_index, 0);
+        ChangeVarNodes(&mut sub_node, PRS2_OLD_VARNO + rt_length, rt_index, 0, mcx);
         *sub_action = sub_node.into_query().unwrap_or_else(|| unreachable!());
     }
     if let Some(q) = rule_qual.as_deref_mut() {
-        OffsetVarNodes(q, rt_length, 0);
-        ChangeVarNodes(q, PRS2_OLD_VARNO + rt_length, rt_index, 0);
+        OffsetVarNodes(q, rt_length, 0, mcx);
+        ChangeVarNodes(q, PRS2_OLD_VARNO + rt_length, rt_index, 0, mcx);
     }
 
     // The remaining steps need the sub-action again; re-borrow.
@@ -1367,7 +1367,7 @@ fn CopyAndAddInvertedQual<'mcx>(
     acquire_locks_on_sublinks_node(&mut new_qual)?;
 
     // Fix references to OLD.
-    ChangeVarNodes(&mut new_qual, PRS2_OLD_VARNO, rt_index, 0);
+    ChangeVarNodes(&mut new_qual, PRS2_OLD_VARNO, rt_index, 0, mcx);
     // Fix references to NEW.
     if event == CmdType::CMD_INSERT || event == CmdType::CMD_UPDATE {
         let rte = parsetree.rtable[(rt_index - 1) as usize].clone_in(mcx)?;
@@ -1692,7 +1692,7 @@ pub fn fireRIRrules<'mcx>(
         let mut sublink_row_security = false;
         let mut err: Option<types_error::PgError> = None;
         {
-            let mut walker = |node: &mut Node| {
+            let mut walker = |node: &mut Node<'mcx>| {
                 fireRIRonSubLink(
                     mcx,
                     node,
@@ -1706,6 +1706,7 @@ pub fn fireRIRrules<'mcx>(
                 &mut walker,
                 backend_nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
                     | backend_nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
+                mcx,
             );
         }
         if let Some(e) = err {
@@ -1740,7 +1741,7 @@ pub fn fireRIRrules<'mcx>(
 /// `PgResult`).
 fn fireRIRonSubLink<'mcx>(
     mcx: Mcx<'mcx>,
-    node: &mut Node,
+    node: &mut Node<'mcx>,
     active_rirs: &mut Vec<Oid>,
     has_row_security: &mut bool,
     err: &mut Option<types_error::PgError>,
@@ -2031,7 +2032,7 @@ fn rewriteTargetView<'mcx>(
         .collect::<PgResult<_>>()?;
     for tle in view_targetlist.iter_mut() {
         let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?)?;
-        ChangeVarNodes(&mut node, base_rt_index, new_rt_index, 0);
+        ChangeVarNodes(&mut node, base_rt_index, new_rt_index, 0, mcx);
         *tle = node.into_targetentry().unwrap_or_else(|| unreachable!());
     }
 
@@ -2108,7 +2109,7 @@ fn rewriteTargetView<'mcx>(
     // resultRelation) to point to the new base relation instead.
     {
         let mut node = Node::mk_query(mcx, parsetree)?;
-        ChangeVarNodes(&mut node, view_result_relation, new_rt_index, 0);
+        ChangeVarNodes(&mut node, view_result_relation, new_rt_index, 0, mcx);
         parsetree = node.into_query().unwrap_or_else(|| unreachable!());
     }
     debug_assert_eq!(parsetree.resultRelation, new_rt_index);
@@ -2173,7 +2174,7 @@ fn rewriteTargetView<'mcx>(
             .and_then(|jt| jt.quals.as_deref())
             .unwrap()
             .clone_in(mcx)?;
-        ChangeVarNodes(&mut viewqual, base_rt_index, new_rt_index, 0);
+        ChangeVarNodes(&mut viewqual, base_rt_index, new_rt_index, 0, mcx);
 
         if rewrite_relation_is_security_view(view) {
             // Security-barrier view: prepend the qual as a security qual on the
@@ -2227,7 +2228,7 @@ fn rewriteTargetView<'mcx>(
                     .and_then(|jt| jt.quals.as_deref())
                     .unwrap()
                     .clone_in(mcx)?;
-                ChangeVarNodes(&mut q, base_rt_index, new_rt_index, 0);
+                ChangeVarNodes(&mut q, base_rt_index, new_rt_index, 0, mcx);
                 if parsetree.commandType == CmdType::CMD_INSERT {
                     added_sublink = checkExprHasSubLink(&q);
                 }
@@ -2504,7 +2505,7 @@ fn RewriteQuery<'mcx>(
                     let mut new_set_nodes: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
                     for tle in new_set.into_iter() {
                         new_set_nodes
-                            .push(alloc_in(mcx, Node::TargetEntry(tle))?);
+                            .push(alloc_in(mcx, Node::mk_target_entry(mcx, tle)?)?);
                     }
                     let oc = parsetree.onConflict.as_deref_mut().unwrap();
                     oc.onConflictSet = new_set_nodes;
