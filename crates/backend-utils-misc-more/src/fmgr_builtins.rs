@@ -13,7 +13,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::Oid;
 use types_error::PgResult;
@@ -55,12 +55,6 @@ fn ret_bool(v: bool) -> Datum {
     Datum::from_bool(v)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 /// A scratch context for the cores' transient allocations (C charges them to
 /// `CurrentMemoryContext`). The `Mcx`-free established pattern: a per-call
 /// working context.
@@ -73,23 +67,19 @@ fn scratch_mcx() -> mcx::MemoryContext {
 // ---------------------------------------------------------------------------
 
 /// `row_security_active(oid)` (pg_proc oid 3298).
-fn fc_row_security_active(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_row_security_active(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let table_oid = arg_oid(fcinfo, 0);
     let ctx = scratch_mcx();
-    match crate::rls::row_security_active(ctx.mcx(), table_oid) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+    let b = crate::rls::row_security_active(ctx.mcx(), table_oid)?;
+    Ok(ret_bool(b))
 }
 
 /// `row_security_active_name(text)` (pg_proc oid 3299).
-fn fc_row_security_active_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_row_security_active_name(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let name = arg_text(fcinfo, 0);
     let ctx = scratch_mcx();
-    match crate::rls::row_security_active_name(ctx.mcx(), name) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+    let b = crate::rls::row_security_active_name(ctx.mcx(), name)?;
+    Ok(ret_bool(b))
 }
 
 // ===========================================================================
@@ -109,44 +99,43 @@ fn fc_row_security_active_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// placeholder word. The core's `record_from_values` →
 /// `HeapTupleGetDatum` hands back the self-describing composite image as a
 /// `Datum::ByRef`, which the `Composite` lane carries verbatim.
-fn ret_record(fcinfo: &mut FunctionCallInfoBaseData, built: PgResult<DatumV<'_>>) -> Datum {
-    match built {
-        Ok(DatumV::ByRef(bytes)) => {
+fn ret_record(fcinfo: &mut FunctionCallInfoBaseData, built: PgResult<DatumV<'_>>) -> PgResult<Datum> {
+    match built? {
+        DatumV::ByRef(bytes) => {
             fcinfo.set_ref_result(RefPayload::Composite(bytes.as_slice().to_vec()));
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
-        Ok(DatumV::Composite(t)) => {
+        DatumV::Composite(t) => {
             fcinfo.set_ref_result(RefPayload::Composite(t.to_datum_image()));
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
-        Ok(_) => panic!("pg_control_* fmgr: record_from_values produced a non-composite Datum"),
-        Err(e) => raise(e),
+        _ => panic!("pg_control_* fmgr: record_from_values produced a non-composite Datum"),
     }
 }
 
 /// `pg_control_system()` (pg_controldata.c, pg_proc oid 3441) — 4-column row.
-fn fc_pg_control_system(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_control_system(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let ctx = scratch_mcx();
     let built = crate::pg_controldata::pg_control_system_datum(ctx.mcx());
     ret_record(fcinfo, built)
 }
 
 /// `pg_control_checkpoint()` (pg_controldata.c, pg_proc oid 3442) — 18-column row.
-fn fc_pg_control_checkpoint(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_control_checkpoint(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let ctx = scratch_mcx();
     let built = crate::pg_controldata::pg_control_checkpoint_datum(ctx.mcx());
     ret_record(fcinfo, built)
 }
 
 /// `pg_control_recovery()` (pg_controldata.c, pg_proc oid 3443) — 5-column row.
-fn fc_pg_control_recovery(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_control_recovery(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let ctx = scratch_mcx();
     let built = crate::pg_controldata::pg_control_recovery_datum(ctx.mcx());
     ret_record(fcinfo, built)
 }
 
 /// `pg_control_init()` (pg_controldata.c, pg_proc oid 3444) — 12-column row.
-fn fc_pg_control_init(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_control_init(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let ctx = scratch_mcx();
     let built = crate::pg_controldata::pg_control_init_datum(ctx.mcx());
     ret_record(fcinfo, built)
@@ -162,23 +151,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    func: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        func,
+    )
 }
 
 /// Register every `rls.c` builtin (C: their `fmgr_builtins[]` rows). Called from
 /// this crate's `init_seams()`. OIDs/nargs/retset from `pg_proc.dat`; both are
 /// strict (no `proisstrict => 'f'`), nargs = 1, not retset.
 pub fn register_backend_utils_misc_more_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(3298, "row_security_active", 1, true, false, fc_row_security_active),
         builtin(
             3299,
