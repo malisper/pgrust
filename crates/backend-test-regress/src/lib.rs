@@ -43,6 +43,26 @@ fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> types_core::Oid {
         .as_oid()
 }
 
+/// `PG_GETARG_INT32(i)` — argument `i`'s word as an `int4`.
+#[inline]
+fn arg_int32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
+    fcinfo
+        .arg(i)
+        .expect("regress fn: missing int4 arg")
+        .value
+        .as_i32()
+}
+
+/// `PG_GETARG_BOOL(i)` — argument `i`'s word as a `bool`.
+#[inline]
+fn arg_bool(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
+    fcinfo
+        .arg(i)
+        .expect("regress fn: missing bool arg")
+        .value
+        .as_bool()
+}
+
 /// `PG_GETARG_CSTRING(i)` — a `cstring` argument on the by-ref lane.
 #[inline]
 fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
@@ -746,6 +766,447 @@ fn test_spinlock() {
     expect_true(&s.data_after == b"ef12", "padding after spinlock modified");
 }
 
+/* ===========================================================================
+ * Encoding-infrastructure test functions  (regress.c)
+ *
+ * These back the regression scripts `conversion.sql` and `encoding.sql`, which
+ * create them with `CREATE FUNCTION ... LANGUAGE C AS '$libdir/regress', '...'`.
+ * The encoding substrate (`pg_char_to_encoding`, `pg_encoding_mblen`,
+ * `pg_encoding_mb2wchar_with_len`, `pg_do_encoding_conversion_buf`, ...) is
+ * ported in common-extra-encnames-fgram / common-wchar / backend-utils-mb-mbutils;
+ * the array / composite plumbing in backend-utils-adt-arrayfuncs /
+ * backend-utils-fmgr-funcapi. A fresh scratch `MemoryContext` stands in for the
+ * fmgr call's `CurrentMemoryContext`; result bytes are copied out of it onto the
+ * by-ref lane before it drops.
+ * ========================================================================= */
+
+use mcx::MemoryContext;
+
+/// `_PG_LAST_ENCODING_` (`mb/pg_wchar.h`) as a plain count.
+const PG_LAST_ENCODING: i32 = common_extra_encnames::_PG_LAST_ENCODING_;
+
+/// `pg_char_to_encoding(name)` over a NUL-terminated byte image (a `name`/`text`
+/// payload). Returns the encoding id, or `-1` for an unknown name.
+fn char_to_encoding(name: &[u8]) -> i32 {
+    let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    common_extra_encnames::pg_char_to_encoding(&String::from_utf8_lossy(&name[..end]))
+}
+
+/* ---------------------------------------------------------------------------
+ * test_enc_setup() RETURNS void  (regress.c)
+ *
+ *   One-time sanity of pg_encoding_set_invalid(): for every multibyte encoding,
+ *   the "official invalid string" must have length 2, mblen 2, and verify as a
+ *   wholly-invalid prefix (valid prefix length 0) both standalone and with
+ *   trailing data. Each mismatch is an elog(WARNING); the function returns void.
+ * ------------------------------------------------------------------------- */
+
+fn fc_test_enc_setup(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    for i in 0..PG_LAST_ENCODING {
+        // if (pg_encoding_max_length(i) == 1) continue;
+        if common_wchar::pg_encoding_max_length(i) == 1 {
+            continue;
+        }
+
+        // char buf[2]; pg_encoding_set_invalid(i, buf);
+        let mut buf = [0u8; 2];
+        common_wchar::pg_encoding_set_invalid(i, &mut buf);
+
+        // len = strnlen(buf, 2);
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(2) as i32;
+        let name = common_extra_encnames::pg_encoding_to_char(i);
+        if len != 2 {
+            warn(&format!(
+                "official invalid string for encoding \"{name}\" has length {len}"
+            ));
+        }
+
+        // mblen = pg_encoding_mblen(i, buf);
+        let mblen = common_wchar::pg_encoding_mblen(i, &buf).unwrap_or(0);
+        if mblen != 2 {
+            warn(&format!(
+                "official invalid string for encoding \"{name}\" has mblen {mblen}"
+            ));
+        }
+
+        // valid = pg_encoding_verifymbstr(i, buf, len);
+        let valid = common_wchar::pg_encoding_verifymbstr(i, &buf[..len as usize]);
+        if valid != 0 {
+            warn(&format!(
+                "official invalid string for encoding \"{name}\" has valid prefix of length {valid}"
+            ));
+        }
+
+        // valid = pg_encoding_verifymbstr(i, buf, 1);
+        let valid = common_wchar::pg_encoding_verifymbstr(i, &buf[..1]);
+        if valid != 0 {
+            warn(&format!(
+                "first byte of official invalid string for encoding \"{name}\" has valid prefix of length {valid}"
+            ));
+        }
+
+        // bigbuf[16] = "  ..  "; bigbuf[0..2] = buf[0..2];
+        let mut bigbuf = [b' '; 16];
+        bigbuf[0] = buf[0];
+        bigbuf[1] = buf[1];
+        let valid = common_wchar::pg_encoding_verifymbstr(i, &bigbuf);
+        if valid != 0 {
+            warn(&format!(
+                "trailing data changed official invalid string for encoding \"{name}\" to have valid prefix of length {valid}"
+            ));
+        }
+    }
+
+    // PG_RETURN_VOID().
+    fcinfo.isnull = false;
+    Datum::from_usize(0)
+}
+
+/* ---------------------------------------------------------------------------
+ * test_enc_conversion(bytea, name, name, bool) RETURNS record  (regress.c)
+ *
+ *   Convert `string` from `src_enc` to `dest_enc`. Returns a 2-column record
+ *   (int4 converted-byte count, bytea converted string). When src == dest, just
+ *   verify the source; with noError, a truncated result is returned. Otherwise
+ *   look up the default conversion proc and run it through
+ *   pg_do_encoding_conversion_buf.
+ * ------------------------------------------------------------------------- */
+
+/// `MAX_CONVERSION_GROWTH` (`mb/pg_wchar.h`).
+const MAX_CONVERSION_GROWTH: usize = 4;
+/// `MaxAllocSize` (`utils/memutils.h`) — `0x3fffffff` (1 GB - 1).
+const MAX_ALLOC_SIZE: usize = 0x3fff_ffff;
+
+fn fc_test_enc_conversion(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    use types_tuple::heaptuple::{BYTEAOID, INT4OID};
+
+    // bytea string = PG_GETARG_BYTEA_PP(0); src = VARDATA_ANY, srclen = EXHDR.
+    let src = arg_text(fcinfo, 0).to_vec();
+    let srclen = src.len();
+
+    let src_name = arg_name_bytes(fcinfo, 1).to_vec();
+    let dest_name = arg_name_bytes(fcinfo, 2).to_vec();
+    let no_error = arg_bool(fcinfo, 3);
+
+    let src_encoding = char_to_encoding(&src_name);
+    let dest_encoding = char_to_encoding(&dest_name);
+
+    if src_encoding < 0 {
+        raise(
+            PgError::error(format!(
+                "invalid source encoding name \"{}\"",
+                String::from_utf8_lossy(&src_name)
+            ))
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        );
+    }
+    if dest_encoding < 0 {
+        raise(
+            PgError::error(format!(
+                "invalid destination encoding name \"{}\"",
+                String::from_utf8_lossy(&dest_name)
+            ))
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+        );
+    }
+
+    let convertedbytes: i32;
+    // The converted payload bytes (no varlena header).
+    let retval: Vec<u8>;
+
+    if src_encoding == dest_encoding {
+        // just check that the source string is valid.
+        let oklen = common_wchar::pg_encoding_verifymbstr(src_encoding, &src);
+        if oklen as usize == srclen {
+            convertedbytes = oklen;
+            retval = src.clone();
+        } else if !no_error {
+            // report_invalid_encoding(src_encoding, src + oklen, srclen - oklen).
+            match backend_utils_mb_mbutils_seams::report_invalid_encoding::call(
+                src_encoding,
+                &src[oklen as usize..],
+            ) {
+                Ok(()) => unreachable!("report_invalid_encoding returned Ok"),
+                Err(err) => raise(err),
+            }
+        } else {
+            // Truncate to the valid prefix.
+            debug_assert!((oklen as usize) < srclen);
+            convertedbytes = oklen;
+            retval = src[..oklen as usize].to_vec();
+        }
+    } else {
+        // proc = FindDefaultConversionProc(src_encoding, dest_encoding).
+        let proc = match backend_utils_mb_mbutils_seams::find_default_conversion_proc::call(
+            src_encoding,
+            dest_encoding,
+        ) {
+            Ok(proc) => proc,
+            Err(err) => raise(err),
+        };
+        if proc == types_core::primitive::Oid::from(0u32) {
+            raise(
+                PgError::error(format!(
+                    "default conversion function for encoding \"{}\" to \"{}\" does not exist",
+                    common_extra_encnames::pg_encoding_to_char(src_encoding),
+                    common_extra_encnames::pg_encoding_to_char(dest_encoding),
+                ))
+                .with_sqlstate(types_error::ERRCODE_UNDEFINED_FUNCTION),
+            );
+        }
+
+        if srclen >= MAX_ALLOC_SIZE / MAX_CONVERSION_GROWTH {
+            raise(
+                PgError::error("out of memory")
+                    .with_detail(format!(
+                        "String of {srclen} bytes is too long for encoding conversion."
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+            );
+        }
+
+        let dstsize = srclen * MAX_CONVERSION_GROWTH + 1;
+        let m = MemoryContext::new("test_enc_conversion scratch");
+        let (consumed, dst) = match backend_utils_mb_mbutils_seams::pg_do_encoding_conversion_buf::call(
+            m.mcx(),
+            proc,
+            src_encoding,
+            dest_encoding,
+            &src,
+            dstsize as i32,
+            no_error,
+        ) {
+            Ok(pair) => pair,
+            Err(err) => raise(err),
+        };
+        convertedbytes = consumed;
+        // C: dstlen = strlen(dst). The seam returns the converted bytes without
+        // the trailing NUL, but a NUL inside the output truncates strlen.
+        let dstlen = dst
+            .as_slice()
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(dst.len());
+        retval = dst.as_slice()[..dstlen].to_vec();
+    }
+
+    // Build the 2-column record (int4 convertedbytes, bytea retval) and lower it
+    // onto the by-ref Composite lane (C: heap_form_tuple + HeapTupleGetDatum).
+    let m = MemoryContext::new("test_enc_conversion record");
+    let image = build_conv_record(m.mcx(), &[INT4OID, BYTEAOID], convertedbytes, &retval);
+    fcinfo.isnull = false;
+    fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Composite(image));
+    Datum::from_usize(0)
+}
+
+/// `record_from_values` over (int4, bytea), returning the self-describing
+/// composite-Datum byte image (copied out of `mcx`).
+fn build_conv_record(
+    mcx: mcx::Mcx<'_>,
+    coltypes: &[types_core::primitive::Oid],
+    convertedbytes: i32,
+    retval: &[u8],
+) -> Vec<u8> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    let bytea_image = varlena_image(retval);
+    let bytea_datum = match TDatum::from_byref_bytes_in(mcx, &bytea_image) {
+        Ok(d) => d,
+        Err(err) => raise(err),
+    };
+    let values = [TDatum::from_i32(convertedbytes), bytea_datum];
+    let nulls = [false, false];
+    let datum =
+        match backend_utils_fmgr_funcapi_seams::record_from_values::call(mcx, coltypes, &values, &nulls)
+        {
+            Ok(d) => d,
+            Err(err) => raise(err),
+        };
+    datum.as_varlena_bytes().into_owned()
+}
+
+/* ---------------------------------------------------------------------------
+ * test_mblen_func(bytea, bytea, bytea, int4) RETURNS int4  (regress.c)
+ *
+ *   Call one of the pg_mblen_* leading-character-length helpers (selected by the
+ *   first text arg) at `offset` into the third arg's bytes. `pg_encoding_mblen`
+ *   uses the explicit encoding named by the second arg; the rest use the
+ *   database encoding.
+ * ------------------------------------------------------------------------- */
+
+fn fc_test_mblen_func(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let func = String::from_utf8_lossy(arg_text(fcinfo, 0)).into_owned();
+    let encoding = arg_text(fcinfo, 1).to_vec();
+    let data = arg_text(fcinfo, 2);
+    let size = data.len();
+    let offset = arg_int32(fcinfo, 3) as usize;
+
+    // The byte windows C forms: data + offset, and the [data+offset, data+size).
+    let at_offset = &data[offset.min(size)..];
+
+    let result: i32 = match func.as_str() {
+        "pg_mblen_unbounded" => backend_utils_mb_mbutils::pg_mblen_unbounded(at_offset),
+        "pg_mblen_cstr" => match backend_utils_mb_mbutils::pg_mblen_cstr(at_offset) {
+            Ok(n) => n,
+            Err(err) => raise(err),
+        },
+        "pg_mblen_with_len" => {
+            match backend_utils_mb_mbutils::pg_mblen_with_len(at_offset, (size - offset) as i32) {
+                Ok(n) => n,
+                Err(err) => raise(err),
+            }
+        }
+        "pg_mblen_range" => match backend_utils_mb_mbutils::pg_mblen_range(at_offset) {
+            Ok(n) => n,
+            Err(err) => raise(err),
+        },
+        "pg_encoding_mblen" => {
+            let enc = char_to_encoding(&encoding);
+            common_wchar::pg_encoding_mblen(enc, at_offset).unwrap_or(0)
+        }
+        _ => raise(PgError::error("unknown function")),
+    };
+
+    fcinfo.isnull = false;
+    Datum::from_i32(result)
+}
+
+/* ---------------------------------------------------------------------------
+ * test_text_to_wchars(bytea, text) RETURNS int4[]  (regress.c)
+ *
+ *   Convert `string` (in the named encoding) to its pg_wchar code points and
+ *   return them as an int4[] array.
+ * ------------------------------------------------------------------------- */
+
+fn fc_test_text_to_wchars(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let encoding_name = arg_text(fcinfo, 0).to_vec();
+    let data = arg_text(fcinfo, 1).to_vec();
+    let size = data.len();
+
+    let encoding = char_to_encoding(&encoding_name);
+    if encoding < 0 {
+        raise(PgError::error(format!(
+            "unknown encoding name: {}",
+            String::from_utf8_lossy(&encoding_name)
+        )));
+    }
+
+    let m = MemoryContext::new("test_text_to_wchars scratch");
+    let datums: Vec<Datum> = if size > 0 {
+        let wchars = match backend_utils_mb_mbutils::pg_encoding_mb2wchar_with_len(
+            m.mcx(),
+            encoding,
+            &data,
+            size as i32,
+        ) {
+            Ok(w) => w,
+            Err(err) => raise(err),
+        };
+        // C asserts wlen <= size and wchars[wlen] == 0; the wchar count == wlen.
+        // Each code point is a UInt32GetDatum element of an int4[] array.
+        wchars
+            .as_slice()
+            .iter()
+            .map(|&w| Datum::from_i32(w as i32))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // construct_array_builtin(datums, wlen, INT4OID) → array varlena image.
+    let array_v = match backend_utils_adt_arrayfuncs::construct::construct_array_builtin_v(
+        m.mcx(),
+        &datums,
+        types_tuple::heaptuple::INT4OID,
+    ) {
+        Ok(v) => v,
+        Err(err) => raise(err),
+    };
+    let image = array_v.as_varlena_bytes().into_owned();
+    fcinfo.isnull = false;
+    fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
+
+/* ---------------------------------------------------------------------------
+ * test_wchars_to_text(bytea, int4[]) RETURNS text  (regress.c)
+ *
+ *   Inverse of test_text_to_wchars: take an int4[] of pg_wchar code points and
+ *   encode them as text in the named encoding.
+ * ------------------------------------------------------------------------- */
+
+fn fc_test_wchars_to_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let encoding_name = arg_text(fcinfo, 0).to_vec();
+    // PG_GETARG_ARRAYTYPE_P(1): the header-ful int4[] varlena image.
+    let array = arg_bytes(fcinfo, 1).to_vec();
+
+    let encoding = char_to_encoding(&encoding_name);
+    if encoding < 0 {
+        raise(PgError::error(format!(
+            "unknown encoding name: {}",
+            String::from_utf8_lossy(&encoding_name)
+        )));
+    }
+
+    let m = MemoryContext::new("test_wchars_to_text scratch");
+    // deconstruct_array_builtin(array, INT4OID) → (Datum, isnull) pairs.
+    let elems = match backend_utils_adt_arrayfuncs::construct::deconstruct_array_builtin(
+        m.mcx(),
+        &array,
+        types_tuple::heaptuple::INT4OID,
+    ) {
+        Ok(v) => v,
+        Err(err) => raise(err),
+    };
+
+    let bytes: Vec<u8> = if !elems.is_empty() {
+        let mut wchars: Vec<types_wchar::wchar::PgWChar> = Vec::with_capacity(elems.len());
+        for (datum, isnull) in elems.iter() {
+            if *isnull {
+                raise(PgError::error("unexpected NULL in array"));
+            }
+            wchars.push(datum.as_i32() as types_wchar::wchar::PgWChar);
+        }
+        let wlen = wchars.len() as i32;
+        match backend_utils_mb_mbutils::pg_encoding_wchar2mb_with_len(
+            m.mcx(),
+            encoding,
+            &wchars,
+            wlen,
+        ) {
+            Ok(mb) => mb.as_slice().to_vec(),
+            Err(err) => raise(err),
+        }
+    } else {
+        Vec::new()
+    };
+
+    ret_varlena(fcinfo, &bytes)
+}
+
+/* ---------------------------------------------------------------------------
+ * get_environ() RETURNS text[]  (regress.c)
+ *
+ *   Return the process environment as a text[] of "VAR=value" strings.
+ * ------------------------------------------------------------------------- */
+
+fn fc_get_environ(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // for (char **s = environ; *s; s++) ... CStringGetTextDatum(environ[i]).
+    let env: Vec<String> = std::env::vars()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    let refs: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
+
+    // construct_array_builtin(env, nvals, TEXTOID) → text[] varlena image.
+    let m = MemoryContext::new("get_environ scratch");
+    let image = match backend_utils_adt_arrayfuncs::construct::construct_text_array_bytes_str(m.mcx(), &refs) {
+        Ok(v) => v.as_slice().to_vec(),
+        Err(err) => raise(err),
+    };
+    fcinfo.isnull = false;
+    fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
+
 /// Resolve a symbol of the `regress` module to its ported `PGFunction` (the
 /// `PG_FUNCTION_INFO_V1`-exposed `(user_fn, api_version=1)` pair). Returns `None`
 /// for an unported / unknown symbol, exactly as the OS loader would fail to find
@@ -770,6 +1231,12 @@ fn lookup(function: &str) -> Option<LoadedExternalFunc> {
         "regress_setenv" => Some(fc_regress_setenv),
         "test_relpath" => Some(fc_test_relpath),
         "test_atomic_ops" => Some(fc_test_atomic_ops),
+        "test_enc_setup" => Some(fc_test_enc_setup),
+        "test_enc_conversion" => Some(fc_test_enc_conversion),
+        "test_mblen_func" => Some(fc_test_mblen_func),
+        "test_text_to_wchars" => Some(fc_test_text_to_wchars),
+        "test_wchars_to_text" => Some(fc_test_wchars_to_text),
+        "get_environ" => Some(fc_get_environ),
         _ => return None,
     };
     Some(LoadedExternalFunc {
