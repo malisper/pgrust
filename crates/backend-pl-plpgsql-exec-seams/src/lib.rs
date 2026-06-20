@@ -186,6 +186,9 @@ pub struct ExecsqlColumn {
     pub isnull: bool,
     pub typeid: Oid,
     pub typmod: int32,
+    /// `SPI_fname(tupdesc, i+1)` — the result column name (the field name a
+    /// `SELECT ... INTO <record>` target resolves `r.<name>` against).
+    pub name: std::string::String,
     pub byref: Option<std::vec::Vec<u8>>,
 }
 

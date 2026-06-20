@@ -54,6 +54,9 @@ pub struct ExecsqlColumn {
     pub value: usize,
     pub isnull: bool,
     pub typeid: Oid,
+    /// `SPI_fname(tupdesc, i+1)` — the result column name (for a record INTO
+    /// target, this is the field name `r.<name>` resolves against).
+    pub name: String,
     pub byref: Option<Vec<u8>>,
 }
 
@@ -344,6 +347,7 @@ fn run_one_execsql_stmt<'mcx>(
                     value: col.value,
                     isnull: col.isnull,
                     typeid: columns.get(i).map(|c| c.typeid).unwrap_or(types_core::InvalidOid),
+                    name: columns.get(i).map(|c| c.name.clone()).unwrap_or_default(),
                     byref: col.byref.clone(),
                 })
                 .collect(),

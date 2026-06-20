@@ -2296,13 +2296,26 @@ fn exec_move_row_into_target(
                 }
             }
         }
-        PLpgSQL_datum_type::PLPGSQL_DTYPE_REC | PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
-            // Expanded-record / record-field deconstruction — composite value
-            // substrate (expanded_record_*), out of scope.
-            panic!(
-                "seam not wired: exec_move_row INTO record (REC/RECFIELD) target (pl_exec.c) — \
-                 expanded-record deconstruction (composite value substrate)"
-            );
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => {
+            // `SELECT ... INTO <record>`: build a transient record from the
+            // result columns and install it as the REC's live expanded header.
+            trigger::exec_move_row_into_record_impl(estate, dno, columns);
+        }
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
+            // INTO a single record field (`SELECT ... INTO rec.field`) maps the
+            // first result column to the field, exactly like the scalar arm.
+            match columns.first() {
+                Some(c) => exec_assign_value_byref_impl(
+                    estate,
+                    dno,
+                    Datum::from_usize(c.value),
+                    c.byref.clone(),
+                    c.isnull,
+                    c.typeid,
+                    c.typmod,
+                ),
+                None => exec_assign_value_impl(estate, dno, Datum::null(), true, INVALID_OID, -1),
+            }
         }
     }
 }

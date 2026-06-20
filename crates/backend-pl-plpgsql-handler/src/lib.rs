@@ -791,6 +791,7 @@ pub fn init_seams() {
                         isnull: c.isnull,
                         typeid: c.typeid,
                         typmod: -1,
+                        name: c.name,
                         // A by-reference INTO column carries its image; forward
                         // it so the INTO store keeps the image in the target var.
                         byref: c.byref,

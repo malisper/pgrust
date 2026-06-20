@@ -14213,7 +14213,9 @@ dependencies = [
 name = "backend-pl-plpgsql-exec"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-tupdesc",
  "backend-commands-trigger-seams",
+ "backend-executor-execTuples",
  "backend-pl-plpgsql-exec-seams",
  "backend-utils-adt-misc2",
  "mcx",

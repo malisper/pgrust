@@ -1630,18 +1630,15 @@ mod recurrence_guard {
         // are now INSTALLED + DELETED from this allowlist.
         //
         // What remains uninstalled below:
-        //   * tg_trigtuple / tg_newtuple — the bare HeapTuple accessors
-        //     unique_key_recheck (constraint.c) reads; the firing path carries
-        //     them on the TriggerData but these owner-homed seams have no consumer
-        //     wired through them yet.
         //   * renametrig — the unported catalog-write DDL leg
         //     (CreateTrigger family: renametrig partition recursion,
         //     RangeVarGetRelidExtended callbacks). `RemoveTriggerById` is now
         //     ported + installed (backend-commands-trigger remove.rs), so its
         //     entry is deleted.
+        // (tg_trigtuple / tg_newtuple are now INSTALLED off the current-trigger
+        // side-channel — read by plpgsql_exec_trigger to populate NEW/OLD records
+        // — so their entries are DELETED.)
         // Install + DELETE each as that substrate / DDL family lands.
-        ("backend_commands_trigger", "tg_trigtuple"),
-        ("backend_commands_trigger", "tg_newtuple"),
         ("backend_commands_trigger", "renametrig"),
         //
         // (TD-RELCACHE-INDEX-NODETREE RETIRED for the relcache owner's four

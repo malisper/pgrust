@@ -17,7 +17,7 @@ use types_plpgsql::{
     PLpgSQL_function, PLpgSQL_promise_type, PLpgSQL_rc, PLpgSQL_var,
 };
 use types_ri_triggers::{TriggerDataRef, TupleTableSlotRef};
-use types_tuple::backend_access_common_heaptuple::FormedTuple;
+use types_tuple::backend_access_common_heaptuple::{Datum as RichDatum, FormedTuple};
 
 /// The current-trigger marker handle (`TriggerData(0)`), the only value the
 /// trigger-data accessors key off (the rich payload rides the firing path's
@@ -263,6 +263,75 @@ pub fn exec_move_row_from_datum_byref_impl(
 /// the unassigned (NULL) state: drop any live expanded header.
 pub fn exec_move_row_null_impl(estate: &mut PLpgSQL_execstate, target_dno: int32) {
     set_rec_erh(estate, target_dno, None);
+}
+
+/// `exec_move_row(estate, rec, ...)` for a `SELECT ... INTO <record>` result
+/// (pl_exec.c `exec_move_row` REC arm): build a transient record tupledesc from
+/// the result columns, make an expanded record of it, set the column values, and
+/// install it as the REC's live header. An empty `columns` (the no-rows case)
+/// clears the record to the NULL state.
+pub fn exec_move_row_into_record_impl(
+    estate: &mut PLpgSQL_execstate,
+    target_dno: int32,
+    columns: &[crate::exec_seams::ExecsqlColumn],
+) {
+    if columns.is_empty() {
+        set_rec_erh(estate, target_dno, None);
+        return;
+    }
+
+    let ctx = Box::new(MemoryContext::new("PL/pgSQL expanded record"));
+    let header: ExpandedRecordHeader<'static> = {
+        let mcx: Mcx<'static> =
+            unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) };
+
+        // CreateTemplateTupleDesc(natts) + TupleDescInitEntry per column, then
+        // BlessTupleDesc to assign the transient record type's typmod.
+        let mut td = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, columns.len() as i32)
+            .unwrap_or_else(|e| std::panic::panic_any(e));
+        for (i, c) in columns.iter().enumerate() {
+            backend_access_common_tupdesc::TupleDescInitEntry(
+                &mut td,
+                (i + 1) as i16,
+                Some(if c.name.is_empty() { "?column?" } else { &c.name }),
+                c.typeid,
+                c.typmod,
+                0,
+            )
+            .unwrap_or_else(|e| std::panic::panic_any(e));
+        }
+        let boxed: mcx::PgBox<'static, types_tuple::heaptuple::TupleDescData<'static>> =
+            mcx::PgBox::try_new_in(td, mcx).unwrap_or_else(|_| std::panic::panic_any(mcx.oom(0)));
+        let blessed = backend_executor_execTuples::exectype_tupoutput::BlessTupleDesc(mcx, Some(boxed))
+            .unwrap_or_else(|e| std::panic::panic_any(e));
+        let td_ref: &types_tuple::heaptuple::TupleDescData<'static> =
+            blessed.as_ref().expect("blessed tupdesc");
+
+        let mut erh = er::make_expanded_record_from_tupdesc(mcx, td_ref)
+            .unwrap_or_else(|e| std::panic::panic_any(e));
+
+        // Set the field values (a by-reference column becomes a ByRef Datum from
+        // its verbatim image; the bare word is a by-value scalar).
+        let mut values: Vec<RichDatum<'static>> = Vec::with_capacity(columns.len());
+        let mut nulls: Vec<bool> = Vec::with_capacity(columns.len());
+        for c in columns {
+            nulls.push(c.isnull);
+            if c.isnull {
+                values.push(RichDatum::null());
+            } else if let Some(image) = &c.byref {
+                let slice = mcx::slice_in(mcx, image)
+                    .unwrap_or_else(|e| std::panic::panic_any(e));
+                values.push(RichDatum::ByRef(slice));
+            } else {
+                values.push(RichDatum::from_usize(c.value));
+            }
+        }
+        er::expanded_record_set_fields(mcx, &mut erh, &values, &nulls, true)
+            .unwrap_or_else(|e| std::panic::panic_any(e));
+        erh
+    };
+    let handle = ErhHandle(crate::erh_table::register(ctx, header));
+    set_rec_erh(estate, target_dno, Some(handle));
 }
 
 /// Set (or clear) a REC datum's expanded-header handle.
