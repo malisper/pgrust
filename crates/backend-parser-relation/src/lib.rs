@@ -486,9 +486,9 @@ pub fn checkNameSpaceConflicts(
 
 /// `check_lateral_ref_ok` — complain if a namespace item is currently disallowed
 /// as a LATERAL reference.
-fn check_lateral_ref_ok(
-    pstate: &ParseState<'_>,
-    nsitem: &ParseNamespaceItem<'_>,
+fn check_lateral_ref_ok<'a>(
+    pstate: &ParseState<'a>,
+    nsitem: &ParseNamespaceItem<'a>,
     location: i32,
 ) -> PgResult<()> {
     if nsitem.p_lateral_only && !nsitem.p_lateral_ok {
@@ -3260,13 +3260,13 @@ pub fn get_rte_attribute_is_dropped<'mcx>(
             let mut atts_done: i32 = 0;
             for func_node in rte.functions.iter() {
                 // C: RangeTblFunction *rtfunc = (RangeTblFunction *) lfirst(lc);
-                let rtfunc = match &**func_node {
-                    types_nodes::nodes::Node::RangeTblFunction(r) => r,
-                    other => {
+                let rtfunc = match func_node.as_rangetblfunction() {
+                    Some(r) => r,
+                    None => {
                         return Err(ereport(ERROR)
                             .errmsg_internal(format!(
                                 "unexpected node type in RTE_FUNCTION functions list: {:?}",
-                                other.node_tag()
+                                func_node.node_tag()
                             ))
                             .into_error());
                     }

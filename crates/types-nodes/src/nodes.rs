@@ -452,6 +452,35 @@ impl<'mcx> Node<'mcx> {
         let other: &Node<'mcx> = unsafe { &*(other as *const Node<'_> as *const Node<'mcx>) };
         self.0.equal(&other.0)
     }
+
+    // --- snake-cased accessor aliases (hand-named differently from the generator's
+    //     `as_<lowercase-ident>`; preserved so existing callers keep compiling) ---
+
+    /// `castNode(TableFunc, node)` (borrow) — snake-named alias of `as_tablefunc`.
+    #[inline]
+    pub fn as_table_func(&self) -> Option<&crate::primnodes::TableFunc<'mcx>> {
+        self.as_tablefunc()
+    }
+    /// `castNode(TableFunc, node)` (mutable borrow) — alias of `as_tablefunc_mut`.
+    #[inline]
+    pub fn as_table_func_mut(&mut self) -> Option<&mut crate::primnodes::TableFunc<'mcx>> {
+        self.as_tablefunc_mut()
+    }
+    /// `castNode(CTECycleClause, node)` (borrow) — alias of `as_ctecycleclause`.
+    #[inline]
+    pub fn as_cte_cycle_clause(&self) -> Option<&crate::rawnodes::CTECycleClause<'mcx>> {
+        self.as_ctecycleclause()
+    }
+    /// `castNode(CTECycleClause, node)` (mutable borrow) — alias of `as_ctecycleclause_mut`.
+    #[inline]
+    pub fn as_cte_cycle_clause_mut(&mut self) -> Option<&mut crate::rawnodes::CTECycleClause<'mcx>> {
+        self.as_ctecycleclause_mut()
+    }
+    /// Consume into `CTECycleClause` — alias of `into_ctecycleclause`.
+    #[inline]
+    pub fn into_cte_cycle_clause(self) -> Option<crate::rawnodes::CTECycleClause<'mcx>> {
+        self.into_ctecycleclause()
+    }
 }
 
 // Node-opaque migration Phase 1 (docs/proposals/node-opaque-migration.md):
