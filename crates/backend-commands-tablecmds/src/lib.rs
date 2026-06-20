@@ -79,6 +79,7 @@ pub fn init_seams() {
     // relhassubclass marking.
     seam::store_catalog_inheritance_supers::set(create::store_catalog_inheritance_supers);
     seam::get_attribute_compression::set(create::get_attribute_compression);
+    seam::get_attribute_storage::set(create::get_attribute_storage);
     // set_attnotnull (tablecmds.c:8534) — the PK/NOT-NULL-implied attnotnull
     // catalog poke, called from DefineRelation's not-null merge tail.
     seam::set_attnotnull::set(create::set_attnotnull);

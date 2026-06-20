@@ -1293,6 +1293,48 @@ pub(crate) fn get_attribute_compression(
     Ok(cmethod as i8)
 }
 
+/// `GetAttributeStorage(atttypid, storagemode)` (tablecmds.c:9152): map a
+/// STORAGE mode keyword to its `attstorage` char, validating the mode is legal
+/// for the column type. Used both by `DefineRelation` (column-level STORAGE in
+/// CREATE TABLE) and `ATExecSetStorage` (ALTER COLUMN SET STORAGE).
+pub(crate) fn get_attribute_storage(atttypid: Oid, storagemode: &str) -> PgResult<i8> {
+    use types_tuple::heaptuple::{
+        TYPSTORAGE_EXTENDED, TYPSTORAGE_EXTERNAL, TYPSTORAGE_MAIN, TYPSTORAGE_PLAIN,
+    };
+
+    // pg_strcasecmp — case-insensitive ASCII comparison.
+    let cstorage = if storagemode.eq_ignore_ascii_case("plain") {
+        TYPSTORAGE_PLAIN
+    } else if storagemode.eq_ignore_ascii_case("external") {
+        TYPSTORAGE_EXTERNAL
+    } else if storagemode.eq_ignore_ascii_case("extended") {
+        TYPSTORAGE_EXTENDED
+    } else if storagemode.eq_ignore_ascii_case("main") {
+        TYPSTORAGE_MAIN
+    } else if storagemode.eq_ignore_ascii_case("default") {
+        lsyscache_seam::get_typstorage::call(atttypid)? as i8
+    } else {
+        return ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(format!("invalid storage type \"{storagemode}\""))
+            .finish(here("GetAttributeStorage"))
+            .map(|()| unreachable!());
+    };
+
+    // safety check: do not allow toasted storage modes unless column datatype
+    // is TOAST-aware.
+    if !(cstorage == TYPSTORAGE_PLAIN || type_is_toastable(atttypid)?) {
+        let typ = backend_utils_adt_format_type_seams::format_type_be_str::call(atttypid)?;
+        return ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("column data type {typ} can only have storage PLAIN"))
+            .finish(here("GetAttributeStorage"))
+            .map(|()| unreachable!());
+    }
+
+    Ok(cstorage)
+}
+
 /// `TypeIsToastable(typid)` (catalog/pg_type.h) ==
 /// `get_typstorage(typid) != TYPSTORAGE_PLAIN`.
 fn type_is_toastable(typid: Oid) -> PgResult<bool> {

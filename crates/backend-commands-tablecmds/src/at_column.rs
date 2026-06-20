@@ -66,7 +66,6 @@ use backend_catalog_pg_attrdef::{RemoveAttrDefault, StoreAttrDefault};
 use backend_utils_cache_lsyscache::attribute::get_attnum;
 use backend_utils_cache_syscache::{SearchSysCacheAttName, ATTNAME, ATTNUM};
 use backend_catalog_objectaccess_seams as objaccess_seam;
-use types_core::Oid;
 
 use backend_commands_tablecmds_seams as seam;
 
@@ -579,20 +578,13 @@ pub fn ATExecSetStatistics<'mcx>(
                 .finish(here("ATExecSetStatistics"))
                 .map(|()| unreachable!());
         }
-        // C: `rel->rd_index->indkey.values[attnum - 1] != 0`. The trimmed
-        // `FormData_pg_index` carries only `indkey0` (the first key column), so
-        // for `attnum > 1` this read is not expressible. (The check fires
-        // before any write, so the loud stop is partial-write-safe.)
-        let indkey_val = if attnum == 1 {
-            rd_index.indkey0
-        } else {
-            panic!(
-                "ALTER INDEX ... ALTER COLUMN {attnum} SET STATISTICS: the trimmed \
-                 types_rel::FormData_pg_index carries only indkey0 (first key column); \
-                 indkey.values[attnum-1] for attnum>1 is not expressible \
-                 (out-of-lane carrier widen — see at_column.rs)"
-            );
-        };
+        // C: `rel->rd_index->indkey.values[attnum - 1] != 0`. The widened
+        // `FormData_pg_index` carrier now holds the full `indkey` int2vector.
+        let indkey_val = rd_index
+            .indkey
+            .get((attnum - 1) as usize)
+            .copied()
+            .unwrap_or(0);
         if indkey_val != 0 {
             return backend_utils_error::ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
@@ -645,7 +637,7 @@ fn att_field_i16(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) 
 }
 
 /// `GETSTRUCT(tuple)->field` for a non-null `oid` `pg_attribute` column.
-fn att_field_oid(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) -> PgResult<Oid> {
+fn att_field_oid(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) -> PgResult<types_core::Oid> {
     Ok(backend_utils_cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)?.as_oid())
 }
 
@@ -691,67 +683,6 @@ pub fn ATExecSetOptions<'mcx>(
          the PgAttributeUpdateRow.attoptions carrier needs (same Datum-redesign \
          keystone backend-commands-indexcmds documents for opclass options)",
     );
-}
-
-/// `GetAttributeStorage(atttypid, storagemode)` (tablecmds.c:9152) — map a
-/// `SET STORAGE` mode keyword to its `TYPSTORAGE_*` char, validating the mode
-/// is legal for the column type.
-fn GetAttributeStorage(mcx: Mcx<'_>, atttypid: Oid, storagemode: &str) -> PgResult<i8> {
-    use types_tuple::heaptuple::{
-        TYPSTORAGE_EXTENDED, TYPSTORAGE_EXTERNAL, TYPSTORAGE_MAIN, TYPSTORAGE_PLAIN,
-    };
-
-    // pg_strcasecmp — case-insensitive ASCII comparison.
-    let cstorage = if storagemode.eq_ignore_ascii_case("plain") {
-        TYPSTORAGE_PLAIN
-    } else if storagemode.eq_ignore_ascii_case("external") {
-        TYPSTORAGE_EXTERNAL
-    } else if storagemode.eq_ignore_ascii_case("extended") {
-        TYPSTORAGE_EXTENDED
-    } else if storagemode.eq_ignore_ascii_case("main") {
-        TYPSTORAGE_MAIN
-    } else if storagemode.eq_ignore_ascii_case("default") {
-        get_typstorage(atttypid)?
-    } else {
-        return backend_utils_error::ereport(ERROR)
-            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
-            .errmsg(format!("invalid storage type \"{storagemode}\""))
-            .finish(here("GetAttributeStorage"))
-            .map(|()| unreachable!());
-    };
-
-    // safety check: do not allow toasted storage modes unless column datatype
-    // is TOAST-aware.
-    if !(cstorage == TYPSTORAGE_PLAIN || type_is_toastable(atttypid)?) {
-        return backend_utils_error::ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(format!(
-                "column data type {} can only have storage PLAIN",
-                format_type_be(mcx, atttypid)?
-            ))
-            .finish(here("GetAttributeStorage"))
-            .map(|()| unreachable!());
-    }
-
-    Ok(cstorage)
-}
-
-/// `get_typstorage(typid)` (lsyscache.c): `typstorage`, or `TYPSTORAGE_PLAIN`.
-fn get_typstorage(typid: Oid) -> PgResult<i8> {
-    Ok(backend_utils_cache_lsyscache_seams::get_typstorage::call(typid)? as i8)
-}
-
-/// `TypeIsToastable(typid)` (catalog/pg_type.h) ==
-/// `get_typstorage(typid) != TYPSTORAGE_PLAIN`.
-fn type_is_toastable(typid: Oid) -> PgResult<bool> {
-    Ok(get_typstorage(typid)? != types_tuple::heaptuple::TYPSTORAGE_PLAIN)
-}
-
-/// `format_type_be(typid)` (format_type.c).
-fn format_type_be(mcx: Mcx<'_>, typid: Oid) -> PgResult<String> {
-    Ok(backend_utils_adt_format_type::format_type_be(mcx, typid)?
-        .as_str()
-        .to_string())
 }
 
 /// `ATExecSetStorage(rel, colName, newValue, lockmode)` (tablecmds.c:9192) —
@@ -804,7 +735,7 @@ pub fn ATExecSetStorage<'mcx>(
 
     // attrtuple->attstorage = GetAttributeStorage(attrtuple->atttypid, strVal(newValue));
     let atttypid = att_field_oid(mcx, ATTNAME, &tuple, Anum_pg_attribute_atttypid)?;
-    let newstorage = GetAttributeStorage(mcx, atttypid, &storagemode)?;
+    let newstorage = seam::get_attribute_storage::call(atttypid, &storagemode)?;
 
     // CatalogTupleUpdate(attrelation, &tuple->t_self, tuple);
     let row = PgAttributeUpdateRow {
