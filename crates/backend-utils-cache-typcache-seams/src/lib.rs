@@ -107,6 +107,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lookup_type_cache(exprType(expr), TYPECACHE_HASH_PROC | TYPECACHE_EQ_OPR)`
+    /// then `OidIsValid(typentry->hash_proc) && OidIsValid(typentry->eq_opr) ?
+    /// Some(eq_opr) : None` (joinpath.c `paraminfo_get_equal_hashops`): resolve a
+    /// type's hash-equality operator for the Memoize cache-key analysis. `None`
+    /// means the type cannot be hashed (Memoize declined). `Err` carries the
+    /// catalog-lookup `ereport(ERROR)` surface.
+    pub fn type_hash_eq_operator(
+        type_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Option<types_core::primitive::Oid>>
+);
+
+seam_core::seam!(
     /// `lookup_type_cache(type_id, TYPECACHE_HASH_PROC_FINFO |
     /// TYPECACHE_HASH_EXTENDED_PROC_FINFO)` then read `hash_proc_finfo.fn_oid` /
     /// `hash_extended_proc_finfo.fn_oid` (the `hash_range` / `hash_range_extended`

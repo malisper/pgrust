@@ -18,6 +18,7 @@ types-pathnodes = { path = "../types-pathnodes" }
 types-datum = { path = "../types-datum" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
 backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
 backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }

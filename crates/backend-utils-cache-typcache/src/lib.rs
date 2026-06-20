@@ -2876,6 +2876,23 @@ pub fn type_cache_typtype(type_id: Oid) -> i8 {
     with_state(|st| st.entry(type_id).typtype)
 }
 
+/// `lookup_type_cache(type_id, TYPECACHE_HASH_PROC | TYPECACHE_EQ_OPR)` then
+/// `OidIsValid(typentry->hash_proc) && OidIsValid(typentry->eq_opr)` — the
+/// joinpath.c `paraminfo_get_equal_hashops` predicate. Returns `Some(eq_opr)`
+/// when the type has both a hash support proc and an equality operator (so it
+/// can be a Memoize cache key), else `None`.
+pub fn type_hash_eq_operator(type_id: Oid) -> PgResult<Option<Oid>> {
+    lookup_type_cache(type_id, TYPECACHE_HASH_PROC | TYPECACHE_EQ_OPR)?;
+    Ok(with_state(|st| {
+        let e = st.entry(type_id);
+        if e.hash_proc != INVALID_OID && e.eq_opr != INVALID_OID {
+            Some(e.eq_opr)
+        } else {
+            None
+        }
+    }))
+}
+
 /// Seam `type_cache_typtype` — `lookup_type_cache(atttypid, 0)->typtype`
 /// (execIndexing.c's `ExecWithoutOverlapsNotEmpty`).
 pub fn type_cache_typtype_seam(type_id: Oid) -> types_error::PgResult<i8> {
@@ -3315,6 +3332,8 @@ pub fn init_seams() {
     // OID read). The array/range ADTs call these across the dep cycle.
     backend_utils_cache_typcache_seams::lookup_element_eq_opr::set(lookup_element_eq_opr);
     backend_utils_cache_typcache_seams::lookup_type_cache_eq_opr::set(lookup_type_cache_eq_opr);
+    // joinpath.c `paraminfo_get_equal_hashops` lateral-var leg (Memoize cache key).
+    backend_utils_cache_typcache_seams::type_hash_eq_operator::set(type_hash_eq_operator);
     // `(hash_proc, eq_opr)` for `check_memoizable` (subselect.c, in init-subselect).
     backend_optimizer_plan_init_subselect_ext_seams::lookup_type_cache_hasheq::set(
         lookup_type_cache_hasheq_seam,

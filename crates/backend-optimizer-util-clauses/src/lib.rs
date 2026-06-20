@@ -193,6 +193,24 @@ pub fn init_seams() {
             .expect("contain_volatile_functions")
     });
 
+    // joinpath.c `paraminfo_get_equal_hashops` lateral-var leg: `IsA(node,
+    // PlaceHolderVar)` and `lookup_type_cache(exprType(node), TYPECACHE_HASH_PROC
+    // | TYPECACHE_EQ_OPR)` → `Some(eq_opr)` iff both the hash proc and eq operator
+    // are valid (else Memoize declines). clauses.c owns the planner-arena node →
+    // exprType bridge; the typcache lookup itself crosses to the typcache owner.
+    backend_optimizer_path_joinpath_seams::node_is_placeholdervar::set(|root, node| {
+        matches!(
+            root.node(node),
+            types_nodes::primnodes::Expr::PlaceHolderVar(_)
+        )
+    });
+    backend_optimizer_path_joinpath_seams::expr_hash_eq_operator::set(|root, node| {
+        let typid = backend_nodes_core::nodefuncs::expr_type(Some(root.node(node)))
+            .expect("expr_hash_eq_operator: exprType");
+        backend_utils_cache_typcache_seams::type_hash_eq_operator::call(typid)
+            .expect("expr_hash_eq_operator: lookup_type_cache")
+    });
+
     // get_eclass_for_sort_expr (equivclass.c) rejects an EC sort expression that
     // contains an aggregate or window function; clauses.c owns both predicates.
     // The grounded impls are fallible only on a catalog miss; a propagated error
