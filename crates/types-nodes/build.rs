@@ -395,9 +395,8 @@ fn plan_field_path(ident: &str) -> Option<&'static str> {
         // direct `.plan` field
         "Append" | "ModifyTable" | "Material" | "Gather" | "GatherMerge" | "MergeAppend"
         | "BitmapAnd" | "BitmapOr" | "RecursiveUnion" | "Group" | "ProjectSet" | "Result"
-        | "SetOp" | "Memoize" | "Limit" | "Unique" | "Sort" | "Agg" | "WindowAgg" | "Hash" => {
-            "plan"
-        }
+        | "SetOp" | "Memoize" | "Limit" | "Unique" | "Sort" | "Agg" | "WindowAgg" | "Hash"
+        | "LockRows" => "plan",
         // `.join.plan` (Join-derived)
         "MergeJoin" | "NestLoop" | "HashJoin" => "join.plan",
         // `.scan.plan` (Scan-derived)
