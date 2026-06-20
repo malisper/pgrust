@@ -10,7 +10,8 @@
 use std::string::ToString;
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_error::PgResult;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -41,102 +42,90 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("ts_rank fmgr scratch")
 }
 
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters — ts_rank.
 // ---------------------------------------------------------------------------
 
-fn fc_ts_rank_wttf(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ts_rank_wttf(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let method = arg_i32(fcinfo, 3);
     let m = scratch_mcx();
-    ret_f32(ok(crate::ts_rank_wttf(
+    Ok(ret_f32(crate::ts_rank_wttf(
         m.mcx(),
         arg_varlena(fcinfo, 0),
         arg_varlena(fcinfo, 1),
         arg_varlena(fcinfo, 2),
         method,
-    )))
+    )?))
 }
-fn fc_ts_rank_wtt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ts_rank_wtt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_f32(ok(crate::ts_rank_wtt(
+    Ok(ret_f32(crate::ts_rank_wtt(
         m.mcx(),
         arg_varlena(fcinfo, 0),
         arg_varlena(fcinfo, 1),
         arg_varlena(fcinfo, 2),
-    )))
+    )?))
 }
-fn fc_ts_rank_ttf(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ts_rank_ttf(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let method = arg_i32(fcinfo, 2);
     let m = scratch_mcx();
-    ret_f32(ok(crate::ts_rank_ttf(
+    Ok(ret_f32(crate::ts_rank_ttf(
         m.mcx(),
         arg_varlena(fcinfo, 0),
         arg_varlena(fcinfo, 1),
         method,
-    )))
+    )?))
 }
-fn fc_ts_rank_tt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ts_rank_tt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_f32(ok(crate::ts_rank_tt(
+    Ok(ret_f32(crate::ts_rank_tt(
         m.mcx(),
         arg_varlena(fcinfo, 0),
         arg_varlena(fcinfo, 1),
-    )))
+    )?))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — ts_rank_cd (cover density).
 // ---------------------------------------------------------------------------
 
-fn fc_ts_rankcd_wttf(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ts_rankcd_wttf(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let method = arg_i32(fcinfo, 3);
     let m = scratch_mcx();
-    ret_f32(ok(crate::ts_rankcd_wttf(
+    Ok(ret_f32(crate::ts_rankcd_wttf(
         m.mcx(),
         arg_varlena(fcinfo, 0),
         arg_varlena(fcinfo, 1),
         arg_varlena(fcinfo, 2),
         method,
-    )))
+    )?))
 }
-fn fc_ts_rankcd_wtt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ts_rankcd_wtt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_f32(ok(crate::ts_rankcd_wtt(
+    Ok(ret_f32(crate::ts_rankcd_wtt(
         m.mcx(),
         arg_varlena(fcinfo, 0),
         arg_varlena(fcinfo, 1),
         arg_varlena(fcinfo, 2),
-    )))
+    )?))
 }
-fn fc_ts_rankcd_ttf(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ts_rankcd_ttf(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let method = arg_i32(fcinfo, 2);
     let m = scratch_mcx();
-    ret_f32(ok(crate::ts_rankcd_ttf(
+    Ok(ret_f32(crate::ts_rankcd_ttf(
         m.mcx(),
         arg_varlena(fcinfo, 0),
         arg_varlena(fcinfo, 1),
         method,
-    )))
+    )?))
 }
-fn fc_ts_rankcd_tt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ts_rankcd_tt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_f32(ok(crate::ts_rankcd_tt(
+    Ok(ret_f32(crate::ts_rankcd_tt(
         m.mcx(),
         arg_varlena(fcinfo, 0),
         arg_varlena(fcinfo, 1),
-    )))
+    )?))
 }
 
 // ---------------------------------------------------------------------------
@@ -147,22 +136,25 @@ fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the `ts_rank` / `ts_rank_cd` fmgr builtins. OIDs/nargs from
 /// `pg_proc.dat`; every row is `proisstrict => 't'` and not retset.
 pub fn register_tsrank_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(3703, "ts_rank_wttf", 4, fc_ts_rank_wttf),
         builtin(3704, "ts_rank_wtt", 3, fc_ts_rank_wtt),
         builtin(3705, "ts_rank_ttf", 3, fc_ts_rank_ttf),
