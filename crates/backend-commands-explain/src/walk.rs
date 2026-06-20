@@ -725,44 +725,48 @@ pub fn ExplainNode<'es, 'p>(
         }
     }
 
-    // The per-node detail switch (show_plan_tlist / show_*_qual / show_sort_keys
-    // / instrumentation counts). `show_scan_qual(plan->qual, "Filter", ...)`:
-    // deparse the (AND of the) qual conditions and emit them as a `Filter:` line.
-    // The verbose-only tlist (`Output:`) / sort-key / instrumentation parts stay
-    // gated. C: `show_scan_qual` uses `useprefix = IsA(plan, SubqueryScan) ||
-    // es->verbose`.
-    if let Some(qual) = plan.qual.as_ref().filter(|q| !q.is_empty()) {
-        // node = (Node *) make_ands_explicit(qual);
-        let exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = qual.iter().cloned().collect();
-        let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
-        let node = Node::mk_expr(mcx, anded);
-
-        let useprefix = matches!(plan_node.node_tag(), ntag::T_SubqueryScan) || es.verbose;
-
-        // context = set_deparse_context_plan(es->deparse_cxt, planstate->plan,
-        //                                    ancestors);
-        // exprstr = deparse_expression(node, context, useprefix, false);
-        // Folded into one ruleutils seam (the deparse_namespace is owner-private).
-        // The folded seam takes pstmt/plan/expr at one lifetime; clone the
-        // running `'p` plan node into the formatting arena so it matches
-        // `es->pstmt` (the `'es` plan-tree copy stored above).
-        let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
-        let es_pstmt = es
-            .pstmt
-            .as_deref()
-            .expect("EXPLAIN: es->pstmt must be set before deparse");
-        let exprstr = ruleutils_s::deparse_expr_for_plan::call(
-            mcx,
-            es_pstmt,
-            &es.rtable_names,
-            &plan_owned,
-            ancestors,
-            &node,
-            useprefix,
-            false,
-        )?;
-        // ExplainPropertyText("Filter", exprstr, es);
-        fmt::ExplainPropertyText("Filter", exprstr.as_str(), es)?;
+    // The per-node "quals, sort keys, etc" switch (explain.c:1952). C emits the
+    // scan-specific quals (`Index Cond` / `Recheck Cond` / `Order By`) BEFORE the
+    // generic `Filter` line, each in its node's case. The `Filter` itself
+    // (`show_scan_qual(plan->qual, "Filter", ...)`) prints for index/bitmap/seq/
+    // values/cte/etc scans and Gather; the index nodes additionally print their
+    // index condition first. (The verbose-only tlist (`Output:`) /
+    // instrumentation counts stay gated.) `show_scan_qual` uses
+    // `useprefix = IsA(plan, SubqueryScan) || es->verbose`.
+    match plan_node.node_tag() {
+        ntag::T_IndexScan => {
+            // indexqualorig -> "Index Cond"; indexorderbyorig -> "Order By";
+            // plan->qual -> "Filter".
+            let is = plan_node.expect_indexscan();
+            show_scan_qual(es, mcx, plan_node, ancestors, is.indexqualorig.as_ref(), "Index Cond")?;
+            show_scan_qual(es, mcx, plan_node, ancestors, is.indexorderbyorig.as_ref(), "Order By")?;
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+        }
+        ntag::T_IndexOnlyScan => {
+            // indexqual -> "Index Cond"; indexorderby -> "Order By";
+            // plan->qual -> "Filter".
+            let ios = plan_node.expect_indexonlyscan();
+            show_scan_qual(es, mcx, plan_node, ancestors, ios.indexqual.as_ref(), "Index Cond")?;
+            show_scan_qual(es, mcx, plan_node, ancestors, ios.indexorderby.as_ref(), "Order By")?;
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+        }
+        ntag::T_BitmapIndexScan => {
+            // indexqualorig -> "Index Cond" (no Filter — the heap node carries it).
+            let bis = plan_node.expect_bitmapindexscan();
+            show_scan_qual(es, mcx, plan_node, ancestors, bis.indexqualorig.as_ref(), "Index Cond")?;
+        }
+        ntag::T_BitmapHeapScan => {
+            // bitmapqualorig -> "Recheck Cond"; plan->qual -> "Filter".
+            let bhs = plan_node.expect_bitmapheapscan();
+            show_scan_qual(es, mcx, plan_node, ancestors, Some(&bhs.bitmapqualorig), "Recheck Cond")?;
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+        }
+        _ => {
+            // The generic `Filter` leg (SeqScan / SampleScan / ValuesScan /
+            // CteScan / NamedTuplestoreScan / WorkTableScan / SubqueryScan /
+            // Gather / joins / Result / etc).
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+        }
     }
 
     // The sort-/group-key detail (`show_sort_keys` / `show_agg_keys` /
@@ -944,6 +948,53 @@ pub fn ExplainNode<'es, 'p>(
         true,
         es,
     )?;
+    Ok(())
+}
+
+/// `show_scan_qual(qual, qlabel, planstate, ancestors, es)` (explain.c:2470):
+/// deparse the AND of `qual`'s conditions and emit them as a `<qlabel>:` line.
+/// A NULL/empty qual prints nothing. C: `useprefix = IsA(plan, SubqueryScan) ||
+/// es->verbose`. The deparse runs against the running plan node (cloned into the
+/// `'es` formatting arena so it matches `es->pstmt`, the `'es` plan-tree copy).
+fn show_scan_qual<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plan_node: &Node<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+    qual: Option<&PgVec<'p, types_nodes::primnodes::Expr>>,
+    qlabel: &str,
+) -> PgResult<()> {
+    let Some(qual) = qual.filter(|q| !q.is_empty()) else {
+        return Ok(());
+    };
+    // node = (Node *) make_ands_explicit(qual);
+    let exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = qual.iter().cloned().collect();
+    let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
+    let node = Node::mk_expr(mcx, anded);
+
+    let useprefix = matches!(plan_node.node_tag(), ntag::T_SubqueryScan) || es.verbose;
+
+    // context = set_deparse_context_plan(es->deparse_cxt, planstate->plan,
+    //                                    ancestors); exprstr =
+    // deparse_expression(node, context, useprefix, false). Folded into one
+    // ruleutils seam (the deparse_namespace is owner-private).
+    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let es_pstmt = es
+        .pstmt
+        .as_deref()
+        .expect("EXPLAIN: es->pstmt must be set before deparse");
+    let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+        mcx,
+        es_pstmt,
+        &es.rtable_names,
+        &plan_owned,
+        ancestors,
+        &node,
+        useprefix,
+        false,
+    )?;
+    // ExplainPropertyText(qlabel, exprstr, es);
+    fmt::ExplainPropertyText(qlabel, exprstr.as_str(), es)?;
     Ok(())
 }
 

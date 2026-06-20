@@ -1388,9 +1388,15 @@ fn index_condition_support(
         Err(e) => panic!("match_pattern_prefix failed: {}", e.message()),
     };
 
-    // match_pattern_prefix never sets lossy (the derived prefix quals are exact
-    // bounds; the recheck is the original LIKE/regex clause, kept by the caller).
-    (result, false)
+    // C `get_index_clause_from_support` sets `req.lossy = true` as the default
+    // assumption (indxpath.c), and `like_regex_support` NEVER overrides it — so a
+    // pattern-prefix index clause is ALWAYS lossy: the derived `>=`/`<`/`=`
+    // prefix quals only bound the search, and the original LIKE/regex clause must
+    // be retained as a recheck `Filter` (createplan.c keeps it because a lossy
+    // IndexClause is skipped by `is_redundant_with_indexclauses`). Even the
+    // exact-prefix `=` case stays lossy in C (regex `^abc$` may still differ from
+    // `proname = 'abc'` for e.g. trailing newline semantics).
+    (result, true)
 }
 
 /// Install the `oid_function_call1_index_support` planner-support seam with the
