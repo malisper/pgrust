@@ -62,6 +62,9 @@ pub fn init_seams() {
     backend_executor_execPartition_seams::exec_cleanup_tuple_routing::set(
         routing_setup::ExecCleanupTupleRouting,
     );
+    backend_executor_execPartition_seams::exec_do_initial_pruning::set(
+        pruning::ExecDoInitialPruning,
+    );
 }
 
 /// Seam adapter for `exec_setup_partition_tuple_routing`: the owner returns the

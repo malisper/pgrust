@@ -9379,6 +9379,7 @@ dependencies = [
  "backend-executor-execJunk",
  "backend-executor-execMain-seams",
  "backend-executor-execParallel-support-seams",
+ "backend-executor-execPartition-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execReplication-seams",
  "backend-executor-execTuples",

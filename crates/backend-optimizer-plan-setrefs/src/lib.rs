@@ -567,6 +567,126 @@ fn offset_relid_set(relids: Relids, rtoffset: i32) -> Relids {
     result
 }
 
+/// Offset every RT index in a `RawBms` (raw `bitmapword[]`) by `rtoffset`,
+/// returning a fresh packed bitmap. Used for `PartitionPruneInfo.relids` whose
+/// members are RT indexes (partprune.c `offset_relid_set`).
+fn offset_rawbms(
+    raw: &types_nodes::partprune_carrier::RawBms,
+    rtoffset: i32,
+) -> types_nodes::partprune_carrier::RawBms {
+    if rtoffset == 0 {
+        return raw.clone();
+    }
+    let members = rawbms_members(raw);
+    if members.is_empty() {
+        return None;
+    }
+    pack_rawbms(members.iter().map(|m| m + rtoffset))
+}
+
+/// Unpack a `RawBms` into its set-bit member list.
+fn rawbms_members(raw: &types_nodes::partprune_carrier::RawBms) -> Vec<i32> {
+    let mut out = Vec::new();
+    if let Some(words) = raw {
+        for (wi, &word) in words.iter().enumerate() {
+            let mut w = word;
+            while w != 0 {
+                let b = w.trailing_zeros() as i32;
+                out.push(wi as i32 * 64 + b);
+                w &= w - 1;
+            }
+        }
+    }
+    out
+}
+
+/// Pack member ints into a `RawBms` (`None` if empty).
+fn pack_rawbms(
+    members: impl Iterator<Item = i32>,
+) -> types_nodes::partprune_carrier::RawBms {
+    let members: Vec<i32> = members.collect();
+    if members.is_empty() {
+        return None;
+    }
+    let maxbit = *members.iter().max().unwrap();
+    let nwords = (maxbit / 64 + 1) as usize;
+    let mut words = alloc::vec![0u64; nwords];
+    for m in members {
+        words[(m / 64) as usize] |= 1u64 << (m % 64);
+    }
+    Some(words)
+}
+
+/// `register_partpruneinfo(root, part_prune_index, rtoffset)` (setrefs.c:1759).
+/// Move the `PartitionPruneInfo` at `root.partPruneInfos[part_prune_index]` into
+/// `glob.part_prune_infos`, applying `rtoffset` to its RT-index fields and
+/// recording leaf-partition RT indexes (when initial pruning is possible) into
+/// `glob.prunable_relids`. Returns the new index in `glob.part_prune_infos`.
+fn register_partpruneinfo(
+    root: &mut PlannerInfo,
+    part_prune_index: i32,
+    rtoffset: i32,
+) -> PgResult<i32> {
+    debug_assert!(
+        part_prune_index >= 0 && (part_prune_index as usize) < root.partPruneInfos.len()
+    );
+    // Move the carrier out of root.partPruneInfos (C aliases by pointer; the
+    // owned model takes ownership and appends to glob).
+    let mut pinfo = root.partPruneInfos[part_prune_index as usize].clone();
+
+    pinfo.relids = offset_rawbms(&pinfo.relids, rtoffset);
+
+    // Collect leaf RT indexes to add to prunableRelids (when initial pruning).
+    let mut new_prunable: Vec<i32> = Vec::new();
+    for prune_infos in pinfo.prune_infos.iter_mut() {
+        for prelinfo in prune_infos.iter_mut() {
+            prelinfo.rtindex = (prelinfo.rtindex as i32 + rtoffset) as u32;
+            // initial_pruning_steps / exec_pruning_steps: the C fix_scan_list
+            // applies rtoffset to Vars in the step exprs. gen_partprune_steps
+            // rejects any Var-bearing expr for INITIAL/EXEC targets (only
+            // Consts/Params/stable exprs over Params reach a step), so there are
+            // no Vars to offset and the step exprs are carried unchanged.
+            let has_initial = !prelinfo.initial_pruning_steps.is_empty();
+            for k in 0..prelinfo.nparts as usize {
+                // Non-leaf / no-subplan partitions are excluded from this map.
+                if prelinfo.leafpart_rti_map[k] != 0 {
+                    prelinfo.leafpart_rti_map[k] += rtoffset;
+                    if has_initial {
+                        new_prunable.push(prelinfo.leafpart_rti_map[k]);
+                    }
+                }
+            }
+        }
+    }
+
+    // glob->prunableRelids = bms_add_member(...) for each leaf rti.
+    {
+        let glob = root
+            .glob
+            .as_mut()
+            .ok_or_else(|| PgError::error("register_partpruneinfo: root->glob is NULL"))?;
+        if !new_prunable.is_empty() {
+            let mut existing: Vec<i32> = Vec::new();
+            let mut rtindex = -1;
+            loop {
+                rtindex = relids_next_member(&glob.prunable_relids, rtindex);
+                if rtindex < 0 {
+                    break;
+                }
+                existing.push(rtindex);
+            }
+            let mut merged: Relids = None;
+            for m in existing.into_iter().chain(new_prunable.into_iter()) {
+                merged = relids_add_member(merged, m);
+            }
+            // Union with whatever was already there (relids_add_member rebuilds).
+            glob.prunable_relids = merged;
+        }
+        glob.part_prune_infos.push(pinfo);
+        Ok(glob.part_prune_infos.len() as i32 - 1)
+    }
+}
+
 // ===========================================================================
 // indexed_tlist + the search_indexed_tlist_for_* family.
 // ===========================================================================
@@ -3062,12 +3182,13 @@ fn set_append_references<'mcx>(
         let ar = bms_nodes_to_relids(a.apprelids.as_deref());
         let ar = offset_relid_set(ar, rtoffset);
         a.apprelids = relids_to_bms_node(ar, mcx)?;
-        if a.part_prune_index >= 0 {
-            return Err(PgError::error(
-                "set_append_references: PartitionPruneInfo registration \
-                 (register_partpruneinfo) is owned by the partition-pruning cohort \
-                 and not ported",
-            ));
+    }
+    // a->part_prune_index = register_partpruneinfo(...) (setrefs.c:1862).
+    {
+        let part_prune_index = plan.as_append().unwrap().part_prune_index;
+        if part_prune_index >= 0 {
+            let new_index = register_partpruneinfo(root, part_prune_index, rtoffset)?;
+            plan.as_append_mut().unwrap().part_prune_index = new_index;
         }
         // We don't recurse to lefttree/righttree (asserted NULL).
     }
@@ -3111,12 +3232,13 @@ fn set_mergeappend_references<'mcx>(
         let ar = bms_nodes_to_relids(m.apprelids.as_deref());
         let ar = offset_relid_set(ar, rtoffset);
         m.apprelids = relids_to_bms_node(ar, mcx)?;
-        if m.part_prune_index >= 0 {
-            return Err(PgError::error(
-                "set_mergeappend_references: PartitionPruneInfo registration \
-                 (register_partpruneinfo) is owned by the partition-pruning cohort \
-                 and not ported",
-            ));
+    }
+    // m->part_prune_index = register_partpruneinfo(...) (setrefs.c:1935).
+    {
+        let part_prune_index = plan.as_mergeappend().unwrap().part_prune_index;
+        if part_prune_index >= 0 {
+            let new_index = register_partpruneinfo(root, part_prune_index, rtoffset)?;
+            plan.as_mergeappend_mut().unwrap().part_prune_index = new_index;
         }
     }
     Ok(plan)

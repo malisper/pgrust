@@ -311,15 +311,21 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
         estate.es_plannedstmt = Some(mcx::alloc_in(mcx, plannedstmt.clone_in(mcx)?)?);
 
         // estate->es_part_prune_infos = plannedstmt->partPruneInfos;
-        // ExecDoInitialPruning(estate) — the trimmed PlannedStmt carries no
-        // partPruneInfos; es_part_prune_infos stays empty, so initial pruning is
-        // a no-op for the plain path. (Guard-and-panic if pruning state is ever
-        // present.)
+        // The owned executor consumes each PartitionPruneInfo as the type-erased
+        // payload of an `Opaque`; clone the planner-produced carriers into the
+        // per-query context as `Opaque(Box<dyn Any>)`.
+        for pinfo in plannedstmt.partPruneInfos.iter() {
+            estate
+                .es_part_prune_infos
+                .push(types_nodes::Opaque(Some(alloc::boxed::Box::new(pinfo.clone()))));
+        }
+
+        // ExecDoInitialPruning(estate) — perform executor-startup pruning. The
+        // results (bitmapsets of surviving subplan indexes) are stored in
+        // es_part_prune_results, parallel to es_part_prune_infos.
         if !estate.es_part_prune_infos.is_empty() {
-            panic!(
-                "execMain InitPlan: ExecDoInitialPruning over partPruneInfos not wired \
-                 (trimmed PlannedStmt carries no partPruneInfos) — #167 F0d"
-            );
+            let mcx = estate.es_query_cxt;
+            backend_executor_execPartition_seams::exec_do_initial_pruning::call(mcx, estate)?;
         }
 
         // Build the ExecRowMark array from PlanRowMark(s), if any.

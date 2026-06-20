@@ -84,3 +84,19 @@ seam_core::seam!(
         proute: &mut types_nodes::PartitionTupleRouting<'mcx>,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecDoInitialPruning(estate)` (execPartition.c): perform run-time
+    /// "initial" (executor-startup) partition pruning for every
+    /// `PartitionPruneInfo` in `estate->es_part_prune_infos`, building each
+    /// `PartitionPruneState` (appended to `es_part_prune_states`), storing the
+    /// surviving-subplan bitmapset (or `None`) in `es_part_prune_results`, and
+    /// accumulating the surviving leaf RT indexes into `es_unpruned_relids`.
+    /// `InitPlan` calls it right after installing `es_part_prune_infos`.
+    /// Allocates in the per-query context and can `ereport(ERROR)` (pruning
+    /// evaluation), hence `mcx` and `PgResult`.
+    pub fn exec_do_initial_pruning<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<()>
+);

@@ -46,6 +46,7 @@ backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-sea
 # (mirror-and-panic) until the matching family of #166 lands — the unit is
 # CATALOG `needs-decomp`, so the seam-install recurrence guard exempts them.
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
+backend-executor-execPartition-seams = { path = "../backend-executor-execPartition-seams" }
 backend-commands-trigger-seams = { path = "../backend-commands-trigger-seams" }
 
 # ExecCheckPermissions ACL/get-rel dependencies (all landed owners).
