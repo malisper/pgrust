@@ -792,6 +792,7 @@ fn exec_stmt_return(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_return) 
     estate.retval = Datum::null();
     estate.retisnull = true;
     estate.rettype = INVALID_OID;
+    estate.retval_byref = None;
 
     if stmt.retvarno >= 0 {
         let dno = stmt.retvarno;
@@ -823,6 +824,10 @@ fn exec_stmt_return(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_return) 
         estate.retval = retval;
         estate.retisnull = retisnull;
         estate.rettype = rettype;
+        // Move the by-ref image companion (set by exec_eval_expr) into the
+        // durable return slot so a by-ref result (text/numeric/…) survives to
+        // the function result; a by-value result leaves it None.
+        estate.retval_byref = estate.last_eval_byref.take();
 
         if estate.retistuple && !estate.retisnull && !seam::type_is_rowtype(estate.rettype) {
             seam::ereport_return_noncomposite();
@@ -984,6 +989,13 @@ fn exec_eval_expr_impl(
         Ok(r) => r,
         Err(e) => std::panic::panic_any(e),
     };
+
+    // Stash the by-ref image (if any) as the out-of-band companion to the
+    // (value, isnull, rettype, rettypmod) tuple. A by-value result leaves
+    // `last_eval_byref == None`; a by-ref result (text/varchar/numeric/…) carries
+    // its `datumCopy`'d varlena/cstring image here, which `exec_stmt_return`
+    // moves into `retval_byref`. The bare-word `value` is `0` in the by-ref case.
+    estate.last_eval_byref = result.byref;
 
     // rettypmod is read by exec_run_select as SPI_gettypmod(tupdesc, 1); the
     // PL/pgSQL callers that consume exec_eval_expr's rettypmod (FOR-i bounds,
@@ -1806,10 +1818,17 @@ pub struct FunctionCallArg {
 
 /// The result of executing a scalar PL/pgSQL function: the result `Datum`, its
 /// NULL flag (the C `fcinfo->isnull`), and its runtime type Oid.
-#[derive(Debug, Clone, Copy)]
+///
+/// `byref` is `Some(image)` when the result is a pass-by-reference value: the
+/// verbatim header-ful varlena / cstring byte image (`datumCopy`'d into the
+/// function's result context). The handler sets `fcinfo.ref_result` from it at
+/// the fmgr boundary, and the bare-word `value` is unused (`0`). `None` for a
+/// by-value result, where `value` is the scalar word.
+#[derive(Debug, Clone)]
 pub struct FunctionResult {
     pub value: Datum,
     pub isnull: bool,
+    pub byref: Option<Vec<u8>>,
     pub rettype: Oid,
 }
 
@@ -1837,6 +1856,8 @@ pub fn plpgsql_estate_setup(
         retval: Datum::null(),
         retisnull: true,
         rettype: INVALID_OID,
+        retval_byref: None,
+        last_eval_byref: None,
 
         fn_rettype: func.fn_rettype,
         retistuple: func.fn_retistuple,
@@ -1999,6 +2020,7 @@ pub fn plpgsql_exec_function(
     let mut result = FunctionResult {
         value: estate.retval,
         isnull: estate.retisnull,
+        byref: None,
         rettype: estate.rettype,
     };
 
@@ -2016,9 +2038,13 @@ pub fn plpgsql_exec_function(
             seam::coerce_function_result_tuple(&mut estate);
             result.value = estate.retval;
         } else if estate.fn_rettype == estate.rettype {
-            // No coercion needed for an exact type match (the VOID-return hack
-            // path: rettype==VOIDOID==fn_rettype). Datum is returned by value.
+            // No coercion needed for an exact type match (the common scalar
+            // RETURN, and the VOID-return hack rettype==VOIDOID==fn_rettype).
+            // A by-value result is returned by word; a by-reference result
+            // (text/varchar/numeric/…) is returned via its owned image, which the
+            // handler copies into the fmgr result context (C's datumCopy out).
             result.value = estate.retval;
+            result.byref = estate.retval_byref.take();
         } else {
             // exec_cast_value to the declared rettype + datumCopy out.
             let (retval, retisnull, rettype, fn_rettype) =

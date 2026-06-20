@@ -60,11 +60,17 @@ pub struct EvalParamValue {
 
 /// The raw result of evaluating a PL/pgSQL expression to a single value (the
 /// first row's first column, `SPI_getbinval(tuptab->vals[0], tupdesc, 1)`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct EvalExprResult {
-    /// The bare-word result datum (`0` when null).
+    /// The bare-word result datum (`0` when null, or when the result is a
+    /// pass-by-reference value carried in `byref`).
     pub value: usize,
     pub isnull: bool,
+    /// `Some(image)` for a non-null pass-by-reference result: the verbatim
+    /// header-ful varlena / cstring byte image (`datumCopy`'d out of the SPI
+    /// arena), so a by-ref result (text/varchar/numeric/…) survives to the
+    /// caller's result context. `None` for a by-value or NULL result.
+    pub byref: Option<std::vec::Vec<u8>>,
     /// The result column's type OID (`SPI_gettypeid(tupdesc, 1)`).
     pub typeid: Oid,
     /// `SPI_processed` — the number of rows the expression produced.

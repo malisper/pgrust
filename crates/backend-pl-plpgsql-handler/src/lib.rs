@@ -274,6 +274,7 @@ pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         FunctionResult {
             value: d,
             isnull: false,
+            byref: None,
             rettype: 0,
         }
     } else if seam::called_as_event_trigger(fcinfo) {
@@ -283,6 +284,7 @@ pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         FunctionResult {
             value: Datum::null(),
             isnull: false,
+            byref: None,
             rettype: 0,
         }
     } else {
@@ -298,6 +300,20 @@ pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
     fcinfo.isnull = result.isnull;
 
+    // A pass-by-reference result (text/varchar/numeric/SQLERRM/…) crosses the
+    // fmgr boundary through `ref_result`: set the owned varlena image (already
+    // header-ful, `datumCopy`'d out of the exec/SPI context, so it outlives the
+    // SPI bracket we close just below) and return the dummy word. fmgr-core's
+    // result marshaling (`take_ref_result` → `FmgrOut::Ref`) reconstructs the
+    // value. A by-value result returns its scalar word directly (`byref == None`).
+    let ret = match result.byref {
+        Some(image) if !result.isnull => {
+            fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Varlena(image));
+            Datum::from_usize(0)
+        }
+        _ => result.value,
+    };
+
     // Disconnect from SPI manager.
     match SPI_finish() {
         Ok(SPI_OK_FINISH) => {}
@@ -305,7 +321,7 @@ pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         Err(e) => seam::propagate(e),
     }
 
-    result.value
+    ret
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +548,7 @@ pub fn init_seams() {
             Ok(backend_pl_plpgsql_exec_seams::EvalExprResult {
                 value: r.value,
                 isnull: r.isnull,
+                byref: r.byref,
                 typeid: r.typeid,
                 processed: r.processed,
             })

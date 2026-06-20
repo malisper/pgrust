@@ -34,18 +34,25 @@ use types_tuple::heaptuple::TupleDescData;
 use types_xml::{SpiColumn, SpiResult, SpiRow};
 
 /// One raw column value retained from a received row: the bare-word datum value
-/// (pass-by-value codec word; `0` for SQL NULL) and the is-null flag. This is
-/// the `SPI_getbinval(tuptab->vals[i], tupdesc, n, &isnull)` raw-datum read that
-/// the PL/pgSQL `exec_run_select` / `exec_eval_expr` slow path needs (the
-/// string-rendered [`SpiRow`] loses the raw value). Only pass-by-value datums
-/// (the value word itself) cross faithfully; a pass-by-reference result is the
-/// separate by-ref-Datum keystone (the value would need to be `datumCopy`'d into
-/// a long-lived context, which the rich `Datum::ByRef` payload carries but the
-/// bare-word channel cannot).
-#[derive(Clone, Copy)]
+/// (pass-by-value codec word; `0` for SQL NULL), the is-null flag, and — for a
+/// pass-by-reference column — the verbatim by-reference byte image (the
+/// `Datum::ByRef` varlena/`Datum::Cstring` payload, header included). This is the
+/// `SPI_getbinval(tuptab->vals[i], tupdesc, n, &isnull)` raw-datum read that the
+/// PL/pgSQL `exec_run_select` / `exec_eval_expr` slow path needs (the
+/// string-rendered [`SpiRow`] loses the raw value).
+///
+/// A pass-by-value datum crosses as `value` (the word itself, `byref == None`);
+/// a pass-by-reference result is `datumCopy`'d into the owned `byref` image
+/// (`value == 0`, never read) so it outlives the receiver/exec arena and can be
+/// re-materialized into the caller's result context — the rich `Datum::ByRef`
+/// payload carried as owned bytes, the by-ref-Datum keystone.
+#[derive(Clone)]
 pub(crate) struct RawCol {
     pub value: usize,
     pub isnull: bool,
+    /// `Some(image)` for a non-null pass-by-reference column (the verbatim
+    /// header-ful varlena / cstring bytes); `None` for a by-value or NULL column.
+    pub byref: Option<Vec<u8>>,
 }
 
 /// One DestSPI receiver's collected state: the result column descriptors (set
@@ -159,9 +166,27 @@ fn spi_printtup<'mcx>(mcx: Mcx<'mcx>, state: u64, slot: &mut SlotData<'mcx>) -> 
     for (i, (value, isnull)) in cols.iter().enumerate() {
         let (typeid, dropped) = coltypes.get(i).copied().unwrap_or((0u32, false));
 
+        // SPI_getbinval raw read: a by-value column crosses as its scalar word; a
+        // by-reference column (the rich `Datum::ByRef`/`Datum::Cstring` arm) is
+        // captured as its owned flat byte image (datumCopy out of the receiver
+        // arena), so a by-ref result survives to the caller's result context.
+        let (raw_value, raw_byref) = if *isnull {
+            (0usize, None)
+        } else {
+            match value {
+                types_tuple::Datum::ByVal(w) => (*w, None),
+                types_tuple::Datum::ByRef(b) => (0usize, Some(b.as_slice().to_vec())),
+                types_tuple::Datum::Cstring(s) => (0usize, Some(s.as_bytes().to_vec())),
+                // Composite/Expanded/Internal are not produced as a scalar
+                // expression's first column on this path; flatten to the varlena
+                // image (matches the form-path `as_varlena_bytes`).
+                _ => (0usize, Some(value.as_varlena_bytes().into_owned())),
+            }
+        };
         raw_row.push(RawCol {
-            value: if *isnull { 0 } else { value.as_usize() },
+            value: raw_value,
             isnull: *isnull,
+            byref: raw_byref,
         });
 
         if dropped {

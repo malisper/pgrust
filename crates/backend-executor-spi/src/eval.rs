@@ -56,11 +56,16 @@ pub struct EvalParamValue {
 
 /// The raw result of evaluating a PL/pgSQL expression to a single value: the
 /// first row's first column (`SPI_getbinval(tuptab->vals[0], tupdesc, 1)`).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct EvalResult {
-    /// The bare-word result datum (`0` when null).
+    /// The bare-word result datum (`0` when null, or when the result is a
+    /// by-reference value carried in `byref`).
     pub value: usize,
     pub isnull: bool,
+    /// `Some(image)` for a non-null pass-by-reference result: the verbatim
+    /// header-ful varlena / cstring byte image (the rich `Datum::ByRef` payload,
+    /// `datumCopy`'d out of the SPI arena). `None` for a by-value/NULL result.
+    pub byref: Option<Vec<u8>>,
     /// The result column's type OID (`SPI_gettypeid(tupdesc, 1)`).
     pub typeid: Oid,
     /// `SPI_processed` — the number of rows the expression produced.
@@ -133,14 +138,15 @@ pub fn spi_eval_expr(
     // SPI_getbinval(tuptab->vals[0], tupdesc, 1, &isnull): the first row's first
     // column. No rows -> a NULL result of the column type (exec_run_select with
     // maxtuples and SPI_processed == 0 leaves *isNull = true).
-    let (typeid, value, isnull) = match raw.first_col() {
-        Some((typeid, col)) => (typeid, col.value, col.isnull),
-        None => (types_core::InvalidOid, 0usize, true),
+    let (typeid, value, isnull, byref) = match raw.first_col() {
+        Some((typeid, col)) => (typeid, col.value, col.isnull, col.byref),
+        None => (types_core::InvalidOid, 0usize, true, None),
     };
 
     Ok(EvalResult {
         value,
         isnull,
+        byref,
         typeid,
         processed,
     })
@@ -283,7 +289,7 @@ impl EvalRaw {
         let row = self.raw_rows.first()?;
         let col = row.first()?;
         let typeid = self.columns.first().map(|c| c.typeid).unwrap_or(types_core::InvalidOid);
-        Some((typeid, *col))
+        Some((typeid, col.clone()))
     }
 }
 

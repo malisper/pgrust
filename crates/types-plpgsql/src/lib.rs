@@ -1081,6 +1081,19 @@ pub struct PLpgSQL_execstate {
     pub retisnull: bool,
     pub rettype: Oid, // type of current retval
 
+    /// `Some(image)` when the current `retval` is a pass-by-reference value: the
+    /// verbatim header-ful varlena / cstring byte image (`datumCopy`'d out of the
+    /// SPI/eval arena), carried alongside the bare-word `retval` so a by-ref
+    /// result (text/varchar/numeric/…) survives to the function's result context.
+    /// The bare-word `retval` is `0` in that case. `None` for a by-value/NULL
+    /// result. Mirrors C's `estate->retval` being a live by-ref pointer.
+    pub retval_byref: Option<Vec<u8>>,
+    /// Out-of-band by-ref image of the most recent `exec_eval_expr` result (the
+    /// companion to the `(value, isnull, rettype, rettypmod)` tuple the evaluator
+    /// returns): `Some(image)` for a by-ref expression result, taken by the
+    /// caller (`exec_stmt_return` into `retval_byref`). `None` for by-value.
+    pub last_eval_byref: Option<Vec<u8>>,
+
     pub fn_rettype: Oid, // info about declared function rettype
     pub retistuple: bool,
     pub retisset: bool,
