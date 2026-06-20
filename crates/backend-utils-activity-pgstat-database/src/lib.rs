@@ -24,6 +24,8 @@
 
 use core::cell::Cell;
 
+pub mod fmgr_builtins;
+
 use backend_utils_activity_pgstat::entry_ref::PgStat_EntryRef;
 use backend_utils_activity_pgstat::kind_info::KindInfoBuilder;
 use backend_utils_activity_pgstat::pgstat_core;
@@ -590,6 +592,9 @@ fn database_kind_info() -> types_pgstat::pgstat_internal::PgStat_KindInfo {
 /// Must run before `backend_utils_activity_pgstat::init_seams()` seals the
 /// per-kind table.
 pub fn init_seams() {
+    // Register the per-database pg_stat_get_db_* SQL accessors (pgstatfuncs.c).
+    fmgr_builtins::register_pgstat_database_builtins();
+
     registry::register(
         KindInfoBuilder::new(PGSTAT_KIND_DATABASE, database_kind_info())
             .flush_pending_cb(pgstat_database_flush_cb)

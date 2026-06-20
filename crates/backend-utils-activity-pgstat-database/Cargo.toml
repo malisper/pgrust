@@ -17,6 +17,11 @@ types-error = { path = "../types-error" }
 types-storage = { path = "../types-storage" }
 types-autovacuum = { path = "../types-autovacuum" }
 types-pgstat = { path = "../types-pgstat" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
+backend-utils-activity-status = { path = "../backend-utils-activity-status" }
 backend-utils-activity-pgstat = { path = "../backend-utils-activity-pgstat" }
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 backend-utils-activity-pgstat-database-seams = { path = "../backend-utils-activity-pgstat-database-seams" }
