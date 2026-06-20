@@ -77,6 +77,9 @@ use backend_utils_cache_relcache_nodexform_seams as nodexform;
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use backend_utils_init_miscinit_seams as miscinit;
 use backend_utils_time_snapmgr_seams as snapmgr;
+use backend_catalog_aclchk_seams as aclchk;
+use backend_utils_misc_more_seams as misc_more;
+use backend_utils_fmgr_fmgr_seams as fmgr_seams;
 
 /// `SysScanDescData`'s live `'mcx` scan state — the C struct's `heap_rel` /
 /// `irel` / `iscan` / `scan` / `slot`, all allocated in `scan_cx`. Erased
@@ -146,6 +149,7 @@ pub fn init_seams() {
     // the relcache build off the canonical `indexam::index_opclass_options`
     // contract — no relcache-owned bridge seam.)
     nodexform::get_attoptions::set(bridge_get_attoptions);
+    seam::build_index_value_description::set(build_index_value_description);
 }
 
 /// `get_attoptions(relid, attnum)` (lsyscache.c) — the relcache
@@ -952,4 +956,125 @@ fn systable_endscan_ordered(mut sysscan: SysScanDescData) -> PgResult<()> {
     }
 
     Ok(())
+}
+
+/// `BuildIndexValueDescription(indexRelation, values, isnull)` (genam.c) — build
+/// a `"(key_names)=(key_values)"` description of an index entry for an
+/// error DETAIL, or `Ok(None)` when the current user lacks rights to see the key
+/// values (the C `NULL`). `values`/`isnull` are the `FormIndexDatum` outputs
+/// (the raw index-AM input; of the opclass *input* type, hence `rd_opcintype`).
+fn build_index_value_description<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relation: &Relation<'_>,
+    values: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+    isnull: &[bool],
+) -> PgResult<Option<mcx::PgString<'mcx>>> {
+    use types_acl::{ACL_SELECT, ACLCHECK_OK, RLS_ENABLED};
+    use types_core::primitive::InvalidAttrNumber;
+
+    // indnkeyatts = IndexRelationGetNumberOfKeyAttributes(indexRelation).
+    let indnkeyatts = match relcache::rd_index_indnkeyatts::call(index_relation)? {
+        Some(n) => n as usize,
+        // rd_index == NULL: not an index. C would deref a NULL idxrec; there is
+        // no description to build, so return None.
+        None => return Ok(None),
+    };
+
+    // idxrec->indrelid — the base table the index is on.
+    let indrelid: Oid = match relcache::rd_index_indrelid::call(index_relation)? {
+        Some(oid) => oid,
+        None => return Ok(None),
+    };
+    // idxrec->indkey.values — the per-key-column attribute numbers in the base
+    // table (InvalidAttrNumber for an expression column).
+    let indkey: alloc::vec::Vec<AttrNumber> =
+        relcache::rd_index_indkey::call(index_relation)?.unwrap_or_default();
+
+    // Check permissions — if the user does not have access to view all of the
+    // key columns then return None to avoid leaking data.
+    //
+    // First check if RLS is enabled for the relation. If so, return None.
+    if misc_more::check_enable_rls::call(indrelid, types_core::primitive::InvalidOid, true)?
+        == RLS_ENABLED
+    {
+        return Ok(None);
+    }
+
+    let userid: Oid = miscinit::get_user_id::call();
+
+    // Table-level SELECT is enough, if the user has it.
+    let aclresult = aclchk::pg_class_aclcheck::call(indrelid, userid, ACL_SELECT)?;
+    if aclresult != ACLCHECK_OK {
+        // No table-level access, so step through the columns in the index and
+        // make sure the user has SELECT rights on all of them.
+        for keyno in 0..indnkeyatts {
+            let attnum = indkey.get(keyno).copied().unwrap_or(InvalidAttrNumber);
+            // If attnum == InvalidAttrNumber, then this is an index based on an
+            // expression and we return no detail rather than try to figure out
+            // what column(s) the expression includes and if the user has SELECT
+            // rights on them.
+            if attnum == InvalidAttrNumber
+                || aclchk::pg_attribute_aclcheck::call(indrelid, attnum, userid, ACL_SELECT)?
+                    != ACLCHECK_OK
+            {
+                // No access, so clean up and return.
+                return Ok(None);
+            }
+        }
+    }
+
+    let mut buf = mcx::PgString::new_in(mcx);
+
+    // appendStringInfo(&buf, "(%s)=(", pg_get_indexdef_columns(indexrelid, true)).
+    //
+    // pg_get_indexdef_columns is unported (it lives in ruleutils.c). For a plain
+    // (non-expression) index it is exactly the comma-joined key column names;
+    // render them from the base table's pg_attribute via get_attname. An
+    // expression key column (attnum == InvalidAttrNumber) has no plain column
+    // name — render a placeholder where ruleutils would expand the deparsed
+    // expression (we cannot deparse here without ruleutils).
+    buf.try_push('(')?;
+    for keyno in 0..indnkeyatts {
+        if keyno > 0 {
+            buf.try_push_str(", ")?;
+        }
+        let attnum = indkey.get(keyno).copied().unwrap_or(InvalidAttrNumber);
+        if attnum != InvalidAttrNumber {
+            let name = lsyscache_seams::get_attname::call(mcx, indrelid, attnum, false)?;
+            match name {
+                Some(s) => buf.try_push_str(s.as_str())?,
+                None => buf.try_push_str("?column?")?,
+            }
+        } else {
+            // Expression column: pg_get_indexdef_columns would emit the deparsed
+            // expression text; ruleutils deparse is unported.
+            buf.try_push_str("?expr?")?;
+        }
+    }
+    buf.try_push_str(")=(")?;
+
+    for i in 0..indnkeyatts {
+        if i > 0 {
+            buf.try_push_str(", ")?;
+        }
+        if *isnull.get(i).unwrap_or(&true) {
+            buf.try_push_str("null")?;
+        } else {
+            // The provided data is not necessarily of the type stored in the
+            // index; rather it is of the index opclass's input type. So look at
+            // rd_opcintype not the index tupdesc. (C: rd_opcintype[i].)
+            let opcintype =
+                relcache::rd_opcintype::call(index_relation, (i + 1) as AttrNumber)?;
+            // getTypeOutputInfo(rd_opcintype[i], &foutoid, &typisvarlena).
+            let (foutoid, _typisvarlena) =
+                lsyscache_seams::get_type_output_info::call(opcintype)?;
+            // OidOutputFunctionCall(foutoid, values[i]).
+            let val = fmgr_seams::oid_output_function_call::call(mcx, foutoid, &values[i])?;
+            buf.try_push_str(&String::from_utf8_lossy(&val))?;
+        }
+    }
+
+    buf.try_push(')')?;
+
+    Ok(Some(buf))
 }

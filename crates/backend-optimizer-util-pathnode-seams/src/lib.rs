@@ -228,6 +228,21 @@ seam_core::seam!(
     ) -> PathId
 );
 seam_core::seam!(
+    /// `import_pathkey_eclasses(root, subroot, pathkeys)` — remap a pathkey
+    /// list's `pk_eclass` handles from the subroot's equivalence-class arena
+    /// into `root`'s (importing each referenced EC), so a path referenced by
+    /// subplan id (a CTE scan) rather than imported whole can still feed its
+    /// pathkeys to `convert_subquery_pathkeys(root, …)` without an out-of-bounds
+    /// `root.ec()`. Same cross-root EC-import primitive `import_path_from_subroot`
+    /// applies at its pathkey step.
+    pub fn import_pathkey_eclasses<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        subroot: &PlannerInfo,
+        pathkeys: &mut [PathKey],
+    ) -> ()
+);
+seam_core::seam!(
     /// `create_subqueryscan_path(...)` (pathnode.c:2223).
     pub fn create_subqueryscan_path<'mcx>(
         root: &mut PlannerInfo,

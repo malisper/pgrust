@@ -468,6 +468,31 @@ pub fn import_path_from_subroot(
     importer.import_path(root, sub_path_id)
 }
 
+/// Remap a pathkey list's `pk_eclass` handles from `subroot`'s
+/// equivalence-class arena into `root`'s, importing each referenced
+/// [`EquivalenceClass`] (and its members / source exprs) on the way.
+///
+/// A CTE-scan path is referenced by its subplan id rather than imported whole
+/// (so [`import_path_from_subroot`] is never run on it), yet its pathkeys still
+/// carry `pk_eclass` [`EcId`]s into the SUBROOT's `eq_classes` arena. Passing
+/// those raw to `convert_subquery_pathkeys(root, …)` makes `root.ec(sub_eclass)`
+/// index out of bounds. This performs the same remap the per-path import does
+/// at the pathkey step, faithful to C where the subroot's `EquivalenceClass *`
+/// pointers are simply valid across roots.
+pub fn import_pathkey_eclasses(
+    mcx: mcx::Mcx<'_>,
+    root: &mut PlannerInfo,
+    subroot: &PlannerInfo,
+    pathkeys: &mut [types_pathnodes::PathKey],
+) {
+    let mut importer = PathImporter::new(mcx, subroot);
+    for pk in pathkeys.iter_mut() {
+        if let Some(sub_ec) = pk.pk_eclass {
+            pk.pk_eclass = Some(importer.import_ec(root, sub_ec));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

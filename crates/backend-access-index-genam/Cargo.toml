@@ -20,6 +20,7 @@ types-tableam = { path = "../types-tableam" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 types-catalog = { path = "../types-catalog" }
+types-acl = { path = "../types-acl" }
 
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-table-table = { path = "../backend-access-table-table" }
@@ -41,3 +42,5 @@ backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-s
 backend-utils-cache-relcache-nodexform-seams = { path = "../backend-utils-cache-relcache-nodexform-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-utils-misc-more-seams = { path = "../backend-utils-misc-more-seams" }

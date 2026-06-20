@@ -54,6 +54,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::string::ToString;
 use alloc::vec::Vec as StdVec;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgVec};
@@ -582,20 +583,39 @@ fn table_index_fetch_tuple_check<'mcx>(
 
 /// `index_deform_tuple(itup, RelationGetDescr(rel), values, isnull)` +
 /// `BuildIndexValueDescription(rel, values, isnull)` (genam.c) — the optional
-/// "(key) = (values)" detail for the unique-violation ereport. C makes this
-/// detail optional (`key_desc ? errdetail(...) : 0`): it is NULL when the user
-/// lacks rights to see the key values. Building it here requires deforming the
-/// index tuple into per-attribute datums (the slot-based `index_deform_tuple`
-/// seam) and the genam `build_index_value_description` seam, neither plumbed
-/// into nbtree-core; we therefore omit the detail, exactly matching C's
-/// NULL-key_desc path. The error itself (message + SQLSTATE) is fully reported.
-#[inline]
+/// "(key)=(values)" detail for the unique-violation ereport. C makes this
+/// detail optional (`key_desc ? errdetail(...) : 0`): it is `None` when the
+/// user lacks rights to see the key values (the genam seam's `Ok(None)`). The
+/// conflicting index tuple is deformed into per-attribute datums via the
+/// `index_deform_tuple` seam over `RelationGetDescr(rel)`, then rendered by the
+/// genam `build_index_value_description` seam. The key out-functions can
+/// `ereport(ERROR)`, carried on `Err`.
 fn build_index_value_desc<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _rel: &Relation<'mcx>,
-    _itup_bytes: &[u8],
-) -> Option<alloc::string::String> {
-    None
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    itup_bytes: &[u8],
+) -> PgResult<Option<alloc::string::String>> {
+    // index_deform_tuple(itup, RelationGetDescr(rel), values, isnull).
+    let columns = backend_access_common_indextuple_seams::index_deform_tuple::call(
+        mcx,
+        itup_bytes,
+        rel.rd_att.as_ref(),
+    )?;
+
+    let mut values: StdVec<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> =
+        StdVec::with_capacity(columns.len());
+    let mut isnull: StdVec<bool> = StdVec::with_capacity(columns.len());
+    for (value, null) in columns.iter() {
+        values.push(value.clone());
+        isnull.push(*null);
+    }
+
+    // BuildIndexValueDescription(rel, values, isnull) — Ok(None) when the user
+    // lacks rights to see the key values (C's NULL key_desc).
+    let desc = backend_access_index_genam_seams::build_index_value_description::call(
+        mcx, rel, &values, &isnull,
+    )?;
+    Ok(desc.map(|s| s.as_str().to_string()))
 }
 
 /// `_bt_allocbuf(rel, heaprel)` (nbtpage.c) — allocate a new write-locked nbtree
@@ -1095,7 +1115,7 @@ fn _bt_check_unique<'mcx>(
                      * lacks rights, or seam unported) we omit the detail exactly
                      * as C does for a NULL key_desc.
                      */
-                    let key_desc = build_index_value_desc(mcx, rel, itup_bytes);
+                    let key_desc = build_index_value_desc(mcx, rel, itup_bytes)?;
                     let mut err = PgError::error(format!(
                         "duplicate key value violates unique constraint \"{}\"",
                         rel_name(rel)

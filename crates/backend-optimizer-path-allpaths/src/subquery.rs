@@ -503,11 +503,22 @@ pub fn set_cte_pathlist<'mcx>(
     // ctepath->pathkeys live in the subplan's subroot path arena. `sub_plan_id`
     // is the PlanId handle stored at glob->subplans[plan_id-1]; it keys the
     // parallel subroots/subpaths stores.
-    let ctepath_pathkeys = {
+    let mut ctepath_pathkeys = {
         let subroot = run.resolve_subroot(sub_plan_id);
         let ctepath = run.resolve_subpath(sub_plan_id);
         subroot.path(ctepath).base().pathkeys.clone()
     };
+
+    // The cloned pathkeys carry `pk_eclass` handles into the SUBROOT's
+    // equivalence-class arena. A CTE scan references its subplan by id (it is
+    // never imported whole via `import_path_from_subroot`), so those handles are
+    // meaningless in `root`: convert_subquery_pathkeys' `root.ec(sub_eclass)`
+    // would index out of bounds. Remap them into `root` first — the same EC
+    // import `import_path_from_subroot` performs at its pathkey step.
+    {
+        let subroot = run.resolve_subroot(sub_plan_id);
+        pathnode::import_pathkey_eclasses::call(run.mcx(), root, subroot, &mut ctepath_pathkeys);
+    }
 
     // Mark rel with estimated output rows, width, etc.
     backend_optimizer_path_costsize::sizeest::set_cte_size_estimates(run, root, rel, cte_plan_rows);

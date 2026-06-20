@@ -50,7 +50,7 @@ use seam::{BMS_Comparison, PathKeysComparison};
 pub mod create;
 pub mod import;
 
-pub use import::import_path_from_subroot;
+pub use import::{import_path_from_subroot, import_pathkey_eclasses};
 
 /// `STD_FUZZ_FACTOR` (pathnode.c:50) — the normal fuzz factor for
 /// [`compare_path_costs_fuzzily`]: `1.0 + delta`, `delta` = 1% considered
@@ -715,6 +715,7 @@ pub fn init_seams() {
     ps::create_tidrangescan_path::set(create::create_tidrangescan_path);
     ps::create_subqueryscan_path::set(create::create_subqueryscan_path);
     ps::import_path_from_subroot::set(import::import_path_from_subroot);
+    ps::import_pathkey_eclasses::set(import::import_pathkey_eclasses);
     ps::create_functionscan_path::set(create::create_functionscan_path);
     ps::create_tablefuncscan_path::set(create::create_tablefuncscan_path);
     ps::create_valuesscan_path::set(create::create_valuesscan_path);
