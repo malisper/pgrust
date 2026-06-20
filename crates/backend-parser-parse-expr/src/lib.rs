@@ -424,7 +424,7 @@ fn transform_expr_node<'mcx>(
             ))
         }
         Expr::GroupingFunc(_) => {
-            seam_transform_grouping_func(pstate, Node::mk_expr(aexpr_clone_ctx(pstate), e))
+            seam_transform_grouping_func(pstate, Node::mk_expr(aexpr_clone_ctx(pstate), e)?)
         }
         Expr::MergeSupportFunc(f) => transformMergeSupportFunc(pstate, f),
 
@@ -509,7 +509,7 @@ fn transform_expr_node<'mcx>(
             .errcode(ERRCODE_INTERNAL_ERROR)
             .errmsg(alloc::format!(
                 "unrecognized node type: {}",
-                Node::mk_expr(aexpr_clone_ctx(pstate), other).node_tag().0
+                Node::mk_expr(aexpr_clone_ctx(pstate), other)?.node_tag().0
             ))
             .into_error()),
     }
@@ -523,7 +523,7 @@ fn transform_expr_node<'mcx>(
 /// flip (§6 `value_no_mcx` sub-sweep); today `mk_expr` ignores `mcx` so this is
 /// behavior-preserving.
 fn expr_to_node<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
-    Ok(Node::mk_expr(mcx, e))
+    Ok(Node::mk_expr(mcx, e)?)
 }
 
 // ===========================================================================
@@ -739,7 +739,7 @@ fn transformAExprIn<'mcx>(
             .ok_or_else(|| PgError::error("transformAExprIn: IN item is NULL"))?;
         rexprs.push(rexpr.clone());
         // contain_vars_of_level((Node *) rexpr, 0).
-        if contain_vars_of_level(&Node::mk_expr(aexpr_clone_ctx(pstate), rexpr.clone()), 0) {
+        if contain_vars_of_level(&Node::mk_expr(aexpr_clone_ctx(pstate), rexpr.clone())?, 0) {
             rvars.push(rexpr);
             has_rvars = true;
         } else {
@@ -873,7 +873,7 @@ fn make_simple_a_expr<'mcx>(
     let mut name: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
     let str_node = Node::mk_string(mcx, types_nodes::value::StringNode {
         sval: mcx::PgString::from_str_in(op, mcx)?,
-    });
+    })?;
     name.push(mcx::alloc_in(mcx, str_node)?);
     Ok(Node::mk_a_expr(mcx, A_Expr {
         kind,
@@ -883,7 +883,7 @@ fn make_simple_a_expr<'mcx>(
         rexpr_list_start: -1,
         rexpr_list_end: -1,
         location,
-    }))
+    })?)
 }
 
 /// `transformAExprBetween(pstate, a)` (parse_expr.c:1293) — `BETWEEN` and its
@@ -1592,7 +1592,7 @@ fn transformCaseExpr<'mcx>(
                 isnull: true,
                 location: -1,
             },
-        ),
+        )?,
     };
     let mut defresult = transformExprRecurse(pstate, Some(defresult_node))?
         .ok_or_else(|| PgError::error("transformCaseExpr: CASE default result is NULL"))?;
@@ -2730,7 +2730,7 @@ fn transformWholeRowRef<'mcx>(
         backend_parser_relation::markNullableIfNeeded(pstate, &mut var)?;
         // Mark relation as requiring whole-row SELECT access.
         backend_parser_relation::markVarForSelectPriv(mcx, pstate, &var)?;
-        Ok(Node::mk_var(mcx, var))
+        Ok(Node::mk_var(mcx, var)?)
     } else {
         // JOIN USING alias: expand into a RowExpr of the common columns.
         let mut colvars: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
@@ -2761,7 +2761,7 @@ fn transformWholeRowRef<'mcx>(
             row_format: CoercionForm::COERCE_IMPLICIT_CAST,
             colnames,
             location,
-        })))
+        }))?)
     }
 }
 
@@ -3475,7 +3475,7 @@ fn sql_fn_post_column_ref<'mcx>(
     Ok(Some(Node::mk_expr(
         aexpr_clone_ctx(pstate),
         Expr::Param(param),
-    )))
+    )?))
 }
 
 /// `sql_fn_make_param` (executor/functions.c:485) — construct a `PARAM_EXTERN`
@@ -3598,7 +3598,7 @@ fn plpgsql_pre_column_ref<'mcx>(
     state.record_paramno(info.dno);
 
     let mcx = aexpr_clone_ctx(pstate);
-    let node = Node::mk_expr(mcx, Expr::Param(param));
+    let node = Node::mk_expr(mcx, Expr::Param(param))?;
     Ok(Some(mcx::alloc_in(mcx, node)?))
 }
 
@@ -3885,7 +3885,7 @@ fn transformSubLink<'mcx>(
             let mut v: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
             let str_node = Node::mk_string(mcx, types_nodes::value::StringNode {
                 sval: mcx::PgString::from_str_in("=", mcx)?,
-            });
+            })?;
             v.push(mcx::alloc_in(mcx, str_node)?);
             v
         } else {

@@ -629,7 +629,7 @@ pub fn transformAssignedExpr<'mcx>(
                 attrtype,
                 attrtypmod,
                 attrcollation,
-            )?))
+            )?))?
         } else {
             // Build a Var for the column to be updated.
             let rtindex = pstate
@@ -646,7 +646,7 @@ pub fn transformAssignedExpr<'mcx>(
                 0,
             );
             var.location = location;
-            Node::mk_var(mcx, var)
+            Node::mk_var(mcx, var)?
         };
 
         let rhs = expr_to_node(mcx, expr.expect("transformAssignedExpr: NULL expr for indirection"))?;
@@ -774,7 +774,7 @@ pub fn transformAssignmentIndirection<'mcx>(
                     typeId: target_type_id,
                     typeMod: target_typmod,
                     collation: target_collation,
-                })))
+                }))?)
             } else {
                 None
             }
@@ -911,10 +911,10 @@ pub fn transformAssignmentIndirection<'mcx>(
                     CoercionForm::COERCE_IMPLICIT_CAST,
                     location,
                     false,
-                )?));
+                )?)?);
             }
 
-            return Ok(Node::mk_field_store(mcx, fstore));
+            return Ok(Node::mk_field_store(mcx, fstore)?);
         }
 
         i += 1;
@@ -954,7 +954,7 @@ pub fn transformAssignmentIndirection<'mcx>(
         -1,
     )?;
     match result {
-        Some(e) => Ok(Node::mk_expr(mcx, e)),
+        Some(e) => Ok(Node::mk_expr(mcx, e)?),
         None => {
             if target_is_subscripting {
                 Err(ereport(ERROR)
@@ -1099,7 +1099,7 @@ fn transformAssignmentSubscripts<'mcx>(
         };
     }
 
-    Ok(Node::mk_expr(mcx, result))
+    Ok(Node::mk_expr(mcx, result)?)
 }
 
 // ===========================================================================
@@ -1298,7 +1298,7 @@ fn ExpandColumnRefStar<'mcx>(
                     .p_rte
                     .as_deref()
                     .expect("p_rte set");
-                Some(alloc_in(mcx, Node::mk_range_tbl_entry(mcx, rte.clone_in(mcx)?))?)
+                Some(alloc_in(mcx, Node::mk_range_tbl_entry(mcx, rte.clone_in(mcx)?)?)?)
             }
             None => None,
         };
@@ -1470,7 +1470,7 @@ fn ExpandIndirectionStar<'mcx>(
     ind.indirection.truncate(new_len);
 
     // Transform that.
-    let expr = parse_expr::transformExpr::call(pstate, Some(Node::mk_a_indirection(mcx, ind)), expr_kind)?
+    let expr = parse_expr::transformExpr::call(pstate, Some(Node::mk_a_indirection(mcx, ind)?), expr_kind)?
         .expect("ExpandIndirectionStar: NULL expr");
 
     // Expand the rowtype expression into individual fields.
@@ -1743,7 +1743,7 @@ pub fn expandRecordVariable<'mcx>(
                 let mypstate = make_fake_pstate(mcx, ps, &subquery.rtable)?;
                 return expandRecordVariable(mcx, &mypstate, &inner_var, 0);
             }
-            drilled = Some(Node::mk_expr(mcx, expr.clone()));
+            drilled = Some(Node::mk_expr(mcx, expr.clone())?);
         }
         RTE_JOIN => {
             debug_assert!(attnum > 0 && (attnum as usize) <= rte.joinaliasvars.len());
@@ -1795,7 +1795,7 @@ pub fn expandRecordVariable<'mcx>(
                     let mypstate = make_fake_pstate_owned(mcx, ps, ctequery_rtable)?;
                     return expandRecordVariable(mcx, &mypstate, &inner_var, 0);
                 }
-                drilled = Some(Node::mk_expr(mcx, expr.clone()));
+                drilled = Some(Node::mk_expr(mcx, expr.clone())?);
             }
         }
         RTE_GROUP => {
@@ -1806,7 +1806,7 @@ pub fn expandRecordVariable<'mcx>(
     // We now have an expression we can't expand any more.
     let expr_node = match drilled {
         Some(n) => n,
-        None => Node::mk_var(mcx, var.clone()),
+        None => Node::mk_var(mcx, var.clone())?,
     };
     Ok(unwrap_tupdesc(get_expr_result_tupdesc_node(mcx, &expr_node)?))
 }
@@ -2154,7 +2154,7 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
 
 /// Move an `Expr` into a raw `Node` wrapper (`Node::Expr`).
 fn expr_to_node<'mcx>(mcx: Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
-    Ok(Node::mk_expr(mcx, e))
+    Ok(Node::mk_expr(mcx, e)?)
 }
 
 /// `(Node *) expr` — unwrap a `Node::Expr` to its inner `Expr`.
