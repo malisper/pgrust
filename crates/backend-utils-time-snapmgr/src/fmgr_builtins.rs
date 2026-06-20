@@ -10,8 +10,9 @@
 //! `pg_proc.dat`.
 
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Result writers.
@@ -33,12 +34,6 @@ fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
@@ -46,11 +41,9 @@ fn raise(err: types_error::PgError) -> ! {
 /// `pg_export_snapshot` (snapmgr.c:1289) — C:
 /// `PG_RETURN_TEXT_P(cstring_to_text(ExportSnapshot(GetActiveSnapshot())))`.
 /// Takes no arguments; returns the export token as `text`.
-fn fc_pg_export_snapshot(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_export_snapshot() {
-        Ok(token) => ret_text(fcinfo, token),
-        Err(e) => raise(e),
-    }
+fn fc_pg_export_snapshot(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let token = crate::pg_export_snapshot()?;
+    Ok(ret_text(fcinfo, token))
 }
 
 // ---------------------------------------------------------------------------
@@ -63,23 +56,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    func: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        func,
+    )
 }
 
 /// Register every expressible `snapmgr.c` builtin (C: their `fmgr_builtins[]`
 /// rows). Called from this crate's `init_seams()`. OIDs/nargs/strict/retset
 /// transcribed exactly from `pg_proc.dat`.
 pub fn register_snapmgr_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // pg_export_snapshot: proargtypes => '' (0 args), prorettype => 'text';
         // no proisstrict (=> not strict), no proretset (=> not set-returning).
         builtin(3809, "pg_export_snapshot", 0, true, false, fc_pg_export_snapshot),
