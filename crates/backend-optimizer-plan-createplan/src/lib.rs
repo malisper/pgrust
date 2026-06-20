@@ -3261,7 +3261,20 @@ fn create_subqueryscan_subplan_inroot<'mcx>(
                 .0
                 .take()
                 .expect("create_subqueryscan_subplan: set-op child rel has no subroot");
+            // In C, `glob` is one shared `PlannerGlobal *` reachable from every
+            // PlannerInfo, so `create_plan(rel->subroot, ...)` can allocate
+            // PARAM_EXEC slots from `subroot->glob->paramExecTypes`. In the owned
+            // model the single `glob` lives on whichever root is being planned;
+            // after the subquery was planned it was moved back onto the outer
+            // `root`, leaving this stored `subroot.glob == None`. Move the shared
+            // glob down into the subroot for the duration of the recursion (so any
+            // replace_nestloop_params / generate_new_exec_param fired while
+            // building the subroot's plan registers against the live glob), then
+            // move it back onto `root` afterwards — exactly mirroring the shared
+            // pointer. Restore on the error path too.
+            subroot.glob = root.glob.take();
             let result = create_plan(mcx, &mut subroot, run, sub_id);
+            root.glob = subroot.glob.take();
             // Restore the subroot so a later level (e.g. set_subqueryscan_references)
             // can still reach it, even on the error path.
             root.rel_mut(rel_id).subroot.0 = Some(subroot);
