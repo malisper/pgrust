@@ -234,11 +234,20 @@ pub fn advance_transition_function<'mcx>(
     //
     // This is the ordered/distinct drain path (process_ordered_aggregate_*).
     // The single-input drain loads the just-fetched sorted column into C's
-    // `fcinfo->args[1]`; the owned model carries that by-ref-faithful value on
-    // `pertrans->distinct_value` / `distinct_value_isnull` (see `fcinfo_set_arg`
-    // / the per-trans frame doc). Only `args[1]` is modeled here (single column);
-    // the multi-column variant is gated separately on slot deform.
+    // `fcinfo->args[1]` (carried by-ref-faithfully on `pertrans->distinct_value`
+    // / `distinct_value_isnull`); the multi-column drain stages all
+    // `numTransInputs` columns on `pertrans->trans_input_args[..]` (see
+    // `load_transfn_args_from_slot`). `transfn_input_args` below resolves the
+    // right source.
     let _ = pertrans.transfn_fcinfo.as_ref();
+
+    // The transfn input arguments `fcinfo->args[1..=numTransInputs]`, staged
+    // by-ref-faithfully off the per-trans frame: the single-column
+    // ordered/distinct drain carries arg[1] on `distinct_value`; the
+    // multi-column drain (`load_transfn_args_from_slot`) stages all
+    // `numTransInputs` columns on `trans_input_args`. (The EEOP interpreter
+    // dispatches don't reach this fn.)
+    let (input_args, input_args_null) = transfn_input_args(pertrans);
 
     if transfn_is_strict(pertrans) {
         // For a strict transfn, nothing happens when there's a NULL input; we
@@ -248,7 +257,12 @@ pub fn advance_transition_function<'mcx>(
         // for (i = 1; i <= numTransInputs; i++)
         //     if (fcinfo->args[i].isnull) return;
         for i in 1..=num_trans_inputs {
-            if fcinfo_arg_isnull(pertrans, i) {
+            // args[i] is input_args[i - 1] (0-based staging).
+            if input_args_null
+                .get((i - 1) as usize)
+                .copied()
+                .unwrap_or(false)
+            {
                 return Ok(());
             }
         }
@@ -263,7 +277,11 @@ pub fn advance_transition_function<'mcx>(
             //   aggstate->curaggcontext->ecxt_per_tuple_memory);
             // pergroupstate->transValue = datumCopy(fcinfo->args[1].value,
             //   pertrans->transtypeByVal, pertrans->transtypeLen);
-            let arg1_value = fcinfo_arg_value(pertrans, 1);
+            // args[1].value == input_args[0].
+            let arg1_value = input_args
+                .first()
+                .cloned()
+                .expect("advance_transition_function: transfn args[1] missing");
             let aggcontext = curaggcontext_ecxt(aggstate);
             pergroupstate.trans_value = datum_copy_into_ecxt(
                 arg1_value,
@@ -308,8 +326,6 @@ pub fn advance_transition_function<'mcx>(
     // arg[1] is the single ordered/distinct input on `distinct_value`.
     let trans_value = pergroupstate.trans_value.clone();
     let trans_value_is_null = pergroupstate.trans_value_is_null;
-    let input_args = [pertrans.distinct_value.clone()];
-    let input_args_null = [pertrans.distinct_value_isnull];
     let mcx = estate.es_query_cxt;
     let (new_val, isnull) = invoke_transfn(
         pertrans,
@@ -763,7 +779,7 @@ pub fn process_ordered_aggregate_single<'mcx>(
                 || (!old_is_null
                     && !new_is_null
                     && old_abbrev_val == new_abbrev_val
-                    && equalfn_one_call(pertrans, old_val.clone(), new_val.clone())?))
+                    && equalfn_one_call(pertrans, old_val.clone(), new_val.clone(), estate)?))
         {
             // MemoryContextSwitchTo(oldContext); continue;
             continue;
@@ -860,9 +876,9 @@ pub fn process_ordered_aggregate_multi<'mcx>(
     backend_utils_sort_tuplesort_seams::tuplesort_performsort::call(&mut state)?;
 
     // ExecClearTuple(slot1); if (slot2) ExecClearTuple(slot2);
-    exec_clear_tuple_slot(slot1)?;
+    backend_executor_execTuples_seams::exec_clear_tuple::call(estate, slot1)?;
     if let Some(s2) = slot2 {
-        exec_clear_tuple_slot(s2)?;
+        backend_executor_execTuples_seams::exec_clear_tuple::call(estate, s2)?;
     }
 
     // while (tuplesort_gettupleslot(..., true, true, slot1, &newAbbrevVal))
@@ -871,7 +887,7 @@ pub fn process_ordered_aggregate_multi<'mcx>(
             &mut state,
             true,
             true,
-            resolve_slot_mut(slot1),
+            estate.slot_data_mut(slot1),
         )?;
         if !found {
             break;
@@ -896,7 +912,7 @@ pub fn process_ordered_aggregate_multi<'mcx>(
         {
             true
         } else {
-            !equalfn_multi_qual(aggstate, pertrans)?
+            !equalfn_multi_qual(aggstate, pertrans, estate)?
         };
 
         if qual_distinct {
@@ -907,7 +923,7 @@ pub fn process_ordered_aggregate_multi<'mcx>(
             //       fcinfo->args[i + 1].value = slot1->tts_values[i];
             //       fcinfo->args[i + 1].isnull = slot1->tts_isnull[i];
             //   }
-            load_transfn_args_from_slot(aggstate, pertrans, slot1, num_trans_inputs)?;
+            load_transfn_args_from_slot(pertrans, slot1, num_trans_inputs, estate)?;
 
             advance_transition_function(aggstate, pertrans, pergroupstate, estate)?;
 
@@ -929,12 +945,12 @@ pub fn process_ordered_aggregate_multi<'mcx>(
         tmpcontext_reset(aggstate, estate)?;
 
         // ExecClearTuple(slot1);
-        exec_clear_tuple_slot(slot1)?;
+        backend_executor_execTuples_seams::exec_clear_tuple::call(estate, slot1)?;
     }
 
     // if (slot2) ExecClearTuple(slot2);
     if let Some(s2) = slot2 {
-        exec_clear_tuple_slot(s2)?;
+        backend_executor_execTuples_seams::exec_clear_tuple::call(estate, s2)?;
     }
 
     // tuplesort_end(pertrans->sortstates[aggstate->current_set]);
@@ -1165,32 +1181,34 @@ fn transfn_is_strict(pertrans: &AggStatePerTransData<'_>) -> bool {
     pertrans.transfn.fn_strict
 }
 
-/// `fcinfo->args[i].isnull` — the transfn call frame's argument null flag.
-/// The shared `FunctionCallInfoBaseData` now carries `args[]` (#296); the blocker
-/// is that this crate has not yet modeled the nodeAgg-owned *per-trans* call frame
-/// `AggStatePerTransData.transfn_fcinfo` as a populated args carrier — it is a
-/// long-lived per-trans frame set up by the unported `build_pertrans_for_aggref`
-/// / `ExecInitAgg` path, so there is no populated `args[]` here to read.
-fn fcinfo_arg_isnull(pertrans: &AggStatePerTransData<'_>, i: i32) -> bool {
-    // The ordered/distinct single-column drain only ever loads index 1, carried
-    // (by-ref-faithfully) on `distinct_value_isnull` (see `fcinfo_set_arg`).
-    debug_assert_eq!(
-        i, 1,
-        "fcinfo_arg_isnull: only the single-column ordered/distinct args[1] is modeled"
-    );
-    pertrans.distinct_value_isnull
-}
-
-/// `fcinfo->args[i].value` — the transfn call frame's argument value.
-fn fcinfo_arg_value<'mcx>(
+/// `fcinfo->args[1..=numTransInputs].{value,isnull}` — the staged transfn input
+/// arguments for the ordered/distinct drain, returned as parallel 0-based vectors
+/// (args[1] is element 0). The single-column ordered/distinct path stages arg[1]
+/// on `distinct_value`/`distinct_value_isnull`; the multi-column drain stages all
+/// `numTransInputs` columns on `trans_input_args`/`trans_input_args_null` (see
+/// `load_transfn_args_from_slot`). The shared `FunctionCallInfoBaseData.args[]` is
+/// the bare-word `NullableDatum` (#296) which cannot carry a by-reference key, so
+/// the canonical per-attribute `Datum`s live on these per-trans side slots.
+fn transfn_input_args<'mcx>(
     pertrans: &AggStatePerTransData<'mcx>,
-    i: i32,
-) -> types_tuple::backend_access_common_heaptuple::Datum<'mcx> {
-    debug_assert_eq!(
-        i, 1,
-        "fcinfo_arg_value: only the single-column ordered/distinct args[1] is modeled"
-    );
-    pertrans.distinct_value.clone()
+) -> (
+    alloc::vec::Vec<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
+    alloc::vec::Vec<bool>,
+) {
+    if pertrans.num_trans_inputs > 1 {
+        // Multi-column ordered-aggregate drain: all numTransInputs columns were
+        // deformed and staged by `load_transfn_args_from_slot`.
+        (
+            pertrans.trans_input_args.clone(),
+            pertrans.trans_input_args_null.clone(),
+        )
+    } else {
+        // Single-column ordered/distinct drain: arg[1] on `distinct_value`.
+        (
+            alloc::vec![pertrans.distinct_value.clone()],
+            alloc::vec![pertrans.distinct_value_isnull],
+        )
+    }
 }
 
 /// `fcinfo->args[i].value = v; fcinfo->args[i].isnull = isnull;` — store one
@@ -1254,75 +1272,88 @@ pub fn set_transfn_arg<'mcx>(
 /// `DatumGetBool(FunctionCall2Coll(&pertrans->equalfnOne, aggCollation,
 /// oldVal, newVal))` — the single-column DISTINCT equality comparator.
 /// `FunctionCall2Coll` is the fmgr direct-call surface owned by the fmgr unit.
-fn equalfn_one_call(
-    pertrans: &AggStatePerTransData<'_>,
-    _old_val: types_tuple::backend_access_common_heaptuple::Datum<'_>,
-    _new_val: types_tuple::backend_access_common_heaptuple::Datum<'_>,
+fn equalfn_one_call<'mcx>(
+    pertrans: &AggStatePerTransData<'mcx>,
+    old_val: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    new_val: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    estate: &EStateData<'mcx>,
 ) -> PgResult<bool> {
-    let _ = (&pertrans.equalfn_one, pertrans.agg_collation);
-    panic!(
-        "backend-executor-nodeAgg::process_ordered_aggregate_single: \
-         FunctionCall2Coll(equalfnOne) is the fmgr direct-call surface, owned by the \
-         not-yet-ported fmgr unit; no seam yet"
-    );
+    // DatumGetBool(FunctionCall2Coll(&pertrans->equalfnOne, pertrans->aggCollation,
+    //                                oldVal, newVal))
+    //
+    // `equalfnOne` is the cached equality `FmgrInfo` built at ExecInitAgg time
+    // (`build_pertrans_for_aggref` -> `initialize_aggregate`'s eq-op lookup). The
+    // by-OID `function_call2_coll_datum` re-resolves it by `fn_oid` under
+    // `aggCollation`, passing the two input-type datums (by-value scalar or by-ref
+    // byte image — the DISTINCT key may be text/name/numeric) through the canonical
+    // `Datum` lane. The equality operator is never strict-NULL here (both args are
+    // known non-NULL at the call site), so the result is a plain bool Datum.
+    let mcx = estate.es_query_cxt;
+    let result = backend_utils_fmgr_fmgr_seams::function_call2_coll_datum::call(
+        mcx,
+        pertrans.equalfn_one.fn_oid,
+        pertrans.agg_collation,
+        old_val,
+        new_val,
+    )?;
+    Ok(result.as_bool())
 }
 
 /// `ExecQual(pertrans->equalfnMulti, tmpcontext)` — the multi-column DISTINCT
 /// comparator, a compiled ExprState evaluated through the execExpr seam over
 /// the tmpcontext (id into the EState pool).
-fn equalfn_multi_qual(
-    aggstate: &AggStateData<'_>,
-    pertrans: &AggStatePerTransData<'_>,
+fn equalfn_multi_qual<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    pertrans: &mut AggStatePerTransData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    let _ = (pertrans.equalfn_multi.as_ref(), aggstate.tmpcontext);
-    panic!(
-        "backend-executor-nodeAgg::process_ordered_aggregate_multi: ExecQual(equalfnMulti) \
-         needs the tmpcontext ExprContext pool id assigned by ExecInitAgg (not yet ported)"
-    );
+    // ExecQual(pertrans->equalfnMulti, tmpcontext): the compiled multi-column
+    // DISTINCT comparator ExprState is evaluated over the tmpcontext (whose
+    // ecxt_outertuple = slot1 / ecxt_innertuple = slot2 were just set), returning
+    // whether the prior and current tuples compare equal on the distinct columns.
+    let tmpcontext = aggstate
+        .tmpcontext
+        .expect("equalfn_multi_qual: tmpcontext EcxtId not assigned by ExecInitAgg");
+    let equalfn_multi = pertrans
+        .equalfn_multi
+        .as_mut()
+        .expect("equalfn_multi_qual: equalfnMulti not compiled (numDistinctCols > 0)");
+    backend_executor_execExpr_seams::exec_qual::call(equalfn_multi, tmpcontext, estate)
 }
 
 /// `slot_getsomeattrs(slot, n)` then copy `slot->tts_values[i]` /
 /// `slot->tts_isnull[i]` into the transfn args. Deforming the slot is the
 /// execTuples surface; the trimmed `TupleTableSlot` carries no payload yet, so
 /// the copy into the (also-unported) fcinfo args cannot run.
-fn load_transfn_args_from_slot(
-    _aggstate: &mut AggStateData<'_>,
-    _pertrans: &mut AggStatePerTransData<'_>,
-    _slot: types_nodes::SlotId,
-    _num_trans_inputs: i32,
+fn load_transfn_args_from_slot<'mcx>(
+    pertrans: &mut AggStatePerTransData<'mcx>,
+    slot: types_nodes::SlotId,
+    num_trans_inputs: i32,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    panic!(
-        "backend-executor-nodeAgg::process_ordered_aggregate_multi: slot_getsomeattrs + the \
-         tts_values/tts_isnull -> fcinfo->args copy span the not-yet-ported execTuples (slot \
-         payload) and fmgr (call frame) units; no seam yet"
-    );
-}
-
-/// `ExecClearTuple(slot)` — clear a slot addressed by pool id. The slot-ops
-/// dispatch is owned by execTuples; its seam takes a `&mut TupleTableSlot`, but
-/// the AggState addresses slots by id only, so the slot lookup is the EState
-/// pool's (also unported here). Reached only on the multi-column DISTINCT path.
-fn exec_clear_tuple_slot(_slot: types_nodes::SlotId) -> PgResult<()> {
-    panic!(
-        "backend-executor-nodeAgg::process_ordered_aggregate_multi: ExecClearTuple needs the \
-         EState slot-pool lookup to resolve the slot id to a TupleTableSlot; that pool is \
-         owned by the not-yet-ported execTuples/EState surface"
-    );
-}
-
-/// Resolve a sort slot id (`pertrans->sortslot`) to the live `TupleTableSlot`
-/// that `tuplesort_gettupleslot` writes into. The multi-column DISTINCT drain
-/// addresses slots by pool id only and does not thread the owning `EState`
-/// here, so the lookup is the EState slot pool's (the surface that assigns
-/// these per-trans slots at ExecInitAgg is not threaded into this path yet).
-fn resolve_slot_mut<'a, 'mcx>(
-    _slot: types_nodes::SlotId,
-) -> &'a mut types_nodes::SlotData<'mcx> {
-    panic!(
-        "backend-executor-nodeAgg::process_ordered_aggregate_multi: tuplesort_gettupleslot \
-         needs the EState slot-pool lookup to resolve the sortslot id to a SlotData; \
-         that pool is owned by the not-yet-ported execTuples/EState surface"
-    );
+    // slot_getsomeattrs(slot1, numTransInputs);
+    // for (i = 0; i < numTransInputs; i++) {
+    //     fcinfo->args[i + 1].value  = slot1->tts_values[i];
+    //     fcinfo->args[i + 1].isnull = slot1->tts_isnull[i];
+    // }
+    //
+    // `slot_getsomeattr(estate, slot, i)` deforms the first `i` columns and
+    // returns the 1-based `i`th as the canonical per-attribute `Datum` — a
+    // `ByVal` for a pass-by-value column or a `ByRef` byte image for a
+    // by-reference column (text/name/numeric multi-key) — fixing the
+    // `Datum::as_ref_bytes on a by-value attribute` symptom: each attribute is
+    // materialized by its own typbyval/typlen, never collapsed into a bare word.
+    // Calling it for each i up to numTransInputs deforms the whole prefix once
+    // (slot_getsomeattrs caches tts_nvalid) and reads each column out in turn.
+    pertrans.trans_input_args.clear();
+    pertrans.trans_input_args_null.clear();
+    for i in 1..=num_trans_inputs {
+        let (value, isnull) =
+            backend_executor_execTuples_seams::slot_getsomeattr::call(estate, slot, i)?;
+        pertrans.trans_input_args.push(value);
+        pertrans.trans_input_args_null.push(isnull);
+    }
+    Ok(())
 }
 
 /// `MemoryContextReset(aggstate->tmpcontext->ecxt_per_tuple_memory)` /

@@ -121,6 +121,20 @@ pub struct AggStatePerTransData<'mcx> {
     /// The isnull flag paired with [`Self::distinct_value`] (C:
     /// `transfn_fcinfo->args[1].isnull`).
     pub distinct_value_isnull: bool,
+    /// The multi-column ordered-aggregate drain's transfn input arguments,
+    /// carried by-ref-faithfully (`process_ordered_aggregate_multi` /
+    /// `load_transfn_args_from_slot`). C loads each sorted column into
+    /// `transfn_fcinfo->args[i + 1].{value,isnull}` for `i in 0..numTransInputs`
+    /// directly off `slot1->tts_values[i]`; the owned `FunctionCallInfoBaseData.
+    /// args[]` is the bare-word `NullableDatum` (#296) which cannot carry a
+    /// by-reference value (text/name/numeric multi-key), so the canonical
+    /// per-attribute `Datum`s are staged here and read back by
+    /// `advance_transition_function` (mirrors `distinct_value` for the single
+    /// column path). Indexed 0-based (C's `args[1..=numTransInputs]`).
+    pub trans_input_args: alloc::vec::Vec<Datum<'mcx>>,
+    /// The isnull flags paired with [`Self::trans_input_args`] (C:
+    /// `transfn_fcinfo->args[i + 1].isnull`).
+    pub trans_input_args_null: alloc::vec::Vec<bool>,
     /// `Tuplesortstate **sortstates` — one per grouping set, if DISTINCT/ORDER BY.
     pub sortstates: Option<PgVec<'mcx, Option<PgBox<'mcx, Tuplesortstate<'mcx>>>>>,
     /// `FunctionCallInfo transfn_fcinfo` — pre-initialized transfn call info.
@@ -171,6 +185,8 @@ impl Default for AggStatePerTransData<'_> {
             haslast: false,
             distinct_value: Datum::null(),
             distinct_value_isnull: false,
+            trans_input_args: alloc::vec::Vec::new(),
+            trans_input_args_null: alloc::vec::Vec::new(),
             sortstates: None,
             transfn_fcinfo: None,
             serialfn_fcinfo: None,
