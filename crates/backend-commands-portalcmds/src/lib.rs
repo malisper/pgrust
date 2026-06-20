@@ -54,6 +54,35 @@ pub fn init_seams() {
     backend_commands_portalcmds_seams::perform_portal_close::set(perform_portal_close_seam);
     backend_commands_portalcmds_seams::portal_cleanup::set(PortalCleanup);
     backend_commands_portalcmds_seams::persist_holdable_portal::set(PersistHoldablePortal);
+
+    // The `tcop/utility.c` dispatch (backend-tcop-utility) routes the portal /
+    // cursor verbs and the FETCH returns-tuples predicate through its own
+    // outward seams. CLOSE and the FETCH returns-tuples predicate operate on
+    // the shared `Portal` only, so install their real arms here. (DECLARE
+    // CURSOR / FETCH are keystone-blocked: `PerformCursorOpen` /
+    // `PerformPortalFetch` are built on the trimmed `portalcmds::Query` model,
+    // which is *incompatible* (per its own doc comment) with the canonical
+    // `copy_query::Query` carried by the raw parse tree at dispatch time — the
+    // jumble/rewrite/plan seams they call expect the trimmed model. Bridging
+    // the two Query models is out of scope for a seam install.)
+    backend_tcop_utility_out_seams::perform_portal_close::set(perform_portal_close_seam);
+    backend_tcop_utility_out_seams::fetch_stmt_portal_tupdesc::set(fetch_stmt_portal_tupdesc_arm);
+}
+
+/// `UtilityReturnsTuples` FETCH leg — `GetPortalByName(name)->tupDesc != NULL`.
+fn fetch_stmt_portal_tupdesc_arm(parsetree: &types_nodes::nodes::Node) -> bool {
+    let Some(stmt) = parsetree.as_fetchstmt() else {
+        panic!("fetch_stmt_portal_tupdesc: parse tree is not a FetchStmt");
+    };
+    let Some(name) = stmt.portalname.as_deref() else {
+        return false;
+    };
+    // portal = GetPortalByName(name); if (!PortalIsValid(portal)) return false;
+    // return portal->tupDesc ? true : false;
+    match portalmem::get_portal_by_name::call(name) {
+        Ok(Some(portal)) => portal.borrow().tupDesc.is_some(),
+        _ => false,
+    }
 }
 
 // Thin marshal adapters for the inward seams (utility.c calls these).

@@ -10,6 +10,7 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
