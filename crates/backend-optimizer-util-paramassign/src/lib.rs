@@ -108,9 +108,14 @@ fn ascend_mut(root: &mut PlannerInfo, levelsup: Index) -> &mut PlannerInfo {
 
 /// Wrap an `Expr` as a `Node`, run `IncrementVarSublevelsUp`, and unwrap. C:
 /// `IncrementVarSublevelsUp((Node *) expr, delta, min)`.
-fn increment_expr_sublevels(e: Expr, delta: i32, min: i32) -> PgResult<Expr> {
-    let mut node = Node::Expr(e);
-    IncrementVarSublevelsUp(&mut node, delta, min)?;
+fn increment_expr_sublevels<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    e: Expr,
+    delta: i32,
+    min: i32,
+) -> PgResult<Expr> {
+    let mut node = Node::mk_expr(mcx, e)?;
+    IncrementVarSublevelsUp(&mut node, delta, min, mcx)?;
     Ok(node
         .into_expr()
         .unwrap_or_else(|| unreachable!("IncrementVarSublevelsUp preserves the Node::Expr wrapper")))
@@ -281,6 +286,7 @@ fn assign_param_for_placeholdervar(
 
         // Nope, so make a new one.
         let copied = increment_expr_sublevels(
+            mcx,
             Expr::PlaceHolderVar(phv.clone_in(mcx)?),
             -(phv.phlevelsup as i32),
             0,
@@ -358,6 +364,7 @@ pub fn replace_outer_agg(mcx: Mcx<'_>, root: &mut PlannerInfo, agg: &Aggref) -> 
         // It does not seem worthwhile to try to de-duplicate references to outer
         // aggs.  Just make a new slot every time.
         let copied = increment_expr_sublevels(
+            mcx,
             Expr::Aggref(agg.clone_in(mcx)?),
             -(agg.agglevelsup as i32),
             0,
@@ -418,6 +425,7 @@ pub fn replace_outer_grouping(
 
         // Just make a new slot every time.
         let copied = increment_expr_sublevels(
+            mcx,
             Expr::GroupingFunc(grp.clone_in(mcx)?),
             -(grp.agglevelsup as i32),
             0,
@@ -541,6 +549,7 @@ pub fn replace_outer_returning(
 
         // Just make a new slot every time.
         let copied = increment_expr_sublevels(
+            mcx,
             Expr::ReturningExpr(rexpr.clone_in(mcx)?),
             -(rexpr.retlevelsup as i32),
             0,
