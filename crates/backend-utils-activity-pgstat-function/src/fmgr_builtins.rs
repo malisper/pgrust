@@ -79,6 +79,16 @@ fn fc_function_self_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
     funcentry_float8_ms(fc, |e| e.self_time)
 }
 
+/// `pg_stat_force_next_flush()` (`pgstatfuncs.c:1860`) — `pgstat_force_next_flush();
+/// PG_RETURN_VOID();`. Forces this backend's pending cumulative stats to be
+/// flushed on the next `pgstat_report_stat()` call (used for writing tests).
+/// Takes no arguments and returns `void`.
+fn fc_force_next_flush(_fc: &mut FunctionCallInfoBaseData) -> Datum {
+    backend_utils_activity_pgstat::pgstat_core::pgstat_force_next_flush();
+    // PG_RETURN_VOID(): the returned Datum is ignored for a void function.
+    Datum::from_i64(0)
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -105,5 +115,15 @@ pub fn register_pgstat_function_builtins() {
         builtin(2978, "pg_stat_get_function_calls", fc_function_calls),
         builtin(2979, "pg_stat_get_function_total_time", fc_function_total_time),
         builtin(2980, "pg_stat_get_function_self_time", fc_function_self_time),
+        // pg_stat_force_next_flush() — fmgr_builtins[] row { 2137, 0, false,
+        // false, ... }: 0 args, non-strict (proisstrict='f'), returns void.
+        BuiltinFunction {
+            foid: 2137,
+            name: "pg_stat_force_next_flush".to_string(),
+            nargs: 0,
+            strict: false,
+            retset: false,
+            func: Some(fc_force_next_flush),
+        },
     ]);
 }

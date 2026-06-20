@@ -45,6 +45,17 @@ const PGSTAT_IDLE_INTERVAL: i64 = 10000;
 thread_local! {
     static PENDING_SINCE: core::cell::Cell<TimestampTz> = const { core::cell::Cell::new(0) };
     static HAVE_PENDING: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    // C file-static `pgStatForceNextFlush` (pgstat.c:250): when set, the next
+    // `pgstat_report_stat` is treated as forced even when nothing appears
+    // pending. Per-backend state, hence thread_local (not a shared Mutex).
+    static FORCE_NEXT_FLUSH: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// `pgstat_force_next_flush(void)` (`pgstat.c:813`) — force locally pending
+/// stats to be flushed during the next `pgstat_report_stat()` call. Used by
+/// the `pg_stat_force_next_flush()` SQL function (for writing tests).
+pub fn pgstat_force_next_flush() {
+    FORCE_NEXT_FLUSH.with(|c| c.set(true));
 }
 
 // ---------------------------------------------------------------------------
@@ -59,10 +70,17 @@ thread_local! {
 /// limits non-forced reports (`PGSTAT_MIN_INTERVAL`), flushes per-entry pending
 /// data through each kind's `flush_pending_cb`, flushes the static (fixed)
 /// kinds through `flush_static_cb`, and retries-or-defers on lock contention.
-pub fn pgstat_report_stat(force: bool) -> PgResult<i64> {
+pub fn pgstat_report_stat(mut force: bool) -> PgResult<i64> {
     // pgstat_assert_is_up()-equivalent + shutdown guard.
     if local::is_shutdown() {
         return Ok(0);
+    }
+
+    // "absorb" the forced flush even if there's nothing to flush (C
+    // pgstat.c:704). Must happen before the "nothing pending" early return.
+    if FORCE_NEXT_FLUSH.with(|c| c.get()) {
+        force = true;
+        FORCE_NEXT_FLUSH.with(|c| c.set(false));
     }
 
     // Is there anything to flush? (pending entries OR fixed/static kinds.)

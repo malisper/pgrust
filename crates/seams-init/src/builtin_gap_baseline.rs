@@ -138,7 +138,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2094, "pg_stat_get_backend_activity_start", BuiltinGapKind::NotRegistered),
     (2098, "pg_get_functiondef", BuiltinGapKind::NotRegistered),
     (2121, "pg_column_compression", BuiltinGapKind::NotRegistered),
-    (2137, "pg_stat_force_next_flush", BuiltinGapKind::NotRegistered),
     (2162, "pg_get_function_arguments", BuiltinGapKind::NotRegistered),
     (2165, "pg_get_function_result", BuiltinGapKind::NotRegistered),
     (2172, "pg_backup_start", BuiltinGapKind::NotRegistered),
