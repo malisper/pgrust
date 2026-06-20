@@ -128,7 +128,7 @@ fn errloc(lineno: i32, funcname: &'static str) -> ErrorLocation {
 }
 
 /// `strVal(lfirst(cell))` for a `String` value node (nodes/value.h).
-fn str_val<'a>(n: &'a Node<'a>) -> &'a str {
+fn str_val<'a, 'mcx>(n: &'a Node<'mcx>) -> &'a str {
     match n.node_tag() {
         ntag::T_String => n.expect_string().sval.as_str(),
         // A non-String here would be a grammar bug; the empty string mirrors a
