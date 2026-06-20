@@ -256,6 +256,55 @@ fn fc_pg_get_viewdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+/// `pg_get_viewdef_name(text) -> text` (oid 1640). By qualified name:
+/// `viewoid = RangeVarGetRelid(makeRangeVarFromNameList(textToQualifiedNameList(
+/// viewname)), NoLock, false)`, then the worker with prettyFlags =
+/// PRETTYFLAG_INDENT.
+fn fc_pg_get_viewdef_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let viewname = arg_text_str(fcinfo, 0);
+    let viewoid = ok(backend_catalog_namespace_seams::range_var_get_relid_from_text::call(
+        m.mcx(),
+        viewname,
+        0, /* NoLock */
+        false,
+    ));
+    let res = ok(crate::viewdef::pg_get_viewdef_worker(
+        m.mcx(),
+        viewoid,
+        crate::PRETTYFLAG_INDENT,
+        crate::WRAP_COLUMN_DEFAULT,
+    ));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `pg_get_viewdef_name_ext(text, bool) -> text` (oid 2505). By qualified name,
+/// prettyFlags = GET_PRETTY_FLAGS(pretty).
+fn fc_pg_get_viewdef_name_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let viewname = arg_text_str(fcinfo, 0);
+    let pretty = arg_bool(fcinfo, 1);
+    let viewoid = ok(backend_catalog_namespace_seams::range_var_get_relid_from_text::call(
+        m.mcx(),
+        viewname,
+        0, /* NoLock */
+        false,
+    ));
+    let res = ok(crate::viewdef::pg_get_viewdef_worker(
+        m.mcx(),
+        viewoid,
+        get_pretty_flags(pretty),
+        crate::WRAP_COLUMN_DEFAULT,
+    ));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
 /// `pg_get_viewdef_wrap(oid, int4) -> text` (oid 3159). Implies pretty;
 /// prettyFlags = GET_PRETTY_FLAGS(true), wrapColumn = the wrap arg.
 fn fc_pg_get_viewdef_wrap(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
@@ -413,6 +462,8 @@ pub fn register_ruleutils_builtins() {
         builtin(1641, "pg_get_viewdef", 1, true, false, fc_pg_get_viewdef),
         builtin(2506, "pg_get_viewdef_ext", 2, true, false, fc_pg_get_viewdef_ext),
         builtin(3159, "pg_get_viewdef_wrap", 2, true, false, fc_pg_get_viewdef_wrap),
+        builtin(1640, "pg_get_viewdef_name", 1, true, false, fc_pg_get_viewdef_name),
+        builtin(2505, "pg_get_viewdef_name_ext", 2, true, false, fc_pg_get_viewdef_name_ext),
         builtin(1573, "pg_get_ruledef", 1, true, false, fc_pg_get_ruledef),
         builtin(2504, "pg_get_ruledef_ext", 2, true, false, fc_pg_get_ruledef_ext),
         builtin(3415, "pg_get_statisticsobjdef", 1, true, false, fc_pg_get_statisticsobjdef),
