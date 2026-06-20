@@ -42,7 +42,7 @@
 
 use mcx::Mcx;
 use types_tuple::backend_access_common_heaptuple::Datum;
-use types_error::{PgError, PgResult};
+use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 use types_error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_ARGUMENT_FOR_NTH_VALUE,
     ERRCODE_INVALID_ARGUMENT_FOR_NTILE, ERRCODE_INVALID_TEXT_REPRESENTATION,
@@ -134,7 +134,11 @@ fn tid_invalid_syntax(str: &str) -> PgError {
 /// ported in full. NULL (`None`) cstring cannot reach a C cstring-in (the cstring
 /// is never SQL-NULL); we treat it as the empty string, which fails the syntax
 /// check exactly like a C empty input would.
-pub fn tidin<'mcx>(mcx: Mcx<'mcx>, string: Option<&str>) -> PgResult<Datum<'mcx>> {
+pub fn tidin<'mcx>(
+    mcx: Mcx<'mcx>,
+    string: Option<&str>,
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Datum<'mcx>> {
     let str = string.unwrap_or("");
     let bytes = str.as_bytes();
 
@@ -154,8 +158,12 @@ pub fn tidin<'mcx>(mcx: Mcx<'mcx>, string: Option<&str>) -> PgResult<Datum<'mcx>
         p += 1;
     }
 
+    // C: `ereturn(escontext, (Datum) 0, ...)` — with a soft sink the syntax
+    // error is saved and a discarded value is returned Ok; without one it
+    // throws. `pg_input_is_valid('(0)','tid')` / `pg_input_error_info` rely on
+    // the soft path.
     if i < NTIDARGS {
-        return Err(tid_invalid_syntax(str));
+        return ereturn(escontext.as_deref_mut(), Datum::null(), tid_invalid_syntax(str));
     }
 
     // errno = 0; cvt = strtoul(coord[0], &badp, 10);
@@ -163,17 +171,19 @@ pub fn tidin<'mcx>(mcx: Mcx<'mcx>, string: Option<&str>) -> PgResult<Datum<'mcx>
     let (cvt0, badp0) = strtoul(bytes, coord[0]);
     let cvt0 = match cvt0 {
         Some(v) => v,
-        None => return Err(tid_invalid_syntax(str)),
+        None => {
+            return ereturn(escontext.as_deref_mut(), Datum::null(), tid_invalid_syntax(str))
+        }
     };
     if byte_at(bytes, badp0) != DELIM {
-        return Err(tid_invalid_syntax(str));
+        return ereturn(escontext.as_deref_mut(), Datum::null(), tid_invalid_syntax(str));
     }
     let block_number = cvt0 as BlockNumber;
 
     // Cope with possibility that unsigned long is wider than BlockNumber
     // (SIZEOF_LONG > 4): reject values out of BlockNumber range (matching oidin).
     if cvt0 != block_number as u64 && cvt0 != (block_number as i32) as u64 {
-        return Err(tid_invalid_syntax(str));
+        return ereturn(escontext.as_deref_mut(), Datum::null(), tid_invalid_syntax(str));
     }
 
     // cvt = strtoul(coord[1], &badp, 10);
@@ -181,10 +191,12 @@ pub fn tidin<'mcx>(mcx: Mcx<'mcx>, string: Option<&str>) -> PgResult<Datum<'mcx>
     let (cvt1, badp1) = strtoul(bytes, coord[1]);
     let cvt1 = match cvt1 {
         Some(v) => v,
-        None => return Err(tid_invalid_syntax(str)),
+        None => {
+            return ereturn(escontext.as_deref_mut(), Datum::null(), tid_invalid_syntax(str))
+        }
     };
     if byte_at(bytes, badp1) != RDELIM || cvt1 > u16::MAX as u64 {
-        return Err(tid_invalid_syntax(str));
+        return ereturn(escontext.as_deref_mut(), Datum::null(), tid_invalid_syntax(str));
     }
     let offset_number = cvt1 as OffsetNumber;
 

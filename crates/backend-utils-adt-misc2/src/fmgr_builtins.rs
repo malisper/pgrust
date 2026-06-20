@@ -987,9 +987,13 @@ fn arg_tid<'mcx>(
 }
 
 fn fc_tidin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    // C: `escontext = (Node *) fcinfo->context`. Copy the input first since
+    // `arg_cstring` borrows `fcinfo` immutably while `escontext_mut` needs
+    // `&mut`. With no soft sink installed escontext is None and a syntax error
+    // throws, as before.
+    let s = arg_cstring(fcinfo, 0).to_string();
     let m = scratch_mcx();
-    let r = crate::scalars::tidin(m.mcx(), Some(s));
+    let r = crate::scalars::tidin(m.mcx(), Some(&s), fcinfo.escontext_mut());
     match r {
         Ok(d) => ret_value_datum(fcinfo, d),
         Err(e) => raise(e),
