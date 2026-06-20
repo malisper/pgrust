@@ -61,6 +61,7 @@ const RELKIND_MATVIEW: u8 = b'm';
 const RELKIND_INDEX: u8 = b'i';
 const RELKIND_FOREIGN_TABLE: u8 = b'f';
 const RELKIND_PARTITIONED_TABLE: u8 = b'p';
+const RELKIND_SEQUENCE: u8 = b'S';
 
 const RELPERSISTENCE_PERMANENT: u8 = b'p';
 
@@ -224,13 +225,17 @@ pub fn get_relation_info<'mcx>(
     let relcx = mcx::MemoryContext::new("get_relation_info relcache");
     let relation = backend_access_table_table::table_open(relcx.mcx(), relation_object_id, NoLock)?;
 
-    // Relations without a table AM can be used only for special-cased relkinds.
-    // `table_open` already rejected indexes and composite types; we additionally
-    // verify the foreign/partitioned exception. (The repo's `Relation` does not
-    // expose `rd_tableam` directly here; we mirror the relkind guard, which is
-    // what the C exception ultimately tests.)
+    // C tests `if (!relation->rd_tableam)`: relations without a table AM can be
+    // used only for the special-cased foreign/partitioned relkinds. The repo's
+    // `Relation` does not expose `rd_tableam` directly here, so we mirror which
+    // relkinds the relcache actually assigns an `rd_tableam` to. That set is the
+    // `RELKIND_HAS_TABLE_AM` macro PLUS sequences: the relcache populates
+    // `rd_tableam` for RELKIND_SEQUENCE (a sequence is a scannable heap; e.g.
+    // `SELECT * FROM a_sequence` is valid), even though sequences are not in the
+    // macro. Missing that arm rejected scans of sequences with a spurious
+    // "cannot open relation".
     let relkind = relation.rd_rel.relkind;
-    let has_table_am = relkind_has_table_am(relkind);
+    let has_table_am = relkind_has_table_am(relkind) || relkind == RELKIND_SEQUENCE;
     if !has_table_am
         && !(relkind == RELKIND_FOREIGN_TABLE || relkind == RELKIND_PARTITIONED_TABLE)
     {

@@ -389,6 +389,16 @@ pub fn ResetSequence<'mcx>(mcx: Mcx<'mcx>, seq_relid: Oid) -> PgResult<()> {
     )?;
 
     /*
+     * RelationSetNewRelfilenumber updated the relcache entry's rd_locator (via
+     * the relcache rebuild driven by CommandCounterIncrement). In C `seq_rel`
+     * is a live pointer into the relcache, so it now reflects the new, empty
+     * relfilenode. Our `seq_rel` is an owned projection captured before the
+     * change, so re-open it (lock already held, NoLock) to pick up the fresh
+     * locator before extending its storage.
+     */
+    let seq_rel = backend_access_sequence_seams::sequence_open::call(mcx, seq_relid, NoLock)?;
+
+    /*
      * Insert the modified tuple into the new storage file.
      */
     fill_seq_with_data(mcx, &seq_rel, &seq)?;
@@ -685,6 +695,16 @@ pub fn AlterSequence<'mcx>(
             rel_relid(&seqrel),
             persistence,
         )?;
+
+        /*
+         * RelationSetNewRelfilenumber updated the relcache entry's rd_locator
+         * (via the relcache rebuild driven by CommandCounterIncrement). In C
+         * `seqrel` is a live pointer into the relcache, so it now reflects the
+         * new, empty relfilenode. Our `seqrel` is an owned projection captured
+         * before the change, so re-open it (lock already held, NoLock) to pick
+         * up the fresh locator before extending its storage.
+         */
+        let seqrel = backend_access_sequence_seams::sequence_open::call(mcx, relid, NoLock)?;
 
         fill_seq_with_data(mcx, &seqrel, &newdataform)?;
     }
