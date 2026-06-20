@@ -13,7 +13,7 @@
 //! dispatch point every builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -37,52 +37,34 @@ fn ret_bool(v: bool) -> Datum {
     Datum::from_bool(v)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// C: `Datum pg_cancel_backend(PG_FUNCTION_ARGS)` — `PG_GETARG_INT32(0)` is the
 /// target pid; result is `bool`.
-fn fc_pg_cancel_backend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_cancel_backend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let pid = arg_int32(fcinfo, 0);
-    match crate::pg_cancel_backend(pid) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+    Ok(ret_bool(crate::pg_cancel_backend(pid)?))
 }
 
 /// C: `Datum pg_terminate_backend(PG_FUNCTION_ARGS)` — `PG_GETARG_INT32(0)` is
 /// the target pid, `PG_GETARG_INT64(1)` the timeout; result is `bool`.
-fn fc_pg_terminate_backend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_terminate_backend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let pid = arg_int32(fcinfo, 0);
     let timeout = arg_int64(fcinfo, 1);
-    match crate::pg_terminate_backend(pid, timeout) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+    Ok(ret_bool(crate::pg_terminate_backend(pid, timeout)?))
 }
 
 /// C: `Datum pg_reload_conf(PG_FUNCTION_ARGS)` — no arguments; result is `bool`.
-fn fc_pg_reload_conf(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_reload_conf() {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+fn fc_pg_reload_conf(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::pg_reload_conf()?))
 }
 
 /// C: `Datum pg_rotate_logfile(PG_FUNCTION_ARGS)` — no arguments; result is
 /// `bool`.
-fn fc_pg_rotate_logfile(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_rotate_logfile() {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+fn fc_pg_rotate_logfile(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::pg_rotate_logfile()?))
 }
 
 // ---------------------------------------------------------------------------
@@ -95,16 +77,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `signalfuncs.c` builtin (C: their `fmgr_builtins[]` rows).
@@ -112,7 +97,7 @@ fn builtin(
 /// transcribed exactly from `pg_proc.dat` (all default `proisstrict => 't'`,
 /// `proretset => 'f'`).
 pub fn register_pmsignal_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // proargtypes 'int4'      -> nargs 1
         builtin(2171, "pg_cancel_backend", 1, true, false, fc_pg_cancel_backend),
         // proargtypes 'int4 int8' -> nargs 2
