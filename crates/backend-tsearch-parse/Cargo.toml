@@ -10,6 +10,7 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
+mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-tsearch-parse-seams = { path = "../backend-tsearch-parse-seams" }

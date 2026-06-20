@@ -111,6 +111,17 @@ fn char2wchar(from: alloc::vec::Vec<u8>) -> types_error::PgResult<alloc::vec::Ve
     Ok(to.into_iter().map(|w| w as u32).collect())
 }
 
+/// C: `pg_mb2wchar_with_len(from, to, len)` (`mbutils.c`) — the C-locale wide
+/// path `prsd_start` takes when `database_ctype_is_c()`. Convert the
+/// database-encoding bytes to `pg_wchar` code points (no trailing NUL),
+/// charged to a scratch context (the result is copied into the owned `Vec`).
+fn pg_mb2wchar_with_len(from: alloc::vec::Vec<u8>) -> types_error::PgResult<alloc::vec::Vec<u32>> {
+    let ctx = mcx::MemoryContext::new("pg_mb2wchar_with_len");
+    let mcx = ctx.mcx();
+    let wide = backend_utils_mb_mbutils::pg_mb2wchar_with_len(mcx, &from)?;
+    Ok(wide.iter().map(|w| *w as u32).collect())
+}
+
 /// `ereport(ERROR, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, "invalid multibyte
 /// character for locale")` — the C `char2wchar` bad-sequence path.
 fn invalid_multibyte_error() -> types_error::PgError {
@@ -169,12 +180,18 @@ pub fn init_seams() {
     // `t_isalnum` multibyte branch.
     s::char2wchar::set(char2wchar);
 
+    // --- mbutils.c: C-locale `pg_wchar` wide path -----------------------------
+    // `pg_mb2wchar_with_len` (the C-locale wide path `prsd_start` takes when
+    // `database_ctype_is_c()` — reached under a `--no-locale` cluster).
+    s::pg_mb2wchar_with_len::set(pg_mb2wchar_with_len);
+
     // The remaining seams stay at their loud-panic default until their owners
-    // land: `pg_mb2wchar_with_len` (the C-locale `pg_wchar` wide path, dormant
-    // while no caller-buffer provider is wired); `config_lenmap` /
-    // `config_dict_ids` / `dict_lexize` (the ts-config dictionary cache + fmgr
-    // lexize dispatch, whose ts_cache catalog cores are unwired in production);
-    // and `ts_execute_hl` / `ts_execute_locations_hl` (the generic TS_execute
+    // land: `ts_execute_hl` / `ts_execute_locations_hl` (the generic TS_execute
     // engine, which exposes no pluggable-callback entry over this seam's
     // specialized `QueryItem` shape).
+    //
+    // `config_lenmap` / `config_dict_ids` / `dict_lexize` (the ts-config
+    // dictionary cache + lexize dispatch) are installed by the `to_tsany`
+    // owner crate (`backend-tsearch-to-tsany`), which sits above both the
+    // ts_cache and the dictionary crates.
 }
