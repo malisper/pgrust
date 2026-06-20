@@ -296,6 +296,22 @@ fn compute_range_stats_inner<'mcx>(
     let mut uppers: PgVec<'mcx, RangeBound> = mcx::vec_with_capacity_in(mcx, cap)?;
     let mut lengths: PgVec<'mcx, f64> = mcx::vec_with_capacity_in(mcx, cap)?;
 
+    // The accumulated `RangeBound.val`s are *pointers* into the fetched sample
+    // value's bytes (for a by-reference subtype like `numeric`: the deserialized
+    // range buffer, whose lower/upper element images live inside the `value`
+    // Datum returned by `fetchfunc`). In C those bytes are part of the sample
+    // tuple, which persists in `anl_context` for the whole function. In the owned
+    // model the fetched `value` owns its `Datum::ByRef` buffer and would free it
+    // at the end of each loop iteration — leaving every stored bound dangling
+    // (all bounds collapse onto the last-freed slot, then read as garbage when
+    // the histogram is serialized). Hold every non-empty row's `value` alive
+    // here, in `anl_context`, so the bound pointers stay valid until the
+    // histograms are built — the faithful analog of C keeping the sample tuples.
+    let mut keep_alive: alloc::vec::Vec<Datum<'mcx>> = alloc::vec::Vec::new();
+    keep_alive
+        .try_reserve(cap)
+        .map_err(|_| mcx.oom(cap))?;
+
     /* Loop over the sample ranges. */
     let mut range_no = 0;
     while range_no < samplerows {
@@ -369,6 +385,11 @@ fn compute_range_stats_inner<'mcx>(
             /* Remember bounds and length for further usage in histograms */
             lowers.push(lower);
             uppers.push(upper);
+            // Keep the fetched value's bytes alive for the whole function: the
+            // bounds just pushed point into them (see `keep_alive` above). For a
+            // by-value subtype the bound `val` is a self-contained word, so this
+            // is harmless; for a by-reference subtype it is load-bearing.
+            keep_alive.push(value);
 
             let length: f64 = if lower.infinite || upper.infinite {
                 /* Length of any kind of an infinite range is infinite */
