@@ -607,13 +607,13 @@ pub fn brin_create_empty_metapage(index: &Relation<'_>, pages_per_range: BlockNu
         ForkNumber::INIT_FORKNUM,
     )?;
 
-    // START_CRIT_SECTION();
+    backend_utils_init_miscinit_seams::start_crit_section::call();
     page_modify(metabuf, |page: &mut [u8]| {
         crate::brin_page::brin_metapage_init(page, pages_per_range, BRIN_CURRENT_VERSION)
     })?;
     mark_buffer_dirty::call(metabuf);
     log_newpage_buffer(metabuf, true)?;
-    // END_CRIT_SECTION();
+    backend_utils_init_miscinit_seams::end_crit_section::call();
 
     unlock_release_buffer::call(metabuf);
     Ok(())

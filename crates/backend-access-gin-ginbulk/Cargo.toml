@@ -33,5 +33,8 @@ backend-access-gin-ginutil-seams = { path = "../backend-access-gin-ginutil-seams
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+# START_CRIT_SECTION / END_CRIT_SECTION (miscadmin.h) — required around the
+# log_newpage_buffer WAL emit of ginbuildempty's two-page init-fork build.
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }

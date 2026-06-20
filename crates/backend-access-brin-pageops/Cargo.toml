@@ -20,6 +20,10 @@ types-wal = { path = "../types-wal" }
 # ereport / critical-section (miscadmin.h, elog.c).
 backend-utils-error = { path = "../backend-utils-error" }
 
+# START_CRIT_SECTION / END_CRIT_SECTION (miscadmin.h) — required around the
+# log_newpage_buffer WAL emit of brin_create_empty_metapage.
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+
 # Page-byte primitives (bufpage.c).
 backend-storage-page = { path = "../backend-storage-page" }
 

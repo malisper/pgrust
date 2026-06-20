@@ -680,7 +680,7 @@ pub fn ginbuildempty<'mcx>(index: &Relation<'mcx>) -> PgResult<()> {
     let root_buffer =
         bufmgr::extend_buffered_rel::call(index, ForkNumber::INIT_FORKNUM)?;
 
-    // START_CRIT_SECTION();
+    backend_utils_init_miscinit_seams::start_crit_section::call();
     bufmgr::with_buffer_page::call(meta_buffer, &mut |page: &mut [u8]| {
         GinInitMetabuffer(page, page.len())
     })?;
@@ -691,7 +691,7 @@ pub fn ginbuildempty<'mcx>(index: &Relation<'mcx>) -> PgResult<()> {
     })?;
     bufmgr::mark_buffer_dirty::call(root_buffer);
     backend_access_transam_xloginsert_seams::log_newpage_buffer::call(root_buffer, false)?;
-    // END_CRIT_SECTION();
+    backend_utils_init_miscinit_seams::end_crit_section::call();
 
     bufmgr::unlock_release_buffer::call(meta_buffer);
     bufmgr::unlock_release_buffer::call(root_buffer);
