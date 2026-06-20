@@ -196,6 +196,114 @@ pub fn generate_relation_name_catalog<'mcx>(
     quote_qualified_identifier(mcx, nspname.as_deref(), relname.as_str())
 }
 
+/// `generate_function_name(funcid, nargs, argnames, argtypes, has_variadic,
+/// use_variadic_p, inGroupBy)` (ruleutils.c 13256-13348): the
+/// possibly-schema-qualified, quoted function name to display for `funcid`,
+/// given the actual argument names/types of the call (which matter because of
+/// ambiguous-function resolution), and whether `VARIADIC` should be printed.
+///
+/// Faithful port: read `proname`/`pronamespace` from `pg_proc`; force
+/// qualification of `cube`/`rollup` inside GROUP BY; decide `use_variadic`;
+/// then schema-qualify iff the unqualified name + argtypes + VARIADIC flag would
+/// NOT re-resolve (via `func_get_detail`) to the same `funcid`. Returns
+/// `(name, use_variadic)`.
+///
+/// Installed as the ruleutils inward seam `generate_function_name`.
+pub fn generate_function_name_catalog<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+    nargs: i32,
+    argnames: PgVec<'mcx, Option<PgString<'mcx>>>,
+    argtypes: PgVec<'mcx, Oid>,
+    has_variadic: bool,
+    want_use_variadic: bool,
+    in_group_by: bool,
+) -> PgResult<(PgString<'mcx>, bool)> {
+    use backend_utils_cache_lsyscache_seams as lsys;
+
+    // proctup = SearchSysCache1(PROCOID, funcid); elog(ERROR) on miss.
+    // proname = NameStr(procform->proname).
+    let proname = match lsys::get_func_name::call(mcx, funcid)? {
+        Some(s) => s,
+        None => {
+            return Err(elog_error(alloc::format!(
+                "cache lookup failed for function {}",
+                funcid
+            )))
+        }
+    };
+
+    // Due to parser hacks to avoid reserving CUBE, force qualification of some
+    // function names within GROUP BY.
+    let mut force_qualify = false;
+    if in_group_by && (proname.as_str() == "cube" || proname.as_str() == "rollup") {
+        force_qualify = true;
+    }
+
+    // Determine whether VARIADIC should be printed. Must be done first since it
+    // affects the func_get_detail lookup rules.
+    let use_variadic = if want_use_variadic {
+        // Assert(!has_variadic || OidIsValid(procform->provariadic));
+        debug_assert!(
+            !has_variadic || lsys::get_func_variadictype::call(funcid).map(|v| v != Oid::from(0u32)).unwrap_or(true),
+            "funcvariadic set but function is not variadic"
+        );
+        has_variadic
+    } else {
+        debug_assert!(!has_variadic);
+        false
+    };
+
+    // Schema-qualify only if the parser would fail to resolve the correct
+    // function from the unqualified name + argtypes + VARIADIC flag. If we
+    // already decided to force qualification, skip the lookup and pretend the
+    // lookup did not find our funcid.
+    let resolves_to_same = if force_qualify {
+        false
+    } else {
+        // func_get_detail(list_make1(makeString(proname)), NIL, argnames, nargs,
+        //                 argtypes, !use_variadic, true, false, ...);
+        // The seam carries argnames + expand_variadic (= !use_variadic) +
+        // expand_defaults (= true, as C passes); include_out_arguments is fixed
+        // false (C passes false). We pass the actual argument names through.
+        // C's argnames is a List of String value-nodes (one per *named* arg, no
+        // NULLs); flatten our Option list to the present names.
+        let names: alloc::vec::Vec<alloc::string::String> =
+            alloc::vec![alloc::string::String::from(proname.as_str())];
+        let mut arg_names: alloc::vec::Vec<PgString<'mcx>> = alloc::vec::Vec::new();
+        for o in argnames.iter() {
+            if let Some(s) = o.as_ref() {
+                arg_names.push(PgString::from_str_in(s.as_str(), mcx)?);
+            }
+        }
+        let arg_types: alloc::vec::Vec<Oid> = argtypes.iter().copied().collect();
+        let detail = backend_parser_parse_func_seams::func_get_detail::call(
+            mcx,
+            &names,
+            &arg_names,
+            nargs,
+            &arg_types,
+            !use_variadic,
+            true,
+        )?;
+        use backend_parser_parse_func_seams::FuncDetailCode as FDC;
+        matches!(
+            detail.fdresult,
+            FDC::Normal | FDC::Aggregate | FDC::WindowFunc
+        ) && detail.funcid == funcid
+    };
+
+    let nspname: Option<PgString<'mcx>> = if resolves_to_same {
+        None
+    } else {
+        let pronamespace = lsys::get_func_namespace::call(funcid)?;
+        lsys::get_namespace_name_or_temp::call(mcx, pronamespace)?
+    };
+
+    let result = quote_qualified_identifier(mcx, nspname.as_deref(), proname.as_str())?;
+    Ok((result, use_variadic))
+}
+
 /// `generate_operator_clause(buf, leftop, leftoptype, opoid, rightop,
 /// rightoptype)` (ruleutils.c:13439) — append the schema-qualified, optionally
 /// casted `leftop OPERATOR(nsp.opr) rightop` fragment to a fresh buffer and

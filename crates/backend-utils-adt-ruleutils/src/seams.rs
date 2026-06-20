@@ -76,6 +76,15 @@ pub fn init_seams() {
         crate::generate_relation_name_catalog,
     );
 
+    // generate_function_name(funcid, nargs, argnames, argtypes, has_variadic,
+    // want_use_variadic, in_group_by) — the schema-qualified, quoted function
+    // name (+ whether to print VARIADIC) for deparsed function/aggregate/window
+    // calls. Reads pg_proc and re-resolves via func_get_detail; all owners
+    // (lsyscache pg_proc readers + parse_func) are installed.
+    backend_utils_adt_ruleutils_seams::generate_function_name::set(
+        crate::generate_function_name_catalog,
+    );
+
     // generate_operator_clause(buf, leftop, leftoptype, opoid, rightop,
     // rightoptype) — the schema-qualified casted operator fragment ri_triggers.c
     // appends when building the FK enforcement query.

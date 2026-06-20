@@ -20424,6 +20424,7 @@ dependencies = [
  "backend-nodes-nodeFuncs-seams",
  "backend-nodes-read-seams",
  "backend-optimizer-util-var-seams",
+ "backend-parser-parse-func-seams",
  "backend-partitioning-partbounds-seams",
  "backend-rewrite-core",
  "backend-utils-adt-format-type-seams",

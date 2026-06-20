@@ -68,11 +68,22 @@ seam_core::seam!(
     /// it with empty `fargs`/`fargnames`, `expand_variadic = false`,
     /// `expand_defaults = false`, `include_out_arguments = false`, and a NULL
     /// `argdefaults` out-param. The owner allocates `true_typeids` in `mcx`.
+    ///
+    /// `argnames` carries the actual argument names (C's `fargnames`, empty for
+    /// the aggregate-creation caller; ruleutils' `generate_function_name` passes
+    /// the deparsed call's named-argument list). `expand_variadic` mirrors C's
+    /// flag of the same name (the aggregate caller passes `false`;
+    /// `generate_function_name` passes `!use_variadic`). `expand_defaults`
+    /// mirrors C (the aggregate caller passes `false`; `generate_function_name`
+    /// passes `true`).
     pub fn func_get_detail<'mcx>(
         mcx: Mcx<'mcx>,
         funcname: &[String],
+        argnames: &[PgString<'mcx>],
         nargs: i32,
         argtypes: &[Oid],
+        expand_variadic: bool,
+        expand_defaults: bool,
     ) -> PgResult<FuncDetail<'mcx>>
 );
 

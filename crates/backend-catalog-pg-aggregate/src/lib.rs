@@ -1020,7 +1020,7 @@ fn lookup_agg_function(
      * type and set or singleton status of the function's return value.  it also
      * returns the true argument types to the function.
      */
-    let detail = func_get_detail::call(mcx, &fn_name_strs, nargs, in_types)?;
+    let detail = func_get_detail::call(mcx, &fn_name_strs, &[], nargs, in_types, false, false)?;
     let fnOid = detail.funcid;
     let mut rettype = detail.rettype;
     let retset = detail.retset;

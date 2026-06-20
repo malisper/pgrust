@@ -1497,8 +1497,11 @@ fn seam_recheck_cast_function_args(
 fn seam_func_get_detail<'mcx>(
     mcx: Mcx<'mcx>,
     funcname: &[String],
+    argnames: &[PgString<'mcx>],
     nargs: i32,
     argtypes: &[Oid],
+    expand_variadic: bool,
+    expand_defaults: bool,
 ) -> PgResult<me::FuncDetail<'mcx>> {
     let names: Vec<PgString<'mcx>> = funcname
         .iter()
@@ -1507,12 +1510,12 @@ fn seam_func_get_detail<'mcx>(
     let detail = func_get_detail(
         mcx,
         &names,
-        &[],   // fargs = NIL
-        &[],   // fargnames = NIL
+        &[], // fargs = NIL
+        argnames,
         nargs,
         argtypes,
-        false, // expand_variadic
-        false, // expand_defaults
+        expand_variadic,
+        expand_defaults,
         false, // include_out_arguments
         false, // argdefaults out-param is NULL
     )?;
