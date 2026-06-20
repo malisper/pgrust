@@ -699,6 +699,18 @@ fn relids_to_bitmapset(relids: &Relids) -> Bitmapset {
 pub fn init_seams() {
     partprune_seams::prune_append_rel_partitions::set(prune_append_rel_partitions_seam);
     partprune_seams::make_partition_pruneinfo::set(make_partition_pruneinfo_seam);
+    partprune_seams::get_matching_partitions::set(get_matching_partitions_seam);
+}
+
+/// Seam adapter: `get_matching_partitions(mcx, context, pruning_steps, estate)`
+/// — the run-time (executor) pruning kernel entry.
+fn get_matching_partitions_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    context: &mut types_nodes::partition::PartitionPruneContext<'mcx>,
+    pruning_steps: &[types_nodes::partprune_carrier::PartitionPruneStep],
+    estate: &mut types_nodes::EStateData<'mcx>,
+) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
+    get_matching_partitions_exec(mcx, context, pruning_steps, estate)
 }
 
 /// Seam adapter: `make_partition_pruneinfo(run, root, parentrel, subpaths,
@@ -2188,6 +2200,442 @@ fn partkey_datum_from_expr(expr: &Expr) -> PgResult<(Datum<'static>, bool)> {
             "partkey_datum_from_expr: non-Const at plan time (run-time pruning unported)",
         )),
     }
+}
+
+// =============================================================================
+// Run-time (executor) pruning kernel — get_matching_partitions over the
+// executor's PartitionPruneContext (partprune.c execution side).
+//
+// The plan-time entry above runs the steps over a trimmed `PruneContext` built
+// from the relcache partition key (PARTTARGET_PLANNER, Const comparisons only).
+// At execution the very same step-evaluation kernel runs, except the comparison
+// values are produced by `partkey_datum_from_expr`'s ExprState leg — evaluating
+// each step's exec-Param / stable-function expression through the context's
+// pre-compiled `exprstates[]` over its `exprcontext`. The bound-math matchers
+// (`get_matching_{list,range,hash}_bounds` + the bsearch helpers) are shared
+// verbatim; only the datum source differs.
+// =============================================================================
+
+/// Run-time `partkey_datum_from_expr(context, expr, stateidx, &datum, &isnull)`
+/// (partprune.c:3787) — the executor leg. A `Const` yields its cached value;
+/// any other expression is evaluated through the pre-compiled `ExprState` at
+/// `exprstates[stateidx]` in the context's `exprcontext`
+/// (`ExecEvalExprSwitchContext`). The context must carry a valid `exprcontext`
+/// whenever a non-Const expression is reached (C: `Assert(exprcontext != NULL)`).
+fn partkey_datum_from_expr_exec<'mcx>(
+    context: &mut types_nodes::partition::PartitionPruneContext<'mcx>,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    expr: &Expr,
+    stateidx: usize,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    if let Expr::Const(con) = expr {
+        // We can always determine the value of a constant.
+        return Ok((con.constvalue.clone(), con.constisnull));
+    }
+
+    // We should never see a non-Const in a step unless the caller has passed a
+    // valid ExprContext.
+    let ectx = context.exprcontext.ok_or_else(|| {
+        PgError::error("partkey_datum_from_expr: non-Const expr without exprcontext")
+    })?;
+
+    // exprstate = context->exprstates[stateidx];
+    let exprstate = context
+        .exprstates
+        .as_mut_slice()
+        .get_mut(stateidx)
+        .and_then(|s| s.as_mut())
+        .ok_or_else(|| {
+            PgError::error("partkey_datum_from_expr: missing compiled ExprState for step")
+        })?;
+
+    // *value = ExecEvalExprSwitchContext(exprstate, ectx, isnull);
+    backend_executor_execExpr_seams::exec_eval_expr_switch_context::call(exprstate, ectx, estate)
+}
+
+/// `get_matching_partitions(context, pruning_steps)` (partprune.c:846) — the
+/// run-time (executor) entry. Mirrors the plan-time kernel exactly, but the
+/// per-step comparison values come from `partkey_datum_from_expr_exec` (the
+/// ExprState leg) so exec-Param / stable-function pruning steps evaluate at
+/// execution. Returns the matching partition indexes as the executor's
+/// `Bitmapset` (`None` is the C NULL/empty set).
+fn get_matching_partitions_exec<'mcx>(
+    mcx: Mcx<'mcx>,
+    context: &mut types_nodes::partition::PartitionPruneContext<'mcx>,
+    pruning_steps: &[types_nodes::partprune_carrier::PartitionPruneStep],
+    estate: &mut types_nodes::EStateData<'mcx>,
+) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
+    let num_steps = pruning_steps.len();
+    let nparts = context.nparts;
+
+    // No pruning steps -> all partitions match.
+    if num_steps == 0 {
+        let mut all = Bitmapset::new();
+        if nparts > 0 {
+            bms_add_range(&mut all, 0, nparts - 1);
+        }
+        return Ok(owned_bms_to_exec(mcx, &all)?);
+    }
+
+    // Evaluate each step in step-id order, storing its result.
+    let mut results: Vec<Option<PruneStepResult>> = alloc::vec![None; num_steps];
+    for step in pruning_steps {
+        match step {
+            types_nodes::partprune_carrier::PartitionPruneStep::Op(op) => {
+                let r = perform_pruning_base_step_exec(mcx, context, estate, op)?;
+                results[op.step_id as usize] = Some(r);
+            }
+            types_nodes::partprune_carrier::PartitionPruneStep::Combine(c) => {
+                let r = perform_pruning_combine_step_exec(mcx, context, c, &results)?;
+                results[c.step_id as usize] = Some(r);
+            }
+        }
+    }
+
+    let final_result = results[num_steps - 1]
+        .as_ref()
+        .expect("get_matching_partitions: final step result missing");
+
+    let bi = exec_boundinfo(context);
+    let mut result = Bitmapset::new();
+    let mut scan_default = final_result.scan_default;
+    for &i in final_result.bound_offsets.iter() {
+        let partindex = bi.indexes.as_slice()[i as usize];
+        if partindex < 0 {
+            scan_default |= partition_bound_has_default(bi);
+            continue;
+        }
+        result.insert(partindex);
+    }
+
+    if final_result.scan_null {
+        result.insert(bi.null_index);
+    }
+    if scan_default {
+        result.insert(bi.default_index);
+    }
+
+    owned_bms_to_exec(mcx, &result)
+}
+
+/// `&context->boundinfo` (the executor context aliases the relcache PartitionDesc
+/// boundinfo, moved into the owned context). All bound-math reads go through here.
+fn exec_boundinfo<'a, 'mcx>(
+    context: &'a types_nodes::partition::PartitionPruneContext<'mcx>,
+) -> &'a PartitionBoundInfoData<'mcx> {
+    context
+        .boundinfo
+        .as_deref()
+        .expect("get_matching_partitions: PartitionPruneContext has no boundinfo")
+}
+
+/// Materialize the executor's `partsupfunc` (the relcache partition key's cached
+/// `FmgrInfo`s, carried opaque) so the hash kernel can read the support-func OIDs
+/// and collations — a minimal `PartitionKeyData` carrying only the fields
+/// `compute_partition_hash_value` reads (`partnatts`, `partsupfunc`,
+/// `partcollation`).
+fn exec_build_hash_key<'mcx>(
+    mcx: Mcx<'mcx>,
+    context: &types_nodes::partition::PartitionPruneContext<'mcx>,
+) -> PgResult<PartitionKeyData<'mcx>> {
+    let partnatts = context.partnatts;
+    let supfuncs: &Vec<types_core::fmgr::FmgrInfo> = context
+        .partsupfunc
+        .0
+        .as_ref()
+        .and_then(|b| b.downcast_ref::<Vec<types_core::fmgr::FmgrInfo>>())
+        .ok_or_else(|| {
+            PgError::error("get_matching_partitions: hash partkey support funcs unavailable")
+        })?;
+
+    let mut key = PartitionKeyData {
+        strategy: context.strategy,
+        partnatts: partnatts as i16,
+        partattrs: mcx::slice_in(mcx, &[])?,
+        partexprs: mcx::slice_in(mcx, &[])?,
+        partopfamily: mcx::slice_in(mcx, &[])?,
+        partopcintype: mcx::slice_in(mcx, &[])?,
+        partsupfunc: mcx::slice_in(mcx, supfuncs.as_slice())?,
+        partcollation: mcx::slice_in(mcx, context.partcollation.as_slice())?,
+        parttypid: mcx::slice_in(mcx, &[])?,
+        parttypmod: mcx::slice_in(mcx, &[])?,
+        parttyplen: mcx::slice_in(mcx, &[])?,
+        parttypbyval: mcx::slice_in(mcx, &[])?,
+        parttypalign: mcx::slice_in(mcx, &[])?,
+        parttypcoll: mcx::slice_in(mcx, &[])?,
+    };
+    // Silence "field never read" lints in the minimal key; only the three fields
+    // above are read by compute_partition_hash_value.
+    let _ = &mut key.partattrs;
+    Ok(key)
+}
+
+/// `perform_pruning_base_step(context, opstep)` (partprune.c:3444) — executor
+/// leg. Builds the lookup key by evaluating each non-null step expression
+/// (`partkey_datum_from_expr_exec`), records the per-key comparison-function OID
+/// into the trimmed `PruneContext`, then dispatches to the shared
+/// `get_matching_{hash,list,range}_bounds`.
+fn perform_pruning_base_step_exec<'mcx>(
+    mcx: Mcx<'mcx>,
+    context: &mut types_nodes::partition::PartitionPruneContext<'mcx>,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    opstep: &types_nodes::partprune_carrier::PartitionPruneStepOp,
+) -> PgResult<PruneStepResult> {
+    let partnatts = context.partnatts;
+    let strategy = context.strategy as i8;
+    let nullkeys = raw_bms_to_vec(&opstep.nullkeys);
+
+    let mut values: Vec<Datum> = alloc::vec![Datum::null(); partnatts as usize];
+    let mut nvalues = 0i32;
+    // Per-key comparison-function OIDs for *this* step, indexed by `keyno`
+    // (`base_stateidx == 0` below). The trimmed kernel calls the comparison/hash
+    // funcs by OID, so we record OIDs (C: `fmgr_info` into `stepcmpfuncs[stateidx]`).
+    let mut stepcmpfuncs: Vec<Oid> = alloc::vec![0 as Oid; partnatts as usize];
+    let mut lc = 0usize;
+
+    for keyno in 0..partnatts {
+        if nullkeys.contains(&keyno) {
+            continue;
+        }
+        if keyno > nvalues && strategy == PARTITION_STRATEGY_RANGE {
+            break;
+        }
+        if lc < opstep.exprs.len() {
+            let expr = &opstep.exprs[lc];
+            // ExprState slot index into the executor context's exprstates[] array
+            // (palloc0'd at partnatts*step_id+keyno by InitPartitionPruneContext).
+            let stateidx = prune_cxt_state_idx(partnatts, opstep.step_id, keyno);
+            let (datum, isnull) = partkey_datum_from_expr_exec(context, estate, expr, stateidx)?;
+            // Strict operators: a null comparison value matches nothing.
+            if isnull {
+                return Ok(PruneStepResult::default());
+            }
+            let cmpfn = opstep.cmpfns[lc];
+            debug_assert!(oid_is_valid(cmpfn));
+            stepcmpfuncs[keyno as usize] = cmpfn;
+            values[keyno as usize] = datum;
+            nvalues += 1;
+            lc += 1;
+        }
+    }
+
+    // The shared matchers read `stepcmpfuncs[base_stateidx + k]`; this step's
+    // funcs sit at the front of the per-step array (base 0).
+    let base_stateidx = 0usize;
+
+    // Build the trimmed PruneContext the shared matchers operate over. For hash
+    // we also need a minimal PartitionKeyData carrying the support funcs.
+    let bi = exec_boundinfo(context).clone_in(mcx)?;
+    let partcollation: Vec<Oid> = context.partcollation.as_slice().to_vec();
+
+    match strategy {
+        PARTITION_STRATEGY_HASH => {
+            let key = exec_build_hash_key(mcx, context)?;
+            let mut pc = PruneContext {
+                strategy,
+                partnatts,
+                nparts: context.nparts,
+                boundinfo: &bi,
+                partcollation: &partcollation,
+                partkey: &key,
+                stepcmpfuncs,
+                mcx,
+            };
+            get_matching_hash_bounds(
+                &mut pc,
+                opstep.opstrategy,
+                &values,
+                nvalues,
+                base_stateidx,
+                &nullkeys,
+            )
+        }
+        PARTITION_STRATEGY_LIST => {
+            let key = empty_partkey(mcx)?;
+            let mut pc = PruneContext {
+                strategy,
+                partnatts,
+                nparts: context.nparts,
+                boundinfo: &bi,
+                partcollation: &partcollation,
+                partkey: &key,
+                stepcmpfuncs,
+                mcx,
+            };
+            get_matching_list_bounds(
+                &mut pc,
+                opstep.opstrategy,
+                values[0].clone(),
+                nvalues,
+                base_stateidx,
+                &nullkeys,
+            )
+        }
+        PARTITION_STRATEGY_RANGE => {
+            let key = empty_partkey(mcx)?;
+            let mut pc = PruneContext {
+                strategy,
+                partnatts,
+                nparts: context.nparts,
+                boundinfo: &bi,
+                partcollation: &partcollation,
+                partkey: &key,
+                stepcmpfuncs,
+                mcx,
+            };
+            get_matching_range_bounds(
+                &mut pc,
+                opstep.opstrategy,
+                &values,
+                nvalues,
+                base_stateidx,
+                &nullkeys,
+            )
+        }
+        _ => Err(PgError::error("unexpected partition strategy")),
+    }
+}
+
+/// `perform_pruning_combine_step(context, cstep, step_results)`
+/// (partprune.c:3592) — executor leg (identical to the plan-time version, but
+/// reading the boundinfo through the executor context).
+fn perform_pruning_combine_step_exec<'mcx>(
+    _mcx: Mcx<'mcx>,
+    context: &types_nodes::partition::PartitionPruneContext<'mcx>,
+    cstep: &types_nodes::partprune_carrier::PartitionPruneStepCombine,
+    step_results: &[Option<PruneStepResult>],
+) -> PgResult<PruneStepResult> {
+    let mut result = PruneStepResult::default();
+    // Map the carrier combine op onto the crate-local one used in the match below.
+    let combine_op = match cstep.combine_op {
+        types_nodes::partprune_carrier::PartitionPruneCombineOp::Union => {
+            PartitionPruneCombineOp::Union
+        }
+        types_nodes::partprune_carrier::PartitionPruneCombineOp::Intersect => {
+            PartitionPruneCombineOp::Intersect
+        }
+    };
+
+    if cstep.source_stepids.is_empty() {
+        let bi = exec_boundinfo(context);
+        bms_add_range(&mut result.bound_offsets, 0, bi.nindexes - 1);
+        result.scan_default = partition_bound_has_default(bi);
+        result.scan_null = partition_bound_accepts_nulls(bi);
+        return Ok(result);
+    }
+
+    match combine_op {
+        PartitionPruneCombineOp::Union => {
+            for &step_id in &cstep.source_stepids {
+                if step_id >= cstep.step_id {
+                    return Err(PgError::error("invalid pruning combine step argument"));
+                }
+                let sr = step_results[step_id as usize]
+                    .as_ref()
+                    .expect("combine: source step result missing");
+                for &off in sr.bound_offsets.iter() {
+                    result.bound_offsets.insert(off);
+                }
+                if !result.scan_null {
+                    result.scan_null = sr.scan_null;
+                }
+                if !result.scan_default {
+                    result.scan_default = sr.scan_default;
+                }
+            }
+        }
+        PartitionPruneCombineOp::Intersect => {
+            let mut firststep = true;
+            for &step_id in &cstep.source_stepids {
+                if step_id >= cstep.step_id {
+                    return Err(PgError::error("invalid pruning combine step argument"));
+                }
+                let sr = step_results[step_id as usize]
+                    .as_ref()
+                    .expect("combine: source step result missing");
+                if firststep {
+                    result.bound_offsets = sr.bound_offsets.clone();
+                    result.scan_null = sr.scan_null;
+                    result.scan_default = sr.scan_default;
+                    firststep = false;
+                } else {
+                    result.bound_offsets = result
+                        .bound_offsets
+                        .intersection(&sr.bound_offsets)
+                        .copied()
+                        .collect();
+                    if result.scan_null {
+                        result.scan_null = sr.scan_null;
+                    }
+                    if result.scan_default {
+                        result.scan_default = sr.scan_default;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// `bms_to_vec` over a `RawBms` carrier (the carrier step's `nullkeys`).
+fn raw_bms_to_vec(raw: &types_nodes::partprune_carrier::RawBms) -> Vec<i32> {
+    match raw {
+        Some(words) => {
+            let mut out = Vec::new();
+            for (wordnum, &w) in words.iter().enumerate() {
+                let mut bits = w;
+                let mut bit = 0;
+                while bits != 0 {
+                    if bits & 1 != 0 {
+                        out.push((wordnum * 64 + bit) as i32);
+                    }
+                    bits >>= 1;
+                    bit += 1;
+                }
+            }
+            out
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Convert a crate-internal `Bitmapset` (BTreeSet of partition indexes) into the
+/// executor's `types_nodes::Bitmapset` allocated in `mcx`. `None` for the empty
+/// set (the C NULL).
+fn owned_bms_to_exec<'mcx>(
+    mcx: Mcx<'mcx>,
+    set: &Bitmapset,
+) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>> {
+    let mut result: Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>> = None;
+    for &member in set.iter() {
+        let cur = result.take();
+        result = Some(backend_nodes_core_seams::bms_add_member::call(
+            mcx, cur, member,
+        )?);
+    }
+    Ok(result)
+}
+
+/// An empty `PartitionKeyData` (list/range pruning never reads the partkey; only
+/// the hash kernel uses `compute_partition_hash_value`).
+fn empty_partkey<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PartitionKeyData<'mcx>> {
+    Ok(PartitionKeyData {
+        strategy: types_nodes::partition::PartitionStrategy::List,
+        partnatts: 0,
+        partattrs: mcx::slice_in(mcx, &[])?,
+        partexprs: mcx::slice_in(mcx, &[])?,
+        partopfamily: mcx::slice_in(mcx, &[])?,
+        partopcintype: mcx::slice_in(mcx, &[])?,
+        partsupfunc: mcx::slice_in(mcx, &[])?,
+        partcollation: mcx::slice_in(mcx, &[])?,
+        parttypid: mcx::slice_in(mcx, &[])?,
+        parttypmod: mcx::slice_in(mcx, &[])?,
+        parttyplen: mcx::slice_in(mcx, &[])?,
+        parttypbyval: mcx::slice_in(mcx, &[])?,
+        parttypalign: mcx::slice_in(mcx, &[])?,
+        parttypcoll: mcx::slice_in(mcx, &[])?,
+    })
 }
 
 // =============================================================================

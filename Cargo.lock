@@ -14326,8 +14326,10 @@ name = "backend-partitioning-core"
 version = "0.0.0"
 dependencies = [
  "backend-access-table-table-seams",
+ "backend-executor-execExpr-seams",
  "backend-nodes-copyfuncs-seams",
  "backend-nodes-core",
+ "backend-nodes-core-seams",
  "backend-nodes-makefuncs-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-optimizer-path-small-seams",

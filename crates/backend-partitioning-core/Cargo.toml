@@ -20,6 +20,8 @@ types-tuple = { path = "../types-tuple" }
 backend-partitioning-partprune-seams = { path = "../backend-partitioning-partprune-seams" }
 backend-partitioning-partbounds-seams = { path = "../backend-partitioning-partbounds-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-partcache-seams = { path = "../backend-utils-cache-partcache-seams" }
 backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
