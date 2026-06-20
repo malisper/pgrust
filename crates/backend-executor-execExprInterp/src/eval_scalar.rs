@@ -1526,13 +1526,29 @@ pub fn ExecEvalScalarArrayOp<'mcx>(
             // Dispatch on the canonical by-reference-capable lane: a by-ref
             // scalar or element (text/numeric/...) reaches the comparison
             // function as its full image, not a downgraded word.
+            //
+            // C sets `fcinfo->args[0].isnull = scalar_isnull` (once, before the
+            // loop) and `fcinfo->args[1].isnull = elt_isnull` per element. A
+            // non-strict comparison function (e.g. a plpgsql operator) is called
+            // even when an arg is NULL and may legitimately return SQL NULL, so
+            // both null flags MUST be threaded through `args_null` — passing the
+            // empty slice (= "no NULLs") would make a NULL element look non-NULL
+            // and break `x <> ALL(... , NULL)` (NOT IN with a NULL element must
+            // yield NULL, excluding the row, not a definitive true).
             let args = if scalar_isnull {
                 [DatumV::null(), elt]
             } else {
                 [scalar_value.clone(), elt]
             };
-            let (result_v, isnull) =
-                function_call_invoke_datum::call(mcx, fn_oid, collation, &args[..], &[], None)?;
+            let args_null = [scalar_isnull, elt_isnull];
+            let (result_v, isnull) = function_call_invoke_datum::call(
+                mcx,
+                fn_oid,
+                collation,
+                &args[..],
+                &args_null[..],
+                None,
+            )?;
             (isnull, result_v.as_bool())
         };
 
@@ -1838,8 +1854,22 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
             } else {
                 [scalar_value.clone(), DatumV::null()]
             };
-            let (result_v, isnull) =
-                function_call_invoke_datum::call(mcx, matchfuncid, collation, &args[..], &[], None)?;
+            // C sets `fcinfo->args[0].isnull = scalar_isnull` and, crucially,
+            // `fcinfo->args[1].isnull = true` (the synthetic NULL rhs). Both null
+            // flags MUST be threaded through `args_null`: a non-strict equality
+            // function (e.g. a plpgsql operator) called with the NULL rhs must see
+            // it as NULL so it can return SQL NULL — passing the empty slice (= "no
+            // NULLs") makes the rhs look non-NULL and yields a definitive result,
+            // breaking `x <> ALL(... , NULL)` (NOT IN with a NULL array element).
+            let args_null = [scalar_isnull, true];
+            let (result_v, isnull) = function_call_invoke_datum::call(
+                mcx,
+                matchfuncid,
+                collation,
+                &args[..],
+                &args_null[..],
+                None,
+            )?;
             // result = DatumGetBool(...); resultnull = fcinfo->isnull;
             result = result_v.as_bool();
             resultnull = isnull;
