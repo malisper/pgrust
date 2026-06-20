@@ -414,14 +414,25 @@ fn ExecScanSubPlan<'mcx>(
     if subLinkType == SubLinkType::Array {
         // We return the result in the caller's context.
         //   result = makeArrayResultAny(astate, oldcontext, true);
-        // `oldcontext` is the entry-time per-tuple eval context. An array is
-        // pass-by-reference, so the unified `_v` seam hands back a
-        // `Datum::ByRef` carrying the array bytes — the form that rides the
-        // by-ref fmgr lane of any downstream array function.
+        // C builds the final array varlena in `oldcontext` (the entry-time
+        // per-tuple eval context) and relies on the caller's bulk
+        // per-tuple-context reset to free it on the next outer tuple. In the
+        // owned model that reset asserts every allocation it owns has already
+        // been dropped, so a varlena that must survive into the caller's
+        // projection (i.e. past the next reset) cannot live in per-tuple
+        // memory. We therefore build the result array in the per-query context
+        // — a longer-lived allocation reclaimed at query end — exactly as the
+        // ARRAY[] constructor (execExprInterp eval_array) and array subscripting
+        // already do for the same reason. The transient `astate` accumulator
+        // stays in per-tuple memory (built/dropped within this call, so its
+        // charge balances before any reset). An array is pass-by-reference, so
+        // the unified `_v` seam hands back a `Datum::ByRef` carrying the array
+        // bytes — the form that rides the by-ref fmgr lane of any downstream
+        // array function.
         result = arrayfuncs::make_array_result_any_v::call(
             estate,
             econtext,
-            arrayfuncs::ArrayBuildCtx::PerTuple,
+            arrayfuncs::ArrayBuildCtx::PerQuery,
             astate,
         )?;
     } else if !found {
