@@ -4231,6 +4231,28 @@ pub(crate) fn collation_qualified_name<'mcx>(
     Ok(Some((nspname, collname)))
 }
 
+/// `SearchSysCache1(CONSTROID, conoid)` + `GETSTRUCT` of the `Form_pg_constraint`
+/// columns `generateClonedIndexStmt` (parse_utilcmd.c) reads when cloning a
+/// constraint-backed index: `condeferrable`, `condeferred`, `contype`, and the
+/// (nullable) `conexclop` operator `oid[]`. `Ok(None)` on a cache miss.
+pub(crate) fn pg_constraint_clone_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    conoid: Oid,
+) -> PgResult<Option<(bool, bool, i8, Option<PgVec<'mcx, Oid>>)>> {
+    let tuple = SearchSysCache1(mcx, CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(conoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let condeferrable = getattr_bool(mcx, CONSTROID, &tup, Anum_pg_constraint_condeferrable as i32)?;
+    let condeferred = getattr_bool(mcx, CONSTROID, &tup, Anum_pg_constraint_condeferred as i32)?;
+    let contype = getattr_char(mcx, CONSTROID, &tup, Anum_pg_constraint_contype as i32)?;
+    // conexclop is `oid[]` (a 1-D Oid array), NULL for non-exclusion constraints.
+    let conexclop =
+        getattr_oid_array(mcx, CONSTROID, &tup, Anum_pg_constraint_conexclop as i32)?.map(|arr| arr.values);
+    ReleaseSysCache(tup);
+    Ok(Some((condeferrable, condeferred, contype, conexclop)))
+}
+
 /// `SearchSysCache1(RELOID, relid)` + `GETSTRUCT` of the full `Form_pg_class`
 /// tuple (relcache Phase3 nailed-entry refill).
 pub(crate) fn search_pg_class_full_form<'mcx>(

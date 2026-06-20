@@ -90,4 +90,13 @@ backend-rewrite-core = { path = "../backend-rewrite-core" }
 # identity-sequence lookup). Cycle-free leaf.
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 
+# generateClonedIndexStmt: AM canorder (amapi), reloptions decode, pg_index /
+# pg_constraint / pg_operator / pg_opclass / collation syscache projections,
+# stringToNode reader, and get_tablespace_name. All cycle-free leaves.
+backend-access-index-amapi = { path = "../backend-access-index-amapi" }
+backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
+backend-commands-tablespace = { path = "../backend-commands-tablespace" }
+
 [dev-dependencies]

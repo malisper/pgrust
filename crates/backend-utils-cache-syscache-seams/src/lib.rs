@@ -961,6 +961,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(CONSTROID, conoid)` + `GETSTRUCT` of the
+    /// `Form_pg_constraint` columns `generateClonedIndexStmt` (parse_utilcmd.c)
+    /// reads: `(condeferrable, condeferred, contype, conexclop)`. `conexclop` is
+    /// the nullable exclusion-operator `oid[]` (`None` for non-exclusion
+    /// constraints). `Ok(None)` on a cache miss (the caller's `elog(ERROR)`).
+    pub fn pg_constraint_clone_info<'mcx>(
+        mcx: Mcx<'mcx>,
+        conoid: Oid,
+    ) -> PgResult<Option<(bool, bool, i8, Option<PgVec<'mcx, Oid>>)>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache2(ATTNUM, ObjectIdGetDatum(relid), Int16GetDatum(attnum))`
     /// + `NameStr(GETSTRUCT(Form_pg_attribute)->attname)` + `ReleaseSysCache`
     /// (the raw `ATTNUM` cache read behind `get_attname`, lsyscache.c). Returns

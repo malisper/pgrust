@@ -9,8 +9,11 @@
 use mcx::{Mcx, PgBox, PgVec};
 use types_error::PgResult;
 use types_nodes::copy_query::Query;
-use types_nodes::ddlnodes::RuleStmt;
+use types_nodes::ddlnodes::{IndexStmt, RuleStmt};
 use types_nodes::nodes::Node;
+use types_nodes::rawnodes::RangeVar;
+use types_rel::Relation;
+use types_tuple::attmap::AttrMap;
 
 /// An owned, arena-allocated `Node` (`Node *` in C).
 pub type NodeBox<'mcx> = PgBox<'mcx, Node<'mcx>>;
@@ -40,6 +43,21 @@ seam_core::seam!(
         stmt: &RuleStmt<'_>,
         query_string: &str,
     ) -> PgResult<(PgVec<'mcx, Query<'mcx>>, Option<Node<'mcx>>)>
+);
+
+seam_core::seam!(
+    /// `generateClonedIndexStmt(heapRel, source_idx, attmap, &constraintOid)`
+    /// (parse_utilcmd.c): build an `IndexStmt` describing an index equivalent to
+    /// the already-existing `source_idx`, remapping expression/predicate Var
+    /// attnos through `attmap`. Returns the `IndexStmt` plus the OID of the
+    /// constraint associated with the index (`*constraintOid`, `InvalidOid` when
+    /// not constraint-backed). Can `ereport(ERROR)` / allocate, carried on `Err`.
+    pub fn generateClonedIndexStmt<'mcx>(
+        mcx: Mcx<'mcx>,
+        heap_rel: Option<&RangeVar<'mcx>>,
+        source_idx: &Relation<'mcx>,
+        attmap: &AttrMap<'mcx>,
+    ) -> PgResult<(IndexStmt<'mcx>, types_core::Oid)>
 );
 
 seam_core::seam!(

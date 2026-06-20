@@ -1060,6 +1060,9 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::collation_qualified_name::set(
         projections::collation_qualified_name,
     );
+    backend_utils_cache_syscache_seams::pg_constraint_clone_info::set(
+        projections::pg_constraint_clone_info,
+    );
     backend_utils_cache_syscache_seams::search_pg_class_full_form::set(
         projections::search_pg_class_full_form,
     );
