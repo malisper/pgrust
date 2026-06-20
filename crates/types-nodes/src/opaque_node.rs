@@ -129,6 +129,21 @@ pub trait NodePayload<'mcx>: 'mcx {
     /// params are invariant, so a differing lifetime cannot be passed).
     fn equal_dyn(&self, other: &dyn NodePayload<'mcx>) -> bool;
 
+    /// The embedded `Plan` base of a plan node (`(Plan *) node`), or `None` for a
+    /// non-plan node — the vtable form of the hand-written `Node::plan_head`
+    /// upcast (proposal §1.1 `plan_base`). Plan-variant adapters override this to
+    /// return the nested `&self.0.<...>.plan` field; every other payload uses the
+    /// `None` default (a non-plan node has no `Plan` base, exactly as the C
+    /// `((Plan *) <parsenode>)` upcast is a type error).
+    fn plan_base(&self) -> Option<&crate::nodeindexscan::Plan<'mcx>> {
+        None
+    }
+
+    /// Mutable dual of [`plan_base`](NodePayload::plan_base).
+    fn plan_base_mut(&mut self) -> Option<&mut crate::nodeindexscan::Plan<'mcx>> {
+        None
+    }
+
     /// The raw data address of this payload — used by the tag-keyed downcast in
     /// [`PgNodeBox`]. `repr(transparent)` adapters make this address equal to
     /// the inner payload's address, so the cast is sound.
@@ -246,6 +261,64 @@ impl<'mcx> PgNodeBox<'mcx> {
         }
     }
 
+    /// Mutable tag-keyed downcast — the `&mut` dual of [`downcast_ref`]. Same
+    /// soundness argument (tag check + bijection + `repr(transparent)`); the
+    /// `&mut` borrow rides on `&mut self`.
+    ///
+    /// [`downcast_ref`]: PgNodeBox::downcast_ref
+    #[inline]
+    pub fn downcast_mut<P>(&mut self, expected: NodeTag) -> Option<&mut P>
+    where
+        P: NodePayload<'mcx> + 'mcx,
+    {
+        if self.0.node_tag() == expected {
+            // SAFETY: identical to `downcast_ref`; the unique `&mut self` borrow
+            // guarantees no aliasing of the returned `&mut P`.
+            Some(unsafe { &mut *(self.0.__payload_ptr() as *mut P) })
+        } else {
+            None
+        }
+    }
+
+    /// Move the concrete payload `P` out of this box (the `into_*` accessor body),
+    /// **iff** the tag matches `expected`. On a tag mismatch the box is returned
+    /// unchanged in the `Err` so the caller can recover it (mirrors the enum
+    /// `into_*` returning the original on the wrong variant).
+    ///
+    /// # Soundness
+    /// Same tag<->adapter bijection + `repr(transparent)` argument as
+    /// [`downcast_ref`]; the move-out itself is encapsulated in
+    /// [`mcx::box_read_payload`] (it `ptr::read`s the payload and frees the box
+    /// storage without double-dropping).
+    #[inline]
+    pub fn into_payload<P>(self, expected: NodeTag) -> Result<P, Self>
+    where
+        P: NodePayload<'mcx> + 'mcx,
+    {
+        if self.0.node_tag() == expected {
+            let data = self.0.__payload_ptr() as *const P;
+            // SAFETY: tag matched -> the runtime type is `P` (bijection); `data`
+            // is the transparent payload address; `box_read_payload` reads `P` out
+            // and frees the box without running the dyn's drop glue.
+            let value = unsafe { mcx::box_read_payload(self.0, data) };
+            Ok(value)
+        } else {
+            Err(self)
+        }
+    }
+
+    /// The embedded `Plan` base (vtable), or `None` for a non-plan node.
+    #[inline]
+    pub fn plan_base(&self) -> Option<&crate::nodeindexscan::Plan<'mcx>> {
+        self.0.plan_base()
+    }
+
+    /// The embedded `Plan` base (vtable, mutable).
+    #[inline]
+    pub fn plan_base_mut(&mut self) -> Option<&mut crate::nodeindexscan::Plan<'mcx>> {
+        self.0.plan_base_mut()
+    }
+
     /// Structural equality via the vtable (C's `equal()`).
     #[inline]
     pub fn equal(&self, other: &PgNodeBox<'mcx>) -> bool {
@@ -296,6 +369,63 @@ impl<'mcx> OpaqueNode<'mcx> {
         P: NodePayload<'mcx> + 'mcx,
     {
         self.0.downcast_ref::<P>(expected)
+    }
+
+    /// Mutable tag-keyed downcast to `&mut P`.
+    #[inline]
+    pub fn downcast_mut<P>(&mut self, expected: NodeTag) -> Option<&mut P>
+    where
+        P: NodePayload<'mcx> + 'mcx,
+    {
+        self.0.downcast_mut::<P>(expected)
+    }
+
+    /// Move the payload `P` out of this node iff the tag matches; on mismatch
+    /// returns the node unchanged in `Err`.
+    #[inline]
+    pub fn into_payload<P>(self, expected: NodeTag) -> Result<P, Self>
+    where
+        P: NodePayload<'mcx> + 'mcx,
+    {
+        match self.0.into_payload::<P>(expected) {
+            Ok(p) => Ok(p),
+            Err(b) => Err(OpaqueNode(b)),
+        }
+    }
+
+    /// The embedded `Plan` base (vtable), or `None` for a non-plan node.
+    #[inline]
+    pub fn plan_base(&self) -> Option<&crate::nodeindexscan::Plan<'mcx>> {
+        self.0.plan_base()
+    }
+
+    /// The embedded `Plan` base (vtable, mutable).
+    #[inline]
+    pub fn plan_base_mut(&mut self) -> Option<&mut crate::nodeindexscan::Plan<'mcx>> {
+        self.0.plan_base_mut()
+    }
+
+    /// `((Plan *) node)->...` — the embedded `Plan`, panicking on a non-plan node
+    /// (the asserting form the hand-written `Node::plan_head` provided).
+    #[inline]
+    pub fn plan_head(&self) -> &crate::nodeindexscan::Plan<'mcx> {
+        self.0.plan_base().unwrap_or_else(|| {
+            panic!(
+                "OpaqueNode::plan_head: called on a non-plan node (tag {:?}), which has no Plan base",
+                self.node_tag()
+            )
+        })
+    }
+
+    /// Mutable dual of [`plan_head`](OpaqueNode::plan_head).
+    #[inline]
+    pub fn plan_head_mut(&mut self) -> &mut crate::nodeindexscan::Plan<'mcx> {
+        let tag = self.node_tag();
+        self.0.plan_base_mut().unwrap_or_else(|| {
+            panic!(
+                "OpaqueNode::plan_head_mut: called on a non-plan node (tag {tag:?}), which has no Plan base"
+            )
+        })
     }
 
     /// Structural equality.

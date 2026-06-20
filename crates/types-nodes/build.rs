@@ -328,6 +328,20 @@ fn emit_node_payload_impls(
             body = node_tag_body,
         ));
 
+        // plan_base / plan_base_mut: for the 41 plan-bearing variants, override
+        // the trait default to return the nested `&self.0.<...>.plan` field (the
+        // vtable form of the hand-written `Node::plan_head` upcast, §1.1). Every
+        // other adapter inherits the `None` default.
+        if let Some(path) = plan_field_path(&v.ident) {
+            s.push_str(&format!(
+                "    #[inline]\n    \
+                 fn plan_base(&self) -> Option<&crate::nodeindexscan::Plan<'mcx>> {{ Some(&self.0.{path}) }}\n    \
+                 #[inline]\n    \
+                 fn plan_base_mut(&mut self) -> Option<&mut crate::nodeindexscan::Plan<'mcx>> {{ Some(&mut self.0.{path}) }}\n",
+                path = path,
+            ));
+        }
+
         // clone_in_dyn: mirror the hand-written `Node::clone_in` arm for this
         // variant, then rebuild the live `Node` via the generated `mk_*` ctor.
         s.push_str(&clone_in_dyn_body(&v.ident, payload, &snake));
@@ -359,6 +373,34 @@ fn emit_node_payload_impls(
     ));
 
     s
+}
+
+/// The nested field path to the embedded `Plan` base for a plan-bearing `Node`
+/// variant (the `&self.0.<path>` the generated `plan_base` returns), mirroring
+/// the hand-written `Node::plan_head` match arms (`&a.plan`, `&m.join.plan`,
+/// `&t.scan.plan`, `&s.sort.plan`). `None` for a non-plan variant (it inherits
+/// the trait's `None` default). This table is the authoritative plan-upcast map
+/// and must stay in sync with the plan node structs.
+fn plan_field_path(ident: &str) -> Option<&'static str> {
+    let p = match ident {
+        // direct `.plan` field
+        "Append" | "ModifyTable" | "Material" | "Gather" | "GatherMerge" | "MergeAppend"
+        | "BitmapAnd" | "BitmapOr" | "RecursiveUnion" | "Group" | "ProjectSet" | "Result"
+        | "SetOp" | "Memoize" | "Limit" | "Unique" | "Sort" | "Agg" | "WindowAgg" | "Hash" => {
+            "plan"
+        }
+        // `.join.plan` (Join-derived)
+        "MergeJoin" | "NestLoop" | "HashJoin" => "join.plan",
+        // `.scan.plan` (Scan-derived)
+        "IndexScan" | "IndexOnlyScan" | "BitmapIndexScan" | "BitmapHeapScan" | "TableFuncScan"
+        | "FunctionScan" | "ValuesScan" | "CteScan" | "NamedTuplestoreScan" | "TidRangeScan"
+        | "SampleScan" | "TidScan" | "WorkTableScan" | "SeqScan" | "SubqueryScan"
+        | "ForeignScan" | "CustomScan" => "scan.plan",
+        // `.sort.plan` (IncrementalSort embeds a Sort)
+        "IncrementalSort" => "sort.plan",
+        _ => return None,
+    };
+    Some(p)
 }
 
 /// Emit the `clone_in_dyn` method body for one variant, mirroring the exact arm

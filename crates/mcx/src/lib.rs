@@ -627,6 +627,49 @@ where
     unsafe { allocator_api2::boxed::Box::from_raw_in(fat, alloc) }
 }
 
+/// Move a concrete payload `P` out of an unsized `PgBox<'mcx, U>` (a trait
+/// object) and free the box's backing allocation **without** dropping `P`.
+///
+/// This is the move-out dual of [`box_unsize_dyn`]: it takes the fat box plus a
+/// thin `*const P` data pointer (the `repr(transparent)` payload address inside
+/// the trait object — the same address the downcast uses), `ptr::read`s the `P`
+/// value out of it, then deallocates the box's storage with the box's own
+/// allocator using the trait object's *runtime* layout (`Layout::for_value`,
+/// which for a `repr(transparent)` adapter over `P` equals `Layout::new::<P>()`).
+/// The box's `Drop` is suppressed (`ManuallyDrop`) so the value is not dropped a
+/// second time after the move.
+///
+/// # Safety
+/// - `data` MUST be the data pointer of the payload stored in `sized` (i.e. the
+///   `repr(transparent)` adapter's address, == the box's data address), and the
+///   concrete stored type MUST have the same size/align as `P` (guaranteed by the
+///   generator's tag<->adapter bijection + `repr(transparent)`).
+/// - The caller MUST have already established (via a tag check) that the runtime
+///   type is `P`.
+pub unsafe fn box_read_payload<'mcx, P, U>(sized: PgBox<'mcx, U>, data: *const P) -> P
+where
+    P: 'mcx,
+    U: ?Sized + 'mcx,
+{
+    // Decompose: take the fat raw pointer + the allocator, suppress the box drop.
+    let (raw, alloc) = allocator_api2::boxed::Box::into_raw_with_allocator(sized);
+    // Runtime layout of the (unsized) value — for a transparent adapter over P
+    // this is exactly Layout::new::<P>(), but read it off the live value so it is
+    // correct regardless.
+    let layout = core::alloc::Layout::for_value(unsafe { &*raw });
+    // Read the payload out of its data address (the move). After this the storage
+    // contains a logically-uninitialized P that we must NOT drop.
+    let value = unsafe { core::ptr::read(data) };
+    // Free the box's backing storage with its own allocator. The dyn value is
+    // not dropped (we moved P out and never run U's drop glue).
+    if layout.size() != 0 {
+        let nn = core::ptr::NonNull::new(raw as *mut u8)
+            .expect("box_read_payload: box raw pointer was null");
+        unsafe { allocator_api2::alloc::Allocator::deallocate(&alloc, nn, layout) };
+    }
+    value
+}
+
 /// Fallible `Vec` construction with the context's OOM error. Enforces
 /// `palloc`'s `MaxAllocSize` gate on the byte size of the request.
 pub fn vec_with_capacity_in<'mcx, T>(mcx: Mcx<'mcx>, cap: usize) -> PgResult<PgVec<'mcx, T>> {
