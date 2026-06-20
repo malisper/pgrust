@@ -108,6 +108,10 @@ fn get_generated_columns<'mcx>(
 // `RELKIND_*` (the `i8` stored in `RangeTblEntry.relkind`) used by the engine.
 const RELKIND_VIEW: i8 = b'v' as i8;
 const RELKIND_MATVIEW: i8 = b'm' as i8;
+// `RELKIND_RELATION` / `RELKIND_PARTITIONED_TABLE` — the relkinds that can carry
+// RLS policies (rowsecurity pass).
+const RELKIND_PLAIN_RELATION: i8 = b'r' as i8;
+const RELKIND_PARTITIONED_TABLE: i8 = b'p' as i8;
 
 type Relation<'mcx> = types_rel::Relation<'mcx>;
 
@@ -1834,13 +1838,159 @@ pub fn fireRIRrules<'mcx>(
         parsetree.hasRowSecurity |= sublink_row_security;
     }
 
-    // Apply RLS policies (the row-security pass).
-    if has_any_rls_relation(&parsetree) {
-        return Err(elog(
-            "fireRIRrules: row-level-security policy application (get_row_security_policies) \
-             is not ported (owner: backend-rewrite-rowsecurity); not part of the common \
-             rewrite spine",
-        ));
+    // Apply any row-level security policies.  We do this last because it
+    // requires special recursion detection if the new quals have sublink
+    // subqueries, and if we did it in the loop above query_tree_walker would
+    // then recurse into those quals a second time.
+    let mut rt_index = 0usize;
+    while rt_index < parsetree.rtable.len() {
+        rt_index += 1;
+        let rtekind = parsetree.rtable[rt_index - 1].rtekind;
+        let relkind = parsetree.rtable[rt_index - 1].relkind;
+
+        // Only normal relations can have RLS policies.
+        if rtekind != RTEKind::RTE_RELATION
+            || (relkind != RELKIND_PLAIN_RELATION && relkind != RELKIND_PARTITIONED_TABLE)
+        {
+            continue;
+        }
+
+        let relid = parsetree.rtable[rt_index - 1].relid;
+        let rel = table_open(mcx, relid, NoLock)?;
+
+        // Fetch any new security quals that must be applied to this RTE. The C
+        // reads several Query-level fields off `parsetree` inside
+        // get_row_security_policies; pass them explicitly.
+        let returning_present = !parsetree.returningList.is_empty();
+        let on_conflict_update = parsetree
+            .onConflict
+            .as_deref()
+            .is_some_and(|oc| oc.action == OnConflictAction::ONCONFLICT_UPDATE);
+        let rls = {
+            let rte = &parsetree.rtable[rt_index - 1];
+            backend_rewrite_rowsecurity::get_row_security_policies(
+                mcx,
+                rte,
+                rt_index as i32,
+                parsetree.resultRelation,
+                parsetree.commandType,
+                returning_present,
+                on_conflict_update,
+                &parsetree.rteperminfos,
+            )?
+        };
+
+        let backend_rewrite_rowsecurity::RlsPolicies {
+            mut security_quals,
+            mut with_check_options,
+            has_row_security,
+            has_sub_links,
+        } = rls;
+
+        if !security_quals.is_empty() || !with_check_options.is_empty() {
+            if has_sub_links {
+                // Recursively process the new quals, checking for infinite
+                // recursion.
+                if active_rirs.contains(&rel.rd_id) {
+                    let name = rel.name().to_string();
+                    rel.close(NoLock)?;
+                    return Err(PgError::new(
+                        ERROR,
+                        format!("infinite recursion detected in policy for relation \"{name}\""),
+                    )
+                    .with_sqlstate(ERRCODE_INVALID_OBJECT_DEFINITION));
+                }
+
+                active_rirs.push(rel.rd_id);
+
+                // get_row_security_policies just passed back securityQuals
+                // and/or withCheckOptions, and there were SubLinks, so lock any
+                // relations they reference (normally acquired by the parser, but
+                // these are added post-parsing).
+                {
+                    let mut err: Option<types_error::PgError> = None;
+                    for q in security_quals.iter_mut() {
+                        acquireLocksOnSubLinks(mcx, q, true, &mut err);
+                    }
+                    for w in with_check_options.iter_mut() {
+                        acquireLocksOnSubLinks(mcx, w, true, &mut err);
+                    }
+                    if let Some(e) = err {
+                        active_rirs.pop();
+                        rel.close(NoLock)?;
+                        return Err(e);
+                    }
+                }
+
+                // Now fire any RIR rules for them. We can ignore the resulting
+                // hasRowSecurity since we only reach here when it is already set.
+                {
+                    let mut sublink_row_security = false;
+                    let mut err: Option<types_error::PgError> = None;
+                    for q in security_quals.iter_mut() {
+                        fireRIRonSubLink(
+                            mcx,
+                            q,
+                            active_rirs,
+                            &mut sublink_row_security,
+                            &mut err,
+                        );
+                    }
+                    for w in with_check_options.iter_mut() {
+                        fireRIRonSubLink(
+                            mcx,
+                            w,
+                            active_rirs,
+                            &mut sublink_row_security,
+                            &mut err,
+                        );
+                    }
+                    if let Some(e) = err {
+                        active_rirs.pop();
+                        rel.close(NoLock)?;
+                        return Err(e);
+                    }
+                }
+
+                active_rirs.pop();
+            }
+
+            // Add the new security barrier quals to the START of the RTE's list
+            // so they get applied before any existing barrier quals (which would
+            // have come from a security-barrier view, and should get lower
+            // priority than RLS conditions on the table itself).
+            // rte->securityQuals = list_concat(securityQuals, rte->securityQuals)
+            {
+                let rte = &mut parsetree.rtable[rt_index - 1];
+                let existing: Vec<NodePtr<'mcx>> = rte.securityQuals.drain(..).collect();
+                for n in existing {
+                    security_quals.push(n);
+                }
+                rte.securityQuals = security_quals;
+            }
+
+            // parsetree->withCheckOptions =
+            //     list_concat(withCheckOptions, parsetree->withCheckOptions)
+            {
+                let existing: Vec<NodePtr<'mcx>> =
+                    parsetree.withCheckOptions.drain(..).collect();
+                for n in existing {
+                    with_check_options.push(n);
+                }
+                parsetree.withCheckOptions = with_check_options;
+            }
+        }
+
+        // Mark the query correctly if RLS applies, or if the new quals had
+        // sublinks.
+        if has_row_security {
+            parsetree.hasRowSecurity = true;
+        }
+        if has_sub_links {
+            parsetree.hasSubLinks = true;
+        }
+
+        rel.close(NoLock)?;
     }
 
     Ok(parsetree)
@@ -1902,13 +2052,6 @@ fn fireRIRonSubLink<'mcx>(
         &mut |n| fireRIRonSubLink(mcx, n, active_rirs, has_row_security, err),
         mcx,
     )
-}
-
-/// Whether the query has already been flagged as needing row-security handling.
-/// The policy expansion owner is not ported, so a flagged query must stop here
-/// instead of silently skipping the RLS rewrite pass.
-fn has_any_rls_relation(parsetree: &Query<'_>) -> bool {
-    parsetree.hasRowSecurity
 }
 
 // ===========================================================================

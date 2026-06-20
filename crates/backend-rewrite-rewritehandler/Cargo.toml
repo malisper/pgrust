@@ -22,6 +22,7 @@ types-trigger = { path = "../types-trigger" }
 # Direct (acyclic) owners.
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-rewrite-core = { path = "../backend-rewrite-core" }
+backend-rewrite-rowsecurity = { path = "../backend-rewrite-rowsecurity" }
 backend-rewrite-rewriteSearchCycle = { path = "../backend-rewrite-rewriteSearchCycle" }
 backend-parser-relation = { path = "../backend-parser-relation" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
