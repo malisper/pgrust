@@ -307,6 +307,66 @@ fn fc_int4_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult
     poly_accum_common(fcinfo, 4)
 }
 
+/// `int2_accum_inv`(3567) / `int4_accum_inv`(3568): inverse transition for
+/// moving-window SUM/var/stddev over the 128-bit poly state. C: errors on NULL
+/// state, then (HAVE_INT128) `do_int128_discard(state, (int128) arg)`.
+fn poly_accum_inv_common(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    width: u8,
+) -> types_error::PgResult<Datum> {
+    let mut state = match take_poly_state(fcinfo) {
+        Some(s) => s,
+        None => {
+            let name = if width == 2 {
+                "int2_accum_inv called with NULL state"
+            } else {
+                "int4_accum_inv called with NULL state"
+            };
+            return Err(types_error::PgError::error(name));
+        }
+    };
+    if !arg_isnull(fcinfo, 1) {
+        let v = fcinfo.arg(1).expect("poly agg inv: missing arg 1").value;
+        let newval: i128 = match width {
+            2 => i128::from(v.as_i16()),
+            _ => i128::from(v.as_i32()),
+        };
+        aggregate::do_int128_discard(&mut state, newval);
+    }
+    Ok(ret_internal(fcinfo, state))
+}
+
+fn fc_int2_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    poly_accum_inv_common(fcinfo, 2)
+}
+fn fc_int4_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    poly_accum_inv_common(fcinfo, 4)
+}
+
+/// `numeric_accum_inv`(3548): inverse transition for moving-window
+/// SUM/AVG/var/stddev over `numeric`. C: errors on NULL state; if the inverse
+/// `do_numeric_discard` fails (a dscale-loss row left the window), `RETURN_NULL`.
+fn fc_numeric_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let mut carrier = match take_numeric_state(fcinfo) {
+        Some(c) => c,
+        None => {
+            return Err(types_error::PgError::error(
+                "numeric_accum_inv called with NULL state",
+            ))
+        }
+    };
+    if !arg_isnull(fcinfo, 1) {
+        let newval = arg_numeric(fcinfo, 1);
+        let ctx_mcx = carrier.ctx.mcx();
+        // If we fail to perform the inverse transition, return NULL.
+        if !aggregate::do_numeric_discard(ctx_mcx, &mut carrier.state, &newval)? {
+            fcinfo.set_result_null(true);
+            return Ok(Datum::null());
+        }
+    }
+    Ok(ret_internal(fcinfo, carrier))
+}
+
 /// `int8_accum`(1836): SUM/AVG over int8 with sumX2. The X² of an int8 can
 /// overflow int128, so int8 uses the wider `NumericAggState` (not the poly
 /// int128 path) — C: `state = makeNumericAggState(fcinfo, true)`;
@@ -461,6 +521,9 @@ pub fn register_numeric_agg_builtins() {
         // Int128AggState (poly) transitions.
         builtin(1834, "int2_accum", 2, false, false, fc_int2_accum),
         builtin(1835, "int4_accum", 2, false, false, fc_int4_accum),
+        builtin(3567, "int2_accum_inv", 2, false, false, fc_int2_accum_inv),
+        builtin(3568, "int4_accum_inv", 2, false, false, fc_int4_accum_inv),
+        builtin(3548, "numeric_accum_inv", 2, false, false, fc_numeric_accum_inv),
         // int8 SUM/AVG transitions: int8_accum uses the wider NumericAggState
         // (int8 X² overflows int128); int8_avg_accum uses the poly int128 path.
         builtin(1836, "int8_accum", 2, false, false, fc_int8_accum),
