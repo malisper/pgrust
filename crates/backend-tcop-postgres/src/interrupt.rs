@@ -763,7 +763,14 @@ pub fn ProcessInterrupts() -> PgResult<()> {
         backend_utils_activity_pgstat_seams::pgstat_report_stat::call(true)?;
     }
 
-    if g::ProcSignalBarrierPending() {
+    // `ProcSignalBarrierPending` is owned by procsignal.c (set by the SIGUSR1
+    // handler `HandleProcSignalBarrierInterrupt`, cleared by
+    // `ProcessProcSignalBarrier`); it lives as that crate's thread-local, not
+    // the `globals.c` duplicate, so read it from the owner. Reading the
+    // init-small copy here was always false — nothing sets it — which is why a
+    // delivered barrier signal never triggered `ProcessProcSignalBarrier` and
+    // `WaitForProcSignalBarrier` (DROP DATABASE) hung forever on its own slot.
+    if backend_storage_ipc_procsignal::ProcSignalBarrierPending() {
         backend_storage_ipc_procsignal::ProcessProcSignalBarrier()?;
     }
 
