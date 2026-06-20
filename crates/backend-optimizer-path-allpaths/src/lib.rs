@@ -948,17 +948,19 @@ fn compute_parallel_worker_seam(
 /// `geqo_eval.c:merge_clump` body — `make_join_rel` then (on success)
 /// `generate_partitionwise_join_paths` + topmost-guarded
 /// `generate_useful_gather_paths` + `set_cheapest`. The seam carries no `Mcx`,
-/// so we run the join build in a fresh local planner memory context (the path
-/// work allocates into the `PlannerInfo` arena; the `Mcx` is only the OOM
-/// channel for `make_join_rel`'s fallible reserves).
+/// so the OOM channel is the planner's own `run` arena (`run.mcx()`): the path
+/// work allocates into the `PlannerInfo`/`PlannerRun` arena, which is exactly
+/// the `'mcx` the fallible reserves charge against. (A fresh local context
+/// would be a *shorter* lifetime than `run`'s `'mcx`; with the now-invariant
+/// `Node`/`Query` carriers that no longer unifies — and the planner arena is
+/// the correct, longer-lived context anyway.)
 fn build_and_cost_join_rel_seam<'mcx>(
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
     rel1: RelId,
     rel2: RelId,
 ) -> Option<RelId> {
-    let cx = mcx::MemoryContext::new("geqo merge_clump");
-    let mcx = cx.mcx();
+    let mcx = run.mcx();
     build_and_cost_join_rel(mcx, root, run, rel1, rel2)
         .unwrap_or_else(|e| panic!("build_and_cost_join_rel: {e:?}"))
 }

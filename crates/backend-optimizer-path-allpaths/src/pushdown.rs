@@ -222,7 +222,7 @@ pub(crate) fn subquery_is_pushdown_safe(
     }
 
     // Are we at top level, or looking at a setop component?
-    if core::ptr::eq(subquery as *const _, top as *const _) {
+    if core::ptr::eq(subquery as *const Query as *const (), top as *const Query as *const ()) {
         // Top level: check any component queries.
         if let Some(setop) = subquery.setOperations.as_ref() {
             if !recurse_pushdown_safe(mcx, setop, top, safety_info)? {
@@ -431,7 +431,8 @@ fn target_is_in_sort_list_clauses(
 /// (`contain_volatile_functions((Node *) rinfo)` walks the rinfo, but the
 /// clause is what carries volatile funcs — we pass the clause for that walk too,
 /// faithful because a RestrictInfo holds no volatile funcs outside its clause).
-pub(crate) fn qual_is_pushdown_safe(
+pub(crate) fn qual_is_pushdown_safe<'mcx>(
+    mcx: Mcx<'mcx>,
     _subquery: &Query<'_>,
     rti: Index,
     clause: &Expr,
@@ -459,7 +460,7 @@ pub(crate) fn qual_is_pushdown_safe(
     }
 
     // Examine all Vars used in clause.
-    let clause_node = Node::Expr(clause.clone());
+    let clause_node = Node::mk_expr(mcx, clause.clone())?;
     let vars = backend_optimizer_util_vars::var::pull_var_clause(
         &clause_node,
         backend_optimizer_util_vars::var::PVC_INCLUDE_PLACEHOLDERS,
@@ -533,7 +534,7 @@ pub(crate) fn subquery_push_qual<'mcx>(
     } else {
         // Replace outer Vars in the qual with copies of the subquery's tlist
         // expressions. ReplaceVarsFromTargetList works over a Node in place.
-        let mut qual_node = Node::Expr(qual.clone());
+        let mut qual_node = Node::mk_expr(mcx, qual.clone())?;
         let mut has_sublinks = Some(subquery.hasSubLinks);
         backend_rewrite_core::replace::ReplaceVarsFromTargetList(
             &mut qual_node,

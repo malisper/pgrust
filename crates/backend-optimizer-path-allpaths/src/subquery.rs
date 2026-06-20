@@ -105,7 +105,7 @@ pub fn set_subquery_pathlist<'mcx>(
             let clause_id = root.rinfo(rinfo_id).clause;
             let clause = root.node(clause_id).clone();
 
-            match crate::pushdown::qual_is_pushdown_safe(&subquery, rti, &clause, &safety_info)? {
+            match crate::pushdown::qual_is_pushdown_safe(mcx, &subquery, rti, &clause, &safety_info)? {
                 crate::pushdown::PushdownSafe::Safe => {
                     // subquery_push_qual reads the RTE; clone it out first so the
                     // immutable `run` borrow does not overlap the `&mut subquery`.
