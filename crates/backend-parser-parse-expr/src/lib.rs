@@ -59,9 +59,10 @@ use mcx::MemoryContext;
 
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
-    PgError, PgResult, ERRCODE_CANNOT_COERCE, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INDETERMINATE_DATATYPE, ERRCODE_INTERNAL_ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR,
+    ErrorLocation, PgError, PgResult, ERRCODE_CANNOT_COERCE, ERRCODE_DATATYPE_MISMATCH,
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_DATATYPE, ERRCODE_INTERNAL_ERROR,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_UNDEFINED_OBJECT, ERROR, WARNING,
 };
 use types_sortsupport::COMPARE_EQ;
 
@@ -5332,22 +5333,63 @@ fn seam_transform_json_expr<'mcx>(
 // Direct-call shims for merged-owner / seam callees not yet re-homed cleanly.
 // ===========================================================================
 
-/// `anytime_typmod_check(istz, typmod)` (utils/adt/date.c) — validate/clamp a
-/// time/timetz typmod. Reached through the date adt seam (unported owner →
-/// panic).
-fn lsyscache_anytime_typmod_check(_istz: bool, _typmod: i32) -> PgResult<i32> {
-    panic!(
-        "anytime_typmod_check (utils/adt/date.c) is not yet ported; \
-         CURRENT_TIME(n)/LOCALTIME(n) typmod validation reaches the unported adt."
-    )
+/// `MAX_TIME_PRECISION` / `MAX_TIMESTAMP_PRECISION` (datetime.h) — both 6.
+const MAX_TIME_PRECISION: i32 = 6;
+const MAX_TIMESTAMP_PRECISION: i32 = 6;
+
+fn typmod_check_errloc(funcname: &'static str) -> ErrorLocation {
+    ErrorLocation::new("src/backend/parser/parse_expr.c", 0, funcname)
 }
 
-/// `anytimestamp_typmod_check(istz, typmod)` (utils/adt/timestamp.c).
-fn lsyscache_anytimestamp_typmod_check(_istz: bool, _typmod: i32) -> PgResult<i32> {
-    panic!(
-        "anytimestamp_typmod_check (utils/adt/timestamp.c) is not yet ported; \
-         CURRENT_TIMESTAMP(n)/LOCALTIMESTAMP(n) typmod validation reaches the unported adt."
-    )
+/// `anytime_typmod_check(istz, typmod)` (utils/adt/date.c) — validate a
+/// time/timetz typmod: negative is an ERROR, over-max clamps to
+/// `MAX_TIME_PRECISION` with a WARNING.  Faithful to date.c.
+fn lsyscache_anytime_typmod_check(istz: bool, mut typmod: i32) -> PgResult<i32> {
+    if typmod < 0 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(alloc::format!(
+                "TIME({typmod}){} precision must not be negative",
+                if istz { " WITH TIME ZONE" } else { "" }
+            ))
+            .into_error());
+    }
+    if typmod > MAX_TIME_PRECISION {
+        ereport(WARNING)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(alloc::format!(
+                "TIME({typmod}){} precision reduced to maximum allowed, {MAX_TIME_PRECISION}",
+                if istz { " WITH TIME ZONE" } else { "" }
+            ))
+            .finish(typmod_check_errloc("anytime_typmod_check"))?;
+        typmod = MAX_TIME_PRECISION;
+    }
+    Ok(typmod)
+}
+
+/// `anytimestamp_typmod_check(istz, typmod)` (utils/adt/timestamp.c) — same
+/// shape over `MAX_TIMESTAMP_PRECISION`.
+fn lsyscache_anytimestamp_typmod_check(istz: bool, mut typmod: i32) -> PgResult<i32> {
+    if typmod < 0 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(alloc::format!(
+                "TIMESTAMP({typmod}){} precision must not be negative",
+                if istz { " WITH TIME ZONE" } else { "" }
+            ))
+            .into_error());
+    }
+    if typmod > MAX_TIMESTAMP_PRECISION {
+        ereport(WARNING)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(alloc::format!(
+                "TIMESTAMP({typmod}){} precision reduced to maximum allowed, {MAX_TIMESTAMP_PRECISION}",
+                if istz { " WITH TIME ZONE" } else { "" }
+            ))
+            .finish(typmod_check_errloc("anytimestamp_typmod_check"))?;
+        typmod = MAX_TIMESTAMP_PRECISION;
+    }
+    Ok(typmod)
 }
 
 /// `format_type_be(typid)` (format_type.c) — through the merged format-type
