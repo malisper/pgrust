@@ -1010,6 +1010,18 @@ fn fc_tidout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+fn fc_currtid_byrelname(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    // currtid_byrelname(text relname, tid) — arg0 text, arg1 by-ref ItemPointer.
+    let relname = arg_text(fcinfo, 0).to_string();
+    let tid = arg_tid(m.mcx(), fcinfo, 1);
+    let r = crate::scalars::currtid_byrelname(m.mcx(), &relname, tid);
+    match r {
+        Ok(d) => ret_value_datum(fcinfo, d),
+        Err(e) => raise(e),
+    }
+}
+
 fn fc_tidrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let src = fcinfo
         .ref_arg(0)
@@ -1414,6 +1426,7 @@ pub fn register_misc2_builtins() {
         builtin(49, "tidout", 1, true, false, fc_tidout),
         builtin(2438, "tidrecv", 1, true, false, fc_tidrecv),
         builtin(2439, "tidsend", 1, true, false, fc_tidsend),
+        builtin(1294, "currtid_byrelname", 2, true, false, fc_currtid_byrelname),
         builtin(1292, "tideq", 2, true, false, fc_tideq),
         builtin(1265, "tidne", 2, true, false, fc_tidne),
         builtin(2791, "tidlt", 2, true, false, fc_tidlt),

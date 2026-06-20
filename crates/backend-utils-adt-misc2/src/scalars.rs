@@ -41,6 +41,7 @@
 //!   in full; only the container/runtime crossing panics.
 
 use mcx::Mcx;
+use alloc::string::ToString;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 use types_error::{
@@ -364,20 +365,206 @@ fn itempointer_image(ptr: &ItemPointer) -> [u8; 6] {
     image
 }
 
-/// `currtid_byrelname(relname, tid)` — open the named relation and return the
-/// latest tuple version pointing at `tid`.
-///
-/// The whole body (`makeRangeVarFromNameList(textToQualifiedNameList(...))`,
-/// `table_openrv`, `currtid_internal` — itself the acl check + snapshot +
-/// `table_beginscan_tid` / `table_tuple_get_latest_tid` path, including
-/// `currtid_for_view`) reaches the catalog/namespace + table-AM owners, none of
-/// which are ported. mirror-pg-and-panic at that named boundary.
+/// Convert the local 6-byte image `ItemPointer` (this unit's decoupled struct)
+/// into the layered `types_tuple::ItemPointerData` the table-AM consumes.
+fn to_item_pointer_data(p: &ItemPointer) -> types_tuple::ItemPointerData {
+    types_tuple::ItemPointerData::new(p.block_number_no_check(), p.offset_number_no_check())
+}
+
+/// Convert back from the table-AM `ItemPointerData` into the local image struct.
+fn from_item_pointer_data(p: &types_tuple::ItemPointerData) -> ItemPointer {
+    ItemPointer::set(p.ip_blkid.block_number(), p.ip_posid)
+}
+
+/// `currtid_internal(rel, tid)` (tid.c) — return the latest tuple version
+/// pointing at `tid` for the open relation `rel`. ACL-checks `ACL_SELECT`,
+/// dispatches views to [`currtid_for_view`], rejects storage-less relkinds, and
+/// otherwise runs a TID scan under a fresh registered snapshot.
+fn currtid_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    tid: &ItemPointer,
+) -> PgResult<ItemPointer> {
+    use types_tuple::access::{
+        RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
+        RELKIND_VIEW,
+    };
+
+    let relid = rel.rd_id;
+    let relkind = rel.rd_rel.relkind;
+
+    // aclresult = pg_class_aclcheck(RelationGetRelid(rel), GetUserId(), ACL_SELECT);
+    let aclresult = backend_catalog_aclchk_seams::pg_class_aclcheck::call(
+        relid,
+        backend_utils_init_miscinit_seams::get_user_id::call(),
+        types_acl::acl::ACL_SELECT,
+    )?;
+    if aclresult != types_acl::acl::ACLCHECK_OK {
+        backend_catalog_aclchk_seams::aclcheck_error::call(
+            aclresult,
+            backend_catalog_objectaddress_seams::get_relkind_objtype::call(relkind),
+            Some(rel.name().to_string()),
+        )?;
+    }
+
+    if relkind == RELKIND_VIEW {
+        return currtid_for_view(mcx, rel, tid);
+    }
+
+    // RELKIND_HAS_STORAGE(relkind) — pg_class.h.
+    let has_storage = relkind == RELKIND_RELATION
+        || relkind == RELKIND_INDEX
+        || relkind == RELKIND_SEQUENCE
+        || relkind == RELKIND_TOASTVALUE
+        || relkind == RELKIND_MATVIEW;
+    if !has_storage {
+        let nspname = backend_utils_cache_lsyscache_seams::get_namespace_name::call(
+            mcx,
+            rel.rd_rel.relnamespace,
+        )?;
+        let nspname = nspname.as_ref().map(|s| s.as_str()).unwrap_or("");
+        return Err(PgError::error(alloc::format!(
+                "cannot look at latest visible tid for relation \"{}.{}\"",
+                nspname,
+                rel.name()
+            ))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+    }
+
+    // ItemPointerCopy(tid, result); then the TID scan fills the latest version.
+    let mut result = to_item_pointer_data(tid);
+
+    let snapshot = backend_utils_time_snapmgr_seams::get_latest_snapshot::call()?;
+    let snapshot = backend_utils_time_snapmgr_seams::register_snapshot::call(snapshot)?;
+    let mut scan = backend_access_table_tableam::table_beginscan_tid(
+        mcx,
+        rel,
+        Some(snapshot.clone()),
+    )?;
+    backend_access_table_tableam::table_tuple_get_latest_tid(mcx, &mut scan, &mut result)?;
+    backend_access_table_tableam::table_endscan(scan)?;
+    backend_utils_time_snapmgr_seams::unregister_snapshot::call(snapshot);
+
+    Ok(from_item_pointer_data(&result))
+}
+
+/// `currtid_for_view(viewrel, tid)` (tid.c) — a view's `ctid` must be defined
+/// and correspond to a base relation's `ctid`. Find the `ctid` column, walk the
+/// view's SELECT rule to the `SelfItemPointerAttributeNumber` Var, then recurse
+/// into the underlying base relation.
+fn currtid_for_view<'mcx>(
+    mcx: Mcx<'mcx>,
+    viewrel: &types_rel::Relation<'mcx>,
+    tid: &ItemPointer,
+) -> PgResult<ItemPointer> {
+    use types_tuple::heaptuple::{SelfItemPointerAttributeNumber, TIDOID};
+
+    let att = &viewrel.rd_att;
+    let natts = att.natts as usize;
+    let mut tididx: i32 = -1;
+
+    for i in 0..natts {
+        let attr = att.attr(i);
+        if attr.attname.name_str() == b"ctid" {
+            if attr.atttypid != TIDOID {
+                return Err(PgError::error("ctid isn't of type TID".to_string())
+                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+            }
+            tididx = i as i32;
+            break;
+        }
+    }
+    if tididx < 0 {
+        return Err(PgError::error("currtid cannot handle views with no CTID".to_string())
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+    }
+
+    // rulelock = viewrel->rd_rules; if (!rulelock) ereport "the view has no rules".
+    let rulelock = backend_utils_cache_relcache_seams::relation_rules::call(mcx, viewrel.rd_id)?;
+    let rulelock = match rulelock {
+        Some(r) => r,
+        None => {
+            return Err(PgError::error("the view has no rules".to_string())
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+        }
+    };
+
+    for rewrite in rulelock.rules.iter() {
+        if rewrite.event == types_nodes::nodes::CmdType::CMD_SELECT {
+            // if (list_length(rewrite->actions) != 1) ereport "only one select rule".
+            if rewrite.actions.len() != 1 {
+                return Err(PgError::error("only one select rule is allowed in views".to_string())
+                        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+            }
+            let query = &rewrite.actions[0];
+            // tle = get_tle_by_resno(query->targetList, tididx + 1);
+            let tle = backend_parser_relation::get_tle_by_resno(
+                &query.targetList,
+                (tididx + 1) as i16,
+            );
+            if let Some(tle) = tle {
+                if let Some(expr) = tle.expr.as_deref() {
+                    if let types_nodes::primnodes::Expr::Var(var) = expr {
+                        // !IS_SPECIAL_VARNO(var->varno) -> varno >= 0 (C: < 0 special)
+                        if var.varno >= 0
+                            && var.varattno == SelfItemPointerAttributeNumber
+                        {
+                            // rte = rt_fetch(var->varno, query->rtable);
+                            let idx = (var.varno - 1) as usize;
+                            if let Some(rte) = query.rtable.get(idx) {
+                                let rel = backend_access_table_table::table_open(
+                                    mcx,
+                                    rte.relid,
+                                    types_storage::lock::AccessShareLock,
+                                )?;
+                                let result = currtid_internal(mcx, &rel, tid)?;
+                                backend_access_table_table::table_close(
+                                    rel,
+                                    types_storage::lock::AccessShareLock,
+                                )?;
+                                return Ok(result);
+                            }
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    // elog(ERROR, "currtid cannot handle this view");
+    Err(PgError::error("currtid cannot handle this view".to_string())
+    )
+}
+
+/// `currtid_byrelname(relname, tid)` (tid.c) — open the named relation and
+/// return the latest tuple version pointing at `tid`.
 pub fn currtid_byrelname<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _relname: &str,
-    _tid: Datum<'_>,
+    mcx: Mcx<'mcx>,
+    relname: &str,
+    tid: Datum<'_>,
 ) -> PgResult<Datum<'mcx>> {
-    unported::currtid_internal_by_relname()
+    let tid = unported::getarg_itempointer(&tid);
+
+    // relrv = makeRangeVarFromNameList(textToQualifiedNameList(relname));
+    let parts =
+        backend_utils_adt_varlena_seams::text_to_qualified_name_list::call(mcx, relname.as_bytes())?;
+    let parts: alloc::vec::Vec<&str> = parts.iter().map(|p| p.as_str()).collect();
+    let relrv = backend_catalog_namespace_seams::make_range_var_from_name_list::call(&parts)?;
+
+    // rel = table_openrv(relrv, AccessShareLock);
+    let rel =
+        backend_access_table_table::table_openrv(mcx, &relrv, types_storage::lock::AccessShareLock)?;
+
+    // result = currtid_internal(rel, tid);
+    let result = currtid_internal(mcx, &rel, &tid);
+
+    // table_close(rel, AccessShareLock); — close before propagating any error,
+    // mirroring C's cleanup (which happens via resowner on the error path).
+    backend_access_table_table::table_close(rel, types_storage::lock::AccessShareLock)?;
+
+    let result = result?;
+    unported::return_itempointer(mcx, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -939,21 +1126,6 @@ mod unported {
         common_hashfn::hash_bytes_extended(image, seed)
     }
 
-    /// The whole `currtid_internal` / `currtid_for_view` path: `table_openrv`,
-    /// `pg_class_aclcheck`, `RegisterSnapshot(GetLatestSnapshot())`,
-    /// `table_beginscan_tid`, `table_tuple_get_latest_tid`, and the view rule
-    /// walk — catalog/namespace + table-AM + snapshot + acl owners, unported.
-    /// Returns a typed `feature not supported`-shaped error rather than building
-    /// a bogus result.
-    pub fn currtid_internal_by_relname<'mcx>() -> PgResult<Datum<'mcx>> {
-        let _ = ERRCODE_FEATURE_NOT_SUPPORTED;
-        let _ = PgError::error("");
-        panic!(
-            "unported owner: currtid_byrelname/currtid_internal (table-AM \
-             table_open/table_beginscan_tid + snapshot + pg_class_aclcheck + view \
-             rule rewrite)"
-        )
-    }
 
     /// `utils/fmgr` `get_fn_expr_arg_stable(flinfo, n)` — whether the n-th
     /// function argument is a stable (non-volatile) expression; flinfo

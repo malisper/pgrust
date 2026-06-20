@@ -83,7 +83,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (1286, "array_fill_with_lower_bounds", BuiltinGapKind::NotRegistered),
     (1291, "suppress_redundant_updates_trigger", BuiltinGapKind::NotRegistered),
     (1293, "multirange_unnest", BuiltinGapKind::NotRegistered),
-    (1294, "currtid_byrelname", BuiltinGapKind::NotRegistered),
     (1300, "positionsel", BuiltinGapKind::NotRegistered),
     (1301, "positionjoinsel", BuiltinGapKind::NotRegistered),
     (1302, "contsel", BuiltinGapKind::NotRegistered),

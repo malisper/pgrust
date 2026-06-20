@@ -79,6 +79,20 @@ backend-utils-adt-oid-seams = { path = "../backend-utils-adt-oid-seams" }
 # not depend on this unit).
 backend-utils-adt-oid = { path = "../backend-utils-adt-oid" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+# currtid_byrelname (tid.c) reaches table-AM open/scan, snapshot mgr, acl,
+# objectaddress, and the view rewrite-rule reader. No cycle: cargo tree -i shows
+# this unit is absent from the table-AM crates' dependency trees.
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-parser-relation = { path = "../backend-parser-relation" }
+types-rel = { path = "../types-rel" }
+types-acl = { path = "../types-acl" }
+types-tableam = { path = "../types-tableam" }
+types-snapshot = { path = "../types-snapshot" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
 port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
