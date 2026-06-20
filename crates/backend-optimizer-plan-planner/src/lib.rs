@@ -1170,11 +1170,55 @@ fn pqe_per_rte<'mcx>(
                 }
             }
             RTEKind::RTE_SUBQUERY => {
+                // planner.c:1001-1012:
+                //   if (rte->lateral && root->hasJoinRTEs)
+                //       rte->subquery = (Query *)
+                //           flatten_join_alias_vars(root, root->parse,
+                //                                   (Node *) rte->subquery);
+                //
+                // We don't want to do all preprocessing yet on the subquery's
+                // expressions, since that will happen when we plan it. But if it
+                // contains any join aliases of our level, those have to get
+                // expanded now, because planning of the subquery won't do it.
+                // That's only possible if the subquery is LATERAL.
                 if lateral && root.hasJoinRTEs {
-                    panic!(
-                        "subquery_planner: LATERAL subquery join-alias flattening \
-                         (planner.c:1009-1012) is not wired over the owned RTE model"
-                    );
+                    // `flatten_join_alias_vars` consults the *outer* query's
+                    // range table (root->parse) for the RTE_JOIN joinaliasvars
+                    // lists; the same `outer_query_ref` node threaded into the
+                    // per-expression preprocess calls above is exactly that
+                    // `root->parse` clone. In the C, the whole subquery `Query`
+                    // is cast to a `Node` and the freshly-built result reassigned
+                    // to `rte->subquery`; here the seam mutates the owned tree, so
+                    // take the subquery out, wrap it as a `Node::Query`, flatten,
+                    // and write the result back into the RTE (mirroring the
+                    // OffsetVarNodes / pullup_replace_vars_subquery write-back
+                    // pattern in prepjointree). The flatten mutator handles a
+                    // top-level `T_Query` node directly (incrementing
+                    // sublevels_up and recursing via query_tree_mutator).
+                    let query_node = outer_query_ref.ok_or_else(|| {
+                        types_error::PgError::error(
+                            "subquery_planner: LATERAL subquery join-alias \
+                             flattening needs the outer Query (root->parse) but \
+                             none was threaded in (root.hasJoinRTEs is set)",
+                        )
+                    })?;
+                    let subq = run.resolve_mut(root.parse).rtable[i].subquery.take();
+                    if let Some(sq) = subq {
+                        let q = mcx::PgBox::into_inner(sq);
+                        let sub_node = Node::mk_query(mcx, q)?;
+                        let flat =
+                            backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
+                                mcx, query_node, sub_node,
+                            )?;
+                        let flat_q = flat.into_query().ok_or_else(|| {
+                            types_error::PgError::error(
+                                "subquery_planner: flatten_join_alias_vars over a \
+                                 LATERAL subquery returned a non-Query node",
+                            )
+                        })?;
+                        run.resolve_mut(root.parse).rtable[i].subquery =
+                            Some(mcx::alloc_in(mcx, flat_q)?);
+                    }
                 }
             }
             RTEKind::RTE_VALUES => {
