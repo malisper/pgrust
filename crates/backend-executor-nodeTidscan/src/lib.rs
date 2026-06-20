@@ -801,6 +801,21 @@ pub fn ExecReScanTidScan<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStat
     execScan::exec_scan_rescan::call(&mut node.ss, estate)
 }
 
+/// The `PlanState.ExecProcNode` callback installed by [`ExecInitTidScan`]:
+/// `castNode(TidScanState, pstate)` then `ExecTidScan`, returning the produced
+/// tuple's slot id (the C `return slot`) or `None`. C wires this via
+/// `tidstate->ss.ps.ExecProcNode = ExecTidScan`.
+fn exec_tid_scan_node<'mcx>(
+    pstate: &mut types_nodes::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<SlotId>> {
+    let node = match pstate {
+        types_nodes::PlanStateNode::TidScan(node) => node,
+        other => panic!("castNode(TidScanState, pstate) failed: tag {}", other.tag()),
+    };
+    ExecTidScan(node, estate)
+}
+
 /// `ExecEndTidScan(node)` — release any storage allocated through C routines.
 pub fn ExecEndTidScan(node: &mut TidScanState) -> PgResult<()> {
     // if (node->ss.ss_currentScanDesc) table_endscan(node->ss.ss_currentScanDesc);
@@ -814,6 +829,7 @@ pub fn ExecEndTidScan(node: &mut TidScanState) -> PgResult<()> {
 /// information, create scan keys, and open the base relation.
 pub fn ExecInitTidScan<'mcx>(
     node: &TidScan<'mcx>,
+    plan_node: &'mcx types_nodes::nodes::Node<'mcx>,
     eflags: i32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, TidScanState<'mcx>>> {
@@ -821,13 +837,13 @@ pub fn ExecInitTidScan<'mcx>(
     let mcx = estate.es_query_cxt;
     let mut tidstate = mcx::alloc_in(mcx, TidScanState::new_in(mcx))?;
 
-    // tidstate->ss.ps.plan = (Plan *) node;  (the executor wires the plan
-    // back-link / ExecProcNode dispatch slot when it installs this node; the
-    // owned `PlanStateData.plan` borrow is set by the executor's node factory.)
-    // Because the trimmed PlanStateData does not retain that back-link, capture
-    // the plan's `scanrelid` onto the node-state now so the EvalPlanQual path
-    // (`ExecScanFetch` -> `node_scanrelid`) can recover it. C reads it via
-    // `((Scan *) node->ps.plan)->scanrelid`.
+    // tidstate->ss.ps.plan = (Plan *) node;  The plan back-link aliases the
+    // caller's read-only plan node (the opaque `Node` for this TidScan), so the
+    // generic scan machinery (`scan_scanrelid` / `ExecScanReScan`) can recover
+    // `((Scan *) node->ps.plan)->scanrelid` on the EvalPlanQual path.
+    tidstate.ss.ps.plan = Some(plan_node);
+    // Also capture the plan's `scanrelid` onto the node-state directly, matching
+    // the existing owned-model field used by `ExecScanFetch` -> `node_scanrelid`.
     tidstate.scanrelid = node.scan.scanrelid;
 
     // Miscellaneous initialization: create expression context for node.
@@ -877,6 +893,10 @@ pub fn ExecInitTidScan<'mcx>(
 
     // TidExprListCreate(tidstate);
     TidExprListCreate(&mut tidstate, node, estate)?;
+
+    // Wire the ExecProcNode dispatch callback (C: assigned via
+    // tidstate->ss.ps.ExecProcNode = ExecTidScan at makeNode time).
+    tidstate.ss.ps.ExecProcNode = Some(exec_tid_scan_node);
 
     // all done.
     Ok(tidstate)

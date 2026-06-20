@@ -43,6 +43,9 @@ pub fn init_seams() {
         Ok(())
     });
     seams::get_portal_by_name::set(|name| Ok(crate::GetPortalByName(Some(name))));
+    // `execCurrentOf`'s GetPortalByName-lending seam: hand the named cursor's
+    // live EState/PlanState to the callback for its duration.
+    seams::with_running_cursor::set(|name, f| crate::with_running_cursor(name, f));
     seams::portal_hash_table_delete_all::set(crate::PortalHashTableDeleteAll);
     seams::portal_drop::set(|portal, is_top_commit| crate::PortalDrop(portal, is_top_commit));
     seams::mark_portal_active::set(|portal| crate::MarkPortalActive(portal));

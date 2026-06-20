@@ -9744,6 +9744,7 @@ dependencies = [
  "backend-executor-execScan-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
+ "backend-executor-nodeTidscan-seams",
  "backend-nodes-core-seams",
  "backend-tcop-postgres-seams",
  "types-error",

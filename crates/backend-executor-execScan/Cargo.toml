@@ -13,6 +13,7 @@ backend-executor-execScan-seams = { path = "../backend-executor-execScan-seams" 
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-executor-nodeTidscan-seams = { path = "../backend-executor-nodeTidscan-seams" }
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

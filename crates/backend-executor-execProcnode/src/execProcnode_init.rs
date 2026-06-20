@@ -170,11 +170,12 @@ pub fn exec_init_node<'mcx>(
             alloc_in(mcx, PlanStateNode::BitmapHeapScan(s))?
         }
 
-        // case T_TidScan: ExecInitTidScan(...) (nodeTidscan.c)
-        //
-        // No `TidScan` Plan variant on the trimmed central `Node` enum
-        // (central-node keystone, K1 follow-on). The owner `ExecInitTidScan`
-        // is ported.
+        // case T_TidScan: ExecInitTidScan((TidScan *) node, estate, eflags) (nodeTidscan.c)
+        ntag::T_TidScan => {
+            let tidscan = node.expect_tidscan();
+            let s = backend_executor_nodeTidscan::ExecInitTidScan(tidscan, node, eflags, estate)?;
+            alloc_in(mcx, PlanStateNode::TidScan(s))?
+        }
 
         // case T_TidRangeScan: ExecInitTidRangeScan((TidRangeScan *) node, estate, eflags)
         ntag::T_TidRangeScan => {

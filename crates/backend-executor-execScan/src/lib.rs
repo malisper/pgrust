@@ -131,6 +131,29 @@ pub fn init_seams() {
     execScan_seams::exec_scan_rescan_cte::set(exec_scan_rescan_cte);
     execScan_seams::exec_assign_scan_projection_info_cte::set(exec_assign_scan_projection_info_cte);
     execScan_seams::exec_scan_namedtuplestore::set(exec_scan_namedtuplestore);
+
+    // The TidScan node carries its own node-owned seam crate (the
+    // `nodeTidrangescan` precedent) because the shared `execScan-seams` crate is
+    // `TableFuncScanState`-specialized. Its `ScanStateData`-based entry points
+    // (`exec_assign_scan_projection_info` carrying the plan's `scanrelid`, and
+    // `exec_scan_rescan`) marshal to the same generic drivers installed above, so
+    // wire them here from the one crate that owns those drivers.
+    backend_executor_nodeTidscan_seams::exec_assign_scan_projection_info::set(
+        tid_exec_assign_scan_projection_info,
+    );
+    backend_executor_nodeTidscan_seams::exec_scan_rescan::set(exec_scan_rescan_ss);
+}
+
+/// `ExecAssignScanProjectionInfo(node)` (execScan.c) specialized for the
+/// TidScan / TidRangeScan node-owned seams, which pass the plan's `scanrelid`
+/// explicitly (the trimmed PlanState may not retain the plan back-link at the
+/// point these are installed). Marshals to the shared varno-driven core.
+fn tid_exec_assign_scan_projection_info<'mcx>(
+    node: &mut ScanStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    scanrelid: u32,
+) -> PgResult<()> {
+    execUtils::exec_assign_scan_projection_info_with_varno::call(node, estate, scanrelid as i32)
 }
 
 // ===========================================================================
@@ -254,6 +277,7 @@ fn scan_scanrelid(ss: &ScanStateData<'_>) -> u32 {
     };
     match plan.node_tag() {
         ntag::T_SeqScan => plan.as_seqscan().unwrap().scan.scanrelid,
+        ntag::T_TidScan => plan.as_tidscan().unwrap().scan.scanrelid,
         ntag::T_TidRangeScan => plan.as_tidrangescan().unwrap().scan.scanrelid,
         ntag::T_IndexScan => plan.as_indexscan().unwrap().scan.scanrelid,
         ntag::T_IndexOnlyScan => plan.as_indexonlyscan().unwrap().scan.scanrelid,

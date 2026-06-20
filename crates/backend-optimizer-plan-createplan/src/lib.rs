@@ -913,6 +913,96 @@ fn is_join_rel(root: &PlannerInfo, rel_id: types_pathnodes::RelId) -> bool {
     k == RELOPT_JOINREL || k == RELOPT_OTHER_JOINREL
 }
 
+/// `IS_PARTITIONED_REL(rel)` (pathnodes.h) — `rel->part_scheme && rel->boundinfo
+/// && rel->nparts > 0 && rel->part_rels && !IS_DUMMY_REL(rel)`. A plain
+/// inheritance parent (`INHERITS (...)`) has no `part_scheme`, so this is false
+/// for it; only a declaratively-partitioned table satisfies the predicate.
+fn is_partitioned_rel(root: &PlannerInfo, rel_id: types_pathnodes::RelId) -> bool {
+    let rel = root.rel(rel_id);
+    rel.part_scheme.is_some()
+        && rel.boundinfo.is_some()
+        && rel.nparts > 0
+        && !rel.part_rels.is_empty()
+        && !is_dummy_rel_local(root, rel_id)
+}
+
+/// `is_dummy_rel(rel)` (joinrels.c:1275) inlined — a relation proven empty has a
+/// single path that (after descending any Projection/ProjectSet wrapper) is a
+/// childless `Append`/`AppendPath`. Duplicated here to avoid a cross-crate dep
+/// on `joinrels` just for the `IS_PARTITIONED_REL` dummy-rel conjunct.
+fn is_dummy_rel_local(root: &PlannerInfo, rel_id: types_pathnodes::RelId) -> bool {
+    let pathlist = &root.rel(rel_id).pathlist;
+    if pathlist.is_empty() {
+        return false;
+    }
+    let mut path = pathlist[0];
+    loop {
+        match root.path(path) {
+            PathNode::ProjectionPath(pp) => match pp.subpath {
+                Some(sp) => path = sp,
+                None => break,
+            },
+            PathNode::ProjectSetPath(psp) => match psp.subpath {
+                Some(sp) => path = sp,
+                None => break,
+            },
+            _ => break,
+        }
+    }
+    matches!(root.path(path), PathNode::AppendPath(ap) if ap.subpaths.is_empty())
+}
+
+/// Mirror of the first loop of `make_partition_pruneinfo` (partprune.c:226): does
+/// any subpath scan a partition child whose topmost partitioned parent is at or
+/// under `parentrel`?  If not, `make_partition_pruneinfo` would build an empty
+/// `prunerelinfos` and `return -1`, so the caller can skip the (keystone-blocked)
+/// seam entirely and leave `part_prune_index = -1`. This is exactly the case for
+/// a plain inheritance hierarchy, where no ancestor is `IS_PARTITIONED_REL`.
+fn append_has_prunable_partitioned_parent(
+    root: &PlannerInfo,
+    parentrel: types_pathnodes::RelId,
+    subpaths: &[types_pathnodes::PathId],
+) -> bool {
+    for &subpath in subpaths {
+        let pathrel = root.path(subpath).base().parent;
+        // We don't consider partitioned joins here.
+        if root.rel(pathrel).reloptkind != RELOPT_OTHER_MEMBER_REL {
+            continue;
+        }
+        // Traverse up to the pathrel's topmost partitioned parent; stop if we
+        // reach a non-partitioned parent or `parentrel`.
+        let mut prel = pathrel;
+        loop {
+            let child_rt = root.rel(prel).relid as usize;
+            let appinfo = match root.append_rel_array.get(child_rt).and_then(|a| a.as_ref()) {
+                Some(a) => a,
+                None => break,
+            };
+            let parent_rt = appinfo.parent_relid as usize;
+            // find_base_rel(root, parent_relid)
+            let parent_rel_id = match root
+                .simple_rel_array
+                .get(parent_rt)
+                .and_then(|r| r.as_ref())
+            {
+                Some(&rid) => rid,
+                None => break,
+            };
+            prel = parent_rel_id;
+            if !is_partitioned_rel(root, prel) {
+                break; // reached a non-partitioned parent
+            }
+            // Found an interesting partitioned parent at/under `parentrel`.
+            return true;
+        }
+        // (We only need to know that one such parent exists; the `parentrel`
+        // upper bound and the per-parent prunequal-usefulness check are applied
+        // inside `make_partition_pruneinfo` itself once we call it.)
+        let _ = parentrel;
+    }
+    false
+}
+
 /// Resolve a list of `TargetEntryNode` arena handles (the C `List<TargetEntry>`
 /// produced by `build_physical_tlist` / an index's `indextlist`) into owned
 /// `TargetEntry<'mcx>` nodes, rebuilding each from its resolved expr (the same
@@ -6488,7 +6578,14 @@ fn create_append_plan<'mcx>(
             prmquals = replace_nestloop_params_list(mcx, root, &prmquals)?;
             prunequal.extend(prmquals);
         }
-        if !prunequal.is_empty() {
+        // make_partition_pruneinfo only produces a non-(-1) index when some
+        // subpath scans a partition child of an `IS_PARTITIONED_REL` parent at or
+        // under `rel_id`; for a plain inheritance hierarchy it would scan the
+        // subpaths and `return -1`. Skip the (keystone-blocked) seam in that case
+        // and leave part_prune_index = -1, matching C's early return exactly.
+        if !prunequal.is_empty()
+            && append_has_prunable_partitioned_parent(root, rel_id, &subpaths)
+        {
             part_prune_index =
                 partprune::make_partition_pruneinfo::call(root, rel_id, &subpaths, &prunequal)?;
         }
@@ -6612,7 +6709,12 @@ fn create_merge_append_plan<'mcx>(
         let prunequal = extract_actual_clauses(root, &baserestrictinfo, false);
         // We don't currently generate any parameterized MergeAppend paths.
         debug_assert!(root.path(best_path).base().param_info.is_none());
-        if !prunequal.is_empty() {
+        // See create_append_plan: skip the keystone-blocked seam when no subpath
+        // scans an `IS_PARTITIONED_REL` parent (e.g. plain inheritance), matching
+        // C's early `return -1` from make_partition_pruneinfo.
+        if !prunequal.is_empty()
+            && append_has_prunable_partitioned_parent(root, rel_id, &subpaths)
+        {
             part_prune_index =
                 partprune::make_partition_pruneinfo::call(root, rel_id, &subpaths, &prunequal)?;
         }

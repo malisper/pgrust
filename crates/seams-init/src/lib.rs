@@ -1522,13 +1522,6 @@ mod recurrence_guard {
         // portal_start / portal_run / get_active_snapshot), all installed by
         // their owners. The `-pre-seams` slice crates and their allowlist
         // entries are gone.
-        // DESIGN_DEBT (TD-PORTAL-CURSOR): `with_running_cursor` lends borrows of
-        // the running `EStateData`/`PlanStateNode` tree (RunningCursorState) for
-        // execCurrentOf. Those carrier types are the executor de-handle keystone
-        // (#167 EState/Plan ownership, #169 consolidated de-handle); the portal's
-        // `queryDesc->estate` borrow cannot be lent until that lands.
-        // Keystone-blocked.
-        ("backend_utils_mmgr_portalmem", "with_running_cursor"),
         // RETIRED (drain re-sweep): the WAL page-read driver
         // (xlogrecovery.c XLogPageRead / WaitForWALToBecomeAvailable + the prefetcher
         // recovery read-record leg) has LANDED in backend-access-transam-xlogrecovery

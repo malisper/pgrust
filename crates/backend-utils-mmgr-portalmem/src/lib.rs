@@ -336,6 +336,67 @@ pub fn GetPortalByName(name: Option<&str>) -> Option<Portal> {
     }
 }
 
+/// `GetPortalByName(name)` lending the named cursor's live state to `f` (the
+/// `with_running_cursor` seam, called by `execCurrentOf`).
+///
+/// C's `execCurrentOf` does `portal = GetPortalByName(cursor_name)` then reads
+/// `portal->strategy`, `portal->queryDesc`, `portal->queryDesc->estate` and
+/// `portal->atStart`/`atEnd`. Here the portal owns its `QueryDesc` (whose
+/// executor working state — `estate`/`planstate` — lives in an `McxOwned`
+/// bundle), so we borrow the `PortalData`, lend a [`RunningCursorState`] view of
+/// those fields, and run `f` for the borrow's duration. `None` is the C
+/// `!PortalIsValid` (no such portal). `has_live_query` mirrors C's
+/// `queryDesc != NULL && queryDesc->estate != NULL`.
+pub fn with_running_cursor(
+    name: &str,
+    f: &mut dyn FnMut(
+        Option<types_nodes::RunningCursorState>,
+    ) -> PgResult<types_nodes::CurrentOfTid>,
+) -> PgResult<types_nodes::CurrentOfTid> {
+    let portal = match GetPortalByName(Some(name)) {
+        Some(p) => p,
+        // !PortalIsValid(portal) — let the consumer raise ERRCODE_UNDEFINED_CURSOR.
+        None => return f(None),
+    };
+
+    let data = portal.borrow();
+    let strategy = data.strategy as u32;
+    let at_start = data.atStart;
+    let at_end = data.atEnd;
+
+    match &data.queryDesc {
+        // queryDesc != NULL: lend the live EState/PlanState from its McxOwned
+        // working bundle for the callback's duration. The bundle's `with`
+        // keeps `'mcx` internal, so no borrow escapes.
+        Some(query_desc) => query_desc.work.with(|w| {
+            let cursor = types_nodes::RunningCursorState {
+                strategy,
+                // queryDesc->estate is always present once the bundle exists
+                // (CreateExecutorState ran in ExecutorStart); a held cursor has
+                // no queryDesc at all (the None arm below).
+                has_live_query: true,
+                at_start,
+                at_end,
+                estate: Some(&w.estate),
+                planstate: w.planstate.as_deref(),
+            };
+            f(Some(cursor))
+        }),
+        // queryDesc == NULL: a held cursor or a non-SELECT — no live query.
+        None => {
+            let cursor = types_nodes::RunningCursorState {
+                strategy,
+                has_live_query: false,
+                at_start,
+                at_end,
+                estate: None,
+                planstate: None,
+            };
+            f(Some(cursor))
+        }
+    }
+}
+
 /// `PortalGetPrimaryStmt` — get the "primary" stmt within a portal, i.e., the
 /// one marked `canSetTag` (portalmem.c:151).
 ///
