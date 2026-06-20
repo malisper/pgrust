@@ -1301,10 +1301,13 @@ pub fn ExecEvalConstraintCheck<'mcx>(
     let checkbool = check.value.as_bool();
 
     if !checknull && !checkbool {
+        // format_type_be(resulttype) — render the domain's type name (the C
+        // errmsg uses format_type_be, not the bare OID).
+        let typename =
+            backend_utils_adt_format_type_seams::format_type_be_owned::call(resulttype)?;
         return Err(PgError::error(format!(
             "value for domain {} violates check constraint \"{}\"",
-            // format_type_be(resulttype) — owner (format-type) not a dep here.
-            resulttype, constraintname
+            typename, constraintname
         ))
         .with_sqlstate(ERRCODE_CHECK_VIOLATION));
     }
