@@ -563,6 +563,38 @@ fn read_attrs(mcx: Mcx<'_>, relid: Oid) -> PgResult<alloc::vec::Vec<AttDesc>> {
     Ok(out)
 }
 
+/// `toast_delete_external(rel, values, isnull, is_speculative)`
+/// (toast_helper.c:317) — check for external stored attributes and delete them
+/// from the secondary (TOAST) relation. `values`/`isnull` are the deformed
+/// columns of the tuple being deleted; for each non-null varlena column whose
+/// stored value is external-ondisk, delete its TOAST chunks.
+pub fn toast_delete_external(
+    rel: &types_rel::RelationData<'_>,
+    values: &[Datum<'_>],
+    isnull: &[bool],
+    is_speculative: bool,
+) -> PgResult<()> {
+    let tuple_desc = &rel.rd_att;
+    let num_attrs = tuple_desc.natts;
+
+    for i in 0..num_attrs.max(0) as usize {
+        // if (TupleDescCompactAttr(tupleDesc, i)->attlen == -1)
+        if tuple_desc.attr(i).attlen == -1 {
+            if isnull[i] {
+                continue;
+            }
+            // else if (VARATT_IS_EXTERNAL_ONDISK(value)) toast_delete_datum(...)
+            if let Datum::ByRef(bytes) = &values[i] {
+                if varatt_is_external_ondisk(bytes) {
+                    toast_internals_seams::toast_delete_datum::call(rel.rd_id, bytes, is_speculative)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Install this unit's seams. Called from `seams-init`.
 pub fn init_seams() {
     toast_helper_seams::toast_tuple_init::set(toast_tuple_init);
@@ -572,4 +604,5 @@ pub fn init_seams() {
     toast_helper_seams::toast_tuple_try_compression::set(toast_tuple_try_compression);
     toast_helper_seams::toast_tuple_externalize::set(toast_tuple_externalize);
     toast_helper_seams::toast_tuple_cleanup::set(toast_tuple_cleanup);
+    toast_internals_seams::toast_delete_external::set(toast_delete_external);
 }

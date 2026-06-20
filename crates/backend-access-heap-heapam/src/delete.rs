@@ -1015,9 +1015,20 @@ fn read_on_page_tuple<'mcx>(
         debug_assert!(item_id.has_storage());
         let item = PageGetItem(&page, &item_id)?;
         let hdr = HeapTupleHeaderData::read_on_page(mcx, item)?;
-        // The user-data area is the on-disk image past the header.
+        // The user-data area is the on-disk image past `t_hoff` (the MAXALIGN'd
+        // header + optional null bitmap), NOT past the fixed `SizeofHeapTupleHeader`
+        // (23). Slicing from `SizeofHeapTupleHeader` left the 1-byte MAXALIGN pad
+        // (and any null-bitmap bytes) in front of the column data, so a later
+        // `heap_deform_tuple(&tp.data)` (e.g. heap_toast_delete / toast_flatten_tuple
+        // / ExtractReplicaIdentity) read every attribute shifted by `t_hoff -
+        // SizeofHeapTupleHeader` bytes — landing the leading attribute's byte
+        // (e.g. a `bool 0x01`) at a varlena offset and tripping
+        // `invalid varlena TOAST tag`. Match `FormedTuple::read_on_page_full`:
+        // `FormedTuple.data` is the user-data area `item[t_hoff..t_len]`.
+        let t_hoff = hdr.t_hoff as usize;
+        let data_start = t_hoff.min(item.len());
         let mut data = mcx::PgVec::new_in(mcx);
-        for &b in &item[SizeofHeapTupleHeader..] {
+        for &b in &item[data_start..] {
             data.push(b);
         }
         out = Some((hdr, data, item.len() as u32));
@@ -1037,14 +1048,11 @@ fn read_on_page_tuple<'mcx>(
 }
 
 /// The tuple's user-data area (`(char *) t_data + t_hoff`) for the cache-key
-/// deform in `CacheInvalidateHeapTuple`. This file's `read_on_page_tuple`
-/// captures `tp.data` as `item[SizeofHeapTupleHeader..]` (header-end onward,
-/// which still spans any null bitmap between the fixed header and `t_hoff`), so
-/// skip the bitmap bytes to reach the user-data area the deform expects.
+/// deform in `CacheInvalidateHeapTuple`. `read_on_page_tuple` now captures
+/// `tp.data` as `item[t_hoff..]` (the canonical [`FormedTuple::data`] user-data
+/// area, matching `read_on_page_full`), so this is the identity.
 fn tuple_user_data<'a, 'mcx>(tp: &'a FormedTuple<'mcx>) -> &'a [u8] {
-    let t_hoff = data_ref(tp).t_hoff as usize;
-    let skip = t_hoff.saturating_sub(SizeofHeapTupleHeader);
-    &tp.data[skip.min(tp.data.len())..]
+    &tp.data
 }
 
 /// `data_ref(tp)` — `tp->t_data` as a shared header reference.

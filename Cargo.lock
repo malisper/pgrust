@@ -2967,6 +2967,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-error",
+ "types-rel",
  "types-tuple",
 ]
 
@@ -21376,6 +21377,7 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-common-relation",
  "backend-access-common-tupdesc",
+ "backend-access-heap-heaptoast-seams",
  "backend-access-index-genam-seams",
  "backend-access-index-indexam-seams",
  "backend-access-transam-xact-seams",

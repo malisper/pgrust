@@ -596,28 +596,67 @@ pub(crate) fn build_fetched(
     ntp: &FormedTuple<'_>,
 ) -> PgResult<FetchedCatalogTuple> {
     // Read t_self / t_len / t_tableOid off the scanned tuple.
-    let t_len = ntp.tuple.t_len;
     let t_self = ItemPointer {
         block: ntp.tuple.t_self.ip_blkid.block_number(),
         offset: ntp.tuple.t_self.ip_posid,
     };
     let t_tableoid = ntp.tuple.t_tableOid;
-    // The cached `t_data` is the tuple's full contiguous on-disk image
-    // (the C `memcpy(dtp->t_data)` of header + null bitmap + pad + user data),
-    // so the entry copy (`catcache_form_cached_tuple` = `heap_copytuple`) can
-    // rebuild a complete `FormedTuple` later. Serialize the scanned tuple via
-    // the heaptuple disk-image codec rather than keeping only the user-data
-    // bytes (which would lose the header).
-    let t_data: alloc::vec::Vec<u8> = {
-        let img = backend_access_common_heaptuple::heap_tuple_to_disk_image(scan_mcx, ntp)?;
-        img.iter().copied().collect()
-    };
 
     // Extract the key datums via the cache's tupdesc + cc_keyno.
     let (cache_id, cc_keyno, cc_nkeys) = with_arena(|arena| {
         let cache = &arena.caches[cache_idx.0];
         (cache.id, cache.cc_keyno, cache.cc_nkeys)
     });
+
+    // `CatalogCacheCreateEntry` (catcache.c:2164): if the tuple has any
+    // out-of-line toasted fields, expand them in-line before caching. This both
+    // saves cycles on later use and — crucially — protects against the toast
+    // tuples being freed before a (slightly stale) catcache entry tries to fetch
+    // them. Without this, the cached `t_data` keeps an external TOAST pointer and
+    // a later deform of that column reads a TOAST pointer where an inline varlena
+    // is expected (`invalid varlena TOAST tag`). We flatten under the cache
+    // tupdesc; the flattened tuple then feeds both the cached image serialization
+    // and the key extraction below.
+    let has_external = ntp
+        .tuple
+        .t_data
+        .as_ref()
+        .map(|h| {
+            (h.t_infomask & types_tuple::heaptuple::HEAP_HASEXTERNAL) != 0
+        })
+        .unwrap_or(false);
+
+    let mut flat_err: Option<types_error::PgError> = None;
+    let mut flattened: Option<FormedTuple<'_>> = None;
+    if has_external {
+        crate::init_meta::with_cache_tupdesc(cache_id, &mut |tupdesc| {
+            match backend_access_heap_heaptoast_seams::toast_flatten_tuple::call(
+                scan_mcx, ntp, tupdesc,
+            ) {
+                Ok(ft) => flattened = Some(ft),
+                Err(e) => flat_err = Some(e),
+            }
+        });
+        if let Some(e) = flat_err {
+            return Err(e);
+        }
+    }
+    // The tuple feeding the cached image + key extraction: the flattened copy if
+    // we had externals, else the scanned tuple verbatim.
+    let dtp: &FormedTuple<'_> = flattened.as_ref().unwrap_or(ntp);
+
+    let t_len = dtp.tuple.t_len;
+
+    // The cached `t_data` is the tuple's full contiguous on-disk image
+    // (the C `memcpy(dtp->t_data)` of header + null bitmap + pad + user data),
+    // so the entry copy (`catcache_form_cached_tuple` = `heap_copytuple`) can
+    // rebuild a complete `FormedTuple` later. Serialize the (possibly flattened)
+    // tuple via the heaptuple disk-image codec rather than keeping only the
+    // user-data bytes (which would lose the header).
+    let t_data: alloc::vec::Vec<u8> = {
+        let img = backend_access_common_heaptuple::heap_tuple_to_disk_image(scan_mcx, dtp)?;
+        img.iter().copied().collect()
+    };
 
     let mut keys: [CatKey; CATCACHE_MAXKEYS] = core::array::from_fn(|_| CatKey::scalar_null());
 
@@ -629,9 +668,9 @@ pub(crate) fn build_fetched(
     crate::init_meta::with_cache_tupdesc(cache_id, &mut |tupdesc| {
         let res = backend_access_common_heaptuple::heap_deform_tuple(
             scan_mcx,
-            &ntp.tuple,
+            &dtp.tuple,
             tupdesc,
-            &ntp.data,
+            &dtp.data,
         );
         match res {
             Ok(deformed) => {

@@ -14,6 +14,7 @@ mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
 types-core = { path = "../types-core" }
 types-tuple = { path = "../types-tuple" }
+types-rel = { path = "../types-rel" }
 backend-access-table-toast-helper-seams = { path = "../backend-access-table-toast-helper-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 backend-access-common-toast-internals-seams = { path = "../backend-access-common-toast-internals-seams" }

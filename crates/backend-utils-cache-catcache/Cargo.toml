@@ -32,4 +32,5 @@ backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-sea
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-heap-heaptoast-seams = { path = "../backend-access-heap-heaptoast-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
