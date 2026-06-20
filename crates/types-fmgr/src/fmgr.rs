@@ -319,6 +319,91 @@ pub fn current_agg_context_link() -> Option<RawAggContextLink> {
     CURRENT_AGG_CONTEXT_LINK.with(|c| c.get())
 }
 
+// ---------------------------------------------------------------------------
+// EState back-channel for aggregate support functions (substrate #2)
+//
+// C's aggregate support functions reach the executor's `EState` through
+// `aggstate->ss.ps.state` to register an ExprContext shutdown callback
+// (`AggRegisterCallback` -> `RegisterExprContextCallback(aggstate->curaggcontext,
+// ...)`). In the owned model the seam body that runs `AggRegisterCallback` holds
+// only the call frame, no `&mut EState`, and the executor's `&mut EState` is not
+// reachable from the support-fn frame. The transfn/finalfn dispatch (which DOES
+// hold the `&mut EState`, and has released its borrow for the duration of the
+// fmgr call) deposits a raw image of it on this thread-local — exactly the
+// `RawAggContextLink` discipline, but for the EState pointer — so the
+// `agg_register_callback` seam body (installed from the executor crate, which
+// names `EStateData` and can re-derive the `&mut`) can register the callback into
+// the live `ExprContext` pool. RAII-scoped to the one dispatch.
+// ---------------------------------------------------------------------------
+
+/// A raw, lifetime-erased back-pointer to the live `EState` for the aggregate
+/// transfn/finalfn dispatch currently being issued (C: `aggstate->ss.ps.state`).
+///
+/// `types-fmgr` cannot name `types_nodes::EStateData`, so it carries only the
+/// thin raw address (a single `*mut ()`); the executor crate, which deposits and
+/// reconstructs it, casts back to `*mut EStateData<'mcx>` (the same
+/// lifetime-erasure-into-raw-address discipline `EStateLink` already uses
+/// internally).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RawEStateLink {
+    /// The erased `*mut EStateData<'mcx>` address.
+    pub data: *mut (),
+}
+
+// SAFETY: identical justification to `RawAggContextLink` — a raw,
+// lifetime-erased back-pointer to the single owned, single-backend-thread-confined
+// `EState`; it only ever crosses this thread-local channel within one backend's
+// fmgr dispatch and is never shared across threads.
+#[allow(unsafe_code)]
+unsafe impl Send for RawEStateLink {}
+#[allow(unsafe_code)]
+unsafe impl Sync for RawEStateLink {}
+
+thread_local! {
+    /// The live `EState` back-pointer C would reach via `aggstate->ss.ps.state`
+    /// for the aggregate transfn/finalfn currently being *issued* on this backend
+    /// thread, or `None` (a non-aggregate call, or a call whose dispatch did not
+    /// deposit it). Deposited by [`EStateCallContextGuard`] (RAII-scoped to the
+    /// call) and read by the `agg_register_callback` seam body.
+    static CURRENT_ESTATE_LINK: core::cell::Cell<Option<RawEStateLink>> =
+        const { core::cell::Cell::new(None) };
+}
+
+/// RAII guard depositing the live-`EState` back-pointer for the aggregate
+/// transfn/finalfn call about to be issued, restoring the prior value on drop
+/// (so a nested fmgr call the support function itself issues observes the outer
+/// value again). The `EState` analogue of [`AggCallContextGuard`].
+#[must_use]
+pub struct EStateCallContextGuard {
+    prev: Option<RawEStateLink>,
+}
+
+impl EStateCallContextGuard {
+    /// Install `link` as the current aggregate-call `EState` back-pointer. The
+    /// caller MUST have released its `&mut EState` borrow for the duration of the
+    /// call this guard scopes (the dispatch sites do: they pull `mcx =
+    /// estate.es_query_cxt` — a `Copy` handle — before installing, so NLL has
+    /// ended the `&mut estate` borrow), so the seam body's momentary re-derived
+    /// `&mut` does not alias.
+    pub fn install(link: RawEStateLink) -> Self {
+        let prev = CURRENT_ESTATE_LINK.with(|c| c.replace(Some(link)));
+        EStateCallContextGuard { prev }
+    }
+}
+
+impl Drop for EStateCallContextGuard {
+    fn drop(&mut self) {
+        CURRENT_ESTATE_LINK.with(|c| c.set(self.prev));
+    }
+}
+
+/// Read (without consuming) the live-`EState` back-pointer deposited for the
+/// aggregate support call currently being issued. The `agg_register_callback`
+/// seam body calls this to reach the executor's ExprContext pool.
+pub fn current_estate_link() -> Option<RawEStateLink> {
+    CURRENT_ESTATE_LINK.with(|c| c.get())
+}
+
 /// RAII guard depositing `tag` as the context node-tag for the fmgr call about
 /// to be issued, restoring the prior value on drop (so nested fmgr calls — a
 /// trigger function that itself issues calls — see the correct context: the

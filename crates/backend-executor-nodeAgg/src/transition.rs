@@ -327,6 +327,7 @@ pub fn advance_transition_function<'mcx>(
     let trans_value = pergroupstate.trans_value.clone();
     let trans_value_is_null = pergroupstate.trans_value_is_null;
     let mcx = estate.es_query_cxt;
+    let estate_link = estate_raw_link(estate);
     let (new_val, isnull) = invoke_transfn(
         pertrans,
         trans_value.clone(),
@@ -334,6 +335,7 @@ pub fn advance_transition_function<'mcx>(
         &input_args,
         &input_args_null,
         mcx,
+        estate_link,
     )?;
 
     //   if (!pertrans->transtypeByVal &&
@@ -436,6 +438,7 @@ fn invoke_transfn<'mcx>(
     input_args: &[AggDatum<'mcx>],
     input_args_null: &[bool],
     mcx: Mcx<'mcx>,
+    estate_link: types_fmgr::fmgr::RawEStateLink,
 ) -> PgResult<(AggDatum<'mcx>, bool)> {
     // fcinfo->args[0] = transValue (a NULL one is the canonical null Datum);
     // args[1..] = the per-row inputs the compiler evaluated into the arg cells.
@@ -468,6 +471,12 @@ fn invoke_transfn<'mcx>(
     // calls `AggCheckCallContext`/`AggGetAggref`/`AggStateIsShared` recovers the
     // AggState. Plain count/min/max/sum/avg transfns ignore it.
     let _agg_ctx_guard = agg_call_context_guard(pertrans.transfn_fcinfo.as_deref());
+    // Substrate #2: deposit the live-EState back-pointer (C: aggstate->ss.ps.state)
+    // on the parallel thread-local channel for the duration of THIS dispatch, so a
+    // transfn that calls `AggRegisterCallback` (ordered_set_transition's first call
+    // runs ordered_set_startup, which registers ordered_set_shutdown) reaches the
+    // executor's ExprContext pool. RAII-scoped; cleared for any nested call.
+    let _estate_guard = types_fmgr::fmgr::EStateCallContextGuard::install(estate_link);
     // By-value dispatch: arg 0 may be a `Datum::Internal` (the running
     // aggregate state for an `internal`-transtype aggregate), whose owned
     // `Box<dyn Any>` cannot be cloned out of a borrow. The owned seam moves it
@@ -480,6 +489,22 @@ fn invoke_transfn<'mcx>(
         args_null,
         fn_expr,
     )
+}
+
+/// Build the raw, lifetime-erased back-pointer image of the live `EState` (C:
+/// `aggstate->ss.ps.state`) for the [`types_fmgr::fmgr::EStateCallContextGuard`]
+/// (substrate #2). The caller MUST already have released its `&mut estate`
+/// borrow for the duration of the guard's scope (the dispatch sites do: they
+/// pull `mcx = estate.es_query_cxt` — a `Copy` handle — first, ending the
+/// `&mut`), so the `agg_register_callback` seam body's momentary re-derived
+/// `&mut EState` does not alias.
+pub(crate) fn estate_raw_link<'mcx>(
+    estate: &EStateData<'mcx>,
+) -> types_fmgr::fmgr::RawEStateLink {
+    // Erase `'mcx` into the raw address, exactly as `EStateLink::from_ref` does.
+    types_fmgr::fmgr::RawEStateLink {
+        data: estate as *const EStateData<'mcx> as *mut (),
+    }
 }
 
 /// Deposit the aggregate-call back-pointer (C `fcinfo->context = (Node *)
@@ -561,9 +586,10 @@ pub fn ExecAggPlainTransByVal<'mcx>(
         )
     };
     let mcx = estate.es_query_cxt;
+    let estate_link = estate_raw_link(estate);
     let (new_val, isnull) = {
         let pertrans = pertrans_ref(aggstate, transno);
-        invoke_transfn(pertrans, trans_value, trans_value_is_null, input_args, input_args_null, mcx)?
+        invoke_transfn(pertrans, trans_value, trans_value_is_null, input_args, input_args_null, mcx, estate_link)?
     };
     let pergroup = pergroup_mut(aggstate, setoff, transno);
     pergroup.trans_value = new_val;
@@ -591,6 +617,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
     aggstate.curpertrans = transno as i32;
 
     let mcx = estate.es_query_cxt;
+    let estate_link = estate_raw_link(estate);
 
     // C `internal`-pseudo-type transition state (e.g. NumericAggState,
     // ArrayBuildState): the running value is a `Datum::Internal` box that cannot
@@ -611,7 +638,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
         };
         let (new_val, isnull) = {
             let pertrans = pertrans_ref(aggstate, transno);
-            invoke_transfn(pertrans, trans_value, trans_value_is_null, input_args, input_args_null, mcx)?
+            invoke_transfn(pertrans, trans_value, trans_value_is_null, input_args, input_args_null, mcx, estate_link)?
         };
         let pergroup = pergroup_mut(aggstate, setoff, transno);
         pergroup.trans_value = new_val;
@@ -637,6 +664,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
             input_args,
             input_args_null,
             mcx,
+            estate_link,
         )?
     };
 

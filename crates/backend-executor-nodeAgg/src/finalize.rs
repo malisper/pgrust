@@ -384,6 +384,15 @@ fn invoke_finalfn<'mcx>(
     // Use the FINAL form, which returns `args[0]` back: C's finalfn reads but does
     // not consume the transition value, so an `internal` state shared across
     // sibling aggregates must survive the call (restored by the caller).
+    // Substrate #2: deposit the live-EState back-pointer (C: aggstate->ss.ps.state)
+    // on the parallel thread-local channel for the duration of THIS finalfn
+    // dispatch, so an ordered-set/hypothetical-set finalfn that calls
+    // `AggRegisterCallback` (when the per-group sort was lazily set up in the
+    // finalfn — e.g. a finalfn-only ordered-set agg) reaches the ExprContext pool.
+    // `mcx` above already released the `&mut estate` borrow (it is a `Copy`
+    // handle), so the seam body's momentary re-derived `&mut` does not alias.
+    let estate_link = crate::transition::estate_raw_link(estate);
+    let _estate_guard = types_fmgr::fmgr::EStateCallContextGuard::install(estate_link);
     backend_utils_fmgr_fmgr_seams::function_call_finalfn_owned::call(
         mcx,
         finalfn_oid,

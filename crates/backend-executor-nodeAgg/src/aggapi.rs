@@ -182,30 +182,58 @@ pub fn AggRegisterCallback<'mcx>(
     func: types_nodes::ExprContextCallbackFunction,
     arg: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
 ) -> PgResult<()> {
-    if let Some(aggstate) = agg_context(fcinfo) {
-        // RegisterExprContextCallback(aggstate->curaggcontext, func, arg);
-        //
-        // The calling AggState is now reachable (the K1 fcinfo->context channel);
-        // `aggstate->curaggcontext` is an `EcxtId` into the EState ExprContext
-        // pool. The residual is the delegation target: `RegisterExprContextCallback`
-        // (execUtils, ported) takes a `&mut ExprContext`, and reaching the live
-        // pool `&mut` for that `EcxtId` from here needs an EState-pool register
-        // seam keyed by `EcxtId` (none is declared yet, and this entry point
-        // carries no `&mut EState`). That EState-pool mutable handoff — NOT the
-        // call-frame context channel, which now works — is the remaining surface.
-        let _curaggcontext: i32 = aggstate.curaggcontext;
-        let _ = (func, arg);
-        panic!(
-            "backend_executor_execUtils::RegisterExprContextCallback: AggRegisterCallback \
-             reaches the live AggState (K1 context channel works) but the delegation needs \
-             an EState ExprContext-pool register seam keyed by the curaggcontext EcxtId \
-             (unported; this entry point holds no &mut EState)"
-        );
-    }
-    // elog(ERROR, "aggregate function cannot register a callback in this context")
-    Err(types_error::PgError::error(
-        "aggregate function cannot register a callback in this context",
-    ))
+    // RegisterExprContextCallback(aggstate->curaggcontext, func, arg);
+    //
+    // The calling AggState is reachable (the K1 fcinfo->context channel);
+    // `aggstate->curaggcontext` is an `EcxtId` into the EState ExprContext pool.
+    // Substrate #2 supplies the `&mut EState`: the transfn/finalfn dispatch
+    // deposited a raw image of the live `&mut EState` on the
+    // `EStateCallContextGuard` thread-local, so the registration reaches the live
+    // pool. (This rich-`types_nodes`-frame entry mirrors the `agg_register_callback`
+    // seam body, which is what the by-OID fmgr dispatch actually invokes.)
+    let aggcontext_id = match agg_context(fcinfo) {
+        Some(aggstate) => aggstate
+            .aggcontexts
+            .as_ref()
+            .and_then(|c| c.get(aggstate.curaggcontext as usize))
+            .copied(),
+        None => {
+            // elog(ERROR, "aggregate function cannot register a callback in this context")
+            return Err(types_error::PgError::error(
+                "aggregate function cannot register a callback in this context",
+            ));
+        }
+    };
+    let Some(ecxt_id) = aggcontext_id else {
+        return Err(types_error::PgError::error(
+            "AggRegisterCallback: aggregate has no curaggcontext ExprContext",
+        ));
+    };
+    let Some(link) = types_fmgr::fmgr::current_estate_link() else {
+        return Err(types_error::PgError::error(
+            "AggRegisterCallback: no live EState back-pointer on the dispatch channel",
+        ));
+    };
+    // SAFETY: see the `agg_register_callback_shim` body — `link.data` is the
+    // erased `*mut EStateData<'mcx>` the dispatch deposited (substrate #2),
+    // pointing at the single owned executor `EState` that outlives + does not move
+    // for this call; the dispatch released its `&mut estate` borrow first, so this
+    // momentary re-derived `&mut` does not alias.
+    #[allow(unsafe_code)]
+    let estate: &mut types_nodes::execnodes::EStateData<'mcx> =
+        unsafe { &mut *(link.data as *mut types_nodes::execnodes::EStateData<'mcx>) };
+    let econtext = estate.ecxt_mut(ecxt_id);
+    let mut ecxt_callback = mcx::alloc_in(
+        econtext.ecxt_per_query_memory,
+        types_nodes::execnodes::ExprContext_CB {
+            next: None,
+            function: func,
+            arg,
+        },
+    )?;
+    ecxt_callback.next = econtext.ecxt_callbacks.take();
+    econtext.ecxt_callbacks = Some(ecxt_callback);
+    Ok(())
 }
 
 
@@ -556,21 +584,72 @@ fn agg_register_callback_shim<'mcx>(
     func: types_nodes::ExprContextCallbackFunction,
     arg: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
 ) -> PgResult<()> {
-    if agg_context_from_raw_frame::<'_, 'mcx>(fcinfo).is_some() {
-        let _ = (func, arg);
-        // RegisterExprContextCallback(aggstate->curaggcontext, func, arg) — the
-        // EState ExprContext-pool register seam keyed by the curaggcontext EcxtId
-        // is unported (this frame carries no &mut EState). NOT a stub: it raises
-        // the same hard error C would never reach with a working pool handoff;
-        // resolving the pool seam unblocks ordered-set aggregate execution.
+    // C `AggRegisterCallback`:
+    //   if (AggCheckCallContext(fcinfo, &aggcontext) == AGG_CONTEXT_AGGREGATE) {
+    //       AggState *aggstate = (AggState *) fcinfo->context;
+    //       ExprContext *cxt = aggstate->curaggcontext;
+    //       RegisterExprContextCallback(cxt, func, arg);
+    //       return;
+    //   }
+    //   elog(ERROR, "aggregate function cannot register a callback in this context");
+    //
+    // The live AggState is recovered from the raw frame; `curaggcontext` is an
+    // EcxtId into the EState ExprContext pool. Substrate #2 supplies the missing
+    // leg: the transfn/finalfn dispatch deposited a raw image of the live
+    // `&mut EState` on the `EStateCallContextGuard` thread-local (the executor
+    // crate, which dispatches, has the `&mut EState` and released its borrow for
+    // the call), so this body re-derives it and registers into the live pool.
+    let aggcontext_id = {
+        let Some(aggstate) = agg_context_from_raw_frame::<'_, 'mcx>(fcinfo) else {
+            return Err(types_error::PgError::error(
+                "aggregate function cannot register a callback in this context",
+            ));
+        };
+        // aggstate->curaggcontext — resolve the index into aggcontexts to its EcxtId.
+        aggstate
+            .aggcontexts
+            .as_ref()
+            .and_then(|c| c.get(aggstate.curaggcontext as usize))
+            .copied()
+    };
+    let Some(ecxt_id) = aggcontext_id else {
         return Err(types_error::PgError::error(
-            "AggRegisterCallback: EState ExprContext-pool register seam (keyed by curaggcontext \
-             EcxtId) is unported; the support-fn frame holds no &mut EState",
+            "AggRegisterCallback: aggregate has no curaggcontext ExprContext",
         ));
-    }
-    Err(types_error::PgError::error(
-        "aggregate function cannot register a callback in this context",
-    ))
+    };
+    let Some(link) = types_fmgr::fmgr::current_estate_link() else {
+        // C would never reach here with a working executor: the dispatch always
+        // deposits the EState link for an aggregate support call.
+        return Err(types_error::PgError::error(
+            "AggRegisterCallback: no live EState back-pointer on the dispatch channel \
+             (the aggregate transfn/finalfn dispatch did not deposit it)",
+        ));
+    };
+    // SAFETY: `link.data` is the erased `*mut EStateData<'mcx>` the dispatch
+    // deposited (substrate #2), pointing at the single owned executor `EState`
+    // that owns this AggState's whole node tree and therefore outlives + does not
+    // move for the duration of this call. The dispatch released its `&mut estate`
+    // borrow (it pulled the `Copy` `mcx` handle first) before installing the
+    // guard, so this momentary re-derived `&mut` does not alias — the same audited
+    // raw-back-pointer discipline as `EStateLink::get_mut` / `RawAggContextLink`.
+    #[allow(unsafe_code)]
+    let estate: &mut types_nodes::execnodes::EStateData<'mcx> =
+        unsafe { &mut *(link.data as *mut types_nodes::execnodes::EStateData<'mcx>) };
+    // RegisterExprContextCallback(cxt, func, arg): allocate the callback node in
+    // the ExprContext's per-query memory and prepend it to the list (reverse
+    // execution order), faithful to execUtils.c:RegisterExprContextCallback.
+    let econtext = estate.ecxt_mut(ecxt_id);
+    let mut ecxt_callback = mcx::alloc_in(
+        econtext.ecxt_per_query_memory,
+        types_nodes::execnodes::ExprContext_CB {
+            next: None,
+            function: func,
+            arg,
+        },
+    )?;
+    ecxt_callback.next = econtext.ecxt_callbacks.take();
+    econtext.ecxt_callbacks = Some(ecxt_callback);
+    Ok(())
 }
 
 pub fn init_seams() {
