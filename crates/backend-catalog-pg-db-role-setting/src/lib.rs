@@ -491,6 +491,30 @@ pub fn init_seams() {
         let ctx = mcx::MemoryContext::new("DropSetting");
         DropSetting(ctx.mcx(), databaseid, roleid)
     });
+
+    // user.c ALTER ROLE ... SET: `AlterSetting(databaseid, roleid, setstmt)`.
+    // The `VariableSetStmt` arrives already in the owned `types_parsenodes`
+    // model (carried opaquely as `types_parsenodes::Node::VariableSetStmt`).
+    backend_commands_user_seams::alter_setting::set(|databaseid, roleid, setstmt| {
+        let ctx = mcx::MemoryContext::new("AlterSetting");
+        let setstmt = setstmt.ok_or_else(|| {
+            backend_utils_error::ereport(types_error::ERROR)
+                .errmsg_internal("AlterSetting: missing VariableSetStmt".to_string())
+                .into_error()
+        })?;
+        let v = match &setstmt {
+            types_parsenodes::Node::VariableSetStmt(v) => v,
+            other => {
+                return Err(backend_utils_error::ereport(types_error::ERROR)
+                    .errmsg_internal(format!(
+                        "unrecognized node type: {}",
+                        other.node_tag_name()
+                    ))
+                    .into_error())
+            }
+        };
+        AlterSetting(ctx.mcx(), databaseid, roleid, v)
+    });
 }
 
 #[cfg(test)]

@@ -254,6 +254,33 @@ fn walk_expr_children(
         false
     };
     crate::nodefuncs::expression_tree_walker(Some(e), &mut child_walker);
+    if aborted {
+        return true;
+    }
+
+    // C `expression_tree_walker` T_SubLink: after `WALK(sublink->testexpr)` it
+    // does `return WALK(sublink->subselect)` — i.e. it invokes the walker on the
+    // sublink's sub-`Query` node so the callback can recurse into the sub-query
+    // (e.g. `query_tree_walker`). The Expr-level walker above only enumerates
+    // `&Expr` children, so the `subselect` (a `Query`, not an `Expr`) is dropped
+    // there; we wrap it as a `Node::Query` and invoke the `Node` walker here.
+    // (lockcmds' `LockViewRecurse_walker` relies on this to lock the tables
+    // referenced by a scalar-subquery / `IN (subselect)` in a view definition.)
+    if let Expr::SubLink(sublink) = e {
+        if let Some(subselect) = sublink.subselect.as_deref() {
+            let q = match subselect.clone_in(mcx) {
+                Ok(q) => q,
+                Err(_) => return false,
+            };
+            let node = match Node::mk_query(mcx, q) {
+                Ok(n) => n,
+                Err(_) => return false,
+            };
+            if walker(&node) {
+                return true;
+            }
+        }
+    }
     aborted
 }
 
@@ -1249,7 +1276,28 @@ pub fn range_table_entry_walker(
         RTEKind::RTE_SUBQUERY => {
             if flags & QTW_IGNORE_RT_SUBQUERIES == 0 {
                 if let Some(sub) = rte.subquery.as_deref() {
-                    if query_tree_walker(sub, walker, flags) {
+                    // C: `WALK(rte->subquery)` — `WALK(n)` is `walker((Node *) n,
+                    // context)`, i.e. it invokes the user *callback* on the
+                    // sub-`Query` node (which then decides whether to recurse via
+                    // `query_tree_walker`). Calling `query_tree_walker` directly
+                    // here would descend the subquery's children but skip
+                    // invoking the callback ON the `Query` node itself — and a
+                    // walker that does per-`Query` work (e.g. lockcmds'
+                    // `LockViewRecurse_walker`, which locks each RTE relation when
+                    // it is handed a `Query`) would never see a FROM-subquery's
+                    // range table. So wrap the subquery as a `Node::Query` and
+                    // invoke the callback, exactly like C.
+                    let scratch = mcx::MemoryContext::new("range_table_entry_walker subquery");
+                    let m = scratch.mcx();
+                    let q = match sub.clone_in(m) {
+                        Ok(q) => q,
+                        Err(_) => return false,
+                    };
+                    let node = match Node::mk_query(m, q) {
+                        Ok(n) => n,
+                        Err(_) => return false,
+                    };
+                    if walker(&node) {
                         return true;
                     }
                 }

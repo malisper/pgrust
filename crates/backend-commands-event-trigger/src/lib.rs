@@ -1667,6 +1667,12 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::event_trigger_alter_table_relid::set(
         event_trigger_alter_table_relid,
     );
+    // tablecmds' `AlterTableInternal` reaches the same C `EventTriggerAlterTableRelid`
+    // through its own seam declaration; install the same body there.
+    backend_commands_tablecmds_seams::event_trigger_alter_table_relid::set(|object_id| {
+        event_trigger_alter_table_relid(object_id);
+        Ok(())
+    });
     backend_tcop_utility_out_seams::event_trigger_alter_table_end::set(
         event_trigger_alter_table_end,
     );

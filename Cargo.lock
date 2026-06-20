@@ -6986,6 +6986,7 @@ dependencies = [
  "backend-commands-event-trigger-fire-seams",
  "backend-commands-event-trigger-seams",
  "backend-commands-extension-seams",
+ "backend-commands-tablecmds-seams",
  "backend-commands-tablespace-globals-seams",
  "backend-nodes-core",
  "backend-parser-func",
