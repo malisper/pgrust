@@ -781,7 +781,8 @@ pub fn BeginCopyTo<'mcx>(
         }
 
         // RETURNING clause is required for non-SELECT.
-        if query.commandType != CmdType::CMD_SELECT && !query.has_returning_list {
+        // Faithful to C copyto.c:744 which tests `query->returningList == NIL`.
+        if query.commandType != CmdType::CMD_SELECT && query.returningList.is_empty() {
             debug_assert!(matches!(
                 query.commandType,
                 CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE
