@@ -158,6 +158,52 @@ unsafe fn varsize_any(ptr: *const u8) -> usize {
     }
 }
 
+/// The canonical, header-FUL owned image of a by-reference range *element* value
+/// at `ptr`, given its subtype `typlen` — the form the fmgr by-reference lane
+/// (`RefPayload::Varlena`) and every adt value core expect.
+///
+/// A range serializes its bound values via [`datum_write`], which (for a
+/// packable varlena subtype like `numeric`/`text`) may store the element with a
+/// **1-byte short header** (`SET_VARSIZE_SHORT`). The owned fmgr boundary's
+/// `RefPayload::Varlena` lane, however, carries an already-detoasted *header-ful*
+/// (4-byte) varlena (the numeric/text value cores read `VARSIZE`/
+/// `NUMERIC_HEADER_SIZE` off a 4-byte header). So a short-header bound image must
+/// be un-packed to the 4-byte form here (mirroring `pg_detoast_datum_packed`):
+/// `[SET_VARSIZE(VARHDRSZ + payload_len)] ++ payload`.
+///
+/// * `typlen == -1` (varlena): un-pack a short header to 4-byte form; a 4-byte
+///   (un-compressed) image crosses verbatim. (A genuinely compressed/external
+///   image never reaches here — `range_serialize` detoasts bounds first.)
+/// * `typlen > 0` (fixed-length by-reference, e.g. `macaddr`/`uuid`): exactly
+///   `typlen` raw bytes, copied verbatim.
+///
+/// # Safety
+/// `ptr` must point at a live, fully-detoasted element image of the indicated
+/// subtype that stays valid for the read.
+pub unsafe fn byref_elem_headerful_image(ptr: *const u8, typlen: i16) -> std::vec::Vec<u8> {
+    if typlen != -1 {
+        debug_assert!(typlen > 0, "by-reference range element typlen must be -1 or > 0");
+        return core::slice::from_raw_parts(ptr, typlen as usize).to_vec();
+    }
+    if varatt_is_short(ptr) {
+        // Short (1-byte header) varlena: rebuild the 4-byte-header form. The
+        // payload is `VARSIZE_SHORT - VARHDRSZ_SHORT` bytes just past the 1-byte
+        // header; the canonical total length is `VARHDRSZ + payload_len`.
+        let payload_len = varsize_short(ptr) - VARHDRSZ_SHORT;
+        let total = VARHDRSZ + payload_len;
+        let mut out = std::vec::Vec::with_capacity(total);
+        out.resize(VARHDRSZ, 0);
+        set_varsize(out.as_mut_ptr(), total);
+        let payload = core::slice::from_raw_parts(ptr.add(VARHDRSZ_SHORT), payload_len);
+        out.extend_from_slice(payload);
+        out
+    } else {
+        // Plain 4-byte-header varlena: crosses verbatim.
+        let len = varsize_4b(ptr);
+        core::slice::from_raw_parts(ptr, len).to_vec()
+    }
+}
+
 /// `VARATT_CONVERTED_SHORT_SIZE(PTR)` -- `VARSIZE(PTR) - VARHDRSZ + VARHDRSZ_SHORT`.
 #[inline]
 unsafe fn varatt_converted_short_size(ptr: *const u8) -> usize {

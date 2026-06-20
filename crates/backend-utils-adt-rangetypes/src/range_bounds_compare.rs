@@ -18,6 +18,87 @@ use types_rangetypes::{RangeBound, RangeTypeP, RANGE_EMPTY};
 
 use crate::range_repr_serialize::{make_range, range_deserialize, range_get_flags};
 
+/// Build the canonical, by-reference-capable `Datum<'mcx>` for a range *element*
+/// value that the subtype `cmp` support function must receive.
+///
+/// In C the element value rides a bare `Datum` (`RangeBound.val`): for a
+/// by-value subtype the word IS the value; for a by-reference subtype the word
+/// is a `Pointer` to the value's (detoasted) image, which the support function
+/// dereferences via `PG_GETARG_*`. The owned fmgr boundary, however, never
+/// carries a by-reference argument on the bare `args[i].value` word — it must
+/// ride the `ref_args` side channel (a `RefPayload::Varlena`), reconstructed
+/// from the canonical [`Datum::ByRef`] arm. So a bare pointer word handed to the
+/// bare-word `function_call2_coll` seam left the by-reference arg's referent
+/// empty and the support function panicked ("by-ref `numeric` arg missing from
+/// by-ref lane").
+///
+/// This bridges the gap exactly as the index-key Datum fix (4e37ce3c7) does for
+/// `FormIndexDatum`: lift the bare element word into the rich canonical `Datum`
+/// (`ByVal` for a by-value subtype; `ByRef` over a copy of the element's image
+/// for a by-reference subtype) so the subsequent `*_coll_datum` dispatch
+/// marshals it onto the proper lane. The element type metadata
+/// (`typbyval`/`typlen`) comes off `typcache->rngelemtype`.
+pub(crate) fn elem_word_to_canon<'mcx>(
+    mcx: Mcx<'mcx>,
+    typcache: &TypeCacheEntry,
+    word: Datum,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+
+    let elem = typcache
+        .rngelemtype
+        .as_ref()
+        .expect("range element compare: typcache->rngelemtype must be set for a range type");
+    if elem.typbyval {
+        // By-value subtype: the machine word IS the value.
+        return Ok(CanonDatum::from_usize(word.as_usize()));
+    }
+
+    // By-reference subtype: the word is a Pointer to the element's image. Copy
+    // its bytes into `mcx` and carry them on the canonical `ByRef` arm. For a
+    // varlena subtype (typlen == -1) the image length is VARSIZE_ANY; for a
+    // fixed-length by-reference subtype (typlen > 0) it is exactly `typlen`
+    // bytes. (`typlen == -2`, a cstring, is never a range element type.)
+    let ptr = word.as_usize() as *const u8;
+    if ptr.is_null() {
+        // A NULL pointer-Datum maps to a by-value zero word; the callers guard
+        // NULL / infinite bounds before reaching the value compare.
+        return Ok(CanonDatum::from_usize(0));
+    }
+    // SAFETY: for a by-reference range element the bound `Datum` is a live
+    // pointer into a detoasted image (the range varlena, or an mcx-materialized
+    // element) that stays valid across this call, exactly as C dereferences it.
+    // `byref_elem_headerful_image` un-packs a short-header bound (the form
+    // `datum_write` may store) into the canonical 4-byte-header varlena the fmgr
+    // by-reference lane and the element value cores require.
+    let image = unsafe {
+        crate::range_repr_serialize::byref_elem_headerful_image(ptr, elem.typlen)
+    };
+    Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &image).map_err(|_| {
+        PgError::error(
+            "range element compare: out of memory copying by-reference element image",
+        )
+    })?))
+}
+
+/// Invoke the subtype's 2-arg `cmp` support function over two range *element*
+/// bound words, threading by-reference elements onto the proper fmgr lane (see
+/// [`elem_word_to_canon`]). Returns the `int4` comparison result.
+fn cmp_elem_words(typcache: &TypeCacheEntry, a: Datum, b: Datum) -> PgResult<i32> {
+    let scratch = mcx::MemoryContext::new_bump("range element cmp");
+    let mcx = scratch.mcx();
+    let av = elem_word_to_canon(mcx, typcache, a)?;
+    let bv = elem_word_to_canon(mcx, typcache, b)?;
+    let r = backend_utils_fmgr_fmgr_seams::function_call2_coll_datum::call(
+        mcx,
+        typcache.rng_cmp_proc_finfo.fn_oid,
+        typcache.rng_collation,
+        av,
+        bv,
+    )?;
+    Ok(r.as_i32())
+}
+
 /// `RangeTypeGetOid(r)` (rangetypes.h:35): `(r)->rangetypid`.
 #[inline]
 fn range_type_get_oid(r: RangeTypeP<'_>) -> Oid {
@@ -109,13 +190,7 @@ pub fn range_cmp_bounds(
     /*
      * Both boundaries are finite, so compare the held values.
      */
-    result = backend_utils_fmgr_fmgr_seams::function_call2_coll::call(
-        typcache.rng_cmp_proc_finfo.fn_oid,
-        typcache.rng_collation,
-        b1.val,
-        b2.val,
-    )?
-    .as_i32();
+    result = cmp_elem_words(typcache, b1.val, b2.val)?;
 
     /*
      * If the comparison is anything other than equal, we're done. If they
@@ -177,13 +252,7 @@ pub fn range_cmp_bound_values(
     /*
      * Both boundaries are finite, so compare the held values.
      */
-    Ok(backend_utils_fmgr_fmgr_seams::function_call2_coll::call(
-        typcache.rng_cmp_proc_finfo.fn_oid,
-        typcache.rng_collation,
-        b1.val,
-        b2.val,
-    )?
-    .as_i32())
+    cmp_elem_words(typcache, b1.val, b2.val)
 }
 
 /// `range_compare(arg1, arg2)` body (rangetypes.c:2193): total order over two
@@ -273,13 +342,7 @@ pub fn range_contains_elem_internal(
     }
 
     if !lower.infinite {
-        let cmp = backend_utils_fmgr_fmgr_seams::function_call2_coll::call(
-            typcache.rng_cmp_proc_finfo.fn_oid,
-            typcache.rng_collation,
-            lower.val,
-            val,
-        )?
-        .as_i32();
+        let cmp = cmp_elem_words(typcache, lower.val, val)?;
         if cmp > 0 {
             return Ok(false);
         }
@@ -289,13 +352,7 @@ pub fn range_contains_elem_internal(
     }
 
     if !upper.infinite {
-        let cmp = backend_utils_fmgr_fmgr_seams::function_call2_coll::call(
-            typcache.rng_cmp_proc_finfo.fn_oid,
-            typcache.rng_collation,
-            upper.val,
-            val,
-        )?
-        .as_i32();
+        let cmp = cmp_elem_words(typcache, upper.val, val)?;
         if cmp < 0 {
             return Ok(false);
         }

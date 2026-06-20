@@ -25,25 +25,61 @@ use types_rangetypes::{
 
 use crate::range_repr_serialize::{make_range, range_deserialize, range_get_flags};
 
-/// Collapse a canonical input-function result onto the bare element word the
-/// `RangeBound.val` carrier (`types_datum::Datum`) holds. A by-value range
-/// element (e.g. `int4range`/`tsrange`) IS its machine word. A by-reference
-/// element (e.g. `textrange`) is the rangetypes by-reference-carrier follow-on
-/// (the `RangeBound.val` carrier is still bare-word, not the lifetime-carrying
-/// canonical `Datum`) — not on the `WHERE`-literal milestone path, and it
-/// equally panicked under the prior `DatumWord` lane.
-#[inline]
-fn canon_to_bound_word(
-    d: types_tuple::backend_access_common_heaptuple::Datum<'_>,
-) -> types_datum::datum::Datum {
+/// Collapse a canonical input-/receive-function result onto the bare element
+/// word the `RangeBound.val` carrier (`types_datum::Datum`) holds — the C
+/// `Datum` an element's I/O function returns.
+///
+/// A by-value range element (e.g. `int4range`/`tsrange`) IS its machine word. A
+/// by-reference element (e.g. `numrange`/`textrange`) is, in C, a `Pointer` to
+/// the value's varlena image; the owned input function hands it back on the
+/// canonical `ByRef` arm. `range_serialize`'s `datum_compute_size`/`datum_write`
+/// dereference `RangeBound.val` as that pointer (`datum.as_usize() as *const
+/// u8`), so MATERIALIZE the header-ful varlena image into `mcx` and store its
+/// pointer word — exactly the form `DatumGetPointer` expects. (`Cstring` would
+/// be a `cstring`-element range, which has no varlena image; that crosses as the
+/// raw NUL-terminated buffer pointer.)
+fn canon_to_bound_word<'mcx>(
+    mcx: Mcx<'mcx>,
+    d: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+) -> PgResult<types_datum::datum::Datum> {
     use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
     match d {
-        CanonDatum::ByVal(w) => types_datum::datum::Datum::from_usize(w),
+        CanonDatum::ByVal(w) => Ok(types_datum::datum::Datum::from_usize(w)),
+        CanonDatum::ByRef(b) => Ok(types_datum::datum::Datum::from_usize(
+            materialize_bound_image(mcx, b.as_slice())? as usize,
+        )),
+        CanonDatum::Cstring(s) => {
+            // A `cstring`-element range: store the NUL-terminated buffer pointer.
+            let mut bytes = s.into_bytes();
+            bytes.push(0);
+            Ok(types_datum::datum::Datum::from_usize(
+                materialize_bound_image(mcx, &bytes)? as usize,
+            ))
+        }
         _ => panic!(
-            "range bound: by-reference range element requires the rangetypes \
-             by-reference carrier (RangeBound.val is the bare element word)"
+            "range bound: unexpected canonical element kind (Composite/Expanded/\
+             Internal) from an element I/O function"
         ),
     }
+}
+
+/// Copy a by-reference bound's image into `mcx` as an 8-byte-aligned block and
+/// return its base pointer (`PointerGetDatum`). The 8-byte alignment matches
+/// what `palloc` hands a detoasted datum — what the element type's by-reference
+/// accessors and `datum_write`'s `varatt_*` reads rely on.
+fn materialize_bound_image<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<*const u8> {
+    use allocator_api2::alloc::Allocator;
+    use core::alloc::Layout;
+    mcx::check_alloc_size(image.len())?;
+    let layout = Layout::from_size_align(image.len().max(1), 8)
+        .expect("valid range bound image layout");
+    let block = mcx.allocate(layout).map_err(|_| mcx.oom(image.len()))?;
+    let dst = block.as_ptr() as *mut u8;
+    // SAFETY: `dst` heads a freshly allocated image.len()-byte region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(image.as_ptr(), dst, image.len());
+    }
+    Ok(dst as *const u8)
 }
 
 /// `RANGE_HAS_LBOUND(flags)` (rangetypes.h:48).
@@ -186,28 +222,34 @@ pub fn range_in<'mcx>(
         // type's text input function is resolved by its OID (`cache.typiofunc`)
         // and run, raising on error rather than returning the soft-error `false`
         // that would `PG_RETURN_NULL`. The seam yields the element value as the
-        // canonical `Datum`; the `RangeBound.val` carrier is the bare element
-        // word, so collapse the by-value arm (a by-reference range element is
-        // the rangetypes by-ref carrier follow-on, not on this path).
-        lower.val = canon_to_bound_word(fmgr_seams::input_function_call::call(
+        // canonical `Datum`; `canon_to_bound_word` lowers it to the bare element
+        // word the `RangeBound.val` carrier holds — materializing a by-reference
+        // element's varlena image into `mcx` and storing its pointer.
+        lower.val = canon_to_bound_word(
             mcx,
-            cache.typiofunc,
-            Some(lbound_str.as_str()),
-            cache.typioparam,
-            _typmod,
-        )?);
+            fmgr_seams::input_function_call::call(
+                mcx,
+                cache.typiofunc,
+                Some(lbound_str.as_str()),
+                cache.typioparam,
+                _typmod,
+            )?,
+        )?;
     }
     if range_has_ubound(flags) {
         let ubound_str = ubound_str.expect("RANGE_HAS_UBOUND implies a parsed upper bound string");
         // C: InputFunctionCallSafe(&cache->typioproc, ubound_str,
         //                          cache->typioparam, typmod, escontext, &upper.val)
-        upper.val = canon_to_bound_word(fmgr_seams::input_function_call::call(
+        upper.val = canon_to_bound_word(
             mcx,
-            cache.typiofunc,
-            Some(ubound_str.as_str()),
-            cache.typioparam,
-            _typmod,
-        )?);
+            fmgr_seams::input_function_call::call(
+                mcx,
+                cache.typiofunc,
+                Some(ubound_str.as_str()),
+                cache.typioparam,
+                _typmod,
+            )?,
+        )?;
     }
 
     lower.infinite = flags & RANGE_LB_INF != 0;
@@ -252,7 +294,7 @@ pub fn range_out<'mcx>(
         let bytes = fmgr_seams::oid_output_function_call::call(
             mcx,
             cache.typiofunc,
-            &datum_word_to_io_value(lower.val),
+            &crate::range_bounds_compare::elem_word_to_canon(mcx, &cache.typcache, lower.val)?,
         )?;
         Some(io_bytes_to_string(&bytes))
     } else {
@@ -263,7 +305,7 @@ pub fn range_out<'mcx>(
         let bytes = fmgr_seams::oid_output_function_call::call(
             mcx,
             cache.typiofunc,
-            &datum_word_to_io_value(upper.val),
+            &crate::range_bounds_compare::elem_word_to_canon(mcx, &cache.typcache, upper.val)?,
         )?;
         Some(io_bytes_to_string(&bytes))
     } else {
@@ -384,16 +426,22 @@ pub fn range_send<'mcx>(
         // The seam resolves the element send function by OID and returns the
         // `bytea` payload with the varlena header already stripped (so its
         // length is the C `VARSIZE - VARHDRSZ` and the slice is `VARDATA`).
-        let payload =
-            fmgr_seams::oid_send_function_call::call(mcx, cache.typiofunc, &datum_word_to_io_value(lower.val))?;
+        let payload = fmgr_seams::oid_send_function_call::call(
+            mcx,
+            cache.typiofunc,
+            &crate::range_bounds_compare::elem_word_to_canon(mcx, &cache.typcache, lower.val)?,
+        )?;
         buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         buf.extend_from_slice(&payload);
     }
 
     if range_has_ubound(flags) {
         // C: same as above for upper.val
-        let payload =
-            fmgr_seams::oid_send_function_call::call(mcx, cache.typiofunc, &datum_word_to_io_value(upper.val))?;
+        let payload = fmgr_seams::oid_send_function_call::call(
+            mcx,
+            cache.typiofunc,
+            &crate::range_bounds_compare::elem_word_to_canon(mcx, &cache.typcache, upper.val)?,
+        )?;
         buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         buf.extend_from_slice(&payload);
     }
@@ -746,20 +794,6 @@ fn strncasecmp_prefix(haystack: &[u8], lit: &[u8]) -> bool {
 fn malformed_literal(string: &str) -> PgError {
     PgError::error(format!("malformed range literal: \"{string}\""))
         .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
-}
-
-/// Cross a deserialized bound `Datum` (the bare element-value word, as
-/// `range_deserialize`/`fetch_att` produce it) to the by-OID I/O seam's owned
-/// per-attribute value model. The word is a scalar for by-value element types
-/// or a pointer (into the range object) for by-reference ones, exactly as C's
-/// `Datum` carries it into `OutputFunctionCall`/`SendFunctionCall`; either way
-/// it crosses as the raw by-value word the owner re-interprets through the
-/// resolved `FmgrInfo`.
-#[inline]
-fn datum_word_to_io_value(
-    val: types_datum::datum::Datum,
-) -> types_tuple::backend_access_common_heaptuple::Datum<'static> {
-    types_tuple::backend_access_common_heaptuple::Datum::ByVal(val.as_usize())
 }
 
 /// Decode the element type's text output bytes (the NUL-excluded `char *` image

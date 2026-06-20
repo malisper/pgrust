@@ -539,6 +539,16 @@ mod tests {
                 Ok(Datum::from_i32((a.as_i32()).cmp(&b.as_i32()) as i32))
             });
         }
+        // `range_cmp_bounds`/`range_cmp_bound_values` now compare element bounds
+        // through the by-reference-capable `function_call2_coll_datum` lane (the
+        // by-ref element fix); the int4 element is by-value so the canonical args
+        // carry the bare word — three-way compare them (btint4cmp).
+        if !fs::function_call2_coll_datum::is_installed() {
+            fs::function_call2_coll_datum::set(|_mcx, _fid, _coll, a, b| {
+                let r = (a.as_usize() as i32).cmp(&(b.as_usize() as i32)) as i32;
+                Ok(types_tuple::backend_access_common_heaptuple::Datum::from_usize(r as usize))
+            });
+        }
         register_rangetypes_builtins();
     }
 

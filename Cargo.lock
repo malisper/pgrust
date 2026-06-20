@@ -19752,6 +19752,7 @@ dependencies = [
  "types-error",
  "types-fmgr",
  "types-rangetypes",
+ "types-tuple",
 ]
 
 [[package]]

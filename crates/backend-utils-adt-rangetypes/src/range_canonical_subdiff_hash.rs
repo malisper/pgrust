@@ -21,7 +21,9 @@ use types_rangetypes::{
 
 use backend_utils_adt_numeric_seams::numeric_subdiff;
 use backend_utils_cache_typcache_seams::lookup_range_elem_hash_proc;
-use backend_utils_fmgr_fmgr_seams::{function_call1_coll, function_call2_coll};
+use backend_utils_fmgr_fmgr_seams::{
+    function_call1_coll_datum, function_call2_coll, function_call2_coll_datum,
+};
 use common_hashfn_seams::{hash_bytes_uint32, hash_bytes_uint32_extended};
 
 use crate::range_bounds_compare::range_cmp_bounds;
@@ -306,15 +308,27 @@ pub fn hash_range(typcache: &TypeCacheEntry, r: RangeTypeP<'_>) -> PgResult<u32>
         lookup_range_elem_hash_proc::call(scache.type_id, false)?
     };
 
-    // Apply the hash function to each bound.
+    // Apply the hash function to each bound. A by-reference element subtype
+    // (numeric/text/...) carries its bound on the `ref_args` lane, so cross the
+    // canonical `Datum` (`*_coll_datum`); the bare-word seam left the referent
+    // empty ("by-ref arg missing from by-ref lane"). `function_call1_coll` over a
+    // by-value bare word stays equivalent for by-value subtypes.
     let lower_hash = if range_has_lbound(flags) {
-        function_call1_coll::call(hash_proc_oid, typcache.rng_collation, lower.val)?.as_u32()
+        let scratch = mcx::MemoryContext::new_bump("hash_range lower");
+        let m = scratch.mcx();
+        let v = crate::range_bounds_compare::elem_word_to_canon(m, typcache, lower.val)?;
+        let r = function_call1_coll_datum::call(m, hash_proc_oid, typcache.rng_collation, v)?;
+        r.as_u32()
     } else {
         0
     };
 
     let upper_hash = if range_has_ubound(flags) {
-        function_call1_coll::call(hash_proc_oid, typcache.rng_collation, upper.val)?.as_u32()
+        let scratch = mcx::MemoryContext::new_bump("hash_range upper");
+        let m = scratch.mcx();
+        let v = crate::range_bounds_compare::elem_word_to_canon(m, typcache, upper.val)?;
+        let r = function_call1_coll_datum::call(m, hash_proc_oid, typcache.rng_collation, v)?;
+        r.as_u32()
     } else {
         0
     };
@@ -350,20 +364,41 @@ pub fn hash_range_extended(
         lookup_range_elem_hash_proc::call(scache.type_id, true)?
     };
 
-    // The seed crosses as a `Datum` to the element's extended hash function
-    // (C: `FunctionCall2Coll(.., lower.val, seed)`).
-    let seed_datum = Datum::from_i64(seed as i64);
+    // The seed crosses as a by-value `Datum` to the element's extended hash
+    // function (C: `FunctionCall2Coll(.., lower.val, seed)`). The bound element
+    // (arg 0) must ride the canonical `Datum` lane so a by-reference subtype
+    // reaches the function on the `ref_args` side channel; the seed (arg 1) stays
+    // a by-value word.
+    let seed_canon = types_tuple::backend_access_common_heaptuple::Datum::from_usize(seed as usize);
 
     let lower_hash = if range_has_lbound(flags) {
-        function_call2_coll::call(hash_proc_oid, typcache.rng_collation, lower.val, seed_datum)?
-            .as_u64()
+        let scratch = mcx::MemoryContext::new_bump("hash_range_extended lower");
+        let m = scratch.mcx();
+        let v = crate::range_bounds_compare::elem_word_to_canon(m, typcache, lower.val)?;
+        let r = function_call2_coll_datum::call(
+            m,
+            hash_proc_oid,
+            typcache.rng_collation,
+            v,
+            seed_canon.clone(),
+        )?;
+        r.as_u64()
     } else {
         0
     };
 
     let upper_hash = if range_has_ubound(flags) {
-        function_call2_coll::call(hash_proc_oid, typcache.rng_collation, upper.val, seed_datum)?
-            .as_u64()
+        let scratch = mcx::MemoryContext::new_bump("hash_range_extended upper");
+        let m = scratch.mcx();
+        let v = crate::range_bounds_compare::elem_word_to_canon(m, typcache, upper.val)?;
+        let r = function_call2_coll_datum::call(
+            m,
+            hash_proc_oid,
+            typcache.rng_collation,
+            v,
+            seed_canon.clone(),
+        )?;
+        r.as_u64()
     } else {
         0
     };

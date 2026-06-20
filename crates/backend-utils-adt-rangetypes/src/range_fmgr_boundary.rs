@@ -351,6 +351,32 @@ pub fn range_constructor3<'mcx>(
     Ok(return_range_p(fcinfo, range))
 }
 
+/// `PG_RETURN_DATUM(bound.val)` for a range *element* result (`range_lower`/
+/// `range_upper`). C returns the element `Datum` directly: for a by-value
+/// subtype the bare word; for a by-reference subtype a `Pointer` to the element
+/// image, which on the owned fmgr boundary must instead ride the `ref_result`
+/// side channel as a `RefPayload::Varlena` (a bare pointer word would dangle and
+/// the caller's `ref_out_to_datum` would mis-read it). Reuses the cmp lane's
+/// `elem_word_to_canon` (header-ful image) so a packed bound un-packs correctly.
+fn return_elem<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &mut FunctionCallInfoBaseData,
+    typcache: &types_cache::typcache::TypeCacheEntry,
+    val: Datum,
+) -> PgResult<Datum> {
+    let canon = crate::range_bounds_compare::elem_word_to_canon(mcx, typcache, val)?;
+    match canon {
+        types_tuple::backend_access_common_heaptuple::Datum::ByVal(w) => Ok(Datum::from_usize(w)),
+        types_tuple::backend_access_common_heaptuple::Datum::ByRef(b) => {
+            fcinfo.set_ref_result(types_fmgr::RefPayload::Varlena(b.as_slice().to_vec()));
+            Ok(Datum::null())
+        }
+        // A range element is only ever by-value or a varlena/fixed-len by-ref
+        // (the `ByRef` arm above); the other canonical kinds never arise here.
+        other => panic!("range element result: unexpected canonical kind {other:?}"),
+    }
+}
+
 /// `range_lower(PG_FUNCTION_ARGS)` (rangetypes.c:448).
 pub fn range_lower<'mcx>(
     mcx: Mcx<'mcx>,
@@ -364,7 +390,7 @@ pub fn range_lower<'mcx>(
     if empty || lower.infinite {
         return Ok(return_null(fcinfo));
     }
-    Ok(lower.val)
+    return_elem(mcx, fcinfo, &typcache, lower.val)
 }
 
 /// `range_upper(PG_FUNCTION_ARGS)` (rangetypes.c:469).
@@ -379,7 +405,7 @@ pub fn range_upper<'mcx>(
     if empty || upper.infinite {
         return Ok(return_null(fcinfo));
     }
-    Ok(upper.val)
+    return_elem(mcx, fcinfo, &typcache, upper.val)
 }
 
 /// `range_empty(PG_FUNCTION_ARGS)` (rangetypes.c:493).
@@ -442,8 +468,13 @@ pub fn range_contains_elem<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
     let r = getarg_range_p(mcx, fcinfo, 0)?;
-    let val = getarg_datum(fcinfo, 1);
     let typcache = range_get_typcache(range_type_get_oid(r))?;
+    // C: `val = PG_GETARG_DATUM(1)` — for a by-reference element subtype that
+    // word is a `Pointer` to the element image; on the owned fmgr boundary the
+    // referent rides the `ref_args` side channel, so stage it the same way the
+    // range constructors stage their element args (materializing the by-ref
+    // image into `mcx` and handing back its pointer word).
+    let val = stage_elem_arg(mcx, fcinfo, 1, elem_typbyval(&typcache))?;
     Ok(Datum::from_bool(range_contains_elem_internal(&typcache, r, val)?))
 }
 
@@ -452,9 +483,11 @@ pub fn elem_contained_by_range<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
-    let val = getarg_datum(fcinfo, 0);
     let r = getarg_range_p(mcx, fcinfo, 1)?;
     let typcache = range_get_typcache(range_type_get_oid(r))?;
+    // C: `val = PG_GETARG_DATUM(0)` — the element is arg 0; stage its by-ref
+    // referent off the `ref_args` lane (see `range_contains_elem`).
+    let val = stage_elem_arg(mcx, fcinfo, 0, elem_typbyval(&typcache))?;
     Ok(Datum::from_bool(range_contains_elem_internal(&typcache, r, val)?))
 }
 
