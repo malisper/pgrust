@@ -428,6 +428,12 @@ pub struct PlannedStmt<'mcx> {
     /// whether a syscache invalidation should drop the cached plan. `None` = the
     /// C `NIL`.
     pub invalItems: Option<PgVec<'mcx, crate::nodeindexscan::PlanInvalItem>>,
+    /// `List *partPruneInfos` — `PartitionPruneInfo` plan-data carriers for the
+    /// query's Append/MergeAppend run-time pruning (`glob->partPruneInfos`,
+    /// copied by `standard_planner`). `InitPlan` installs this into
+    /// `es_part_prune_infos`. Empty = the C `NIL`. The carrier is `'static`
+    /// owned plan data, so it is a plain `Vec` (not arena-bound).
+    pub partPruneInfos: alloc::vec::Vec<crate::partprune_carrier::PartitionPruneInfo>,
 }
 
 impl<'mcx> PlannedStmt<'mcx> {
@@ -491,6 +497,7 @@ impl<'mcx> PlannedStmt<'mcx> {
             transientPlan: false,
             dependsOnRole: false,
             invalItems: None,
+            partPruneInfos: alloc::vec::Vec::new(),
         })
     }
 }
@@ -614,6 +621,7 @@ impl PlannedStmt<'_> {
             transientPlan: self.transientPlan,
             dependsOnRole: self.dependsOnRole,
             invalItems,
+            partPruneInfos: self.partPruneInfos.clone(),
         })
     }
 }

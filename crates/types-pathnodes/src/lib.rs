@@ -633,8 +633,10 @@ pub struct PlannerGlobal {
     pub result_relations: Vec<i32>,
     /// `List *appendRelations`.
     pub append_relations: Vec<NodeId>,
-    /// `List *partPruneInfos`.
-    pub part_prune_infos: Vec<NodeId>,
+    /// `List *partPruneInfos` — `PartitionPruneInfo` plan-data carriers
+    /// registered by `set_plan_references`' `register_partpruneinfo`; the final
+    /// list is copied onto `PlannedStmt.partPruneInfos`.
+    pub part_prune_infos: Vec<types_nodes::partprune_carrier::PartitionPruneInfo>,
     /// `List *relationOids`.
     pub relation_oids: Vec<Oid>,
     /// `List *invalItems` — `PlanInvalItem`s recorded by
@@ -2454,9 +2456,11 @@ pub struct PlannerInfo {
     #[allow(non_snake_case)]
     pub partColsUpdated: bool,
     /// `List *partPruneInfos` — PartitionPruneInfos added in this query's plan
-    /// (opaque node handles).
+    /// by `make_partition_pruneinfo`. `Append/MergeAppend.part_prune_index`
+    /// indexes this list; `set_plan_references` moves the entries into
+    /// `glob->part_prune_infos`.
     #[allow(non_snake_case)]
-    pub partPruneInfos: Vec<NodeId>,
+    pub partPruneInfos: Vec<types_nodes::partprune_carrier::PartitionPruneInfo>,
 
     /* Arenas (owned-tree arena + handle model — not in the C struct). */
     /// Backing store for every [`RelOptInfo`]; a [`RelId`] indexes here.

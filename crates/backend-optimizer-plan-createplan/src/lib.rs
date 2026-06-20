@@ -6708,7 +6708,7 @@ fn create_append_plan<'mcx>(
             && append_has_prunable_partitioned_parent(root, rel_id, &subpaths)
         {
             part_prune_index =
-                partprune::make_partition_pruneinfo::call(root, rel_id, &subpaths, &prunequal)?;
+                partprune::make_partition_pruneinfo::call(run, root, rel_id, &subpaths, &prunequal)?;
         }
     }
 
@@ -6837,7 +6837,7 @@ fn create_merge_append_plan<'mcx>(
             && append_has_prunable_partitioned_parent(root, rel_id, &subpaths)
         {
             part_prune_index =
-                partprune::make_partition_pruneinfo::call(root, rel_id, &subpaths, &prunequal)?;
+                partprune::make_partition_pruneinfo::call(run, root, rel_id, &subpaths, &prunequal)?;
         }
     }
 

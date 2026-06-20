@@ -103,6 +103,7 @@ pub mod rawnodes;
 /// post-analysis [`primnodes::Expr`] enum.
 pub mod rawexprnodes;
 pub mod partition;
+pub mod partprune_carrier;
 pub mod pathnodes;
 pub mod portalcmds;
 pub mod planstate;

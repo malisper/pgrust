@@ -17,10 +17,19 @@
 //! (they are plan-data only, never copyObject/equal/out-walked, so no Node
 //! registration is required).
 //!
-//! Deferred to a follow-on lane: run-time/executor pruning (PARTTARGET_INITIAL /
-//! PARTTARGET_EXEC, Param-bearing quals, the `get_matching_partitions` seam body
-//! over a live ExprContext), and the `make_partition_pruneinfo` PlannedStmt leg
-//! that wires Append/MergeAppend run-time pruning.
+//! Run-time pruning planner leg (this lane): `make_partition_pruneinfo` /
+//! `make_partitionedrel_pruneinfo` build the `PartitionPruneInfo` plan-data
+//! carrier (`types_nodes::partprune_carrier`) for Append/MergeAppend, generating
+//! INITIAL/EXEC pruning steps (`gen_partprune_steps` now honors all three
+//! `PartClauseTarget` values, with `pull_exec_paramids` /
+//! `get_partkey_exec_paramids`). The carrier is appended to
+//! `root.partPruneInfos`; `set_plan_references`' `register_partpruneinfo` moves
+//! it onto `glob.part_prune_infos` and the `PlannedStmt`.
+//!
+//! Deferred to a follow-on lane: the executor-side run-time kernel evaluation
+//! (`get_matching_partitions` seam body over a live `ExprContext`, the
+//! `partkey_datum_from_expr` `ExprState` leg) — i.e. actually *executing* the
+//! exec/initial steps at scan time.
 
 extern crate alloc;
 
@@ -111,10 +120,16 @@ enum PartClauseMatchStatus {
     Unsupported,
 }
 
-/// `PartClauseTarget` (partprune.c). This lane only generates PLANNER steps.
+/// `PartClauseTarget` (partprune.c) — what kind of pruning steps to generate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PartClauseTarget {
+    /// `PARTTARGET_PLANNER` — prune during planning (immutable clauses only).
     Planner,
+    /// `PARTTARGET_INITIAL` — executor startup pruning (any allowable clause
+    /// except ones containing PARAM_EXEC Params).
+    Initial,
+    /// `PARTTARGET_EXEC` — executor per-scan pruning (any allowable clause).
+    Exec,
 }
 
 /// `PartitionPruneCombineOp` (plannodes.h).
@@ -221,13 +236,481 @@ fn bms_add_range(set: &mut Bitmapset, lo: i32, hi: i32) {
     }
 }
 
+/// `pull_exec_paramids(expr)` (partprune.c:2620) — collect the `paramid`s of all
+/// `PARAM_EXEC` Params anywhere in `expr`. Faithfully walks the whole expression
+/// tree via `expression_tree_walker` over a transient `Node` wrapper (same model
+/// as var.c's `pull_varnos`).
+fn pull_exec_paramids(expr: &Expr) -> Bitmapset {
+    use backend_nodes_core::node_walker::{expression_tree_walker, node_expr_wrapper};
+    use types_nodes::nodes::Node;
+
+    let scratch = mcx::MemoryContext::new("pull_exec_paramids");
+    let mut result = Bitmapset::new();
+    let wrapped = node_expr_wrapper(expr, scratch.mcx());
+    pull_exec_paramids_walker(&wrapped, &mut result);
+    return result;
+
+    /// `pull_exec_paramids_walker` (partprune.c:2633).
+    fn pull_exec_paramids_walker(node: &Node, context: &mut Bitmapset) -> bool {
+        if let Some(Expr::Param(param)) = node.as_expr() {
+            if param.paramkind == types_nodes::primnodes::PARAM_EXEC {
+                context.insert(param.paramid);
+            }
+            return false;
+        }
+        expression_tree_walker(node, &mut |n: &Node| pull_exec_paramids_walker(n, context))
+    }
+}
+
 // =============================================================================
-// init_seams — install prune_append_rel_partitions
+// make_partition_pruneinfo / make_partitionedrel_pruneinfo (partprune.c:224)
+// =============================================================================
+
+use types_nodes::partprune_carrier::{
+    PartitionPruneCombineOp as CarrierCombineOp, PartitionPruneInfo as CarrierPruneInfo,
+    PartitionPruneStep as CarrierStep, PartitionPruneStepCombine as CarrierStepCombine,
+    PartitionPruneStepOp as CarrierStepOp, PartitionedRelPruneInfo as CarrierRelPruneInfo, RawBms,
+};
+
+use backend_optimizer_util_relnode::find_base_rel;
+use backend_optimizer_util_appendinfo::adjust_appendrel_attrs_multilevel;
+use backend_optimizer_util_appendinfo_seams::find_appinfos_by_relids;
+
+/// `IS_PARTITIONED_REL(rel)` (pathnodes.h macro): `rel->part_scheme != NULL`.
+#[inline]
+fn rel_is_partitioned(root: &PlannerInfo, rel: RelId) -> bool {
+    root.rel(rel).part_scheme.is_some()
+}
+
+/// Convert a partprune-core local pruning step to the plan-data carrier step.
+fn step_to_carrier(step: &PartitionPruneStep) -> CarrierStep {
+    match step {
+        PartitionPruneStep::Op(op) => CarrierStep::Op(CarrierStepOp {
+            step_id: op.step_id,
+            opstrategy: op.opstrategy,
+            exprs: op.exprs.clone(),
+            cmpfns: op.cmpfns.clone(),
+            nullkeys: ints_to_rawbms(&op.nullkeys),
+        }),
+        PartitionPruneStep::Combine(c) => CarrierStep::Combine(CarrierStepCombine {
+            step_id: c.step_id,
+            combine_op: match c.combine_op {
+                PartitionPruneCombineOp::Union => CarrierCombineOp::Union,
+                PartitionPruneCombineOp::Intersect => CarrierCombineOp::Intersect,
+            },
+            source_stepids: c.source_stepids.clone(),
+        }),
+    }
+}
+
+/// Pack a list of small non-negative ints into a `bitmapword[]` `RawBms`
+/// (`None`/empty == the C NULL set).
+fn ints_to_rawbms(ints: &[i32]) -> RawBms {
+    if ints.is_empty() {
+        return None;
+    }
+    let maxbit = *ints.iter().max().unwrap();
+    let bits_per_word = (core::mem::size_of::<types_nodes::bitmapset::bitmapword>() * 8) as i32;
+    let nwords = (maxbit / bits_per_word + 1) as usize;
+    let mut words = alloc::vec![0 as types_nodes::bitmapset::bitmapword; nwords];
+    for &i in ints {
+        let w = (i / bits_per_word) as usize;
+        let b = i % bits_per_word;
+        words[w] |= (1 as types_nodes::bitmapset::bitmapword) << b;
+    }
+    Some(words)
+}
+
+/// Pack a `Bitmapset` (BTreeSet) into a `RawBms`.
+fn bms_to_rawbms(set: &Bitmapset) -> RawBms {
+    let v: Vec<i32> = set.iter().copied().collect();
+    ints_to_rawbms(&v)
+}
+
+/// `add_part_relids(allpartrelids, partrelids)` (partprune.c:398). Add a
+/// newly-found partition hierarchy's RT-index set to the appropriate member of
+/// `allpartrelids`, keyed by the lowest set bit (the topmost parent).
+fn add_part_relids(allpartrelids: &mut Vec<Bitmapset>, partrelids: Bitmapset) {
+    // Lowest set bit = topmost parent.
+    let targetpart = *partrelids.iter().next().expect("add_part_relids: empty set");
+    for curr in allpartrelids.iter_mut() {
+        let currtarget = *curr.iter().next().expect("empty hierarchy set");
+        if targetpart == currtarget {
+            for m in partrelids.iter() {
+                curr.insert(*m);
+            }
+            return;
+        }
+    }
+    allpartrelids.push(partrelids);
+}
+
+/// `make_partition_pruneinfo(root, parentrel, subpaths, prunequal)`
+/// (partprune.c:224). Returns the 0-based index of the appended
+/// `PartitionPruneInfo` in `root.partPruneInfos`, or -1 if nothing was added.
+fn make_partition_pruneinfo<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    parentrel: RelId,
+    subpaths: &[types_pathnodes::PathId],
+    prunequal_ids: &[types_pathnodes::NodeId],
+) -> PgResult<i32> {
+    let mcx = run.mcx();
+
+    // Deref the prunequal clauses to owned Exprs once.
+    let prunequal: Vec<Expr> =
+        prunequal_ids.iter().map(|id| root.node(*id).clone()).collect();
+
+    let simple_rel_array_size = root.simple_rel_array_size;
+
+    // Scan subpaths to identify partition-child scans and their parents, and
+    // build relid_subplan_map (1-based; 0 = unfilled).
+    let mut allpartrelids: Vec<Bitmapset> = Vec::new();
+    let mut relid_subplan_map: Vec<i32> = alloc::vec![0; simple_rel_array_size as usize];
+
+    let mut i: i32 = 1;
+    for &pathid in subpaths {
+        let pathrel: RelId = root.path(pathid).base().parent;
+        // We don't consider partitioned joins here.
+        if root.rel(pathrel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL {
+            let mut prel = pathrel;
+            let mut partrelids: Bitmapset = Bitmapset::new();
+            // Traverse up to the topmost partitioned parent (stop at parentrel).
+            loop {
+                let prel_relid = root.rel(prel).relid;
+                debug_assert!((prel_relid as i32) < simple_rel_array_size);
+                let parent_relid = match &root.append_rel_array[prel_relid as usize] {
+                    Some(appinfo) => appinfo.parent_relid,
+                    None => break,
+                };
+                prel = find_base_rel(root, parent_relid as i32);
+                if !rel_is_partitioned(root, prel) {
+                    break; // reached a non-partitioned parent
+                }
+                partrelids.insert(root.rel(prel).relid as i32);
+                if prel == parentrel {
+                    break; // don't traverse above parentrel
+                }
+                if root.rel(prel).reloptkind != types_pathnodes::RELOPT_OTHER_MEMBER_REL {
+                    break;
+                }
+            }
+
+            if !partrelids.is_empty() {
+                add_part_relids(&mut allpartrelids, partrelids);
+                let pr = root.rel(pathrel).relid as usize;
+                debug_assert!(relid_subplan_map[pr] == 0); // no duplicates
+                relid_subplan_map[pr] = i;
+            }
+        }
+        i += 1;
+    }
+
+    // Build a PartitionedRelPruneInfo list for each topmost partitioned rel.
+    let mut prunerelinfos: Vec<Vec<CarrierRelPruneInfo>> = Vec::new();
+    let mut allmatchedsubplans: Bitmapset = Bitmapset::new();
+
+    for partrelids in &allpartrelids {
+        let mut matchedsubplans: Bitmapset = Bitmapset::new();
+        let pinfolist = make_partitionedrel_pruneinfo(
+            run,
+            root,
+            parentrel,
+            &prunequal,
+            partrelids,
+            &relid_subplan_map,
+            &mut matchedsubplans,
+            mcx,
+        )?;
+        if let Some(list) = pinfolist {
+            prunerelinfos.push(list);
+            for m in matchedsubplans.iter() {
+                allmatchedsubplans.insert(*m);
+            }
+        }
+    }
+
+    // If no hierarchy had useful run-time pruning quals, skip run-time pruning.
+    if prunerelinfos.is_empty() {
+        return Ok(-1);
+    }
+
+    // Build the result PartitionPruneInfo.
+    let relids = bms_to_rawbms(&relids_to_bitmapset(&root.rel(parentrel).relids));
+
+    // Subplans not matched to any hierarchy must never be pruned.
+    let other_subplans: RawBms = if (allmatchedsubplans.len() as usize) < subpaths.len() {
+        let mut other: Bitmapset = Bitmapset::new();
+        bms_add_range(&mut other, 0, subpaths.len() as i32 - 1);
+        for m in allmatchedsubplans.iter() {
+            other.remove(m);
+        }
+        bms_to_rawbms(&other)
+    } else {
+        None
+    };
+
+    let pruneinfo = CarrierPruneInfo {
+        relids,
+        prune_infos: prunerelinfos,
+        other_subplans,
+    };
+
+    root.partPruneInfos.push(pruneinfo);
+    Ok(root.partPruneInfos.len() as i32 - 1)
+}
+
+/// `make_partitionedrel_pruneinfo(...)` (partprune.c:445). Build the list of
+/// `PartitionedRelPruneInfo`s for one partition hierarchy, or `None` if no
+/// useful run-time pruning steps exist.
+#[allow(clippy::too_many_arguments)]
+fn make_partitionedrel_pruneinfo<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    parentrel: RelId,
+    prunequal: &[Expr],
+    partrelids: &Bitmapset,
+    relid_subplan_map: &[i32],
+    matchedsubplans: &mut Bitmapset,
+    mcx: Mcx<'mcx>,
+) -> PgResult<Option<Vec<CarrierRelPruneInfo>>> {
+    let simple_rel_array_size = root.simple_rel_array_size;
+    let mut relid_subpart_map: Vec<i32> = alloc::vec![0; simple_rel_array_size as usize];
+
+    // First pass: per partitioned rel, generate INITIAL/EXEC steps and discover
+    // whether any run-time pruning is needed.
+    struct PinfoBuild {
+        rtindex: u32,
+        initial_pruning_steps: Vec<CarrierStep>,
+        exec_pruning_steps: Vec<CarrierStep>,
+        execparamids: RawBms,
+    }
+    let mut pinfo_builds: Vec<PinfoBuild> = Vec::new();
+    let mut doruntimeprune = false;
+    let mut targetpart: Option<RelId> = None;
+    // The prunequal may be translated parent->child as we descend; carry it.
+    let mut cur_prunequal: Vec<Expr> = prunequal.to_vec();
+
+    let mut i: i32 = 1;
+    let rtis: Vec<i32> = partrelids.iter().copied().collect();
+    for &rti in &rtis {
+        let subpart = find_base_rel(root, rti);
+        debug_assert!(rti < simple_rel_array_size);
+        relid_subpart_map[rti as usize] = i;
+        i += 1;
+
+        // Translate the pruning qual for this partition.
+        let partprunequal: Vec<Expr> = match targetpart {
+            None => {
+                targetpart = Some(subpart);
+                // The prunequal is presented for 'parentrel'. If targetpart is a
+                // different rel, translate parent->target and update cur_prunequal.
+                let parent_relids = relids_to_bitmapset(&root.rel(parentrel).relids);
+                let sub_relids = relids_to_bitmapset(&root.rel(subpart).relids);
+                if parent_relids != sub_relids {
+                    let sub_rel_set = root.rel(subpart).relids.clone();
+                    let appinfos = find_appinfos_by_relids::call(root, &sub_rel_set)?;
+                    let mut translated: Vec<Expr> = Vec::with_capacity(cur_prunequal.len());
+                    for cl in core::mem::take(&mut cur_prunequal) {
+                        translated.push(
+                            backend_optimizer_util_appendinfo::adjust_appendrel_attrs(
+                                root, cl, &appinfos,
+                            )?,
+                        );
+                    }
+                    cur_prunequal = translated;
+                }
+                cur_prunequal.clone()
+            }
+            Some(tp) => {
+                // Sub-partitioned: translate from the target down to this child.
+                let mut translated: Vec<Expr> = Vec::with_capacity(cur_prunequal.len());
+                for cl in cur_prunequal.iter() {
+                    translated.push(adjust_appendrel_attrs_multilevel(
+                        root,
+                        cl.clone(),
+                        subpart,
+                        tp,
+                    )?);
+                }
+                translated
+            }
+        };
+
+        // gen_partprune_steps with PARTTARGET_INITIAL.
+        let inputs_initial = collect_prune_inputs_with_clauses(
+            run,
+            root,
+            subpart,
+            mcx,
+            Some(partprunequal.clone()),
+        )?;
+        let gctx_initial = gen_partprune_steps(&inputs_initial, PartClauseTarget::Initial)?;
+        if gctx_initial.contradictory {
+            // Shouldn't normally happen; disable run-time pruning to be safe.
+            return Ok(None);
+        }
+
+        // Startup steps only matter if there's a mutable op/arg.
+        let initial_pruning_steps: Vec<CarrierStep> =
+            if gctx_initial.has_mutable_op || gctx_initial.has_mutable_arg {
+                gctx_initial.steps.iter().map(step_to_carrier).collect()
+            } else {
+                Vec::new()
+            };
+
+        // exec pruning only if exec Params appear.
+        let mut exec_pruning_steps: Vec<CarrierStep> = Vec::new();
+        let mut execparamids: RawBms = None;
+        if gctx_initial.has_exec_param {
+            let inputs_exec = collect_prune_inputs_with_clauses(
+                run,
+                root,
+                subpart,
+                mcx,
+                Some(partprunequal.clone()),
+            )?;
+            let gctx_exec = gen_partprune_steps(&inputs_exec, PartClauseTarget::Exec)?;
+            if gctx_exec.contradictory {
+                return Ok(None);
+            }
+            // Detect which exec Params actually got used.
+            let paramids = get_partkey_exec_paramids(&gctx_exec.steps);
+            if !paramids.is_empty() {
+                exec_pruning_steps = gctx_exec.steps.iter().map(step_to_carrier).collect();
+                execparamids = bms_to_rawbms(&paramids);
+            }
+        }
+
+        if !initial_pruning_steps.is_empty() || !exec_pruning_steps.is_empty() {
+            doruntimeprune = true;
+        }
+
+        pinfo_builds.push(PinfoBuild {
+            rtindex: rti as u32,
+            initial_pruning_steps,
+            exec_pruning_steps,
+            execparamids,
+        });
+    }
+
+    if !doruntimeprune {
+        return Ok(None);
+    }
+
+    // Second pass: build the subplan/subpart/relid/leafpart maps.
+    let mut subplansfound: Bitmapset = Bitmapset::new();
+    let mut result: Vec<CarrierRelPruneInfo> = Vec::with_capacity(pinfo_builds.len());
+
+    for build in pinfo_builds {
+        let subpart = find_base_rel(root, build.rtindex as i32);
+        let nparts = root.rel(subpart).nparts;
+        let mut subplan_map: Vec<i32> = alloc::vec![-1; nparts as usize];
+        let mut subpart_map: Vec<i32> = alloc::vec![-1; nparts as usize];
+        let mut relid_map: Vec<Oid> = alloc::vec![0 as Oid; nparts as usize];
+        let mut leafpart_rti_map: Vec<i32> = alloc::vec![0; nparts as usize];
+        let mut present_parts: Bitmapset = Bitmapset::new();
+
+        let live_parts: Vec<i32> =
+            relids_to_bitmapset(&root.rel(subpart).live_parts).iter().copied().collect();
+        for p in live_parts {
+            let partrel = root.rel(subpart).part_rels[p as usize]
+                .expect("live part has no part_rel");
+            let partrel_relid = root.rel(partrel).relid as usize;
+            let subplanidx = relid_subplan_map[partrel_relid] - 1;
+            let subpartidx = relid_subpart_map[partrel_relid] - 1;
+            subplan_map[p as usize] = subplanidx;
+            subpart_map[p as usize] = subpartidx;
+            relid_map[p as usize] =
+                planner_rt_fetch(run, root, root.rel(partrel).relid).relid;
+
+            if subplanidx >= 0 {
+                present_parts.insert(p);
+                // Track leaf partitions (nparts == -1) for prunableRelids.
+                if root.rel(partrel).nparts == -1 {
+                    leafpart_rti_map[p as usize] = root.rel(partrel).relid as i32;
+                }
+                subplansfound.insert(subplanidx);
+            } else if subpartidx >= 0 {
+                present_parts.insert(p);
+            }
+        }
+
+        debug_assert!(!present_parts.is_empty());
+
+        result.push(CarrierRelPruneInfo {
+            rtindex: build.rtindex,
+            present_parts: bms_to_rawbms(&present_parts),
+            nparts,
+            subplan_map,
+            subpart_map,
+            leafpart_rti_map,
+            relid_map,
+            initial_pruning_steps: build.initial_pruning_steps,
+            exec_pruning_steps: build.exec_pruning_steps,
+            execparamids: build.execparamids,
+        });
+    }
+
+    *matchedsubplans = subplansfound;
+    Ok(Some(result))
+}
+
+/// `get_partkey_exec_paramids(steps)` (partprune.c:2654): collect the exec Param
+/// ids used in the Op steps' non-Const exprs.
+fn get_partkey_exec_paramids(steps: &[PartitionPruneStep]) -> Bitmapset {
+    let mut execparamids = Bitmapset::new();
+    for step in steps {
+        if let PartitionPruneStep::Op(op) = step {
+            for expr in &op.exprs {
+                if !matches!(expr, Expr::Const(_)) {
+                    for id in pull_exec_paramids(expr) {
+                        execparamids.insert(id);
+                    }
+                }
+            }
+        }
+    }
+    execparamids
+}
+
+/// Convert a `Relids` (planner bitmapset, `Option<Box<Bitmapset { words }>>`) to
+/// the crate-local `Bitmapset` (sorted set of set-bit indexes).
+fn relids_to_bitmapset(relids: &Relids) -> Bitmapset {
+    let mut set = Bitmapset::new();
+    if let Some(bms) = relids {
+        for (wi, &word) in bms.words.iter().enumerate() {
+            let mut w = word;
+            while w != 0 {
+                let b = w.trailing_zeros() as i32;
+                set.insert(wi as i32 * 64 + b);
+                w &= w - 1;
+            }
+        }
+    }
+    set
+}
+
+// =============================================================================
+// init_seams — install prune_append_rel_partitions + make_partition_pruneinfo
 // =============================================================================
 
 /// Install this unit's `partprune.c` seams.
 pub fn init_seams() {
     partprune_seams::prune_append_rel_partitions::set(prune_append_rel_partitions_seam);
+    partprune_seams::make_partition_pruneinfo::set(make_partition_pruneinfo_seam);
+}
+
+/// Seam adapter: `make_partition_pruneinfo(run, root, parentrel, subpaths,
+/// prunequal)`.
+fn make_partition_pruneinfo_seam<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    parentrel: RelId,
+    subpaths: &[types_pathnodes::PathId],
+    prunequal: &[types_pathnodes::NodeId],
+) -> PgResult<i32> {
+    make_partition_pruneinfo(run, root, parentrel, subpaths, prunequal)
 }
 
 /// Seam adapter: `prune_append_rel_partitions(run, root, rel)`.
@@ -338,6 +821,20 @@ fn collect_prune_inputs<'mcx>(
     rel: RelId,
     mcx: Mcx<'mcx>,
 ) -> PgResult<PruneInputs<'mcx>> {
+    collect_prune_inputs_with_clauses(run, root, rel, mcx, None)
+}
+
+/// Like [`collect_prune_inputs`], but if `override_clauses` is `Some`, use those
+/// owned clauses instead of the rel's `baserestrictinfo`. The run-time-pruning
+/// path (`make_partitionedrel_pruneinfo`) passes the per-partition-translated
+/// `partprunequal` here.
+fn collect_prune_inputs_with_clauses<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+    mcx: Mcx<'mcx>,
+    override_clauses: Option<Vec<Expr>>,
+) -> PgResult<PruneInputs<'mcx>> {
     // Read the RelOptInfo fields we need (immutable borrow, then drop it).
     let (relid_index, nparts, has_default, has_partition_qual, partexpr_ids, restrict_ids) = {
         let r = root.rel(rel);
@@ -356,13 +853,16 @@ fn collect_prune_inputs<'mcx>(
     // Deref the partexprs and restriction clauses out of the planner arenas to
     // owned Exprs.
     let partexprs: Vec<Expr> = partexpr_ids.iter().map(|id| root.node(*id).clone()).collect();
-    let clauses: Vec<Expr> = restrict_ids
-        .iter()
-        .map(|rid| {
-            let clause_id = root.rinfo(*rid).clause;
-            root.node(clause_id).clone()
-        })
-        .collect();
+    let clauses: Vec<Expr> = match override_clauses {
+        Some(c) => c,
+        None => restrict_ids
+            .iter()
+            .map(|rid| {
+                let clause_id = root.rinfo(*rid).clause;
+                root.node(clause_id).clone()
+            })
+            .collect(),
+    };
 
     // Resolve the relation Oid from the RTE.
     let reloid_oid = planner_rt_fetch(run, root, relid_index).relid;
@@ -1275,16 +1775,45 @@ fn match_opexpr_to_partition_key(
         return Ok(PartClauseMatchStatus::Unsupported);
     }
 
-    // Examine the other argument. Plan-time only supports Const comparisons.
+    // Examine the other argument. We postpone these tests until after matching
+    // the partkey and operator (partprune.c:2030).
+    //
+    // First, check for non-Const argument. (Immutable subexpressions are
+    // assumed already folded to a Const.)
     if !matches!(expr, Expr::Const(_)) {
-        // PARTTARGET_PLANNER: only Const args are usable.
-        return Ok(PartClauseMatchStatus::Unsupported);
+        // When pruning in the planner, only comparisons to constants are
+        // supported; has_mutable_arg/has_exec_param do not get set for PLANNER.
+        if context.target == PartClauseTarget::Planner {
+            return Ok(PartClauseMatchStatus::Unsupported);
+        }
+        // We can never prune using an expression that contains Vars.
+        if backend_optimizer_util_var_seams::contain_var_clause::call(&expr) {
+            return Ok(PartClauseMatchStatus::Unsupported);
+        }
+        // Reject anything containing a volatile function (stable is OK).
+        if backend_optimizer_path_small_seams::contain_volatile_functions_expr::call(&expr) {
+            return Ok(PartClauseMatchStatus::Unsupported);
+        }
+        // See if there are any exec Params. If so, usable only at per-scan time.
+        let paramids = pull_exec_paramids(&expr);
+        if !paramids.is_empty() {
+            context.has_exec_param = true;
+            if context.target != PartClauseTarget::Exec {
+                return Ok(PartClauseMatchStatus::Unsupported);
+            }
+        } else {
+            // It's potentially usable, but mutable.
+            context.has_mutable_arg = true;
+        }
     }
 
-    // Operator immutability. PLANNER cannot prune with mutable operators.
+    // Operator immutability (partprune.c:2087).
     if op_volatile(opno)? != PROVOLATILE_IMMUTABLE {
         context.has_mutable_op = true;
-        return Ok(PartClauseMatchStatus::Unsupported);
+        // When pruning in the planner, we cannot prune with mutable operators.
+        if context.target == PartClauseTarget::Planner {
+            return Ok(PartClauseMatchStatus::Unsupported);
+        }
     }
 
     // Resolve the comparison/hash support function.
@@ -1376,28 +1905,66 @@ fn match_saop_to_partition_key(
         return Ok(PartClauseMatchStatus::Unsupported);
     }
 
-    // Plan-time only supports a constant array argument.
+    // Examine the array argument to see if it's usable for pruning. This is
+    // identical to the logic for a plain OpExpr (partprune.c:2236).
     if !matches!(rightop, Expr::Const(_)) {
-        return Ok(PartClauseMatchStatus::Unsupported);
+        // PLANNER only supports comparisons to constants; has_mutable_arg /
+        // has_exec_param do not get set for PLANNER.
+        if context.target == PartClauseTarget::Planner {
+            return Ok(PartClauseMatchStatus::Unsupported);
+        }
+        // We can never prune using an expression that contains Vars.
+        if backend_optimizer_util_var_seams::contain_var_clause::call(rightop) {
+            return Ok(PartClauseMatchStatus::Unsupported);
+        }
+        // Reject anything containing a volatile function (stable is OK).
+        if backend_optimizer_path_small_seams::contain_volatile_functions_expr::call(rightop) {
+            return Ok(PartClauseMatchStatus::Unsupported);
+        }
+        // See if there are any exec Params. If so, usable only at per-scan time.
+        let paramids = pull_exec_paramids(rightop);
+        if !paramids.is_empty() {
+            context.has_exec_param = true;
+            if context.target != PartClauseTarget::Exec {
+                return Ok(PartClauseMatchStatus::Unsupported);
+            }
+        } else {
+            context.has_mutable_arg = true;
+        }
     }
 
+    // Operator immutability (partprune.c:2285).
     if op_volatile(saop_op)? != PROVOLATILE_IMMUTABLE {
         context.has_mutable_op = true;
-        return Ok(PartClauseMatchStatus::Unsupported);
+        if context.target == PartClauseTarget::Planner {
+            return Ok(PartClauseMatchStatus::Unsupported);
+        }
     }
 
-    // Deconstruct the constant array into per-element Const exprs.
-    let Expr::Const(arr) = rightop else {
-        return Ok(PartClauseMatchStatus::Unsupported);
-    };
-    if arr.constisnull {
-        return Ok(PartClauseMatchStatus::MatchContradict);
-    }
-
-    let elem_exprs = deconstruct_const_array(arr, saop.useOr)?;
-    let elem_exprs = match elem_exprs {
-        Some(e) => e,
-        None => return Ok(PartClauseMatchStatus::MatchContradict),
+    // Examine the contents of the array argument (partprune.c:2297).
+    let elem_exprs: Vec<Expr> = match rightop {
+        Expr::Const(arr) => {
+            // For a constant array, convert the elements to per-element Const
+            // nodes (excepting nulls).
+            if arr.constisnull {
+                return Ok(PartClauseMatchStatus::MatchContradict);
+            }
+            match deconstruct_const_array(arr, saop.useOr)? {
+                Some(e) => e,
+                None => return Ok(PartClauseMatchStatus::MatchContradict),
+            }
+        }
+        Expr::ArrayExpr(arrexpr) => {
+            // For a nested ArrayExpr we don't know how to flatten; give up.
+            if arrexpr.multidims {
+                return Ok(PartClauseMatchStatus::Unsupported);
+            }
+            arrexpr.elements.clone()
+        }
+        _ => {
+            // Give up on any other clause types.
+            return Ok(PartClauseMatchStatus::Unsupported);
+        }
     };
 
     // Build one OpExpr per element: leftop saop_op elem.

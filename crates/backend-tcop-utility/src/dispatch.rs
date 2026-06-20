@@ -753,6 +753,7 @@ pub fn process_utility_wrapper<'mcx, 'a>(
         transientPlan: false,
         dependsOnRole: false,
         invalItems: None,
+        partPruneInfos: Vec::new(),
     };
 
     // qc == NULL in C: a throwaway completion the subcommand never reports.

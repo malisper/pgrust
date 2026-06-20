@@ -586,6 +586,13 @@ fn standard_planner<'mcx>(
         }
     };
 
+    // result->partPruneInfos = glob->partPruneInfos; (planner.c:580). The glob
+    // list carries the `PartitionPruneInfo` carriers registered by
+    // `register_partpruneinfo` during set_plan_references.
+    let part_prune_infos: alloc::vec::Vec<
+        types_nodes::partprune_carrier::PartitionPruneInfo,
+    > = root.glob.as_ref().map(|g| g.part_prune_infos.clone()).unwrap_or_default();
+
     // if (glob->partition_directory != NULL)
     //     DestroyPartitionDirectory(glob->partition_directory); (planner.c:611)
     //
@@ -627,6 +634,7 @@ fn standard_planner<'mcx>(
         transientPlan: glob_transient,
         dependsOnRole: glob_depends_on_role,
         invalItems: inval_items,
+        partPruneInfos: part_prune_infos,
     };
 
     Ok(result)

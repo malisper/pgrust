@@ -41,7 +41,8 @@ seam_core::seam!(
     /// partprune-blocked memory note), so this currently panics when reached —
     /// the planner only reaches it for a partitioned rel with a non-empty
     /// prunequal.
-    pub fn make_partition_pruneinfo(
+    pub fn make_partition_pruneinfo<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut types_pathnodes::PlannerInfo,
         parentrel: types_pathnodes::RelId,
         subpaths: &[types_pathnodes::PathId],

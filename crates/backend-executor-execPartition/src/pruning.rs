@@ -4,7 +4,7 @@
 //! `ExecFindMatchingSubPlans`, `find_matching_subplans_recurse`.
 
 use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
-use types_core::primitive::{Index, Oid};
+use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use types_nodes::executor::EXEC_FLAG_EXPLAIN_GENERIC;
 use types_nodes::partition::{
@@ -26,104 +26,19 @@ use backend_utils_misc_stack_depth_seams as stack_depth_seams;
  *
  * `PartitionPruneInfo` / `PartitionedRelPruneInfo` (nodes/plannodes.h) and the
  * `PartitionPruneStep` family (also nodes/plannodes.h) are produced by the
- * (not-yet-ported) planner and stored by the executor as the type-erased
- * payload of the `Opaque` handles in `EState.es_part_prune_infos` and the
- * `PartitionedRelPruningData.{initial,exec}_pruning_steps` fields. We define
- * the trimmed real types here (the consuming unit's right to define a
- * neighbor's type early) and downcast the `Opaque` payload with a loud panic on
- * mismatch — exactly what the owning crate will do once it installs the real
- * producer.
+ * planner (`partprune.c` `make_partition_pruneinfo`) and stored by the executor
+ * as the type-erased payload of the `Opaque` handles in
+ * `EState.es_part_prune_infos` and the
+ * `PartitionedRelPruningData.{initial,exec}_pruning_steps` fields. The real
+ * types live in `types_nodes::partprune_carrier` (shared with the producing
+ * crate); we re-export them and downcast the `Opaque` payload with a loud panic
+ * on mismatch — exactly the C `lfirst_node()` cast.
  * ------------------------------------------------------------------------- */
 
-/// `PartitionPruneInfo` (nodes/plannodes.h), trimmed to the fields the executor
-/// reads. Produced by the (not-yet-ported) planner and stored as the
-/// type-erased payload of an `EState.es_part_prune_infos` `Opaque`. The struct
-/// is `'static` plan data — bitmapsets are carried as raw `bitmapword[]` (see
-/// [`RawBms`]) so the value satisfies `dyn Any`'s `'static` bound; readers wrap
-/// the words into a transient `Bitmapset` to call the `bms_*` owner seams.
-#[derive(Debug)]
-pub struct PartitionPruneInfo {
-    /// `Bitmapset *relids`.
-    pub relids: RawBms,
-    /// `List *prune_infos` — list of lists of `PartitionedRelPruneInfo`.
-    pub prune_infos: alloc::vec::Vec<alloc::vec::Vec<PartitionedRelPruneInfo>>,
-    /// `Bitmapset *other_subplans`.
-    pub other_subplans: RawBms,
-}
-
-/// `PartitionedRelPruneInfo` (nodes/plannodes.h), trimmed to the fields the
-/// executor reads. `'static` plan data; see [`PartitionPruneInfo`].
-#[derive(Debug)]
-pub struct PartitionedRelPruneInfo {
-    /// `Index rtindex` — RT index of partition rel for this level.
-    pub rtindex: Index,
-    /// `Bitmapset *present_parts`.
-    pub present_parts: RawBms,
-    /// `int nparts` — length of the following arrays.
-    pub nparts: i32,
-    /// `int *subplan_map` — subplan index by partition index, or -1.
-    pub subplan_map: alloc::vec::Vec<i32>,
-    /// `int *subpart_map` — subpart index by partition index, or -1.
-    pub subpart_map: alloc::vec::Vec<i32>,
-    /// `int *leafpart_rti_map` — RT index by partition index, or 0.
-    pub leafpart_rti_map: alloc::vec::Vec<i32>,
-    /// `Oid *relid_map` — relation OID by partition index, or 0.
-    pub relid_map: alloc::vec::Vec<Oid>,
-    /// `List *initial_pruning_steps` — `PartitionPruneStep` nodes (NIL if none).
-    pub initial_pruning_steps: alloc::vec::Vec<PartitionPruneStep>,
-    /// `List *exec_pruning_steps` — `PartitionPruneStep` nodes (NIL if none).
-    pub exec_pruning_steps: alloc::vec::Vec<PartitionPruneStep>,
-    /// `Bitmapset *execparamids`.
-    pub execparamids: RawBms,
-}
-
-/// A `Bitmapset *` carried as raw `bitmapword[]` plan data; `None` is the C
-/// NULL set. Wrapped into a transient `Bitmapset` in `mcx` for the `bms_*`
-/// seams (see [`raw_to_bms`]).
-pub type RawBms = Option<alloc::vec::Vec<types_nodes::bitmapset::bitmapword>>;
-
-/// `PartitionPruneStep` (nodes/plannodes.h) — abstract base; the concrete
-/// variants are `PartitionPruneStepOp` and `PartitionPruneStepCombine`. The
-/// `step_id` is carried by the base in C; here each variant carries it.
-#[derive(Clone, Debug)]
-pub enum PartitionPruneStep {
-    /// `PartitionPruneStepOp`.
-    Op(PartitionPruneStepOp),
-    /// `PartitionPruneStepCombine`.
-    Combine(PartitionPruneStepCombine),
-}
-
-impl PartitionPruneStep {
-    /// `step->step.step_id`.
-    fn step_id(&self) -> i32 {
-        match self {
-            PartitionPruneStep::Op(op) => op.step_id,
-            PartitionPruneStep::Combine(c) => c.step_id,
-        }
-    }
-}
-
-/// `PartitionPruneStepOp` (nodes/plannodes.h), trimmed to the fields
-/// `InitPartitionPruneContext` reads.
-#[derive(Clone, Debug)]
-pub struct PartitionPruneStepOp {
-    /// `step.step_id`.
-    pub step_id: i32,
-    /// `List *exprs` — lookup-key expressions (up to partnatts items).
-    pub exprs: alloc::vec::Vec<Expr>,
-    /// `Bitmapset *nullkeys` — partition-key offsets matched to IS NULL,
-    /// carried as the raw `bitmapword[]` (plan data; `None`/empty is the C
-    /// NULL set). Wrapped back into a `Bitmapset` at use to call `bms_is_member`
-    /// through the owner's seam.
-    pub nullkeys: Option<alloc::vec::Vec<types_nodes::bitmapset::bitmapword>>,
-}
-
-/// `PartitionPruneStepCombine` (nodes/plannodes.h), trimmed.
-#[derive(Clone, Debug)]
-pub struct PartitionPruneStepCombine {
-    /// `step.step_id`.
-    pub step_id: i32,
-}
+pub use types_nodes::partprune_carrier::{
+    PartitionPruneInfo, PartitionPruneStep, PartitionPruneStepCombine, PartitionPruneStepOp,
+    PartitionedRelPruneInfo, RawBms,
+};
 
 /// `PruneCxtStateIdx(partnatts, step_id, keyno)` (partprune.h) — index into the
 /// `stepcmpfuncs[]` / `exprstates[]` arrays.
