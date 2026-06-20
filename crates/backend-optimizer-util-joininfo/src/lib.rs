@@ -188,26 +188,10 @@ pub fn init_seams() {
         find_placeholder_info(root, &phv).expect("find_placeholder_info failed")
     });
 
-    // joinpath.c paraminfo_get_equal_hashops: a memoize cache-key expr is usable
-    // only if its type has BOTH a hash support proc and an equality operator. C:
-    // `typentry = lookup_type_cache(exprType((Node*) expr), TYPECACHE_HASH_PROC |
-    // TYPECACHE_EQ_OPR); if (!OidIsValid(typentry->hash_proc) ||
-    // !OidIsValid(typentry->eq_opr)) return false;` else use `typentry->eq_opr`.
-    // exprType is in backend-nodes-core; the (hash_proc, eq_opr) typcache
-    // projection is the already-installed `lookup_type_cache_hasheq` seam.
-    joinpath_seam::expr_hash_eq_operator::set(|root, node| {
-        let typid = backend_nodes_core::nodefuncs::expr_type(Some(root.node(node)))
-            .expect("expr_hash_eq_operator: exprType failed");
-        let (hash_proc, eq_opr) =
-            backend_optimizer_plan_init_subselect_ext_seams::lookup_type_cache_hasheq::call(typid);
-        if types_core::primitive::OidIsValid(hash_proc)
-            && types_core::primitive::OidIsValid(eq_opr)
-        {
-            Some(eq_opr)
-        } else {
-            None
-        }
-    });
+    // joinpath.c paraminfo_get_equal_hashops (expr_hash_eq_operator) is installed
+    // by its real owner var.c (backend-optimizer-util-vars init_seams); see
+    // seam_expr_hash_eq_operator there. Installing it here too double-installs the
+    // seam (panic "seam installed twice"), so the duplicate was removed.
 
     // placeholder.c — placeholder-seams (consumed by the parse-tree-aware
     // planner driver; prepjointree.c's pull-up code calls make_placeholder_expr,
