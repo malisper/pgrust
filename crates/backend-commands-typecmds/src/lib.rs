@@ -47,12 +47,12 @@ use backend_catalog_namespace::{
     RangeVarGetAndCheckCreationNamespace,
 };
 use backend_catalog_pg_cast::CastCreate;
-use backend_catalog_pg_enum::EnumValuesCreate;
+use backend_catalog_pg_enum::{AddEnumLabel, EnumValuesCreate, RenameEnumLabel};
 use backend_catalog_pg_range::RangeCreate;
 use backend_catalog_pg_type::{
     makeArrayTypeName, makeMultirangeTypeName, moveArrayTypeName, TypeCreate, TypeShellMake,
 };
-use backend_utils_error::ereport;
+use backend_utils_error::{ereport, ThrowErrorData};
 use mcx::{Mcx, MemoryContext};
 
 use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE, ACL_USAGE};
@@ -4543,6 +4543,101 @@ fn get_namespace_name_seam(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<String>>
 }
 
 // ---------------------------------------------------------------------------
+// checkEnumOwner   (typecmds.c:1303)
+// ---------------------------------------------------------------------------
+
+/// `checkEnumOwner(tup)` (typecmds.c:1303) — verify the type is an enum and the
+/// current user owns it. The C function reads `Form_pg_type` out of the syscache
+/// tuple; here we project it to the fixed-part [`FormData_pg_type`].
+fn checkEnumOwner(typ: &types_tuple::pg_type::FormData_pg_type) -> PgResult<()> {
+    /* Check that this is actually an enum */
+    if typ.typtype != TYPTYPE_ENUM {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("{} is not an enum", format_type_be(typ.oid)?))
+            .finish(errloc(1320, "checkEnumOwner"))
+            .map(|()| unreachable!());
+    }
+
+    /* Permission check: must own type */
+    if !backend_catalog_aclchk_seams::object_ownercheck::call(
+        TypeRelationId,
+        typ.oid,
+        get_user_id::call(),
+    )? {
+        backend_catalog_aclchk_seams::aclcheck_error_type::call(
+            types_acl::acl::ACLCHECK_NOT_OWNER,
+            typ.oid,
+        )?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AlterEnum   (typecmds.c:1336)
+// ---------------------------------------------------------------------------
+
+/// `AlterEnum(stmt)` (typecmds.c:1336) — ALTER TYPE ... ADD VALUE / RENAME VALUE.
+///
+/// Looks up the enum type by its qualified name, checks it is an enum the user
+/// owns, then either renames an existing label (`oldVal` set) or adds a new
+/// label (`AddEnumLabel`), placing it before/after a neighbor as requested.
+/// Finally fires the post-alter hook and returns the type's `ObjectAddress`.
+///
+/// `oldVal`/`newVal`/`newValNeighbor` arrive pre-decoded from the rich
+/// `AlterEnumStmt` (the seam adapter projects the `String` payloads).
+fn AlterEnum(
+    type_name: &[String],
+    old_val: Option<&str>,
+    new_val: &str,
+    new_val_neighbor: Option<&str>,
+    new_val_is_after: bool,
+    skip_if_new_val_exists: bool,
+) -> PgResult<ObjectAddress> {
+    /* Make a TypeName so we can use standard type lookup machinery */
+    let enum_type_oid = typename_type_id_from_names(type_name)?;
+
+    /* SearchSysCache1(TYPEOID, ...) + "cache lookup failed" on a missing row. */
+    let tup = read_type_form(enum_type_oid)?;
+
+    /* Check it's an enum and check user has permission to ALTER the enum */
+    checkEnumOwner(&tup)?;
+
+    if let Some(old_val) = old_val {
+        /* Rename an existing label */
+        RenameEnumLabel(enum_type_oid, old_val, new_val)?;
+    } else {
+        /* Add a new label */
+        //
+        // `AddEnumLabel` surfaces the IF NOT EXISTS "already exists, skipping"
+        // NOTICE as an `Err` carrying a sub-ERROR level (the pg_enum port's
+        // convention). In C this path emits the NOTICE and returns normally, so
+        // re-report any sub-ERROR diagnostic and continue; propagate real
+        // errors.
+        if let Err(e) = AddEnumLabel(
+            enum_type_oid,
+            new_val,
+            new_val_neighbor,
+            new_val_is_after,
+            skip_if_new_val_exists,
+        ) {
+            if e.level() >= ERROR {
+                return Err(e);
+            }
+            ThrowErrorData(e)?;
+        }
+    }
+
+    backend_catalog_objectaccess_seams::invoke_object_post_alter_hook::call(
+        TypeRelationId,
+        enum_type_oid,
+        0,
+    )?;
+
+    Ok(object_address_set_type(enum_type_oid))
+}
+
+// ---------------------------------------------------------------------------
 // init_seams
 // ---------------------------------------------------------------------------
 
@@ -4676,6 +4771,51 @@ pub fn init_seams() {
     // ProcessUtilitySlow `T_AlterTypeStmt` dispatch target (utility.c) — ALTER
     // TYPE … SET (…).
     backend_tcop_utility_out_seams::alter_type::set(alter_type_seam);
+
+    // ProcessUtilitySlow `T_AlterEnumStmt` dispatch target (utility.c) — ALTER
+    // TYPE … ADD VALUE / RENAME VALUE.
+    backend_tcop_utility_out_seams::alter_enum::set(alter_enum_seam);
+}
+
+/// Outward-seam adapter for `AlterEnum((AlterEnumStmt *) stmt)`
+/// (utility.c `ProcessUtilitySlow` `T_AlterEnumStmt`): project the rich
+/// `typeName` (List of String) and the `String` payloads, then run the ported
+/// [`AlterEnum`] body.
+fn alter_enum_seam<'mcx>(
+    _mcx: Mcx<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let aes = match stmt.as_alterenumstmt() {
+        Some(s) => s,
+        None => return Err(PgError::error("alter_enum_seam: statement is not an AlterEnumStmt")),
+    };
+
+    // typeName: List of String -> Vec<String>.
+    let mut type_name: Vec<String> = Vec::with_capacity(aes.typeName.len());
+    for n in aes.typeName.iter() {
+        match n.as_string() {
+            Some(s) => type_name.push(s.sval.as_str().to_string()),
+            None => return Err(PgError::error("ALTER TYPE: enum type name element is not a String")),
+        }
+    }
+
+    // C requires a newVal for both ADD VALUE and RENAME VALUE TO; the grammar
+    // guarantees it. `oldVal`/`newValNeighbor` are optional.
+    let new_val = match aes.newVal.as_ref() {
+        Some(s) => s.as_str().to_string(),
+        None => return Err(PgError::error("ALTER TYPE: enum statement missing new value")),
+    };
+    let old_val = aes.oldVal.as_ref().map(|s| s.as_str().to_string());
+    let neighbor = aes.newValNeighbor.as_ref().map(|s| s.as_str().to_string());
+
+    AlterEnum(
+        &type_name,
+        old_val.as_deref(),
+        &new_val,
+        neighbor.as_deref(),
+        aes.newValIsAfter,
+        aes.skipIfNewValExists,
+    )
 }
 
 /// Outward-seam adapter for `AlterType(stmt)` (utility.c `ProcessUtilitySlow`

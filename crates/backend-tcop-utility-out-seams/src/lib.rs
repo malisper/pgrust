@@ -800,6 +800,58 @@ seam!(
     pub fn alter_enum<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
 );
 seam!(
+    /// `CreateForeignDataWrapper(pstate, stmt)` (foreigncmds.c) — CREATE FOREIGN
+    /// DATA WRAPPER. The owner adapter decodes the rich `CreateFdwStmt` into the
+    /// flat `types_foreigncmds` form the ported body consumes.
+    pub fn create_foreign_data_wrapper<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: &mut ParseState<'mcx>,
+        stmt: &Node<'mcx>,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterForeignDataWrapper(pstate, stmt)` (foreigncmds.c) — ALTER FOREIGN
+    /// DATA WRAPPER.
+    pub fn alter_foreign_data_wrapper<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: &mut ParseState<'mcx>,
+        stmt: &Node<'mcx>,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `CreateForeignServer(stmt)` (foreigncmds.c) — CREATE SERVER.
+    pub fn create_foreign_server<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &Node<'mcx>,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterForeignServer(stmt)` (foreigncmds.c) — ALTER SERVER.
+    pub fn alter_foreign_server<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &Node<'mcx>,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `CreateUserMapping(stmt)` (foreigncmds.c) — CREATE USER MAPPING.
+    pub fn create_user_mapping<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &Node<'mcx>,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterUserMapping(stmt)` (foreigncmds.c) — ALTER USER MAPPING.
+    pub fn alter_user_mapping<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &Node<'mcx>,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `ImportForeignSchema(stmt)` (foreigncmds.c) — IMPORT FOREIGN SCHEMA.
+    /// Stashes its own commands; returns no address.
+    pub fn import_foreign_schema<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
+);
+seam!(
     /// `DefineDomain(pstate, stmt)` (typecmds.c) — CREATE DOMAIN.
     pub fn define_domain<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
 );

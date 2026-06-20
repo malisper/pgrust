@@ -561,14 +561,49 @@ fn process_utility_slow_body<'mcx>(
             command_collected = true;
         }
 
+        t if t == ntag::T_CreateFdwStmt => {
+            // CREATE FOREIGN DATA WRAPPER.
+            address = rt::create_foreign_data_wrapper::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterFdwStmt => {
+            // ALTER FOREIGN DATA WRAPPER.
+            address = rt::alter_foreign_data_wrapper::call(mcx, pstate, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateForeignServerStmt => {
+            // CREATE SERVER.
+            address = rt::create_foreign_server::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterForeignServerStmt => {
+            // ALTER SERVER.
+            address = rt::alter_foreign_server::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_CreateUserMappingStmt => {
+            // CREATE USER MAPPING.
+            address = rt::create_user_mapping::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_AlterUserMappingStmt => {
+            // ALTER USER MAPPING.
+            address = rt::alter_user_mapping::call(mcx, parsetree)?;
+        }
+
+        t if t == ntag::T_ImportForeignSchemaStmt => {
+            // IMPORT FOREIGN SCHEMA. Commands are stashed inside
+            // ImportForeignSchema; no address is returned.
+            rt::import_foreign_schema::call(mcx, parsetree)?;
+            command_collected = true;
+        }
+
         // The remaining DDL arms whose owner bodies are either unported or whose
         // ported bodies still lack the rich-node → owner-parse-form conversion
-        // layer: the FDW / server / user-mapping / import-foreign-schema family
-        // (foreigncmds bodies consume the `types_foreigncmds` flat forms), ALTER
-        // EXTENSION / ALTER EXTENSION … ADD|DROP, CREATE/ALTER/DROP SUBSCRIPTION,
-        // ALTER TABLE … SET TABLESPACE … (AlterTableMoveAll), and ALTER TYPE (enum)
-        // (AlterEnum). Route them to one documented seam-panic so the unported set
-        // is a single loud panic rather than many.
+        // layer: ALTER EXTENSION / ALTER EXTENSION … ADD|DROP,
+        // CREATE/ALTER/DROP SUBSCRIPTION, and ALTER TABLE … SET TABLESPACE …
+        // (AlterTableMoveAll). Route them to one documented seam-panic so the
+        // unported set is a single loud panic rather than many.
         _ => {
             address = rt::process_utility_slow_unported::call(mcx, pstate, parsetree, is_top_level)?;
         }

@@ -1554,8 +1554,341 @@ fn rolespec_oid(role: &RoleSpec<'_>, missing_ok: bool) -> PgResult<Oid> {
  * bridging idiom (cf. backend-commands-matview::init_seams).
  * ======================================================================== */
 
+/* =========================================================================
+ * ProcessUtilitySlow dispatch adapters: rich `types_nodes` -> flat
+ * `types_foreigncmds` converters + the dispatch arms.
+ *
+ * The parser produces the rich `types_nodes` statement nodes (option lists as
+ * `List *` of `DefElem`/`String`, role specs as `RoleSpec` nodes). The ported
+ * foreigncmds bodies consume the trimmed flat `types_foreigncmds` forms, which
+ * the C unit reads directly off the same parse node. These converters perform
+ * that projection — mirroring the field-by-field copy `transformGenericOptions`
+ * and the command drivers do — allocating the flat option set in the per-utility
+ * working `mcx`.
+ * ========================================================================= */
+
+use types_nodes::nodes::{ntag, Node as RichNode};
+
+/// Project one rich `DefElem`'s `arg` value node into the flat `DefElemArg`
+/// variant. Mirrors the C value-node switch (`nodeTag(arg)`): `Integer`,
+/// `Float`, `Boolean`, `String`, and a `List` of `String` nodes (the qualified
+/// name carried by HANDLER/VALIDATOR options and passed to `LookupFuncName`).
+fn rich_arg_to_flat<'mcx>(
+    mcx: Mcx<'mcx>,
+    arg: &RichNode<'mcx>,
+) -> PgResult<DefElemArg<'mcx>> {
+    Ok(match arg.node_tag() {
+        ntag::T_Integer => DefElemArg::Integer(arg.expect_integer().ival as i64),
+        ntag::T_Float => {
+            DefElemArg::Float(mcx::PgString::from_str_in(arg.expect_float().fval.as_str(), mcx)?)
+        }
+        ntag::T_Boolean => DefElemArg::Boolean(arg.expect_boolean().boolval),
+        ntag::T_String => {
+            DefElemArg::String(mcx::PgString::from_str_in(arg.expect_string().sval.as_str(), mcx)?)
+        }
+        ntag::T_List => {
+            let l = arg.expect_list();
+            let mut names = mcx::vec_with_capacity_in(mcx, l.len())?;
+            for e in l.iter() {
+                match e.as_string() {
+                    Some(s) => names.push(mcx::PgString::from_str_in(s.sval.as_str(), mcx)?),
+                    None => {
+                        return Err(PgError::error(
+                            "foreigncmds option: name-list element is not a String",
+                        ))
+                    }
+                }
+            }
+            DefElemArg::NameList(names)
+        }
+        other => {
+            return Err(PgError::error(format!(
+                "foreigncmds option: arg node tag {} not convertible",
+                other.0
+            )))
+        }
+    })
+}
+
+/// Project one rich `DefElem` node into the flat `types_foreigncmds::DefElem`.
+fn rich_defelem_to_flat<'mcx>(
+    mcx: Mcx<'mcx>,
+    de: &types_nodes::ddlnodes::DefElem<'mcx>,
+) -> PgResult<DefElem<'mcx>> {
+    let defname = match de.defname.as_ref() {
+        Some(s) => mcx::PgString::from_str_in(s.as_str(), mcx)?,
+        None => return Err(PgError::error("foreigncmds option: DefElem has no defname")),
+    };
+    let arg = match &de.arg {
+        None => None,
+        Some(a) => Some(mcx::alloc_in(mcx, rich_arg_to_flat(mcx, a)?)?),
+    };
+    let defaction = match de.defaction {
+        types_nodes::ddlnodes::DEFELEM_UNSPEC => DefElemAction::Unspec,
+        types_nodes::ddlnodes::DEFELEM_SET => DefElemAction::Set,
+        types_nodes::ddlnodes::DEFELEM_ADD => DefElemAction::Add,
+        types_nodes::ddlnodes::DEFELEM_DROP => DefElemAction::Drop,
+    };
+    Ok(DefElem { defname, arg, defaction })
+}
+
+/// Project a rich `List *` of `DefElem` nodes into a flat `Vec<DefElem>`.
+fn rich_options_to_flat<'mcx>(
+    mcx: Mcx<'mcx>,
+    options: &PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>>,
+) -> PgResult<PgVec<'mcx, DefElem<'mcx>>> {
+    let mut out = mcx::vec_with_capacity_in(mcx, options.len())?;
+    for n in options.iter() {
+        match n.as_defelem() {
+            Some(de) => out.push(rich_defelem_to_flat(mcx, de)?),
+            None => {
+                return Err(PgError::error(
+                    "foreigncmds option list: element is not a DefElem",
+                ))
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Project a rich `RoleSpec` node into the flat `parsenodes::RoleSpec` the USER
+/// MAPPING statements carry.
+fn rich_rolespec_to_flat<'mcx>(
+    mcx: Mcx<'mcx>,
+    role: &RichNode<'mcx>,
+) -> PgResult<RoleSpec<'mcx>> {
+    let rs = match role.as_rolespec() {
+        Some(r) => r,
+        None => return Err(PgError::error("USER MAPPING: user is not a RoleSpec")),
+    };
+    let rolename = match rs.rolename.as_ref() {
+        Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
+        None => None,
+    };
+    Ok(RoleSpec {
+        roletype: rs.roletype,
+        rolename,
+    })
+}
+
+/// Outward-seam adapter for `CreateForeignDataWrapper(pstate, stmt)`.
+fn create_fdw_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let s = match stmt.as_createfdwstmt() {
+        Some(s) => s,
+        None => return Err(PgError::error("create_fdw_seam: not a CreateFdwStmt")),
+    };
+    let fdwname = match s.fdwname.as_ref() {
+        Some(n) => mcx::PgString::from_str_in(n.as_str(), mcx)?,
+        None => return Err(PgError::error("CREATE FOREIGN DATA WRAPPER: missing name")),
+    };
+    let flat = CreateFdwStmt {
+        fdwname,
+        func_options: rich_options_to_flat(mcx, &s.func_options)?,
+        options: rich_options_to_flat(mcx, &s.options)?,
+    };
+    CreateForeignDataWrapper(mcx, &flat)
+}
+
+/// Outward-seam adapter for `AlterForeignDataWrapper(pstate, stmt)`.
+fn alter_fdw_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let s = match stmt.as_alterfdwstmt() {
+        Some(s) => s,
+        None => return Err(PgError::error("alter_fdw_seam: not an AlterFdwStmt")),
+    };
+    let fdwname = match s.fdwname.as_ref() {
+        Some(n) => mcx::PgString::from_str_in(n.as_str(), mcx)?,
+        None => return Err(PgError::error("ALTER FOREIGN DATA WRAPPER: missing name")),
+    };
+    let flat = AlterFdwStmt {
+        fdwname,
+        func_options: rich_options_to_flat(mcx, &s.func_options)?,
+        options: rich_options_to_flat(mcx, &s.options)?,
+    };
+    AlterForeignDataWrapper(mcx, &flat)
+}
+
+/// Outward-seam adapter for `CreateForeignServer(stmt)`.
+fn create_foreign_server_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let s = match stmt.as_createforeignserverstmt() {
+        Some(s) => s,
+        None => return Err(PgError::error("create_foreign_server_seam: not a CreateForeignServerStmt")),
+    };
+    let servername = match s.servername.as_ref() {
+        Some(n) => mcx::PgString::from_str_in(n.as_str(), mcx)?,
+        None => return Err(PgError::error("CREATE SERVER: missing name")),
+    };
+    let fdwname = match s.fdwname.as_ref() {
+        Some(n) => mcx::PgString::from_str_in(n.as_str(), mcx)?,
+        None => return Err(PgError::error("CREATE SERVER: missing FDW name")),
+    };
+    let servertype = match s.servertype.as_ref() {
+        Some(n) => Some(mcx::PgString::from_str_in(n.as_str(), mcx)?),
+        None => None,
+    };
+    let version = match s.version.as_ref() {
+        Some(n) => Some(mcx::PgString::from_str_in(n.as_str(), mcx)?),
+        None => None,
+    };
+    let flat = CreateForeignServerStmt {
+        servername,
+        servertype,
+        version,
+        fdwname,
+        if_not_exists: s.if_not_exists,
+        options: rich_options_to_flat(mcx, &s.options)?,
+    };
+    CreateForeignServer(mcx, &flat)
+}
+
+/// Outward-seam adapter for `AlterForeignServer(stmt)`.
+fn alter_foreign_server_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let s = match stmt.as_alterforeignserverstmt() {
+        Some(s) => s,
+        None => return Err(PgError::error("alter_foreign_server_seam: not an AlterForeignServerStmt")),
+    };
+    let servername = match s.servername.as_ref() {
+        Some(n) => mcx::PgString::from_str_in(n.as_str(), mcx)?,
+        None => return Err(PgError::error("ALTER SERVER: missing name")),
+    };
+    let version = match s.version.as_ref() {
+        Some(n) => Some(mcx::PgString::from_str_in(n.as_str(), mcx)?),
+        None => None,
+    };
+    let flat = AlterForeignServerStmt {
+        servername,
+        version,
+        options: rich_options_to_flat(mcx, &s.options)?,
+        has_version: s.has_version,
+    };
+    AlterForeignServer(mcx, &flat)
+}
+
+/// Outward-seam adapter for `CreateUserMapping(stmt)`.
+fn create_user_mapping_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let s = match stmt.as_createusermappingstmt() {
+        Some(s) => s,
+        None => return Err(PgError::error("create_user_mapping_seam: not a CreateUserMappingStmt")),
+    };
+    let user = match &s.user {
+        Some(u) => rich_rolespec_to_flat(mcx, u)?,
+        None => return Err(PgError::error("CREATE USER MAPPING: missing user")),
+    };
+    let servername = match s.servername.as_ref() {
+        Some(n) => mcx::PgString::from_str_in(n.as_str(), mcx)?,
+        None => return Err(PgError::error("CREATE USER MAPPING: missing server name")),
+    };
+    let flat = CreateUserMappingStmt {
+        user: mcx::alloc_in(mcx, user)?,
+        servername,
+        if_not_exists: s.if_not_exists,
+        options: rich_options_to_flat(mcx, &s.options)?,
+    };
+    CreateUserMapping(mcx, &flat)
+}
+
+/// Outward-seam adapter for `AlterUserMapping(stmt)`.
+fn alter_user_mapping_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let s = match stmt.as_alterusermappingstmt() {
+        Some(s) => s,
+        None => return Err(PgError::error("alter_user_mapping_seam: not an AlterUserMappingStmt")),
+    };
+    let user = match &s.user {
+        Some(u) => rich_rolespec_to_flat(mcx, u)?,
+        None => return Err(PgError::error("ALTER USER MAPPING: missing user")),
+    };
+    let servername = match s.servername.as_ref() {
+        Some(n) => mcx::PgString::from_str_in(n.as_str(), mcx)?,
+        None => return Err(PgError::error("ALTER USER MAPPING: missing server name")),
+    };
+    let flat = AlterUserMappingStmt {
+        user: mcx::alloc_in(mcx, user)?,
+        servername,
+        options: rich_options_to_flat(mcx, &s.options)?,
+    };
+    AlterUserMapping(mcx, &flat)
+}
+
+/// Outward-seam adapter for `ImportForeignSchema(stmt)`.
+fn import_foreign_schema_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<()> {
+    let s = match stmt.as_importforeignschemastmt() {
+        Some(s) => s,
+        None => return Err(PgError::error("import_foreign_schema_seam: not an ImportForeignSchemaStmt")),
+    };
+    let server_name = match s.server_name.as_ref() {
+        Some(n) => mcx::PgString::from_str_in(n.as_str(), mcx)?,
+        None => return Err(PgError::error("IMPORT FOREIGN SCHEMA: missing server name")),
+    };
+    let remote_schema = match s.remote_schema.as_ref() {
+        Some(n) => mcx::PgString::from_str_in(n.as_str(), mcx)?,
+        None => return Err(PgError::error("IMPORT FOREIGN SCHEMA: missing remote schema")),
+    };
+    let local_schema = match s.local_schema.as_ref() {
+        Some(n) => mcx::PgString::from_str_in(n.as_str(), mcx)?,
+        None => return Err(PgError::error("IMPORT FOREIGN SCHEMA: missing local schema")),
+    };
+    let list_type = match s.list_type {
+        types_nodes::ddlnodes::FDW_IMPORT_SCHEMA_ALL => {
+            types_foreigncmds::FDW_IMPORT_SCHEMA_ALL
+        }
+        types_nodes::ddlnodes::FDW_IMPORT_SCHEMA_LIMIT_TO => {
+            types_foreigncmds::FDW_IMPORT_SCHEMA_LIMIT_TO
+        }
+        types_nodes::ddlnodes::FDW_IMPORT_SCHEMA_EXCEPT => {
+            types_foreigncmds::FDW_IMPORT_SCHEMA_EXCEPT
+        }
+    };
+    // `table_list` is the C `List *` of `RangeVar`; the flat form keeps only the
+    // relation names `IsImportableForeignTable` compares.
+    let mut table_list = mcx::vec_with_capacity_in(mcx, s.table_list.len())?;
+    for n in s.table_list.iter() {
+        let rv = match n.as_rangevar() {
+            Some(rv) => rv,
+            None => return Err(PgError::error("IMPORT FOREIGN SCHEMA: table list element is not a RangeVar")),
+        };
+        let name = match rv.relname.as_ref() {
+            Some(nm) => mcx::PgString::from_str_in(nm.as_str(), mcx)?,
+            None => return Err(PgError::error("IMPORT FOREIGN SCHEMA: RangeVar has no relname")),
+        };
+        table_list.push(name);
+    }
+    let flat = ImportForeignSchemaStmt {
+        server_name,
+        remote_schema,
+        local_schema,
+        list_type,
+        table_list,
+        options: rich_options_to_flat(mcx, &s.options)?,
+    };
+    ImportForeignSchema(mcx, &flat)
+}
+
 /// Install this crate's inward seams: the two REASSIGN-OWNED owner-change
-/// entry points reached from `backend-catalog-pg-shdepend`.
+/// entry points reached from `backend-catalog-pg-shdepend`, plus the
+/// ProcessUtilitySlow FDW / server / user-mapping / import-foreign-schema
+/// dispatch arms.
 pub fn init_seams() {
     use backend_commands_foreigncmds_seams as s;
 
@@ -1567,6 +1900,15 @@ pub fn init_seams() {
         let ctx = mcx::MemoryContext::new("AlterForeignDataWrapperOwner_oid");
         AlterForeignDataWrapperOwner_oid(ctx.mcx(), fdw_id, new_owner_id)
     });
+
+    // ProcessUtilitySlow dispatch arms (utility.c).
+    backend_tcop_utility_out_seams::create_foreign_data_wrapper::set(create_fdw_seam);
+    backend_tcop_utility_out_seams::alter_foreign_data_wrapper::set(alter_fdw_seam);
+    backend_tcop_utility_out_seams::create_foreign_server::set(create_foreign_server_seam);
+    backend_tcop_utility_out_seams::alter_foreign_server::set(alter_foreign_server_seam);
+    backend_tcop_utility_out_seams::create_user_mapping::set(create_user_mapping_seam);
+    backend_tcop_utility_out_seams::alter_user_mapping::set(alter_user_mapping_seam);
+    backend_tcop_utility_out_seams::import_foreign_schema::set(import_foreign_schema_seam);
 }
 
 #[cfg(test)]

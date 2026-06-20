@@ -36,3 +36,8 @@ backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" 
 backend-foreign-foreign-seams = { path = "../backend-foreign-foreign-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-tcop-utility-fc-seams = { path = "../backend-tcop-utility-fc-seams" }
+
+# ProcessUtilitySlow out-seams: foreigncmds installs the FDW/server/user-mapping/
+# import-foreign-schema dispatch arms (rich types_nodes -> flat types_foreigncmds
+# decode adapters) here.
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
