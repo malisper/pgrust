@@ -966,7 +966,7 @@ mod tests {
 
         // jointree: FROM (RangeTblRef 1)
         let mut fromlist = mcx::PgVec::new_in(mcx);
-        fromlist.push(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 })).unwrap());
+        fromlist.push(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 }).unwrap()).unwrap());
         q.jointree = Some(
             mcx::alloc_in(
                 mcx,
@@ -1006,7 +1006,7 @@ mod tests {
         let mut q = simple_view_query(mcx);
         // Adding a DISTINCT clause makes it non-auto-updatable.
         q.distinctClause
-            .push(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 })).unwrap());
+            .push(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 }).unwrap()).unwrap());
         let detail = view_query_is_auto_updatable(&q, false).unwrap();
         assert_eq!(
             detail,

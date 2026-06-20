@@ -29,6 +29,9 @@ use crate::{
 /// Install the rewriteHandler.c seams this slice owns.
 pub fn init_seams() {
     backend_rewrite_rewritehandler_seams::build_column_default::set(seam_build_column_default);
+    backend_rewrite_rewritehandler_seams::build_generation_expression::set(
+        seam_build_generation_expression,
+    );
     backend_rewrite_rewritehandler_seams::expand_generated_columns_in_expr::set(
         seam_expand_generated_columns_in_expr,
     );
@@ -161,6 +164,15 @@ fn seam_build_column_default<'mcx>(
     attrno: i32,
 ) -> PgResult<Option<PgBox<'mcx, Expr>>> {
     build_column_default(mcx, &rel, attrno)
+}
+
+fn seam_build_generation_expression<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    attrno: i32,
+) -> PgResult<PgBox<'mcx, Expr>> {
+    let expr = crate::build_generation_expression(mcx, rel, attrno)?;
+    mcx::alloc_in(mcx, expr)
 }
 
 fn seam_expand_generated_columns_in_expr<'mcx>(

@@ -146,9 +146,8 @@ seam_core::seam!(
     /// returning `Ok(Some(tlist))`. Returns `Ok(None)` when the relation has no
     /// virtual generated columns (the common no-op path). **Owner: the
     /// relcache + rewriteHandler leg (`table_open` / `RelationGetDescr` /
-    /// `build_generation_expression`); seam-and-panics until it lands** — the
-    /// `build_generation_expression` rewriter is unported, and the bare loop in
-    /// the owner cannot prove the no-op without opening the relation.
+    /// `build_generation_expression`)** — installed by the prepjointree unit,
+    /// which calls `build_generation_expression` across the rewriteHandler seam.
     pub fn build_virtual_generated_columns_tlist<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut types_pathnodes::PlannerInfo,

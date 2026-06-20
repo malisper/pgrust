@@ -12955,6 +12955,7 @@ dependencies = [
  "backend-optimizer-util-placeholder-seams",
  "backend-optimizer-util-vars",
  "backend-rewrite-core",
+ "backend-rewrite-rewritehandler-seams",
  "backend-rewrite-rewritemanip-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-cache-relcache-seams",
@@ -12966,6 +12967,7 @@ dependencies = [
  "types-nodes",
  "types-pathnodes",
  "types-rel",
+ "types-tuple",
 ]
 
 [[package]]

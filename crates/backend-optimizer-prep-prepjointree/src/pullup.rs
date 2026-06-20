@@ -59,6 +59,7 @@ use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
 use types_nodes::primnodes::{Expr, ExprRelids, Var};
 use types_nodes::rawnodes::FromExpr;
 use types_pathnodes::{NodeId, PlannerInfo};
+use types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL;
 
 use backend_nodes_core::bitmapset::{bms_is_member, bms_is_subset};
 use backend_optimizer_util_clauses::grounded::{
@@ -1662,15 +1663,16 @@ pub fn expand_virtual_generated_columns<'mcx>(
 /// replacement targetlist. Returns `Ok(None)` for the common no-virtual-
 /// generated-columns case (the early `table_close` + skip in C).
 ///
-/// The actual tlist construction needs `build_generation_expression`
-/// (rewriteHandler.c), which is unported; until it lands this leg faithfully
-/// serves the no-op case (which covers every system catalog) and panics if a
-/// relation actually carries virtual generated columns.
+/// The tlist construction calls `build_generation_expression`
+/// (rewriteHandler.c) per VIRTUAL generated column (via the
+/// `build_generation_expression` seam) and `makeVar` for the rest, then
+/// `ChangeVarNodes` remaps the generation expressions onto this RTE's index —
+/// faithful to prepjointree.c:1004-1043.
 pub(crate) fn build_virtual_generated_columns_tlist<'mcx>(
     mcx: Mcx<'mcx>,
     _root: &mut PlannerInfo,
     relid: types_core::primitive::Oid,
-    _rt_index: i32,
+    rt_index: i32,
 ) -> PgResult<Option<PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>>> {
     // rel = table_open(rte->relid, NoLock);
     let rel = backend_utils_cache_relcache_seams::relation_id_get_relation::call(mcx, relid)?
@@ -1695,13 +1697,71 @@ pub(crate) fn build_virtual_generated_columns_tlist<'mcx>(
         return Ok(None);
     }
 
-    // The tlist build runs build_generation_expression(rel, i + 1) per generated
-    // attribute (rewriteHandler.c) and makeVar for the rest; that rewriter is
-    // unported. No system catalog reaches here.
-    panic!(
-        "expand_virtual_generated_columns: relation {relid} has virtual generated \
-         columns; build_generation_expression (rewriteHandler.c) is not yet ported"
-    )
+    // The relation has virtual generated columns. Build the per-attribute
+    // replacement targetlist (prepjointree.c:1004-1043):
+    //   for (i = 0; i < tupdesc->natts; i++)
+    //     if attr->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL:
+    //       defexpr = build_generation_expression(rel, i + 1);
+    //       ChangeVarNodes(defexpr, 1, rt_index, 0);
+    //       tle = makeTargetEntry(defexpr, i + 1, 0, false);
+    //     else:
+    //       var = makeVar(rt_index, i + 1, atttypid, atttypmod, attcollation, 0);
+    //       tle = makeTargetEntry(var, i + 1, 0, false);
+    //
+    // `build_generation_expression` (rewriteHandler.c) is owned by the rewriter;
+    // it rides the `build_generation_expression` seam (installed by the
+    // rewriteHandler unit) so the planner needs no direct rewriter dependency.
+    // The seam wants a `types_rel::Relation`; wrap the projected `RelationData`
+    // (no closer — the explicit `relation_close::call` below releases the pin).
+    let natts = rel.rd_att.natts as usize;
+    let relation = types_rel::Relation::open(rel, None);
+
+    let mut tlist: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+    tlist.try_reserve(natts).map_err(|_| mcx.oom(natts))?;
+
+    for i in 0..natts {
+        let attr = relation.rd_att.attr(i);
+        let attrno = (i + 1) as AttrNumber;
+
+        if attr.attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
+            // defexpr = build_generation_expression(rel, i + 1);
+            let defbox = backend_rewrite_rewritehandler_seams::build_generation_expression::call(
+                mcx,
+                &relation,
+                (i + 1) as i32,
+            )?;
+            let defexpr = PgBox::into_inner(defbox);
+
+            // ChangeVarNodes(defexpr, 1, rt_index, 0) — the generation
+            // expression's Vars reference rt_index 1 (build_column_default emits
+            // a single-relation expression); remap them onto this RTE's index.
+            let mut defnode = Node::mk_expr(mcx, defexpr)?;
+            backend_rewrite_core::ChangeVarNodes(&mut defnode, 1, rt_index, 0, mcx);
+            let defexpr = defnode
+                .into_expr()
+                .unwrap_or_else(|| unreachable!("ChangeVarNodes preserves the node kind"));
+
+            tlist.push(make_target_entry(mcx, defexpr, attrno, None, false)?);
+        } else {
+            // var = makeVar(rt_index, i + 1, atttypid, atttypmod, attcollation, 0);
+            let var = backend_nodes_core::makefuncs::make_var(
+                rt_index,
+                attrno,
+                attr.atttypid,
+                attr.atttypmod,
+                attr.attcollation,
+                0,
+            );
+            tlist.push(make_target_entry(mcx, Expr::Var(var), attrno, None, false)?);
+        }
+    }
+
+    debug_assert!(!tlist.is_empty());
+
+    // table_close(rel, NoLock) — release the relcache pin taken above.
+    backend_utils_cache_relcache_seams::relation_close::call(relid)?;
+
+    Ok(Some(tlist))
 }
 
 /// `pull_up_simple_values(root, jtnode, rte)` (prepjointree.c:1947).

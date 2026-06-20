@@ -35,9 +35,13 @@ backend-optimizer-util-placeholder-seams = { path = "../backend-optimizer-util-p
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 backend-optimizer-plan-subselect-pullup = { path = "../backend-optimizer-plan-subselect-pullup" }
 
-# expand_virtual_generated_columns relcache leg: table_open + RelationGetDescr.
+# expand_virtual_generated_columns relcache leg: table_open + RelationGetDescr,
+# then build_generation_expression (rewriteHandler.c, via its seam) + makeVar to
+# build the virtual-generated-column replacement targetlist.
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
 types-rel = { path = "../types-rel" }
+types-tuple = { path = "../types-tuple" }
 
 # Inward seams this unit owns + installs.
 backend-optimizer-prep-prepjointree-seams = { path = "../backend-optimizer-prep-prepjointree-seams" }

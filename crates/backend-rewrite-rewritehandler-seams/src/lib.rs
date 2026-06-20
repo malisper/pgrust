@@ -75,6 +75,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `build_generation_expression(rel, attrno)` (rewriteHandler.c): build the
+    /// generation expression for the 1-based VIRTUAL generated column `attrno`
+    /// of `rel` (its `build_column_default` tree, wrapped in a `CollateExpr`
+    /// when the column collation differs from the expression's). The C
+    /// `elog(ERROR)`s when the column has no generation expression, carried on
+    /// `Err`. The result expression is allocated in `mcx`.
+    ///
+    /// Exposed so the planner's `expand_virtual_generated_columns`
+    /// (prepjointree.c) can build the per-column replacement targetlist without
+    /// a direct dependency on the rewriter.
+    pub fn build_generation_expression<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        attrno: i32,
+    ) -> PgResult<mcx::PgBox<'mcx, types_nodes::Expr>>
+);
+
+seam_core::seam!(
     /// `get_view_query(view)` (rewriteHandler.c): return the `Query` from a
     /// view's `_RETURN` rule (the `ON SELECT` rewrite action). The C returns a
     /// read-only pointer into the relcache's `rd_rules`; this seam returns the
