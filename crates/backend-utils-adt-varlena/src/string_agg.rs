@@ -21,7 +21,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `StringInfo` transition state for `string_agg`. `data` is the accumulated
 /// buffer (`StringInfoData.data`); `cursor` is `StringInfoData.cursor`, reused
@@ -113,7 +113,7 @@ fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
 
 /// `string_agg_transfn`(3535): append `value` (and the preceding `delim`) to the
 /// running buffer.
-fn fc_string_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_string_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // state = PG_ARGISNULL(0) ? NULL : (StringInfo) PG_GETARG_POINTER(0);
     let mut state = take_string_state(fcinfo);
 
@@ -152,17 +152,17 @@ fn fc_string_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 
     // if (state) PG_RETURN_POINTER(state); else PG_RETURN_NULL();
-    match state {
+    Ok(match state {
         Some(s) => ret_internal(fcinfo, s),
         None => ret_null(fcinfo),
-    }
+    })
 }
 
 /// `string_agg_finalfn`(3536): the accumulated string with the first delimiter
 /// stripped off the front.
-fn fc_string_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_string_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // state = PG_ARGISNULL(0) ? NULL : (StringInfo) PG_GETARG_POINTER(0);
-    match take_string_state(fcinfo) {
+    Ok(match take_string_state(fcinfo) {
         None => ret_null(fcinfo),
         Some(state) => {
             // PG_RETURN_TEXT_P(cstring_to_text_with_len(&state->data[state->cursor],
@@ -171,7 +171,7 @@ fn fc_string_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
             let payload = state.data[cursor..].to_vec();
             ret_text(fcinfo, payload)
         }
-    }
+    })
 }
 
 /// `PG_GETARG_BYTEA_PP(i)` — the detoasted `bytea` payload (`VARDATA_ANY`).
@@ -272,7 +272,7 @@ fn fc_bytea_string_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 pub fn register_string_agg_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(3535, "string_agg_transfn", 3, fc_string_agg_transfn),
         builtin(3536, "string_agg_finalfn", 1, fc_string_agg_finalfn),
         builtin(3543, "bytea_string_agg_transfn", 3, fc_bytea_string_agg_transfn),
@@ -280,19 +280,23 @@ pub fn register_string_agg_builtins() {
     ]);
 }
 
-/// A non-strict (`proisstrict => 'f'`) builtin row.
+/// A non-strict (`proisstrict => 'f'`) Result-native builtin row (`func: None`;
+/// dispatch goes through the native overlay) paired with its [`PgFnNative`] body.
 fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: false,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: false,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
