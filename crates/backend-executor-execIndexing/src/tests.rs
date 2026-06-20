@@ -18,8 +18,9 @@ fn typtype_codes_match_pg_type_h() {
 
 #[test]
 fn scan_key_null_flags_match_skey_h() {
-    assert_eq!(SK_ISNULL, 0x0002);
-    assert_eq!(SK_SEARCHNULL, 0x0010);
+    // PG access/skey.h: SK_ISNULL = 0x0001, SK_SEARCHNULL = 0x0040.
+    assert_eq!(SK_ISNULL, 0x0001);
+    assert_eq!(SK_SEARCHNULL, 0x0040);
 }
 
 #[test]

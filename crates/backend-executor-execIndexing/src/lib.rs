@@ -70,9 +70,9 @@ use backend_access_transam_xact_seams as xact_seams;
 mod tests;
 
 /// `SK_ISNULL` (`access/skey.h`) — scankey argument is NULL.
-const SK_ISNULL: i32 = 0x0002;
+use types_scan::scankey::SK_ISNULL;
 /// `SK_SEARCHNULL` (`access/skey.h`) — scankey is an `IS NULL` search.
-const SK_SEARCHNULL: i32 = 0x0010;
+use types_scan::scankey::SK_SEARCHNULL;
 
 /// `FirstLowInvalidHeapAttributeNumber` (`access/sysattr.h`, PG 18) — `(-7)`.
 const FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER: i32 = -7;
