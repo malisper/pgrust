@@ -1680,9 +1680,32 @@ fn parse_full_float(val: &str) -> bool {
 /// `pub fn init_seams()` — install the two inward seams other crates call
 /// across a cycle: `deserialize_deflist` (ts_cache) and
 /// `RemoveTSConfigurationById` (dependency.c `doDeletion`).
+/// `case T_AlterTSDictionaryStmt: AlterTSDictionary(stmt)` (utility.c).
+fn alter_ts_dictionary_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress> {
+    match stmt.node_tag() {
+        ntag::T_AlterTSDictionaryStmt => AlterTSDictionary(mcx, stmt.expect_altertsdictionarystmt()),
+        _ => panic!("alter_ts_dictionary: parse tree is not an AlterTSDictionaryStmt"),
+    }
+}
+
+/// `case T_AlterTSConfigurationStmt: AlterTSConfiguration(stmt)` (utility.c).
+fn alter_ts_configuration_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress> {
+    match stmt.node_tag() {
+        ntag::T_AlterTSConfigurationStmt => {
+            AlterTSConfiguration(mcx, stmt.expect_altertsconfigurationstmt())
+        }
+        _ => panic!("alter_ts_configuration: parse tree is not an AlterTSConfigurationStmt"),
+    }
+}
+
 pub fn init_seams() {
     backend_commands_tsearchcmds_seams::deserialize_deflist::set(deserialize_deflist_seam);
     backend_commands_tsearchcmds_seams::RemoveTSConfigurationById::set(RemoveTSConfigurationById);
+
+    // ProcessUtilitySlow dispatch arms (utility.c ALTER TEXT SEARCH DICTIONARY /
+    // CONFIGURATION).
+    backend_tcop_utility_out_seams::alter_ts_dictionary::set(alter_ts_dictionary_arm);
+    backend_tcop_utility_out_seams::alter_ts_configuration::set(alter_ts_configuration_arm);
 }
 
 /// Owner-side installer for the `deserialize_deflist` inward seam: the verbatim

@@ -1048,6 +1048,29 @@ seam!(
     pub fn drop_owned_objects<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
 );
 seam!(
+    /// `CreateExtension(pstate, stmt)` (extension.c) — CREATE EXTENSION.
+    pub fn create_extension<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `CreateProceduralLanguage(stmt)` (proclang.c) — CREATE LANGUAGE.
+    pub fn create_procedural_language<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `CreateTransform(stmt)` (functioncmds.c) — CREATE TRANSFORM.
+    pub fn create_transform<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterTSDictionary(stmt)` (tsearchcmds.c) — ALTER TEXT SEARCH DICTIONARY.
+    pub fn alter_ts_dictionary<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterTSConfiguration(stmt)` (tsearchcmds.c) — ALTER TEXT SEARCH
+    /// CONFIGURATION. Commands are stashed in MakeConfigurationMapping /
+    /// DropConfigurationMapping; the dispatcher sets `commandCollected = true`.
+    pub fn alter_ts_configuration<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+
+seam!(
     /// The extension / FDW / AM / publication / subscription / transform / cast /
     /// conversion / language / op-class / op-family DDL handlers (utility.c:
     /// 1395-1581) — `CreateExtension` / `ExecAlterExtension*` / `Create/AlterFdw` /

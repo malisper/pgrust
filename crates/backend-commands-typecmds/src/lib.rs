@@ -4663,6 +4663,41 @@ pub fn init_seams() {
     // loudly while `ProcedureCreate` was unported; now ported here and installed.
     me::make_range_constructors::set(make_range_constructors_seam);
     me::make_multirange_constructors::set(make_multirange_constructors_seam);
+
+    // ProcessUtilitySlow `T_AlterTypeStmt` dispatch target (utility.c) — ALTER
+    // TYPE … SET (…).
+    backend_tcop_utility_out_seams::alter_type::set(alter_type_seam);
+}
+
+/// Outward-seam adapter for `AlterType(stmt)` (utility.c `ProcessUtilitySlow`
+/// `T_AlterTypeStmt`): project the rich `typeName` (List of String) and decode
+/// the `options` (List of DefElem) into the flat parsenodes form the ported
+/// [`AlterType`] body consumes.
+fn alter_type_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &RichNode<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let ats = match stmt.as_altertypestmt() {
+        Some(s) => s,
+        None => return Err(PgError::error("alter_type_seam: statement is not an AlterTypeStmt")),
+    };
+
+    // typeName: List of String -> Vec<String>.
+    let mut type_name: Vec<String> = Vec::with_capacity(ats.typeName.len());
+    for n in ats.typeName.iter() {
+        match n.as_string() {
+            Some(s) => type_name.push(s.sval.as_str().to_string()),
+            None => return Err(PgError::error("ALTER TYPE: type name element is not a String")),
+        }
+    }
+
+    // options: List of DefElem -> Vec<parsenodes::Node::DefElem>.
+    let mut options: Vec<Node> = Vec::with_capacity(ats.options.len());
+    for n in ats.options.iter() {
+        options.push(backend_parser_parse_type::rich_node_to_parse(n)?);
+    }
+
+    AlterType(mcx, &type_name, &options)
 }
 
 /// Outward-seam adapter for `DefineEnum((CreateEnumStmt *) stmt)`

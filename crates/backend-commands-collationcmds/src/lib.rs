@@ -592,9 +592,11 @@ pub fn IsThereCollationInNamespace(collname: &str, nspOid: Oid) -> PgResult<()> 
 /// Opening `pg_collation` (RowExclusiveLock), the `collversion`
 /// `CatalogTupleUpdate`, `InvokeObjectPostAlterHook`, and closing (NoLock) are
 /// performed inside `update_collation_version`.
-pub fn AlterCollation<'mcx>(mcx: Mcx<'mcx>, collname: &[Node]) -> PgResult<ObjectAddress> {
-    let name_list = node_string_list(collname);
-    let collOid = get_collation_oid(mcx, &name_list, false)?;
+pub fn AlterCollation<'mcx>(
+    mcx: Mcx<'mcx>,
+    name_list: &[Option<String>],
+) -> PgResult<ObjectAddress> {
+    let collOid = get_collation_oid(mcx, name_list, false)?;
 
     if collOid == DEFAULT_COLLATION_OID {
         return ereport(ERROR)
@@ -610,7 +612,7 @@ pub fn AlterCollation<'mcx>(mcx: Mcx<'mcx>, collname: &[Node]) -> PgResult<Objec
 
     if !seam::collation_ownercheck::call(collOid, get_user_id::call())? {
         seam::aclcheck_error_not_owner_collation::call(
-            NameListToString(mcx, &name_list)?.to_string(),
+            NameListToString(mcx, name_list)?.to_string(),
         )?;
     }
 
@@ -1040,14 +1042,29 @@ pub fn pg_import_system_collations<'mcx>(mcx: Mcx<'mcx>, nspid: Oid) -> PgResult
 /// Project the `String` value nodes of a `collname` (`List *`) into the
 /// `NameList`-shaped `Vec<Option<String>>` the lookups expect. A non-`String`
 /// node maps to `None` (the deconstruct path then errors like the C `strVal`).
-fn node_string_list(collname: &[Node]) -> Vec<Option<String>> {
+fn rich_node_string_list(collname: &[types_nodes::nodes::NodePtr<'_>]) -> Vec<Option<String>> {
     collname
         .iter()
-        .map(|n| match n {
-            Node::String(s) => s.sval.clone(),
+        .map(|n| match &**n {
+            types_nodes::nodes::Node::String(s) => Some(s.sval.to_string()),
             _ => None,
         })
         .collect()
+}
+
+/// `case T_AlterCollationStmt: AlterCollation(stmt)` (utility.c) — the
+/// ProcessUtilitySlow dispatch carries the parse tree as `&Node`; project
+/// `stmt->collname` into the `NameList` and run the ported body.
+fn alter_collation_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let acs = match stmt.node_tag() {
+        types_nodes::nodes::ntag::T_AlterCollationStmt => stmt.expect_altercollationstmt(),
+        _ => panic!("alter_collation: parse tree is not an AlterCollationStmt"),
+    };
+    let name_list = rich_node_string_list(&acs.collname);
+    AlterCollation(mcx, &name_list)
 }
 
 /// `elog(ERROR, ...)` value (no SQLSTATE; XX000), for the "can't happen"
@@ -1099,6 +1116,10 @@ mod fmgr_builtins;
 /// table, so by-OID dispatch resolves them.
 pub fn init_seams() {
     fmgr_builtins::register_collationcmds_builtins();
+
+    // ProcessUtilitySlow dispatch arm (utility.c ALTER COLLATION … REFRESH
+    // VERSION).
+    backend_tcop_utility_out_seams::alter_collation::set(alter_collation_arm);
 
     // `pg_import_system_collations` static helpers — these bodies live in
     // collationcmds.c itself, so this unit installs them.

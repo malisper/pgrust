@@ -2250,8 +2250,27 @@ fn error_conflicting_def_elem(
 
 /// Install every inward seam this unit owns
 /// (`backend-commands-extension-seams`).
+/// `case T_CreateExtensionStmt: CreateExtension(pstate, stmt)` (utility.c) — the
+/// ProcessUtilitySlow dispatch carries the parse tree as `&Node`; decode the
+/// `CreateExtensionStmt` and forward.
+fn create_extension_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    match stmt.node_tag() {
+        types_nodes::nodes::ntag::T_CreateExtensionStmt => {
+            CreateExtension(mcx, pstate, stmt.expect_createextensionstmt())
+        }
+        _ => panic!("create_extension: parse tree is not a CreateExtensionStmt"),
+    }
+}
+
 pub fn init_seams() {
     use backend_commands_extension_seams as s;
+
+    // ProcessUtilitySlow dispatch arm (utility.c CREATE EXTENSION).
+    backend_tcop_utility_out_seams::create_extension::set(create_extension_arm);
 
     // `extension_control_path` GUC slot (`char *Extension_control_path`,
     // extension.c:76) — install its `conf->variable` get/set accessors over

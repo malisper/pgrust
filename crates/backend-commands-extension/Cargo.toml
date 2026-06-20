@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }

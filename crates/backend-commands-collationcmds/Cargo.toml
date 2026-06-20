@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 common-string = { path = "../common-string" }

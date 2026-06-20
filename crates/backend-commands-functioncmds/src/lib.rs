@@ -60,6 +60,54 @@ pub fn init_seams() {
     // ported bodies consume, then run them.
     backend_tcop_utility_out_seams::create_function::set(create_function_seam);
     backend_tcop_utility_out_seams::create_cast::set(create_cast_seam);
+
+    // ProcessUtilitySlow dispatch target (utility.c): CREATE TRANSFORM. The
+    // ported body consumes the rich `CreateTransformStmt` directly.
+    backend_tcop_utility_out_seams::create_transform::set(create_transform_seam);
+}
+
+/// Outward-seam adapter for `CreateTransform(stmt)` (utility.c
+/// `ProcessUtilitySlow` `T_CreateTransformStmt`): decode the rich
+/// `CreateTransformStmt` into the flat [`types_parsenodes::CreateTransformStmt`]
+/// the ported body consumes.
+fn create_transform_seam<'mcx>(
+    _mcx: mcx::Mcx<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> types_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+    use backend_parser_parse_type::rich_node_to_parse;
+    use types_error::PgError;
+
+    let cts = match stmt.as_createtransformstmt() {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error(
+                "create_transform_seam: statement is not a CreateTransformStmt",
+            ))
+        }
+    };
+
+    let type_name = match cts.type_name.as_deref() {
+        Some(n) => Some(Box::new(rich_node_to_parse(n)?)),
+        None => None,
+    };
+    let fromsql = match cts.fromsql.as_deref() {
+        Some(n) => Some(Box::new(rich_node_to_parse(n)?)),
+        None => None,
+    };
+    let tosql = match cts.tosql.as_deref() {
+        Some(n) => Some(Box::new(rich_node_to_parse(n)?)),
+        None => None,
+    };
+
+    let pn = types_parsenodes::CreateTransformStmt {
+        replace: cts.replace,
+        type_name,
+        lang: cts.lang.as_ref().map(|s| s.as_str().to_string()),
+        fromsql,
+        tosql,
+    };
+
+    CreateTransform(&pn)
 }
 
 /// Outward-seam adapter for `CreateFunction(pstate, stmt)` (utility.c

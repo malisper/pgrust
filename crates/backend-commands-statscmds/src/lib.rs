@@ -1063,10 +1063,64 @@ pub fn StatisticsGetRelation(statId: Oid, missing_ok: bool) -> PgResult<Oid> {
     }
 }
 
+/// `case T_AlterStatsStmt: AlterStatistics(stmt)` (utility.c).
+fn alter_statistics_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress> {
+    match stmt.node_tag() {
+        ntag::T_AlterStatsStmt => AlterStatistics(mcx, stmt.expect_alterstatsstmt()),
+        _ => panic!("alter_statistics: parse tree is not an AlterStatsStmt"),
+    }
+}
+
+/// `case T_CreateStatsStmt: address = CreateStatistics(stmt, true)` (utility.c).
+/// The dispatch passes the already-`transformStatsStmt`'d node.
+fn create_statistics_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: types_nodes::nodes::NodePtr<'mcx>,
+) -> PgResult<ObjectAddress> {
+    match (&*stmt).node_tag() {
+        ntag::T_CreateStatsStmt => CreateStatistics(mcx, (&*stmt).expect_createstatsstmt(), true),
+        _ => panic!("create_statistics: parse tree is not a CreateStatsStmt"),
+    }
+}
+
+/// `RangeVarGetRelid(rel, ShareUpdateExclusiveLock, false)` (utility.c
+/// `T_CreateStatsStmt`) — resolve the CREATE STATISTICS relation OID. The
+/// dispatch passes the FROM-clause `RangeVar` node; build the resolved
+/// owned-String form and delegate to the namespace owner.
+fn range_var_get_relid_share_update_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: types_nodes::nodes::NodePtr<'mcx>,
+) -> PgResult<Oid> {
+    let rangevar = match (&*rel).node_tag() {
+        ntag::T_RangeVar => (&*rel).expect_rangevar(),
+        _ => panic!("range_var_get_relid_share_update: parse tree is not a RangeVar"),
+    };
+    let rv = types_tuple::access::RangeVar {
+        catalogname: rangevar.catalogname.as_ref().map(|s| s.as_str().to_string()),
+        schemaname: rangevar.schemaname.as_ref().map(|s| s.as_str().to_string()),
+        relname: rangevar
+            .relname
+            .as_ref()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default(),
+        inh: rangevar.inh,
+        relpersistence: rangevar.relpersistence as u8,
+        location: rangevar.location,
+    };
+    backend_catalog_namespace::RangeVarGetRelid(mcx, &rv, ShareUpdateExclusiveLock, false)
+}
+
 /// `statscmds.c` owns the `RemoveStatisticsById` inward seam (dependency.c's
 /// `doDeletion` for `OCLASS_STATISTIC_EXT`).  Installed here.
 pub fn init_seams() {
     backend_commands_statscmds_seams::RemoveStatisticsById::set(remove_statistics_by_id_seam);
+
+    // ProcessUtilitySlow dispatch arms (utility.c CREATE/ALTER STATISTICS).
+    backend_tcop_utility_out_seams::alter_statistics::set(alter_statistics_arm);
+    backend_tcop_utility_out_seams::create_statistics::set(create_statistics_arm);
+    backend_tcop_utility_out_seams::range_var_get_relid_share_update::set(
+        range_var_get_relid_share_update_arm,
+    );
 }
 
 /// Seam shim for [`RemoveStatisticsById`]: the inward seam carries no `mcx`

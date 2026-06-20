@@ -336,6 +336,22 @@ pub fn get_language_oid(langname: &str, missing_ok: bool) -> PgResult<Oid> {
 /// Install this unit's inward seams (`commands/proclang.c`). The `get_language_oid`
 /// seam is owned here; the rest of proclang's externals consume other owners'
 /// seam crates.
+/// `case T_CreatePLangStmt: CreateProceduralLanguage(stmt)` (utility.c).
+fn create_procedural_language_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    match stmt.node_tag() {
+        types_nodes::nodes::ntag::T_CreatePLangStmt => {
+            CreateProceduralLanguage(mcx, stmt.expect_createplangstmt())
+        }
+        _ => panic!("create_procedural_language: parse tree is not a CreatePLangStmt"),
+    }
+}
+
 pub fn init_seams() {
     backend_commands_proclang_seams::get_language_oid::set(get_language_oid);
+
+    // ProcessUtilitySlow dispatch arm (utility.c CREATE LANGUAGE).
+    backend_tcop_utility_out_seams::create_procedural_language::set(create_procedural_language_arm);
 }
