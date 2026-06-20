@@ -150,14 +150,23 @@ fn scratch_mcx() -> mcx::MemoryContext {
 
 fn fc_inet_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
-    let addr = ok(crate::inet_in(&s, None)).expect("inet_in: no soft-error sink yet null result");
-    ret_inet(fcinfo, addr)
+    // Forward `fcinfo->context` (the soft ErrorSaveContext installed by
+    // InputFunctionCallSafe); on the soft path the body returns `Ok(None)` and
+    // the caller discards this placeholder after `soft_error_occurred()`.
+    let escontext = fcinfo.escontext_mut();
+    match ok(crate::inet_in(&s, escontext)) {
+        Some(addr) => ret_inet(fcinfo, addr),
+        None => Datum::null(),
+    }
 }
 
 fn fc_cidr_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
-    let addr = ok(crate::cidr_in(&s, None)).expect("cidr_in: no soft-error sink yet null result");
-    ret_inet(fcinfo, addr)
+    let escontext = fcinfo.escontext_mut();
+    match ok(crate::cidr_in(&s, escontext)) {
+        Some(addr) => ret_inet(fcinfo, addr),
+        None => Datum::null(),
+    }
 }
 
 fn fc_inet_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {

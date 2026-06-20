@@ -134,9 +134,16 @@ fn ok<T>(r: types_error::PgResult<T>) -> T {
 
 fn fc_macaddr8_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
-    let m = ok(crate::macaddr8_in(&s, None))
-        .expect("macaddr8_in: no soft-error sink yet null result");
-    ret_macaddr8(fcinfo, m)
+    // Forward `fcinfo->context` (the soft ErrorSaveContext installed by
+    // InputFunctionCallSafe) so a recoverable parse failure `ereturn`s into the
+    // soft sink instead of throwing — matching fc_int2in. On the soft path the
+    // body returns `Ok(None)`; the caller checks `soft_error_occurred()` first
+    // and discards this placeholder result word.
+    let escontext = fcinfo.escontext_mut();
+    match ok(crate::macaddr8_in(&s, escontext)) {
+        Some(m) => ret_macaddr8(fcinfo, m),
+        None => Datum::null(),
+    }
 }
 
 fn fc_macaddr8_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {

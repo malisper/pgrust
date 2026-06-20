@@ -142,17 +142,16 @@ fn fc_int2send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_int2vectorin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let s = arg_cstring(fcinfo, 0).to_string();
     let m = scratch_mcx();
-    // C passes fcinfo->context (the soft ErrorSaveContext) to the parser; the
-    // soft context is not carried on the fmgr frame here, so a bad token raises
-    // a hard error. The soft-error caller (InputFunctionCallSafe in fmgr-core)
-    // catches it and records into the real escontext, so pg_input_is_valid /
-    // pg_input_error_info still observe a soft failure.
-    let image_bytes: Vec<u8> = match crate::int2vectorin(m.mcx(), &s, None) {
+    // C passes fcinfo->context (the soft ErrorSaveContext installed by
+    // InputFunctionCallSafe) to the parser so a recoverable bad token `ereturn`s
+    // into the soft sink instead of throwing. On the soft path the body returns
+    // `Ok(None)`; the caller checks `soft_error_occurred()` first and discards
+    // this placeholder result word.
+    let escontext = fcinfo.escontext_mut();
+    let image_bytes: Vec<u8> = match crate::int2vectorin(m.mcx(), &s, escontext) {
         Ok(Some(image)) => image.as_slice().to_vec(),
-        // None only when a soft escontext was supplied (not on this path).
-        Ok(None) => raise(types_error::PgError::error(
-            "invalid input syntax for type smallint",
-        )),
+        // Soft error recorded: return a placeholder, discarded by the caller.
+        Ok(None) => return Datum::null(),
         Err(e) => raise(e),
     };
     ret_varlena(fcinfo, image_bytes)
