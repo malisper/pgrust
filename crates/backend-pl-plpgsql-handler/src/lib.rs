@@ -308,7 +308,7 @@ pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<D
             }
         } else if seam::called_as_event_trigger(fcinfo) {
             let trigdata = seam::take_event_trigger_data(fcinfo);
-            backend_pl_plpgsql_exec::plpgsql_exec_event_trigger(&func, trigdata);
+            backend_pl_plpgsql_exec::plpgsql_exec_event_trigger(&func, trigdata)?;
             // no return value in this case
             FunctionResult {
                 value: Datum::null(),

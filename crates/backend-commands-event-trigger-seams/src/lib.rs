@@ -129,6 +129,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `estate->evtrigdata->event` (pl_exec.c `PLPGSQL_PROMISE_TG_EVENT`) — the
+    /// event name string (`"ddl_command_start"` etc.) of the event trigger
+    /// currently firing on this backend thread. `Ok(None)` mirrors the C
+    /// `elog(ERROR, "event trigger promise is not in an event trigger function")`
+    /// guard (`estate->evtrigdata == NULL`); the caller raises that error.
+    pub fn event_trigger_get_event() -> PgResult<Option<String>>
+);
+
+seam_core::seam!(
+    /// `GetCommandTagName(estate->evtrigdata->tag)` (pl_exec.c
+    /// `PLPGSQL_PROMISE_TG_TAG`) — the command-tag name (e.g. `"CREATE TABLE"`)
+    /// of the event trigger currently firing. `Ok(None)` is the same
+    /// `evtrigdata == NULL` guard as [`event_trigger_get_event`].
+    pub fn event_trigger_get_tag_name() -> PgResult<Option<String>>
+);
+
+seam_core::seam!(
     /// `EventTriggerCollectSimpleCommand(address, secondaryObject, (Node *) stmt)`
     /// (event_trigger.c) keyed by an owned `AlterPublicationStmt` — the
     /// publication CREATE/ALTER command-collection path (publicationcmds.c

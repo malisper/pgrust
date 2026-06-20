@@ -33,6 +33,9 @@ backend-executor-execTuples = { path = "../backend-executor-execTuples" }
 # tg_relation / tg_trigger / tg_argv / tg_nargs) + the BEFORE-trigger
 # return-tuple channel (set_before_trigger_result_tuple).
 backend-commands-trigger-seams = { path = "../backend-commands-trigger-seams" }
+# TG_EVENT / TG_TAG promises read the event trigger's event/tag off the
+# event-trigger firing side-channel.
+backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
 
 # Inward seam this crate installs (plpgsql_exec_get_datum_type_info).
 backend-pl-plpgsql-exec-seams = { path = "../backend-pl-plpgsql-exec-seams" }

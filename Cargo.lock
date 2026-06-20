@@ -6972,6 +6972,7 @@ name = "backend-commands-event-trigger"
 version = "0.0.0"
 dependencies = [
  "backend-access-table-table-seams",
+ "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-indexing-seams",
  "backend-catalog-objectaccess-seams",
@@ -6981,13 +6982,16 @@ dependencies = [
  "backend-commands-event-trigger-fire-seams",
  "backend-commands-event-trigger-seams",
  "backend-commands-extension-seams",
+ "backend-nodes-core",
  "backend-parser-func",
  "backend-tcop-cmdtag",
  "backend-tcop-utility-out-seams",
+ "backend-tcop-utility-seams",
  "backend-utils-cache-evtcache-seams",
  "backend-utils-cache-lsyscache",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-init-miscinit",
  "backend-utils-init-miscinit-seams",
  "backend-utils-init-small-seams",
@@ -6997,8 +7001,10 @@ dependencies = [
  "types-acl",
  "types-catalog",
  "types-core",
+ "types-datum",
  "types-error",
  "types-evtcache",
+ "types-fmgr",
  "types-nodes",
  "types-opclass",
  "types-portal",
@@ -14372,6 +14378,7 @@ name = "backend-pl-plpgsql-exec"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-tupdesc",
+ "backend-commands-event-trigger-seams",
  "backend-commands-trigger-seams",
  "backend-executor-execTuples",
  "backend-pl-plpgsql-exec-seams",

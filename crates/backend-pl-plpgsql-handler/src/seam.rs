@@ -163,11 +163,18 @@ pub fn take_trigger_data(_fcinfo: &mut FunctionCallInfoBaseData) -> TriggerData 
 }
 
 /// `(EventTriggerData *) fcinfo->context` — the live event-trigger context.
+///
+/// Like [`take_trigger_data`], the rich `EventTriggerData` (event / tag /
+/// parsetree) cannot ride the tag-only fmgr `ContextNode`; it lives on the firing
+/// path's per-call thread-local side-channel (`commands/event_trigger.c`'s
+/// `CURRENT_EVENT_TRIGGER`), which the executor reads through the
+/// `event_trigger_get_event` / `event_trigger_get_tag_name` accessor seams. All
+/// `fcinfo->context` carries is the `T_EventTriggerData` demux tag — already
+/// verified by [`called_as_event_trigger`] — so the handle returned here is the
+/// opaque marker (`EventTriggerData(0)`) that resolves to that side-channel.
 pub fn take_event_trigger_data(_fcinfo: &mut FunctionCallInfoBaseData) -> EventTriggerData {
-    panic!(
-        "seam not wired: EventTriggerData from fcinfo->context (pl_handler.c) — the event-trigger \
-         context is not carried through the tag-only fmgr ContextNode (event-trigger substrate)"
-    );
+    debug_assert!(called_as_event_trigger(_fcinfo));
+    EventTriggerData(0)
 }
 
 /// `ResourceOwnerCreate(NULL, "PL/pgSQL procedure resources")` (resowner.c) —

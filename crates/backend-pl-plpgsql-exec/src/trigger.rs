@@ -170,11 +170,26 @@ pub fn plpgsql_fulfill_promise_impl(
             let image = crate::exec_seams::construct_text_array_datum::call(args)?;
             (0, Some(image), false)
         }
-        PLPGSQL_PROMISE_TG_EVENT | PLPGSQL_PROMISE_TG_TAG => {
-            panic!(
-                "plpgsql_fulfill_promise: event-trigger promise reached in a DML \
-                 trigger context (TG_EVENT/TG_TAG)"
-            );
+        PLPGSQL_PROMISE_TG_EVENT => {
+            // assign_text_var(estate, var, estate->evtrigdata->event); the
+            // evtrigdata == NULL guard is the None case.
+            let event = backend_commands_event_trigger_seams::event_trigger_get_event::call()?
+                .ok_or_else(|| {
+                    types_error::PgError::error(
+                        "event trigger promise is not in an event trigger function".to_string(),
+                    )
+                })?;
+            (0, Some(text_image(&event)), false)
+        }
+        PLPGSQL_PROMISE_TG_TAG => {
+            // assign_text_var(estate, var, GetCommandTagName(estate->evtrigdata->tag));
+            let tag = backend_commands_event_trigger_seams::event_trigger_get_tag_name::call()?
+                .ok_or_else(|| {
+                    types_error::PgError::error(
+                        "event trigger promise is not in an event trigger function".to_string(),
+                    )
+                })?;
+            (0, Some(text_image(&tag)), false)
         }
     };
 

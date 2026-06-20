@@ -3134,15 +3134,48 @@ pub fn plpgsql_exec_trigger(
 }
 
 /// `plpgsql_exec_event_trigger(func, trigdata)` (pl_exec.c) — the event-trigger
-/// executor entry.
+/// executor entry. Sets up the execution state, marks it as an event-trigger
+/// call (so the `TG_EVENT`/`TG_TAG` promises resolve), runs the toplevel block,
+/// and requires a RETURN (an event-trigger function returns no value, but must
+/// reach a RETURN, exactly as C).
 pub fn plpgsql_exec_event_trigger(
-    _func: &PLpgSQL_function,
+    func: &PLpgSQL_function,
     _trigdata: types_plpgsql::EventTriggerData,
-) {
-    panic!(
-        "seam not wired: plpgsql_exec_event_trigger (pl_exec.c) — event-trigger var setup \
-         + plpgsql_estate_setup + exec_toplevel_block (executor + SPI substrate)"
-    );
+) -> types_error::PgResult<()> {
+    // Setup the execution state. (No simple_eval_estate/resowner — C passes NULL.)
+    let mut estate = plpgsql_estate_setup(func, None, None, None);
+
+    // estate.evtrigdata = trigdata (the current-event-trigger marker; the rich
+    // event/tag rides commands/event_trigger.c's CURRENT_EVENT_TRIGGER side-channel).
+    estate.evtrigdata = Some(types_plpgsql::EventTriggerData(0));
+
+    // Make local execution copies of all the datums.
+    estate.err_text = Some(crate::mem::sdup("during initialization of execution state"));
+    copy_plpgsql_datums(&mut estate, func);
+
+    // Now call the toplevel block of statements.
+    estate.err_text = None;
+    let action = func
+        .action
+        .as_deref()
+        .expect("compiled event-trigger function has an action block");
+    let rc = exec_toplevel_block(&mut estate, action)?;
+    if rc != types_plpgsql::PLpgSQL_rc::PLPGSQL_RC_RETURN {
+        estate.err_text = None;
+        return Err(types_error::PgError::error(
+            "control reached end of trigger procedure without RETURN".to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT));
+    }
+
+    estate.err_text = Some(crate::mem::sdup("during function exit"));
+
+    // Clean up any leftover temporary memory (the C plpgsql_destroy_econtext +
+    // exec_eval_cleanup; the simple-eval econtext teardown is owned elsewhere in
+    // this port, matching plpgsql_exec_trigger_impl).
+    exec_eval_cleanup(&mut estate);
+
+    Ok(())
 }
 
 // ===========================================================================

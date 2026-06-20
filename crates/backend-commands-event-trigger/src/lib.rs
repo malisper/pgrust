@@ -61,6 +61,8 @@ use backend_catalog_objectaccess_seams as objectaccess_seams;
 use backend_utils_cache_syscache_seams as syscache_seams;
 use backend_utils_error::ereport;
 
+use types_nodes::parsestmt::CommandTag;
+
 /// `TRIGGER_FIRES_ON_ORIGIN` `'O'` (utils/rel.h) — the on-disk `evtenabled`
 /// firing-configuration byte set at creation.
 const TRIGGER_FIRES_ON_ORIGIN: i8 = b'O' as i8;
@@ -393,6 +395,207 @@ pub fn event_trigger_sql_drop(parsetree: &Node) -> PgResult<()> {
     });
 
     res
+}
+
+// ===========================================================================
+// EventTriggerCommonSetup run-list + EventTriggerInvoke (event_trigger.c) — the
+// post-gate firing tail crossed by `fire_seams::event_trigger_fire`.
+// ===========================================================================
+
+/// `T_EventTriggerData` (nodetags.h) — the fmgr call-context demux tag stamped
+/// on the firing call frame so the trigger-language handler's
+/// `CALLED_AS_EVENT_TRIGGER(fcinfo)` fires.
+const T_EVENT_TRIGGER_DATA: u32 = 443;
+
+/// `TRIGGER_FIRES_ON_REPLICA` `'R'` (utils/rel.h) — the `evtenabled` value of a
+/// trigger that fires only under `session_replication_role = replica`.
+const TRIGGER_FIRES_ON_REPLICA: i8 = b'R' as i8;
+/// `SESSION_REPLICATION_ROLE_REPLICA` (utils/guc.h).
+const SESSION_REPLICATION_ROLE_REPLICA: i32 = 1;
+
+/// The currently-firing event trigger's `event` / `tag` — the owned analogue of
+/// `estate->evtrigdata->{event,tag}`, read by the PL/pgSQL `TG_EVENT` / `TG_TAG`
+/// promises through the [`event_trigger_get_event`](backend_commands_event_trigger_seams::event_trigger_get_event)
+/// / [`event_trigger_get_tag_name`](backend_commands_event_trigger_seams::event_trigger_get_tag_name)
+/// accessor seams. Like the DML-trigger `LocTriggerData` side-channel in
+/// `commands/trigger.c`, the rich `EventTriggerData` cannot ride the tag-only
+/// fmgr `ContextNode`, so it lives here for the call's duration.
+struct CurrentEventTrigger {
+    /// `trigdata->event` — the event name string (`"ddl_command_start"` etc.).
+    event: String,
+    /// `trigdata->tag` — the command tag the firing command produced.
+    tag: CommandTag,
+}
+
+thread_local! {
+    /// `EventTriggerData` of the event-trigger call in flight on this backend
+    /// thread, or `None` outside such a call.
+    static CURRENT_EVENT_TRIGGER: RefCell<Option<CurrentEventTrigger>> =
+        const { RefCell::new(None) };
+}
+
+/// RAII guard installing the current event-trigger side-channel for the firing
+/// call's duration, restoring the prior value on drop (so a nested event trigger
+/// firing another DDL nests correctly).
+struct CurrentEventTriggerGuard {
+    prev: Option<CurrentEventTrigger>,
+}
+
+impl CurrentEventTriggerGuard {
+    fn install(data: CurrentEventTrigger) -> Self {
+        let prev = CURRENT_EVENT_TRIGGER.with(|c| c.borrow_mut().replace(data));
+        CurrentEventTriggerGuard { prev }
+    }
+}
+
+impl Drop for CurrentEventTriggerGuard {
+    fn drop(&mut self) {
+        CURRENT_EVENT_TRIGGER.with(|c| *c.borrow_mut() = self.prev.take());
+    }
+}
+
+/// `estate->evtrigdata->event` — the firing event's name, or `None` outside an
+/// event-trigger call (the C `evtrigdata == NULL` guard).
+pub fn event_trigger_get_event() -> Option<String> {
+    CURRENT_EVENT_TRIGGER.with(|c| c.borrow().as_ref().map(|d| d.event.clone()))
+}
+
+/// `GetCommandTagName(estate->evtrigdata->tag)` — the firing command's tag name,
+/// or `None` outside an event-trigger call.
+pub fn event_trigger_get_tag_name() -> Option<String> {
+    CURRENT_EVENT_TRIGGER.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|d| backend_tcop_cmdtag::get_command_tag_name(d.tag.0).to_string())
+    })
+}
+
+/// `EventTriggerGetTag(parsetree, event)` (event_trigger.c) — the command tag for
+/// the firing command. `EVT_Login` is `CMDTAG_LOGIN`; everything else is
+/// `CreateCommandTag(parsetree)`.
+fn event_trigger_get_tag(parsetree: &Node, event: EventTriggerEvent) -> PgResult<CommandTag> {
+    if event == EventTriggerEvent::Login {
+        // CMDTAG_LOGIN (cmdtaglist.h) — resolve its tag index by name.
+        Ok(CommandTag(backend_tcop_cmdtag::get_command_tag_enum(b"LOGIN")))
+    } else {
+        backend_tcop_utility_seams::create_command_tag::call(parsetree)
+    }
+}
+
+/// `filter_event_trigger(tag, item)` (event_trigger.c) — should this cached
+/// trigger fire for this command tag? Filters by session replication role and by
+/// the trigger's tag set (when specified).
+fn filter_event_trigger(
+    tag: CommandTag,
+    item: &types_evtcache::EventTriggerCacheItem<'_>,
+) -> bool {
+    // Filter by session replication role (we never see disabled items here).
+    let session_replica = backend_utils_misc_guc_tables::vars::SessionReplicationRole.read()
+        == SESSION_REPLICATION_ROLE_REPLICA;
+    if session_replica {
+        if item.enabled == TRIGGER_FIRES_ON_ORIGIN {
+            return false;
+        }
+    } else if item.enabled == TRIGGER_FIRES_ON_REPLICA {
+        return false;
+    }
+
+    // Filter by tags, if any were specified.
+    let tagset = item.tagset.as_deref();
+    if !backend_nodes_core::bitmapset::bms_is_empty(tagset)
+        && !backend_nodes_core::bitmapset::bms_is_member(tag.0, tagset)
+    {
+        return false;
+    }
+
+    true
+}
+
+/// `EventTriggerInvoke(fn_oid_list, trigdata)` (event_trigger.c) — call each
+/// event-trigger function in turn via `fmgr`.
+///
+/// The C per-call `MemoryContext`/`MemoryContextReset` for leak containment is
+/// Rust `Drop`; the EXPLAIN `instr`/pgstat usage is not ported. The rich
+/// `EventTriggerData` (event / tag / parsetree) rides the
+/// [`CURRENT_EVENT_TRIGGER`] side-channel for the call's duration, with the
+/// `T_EventTriggerData` demux tag stamped on the fmgr call frame so the
+/// trigger-language handler's `CALLED_AS_EVENT_TRIGGER` fires.
+fn event_trigger_invoke(
+    fn_oid_list: &[Oid],
+    event: &str,
+    tag: CommandTag,
+) -> PgResult<()> {
+    // Guard against stack overflow due to recursive event trigger.
+    backend_tcop_utility_out_seams::check_stack_depth::call()?;
+
+    let mut first = true;
+    for &fnoid in fn_oid_list {
+        // Each event trigger sees the results of the previous one's action.
+        if first {
+            first = false;
+        } else {
+            backend_access_transam_xact_seams::command_counter_increment::call()?;
+        }
+
+        // Install the per-call EventTriggerData side-channel + the fmgr
+        // call-context demux tag, then invoke the function with no arguments and
+        // the InvalidOid collation (an event-trigger function takes no args).
+        let _data_guard = CurrentEventTriggerGuard::install(CurrentEventTrigger {
+            event: event.to_string(),
+            tag,
+        });
+        let _ctx_guard = types_fmgr::fmgr::CallContextTagGuard::install(T_EVENT_TRIGGER_DATA);
+        backend_utils_fmgr_fmgr_seams::function_call_invoke::call(fnoid, InvalidOid, &[])?;
+    }
+
+    Ok(())
+}
+
+/// `EventTriggerCommonSetup` run-list build + `EventTriggerInvoke` + the
+/// post-fire `CommandCounterIncrement` — the firing tail crossed by
+/// [`fire_seams::event_trigger_fire`]. Entered only after the fence verified the
+/// event cache is non-empty for this event.
+///
+/// Mirrors the C `EventTriggerDDLCommandStart` tail: build the run-list (filter
+/// the cache items by `filter_event_trigger`), fast-exit if empty (the common
+/// trigger-present-but-tag-mismatch no-op), invoke each matching function, then
+/// `CommandCounterIncrement` so the main command sees what the triggers did.
+fn event_trigger_fire_impl(
+    parsetree: &Node,
+    event: EventTriggerEvent,
+    eventstr: &str,
+) -> PgResult<()> {
+    // EventTriggerCommonSetup: re-read the cache (the fence's emptiness check ran
+    // in a transient context) and build the run-list.
+    let setup_cxt = MemoryContext::new("event trigger common-setup");
+    let cachelist = evtcache_seams::event_cache_lookup::call(setup_cxt.mcx(), event)?;
+    if cachelist.is_empty() {
+        return Ok(());
+    }
+
+    // Get the command tag.
+    let tag = event_trigger_get_tag(parsetree, event)?;
+
+    // Filter list of event triggers by command tag; collect the fnoids to run.
+    let mut runlist: Vec<Oid> = Vec::new();
+    for item in cachelist.iter() {
+        if filter_event_trigger(tag, item) {
+            runlist.push(item.fnoid);
+        }
+    }
+
+    // Don't spend any more time on this if no functions to run.
+    if runlist.is_empty() {
+        return Ok(());
+    }
+
+    // Run the triggers.
+    event_trigger_invoke(&runlist, eventstr, tag)?;
+
+    // Make sure anything the event triggers did is visible to the main command.
+    backend_access_transam_xact_seams::command_counter_increment::call()?;
+
+    Ok(())
 }
 
 // ===========================================================================
@@ -1190,6 +1393,20 @@ pub fn init_seams() {
     );
     backend_tcop_utility_out_seams::create_event_trigger::set(create_event_trigger_seam);
     backend_tcop_utility_out_seams::alter_event_trigger::set(alter_event_trigger_seam);
+
+    // The post-gate firing tail (EventTriggerCommonSetup run-list + EventTriggerInvoke).
+    fire_seams::event_trigger_fire::set(|parsetree, event, eventstr| {
+        event_trigger_fire_impl(parsetree, event, eventstr)
+    });
+
+    // PL/pgSQL TG_EVENT / TG_TAG promise accessors — read the currently-firing
+    // event trigger's event/tag off the CURRENT_EVENT_TRIGGER side-channel.
+    backend_commands_event_trigger_seams::event_trigger_get_event::set(|| {
+        Ok(event_trigger_get_event())
+    });
+    backend_commands_event_trigger_seams::event_trigger_get_tag_name::set(|| {
+        Ok(event_trigger_get_tag_name())
+    });
 
     // Inward seams (callers: tcop/utility dispatch via the out-seams above; and
     // catalog/dependency.c's drop-time `sql_drop` collection gate). Only the

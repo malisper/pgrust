@@ -2,14 +2,12 @@
 //!
 //! The fence entry points (`EventTriggerDDLCommandStart` / `…End` /
 //! `EventTriggerSQLDrop` / `EventTriggerTableRewrite`) all begin with
-//! `if (!IsUnderPostmaster || !event_triggers) return;` — so in standalone
-//! single-user mode (the only mode this repo currently boots) the firing tail is
-//! never reached. The tail (`EventTriggerCommonSetup` + `EventTriggerInvoke`)
-//! pulls in the whole fmgr-dispatch / snapshot / `CreateCommandTag` /
-//! `session_replication_role` / bitmapset firing machinery; porting it is a
-//! distinct sub-campaign. Until then this seam stays uninstalled and panics
-//! loudly if a build ever reaches it with `IsUnderPostmaster` true and an event
-//! trigger present — never a silent stub.
+//! `if (!IsUnderPostmaster || !event_triggers) return;`. Once
+//! `IsUnderPostmaster` is true (the postmaster boot the regression suite uses)
+//! and a `pg_event_trigger` row exists, the firing tail is reached: this seam
+//! carries the post-gate `EventTriggerCommonSetup` run-list build (`CommandTag`
+//! + `filter_event_trigger`) and `EventTriggerInvoke` (the fmgr dispatch of each
+//! matching trigger function). The owner installs it from `init_seams`.
 
 #![allow(non_snake_case)]
 
