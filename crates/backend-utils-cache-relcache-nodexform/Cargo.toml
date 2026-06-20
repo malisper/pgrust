@@ -16,6 +16,7 @@ types-error = { path = "../types-error" }
 types-rel = { path = "../types-rel" }
 types-catalog = { path = "../types-catalog" }
 types-nodes = { path = "../types-nodes" }
+types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
 types-tableam = { path = "../types-tableam" }
 

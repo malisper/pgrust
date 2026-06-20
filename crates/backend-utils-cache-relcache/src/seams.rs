@@ -896,11 +896,13 @@ fn relation_get_dummy_index_expressions<'mcx>(
         // NIL — not an index, or no expression columns.
         return Ok(None);
     }
-    // An expression column is present: defer to the still-unported node-tree
-    // decode owner (mirror-PG-and-panic).
-    crate::derived::RelationGetDummyIndexExpressions(index.rd_id)?;
-    // Unreachable until the node-tree decode lands (the call above panics).
-    Ok(None)
+    // An expression column is present: the `indexprs` node-tree decode
+    // (`stringToNode`) + the dummy-`Const` build (`makeConst` over
+    // `exprType`/`exprTypmod`/`exprCollation`) is node vocabulary owned
+    // cross-unit; route through the node-tree owner seam, which returns the
+    // dummy null-`Const` list in `mcx`. The owned entry does not carry the C's
+    // memoization, so the tree is re-derived per call.
+    backend_utils_cache_relcache_nodexform_seams::dummy_index_expressions::call(mcx, index.rd_id)
 }
 
 /// `RelationGetExclusionInfo(indexRelation, &operators, &procs, &strategies)`

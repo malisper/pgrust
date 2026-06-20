@@ -1693,10 +1693,12 @@ mod recurrence_guard {
         // `IndexInfo.ii_{Expressions,Predicate}`. (The separate planner-catalog read
         // path `get_index_{expressions,predicate}` still errors on the #159
         // planner-arena `NodeId` projection — a distinct keystone, untouched here.)
-        // `dummy_index_expressions` stays uninstalled: its only consumer
-        // (`BuildDummyIndexInfo`, the TRUNCATE-of-expression-index path) is not yet
-        // reached. Install + DELETE it when that lands.
-        ("backend_utils_cache_relcache_nodexform", "dummy_index_expressions"),
+        // (`dummy_index_expressions` is now INSTALLED: it `stringToNode`s the raw
+        // `indexprs` and builds the dummy null-`Const` list (`makeConst` over
+        // `exprType`/`exprTypmod`/`exprCollation`) returned in `mcx`; its consumer
+        // `BuildDummyIndexInfo` (catalog/index.c, the ON COMMIT DELETE ROWS /
+        // TRUNCATE-of-expression-index rebuild path) is now reached — so its entry
+        // was DELETED.)
         //
         // (TD-INDEXING-APPEND-ATTRIBUTE-TUPLES RETIRED: `AppendAttributeTuples`
         // (catalog/index.c) is now INSTALLED by backend-catalog-indexing's

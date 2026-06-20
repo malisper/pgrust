@@ -21783,6 +21783,7 @@ dependencies = [
  "types-rel",
  "types-storage",
  "types-tableam",
+ "types-tuple",
 ]
 
 [[package]]

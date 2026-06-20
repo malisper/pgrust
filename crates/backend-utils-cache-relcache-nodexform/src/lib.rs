@@ -457,17 +457,60 @@ fn index_predicate<'mcx>(
     Ok(Some(result))
 }
 
-/// Install this unit's seams. `index_expressions` / `index_predicate` decode the
-/// raw `pg_index.indexprs` / `indpred` node trees and return the transformed
-/// expression lists; the owned relcache entry does not retain the C's
-/// `rd_indexprs` / `rd_indpred` memoization, so each call re-derives the tree
-/// (faithful behavior, minus the cache). `dummy_index_expressions` remains
-/// unwired (its only consumer, `BuildDummyIndexInfo`, is on the TRUNCATE path
-/// not yet reached).
+/// `RelationGetDummyIndexExpressions(relation)` (relcache.c:5156): decode the
+/// raw `pg_index.indexprs` text, then build, per raw sub-expression, a null
+/// `Const` carrying the same type/typmod/collation —
+/// `makeConst(exprType(rawExpr), exprTypmod(rawExpr), exprCollation(rawExpr), 1,
+/// (Datum) 0, true /*isnull*/, true /*byval*/)`. Used by `BuildDummyIndexInfo`
+/// (catalog/index.c) when truncating an index so no user-defined expression code
+/// runs (the typlen/typbyval are arbitrary, as the value is null). Returns the
+/// dummy-Const list in `mcx`, or `None` when the index has no expression columns.
+fn dummy_index_expressions<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relid: Oid,
+) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+    // heap_attisnull(rd_indextuple, Anum_pg_index_indexprs): the raw indexprs
+    // text is read by OID through the syscache owner (the C `rd_indextuple`
+    // analogue). NULL == no expression columns == NIL.
+    let Some(text) = syscache_seam::pg_index_exprs_text::call(index_relid)? else {
+        return Ok(None);
+    };
+
+    let raw = decode_node_text_to_exprs(mcx, &text)?;
+    let mut result: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    for rawexpr in &raw {
+        // makeConst(exprType, exprTypmod, exprCollation, 1, (Datum) 0, true, true)
+        // — a null Const of the same type/typmod/collation as the real expr. The
+        // constlen (1) and constbyval (true) are arbitrary, per the C comment,
+        // because the value is null.
+        let consttype = backend_nodes_core::nodefuncs::expr_type(Some(rawexpr))?;
+        let consttypmod = backend_nodes_core::nodefuncs::expr_typmod(Some(rawexpr))?;
+        let constcollid = backend_nodes_core::nodefuncs::expr_collation(Some(rawexpr))?;
+        let cons = backend_nodes_core::makefuncs::make_const(
+            mcx,
+            consttype,
+            consttypmod,
+            constcollid,
+            1,
+            types_tuple::backend_access_common_heaptuple::Datum::ByVal(0),
+            true,
+            true,
+        )?;
+        result.push(Expr::Const(cons));
+    }
+    Ok(Some(result))
+}
+
+/// Install this unit's seams. `index_expressions` / `index_predicate` /
+/// `dummy_index_expressions` decode the raw `pg_index.indexprs` / `indpred`
+/// node trees and return the transformed expression lists; the owned relcache
+/// entry does not retain the C's `rd_indexprs` / `rd_indpred` memoization, so
+/// each call re-derives the tree (faithful behavior, minus the cache).
 pub fn init_seams() {
     inward::open_index_attrs::set(open_index_attrs);
     inward::relation_build_publication_desc::set(relation_build_publication_desc);
     inward::publication_desc::set(publication_desc);
     inward::index_expressions::set(index_expressions);
     inward::index_predicate::set(index_predicate);
+    inward::dummy_index_expressions::set(dummy_index_expressions);
 }

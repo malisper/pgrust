@@ -73,14 +73,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `RelationGetDummyIndexExpressions(relation)` (relcache.c): read the raw
-    /// `pg_index.indexprs` datum (`heap_getattr` over `GetPgIndexDescriptor`),
+    /// `RelationGetDummyIndexExpressions(relation)` (relcache.c:5156): read the
+    /// raw `pg_index.indexprs` datum (`heap_getattr` over `GetPgIndexDescriptor`),
     /// `stringToNode` the expression list, then per sub-tree
-    /// `makeConst(exprType, exprTypmod, exprCollation, 1, 0, true, true)`
-    /// (makefuncs + nodeFuncs owners). The built dummy-Const list lives on the
-    /// entry behind the seam; the consumer only needs the acknowledgement. Can
-    /// `ereport(ERROR)`, carried on `Err`.
-    pub fn dummy_index_expressions(index_relid: Oid) -> PgResult<()>
+    /// `makeConst(exprType, exprTypmod, exprCollation, 1, (Datum) 0, true, true)`
+    /// (makefuncs + nodeFuncs owners). Returns the dummy null-`Const` list in
+    /// `mcx`, or `None` (== `NIL`) when the index has no expression columns. The
+    /// owned relcache entry does not retain the C's memoization, so the tree is
+    /// re-derived per call. Can `ereport(ERROR)`, carried on `Err`.
+    pub fn dummy_index_expressions<'mcx>(
+        mcx: Mcx<'mcx>,
+        index_relid: Oid,
+    ) -> PgResult<Option<PgVec<'mcx, Expr>>>
 );
 
 seam_core::seam!(

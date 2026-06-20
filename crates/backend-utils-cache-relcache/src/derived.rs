@@ -1245,7 +1245,9 @@ fn index_predicate_seam(relid: Oid) -> PgResult<()> {
 /// All node vocabulary (`stringToNode`/`makeConst`/`exprType`/`exprTypmod`/
 /// `exprCollation`) + the raw `rd_indextuple` read; node owner.
 fn dummy_index_expressions_seam(relid: Oid) -> PgResult<()> {
-    nodexform_seam::dummy_index_expressions::call(relid)
+    let scratch = MemoryContext::new("RelationGetDummyIndexExpressions seam");
+    nodexform_seam::dummy_index_expressions::call(scratch.mcx(), relid)?;
+    Ok(())
 }
 
 /// One index's attribute contributions for `RelationGetIndexAttrBitmap`,
