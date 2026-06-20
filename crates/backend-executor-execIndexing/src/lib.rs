@@ -65,6 +65,7 @@ use backend_utils_fmgr_fmgr_seams as fmgr_seams;
 use backend_executor_execExpr_seams as expr_seams;
 use backend_access_transam_transam_seams as transam_seams;
 use backend_access_transam_xact_seams as xact_seams;
+use backend_utils_time_snapmgr_seams as snapmgr_seams;
 
 #[cfg(test)]
 mod tests;
@@ -945,6 +946,191 @@ fn exclusion_scan_loop<'mcx>(
 }
 
 // ===========================================================================
+// IndexCheckExclusion
+// ===========================================================================
+
+/// `IndexCheckExclusion(heapRelation, indexRelation, indexInfo)` (catalog/index.c).
+///
+/// After building an exclusion-constraint index, make a second pass over the
+/// heap to verify that the constraint is satisfied: scan all live tuples in the
+/// base relation, form each one's index values, and probe the (now fully built)
+/// index via [`check_exclusion_constraint`], which raises a clean
+/// `exclusion_violation` `ERROR` on a conflict.
+///
+/// This is the body the `index_check_exclusion` seam (catalog-index-seams) is
+/// installed with from this crate's [`init_seams`]; the catalog `index_build`
+/// driver calls it through that seam for an exclusion index. (Homed here, not in
+/// catalog/index.c's crate, because it needs the executor table-scan +
+/// `check_exclusion_constraint` substrate this crate owns — exactly why the seam
+/// header pins its owner to the executor layer.)
+pub fn IndexCheckExclusion<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &IndexInfo<'mcx>,
+) -> PgResult<()> {
+    // If we are reindexing the target index, mark it as no longer being
+    // reindexed, to forestall an Assert in index_beginscan when we try to use
+    // the index for probes. This is OK because the index is now fully valid.
+    if index_seams::reindex_is_currently_processing_index::call(index_relation.rd_id) {
+        index_seams::reset_reindex_processing::call();
+    }
+
+    // Need an EState for evaluation of index expressions and partial-index
+    // predicates. Also a slot to hold the current tuple. The owned model builds
+    // the EState directly in the caller's `mcx` (which plays the role of C's
+    // private per-query "ExecutorState" context — the surrounding index_build
+    // transaction owns and reclaims it); we run the same non-memory teardown as
+    // `FreeExecutorState` (firing ExprContext shutdown callbacks) before
+    // returning.
+    let mut estate = EStateData::new_in(mcx);
+
+    // econtext = GetPerTupleExprContext(estate)
+    let econtext = execUtils::MakePerTupleExprContext(&mut estate)?;
+
+    // slot = table_slot_create(heapRelation, NULL); held in the EState pool so
+    // FormIndexDatum/ecxt_scantuple can address it by id, and reclaimed with the
+    // EState (the same compromise the crate's other FormIndexDatum callers make
+    // for their standalone slots).
+    let slot_data = tableam::table_slot_create(mcx, heap_relation)?;
+    let slot = estate.push_slot_data(slot_data)?;
+
+    // Arrange for econtext's scan tuple to be the tuple under test.
+    estate.ecxt_mut(econtext).ecxt_scantuple = Some(slot);
+
+    // Set up execution state for predicate, if any.
+    let mut predicate = expr_seams::exec_prepare_qual::call(
+        index_info.ii_Predicate.as_deref(),
+        &mut estate,
+    )?;
+
+    // Run the scan body, capturing its result so the EState teardown runs on
+    // either outcome (mirroring C's straight-line cleanup; the C version lets an
+    // ereport escape mid-teardown, but reclamation is via the surrounding
+    // context either way).
+    let result = index_check_exclusion_scan(
+        mcx,
+        &mut estate,
+        heap_relation,
+        index_relation,
+        index_info,
+        econtext,
+        slot,
+        predicate.as_deref_mut(),
+    );
+
+    // ExecDropSingleTupleTableSlot(slot): clear the scan slot to release the
+    // buffer pin a BufferHeapTupleTableSlot holds on the last fetched heap page
+    // (its ExecClearTuple -> tts_buffer_heap_clear -> ReleaseBuffer), so the pin
+    // is dropped from the resource owner before commit (else "resource was not
+    // closed" at REINDEX-transaction end). C drops this single slot; here we also
+    // clear `check_exclusion_constraint`'s internal `existing_slot` (which the
+    // owned model leaves in the EState pool rather than dropping standalone), so
+    // ExecResetTupleTable over the whole pool is the faithful release. Run this
+    // even on the scan body's error path. The slot structs are reclaimed with the
+    // EState's `mcx`.
+    let drop_slot = execUtils::ExecResetTupleTable(&mut estate, false);
+
+    // FreeExecutorState(estate): fire any ExprContext shutdown callbacks / release
+    // JIT + partition directory. The per-query memory is reclaimed when the
+    // caller resets its `mcx`.
+    let teardown = execUtils::free_executor_state_teardown(&mut estate);
+
+    // ii_Expressions/PredicateState pointed into the now-gone estate; in the
+    // owned model `index_info` is borrowed immutably (the caller's IndexInfo), so
+    // the C `indexInfo->ii_ExpressionsState = NIL / ii_PredicateState = NULL`
+    // reset is performed by the caller (index_build) against its owned copy when
+    // it drops the EState-tied states — no aliasing write needed here.
+
+    result?;
+    drop_slot?;
+    teardown
+}
+
+/// The heap-rescan loop of [`IndexCheckExclusion`], factored out so the EState
+/// teardown in the caller runs on either outcome.
+fn index_check_exclusion_scan<'mcx>(
+    mcx: Mcx<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &IndexInfo<'mcx>,
+    econtext: EcxtId,
+    slot: SlotId,
+    mut predicate: Option<&mut types_nodes::execexpr::ExprState<'mcx>>,
+) -> PgResult<()> {
+    // Scan all live tuples in the base relation.
+    // snapshot = RegisterSnapshot(GetLatestSnapshot())
+    let snapshot =
+        snapmgr_seams::register_snapshot::call(snapmgr_seams::get_latest_snapshot::call()?)?;
+
+    let mut scan = tableam::table_beginscan_strat(
+        mcx,
+        heap_relation,
+        Some(snapshot.clone()),
+        0,                       // number of keys
+        PgVec::new_in(mcx),      // scan key
+        true,                    // buffer access strategy OK
+        true,                    // syncscan OK
+    )?;
+
+    let body = (|| -> PgResult<()> {
+        loop {
+            // table_scan_getnextslot(scan, ForwardScanDirection, slot)
+            if !tableam::table_scan_getnextslot(
+                mcx,
+                &mut scan,
+                ScanDirection::ForwardScanDirection,
+                estate.slot_data_mut(slot),
+            )? {
+                break;
+            }
+
+            // CHECK_FOR_INTERRUPTS(): cooperative-cancellation point; the owned
+            // model has no signal machinery reachable here (procsignal unported),
+            // so it is a no-op.
+
+            // In a partial index, ignore tuples that don't satisfy the predicate.
+            if let Some(pred) = predicate.as_deref_mut() {
+                if !expr_seams::exec_qual::call(pred, econtext, estate)? {
+                    continue;
+                }
+            }
+
+            // Extract index column values, including computing expressions.
+            let (values, isnull) =
+                index_seams::form_index_datum::call(index_info, slot, estate)?;
+
+            // Check that this tuple has no conflicts.
+            let tupleid = estate.slot(slot).tts_tid;
+            check_exclusion_constraint(
+                mcx,
+                estate,
+                heap_relation,
+                index_relation,
+                index_info,
+                Some(&tupleid),
+                &values,
+                &isnull,
+                true, // newIndex
+            )?;
+
+            // MemoryContextReset(econtext->ecxt_per_tuple_memory)
+            execUtils::ResetExprContext(estate.ecxt_mut(econtext));
+        }
+        Ok(())
+    })();
+
+    // table_endscan(scan); UnregisterSnapshot(snapshot) — run regardless of the
+    // loop's outcome so the scan/snapshot resources are released even on a
+    // constraint-violation error (then propagate the body's result).
+    tableam::table_endscan(scan)?;
+    snapmgr_seams::unregister_snapshot::call(snapshot);
+
+    body
+}
+
+// ===========================================================================
 // check_exclusion_constraint
 // ===========================================================================
 
@@ -1295,6 +1481,12 @@ pub fn init_seams() {
     inward::exec_close_indices::set(ExecCloseIndices);
     inward::exec_insert_index_tuples::set(seam_exec_insert_index_tuples);
     inward::exec_check_index_constraints::set(seam_exec_check_index_constraints);
+
+    // IndexCheckExclusion (catalog/index.c's exclusion-constraint second pass)
+    // is homed here because it needs this crate's executor table-scan +
+    // check_exclusion_constraint substrate; install the catalog-index-seams
+    // `index_check_exclusion` seam its index_build driver calls.
+    index_seams::index_check_exclusion::set(IndexCheckExclusion);
 }
 
 fn seam_exec_open_indices<'mcx>(

@@ -33,6 +33,8 @@ backend-utils-adt-multirangetypes-seams = { path = "../backend-utils-adt-multira
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-access-transam-transam-seams = { path = "../backend-access-transam-transam-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+# IndexCheckExclusion: RegisterSnapshot(GetLatestSnapshot()) over the heap rescan.
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 
 backend-utils-error = { path = "../backend-utils-error" }
 mcx = { path = "../mcx" }

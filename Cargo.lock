@@ -9284,6 +9284,7 @@ dependencies = [
  "backend-utils-cache-typcache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-time-snapmgr-seams",
  "mcx",
  "seam-core",
  "types-core",

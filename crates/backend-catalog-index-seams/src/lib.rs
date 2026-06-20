@@ -148,6 +148,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ReindexIsCurrentlyProcessingIndex(indexOid)` (catalog/index.c,
+    /// file-static): is the given index OID the one *currently* being reindexed
+    /// (the `currentlyReindexedIndex` global), ignoring the pending list? Reads
+    /// index.c's backend-local reindex state. Pure lookup; cannot `ereport`.
+    /// Used by `IndexCheckExclusion` (executor layer) to decide whether the
+    /// target exclusion index must be un-suppressed before probing it.
+    pub fn reindex_is_currently_processing_index(index_oid: types_core::primitive::Oid) -> bool
+);
+
+seam_core::seam!(
+    /// `ResetReindexProcessing()` (catalog/index.c, file-static): clear the
+    /// `currentlyReindexedHeap`/`currentlyReindexedIndex` globals, re-allowing
+    /// use of the target index for index probes. (The reindexing nest level
+    /// stays set until end of (sub)transaction.) Called by `IndexCheckExclusion`
+    /// once the freshly-built exclusion index is fully valid. Cannot `ereport`.
+    pub fn reset_reindex_processing()
+);
+
+seam_core::seam!(
     /// `BuildIndexInfo(index)` (catalog/index.c): construct an `IndexInfo`
     /// describing the open index relation, fetching any expression / predicate
     /// / exclusion info. The expression / predicate / exclusion legs allocate

@@ -4025,6 +4025,8 @@ pub fn init_seams() {
 
     // Reindexing-support state machine.
     index_seam::reindex_is_processing_index::set(ReindexIsProcessingIndex);
+    index_seam::reindex_is_currently_processing_index::set(ReindexIsCurrentlyProcessingIndex);
+    index_seam::reset_reindex_processing::set(ResetReindexProcessing);
     index_seam::reset_reindex_state::set(ResetReindexState);
 
     // reindex_index / reindex_relation — rebuild one / all indexes of a relation
