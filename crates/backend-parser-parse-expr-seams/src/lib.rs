@@ -9,6 +9,7 @@
 use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_error::PgResult;
+use types_tuple::Datum;
 use types_nodes::nodes::Node;
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::Expr;
@@ -81,4 +82,15 @@ seam_core::seam!(
     /// error messages. Owned by parse_expr.c; consumed by
     /// `check_srf_call_placement` (parse_func.c) across the parser cycle.
     pub fn parse_expr_kind_name(expr_kind: ParseExprKind) -> &'static str
+);
+
+seam_core::seam!(
+    /// `DirectFunctionCall1(jsonb_in, CStringGetDatum(val))` — parse a
+    /// NUL-free cstring into an on-disk `jsonb` value and return the resulting
+    /// `Datum` (a by-ref varlena). Used by `GetJsonBehaviorConst`
+    /// (parse_expr.c) to build the `[]` / `{}` jsonb `Const` for EMPTY ARRAY /
+    /// EMPTY OBJECT behaviors. Owned by `backend-utils-adt-jsonb` (which links
+    /// the jsonb parser); declared here so the parser can build the const
+    /// without depending on the jsonb crate. A parse failure raises `Err`.
+    pub fn jsonb_const_from_cstring<'mcx>(mcx: Mcx<'mcx>, val: &str) -> PgResult<Datum<'mcx>>
 );

@@ -59,7 +59,8 @@ use mcx::MemoryContext;
 
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_CANNOT_COERCE, ERRCODE_DATATYPE_MISMATCH,
+    ErrorLocation, PgError, PgResult, ERRCODE_CANNOT_COERCE, ERRCODE_COLLATION_MISMATCH,
+    ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_DATATYPE, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT, ERROR, WARNING,
@@ -88,6 +89,8 @@ use types_tuple::heaptuple::{
 
 // SQL/JSON catalog OIDs (stable; nodes/parsenodes.h transforms reference these).
 const JSONOID: Oid = 114;
+/// `JSONPATHOID` (catalog/pg_type_d.h).
+const JSONPATHOID: Oid = 4072;
 /// `F_TO_JSON` (utils/fmgroids.h).
 const F_TO_JSON: Oid = 3176;
 /// `F_TO_JSONB` (utils/fmgroids.h).
@@ -96,6 +99,10 @@ const F_TO_JSONB: Oid = 3787;
 const F_CONVERT_FROM: Oid = 1714;
 /// `TYPCATEGORY_STRING` (catalog/pg_type.h).
 const TYPCATEGORY_STRING: u8 = b'S';
+/// `TYPCATEGORY_BITSTRING` (catalog/pg_type.h).
+const TYPCATEGORY_BITSTRING: u8 = b'V';
+/// `TYPTYPE_DOMAIN` (catalog/pg_type.h).
+const TYPTYPE_DOMAIN: u8 = b'd';
 /// `TYPTYPE_PSEUDO` (catalog/pg_type.h).
 const TYPTYPE_PSEUDO: u8 = b'p';
 use backend_parser_parse_target::FigureColname;
@@ -108,9 +115,10 @@ use types_nodes::nodes::{self, ntag, Node};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::{
     Aggref, ArrayExpr, BoolTestType, BooleanTest, CaseExpr, CaseTestExpr, CaseWhen, CoalesceExpr,
-    CoercionForm, CollateExpr, CurrentOfExpr, Expr, JsonConstructorType, JsonEncoding, JsonFormat,
-    JsonFormatType, JsonReturning, JsonValueExpr as CookedJsonValueExpr, JsonValueType,
-    MergeSupportFunc, MinMaxExpr, MinMaxOp,
+    CoercionForm, CollateExpr, CurrentOfExpr, Expr, JsonBehavior, JsonBehaviorType,
+    JsonConstructorType, JsonEncoding, JsonExpr, JsonExprOp, JsonFormat,
+    JsonFormatType, JsonQuotes, JsonReturning, JsonValueExpr as CookedJsonValueExpr, JsonValueType,
+    JsonWrapper, MergeSupportFunc, MinMaxExpr, MinMaxOp,
     NamedArgExpr, NullTest, NullTestType, OpExpr, RowCompareExpr, RowExpr, SQLValueFunction, SQLValueFunctionOp,
     SubscriptingRef, WindowFunc, AND_EXPR, NOT_EXPR, OR_EXPR,
     XmlExpr as CookedXmlExpr, XmlExprOp,
@@ -124,8 +132,8 @@ use types_parsenodes::CoercionContext;
 
 use backend_utils_error::ereport;
 use backend_nodes_core::makefuncs::{
-    make_bool_const, make_bool_expr, make_const, make_func_expr, make_json_constructor_expr,
-    make_json_format, make_json_is_predicate, make_target_entry,
+    make_bool_const, make_bool_expr, make_const, make_func_expr, make_json_behavior,
+    make_json_constructor_expr, make_json_format, make_json_is_predicate, make_target_entry,
 };
 use backend_nodes_core::nodefuncs::{
     expr_collation, expr_location, expr_type, expr_typmod, expression_returns_set,
@@ -133,6 +141,8 @@ use backend_nodes_core::nodefuncs::{
 
 use backend_parser_coerce_seams as coerce;
 use backend_utils_cache_lsyscache_seams as lsyscache;
+use backend_utils_cache_typcache_seams as typcache;
+use types_tuple::Datum;
 
 use backend_parser_relation::{
     colNameToVar, errorMissingColumn, errorMissingRTE, refnameNamespaceItem, scanNSItemForColumn,
@@ -383,6 +393,9 @@ pub fn transformExprRecurse<'mcx>(
         }
         ntag::T_JsonIsPredicate => {
             transformJsonIsPredicate(pstate, expr.into_jsonispredicate().unwrap())?
+        }
+        ntag::T_JsonFuncExpr => {
+            transformJsonFuncExpr(pstate, expr.into_jsonfuncexpr().unwrap())?
         }
 
         // T_CurrentOfExpr → transformCurrentOfExpr(pstate, (CurrentOfExpr *) expr)
@@ -5359,32 +5372,640 @@ fn transformJsonIsPredicate<'mcx>(
     ))
 }
 
-#[allow(dead_code)]
-fn seam_transform_json_expr<'mcx>(
-    _pstate: &mut ParseState<'mcx>,
-    _node: Node<'mcx>,
+/// `transformJsonFuncExpr(pstate, func)` (parse_expr.c:4293) — analyze a raw
+/// `JSON_VALUE`/`JSON_QUERY`/`JSON_EXISTS` function expression into a cooked
+/// [`JsonExpr`]. The `JSON_TABLE_OP` op branch is ported for completeness even
+/// though JSON_TABLE itself reaches the cooked node via parse_jsontable.c.
+fn transformJsonFuncExpr<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    func: types_nodes::rawexprnodes::JsonFuncExpr<'mcx>,
 ) -> PgResult<Expr> {
-    // The SQL/JSON transform family (transformJson{Object,Array}Constructor /
-    // transformJson{Object,Array}Agg / transformJsonIsPredicate /
-    // transformJson{Parse,Scalar,Serialize,Func}Expr and their helpers) is
-    // blocked on a node-model keystone OUTSIDE this unit: the 12 raw SQL/JSON
-    // grammar parse-nodes (JsonObjectConstructor, JsonArrayConstructor,
-    // JsonArrayQueryConstructor, JsonAggConstructor, JsonObjectAgg,
-    // JsonArrayAgg, JsonFuncExpr, JsonParseExpr, JsonScalarExpr,
-    // JsonSerializeExpr, JsonOutput, JsonKeyValue) are NOT variants of
-    // `types_nodes::nodes::Node`/`Expr` (they exist only in the parallel
-    // `backend-nodes-types-fgram` tree), and the idiomatic grammar
-    // (`backend-parser-gram-core`) emits no JSON productions. Lifting those
-    // structs into `types-nodes` + adding their grammar converters is a
-    // separate cross-owner campaign (types-nodes + gram-core); the coercion /
-    // makefuncs substrate the transforms need is already real. Until that
-    // lands there is no input node to match on.
-    panic!(
-        "SQL/JSON transform family blocked on node-model keystone: 12 raw JSON \
-         grammar parse-nodes are absent from types_nodes::Node/Expr and the \
-         idiomatic grammar emits no JSON productions (owner: types-nodes + \
-         backend-parser-gram-core)."
-    )
+    let mcx = aexpr_clone_ctx(pstate);
+
+    let (func_name, default_format): (&str, JsonFormatType) = match func.op {
+        JsonExprOp::JSON_EXISTS_OP => ("JSON_EXISTS", JsonFormatType::JS_FORMAT_DEFAULT),
+        JsonExprOp::JSON_QUERY_OP => ("JSON_QUERY", JsonFormatType::JS_FORMAT_JSONB),
+        JsonExprOp::JSON_VALUE_OP => ("JSON_VALUE", JsonFormatType::JS_FORMAT_DEFAULT),
+        JsonExprOp::JSON_TABLE_OP => ("JSON_TABLE", JsonFormatType::JS_FORMAT_JSONB),
+    };
+
+    // Lift the raw ON EMPTY / ON ERROR JsonBehavior out of its NodePtr so it
+    // survives independently of the borrowed raw graph.
+    let on_empty_raw = raw_json_behavior(mcx, &func.on_empty)?;
+    let on_error_raw = raw_json_behavior(mcx, &func.on_error)?;
+
+    // FORMAT JSON in RETURNING is meaningless except for JSON_QUERY().
+    if func.op != JsonExprOp::JSON_QUERY_OP {
+        if let Some(out) = func.output.as_deref() {
+            if let Some(ret) = out.returning.as_ref() {
+                if let Some(format) = ret.format {
+                    if format.format_type != JsonFormatType::JS_FORMAT_DEFAULT
+                        || format.encoding != JsonEncoding::JS_ENC_DEFAULT
+                    {
+                        return Err(ereport(ERROR)
+                            .errcode(ERRCODE_SYNTAX_ERROR)
+                            .errmsg(alloc::format!(
+                                "cannot specify FORMAT JSON in RETURNING clause of {}()",
+                                func_name
+                            ))
+                            .errposition(parser_errposition(pstate, format.location))
+                            .into_error());
+                    }
+                }
+            }
+        }
+    }
+
+    let column_name = func.column_name.as_ref().map(|s| s.as_str());
+
+    // JSON_QUERY: OMIT QUOTES vs WITH WRAPPER and ON EMPTY/ON ERROR validity.
+    if func.op == JsonExprOp::JSON_QUERY_OP {
+        if func.quotes == JsonQuotes::JS_QUOTES_OMIT
+            && (func.wrapper == JsonWrapper::JSW_CONDITIONAL
+                || func.wrapper == JsonWrapper::JSW_UNCONDITIONAL)
+        {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg("SQL/JSON QUOTES behavior must not be specified when WITH WRAPPER is used")
+                .errposition(parser_errposition(pstate, func.location))
+                .into_error());
+        }
+        check_json_query_behavior_valid(pstate, column_name, on_empty_raw.as_ref(), "ON EMPTY")?;
+        check_json_query_behavior_valid(pstate, column_name, on_error_raw.as_ref(), "ON ERROR")?;
+    }
+
+    // JSON_EXISTS: ON ERROR validity.
+    if func.op == JsonExprOp::JSON_EXISTS_OP {
+        if let Some(oe) = on_error_raw.as_ref() {
+            let b = oe.btype;
+            if b != JsonBehaviorType::JSON_BEHAVIOR_ERROR
+                && b != JsonBehaviorType::JSON_BEHAVIOR_TRUE
+                && b != JsonBehaviorType::JSON_BEHAVIOR_FALSE
+                && b != JsonBehaviorType::JSON_BEHAVIOR_UNKNOWN
+            {
+                return Err(invalid_behavior_err(
+                    pstate,
+                    column_name,
+                    "ON ERROR",
+                    "Only ERROR, TRUE, FALSE, or UNKNOWN is allowed in ON ERROR for JSON_EXISTS().",
+                    "Only ERROR, TRUE, FALSE, or UNKNOWN is allowed in ON ERROR for EXISTS columns.",
+                    oe.location,
+                ));
+            }
+        }
+    }
+
+    // JSON_VALUE: ON EMPTY / ON ERROR validity.
+    if func.op == JsonExprOp::JSON_VALUE_OP {
+        for (beh, clause) in [
+            (on_empty_raw.as_ref(), "ON EMPTY"),
+            (on_error_raw.as_ref(), "ON ERROR"),
+        ] {
+            if let Some(b) = beh {
+                let t = b.btype;
+                if t != JsonBehaviorType::JSON_BEHAVIOR_ERROR
+                    && t != JsonBehaviorType::JSON_BEHAVIOR_NULL
+                    && t != JsonBehaviorType::JSON_BEHAVIOR_DEFAULT
+                {
+                    return Err(invalid_behavior_err(
+                        pstate,
+                        column_name,
+                        clause,
+                        "Only ERROR, NULL, or DEFAULT expression is allowed in this clause for JSON_VALUE().",
+                        "Only ERROR, NULL, or DEFAULT expression is allowed in this clause for scalar columns.",
+                        b.location,
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut jsexpr = JsonExpr {
+        op: func.op,
+        column_name: func.column_name.as_ref().map(|s| s.as_str().into()),
+        formatted_expr: None,
+        format: None,
+        path_spec: None,
+        returning: None,
+        passing_names: Vec::new(),
+        passing_values: Vec::new(),
+        on_empty: None,
+        on_error: None,
+        use_io_coercion: false,
+        use_json_coercion: false,
+        wrapper: JsonWrapper::JSW_NONE,
+        omit_quotes: false,
+        collation: InvalidOid,
+        location: func.location,
+    };
+
+    // jsonpath machinery only handles jsonb; coerce the context to jsonb.
+    let context_item = func
+        .context_item
+        .as_deref()
+        .ok_or_else(|| PgError::error("transformJsonFuncExpr: NULL context item"))?;
+    let formatted_expr = transform_json_value_expr(
+        pstate,
+        func_name,
+        context_item,
+        default_format,
+        JSONBOID,
+        false,
+    )?;
+    jsexpr.formatted_expr = Some(Box::new(formatted_expr));
+    jsexpr.format = context_item.format;
+
+    // path_spec = coerce_to_target_type(transformExpr(pathspec), JSONPATHOID).
+    let path_node = boxed_node(
+        func.pathspec
+            .as_ref()
+            .map(|p| p.clone_in(mcx))
+            .transpose()?
+            .map(|n| mcx::alloc_in(mcx, n))
+            .transpose()?,
+    );
+    let path_spec = transformExprRecurse(pstate, path_node)?
+        .ok_or_else(|| PgError::error("transformJsonFuncExpr: NULL path spec"))?;
+    let pathspec_type = expr_type(Some(&path_spec))?;
+    let pathspec_loc = expr_location(Some(&path_spec))?;
+    let coerced_path_spec = coerce::coerce_to_target_type::call(
+        pstate,
+        path_spec,
+        pathspec_type,
+        JSONPATHOID,
+        -1,
+        CoercionContext::COERCION_EXPLICIT,
+        CoercionForm::COERCE_IMPLICIT_CAST,
+        pathspec_loc,
+    )?;
+    let coerced_path_spec = coerced_path_spec.ok_or_else(|| {
+        ereport(ERROR)
+            .errcode(ERRCODE_DATATYPE_MISMATCH)
+            .errmsg(alloc::format!(
+                "JSON path expression must be of type jsonpath, not of type {}",
+                format_type_be(pathspec_type).unwrap_or_else(|_| String::from("?"))
+            ))
+            .errposition(parser_errposition(pstate, pathspec_loc))
+            .into_error()
+    })?;
+    jsexpr.path_spec = Some(Box::new(coerced_path_spec));
+
+    // Transform and coerce the PASSING arguments to jsonb.
+    transform_json_passing_args(
+        pstate,
+        func_name,
+        JsonFormatType::JS_FORMAT_JSONB,
+        &func.passing,
+        &mut jsexpr,
+    )?;
+
+    // Transform the JsonOutput into JsonReturning.
+    jsexpr.returning = Some(transform_json_output(pstate, func.output.as_deref(), false)?);
+
+    match func.op {
+        JsonExprOp::JSON_EXISTS_OP => {
+            {
+                let ret = jsexpr.returning.as_mut().unwrap();
+                if !OidIsValid(ret.typid) {
+                    ret.typid = BOOLOID;
+                    ret.typmod = -1;
+                    jsexpr.collation = InvalidOid;
+                }
+            }
+            if jsexpr.returning.as_ref().unwrap().typid != BOOLOID {
+                jsexpr.use_json_coercion = true;
+            }
+            jsexpr.on_error = transform_json_behavior(
+                pstate,
+                &jsexpr,
+                on_error_raw.as_ref(),
+                JsonBehaviorType::JSON_BEHAVIOR_FALSE,
+            )?
+            .map(Box::new);
+        }
+        JsonExprOp::JSON_QUERY_OP => {
+            {
+                let ret = jsexpr.returning.as_mut().unwrap();
+                if !OidIsValid(ret.typid) {
+                    ret.typid = JSONBOID;
+                    ret.typmod = -1;
+                }
+            }
+            let rettypid = jsexpr.returning.as_ref().unwrap().typid;
+            jsexpr.collation = lsyscache::get_typcollation::call(rettypid)?;
+            jsexpr.omit_quotes = func.quotes == JsonQuotes::JS_QUOTES_OMIT;
+            jsexpr.wrapper = func.wrapper;
+            if rettypid != JSONBOID || jsexpr.omit_quotes {
+                jsexpr.use_json_coercion = true;
+            }
+            jsexpr.on_empty = transform_json_behavior(
+                pstate,
+                &jsexpr,
+                on_empty_raw.as_ref(),
+                JsonBehaviorType::JSON_BEHAVIOR_NULL,
+            )?
+            .map(Box::new);
+            jsexpr.on_error = transform_json_behavior(
+                pstate,
+                &jsexpr,
+                on_error_raw.as_ref(),
+                JsonBehaviorType::JSON_BEHAVIOR_NULL,
+            )?
+            .map(Box::new);
+        }
+        JsonExprOp::JSON_VALUE_OP => {
+            {
+                let ret = jsexpr.returning.as_mut().unwrap();
+                if !OidIsValid(ret.typid) {
+                    ret.typid = TEXTOID;
+                    ret.typmod = -1;
+                }
+            }
+            let rettypid = jsexpr.returning.as_ref().unwrap().typid;
+            jsexpr.collation = lsyscache::get_typcollation::call(rettypid)?;
+            // transformJsonOutput assumed jsonb output; override for JSON_VALUE.
+            if let Some(f) = jsexpr.returning.as_mut().unwrap().format.as_mut() {
+                f.format_type = JsonFormatType::JS_FORMAT_DEFAULT;
+                f.encoding = JsonEncoding::JS_ENC_DEFAULT;
+            }
+            jsexpr.omit_quotes = true;
+            if rettypid != TEXTOID {
+                if lsyscache::get_typtype::call(rettypid)? == TYPTYPE_DOMAIN
+                    && typcache::domain_has_constraints::call(rettypid)?
+                {
+                    jsexpr.use_json_coercion = true;
+                } else {
+                    jsexpr.use_io_coercion = true;
+                }
+            }
+            jsexpr.on_empty = transform_json_behavior(
+                pstate,
+                &jsexpr,
+                on_empty_raw.as_ref(),
+                JsonBehaviorType::JSON_BEHAVIOR_NULL,
+            )?
+            .map(Box::new);
+            jsexpr.on_error = transform_json_behavior(
+                pstate,
+                &jsexpr,
+                on_error_raw.as_ref(),
+                JsonBehaviorType::JSON_BEHAVIOR_NULL,
+            )?
+            .map(Box::new);
+        }
+        JsonExprOp::JSON_TABLE_OP => {
+            {
+                let formatted_type = expr_type(jsexpr.formatted_expr.as_deref())?;
+                let ret = jsexpr.returning.as_mut().unwrap();
+                if !OidIsValid(ret.typid) {
+                    ret.typid = formatted_type;
+                    ret.typmod = -1;
+                }
+            }
+            let rettypid = jsexpr.returning.as_ref().unwrap().typid;
+            jsexpr.collation = lsyscache::get_typcollation::call(rettypid)?;
+            jsexpr.on_error = transform_json_behavior(
+                pstate,
+                &jsexpr,
+                on_error_raw.as_ref(),
+                JsonBehaviorType::JSON_BEHAVIOR_EMPTY_ARRAY,
+            )?
+            .map(Box::new);
+        }
+    }
+
+    Ok(Expr::JsonExpr(jsexpr))
+}
+
+/// A flattened raw `JsonBehavior` lifted out of its `NodePtr` so it survives
+/// independently of the borrowed raw node graph.
+struct RawJsonBehavior<'mcx> {
+    btype: JsonBehaviorType,
+    expr: Option<nodes::NodePtr<'mcx>>,
+    location: i32,
+}
+
+/// Lift the raw `JsonBehavior` referenced by an `on_empty`/`on_error` NodePtr
+/// (it always points at a raw `T_JsonBehavior` node).
+fn raw_json_behavior<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    bp: &Option<nodes::NodePtr<'mcx>>,
+) -> PgResult<Option<RawJsonBehavior<'mcx>>> {
+    match bp {
+        None => Ok(None),
+        Some(p) => {
+            let n = p.clone_in(mcx)?;
+            let rb = n.into_jsonbehavior().ok_or_else(|| {
+                PgError::error("transformJsonFuncExpr: ON ERROR/EMPTY is not a JsonBehavior")
+            })?;
+            Ok(Some(RawJsonBehavior {
+                btype: rb.btype,
+                expr: rb.expr,
+                location: rb.location,
+            }))
+        }
+    }
+}
+
+/// One of the JSON_QUERY() ON EMPTY / ON ERROR behavior-validity checks
+/// (parse_expr.c:4346/4382): only ERROR, NULL, EMPTY, EMPTY ARRAY, EMPTY
+/// OBJECT, or DEFAULT are allowed.
+fn check_json_query_behavior_valid<'mcx>(
+    pstate: &ParseState<'mcx>,
+    column_name: Option<&str>,
+    behavior: Option<&RawJsonBehavior<'mcx>>,
+    clause: &str,
+) -> PgResult<()> {
+    if let Some(b) = behavior {
+        let t = b.btype;
+        if t != JsonBehaviorType::JSON_BEHAVIOR_ERROR
+            && t != JsonBehaviorType::JSON_BEHAVIOR_NULL
+            && t != JsonBehaviorType::JSON_BEHAVIOR_EMPTY
+            && t != JsonBehaviorType::JSON_BEHAVIOR_EMPTY_ARRAY
+            && t != JsonBehaviorType::JSON_BEHAVIOR_EMPTY_OBJECT
+            && t != JsonBehaviorType::JSON_BEHAVIOR_DEFAULT
+        {
+            return Err(invalid_behavior_err(
+                pstate,
+                column_name,
+                clause,
+                "Only ERROR, NULL, EMPTY ARRAY, EMPTY OBJECT, or DEFAULT expression is allowed in this clause for JSON_QUERY().",
+                "Only ERROR, NULL, EMPTY ARRAY, EMPTY OBJECT, or DEFAULT expression is allowed in this clause for formatted columns.",
+                b.location,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Build the `invalid <clause> behavior` ereport for the column / non-column
+/// variants (parse_expr.c).
+fn invalid_behavior_err(
+    pstate: &ParseState<'_>,
+    column_name: Option<&str>,
+    clause: &str,
+    detail_no_col: &str,
+    detail_col: &str,
+    location: i32,
+) -> types_error::PgError {
+    match column_name {
+        None => ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(alloc::format!("invalid {} behavior", clause))
+            .errdetail(detail_no_col)
+            .errposition(parser_errposition(pstate, location))
+            .into_error(),
+        Some(col) => ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg(alloc::format!("invalid {} behavior for column \"{}\"", clause, col))
+            .errdetail(detail_col)
+            .errposition(parser_errposition(pstate, location))
+            .into_error(),
+    }
+}
+
+/// `transformJsonPassingArgs(pstate, constructName, format, args,
+/// &passing_values, &passing_names)` (parse_expr.c:4683).
+fn transform_json_passing_args<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    construct_name: &str,
+    format: JsonFormatType,
+    args: &mcx::PgVec<'mcx, nodes::NodePtr<'mcx>>,
+    jsexpr: &mut JsonExpr,
+) -> PgResult<()> {
+    let mcx = aexpr_clone_ctx(pstate);
+    for argp in args.iter() {
+        let n = argp.clone_in(mcx)?;
+        let arg = n.into_jsonargument().ok_or_else(|| {
+            PgError::error("transformJsonPassingArgs: PASSING item is not a JsonArgument")
+        })?;
+        let val = arg
+            .val
+            .as_deref()
+            .ok_or_else(|| PgError::error("transformJsonPassingArgs: NULL PASSING value"))?;
+        let expr =
+            transform_json_value_expr(pstate, construct_name, val, format, InvalidOid, true)?;
+        jsexpr.passing_values.push(expr);
+        let name: String = arg
+            .name
+            .as_ref()
+            .map(|s| String::from(s.as_str()))
+            .unwrap_or_default();
+        jsexpr.passing_names.push(name);
+    }
+    Ok(())
+}
+
+/// `ValidJsonBehaviorDefaultExpr(expr, context)` (parse_expr.c:4707).
+fn valid_json_behavior_default_expr(expr: Option<&Expr>) -> bool {
+    let Some(expr) = expr else { return false };
+    match expr {
+        Expr::Const(_) | Expr::FuncExpr(_) | Expr::OpExpr(_) => true,
+        Expr::CoerceViaIO(c) => valid_json_behavior_default_expr(c.arg.as_deref()),
+        Expr::CoerceToDomain(c) => valid_json_behavior_default_expr(c.arg.as_deref()),
+        Expr::ArrayCoerceExpr(c) => valid_json_behavior_default_expr(c.arg.as_deref()),
+        Expr::ConvertRowtypeExpr(c) => valid_json_behavior_default_expr(c.arg.as_deref()),
+        Expr::RelabelType(c) => valid_json_behavior_default_expr(c.arg.as_deref()),
+        Expr::CollateExpr(c) => valid_json_behavior_default_expr(c.arg.as_deref()),
+        _ => false,
+    }
+}
+
+/// `transformJsonBehavior(pstate, jsexpr, behavior, default_behavior,
+/// returning)` (parse_expr.c:4742).
+fn transform_json_behavior<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    jsexpr: &JsonExpr,
+    behavior: Option<&RawJsonBehavior<'mcx>>,
+    default_behavior: JsonBehaviorType,
+) -> PgResult<Option<JsonBehavior>> {
+    let mcx = aexpr_clone_ctx(pstate);
+    let ret_typid = jsexpr.returning.as_ref().unwrap().typid;
+    let ret_typmod = jsexpr.returning.as_ref().unwrap().typmod;
+    let mut btype = default_behavior;
+    let mut expr: Option<Expr> = None;
+    let mut coerce_at_runtime = false;
+    let mut location = -1;
+
+    if let Some(b) = behavior {
+        btype = b.btype;
+        location = b.location;
+        if btype == JsonBehaviorType::JSON_BEHAVIOR_DEFAULT {
+            let dnode = boxed_node(
+                b.expr
+                    .as_ref()
+                    .map(|p| p.clone_in(mcx))
+                    .transpose()?
+                    .map(|n| mcx::alloc_in(mcx, n))
+                    .transpose()?,
+            );
+            let e = transformExprRecurse(pstate, dnode)?
+                .ok_or_else(|| PgError::error("transformJsonBehavior: NULL DEFAULT expr"))?;
+
+            if !valid_json_behavior_default_expr(Some(&e)) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_DATATYPE_MISMATCH)
+                    .errmsg("can only specify a constant, non-aggregate function, or operator expression for DEFAULT")
+                    .errposition(parser_errposition(pstate, expr_location(Some(&e))?))
+                    .into_error());
+            }
+            let enode = Node::mk_expr(mcx, e.clone())?;
+            if backend_optimizer_util_vars::var::contain_var_clause(&enode) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_DATATYPE_MISMATCH)
+                    .errmsg("DEFAULT expression must not contain column references")
+                    .errposition(parser_errposition(pstate, expr_location(Some(&e))?))
+                    .into_error());
+            }
+            if expression_returns_set(Some(&e)) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_DATATYPE_MISMATCH)
+                    .errmsg("DEFAULT expression must not return a set")
+                    .errposition(parser_errposition(pstate, expr_location(Some(&e))?))
+                    .into_error());
+            }
+            // Reject a DEFAULT whose collation differs from the RETURNING coll.
+            let targetcoll = jsexpr.collation;
+            let mut exprcoll = expr_collation(Some(&e))?;
+            if !OidIsValid(exprcoll) {
+                exprcoll = lsyscache::get_typcollation::call(expr_type(Some(&e))?)?;
+            }
+            if OidIsValid(targetcoll) && OidIsValid(exprcoll) && targetcoll != exprcoll {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_COLLATION_MISMATCH)
+                    .errmsg("collation of DEFAULT expression conflicts with RETURNING clause")
+                    .errposition(parser_errposition(pstate, expr_location(Some(&e))?))
+                    .into_error());
+            }
+            expr = Some(e);
+        }
+    }
+
+    if expr.is_none() && btype != JsonBehaviorType::JSON_BEHAVIOR_ERROR {
+        expr = Some(get_json_behavior_const(pstate, btype, location)?);
+    }
+
+    // Coerce the expression if needed.
+    if let Some(e) = expr.take() {
+        let etype = expr_type(Some(&e))?;
+        if etype != ret_typid {
+            let isnull = matches!(&e, Expr::Const(c) if c.constisnull);
+            if isnull
+                || etype == JSONBOID
+                || (etype == BOOLOID && lsyscache::get_base_type::call(ret_typid)? != INT4OID)
+            {
+                coerce_at_runtime = true;
+                if etype == BOOLOID {
+                    // json_populate_type() expects a jsonb value; replace the
+                    // plain boolean Const with the equivalent jsonb Const.
+                    let val = if btype == JsonBehaviorType::JSON_BEHAVIOR_TRUE {
+                        "true"
+                    } else {
+                        "false"
+                    };
+                    let datum = me::jsonb_const_from_cstring::call(mcx, val)?;
+                    expr = Some(Expr::Const(make_const(
+                        mcx, JSONBOID, -1, InvalidOid, -1, datum, false, false,
+                    )?));
+                } else {
+                    expr = Some(e);
+                }
+            } else {
+                let (typcategory, _) =
+                    lsyscache::get_type_category_preferred::call(ret_typid)?;
+                let ctx = if typcategory == TYPCATEGORY_STRING
+                    || typcategory == TYPCATEGORY_BITSTRING
+                {
+                    CoercionContext::COERCION_ASSIGNMENT
+                } else {
+                    CoercionContext::COERCION_EXPLICIT
+                };
+                let eloc = expr_location(Some(&e))?;
+                let coerced = coerce::coerce_to_target_type::call(
+                    pstate,
+                    e,
+                    etype,
+                    ret_typid,
+                    ret_typmod,
+                    ctx,
+                    CoercionForm::COERCE_EXPLICIT_CAST,
+                    location,
+                )?;
+                let Some(c) = coerced else {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_CANNOT_COERCE)
+                        .errmsg(alloc::format!(
+                            "cannot cast behavior expression of type {} to {}",
+                            format_type_be(etype).unwrap_or_else(|_| String::from("?")),
+                            format_type_be(ret_typid).unwrap_or_else(|_| String::from("?"))
+                        ))
+                        .errposition(parser_errposition(pstate, eloc))
+                        .into_error());
+                };
+                expr = Some(c);
+            }
+        } else {
+            expr = Some(e);
+        }
+    }
+
+    let mut out = make_json_behavior(btype, expr, location);
+    out.coerce = coerce_at_runtime;
+    Ok(Some(out))
+}
+
+/// `GetJsonBehaviorConst(btype, location)` (parse_expr.c:4904) — a `Const`
+/// holding the value for the given non-ERROR `JsonBehaviorType`.
+fn get_json_behavior_const<'mcx>(
+    pstate: &ParseState<'mcx>,
+    btype: JsonBehaviorType,
+    location: i32,
+) -> PgResult<Expr> {
+    let mcx = aexpr_clone_ctx(pstate);
+    let mut typid = JSONBOID;
+    let mut len: i32 = -1;
+    let mut isbyval = false;
+    let mut isnull = false;
+    let datum: Datum<'mcx>;
+
+    match btype {
+        JsonBehaviorType::JSON_BEHAVIOR_EMPTY_ARRAY => {
+            datum = me::jsonb_const_from_cstring::call(mcx, "[]")?;
+        }
+        JsonBehaviorType::JSON_BEHAVIOR_EMPTY_OBJECT => {
+            datum = me::jsonb_const_from_cstring::call(mcx, "{}")?;
+        }
+        JsonBehaviorType::JSON_BEHAVIOR_TRUE => {
+            datum = Datum::from_bool(true);
+            typid = BOOLOID;
+            len = 1;
+            isbyval = true;
+        }
+        JsonBehaviorType::JSON_BEHAVIOR_FALSE => {
+            datum = Datum::from_bool(false);
+            typid = BOOLOID;
+            len = 1;
+            isbyval = true;
+        }
+        JsonBehaviorType::JSON_BEHAVIOR_NULL
+        | JsonBehaviorType::JSON_BEHAVIOR_UNKNOWN
+        | JsonBehaviorType::JSON_BEHAVIOR_EMPTY => {
+            datum = Datum::from_usize(0);
+            isnull = true;
+            typid = INT4OID;
+            len = 4;
+            isbyval = true;
+        }
+        JsonBehaviorType::JSON_BEHAVIOR_DEFAULT | JsonBehaviorType::JSON_BEHAVIOR_ERROR => {
+            return Err(PgError::error(
+                "GetJsonBehaviorConst: DEFAULT/ERROR handled by caller",
+            ));
+        }
+    }
+
+    let mut con = make_const(mcx, typid, -1, InvalidOid, len, datum, isnull, isbyval)?;
+    con.location = location;
+    Ok(Expr::Const(con))
 }
 
 // ===========================================================================

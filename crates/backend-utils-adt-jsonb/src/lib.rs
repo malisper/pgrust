@@ -116,6 +116,22 @@ pub fn init_seams() {
     // `DatumGetJsonbP(val)` = `PG_DETOAST_DATUM(val)` (JSONTYPE_JSONB arm) —
     // detoast the on-disk `jsonb` varlena via the `detoast_attr` seam.
     jsonb_seam::jsonb_datum_bytes::set(seam_jsonb_datum_bytes);
+
+    // `DirectFunctionCall1(jsonb_in, CStringGetDatum(val))` — the parser
+    // (`GetJsonBehaviorConst`, parse_expr.c) builds the `[]`/`{}` jsonb `Const`
+    // for EMPTY ARRAY / EMPTY OBJECT behaviors through this seam so it need not
+    // link the jsonb crate.
+    backend_parser_parse_expr_seams::jsonb_const_from_cstring::set(seam_jsonb_const_from_cstring);
+}
+
+/// `DirectFunctionCall1(jsonb_in, CStringGetDatum(val))` — parse `val` into an
+/// on-disk `jsonb` value and return it as a by-ref `Datum`. Mirrors the C
+/// helper used by `GetJsonBehaviorConst`; a parse failure raises `Err` (no soft
+/// `escontext`, exactly as the C `DirectFunctionCall1`).
+fn seam_jsonb_const_from_cstring<'mcx>(mcx: Mcx<'mcx>, val: &str) -> PgResult<Datum<'mcx>> {
+    let bytes = jsonb_from_cstring(mcx, val.as_bytes(), false, None)?
+        .expect("jsonb_from_cstring without escontext never soft-fails");
+    Datum::from_byref_bytes_in(mcx, &bytes)
 }
 
 /// `OidFunctionCall1(outfuncoid, val)` (fmgr.c): resolve the cast function and

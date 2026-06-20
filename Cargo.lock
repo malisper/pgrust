@@ -13954,6 +13954,7 @@ dependencies = [
  "backend-utils-adt-format-type",
  "backend-utils-adt-xml",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-typcache-seams",
  "backend-utils-error",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
@@ -13977,6 +13978,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -19817,6 +19819,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
  "backend-optimizer-util-clauses-seams",
+ "backend-parser-parse-expr-seams",
  "backend-utils-adt-jsonb-op",
  "backend-utils-adt-jsonb-seams",
  "backend-utils-adt-jsonb-util",
