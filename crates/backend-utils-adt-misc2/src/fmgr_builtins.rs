@@ -23,7 +23,7 @@ use std::vec::Vec;
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_stringinfo::StringInfo;
 
 use types_core::Oid;
@@ -176,12 +176,6 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("misc2 fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ===========================================================================
 // regproc.c — reg* alias-type I/O + to_reg* lookups.
 // ===========================================================================
@@ -197,7 +191,7 @@ fn raise(err: types_error::PgError) -> ! {
 fn fc_regin(
     fcinfo: &mut FunctionCallInfoBaseData,
     core: fn(mcx::Mcx<'_>, &str, Option<&mut types_error::SoftErrorContext>) -> types_error::PgResult<Option<Oid>>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     let s = alloc::string::String::from(arg_cstring(fcinfo, 0));
     let m = scratch_mcx();
     // Move the frame's sink out so it can be threaded into the core, then put
@@ -205,10 +199,8 @@ fn fc_regin(
     let mut escontext = fcinfo.escontext.take();
     let outcome = core(m.mcx(), &s, escontext.as_mut());
     fcinfo.escontext = escontext;
-    match outcome {
-        Ok(opt) => ret_oid_opt(fcinfo, opt),
-        Err(e) => raise(e),
-    }
+    let opt = outcome?;
+    Ok(ret_oid_opt(fcinfo, opt))
 }
 
 /// Generic `to_reg*(text)` adapter: `(mcx, &str) -> PgResult<Option<Oid>>`,
@@ -216,34 +208,29 @@ fn fc_regin(
 fn fc_to_reg(
     fcinfo: &mut FunctionCallInfoBaseData,
     core: fn(mcx::Mcx<'_>, &str) -> types_error::PgResult<Option<Oid>>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     let s = arg_text(fcinfo, 0);
     let m = scratch_mcx();
-    match core(m.mcx(), s) {
-        Ok(opt) => ret_oid_opt(fcinfo, opt),
-        Err(e) => raise(e),
-    }
+    let opt = core(m.mcx(), s)?;
+    Ok(ret_oid_opt(fcinfo, opt))
 }
 
 /// Generic `reg*out(oid)` adapter: `(mcx, Oid) -> PgResult<PgString>`.
 fn fc_regout(
     fcinfo: &mut FunctionCallInfoBaseData,
     core: fn(mcx::Mcx<'_>, Oid) -> types_error::PgResult<mcx::PgString<'_>>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     let oid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let res = core(m.mcx(), oid);
-    match res {
-        Ok(s) => ret_cstring(fcinfo, s.as_str().to_string()),
-        Err(e) => raise(e),
-    }
+    let s = core(m.mcx(), oid)?;
+    Ok(ret_cstring(fcinfo, s.as_str().to_string()))
 }
 
 /// `reg*recv(internal)` — every reg* binary-input is byte-for-byte `oidrecv`
 /// (regproc.c: `return oidrecv(fcinfo)`). The wire `StringInfo` message buffer
 /// arrives on the by-ref lane as its raw bytes; rebuild a `StringInfo` (in a
 /// scratch context) and hand it to the real `oid.c` value core.
-fn fc_regrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regrecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let src = fcinfo
         .ref_arg(0)
         .and_then(|p| p.as_varlena())
@@ -251,144 +238,139 @@ fn fc_regrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let mut data = mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(src.len()).is_err() {
-        raise(types_error::PgError::error("out of memory"));
+        return Err(types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(src);
     let mut buf = StringInfo::from_vec(data);
-    match backend_utils_adt_oid::oidrecv(&mut buf) {
-        Ok(o) => ret_oid(o),
-        Err(e) => raise(e),
-    }
+    let o = backend_utils_adt_oid::oidrecv(&mut buf)?;
+    Ok(ret_oid(o))
 }
 
 /// `reg*send(reg*)` — every reg* binary-output is byte-for-byte `oidsend`
 /// (regproc.c: `return oidsend(fcinfo)`). Delegates to the real `oid.c` value
 /// core and writes the `bytea` wire image onto the by-ref lane.
-fn fc_regsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regsend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let arg1 = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let image = match backend_utils_adt_oid::oidsend(m.mcx(), arg1) {
-        Ok(bytea) => bytea.as_bytes().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_bytea_image(fcinfo, &image)
+    let image = backend_utils_adt_oid::oidsend(m.mcx(), arg1)?.as_bytes().to_vec();
+    Ok(ret_bytea_image(fcinfo, &image))
 }
 
-fn fc_regprocin(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regprocin(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regin(f, crate::regproc::regprocin)
 }
-fn fc_regprocout(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regprocout(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regout(f, crate::regproc::regprocout)
 }
-fn fc_regprocedurein(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regprocedurein(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regin(f, crate::regproc::regprocedurein)
 }
-fn fc_regprocedureout(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regprocedureout(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regout(f, crate::regproc::regprocedureout)
 }
-fn fc_regoperin(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regoperin(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regin(f, crate::regproc::regoperin)
 }
-fn fc_regoperout(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regoperout(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regout(f, crate::regproc::regoperout)
 }
-fn fc_regoperatorin(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regoperatorin(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regin(f, crate::regproc::regoperatorin)
 }
-fn fc_regoperatorout(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regoperatorout(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regout(f, crate::regproc::regoperatorout)
 }
-fn fc_regclassin(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regclassin(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regin(f, crate::regproc::regclassin)
 }
-fn fc_regclassout(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regclassout(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regout(f, crate::regproc::regclassout)
 }
-fn fc_regtypein(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regtypein(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regin(f, crate::regproc::regtypein)
 }
-fn fc_regtypeout(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regtypeout(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regout(f, crate::regproc::regtypeout)
 }
-fn fc_regconfigin(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regconfigin(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regin(f, crate::regproc::regconfigin)
 }
-fn fc_regconfigout(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regconfigout(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regout(f, crate::regproc::regconfigout)
 }
-fn fc_regdictionaryin(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regdictionaryin(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regin(f, crate::regproc::regdictionaryin)
 }
-fn fc_regdictionaryout(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regdictionaryout(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regout(f, crate::regproc::regdictionaryout)
 }
-fn fc_regrolein(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regrolein(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regin(f, crate::regproc::regrolein)
 }
-fn fc_regroleout(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regroleout(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regout(f, crate::regproc::regroleout)
 }
-fn fc_regnamespacein(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regnamespacein(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regin(f, crate::regproc::regnamespacein)
 }
-fn fc_regnamespaceout(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regnamespaceout(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regout(f, crate::regproc::regnamespaceout)
 }
-fn fc_regcollationin(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regcollationin(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regin(f, crate::regproc::regcollationin)
 }
-fn fc_regcollationout(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_regcollationout(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_regout(f, crate::regproc::regcollationout)
 }
 
-fn fc_to_regproc(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_regproc(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_to_reg(f, crate::regproc::to_regproc)
 }
-fn fc_to_regprocedure(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_regprocedure(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_to_reg(f, crate::regproc::to_regprocedure)
 }
-fn fc_to_regoper(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_regoper(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_to_reg(f, crate::regproc::to_regoper)
 }
-fn fc_to_regoperator(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_regoperator(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_to_reg(f, crate::regproc::to_regoperator)
 }
-fn fc_to_regtype(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_regtype(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_to_reg(f, crate::regproc::to_regtype)
 }
-fn fc_to_regclass(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_regclass(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_to_reg(f, crate::regproc::to_regclass)
 }
-fn fc_to_regrole(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_regrole(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_to_reg(f, crate::regproc::to_regrole)
 }
-fn fc_to_regnamespace(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_regnamespace(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_to_reg(f, crate::regproc::to_regnamespace)
 }
-fn fc_to_regcollation(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_regcollation(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_to_reg(f, crate::regproc::to_regcollation)
 }
 
 /// `to_regtypemod(text)` — `(mcx, &str) -> PgResult<Option<i32>>`, NULL when
 /// not found.
-fn fc_to_regtypemod(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_regtypemod(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_text(fcinfo, 0);
     let m = scratch_mcx();
     match crate::regproc::to_regtypemod(m.mcx(), s) {
-        Ok(Some(v)) => Datum::from_i32(v),
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+        Ok(Some(v)) => Ok(Datum::from_i32(v)),
+        Ok(None) => Ok(ret_null(fcinfo)),
+        Err(e) => Err(e),
     }
 }
 
 /// `regclass(text)` (the implicit text→regclass cast) — `text_regclass(mcx,
 /// &str) -> PgResult<Oid>` (always a hard error / never NULL).
-fn fc_text_regclass(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_regclass(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_text(fcinfo, 0);
     let m = scratch_mcx();
     match crate::regproc::text_regclass(m.mcx(), s) {
-        Ok(oid) => ret_oid(oid),
-        Err(e) => raise(e),
+        Ok(oid) => Ok(ret_oid(oid)),
+        Err(e) => Err(e),
     }
 }
 
@@ -396,18 +378,18 @@ fn fc_text_regclass(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // genfile.c — pg_read_file / pg_read_binary_file (text / bytea result).
 // ===========================================================================
 
-fn fc_pg_read_file_off_len(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_read_file_off_len(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let filename = arg_text(fcinfo, 0);
     let off = arg_i64(fcinfo, 1);
     let len = arg_i64(fcinfo, 2);
     let m = scratch_mcx();
     let res = crate::admin::pg_read_file_off_len(m.mcx(), filename, off, len);
     match res {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
-fn fc_pg_read_file_off_len_missing(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_read_file_off_len_missing(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let filename = arg_text(fcinfo, 0);
     let off = arg_i64(fcinfo, 1);
     let len = arg_i64(fcinfo, 2);
@@ -415,41 +397,41 @@ fn fc_pg_read_file_off_len_missing(fcinfo: &mut FunctionCallInfoBaseData) -> Dat
     let m = scratch_mcx();
     let res = crate::admin::pg_read_file_off_len_missing(m.mcx(), filename, off, len, missing);
     match res {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
-fn fc_pg_read_file_all(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_read_file_all(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let filename = arg_text(fcinfo, 0);
     let m = scratch_mcx();
     let res = crate::admin::pg_read_file_all(m.mcx(), filename);
     match res {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
-fn fc_pg_read_file_all_missing(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_read_file_all_missing(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let filename = arg_text(fcinfo, 0);
     let missing = arg_bool(fcinfo, 1);
     let m = scratch_mcx();
     let res = crate::admin::pg_read_file_all_missing(m.mcx(), filename, missing);
     match res {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
-fn fc_pg_read_binary_file_off_len(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_read_binary_file_off_len(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let filename = arg_text(fcinfo, 0);
     let off = arg_i64(fcinfo, 1);
     let len = arg_i64(fcinfo, 2);
     let m = scratch_mcx();
     let res = crate::admin::pg_read_binary_file_off_len(m.mcx(), filename, off, len);
     match res {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
-fn fc_pg_read_binary_file_off_len_missing(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_read_binary_file_off_len_missing(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let filename = arg_text(fcinfo, 0);
     let off = arg_i64(fcinfo, 1);
     let len = arg_i64(fcinfo, 2);
@@ -457,54 +439,54 @@ fn fc_pg_read_binary_file_off_len_missing(fcinfo: &mut FunctionCallInfoBaseData)
     let m = scratch_mcx();
     let res = crate::admin::pg_read_binary_file_off_len_missing(m.mcx(), filename, off, len, missing);
     match res {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
-fn fc_pg_read_binary_file_all(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_read_binary_file_all(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let filename = arg_text(fcinfo, 0);
     let m = scratch_mcx();
     let res = crate::admin::pg_read_binary_file_all(m.mcx(), filename);
     match res {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
-fn fc_pg_read_binary_file_all_missing(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_read_binary_file_all_missing(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let filename = arg_text(fcinfo, 0);
     let missing = arg_bool(fcinfo, 1);
     let m = scratch_mcx();
     let res = crate::admin::pg_read_binary_file_all_missing(m.mcx(), filename, missing);
     match res {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
 
 /// `pg_stat_file(filename, missing_ok)` (genfile.c) — the 6-column record
 /// `(size int8, access/modification/change/creation timestamptz, isdir bool)`.
 /// The composite result crosses the by-reference `Composite` lane.
-fn fc_pg_stat_file(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_stat_file(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let filename = arg_text(fcinfo, 0);
     let missing_ok = arg_bool(fcinfo, 1);
     let m = scratch_mcx();
     // C: PG_NARGS() == 2 here.
     let res = crate::admin::pg_stat_file(m.mcx(), filename, missing_ok, true);
     match res {
-        Ok(d) => ret_composite_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_composite_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
 
 /// `pg_stat_file_1arg(filename)` (genfile.c) — the one-argument variant
 /// (`missing_ok == false`).
-fn fc_pg_stat_file_1arg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_stat_file_1arg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let filename = arg_text(fcinfo, 0);
     let m = scratch_mcx();
     let res = crate::admin::pg_stat_file_1arg(m.mcx(), filename);
     match res {
-        Ok(d) => ret_composite_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_composite_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
 
@@ -512,13 +494,13 @@ fn fc_pg_stat_file_1arg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // partitionfuncs.c — pg_partition_root (regclass result).
 // ===========================================================================
 
-fn fc_pg_partition_root(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_partition_root(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let relid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
     let res = crate::admin::pg_partition_root(m.mcx(), relid);
     match res {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
 
@@ -530,108 +512,108 @@ fn fc_pg_partition_root(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_adv_void_int8(
     fcinfo: &mut FunctionCallInfoBaseData,
     core: fn(i64) -> types_error::PgResult<()>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     match core(arg_i64(fcinfo, 0)) {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
+        Ok(()) => Ok(ret_void()),
+        Err(e) => Err(e),
     }
 }
 /// `(int8) -> bool` advisory adapter.
 fn fc_adv_bool_int8(
     fcinfo: &mut FunctionCallInfoBaseData,
     core: fn(i64) -> types_error::PgResult<bool>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     match core(arg_i64(fcinfo, 0)) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
+        Ok(b) => Ok(ret_bool(b)),
+        Err(e) => Err(e),
     }
 }
 /// `(int4, int4) -> void` advisory adapter.
 fn fc_adv_void_int4(
     fcinfo: &mut FunctionCallInfoBaseData,
     core: fn(i32, i32) -> types_error::PgResult<()>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     match core(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)) {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
+        Ok(()) => Ok(ret_void()),
+        Err(e) => Err(e),
     }
 }
 /// `(int4, int4) -> bool` advisory adapter.
 fn fc_adv_bool_int4(
     fcinfo: &mut FunctionCallInfoBaseData,
     core: fn(i32, i32) -> types_error::PgResult<bool>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     match core(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
+        Ok(b) => Ok(ret_bool(b)),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_pg_advisory_lock_int8(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_lock_int8(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_void_int8(f, crate::admin::pg_advisory_lock_int8)
 }
-fn fc_pg_advisory_lock_shared_int8(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_lock_shared_int8(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_void_int8(f, crate::admin::pg_advisory_lock_shared_int8)
 }
-fn fc_pg_try_advisory_lock_int8(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_try_advisory_lock_int8(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_bool_int8(f, crate::admin::pg_try_advisory_lock_int8)
 }
-fn fc_pg_try_advisory_lock_shared_int8(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_try_advisory_lock_shared_int8(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_bool_int8(f, crate::admin::pg_try_advisory_lock_shared_int8)
 }
-fn fc_pg_advisory_unlock_int8(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_unlock_int8(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_bool_int8(f, crate::admin::pg_advisory_unlock_int8)
 }
-fn fc_pg_advisory_unlock_shared_int8(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_unlock_shared_int8(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_bool_int8(f, crate::admin::pg_advisory_unlock_shared_int8)
 }
-fn fc_pg_advisory_xact_lock_int8(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_xact_lock_int8(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_void_int8(f, crate::admin::pg_advisory_xact_lock_int8)
 }
-fn fc_pg_advisory_xact_lock_shared_int8(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_xact_lock_shared_int8(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_void_int8(f, crate::admin::pg_advisory_xact_lock_shared_int8)
 }
-fn fc_pg_try_advisory_xact_lock_int8(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_try_advisory_xact_lock_int8(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_bool_int8(f, crate::admin::pg_try_advisory_xact_lock_int8)
 }
-fn fc_pg_try_advisory_xact_lock_shared_int8(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_try_advisory_xact_lock_shared_int8(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_bool_int8(f, crate::admin::pg_try_advisory_xact_lock_shared_int8)
 }
 
-fn fc_pg_advisory_lock_int4(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_lock_int4(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_void_int4(f, crate::admin::pg_advisory_lock_int4)
 }
-fn fc_pg_advisory_lock_shared_int4(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_lock_shared_int4(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_void_int4(f, crate::admin::pg_advisory_lock_shared_int4)
 }
-fn fc_pg_try_advisory_lock_int4(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_try_advisory_lock_int4(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_bool_int4(f, crate::admin::pg_try_advisory_lock_int4)
 }
-fn fc_pg_try_advisory_lock_shared_int4(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_try_advisory_lock_shared_int4(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_bool_int4(f, crate::admin::pg_try_advisory_lock_shared_int4)
 }
-fn fc_pg_advisory_unlock_int4(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_unlock_int4(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_bool_int4(f, crate::admin::pg_advisory_unlock_int4)
 }
-fn fc_pg_advisory_unlock_shared_int4(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_unlock_shared_int4(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_bool_int4(f, crate::admin::pg_advisory_unlock_shared_int4)
 }
-fn fc_pg_advisory_xact_lock_int4(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_xact_lock_int4(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_void_int4(f, crate::admin::pg_advisory_xact_lock_int4)
 }
-fn fc_pg_advisory_xact_lock_shared_int4(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_xact_lock_shared_int4(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_void_int4(f, crate::admin::pg_advisory_xact_lock_shared_int4)
 }
-fn fc_pg_try_advisory_xact_lock_int4(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_try_advisory_xact_lock_int4(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_bool_int4(f, crate::admin::pg_try_advisory_xact_lock_int4)
 }
-fn fc_pg_try_advisory_xact_lock_shared_int4(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_try_advisory_xact_lock_shared_int4(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_adv_bool_int4(f, crate::admin::pg_try_advisory_xact_lock_shared_int4)
 }
-fn fc_pg_advisory_unlock_all(_f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_advisory_unlock_all(_f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::admin::pg_advisory_unlock_all() {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
+        Ok(()) => Ok(ret_void()),
+        Err(e) => Err(e),
     }
 }
 
@@ -643,80 +625,80 @@ fn fc_pg_advisory_unlock_all(_f: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_binup_oid_void(
     fcinfo: &mut FunctionCallInfoBaseData,
     core: fn(u32) -> types_error::PgResult<()>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     match core(arg_oid(fcinfo, 0)) {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
+        Ok(()) => Ok(ret_void()),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_binary_upgrade_set_next_pg_type_oid(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_next_pg_type_oid(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(f, crate::admin::binary_upgrade_set_next_pg_type_oid)
 }
-fn fc_binary_upgrade_set_next_array_pg_type_oid(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_next_array_pg_type_oid(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(f, crate::admin::binary_upgrade_set_next_array_pg_type_oid)
 }
-fn fc_binary_upgrade_set_next_multirange_pg_type_oid(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_next_multirange_pg_type_oid(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(f, crate::admin::binary_upgrade_set_next_multirange_pg_type_oid)
 }
 fn fc_binary_upgrade_set_next_multirange_array_pg_type_oid(
     f: &mut FunctionCallInfoBaseData,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(
         f,
         crate::admin::binary_upgrade_set_next_multirange_array_pg_type_oid,
     )
 }
-fn fc_binary_upgrade_set_next_heap_pg_class_oid(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_next_heap_pg_class_oid(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(f, crate::admin::binary_upgrade_set_next_heap_pg_class_oid)
 }
-fn fc_binary_upgrade_set_next_heap_relfilenode(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_next_heap_relfilenode(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(f, crate::admin::binary_upgrade_set_next_heap_relfilenode)
 }
-fn fc_binary_upgrade_set_next_index_pg_class_oid(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_next_index_pg_class_oid(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(f, crate::admin::binary_upgrade_set_next_index_pg_class_oid)
 }
-fn fc_binary_upgrade_set_next_index_relfilenode(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_next_index_relfilenode(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(f, crate::admin::binary_upgrade_set_next_index_relfilenode)
 }
-fn fc_binary_upgrade_set_next_toast_pg_class_oid(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_next_toast_pg_class_oid(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(f, crate::admin::binary_upgrade_set_next_toast_pg_class_oid)
 }
-fn fc_binary_upgrade_set_next_toast_relfilenode(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_next_toast_relfilenode(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(f, crate::admin::binary_upgrade_set_next_toast_relfilenode)
 }
-fn fc_binary_upgrade_set_next_pg_enum_oid(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_next_pg_enum_oid(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(f, crate::admin::binary_upgrade_set_next_pg_enum_oid)
 }
-fn fc_binary_upgrade_set_next_pg_authid_oid(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_next_pg_authid_oid(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(f, crate::admin::binary_upgrade_set_next_pg_authid_oid)
 }
-fn fc_binary_upgrade_set_next_pg_tablespace_oid(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_next_pg_tablespace_oid(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_binup_oid_void(f, crate::admin::binary_upgrade_set_next_pg_tablespace_oid)
 }
 
-fn fc_binary_upgrade_set_record_init_privs(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_record_init_privs(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::admin::binary_upgrade_set_record_init_privs(arg_bool(fcinfo, 0)) {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
+        Ok(()) => Ok(ret_void()),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_binary_upgrade_set_missing_value(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_set_missing_value(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let table_id = arg_oid(fcinfo, 0);
     let attname = arg_text(fcinfo, 1);
     let value = arg_text(fcinfo, 2);
     match crate::admin::binary_upgrade_set_missing_value(table_id, attname, value) {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
+        Ok(()) => Ok(ret_void()),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_binary_upgrade_logical_slot_has_caught_up(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_logical_slot_has_caught_up(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let slot_name = arg_text(fcinfo, 0);
     match crate::admin::binary_upgrade_logical_slot_has_caught_up(slot_name) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
+        Ok(b) => Ok(ret_bool(b)),
+        Err(e) => Err(e),
     }
 }
 
@@ -737,7 +719,7 @@ fn arg_record<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
-) -> FormedTuple<'mcx> {
+) -> types_error::PgResult<FormedTuple<'mcx>> {
     // A composite Datum is, in C, a pointer to a varlena-tagged HeapTupleHeader
     // block: physically the same image whether the value reached us tagged as
     // `RefPayload::Composite` (minted by ExecEvalRow / record_in via
@@ -753,10 +735,7 @@ fn arg_record<'mcx>(
         .as_composite()
         .or_else(|| arg.as_varlena())
         .expect("rowtypes fn: composite arg is neither a Composite nor a Varlena by-ref payload");
-    match FormedTuple::from_datum_image(mcx, image) {
-        Ok(t) => t,
-        Err(e) => raise(e),
-    }
+    FormedTuple::from_datum_image(mcx, image)
 }
 
 /// Set a composite (`record`) result on the by-ref lane as its flat
@@ -794,13 +773,13 @@ fn fc_record_cmp_bool(
         &FormedTuple<'_>,
         &FormedTuple<'_>,
     ) -> types_error::PgResult<bool>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let left = arg_record(m.mcx(), fcinfo, 0);
-    let right = arg_record(m.mcx(), fcinfo, 1);
+    let left = arg_record(m.mcx(), fcinfo, 0)?;
+    let right = arg_record(m.mcx(), fcinfo, 1)?;
     match core(m.mcx(), &left, &right) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
+        Ok(b) => Ok(ret_bool(b)),
+        Err(e) => Err(e),
     }
 }
 
@@ -813,54 +792,54 @@ fn fc_record_cmp_i32(
         &FormedTuple<'_>,
         &FormedTuple<'_>,
     ) -> types_error::PgResult<i32>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let left = arg_record(m.mcx(), fcinfo, 0);
-    let right = arg_record(m.mcx(), fcinfo, 1);
+    let left = arg_record(m.mcx(), fcinfo, 0)?;
+    let right = arg_record(m.mcx(), fcinfo, 1)?;
     match core(m.mcx(), &left, &right) {
-        Ok(v) => ret_i32(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(ret_i32(v)),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_record_eq(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_eq(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_eq)
 }
-fn fc_record_ne(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_ne(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_ne)
 }
-fn fc_record_lt(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_lt(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_lt)
 }
-fn fc_record_gt(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_gt(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_gt)
 }
-fn fc_record_le(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_le(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_le)
 }
-fn fc_record_ge(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_ge(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_ge)
 }
-fn fc_btrecordcmp(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_btrecordcmp(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_i32(f, crate::rowtypes::btrecordcmp)
 }
 
-fn fc_record_image_eq(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_image_eq(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_image_eq)
 }
-fn fc_record_image_ne(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_image_ne(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_image_ne)
 }
-fn fc_record_image_lt(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_image_lt(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_image_lt)
 }
-fn fc_record_image_gt(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_image_gt(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_image_gt)
 }
-fn fc_record_image_le(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_image_le(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_image_le)
 }
-fn fc_record_image_ge(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_image_ge(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_cmp_bool(f, crate::rowtypes::record_image_ge)
 }
 
@@ -873,41 +852,41 @@ fn fc_record_larger_smaller(
         FormedTuple<'m>,
         FormedTuple<'m>,
     ) -> types_error::PgResult<FormedTuple<'m>>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let left = arg_record(m.mcx(), fcinfo, 0);
-    let right = arg_record(m.mcx(), fcinfo, 1);
+    let left = arg_record(m.mcx(), fcinfo, 0)?;
+    let right = arg_record(m.mcx(), fcinfo, 1)?;
     let r = core(m.mcx(), left, right);
     match r {
-        Ok(t) => ret_record(fcinfo, &t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_record(fcinfo, &t)),
+        Err(e) => Err(e),
     }
 }
-fn fc_record_larger(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_larger(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_larger_smaller(f, crate::rowtypes::record_larger)
 }
-fn fc_record_smaller(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_smaller(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_record_larger_smaller(f, crate::rowtypes::record_smaller)
 }
 
 /// `hash_record(record) -> int4`.
-fn fc_hash_record(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hash_record(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let rec = arg_record(m.mcx(), fcinfo, 0);
+    let rec = arg_record(m.mcx(), fcinfo, 0)?;
     match crate::rowtypes::hash_record(m.mcx(), &rec) {
-        Ok(h) => ret_i32(h as i32),
-        Err(e) => raise(e),
+        Ok(h) => Ok(ret_i32(h as i32)),
+        Err(e) => Err(e),
     }
 }
 
 /// `hash_record_extended(record, int8) -> int8`.
-fn fc_hash_record_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hash_record_extended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let rec = arg_record(m.mcx(), fcinfo, 0);
+    let rec = arg_record(m.mcx(), fcinfo, 0)?;
     let seed = arg_i64(fcinfo, 1) as u64;
     match crate::rowtypes::hash_record_extended(m.mcx(), &rec, seed) {
-        Ok(h) => ret_i64(h as i64),
-        Err(e) => raise(e),
+        Ok(h) => Ok(ret_i64(h as i64)),
+        Err(e) => Err(e),
     }
 }
 
@@ -916,7 +895,7 @@ fn fc_hash_record_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// parse failure `ereturn`s into it and the core returns `Ok(None)` (NULL
 /// result); a hard error propagates. With no caller sink the frame's escontext
 /// is `None`, so every error is hard.
-fn fc_record_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = alloc::string::String::from(arg_cstring(fcinfo, 0));
     let tupioparam = arg_oid(fcinfo, 1);
     let tup_typmod = arg_i32(fcinfo, 2);
@@ -931,35 +910,35 @@ fn fc_record_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     );
     fcinfo.escontext = escontext;
     match r {
-        Ok(Some(t)) => ret_record(fcinfo, &t),
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+        Ok(Some(t)) => Ok(ret_record(fcinfo, &t)),
+        Ok(None) => Ok(ret_null(fcinfo)),
+        Err(e) => Err(e),
     }
 }
 
 /// `record_out(record) -> cstring`.
-fn fc_record_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let rec = arg_record(m.mcx(), fcinfo, 0);
+    let rec = arg_record(m.mcx(), fcinfo, 0)?;
     let r = crate::rowtypes::record_out(m.mcx(), &rec);
     match r {
         Ok(bytes) => {
             let s = String::from_utf8(bytes.as_slice().to_vec())
                 .expect("record_out: result not valid UTF-8");
-            ret_cstring(fcinfo, s)
+            Ok(ret_cstring(fcinfo, s))
         }
-        Err(e) => raise(e),
+        Err(e) => Err(e),
     }
 }
 
 /// `record_send(record) -> bytea`.
-fn fc_record_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_record_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let rec = arg_record(m.mcx(), fcinfo, 0);
+    let rec = arg_record(m.mcx(), fcinfo, 0)?;
     let r = crate::rowtypes::record_send(m.mcx(), &rec);
     match r {
-        Ok(bytes) => ret_bytea_image(fcinfo, bytes.as_slice()),
-        Err(e) => raise(e),
+        Ok(bytes) => Ok(ret_bytea_image(fcinfo, bytes.as_slice())),
+        Err(e) => Err(e),
     }
 }
 
@@ -986,7 +965,7 @@ fn arg_tid<'mcx>(
     )
 }
 
-fn fc_tidin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tidin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: `escontext = (Node *) fcinfo->context`. Copy the input first since
     // `arg_cstring` borrows `fcinfo` immutably while `escontext_mut` needs
     // `&mut`. With no soft sink installed escontext is None and a syntax error
@@ -995,34 +974,34 @@ fn fc_tidin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let r = crate::scalars::tidin(m.mcx(), Some(&s), fcinfo.escontext_mut());
     match r {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_tidout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tidout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let arg = arg_tid(m.mcx(), fcinfo, 0);
     let r = crate::scalars::tidout(m.mcx(), arg);
     match r {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_currtid_byrelname(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_currtid_byrelname(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     // currtid_byrelname(text relname, tid) — arg0 text, arg1 by-ref ItemPointer.
     let relname = arg_text(fcinfo, 0).to_string();
     let tid = arg_tid(m.mcx(), fcinfo, 1);
     let r = crate::scalars::currtid_byrelname(m.mcx(), &relname, tid);
     match r {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_tidrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tidrecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let src = fcinfo
         .ref_arg(0)
         .and_then(|p| p.as_varlena())
@@ -1030,18 +1009,18 @@ fn fc_tidrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let r = crate::scalars::tidrecv(m.mcx(), src);
     match r {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_tidsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tidsend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let arg = arg_tid(m.mcx(), fcinfo, 0);
     let r = crate::scalars::tidsend(m.mcx(), arg);
     match r {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
 
@@ -1049,83 +1028,83 @@ fn fc_tidsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_tid_cmp_bool(
     fcinfo: &mut FunctionCallInfoBaseData,
     f: fn(types_tuple::Datum<'_>, types_tuple::Datum<'_>) -> types_error::PgResult<bool>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let a1 = arg_tid(m.mcx(), fcinfo, 0);
     let a2 = arg_tid(m.mcx(), fcinfo, 1);
     match f(a1, a2) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
+        Ok(b) => Ok(ret_bool(b)),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_tideq(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tideq(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_tid_cmp_bool(f, crate::scalars::tideq)
 }
-fn fc_tidne(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tidne(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_tid_cmp_bool(f, crate::scalars::tidne)
 }
-fn fc_tidlt(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tidlt(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_tid_cmp_bool(f, crate::scalars::tidlt)
 }
-fn fc_tidle(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tidle(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_tid_cmp_bool(f, crate::scalars::tidle)
 }
-fn fc_tidgt(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tidgt(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_tid_cmp_bool(f, crate::scalars::tidgt)
 }
-fn fc_tidge(f: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tidge(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     fc_tid_cmp_bool(f, crate::scalars::tidge)
 }
 
-fn fc_bttidcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bttidcmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let a1 = arg_tid(m.mcx(), fcinfo, 0);
     let a2 = arg_tid(m.mcx(), fcinfo, 1);
     match crate::scalars::bttidcmp(a1, a2) {
-        Ok(v) => Datum::from_i32(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(Datum::from_i32(v)),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_tidlarger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tidlarger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let a1 = arg_tid(m.mcx(), fcinfo, 0);
     let a2 = arg_tid(m.mcx(), fcinfo, 1);
     let r = crate::scalars::tidlarger(a1, a2);
     match r {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_tidsmaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tidsmaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let a1 = arg_tid(m.mcx(), fcinfo, 0);
     let a2 = arg_tid(m.mcx(), fcinfo, 1);
     let r = crate::scalars::tidsmaller(a1, a2);
     match r {
-        Ok(d) => ret_value_datum(fcinfo, d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_value_datum(fcinfo, d)),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_hashtid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashtid(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let key = arg_tid(m.mcx(), fcinfo, 0);
     match crate::scalars::hashtid(key) {
-        Ok(v) => Datum::from_u32(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(Datum::from_u32(v)),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_hashtidextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashtidextended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let key = arg_tid(m.mcx(), fcinfo, 0);
     let seed = arg_i64(fcinfo, 1) as u64;
     match crate::scalars::hashtidextended(key, seed) {
-        Ok(v) => Datum::from_u64(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(Datum::from_u64(v)),
+        Err(e) => Err(e),
     }
 }
 
@@ -1186,7 +1165,7 @@ fn opt_arg_lsn(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Option<u64> {
 /// args are required (the core raises the C `elog` on a NULL); `config`/
 /// `condition` are optional array varlena images carried verbatim; `requires`
 /// is an optional `text[]` deconstructed into its element extension names.
-fn fc_binary_upgrade_create_empty_extension(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_create_empty_extension(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let ext_name = opt_arg_text(fcinfo, 0);
     let schema_name = opt_arg_text(fcinfo, 1);
@@ -1204,10 +1183,9 @@ fn fc_binary_upgrade_create_empty_extension(fcinfo: &mut FunctionCallInfoBaseDat
             .ref_arg(6)
             .and_then(|p| p.as_varlena())
             .expect("binary_upgrade_create_empty_extension: requires text[] missing from by-ref lane");
-        match backend_utils_adt_arrayfuncs_seams::deconstruct_text_array::call(m.mcx(), arr) {
-            Ok(v) => v.into_iter().collect(),
-            Err(e) => raise(e),
-        }
+        backend_utils_adt_arrayfuncs_seams::deconstruct_text_array::call(m.mcx(), arr)?
+            .into_iter()
+            .collect()
     };
     let required_refs: Vec<&str> = required_strings.iter().map(|s| s.as_str()).collect();
 
@@ -1220,34 +1198,34 @@ fn fc_binary_upgrade_create_empty_extension(fcinfo: &mut FunctionCallInfoBaseDat
         ext_condition,
         &required_refs,
     ) {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
+        Ok(()) => Ok(ret_void()),
+        Err(e) => Err(e),
     }
 }
 
 /// `binary_upgrade_add_sub_rel_state(subname, relid, relstate, sublsn)`
 /// (OID 6319) — non-strict. The first three args are required (the core raises
 /// on NULL); `sublsn` is `None` for a NULL `pg_lsn`.
-fn fc_binary_upgrade_add_sub_rel_state(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_add_sub_rel_state(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let subname = opt_arg_text(fcinfo, 0);
     let relid = if arg_is_null(fcinfo, 1) { None } else { Some(arg_oid(fcinfo, 1)) };
     let relstate = if arg_is_null(fcinfo, 2) { None } else { Some(arg_char(fcinfo, 2)) };
     let sublsn = opt_arg_lsn(fcinfo, 3);
     match crate::admin::binary_upgrade_add_sub_rel_state(subname, relid, relstate, sublsn) {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
+        Ok(()) => Ok(ret_void()),
+        Err(e) => Err(e),
     }
 }
 
 /// `binary_upgrade_replorigin_advance(subname, remote_commit)` (OID 6320) —
 /// non-strict. `subname` is required (the core raises on NULL); `remote_commit`
 /// is `None` for a NULL `pg_lsn`.
-fn fc_binary_upgrade_replorigin_advance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_binary_upgrade_replorigin_advance(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let subname = opt_arg_text(fcinfo, 0);
     let remote_commit = opt_arg_lsn(fcinfo, 1);
     match crate::admin::binary_upgrade_replorigin_advance(subname, remote_commit) {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
+        Ok(()) => Ok(ret_void()),
+        Err(e) => Err(e),
     }
 }
 
@@ -1261,24 +1239,29 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every SQL-callable builtin of this unit whose types are expressible
-/// at the current fmgr boundary (C: their `fmgr_builtins[]` rows). Called from
-/// this crate's `init_seams()`. OIDs/nargs/strict/retset transcribed exactly
-/// from `pg_proc.dat` (none is strict or retset).
+/// at the current fmgr boundary (C: their `fmgr_builtins[]` rows) as
+/// **Result-native** (the panic→Result migration; see
+/// `docs/proposals/panic-to-result-migration.md`). Called from this crate's
+/// `init_seams()`. OIDs/nargs/strict/retset transcribed exactly from
+/// `pg_proc.dat`.
 pub fn register_misc2_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- regproc.c: reg* I/O ----
         builtin(44, "regprocin", 1, true, false, fc_regprocin),
         builtin(45, "regprocout", 1, true, false, fc_regprocout),
@@ -1557,8 +1540,8 @@ mod tests {
             Some(RefPayload::Composite(a.to_vec())),
             Some(RefPayload::Composite(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
-        (entry.func.unwrap())(&mut fcinfo)
+        let native = backend_utils_fmgr_core::native_builtin(oid).expect("builtin registered");
+        native(&mut fcinfo).expect("builtin returned Err")
     }
 
     #[test]
@@ -1628,8 +1611,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![types_datum::NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Cstring(s.to_string()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(48).expect("tidin registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let native = backend_utils_fmgr_core::native_builtin(48).expect("tidin registered");
+        native(&mut fcinfo).expect("tidin returned Err");
         match fcinfo.take_ref_result().expect("tidin set a by-ref result") {
             RefPayload::Varlena(b) => b,
             other => panic!("tidin returned unexpected lane: {other:?}"),
@@ -1643,8 +1626,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![types_datum::NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(image.to_vec()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(49).expect("tidout registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let native = backend_utils_fmgr_core::native_builtin(49).expect("tidout registered");
+        native(&mut fcinfo).expect("tidout returned Err");
         match fcinfo.take_ref_result().expect("tidout set a by-ref result") {
             RefPayload::Cstring(s) => s,
             other => panic!("tidout returned unexpected lane: {other:?}"),
@@ -1677,8 +1660,8 @@ mod tests {
             ];
             fcinfo.ref_args =
                 vec![Some(RefPayload::Varlena(x.to_vec())), Some(RefPayload::Varlena(y.to_vec()))];
-            let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("registered");
-            (entry.func.unwrap())(&mut fcinfo).as_bool()
+            let native = backend_utils_fmgr_core::native_builtin(oid).expect("registered");
+            native(&mut fcinfo).expect("builtin returned Err").as_bool()
         };
         assert!(call2(1292, &a, &a)); // tideq: (0,1) == (0,1)
         assert!(!call2(1292, &a, &b)); // tideq: (0,1) != (0,2)
