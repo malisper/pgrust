@@ -73,6 +73,7 @@ backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-commands-user-seams = { path = "../backend-commands-user-seams" }
 backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }

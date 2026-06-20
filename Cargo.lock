@@ -7327,6 +7327,7 @@ dependencies = [
  "backend-access-table-table-seams",
  "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",
+ "backend-catalog-catalog-seams",
  "backend-catalog-index",
  "backend-catalog-index-seams",
  "backend-catalog-namespace",
