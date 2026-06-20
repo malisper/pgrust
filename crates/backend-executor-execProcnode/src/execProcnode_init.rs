@@ -118,7 +118,7 @@ pub fn exec_init_node<'mcx>(
         ntag::T_BitmapOr => {
             let bitmap_or = node.expect_bitmapor();
             let s = backend_executor_nodeBitmapOr::ExecInitBitmapOr(
-                mcx, bitmap_or, estate, eflags,
+                mcx, node, bitmap_or, estate, eflags,
             )?;
             alloc_in(mcx, PlanStateNode::BitmapOr(s))?
         }

@@ -253,15 +253,20 @@ fn explain_pre_scan_node<'es, 'p>(
     }
 
     // return planstate_tree_walker(planstate, ExplainPreScanNode, rels_used).
-    // The owned PlanStateNode threads outer (lefttree) and inner (righttree);
-    // member-node children (Append/BitmapAnd ...) are not yet on the enum (same
-    // limitation as ExplainNode's child recursion) and contribute no scanrelid
-    // for the cases this serves.
+    // The owned PlanStateNode threads outer (lefttree) and inner (righttree),
+    // plus the member-node children (Append/MergeAppend/BitmapAnd/BitmapOr) via
+    // `member_input_states()` — so partition Seq Scans under an Append
+    // contribute their scanrelids (and thus get display names).
     if let Some(outer) = planstate.outer_plan_state() {
         acc = explain_pre_scan_node(mcx, outer, acc)?;
     }
     if let Some(inner) = planstate.ps_head().righttree.as_deref() {
         acc = explain_pre_scan_node(mcx, inner, acc)?;
+    }
+    if let Some(members) = planstate.member_input_states() {
+        for child in members {
+            acc = explain_pre_scan_node(mcx, child, acc)?;
+        }
     }
 
     Ok(acc)
@@ -884,7 +889,16 @@ pub fn ExplainNode<'es, 'p>(
     let has_sub = head.subPlan.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
     let has_outer = planstate.outer_plan_state().is_some();
     let has_inner = head.righttree.is_some();
-    let haschildren = has_init || has_outer || has_inner || has_sub;
+    // Member-node children: Append/MergeAppend appendplans/mergeplans,
+    // BitmapAnd/BitmapOr bitmapplans (explain.c's `haschildren` member legs).
+    let has_members = matches!(
+        plan_node.node_tag(),
+        ntag::T_Append | ntag::T_MergeAppend | ntag::T_BitmapAnd | ntag::T_BitmapOr
+    ) && planstate
+        .member_input_states()
+        .map(|m| !m.is_empty())
+        .unwrap_or(false);
+    let haschildren = has_init || has_outer || has_inner || has_members || has_sub;
 
     if haschildren {
         fmt::ExplainOpenGroup("Plans", Some("Plans"), false, es)?;
@@ -910,19 +924,18 @@ pub fn ExplainNode<'es, 'p>(
         ExplainNode(es, mcx, inner, ancestors, Some("Inner"), None)?;
     }
 
-    // Special member-node children (Append/MergeAppend/BitmapAnd/BitmapOr/
-    // SubqueryScan/CustomScan): the trimmed PlanState does not yet thread those
-    // member-node vectors into the enum (append_input_states returns None), so a
-    // member-bearing node reaches no children here. Guard loudly if such a node
-    // appears with children to display.
-    if matches!(
-        plan_node.node_tag(),
-        ntag::T_Append | ntag::T_MergeAppend | ntag::T_BitmapAnd
-    ) {
-        panic!(
-            "ExplainNode: Append/MergeAppend/BitmapAnd member-node recursion needs the \
-             member plan-state vectors (not threaded into PlanStateNode yet)"
-        );
+    // Special member-node children (explain.c:2042-2065): Append/MergeAppend
+    // recurse into appendplans/mergeplans, BitmapAnd/BitmapOr into bitmapplans,
+    // each via ExplainMemberNodes (relationship "Member"). The member plan-state
+    // vectors are threaded onto the owned state structs and exposed through
+    // `member_input_states()`. (SubqueryScan recurses through its subplan, and
+    // CustomScan through custom_ps; those legs land with those nodes.)
+    if let ntag::T_Append | ntag::T_MergeAppend | ntag::T_BitmapAnd | ntag::T_BitmapOr =
+        plan_node.node_tag()
+    {
+        if let Some(members) = planstate.member_input_states() {
+            ExplainMemberNodes(es, mcx, &members, ancestors)?;
+        }
     }
 
     // subPlan-s.
@@ -995,6 +1008,24 @@ fn show_scan_qual<'es, 'p>(
     )?;
     // ExplainPropertyText(qlabel, exprstr, es);
     fmt::ExplainPropertyText(qlabel, exprstr.as_str(), es)?;
+    Ok(())
+}
+
+/// `ExplainMemberNodes(planstates, nplans, ancestors, es)` (explain.c:4537) —
+/// explain a list of the member-node child plan states of an Append /
+/// MergeAppend / BitmapAnd / BitmapOr node, each as a "Member" child.
+#[allow(non_snake_case)]
+fn ExplainMemberNodes<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    planstates: &[&PlanStateNode<'p>],
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+) -> PgResult<()> {
+    // for (j = 0; j < nplans; j++)
+    //     ExplainNode(planstates[j], ancestors, "Member", NULL, es);
+    for child in planstates {
+        ExplainNode(es, mcx, child, ancestors, Some("Member"), None)?;
+    }
     Ok(())
 }
 

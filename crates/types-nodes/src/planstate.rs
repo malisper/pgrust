@@ -371,6 +371,33 @@ impl<'mcx> PlanStateNode<'mcx> {
         }
     }
 
+    /// `planstate_walk_members(planstate, ...)` — the per-node member child
+    /// `PlanState`s of the special member-bearing nodes
+    /// (`AppendState.appendplans`, `MergeAppendState.mergeplans`,
+    /// `BitmapAndState`/`BitmapOrState.bitmapplans`), in array order, for shared
+    /// (`&`) read walks such as `ExplainMemberNodes`. Returns the present
+    /// (`Some`) children only — the C arrays are fully populated by the node's
+    /// `ExecInit*`, but the owned vectors carry `Option<PgBox<..>>` slots so a
+    /// not-yet-initialized slot reads as absent. `None` for non-member nodes
+    /// (distinct from `Some(empty)` for a member node with no children).
+    pub fn member_input_states(&self) -> Option<alloc::vec::Vec<&PlanStateNode<'mcx>>> {
+        let members = match self {
+            PlanStateNode::Append(a) => &a.appendplans,
+            PlanStateNode::MergeAppend(m) => &m.mergeplans,
+            PlanStateNode::BitmapAnd(b) => &b.bitmapplans,
+            PlanStateNode::BitmapOr(b) => &b.bitmapplans,
+            _ => return None,
+        };
+        let mut out: alloc::vec::Vec<&PlanStateNode<'mcx>> =
+            alloc::vec::Vec::with_capacity(members.len());
+        for c in members.iter() {
+            if let Some(c) = c.as_deref() {
+                out.push(c);
+            }
+        }
+        Some(out)
+    }
+
     /// `castNode(AggState, node)` — the `AggState` an aggregate-owned
     /// `ExprState`'s `parent` points at (read by `EEOP_GROUPING_FUNC` for
     /// `aggstate->grouped_cols`). `None` until nodeAgg threads its `AggState`
