@@ -45,13 +45,14 @@ use types_catalog::catalog_dependency::ObjectAddress;
 use types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
 use types_core::primitive::{AttrNumber, InvalidAttrNumber};
 use types_error::{
-    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
-    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERROR, WARNING,
+    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_COLUMN_REFERENCE,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
+    ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
 use types_nodes::ddlnodes::AlterTableType;
 use types_nodes::nodes::{ntag, Node};
 use types_rel::Relation;
-use types_storage::lock::{RowExclusiveLock, LOCKMODE};
+use types_storage::lock::{RowExclusiveLock, ShareLock, LOCKMODE};
 use types_nodes::parsenodes::DROP_RESTRICT;
 use types_statistics::MAX_STATISTICS_TARGET;
 use types_tuple::access::{
@@ -78,6 +79,214 @@ fn object_address_subset(class_id: types_core::Oid, object_id: types_core::Oid, 
         objectId: object_id,
         objectSubId: sub,
     }
+}
+
+// `pg_class.relreplident` values (catalog/pg_class.h).
+const REPLICA_IDENTITY_DEFAULT: i8 = b'd' as i8;
+const REPLICA_IDENTITY_NOTHING: i8 = b'n' as i8;
+const REPLICA_IDENTITY_FULL: i8 = b'f' as i8;
+const REPLICA_IDENTITY_INDEX: i8 = b'i' as i8;
+
+/// `relation_mark_replica_identity(rel, ri_type, indexOid, is_internal)`
+/// (tablecmds.c:18402) — update `pg_class.relreplident` and the per-index
+/// `pg_index.indisreplident` flags. `indexOid` is `InvalidOid` for the
+/// non-index identity types. Caller holds an exclusive lock on `rel`.
+fn relation_mark_replica_identity<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    ri_type: i8,
+    index_oid: types_core::Oid,
+) -> PgResult<()> {
+    // Check whether relreplident has changed, and update it if so. The pg_class
+    // open/SearchSysCacheCopy1/conditional-poke/CatalogTupleUpdate/close lives in
+    // the pg_class-write owner (backend-catalog-indexing).
+    let valid = indexing_seam::set_pg_class_relreplident::call(rel.rd_id, ri_type)?;
+    if !valid {
+        return backend_utils_error::ereport(ERROR)
+            .errmsg_internal(format!("cache lookup failed for relation \"{}\"", rel.name()))
+            .finish(here("relation_mark_replica_identity"))
+            .map(|()| unreachable!());
+    }
+
+    // Update the per-index indisreplident flags correctly. Iterate
+    // RelationGetIndexList(rel): set the bit on `index_oid`, clear it on all the
+    // others; each dirty index gets a CacheInvalidateRelcache(rel).
+    let index_list = backend_utils_cache_relcache_seams::relation_get_index_list::call(mcx, rel)?;
+    for this_index_oid in index_list.iter().copied() {
+        let want = this_index_oid == index_oid;
+        let (found, dirty) =
+            indexing_seam::set_index_isreplident::call(this_index_oid, want)?;
+        if !found {
+            return backend_utils_error::ereport(ERROR)
+                .errmsg_internal(format!("cache lookup failed for index {this_index_oid}"))
+                .finish(here("relation_mark_replica_identity"))
+                .map(|()| unreachable!());
+        }
+        if dirty {
+            // InvokeObjectPostAlterHookArg(IndexRelationId, ...): no-op without an
+            // installed object-access hook.
+            //
+            // Invalidate the relcache for the table, so that after we commit all
+            // sessions will refresh the table's replica identity index before
+            // attempting any UPDATE or DELETE on the table.
+            backend_utils_cache_inval_seams::cache_invalidate_relcache::call(rel.rd_id)?;
+        }
+    }
+    Ok(())
+}
+
+/// `ATExecReplicaIdentity(rel, stmt, lockmode)` (tablecmds.c:18490) — ALTER TABLE
+/// `<name>` REPLICA IDENTITY ...
+pub fn ATExecReplicaIdentity<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    stmt: &types_nodes::ddlnodes::ReplicaIdentityStmt<'_>,
+    _lockmode: LOCKMODE,
+) -> PgResult<ObjectAddress> {
+    let identity_type = stmt.identity_type;
+
+    if identity_type == REPLICA_IDENTITY_DEFAULT
+        || identity_type == REPLICA_IDENTITY_FULL
+        || identity_type == REPLICA_IDENTITY_NOTHING
+    {
+        relation_mark_replica_identity(mcx, rel, identity_type, types_core::InvalidOid)?;
+        return Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0));
+    } else if identity_type == REPLICA_IDENTITY_INDEX {
+        // fallthrough
+    } else {
+        return backend_utils_error::ereport(ERROR)
+            .errmsg_internal(format!("unexpected identity type {}", identity_type as u8))
+            .finish(here("ATExecReplicaIdentity"))
+            .map(|()| unreachable!());
+    }
+
+    // Check that the index exists.
+    let index_name = stmt
+        .name
+        .as_ref()
+        .map(|s| s.as_str())
+        .expect("REPLICA IDENTITY USING INDEX requires an index name");
+    let index_oid = backend_utils_cache_lsyscache_seams::get_relname_relid::call(
+        index_name,
+        rel.rd_rel.relnamespace,
+    )?;
+    if index_oid == types_core::InvalidOid {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(format!(
+                "index \"{}\" for table \"{}\" does not exist",
+                index_name,
+                rel.name()
+            ))
+            .finish(here("ATExecReplicaIdentity"))
+            .map(|()| unreachable!());
+    }
+
+    // indexRel = index_open(indexOid, ShareLock): take the lock + build/pin the
+    // index relcache entry. Held for the duration (the lock kept to txn end).
+    let index_rel = relation_open(mcx, index_oid, ShareLock)?;
+    let index_relname = index_rel.name().to_string();
+
+    // Read everything ATExecReplicaIdentity inspects off the opened index
+    // (rd_index flags, rd_indam->amcanunique, expression/predicate presence, key
+    // columns) via the relcache projection.
+    let info = backend_utils_cache_relcache_seams::get_replident_index_info::call(index_oid)?;
+
+    // Check that the index is on the relation we're altering.
+    if !info.is_index || info.indrelid != rel.rd_id {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!(
+                "\"{}\" is not an index for table \"{}\"",
+                index_relname,
+                rel.name()
+            ))
+            .finish(here("ATExecReplicaIdentity"))
+            .map(|()| unreachable!());
+    }
+
+    // The AM must support uniqueness, and the index must in fact be unique. If we
+    // have a WITHOUT OVERLAPS constraint (uniqueness + exclusion), we can use that
+    // too.
+    if (!info.amcanunique || !info.indisunique)
+        && !(info.indisunique && info.indisexclusion)
+    {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!(
+                "cannot use non-unique index \"{index_relname}\" as replica identity"
+            ))
+            .finish(here("ATExecReplicaIdentity"))
+            .map(|()| unreachable!());
+    }
+    // Deferred indexes are not guaranteed to be always unique.
+    if !info.indimmediate {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "cannot use non-immediate index \"{index_relname}\" as replica identity"
+            ))
+            .finish(here("ATExecReplicaIdentity"))
+            .map(|()| unreachable!());
+    }
+    // Expression indexes aren't supported.
+    if info.has_expressions {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "cannot use expression index \"{index_relname}\" as replica identity"
+            ))
+            .finish(here("ATExecReplicaIdentity"))
+            .map(|()| unreachable!());
+    }
+    // Predicate indexes aren't supported.
+    if info.has_predicate {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "cannot use partial index \"{index_relname}\" as replica identity"
+            ))
+            .finish(here("ATExecReplicaIdentity"))
+            .map(|()| unreachable!());
+    }
+
+    // Check index for nullable columns.
+    for col in &info.key_columns {
+        let attno = col.attno;
+
+        // Reject any system columns (attno <= 0, which also covers the 0
+        // expression-column marker, though expression indexes are rejected
+        // above).
+        if attno <= 0 {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
+                .errmsg(format!(
+                    "index \"{index_relname}\" cannot be used as replica identity because column {attno} is a system column"
+                ))
+                .finish(here("ATExecReplicaIdentity"))
+                .map(|()| unreachable!());
+        }
+
+        let attr = rel.rd_att.attr((attno - 1) as usize);
+        if !attr.attnotnull {
+            let attname = String::from_utf8_lossy(attr.attname.name_str()).into_owned();
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(format!(
+                    "index \"{index_relname}\" cannot be used as replica identity because column \"{attname}\" is nullable"
+                ))
+                .finish(here("ATExecReplicaIdentity"))
+                .map(|()| unreachable!());
+        }
+    }
+
+    // This index is suitable for use as a replica identity. Mark it.
+    relation_mark_replica_identity(mcx, rel, identity_type, index_oid)?;
+
+    // index_close(indexRel, NoLock): drop the relcache pin, keep the lock.
+    drop(index_rel);
+
+    Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
 }
 
 /// Faithful seam-and-panic for an unported column-attribute family. See module

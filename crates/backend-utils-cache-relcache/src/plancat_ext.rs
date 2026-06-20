@@ -20,6 +20,7 @@
 #![allow(unused_variables)]
 
 use backend_optimizer_util_plancat_ext_seams as px;
+use backend_utils_cache_relcache_seams as sx;
 use types_core::primitive::{BlockNumber, Oid};
 use types_error::{PgError, PgResult};
 
@@ -77,6 +78,80 @@ pub fn init_seams() {
     px::relation_has_transition_tables::set(relation_has_transition_tables);
     px::get_infer_index_info::set(get_infer_index_info);
     px::infer_collation_opclass_match::set(infer_collation_opclass_match);
+    sx::get_replident_index_info::set(get_replident_index_info);
+}
+
+/// `ATExecReplicaIdentity`'s `index_open(indexOid, ShareLock)` reads, projected
+/// into a [`sx::ReplidentIndexInfo`] (tablecmds.c:18490). The caller already
+/// holds the `ShareLock`; this pins the relcache entry (`relation_open(..,
+/// NoLock)` half of `index_open`), reads `rd_index`/`rd_indam` + the
+/// expression/predicate presence, and unpins (`index_close(.., NoLock)`).
+///
+/// A relation with `rd_index == NULL` (not an index) yields `is_index == false`
+/// and default fields; the caller raises the `is not an index for table` error.
+fn get_replident_index_info(index_oid: Oid) -> PgResult<sx::ReplidentIndexInfo> {
+    with_index_open(index_oid, || {
+        // `rd_index` flags + key-column vector off the owned entry.
+        let (is_index, indrelid, indisunique, indisexclusion, indimmediate, key_columns, has_expr) =
+            with_relation(index_oid, |rd| match rd.rd_index.as_ref() {
+                None => (false, types_core::InvalidOid, false, false, false, Vec::new(), false),
+                Some(index) => {
+                    let nkey = index.indnkeyatts as usize;
+                    let key_columns = index
+                        .indkey
+                        .iter()
+                        .take(nkey)
+                        .map(|&k| sx::ReplidentKeyColumn { attno: k as i16 })
+                        .collect::<Vec<_>>();
+                    // `RelationGetIndexExpressions(indexRel) != NIL`: an index
+                    // carries expression columns iff some `indkey[i] == 0`
+                    // (`InvalidAttrNumber`), the on-disk marker for an expression
+                    // column (relcache.c:5108 quick-exit proxy).
+                    let has_expr = index
+                        .indkey
+                        .iter()
+                        .any(|&k| k == types_core::primitive::InvalidAttrNumber);
+                    (
+                        true,
+                        index.indrelid,
+                        index.indisunique,
+                        index.indisexclusion,
+                        index.indimmediate,
+                        key_columns,
+                        has_expr,
+                    )
+                }
+            })?;
+
+        // `indexRel->rd_indam->amcanunique`. A partitioned index has `rd_indam ==
+        // NULL` (no AM routine); the C reads `indexRel->rd_indam->amcanunique`
+        // unconditionally, but a partitioned index reaches here only with
+        // `indisunique` already set by a valid AM, so absent `rd_indam` => false
+        // is the faithful "AM does not support uniqueness" outcome.
+        let amcanunique =
+            with_relation(index_oid, |rd| rd.rd_indam.as_ref().map(|am| am.amcanunique))?
+                .unwrap_or(false);
+
+        // `RelationGetIndexPredicate(indexRel) != NIL`: a partial index. The
+        // owned relcache entry does not carry `indpred`; read its presence off
+        // pg_index (`heap_attisnull(.., Anum_pg_index_indpred)`), exactly as the
+        // FK/logical-replication callers do.
+        let has_predicate =
+            backend_utils_cache_syscache_seams::pg_index_has_predicate::call(index_oid)?
+                .unwrap_or(false);
+
+        Ok(sx::ReplidentIndexInfo {
+            is_index,
+            indrelid,
+            amcanunique,
+            indisunique,
+            indisexclusion,
+            indimmediate,
+            has_expressions: has_expr,
+            has_predicate,
+            key_columns,
+        })
+    })
 }
 
 /// `index_open(indexoid, rellockmode)` + the `idxForm`/expression/predicate reads

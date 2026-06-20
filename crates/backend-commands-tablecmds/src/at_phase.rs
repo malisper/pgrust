@@ -1051,7 +1051,8 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_MATVIEW,
             )?;
-            unported("REPLICA IDENTITY");
+            // This command never recurses; no command-specific prep needed.
+            pass = AT_PASS_MISC;
         }
         AT_EnableTrig | AT_EnableAlwaysTrig | AT_EnableReplicaTrig | AT_EnableTrigAll
         | AT_EnableTrigUser | AT_DisableTrig | AT_DisableTrigAll | AT_DisableTrigUser => {
@@ -1558,7 +1559,16 @@ fn ATExecCmd<'mcx>(
         AT_DropInherit => unported("NO INHERIT (ATExecDropInherit)"),
         AT_AddOf => unported("OF (ATExecAddOf)"),
         AT_DropOf => unported("NOT OF (ATExecDropOf)"),
-        AT_ReplicaIdentity => unported("REPLICA IDENTITY (ATExecReplicaIdentity)"),
+        AT_ReplicaIdentity => {
+            // ATExecReplicaIdentity(rel, (ReplicaIdentityStmt *) cmd->def, lockmode).
+            let stmt = cmd
+                .def
+                .as_deref()
+                .expect("AT_ReplicaIdentity: cmd.def is NULL")
+                .as_replicaidentitystmt()
+                .expect("AT_ReplicaIdentity: cmd.def is not a ReplicaIdentityStmt");
+            _address = crate::at_column::ATExecReplicaIdentity(mcx, rel, stmt, lockmode)?;
+        }
         AT_EnableTrig | AT_EnableAlwaysTrig | AT_EnableReplicaTrig | AT_DisableTrig
         | AT_EnableTrigAll | AT_DisableTrigAll | AT_EnableTrigUser | AT_DisableTrigUser => {
             unported("ENABLE/DISABLE TRIGGER (EnableDisableTrigger)")

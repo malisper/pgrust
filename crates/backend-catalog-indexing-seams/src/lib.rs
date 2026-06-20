@@ -116,6 +116,28 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `relation_mark_replica_identity`'s pg_class leg (tablecmds.c:18411-18429):
+    /// open pg_class RowExclusiveLock, `SearchSysCacheCopy1(RELOID, relid)`, and —
+    /// only if `relreplident != ri_type` — poke `relreplident = ri_type` on the
+    /// `GETSTRUCT` copy and `CatalogTupleUpdate`. The boolean result is
+    /// `HeapTupleIsValid(tuple)`; the caller raises the `cache lookup failed for
+    /// relation %s` `elog(ERROR)` when it is `false`.
+    pub fn set_pg_class_relreplident(relid: Oid, ri_type: i8) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `relation_mark_replica_identity`'s per-index pg_index leg
+    /// (tablecmds.c:18435-18481): open pg_index RowExclusiveLock,
+    /// `SearchSysCacheCopy1(INDEXRELID, index_oid)`, and — only if
+    /// `indisreplident != want` — poke `indisreplident = want` on the `GETSTRUCT`
+    /// copy and `CatalogTupleUpdate`. Returns `(found, dirty)`: `found` is
+    /// `HeapTupleIsValid(tuple)` (the caller raises `cache lookup failed for index
+    /// %u` when `false`), and `dirty` is whether the flag actually changed (the
+    /// caller owns the per-dirty-index `CacheInvalidateRelcache(rel)`).
+    pub fn set_index_isreplident(index_oid: Oid, want: bool) -> PgResult<(bool, bool)>
+);
+
+seam_core::seam!(
     /// `systable_inplace_update_begin(class_rel, ClassOidIndexId, true, NULL,
     /// key[oid = rel_oid], &reltup, &state)`; if the tuple is found, write
     /// `((Form_pg_class) GETSTRUCT(reltup))->reltoastrelid = toast_relid` and

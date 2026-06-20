@@ -1161,3 +1161,54 @@ seam_core::seam!(
     /// `ereport`.
     pub fn release_relation_ref(relid: types_core::primitive::Oid) -> types_error::PgResult<()>
 );
+
+/// One index key column's identity for the `ATExecReplicaIdentity` nullability
+/// check: the table column number `indkey.values[key]` and, when it is a real
+/// (non-system, non-expression) column, that column's `attname`. System columns
+/// (`attno <= 0`, including the `0` expression-column marker) are surfaced via
+/// `attno` alone; the caller raises the system-column error before touching the
+/// table descriptor.
+#[derive(Clone, Debug)]
+pub struct ReplidentKeyColumn {
+    /// `indexRel->rd_index->indkey.values[key]` — the table column number.
+    pub attno: i16,
+}
+
+/// Everything `ATExecReplicaIdentity` (tablecmds.c) reads off the opened index
+/// relation (`index_open(indexOid, ShareLock)`): `rd_index` flags, the AM's
+/// `amcanunique`, the expression/predicate presence, and the key-column list.
+/// The `index_open`/`index_close(.., NoLock)` pin lifecycle is owned by the
+/// relcache installer; the `ShareLock` is taken by the caller before this seam.
+#[derive(Clone, Debug)]
+pub struct ReplidentIndexInfo {
+    /// `indexRel->rd_index != NULL` — the relation is in fact an index.
+    pub is_index: bool,
+    /// `indexRel->rd_index->indrelid` — the table the index is for.
+    pub indrelid: types_core::primitive::Oid,
+    /// `indexRel->rd_indam->amcanunique` — the AM supports uniqueness.
+    pub amcanunique: bool,
+    /// `indexRel->rd_index->indisunique`.
+    pub indisunique: bool,
+    /// `indexRel->rd_index->indisexclusion`.
+    pub indisexclusion: bool,
+    /// `indexRel->rd_index->indimmediate`.
+    pub indimmediate: bool,
+    /// `RelationGetIndexExpressions(indexRel) != NIL` — an expression index.
+    pub has_expressions: bool,
+    /// `RelationGetIndexPredicate(indexRel) != NIL` — a partial index.
+    pub has_predicate: bool,
+    /// `indexRel->rd_index->indkey.values[0..indnkeyatts]` — the key columns.
+    pub key_columns: Vec<ReplidentKeyColumn>,
+}
+
+seam_core::seam!(
+    /// `index_open(indexOid, NoLock)` + the `rd_index`/`rd_indam`/expression/
+    /// predicate reads `ATExecReplicaIdentity` (tablecmds.c:18490) performs on the
+    /// opened index, projected into a [`ReplidentIndexInfo`] (the index is left
+    /// closed at return, mirroring `index_close(indexRel, NoLock)`). The caller
+    /// holds the `ShareLock` already; this only pins/reads/unpins the relcache
+    /// entry. `Err` carries a `could not open index` failure.
+    pub fn get_replident_index_info(
+        index_oid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<ReplidentIndexInfo>
+);

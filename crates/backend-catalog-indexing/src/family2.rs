@@ -92,9 +92,11 @@ const ANUM_PG_CLASS_RELHASSUBCLASS: i16 = 23;
 const ANUM_PG_CLASS_RELROWSECURITY: i16 = 24;
 const ANUM_PG_CLASS_RELFORCEROWSECURITY: i16 = 25;
 const ANUM_PG_CLASS_RELISPOPULATED: i16 = 26;
+const ANUM_PG_CLASS_RELREPLIDENT: i16 = 27;
 const ANUM_PG_CLASS_RELISPARTITION: i16 = 28;
 const ANUM_PG_INDEX_INDEXRELID: i16 = 1;
 const ANUM_PG_INDEX_INDISVALID: i16 = 11;
+const ANUM_PG_INDEX_INDISREPLIDENT: i16 = 15;
 
 // pg_sequence (CATALOG(pg_sequence,2224)): 8 fixed columns.
 const ANUM_PG_SEQUENCE_SEQRELID: i16 = 1;
@@ -1259,6 +1261,77 @@ fn set_pg_class_relispopulated(relid: Oid, newstate: bool) -> PgResult<bool> {
     modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
     pg_class.close(RowExclusiveLock)?;
     Ok(true)
+}
+
+/// `relation_mark_replica_identity`'s pg_class leg (tablecmds.c:18411-18429):
+/// `pg_class = table_open(RelationRelationId, RowExclusiveLock)` → `tuple =
+/// SearchSysCacheCopy1(RELOID, relid)` → if `relreplident != ri_type`, poke
+/// `relreplident = ri_type` and `CatalogTupleUpdate` → `table_close` →
+/// `heap_freetuple`. Returns `false` when the syscache lookup failed
+/// (`!HeapTupleIsValid`), so the caller raises `cache lookup failed for relation
+/// %s`. The C unconditionally writes `relreplident` then guards the
+/// `CatalogTupleUpdate` on a change; the owned re-fetch model only writes (and
+/// re-forms) when the value differs, which is the same on-disk outcome.
+fn set_pg_class_relreplident(relid: Oid, ri_type: i8) -> PgResult<bool> {
+    let ctx = MemoryContext::new("set_pg_class_relreplident");
+    let mcx = ctx.mcx();
+    let pg_class = table_open(mcx, cat::catalog::RELATION_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_class, ANUM_PG_CLASS_OID, relid)? else {
+        pg_class.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+    let (mut values, mut nulls) = deform(mcx, &pg_class, &oldtup)?;
+    // `if (pg_class_form->relreplident != ri_type)` — only update if it changed.
+    if values[(ANUM_PG_CLASS_RELREPLIDENT - 1) as usize].as_char() != ri_type {
+        let mut replaces = vec![false; values.len()];
+        set_col(
+            &mut values,
+            &mut nulls,
+            &mut replaces,
+            ANUM_PG_CLASS_RELREPLIDENT,
+            Datum::from_char(ri_type),
+        );
+        modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
+    }
+    pg_class.close(RowExclusiveLock)?;
+    Ok(true)
+}
+
+/// `relation_mark_replica_identity`'s per-index pg_index leg
+/// (tablecmds.c:18435-18481): `pg_index = table_open(IndexRelationId,
+/// RowExclusiveLock)` (the caller loops over `RelationGetIndexList(rel)`) →
+/// `tuple = SearchSysCacheCopy1(INDEXRELID, thisIndexOid)` → if `indisreplident
+/// != want`, poke `indisreplident = want` and `CatalogTupleUpdate`. Returns
+/// `(found, dirty)`: `found` is `HeapTupleIsValid(tuple)` (the caller raises
+/// `cache lookup failed for index %u` when `false`), `dirty` is whether the flag
+/// actually changed (the caller owns the per-dirty-index
+/// `InvokeObjectPostAlterHookArg` + `CacheInvalidateRelcache(rel)`). The
+/// `table_open`/`table_close` of pg_index per call mirrors C re-opening it once
+/// for the whole loop; the on-disk effect is identical.
+fn set_index_isreplident(index_oid: Oid, want: bool) -> PgResult<(bool, bool)> {
+    let ctx = MemoryContext::new("set_index_isreplident");
+    let mcx = ctx.mcx();
+    let pg_index = table_open(mcx, types_core::catalog::INDEX_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_index, ANUM_PG_INDEX_INDEXRELID, index_oid)? else {
+        pg_index.close(RowExclusiveLock)?;
+        return Ok((false, false));
+    };
+    let (mut values, mut nulls) = deform(mcx, &pg_index, &oldtup)?;
+    let mut dirty = false;
+    if values[(ANUM_PG_INDEX_INDISREPLIDENT - 1) as usize].as_bool() != want {
+        dirty = true;
+        let mut replaces = vec![false; values.len()];
+        set_col(
+            &mut values,
+            &mut nulls,
+            &mut replaces,
+            ANUM_PG_INDEX_INDISREPLIDENT,
+            Datum::from_bool(want),
+        );
+        modify_and_update(mcx, &pg_index, &oldtup, &values, &nulls, &replaces)?;
+    }
+    pg_index.close(RowExclusiveLock)?;
+    Ok((true, dirty))
 }
 
 /// The minimal `PgClassForm` the relcache-invalidation seam reads (`oid` is
@@ -2783,6 +2856,8 @@ pub fn install() {
     s::set_relation_rule_status::set(set_relation_rule_status);
     s::set_pg_class_row_security::set(set_pg_class_row_security);
     s::set_pg_class_relhastriggers::set(set_pg_class_relhastriggers);
+    s::set_pg_class_relreplident::set(set_pg_class_relreplident);
+    s::set_index_isreplident::set(set_index_isreplident);
 
     // matview.c's SetMatViewPopulatedState pg_class write (cross-crate install:
     // the matview-deps seam's body is this pg_class single-field writer).
