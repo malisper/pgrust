@@ -3892,6 +3892,8 @@ fn transformSubLink<'mcx>(
         subLinkType: sub_link_type,
         subLinkId: sub_link_id,
         testexpr: None,
+        // operName defaults to NIL; only the ALL/ANY/ROWCOMPARE arm below sets it.
+        operName: Vec::new(),
         subselect: analyzed_subselect,
         location,
     };
@@ -3971,6 +3973,18 @@ fn transformSubLink<'mcx>(
                 .errposition(parser_errposition(pstate, location))
                 .into_error());
         }
+
+        // C: sublink->operName = operName; — retain the (possibly defaulted)
+        // operator name on the analyzed node so `_outSubLink`/`_readSubLink`
+        // round-trips it in stored `_RETURN` rules (the analyzed carrier models
+        // the `List *` of `String` as the lifetime-free `Vec<String>`).
+        out.operName = oper_name
+            .iter()
+            .filter_map(|n| match &**n {
+                Node::String(s) => Some(String::from(s.sval.as_str())),
+                _ => None,
+            })
+            .collect();
 
         // Identify the combining operator(s) and generate a suitable
         // row-comparison expression.

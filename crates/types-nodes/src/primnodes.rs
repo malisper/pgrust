@@ -989,6 +989,14 @@ pub struct SubLink {
     pub subLinkId: i32,
     /// `Node *testexpr`.
     pub testexpr: Option<Box<Expr>>,
+    /// `List *operName` — the (possibly qualified) operator name for an
+    /// `ALL`/`ANY`/`ROWCOMPARE_SUBLINK`, e.g. `("=")`. Unlike most parse-time
+    /// fields it SURVIVES parse-analysis (C `_outSubLink`/`_readSubLink` write/read
+    /// it unconditionally), so stored view `_RETURN` rules embed it. Modeled as the
+    /// lifetime-free `Vec<String>` used by the other analyzed string-list carriers;
+    /// NIL for `EXISTS`/`EXPR`/`ARRAY`/`CTE` sublinks renders as the empty vec
+    /// (`<>`).
+    pub operName: Vec<String>,
     /// `Node *subselect` — the sub-`Query` (after analysis), embedded owned and
     /// walked by deref, exactly mirroring
     /// [`RangeTblEntry::subquery`](crate::parsenodes::RangeTblEntry). Because the
@@ -2412,6 +2420,7 @@ fn clone_sublink<'b>(s: &SubLink, mcx: Mcx<'b>) -> PgResult<SubLink> {
         subLinkType: s.subLinkType,
         subLinkId: s.subLinkId,
         testexpr: clone_opt_box_expr(&s.testexpr, mcx)?,
+        operName: s.operName.clone(),
         subselect,
         location: s.location,
     })
@@ -2684,6 +2693,7 @@ mod clone_in_tests {
             subLinkType: SubLinkType::Any,
             subLinkId: 0,
             testexpr: Some(Box::new(a_var(4))),
+            operName: alloc::vec![String::from("=")],
             subselect: Some(q_static),
             location: 99,
         };
@@ -2737,6 +2747,7 @@ mod clone_in_tests {
             subLinkType: SubLinkType::Exists,
             subLinkId: 0,
             testexpr: None,
+            operName: alloc::vec::Vec::new(),
             subselect: Some(q_static),
             location: 7,
         }));
