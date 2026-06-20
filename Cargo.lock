@@ -6195,8 +6195,11 @@ dependencies = [
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-ipc-procarray-seams",
  "backend-utils-activity-small-seams",
+ "backend-utils-adt-array-typanalyze-seams",
  "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-rangetypes-typanalyze-seams",
  "backend-utils-adt-scalar-datum-core",
+ "backend-utils-adt-tsvector-typanalyze-seams",
  "backend-utils-cache-attoptcache",
  "backend-utils-cache-lsyscache",
  "backend-utils-cache-lsyscache-seams",
@@ -20372,6 +20375,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-rangetypes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -20835,6 +20839,34 @@ dependencies = [
  "types-ri-triggers",
  "types-tsearch",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-tsvector-typanalyze"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-access-heap-vacuumlazy-seams",
+ "backend-commands-vacuum-seams",
+ "backend-utils-adt-tsvector-core",
+ "backend-utils-adt-tsvector-typanalyze-seams",
+ "backend-utils-misc-guc-tables",
+ "common-hashfn",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-selfuncs",
+ "types-statistics",
+ "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-adt-tsvector-typanalyze-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-error",
+ "types-statistics",
 ]
 
 [[package]]
@@ -24328,6 +24360,7 @@ dependencies = [
  "backend-utils-adt-tsquery-core",
  "backend-utils-adt-tsrank",
  "backend-utils-adt-tsvector-core",
+ "backend-utils-adt-tsvector-typanalyze",
  "backend-utils-adt-uuid",
  "backend-utils-adt-varbit",
  "backend-utils-adt-varchar",

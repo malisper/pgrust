@@ -91,6 +91,7 @@ pub fn init_seams() {
     seams::range_serialize::set(range_repr_serialize::range_serialize_seam);
     seams::range_deserialize::set(range_repr_serialize::range_deserialize_seam);
     seams::datum_get_range_type_p::set(range_repr_serialize::datum_get_range_type_p);
+    seams::datum_get_range_type_p_value::set(range_repr_serialize::datum_get_range_type_p_value);
 
     // RangeType engine constructors / flags (range_repr_serialize) — signatures
     // match the seams exactly.

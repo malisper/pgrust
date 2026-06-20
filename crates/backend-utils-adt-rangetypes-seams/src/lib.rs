@@ -11,6 +11,9 @@ use types_core::primitive::Oid;
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_rangetypes::{RangeBound, RangeTypeP};
+// Canonical unified value (the Datum-unification keystone): a by-reference
+// `RangeType` array element rides the `Datum::ByRef` arm verbatim.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 // ---------------------------------------------------------------------------
 // Extension for the `backend-utils-adt-multirangetypes` unit.
@@ -82,6 +85,22 @@ seam_core::seam!(
     pub fn datum_get_range_type_p<'mcx>(
         mcx: Mcx<'mcx>,
         d: Datum,
+    ) -> PgResult<RangeTypeP<'mcx>>
+);
+
+seam_core::seam!(
+    /// `DatumGetRangeTypeP(d)` (rangetypes.h) for a value-carrying canonical
+    /// [`DatumV`] whose on-disk `RangeType` varlena image rides the
+    /// `Datum::ByRef` arm (header included). Unlike [`datum_get_range_type_p`],
+    /// which interprets the `Datum` word as a bare pointer, this reads the
+    /// element image bytes directly -- the form needed for a by-reference array
+    /// element (e.g. a `pg_statistic` bounds-histogram entry) extracted by
+    /// `get_attstatsslot_value_datums`, whose bare-word surrogate would be a
+    /// non-dereferenceable in-buffer offset. Detoasts only a compressed/external
+    /// image, copying into `mcx`. `Err` carries detoast `ereport(ERROR)`s and OOM.
+    pub fn datum_get_range_type_p_value<'mcx>(
+        mcx: Mcx<'mcx>,
+        value: &DatumV<'mcx>,
     ) -> PgResult<RangeTypeP<'mcx>>
 );
 

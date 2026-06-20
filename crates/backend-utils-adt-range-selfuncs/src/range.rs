@@ -14,7 +14,9 @@ use types_pathnodes::{NodeId, PlannerInfo};
 use types_rangetypes::{RangeBound, RangeTypeP};
 use types_selfuncs::{VariableStatData, DEFAULT_INEQ_SEL, DEFAULT_RANGE_INEQ_SEL};
 
-use backend_utils_adt_rangetypes_seams::{range_deserialize, range_get_typcache, range_serialize};
+use backend_utils_adt_rangetypes_seams::{
+    datum_get_range_type_p_value, range_deserialize, range_get_typcache, range_serialize,
+};
 use backend_utils_adt_selfuncs_seams::get_restriction_variable;
 use backend_utils_cache_lsyscache_seams::get_commutator;
 
@@ -149,10 +151,14 @@ pub fn rangesel<'mcx>(
             .type_id;
         if other.consttype == elem_type_id {
             // C: `lower.val = upper.val = other->constvalue;` — a verbatim
-            // Datum-word copy. `constvalue` is now the canonical value (its
-            // by-value arm carries the machine word); pull the word out for the
-            // still-shim `RangeBound.val`.
-            let constword = Datum::from_usize(other.constvalue.as_usize());
+            // Datum-word copy. `constvalue` is the canonical value; the
+            // still-shim `RangeBound.val` carries the bare Datum word C uses: a
+            // by-value element's machine word, or a by-reference element's
+            // pointer into its image (the form `range_serialize` reads via
+            // `datum_write`). `as_byref_word` yields exactly that for either arm
+            // — `.as_usize()` would panic on a by-reference element (e.g. the
+            // `numeric` `1.9` in `1.9 <@ nr`).
+            let constword = Datum::from_usize(other.constvalue.as_byref_word());
             let lower = RangeBound {
                 val: constword,
                 infinite: false,
@@ -177,14 +183,12 @@ pub fn rangesel<'mcx>(
     } else if other.consttype == vardata.data().vartype {
         /* Both sides are the same range type */
         let tc = range_get_typcache::call(vardata.data().vartype)?;
-        // C: `DatumGetRangeTypeP(other->constvalue)` — the word is a range
-        // varlena pointer; the seam (still shim-typed) detoasts it.
-        constrange = Some(
-            backend_utils_adt_rangetypes_seams::datum_get_range_type_p::call(
-                mcx,
-                Datum::from_usize(other.constvalue.as_usize()),
-            )?,
-        );
+        // C: `DatumGetRangeTypeP(other->constvalue)` — detoast the range. The
+        // canonical `constvalue` is a by-reference range varlena image
+        // (`Datum::ByRef`), so go through the value-form seam, which reads the
+        // image bytes; the bare-word `datum_get_range_type_p` would require a
+        // scalar word and panic on the by-reference value.
+        constrange = Some(datum_get_range_type_p_value::call(mcx, &other.constvalue)?);
         typcache = Some(tc);
     }
 
