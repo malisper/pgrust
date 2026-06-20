@@ -1045,10 +1045,7 @@ pub fn pg_import_system_collations<'mcx>(mcx: Mcx<'mcx>, nspid: Oid) -> PgResult
 fn rich_node_string_list(collname: &[types_nodes::nodes::NodePtr<'_>]) -> Vec<Option<String>> {
     collname
         .iter()
-        .map(|n| match &**n {
-            types_nodes::nodes::Node::String(s) => Some(s.sval.to_string()),
-            _ => None,
-        })
+        .map(|n| n.as_string().map(|s| s.sval.to_string()))
         .collect()
 }
 

@@ -442,11 +442,11 @@ fn unrecognized_arg(node: &types_nodes::nodes::Node<'_>) -> types_error::PgError
 
 /// `alter_database_setting` seam body: convert the arena `VariableSetStmt` to
 /// the owned model and run `AlterSetting`.
-fn alter_database_setting<'mcx>(
+fn alter_database_setting<'mcx, 's>(
     mcx: Mcx<'mcx>,
     databaseid: Oid,
     roleid: Oid,
-    setstmt: &types_nodes::nodes::Node<'mcx>,
+    setstmt: &types_nodes::nodes::Node<'s>,
 ) -> PgResult<()> {
     use types_nodes::ddlnodes::VariableSetKind as AKind;
 

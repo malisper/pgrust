@@ -24,11 +24,11 @@ seam_core::seam!(
     /// layer — meet only here) and runs the catalog read-modify-write. `Err`
     /// carries `AlterSetting`'s GUC-parse / catalog-mutation `ereport(ERROR)`
     /// surface.
-    pub fn alter_database_setting<'mcx>(
+    pub fn alter_database_setting<'mcx, 's>(
         mcx: Mcx<'mcx>,
         databaseid: Oid,
         roleid: Oid,
-        setstmt: &Node<'mcx>,
+        setstmt: &Node<'s>,
     ) -> PgResult<()>
 );
 

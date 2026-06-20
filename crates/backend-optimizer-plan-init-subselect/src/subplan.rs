@@ -720,7 +720,9 @@ fn test_opexpr_is_hashable(testexpr: &OpExpr, param_ids: &[i32]) -> PgResult<boo
     if contain_exec_param(Some(&testexpr.args[0]), param_ids)? {
         return Ok(false);
     }
-    if backend_optimizer_util_vars::var::contain_var_clause(&Node::Expr(testexpr.args[1].clone())) {
+    let scratch = mcx::MemoryContext::new("test_opexpr_is_hashable");
+    let arg1_node = Node::mk_expr(scratch.mcx(), testexpr.args[1].clone())?;
+    if backend_optimizer_util_vars::var::contain_var_clause(&arg1_node) {
         return Ok(false);
     }
     Ok(true)
@@ -1047,10 +1049,12 @@ fn contain_dml_walker(node: &Node<'_>) -> bool {
             }
             false
         };
-        return backend_nodes_core::node_walker::expression_tree_walker(
-            &Node::Expr(e.clone()),
-            &mut visit,
-        );
+        let scratch = mcx::MemoryContext::new("contain_dml_walker");
+        let e_node = match Node::mk_expr(scratch.mcx(), e.clone()) {
+            Ok(n) => n,
+            Err(_) => return true,
+        };
+        return backend_nodes_core::node_walker::expression_tree_walker(&e_node, &mut visit);
     }
     false
 }
@@ -1128,7 +1132,10 @@ fn contain_outer_selfref_walker(node: &Node<'_>, depth: &mut u32) -> bool {
             }
             false
         };
-        backend_nodes_core::node_walker::expression_tree_walker(&Node::Expr(e.clone()), &mut visit);
+        let scratch = mcx::MemoryContext::new("contain_outer_selfref_walker");
+        if let Ok(e_node) = Node::mk_expr(scratch.mcx(), e.clone()) {
+            backend_nodes_core::node_walker::expression_tree_walker(&e_node, &mut visit);
+        }
         return result;
     }
     false
@@ -1232,6 +1239,7 @@ fn inline_cte_walker_query<'mcx>(
                     &mut nq_node,
                     ctx.levelsup as i32,
                     1,
+                    mcx,
                 )?;
                 newquery = nq_node.into_query().expect("expected Query node");
             }
@@ -1292,6 +1300,7 @@ fn inline_cte_walk_query_exprs<'mcx>(
         query,
         &mut visit,
         backend_nodes_core::node_walker::QTW_IGNORE_RANGE_TABLE,
+        mcx,
     );
     match err {
         Some(e) => Err(e),
@@ -1381,14 +1390,20 @@ fn datum_get_int64(d: &types_tuple::backend_access_common_heaptuple::Datum<'_>) 
 /// `contain_vars_of_level((Node *) list, levelsup)` over a slice of `Expr`
 /// conjuncts: true if any element references a Var of the given level.
 fn list_contain_vars_of_level(list: &[Expr], levelsup: i32) -> bool {
-    list.iter()
-        .any(|e| backend_optimizer_util_vars::var::contain_vars_of_level(&Node::Expr(e.clone()), levelsup))
+    let scratch = mcx::MemoryContext::new("list_contain_vars_of_level");
+    list.iter().any(|e| match Node::mk_expr(scratch.mcx(), e.clone()) {
+        Ok(n) => backend_optimizer_util_vars::var::contain_vars_of_level(&n, levelsup),
+        Err(_) => false,
+    })
 }
 
 /// `contain_aggs_of_level((Node *) list, levelsup)` over a slice of `Expr`.
 fn list_contain_aggs_of_level(list: &[Expr], levelsup: i32) -> bool {
-    list.iter()
-        .any(|e| backend_rewrite_core::walkers::contain_aggs_of_level(&Node::Expr(e.clone()), levelsup))
+    let scratch = mcx::MemoryContext::new("list_contain_aggs_of_level");
+    list.iter().any(|e| match Node::mk_expr(scratch.mcx(), e.clone()) {
+        Ok(n) => backend_rewrite_core::walkers::contain_aggs_of_level(&n, levelsup),
+        Err(_) => false,
+    })
 }
 
 /// `convert_EXISTS_to_ANY(root, subselect, &testexpr, &paramIds)` (subselect.c):
@@ -1540,7 +1555,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
         let mut adjusted: Vec<Expr> = Vec::with_capacity(leftargs.len());
         for l in leftargs.drain(..) {
             let mut n = Node::mk_expr(mcx, l)?;
-            backend_rewrite_core::increment::IncrementVarSublevelsUp(&mut n, -1, 1)?;
+            backend_rewrite_core::increment::IncrementVarSublevelsUp(&mut n, -1, 1, mcx)?;
             adjusted.push(n.into_expr().expect("expected Expr node"));
         }
         leftargs = adjusted;

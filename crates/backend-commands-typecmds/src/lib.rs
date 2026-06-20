@@ -3083,7 +3083,7 @@ pub fn AlterDomainNotNull<'mcx>(
     }
 
     if not_null {
-        let constr = make_constraint(mcx, CONSTR_NOTNULL);
+        let constr = make_constraint(mcx, CONSTR_NOTNULL)?;
         domain_add_not_null_constraint(
             mcx,
             domainoid,
@@ -3716,8 +3716,8 @@ fn domain_constraint_kind_error(contype: ConstrType) -> PgError {
 /// `makeNode(Constraint); constr->contype = ...; constr->initially_valid =
 /// true; constr->location = -1;` — the bare Constraint node `AlterDomainNotNull`
 /// builds for the SET NOT NULL path (typecmds.c:2778).
-fn make_constraint<'mcx>(mcx: Mcx<'mcx>, contype: ConstrType) -> RichNode<'mcx> {
-    RichNode::Constraint(types_nodes::ddlnodes::Constraint {
+fn make_constraint<'mcx>(mcx: Mcx<'mcx>, contype: ConstrType) -> PgResult<RichNode<'mcx>> {
+    RichNode::mk_constraint(mcx, types_nodes::ddlnodes::Constraint {
         contype,
         conname: None,
         deferrable: false,
