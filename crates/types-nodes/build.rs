@@ -417,26 +417,26 @@ fn clone_in_dyn_body(ident: &str, _payload: &str, snake: &str) -> String {
              for item in self.0.iter() {\n            \
              let cloned = item.clone_in(mcx)?;\n            \
              out.push(mcx::alloc_in(mcx, cloned)?);\n        }\n        \
-             Ok(Node::mk_list(mcx, out))\n    }\n",
+             Node::mk_list(mcx, out)\n    }\n",
         ),
         // T_IntList: bare-int list, copied verbatim into a fresh context vec.
         "IntList" => String::from(
             "    fn clone_in_dyn<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {\n        \
              let mut out: PgVec<'b, i32> = mcx::vec_with_capacity_in(mcx, self.0.len())?;\n        \
              out.extend(self.0.iter().copied());\n        \
-             Ok(Node::mk_int_list(mcx, out))\n    }\n",
+             Node::mk_int_list(mcx, out)\n    }\n",
         ),
         // `Expr`: the lifetime-free expression sub-enum's own deep `clone_in`
         // (`.clone()` PANICS on context-allocated Aggref/SubLink children).
         "Expr" => String::from(
             "    fn clone_in_dyn<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {\n        \
-             Ok(Node::mk_expr(mcx, self.0.clone_in(mcx)?))\n    }\n",
+             Node::mk_expr(mcx, self.0.clone_in(mcx)?)\n    }\n",
         ),
         // Every other variant: per-struct `clone_in` (the analogue of `copyObject`\n
         // into the target context), rebuilt via the generated `mk_<snake>` ctor.
         _ => format!(
             "    fn clone_in_dyn<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {{\n        \
-             Ok(Node::mk_{snake}(mcx, self.0.clone_in(mcx)?))\n    }}\n",
+             Node::mk_{snake}(mcx, self.0.clone_in(mcx)?)\n    }}\n",
             snake = snake,
         ),
     }
@@ -505,8 +505,8 @@ fn emit_constructors(
                 "    /// Wrap an already-built `Expr` value as a `Node::Expr`. `mcx` is\n    \
                  /// unused for now; at the opaque flip this body allocates the opaque rep.\n    \
                  #[inline]\n    \
-                 pub fn mk_expr(_mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> crate::nodes::Node<'mcx> {\n        \
-                 crate::nodes::Node::Expr(payload)\n    }\n",
+                 pub fn mk_expr(_mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> types_error::PgResult<crate::nodes::Node<'mcx>> {\n        \
+                 Ok(crate::nodes::Node::Expr(payload))\n    }\n",
             );
         }
     }
@@ -525,8 +525,8 @@ fn emit_constructors(
             "    /// `makeNode({ident})` — build a `{ident}` node. `mcx` is unused\n    \
              /// for now; at the opaque flip this body allocates the opaque rep.\n    \
              #[inline]\n    \
-             pub fn mk_{snake}(_mcx: mcx::Mcx<'mcx>, payload: {payload_ty}) -> crate::nodes::Node<'mcx> {{\n        \
-             crate::nodes::Node::{ident}(payload)\n    }}\n",
+             pub fn mk_{snake}(_mcx: mcx::Mcx<'mcx>, payload: {payload_ty}) -> types_error::PgResult<crate::nodes::Node<'mcx>> {{\n        \
+             Ok(crate::nodes::Node::{ident}(payload))\n    }}\n",
             ident = v.ident,
             snake = to_snake_case(&v.ident),
         ));
@@ -544,8 +544,8 @@ fn emit_constructors(
              /// through `Node::Expr`. `mcx` is unused for now; at the opaque flip\n    \
              /// this body allocates the opaque rep.\n    \
              #[inline]\n    \
-             pub fn mk_{snake}(_mcx: mcx::Mcx<'mcx>, payload: {payload_ty}) -> crate::nodes::Node<'mcx> {{\n        \
-             crate::nodes::Node::Expr(crate::primnodes::Expr::{ident}(payload))\n    }}\n",
+             pub fn mk_{snake}(_mcx: mcx::Mcx<'mcx>, payload: {payload_ty}) -> types_error::PgResult<crate::nodes::Node<'mcx>> {{\n        \
+             Ok(crate::nodes::Node::Expr(crate::primnodes::Expr::{ident}(payload))\n)    }}\n",
             ident = v.ident,
             snake = to_snake_case(&v.ident),
         ));
