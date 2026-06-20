@@ -268,6 +268,116 @@ pub(crate) fn cv_wait_link_write(procno: ProcNumber, node: types_storage::procli
     unsafe { core::ptr::write(base.add(idx), node) };
 }
 
+// ---- genuinely-shared per-PGPROC `lwWaitLink` / `lwWaiting` / `lwWaitMode` ----
+//
+// An LWLock's wait queue is a `proclist` threaded through each waiter's
+// `PGPROC.lwWaitLink`, with the per-waiter `lwWaiting`/`lwWaitMode` bytes. This
+// is a cross-process structure exactly like `cvWaitLink` above: a process
+// releasing an LWLock (`LWLockWakeup`/`LWLockUpdateVar`) walks `lock->waiters`
+// (shared) and reads+writes the `lwWaiting`/`lwWaitLink` of waiters owned by
+// OTHER backends. If those per-PGPROC fields stayed in the COW-inherited,
+// process-local `PROC_GLOBAL`, the releaser would resolve a waiter's
+// `lwWaitLink`/`lwWaiting` in its own private copy (where the waiter never
+// queued itself), so the traversal sees an inconsistent list and a proc whose
+// shared list-membership says "queued" has a process-local `lwWaiting` that is
+// not `LW_WS_WAITING` — firing the `LWLockWakeup` assertion (and then a stuck
+// wait-list spinlock as the panic unwinds with `LW_FLAG_LOCKED` held). So these
+// three fields live in genuine shmem, mirroring `cvWaitLink`. `lwWaiting` and
+// `lwWaitMode` are single bytes (`LWLockWaitState` / `LWLockMode` discriminants).
+static SHARED_LW_WAIT_LINKS: AtomicPtr<types_storage::proclist_node> =
+    AtomicPtr::new(core::ptr::null_mut());
+/// Length of [`SHARED_LW_WAIT_LINKS`] (== total_procs), for bounds checks.
+static SHARED_LW_WAIT_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Base of the genuinely-shared `[u8; total_procs]` `lwWaiting` words.
+static SHARED_LW_WAITING: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+/// Base of the genuinely-shared `[u8; total_procs]` `lwWaitMode` words.
+static SHARED_LW_WAIT_MODE: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+
+/// `&proc->lwWaitLink` over the genuinely-shared array (read).
+pub(crate) fn lw_wait_link_read(procno: ProcNumber) -> types_storage::proclist_node {
+    let base = SHARED_LW_WAIT_LINKS.load(AtomicOrdering::Relaxed);
+    let count = SHARED_LW_WAIT_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "lw_wait_link_read: lwWaitLink base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "lwWaitLink index {idx} out of range (count {count})");
+    // SAFETY: in-range slot of the shared array; read under the wait-list
+    // spinlock (`LW_FLAG_LOCKED`), mirroring C's read of `proc->lwWaitLink`.
+    unsafe { core::ptr::read(base.add(idx)) }
+}
+
+/// `proc->lwWaitLink = node` over the genuinely-shared array (write).
+pub(crate) fn lw_wait_link_write(procno: ProcNumber, node: types_storage::proclist_node) {
+    let base = SHARED_LW_WAIT_LINKS.load(AtomicOrdering::Relaxed);
+    let count = SHARED_LW_WAIT_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "lw_wait_link_write: lwWaitLink base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "lwWaitLink index {idx} out of range (count {count})");
+    // SAFETY: see `lw_wait_link_read`; written under the wait-list spinlock.
+    unsafe { core::ptr::write(base.add(idx), node) };
+}
+
+/// `&proc->lwWaiting` over the genuinely-shared array (read).
+pub(crate) fn lw_waiting_read(procno: ProcNumber) -> u8 {
+    let base = SHARED_LW_WAITING.load(AtomicOrdering::Relaxed);
+    let count = SHARED_LW_WAIT_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "lw_waiting_read: lwWaiting base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "lwWaiting index {idx} out of range (count {count})");
+    // SAFETY: in-range slot of the shared array.
+    unsafe { core::ptr::read(base.add(idx)) }
+}
+
+/// `proc->lwWaiting = v` over the genuinely-shared array (write).
+pub(crate) fn lw_waiting_write(procno: ProcNumber, v: u8) {
+    let base = SHARED_LW_WAITING.load(AtomicOrdering::Relaxed);
+    let count = SHARED_LW_WAIT_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "lw_waiting_write: lwWaiting base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "lwWaiting index {idx} out of range (count {count})");
+    // SAFETY: see `lw_waiting_read`.
+    unsafe { core::ptr::write(base.add(idx), v) };
+}
+
+/// `&proc->lwWaitMode` over the genuinely-shared array (read).
+pub(crate) fn lw_wait_mode_read(procno: ProcNumber) -> u8 {
+    let base = SHARED_LW_WAIT_MODE.load(AtomicOrdering::Relaxed);
+    let count = SHARED_LW_WAIT_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "lw_wait_mode_read: lwWaitMode base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "lwWaitMode index {idx} out of range (count {count})");
+    // SAFETY: in-range slot of the shared array.
+    unsafe { core::ptr::read(base.add(idx)) }
+}
+
+/// `proc->lwWaitMode = v` over the genuinely-shared array (write).
+pub(crate) fn lw_wait_mode_write(procno: ProcNumber, v: u8) {
+    let base = SHARED_LW_WAIT_MODE.load(AtomicOrdering::Relaxed);
+    let count = SHARED_LW_WAIT_LINK_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "lw_wait_mode_write: lwWaitMode base uninitialized (InitProcGlobal not run)"
+    );
+    let idx = procno as usize;
+    assert!(idx < count, "lwWaitMode index {idx} out of range (count {count})");
+    // SAFETY: see `lw_wait_mode_read`.
+    unsafe { core::ptr::write(base.add(idx), v) };
+}
+
 /// Pointer to the genuinely-shared `ProcStructLock` spinlock word. Set by
 /// [`InitProcGlobal`], NULL until then. C: `slock_t *ProcStructLock` placed by
 /// `ShmemInitStruct`.
@@ -697,6 +807,43 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
     }
     SHARED_CV_WAIT_LINKS.store(cv_ptr, AtomicOrdering::Relaxed);
     SHARED_CV_WAIT_LINK_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-PGPROC `lwWaitLink` nodes + `lwWaiting`/`lwWaitMode` bytes (genuinely
+    // shared so an LWLock release in one process walks the same wait queue the
+    // waiter linked itself onto, and reads the waiter's true wait state).
+    let lw_size = mul_size(total_procs, size_of::<types_storage::proclist_node>());
+    let (lw_ptr, lw_found) =
+        shmem::shmem_init_struct::call("PGPROC lwWaitLink nodes", lw_size)?;
+    let lw_ptr = lw_ptr as *mut types_storage::proclist_node;
+    if !lw_found {
+        // Zero (`proclist_node { next: 0, prev: 0 }`), matching C's MemSet.
+        // SAFETY: `lw_ptr` addresses `lw_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(lw_ptr as *mut u8, 0, lw_size) };
+    }
+    SHARED_LW_WAIT_LINKS.store(lw_ptr, AtomicOrdering::Relaxed);
+    SHARED_LW_WAIT_LINK_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    let lww_size = mul_size(total_procs, size_of::<u8>());
+    let (lww_ptr, lww_found) =
+        shmem::shmem_init_struct::call("PGPROC lwWaiting words", lww_size)?;
+    let lww_ptr = lww_ptr as *mut u8;
+    if !lww_found {
+        // Zero == `LW_WS_NOT_WAITING` (discriminant 0).
+        // SAFETY: `lww_ptr` addresses `lww_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(lww_ptr, 0, lww_size) };
+    }
+    SHARED_LW_WAITING.store(lww_ptr, AtomicOrdering::Relaxed);
+
+    let lwm_size = mul_size(total_procs, size_of::<u8>());
+    let (lwm_ptr, lwm_found) =
+        shmem::shmem_init_struct::call("PGPROC lwWaitMode words", lwm_size)?;
+    let lwm_ptr = lwm_ptr as *mut u8;
+    if !lwm_found {
+        // Zero == `LW_EXCLUSIVE` (discriminant 0); reset whenever a proc queues.
+        // SAFETY: `lwm_ptr` addresses `lwm_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(lwm_ptr, 0, lwm_size) };
+    }
+    SHARED_LW_WAIT_MODE.store(lwm_ptr, AtomicOrdering::Relaxed);
 
     Ok(())
 }

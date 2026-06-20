@@ -50,28 +50,32 @@ fn lw_wait_mode_from_u8(v: u8) -> LWLockMode {
 // ---- LWLock / CV wait-list fields on a PGPROC (lwlock.c / condition_variable.c
 // read & write proc.c-owned PGPROC fields) ----
 
+// `lwWaiting`/`lwWaitMode`/`lwWaitLink` are genuinely shared (not the
+// COW-inherited PGPROC): an LWLock release in one process walks the wait queue a
+// waiter linked itself onto in another, reading+writing that waiter's wait
+// state. See `proc_shmem::lw_*` and the cvWaitLink precedent.
 fn proc_lw_waiting(procno: ProcNumber) -> LWLockWaitState {
-    with_proc_by_number(procno, |p| lw_wait_state_from_u8(p.lwWaiting))
+    lw_wait_state_from_u8(crate::proc_shmem::lw_waiting_read(procno))
 }
 
 fn set_proc_lw_waiting(procno: ProcNumber, state: LWLockWaitState) {
-    with_proc_by_number(procno, |p| p.lwWaiting = state as u8);
+    crate::proc_shmem::lw_waiting_write(procno, state as u8);
 }
 
 fn proc_lw_wait_mode(procno: ProcNumber) -> LWLockMode {
-    with_proc_by_number(procno, |p| lw_wait_mode_from_u8(p.lwWaitMode))
+    lw_wait_mode_from_u8(crate::proc_shmem::lw_wait_mode_read(procno))
 }
 
 fn set_proc_lw_wait_mode(procno: ProcNumber, mode: LWLockMode) {
-    with_proc_by_number(procno, |p| p.lwWaitMode = mode as u8);
+    crate::proc_shmem::lw_wait_mode_write(procno, mode as u8);
 }
 
 fn proc_lw_wait_link(procno: ProcNumber) -> proclist_node {
-    with_proc_by_number(procno, |p| p.lwWaitLink)
+    crate::proc_shmem::lw_wait_link_read(procno)
 }
 
 fn set_proc_lw_wait_link(procno: ProcNumber, node: proclist_node) {
-    with_proc_by_number(procno, |p| p.lwWaitLink = node);
+    crate::proc_shmem::lw_wait_link_write(procno, node);
 }
 
 fn proc_cv_wait_link(procno: ProcNumber) -> proclist_node {
@@ -362,6 +366,13 @@ fn proc_init_prepared(
         proc.isRegularBackend = false;
         proc.lwWaiting = LWLockWaitState::LW_WS_NOT_WAITING as u8;
         proc.lwWaitMode = 0;
+        // The live lwWaiting/lwWaitMode/lwWaitLink are the genuinely-shared cells
+        // (the COW-local fields above are dead). Reset them too so a re-attached
+        // slot never reports stale wait state. lwWaitLink is left as its
+        // zero-init {0,0} ("not in any list").
+        crate::proc_shmem::lw_waiting_write(pgprocno, LWLockWaitState::LW_WS_NOT_WAITING as u8);
+        crate::proc_shmem::lw_wait_mode_write(pgprocno, 0);
+        crate::proc_shmem::lw_wait_link_write(pgprocno, proclist_node { next: 0, prev: 0 });
         proc.waitLock = None;
         proc.waitProcLock = None;
         proc.waitStart.write(0);

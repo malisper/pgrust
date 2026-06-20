@@ -1571,8 +1571,11 @@ pub fn parserOpenTable<'mcx>(
     relation: &RangeVar<'_>,
     lockmode: LOCKMODE,
 ) -> PgResult<types_rel::Relation<'mcx>> {
-    // setup/cancel_parser_errposition_callback are no-ops in this repo's error
-    // model (location tags attach on propagation).
+    // C installs `setup_parser_errposition_callback(&pcbstate, pstate,
+    // relation->location)` here, so the "relation does not exist" errors carry the
+    // RangeVar's parse position (the LINE/caret psql shows). The port attaches it
+    // explicitly via `parser_errposition`.
+    let errpos = parser_errposition(pstate, relation.location);
     let rel = backend_access_table_table::table_openrv_extended(mcx, &to_access_range_var(relation), lockmode, true)?;
     match rel {
         Some(rel) => Ok(rel),
@@ -1583,6 +1586,7 @@ pub fn parserOpenTable<'mcx>(
                 Err(ereport(ERROR)
                     .errcode(ERRCODE_UNDEFINED_TABLE)
                     .errmsg(format!("relation \"{sn}.{rn}\" does not exist"))
+                    .errposition(errpos)
                     .into_error())
             } else {
                 let rn = relation.relname.as_deref().unwrap_or("");
@@ -1596,11 +1600,13 @@ pub fn parserOpenTable<'mcx>(
                         .errhint(format!(
                             "Use WITH RECURSIVE, or re-order the WITH items to remove forward references."
                         ))
+                        .errposition(errpos)
                         .into_error())
                 } else {
                     Err(ereport(ERROR)
                         .errcode(ERRCODE_UNDEFINED_TABLE)
                         .errmsg(format!("relation \"{rn}\" does not exist"))
+                        .errposition(errpos)
                         .into_error())
                 }
             }

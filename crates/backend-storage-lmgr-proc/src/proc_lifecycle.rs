@@ -78,6 +78,13 @@ fn init_my_proc_common(proc: &mut PGPROC, procno: ProcNumber, regular: bool) {
     }
     proc.lwWaiting = LW_WS_NOT_WAITING as u8;
     proc.lwWaitMode = 0;
+    // Live wait state is the genuinely-shared cells; reset them too.
+    crate::proc_shmem::lw_waiting_write(procno, LW_WS_NOT_WAITING as u8);
+    crate::proc_shmem::lw_wait_mode_write(procno, 0);
+    crate::proc_shmem::lw_wait_link_write(
+        procno,
+        types_storage::proclist_node { next: 0, prev: 0 },
+    );
     proc.waitLock = None;
     proc.waitProcLock = None;
     proc.waitStart.write(0);
@@ -286,6 +293,13 @@ pub fn InitAuxiliaryProcess(_mcx: Mcx<'_>) -> PgResult<()> {
         proc.statusFlags = 0;
         proc.lwWaiting = LW_WS_NOT_WAITING as u8;
         proc.lwWaitMode = 0;
+        // Live wait state is the genuinely-shared cells; reset them too.
+        crate::proc_shmem::lw_waiting_write(aux_procno, LW_WS_NOT_WAITING as u8);
+        crate::proc_shmem::lw_wait_mode_write(aux_procno, 0);
+        crate::proc_shmem::lw_wait_link_write(
+            aux_procno,
+            types_storage::proclist_node { next: 0, prev: 0 },
+        );
         proc.waitLock = None;
         proc.waitProcLock = None;
         proc.waitStart.write(0);

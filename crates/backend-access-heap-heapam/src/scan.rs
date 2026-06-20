@@ -157,6 +157,13 @@ pub struct HeapScanDescData<'mcx> {
     pub rs_ntuples: u32,
     /// `rs_vistuples` — their offsets.
     pub rs_vistuples: [OffsetNumber; MaxHeapTuplesPerPage],
+    /// Whether the current bitmap page requires per-tuple qual recheck. In C
+    /// this is the caller's `node->recheck` field, which `BitmapHeapScanNextBlock`
+    /// writes once per page and `heapam_scan_bitmap_next_tuple` reads for every
+    /// tuple on that page. The owned port persists it here so the 2nd..Nth tuple
+    /// of a lossy page still reports recheck=true (otherwise a fresh per-call
+    /// local defaulted to false, skipping the recheck and over-returning rows).
+    pub rs_recheck: bool,
 
     /// TID-range scan bounds (`sscan->st.tidrange` in C; the only `st` union
     /// member a sequential/tidrange heap scan uses). Set by `heap_set_tidrange`.
@@ -1119,6 +1126,7 @@ pub fn heap_beginscan<'mcx>(
         rs_cindex: 0,
         rs_ntuples: 0,
         rs_vistuples: [0; MaxHeapTuplesPerPage],
+        rs_recheck: false,
         rs_mintid: ItemPointerData::default(),
         rs_maxtid: ItemPointerData::default(),
     };
@@ -1427,6 +1435,9 @@ fn BitmapHeapScanNextBlock<'mcx>(
     debug_assert!(bufmgr_seam::buffer_get_block_number::call(buffer) == block);
 
     *recheck = tbmres.recheck;
+    // Persist on the scan state so per-tuple fetches on this page (which do not
+    // re-enter this block-advance path) still report the page's recheck flag.
+    heap_scan(sscan).rs_recheck = tbmres.recheck;
 
     let relid = sscan.rs_rd.rd_id;
 
@@ -1598,6 +1609,7 @@ pub fn heapam_scan_bitmap_next_tuple<'mcx>(
     // Set up the result slot to point to this tuple (acquires a pin on buffer).
     exec_store_buffer_heap_tuple(tuple, slot, buffer)?;
 
+    let recheck = heap_scan(sscan).rs_recheck;
     heap_scan(sscan).rs_cindex += 1;
 
     Ok(Some((recheck, lossy_pages, exact_pages)))
