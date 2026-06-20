@@ -223,6 +223,15 @@ fn conv_namedargexpr<'mcx>(
     })
 }
 
+fn conv_mergesupportfunc(p: *mut cpr::MergeSupportFunc) -> tn_prim::MergeSupportFunc {
+    let e = unsafe { &*p };
+    tn_prim::MergeSupportFunc {
+        msftype: e.msftype,
+        msfcollid: e.msfcollid,
+        location: e.location,
+    }
+}
+
 fn conv_sqlvaluefunction(p: *mut cpr::SQLValueFunction) -> tn_re::SQLValueFunction {
     let e = unsafe { &*p };
     tn_re::SQLValueFunction {

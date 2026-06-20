@@ -361,6 +361,18 @@ pub fn convert_node<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Node<'mcx
         tags::T_ReturningClause => {
             Ok(Node::mk_returning_clause(mcx, conv_returning(mcx, n.cast())?)?)
         }
+        tags::T_ReturningOption => {
+            Ok(Node::mk_returning_option(mcx, conv_returning_option(mcx, n.cast())?)?)
+        }
+        tags::T_TriggerTransition => {
+            Ok(Node::mk_trigger_transition(mcx, conv_trigger_transition(mcx, n.cast())?)?)
+        }
+        tags::T_RangeTableFunc => {
+            Ok(Node::mk_range_table_func(mcx, conv_range_table_func(mcx, n.cast())?)?)
+        }
+        tags::T_RangeTableFuncCol => {
+            Ok(Node::mk_range_table_func_col(mcx, conv_range_table_func_col(mcx, n.cast())?)?)
+        }
         tags::T_GroupingSet => Ok(Node::mk_grouping_set(mcx, conv_groupingset(mcx, n.cast())?)?),
         tags::T_WindowClause => Ok(Node::mk_window_clause(mcx, conv_windowclause(mcx, n.cast())?)?),
         tags::T_SortGroupClause => {
@@ -395,6 +407,9 @@ pub fn convert_node<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Node<'mcx
             Ok(Node::mk_current_of_expr(mcx, conv_currentofexpr(mcx, n.cast())?)?)
         }
         tags::T_NamedArgExpr => Ok(Node::mk_named_arg_expr(mcx, conv_namedargexpr(mcx, n.cast())?)?),
+        tags::T_MergeSupportFunc => {
+            Ok(Node::mk_merge_support_func(mcx, conv_mergesupportfunc(n.cast()))?)
+        }
         tags::T_SQLValueFunction => {
             Ok(Node::mk_sql_value_function(mcx, conv_sqlvaluefunction(n.cast()))?)
         }
