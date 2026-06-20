@@ -33,9 +33,9 @@
 use alloc::string::String;
 
 use types_datum::Datum;
-use types_error::PgError;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use backend_utils_error::ereport;
 use types_error::{ERROR, ERRCODE_NULL_VALUE_NOT_ALLOWED};
@@ -95,12 +95,6 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
@@ -108,28 +102,25 @@ fn raise(err: PgError) -> ! {
 /// `show_config_by_name(PG_FUNCTION_ARGS)` (guc_funcs.c:807): `current_setting`.
 /// `varval = GetConfigOptionByName(varname, NULL, false);
 /// PG_RETURN_TEXT_P(cstring_to_text(varval));`
-fn fc_show_config_by_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_show_config_by_name(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let varname = arg_text(fcinfo, 0);
     // missing_ok == false: the core errors for an unknown name and otherwise
     // returns the rendered value (never None here).
-    match crate::config_option_value(varname, false) {
-        Ok(value) => ret_text(fcinfo, value.unwrap_or_default()),
-        Err(e) => raise(e),
-    }
+    let value = crate::config_option_value(varname, false)?;
+    Ok(ret_text(fcinfo, value.unwrap_or_default()))
 }
 
 /// `show_config_by_name_missing_ok(PG_FUNCTION_ARGS)` (guc_funcs.c:825):
 /// `current_setting(text, bool)`. `varval = GetConfigOptionByName(varname, NULL,
 /// missing_ok); if (varval == NULL) PG_RETURN_NULL(); else
 /// PG_RETURN_TEXT_P(cstring_to_text(varval));`
-fn fc_show_config_by_name_missing_ok(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_show_config_by_name_missing_ok(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let varname = arg_text(fcinfo, 0);
     let missing_ok = arg_bool(fcinfo, 1);
-    match crate::config_option_value(varname, missing_ok) {
-        Ok(Some(value)) => ret_text(fcinfo, value),
+    match crate::config_option_value(varname, missing_ok)? {
+        Some(value) => Ok(ret_text(fcinfo, value)),
         // missing_ok == true and no such variable: return NULL.
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 
@@ -137,16 +128,14 @@ fn fc_show_config_by_name_missing_ok(fcinfo: &mut FunctionCallInfoBaseData) -> D
 /// strict — the body NULL-checks each arg (arg0 NULL is an error; arg1 NULL is a
 /// RESET; arg2 NULL defaults `is_local` to false). After applying the option it
 /// returns the new current value.
-fn fc_set_config_by_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_set_config_by_name(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // if (PG_ARGISNULL(0)) ereport(ERROR, NULL_VALUE_NOT_ALLOWED, "SET requires
     // parameter name");
     if arg_is_null(fcinfo, 0) {
-        raise(
-            ereport(ERROR)
-                .errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED)
-                .errmsg("SET requires parameter name")
-                .into_error(),
-        );
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED)
+            .errmsg("SET requires parameter name")
+            .into_error());
     }
     let name = arg_text(fcinfo, 0);
 
@@ -171,15 +160,11 @@ fn fc_set_config_by_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     } else {
         backend_utils_misc_guc::GUC_ACTION_SET
     };
-    if let Err(e) = crate::set_config_option_call(name, value, crate::suset_or_userset(), action) {
-        raise(e);
-    }
+    crate::set_config_option_call(name, value, crate::suset_or_userset(), action)?;
 
     // new_value = GetConfigOptionByName(name, NULL, false); return as text.
-    match crate::config_option_value(name, false) {
-        Ok(new_value) => ret_text(fcinfo, new_value.unwrap_or_default()),
-        Err(e) => raise(e),
-    }
+    let new_value = crate::config_option_value(name, false)?;
+    Ok(ret_text(fcinfo, new_value.unwrap_or_default()))
 }
 
 // ---------------------------------------------------------------------------
@@ -192,23 +177,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: alloc::string::ToString::to_string(name),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    func: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: alloc::string::ToString::to_string(name),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        func,
+    )
 }
 
 /// Register the `text`-boundary `guc_funcs.c` SQL functions (C: their
 /// `fmgr_builtins[]` rows). Called from this crate's `init_seams()`.
 /// OIDs / nargs / strict / retset transcribed exactly from `pg_proc.dat`.
 pub fn register_guc_funcs_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // current_setting(text) -> text  (prosrc show_config_by_name)
         builtin(2077, "show_config_by_name", 1, true, false, fc_show_config_by_name),
         // current_setting(text, bool) -> text  (prosrc show_config_by_name_missing_ok)
