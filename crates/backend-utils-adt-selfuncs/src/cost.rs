@@ -726,11 +726,89 @@ pub(crate) fn gistcostestimate<'mcx, 'run>(
     })
 }
 
+/// `spgcostestimate(root, path, loop_count, ...)` (selfuncs.c) — the SP-GiST
+/// index AM's cost estimator. Runs the AM-independent [`genericcostestimate`],
+/// then adds btree-style descent costs. Unlike btree/GiST, SP-GiST first derives
+/// an estimate of the tree height when it is unknown (`tree_height < 0`) by
+/// assuming a fanout of 100, i.e. `log100(pages)`, and caches it back onto the
+/// `IndexOptInfo`. The initial-descent CPU cost uses `ceil(log(N))` (natural log,
+/// since the branching factor isn't necessarily two), and the per-page charge is
+/// computed the same as for btrees (`tree_height + 1`). SP-GiST presets neither
+/// `num_index_tuples` nor `num_sa_scans`, so `num_sa_scans` stays at
+/// `genericcostestimate`'s default of 1. 1:1 with the C body.
+pub(crate) fn spgcostestimate<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    path_id: PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let mut costs = GenericCosts::default();
+    genericcostestimate(mcx, run, root, path_id, loop_count, &mut costs)?;
+
+    // We model index descent costs similarly to those for btree, but to do that
+    // we first need an idea of the tree height. We somewhat arbitrarily assume
+    // that the fanout is 100, meaning the tree height is at most
+    // log100(index->pages). Cache the result back onto the IndexOptInfo via
+    // index->tree_height, as the C body does.
+    let index = {
+        let path = expect_index_path_mut(root, path_id);
+        let index = path
+            .indexinfo
+            .as_mut()
+            .expect("spgcostestimate: indexinfo must be set");
+        if index.tree_height < 0 {
+            // unknown?
+            index.tree_height = if index.pages > 1 {
+                // avoid computing log(0)
+                (((index.pages as f64).ln()) / 100.0f64.ln()) as i32
+            } else {
+                0
+            };
+        }
+        (**index).clone()
+    };
+
+    let cpu_operator_cost = cz::cpu_operator_cost::call();
+
+    // Add a CPU-cost component to represent the costs of initial descent. We just
+    // use log(N) here not log2(N) since the branching factor isn't necessarily
+    // two anyway. As for btree, charge once per SA scan.
+    if index.tuples > 1.0 {
+        // avoid computing log(0)
+        let descent_cost = index.tuples.ln().ceil() * cpu_operator_cost;
+        costs.index_startup_cost += descent_cost;
+        costs.index_total_cost += costs.num_sa_scans * descent_cost;
+    }
+
+    // Likewise add a per-page charge, calculated the same as for btrees.
+    let descent_cost =
+        (index.tree_height as f64 + 1.0) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+    costs.index_startup_cost += descent_cost;
+    costs.index_total_cost += costs.num_sa_scans * descent_cost;
+
+    Ok(AmCostEstimate {
+        index_startup_cost: costs.index_startup_cost,
+        index_total_cost: costs.index_total_cost,
+        index_selectivity: costs.index_selectivity,
+        index_correlation: costs.index_correlation,
+        index_pages: costs.num_index_pages,
+    })
+}
+
 /// `&mut`-borrow the `IndexPath` for a `PathId`, panicking if it is not one.
 fn expect_index_path(root: &PlannerInfo, path_id: PathId) -> &types_pathnodes::IndexPath {
     match root.path(path_id) {
         PathNode::IndexPath(ip) => ip,
         _ => panic!("expect_index_path: path is not an IndexPath"),
+    }
+}
+
+/// `&mut`-borrow the `IndexPath` for a `PathId`, panicking if it is not one.
+fn expect_index_path_mut(root: &mut PlannerInfo, path_id: PathId) -> &mut types_pathnodes::IndexPath {
+    match root.path_mut(path_id) {
+        PathNode::IndexPath(ip) => ip,
+        _ => panic!("expect_index_path_mut: path is not an IndexPath"),
     }
 }
 
@@ -761,6 +839,9 @@ pub fn seam_amcostestimate<'mcx>(
         // GIST_AM_OID (pg_am.h) — the GiST access method.
         783 => gistcostestimate(mcx, run, root, path_id, loop_count)
             .expect("gistcostestimate"),
+        // SPGIST_AM_OID (pg_am.h) — the SP-GiST access method.
+        4000 => spgcostestimate(mcx, run, root, path_id, loop_count)
+            .expect("spgcostestimate"),
         other => panic!(
             "amcostestimate: no cost estimator ported for index AM oid {}",
             other
