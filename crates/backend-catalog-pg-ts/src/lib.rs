@@ -44,7 +44,10 @@ use backend_catalog_indexing::keystone::CatalogTupleInsert;
 use backend_catalog_indexing_seams as indexing_seams;
 use backend_utils_cache_syscache as syscache;
 
-use backend_commands_tsearchcmds_seams::{ConfigMapEntry, TSConfigForm, TSDictForm};
+use backend_commands_tsearchcmds_seams::{
+    ConfigMapEntry, NewTSParser, NewTSTemplate, TSConfigForm, TSDictForm, TSParserForm,
+    TSTemplateForm,
+};
 
 use types_core::fmgr::F_OIDEQ;
 
@@ -81,6 +84,25 @@ const Anum_pg_ts_config_map_mapdict: AttrNumber = 4;
 
 const Anum_pg_ts_template_tmplname: AttrNumber = 2;
 const Anum_pg_ts_template_tmplinit: AttrNumber = 4;
+
+const TSParserRelationId: Oid = 3601;
+const TSParserOidIndexId: Oid = 3607;
+const Natts_pg_ts_parser: usize = 8;
+const Anum_pg_ts_parser_oid: AttrNumber = 1;
+const Anum_pg_ts_parser_prsname: AttrNumber = 2;
+const Anum_pg_ts_parser_prsnamespace: AttrNumber = 3;
+const Anum_pg_ts_parser_prsstart: AttrNumber = 4;
+const Anum_pg_ts_parser_prstoken: AttrNumber = 5;
+const Anum_pg_ts_parser_prsend: AttrNumber = 6;
+const Anum_pg_ts_parser_prsheadline: AttrNumber = 7;
+const Anum_pg_ts_parser_prslextype: AttrNumber = 8;
+
+const TSTemplateRelationId: Oid = 3764;
+const TSTemplateOidIndexId: Oid = 3767;
+const Natts_pg_ts_template: usize = 5;
+const Anum_pg_ts_template_oid: AttrNumber = 1;
+const Anum_pg_ts_template_tmplnamespace: AttrNumber = 3;
+const Anum_pg_ts_template_tmpllexize: AttrNumber = 5;
 
 const TSCONFIGOID: i32 = syscache::TSCONFIGOID;
 const TSTEMPLATEOID: i32 = syscache::TSTEMPLATEOID;
@@ -253,6 +275,78 @@ fn insert_ts_config(
         cfgparser: prs_oid,
     };
     Ok((cfg_oid, form))
+}
+
+/* ===========================================================================
+ * `insert_ts_parser` — CREATE TEXT SEARCH PARSER's pg_ts_parser insert.
+ * ========================================================================= */
+
+fn insert_ts_parser(row: &NewTSParser) -> PgResult<(Oid, TSParserForm)> {
+    let ctx = MemoryContext::new("insert_ts_parser");
+    let mcx = ctx.mcx();
+    let rel = table_open(mcx, TSParserRelationId, RowExclusiveLock)?;
+
+    /* memset(values, 0); memset(nulls, false). */
+    let mut values: Vec<Datum> = vec![Datum::null(); Natts_pg_ts_parser];
+    let nulls: Vec<bool> = vec![false; Natts_pg_ts_parser];
+
+    let prs_oid = GetNewOidWithIndex(&rel, TSParserOidIndexId, Anum_pg_ts_parser_oid)?;
+    values[Anum_pg_ts_parser_oid as usize - 1] = Datum::from_oid(prs_oid);
+    values[Anum_pg_ts_parser_prsname as usize - 1] = name_datum(mcx, &row.prsname)?;
+    values[Anum_pg_ts_parser_prsnamespace as usize - 1] = Datum::from_oid(row.prsnamespace);
+    values[Anum_pg_ts_parser_prsstart as usize - 1] = Datum::from_oid(row.prsstart);
+    values[Anum_pg_ts_parser_prstoken as usize - 1] = Datum::from_oid(row.prstoken);
+    values[Anum_pg_ts_parser_prsend as usize - 1] = Datum::from_oid(row.prsend);
+    values[Anum_pg_ts_parser_prsheadline as usize - 1] = Datum::from_oid(row.prsheadline);
+    values[Anum_pg_ts_parser_prslextype as usize - 1] = Datum::from_oid(row.prslextype);
+
+    form_and_insert(mcx, &rel, &values, &nulls)?;
+
+    table_close(rel, RowExclusiveLock)?;
+
+    let form = TSParserForm {
+        oid: prs_oid,
+        prsnamespace: row.prsnamespace,
+        prsstart: row.prsstart,
+        prstoken: row.prstoken,
+        prsend: row.prsend,
+        prsheadline: row.prsheadline,
+        prslextype: row.prslextype,
+    };
+    Ok((prs_oid, form))
+}
+
+/* ===========================================================================
+ * `insert_ts_template` — CREATE TEXT SEARCH TEMPLATE's pg_ts_template insert.
+ * ========================================================================= */
+
+fn insert_ts_template(row: &NewTSTemplate) -> PgResult<(Oid, TSTemplateForm)> {
+    let ctx = MemoryContext::new("insert_ts_template");
+    let mcx = ctx.mcx();
+    let rel = table_open(mcx, TSTemplateRelationId, RowExclusiveLock)?;
+
+    /* memset(values, 0); memset(nulls, false). */
+    let mut values: Vec<Datum> = vec![Datum::null(); Natts_pg_ts_template];
+    let nulls: Vec<bool> = vec![false; Natts_pg_ts_template];
+
+    let tmpl_oid = GetNewOidWithIndex(&rel, TSTemplateOidIndexId, Anum_pg_ts_template_oid)?;
+    values[Anum_pg_ts_template_oid as usize - 1] = Datum::from_oid(tmpl_oid);
+    values[Anum_pg_ts_template_tmplname as usize - 1] = name_datum(mcx, &row.tmplname)?;
+    values[Anum_pg_ts_template_tmplnamespace as usize - 1] = Datum::from_oid(row.tmplnamespace);
+    values[Anum_pg_ts_template_tmplinit as usize - 1] = Datum::from_oid(row.tmplinit);
+    values[Anum_pg_ts_template_tmpllexize as usize - 1] = Datum::from_oid(row.tmpllexize);
+
+    form_and_insert(mcx, &rel, &values, &nulls)?;
+
+    table_close(rel, RowExclusiveLock)?;
+
+    let form = TSTemplateForm {
+        oid: tmpl_oid,
+        tmplnamespace: row.tmplnamespace,
+        tmplinit: row.tmplinit,
+        tmpllexize: row.tmpllexize,
+    };
+    Ok((tmpl_oid, form))
 }
 
 /* ===========================================================================
@@ -446,6 +540,8 @@ fn delete_config_map_for_cfg(cfg_id: Oid) -> PgResult<()> {
 /// read+write seams `commands/tsearchcmds.c` calls.
 pub fn init_seams() {
     use backend_commands_tsearchcmds_seams as s;
+    s::insert_ts_parser::set(insert_ts_parser);
+    s::insert_ts_template::set(insert_ts_template);
     s::insert_ts_dict::set(insert_ts_dict);
     s::insert_ts_config::set(insert_ts_config);
     s::config_form_by_oid::set(config_form_by_oid);

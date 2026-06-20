@@ -4976,7 +4976,8 @@ fn define_stmt_seam<'mcx>(
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
     use types_nodes::parsenodes::{
-        OBJECT_AGGREGATE, OBJECT_OPERATOR, OBJECT_TSCONFIGURATION, OBJECT_TSDICTIONARY, OBJECT_TYPE,
+        OBJECT_AGGREGATE, OBJECT_OPERATOR, OBJECT_TSCONFIGURATION, OBJECT_TSDICTIONARY,
+        OBJECT_TSPARSER, OBJECT_TSTEMPLATE, OBJECT_TYPE,
     };
 
     let ds = match stmt.as_definestmt() {
@@ -5034,9 +5035,17 @@ fn define_stmt_seam<'mcx>(
                 ds.replace,
             )
         }
+        OBJECT_TSPARSER => {
+            // Assert(stmt->args == NIL).
+            backend_commands_tsearchcmds::DefineTSParser(mcx, &ds.defnames, &ds.definition)
+        }
         OBJECT_TSDICTIONARY => {
             // Assert(stmt->args == NIL).
             backend_commands_tsearchcmds::DefineTSDictionary(mcx, &ds.defnames, &ds.definition)
+        }
+        OBJECT_TSTEMPLATE => {
+            // Assert(stmt->args == NIL).
+            backend_commands_tsearchcmds::DefineTSTemplate(mcx, &ds.defnames, &ds.definition)
         }
         OBJECT_TSCONFIGURATION => {
             // Assert(stmt->args == NIL).  `copied` is the C `&secondaryObject`
