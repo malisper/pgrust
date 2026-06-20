@@ -484,10 +484,11 @@ fn hashdatum_step_inputs<'mcx>(
             let c = state.result_cells.get(*arg_cell);
             let args = vec![c.value.clone()];
             // DatumGetUInt32(op->d.hashdatum.iresult->value) (NEXT32 only; the
-            // FIRST variants ignore it).
-            let existing = iresult
-                .as_ref()
-                .map(|ir| ir.value.as_u32())
+            // FIRST variants ignore it). `iresult` carries the shared accumulator
+            // cell id (C's aliased `iresult->value`); the prior column's hash
+            // step wrote the running hash there, so read it back from that cell.
+            let existing = (*iresult)
+                .map(|cell| state.result_cells.get(cell).value.as_u32())
                 .unwrap_or(0);
             (finfo.fn_oid, fcinfo.fncollation, args, c.isnull, existing)
         }

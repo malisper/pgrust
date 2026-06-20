@@ -1144,8 +1144,15 @@ pub enum ExprEvalStepData<'mcx> {
         arg_cell: ResultCellId,
         /// jump here on null
         jumpdone: i32,
-        /// `NullableDatum *iresult` — intermediate hash result.
-        iresult: Option<PgBox<'mcx, NullableDatum>>,
+        /// `NullableDatum *iresult` — the shared intermediate hash-result
+        /// workspace. In C this is a single `NullableDatum` aliased by every
+        /// step's `resvalue` in the chain, so `iresult->value` always holds the
+        /// running hash the NEXT32 steps rotate-and-XOR into. In the owned model
+        /// the running hash flows through the arena result cells, so this carries
+        /// the *cell id* of that shared accumulator (the `iresult_cell` the
+        /// intermediate steps write to). `None` for single-column chains that
+        /// never combine.
+        iresult: Option<ResultCellId>,
     },
     /// `convert_rowtype` — for EEOP_CONVERT_ROWTYPE.
     ConvertRowtype {

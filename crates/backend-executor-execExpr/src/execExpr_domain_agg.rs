@@ -12,7 +12,6 @@ use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::catalog::PROCEDURE_RELATION_ID;
 use types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, Oid};
-use types_datum::datum::NullableDatum;
 // The canonical unified value type (Datum-unification keystone) — what
 // `ExprEvalStepData::HashDatumInitValue { init_value }` carries.
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -1082,14 +1081,13 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
             let c = iresult_cell.expect("intermediate hash column needs iresult");
             (c, c)
         };
-        // NEXT32 opcodes need the intermediate result; set it for all ops
-        // (FIRSTs won't look at it). The owned `iresult` is the per-step
-        // NullableDatum workspace; present exactly when combining is needed.
-        let iresult = if need_iresult {
-            Some(mcx::alloc_in(mcx, NullableDatum::default())?)
-        } else {
-            None
-        };
+        // NEXT32 opcodes read the running hash from the shared accumulator cell
+        // (the C `iresult->value`, aliased by every intermediate step's
+        // resvalue). In the owned model that accumulator IS `iresult_cell`, the
+        // cell the intermediate steps write to; carry its id so NEXT32 can read
+        // the prior column's hash back. Present exactly when combining is needed
+        // (FIRSTs ignore it).
+        let iresult = if need_iresult { iresult_cell } else { None };
         let hashstep = ExprEvalStep {
             opcode,
             resvalue: resv,
@@ -1213,11 +1211,9 @@ pub fn exec_build_hash32_expr<'mcx>(
             let c = iresult_cell.expect("intermediate hash expr needs iresult");
             (c, c)
         };
-        let iresult = if need_iresult {
-            Some(mcx::alloc_in(mcx, NullableDatum::default())?)
-        } else {
-            None
-        };
+        // NEXT32 reads the running hash from the shared accumulator cell
+        // (`iresult_cell`), mirroring C's aliased `iresult->value`.
+        let iresult = if need_iresult { iresult_cell } else { None };
 
         // strict opcode iff the hash func is strict and we are not keeping NULLs.
         let step_opcode = if opstrict[i] && !keep_nulls {
