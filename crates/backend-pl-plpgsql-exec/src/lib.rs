@@ -12,7 +12,9 @@
 //! SQLSTATE/messages at the abort sites, real return-code propagation): the
 //! `exec_stmt_*` dispatch, the loops, the block RC switch (deliberately
 //! different from `LOOP_RC_PROCESSING`), the EXCEPTION-block sub-transaction +
-//! `catch_unwind` error channel ([`exec_stmt_block_with_exceptions`]), the
+//! `Err`-match error channel ([`exec_stmt_block_with_exceptions`]; a narrow
+//! `catch_unwind` there only rolls the subtransaction back if a not-yet-ported
+//! loud seam panics inside the body, then resumes the unwind), the
 //! SQLSTATE condition matcher ([`exception_matches_conditions`]), and the
 //! VAR/PROMISE arm of [`plpgsql_exec_get_datum_type_info`].
 //!
@@ -85,6 +87,14 @@ const RECORDOID: Oid = 2249;
 /// `ERROR` elog level (`elog.h` `ERROR` == 21) — the `elog_level` threshold at
 /// which `exec_stmt_raise` defaults the SQLSTATE to `ERRCODE_RAISE_EXCEPTION`.
 const ERROR_LEVEL: int32 = 21;
+
+/// The Result-threaded return type of the statement executor: the loop/return
+/// control code on success, or the SQL error (`Err(PgError)`) raised somewhere
+/// in the body — propagated by `?` up to the EXCEPTION block (a `match` on the
+/// `Err`) or, failing any handler, out to `plpgsql_call_handler` / the fmgr
+/// boundary. This is the type that replaces C's `longjmp`-based PG_TRY/PG_CATCH
+/// error channel throughout the executor.
+type PLpgSQL_rc_result = types_error::PgResult<PLpgSQL_rc>;
 
 // ===========================================================================
 // Return-code propagation table (LOOP_RC_PROCESSING)
@@ -161,17 +171,20 @@ fn push_stmt_mcontext(estate: &mut PLpgSQL_execstate) {
 pub fn exec_toplevel_block(
     estate: &mut PLpgSQL_execstate,
     block: &PLpgSQL_stmt_block,
-) -> PLpgSQL_rc {
+) -> PLpgSQL_rc_result {
     estate.err_stmt = None;
     seam::check_for_interrupts();
-    let rc = exec_stmt_block(estate, block);
+    let rc = exec_stmt_block(estate, block)?;
     estate.err_stmt = None;
-    rc
+    Ok(rc)
 }
 
 /// `exec_stmt_block(estate, block)` (pl_exec.c) — execute a block of
 /// statements.
-fn exec_stmt_block(estate: &mut PLpgSQL_execstate, block: &PLpgSQL_stmt_block) -> PLpgSQL_rc {
+fn exec_stmt_block(
+    estate: &mut PLpgSQL_execstate,
+    block: &PLpgSQL_stmt_block,
+) -> PLpgSQL_rc_result {
     // First initialize all variables declared in this block.
     estate.err_text = Some(mem::sdup(
         "during statement block local variable initialization",
@@ -183,8 +196,8 @@ fn exec_stmt_block(estate: &mut PLpgSQL_execstate, block: &PLpgSQL_stmt_block) -
 
         // The set of dtypes handled here must match plpgsql_add_initdatums().
         match datum_dtype(&estate.datums[n as usize]) {
-            PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR => exec_block_init_var(estate, n),
-            PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => exec_block_init_rec(estate, n),
+            PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR => exec_block_init_var(estate, n)?,
+            PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => exec_block_init_rec(estate, n)?,
             other => seam::elog_unrecognized_dtype_exec(other),
         }
     }
@@ -192,15 +205,15 @@ fn exec_stmt_block(estate: &mut PLpgSQL_execstate, block: &PLpgSQL_stmt_block) -
     estate.err_var = None;
 
     let rc = if block.exceptions.is_some() {
-        exec_stmt_block_with_exceptions(estate, block)
+        exec_stmt_block_with_exceptions(estate, block)?
     } else {
         estate.err_text = None;
-        exec_stmts(estate, &block.body)
+        exec_stmts(estate, &block.body)?
     };
 
     estate.err_text = None;
 
-    block_handle_rc(estate, block.label.as_deref(), rc)
+    Ok(block_handle_rc(estate, block.label.as_deref(), rc))
 }
 
 /// The block-exit return-code switch of `exec_stmt_block` (pl_exec.c).
@@ -234,7 +247,7 @@ fn block_handle_rc(
 /// Block-local VAR initialization (the `PLPGSQL_DTYPE_VAR` arm of
 /// `exec_stmt_block`). Control flow is faithful; the NULL/domain/expr
 /// assignment is the value substrate (loud).
-fn exec_block_init_var(estate: &mut PLpgSQL_execstate, dno: int32) {
+fn exec_block_init_var(estate: &mut PLpgSQL_execstate, dno: int32) -> types_error::PgResult<()> {
     {
         let mut var = take_var(estate, dno);
         assign_simple_var(estate, &mut var, Datum::null(), true, false);
@@ -243,26 +256,28 @@ fn exec_block_init_var(estate: &mut PLpgSQL_execstate, dno: int32) {
 
     if !var_has_default(&estate.datums[dno as usize]) {
         if var_is_domain(&estate.datums[dno as usize]) {
-            seam::exec_assign_value(estate, dno, Datum::null(), true, UNKNOWNOID, -1);
+            seam::exec_assign_value(estate, dno, Datum::null(), true, UNKNOWNOID, -1)?;
         }
         // parser should have rejected NOT NULL (Assert(!var->notnull)).
     } else {
         let default =
             clone_var_default(&estate.datums[dno as usize]).expect("default_val present");
-        seam::exec_assign_expr(estate, dno, &default);
+        seam::exec_assign_expr(estate, dno, &default)?;
     }
+    Ok(())
 }
 
 /// Block-local REC initialization (the `PLPGSQL_DTYPE_REC` arm).
-fn exec_block_init_rec(estate: &mut PLpgSQL_execstate, dno: int32) {
+fn exec_block_init_rec(estate: &mut PLpgSQL_execstate, dno: int32) -> types_error::PgResult<()> {
     if !rec_has_default(&estate.datums[dno as usize]) {
-        seam::exec_move_row_null(estate, dno);
+        seam::exec_move_row_null(estate, dno)?;
         // parser should have rejected NOT NULL (Assert(!rec->notnull)).
     } else {
         let default =
             clone_rec_default(&estate.datums[dno as usize]).expect("default present");
-        seam::exec_assign_expr(estate, dno, &default);
+        seam::exec_assign_expr(estate, dno, &default)?;
     }
+    Ok(())
 }
 
 /// `exec_stmt_block` EXCEPTION arm (pl_exec.c ~1793) — the catchable error
@@ -270,61 +285,88 @@ fn exec_block_init_rec(estate: &mut PLpgSQL_execstate, dno: int32) {
 ///
 /// The body runs inside an internal subtransaction; on error the captured
 /// `PgError` is matched against the WHEN conditions. This is the repo's
-/// `longjmp` replacement: the SQL executor / SPI raise an error by
-/// `panic_any(PgError)` (see `backend-utils-fmgr-core::invoke_pgfunction`), so
-/// PG_TRY/PG_CATCH becomes `catch_unwind` + `downcast::<PgError>`.
+/// `longjmp` replacement: the SQL executor / SPI raise an error as
+/// `Err(PgError)` propagated by `?` up through the now-Result-threaded
+/// `exec_stmts` call tree, so C's PG_TRY/PG_CATCH becomes a `match` on the
+/// returned `Err` (no `catch_unwind`). The error-recovery semantics are
+/// byte-identical to the panic-catch form: run the body, on `Err` roll back the
+/// subtransaction, check the SQLSTATE against the WHEN conditions, run the
+/// matching handler (or re-propagate the `Err` if none matches).
 ///
 /// The subtransaction machinery (`BeginInternalSubTransaction`,
 /// `RollbackAndReleaseCurrentSubTransaction`, `ReleaseCurrentSubTransaction`,
 /// `MemoryContextSwitchTo`, `SPI_restore_connection`) and the per-handler datum
 /// setup (`assign_text_var` of SQLSTATE/SQLERRM, `exec_eval_cleanup`) bottom out
-/// in the xact + SPI value substrate and are routed through [`seam`] (loud).
-/// The control flow — run body, catch, match, run the matching handler, or
-/// re-raise — is real.
+/// in the xact + SPI value substrate and are routed through [`seam`].
 fn exec_stmt_block_with_exceptions(
     estate: &mut PLpgSQL_execstate,
     block: &PLpgSQL_stmt_block,
-) -> PLpgSQL_rc {
+) -> PLpgSQL_rc_result {
     // BeginInternalSubTransaction(NULL) + remember the caller context / owner.
-    // (xact substrate; loud until SPI/xact #215 lands.)
-    begin_internal_subtransaction(estate);
+    begin_internal_subtransaction(estate)?;
 
-    // PG_TRY: run the block body. The executor/SPI raise errors via
-    // panic_any(PgError); catch them here so the WHEN clauses can inspect the
-    // SQLSTATE and the subtransaction can be rolled back.
-    let body = core::panic::AssertUnwindSafe(|| exec_stmts(estate, &block.body));
-    let caught = run_catching(body);
+    // PG_TRY: run the block body. The executor/SPI raise errors as `Err(PgError)`
+    // threaded back through `exec_stmts`; match on the returned `Err` so the WHEN
+    // clauses can inspect the SQLSTATE and the subtransaction can be rolled back.
+    //
+    // PANIC-SAFETY (cleanup-on-panic, NOT error dispatch): a still-unported loud
+    // seam inside the body raises via `panic!` rather than `Err` (the value/SPI
+    // substrate that has not yet been Result-threaded — exec_stmt_dynexecute,
+    // exec_stmt_call, the cursor surface, etc.). C's PG_CATCH runs its cleanup on
+    // ANY error; a panic that unwound straight past this frame would leave the
+    // internal subtransaction open, poisoning the parent transaction (every later
+    // command then fails "current transaction is aborted"). So we catch a panic
+    // PURELY to roll the subtransaction back, then resume the unwind — the panic
+    // still propagates to the handler boundary's catch exactly as before, it just
+    // no longer skips the rollback. The normal catchable-error path remains the
+    // `Err` match below; this `catch_unwind` never inspects or swallows the panic.
+    let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        exec_stmts(estate, &block.body)
+    }));
+    let caught = match body {
+        Ok(rc) => rc,
+        Err(payload) => {
+            // Best-effort rollback of the open subtransaction, then re-raise.
+            let _ = rollback_and_release_current_subtransaction(estate);
+            std::panic::resume_unwind(payload);
+        }
+    };
 
     match caught {
         Ok(rc) => {
             // No error: ReleaseCurrentSubTransaction + restore context/owner.
-            release_current_subtransaction(estate);
-            rc
+            release_current_subtransaction(estate)?;
+            Ok(rc)
         }
         Err(edata) => {
             // PG_CATCH: roll back the subtransaction, restore the SPI
             // connection, then look for a matching exception handler.
-            rollback_and_release_current_subtransaction(estate);
+            rollback_and_release_current_subtransaction(estate)?;
 
             let exceptions = block
                 .exceptions
                 .as_deref()
                 .expect("exception path entered without an exception block");
 
-            let mut handled: Option<PLpgSQL_rc> = None;
+            let mut handled: Option<PLpgSQL_rc_result> = None;
             for exc in &exceptions.exc_list {
                 if exception_matches_conditions(edata.sqlstate.0, exc.conditions.as_deref())
                 {
                     // Bind SQLSTATE / SQLERRM into the handler's special vars
                     // and record the current error for GET STACKED DIAGNOSTICS.
                     // `estate->cur_error = &edata` in C; the owned model carries
-                    // cur_error as an opaque ErrorData handle whose population +
-                    // field reads (exec_stmt_getdiag) are the ErrorData-codec
-                    // value substrate (loud). We save/restore the slot here so
-                    // the nesting discipline is preserved; the live edata is
-                    // bound into the handler's special vars by assign_error_vars.
+                    // cur_error as the live PgError value. We save/restore the
+                    // slot here so the nesting discipline is preserved; the live
+                    // edata is bound into the handler's special vars by
+                    // assign_error_vars.
                     let save_cur_error = estate.cur_error.take();
-                    assign_error_vars(estate, exceptions, &edata);
+                    // assign_error_vars may itself fail (the SQLSTATE/SQLERRM
+                    // text-build seam); on failure restore the slot and
+                    // propagate, mirroring C's error-in-error escalation.
+                    if let Err(e) = assign_error_vars(estate, exceptions, &edata) {
+                        estate.cur_error = save_cur_error;
+                        return Err(e);
+                    }
 
                     let rc = exec_stmts(estate, &exc.action);
 
@@ -336,48 +378,12 @@ fn exec_stmt_block_with_exceptions(
 
             match handled {
                 Some(rc) => rc,
-                // No matching handler: re-raise the original error.
-                None => re_raise(edata),
+                // No matching handler: re-propagate the original error
+                // (C's PG_RE_THROW; here the `Err` bubbles up via the return).
+                None => Err(edata),
             }
         }
     }
-}
-
-/// Run `f` catching a `PgError` raised via `panic_any`, mirroring PG_TRY /
-/// PG_CATCH. Mirrors `backend-utils-fmgr-core::invoke_pgfunction`'s boundary.
-fn run_catching<R>(
-    f: core::panic::AssertUnwindSafe<impl FnOnce() -> R>,
-) -> Result<R, types_error::PgError> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f.0)) {
-        Ok(r) => Ok(r),
-        Err(payload) => Err(downcast_pgerror(payload)),
-    }
-}
-
-fn downcast_pgerror(payload: Box<dyn core::any::Any + Send>) -> types_error::PgError {
-    match payload.downcast::<types_error::PgError>() {
-        Ok(err) => *err,
-        Err(payload) => {
-            // Not a structured PgError (e.g. a bare string panic from an
-            // unported leg): reconstruct a generic internal error, mirroring
-            // the C path that wraps a non-ereport longjmp.
-            let msg = payload
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| {
-                    payload
-                        .downcast_ref::<&str>()
-                        .map(|s| String::from(*s))
-                })
-                .unwrap_or_else(|| String::from("unrecognized error in PL/pgSQL block"));
-            types_error::PgError::error(msg)
-        }
-    }
-}
-
-/// Re-raise an error out of an un-handled EXCEPTION block (`PG_RE_THROW`).
-fn re_raise(edata: types_error::PgError) -> ! {
-    std::panic::panic_any(edata)
 }
 
 /// `exception_matches_conditions(edata, cond)` (pl_exec.c) — does any condition
@@ -416,19 +422,15 @@ fn exception_matches_conditions(
 /// xact subxact engine owns `CurTransactionContext` + resource lifetimes), and
 /// the eval econtext is reset per-statement via `exec_eval_cleanup`, so no
 /// explicit save is needed — the subxact begin is the whole leg.
-fn begin_internal_subtransaction(_estate: &mut PLpgSQL_execstate) {
-    if let Err(e) = exec_seams::begin_internal_subtransaction::call() {
-        std::panic::panic_any(e);
-    }
+fn begin_internal_subtransaction(_estate: &mut PLpgSQL_execstate) -> types_error::PgResult<()> {
+    exec_seams::begin_internal_subtransaction::call()
 }
 
 /// `ReleaseCurrentSubTransaction()` (pl_exec.c exec_stmt_block) — commit the
 /// EXCEPTION block's internal subtransaction on the no-error path, then (C)
 /// restore the saved context/owner/econtext (RAII here, see above).
-fn release_current_subtransaction(_estate: &mut PLpgSQL_execstate) {
-    if let Err(e) = exec_seams::release_current_subtransaction::call() {
-        std::panic::panic_any(e);
-    }
+fn release_current_subtransaction(_estate: &mut PLpgSQL_execstate) -> types_error::PgResult<()> {
+    exec_seams::release_current_subtransaction::call()
 }
 
 /// `RollbackAndReleaseCurrentSubTransaction()` (pl_exec.c exec_stmt_block
@@ -437,10 +439,10 @@ fn release_current_subtransaction(_estate: &mut PLpgSQL_execstate) {
 /// `AbortSubTransaction` drives `AtEOSubXact_SPI(false, mySubid)` through the
 /// installed seam (modern PG dropped the explicit `SPI_restore_connection`
 /// call). The context/owner restore is RAII (the subxact engine owns them).
-fn rollback_and_release_current_subtransaction(_estate: &mut PLpgSQL_execstate) {
-    if let Err(e) = exec_seams::rollback_and_release_current_subtransaction::call() {
-        std::panic::panic_any(e);
-    }
+fn rollback_and_release_current_subtransaction(
+    _estate: &mut PLpgSQL_execstate,
+) -> types_error::PgResult<()> {
+    exec_seams::rollback_and_release_current_subtransaction::call()
 }
 
 /// Bind the SQLSTATE / SQLERRM special variables of the matching handler, and
@@ -459,7 +461,7 @@ fn assign_error_vars(
     estate: &mut PLpgSQL_execstate,
     block: &types_plpgsql::PLpgSQL_exception_block,
     edata: &types_error::PgError,
-) {
+) -> types_error::PgResult<()> {
     // C's assign_error_vars binds the implicit SQLSTATE / SQLERRM special vars
     // via assign_text_var(estate, var, str) ==
     // assign_simple_var(estate, var, CStringGetTextDatum(str), false, true).
@@ -469,25 +471,28 @@ fn assign_error_vars(
     // no datumCopy / expanded-object transfer (the unported exec_assign_value
     // by-ref leg); `freeable=false` because the buffer is never individually
     // freed (it lives with the backend, like C's palloc in the handler context).
-    assign_text_var(estate, block.sqlstate_varno, unpack_sql_state(edata.sqlstate.0));
-    assign_text_var(estate, block.sqlerrm_varno, edata.message.clone());
+    assign_text_var(estate, block.sqlstate_varno, unpack_sql_state(edata.sqlstate.0))?;
+    assign_text_var(estate, block.sqlerrm_varno, edata.message.clone())?;
 
     // estate->cur_error = edata: record the live error so GET STACKED
     // DIAGNOSTICS / RAISE-without-parameters in this handler can read it. The
     // owned model carries `cur_error` as the full PgError value (the live
     // edata), not the opaque-handle placeholder.
     estate.cur_error = Some(edata.clone());
+    Ok(())
 }
 
 /// `assign_text_var(estate, var, str)` (pl_exec.c 8847) — build a `text` Datum
 /// from `str` and store it into the scalar VAR `dno` via `assign_simple_var`.
 /// The text bytes live in a backend-lifetime context (the `cstring_to_text_datum`
 /// seam), so the stored bare-word pointer stays valid and `freeable` is false.
-fn assign_text_var(estate: &mut PLpgSQL_execstate, dno: int32, s: String) {
-    let (datum, image) = match exec_seams::cstring_to_text_datum::call(s) {
-        Ok((d, image)) => (Datum::from_usize(d), image),
-        Err(e) => std::panic::panic_any(e),
-    };
+fn assign_text_var(
+    estate: &mut PLpgSQL_execstate,
+    dno: int32,
+    s: String,
+) -> types_error::PgResult<()> {
+    let (d, image) = exec_seams::cstring_to_text_datum::call(s)?;
+    let datum = Datum::from_usize(d);
     let mut var = take_var(estate, dno);
     assign_simple_var(estate, &mut var, datum, false, false);
     // `text` is pass-by-reference: the bare-word `value` alone cannot be read
@@ -499,6 +504,7 @@ fn assign_text_var(estate: &mut PLpgSQL_execstate, dno: int32, s: String) {
     // store above; set the image here (mirroring the by-ref arg-store leg).
     var.value_byref = Some(image);
     put_var(estate, dno, var);
+    Ok(())
 }
 
 // ===========================================================================
@@ -507,21 +513,24 @@ fn assign_text_var(estate: &mut PLpgSQL_execstate, dno: int32, s: String) {
 
 /// `exec_stmts(estate, stmts)` (pl_exec.c) — iterate over a list of statements
 /// as long as their return code is OK.
-fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL_rc {
+fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL_rc_result {
     let save_estmt = estate.err_stmt.take();
 
     if stmts.is_empty() {
         // Ensure a CHECK_FOR_INTERRUPTS even though there is no statement.
         seam::check_for_interrupts();
         estate.err_stmt = save_estmt;
-        return PLpgSQL_rc::PLPGSQL_RC_OK;
+        return Ok(PLpgSQL_rc::PLPGSQL_RC_OK);
     }
 
     for stmt in stmts {
         estate.err_stmt = None;
         seam::check_for_interrupts();
 
-        let rc = match stmt {
+        // On an `Err` from a statement, restore the err_stmt marker (C's
+        // PG_FINALLY-equivalent housekeeping in the unwind path) before
+        // propagating, so a containing EXCEPTION block sees the saved marker.
+        let rc = match (|| match stmt {
             PLpgSQL_stmt::Block(b) => exec_stmt_block(estate, b),
             PLpgSQL_stmt::Assign(s) => exec_stmt_assign(estate, s),
             PLpgSQL_stmt::Perform(s) => exec_stmt_perform(estate, s),
@@ -549,16 +558,22 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
             PLpgSQL_stmt::Close(_) => exec_stmt_close(estate),
             PLpgSQL_stmt::Commit(_) => exec_stmt_commit(estate),
             PLpgSQL_stmt::Rollback(_) => exec_stmt_rollback(estate),
+        })() {
+            Ok(rc) => rc,
+            Err(e) => {
+                estate.err_stmt = save_estmt;
+                return Err(e);
+            }
         };
 
         if rc != PLpgSQL_rc::PLPGSQL_RC_OK {
             estate.err_stmt = save_estmt;
-            return rc;
+            return Ok(rc);
         }
     }
 
     estate.err_stmt = save_estmt;
-    PLpgSQL_rc::PLPGSQL_RC_OK
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
 // ===========================================================================
@@ -566,27 +581,33 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
 // ===========================================================================
 
 /// `exec_stmt_assign(estate, stmt)` (pl_exec.c).
-fn exec_stmt_assign(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_assign) -> PLpgSQL_rc {
+fn exec_stmt_assign(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &PLpgSQL_stmt_assign,
+) -> PLpgSQL_rc_result {
     debug_assert!(stmt.varno >= 0);
     let expr = stmt.expr.as_deref().expect("ASSIGN carries an expr");
-    seam::exec_assign_expr(estate, stmt.varno, expr);
-    PLpgSQL_rc::PLPGSQL_RC_OK
+    seam::exec_assign_expr(estate, stmt.varno, expr)?;
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
 /// `exec_stmt_perform(estate, stmt)` (pl_exec.c) — run a query, discard the
 /// result, set FOUND from the rowcount.
-fn exec_stmt_perform(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_perform) -> PLpgSQL_rc {
+fn exec_stmt_perform(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &PLpgSQL_stmt_perform,
+) -> PLpgSQL_rc_result {
     let expr = stmt.expr.as_deref().expect("PERFORM carries an expr");
-    let _ = seam::exec_run_select(estate, expr, 0, false);
+    let _ = seam::exec_run_select(estate, expr, 0, false)?;
     exec_set_found(estate, estate.eval_processed != 0);
     exec_eval_cleanup(estate);
-    PLpgSQL_rc::PLPGSQL_RC_OK
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
 /// `exec_stmt_if(estate, stmt)` (pl_exec.c).
-fn exec_stmt_if(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_if) -> PLpgSQL_rc {
+fn exec_stmt_if(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_if) -> PLpgSQL_rc_result {
     let cond = stmt.cond.as_deref().expect("IF carries a condition");
-    let (value, isnull) = seam::exec_eval_boolean(estate, cond);
+    let (value, isnull) = seam::exec_eval_boolean(estate, cond)?;
     exec_eval_cleanup(estate);
     if !isnull && value {
         return exec_stmts(estate, &stmt.then_body);
@@ -594,7 +615,7 @@ fn exec_stmt_if(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_if) -> PLpgS
 
     for elif in &stmt.elsif_list {
         let ec = elif.cond.as_deref().expect("ELSIF carries a condition");
-        let (value, isnull) = seam::exec_eval_boolean(estate, ec);
+        let (value, isnull) = seam::exec_eval_boolean(estate, ec)?;
         exec_eval_cleanup(estate);
         if !isnull && value {
             return exec_stmts(estate, &elif.stmts);
@@ -605,11 +626,11 @@ fn exec_stmt_if(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_if) -> PLpgS
 }
 
 /// `exec_stmt_case(estate, stmt)` (pl_exec.c) — searched / simple CASE.
-fn exec_stmt_case(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_case) -> PLpgSQL_rc {
+fn exec_stmt_case(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_case) -> PLpgSQL_rc_result {
     let has_t_var = stmt.t_expr.is_some();
 
     if let Some(t_expr) = stmt.t_expr.as_deref() {
-        let (t_val, isnull, t_typoid, t_typmod) = seam::exec_eval_expr(estate, t_expr);
+        let (t_val, isnull, t_typoid, t_typmod) = seam::exec_eval_expr(estate, t_expr)?;
 
         let t_varno = stmt.t_varno;
         if temp_var_type_differs(&estate.datums[t_varno as usize], t_typoid, t_typmod) {
@@ -618,13 +639,13 @@ fn exec_stmt_case(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_case) -> P
             put_var(estate, t_varno, t_var);
         }
 
-        seam::exec_assign_value(estate, t_varno, t_val, isnull, t_typoid, t_typmod);
+        seam::exec_assign_value(estate, t_varno, t_val, isnull, t_typoid, t_typmod)?;
         exec_eval_cleanup(estate);
     }
 
     for cwt in &stmt.case_when_list {
         let expr = cwt.expr.as_deref().expect("CASE WHEN carries a condition");
-        let (value, isnull) = seam::exec_eval_boolean(estate, expr);
+        let (value, isnull) = seam::exec_eval_boolean(estate, expr)?;
         exec_eval_cleanup(estate);
         if !isnull && value {
             if has_t_var {
@@ -639,80 +660,80 @@ fn exec_stmt_case(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_case) -> P
     }
 
     if !stmt.have_else {
-        seam::ereport_case_not_found();
+        return Err(seam::ereport_case_not_found());
     }
 
     exec_stmts(estate, &stmt.else_stmts)
 }
 
 /// `exec_stmt_loop(estate, stmt)` (pl_exec.c) — unconditional LOOP.
-fn exec_stmt_loop(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_loop) -> PLpgSQL_rc {
+fn exec_stmt_loop(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_loop) -> PLpgSQL_rc_result {
     let label = stmt.label.clone();
     loop {
-        let body_rc = exec_stmts(estate, &stmt.body);
+        let body_rc = exec_stmts(estate, &stmt.body)?;
         if let LoopRc::Break(rc) = loop_rc_processing(estate, label.as_deref(), body_rc) {
-            return rc;
+            return Ok(rc);
         }
     }
 }
 
 /// `exec_stmt_while(estate, stmt)` (pl_exec.c).
-fn exec_stmt_while(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_while) -> PLpgSQL_rc {
+fn exec_stmt_while(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_while) -> PLpgSQL_rc_result {
     let label = stmt.label.clone();
     let cond = stmt.cond.as_deref().expect("WHILE carries a condition");
     loop {
-        let (value, isnull) = seam::exec_eval_boolean(estate, cond);
+        let (value, isnull) = seam::exec_eval_boolean(estate, cond)?;
         exec_eval_cleanup(estate);
         if isnull || !value {
-            return PLpgSQL_rc::PLPGSQL_RC_OK;
+            return Ok(PLpgSQL_rc::PLPGSQL_RC_OK);
         }
-        let body_rc = exec_stmts(estate, &stmt.body);
+        let body_rc = exec_stmts(estate, &stmt.body)?;
         if let LoopRc::Break(rc) = loop_rc_processing(estate, label.as_deref(), body_rc) {
-            return rc;
+            return Ok(rc);
         }
     }
 }
 
 /// `exec_stmt_fori(estate, stmt)` (pl_exec.c) — integer FOR loop.
-fn exec_stmt_fori(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_fori) -> PLpgSQL_rc {
+fn exec_stmt_fori(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_fori) -> PLpgSQL_rc_result {
     let var_dno = stmt.var.as_ref().expect("FOR(i) has a loop var").dno;
     let (var_typoid, var_typmod) = fori_var_type(estate, var_dno);
 
     // Lower bound.
     let lower = stmt.lower.as_deref().expect("FOR(i) lower bound");
-    let (value, isnull, valtype, valtypmod) = seam::exec_eval_expr(estate, lower);
+    let (value, isnull, valtype, valtypmod) = seam::exec_eval_expr(estate, lower)?;
     let (value, isnull) =
-        seam::exec_cast_value(estate, value, isnull, valtype, valtypmod, var_typoid, var_typmod);
+        seam::exec_cast_value(estate, value, isnull, valtype, valtypmod, var_typoid, var_typmod)?;
     if isnull {
-        seam::ereport_for_bound_null("lower bound");
+        return Err(seam::ereport_for_bound_null("lower bound"));
     }
     let loop_value_start = value.as_i32();
     exec_eval_cleanup(estate);
 
     // Upper bound.
     let upper = stmt.upper.as_deref().expect("FOR(i) upper bound");
-    let (value, isnull, valtype, valtypmod) = seam::exec_eval_expr(estate, upper);
+    let (value, isnull, valtype, valtypmod) = seam::exec_eval_expr(estate, upper)?;
     let (value, isnull) =
-        seam::exec_cast_value(estate, value, isnull, valtype, valtypmod, var_typoid, var_typmod);
+        seam::exec_cast_value(estate, value, isnull, valtype, valtypmod, var_typoid, var_typmod)?;
     if isnull {
-        seam::ereport_for_bound_null("upper bound");
+        return Err(seam::ereport_for_bound_null("upper bound"));
     }
     let end_value = value.as_i32();
     exec_eval_cleanup(estate);
 
     // Step.
     let step_value = if let Some(step) = stmt.step.as_deref() {
-        let (value, isnull, valtype, valtypmod) = seam::exec_eval_expr(estate, step);
+        let (value, isnull, valtype, valtypmod) = seam::exec_eval_expr(estate, step)?;
         let (value, isnull) = seam::exec_cast_value(
             estate, value, isnull, valtype, valtypmod, var_typoid, var_typmod,
-        );
+        )?;
         if isnull {
-            seam::ereport_for_bound_null("BY value");
+            return Err(seam::ereport_for_bound_null("BY value"));
         }
         let sv = value.as_i32();
         exec_eval_cleanup(estate);
         if sv <= 0 {
-            seam::ereport_for_step_nonpositive();
+            return Err(seam::ereport_for_step_nonpositive());
         }
         sv
     } else {
@@ -742,7 +763,7 @@ fn exec_stmt_fori(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_fori) -> P
             put_var(estate, var_dno, var);
         }
 
-        let body_rc = exec_stmts(estate, &stmt.body);
+        let body_rc = exec_stmts(estate, &stmt.body)?;
         match loop_rc_processing(estate, label.as_deref(), body_rc) {
             LoopRc::Break(r) => {
                 rc = r;
@@ -765,7 +786,7 @@ fn exec_stmt_fori(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_fori) -> P
     }
 
     exec_set_found(estate, found);
-    rc
+    Ok(rc)
 }
 
 /// `exec_stmt_foreach_a(estate, stmt)` (pl_exec.c) — FOREACH over array
@@ -774,11 +795,11 @@ fn exec_stmt_fori(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_fori) -> P
 fn exec_stmt_foreach_a(
     estate: &mut PLpgSQL_execstate,
     stmt: &PLpgSQL_stmt_foreach_a,
-) -> PLpgSQL_rc {
+) -> PLpgSQL_rc_result {
     let expr = stmt.expr.as_deref().expect("FOREACH has an array expr");
-    let (_value, isnull, _arrtype, _arrtypmod) = seam::exec_eval_expr(estate, expr);
+    let (_value, isnull, _arrtype, _arrtypmod) = seam::exec_eval_expr(estate, expr)?;
     if isnull {
-        seam::ereport_foreach_null();
+        return Err(seam::ereport_foreach_null());
     }
 
     let _stmt_mcontext = get_stmt_mcontext(estate);
@@ -792,27 +813,27 @@ fn exec_stmt_foreach_a(
 }
 
 /// `exec_stmt_exit(estate, stmt)` (pl_exec.c) — EXIT / CONTINUE.
-fn exec_stmt_exit(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_exit) -> PLpgSQL_rc {
+fn exec_stmt_exit(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_exit) -> PLpgSQL_rc_result {
     if let Some(cond) = stmt.cond.as_deref() {
-        let (value, isnull) = seam::exec_eval_boolean(estate, cond);
+        let (value, isnull) = seam::exec_eval_boolean(estate, cond)?;
         exec_eval_cleanup(estate);
         if isnull || !value {
-            return PLpgSQL_rc::PLPGSQL_RC_OK;
+            return Ok(PLpgSQL_rc::PLPGSQL_RC_OK);
         }
     }
 
     estate.exitlabel = stmt.label.clone();
     if stmt.is_exit {
-        PLpgSQL_rc::PLPGSQL_RC_EXIT
+        Ok(PLpgSQL_rc::PLPGSQL_RC_EXIT)
     } else {
-        PLpgSQL_rc::PLPGSQL_RC_CONTINUE
+        Ok(PLpgSQL_rc::PLPGSQL_RC_CONTINUE)
     }
 }
 
 /// `exec_stmt_return(estate, stmt)` (pl_exec.c) — RETURN.
-fn exec_stmt_return(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_return) -> PLpgSQL_rc {
+fn exec_stmt_return(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_return) -> PLpgSQL_rc_result {
     if estate.retisset {
-        return PLpgSQL_rc::PLPGSQL_RC_RETURN;
+        return Ok(PLpgSQL_rc::PLPGSQL_RC_RETURN);
     }
 
     estate.retval = Datum::null();
@@ -825,17 +846,17 @@ fn exec_stmt_return(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_return) 
         match datum_dtype(&estate.datums[dno as usize]) {
             PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE => {
                 let mut var = take_var(estate, dno);
-                seam::plpgsql_fulfill_promise(estate, &mut var);
+                seam::plpgsql_fulfill_promise(estate, &mut var)?;
                 put_var(estate, dno, var);
-                exec_return_simple_var(estate, dno);
+                exec_return_simple_var(estate, dno)?;
             }
             PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR => {
-                exec_return_simple_var(estate, dno);
+                exec_return_simple_var(estate, dno)?;
             }
             PLpgSQL_datum_type::PLPGSQL_DTYPE_ROW | PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => {
                 let datum = estate.datums[dno as usize].clone();
                 let (rettype, _rettypmod, retval, retisnull) =
-                    seam::exec_eval_datum(estate, &datum);
+                    seam::exec_eval_datum(estate, &datum)?;
                 estate.rettype = rettype;
                 estate.retval = retval;
                 estate.retisnull = retisnull;
@@ -847,11 +868,11 @@ fn exec_stmt_return(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_return) 
             }
             other => seam::elog_unrecognized_dtype_exec(other),
         }
-        return PLpgSQL_rc::PLPGSQL_RC_RETURN;
+        return Ok(PLpgSQL_rc::PLPGSQL_RC_RETURN);
     }
 
     if let Some(expr) = stmt.expr.as_deref() {
-        let (retval, retisnull, rettype, _rettypmod) = seam::exec_eval_expr(estate, expr);
+        let (retval, retisnull, rettype, _rettypmod) = seam::exec_eval_expr(estate, expr)?;
         estate.retval = retval;
         estate.retisnull = retisnull;
         estate.rettype = rettype;
@@ -861,10 +882,10 @@ fn exec_stmt_return(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_return) 
         estate.retval_byref = estate.last_eval_byref.take();
 
         if estate.retistuple && !estate.retisnull && !seam::type_is_rowtype(estate.rettype) {
-            seam::ereport_return_noncomposite();
+            return Err(seam::ereport_return_noncomposite());
         }
 
-        return PLpgSQL_rc::PLPGSQL_RC_RETURN;
+        return Ok(PLpgSQL_rc::PLPGSQL_RC_RETURN);
     }
 
     // Special hack for function returning VOID (but not for procedures).
@@ -874,11 +895,14 @@ fn exec_stmt_return(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_return) 
         estate.rettype = VOIDOID;
     }
 
-    PLpgSQL_rc::PLPGSQL_RC_RETURN
+    Ok(PLpgSQL_rc::PLPGSQL_RC_RETURN)
 }
 
 /// The DTYPE_VAR / DTYPE_PROMISE-after-fulfill arm of `exec_stmt_return`.
-fn exec_return_simple_var(estate: &mut PLpgSQL_execstate, dno: int32) {
+fn exec_return_simple_var(
+    estate: &mut PLpgSQL_execstate,
+    dno: int32,
+) -> types_error::PgResult<()> {
     let (value, isnull, typoid) = read_var_value(&estate.datums[dno as usize]);
     estate.retval = value;
     estate.retisnull = isnull;
@@ -895,8 +919,9 @@ fn exec_return_simple_var(estate: &mut PLpgSQL_execstate, dno: int32) {
     };
 
     if estate.retistuple && !estate.retisnull {
-        seam::ereport_return_noncomposite();
+        return Err(seam::ereport_return_noncomposite());
     }
+    Ok(())
 }
 
 /// `exec_set_found(estate, state)` (pl_exec.c) — set the FOUND variable.
@@ -934,7 +959,7 @@ fn build_plpgsql_parse_state(
     estate: &PLpgSQL_execstate,
     expr: &types_plpgsql::PLpgSQL_expr,
     input_collation: Oid,
-) -> types_nodes::parsestmt::PlpgsqlExprParseState {
+) -> types_error::PgResult<types_nodes::parsestmt::PlpgsqlExprParseState> {
     use types_nodes::parsestmt::{PlpgsqlExprParseState, PlpgsqlParamInfo};
 
     let mut names: std::collections::BTreeMap<std::string::String, PlpgsqlParamInfo> =
@@ -1001,7 +1026,7 @@ fn build_plpgsql_parse_state(
                             continue;
                         }
                         let finfo = if handle != 0 {
-                            resolve_recfield_finfo(handle, &rf.fieldname)
+                            resolve_recfield_finfo(handle, &rf.fieldname)?
                         } else {
                             None
                         };
@@ -1025,7 +1050,7 @@ fn build_plpgsql_parse_state(
         cur = ns.prev.as_deref();
     }
 
-    PlpgsqlExprParseState::new(names, input_collation)
+    Ok(PlpgsqlExprParseState::new(names, input_collation))
 }
 
 /// Project a rich expanded-record field [`RichDatum`] (the
@@ -1085,22 +1110,27 @@ fn rich_datum_to_param(value: &RichDatum<'_>, isnull: bool, typeid: Oid) -> exec
 fn resolve_recfield_finfo(
     handle: u64,
     fieldname: &str,
-) -> Option<types_plpgsql::ExpandedRecordFieldInfo> {
-    erh_table::with_erh_mut(handle, |mcx, erh| {
+) -> types_error::PgResult<Option<types_plpgsql::ExpandedRecordFieldInfo>> {
+    let r = erh_table::with_erh_mut(handle, |mcx, erh| {
         match backend_utils_adt_misc2::expandedrecord::expanded_record_lookup_field(
             mcx, erh, fieldname,
         ) {
-            Ok(Some(fi)) => Some(types_plpgsql::ExpandedRecordFieldInfo {
+            Ok(Some(fi)) => Ok(Some(types_plpgsql::ExpandedRecordFieldInfo {
                 fnumber: fi.fnumber,
                 ftypeid: fi.ftypeid,
                 ftypmod: fi.ftypmod,
                 fcollation: fi.fcollation,
-            }),
-            Ok(None) => None,
-            Err(e) => std::panic::panic_any(e),
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
         }
-    })
-    .flatten()
+    });
+    // `with_erh_mut` returns `None` for the NULL/cleared handle; flatten that to
+    // `Ok(None)` (the field reads as absent) and propagate any codec error.
+    match r {
+        Some(res) => res,
+        None => Ok(None),
+    }
 }
 
 /// The runtime composite `(typeid, typmod)` of a REC datum: its live expanded
@@ -1140,39 +1170,45 @@ fn record_name_for(estate: &PLpgSQL_execstate, dno: int32) -> String {
 fn snapshot_recfield(
     estate: &PLpgSQL_execstate,
     rf: &types_plpgsql::PLpgSQL_recfield,
-) -> Option<exec_seams::EvalParamValue> {
+) -> types_error::PgResult<Option<exec_seams::EvalParamValue>> {
     let parent = &estate.datums[rf.recparentno as usize];
     let PLpgSQL_datum::Rec(rec) = parent else {
-        return None;
+        return Ok(None);
     };
     let handle = rec.erh.as_ref().map(|h| h.0).unwrap_or(0);
     if handle == 0 {
         // Unassigned record: the field reads as NULL.
-        return Some(exec_seams::EvalParamValue {
+        return Ok(Some(exec_seams::EvalParamValue {
             value: 0,
             isnull: true,
             typeid: INVALID_OID,
             byref: None,
-        });
+        }));
     }
-    let finfo = resolve_recfield_finfo(handle, &rf.fieldname)?;
-    erh_table::with_erh_mut(handle, |mcx, erh| {
+    let Some(finfo) = resolve_recfield_finfo(handle, &rf.fieldname)? else {
+        return Ok(None);
+    };
+    let r = erh_table::with_erh_mut(handle, |mcx, erh| {
         match backend_utils_adt_misc2::expandedrecord::expanded_record_fetch_field(
             mcx,
             erh,
             finfo.fnumber,
         ) {
-            Ok((value, isnull)) => rich_datum_to_param(&value, isnull, finfo.ftypeid),
-            Err(e) => std::panic::panic_any(e),
+            Ok((value, isnull)) => Ok(rich_datum_to_param(&value, isnull, finfo.ftypeid)),
+            Err(e) => Err(e),
         }
-    })
+    });
+    match r {
+        Some(res) => res.map(Some),
+        None => Ok(None),
+    }
 }
 
 /// Fulfill every still-pending `DTYPE_PROMISE` variable (`plpgsql_fulfill_promise`).
 /// C fulfills a promise lazily when `exec_eval_datum` first reads it; the param
 /// snapshot below is such a read, so we fulfill the whole set here (idempotent —
 /// each fulfilled promise clears its flag to `PLPGSQL_PROMISE_NONE`).
-fn fulfill_pending_promises(estate: &mut PLpgSQL_execstate) {
+fn fulfill_pending_promises(estate: &mut PLpgSQL_execstate) -> types_error::PgResult<()> {
     let ndatums = estate.datums.len();
     for dno in 0..ndatums {
         let pending = matches!(
@@ -1182,10 +1218,12 @@ fn fulfill_pending_promises(estate: &mut PLpgSQL_execstate) {
         );
         if pending {
             let mut var = take_var(estate, dno as int32);
-            seam::plpgsql_fulfill_promise(estate, &mut var);
+            let r = seam::plpgsql_fulfill_promise(estate, &mut var);
             put_var(estate, dno as int32, var);
+            r?;
         }
     }
+    Ok(())
 }
 
 /// Build the per-datum value snapshot (`setup_param_list` material): for every
@@ -1195,14 +1233,16 @@ fn fulfill_pending_promises(estate: &mut PLpgSQL_execstate) {
 /// scalar field reference a simple expression binds).
 fn build_datum_snapshot(
     estate: &mut PLpgSQL_execstate,
-) -> std::vec::Vec<Option<exec_seams::EvalParamValue>> {
+) -> types_error::PgResult<std::vec::Vec<Option<exec_seams::EvalParamValue>>> {
     // A DTYPE_PROMISE variable computes its value lazily on first read (C's
     // `exec_eval_datum` calls `plpgsql_fulfill_promise`). The param snapshot is a
     // read, so fulfill any pending promises (TG_OP / TG_NAME / …) before
     // projecting their values; fulfillment is idempotent (the promise flag clears
     // to NONE).
-    fulfill_pending_promises(estate);
+    fulfill_pending_promises(estate)?;
     let mut snap = std::vec::Vec::with_capacity(estate.datums.len());
+    // Snapshot RECFIELD values first borrowing `estate` immutably; collect the
+    // (index, value) pairs so the push order matches the datum order.
     for d in estate.datums.iter() {
         match d {
             PLpgSQL_datum::Var(v) => {
@@ -1217,11 +1257,11 @@ fn build_datum_snapshot(
                     byref: v.value_byref.clone(),
                 }));
             }
-            PLpgSQL_datum::Recfield(rf) => snap.push(snapshot_recfield(estate, rf)),
+            PLpgSQL_datum::Recfield(rf) => snap.push(snapshot_recfield(estate, rf)?),
             _ => snap.push(None),
         }
     }
-    snap
+    Ok(snap)
 }
 
 /// `exec_eval_datum(estate, datum, &typeid, &typetypmod, &value, &isnull)`
@@ -1232,7 +1272,7 @@ fn build_datum_snapshot(
 fn exec_eval_datum_impl(
     estate: &mut PLpgSQL_execstate,
     datum: &PLpgSQL_datum,
-) -> (Oid, int32, Datum, bool) {
+) -> types_error::PgResult<(Oid, int32, Datum, bool)> {
     use backend_utils_adt_misc2::expandedrecord as er;
     estate.last_eval_byref = None;
     match datum {
@@ -1241,7 +1281,7 @@ fn exec_eval_datum_impl(
             let t = var.datatype.as_ref().expect("VAR datum has a datatype");
             let (typeid, typmod) = (t.typoid, t.atttypmod);
             estate.last_eval_byref = var.value_byref.clone();
-            (typeid, typmod, var.value, var.isnull)
+            Ok((typeid, typmod, var.value, var.isnull))
         }
         PLpgSQL_datum::Recfield(rf) => {
             // Read the field off the parent record's live expanded header,
@@ -1252,10 +1292,10 @@ fn exec_eval_datum_impl(
             };
             let handle = rec.erh.as_ref().map(|h| h.0).unwrap_or(0);
             if handle == 0 {
-                return (INVALID_OID, -1, Datum::null(), true);
+                return Ok((INVALID_OID, -1, Datum::null(), true));
             }
-            let Some(finfo) = resolve_recfield_finfo(handle, &rf.fieldname) else {
-                std::panic::panic_any(
+            let Some(finfo) = resolve_recfield_finfo(handle, &rf.fieldname)? else {
+                return Err(
                     types_error::PgError::error(format!(
                         "record \"{}\" has no field \"{}\"",
                         record_name_for(estate, rf.recparentno),
@@ -1264,15 +1304,18 @@ fn exec_eval_datum_impl(
                     .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
                 );
             };
-            let (value_word, byref, isnull) = erh_table::with_erh_mut(handle, |mcx, erh| {
+            let fetched = erh_table::with_erh_mut(handle, |mcx, erh| {
                 match er::expanded_record_fetch_field(mcx, erh, finfo.fnumber) {
-                    Ok((value, isnull)) => rich_datum_to_word(&value, isnull),
-                    Err(e) => std::panic::panic_any(e),
+                    Ok((value, isnull)) => Ok(rich_datum_to_word(&value, isnull)),
+                    Err(e) => Err(e),
                 }
-            })
-            .unwrap_or((0usize, None, true));
+            });
+            let (value_word, byref, isnull) = match fetched {
+                Some(res) => res?,
+                None => (0usize, None, true),
+            };
             estate.last_eval_byref = byref;
-            (finfo.ftypeid, finfo.ftypmod, Datum::from_usize(value_word), isnull)
+            Ok((finfo.ftypeid, finfo.ftypmod, Datum::from_usize(value_word), isnull))
         }
         PLpgSQL_datum::Rec(rec) => {
             // The whole record as a composite value (rec->erh->er_typeid).
@@ -1281,18 +1324,20 @@ fn exec_eval_datum_impl(
                 let typeid = erh.er_typeid;
                 let typmod = erh.er_typmod;
                 match er::expanded_record_get_tuple(mcx, erh) {
-                    Ok(Some(ft)) => (typeid, typmod, Some(ft.to_datum_image()), false),
-                    Ok(None) => (typeid, typmod, None, true),
-                    Err(e) => std::panic::panic_any(e),
+                    Ok(Some(ft)) => Ok((typeid, typmod, Some(ft.to_datum_image()), false)),
+                    Ok(None) => Ok((typeid, typmod, None, true)),
+                    Err(e) => Err(e),
                 }
             });
             match result {
-                Some((typeid, typmod, Some(image), false)) => {
-                    estate.last_eval_byref = Some(image);
-                    (typeid, typmod, Datum::from_usize(0), false)
-                }
-                Some((typeid, typmod, _, _)) => (typeid, typmod, Datum::null(), true),
-                None => (rec.rectypeid, -1, Datum::null(), true),
+                Some(res) => match res? {
+                    (typeid, typmod, Some(image), false) => {
+                        estate.last_eval_byref = Some(image);
+                        Ok((typeid, typmod, Datum::from_usize(0), false))
+                    }
+                    (typeid, typmod, _, _) => Ok((typeid, typmod, Datum::null(), true)),
+                },
+                None => Ok((rec.rectypeid, -1, Datum::null(), true)),
             }
         }
         PLpgSQL_datum::Row(_) => {
@@ -1315,13 +1360,13 @@ fn word_to_rich_datum<'mcx>(
     word: Datum,
     byref: Option<Vec<u8>>,
     isnull: bool,
-) -> RichDatum<'mcx> {
+) -> types_error::PgResult<RichDatum<'mcx>> {
     if isnull {
-        return RichDatum::null();
+        return Ok(RichDatum::null());
     }
     match byref {
-        Some(bytes) => RichDatum::ByRef(mcx::slice_in(mcx, &bytes).unwrap_or_else(|e| std::panic::panic_any(e))),
-        None => RichDatum::from_usize(word.as_usize()),
+        Some(bytes) => Ok(RichDatum::ByRef(mcx::slice_in(mcx, &bytes)?)),
+        None => Ok(RichDatum::from_usize(word.as_usize())),
     }
 }
 
@@ -1352,28 +1397,25 @@ fn rich_datum_to_word(value: &RichDatum<'_>, isnull: bool) -> (usize, Option<Vec
 fn exec_eval_expr_impl(
     estate: &mut PLpgSQL_execstate,
     expr: &types_plpgsql::PLpgSQL_expr,
-) -> (Datum, bool, Oid, int32) {
+) -> types_error::PgResult<(Datum, bool, Oid, int32)> {
     // The expression's input collation (fncollation analogue): the function's
     // input collation. The execstate does not carry it directly; the variables'
     // own collations drive Param collation, so InvalidOid is the fallback.
     let input_collation = INVALID_OID;
 
-    let parse_state = build_plpgsql_parse_state(estate, expr, input_collation);
-    let snapshot = build_datum_snapshot(estate);
+    let parse_state = build_plpgsql_parse_state(estate, expr, input_collation)?;
+    let snapshot = build_datum_snapshot(estate)?;
 
     // exec_run_select passes maxtuples = 0 for exec_eval_expr's underlying
     // single-row evaluation (C caps the simple-expr to one row; the one-row
     // SELECT a scalar expression produces yields exactly one row).
-    let result = match exec_seams::exec_eval_expr_via_spi::call(
+    let result = exec_seams::exec_eval_expr_via_spi::call(
         expr.query.clone(),
         expr.parseMode,
         parse_state,
         snapshot,
         2, // detect ">1 row" like C exec_run_select(expr, 2, ...)
-    ) {
-        Ok(r) => r,
-        Err(e) => std::panic::panic_any(e),
-    };
+    )?;
 
     // Stash the by-ref image (if any) as the out-of-band companion to the
     // (value, isnull, rettype, rettypmod) tuple. A by-value result leaves
@@ -1387,12 +1429,12 @@ fn exec_eval_expr_impl(
     // CASE) cast through exec_cast_value which tolerates -1, and exec_stmt_return
     // ignores it. -1 is the correct typmod for the int/bool results the value
     // path produces.
-    (
+    Ok((
         Datum::from_usize(result.value),
         result.isnull,
         result.typeid,
         -1,
-    )
+    ))
 }
 
 // ===========================================================================
@@ -1407,19 +1449,20 @@ fn exec_assign_expr_impl(
     estate: &mut PLpgSQL_execstate,
     target_dno: int32,
     expr: &types_plpgsql::PLpgSQL_expr,
-) {
+) -> types_error::PgResult<()> {
     // exec_prepare_plan is folded into exec_eval_expr's slow path here (the
     // owned model re-prepares per call; the plan-caching optimization is the
     // simple-expr fast path, not yet wired). exec_eval_expr returns the value +
     // its runtime (type, typmod).
-    let (value, isnull, valtype, valtypmod) = exec_eval_expr_impl(estate, expr);
+    let (value, isnull, valtype, valtypmod) = exec_eval_expr_impl(estate, expr)?;
     // A by-reference expression result (`text`/`varchar`/`numeric`/…) carries
     // its image in `estate.last_eval_byref` (stashed by `exec_eval_expr_impl`);
     // hand it to the store so a `x := <by-ref expr>` assignment keeps the image
     // in the target variable.
     let value_byref = estate.last_eval_byref.take();
-    exec_assign_value_byref_impl(estate, target_dno, value, value_byref, isnull, valtype, valtypmod);
+    exec_assign_value_byref_impl(estate, target_dno, value, value_byref, isnull, valtype, valtypmod)?;
     exec_eval_cleanup(estate);
+    Ok(())
 }
 
 /// `exec_assign_value(estate, target, value, isNull, valtype, valtypmod)`
@@ -1433,8 +1476,8 @@ fn exec_assign_value_impl(
     isnull: bool,
     valtype: Oid,
     valtypmod: int32,
-) {
-    exec_assign_value_byref_impl(estate, target_dno, value, None, isnull, valtype, valtypmod);
+) -> types_error::PgResult<()> {
+    exec_assign_value_byref_impl(estate, target_dno, value, None, isnull, valtype, valtypmod)
 }
 
 /// `exec_assign_value` carrying the source value's by-reference image
@@ -1451,7 +1494,7 @@ fn exec_assign_value_byref_impl(
     isnull: bool,
     valtype: Oid,
     valtypmod: int32,
-) {
+) -> types_error::PgResult<()> {
     match datum_dtype(&estate.datums[target_dno as usize]) {
         PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR | PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE => {
             let mut var = take_var(estate, target_dno);
@@ -1466,14 +1509,22 @@ fn exec_assign_value_byref_impl(
 
             // exec_cast_value(value, &isNull, valtype, valtypmod, var->typoid,
             // var->atttypmod). Thread the by-ref image both ways so a by-ref
-            // source / by-ref target carries its varlena/cstring bytes.
-            let (newvalue, isnull, newbyref) = exec_cast_value_with_byref(
+            // source / by-ref target carries its varlena/cstring bytes. On a cast
+            // error, restore the var before propagating (the take_var leaves a
+            // placeholder).
+            let (newvalue, isnull, newbyref) = match exec_cast_value_with_byref(
                 estate, value, value_byref, isnull, valtype, valtypmod, reqtype, reqtypmod,
-            );
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    put_var(estate, target_dno, var);
+                    return Err(e);
+                }
+            };
 
             if isnull && notnull {
                 put_var(estate, target_dno, var);
-                std::panic::panic_any(
+                return Err(
                     types_error::PgError::error(format!(
                         "null value cannot be assigned to variable \"{refname}\" declared NOT NULL"
                     ))
@@ -1503,7 +1554,7 @@ fn exec_assign_value_byref_impl(
                         seam::arg_store_expanded_object(newvalue);
                     }
                 }
-                return;
+                return Ok(());
             }
 
             // assign_simple_var(estate, var, newvalue, isNull, freeable). For a
@@ -1516,12 +1567,12 @@ fn exec_assign_value_byref_impl(
             // The ROW/REC assignment is the composite-deconstruction substrate
             // (exec_move_row / exec_move_row_from_datum), out of scope.
             if isnull {
-                seam::exec_move_row_null(estate, target_dno);
+                seam::exec_move_row_null(estate, target_dno)?;
             } else {
                 if !seam::type_is_rowtype(valtype) {
-                    seam::ereport_return_noncomposite();
+                    return Err(seam::ereport_return_noncomposite());
                 }
-                seam::exec_move_row_from_datum(estate, target_dno, value);
+                seam::exec_move_row_from_datum(estate, target_dno, value)?;
             }
         }
         PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
@@ -1545,7 +1596,7 @@ fn exec_assign_value_byref_impl(
                 rec.erh.as_ref().map(|h| h.0).unwrap_or(0)
             };
             if handle == 0 {
-                std::panic::panic_any(
+                return Err(
                     types_error::PgError::error(format!(
                         "record \"{}\" is not assigned yet",
                         record_name_for(estate, recparentno)
@@ -1558,8 +1609,8 @@ fn exec_assign_value_byref_impl(
             }
 
             // Resolve the field by NAME against the live tupdesc.
-            let Some(finfo) = resolve_recfield_finfo(handle, &fieldname) else {
-                std::panic::panic_any(
+            let Some(finfo) = resolve_recfield_finfo(handle, &fieldname)? else {
+                return Err(
                     types_error::PgError::error(format!(
                         "record \"{}\" has no field \"{}\"",
                         record_name_for(estate, recparentno),
@@ -1572,18 +1623,20 @@ fn exec_assign_value_byref_impl(
             // exec_cast_value(value -> field type), threading the by-ref image.
             let (newvalue, isnull, newbyref) = exec_cast_value_with_byref(
                 estate, value, value_byref, isnull, valtype, valtypmod, finfo.ftypeid, finfo.ftypmod,
-            );
+            )?;
 
-            erh_table::with_erh_mut(handle, |mcx, erh| {
-                let rich = word_to_rich_datum(mcx, newvalue, newbyref, isnull);
-                if let Err(e) = backend_utils_adt_misc2::expandedrecord::expanded_record_set_field_internal(
+            let r = erh_table::with_erh_mut(handle, |mcx, erh| {
+                let rich = word_to_rich_datum(mcx, newvalue, newbyref, isnull)?;
+                backend_utils_adt_misc2::expandedrecord::expanded_record_set_field_internal(
                     mcx, erh, finfo.fnumber, rich, isnull, true, true,
-                ) {
-                    std::panic::panic_any(e);
-                }
+                )
             });
+            if let Some(res) = r {
+                res?;
+            }
         }
     }
+    Ok(())
 }
 
 /// `exec_cast_value(estate, value, &isnull, valtype, valtypmod, reqtype,
@@ -1598,12 +1651,13 @@ fn exec_cast_value_impl(
     valtypmod: int32,
     reqtype: Oid,
     reqtypmod: int32,
-) -> (Datum, bool) {
+) -> types_error::PgResult<(Datum, bool)> {
     // The bare-word variant for by-value targets (FOR-loop bounds cast to int,
     // etc.): no source image, the coerced image (if any) is dropped.
-    let (v, n, _byref) =
-        exec_cast_value_with_byref(estate, value, None, isnull, valtype, valtypmod, reqtype, reqtypmod);
-    (v, n)
+    let (v, n, _byref) = exec_cast_value_with_byref(
+        estate, value, None, isnull, valtype, valtypmod, reqtype, reqtypmod,
+    )?;
+    Ok((v, n))
 }
 
 /// `exec_cast_value` carrying the by-reference image both ways (pl_exec.c 7874).
@@ -1621,12 +1675,12 @@ fn exec_cast_value_with_byref(
     valtypmod: int32,
     reqtype: Oid,
     reqtypmod: int32,
-) -> (Datum, bool, Option<Vec<u8>>) {
+) -> types_error::PgResult<(Datum, bool, Option<Vec<u8>>)> {
     let _ = estate;
     // pl_exec.c 7882: convert only if the type differs or a constrained typmod
     // differs. Otherwise the value passes through unchanged (the no-op relabel).
     if valtype != reqtype || (valtypmod != reqtypmod && reqtypmod != -1) {
-        let r = match exec_seams::exec_cast_value_via_spi::call(
+        let r = exec_seams::exec_cast_value_via_spi::call(
             value.as_usize(),
             value_byref,
             isnull,
@@ -1634,14 +1688,11 @@ fn exec_cast_value_with_byref(
             valtypmod,
             reqtype,
             reqtypmod,
-        ) {
-            Ok(r) => r,
-            Err(e) => std::panic::panic_any(e),
-        };
-        return (Datum::from_usize(r.value), r.isnull, r.byref);
+        )?;
+        return Ok((Datum::from_usize(r.value), r.isnull, r.byref));
     }
     // No-op relabel: the value (and its by-ref image, if any) passes through.
-    (value, isnull, value_byref)
+    Ok((value, isnull, value_byref))
 }
 
 /// `exec_run_select(estate, expr, maxtuples, portalP)` (pl_exec.c 5753) — run a
@@ -1652,7 +1703,7 @@ fn exec_run_select_impl(
     expr: &types_plpgsql::PLpgSQL_expr,
     maxtuples: i64,
     set_portal: bool,
-) -> int32 {
+) -> types_error::PgResult<int32> {
     if set_portal {
         panic!(
             "seam not wired: exec_run_select portal leg (pl_exec.c) — \
@@ -1661,14 +1712,14 @@ fn exec_run_select_impl(
     }
 
     let input_collation = INVALID_OID;
-    let parse_state = build_plpgsql_parse_state(estate, expr, input_collation);
-    let snapshot = build_datum_snapshot(estate);
+    let parse_state = build_plpgsql_parse_state(estate, expr, input_collation)?;
+    let snapshot = build_datum_snapshot(estate)?;
 
     // SPI_execute_plan_with_paramlist(plan, paramLI, readonly, maxtuples), with
     // no INTO (run the SELECT to the requested row cap). exec_run_select rejects
     // a non-SELECT; the execsql bridge classifies the command and a PERFORM is a
     // plain query (we don't read the rows here, only the rowcount).
-    let result = match exec_seams::exec_execsql_via_spi::call(
+    let result = exec_seams::exec_execsql_via_spi::call(
         expr.query.clone(),
         expr.parseMode,
         parse_state,
@@ -1676,13 +1727,10 @@ fn exec_run_select_impl(
         estate.readonly_func,
         false, // into
         maxtuples,
-    ) {
-        Ok(r) => r,
-        Err(e) => std::panic::panic_any(e),
-    };
+    )?;
 
     estate.eval_processed = result.processed;
-    result.code
+    Ok(result.code)
 }
 
 /// `exec_run_select(estate, expr, 0, NULL)` for the FOR-loop / RETURN QUERY
@@ -1696,20 +1744,17 @@ fn exec_run_select_rows(
     query: &str,
     parse_mode: types_plpgsql::RawParseMode,
     parse_state: types_nodes::parsestmt::PlpgsqlExprParseState,
-) -> Vec<Vec<exec_seams::ExecsqlColumn>> {
-    let snapshot = build_datum_snapshot(estate);
-    let result = match exec_seams::exec_run_select_via_spi::call(
+) -> types_error::PgResult<Vec<Vec<exec_seams::ExecsqlColumn>>> {
+    let snapshot = build_datum_snapshot(estate)?;
+    let result = exec_seams::exec_run_select_via_spi::call(
         query.to_string(),
         parse_mode,
         parse_state,
         snapshot,
         estate.readonly_func,
-    ) {
-        Ok(r) => r,
-        Err(e) => std::panic::panic_any(e),
-    };
+    )?;
     estate.eval_processed = result.processed;
-    result.all_rows
+    Ok(result.all_rows)
 }
 
 /// `exec_for_query(estate, stmt, portal, prefetch_ok)` (pl_exec.c 6011) — the
@@ -1724,7 +1769,7 @@ fn exec_for_query(
     body: &[PLpgSQL_stmt],
     label: Option<&str>,
     rows: Vec<Vec<exec_seams::ExecsqlColumn>>,
-) -> PLpgSQL_rc {
+) -> PLpgSQL_rc_result {
     let mut rc = PLpgSQL_rc::PLPGSQL_RC_OK;
     let mut found = false;
 
@@ -1733,10 +1778,10 @@ fn exec_for_query(
 
         // exec_move_row(estate, var, tuple, tupdesc) — assign the fetched row
         // into the loop's record / row variable.
-        exec_move_row_into_target(estate, loopvar, row);
+        exec_move_row_into_target(estate, loopvar, row)?;
 
         // Execute the statements.
-        let body_rc = exec_stmts(estate, body);
+        let body_rc = exec_stmts(estate, body)?;
 
         match loop_rc_processing(estate, label, body_rc) {
             LoopRc::Break(r) => {
@@ -1754,7 +1799,7 @@ fn exec_for_query(
 
     // SPI_cursor_close(portal) — the materialize-all path holds no live portal,
     // so there is nothing to close (the rows were fully fetched up front).
-    rc
+    Ok(rc)
 }
 
 // ===========================================================================
@@ -1762,7 +1807,7 @@ fn exec_for_query(
 // whole-statement SQL/value leg (SPI / executor / fmgr), not control flow.
 // ===========================================================================
 
-fn exec_stmt_call(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
+fn exec_stmt_call(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
     panic!(
         "seam not wired: exec_stmt_call (pl_exec.c) — exec_prepare_plan / \
          make_callstmt_target / setup_param_list / SPI_execute_plan_extended / \
@@ -1778,14 +1823,14 @@ fn exec_stmt_call(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
 fn exec_stmt_getdiag(
     estate: &mut PLpgSQL_execstate,
     stmt: &types_plpgsql::PLpgSQL_stmt_getdiag,
-) -> PLpgSQL_rc {
+) -> PLpgSQL_rc_result {
     use types_plpgsql::PLpgSQL_getdiag_kind as K;
 
     // STACKED DIAGNOSTICS requires an active exception handler; the grammar and
     // pl_comp.c already reject the standalone case, but if cur_error is None
     // here the read is undefined — mirror C and guard.
     if stmt.is_stacked && estate.cur_error.is_none() {
-        std::panic::panic_any(types_error::PgError::error(
+        return Err(types_error::PgError::error(
             "GET STACKED DIAGNOSTICS cannot be used outside an exception handler"
                 .to_string(),
         ));
@@ -1804,13 +1849,13 @@ fn exec_stmt_getdiag(
                     false,
                     INT8OID,
                     -1,
-                );
+                )?;
             }
             K::PLPGSQL_GETDIAG_ROUTINE_OID => {
                 // estate->func->fn_oid — the func back-reference is opaque in the
                 // owned model; this is rarely used and not reachable from the
-                // current execstate carrier. Mirror C-and-panic loudly.
-                std::panic::panic_any(types_error::PgError::error(
+                // current execstate carrier. Mirror C and raise.
+                return Err(types_error::PgError::error(
                     "GET DIAGNOSTICS ... PG_ROUTINE_OID not yet supported \
                      (opaque func back-reference)"
                         .to_string(),
@@ -1865,11 +1910,13 @@ fn exec_stmt_getdiag(
                     // modeled in the owned execstate yet.
                     match other {
                         K::PLPGSQL_GETDIAG_CONTEXT => String::new(),
-                        _ => std::panic::panic_any(types_error::PgError::error(format!(
-                            "GET CURRENT DIAGNOSTICS item {:?} not available outside \
-                             an exception handler",
-                            other
-                        ))),
+                        _ => {
+                            return Err(types_error::PgError::error(format!(
+                                "GET CURRENT DIAGNOSTICS item {:?} not available outside \
+                                 an exception handler",
+                                other
+                            )))
+                        }
                     }
                 };
 
@@ -1880,12 +1927,12 @@ fn exec_stmt_getdiag(
                 // always text/varchar variables, so the assign_text_var path
                 // (direct assign_simple_var, no by-ref cast/transfer leg) is the
                 // faithful store for them.
-                assign_text_var(estate, di.target, s);
+                assign_text_var(estate, di.target, s)?;
             }
         }
     }
 
-    PLpgSQL_rc::PLPGSQL_RC_OK
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
 /// `exec_stmt_fors(estate, stmt)` (pl_exec.c 2766) — FOR rec/row IN SELECT ...
@@ -1894,7 +1941,7 @@ fn exec_stmt_getdiag(
 fn exec_stmt_fors(
     estate: &mut PLpgSQL_execstate,
     stmt: &types_plpgsql::PLpgSQL_stmt_fors,
-) -> PLpgSQL_rc {
+) -> PLpgSQL_rc_result {
     let expr = stmt.query.as_deref().expect("FOR-IN-SELECT carries a query");
     let loopvar = stmt
         .var
@@ -1904,19 +1951,19 @@ fn exec_stmt_fors(
     // exec_run_select(estate, stmt->query, 0, &portal) — run the query and
     // collect every result row.
     let input_collation = INVALID_OID;
-    let parse_state = build_plpgsql_parse_state(estate, expr, input_collation);
-    let rows = exec_run_select_rows(estate, &expr.query, expr.parseMode, parse_state);
+    let parse_state = build_plpgsql_parse_state(estate, expr, input_collation)?;
+    let rows = exec_run_select_rows(estate, &expr.query, expr.parseMode, parse_state)?;
 
     // Execute the loop.
-    let rc = exec_for_query(estate, loopvar, &stmt.body, stmt.label.as_deref(), rows);
+    let rc = exec_for_query(estate, loopvar, &stmt.body, stmt.label.as_deref(), rows)?;
 
     // exec_eval_cleanup + SPI_freetuptable are folded into the materialize-all
     // teardown (the rows are owned and drop here).
     exec_eval_cleanup(estate);
-    rc
+    Ok(rc)
 }
 
-fn exec_stmt_forc(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
+fn exec_stmt_forc(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
     panic!(
         "seam not wired: exec_stmt_forc (pl_exec.c) — SPI_cursor_open_with_paramlist + \
          exec_for_query (SPI cursor surface)"
@@ -1942,10 +1989,10 @@ fn exec_stmt_forc(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
 fn read_retvar_into_columns(
     estate: &mut PLpgSQL_execstate,
     retvarno: int32,
-) -> Vec<exec_seams::ExecsqlColumn> {
+) -> types_error::PgResult<Vec<exec_seams::ExecsqlColumn>> {
     use backend_utils_adt_misc2::expandedrecord as er;
 
-    match datum_dtype(&estate.datums[retvarno as usize]) {
+    Ok(match datum_dtype(&estate.datums[retvarno as usize]) {
         PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR | PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE => {
             // A scalar SETOF (a 1-column result): read the single variable value.
             // A PROMISE is fulfilled first (C: plpgsql_fulfill_promise).
@@ -1953,11 +2000,12 @@ fn read_retvar_into_columns(
                 == PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE
             {
                 let mut var = take_var(estate, retvarno);
-                seam::plpgsql_fulfill_promise(estate, &mut var);
+                let r = seam::plpgsql_fulfill_promise(estate, &mut var);
                 put_var(estate, retvarno, var);
+                r?;
             }
             let datum = estate.datums[retvarno as usize].clone();
-            let (typeid, typmod, value, isnull) = exec_eval_datum_impl(estate, &datum);
+            let (typeid, typmod, value, isnull) = exec_eval_datum_impl(estate, &datum)?;
             let byref = estate.last_eval_byref.take();
             std::vec![exec_seams::ExecsqlColumn {
                 value: value.as_usize(),
@@ -1976,13 +2024,12 @@ fn read_retvar_into_columns(
                 PLpgSQL_datum::Rec(rec) => rec.erh.as_ref().map(|h| h.0).unwrap_or(0),
                 _ => unreachable!("REC dtype is a Rec datum"),
             };
-            let cols: Option<Vec<exec_seams::ExecsqlColumn>> = erh_table::with_erh_mut(
+            let cols = erh_table::with_erh_mut(
                 handle,
-                |mcx, erh| -> Vec<exec_seams::ExecsqlColumn> {
+                |mcx, erh| -> types_error::PgResult<Vec<exec_seams::ExecsqlColumn>> {
                     // Ensure the tupdesc is available (C: expanded_record_get_tupdesc),
                     // then read each field by position.
-                    er::expanded_record_fetch_tupdesc(mcx, erh)
-                        .unwrap_or_else(|e| std::panic::panic_any(e));
+                    er::expanded_record_fetch_tupdesc(mcx, erh)?;
                     let attrs: Vec<(Oid, int32, std::string::String)> = erh
                         .er_tupdesc
                         .as_ref()
@@ -2001,8 +2048,7 @@ fn read_retvar_into_columns(
                     let mut out = Vec::with_capacity(attrs.len());
                     for (i, (typeid, typmod, name)) in attrs.into_iter().enumerate() {
                         let (value, isnull) =
-                            er::expanded_record_fetch_field(mcx, erh, (i + 1) as i32)
-                                .unwrap_or_else(|e| std::panic::panic_any(e));
+                            er::expanded_record_fetch_field(mcx, erh, (i + 1) as i32)?;
                         let (word, byref, isn) = rich_datum_to_word(&value, isnull);
                         out.push(exec_seams::ExecsqlColumn {
                             value: word,
@@ -2013,10 +2059,13 @@ fn read_retvar_into_columns(
                             byref,
                         });
                     }
-                    out
+                    Ok(out)
                 },
             );
-            cols.unwrap_or_default()
+            match cols {
+                Some(res) => res?,
+                None => Vec::new(),
+            }
         }
         PLpgSQL_datum_type::PLPGSQL_DTYPE_ROW => {
             // `make_tuple_from_row`: read each scalar field's current value.
@@ -2040,7 +2089,7 @@ fn read_retvar_into_columns(
                 }
                 let field_datum = estate.datums[field_dno as usize].clone();
                 let (typeid, typmod, value, isnull) =
-                    exec_eval_datum_impl(estate, &field_datum);
+                    exec_eval_datum_impl(estate, &field_datum)?;
                 let byref = estate.last_eval_byref.take();
                 out.push(exec_seams::ExecsqlColumn {
                     value: value.as_usize(),
@@ -2056,7 +2105,7 @@ fn read_retvar_into_columns(
         PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
             // RETURN NEXT of a single record field → a 1-column row.
             let datum = estate.datums[retvarno as usize].clone();
-            let (typeid, typmod, value, isnull) = exec_eval_datum_impl(estate, &datum);
+            let (typeid, typmod, value, isnull) = exec_eval_datum_impl(estate, &datum)?;
             let byref = estate.last_eval_byref.take();
             std::vec![exec_seams::ExecsqlColumn {
                 value: value.as_usize(),
@@ -2067,7 +2116,7 @@ fn read_retvar_into_columns(
                 byref,
             }]
         }
-    }
+    })
 }
 
 /// `exec_stmt_return_next(estate, stmt)` (pl_exec.c 4116) — RETURN NEXT.
@@ -2080,11 +2129,11 @@ fn read_retvar_into_columns(
 fn exec_stmt_return_next(
     estate: &mut PLpgSQL_execstate,
     stmt: &types_plpgsql::PLpgSQL_stmt_return_next,
-) -> PLpgSQL_rc {
+) -> PLpgSQL_rc_result {
     // C: if (!estate->retisset) ereport(ERROR, "cannot use RETURN NEXT in a
     //    non-SETOF function").
     if !estate.retisset {
-        std::panic::panic_any(
+        return Err(
             types_error::PgError::error(
                 "cannot use RETURN NEXT in a non-SETOF function".to_string(),
             )
@@ -2098,15 +2147,15 @@ fn exec_stmt_return_next(
         // function's result rowtype, and `tuplestore_puttuple`/`putvalues` it.
         // In the owned model the result tuplestore is the active materialize
         // sink; we read the variable's columns and deposit one row.
-        let columns = read_retvar_into_columns(estate, stmt.retvarno);
+        let columns = read_retvar_into_columns(estate, stmt.retvarno)?;
         seam::put_rows_into_sink(std::vec![columns]);
-        return PLpgSQL_rc::PLPGSQL_RC_OK;
+        return Ok(PLpgSQL_rc::PLPGSQL_RC_OK);
     }
 
     if let Some(expr) = stmt.expr.as_deref() {
         // C: tupmap / coercion of the value to the function's element type, then
         // `tuplestore_putvalues(estate->tuple_store, tupdesc, &retval, &isNull)`.
-        let (value, isnull, _rettype, _rettypmod) = seam::exec_eval_expr(estate, expr);
+        let (value, isnull, _rettype, _rettypmod) = seam::exec_eval_expr(estate, expr)?;
         let byref = estate.last_eval_byref.take();
         // Build one single-column row and deposit it into the materialize sink
         // (the `ReturnSetInfo.setResult` tuplestore the executor-frame SRF
@@ -2122,11 +2171,11 @@ fn exec_stmt_return_next(
         };
         seam::put_rows_into_sink(std::vec![std::vec![col]]);
         exec_eval_cleanup(estate);
-        return PLpgSQL_rc::PLPGSQL_RC_OK;
+        return Ok(PLpgSQL_rc::PLPGSQL_RC_OK);
     }
 
     // RETURN NEXT with neither expr nor retvarno is a parse error C never builds.
-    PLpgSQL_rc::PLPGSQL_RC_OK
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
 /// `exec_stmt_return_query(estate, stmt)` (pl_exec.c 4046) — RETURN QUERY [EXECUTE].
@@ -2143,11 +2192,11 @@ fn exec_stmt_return_next(
 fn exec_stmt_return_query(
     estate: &mut PLpgSQL_execstate,
     stmt: &types_plpgsql::PLpgSQL_stmt_return_query,
-) -> PLpgSQL_rc {
+) -> PLpgSQL_rc_result {
     // C: if (!estate->retisset) ereport(ERROR, "cannot use RETURN QUERY in a
     //    non-SETOF function").
     if !estate.retisset {
-        std::panic::panic_any(
+        return Err(
             types_error::PgError::error(
                 "cannot use RETURN QUERY in a non-SETOF function".to_string(),
             )
@@ -2159,10 +2208,10 @@ fn exec_stmt_return_query(
     // dynamic RETURN QUERY EXECUTE → exec_dynquery_with_params).
     let rows = if let Some(query) = stmt.query.as_deref() {
         let input_collation = INVALID_OID;
-        let parse_state = build_plpgsql_parse_state(estate, query, input_collation);
-        exec_run_select_rows(estate, &query.query, query.parseMode, parse_state)
+        let parse_state = build_plpgsql_parse_state(estate, query, input_collation)?;
+        exec_run_select_rows(estate, &query.query, query.parseMode, parse_state)?
     } else {
-        exec_dynquery_with_params(estate, &stmt.dynquery, &stmt.params)
+        exec_dynquery_with_params(estate, &stmt.dynquery, &stmt.params)?
     };
 
     // Push each row into the function's SRF result tuplestore. The tuplestore +
@@ -2175,7 +2224,7 @@ fn exec_stmt_return_query(
     seam::return_query_put_rows(estate, rows);
 
     exec_eval_cleanup(estate);
-    PLpgSQL_rc::PLPGSQL_RC_OK
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
 /// `exec_stmt_raise(estate, stmt)` (pl_exec.c 3725) — build a message and throw
@@ -2186,7 +2235,7 @@ fn exec_stmt_return_query(
 fn exec_stmt_raise(
     estate: &mut PLpgSQL_execstate,
     stmt: &types_plpgsql::PLpgSQL_stmt_raise,
-) -> PLpgSQL_rc {
+) -> PLpgSQL_rc_result {
     use types_plpgsql::PLpgSQL_raise_option_type as Opt;
 
     let mut err_code: int32 = 0;
@@ -2205,11 +2254,11 @@ fn exec_stmt_raise(
         if let Some(edata) = estate.cur_error.clone() {
             // ReThrowError(estate->cur_error): re-raise the error currently
             // being handled. The owned model carries cur_error as the live
-            // PgError, so re-raise is the same panic_any channel as PG_RE_THROW.
-            std::panic::panic_any(edata);
+            // PgError; re-raise is the same `Err` channel as PG_RE_THROW.
+            return Err(edata);
         }
         // oops, we're not inside a handler.
-        std::panic::panic_any(
+        return Err(
             types_error::PgError::error(
                 "RAISE without parameters cannot be used outside an exception handler"
                     .to_string(),
@@ -2219,7 +2268,7 @@ fn exec_stmt_raise(
     }
 
     if let Some(cn) = stmt.condname.as_deref() {
-        err_code = recognize_err_condition(cn, true);
+        err_code = recognize_err_condition(cn, true)?;
         condname = Some(cn.to_string());
     }
 
@@ -2242,7 +2291,7 @@ fn exec_stmt_raise(
                     .next()
                     .unwrap_or_else(|| panic!("unexpected RAISE parameter list length"));
                 let (paramvalue, paramisnull, paramtypeid, _paramtypmod) =
-                    seam::exec_eval_expr(estate, param);
+                    seam::exec_eval_expr(estate, param)?;
                 // A pass-by-reference result leaves its varlena/cstring image in
                 // estate.last_eval_byref (value bare-word == 0); take it so the
                 // output function reads the real referent.
@@ -2250,7 +2299,7 @@ fn exec_stmt_raise(
                 let extval = if paramisnull {
                     "<NULL>".to_string()
                 } else {
-                    convert_value_to_string(paramvalue, param_byref, paramtypeid)
+                    convert_value_to_string(paramvalue, param_byref, paramtypeid)?
                 };
                 ds.push_str(&extval);
                 exec_eval_cleanup(estate);
@@ -2275,38 +2324,38 @@ fn exec_stmt_raise(
     for opt in &stmt.options {
         let expr = opt.expr.as_deref().expect("RAISE option carries an expr");
         let (optionvalue, optionisnull, optiontypeid, _optiontypmod) =
-            seam::exec_eval_expr(estate, expr);
+            seam::exec_eval_expr(estate, expr)?;
         // A pass-by-reference option value (MESSAGE/DETAIL/HINT text) carries its
         // varlena image out-of-band in last_eval_byref (bare word == 0).
         let option_byref = estate.last_eval_byref.clone();
         if optionisnull {
-            std::panic::panic_any(
+            return Err(
                 types_error::PgError::error("RAISE statement option cannot be null".to_string())
                     .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
             );
         }
-        let extval = convert_value_to_string(optionvalue, option_byref, optiontypeid);
+        let extval = convert_value_to_string(optionvalue, option_byref, optiontypeid)?;
 
         match opt.opt_type {
             Opt::PLPGSQL_RAISEOPTION_ERRCODE => {
                 if err_code != 0 {
-                    raise_option_already_specified("ERRCODE");
+                    return Err(raise_option_already_specified("ERRCODE"));
                 }
-                err_code = recognize_err_condition(&extval, true);
+                err_code = recognize_err_condition(&extval, true)?;
                 condname = Some(extval);
             }
-            Opt::PLPGSQL_RAISEOPTION_MESSAGE => set_raise_option_text(&mut err_message, extval, "MESSAGE"),
-            Opt::PLPGSQL_RAISEOPTION_DETAIL => set_raise_option_text(&mut err_detail, extval, "DETAIL"),
-            Opt::PLPGSQL_RAISEOPTION_HINT => set_raise_option_text(&mut err_hint, extval, "HINT"),
-            Opt::PLPGSQL_RAISEOPTION_COLUMN => set_raise_option_text(&mut err_column, extval, "COLUMN"),
+            Opt::PLPGSQL_RAISEOPTION_MESSAGE => set_raise_option_text(&mut err_message, extval, "MESSAGE")?,
+            Opt::PLPGSQL_RAISEOPTION_DETAIL => set_raise_option_text(&mut err_detail, extval, "DETAIL")?,
+            Opt::PLPGSQL_RAISEOPTION_HINT => set_raise_option_text(&mut err_hint, extval, "HINT")?,
+            Opt::PLPGSQL_RAISEOPTION_COLUMN => set_raise_option_text(&mut err_column, extval, "COLUMN")?,
             Opt::PLPGSQL_RAISEOPTION_CONSTRAINT => {
-                set_raise_option_text(&mut err_constraint, extval, "CONSTRAINT")
+                set_raise_option_text(&mut err_constraint, extval, "CONSTRAINT")?
             }
             Opt::PLPGSQL_RAISEOPTION_DATATYPE => {
-                set_raise_option_text(&mut err_datatype, extval, "DATATYPE")
+                set_raise_option_text(&mut err_datatype, extval, "DATATYPE")?
             }
-            Opt::PLPGSQL_RAISEOPTION_TABLE => set_raise_option_text(&mut err_table, extval, "TABLE"),
-            Opt::PLPGSQL_RAISEOPTION_SCHEMA => set_raise_option_text(&mut err_schema, extval, "SCHEMA"),
+            Opt::PLPGSQL_RAISEOPTION_TABLE => set_raise_option_text(&mut err_table, extval, "TABLE")?,
+            Opt::PLPGSQL_RAISEOPTION_SCHEMA => set_raise_option_text(&mut err_schema, extval, "SCHEMA")?,
         }
 
         exec_eval_cleanup(estate);
@@ -2339,29 +2388,31 @@ fn exec_stmt_raise(
         table: err_table,
         schema: err_schema,
     };
-    if let Err(e) = exec_seams::raise_ereport::call(report) {
-        // For an ERROR-level RAISE the report cycle raises; propagate it.
-        std::panic::panic_any(e);
-    }
+    // For an ERROR-level RAISE the report cycle raises; propagate it as `Err`.
+    // A non-ERROR level (NOTICE/WARNING/…) reports to the client and returns Ok.
+    exec_seams::raise_ereport::call(report)?;
 
-    PLpgSQL_rc::PLPGSQL_RC_OK
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
 /// `SET_RAISE_OPTION_TEXT(opt, name)` (pl_exec.c macro): error if `opt` already
 /// set, else store `extval`.
-fn set_raise_option_text(opt: &mut Option<String>, extval: String, name: &str) {
+fn set_raise_option_text(
+    opt: &mut Option<String>,
+    extval: String,
+    name: &str,
+) -> types_error::PgResult<()> {
     if opt.is_some() {
-        raise_option_already_specified(name);
+        return Err(raise_option_already_specified(name));
     }
     *opt = Some(extval);
+    Ok(())
 }
 
 /// `ereport(ERROR, ERRCODE_SYNTAX_ERROR, "RAISE option already specified: %s")`.
-fn raise_option_already_specified(name: &str) -> ! {
-    std::panic::panic_any(
-        types_error::PgError::error(format!("RAISE option already specified: {name}"))
-            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
-    );
+fn raise_option_already_specified(name: &str) -> types_error::PgError {
+    types_error::PgError::error(format!("RAISE option already specified: {name}"))
+        .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR)
 }
 
 /// The UTF-8 length of the character whose first byte is `b` (1..=4).
@@ -2381,20 +2432,18 @@ fn utf8_char_len(b: u8) -> usize {
 
 /// `plpgsql_recognize_err_condition(condname, allow_sqlstate)` (pl_comp.c) via
 /// the installed seam — panics with the unrecognized-condition ereport on Err.
-fn recognize_err_condition(condname: &str, allow_sqlstate: bool) -> int32 {
-    match exec_seams::recognize_err_condition::call(condname.to_string(), allow_sqlstate) {
-        Ok(c) => c,
-        Err(e) => std::panic::panic_any(e),
-    }
+fn recognize_err_condition(condname: &str, allow_sqlstate: bool) -> types_error::PgResult<int32> {
+    exec_seams::recognize_err_condition::call(condname.to_string(), allow_sqlstate)
 }
 
 /// `convert_value_to_string(estate, value, valtype)` (pl_exec.c) via the
 /// installed seam (getTypeOutputInfo + OidOutputFunctionCall).
-fn convert_value_to_string(value: Datum, byref: Option<Vec<u8>>, valtype: Oid) -> String {
-    match exec_seams::convert_value_to_string::call(value.as_usize(), byref, valtype) {
-        Ok(s) => s,
-        Err(e) => std::panic::panic_any(e),
-    }
+fn convert_value_to_string(
+    value: Datum,
+    byref: Option<Vec<u8>>,
+    valtype: Oid,
+) -> types_error::PgResult<String> {
+    exec_seams::convert_value_to_string::call(value.as_usize(), byref, valtype)
 }
 
 /// `unpack_sql_state(sql_state)` (elog.c): the inverse of `MAKE_SQLSTATE` — the
@@ -2412,7 +2461,7 @@ fn unpack_sql_state(sql_state: int32) -> String {
     out
 }
 
-fn exec_stmt_assert(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
+fn exec_stmt_assert(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
     panic!(
         "seam not wired: exec_stmt_assert (pl_exec.c) — exec_eval_boolean(cond) + \
          exec_eval_expr(message) + ereport(ASSERT_FAILURE) (value substrate)"
@@ -2427,7 +2476,7 @@ fn exec_stmt_assert(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
 fn exec_stmt_execsql(
     estate: &mut PLpgSQL_execstate,
     stmt: &types_plpgsql::PLpgSQL_stmt_execsql,
-) -> PLpgSQL_rc {
+) -> PLpgSQL_rc_result {
     let expr = stmt.sqlstmt.as_deref().expect("EXECSQL carries a sqlstmt");
 
     // plpgsql_extra_errors / plpgsql_extra_warnings & PLPGSQL_XCHECK_TOOMANYROWS:
@@ -2453,10 +2502,10 @@ fn exec_stmt_execsql(
     };
 
     let input_collation = INVALID_OID;
-    let parse_state = build_plpgsql_parse_state(estate, expr, input_collation);
-    let snapshot = build_datum_snapshot(estate);
+    let parse_state = build_plpgsql_parse_state(estate, expr, input_collation)?;
+    let snapshot = build_datum_snapshot(estate)?;
 
-    let result = match exec_seams::exec_execsql_via_spi::call(
+    let result = exec_seams::exec_execsql_via_spi::call(
         expr.query.clone(),
         expr.parseMode,
         parse_state,
@@ -2464,10 +2513,7 @@ fn exec_stmt_execsql(
         estate.readonly_func,
         stmt.into,
         tcount,
-    ) {
-        Ok(r) => r,
-        Err(e) => std::panic::panic_any(e),
-    };
+    )?;
 
     let code = result.code;
     let processed = result.processed;
@@ -2493,14 +2539,18 @@ fn exec_stmt_execsql(
         | exec_seams::SPI_OK_DELETE_RETURNING => exec_set_found(estate, processed != 0),
         exec_seams::SPI_OK_SELINTO | exec_seams::SPI_OK_UTILITY => {}
         exec_seams::SPI_OK_REWRITTEN => exec_set_found(estate, false),
-        exec_seams::SPI_ERROR_COPY => std::panic::panic_any(
-            types_error::PgError::error("cannot COPY to/from client in PL/pgSQL".to_string())
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ),
-        _ => std::panic::panic_any(types_error::PgError::error(format!(
-            "SPI_execute_plan_with_paramlist failed executing query \"{}\": code {code}",
-            expr.query
-        ))),
+        exec_seams::SPI_ERROR_COPY => {
+            return Err(
+                types_error::PgError::error("cannot COPY to/from client in PL/pgSQL".to_string())
+                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            )
+        }
+        _ => {
+            return Err(types_error::PgError::error(format!(
+                "SPI_execute_plan_with_paramlist failed executing query \"{}\": code {code}",
+                expr.query
+            )))
+        }
     }
 
     // All variants should save result info for GET DIAGNOSTICS.
@@ -2509,7 +2559,7 @@ fn exec_stmt_execsql(
     // Process INTO if present.
     if stmt.into {
         if !result.returned_tuptable {
-            std::panic::panic_any(
+            return Err(
                 types_error::PgError::error(
                     "INTO used with a command that cannot return data".to_string(),
                 )
@@ -2522,30 +2572,30 @@ fn exec_stmt_execsql(
 
         if n == 0 {
             if stmt.strict {
-                std::panic::panic_any(
+                return Err(
                     types_error::PgError::error("query returned no rows".to_string())
                         .with_sqlstate(types_error::ERRCODE_NO_DATA_FOUND),
                 );
             }
             // Set the target to NULL(s).
-            exec_move_row_into_target(estate, target, &[]);
+            exec_move_row_into_target(estate, target, &[])?;
         } else {
             if n > 1 && (stmt.strict || mod_stmt || too_many_rows_level != 0) {
-                std::panic::panic_any(
+                return Err(
                     types_error::PgError::error("query returned more than one row".to_string())
                         .with_detail("Make sure the query returns a single row, or use LIMIT 1.".to_string())
                         .with_sqlstate(types_error::ERRCODE_TOO_MANY_ROWS),
                 );
             }
             // Put the first result row into the target.
-            exec_move_row_into_target(estate, target, &result.first_row);
+            exec_move_row_into_target(estate, target, &result.first_row)?;
         }
 
         exec_eval_cleanup(estate);
     } else {
         // If the statement returned a tuple table, complain (no destination).
         if result.returned_tuptable && code == exec_seams::SPI_OK_SELECT {
-            std::panic::panic_any(
+            return Err(
                 types_error::PgError::error("query has no destination for result data".to_string())
                     .with_detail(
                         "If you want to discard the results of a SELECT, use PERFORM instead."
@@ -2556,7 +2606,7 @@ fn exec_stmt_execsql(
         }
     }
 
-    PLpgSQL_rc::PLPGSQL_RC_OK
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
 /// `exec_move_row(estate, target, tuple, tupdesc)` (pl_exec.c) specialized to
@@ -2568,7 +2618,7 @@ fn exec_move_row_into_target(
     estate: &mut PLpgSQL_execstate,
     target: &types_plpgsql::PLpgSQL_variable,
     columns: &[exec_seams::ExecsqlColumn],
-) {
+) -> types_error::PgResult<()> {
     let dno = target.dno;
     match datum_dtype(&estate.datums[dno as usize]) {
         PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR | PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE => {
@@ -2585,8 +2635,8 @@ fn exec_move_row_into_target(
                     c.isnull,
                     c.typeid,
                     c.typmod,
-                ),
-                None => exec_assign_value_impl(estate, dno, Datum::null(), true, INVALID_OID, -1),
+                )?,
+                None => exec_assign_value_impl(estate, dno, Datum::null(), true, INVALID_OID, -1)?,
             }
         }
         PLpgSQL_datum_type::PLPGSQL_DTYPE_ROW => {
@@ -2618,7 +2668,7 @@ fn exec_move_row_into_target(
                         c.isnull,
                         c.typeid,
                         c.typmod,
-                    ),
+                    )?,
                     None => exec_assign_value_impl(
                         estate,
                         field_dno,
@@ -2626,14 +2676,14 @@ fn exec_move_row_into_target(
                         true,
                         INVALID_OID,
                         -1,
-                    ),
+                    )?,
                 }
             }
         }
         PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => {
             // `SELECT ... INTO <record>`: build a transient record from the
             // result columns and install it as the REC's live expanded header.
-            trigger::exec_move_row_into_record_impl(estate, dno, columns);
+            trigger::exec_move_row_into_record_impl(estate, dno, columns)?;
         }
         PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
             // INTO a single record field (`SELECT ... INTO rec.field`) maps the
@@ -2647,14 +2697,15 @@ fn exec_move_row_into_target(
                     c.isnull,
                     c.typeid,
                     c.typmod,
-                ),
-                None => exec_assign_value_impl(estate, dno, Datum::null(), true, INVALID_OID, -1),
+                )?,
+                None => exec_assign_value_impl(estate, dno, Datum::null(), true, INVALID_OID, -1)?,
             }
         }
     }
+    Ok(())
 }
 
-fn exec_stmt_dynexecute(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
+fn exec_stmt_dynexecute(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
     panic!(
         "seam not wired: exec_stmt_dynexecute (pl_exec.c) — exec_eval_expr(querystring) + \
          SPI_execute / exec_eval_using_params / exec_move_row (SPI + fmgr)"
@@ -2668,18 +2719,18 @@ fn exec_stmt_dynexecute(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
 fn exec_stmt_dynfors(
     estate: &mut PLpgSQL_execstate,
     stmt: &types_plpgsql::PLpgSQL_stmt_dynfors,
-) -> PLpgSQL_rc {
+) -> PLpgSQL_rc_result {
     let loopvar = stmt
         .var
         .as_deref()
         .expect("FOR-IN-EXECUTE carries a loop variable");
 
-    let rows = exec_dynquery_with_params(estate, &stmt.query, &stmt.params);
+    let rows = exec_dynquery_with_params(estate, &stmt.query, &stmt.params)?;
 
-    let rc = exec_for_query(estate, loopvar, &stmt.body, stmt.label.as_deref(), rows);
+    let rc = exec_for_query(estate, loopvar, &stmt.body, stmt.label.as_deref(), rows)?;
 
     exec_eval_cleanup(estate);
-    rc
+    Ok(rc)
 }
 
 /// `exec_dynquery_with_params(estate, dynquery, params, ...)` (pl_exec.c 8359) —
@@ -2692,15 +2743,15 @@ fn exec_dynquery_with_params(
     estate: &mut PLpgSQL_execstate,
     dynquery: &Option<Box<types_plpgsql::PLpgSQL_expr>>,
     params: &[types_plpgsql::PLpgSQL_expr],
-) -> Vec<Vec<exec_seams::ExecsqlColumn>> {
+) -> types_error::PgResult<Vec<Vec<exec_seams::ExecsqlColumn>>> {
     let dynquery = dynquery
         .as_deref()
         .expect("FOR-IN-EXECUTE carries a query-string expression");
 
     // Evaluate the string expression (querystr = exec_eval_expr(dynquery)).
-    let (value, isnull, restype, _restypmod) = exec_eval_expr_impl(estate, dynquery);
+    let (value, isnull, restype, _restypmod) = exec_eval_expr_impl(estate, dynquery)?;
     if isnull {
-        std::panic::panic_any(
+        return Err(
             types_error::PgError::error(
                 "query string argument of EXECUTE is null".to_string(),
             )
@@ -2709,7 +2760,7 @@ fn exec_dynquery_with_params(
     }
     // convert_value_to_string(estate, query, restype) — render the value to text.
     let byref = estate.last_eval_byref.take();
-    let querystr = convert_value_to_string(value, byref, restype);
+    let querystr = convert_value_to_string(value, byref, restype)?;
     exec_eval_cleanup(estate);
 
     if !params.is_empty() {
@@ -2737,35 +2788,38 @@ fn exec_dynquery_with_params(
     )
 }
 
-fn exec_stmt_open(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
+// NB: the FOR-IN-EXECUTE USING leg above stays a loud `panic!` (unported
+// dynamic-param substrate), reached before any row is produced.
+
+fn exec_stmt_open(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
     panic!(
         "seam not wired: exec_stmt_open (pl_exec.c) — exec_prepare_plan / \
          SPI_cursor_open_with_paramlist / exec_dynquery_with_params (SPI cursor surface)"
     );
 }
 
-fn exec_stmt_fetch(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
+fn exec_stmt_fetch(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
     panic!(
         "seam not wired: exec_stmt_fetch (pl_exec.c) — SPI_scroll_cursor_fetch/move + \
          exec_move_row (SPI cursor surface + value substrate)"
     );
 }
 
-fn exec_stmt_close(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
+fn exec_stmt_close(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
     panic!(
         "seam not wired: exec_stmt_close (pl_exec.c) — SPI_cursor_find / SPI_cursor_close \
          (SPI cursor surface)"
     );
 }
 
-fn exec_stmt_commit(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
+fn exec_stmt_commit(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
     panic!(
         "seam not wired: exec_stmt_commit (pl_exec.c) — SPI_commit / SPI_start_transaction + \
          simple-expr infra rebuild (SPI + xact)"
     );
 }
 
-fn exec_stmt_rollback(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
+fn exec_stmt_rollback(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
     panic!(
         "seam not wired: exec_stmt_rollback (pl_exec.c) — SPI_rollback / SPI_start_transaction + \
          simple-expr infra rebuild (SPI + xact)"
@@ -2920,7 +2974,7 @@ pub fn plpgsql_exec_function(
     simple_eval_resowner: Option<ResourceOwner>,
     procedure_resowner: Option<ResourceOwner>,
     atomic: bool,
-) -> FunctionResult {
+) -> types_error::PgResult<FunctionResult> {
     // Setup the execution state.
     let mut estate = plpgsql_estate_setup(func, None, simple_eval_estate, simple_eval_resowner);
     estate.procedure_resowner = procedure_resowner;
@@ -2975,9 +3029,9 @@ pub fn plpgsql_exec_function(
             }
             PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => {
                 if !arg.isnull {
-                    seam::exec_move_row_from_datum(&mut estate, n, arg.value);
+                    seam::exec_move_row_from_datum(&mut estate, n, arg.value)?;
                 } else {
-                    seam::exec_move_row_null(&mut estate, n);
+                    seam::exec_move_row_null(&mut estate, n)?;
                 }
                 exec_eval_cleanup(&mut estate);
             }
@@ -2999,10 +3053,10 @@ pub fn plpgsql_exec_function(
         .action
         .as_deref()
         .expect("compiled PL/pgSQL function has an action block");
-    let rc = exec_toplevel_block(&mut estate, action);
+    let rc = exec_toplevel_block(&mut estate, action)?;
     if rc != PLpgSQL_rc::PLPGSQL_RC_RETURN {
         estate.err_text = None;
-        seam::ereport_no_return_statement();
+        return Err(seam::ereport_no_return_statement());
     }
 
     // We got a return value — process it.
@@ -3057,7 +3111,7 @@ pub fn plpgsql_exec_function(
                 -1,
                 fn_rettype,
                 -1,
-            );
+            )?;
             result.value = v;
             result.isnull = isnull;
             result.byref = byref;
@@ -3067,7 +3121,7 @@ pub fn plpgsql_exec_function(
     // Let the eval econtext be released (exec_eval_cleanup + teardown happens
     // as the estate drops; the SPI Proc context / shared econtext are owned by
     // the caller's SPI bracket).
-    result
+    Ok(result)
 }
 
 /// `plpgsql_exec_trigger(func, trigdata)` (pl_exec.c) — the DML-trigger
@@ -3075,7 +3129,7 @@ pub fn plpgsql_exec_function(
 pub fn plpgsql_exec_trigger(
     func: &PLpgSQL_function,
     trigdata: types_plpgsql::TriggerData,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     trigger::plpgsql_exec_trigger_impl(func, trigdata)
 }
 
