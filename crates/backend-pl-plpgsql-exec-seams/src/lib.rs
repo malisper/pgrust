@@ -127,9 +127,16 @@ seam_core::seam!(
     /// in `RAISE`, the `USING` option text). The executor (`pl_exec.c`, this
     /// unit) is layered below the fmgr/lsyscache output-function path, so the
     /// handler installs this from its `init_seams()`. `value` is the bare-word
-    /// datum (`0` when the caller already screened NULL); the result is the
-    /// NUL-excluded output bytes as an owned `String`.
-    pub fn convert_value_to_string(value: usize, valtype: Oid) -> PgResult<std::string::String>
+    /// datum (`0` when the caller already screened NULL); for a pass-by-reference
+    /// type (`text`/`varchar`/`numeric`/…) the bare word is `0` and the real
+    /// referent is its varlena/cstring image, carried out-of-band in `byref`
+    /// (C: the `Datum` *is* the pointer; the owned model materializes the image).
+    /// The result is the NUL-excluded output bytes as an owned `String`.
+    pub fn convert_value_to_string(
+        value: usize,
+        byref: std::option::Option<std::vec::Vec<u8>>,
+        valtype: Oid,
+    ) -> PgResult<std::string::String>
 );
 
 seam_core::seam!(

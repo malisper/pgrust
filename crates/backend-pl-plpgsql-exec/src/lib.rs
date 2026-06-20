@@ -1408,10 +1408,14 @@ fn exec_stmt_raise(
                     .unwrap_or_else(|| panic!("unexpected RAISE parameter list length"));
                 let (paramvalue, paramisnull, paramtypeid, _paramtypmod) =
                     seam::exec_eval_expr(estate, param);
+                // A pass-by-reference result leaves its varlena/cstring image in
+                // estate.last_eval_byref (value bare-word == 0); take it so the
+                // output function reads the real referent.
+                let param_byref = estate.last_eval_byref.clone();
                 let extval = if paramisnull {
                     "<NULL>".to_string()
                 } else {
-                    convert_value_to_string(paramvalue, paramtypeid)
+                    convert_value_to_string(paramvalue, param_byref, paramtypeid)
                 };
                 ds.push_str(&extval);
                 exec_eval_cleanup(estate);
@@ -1437,13 +1441,16 @@ fn exec_stmt_raise(
         let expr = opt.expr.as_deref().expect("RAISE option carries an expr");
         let (optionvalue, optionisnull, optiontypeid, _optiontypmod) =
             seam::exec_eval_expr(estate, expr);
+        // A pass-by-reference option value (MESSAGE/DETAIL/HINT text) carries its
+        // varlena image out-of-band in last_eval_byref (bare word == 0).
+        let option_byref = estate.last_eval_byref.clone();
         if optionisnull {
             std::panic::panic_any(
                 types_error::PgError::error("RAISE statement option cannot be null".to_string())
                     .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
             );
         }
-        let extval = convert_value_to_string(optionvalue, optiontypeid);
+        let extval = convert_value_to_string(optionvalue, option_byref, optiontypeid);
 
         match opt.opt_type {
             Opt::PLPGSQL_RAISEOPTION_ERRCODE => {
@@ -1548,8 +1555,8 @@ fn recognize_err_condition(condname: &str, allow_sqlstate: bool) -> int32 {
 
 /// `convert_value_to_string(estate, value, valtype)` (pl_exec.c) via the
 /// installed seam (getTypeOutputInfo + OidOutputFunctionCall).
-fn convert_value_to_string(value: Datum, valtype: Oid) -> String {
-    match exec_seams::convert_value_to_string::call(value.as_usize(), valtype) {
+fn convert_value_to_string(value: Datum, byref: Option<Vec<u8>>, valtype: Oid) -> String {
+    match exec_seams::convert_value_to_string::call(value.as_usize(), byref, valtype) {
         Ok(s) => s,
         Err(e) => std::panic::panic_any(e),
     }

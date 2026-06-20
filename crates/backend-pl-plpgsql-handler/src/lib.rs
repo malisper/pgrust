@@ -605,16 +605,35 @@ pub fn init_seams() {
     // USING option text. The plpgsql value crosses as a bare word; for a
     // by-value type that is the value itself (a by-ref result is the separate
     // by-ref-Datum keystone, which the output function would dereference).
-    backend_pl_plpgsql_exec_seams::convert_value_to_string::set(|value: usize, valtype| {
-        let cxt = mcx::MemoryContext::new("PL/pgSQL convert_value_to_string");
-        let mcx = cxt.mcx();
-        let (typoutput, _typisvarlena) =
-            backend_utils_cache_lsyscache_seams::get_type_output_info::call(valtype)?;
-        let datum = types_tuple::backend_access_common_heaptuple::Datum::from_usize(value);
-        let bytes =
-            backend_utils_fmgr_fmgr_seams::oid_output_function_call::call(mcx, typoutput, &datum)?;
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
-    });
+    backend_pl_plpgsql_exec_seams::convert_value_to_string::set(
+        |value: usize, byref: Option<Vec<u8>>, valtype| {
+            let cxt = mcx::MemoryContext::new("PL/pgSQL convert_value_to_string");
+            let mcx = cxt.mcx();
+            let (typoutput, typisvarlena) =
+                backend_utils_cache_lsyscache_seams::get_type_output_info::call(valtype)?;
+            // For a pass-by-reference type the bare word is `0` and the referent
+            // varlena/cstring image is carried out-of-band in `byref`; build the
+            // canonical by-ref Datum so the output function reads the real value
+            // (C: the Datum *is* the pointer). A by-value type uses the bare word.
+            use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+            let datum = match byref {
+                Some(image) if typisvarlena => CanonDatum::ByRef(mcx::slice_in(mcx, &image)?),
+                Some(image) => {
+                    // A pass-by-reference but non-varlena output type (e.g. a
+                    // cstring-domain) renders its image as a cstring referent.
+                    match std::str::from_utf8(&image) {
+                        Ok(s) => CanonDatum::Cstring(s.to_string()),
+                        Err(_) => CanonDatum::ByRef(mcx::slice_in(mcx, &image)?),
+                    }
+                }
+                None => CanonDatum::from_usize(value),
+            };
+            let bytes = backend_utils_fmgr_fmgr_seams::oid_output_function_call::call(
+                mcx, typoutput, &datum,
+            )?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        },
+    );
 
     // Install `plpgsql_recognize_err_condition` (pl_comp.c) — bridge to the
     // compiler's real body (the exception-label table + SQLSTATE parse).
