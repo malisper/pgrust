@@ -3647,8 +3647,10 @@ pub fn extract_expr_dependencies_value<'mcx>(
         depends_on_role: false,
     };
     // (void) extract_query_dependencies_walker(result, &root); — `result` is a
-    // bare Expr, wrapped as the `Node::Expr` the walker dispatches on.
-    let node = Node::mk_expr(_mcx, expr.clone())?;
+    // bare Expr, wrapped as the `Node::Expr` the walker dispatches on. Deep-copy
+    // via `Expr::clone_in` (a shallow `.clone()` panics on the `SubPlan` arm —
+    // e.g. EXPLAIN of an OR-filter SubPlan reaches here with a SubPlanExpr).
+    let node = Node::mk_expr(_mcx, expr.clone_in(_mcx)?)?;
     extract_query_dependencies_walker(&node, &mut ctx)?;
     Ok(ext::QueryDependenciesValue {
         relation_oids: ctx.relation_oids,
