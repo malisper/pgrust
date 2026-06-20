@@ -196,6 +196,11 @@ fn elem_datum<'mcx>(
         Some(types_fmgr::boundary::RefPayload::Varlena(b)) => {
             construct::byref_image_to_datum(ctx_mcx, b.as_slice())
         }
+        // A composite element (`record`/row type) is a varlena-framed
+        // `HeapTupleHeader` image; copy its flat bytes verbatim like a varlena.
+        Some(types_fmgr::boundary::RefPayload::Composite(b)) => {
+            construct::byref_image_to_datum(ctx_mcx, b.as_slice())
+        }
         // `cstring` (`typlen == -2`) elements: `accumArrayResult`'s by-ref copy
         // reads a NUL-terminated image, so append the terminator the `Cstring`
         // lane drops.

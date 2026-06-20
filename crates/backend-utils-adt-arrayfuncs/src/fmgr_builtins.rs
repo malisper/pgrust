@@ -235,7 +235,11 @@ fn arg_element<'a>(
         ArrayElementDatum::ByRef(
             fcinfo
                 .ref_arg(i)
-                .and_then(|p| p.as_varlena().or_else(|| p.as_cstring().map(|c| c.as_bytes())))
+                .and_then(|p| {
+                    p.as_varlena()
+                        .or_else(|| p.as_composite())
+                        .or_else(|| p.as_cstring().map(|c| c.as_bytes()))
+                })
                 .expect("array element fn: by-ref element missing from by-ref lane"),
         )
     })
@@ -492,7 +496,11 @@ fn resolve_push_element(
         // pointer into the stored element).
         let bytes = fcinfo
             .ref_arg(elem_argno)
-            .and_then(|p| p.as_varlena().or_else(|| p.as_cstring().map(|c| c.as_bytes())))
+            .and_then(|p| {
+                p.as_varlena()
+                    .or_else(|| p.as_composite())
+                    .or_else(|| p.as_cstring().map(|c| c.as_bytes()))
+            })
             .expect("array_push: by-ref element missing from by-ref lane")
             .to_vec();
         let ptr = bytes.as_ptr() as usize;
@@ -895,7 +903,11 @@ fn resolve_fill_value(
     } else {
         let bytes = fcinfo
             .ref_arg(0)
-            .and_then(|p| p.as_varlena().or_else(|| p.as_cstring().map(|c| c.as_bytes())))
+            .and_then(|p| {
+                p.as_varlena()
+                    .or_else(|| p.as_composite())
+                    .or_else(|| p.as_cstring().map(|c| c.as_bytes()))
+            })
             .expect("array_fill: by-ref element missing from by-ref lane")
             .to_vec();
         let ptr = bytes.as_ptr() as usize;

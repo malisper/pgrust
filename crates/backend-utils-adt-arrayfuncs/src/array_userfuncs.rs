@@ -84,11 +84,12 @@ use pg_prng_seams as prng;
 use crate::sql;
 use types_error::PgError;
 
-/// `format_type_be(element_type)`-style identifier for the "could not identify"
-/// error message; the real `format_type_be` lives in a not-yet-reachable owner,
-/// so the OID is reported (same convention as `ops::format_type_be`).
+/// `format_type_be(element_type)` — the type's printable name for backend error
+/// messages (format_type.c), via the installed `format_type_be` seam in a
+/// scratch context. Falls back to the raw OID only if the lookup itself errors.
 fn format_type_be(element_type: Oid) -> String {
-    format!("type {element_type}")
+    backend_utils_adt_format_type_seams::format_type_be_str::call(element_type)
+        .unwrap_or_else(|_| format!("type {element_type}"))
 }
 
 /// `array_cat(v1, v2)` (array_userfuncs.c:316): concatenate two nD arrays into an

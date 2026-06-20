@@ -2174,13 +2174,21 @@ fn prepare_value_elem<'mcx>(
             let flat = types_datum::flatten_expanded(eo.as_ref());
             Ok(PreparedElem::Bytes(slice_to_pgvec(mcx, &flat)?))
         }
+        TDatum::Composite(_) => {
+            // A composite value already IS a varlena-framed HeapTupleHeader
+            // image (C: `struct varlena *`). Materialize its flat datum image
+            // and treat it as a varlena element (composite element types are
+            // always varlena, elmlen == -1). Flattened images are never toasted.
+            let flat = v.as_varlena_bytes();
+            Ok(PreparedElem::Bytes(slice_to_pgvec(mcx, &flat)?))
+        }
         TDatum::ByVal(_) => panic!(
             "construct_md_array_values: by-reference element type but value is \
              Datum::ByVal"
         ),
-        TDatum::Composite(_) | TDatum::Internal(_) => panic!(
-            "construct_md_array_values: element value is Composite/Internal, \
-             which has no flat by-reference image (arrays of record/internal are \
+        TDatum::Internal(_) => panic!(
+            "construct_md_array_values: element value is Internal, \
+             which has no flat by-reference image (arrays of internal are \
              not constructed through this path)"
         ),
     }

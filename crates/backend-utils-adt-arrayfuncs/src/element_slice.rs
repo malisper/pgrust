@@ -1045,6 +1045,7 @@ pub fn array_set_slice<'mcx>(
     let newitemsize = array_nelems_size(
         src_array,
         arr_data_ptr_off(src_array),
+        0,
         src_nullsptr,
         nsrcitems,
         elmlen,
@@ -1086,6 +1087,7 @@ pub fn array_set_slice<'mcx>(
         lenbefore = array_nelems_size(
             array,
             oldarraydata,
+            0,
             oldarraybitmap,
             itemsbefore,
             elmlen,
@@ -1101,6 +1103,7 @@ pub fn array_set_slice<'mcx>(
             olditemsize = array_nelems_size(
                 array,
                 oldarraydata + lenbefore as usize,
+                itemsbefore,
                 oldarraybitmap,
                 nolditems,
                 elmlen,
@@ -1587,10 +1590,12 @@ fn array_copy_cross<'mcx>(
     typbyval: bool,
     typalign: u8,
 ) -> usize {
-    // Determine the byte span of `nitems` source elements starting at src_off.
+    // Determine the byte span of `nitems` source elements starting at src_off
+    // (element index `src_elem_offset`, used to position the null bitmap).
     let bytes = array_nelems_size(
         src,
         src_off,
+        src_elem_offset,
         nullbitmap,
         nitems,
         typlen,

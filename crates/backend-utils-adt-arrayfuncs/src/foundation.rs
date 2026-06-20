@@ -474,7 +474,7 @@ pub fn array_seek(
     buf: &[u8],
     data_off: usize,
     nullbitmap: Option<usize>,
-    bitmask_in: i32,
+    offset: i32,
     typlen: i32,
     typbyval: bool,
     typalign: u8,
@@ -486,18 +486,18 @@ pub fn array_seek(
     if typlen > 0 && nullbitmap.is_none() {
         // ptr + nitems * att_align_nominal(typlen, typalign).
         let step = att_align_nominal(typlen as usize, typalign);
-        return (data_off + nitems as usize * step, bitmask_in);
+        return (data_off + nitems as usize * step, 0);
     }
 
     let mut ptr = data_off;
 
     // seems worth having separate loops for NULL and no-NULLs cases.
     if let Some(bitmap_base) = nullbitmap {
-        // The caller positions `nullbitmap` at its base; the per-byte cursor
-        // and `bitmask` are threaded here (mirrors C advancing the local
-        // `nullbitmap` pointer + `bitmask`).
-        let mut bm = bitmap_base;
-        let mut bitmask = bitmask_in;
+        // C: nullbitmap += offset / 8; bitmask = 1 << (offset % 8);
+        // The `offset` argument positions the bitmap cursor at the first
+        // element to be walked (faithful to arrayfuncs.c array_seek).
+        let mut bm = bitmap_base + (offset as usize) / 8;
+        let mut bitmask: i32 = 1 << (offset % 8);
         for _ in 0..nitems {
             if (buf[bm] as i32 & bitmask) != 0 {
                 ptr = att_addlength_pointer(ptr, typlen, buf, ptr);
@@ -515,7 +515,7 @@ pub fn array_seek(
             ptr = att_addlength_pointer(ptr, typlen, buf, ptr);
             ptr = att_align_nominal(ptr, typalign);
         }
-        (ptr, bitmask_in)
+        (ptr, 0)
     }
 }
 
@@ -525,6 +525,7 @@ pub fn array_seek(
 pub fn array_nelems_size(
     buf: &[u8],
     data_off: usize,
+    offset: i32,
     nullbitmap: Option<usize>,
     nitems: i32,
     typlen: i32,
@@ -532,22 +533,23 @@ pub fn array_nelems_size(
     typalign: u8,
 ) -> usize {
     // C: array_seek(ptr, offset, nullbitmap, nitems, ...) - ptr.
-    // The refactored interface threads a pre-positioned bitmap base with the
-    // first element's bitmask = 1 (offset-relative to the supplied base).
     let (end, _bitmask) = array_seek(
-        buf, data_off, nullbitmap, 1, typlen, typbyval, typalign, nitems,
+        buf, data_off, nullbitmap, offset, typlen, typbyval, typalign, nitems,
     );
     end - data_off
 }
 
 /// `array_copy(destptr, nitems, srcptr, offset, typlen, typbyval, typalign,
 /// nullbitmap)` (arrayfuncs.c): copy `nitems` elements of data bytes.
+/// `offset` is the 0-based linear element number of the first element (the one
+/// at `src_off`), used to position the source null bitmap.
 pub fn array_copy(
     dest: &mut [u8],
     dest_off: usize,
     nitems: i32,
     src: &[u8],
     src_off: usize,
+    offset: i32,
     nullbitmap: Option<usize>,
     typlen: i32,
     typbyval: bool,
@@ -555,7 +557,7 @@ pub fn array_copy(
 ) -> usize {
     // numbytes = array_nelems_size(srcptr, offset, nullbitmap, nitems, ...).
     let numbytes = array_nelems_size(
-        src, src_off, nullbitmap, nitems, typlen, typbyval, typalign,
+        src, src_off, offset, nullbitmap, nitems, typlen, typbyval, typalign,
     );
     // memcpy(destptr, srcptr, numbytes).
     dest[dest_off..dest_off + numbytes].copy_from_slice(&src[src_off..src_off + numbytes]);
