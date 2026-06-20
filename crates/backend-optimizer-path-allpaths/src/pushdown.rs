@@ -107,7 +107,7 @@ pub(crate) enum PushdownSafe {
 /// `FirstLowInvalidHeapAttributeNumber` (sysattr.h): system columns occupy
 /// `-1 .. FirstLowInvalidHeapAttributeNumber+1`; attribute bitmapsets are offset
 /// by this so attno 0 (whole-row) maps to a valid bit.
-const FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER: i32 = -8;
+const FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER: i32 = -7;
 
 /* ==========================================================================
  * SupportRequestWFuncMonotonic dispatch (prosupport for window functions)
