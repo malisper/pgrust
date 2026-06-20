@@ -16,6 +16,7 @@ extern crate alloc;
 use alloc::format;
 
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
 use types_nodes::nodeindexscan::{Plan, PlannedStmt};
@@ -64,12 +65,17 @@ pub fn ExplainPrintPlan<'es, 'p>(
     //
     // The deparse context itself is built on demand inside ruleutils' folded
     // `deparse_expr_for_plan` seam (from es->pstmt + es->rtable_names), so we keep
-    // only the per-RTE display names here. We pass an empty `rels_used`: the
-    // unported `ExplainPreScanNode` scan-pre walk would mark the referenced RTEs,
-    // but `select_rtable_names_for_explain` falls back to each RTE's eref alias
-    // for un-marked RTEs, which yields correct unqualified column output.
-    let rels_used = types_nodes::bitmapset::Bitmapset {
-        words: PgVec::new_in(mcx),
+    // only the per-RTE display names here. `ExplainPreScanNode` walks the
+    // plan-state tree marking the RTE indexes actually referenced by scan /
+    // ModifyTable / Append nodes; `select_rtable_names_for_explain` then assigns
+    // display names only to those (and suppresses unreferenced RTEs), so a Var
+    // resolved to a referenced RTE gets its `alias.` prefix.
+    let rels_used = explain_pre_scan_node(mcx, planstate, None)?;
+    let rels_used = match rels_used {
+        Some(b) => PgBox::into_inner(b),
+        None => types_nodes::bitmapset::Bitmapset {
+            words: PgVec::new_in(mcx),
+        },
     };
     if let Some(rtable) = es.rtable.as_ref() {
         let names = ruleutils_s::select_rtable_names_for_explain::call(mcx, rtable, &rels_used)?;
@@ -113,6 +119,152 @@ pub fn ExplainPrintPlan<'es, 'p>(
     // The es->verbose queryId block reads pstmt->queryId, a field the trimmed
     // PlannedStmt does not carry; it is verbose-only and already gated out above.
     Ok(())
+}
+
+/// `ExplainPreScanNode(planstate, &rels_used)` (explain.c:1182) — walk the
+/// plan-state tree and accumulate the set of RTE indexes (`scanrelid` /
+/// `nominalRelation` / `apprelids` / ...) that are actually referenced, so the
+/// deparser assigns display names only to those (and gives Vars resolving to
+/// them an `alias.` prefix). Returns the accumulated `Bitmapset` (the C
+/// `*rels_used`), threaded by value (`acc`) down the recursion as the C `**`
+/// out-parameter would be mutated.
+fn explain_pre_scan_node<'es, 'p>(
+    mcx: Mcx<'es>,
+    planstate: &PlanStateNode<'p>,
+    acc: Option<PgBox<'es, types_nodes::bitmapset::Bitmapset<'es>>>,
+) -> PgResult<Option<PgBox<'es, types_nodes::bitmapset::Bitmapset<'es>>>> {
+    use backend_nodes_core::bitmapset::{bms_add_member, bms_add_members};
+
+    let plan_node: &Node<'p> = match planstate.ps_head().plan {
+        Some(p) => p,
+        None => return Ok(acc),
+    };
+
+    let mut acc = acc;
+    match plan_node.node_tag() {
+        // Plain Scan-family: bms_add_member(*rels_used, ((Scan*)plan)->scanrelid).
+        ntag::T_SeqScan => {
+            acc = Some(bms_add_member(mcx, acc, plan_node.expect_seqscan().scan.scanrelid as i32)?);
+        }
+        ntag::T_SampleScan => {
+            acc = Some(bms_add_member(mcx, acc, plan_node.expect_samplescan().scan.scanrelid as i32)?);
+        }
+        ntag::T_IndexScan => {
+            acc = Some(bms_add_member(mcx, acc, plan_node.expect_indexscan().scan.scanrelid as i32)?);
+        }
+        ntag::T_IndexOnlyScan => {
+            acc = Some(bms_add_member(
+                mcx,
+                acc,
+                plan_node.expect_indexonlyscan().scan.scanrelid as i32,
+            )?);
+        }
+        ntag::T_BitmapHeapScan => {
+            acc = Some(bms_add_member(
+                mcx,
+                acc,
+                plan_node.expect_bitmapheapscan().scan.scanrelid as i32,
+            )?);
+        }
+        ntag::T_TidScan => {
+            acc = Some(bms_add_member(mcx, acc, plan_node.expect_tidscan().scan.scanrelid as i32)?);
+        }
+        ntag::T_TidRangeScan => {
+            acc = Some(bms_add_member(
+                mcx,
+                acc,
+                plan_node.expect_tidrangescan().scan.scanrelid as i32,
+            )?);
+        }
+        ntag::T_SubqueryScan => {
+            acc = Some(bms_add_member(
+                mcx,
+                acc,
+                plan_node.expect_subqueryscan().scan.scanrelid as i32,
+            )?);
+        }
+        ntag::T_FunctionScan => {
+            acc = Some(bms_add_member(
+                mcx,
+                acc,
+                plan_node.expect_functionscan().scan.scanrelid as i32,
+            )?);
+        }
+        ntag::T_TableFuncScan => {
+            acc = Some(bms_add_member(
+                mcx,
+                acc,
+                plan_node.expect_tablefuncscan().scan.scanrelid as i32,
+            )?);
+        }
+        ntag::T_ValuesScan => {
+            acc = Some(bms_add_member(mcx, acc, plan_node.expect_valuesscan().scan.scanrelid as i32)?);
+        }
+        ntag::T_CteScan => {
+            acc = Some(bms_add_member(mcx, acc, plan_node.expect_ctescan().scan.scanrelid as i32)?);
+        }
+        ntag::T_NamedTuplestoreScan => {
+            acc = Some(bms_add_member(
+                mcx,
+                acc,
+                plan_node.expect_namedtuplestorescan().scan.scanrelid as i32,
+            )?);
+        }
+        ntag::T_WorkTableScan => {
+            acc = Some(bms_add_member(
+                mcx,
+                acc,
+                plan_node.expect_worktablescan().scan.scanrelid as i32,
+            )?);
+        }
+        ntag::T_ForeignScan => {
+            // bms_add_members(*rels_used, ((ForeignScan*)plan)->fs_base_relids).
+            let fs = plan_node.expect_foreignscan();
+            if let Some(relids) = fs.fs_base_relids.as_ref() {
+                acc = bms_add_members(mcx, acc, Some(&**relids))?;
+            }
+        }
+        ntag::T_ModifyTable => {
+            let m = plan_node.expect_modifytable();
+            acc = Some(bms_add_member(mcx, acc, m.nominalRelation as i32)?);
+            if m.exclRelRTI != 0 {
+                acc = Some(bms_add_member(mcx, acc, m.exclRelRTI as i32)?);
+            }
+            // Ensure Vars used in RETURNING will have refnames.
+            if plan_node.plan_head().targetlist.is_some() {
+                if let Some(rrs) = m.resultRelations.as_ref() {
+                    if let Some(&first) = rrs.first() {
+                        acc = Some(bms_add_member(mcx, acc, first as i32)?);
+                    }
+                }
+            }
+        }
+        ntag::T_Append => {
+            if let Some(relids) = plan_node.expect_append().apprelids.as_ref() {
+                acc = bms_add_members(mcx, acc, Some(&**relids))?;
+            }
+        }
+        ntag::T_MergeAppend => {
+            if let Some(relids) = plan_node.expect_mergeappend().apprelids.as_ref() {
+                acc = bms_add_members(mcx, acc, Some(&**relids))?;
+            }
+        }
+        _ => {}
+    }
+
+    // return planstate_tree_walker(planstate, ExplainPreScanNode, rels_used).
+    // The owned PlanStateNode threads outer (lefttree) and inner (righttree);
+    // member-node children (Append/BitmapAnd ...) are not yet on the enum (same
+    // limitation as ExplainNode's child recursion) and contribute no scanrelid
+    // for the cases this serves.
+    if let Some(outer) = planstate.outer_plan_state() {
+        acc = explain_pre_scan_node(mcx, outer, acc)?;
+    }
+    if let Some(inner) = planstate.ps_head().righttree.as_deref() {
+        acc = explain_pre_scan_node(mcx, inner, acc)?;
+    }
+
+    Ok(acc)
 }
 
 /// `ExplainNode(planstate, ancestors, relationship, plan_name, es)`
@@ -578,6 +730,113 @@ pub fn ExplainNode<'es, 'p>(
         fmt::ExplainPropertyText("Filter", exprstr.as_str(), es)?;
     }
 
+    // The sort-/group-key detail (`show_sort_keys` / `show_agg_keys` /
+    // `show_group_keys`). These are NOT verbose-only in C — they always print
+    // for Sort/IncrementalSort/Agg/Group nodes. The key columns refer to a
+    // target list, deparsed against a plan context (the node itself for sort
+    // keys, the *outer child* plan for group keys).
+    match plan_node.node_tag() {
+        ntag::T_Sort => {
+            // show_sort_keys: show_sort_group_keys((PlanState*)sortstate,
+            //   "Sort Key", numCols, 0, sortColIdx, sortOperators, collations,
+            //   nullsFirst, ...). Context plan = the sort node itself.
+            let s = plan_node.expect_sort();
+            show_sort_group_keys(
+                es,
+                mcx,
+                plan_node,
+                plan,
+                ancestors,
+                "Sort Key",
+                s.numCols,
+                &s.sortColIdx,
+                Some(&s.sortOperators),
+                Some(&s.collations),
+                Some(&s.nullsFirst),
+            )?;
+        }
+        ntag::T_IncrementalSort => {
+            // show_incremental_sort_keys: same as Sort Key. The trimmed
+            // IncrementalSort carries the Sort base plus nPresortedCols, but the
+            // "Presorted Key" list is verbose-only detail we don't reach in the
+            // structural slice; emit the full Sort Key here.
+            let s = plan_node.expect_incrementalsort();
+            show_sort_group_keys(
+                es,
+                mcx,
+                plan_node,
+                plan,
+                ancestors,
+                "Sort Key",
+                s.sort.numCols,
+                &s.sort.sortColIdx,
+                Some(&s.sort.sortOperators),
+                Some(&s.sort.collations),
+                Some(&s.sort.nullsFirst),
+            )?;
+        }
+        ntag::T_Agg => {
+            // show_agg_keys: when numCols > 0 (and no grouping sets), the key
+            // columns refer to the *child* plan's tlist. Group Key has no
+            // sort-order arrays.
+            let agg = plan_node.expect_agg();
+            if agg.grouping_sets.as_ref().map(|g| !g.is_empty()).unwrap_or(false) {
+                panic!(
+                    "ExplainNode: show_grouping_sets (GROUPING SETS / ROLLUP / CUBE) \
+                     detail unported — structural EXPLAIN only"
+                );
+            }
+            if agg.num_cols > 0 {
+                let child_plan = planstate
+                    .outer_plan_state()
+                    .and_then(|c| c.ps_head().plan)
+                    .expect("show_agg_keys: outerPlanState(astate)->plan");
+                let child = child_plan.plan_head();
+                let grp = agg
+                    .grp_col_idx
+                    .as_ref()
+                    .expect("show_agg_keys: grpColIdx with numCols>0");
+                show_sort_group_keys(
+                    es,
+                    mcx,
+                    child_plan,
+                    child,
+                    ancestors,
+                    "Group Key",
+                    agg.num_cols,
+                    grp,
+                    None,
+                    None,
+                    None,
+                )?;
+            }
+        }
+        ntag::T_Group => {
+            // show_group_keys: keys refer to the *child* plan's tlist (no
+            // sort-order arrays — Group Key).
+            let g = plan_node.expect_group();
+            let child_plan = planstate
+                .outer_plan_state()
+                .and_then(|c| c.ps_head().plan)
+                .expect("show_group_keys: outerPlanState(gstate)->plan");
+            let child = child_plan.plan_head();
+            show_sort_group_keys(
+                es,
+                mcx,
+                child_plan,
+                child,
+                ancestors,
+                "Group Key",
+                g.numCols,
+                &g.grpColIdx,
+                None,
+                None,
+                None,
+            )?;
+        }
+        _ => {}
+    }
+
     // Children. haschildren over initPlan / outer / inner / member nodes /
     // subPlan. The trimmed PlanState carries initPlan/subPlan as Option<PgVec>;
     // member-node nodes (Append/BitmapAnd/...) recurse through their own state.
@@ -761,4 +1020,156 @@ fn explain_scan_target_switch<'es, 'p>(
         ),
         _ => Ok(()),
     }
+}
+
+/// `show_sort_group_keys` (explain.c:2768). Deparse each key column's tlist
+/// expression against `context_plan` and emit them as a `qlabel:` property
+/// list (e.g. `Sort Key:` / `Group Key:`). When `sort_operators` is `Some`
+/// (sort keys), append per-key `COLLATE`/`DESC`/`USING`/`NULLS` options via
+/// [`show_sortorder_options`].
+///
+/// `context_plan`/`context_plan_head` are the plan whose target list holds the
+/// key expressions (the node itself for sort keys, the outer child for group
+/// keys); both refer to the same node, passed split so we needn't re-`plan_head`.
+#[allow(clippy::too_many_arguments)]
+fn show_sort_group_keys<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    context_plan: &Node<'p>,
+    context_plan_head: &Plan<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+    qlabel: &str,
+    nkeys: i32,
+    keycols: &PgVec<'p, AttrNumber>,
+    sort_operators: Option<&PgVec<'p, Oid>>,
+    collations: Option<&PgVec<'p, Oid>>,
+    nulls_first: Option<&PgVec<'p, bool>>,
+) -> PgResult<()> {
+    // if (nkeys <= 0) return;
+    if nkeys <= 0 {
+        return Ok(());
+    }
+
+    let tlist = context_plan_head.targetlist.as_ref();
+
+    // Set up deparsing context. useprefix = (es->rtable_size > 1 || es->verbose).
+    let useprefix = es.rtable_size > 1 || es.verbose;
+
+    // Clone the context plan into the formatting arena (matches es->pstmt's
+    // 'es plan-tree copy), as the qual/Filter deparse does above.
+    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, context_plan.clone_in(mcx)?)?;
+    let es_pstmt = es
+        .pstmt
+        .as_deref()
+        .expect("EXPLAIN: es->pstmt must be set before deparse")
+        .clone_in(mcx)?;
+    let es_pstmt: PgBox<'es, PlannedStmt<'es>> = mcx::alloc_in(mcx, es_pstmt)?;
+
+    let mut result: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+
+    for keyno in 0..nkeys as usize {
+        // AttrNumber keyresno = keycols[keyno];
+        let keyresno = keycols[keyno];
+        // TargetEntry *target = get_tle_by_resno(plan->targetlist, keyresno);
+        let target = tlist
+            .and_then(|tl| tl.iter().find(|tle| tle.resno == keyresno))
+            .unwrap_or_else(|| panic!("no tlist entry for key {keyresno}"));
+        let target_expr = target
+            .expr
+            .as_deref()
+            .expect("show_sort_group_keys: TargetEntry has no expr");
+
+        // Deparse the expression, showing any top-level cast (showImplicit=true).
+        let expr_node = Node::mk_expr(mcx, target_expr.clone_in(mcx)?);
+        let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+            mcx,
+            &es_pstmt,
+            &es.rtable_names,
+            &plan_owned,
+            ancestors,
+            &expr_node,
+            useprefix,
+            true,
+        )?;
+
+        let mut sortkeybuf = alloc::string::String::from(exprstr.as_str());
+
+        // Append sort order information, if relevant.
+        if let (Some(ops), Some(colls), Some(nf)) = (sort_operators, collations, nulls_first) {
+            show_sortorder_options(
+                mcx,
+                &mut sortkeybuf,
+                target_expr,
+                ops[keyno],
+                colls[keyno],
+                nf[keyno],
+            )?;
+        }
+
+        result.push(sortkeybuf);
+    }
+
+    let view: alloc::vec::Vec<&str> = result.iter().map(|s| s.as_str()).collect();
+    fmt::ExplainPropertyList(qlabel, &view, es)?;
+    Ok(())
+}
+
+/// `show_sortorder_options` (explain.c:2830). Append the nondefault sort-order
+/// characteristics (COLLATE / DESC / USING / NULLS FIRST|LAST) of one key to
+/// `buf`.
+fn show_sortorder_options<'p>(
+    mcx: Mcx<'_>,
+    buf: &mut alloc::string::String,
+    sortexpr: &types_nodes::primnodes::Expr,
+    sort_operator: types_core::primitive::Oid,
+    collation: types_core::primitive::Oid,
+    nulls_first: bool,
+) -> PgResult<()> {
+    use types_core::primitive::InvalidOid;
+
+    // Oid sortcoltype = exprType(sortexpr);
+    let sortcoltype = backend_nodes_core::nodefuncs::expr_type(Some(sortexpr))?;
+
+    // typentry = lookup_type_cache(sortcoltype, TYPECACHE_LT_OPR | TYPECACHE_GT_OPR);
+    let (lt_opr, gt_opr) =
+        ruleutils_s::lookup_type_cache_lt_gt_opr::call(sortcoltype)?;
+
+    let mut reverse = false;
+
+    // Print COLLATE if it's not default for the column's type.
+    if collation != InvalidOid
+        && collation != backend_utils_cache_lsyscache::type_::get_typcollation(sortcoltype)?
+    {
+        let collname = backend_utils_cache_lsyscache::collation_constraint_language_cast::get_collation_name(mcx, collation)?
+            .unwrap_or_else(|| panic!("cache lookup failed for collation {collation}"));
+        let quoted = backend_utils_adt_ruleutils::quote_identifier(mcx, collname.as_str())?;
+        buf.push_str(" COLLATE ");
+        buf.push_str(quoted.as_str());
+    }
+
+    // Print direction if not ASC, or USING if non-default sort operator.
+    if sort_operator == gt_opr {
+        buf.push_str(" DESC");
+        reverse = true;
+    } else if sort_operator != lt_opr {
+        let opname = backend_utils_cache_lsyscache::opfamily_operator::get_opname(mcx, sort_operator)?
+            .unwrap_or_else(|| panic!("cache lookup failed for operator {sort_operator}"));
+        buf.push_str(" USING ");
+        buf.push_str(opname.as_str());
+        // Determine whether operator would be considered ASC or DESC.
+        if let Some((_eq_op, rev)) =
+            backend_utils_cache_lsyscache::opfamily_operator::get_equality_op_for_ordering_op(sort_operator)?
+        {
+            reverse = rev;
+        }
+    }
+
+    // Add NULLS FIRST/LAST only if it wouldn't be default.
+    if nulls_first && !reverse {
+        buf.push_str(" NULLS FIRST");
+    } else if !nulls_first && reverse {
+        buf.push_str(" NULLS LAST");
+    }
+
+    Ok(())
 }

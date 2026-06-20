@@ -2981,6 +2981,18 @@ fn lookup_type_cache_lt_opr(type_id: Oid) -> PgResult<Oid> {
     Ok(with_state(|st| st.entry(type_id).lt_opr))
 }
 
+/// `lookup_type_cache(type_id, TYPECACHE_LT_OPR | TYPECACHE_GT_OPR)` projecting
+/// `(lt_opr, gt_opr)` — used by ruleutils `show_sortorder_options` (EXPLAIN sort
+/// keys) and `get_rule_orderby` to decide ASC/DESC/USING annotations. Either OID
+/// is `InvalidOid` when the type has no default btree ordering operator.
+fn lookup_type_cache_lt_gt_opr(type_id: Oid) -> PgResult<(Oid, Oid)> {
+    lookup_type_cache(type_id, TYPECACHE_LT_OPR | TYPECACHE_GT_OPR)?;
+    Ok(with_state(|st| {
+        let e = st.entry(type_id);
+        (e.lt_opr, e.gt_opr)
+    }))
+}
+
 /// `lookup_type_cache(element_type, TYPECACHE_CMP_PROC_FINFO)->cmp_proc_finfo.fn_oid`.
 fn lookup_element_cmp_proc(element_type: Oid) -> PgResult<Oid> {
     lookup_type_cache(element_type, TYPECACHE_CMP_PROC_FINFO)?;
@@ -3308,6 +3320,8 @@ pub fn init_seams() {
         lookup_type_cache_hasheq_seam,
     );
     backend_utils_cache_typcache_seams::lookup_type_cache_lt_opr::set(lookup_type_cache_lt_opr);
+    // `(lt_opr, gt_opr)` for ruleutils show_sortorder_options / get_rule_orderby.
+    backend_utils_adt_ruleutils_seams::lookup_type_cache_lt_gt_opr::set(lookup_type_cache_lt_gt_opr);
     backend_utils_cache_typcache_seams::lookup_element_cmp_proc::set(lookup_element_cmp_proc);
     backend_utils_cache_typcache_seams::lookup_element_hash_proc::set(lookup_element_hash_proc);
     backend_utils_cache_typcache_seams::lookup_element_hash_extended_proc::set(

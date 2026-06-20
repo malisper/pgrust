@@ -490,7 +490,11 @@ pub fn RelationTruncate(rel: &types_rel::Relation<'_>, nblocks: BlockNumber) -> 
     // for (i = 0; i <= MAX_FORKNUM; ++i) reln->smgr_cached_nblocks[i] = Invalid.
     // In this repo the smgr cache is keyed; resetting the targblock/cache is a
     // no-op against the value-keyed model (smgropen returns a fresh snapshot),
-    // but call smgrnblocks below off the live key.
+    // but `RelationGetSmgr` still does the `smgropen` that registers the entry
+    // in the (value-keyed) smgr cache — the md layer requires a prior smgropen
+    // before `smgrnblocks`/`smgrtruncate` (else "md operation on an unopened
+    // SMgrRelation"). Open it here, mirroring `RelationGetSmgr(rel)`.
+    smgr::smgropen(rel.rd_locator, rel.rd_backend)?;
 
     let mut forks: Vec<ForkNumber> = Vec::new();
     let mut old_blocks: Vec<BlockNumber> = Vec::new();

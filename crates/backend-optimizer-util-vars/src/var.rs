@@ -40,6 +40,7 @@ use types_error::PgResult;
 use types_nodes::nodes::{ntag, Node};
 use types_nodes::primnodes::Expr;
 use types_pathnodes::{Bitmapset, NodeId, PlannerInfo, Relids};
+use types_core::primitive::{InvalidOid, Oid};
 
 // `FirstLowInvalidHeapAttributeNumber` (access/sysattr.h) = -7. var.c offsets
 // attribute numbers by this so system attributes fit a bitmap; matches
@@ -808,6 +809,23 @@ fn seam_var_varno(root: &PlannerInfo, node: NodeId) -> i32 {
     }
 }
 
+/// `paraminfo_get_equal_hashops` inner logic (joinpath.c): for a cache-key
+/// expression, `lookup_type_cache(exprType((Node*) expr), TYPECACHE_HASH_PROC |
+/// TYPECACHE_EQ_OPR)`. Returns `Some(eq_opr)` iff both `hash_proc` and `eq_opr`
+/// are valid OIDs (C `OidIsValid` on both, else `return false` → caller yields
+/// no Memoize path), else `None`.
+fn seam_expr_hash_eq_operator(root: &PlannerInfo, node: NodeId) -> Option<Oid> {
+    let typid = backend_nodes_core::nodefuncs::expr_type(Some(root.node(node)))
+        .expect("expr_hash_eq_operator: exprType");
+    let (hash_proc, eq_opr) =
+        backend_optimizer_plan_init_subselect_ext_seams::lookup_type_cache_hasheq::call(typid);
+    if hash_proc == InvalidOid || eq_opr == InvalidOid {
+        None
+    } else {
+        Some(eq_opr)
+    }
+}
+
 /// `pull_varattnos(node, varno, &varattnos)` (var.c) — installed seam. The
 /// existing `backend-optimizer-util-var-seams` contract takes the expression by
 /// value and `varno: u32`, accumulating into a `types_nodes::Bitmapset`
@@ -941,6 +959,7 @@ pub fn init_seams() {
     jp::pull_vars_of_level::set(seam_pull_vars_of_level);
     jp::node_is_var::set(seam_node_is_var);
     jp::var_varno::set(seam_var_varno);
+    jp::expr_hash_eq_operator::set(seam_expr_hash_eq_operator);
 
     use backend_optimizer_util_var_seams as vs;
     vs::pull_varattnos::set(seam_pull_varattnos);

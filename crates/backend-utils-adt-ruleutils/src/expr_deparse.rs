@@ -2037,9 +2037,9 @@ fn recurse_subquery<'mcx>(
 /// `OUTER_VAR` / `INNER_VAR` / `INDEX_VAR` (`primnodes.h`) — the special varnos
 /// that reference a plan node's outer/inner/index targetlist rather than the
 /// range table.
-const OUTER_VAR: i32 = 65000;
-const INNER_VAR: i32 = 65001;
-const INDEX_VAR: i32 = 65002;
+const INNER_VAR: i32 = -1;
+const OUTER_VAR: i32 = -2;
+const INDEX_VAR: i32 = -3;
 
 /// `get_tle_by_resno(tlist, resno)` (tlist.c) — find the `TargetEntry` with the
 /// given `resno` in a namespace tlist (`PgVec<PgBox<Node>>` wrapping

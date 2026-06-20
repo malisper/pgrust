@@ -179,6 +179,7 @@ pub fn init_seams() {
     );
     backend_catalog_heap_seams::heap_drop_with_catalog::set(heap_drop_with_catalog_seam);
     backend_catalog_heap_seams::check_attribute_names_types::set(check_attribute_names_types_seam);
+    backend_catalog_heap_seams::check_attribute_type::set(check_attribute_type_seam);
     // Low-level relation-create seams `index_create` (catalog/index.c) calls
     // directly. Their owner signatures match the seam signatures exactly, so
     // they install without a wrapper.
@@ -264,4 +265,24 @@ fn check_attribute_names_types_seam<'mcx>(
     flags: i32,
 ) -> PgResult<()> {
     crate::CheckAttributeNamesTypes(mcx, &tupdesc.attrs, relkind, flags)
+}
+
+/// Seam body for `CheckAttributeType` (catalog/heap.c). As called by
+/// `ConstructTupleDescriptor` (catalog/index.c) for an expression-index column:
+/// `containing_rowtypes = NIL`, `flags = 0`. The inward seam carries no `mcx`.
+fn check_attribute_type_seam(
+    attname: &str,
+    atttypid: types_core::Oid,
+    attcollation: types_core::Oid,
+) -> PgResult<()> {
+    let ctx = MemoryContext::new("CheckAttributeType");
+    let mut containing_rowtypes: alloc::vec::Vec<types_core::Oid> = alloc::vec::Vec::new();
+    crate::CheckAttributeType(
+        ctx.mcx(),
+        attname,
+        atttypid,
+        attcollation,
+        &mut containing_rowtypes,
+        0,
+    )
 }
