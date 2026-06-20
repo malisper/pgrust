@@ -22,3 +22,5 @@ backend-utils-adt-formatting-seams = { path = "../backend-utils-adt-formatting-s
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+types-fmgr = { path = "../types-fmgr" }

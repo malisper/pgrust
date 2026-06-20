@@ -35,7 +35,9 @@
 //! (`tsearch/ts_cache.c` + fmgr) are not ported yet, so they panic loudly until
 //! installed (project rule: no silent fallback).
 
-#![no_std]
+// NB: not `#![no_std]` — the fmgr builtin registration layer (`fmgr_builtins`)
+// needs `std` (the `register_builtins_native` table + `String`/`Vec` result
+// framing). The dictionary-template value cores remain `alloc`-only.
 #![allow(non_snake_case)]
 
 extern crate alloc;
@@ -46,6 +48,7 @@ use backend_utils_error::ereport;
 use types_error::{PgError, ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 
 pub mod dict;
+pub mod fmgr_builtins;
 pub mod dict_simple;
 pub mod dict_synonym;
 pub mod dict_thesaurus;
@@ -105,4 +108,8 @@ pub fn init_seams() {
     backend_tsearch_dict_seams::thesaurus_init::set(dict_thesaurus::thesaurus_init);
     backend_tsearch_dict_seams::thesaurus_lexize::set(dict_thesaurus::thesaurus_lexize);
     backend_tsearch_dict_seams::ts_lexize::set(dict::ts_lexize);
+
+    // dict.c: register the `ts_lexize(regdictionary, text)` fmgr builtin into
+    // fmgr-core's by-OID dispatch table.
+    fmgr_builtins::register_dict_builtins();
 }

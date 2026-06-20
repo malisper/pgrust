@@ -18471,11 +18471,13 @@ dependencies = [
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-formatting-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-mb-mbutils-seams",
  "mcx",
  "types-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
  "types-tsearch",
 ]
 
