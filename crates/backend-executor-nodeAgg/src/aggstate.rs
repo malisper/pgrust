@@ -276,6 +276,28 @@ pub struct AggStatePerHashData<'mcx> {
     pub hash_grp_col_idx_hash: Option<PgVec<'mcx, AttrNumber>>,
     /// `Agg *aggnode` — original Agg node, for numGroups etc.
     pub aggnode: Option<PgBox<'mcx, Agg<'mcx>>>,
+
+    /// Per-group transition-state side-table (owned-model rendering of C's
+    /// `TupleHashEntryGetAdditional` aliasing).
+    ///
+    /// In C, each hash entry's MAXALIGN'd `additional` space holds the entry's
+    /// `numtrans`-long `AggStatePerGroupData[]` in place; `lookup_hash_entries`
+    /// repoints `hash_pergroup[setno] = entry->additional` so the compiled
+    /// transition expr (`EEOP_AGG_PLAIN_TRANS_*`, indexing
+    /// `all_pergroups[setoff][transno]`) mutates that storage directly, and
+    /// `finalize_aggregates` later reads it back out of the same entry. A typed
+    /// `AggStatePerGroupData<'mcx>` (whose `transValue` is an owned `Datum<'mcx>`
+    /// enum, not a bare word) cannot be aliased into the entry's opaque
+    /// `additional` bytes. Following the `cte_link_plan_state` index-indirection
+    /// precedent, the real per-group `PgVec` lives here, keyed by the entry's
+    /// stable insertion index; the entry's `additional` bytes carry only that
+    /// `u32` index (`pergroup_index_{read,write}`). `lookup_hash_entries` swaps
+    /// the entry's `PgVec` out of this table into `all_pergroups[setoff]` for the
+    /// duration of `advance_aggregates`, then swaps it back; `finalize` borrows
+    /// it directly. Index `i` corresponds to the `i`-th entry created in this
+    /// grouping set's table (monotonic, never reused — matches the entry's
+    /// `additional` allocation, which is never freed until table reset).
+    pub pergroup_sidetable: alloc::vec::Vec<Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +467,16 @@ pub struct AggStateData<'mcx> {
     pub hash_pergroup: Option<PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>>>,
     /// `AggStatePerGroup *all_pergroups` (field 54).
     pub all_pergroups: Option<PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>>>,
+    /// Owned-model transient: the side-table entry index that `lookup_hash_entries`
+    /// borrowed into `all_pergroups[hash_setoff_base + setno]` for the current
+    /// input tuple, per grouping set (`None` = spilled / no entry). After
+    /// `advance_aggregates` runs the transition over that borrowed storage,
+    /// `store_hash_pergroups_back` returns each borrowed `PgVec` to its
+    /// `perhash[setno].pergroup_sidetable[index]` slot. This has no C analogue —
+    /// C aliases `hash_pergroup[setno] = entry->additional` in place, so the
+    /// transition mutates the entry's storage directly and no write-back is
+    /// needed. Sized `num_hashes`.
+    pub hash_cur_entry_index: alloc::vec::Vec<Option<usize>>,
     /// `SharedAggInfo *shared_info` — one entry per worker.
     pub shared_info: Option<PgBox<'mcx, SharedAggInfo<'mcx>>>,
 }

@@ -449,8 +449,8 @@ pub fn hash_choose_num_partitions(
 /// created hash entry's per-group transition values.
 pub fn initialize_hash_entry<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
-    entry: &mut TupleHashEntryData<'mcx>,
-    additional: &mut [u8],
+    setno: i32,
+    index: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let mcx = estate_mcx(estate);
@@ -467,20 +467,61 @@ pub fn initialize_hash_entry<'mcx>(
     }
 
     // pergroup = (AggStatePerGroup) TupleHashEntryGetAdditional(hashtable, entry);
-    // for (transno = 0; transno < numtrans; transno++)
-    //     initialize_aggregate(aggstate, &pertrans[transno], &pergroup[transno]);
     //
-    // The per-group AggStatePerGroupData array lives in the entry's additional
-    // space, owned by the unported execGrouping unit, which the seam exposes as
-    // raw &mut [u8] via a callback (no &'static mut). Driving initialize_aggregate
-    // over that aliased storage — and holding &mut pertrans simultaneously —
-    // requires execGrouping's concrete entry layout to be a real type. Loud
-    // panic until execGrouping lands.
-    let _ = (entry, additional, mcx);
-    panic!(
-        "backend-executor-execGrouping: TupleHashEntryGetAdditional additional layout \
-         not yet a real type (initialize_hash_entry)"
-    );
+    // In C `pergroup` aliases the entry's additional bytes; here the entry's
+    // per-group `AggStatePerGroupData[]` lives in the perhash side-table slot
+    // `index` (its id is stashed in the entry's `additional` bytes). Allocate the
+    // `numtrans`-long `palloc0`-equivalent slot, then drive
+    // `initialize_aggregate` over each transition.
+    //
+    //   for (transno = 0; transno < aggstate->numtrans; transno++) {
+    //       AggStatePerTrans pertrans = &aggstate->pertrans[transno];
+    //       AggStatePerGroup pergroupstate = &pergroup[transno];
+    //       initialize_aggregate(aggstate, pertrans, pergroupstate);
+    //   }
+    let num_trans = aggstate.numtrans as usize;
+
+    // Allocate the side-table slot (palloc0(sizeof(AggStatePerGroupData)*numtrans)).
+    {
+        let perhash =
+            &mut aggstate.perhash.as_mut().expect("perhash")[setno as usize];
+        debug_assert_eq!(perhash.pergroup_sidetable.len(), index);
+        let mut pg: mcx::PgVec<'mcx, AggStatePerGroupData<'mcx>> =
+            mcx::vec_with_capacity_in(mcx, num_trans)?;
+        for _ in 0..num_trans {
+            pg.push(AggStatePerGroupData::default());
+        }
+        perhash.pergroup_sidetable.push(Some(pg));
+    }
+
+    // Take the slot and the pertrans array out so both can be borrowed mutably
+    // alongside &mut aggstate (mirrors the two raw pointers in C).
+    let mut pg = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
+        .pergroup_sidetable[index]
+        .take()
+        .expect("initialize_hash_entry: side-table slot just pushed");
+    let mut transstates = aggstate
+        .pertrans
+        .take()
+        .expect("initialize_hash_entry: pertrans not built");
+
+    let mut init_result = Ok(());
+    for transno in 0..num_trans {
+        if let Err(e) = crate::transition::initialize_aggregate(
+            aggstate,
+            &mut transstates[transno],
+            &mut pg[transno],
+            mcx,
+        ) {
+            init_result = Err(e);
+            break;
+        }
+    }
+
+    aggstate.pertrans = Some(transstates);
+    aggstate.perhash.as_mut().expect("perhash")[setno as usize].pergroup_sidetable[index] =
+        Some(pg);
+    init_result
 }
 
 /// `lookup_hash_entries(aggstate)` — probe every grouping set's hash table for
@@ -501,7 +542,19 @@ pub fn lookup_hash_entries<'mcx>(
 
     let num_hashes = aggstate.num_hashes;
 
+    // hash_pergroup aliases the tail of all_pergroups (the last num_hashes
+    // slots): C sets `hash_pergroup = all_pergroups + numGroupingSets`, and the
+    // compiled transition expr indexes `all_pergroups[setoff][transno]` where for
+    // the hashed phase setoff == hash_setoff_base + setno. So the per-group state
+    // for grouping set `setno` is all_pergroups[hash_setoff_base + setno].
+    let hash_setoff_base = hash_setoff_base(aggstate);
+
     for setno in 0..num_hashes {
+        // Reset this set's borrowed-entry record for the current tuple.
+        if (setno as usize) < aggstate.hash_cur_entry_index.len() {
+            aggstate.hash_cur_entry_index[setno as usize] = None;
+        }
+
         let hashslot = aggstate.perhash.as_ref().expect("perhash")[setno as usize]
             .hashslot
             .expect("perhash->hashslot");
@@ -518,18 +571,20 @@ pub fn lookup_hash_entries<'mcx>(
         if want_new {
             // entry = LookupTupleHashEntry(hashtable, hashslot, &isnew, &hash);
             //
-            // The seam finds/creates the entry and reports whether it is new.
-            // When new the C runs initialize_hash_entry; then it caches the
-            // per-group pointer (TupleHashEntryGetAdditional) in
-            // hash_pergroup[setno]. In the owned model the entry's additional
-            // bytes are execGrouping-owned and cannot be aliased into a typed
-            // `AggStatePerGroup` cache held alongside a live table borrow. For
-            // numtrans == 0 (hashed DISTINCT / set-op dedup / DISTINCT-only
-            // grouping) there is no per-group transition state, so the cache is
-            // an empty array and the divergence is inert: the lookup itself does
-            // the dedup. For numtrans > 0 the typed-additional aliasing is a
-            // genuine keystone (advance_aggregates mutates per-group state in
-            // place inside the entry); loud-panic there.
+            // The seam finds/creates the entry and reports whether it is new,
+            // lending its additional bytes to the callback. C then runs
+            // initialize_hash_entry for a new entry and caches the per-group
+            // pointer `hash_pergroup[setno] = TupleHashEntryGetAdditional(entry)`.
+            // Here the per-group AggStatePerGroupData[] lives in the perhash
+            // side-table, and the entry's additional bytes carry only its slot id
+            // (pergroup_index_{read,write}). For a brand-new entry we assign the
+            // next side-table slot id (== current side-table length) and stamp it
+            // into the entry; for an existing entry we read its id back.
+            let next_index = aggstate.perhash.as_ref().expect("perhash")[setno as usize]
+                .pergroup_sidetable
+                .len();
+            let aggstate_numtrans_gt0 = aggstate.numtrans != 0;
+            let mut captured_index: Option<usize> = None;
             let isnew = {
                 let hashtable = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
                     .hashtable
@@ -540,7 +595,18 @@ pub fn lookup_hash_entries<'mcx>(
                         &mut **hashtable,
                         hashslot,
                         estate,
-                        &mut |_entry, _additional| {},
+                        &mut |_entry, additional| {
+                            if aggstate_numtrans_gt0 {
+                                match pergroup_index_read(additional) {
+                                    Some(idx) => captured_index = Some(idx),
+                                    None => {
+                                        // Fresh (zeroed) entry: stamp the next id.
+                                        pergroup_index_write(additional, next_index);
+                                        captured_index = Some(next_index);
+                                    }
+                                }
+                            }
+                        },
                     )?;
                 isnew
             };
@@ -556,12 +622,30 @@ pub fn lookup_hash_entries<'mcx>(
                     hp[setno as usize] = Some(mcx::PgVec::new_in(estate.es_query_cxt));
                 }
             } else {
-                let _ = isnew;
-                panic!(
-                    "backend-executor-execGrouping: hash_pergroup pointer into entry \
-                     additional space (typed AggStatePerGroup aliasing) needs in-place \
-                     per-group state for numtrans > 0 (lookup_hash_entries)"
-                );
+                let index =
+                    captured_index.expect("lookup_hash_entries: callback set the side-table id");
+
+                // if (isnew) initialize_hash_entry(aggstate, hashtable, entry);
+                if isnew {
+                    initialize_hash_entry(aggstate, setno, index, estate)?;
+                }
+
+                // pergroup[setno] = TupleHashEntryGetAdditional(hashtable, entry);
+                //
+                // C repoints hash_pergroup[setno] (== all_pergroups[setoff]) at
+                // the entry's additional storage so the transition mutates it in
+                // place. Here we move the entry's per-group PgVec out of the
+                // side-table into all_pergroups[setoff]; store_hash_pergroups_back
+                // returns it after advance_aggregates.
+                let setoff = hash_setoff_base + setno as usize;
+                let pg = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
+                    .pergroup_sidetable[index]
+                    .take()
+                    .expect("lookup_hash_entries: side-table slot for entry");
+                if let Some(all) = aggstate.all_pergroups.as_mut() {
+                    all[setoff] = Some(pg);
+                }
+                aggstate.hash_cur_entry_index[setno as usize] = Some(index);
             }
         } else {
             // Spill mode: LookupTupleHashEntryHash with create == false (the C
@@ -611,6 +695,12 @@ pub fn agg_fill_hash_table<'mcx>(
 
         // Advance the aggregates (or combine functions)
         crate::transition::advance_aggregates(aggstate, estate)?;
+
+        // Owned-model write-back: return each entry's per-group PgVec (mutated in
+        // place by advance_aggregates inside all_pergroups[setoff]) to its
+        // side-table slot. C needs none of this — its hash_pergroup[setno] aliases
+        // the entry's additional bytes directly.
+        store_hash_pergroups_back(aggstate);
 
         // ResetExprContext(aggstate->tmpcontext);
         reset_tmpcontext(aggstate, estate)?;
@@ -807,6 +897,8 @@ pub fn agg_retrieve_hash_table_in_memory<'mcx>(
         let mut entry_tuple: Option<
             types_tuple::backend_access_common_heaptuple::FormedMinimalTuple<'mcx>,
         > = None;
+        let mut entry_pergroup_index: Option<usize> = None;
+        let want_pergroup = aggstate.numtrans != 0;
         let found = {
             let mcx = estate.es_query_cxt;
             let mut hashiter = aggstate.perhash.as_ref().expect("perhash")[setno as usize].hashiter;
@@ -818,13 +910,17 @@ pub fn agg_retrieve_hash_table_in_memory<'mcx>(
                 &mut **hashtable,
                 &mut hashiter,
                 estate,
-                &mut |entry, _additional| {
-                    // TupleHashEntryGetTuple(entry) — group's first tuple. For
-                    // numtrans == 0 there is no per-group state in `additional`.
+                &mut |entry, additional| {
+                    // TupleHashEntryGetTuple(entry) — group's first tuple.
                     entry_tuple = entry
                         .firstTuple
                         .as_ref()
                         .map(|m| m.clone_in(mcx).expect("clone hash entry tuple"));
+                    // For numtrans > 0 the entry's additional bytes carry the
+                    // per-group side-table slot id (pergroup_index codec).
+                    if want_pergroup {
+                        entry_pergroup_index = pergroup_index_read(additional);
+                    }
                 },
             )?;
             aggstate.perhash.as_mut().expect("perhash")[setno as usize].hashiter = hashiter;
@@ -911,22 +1007,30 @@ pub fn agg_retrieve_hash_table_in_memory<'mcx>(
 
         // finalize_aggregates(aggstate, peragg, pergroup);
         //
-        // For numtrans > 0 the per-group transition values live in the entry's
-        // additional bytes (typed-additional aliasing keystone); finalize reads
-        // them. For numtrans == 0 (hashed DISTINCT / set-op dedup) there are no
-        // aggregates to finalize, so this is a no-op and the projection emits the
-        // grouping columns directly.
-        if aggstate.numtrans == 0 {
-            // result = project_aggregates(aggstate);
-            if let Some(result) = crate::finalize::project_aggregates(aggstate, estate)? {
-                return Ok(Some(result));
-            }
-        } else {
-            panic!(
-                "backend-executor-nodeAgg: finalize_aggregates over the entry's per-group \
-                 additional bytes (typed AggStatePerGroup aliasing) for numtrans > 0 \
-                 (agg_retrieve_hash_table_in_memory)"
-            );
+        // C: pergroup = TupleHashEntryGetAdditional(hashtable, entry). Here the
+        // entry's per-group state is in the perhash side-table slot whose id was
+        // read from the entry's additional bytes during the scan. For numtrans ==
+        // 0 (hashed DISTINCT / set-op dedup) there are no aggregates to finalize,
+        // so this is a no-op and the projection emits the grouping columns
+        // directly.
+        if aggstate.numtrans != 0 {
+            let index = entry_pergroup_index
+                .expect("agg_retrieve_hash_table_in_memory: entry had no per-group side-table id");
+            // Take the slot out so finalize_aggregates can borrow it mutably
+            // alongside &mut aggstate (C aliases the entry storage in place).
+            let mut pg = aggstate.perhash.as_mut().expect("perhash")[setno as usize]
+                .pergroup_sidetable[index]
+                .take()
+                .expect("agg_retrieve_hash_table_in_memory: side-table slot for entry");
+            let fin = crate::finalize::finalize_aggregates(aggstate, pg.as_mut_slice(), estate);
+            aggstate.perhash.as_mut().expect("perhash")[setno as usize].pergroup_sidetable[index] =
+                Some(pg);
+            fin?;
+        }
+
+        // result = project_aggregates(aggstate);
+        if let Some(result) = crate::finalize::project_aggregates(aggstate, estate)? {
+            return Ok(Some(result));
         }
     }
 }
@@ -1009,4 +1113,82 @@ fn rescan_hashcontext<'mcx>(
 /// hash-grouping path hands to `mcx`-taking siblings/seams.
 fn estate_mcx<'mcx>(estate: &EStateData<'mcx>) -> Mcx<'mcx> {
     estate.es_query_cxt
+}
+
+// ---------------------------------------------------------------------------
+// Per-group side-table index codec (owned-model rendering of the C
+// `TupleHashEntryGetAdditional` per-entry per-group storage).
+//
+// C carves a `numtrans * sizeof(AggStatePerGroupData)` MAXALIGN'd region into
+// each entry's `additional` bytes and stores the `AggStatePerGroupData[]` there
+// in place. A typed `AggStatePerGroupData<'mcx>` (owned `Datum<'mcx>` enum) is
+// not reinterpretable from raw bytes, so the real per-group `PgVec` lives in
+// `perhash.pergroup_sidetable`, and the entry's first 4 `additional` bytes carry
+// a `u32` index into that table. The stored value is `index + 1` so that a
+// freshly-zeroed (just-inserted, index-not-yet-written) entry reads back as the
+// "unassigned" sentinel `0` and is distinguishable from a valid index `0`.
+// `additionalsize` is always `>= 4` here because this codec is only used when
+// `numtrans > 0` (so `numtrans * sizeof(AggStatePerGroupData) >= 24`).
+// ---------------------------------------------------------------------------
+
+/// The index into `all_pergroups` at which the hashed grouping-set region
+/// begins (`hash_pergroup == all_pergroups + offset`). C's `ExecInitAgg`
+/// advances the pergroups pointer by `numGroupingSets` only on the non-hashed
+/// (AGG_SORTED/AGG_MIXED) path; for pure AGG_HASHED the hash region is at the
+/// front (offset 0). The compiled hashed-phase transition expr is built with the
+/// matching `setoff` base (`execExpr.c`: `setoff = (aggstrategy != AGG_HASHED) ?
+/// maxsets : 0`), so this offset is exactly `pergroup_offset` from
+/// `assign_pergroup_regions`.
+fn hash_setoff_base(aggstate: &AggStateData<'_>) -> usize {
+    if aggstate.aggstrategy == AggStrategy::AggHashed {
+        0
+    } else {
+        aggstate.maxsets.max(0) as usize
+    }
+}
+
+/// Return each grouping set's borrowed per-group `PgVec` (mutated in place by
+/// `advance_aggregates` inside `all_pergroups[hash_setoff_base + setno]`) to its
+/// `perhash[setno].pergroup_sidetable[index]` slot, clearing the transient
+/// borrow record. No-op for sets that spilled / had no entry this tuple. C has no
+/// analogue: it aliases the entry's additional bytes, so the transition mutates
+/// the entry storage directly and nothing is written back.
+fn store_hash_pergroups_back(aggstate: &mut AggStateData<'_>) {
+    let num_hashes = aggstate.num_hashes as usize;
+    let hash_setoff_base = hash_setoff_base(aggstate);
+
+    for setno in 0..num_hashes {
+        let index = match aggstate.hash_cur_entry_index.get(setno).copied().flatten() {
+            Some(i) => i,
+            None => continue,
+        };
+        let setoff = hash_setoff_base + setno;
+        let pg = match aggstate.all_pergroups.as_mut() {
+            Some(all) => all[setoff].take(),
+            None => None,
+        };
+        if let Some(pg) = pg {
+            aggstate.perhash.as_mut().expect("perhash")[setno].pergroup_sidetable[index] = Some(pg);
+        }
+        aggstate.hash_cur_entry_index[setno] = None;
+    }
+}
+
+/// Write the `index`-th side-table slot id into the entry's `additional` bytes.
+fn pergroup_index_write(additional: &mut [u8], index: usize) {
+    let stored = (index as u32) + 1;
+    additional[0..4].copy_from_slice(&stored.to_ne_bytes());
+}
+
+/// Read the side-table slot id out of the entry's `additional` bytes; returns
+/// `None` for the zeroed "unassigned" sentinel.
+fn pergroup_index_read(additional: &[u8]) -> Option<usize> {
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(&additional[0..4]);
+    let stored = u32::from_ne_bytes(buf);
+    if stored == 0 {
+        None
+    } else {
+        Some((stored - 1) as usize)
+    }
 }

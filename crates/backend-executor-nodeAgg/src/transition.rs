@@ -1018,6 +1018,17 @@ fn work_mem() -> i32 {
 /// the target context) is the unported datum surface, so we only check the
 /// context is present here.
 fn curaggcontext_assert_built(aggstate: &AggStateData<'_>) {
+    // C: select_current_set() sets `curaggcontext = is_hash ? hashcontext :
+    // aggcontexts[setno]`. The owned model carries `curaggcontext` as an i32: a
+    // grouping-set index into `aggcontexts`, or the `CURAGGCONTEXT_HASH` (-1)
+    // sentinel meaning "use the single hashcontext". Resolve the sentinel to the
+    // hashcontext rather than indexing `aggcontexts[-1]`.
+    if aggstate.curaggcontext == crate::node_lifecycle::CURAGGCONTEXT_HASH {
+        let _: types_nodes::execnodes::EcxtId = aggstate
+            .hashcontext
+            .expect("curaggcontext: hashcontext not built (hashed path)");
+        return;
+    }
     let idx = aggstate.curaggcontext as usize;
     let aggcontexts = aggstate
         .aggcontexts

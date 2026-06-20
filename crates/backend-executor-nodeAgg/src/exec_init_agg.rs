@@ -472,6 +472,12 @@ pub fn ExecInitAgg<'mcx>(
             aggstate.table_filled = false;
             // Initialize to 1, meaning nothing spilled yet.
             aggstate.hash_batches_used = 1;
+
+            // Owned-model transient (no C analogue): one entry-index slot per
+            // grouping set, filled by lookup_hash_entries and drained by
+            // store_hash_pergroups_back around each tuple's advance_aggregates.
+            aggstate.hash_cur_entry_index =
+                alloc::vec![None; aggstate.num_hashes.max(0) as usize];
         }
 
         // Initialize current phase-dependent values to the initial phase.
