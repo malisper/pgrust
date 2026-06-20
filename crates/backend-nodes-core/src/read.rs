@@ -426,7 +426,7 @@ pub fn node_read<'mcx>(mcx: Mcx<'mcx>, pre_read: Option<Token<'_>>) -> PgResult<
                         Some(t) => t,
                     };
                 }
-                let node = mcx::alloc_in(mcx, Node::mk_list(mcx, elements))?;
+                let node = mcx::alloc_in(mcx, Node::mk_list(mcx, elements)?)?;
                 Ok(Some(node))
             }
         }
@@ -445,7 +445,7 @@ pub fn node_read<'mcx>(mcx: Mcx<'mcx>, pre_read: Option<Token<'_>>) -> PgResult<
             let s = String::from_utf8_lossy(tok.bytes);
             let ival = atoi_i32(&s);
             let node =
-                mcx::alloc_in(mcx, Node::mk_integer(mcx, types_nodes::value::Integer { ival }))?;
+                mcx::alloc_in(mcx, Node::mk_integer(mcx, types_nodes::value::Integer { ival })?)?;
             Ok(Some(node))
         }
         TokenType::Float => {
@@ -453,14 +453,14 @@ pub fn node_read<'mcx>(mcx: Mcx<'mcx>, pre_read: Option<Token<'_>>) -> PgResult<
             // The numeric literal is kept verbatim as its source string.
             let s = String::from_utf8_lossy(tok.bytes);
             let fval = PgString::from_str_in(&s, mcx)?;
-            let node = mcx::alloc_in(mcx, Node::mk_float(mcx, types_nodes::value::Float { fval }))?;
+            let node = mcx::alloc_in(mcx, Node::mk_float(mcx, types_nodes::value::Float { fval })?)?;
             Ok(Some(node))
         }
         TokenType::Boolean => {
             // C: result = makeBoolean(token[0] == 't');
             let boolval = tok.bytes[0] == b't';
             let node =
-                mcx::alloc_in(mcx, Node::mk_boolean(mcx, types_nodes::value::Boolean { boolval }))?;
+                mcx::alloc_in(mcx, Node::mk_boolean(mcx, types_nodes::value::Boolean { boolval })?)?;
             Ok(Some(node))
         }
         TokenType::String => {
@@ -472,7 +472,7 @@ pub fn node_read<'mcx>(mcx: Mcx<'mcx>, pre_read: Option<Token<'_>>) -> PgResult<
             let sval_s = debackslash(inner);
             let sval = PgString::from_str_in(&sval_s, mcx)?;
             let node =
-                mcx::alloc_in(mcx, Node::mk_string(mcx, types_nodes::value::StringNode { sval }))?;
+                mcx::alloc_in(mcx, Node::mk_string(mcx, types_nodes::value::StringNode { sval })?)?;
             Ok(Some(node))
         }
         TokenType::BitString => {
@@ -481,7 +481,7 @@ pub fn node_read<'mcx>(mcx: Mcx<'mcx>, pre_read: Option<Token<'_>>) -> PgResult<
             let bsval_s = debackslash(tok.bytes);
             let bsval = PgString::from_str_in(&bsval_s, mcx)?;
             let node =
-                mcx::alloc_in(mcx, Node::mk_bit_string(mcx, types_nodes::value::BitString { bsval }))?;
+                mcx::alloc_in(mcx, Node::mk_bit_string(mcx, types_nodes::value::BitString { bsval })?)?;
             Ok(Some(node))
         }
     }

@@ -419,7 +419,7 @@ impl<'mcx> PlannerRun<'mcx> {
     /// coexist with `&mut self.subplans[..]`). Pair with [`put_subplan`].
     #[inline]
     pub fn take_subplan(&mut self, id: PlanId) -> types_error::PgResult<Node<'mcx>> {
-        let placeholder = Node::mk_range_tbl_ref(self.mcx(), types_nodes::rawnodes::RangeTblRef { rtindex: 0 });
+        let placeholder = Node::mk_range_tbl_ref(self.mcx(), types_nodes::rawnodes::RangeTblRef { rtindex: 0 })?;
         Ok(core::mem::replace(&mut self.subplans[id.0 as usize], placeholder))
     }
 

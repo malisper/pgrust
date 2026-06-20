@@ -111,7 +111,7 @@ const MaxAttrNumber: i32 = 32767;
 fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
     let node = Node::mk_string(mcx, StringNode {
         sval: PgString::from_str_in(s, mcx)?,
-    });
+    })?;
     mcx::alloc_in(mcx, node)
 }
 
@@ -125,7 +125,7 @@ fn str_val<'a>(node: &'a Node<'_>) -> &'a str {
 
 /// `(Node *) makeVar(...)` — wrap a `Var` as the central `Node`.
 fn var_node<'mcx>(mcx: Mcx<'mcx>, var: Var) -> PgResult<Node<'mcx>> {
-    Ok(Node::mk_var(mcx, var))
+    Ok(Node::mk_var(mcx, var)?)
 }
 
 /// `NameStr(attr->attname)` (a `NameData` carries NUL-terminated bytes).
@@ -2073,7 +2073,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
         rtfunc.funccolcount = final_tupdesc.natts;
         // C: rte->functions = lappend(rte->functions, rtfunc);
         rte.functions
-            .push(mcx::alloc_in(mcx, Node::mk_range_tbl_function(mcx, rtfunc))?);
+            .push(mcx::alloc_in(mcx, Node::mk_range_tbl_function(mcx, rtfunc)?)?);
 
         // C: functupdescs[funcno] = tupdesc; totalatts += tupdesc->natts;
         totalatts += final_tupdesc.natts;
@@ -2649,7 +2649,7 @@ pub fn addRangeTableEntryForGroup<'mcx>(
         // groupexprs = lappend(groupexprs, copyObject(te->expr))
         let expr = te.expr.as_deref();
         let expr_node = match expr {
-            Some(e) => Node::mk_expr(mcx, e.clone()),
+            Some(e) => Node::mk_expr(mcx, e.clone())?,
             None => panic!("addRangeTableEntryForGroup: group clause has no expr"),
         };
         groupexprs.push(mcx::alloc_in(mcx, expr_node)?);
@@ -2728,7 +2728,7 @@ pub fn addNSItemToQuery<'mcx>(
     if add_to_join_list {
         let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef {
             rtindex: nsitem.p_rtindex,
-        });
+        })?;
         pstate.p_joinlist.push(mcx::alloc_in(mcx, rtr)?);
     }
     if add_to_rel_namespace || add_to_var_namespace {
@@ -2903,7 +2903,7 @@ pub fn expandRTE<'mcx>(
                         cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
                     } else if include_dropped {
                         let nc = make_null_const(mcx, INT4OID, -1, InvalidOid)?;
-                        cv.push(mcx::alloc_in(mcx, Node::mk_const(mcx, nc))?);
+                        cv.push(mcx::alloc_in(mcx, Node::mk_const(mcx, nc)?)?);
                     }
                 }
             }
@@ -2986,7 +2986,7 @@ fn expandTupleDesc<'mcx>(
                 }
                 if let Some(cv) = colvars.as_deref_mut() {
                     let nc = make_null_const(mcx, INT4OID, -1, InvalidOid)?;
-                    cv.push(mcx::alloc_in(mcx, Node::mk_const(mcx, nc))?);
+                    cv.push(mcx::alloc_in(mcx, Node::mk_const(mcx, nc)?)?);
                 }
             }
             if let Some(ai) = aliasidx {

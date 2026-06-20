@@ -1080,7 +1080,7 @@ pub fn make_const_node_seam<'mcx>(
         constisnull,
         constbyval,
     )?;
-    alloc_in(mcx, Node::mk_expr(mcx, Expr::Const(c)))
+    alloc_in(mcx, Node::mk_expr(mcx, Expr::Const(c))?)
 }
 
 /// `make_and_boolexpr` seam — `makeBoolExpr(AND_EXPR, args, location)` returned
@@ -1108,7 +1108,7 @@ pub fn make_and_boolexpr_seam<'mcx>(
         }
     }
     let e = make_bool_expr(AND_EXPR, exprs, location);
-    alloc_in(mcx, Node::mk_expr(mcx, e))
+    alloc_in(mcx, Node::mk_expr(mcx, e)?)
 }
 
 /// `make_type_name_from_name_list` seam — build a raw-parser `TypeName` from a
