@@ -473,10 +473,10 @@ pub fn RefreshMatViewByOid(
 /// `refresh_matview_datafill` — execute the given query, sending result rows to
 /// `dest` (which inserts them into the target matview). Returns the number of
 /// rows inserted.
-fn refresh_matview_datafill(
-    mcx: Mcx<'_>,
+fn refresh_matview_datafill<'mcx>(
+    mcx: Mcx<'mcx>,
     dest: DestReceiverHandle,
-    query: Query<'_>,
+    query: Query<'mcx>,
     query_string: &str,
     _is_create: bool,
 ) -> PgResult<u64> {
