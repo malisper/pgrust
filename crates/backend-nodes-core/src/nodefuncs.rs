@@ -898,70 +898,110 @@ fn leftmost_loc(loc1: i32, loc2: i32) -> i32 {
 /// `exprLocation(expr)` (nodeFuncs.c) — the parse location (leftmost token) of
 /// an expression tree, for error reports; `-1` if it can't be determined.
 ///
-/// The layered model trims the per-node `location` field (docs/types.md rule 3)
-/// and does not model the raw-grammar node types this C switch also covers, so
-/// every modeled leaf's own location is unknown (`-1`). The real `leftmostLoc`
-/// recursion over the compound variants is preserved (so the structure is
-/// faithful), but with no stored leaf location it resolves to `-1` throughout —
-/// exactly the documented "location can't be determined" fallback.
+/// Modeled `Expr` variants that retain their parser `location` field report it
+/// faithfully (matching the corresponding C `case`), and the `leftmostLoc`
+/// recursion over compound variants combines each node's own `location` with
+/// its children. The raw-grammar node types this C switch also covers
+/// (RangeVar/TypeName/ColumnDef/Constraint/... and CaseWhen/JsonFormat, which
+/// are not standalone `Expr` variants here) are not modeled and resolve to
+/// `-1` — the documented "location can't be determined" fallback.
 pub fn expr_location(expr: Option<&Expr>) -> PgResult<i32> {
     let Some(expr) = expr else {
         return Ok(-1);
     };
     let loc = match expr.expr_tag() {
+        // Leaf nodes whose own `location` token is the answer (nodeFuncs.c).
+        etag::T_Var => expr.as_var().unwrap().location,
+        etag::T_Const => expr.as_const().unwrap().location,
+        etag::T_Param => expr.as_param().unwrap().location,
+        etag::T_WindowFunc => expr.as_windowfunc().unwrap().location,
+        etag::T_MergeSupportFunc => expr.as_mergesupportfunc().unwrap().location,
+        etag::T_CaseExpr => expr.as_caseexpr().unwrap().location,
+        // ArrayExpr/RowExpr: location points at ARRAY/[ or ROW/( — leftmost.
+        etag::T_ArrayExpr => expr.as_arrayexpr().unwrap().location,
+        etag::T_RowExpr => expr.as_rowexpr().unwrap().location,
+        etag::T_CoalesceExpr => expr.as_coalesceexpr().unwrap().location,
+        etag::T_MinMaxExpr => expr.as_minmaxexpr().unwrap().location,
+        etag::T_SQLValueFunction => expr.as_sqlvaluefunction().unwrap().location,
+        etag::T_JsonConstructorExpr => expr.as_jsonconstructorexpr().unwrap().location,
+        etag::T_SetToDefault => expr.as_settodefault().unwrap().location,
         etag::T_SubscriptingRef => {
             expr_location(expr.as_subscriptingref().unwrap().refexpr.as_deref())?
         }
-        etag::T_FuncExpr => leftmost_loc(-1, expr_location_list(&expr.as_funcexpr().unwrap().args)?),
-        etag::T_NamedArgExpr => {
-            leftmost_loc(-1, expr_location(expr.as_namedargexpr().unwrap().arg.as_deref())?)
+        etag::T_FuncExpr => {
+            let f = expr.as_funcexpr().unwrap();
+            leftmost_loc(f.location, expr_location_list(&f.args)?)
         }
-        etag::T_OpExpr => leftmost_loc(-1, expr_location_list(&expr.as_opexpr().unwrap().args)?),
+        etag::T_NamedArgExpr => {
+            let na = expr.as_namedargexpr().unwrap();
+            leftmost_loc(na.location, expr_location(na.arg.as_deref())?)
+        }
+        etag::T_OpExpr => {
+            let o = expr.as_opexpr().unwrap();
+            leftmost_loc(o.location, expr_location_list(&o.args)?)
+        }
         etag::T_DistinctExpr => {
-            leftmost_loc(-1, expr_location_list(&expr.as_distinctexpr().unwrap().args)?)
+            let o = expr.as_distinctexpr().unwrap();
+            leftmost_loc(o.location, expr_location_list(&o.args)?)
         }
         etag::T_NullIfExpr => {
-            leftmost_loc(-1, expr_location_list(&expr.as_nullifexpr().unwrap().args)?)
+            let o = expr.as_nullifexpr().unwrap();
+            leftmost_loc(o.location, expr_location_list(&o.args)?)
         }
         etag::T_ScalarArrayOpExpr => {
             let s = expr.as_scalararrayopexpr().unwrap();
             leftmost_loc(s.location, expr_location_list(&s.args)?)
         }
-        etag::T_BoolExpr => leftmost_loc(-1, expr_location_list(&expr.as_boolexpr().unwrap().args)?),
+        etag::T_BoolExpr => {
+            let b = expr.as_boolexpr().unwrap();
+            leftmost_loc(b.location, expr_location_list(&b.args)?)
+        }
         etag::T_SubLink => {
-            leftmost_loc(expr_location(expr.as_sublink().unwrap().testexpr.as_deref())?, -1)
+            let s = expr.as_sublink().unwrap();
+            leftmost_loc(expr_location(s.testexpr.as_deref())?, s.location)
         }
         etag::T_FieldSelect => expr_location(expr.as_fieldselect().unwrap().arg.as_deref())?,
         etag::T_FieldStore => expr_location(expr.as_fieldstore().unwrap().arg.as_deref())?,
         etag::T_RelabelType => {
-            leftmost_loc(-1, expr_location(expr.as_relabeltype().unwrap().arg.as_deref())?)
+            let r = expr.as_relabeltype().unwrap();
+            leftmost_loc(r.location, expr_location(r.arg.as_deref())?)
         }
         etag::T_CoerceViaIO => {
-            leftmost_loc(-1, expr_location(expr.as_coerceviaio().unwrap().arg.as_deref())?)
+            let c = expr.as_coerceviaio().unwrap();
+            leftmost_loc(c.location, expr_location(c.arg.as_deref())?)
         }
         etag::T_ArrayCoerceExpr => {
-            leftmost_loc(-1, expr_location(expr.as_arraycoerceexpr().unwrap().arg.as_deref())?)
+            let c = expr.as_arraycoerceexpr().unwrap();
+            leftmost_loc(c.location, expr_location(c.arg.as_deref())?)
         }
         etag::T_ConvertRowtypeExpr => {
-            leftmost_loc(-1, expr_location(expr.as_convertrowtypeexpr().unwrap().arg.as_deref())?)
+            let c = expr.as_convertrowtypeexpr().unwrap();
+            leftmost_loc(c.location, expr_location(c.arg.as_deref())?)
         }
         etag::T_CollateExpr => expr_location(expr.as_collateexpr().unwrap().arg.as_deref())?,
         etag::T_RowCompareExpr => expr_location_list(&expr.as_rowcompareexpr().unwrap().largs)?,
-        etag::T_XmlExpr => leftmost_loc(-1, expr_location_list(&expr.as_xmlexpr().unwrap().args)?),
+        etag::T_XmlExpr => {
+            let x = expr.as_xmlexpr().unwrap();
+            leftmost_loc(x.location, expr_location_list(&x.args)?)
+        }
         etag::T_JsonValueExpr => {
             expr_location(expr.as_jsonvalueexpr().unwrap().raw_expr.as_deref())?
         }
         etag::T_JsonExpr => {
-            leftmost_loc(-1, expr_location(expr.as_jsonexpr().unwrap().formatted_expr.as_deref())?)
+            let j = expr.as_jsonexpr().unwrap();
+            leftmost_loc(j.location, expr_location(j.formatted_expr.as_deref())?)
         }
         etag::T_NullTest => {
-            leftmost_loc(-1, expr_location(expr.as_nulltest().unwrap().arg.as_deref())?)
+            let n = expr.as_nulltest().unwrap();
+            leftmost_loc(n.location, expr_location(n.arg.as_deref())?)
         }
         etag::T_BooleanTest => {
-            leftmost_loc(-1, expr_location(expr.as_booleantest().unwrap().arg.as_deref())?)
+            let b = expr.as_booleantest().unwrap();
+            leftmost_loc(b.location, expr_location(b.arg.as_deref())?)
         }
         etag::T_CoerceToDomain => {
-            leftmost_loc(-1, expr_location(expr.as_coercetodomain().unwrap().arg.as_deref())?)
+            let c = expr.as_coercetodomain().unwrap();
+            leftmost_loc(c.location, expr_location(c.arg.as_deref())?)
         }
         etag::T_ReturningExpr => {
             expr_location(expr.as_returningexpr().unwrap().retexpr.as_deref())?

@@ -24066,6 +24066,7 @@ dependencies = [
  "backend-parser-parse-type",
  "backend-parser-parse-utilcmd",
  "backend-parser-relation",
+ "backend-parser-scan-fgram",
  "backend-parser-small1",
  "backend-partitioning-partbounds",
  "backend-partitioning-partdesc",
