@@ -107,8 +107,9 @@ fn float8in_internal_endptr_seam(
     orig_string: String,
 ) -> PgResult<(f64, usize)> {
     let mut consumed = 0usize;
+    // Geo I/O always wants a hard error here (no soft `pg_input_is_valid` path).
     let value =
-        io::float8in_internal(&num, Some(&mut consumed), &type_name, &orig_string)?;
+        io::float8in_internal(&num, Some(&mut consumed), &type_name, &orig_string, None)?;
     Ok((value, consumed))
 }
 

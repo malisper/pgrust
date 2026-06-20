@@ -119,7 +119,11 @@ fn with_recv_buf<T>(
 // ---------------------------------------------------------------------------
 
 fn fc_int2in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i16(ok_or_raise!(crate::int2in(arg_cstring(fcinfo, 0), None)))
+    // C: `int2in` forwards `fcinfo->context` so a recoverable parse failure
+    // `ereturn`s into the soft sink installed by `InputFunctionCallSafe`.
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let escontext = fcinfo.escontext_mut();
+    ret_i16(ok_or_raise!(crate::int2in(&s, escontext)))
 }
 fn fc_int2out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let s = crate::int2out(arg_i16(fcinfo, 0));
@@ -176,7 +180,11 @@ fn fc_int2vectorout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 fn fc_int4in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(ok_or_raise!(crate::int4in(arg_cstring(fcinfo, 0), None)))
+    // C: `int4in` forwards `fcinfo->context` so a recoverable parse failure
+    // `ereturn`s into the soft sink installed by `InputFunctionCallSafe`.
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let escontext = fcinfo.escontext_mut();
+    ret_i32(ok_or_raise!(crate::int4in(&s, escontext)))
 }
 fn fc_int4out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let s = crate::int4out(arg_i32(fcinfo, 0));

@@ -130,11 +130,14 @@ fn try_i64(r: types_error::PgResult<i64>) -> Datum {
 // ---- I/O ----
 
 fn fc_int8in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
-    // C: pg_strtoint64_safe(str, fcinfo->context). A soft ErrorSaveContext is
-    // not modeled on the fmgr frame, so a hard parse is used here (matching
-    // every other adt _in at this boundary).
-    match crate::int8in(s, None) {
+    // C: `int8in` does `pg_strtoint64_safe(str, fcinfo->context)`, forwarding the
+    // frame's soft `ErrorSaveContext` (installed by `InputFunctionCallSafe`) so a
+    // recoverable parse failure `ereturn`s into the sink instead of throwing. We
+    // own-copy the cstring to release the immutable arg borrow before taking the
+    // mutable escontext borrow off the same frame.
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let escontext = fcinfo.escontext_mut();
+    match crate::int8in(&s, escontext) {
         Ok(v) => ret_i64(v),
         Err(e) => raise(e),
     }

@@ -234,7 +234,19 @@ pub fn numeric_to_char<'mcx>(
 
         let mut x = val.clone();
         backend_utils_adt_numeric::kernel_var::round_var(&mut x, num.post);
-        let orgnum = backend_utils_adt_numeric::io::get_str_from_var(&x);
+        // C: `orgnum = numeric_out(x)`, which renders NaN/Infinity specially;
+        // `get_str_from_var` (used for the finite case) renders specials as "0".
+        let orgnum = {
+            use types_numeric::var::NumericSign;
+            match x.sign {
+                NumericSign::NaN => "NaN".to_string(),
+                NumericSign::PInf => "Infinity".to_string(),
+                NumericSign::NInf => "-Infinity".to_string(),
+                NumericSign::Pos | NumericSign::Neg => {
+                    backend_utils_adt_numeric::io::get_str_from_var(&x)
+                }
+            }
+        };
         let (s, sgn) = if let Some(stripped) = orgnum.strip_prefix('-') {
             (stripped.to_string(), b'-' as i32)
         } else {
@@ -562,6 +574,17 @@ fn adjust_pre_float(numstr: Vec<u8>, numstr_pre_len: i32, num: &NUMDesc) -> (i32
 }
 
 fn numeric_out_sci_var(value: &NumericVar, scale: i32) -> PgResult<String> {
+    // C `numeric_to_char` calls `numeric_out_sci(value, Num.post)`, whose head
+    // renders the special values; only the finite path reaches
+    // `get_str_from_var_sci` (which asserts non-special). Mirror that here, since
+    // the formatting caller holds a `NumericVar` rather than the on-disk image.
+    use types_numeric::var::NumericSign;
+    match value.sign {
+        NumericSign::NaN => return Ok("NaN".to_string()),
+        NumericSign::PInf => return Ok("Infinity".to_string()),
+        NumericSign::NInf => return Ok("-Infinity".to_string()),
+        NumericSign::Pos | NumericSign::Neg => {}
+    }
     backend_utils_adt_numeric::io::get_str_from_var_sci(value, scale)
 }
 

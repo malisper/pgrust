@@ -159,16 +159,20 @@ fn ret_opt_f64(fcinfo: &mut FunctionCallInfoBaseData, v: Option<f64>) -> Datum {
 
 // ---- I/O ----
 fn fc_float4in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
-    ret_f32(unwrap_or_raise(crate::float4in(s)))
+    // C: `float4in` forwards `fcinfo->context` for soft `pg_input_is_valid`.
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let escontext = fcinfo.escontext_mut();
+    ret_f32(unwrap_or_raise(crate::float4in(&s, escontext)))
 }
 fn fc_float4out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let v = arg_f32(fcinfo, 0);
     ret_cstring(fcinfo, crate::float4out(v))
 }
 fn fc_float8in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
-    ret_f64(unwrap_or_raise(crate::float8in(s)))
+    // C: `float8in` forwards `fcinfo->context` for soft `pg_input_is_valid`.
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let escontext = fcinfo.escontext_mut();
+    ret_f64(unwrap_or_raise(crate::float8in(&s, escontext)))
 }
 fn fc_float8out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let v = arg_f64(fcinfo, 0);

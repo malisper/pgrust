@@ -55,10 +55,17 @@ pub fn fmt_pad_str(width: i32, s: &str) -> String {
 /// C: `psprintf("%+.*e", prec, val)` for f64.  Produces an explicit leading
 /// sign, `prec` fraction digits, and a sign + at-least-two-digit exponent.
 pub fn fmt_plus_e(prec: usize, val: f64) -> String {
+    // PG's `pg_snprintf` renders specials as "NaN" / "Infinity" (NaN carries no
+    // sign; +Inf gets the forced '+', -Inf a '-'), NOT glibc's "nan"/"inf".
     if val.is_nan() {
-        // matches glibc "%+.*e" of NaN -> "+nan" — but callers handle NaN
-        // separately, so this is only a safety net.
-        return "+nan".to_string();
+        return "NaN".to_string();
+    }
+    if val.is_infinite() {
+        return if val.is_sign_negative() {
+            "-Infinity".to_string()
+        } else {
+            "+Infinity".to_string()
+        };
     }
     let neg = val.is_sign_negative();
     let s = format!("{:.*e}", prec, val.abs());
@@ -71,14 +78,38 @@ pub fn fmt_plus_e(prec: usize, val: f64) -> String {
     }
 }
 
-/// C: `psprintf("%.*f", prec, val)` for f64.
+/// C: `psprintf("%.*f", prec, val)` for f64. PG's `pg_snprintf` renders specials
+/// as "NaN" / "Infinity" / "-Infinity" (NaN has no sign), unlike glibc's
+/// "nan"/"inf".
 pub fn fmt_f(prec: usize, val: f64) -> String {
+    if let Some(s) = special_float_text(val) {
+        return s;
+    }
     format!("{val:.prec$}")
 }
 
-/// C: `psprintf("%.0f", val)` for f64.
+/// C: `psprintf("%.0f", val)` for f64. See [`fmt_f`] for the special-value note.
 pub fn fmt_f0(val: f64) -> String {
+    if let Some(s) = special_float_text(val) {
+        return s;
+    }
     format!("{val:.0}")
+}
+
+/// The PG-`snprintf` spelling of a special float (`%f`/`%e` non-forcesign): NaN
+/// has no sign; +Inf → "Infinity"; -Inf → "-Infinity". `None` for finite values.
+fn special_float_text(val: f64) -> Option<String> {
+    if val.is_nan() {
+        Some("NaN".to_string())
+    } else if val.is_infinite() {
+        Some(if val.is_sign_negative() {
+            "-Infinity".to_string()
+        } else {
+            "Infinity".to_string()
+        })
+    } else {
+        None
+    }
 }
 
 /// Rewrite Rust's `1.23e4` / `1.23e-4` exponent form into C's `1.23e+04`

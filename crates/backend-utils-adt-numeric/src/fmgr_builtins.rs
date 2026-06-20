@@ -138,11 +138,26 @@ fn ok<T>(r: types_error::PgResult<T>) -> T {
 /// `numeric_in(cstring, oid, int4) -> numeric` (oid 1701). The `typelem` oid arg
 /// (arg 1) is unused by `numeric_in`, exactly as in C; the typmod is arg 2.
 fn fc_numeric_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    // C: `numeric_in` threads `fcinfo->context` so a recoverable
+    // syntax/range/typmod failure `ereturn`s into the soft sink installed by
+    // `InputFunctionCallSafe` (then `PG_RETURN_NULL`). Own-copy the cstring to
+    // release the immutable arg borrow before the mutable escontext borrow.
+    let s = arg_cstring(fcinfo, 0).to_string();
     let typmod = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
-    let image = ok(crate::io::numeric_in(m.mcx(), s, typmod));
-    ret_numeric(fcinfo, image.as_slice().to_vec())
+    let escontext = fcinfo.escontext_mut();
+    // Materialize the image out of the escontext borrow before re-borrowing
+    // `fcinfo` for the result write.
+    let image = ok(crate::io::numeric_in_safe(m.mcx(), &s, typmod, escontext))
+        .map(|img| img.as_slice().to_vec());
+    match image {
+        Some(bytes) => ret_numeric(fcinfo, bytes),
+        None => {
+            // Soft error recorded into the frame's escontext; C `PG_RETURN_NULL`.
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
 }
 
 /// `numeric_out(numeric) -> cstring` (oid 1702).

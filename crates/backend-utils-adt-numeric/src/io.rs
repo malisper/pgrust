@@ -369,6 +369,43 @@ pub fn set_var_from_non_decimal_integer_str<'mcx>(
 /// unsigned), the non-decimal integer prefixes ("0x"/"0o"/"0b"), trailing-junk
 /// detection, then `apply_typmod[_special]` and `make_result_opt_error`.
 pub fn numeric_in<'mcx>(mcx: Mcx<'mcx>, s: &str, typmod: i32) -> PgResult<PgVec<'mcx, u8>> {
+    match numeric_in_safe(mcx, s, typmod, None)? {
+        Some(image) => Ok(image),
+        // No escontext supplied => every soft site is a hard `Err`, so `None`
+        // is unreachable. (Belt-and-braces: surface the syntax error.)
+        None => Err(invalid_syntax(s)),
+    }
+}
+
+/// Soft-error-aware `numeric_in` (numeric.c:`numeric_in`, threading
+/// `fcinfo->context`). When `escontext` is supplied, a recoverable
+/// syntax/range/typmod failure is recorded into the sink (C `ereturn`) and
+/// `Ok(None)` is returned (C `PG_RETURN_NULL()`); with no `escontext` every such
+/// site raises a hard `Err`, exactly as the bare `numeric_in` did before.
+pub fn numeric_in_safe<'mcx>(
+    mcx: Mcx<'mcx>,
+    s: &str,
+    typmod: i32,
+    mut escontext: Option<&mut types_error::SoftErrorContext>,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    // Route a soft-eligible `Err` either into the sink (Ok(None)) or out as a
+    // hard `Err`, mirroring C's `ereturn(escontext, (Datum) 0, ...)`.
+    macro_rules! soft {
+        ($err:expr) => {
+            match types_error::ereturn(escontext.as_deref_mut(), (), $err) {
+                Ok(()) => return Ok(None),
+                Err(e) => return Err(e),
+            }
+        };
+    }
+    macro_rules! soft_try {
+        ($r:expr) => {
+            match $r {
+                Ok(v) => v,
+                Err(e) => soft!(e),
+            }
+        };
+    }
     let bytes = s.as_bytes();
     let at = |i: usize| -> u8 {
         if i < bytes.len() {
@@ -425,21 +462,21 @@ pub fn numeric_in<'mcx>(mcx: Mcx<'mcx>, s: &str, typmod: i32) -> PgResult<PgVec<
             );
             cp += 3;
         } else {
-            return Err(invalid_syntax(s));
+            soft!(invalid_syntax(s));
         }
 
         // Check for trailing junk; nothing but spaces allowed. We do this check
         // before applying the typmod, matching C.
         while at(cp) != 0 {
             if !is_c_space(at(cp)) {
-                return Err(invalid_syntax(s));
+                soft!(invalid_syntax(s));
             }
             cp += 1;
         }
 
         let res = convert::make_result(mcx, &var)?;
-        convert::apply_typmod_special(&res, typmod)?;
-        return Ok(res);
+        soft_try!(convert::apply_typmod_special(&res, typmod));
+        return Ok(Some(res));
     }
 
     // Normal numeric value, which may be a non-decimal integer (PG 18) or a
@@ -457,15 +494,14 @@ pub fn numeric_in<'mcx>(mcx: Mcx<'mcx>, s: &str, typmod: i32) -> PgResult<PgVec<
     };
 
     let (mut value, end) = if base == 10 {
-        let (mut value, end) = set_var_from_str(mcx, s, cp)?;
+        let (mut value, end) = soft_try!(set_var_from_str(mcx, s, cp));
         value.sign = sign;
         (value, end)
     } else {
         // Skip the two-character base prefix.
-        set_var_from_non_decimal_integer_str(mcx, s, cp + 2, base).map(|(mut v, end)| {
-            v.sign = sign;
-            (v, end)
-        })?
+        let (mut v, end) = soft_try!(set_var_from_non_decimal_integer_str(mcx, s, cp + 2, base));
+        v.sign = sign;
+        (v, end)
     };
     cp = end;
 
@@ -473,16 +509,16 @@ pub fn numeric_in<'mcx>(mcx: Mcx<'mcx>, s: &str, typmod: i32) -> PgResult<PgVec<
     // finishing the syntax check.
     while at(cp) != 0 {
         if !is_c_space(at(cp)) {
-            return Err(invalid_syntax(s));
+            soft!(invalid_syntax(s));
         }
         cp += 1;
     }
 
-    convert::apply_typmod(&mut value, typmod)?;
+    soft_try!(convert::apply_typmod(&mut value, typmod));
 
     match convert::make_result_opt_error(mcx, &value)? {
-        Some(res) => Ok(res),
-        None => Err(out_of_range()),
+        Some(res) => Ok(Some(res)),
+        None => soft!(out_of_range()),
     }
 }
 

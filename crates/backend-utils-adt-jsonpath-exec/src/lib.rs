@@ -3975,6 +3975,7 @@ fn soft_float8in_internal(s: &str) -> PgResult<Option<f64>> {
         None,
         "double precision",
         s,
+        None,
     ))
 }
 

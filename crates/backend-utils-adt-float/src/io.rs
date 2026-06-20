@@ -14,8 +14,8 @@
 
 use common_ryu::{double_to_shortest_decimal, float_to_shortest_decimal};
 use types_error::{
-    PgError, PgResult, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-    ERRCODE_PROTOCOL_VIOLATION,
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
+    ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_PROTOCOL_VIOLATION,
 };
 
 use crate::{get_float4_infinity, get_float4_nan, get_float8_infinity, get_float8_nan};
@@ -359,6 +359,7 @@ pub fn float8in_internal(
     endptr_consumed: Option<&mut usize>,
     type_name: &str,
     orig_string: &str,
+    mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<f64> {
     let bytes = num.as_bytes();
 
@@ -368,7 +369,8 @@ pub fn float8in_internal(
     }
 
     if start >= bytes.len() {
-        return Err(invalid_input(type_name, orig_string));
+        // C: ereturn(escontext, 0, ...).
+        return ereturn(escontext.as_deref_mut(), 0.0, invalid_input(type_name, orig_string));
     }
 
     let rest = &bytes[start..];
@@ -385,16 +387,30 @@ pub fn float8in_internal(
                 NumKind::Hex => parse_hex_float(token.as_bytes()),
             };
             if parsed.is_infinite() {
-                return Err(out_of_range(token, "double precision"));
+                return ereturn(
+                    escontext.as_deref_mut(),
+                    0.0,
+                    out_of_range(token, "double precision"),
+                );
             }
             if parsed == 0.0 && tok.nonzero {
-                return Err(out_of_range(token, "double precision"));
+                return ereturn(
+                    escontext.as_deref_mut(),
+                    0.0,
+                    out_of_range(token, "double precision"),
+                );
             }
             (parsed, tok.len)
         }
         None => match special_float8(rest) {
             Some((v, n)) => (v, n),
-            None => return Err(invalid_input(type_name, orig_string)),
+            None => {
+                return ereturn(
+                    escontext.as_deref_mut(),
+                    0.0,
+                    invalid_input(type_name, orig_string),
+                )
+            }
         },
     };
 
@@ -406,7 +422,7 @@ pub fn float8in_internal(
     if let Some(slot) = endptr_consumed {
         *slot = end;
     } else if end != bytes.len() {
-        return Err(invalid_input(type_name, orig_string));
+        return ereturn(escontext.as_deref_mut(), 0.0, invalid_input(type_name, orig_string));
     }
 
     Ok(val)
@@ -419,6 +435,7 @@ pub fn float4in_internal(
     endptr_consumed: Option<&mut usize>,
     type_name: &str,
     orig_string: &str,
+    mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<f32> {
     let bytes = num.as_bytes();
 
@@ -428,7 +445,7 @@ pub fn float4in_internal(
     }
 
     if start >= bytes.len() {
-        return Err(invalid_input(type_name, orig_string));
+        return ereturn(escontext.as_deref_mut(), 0.0, invalid_input(type_name, orig_string));
     }
 
     let rest = &bytes[start..];
@@ -445,16 +462,22 @@ pub fn float4in_internal(
                 NumKind::Hex => parse_hex_float32(token.as_bytes()),
             };
             if parsed.is_infinite() {
-                return Err(out_of_range(token, "real"));
+                return ereturn(escontext.as_deref_mut(), 0.0, out_of_range(token, "real"));
             }
             if parsed == 0.0 && tok.nonzero {
-                return Err(out_of_range(token, "real"));
+                return ereturn(escontext.as_deref_mut(), 0.0, out_of_range(token, "real"));
             }
             (parsed, tok.len)
         }
         None => match special_float4(rest) {
             Some((v, n)) => (v, n),
-            None => return Err(invalid_input(type_name, orig_string)),
+            None => {
+                return ereturn(
+                    escontext.as_deref_mut(),
+                    0.0,
+                    invalid_input(type_name, orig_string),
+                )
+            }
         },
     };
 
@@ -466,7 +489,7 @@ pub fn float4in_internal(
     if let Some(slot) = endptr_consumed {
         *slot = end;
     } else if end != bytes.len() {
-        return Err(invalid_input(type_name, orig_string));
+        return ereturn(escontext.as_deref_mut(), 0.0, invalid_input(type_name, orig_string));
     }
 
     Ok(val)
@@ -516,13 +539,15 @@ fn special_float4(s: &[u8]) -> Option<(f32, usize)> {
 }
 
 /// `float8in()` core (float.c:363): parse a full cstring as `double precision`.
-pub fn float8in(num: &str) -> PgResult<f64> {
-    float8in_internal(num, None, "double precision", num)
+/// `escontext` forwards `fcinfo->context` so a recoverable failure `ereturn`s
+/// into the soft sink (`pg_input_is_valid`) instead of throwing.
+pub fn float8in(num: &str, escontext: Option<&mut SoftErrorContext>) -> PgResult<f64> {
+    float8in_internal(num, None, "double precision", num, escontext)
 }
 
 /// `float4in()` core (float.c:163): parse a full cstring as `real`.
-pub fn float4in(num: &str) -> PgResult<f32> {
-    float4in_internal(num, None, "real", num)
+pub fn float4in(num: &str, escontext: Option<&mut SoftErrorContext>) -> PgResult<f32> {
+    float4in_internal(num, None, "real", num, escontext)
 }
 
 /// `float8out_internal()` (float.c:536). Reads the live `extra_float_digits`
@@ -715,26 +740,26 @@ mod tests {
 
     #[test]
     fn parse_basic_doubles() {
-        assert_eq!(float8in("1.5").unwrap(), 1.5);
-        assert_eq!(float8in("  -2.25  ").unwrap(), -2.25);
-        assert_eq!(float8in("1e10").unwrap(), 1e10);
-        assert_eq!(float8in("0").unwrap(), 0.0);
-        assert_eq!(float8in(".5").unwrap(), 0.5);
-        assert_eq!(float8in("5.").unwrap(), 5.0);
+        assert_eq!(float8in("1.5", None).unwrap(), 1.5);
+        assert_eq!(float8in("  -2.25  ", None).unwrap(), -2.25);
+        assert_eq!(float8in("1e10", None).unwrap(), 1e10);
+        assert_eq!(float8in("0", None).unwrap(), 0.0);
+        assert_eq!(float8in(".5", None).unwrap(), 0.5);
+        assert_eq!(float8in("5.", None).unwrap(), 5.0);
     }
 
     #[test]
     fn parse_specials() {
-        assert!(float8in("NaN").unwrap().is_nan());
-        assert!(float8in("nan").unwrap().is_nan());
-        assert_eq!(float8in("Infinity").unwrap(), f64::INFINITY);
-        assert_eq!(float8in("infinity").unwrap(), f64::INFINITY);
-        assert_eq!(float8in("-Infinity").unwrap(), f64::NEG_INFINITY);
-        assert_eq!(float8in("inf").unwrap(), f64::INFINITY);
-        assert_eq!(float8in("+inf").unwrap(), f64::INFINITY);
-        assert_eq!(float8in("-inf").unwrap(), f64::NEG_INFINITY);
-        assert!(float4in("NaN").unwrap().is_nan());
-        assert_eq!(float4in("-Infinity").unwrap(), f32::NEG_INFINITY);
+        assert!(float8in("NaN", None).unwrap().is_nan());
+        assert!(float8in("nan", None).unwrap().is_nan());
+        assert_eq!(float8in("Infinity", None).unwrap(), f64::INFINITY);
+        assert_eq!(float8in("infinity", None).unwrap(), f64::INFINITY);
+        assert_eq!(float8in("-Infinity", None).unwrap(), f64::NEG_INFINITY);
+        assert_eq!(float8in("inf", None).unwrap(), f64::INFINITY);
+        assert_eq!(float8in("+inf", None).unwrap(), f64::INFINITY);
+        assert_eq!(float8in("-inf", None).unwrap(), f64::NEG_INFINITY);
+        assert!(float4in("NaN", None).unwrap().is_nan());
+        assert_eq!(float4in("-Infinity", None).unwrap(), f32::NEG_INFINITY);
     }
 
     #[test]
@@ -763,7 +788,7 @@ mod tests {
             ("0x.1p4", 0x3ff0000000000000),
         ];
         for &(lit, bits) in cases {
-            let v = float8in(lit).unwrap_or_else(|e| panic!("{lit}: {}", e.message()));
+            let v = float8in(lit, None).unwrap_or_else(|e| panic!("{lit}: {}", e.message()));
             assert_eq!(v.to_bits(), bits, "float8 {lit}: got {:#018x} want {bits:#018x}", v.to_bits());
         }
 
@@ -781,91 +806,91 @@ mod tests {
             ("0x1p-127", 0x00400000),
         ];
         for &(lit, bits) in cases4 {
-            let v = float4in(lit).unwrap_or_else(|e| panic!("{lit}: {}", e.message()));
+            let v = float4in(lit, None).unwrap_or_else(|e| panic!("{lit}: {}", e.message()));
             assert_eq!(v.to_bits(), bits, "float4 {lit}: got {:#010x} want {bits:#010x}", v.to_bits());
         }
     }
 
     #[test]
     fn hex_float_overflow_underflow_and_junk_match_pg() {
-        let err = float8in("0x1p1024").unwrap_err();
+        let err = float8in("0x1p1024", None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
         assert_eq!(err.message(), "\"0x1p1024\" is out of range for type double precision");
-        assert_eq!(float8in("0x1p1000000").unwrap_err().sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
-        assert_eq!(float8in("0x1p-1075").unwrap_err().sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
-        assert_eq!(float8in("0x1p-1000000").unwrap_err().sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
-        assert_eq!(float4in("0x1p128").unwrap_err().sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
-        assert_eq!(float4in("0x1p-150").unwrap_err().sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        assert_eq!(float8in("0x1p1000000", None).unwrap_err().sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        assert_eq!(float8in("0x1p-1075", None).unwrap_err().sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        assert_eq!(float8in("0x1p-1000000", None).unwrap_err().sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        assert_eq!(float4in("0x1p128", None).unwrap_err().sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
+        assert_eq!(float4in("0x1p-150", None).unwrap_err().sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
 
-        let err = float8in("0x").unwrap_err();
+        let err = float8in("0x", None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
         assert_eq!(err.message(), "invalid input syntax for type double precision: \"0x\"");
-        assert_eq!(float8in("0x1p").unwrap_err().sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
-        assert_eq!(float8in("0xg").unwrap_err().sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
-        assert_eq!(float8in("0x10abcxyz").unwrap_err().sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
+        assert_eq!(float8in("0x1p", None).unwrap_err().sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
+        assert_eq!(float8in("0xg", None).unwrap_err().sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
+        assert_eq!(float8in("0x10abcxyz", None).unwrap_err().sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
 
-        assert_eq!(float8in("  0x1p4  ").unwrap(), 16.0);
-        assert_eq!(float8in("+0x1p4").unwrap(), 16.0);
-        assert_eq!(float8in("0x0").unwrap(), 0.0);
-        assert_eq!(float8in("0x0p0").unwrap(), 0.0);
+        assert_eq!(float8in("  0x1p4  ", None).unwrap(), 16.0);
+        assert_eq!(float8in("+0x1p4", None).unwrap(), 16.0);
+        assert_eq!(float8in("0x0", None).unwrap(), 0.0);
+        assert_eq!(float8in("0x0p0", None).unwrap(), 0.0);
     }
 
     #[test]
     fn hex_float_endptr_for_geometric_types() {
         let mut endptr = 0usize;
-        let v = float8in_internal("0x10,0x1p4", Some(&mut endptr), "point", "0x10,0x1p4").unwrap();
+        let v = float8in_internal("0x10,0x1p4", Some(&mut endptr), "point", "0x10,0x1p4", None).unwrap();
         assert_eq!(v, 16.0);
         assert_eq!(endptr, 4);
 
         let mut endptr = 0usize;
-        let v = float8in_internal("0x1p,5", Some(&mut endptr), "point", "0x1p,5").unwrap();
+        let v = float8in_internal("0x1p,5", Some(&mut endptr), "point", "0x1p,5", None).unwrap();
         assert_eq!(v, 1.0);
         assert_eq!(endptr, 3);
     }
 
     #[test]
     fn empty_and_junk_are_syntax_errors() {
-        let err = float8in("").unwrap_err();
+        let err = float8in("", None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
         assert_eq!(err.message(), "invalid input syntax for type double precision: \"\"");
 
-        let err = float8in("  ").unwrap_err();
+        let err = float8in("  ", None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
 
-        let err = float8in("1.5x").unwrap_err();
+        let err = float8in("1.5x", None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
         assert_eq!(err.message(), "invalid input syntax for type double precision: \"1.5x\"");
 
-        let err = float8in("xyz").unwrap_err();
+        let err = float8in("xyz", None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_INVALID_TEXT_REPRESENTATION);
 
-        let err = float4in("abc").unwrap_err();
+        let err = float4in("abc", None).unwrap_err();
         assert_eq!(err.message(), "invalid input syntax for type real: \"abc\"");
     }
 
     #[test]
     fn overflow_and_underflow_raise_22003() {
-        let err = float8in("1e400").unwrap_err();
+        let err = float8in("1e400", None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
         assert_eq!(err.message(), "\"1e400\" is out of range for type double precision");
-        let err = float8in("1e-400").unwrap_err();
+        let err = float8in("1e-400", None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
         assert_eq!(err.message(), "\"1e-400\" is out of range for type double precision");
-        let err = float4in("1e40").unwrap_err();
+        let err = float4in("1e40", None).unwrap_err();
         assert_eq!(err.message(), "\"1e40\" is out of range for type real");
-        let err = float4in("1e-50").unwrap_err();
+        let err = float4in("1e-50", None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE);
     }
 
     #[test]
     fn endptr_path_allows_trailing_junk() {
         let mut endptr = 0usize;
-        let v = float8in_internal("2.71, 2.0", Some(&mut endptr), "point", "2.71, 2.0").unwrap();
+        let v = float8in_internal("2.71, 2.0", Some(&mut endptr), "point", "2.71, 2.0", None).unwrap();
         assert_eq!(v, 2.71);
         assert_eq!(endptr, 4);
 
         let mut endptr2 = 0usize;
-        let v = float8in_internal("  2.71  rest", Some(&mut endptr2), "box", "  2.71  rest").unwrap();
+        let v = float8in_internal("  2.71  rest", Some(&mut endptr2), "box", "  2.71  rest", None).unwrap();
         assert_eq!(v, 2.71);
         assert_eq!(endptr2, 8);
     }
@@ -889,9 +914,9 @@ mod tests {
     #[test]
     fn roundtrip_in_out() {
         for &s in &["1.5", "3.14159265358979", "1e10", "-2.5e-3", "0", "123456.789"] {
-            let v = float8in(s).unwrap();
+            let v = float8in(s, None).unwrap();
             let out = float8out(v);
-            assert_eq!(float8in(&out).unwrap(), v, "roundtrip {s} -> {out}");
+            assert_eq!(float8in(&out, None).unwrap(), v, "roundtrip {s} -> {out}");
         }
     }
 
