@@ -1084,15 +1084,24 @@ pub enum ExprEvalStepData<'mcx> {
     },
     /// `fieldstore` — for EEOP_FIELDSTORE_DEFORM / FIELDSTORE_FORM.
     FieldStore {
-        /// `FieldStore *fstore` — original node; parked until primnodes carries
-        /// `FieldStore` (opaque address for now).
-        fstore: usize,
+        /// `FieldStore *fstore` — original node. The interpreter only needs
+        /// `fstore->resulttype` (the composite type whose rowtype the DEFORM/FORM
+        /// pair looks up), so the owned model carries that scalar directly rather
+        /// than parking the node as an opaque address.
+        resulttype: Oid,
         /// `ExprEvalRowtypeCache *rowcache` — shared by the DEFORM/FORM pair.
         rowcache: Option<PgBox<'mcx, ExprEvalRowtypeCache>>,
-        /// `Datum *values` — column-value workspace.
-        values: Option<PgVec<'mcx, Datum<'mcx>>>,
-        /// `bool *nulls`.
-        nulls: Option<PgVec<'mcx, bool>>,
+        /// `Datum *values` / `bool *nulls` — the per-column value/null workspace.
+        ///
+        /// In C these are two flat `palloc`'d arrays (`values[ncolumns]` /
+        /// `nulls[ncolumns]`) that DEFORM fills from the deformed input tuple,
+        /// each `newval` sub-expression writes into via `&values[fieldnum-1]` /
+        /// `&nulls[fieldnum-1]` (which is *also* the `innermost_caseval` source
+        /// for that field), and FORM gathers back into `heap_form_tuple`. In the
+        /// owned model each column is an arena [`ResultCellId`] (paired
+        /// value+null), so this is a per-column `Vec` of cell ids — the DEFORM
+        /// writes them, the newval sub-exprs target them, FORM reads them.
+        col_cells: Option<PgVec<'mcx, ResultCellId>>,
         ncolumns: i32,
     },
     /// `sbsref_subscript` — for EEOP_SBSREF_SUBSCRIPTS.

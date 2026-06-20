@@ -1623,18 +1623,119 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
-        etag::T_FieldStore => panic!(
-            "execExpr-core: FieldStore threads each new field value through \
-             state->innermost_caseval = &values[fieldnum-1] and recurses into \
-             &values[fieldnum-1] (execExpr.c:1581-1586), but the ExprEvalStepData::FieldStore \
-             variant models values/nulls as plain Datum/bool workspace vecs with no per-column \
-             ResultCellId — so neither the innermost_caseval thread nor the per-field recursion \
-             has an arena cell to bind to. The variant also parks the FieldStore node itself as \
-             an opaque address (fstore: usize), but the interpreter's DEFORM/FORM pair needs \
-             fstore->fieldnums. Genuine model gap (gap-2 not extended to FieldStore + parked \
-             node), owned by the nodes/keystone model layer. lookup_rowtype_tupdesc (for natts) \
-             is a landed seam."
-        ),
+        // ----- T_FieldStore -----
+        etag::T_FieldStore => {
+            let fstore = node.expect_fieldstore();
+
+            // /* find out the number of columns in the composite type */
+            // tupDesc = lookup_rowtype_tupdesc(fstore->resulttype, -1);
+            // ncolumns = tupDesc->natts;
+            // ReleaseTupleDesc(tupDesc);
+            let tup_desc = backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(
+                mcx,
+                fstore.resulttype,
+                -1,
+            )?;
+            let ncolumns = tup_desc.natts;
+
+            // /* create workspace for column values */
+            // values = (Datum *) palloc(sizeof(Datum) * ncolumns);
+            // nulls  = (bool  *) palloc(sizeof(bool)  * ncolumns);
+            //
+            // The owned model replaces the two flat workspace arrays with a
+            // per-column arena ResultCellId. Allocate one cell per column up
+            // front; DEFORM writes each, the newval sub-exprs target their
+            // field's cell, and FORM gathers them all into heap_form_tuple.
+            let mut col_cells: PgVec<ResultCellId> =
+                mcx::vec_with_capacity_in(mcx, ncolumns as usize)?;
+            for _ in 0..ncolumns {
+                col_cells.push(new_result_cell(mcx, state)?);
+            }
+
+            // /* create shared composite-type-lookup cache struct */
+            // rowcachep = palloc(sizeof(ExprEvalRowtypeCache));
+            // rowcachep->cacheptr = NULL;
+            //
+            // C shares one rowcachep between the DEFORM and FORM steps; in the
+            // owned model the rowtype lookup goes through the internally-cached
+            // typcache seam (the void* cacheptr cannot round-trip), so the cache
+            // carries no cross-step state — give each step its own default box.
+            let deform_rowcache = mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
+            let form_rowcache = mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
+
+            // /* emit code to evaluate the composite input value */
+            // ExecInitExprRec(fstore->arg, state, resv, resnull);
+            let arg = fstore.arg.as_deref().expect("FieldStore.arg present");
+            exec_init_expr_rec(mcx, arg, state, resv)?;
+
+            // /* next, deform the input tuple into our workspace */
+            // scratch.opcode = EEOP_FIELDSTORE_DEFORM;
+            // scratch.d.fieldstore.fstore   = fstore;
+            // scratch.d.fieldstore.rowcache = rowcachep;
+            // scratch.d.fieldstore.values   = values;
+            // scratch.d.fieldstore.nulls    = nulls;
+            // scratch.d.fieldstore.ncolumns = ncolumns;
+            // ExprEvalPushStep(state, &scratch);
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_FIELDSTORE_DEFORM,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::FieldStore {
+                    resulttype: fstore.resulttype,
+                    rowcache: Some(deform_rowcache),
+                    col_cells: Some(col_cells.clone()),
+                    ncolumns,
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+
+            // /* evaluate new field values, store in workspace columns */
+            // forboth(l1, fstore->newvals, l2, fstore->fieldnums) { ... }
+            debug_assert_eq!(fstore.newvals.len(), fstore.fieldnums.len());
+            for (e, &fieldnum) in fstore.newvals.iter().zip(fstore.fieldnums.iter()) {
+                // if (fieldnum <= 0 || fieldnum > ncolumns)
+                //     elog(ERROR, "field number %d is out of range in FieldStore", ...);
+                if fieldnum <= 0 || fieldnum as i32 > ncolumns {
+                    return Err(types_error::PgError::error(format!(
+                        "field number {fieldnum} is out of range in FieldStore"
+                    )));
+                }
+
+                // The field's workspace cell is both the CaseTestExpr source (so a
+                // nested FieldStore/SubscriptingRef newval can read the old value
+                // being replaced) and the result address for this sub-expression.
+                // In the owned model both halves are the one paired ResultCell.
+                //
+                // save_innermost_caseval = state->innermost_caseval;
+                // state->innermost_caseval = &values[fieldnum - 1];
+                // (innermost_casenull rides along on the same paired cell)
+                let field_cell = col_cells[(fieldnum - 1) as usize];
+                let save_caseval = state.innermost_caseval;
+                state.innermost_caseval = Some(field_cell);
+
+                // ExecInitExprRec(e, state, &values[fieldnum-1], &nulls[fieldnum-1]);
+                exec_init_expr_rec(mcx, e, state, field_cell)?;
+
+                // state->innermost_caseval = save_innermost_caseval;
+                state.innermost_caseval = save_caseval;
+            }
+
+            // /* finally, form result tuple */
+            // scratch.opcode = EEOP_FIELDSTORE_FORM; ... ExprEvalPushStep(state, &scratch);
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_FIELDSTORE_FORM,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::FieldStore {
+                    resulttype: fstore.resulttype,
+                    rowcache: Some(form_rowcache),
+                    col_cells: Some(col_cells),
+                    ncolumns,
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
         // ----- T_CoerceToDomain -----
         etag::T_CoerceToDomain => {
             let ctest = node.expect_coercetodomain();

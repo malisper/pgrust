@@ -26,15 +26,12 @@
 //! the tuple-conversion map (`convert_tuples_by_name` / `execute_attr_map_tuple`
 //! / `heap_copy_tuple_as_datum`), the TOAST flattener
 //! (`toast_build_flattened_tuple`) and `BlessTupleDesc` are all wired here, so
-//! `ExecEvalRow`, `ExecEvalFieldSelect`, `ExecEvalWholeRowVar` and
-//! `ExecEvalConvertRowtype` run end-to-end.
-//!
-//! Two legs remain parked, each on a *different* boundary (not the composite
-//! bridge): `ExecEvalFieldStoreDeForm`/`Form` need the `FieldStore` node carrier
-//! + per-column `ResultCellId` model (the execExpr.c *compiler* step for
-//! `EEOP_FIELDSTORE_*` `panic!`s before runtime is reached — a nodes/keystone
-//! gap), and `ExecEvalRowNullInt` needs the per-field `heap_attisnull` row-null
-//! test. Those still abort loudly naming the unported owner.
+//! `ExecEvalRow`, `ExecEvalFieldSelect`, `ExecEvalWholeRowVar`,
+//! `ExecEvalConvertRowtype` and `ExecEvalFieldStoreDeForm`/`Form` run
+//! end-to-end. The FieldStore pair deforms the input composite into the step's
+//! per-column `ResultCellId` cells (`heap_deform_tuple`), the per-field newval
+//! sub-expressions overwrite their target cell, then FORM re-forms the tuple
+//! (`heap_form_tuple` + `HeapTupleGetDatum`) into a new composite `Datum`.
 
 // The bare-word newtype: the scalar form the composite eval helpers operate on.
 // The canonical unified value type (Datum-unification keystone) — what the
@@ -56,27 +53,6 @@ use types_nodes::{EStateData, SlotId};
 /// scan slot (INDEX_VAR is handled by this default case too).
 const INNER_VAR: i32 = -1;
 const OUTER_VAR: i32 = -2;
-
-/// The composite-`Datum` bridge (`DatumGetHeapTupleHeader` / `HeapTupleGetDatum`
-/// / `PointerGetDatum`) and the heap-tuple / tupconvert / TOAST / expanded-record
-/// owners these composite opcodes call sit behind a not-yet-ported boundary:
-/// a composite value is a pass-by-reference (varlena) `Datum`, which the trimmed
-/// `Datum` scalar-word model cannot round-trip, and the heap-tuple payload model
-/// is owned by `execTuples` / `backend-access-common-heaptuple` (not wired as a
-/// dependency of this crate). Mirror-PG-and-panic: abort loudly naming the owner
-/// rather than no-op a fabricated result.
-#[cold]
-#[inline(never)]
-fn composite_datum_owner_unported(what: &str) -> ! {
-    panic!(
-        "backend-access-common-heaptuple / backend-executor-execTuples: {what} \
-         needs the composite-Datum bridge (DatumGetHeapTupleHeader / \
-         HeapTupleGetDatum / PointerGetDatum) and the heap-tuple payload model; \
-         a composite value is a pass-by-reference varlena Datum the trimmed \
-         Datum scalar-word model cannot round-trip, and those owners are not \
-         ported / not wired as a dependency of this crate yet"
-    )
-}
 
 /// Read a step's current `(value, isnull)` result (the C `*op->resvalue` /
 /// `*op->resnull`). [`STATE_RESULT_CELL`] aliases the owning `ExprState`'s own
@@ -559,29 +535,42 @@ pub fn ExecEvalFieldStoreDeForm<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     _econtext: EcxtId,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    let (_tup_datum, isnull) = load_result(state, op);
+    let mcx = estate.es_query_cxt;
+    let (tup_datum, isnull) = load_result(state, op);
+
+    // Read the step's resulttype / per-column cells / ncolumns up front.
+    let steps = state.steps.as_ref().expect("eval_composite: steps not ready");
+    let (resulttype, col_cells, ncolumns) = match &steps[op].d {
+        ExprEvalStepData::FieldStore {
+            resulttype,
+            col_cells,
+            ncolumns,
+            ..
+        } => {
+            let col_cells = col_cells
+                .as_ref()
+                .expect("ExecEvalFieldStoreDeForm: op->d.fieldstore.col_cells not allocated")
+                .clone();
+            (*resulttype, col_cells, *ncolumns as usize)
+        }
+        other => unreachable!("ExecEvalFieldStoreDeForm: step.d is not FieldStore: {other:?}"),
+    };
 
     // if (*op->resnull) {
     //     /* Convert null input tuple into an all-nulls row */
     //     memset(op->d.fieldstore.nulls, true, op->d.fieldstore.ncolumns * sizeof(bool));
     // }
-    let steps = state.steps.as_mut().expect("eval_composite: steps not ready");
     if isnull {
-        match &mut steps[op].d {
-            ExprEvalStepData::FieldStore { nulls, ncolumns, .. } => {
-                let ncolumns = *ncolumns as usize;
-                let nulls = nulls
-                    .as_mut()
-                    .expect("ExecEvalFieldStoreDeForm: op->d.fieldstore.nulls not allocated");
-                for n in nulls.iter_mut().take(ncolumns) {
-                    *n = true;
-                }
-            }
-            other => {
-                unreachable!("ExecEvalFieldStoreDeForm: step.d is not FieldStore: {other:?}")
-            }
+        for i in 0..ncolumns {
+            state.result_cells.set(
+                col_cells[i],
+                ResultCell {
+                    value: Datum::null(),
+                    isnull: true,
+                },
+            );
         }
         return Ok(());
     }
@@ -600,14 +589,57 @@ pub fn ExecEvalFieldStoreDeForm<'mcx>(
     //     heap_deform_tuple(&tmptup, tupDesc, op->d.fieldstore.values, op->d.fieldstore.nulls);
     // }
     //
-    // DatumGetHeapTupleHeader + heap_deform_tuple cross the composite-Datum /
-    // heap-tuple boundary; note the C `fstore->resulttype` lookup is itself parked
-    // on the unported FieldStore node (op->d.fieldstore.fstore is an opaque address).
-    composite_datum_owner_unported(
-        "ExecEvalFieldStoreDeForm: decoding the input record Datum \
-         (DatumGetHeapTupleHeader) and heap_deform_tuple into the step's \
-         values/nulls arrays",
-    )
+    // Decode the input composite Datum (Composite or a flat by-ref
+    // HeapTupleHeader image) into a FormedTuple — the owned stand-in for
+    // DatumGetHeapTupleHeader / building the bare `tmptup`.
+    let tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx> = match &tup_datum {
+        Datum::Composite(t) => t.clone_in(mcx)?,
+        Datum::ByRef(image) => {
+            types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
+                mcx,
+                image.as_slice(),
+            )?
+        }
+        other => unreachable!(
+            "ExecEvalFieldStoreDeForm: composite input Datum is neither Composite nor ByRef: {other:?}"
+        ),
+    };
+
+    // tupDesc = get_cached_rowtype(op->d.fieldstore.fstore->resulttype, -1, rowcache, NULL);
+    //
+    // The owned rowcache cannot round-trip the C void* cache pointer; the
+    // faithful substitute is the internally-cached typcache lookup.
+    let tup_desc = backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(
+        mcx, resulttype, -1,
+    )?;
+
+    // if (unlikely(tupDesc->natts > op->d.fieldstore.ncolumns))
+    //     elog(ERROR, "too many columns in composite type %u", fstore->resulttype);
+    if tup_desc.natts as usize > ncolumns {
+        return Err(types_error::PgError::error(format!(
+            "too many columns in composite type {resulttype}"
+        )));
+    }
+
+    // heap_deform_tuple(&tmptup, tupDesc, op->d.fieldstore.values, op->d.fieldstore.nulls);
+    let cols = backend_access_common_heaptuple::heap_deform_tuple(
+        mcx,
+        &tuple.tuple,
+        &tup_desc,
+        tuple.data.as_slice(),
+    )?;
+
+    // Scatter the deformed (value, isnull) pairs into the per-column cells.
+    for (i, (value, colisnull)) in cols.iter().enumerate().take(ncolumns) {
+        state.result_cells.set(
+            col_cells[i],
+            ResultCell {
+                value: value.clone(),
+                isnull: *colisnull,
+            },
+        );
+    }
+    Ok(())
 }
 
 /// `ExecEvalFieldStoreForm(ExprState *state, ExprEvalStep *op,
@@ -619,24 +651,56 @@ pub fn ExecEvalFieldStoreForm<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     _econtext: EcxtId,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+
     // tupDesc = get_cached_rowtype(op->d.fieldstore.fstore->resulttype, -1,
     //                              op->d.fieldstore.rowcache, NULL);
     // tuple = heap_form_tuple(tupDesc, op->d.fieldstore.values, op->d.fieldstore.nulls);
     // *op->resvalue = HeapTupleGetDatum(tuple);
     // *op->resnull = false;
     let steps = state.steps.as_ref().expect("eval_composite: steps not ready");
-    match &steps[op].d {
-        ExprEvalStepData::FieldStore { .. } => {}
+    let (resulttype, col_cells, ncolumns) = match &steps[op].d {
+        ExprEvalStepData::FieldStore {
+            resulttype,
+            col_cells,
+            ncolumns,
+            ..
+        } => {
+            let col_cells = col_cells
+                .as_ref()
+                .expect("ExecEvalFieldStoreForm: op->d.fieldstore.col_cells not allocated")
+                .clone();
+            (*resulttype, col_cells, *ncolumns as usize)
+        }
         other => unreachable!("ExecEvalFieldStoreForm: step.d is not FieldStore: {other:?}"),
+    };
+
+    // tupDesc = get_cached_rowtype(fstore->resulttype, -1, rowcache, NULL);
+    let tup_desc = backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(
+        mcx, resulttype, -1,
+    )?;
+
+    // Gather the per-column cells (DEFORM-populated, then overwritten by each
+    // newval sub-expression) into the values/nulls heap_form_tuple expects.
+    let natts = tup_desc.natts as usize;
+    debug_assert!(natts <= ncolumns);
+    let mut values: Vec<Datum<'mcx>> = Vec::with_capacity(natts);
+    let mut nulls: Vec<bool> = Vec::with_capacity(natts);
+    for i in 0..natts {
+        let c = state.result_cells.get(col_cells[i]);
+        values.push(c.value);
+        nulls.push(c.isnull);
     }
-    // heap_form_tuple + HeapTupleGetDatum cross the heap-tuple / composite-Datum
-    // boundary (and the C resulttype lookup is parked on the unported FieldStore node).
-    composite_datum_owner_unported(
-        "ExecEvalFieldStoreForm: heap_form_tuple(tupDesc, values, nulls) then \
-         HeapTupleGetDatum",
-    )
+
+    // tuple = heap_form_tuple(tupDesc, values, nulls);
+    let tuple = backend_access_common_heaptuple::heap_form_tuple(mcx, &tup_desc, &values, &nulls)
+        .map_err(|e| types_error::PgError::error(format!("ExecEvalFieldStoreForm: {e:?}")))?;
+
+    // *op->resvalue = HeapTupleGetDatum(tuple); *op->resnull = false;
+    store_result(state, op, Datum::Composite(tuple), false);
+    Ok(())
 }
 
 /// `ExecEvalConvertRowtype(ExprState *state, ExprEvalStep *op,
