@@ -33,7 +33,7 @@ use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
 use types_error::PgError;
 use types_nodes::execexpr::ExprDoneCond;
 use types_nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
-use types_numeric::var::NumericSign;
+use types_numeric::var::{NumericSign, NumericVar};
 use types_numeric::{numeric_is_nan, numeric_is_special};
 use types_tuple::backend_access_common_heaptuple::Datum;
 
@@ -54,14 +54,71 @@ pub(crate) fn register_generate_series_numeric() {
     register_srf(GENERATE_SERIES_NUMERIC, generate_series_step_numeric);
 }
 
+/// A lifetime-free snapshot of a finite [`NumericVar`]'s logical value (the
+/// idiomatic analogue of C keeping the live `NumericVar` in `funcctx->user_fctx`).
+///
+/// Crucially this is NOT the on-disk numeric image: `make_result` clamps `weight`
+/// to the on-disk `int16` field and raises "value overflows numeric format" for
+/// `|weight| > NUMERIC_WEIGHT_MAX`. C's `generate_series_step_numeric` advances
+/// `current` past `stop` with a plain `add_var` (no `make_result`) and only ever
+/// *compares* that out-of-range value before ending the series, so it must never
+/// be materialized. Storing the raw `sign`/`weight`/`dscale`/digits keeps the
+/// advanced value exactly, matching C (e.g. `generate_series(6e131071, 9e131071,
+/// 1e131071)` advances to `1e131072`, weight 32768, which C never materializes).
+#[derive(Clone)]
+struct OwnedNumericVal {
+    sign: NumericSign,
+    weight: i32,
+    dscale: i32,
+    /// Logical base-NBASE digits (no carry headroom).
+    digits: Vec<i16>,
+}
+
+impl OwnedNumericVal {
+    /// Snapshot a finite `NumericVar`'s logical value (`headroom`-stripped).
+    fn from_var(var: &NumericVar<'_>) -> Self {
+        OwnedNumericVal {
+            sign: var.sign,
+            weight: var.weight,
+            dscale: var.dscale,
+            digits: var.logical_digits().to_vec(),
+        }
+    }
+
+    /// Rebuild a `NumericVar` in `mcx` from this snapshot, reserving one leading
+    /// carry-slack digit (`headroom = 1`) like `set_var_from_num`/`alloc_var`.
+    fn to_var<'mcx>(&self, mcx: Mcx<'mcx>) -> NumericVar<'mcx> {
+        if self.sign.is_special() {
+            return NumericVar::special(mcx, self.sign);
+        }
+        // Reserve one leading carry-slack digit (`headroom = 1`), mirroring
+        // `set_var_from_num`/`alloc_var`.
+        let ndigits = self.digits.len();
+        let mut digits = mcx::vec_with_capacity_in::<i16>(mcx, ndigits + 1)
+            .unwrap_or_else(|_| std::panic::panic_any(mcx.oom(ndigits + 1)));
+        digits.resize(ndigits + 1, 0);
+        for (i, &d) in self.digits.iter().enumerate() {
+            digits[i + 1] = d;
+        }
+        NumericVar {
+            sign: self.sign,
+            weight: self.weight,
+            dscale: self.dscale,
+            digits,
+            headroom: 1,
+        }
+    }
+}
+
 /// The lifetime-free cross-call state for numeric `generate_series` (C:
-/// `generate_series_numeric_fctx`'s three `NumericVar`s). Stored as canonical
-/// on-disk numeric byte images so the state can live behind the `dyn Any`
-/// (`Any: 'static`) `user_fctx` carrier across the row series; each `NumericVar`
-/// is re-materialized from its image per call (in the multi-call `Mcx`).
+/// `generate_series_numeric_fctx`'s three `NumericVar`s). `current` is kept as a
+/// raw [`OwnedNumericVal`] (NOT an on-disk image) so an out-of-range advance past
+/// `stop` survives without `make_result` overflow, exactly as C keeps the live
+/// `NumericVar`. `stop`/`step` come from on-disk args and are always
+/// representable, so they stay as canonical images.
 struct SeriesNumericFctx {
     /// The next value to emit (advanced by `step` each producing call).
-    current: Vec<u8>,
+    current: OwnedNumericVal,
     /// The series end value.
     stop: Vec<u8>,
     /// The step (an explicit non-zero numeric, or one).
@@ -149,9 +206,12 @@ fn generate_series_step_numeric<'mcx>(
                 (image.as_slice().to_vec(), true)
             };
 
-            // Seed `current` with the original start value (copied via its image).
+            // Seed `current` with the original start value as a raw snapshot (C
+            // copies the live `NumericVar` into the fctx).
+            let start_var = set_var_from_num(mcx, &start)
+                .unwrap_or_else(|e| std::panic::panic_any(e));
             SeriesNumericFctx {
-                current: start,
+                current: OwnedNumericVal::from_var(&start_var),
                 stop,
                 step: step_image,
                 step_is_positive,
@@ -173,9 +233,9 @@ fn generate_series_step_numeric<'mcx>(
         .downcast_mut::<SeriesNumericFctx>()
         .expect("user_fctx is SeriesNumericFctx");
 
-    // Re-materialize current/stop/step NumericVars from their canonical images.
-    let current = set_var_from_num(mcx, &state.current)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    // Re-materialize current (from its raw snapshot) and stop/step (from their
+    // canonical images).
+    let current = state.current.to_var(mcx);
     let stop = set_var_from_num(mcx, &state.stop)
         .unwrap_or_else(|e| std::panic::panic_any(e));
     let step = set_var_from_num(mcx, &state.step)
@@ -197,12 +257,11 @@ fn generate_series_step_numeric<'mcx>(
         let datum = numeric_image_datum(mcx, result_image.as_slice());
 
         // C: add_var(&fctx->current, &fctx->step, &fctx->current); — advance.
+        // Snapshot the raw var (NOT `make_result`): the advance may step past
+        // `stop` to an on-disk-unrepresentable weight that C only ever compares.
         let next = add_var(mcx, &current, &step)
             .unwrap_or_else(|e| std::panic::panic_any(e));
-        state.current = make_result(mcx, &next)
-            .unwrap_or_else(|e| std::panic::panic_any(e))
-            .as_slice()
-            .to_vec();
+        state.current = OwnedNumericVal::from_var(&next);
 
         funcctx.call_cntr += 1;
         set_isdone(fcinfo, ExprDoneCond::ExprMultipleResult);
