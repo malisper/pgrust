@@ -266,7 +266,7 @@ fn build_coldef_checked<'mcx>(
         }
     }
 
-    Ok(Node::mk_column_def(mcx, col))
+    Ok(Node::mk_column_def(mcx, col)?)
 }
 
 // ===========================================================================

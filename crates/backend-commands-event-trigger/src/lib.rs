@@ -488,7 +488,7 @@ pub fn event_trigger_collect_simple_command_create_schema(
 
         // copyObject into the state's private arena, wrapped as a Node.
         let copied_stmt = stmt.clone_in(st.cmd_cxt.mcx())?;
-        let copied = Node::mk_create_schema_stmt(st.cmd_cxt.mcx(), copied_stmt);
+        let copied = Node::mk_create_schema_stmt(st.cmd_cxt.mcx(), copied_stmt)?;
         // SAFETY: `copied` lives in `cmd_cxt`; `command_list` is dropped before
         // `cmd_cxt` (field order in `EventTriggerQueryState`), so the copy never
         // outlives its arena — same invariant as the generic collector above.

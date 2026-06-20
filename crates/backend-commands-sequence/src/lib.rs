@@ -2037,7 +2037,7 @@ fn push_def_float<'mcx>(
     // makeDefElem(name, (Node *) makeFloat(psprintf(INT64_FORMAT, val)), -1)
     let float = Node::mk_float(mcx, types_nodes::value::Float {
         fval: mcx::PgString::from_str_in(&val.to_string(), mcx)?,
-    });
+    })?;
     let de = DefElem {
         defnamespace: None,
         defname: Some(mcx::PgString::from_str_in(name, mcx)?),
@@ -2045,7 +2045,7 @@ fn push_def_float<'mcx>(
         defaction: types_nodes::ddlnodes::DefElemAction::DEFELEM_UNSPEC,
         location: -1,
     };
-    let node = mcx::alloc_in(mcx, Node::mk_def_elem(mcx, de))?;
+    let node = mcx::alloc_in(mcx, Node::mk_def_elem(mcx, de)?)?;
     options.push(node);
     Ok(())
 }
@@ -2057,7 +2057,7 @@ fn push_def_bool<'mcx>(
     val: bool,
 ) -> PgResult<()> {
     // makeDefElem(name, (Node *) makeBoolean(val), -1)
-    let b = Node::mk_boolean(mcx, types_nodes::value::Boolean { boolval: val });
+    let b = Node::mk_boolean(mcx, types_nodes::value::Boolean { boolval: val })?;
     let de = DefElem {
         defnamespace: None,
         defname: Some(mcx::PgString::from_str_in(name, mcx)?),
@@ -2065,7 +2065,7 @@ fn push_def_bool<'mcx>(
         defaction: types_nodes::ddlnodes::DefElemAction::DEFELEM_UNSPEC,
         location: -1,
     };
-    let node = mcx::alloc_in(mcx, Node::mk_def_elem(mcx, de))?;
+    let node = mcx::alloc_in(mcx, Node::mk_def_elem(mcx, de)?)?;
     options.push(node);
     Ok(())
 }
