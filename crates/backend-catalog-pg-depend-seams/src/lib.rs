@@ -179,3 +179,29 @@ seam_core::seam!(
         indexId: Oid,
     ) -> PgResult<PgVec<'mcx, Oid>>
 );
+
+/// One `pg_depend` row from a scan keyed on
+/// `(refclassid = TypeRelationId, refobjid = typeOid)`: the dependent object's
+/// `(classid, objid, objsubid)` triple plus the `deptype` byte. The shared
+/// projection that `find_composite_type_dependencies` (tablecmds.c:6936) and
+/// `RememberAllDependentForRebuilding` (tablecmds.c:15042) drive over the
+/// `DependReferenceIndexId`.
+pub struct TypeRefererRow {
+    pub classid: Oid,
+    pub objid: Oid,
+    pub objsubid: i32,
+    pub deptype: i8,
+}
+
+seam_core::seam!(
+    /// `systable_beginscan(pg_depend, DependReferenceIndexId, ...)` keyed on
+    /// `(refclassid = pg_type, refobjid = typeOid)` — the raw row scan that
+    /// tablecmds' `find_composite_type_dependencies` /
+    /// `RememberAllDependentForRebuilding` share. Returns every matching row's
+    /// `(classid, objid, objsubid, deptype)` in scan order; tablecmds supplies
+    /// the relation-open / relkind dispatch and the recursion.
+    pub fn scan_type_referers<'mcx>(
+        mcx: Mcx<'mcx>,
+        type_oid: Oid,
+    ) -> PgResult<PgVec<'mcx, TypeRefererRow>>
+);

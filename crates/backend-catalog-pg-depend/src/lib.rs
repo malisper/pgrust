@@ -51,6 +51,7 @@ use types_tuple::heaptuple::ItemPointerData;
 use backend_access_common_heaptuple::heap_deform_tuple;
 use backend_access_common_scankey::ScanKeyInit;
 use backend_access_index_genam_seams as genam_seams;
+use backend_catalog_pg_depend_seams::TypeRefererRow;
 use backend_access_table_table as table;
 use types_rel::Relation;
 use backend_catalog_catalog_seams as catalog_seams;
@@ -810,6 +811,45 @@ pub fn getExtensionOfObject(classId: Oid, objectId: Oid) -> PgResult<Oid> {
     Ok(result)
 }
 
+/// `systable_beginscan(pg_depend, DependReferenceIndexId, ...)` keyed on
+/// `(refclassid = TypeRelationId, refobjid = typeOid)` — the raw scan that
+/// `find_composite_type_dependencies` (tablecmds.c:6936) and
+/// `RememberAllDependentForRebuilding` (tablecmds.c:15042) share. Returns the
+/// `(classid, objid, objsubid, deptype)` projection of every matching row in
+/// scan order; the caller (tablecmds) supplies the relation-open / relkind
+/// dispatch and the recursion, which need its relation machinery.
+pub fn scan_type_referers<'mcx>(
+    mcx: Mcx<'mcx>,
+    typeOid: Oid,
+) -> PgResult<PgVec<'mcx, TypeRefererRow>> {
+    let mut result: PgVec<'mcx, TypeRefererRow> = PgVec::new_in(mcx);
+
+    let dep_ctx = MemoryContext::new("pg_depend");
+    let depRel = open_depend(dep_ctx.mcx(), AccessShareLock)?;
+
+    let key = [
+        oid_key(Anum_pg_depend_refclassid, TYPE_RELATION_ID)?,
+        oid_key(Anum_pg_depend_refobjid, typeOid)?,
+    ];
+
+    systable_scan_foreach(&depRel, DependReferenceIndexId, &key, |row| {
+        let depform = form_pg_depend(row);
+        result
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<TypeRefererRow>()))?;
+        result.push(TypeRefererRow {
+            classid: depform.classid,
+            objid: depform.objid,
+            objsubid: depform.objsubid,
+            deptype: depform.deptype,
+        });
+        Ok(true)
+    })?;
+
+    depRel.close(AccessShareLock)?;
+    Ok(result)
+}
+
 /// Return (possibly empty) list of extensions that the given object depends
 /// on in `DEPENDENCY_AUTO_EXTENSION` mode.
 pub fn getAutoExtensionsOfObject<'mcx>(
@@ -1151,6 +1191,7 @@ pub fn init_seams() {
     seams::getIdentitySequence::set(getIdentitySequence);
     seams::get_index_constraint::set(get_index_constraint);
     seams::get_index_ref_constraints::set(get_index_ref_constraints);
+    seams::scan_type_referers::set(scan_type_referers);
 
     // The snake_case `backend-catalog-dependency-seams` declarations are a
     // parallel seam surface for the SAME pg_depend.c functions that catalog

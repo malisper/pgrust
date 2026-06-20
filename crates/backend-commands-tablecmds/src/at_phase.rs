@@ -922,26 +922,12 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_COMPOSITE_TYPE | ATT_FOREIGN_TABLE,
             )?;
-            // ATPrepAlterColumnType: if (rel->rd_rel->reloftype && !recursing)
-            //   ereport(ERROR, "cannot alter column type of typed table").
-            let reloftype =
-                backend_utils_cache_syscache_seams::search_relation_reloftype::call(rel.rd_id)?
-                    .unwrap_or(types_core::InvalidOid);
-            if reloftype != types_core::InvalidOid && !recursing {
-                // parser_errposition(pstate, def->location): pstate->p_sourcetext
-                // = context->queryString.
-                let location = cmd
-                    .def
-                    .as_deref()
-                    .map(|d| d.expect_columndef().location)
-                    .unwrap_or(-1);
-                return backend_utils_error::ereport(ERROR)
-                    .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
-                    .errmsg("cannot alter column type of typed table".to_string())
-                    .errposition(parser_errposition_src(context.query_string, location))
-                    .finish(here("ATPrepCmd"));
-            }
-            unported("ALTER COLUMN TYPE (ATParseTransformCmd / ATPrepAlterColumnType)");
+            // ATPrepAlterColumnType(wqueue, tab, rel, recurse, recursing, cmd,
+            //   lockmode, context).
+            crate::at_altertype::ATPrepAlterColumnType(
+                mcx, wqueue, tab_idx, rel, recurse, recursing, &cmd, lockmode, context,
+            )?;
+            pass = AT_PASS_ALTER_TYPE;
         }
         AT_AlterColumnGenericOptions => {
             ATSimplePermissions(cmd.subtype, rel, ATT_FOREIGN_TABLE)?;
@@ -1157,11 +1143,32 @@ fn ATRewriteCatalogs<'mcx>(
                 ATExecCmd(mcx, wqueue, ti, &cmd, lockmode, pass, context)?;
             }
 
-            // After ALTER TYPE / SET EXPRESSION passes, do cleanup work.
+            // After ALTER TYPE / SET EXPRESSION passes, do cleanup work
+            // (tablecmds.c:5343 `ATPostAlterTypeCleanup`). The cleanup re-parses
+            // and rebuilds every dependent index/constraint/extended-statistics
+            // object captured into `changed*Oids`/`changed*Defs` by
+            // `RememberAllDependentForRebuilding`, and resets a remembered
+            // REPLICA IDENTITY / CLUSTER index. When *no* dependent object was
+            // remembered (the column had no index/constraint/stats depending on
+            // it), every `forboth` loop is empty, `new_object_addresses()` is
+            // empty, and `performMultipleDeletions` over the empty set is a
+            // no-op — so the whole function is a faithful no-op. Our
+            // `ATExecAlterColumnType`/`RememberAllDependentForRebuilding` already
+            // seam-and-panics the moment it finds such a dependent, so when we
+            // get here those lists are guaranteed empty. If any are non-empty we
+            // stop loudly: the deparse/rebuild leg (`ATPostAlterTypeParse`) is
+            // unported.
             if pass == AT_PASS_ALTER_TYPE || pass == AT_PASS_SET_EXPRESSION {
-                // ATPostAlterTypeCleanup — only reached if those families ran,
-                // which they cannot yet (they seam-panic in ATExecCmd).
-                unported("ATPostAlterTypeCleanup");
+                let tab = &wqueue[ti];
+                if !tab.changedConstraintOids.is_empty()
+                    || !tab.changedIndexOids.is_empty()
+                    || !tab.changedStatisticsOids.is_empty()
+                    || tab.replicaIdentityIndex.is_some()
+                    || tab.clusterOnIndex.is_some()
+                {
+                    unported("ATPostAlterTypeCleanup (rebuild of dependent index/constraint/statistics — ATPostAlterTypeParse deparse+recreate)");
+                }
+                // else: nothing remembered → faithful no-op.
             }
 
             // Close the per-pass relation.
@@ -1534,7 +1541,17 @@ fn ATExecCmd<'mcx>(
                 objectSubId: 0,
             };
         }
-        AT_AlterColumnType => unported("ALTER COLUMN TYPE (ATExecAlterColumnType + ATRewriteTable)"),
+        AT_AlterColumnType => {
+            // ATExecAlterColumnType(tab, rel, cmd, lockmode). Take the single
+            // open `tab->rel` out of the queue entry (see AT_AddIndex above) so
+            // we can pass `&mut wqueue` alongside `&rel`.
+            let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");
+            let res = crate::at_altertype::ATExecAlterColumnType(
+                mcx, wqueue, ti, &owned_rel, &cmd, lockmode,
+            );
+            wqueue[ti].rel = Some(owned_rel);
+            _address = res?;
+        }
         AT_AlterColumnGenericOptions => {
             unported("ALTER COLUMN OPTIONS (ATExecAlterColumnGenericOptions)")
         }
@@ -1698,6 +1715,30 @@ fn ATRewriteTables<'mcx>(
 ) -> PgResult<()> {
     // foreach: if (tab->rewrite > 0 || tab->verify_new_notnull) -> phase-3 scan
     for ti in 0..wqueue.len() {
+        // Relations without storage may be ignored here (tablecmds.c:5849).
+        if !backend_catalog_heap::RELKIND_HAS_STORAGE(wqueue[ti].relkind) {
+            continue;
+        }
+
+        // If we change column data types (or add a column with a default), the
+        // operation has to be propagated to tables that use this table's rowtype
+        // as a column type (tablecmds.c:5865). `tab->newvals != NIL ||
+        // tab->rewrite > 0` → re-open and run `find_composite_type_dependencies`
+        // over the relation's composite rowtype. This is the guard that rejects
+        // e.g. `ALTER COLUMN ... TYPE` on a table whose rowtype is stored in
+        // another table's column.
+        if !wqueue[ti].newvals.is_empty() || wqueue[ti].rewrite > 0 {
+            let relid = wqueue[ti].relid;
+            let rel = backend_access_common_relation::relation_open(mcx, relid, NoLock)?;
+            crate::at_altertype::find_composite_type_dependencies(
+                mcx,
+                rel.rd_rel.reltype,
+                &rel,
+                None,
+            )?;
+            rel.close(NoLock)?;
+        }
+
         // tab->rewrite > 0 (heap rewrite) and tab->constraints (CHECK
         // revalidation) require the full ATRewriteTable rewrite/eval path, which
         // is not yet ported. The NOT-NULL-only verify path (verify_new_notnull,

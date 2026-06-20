@@ -27,6 +27,7 @@
 
 #![allow(non_snake_case)]
 
+mod at_altertype;
 mod at_attach;
 mod at_detach;
 mod at_coladd;

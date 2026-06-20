@@ -52,7 +52,7 @@ const BITS_PER_BITMAPWORD: i32 = 64;
 
 /// `bms_make_singleton(x)` (bitmapset.c) in the `types_pathnodes::Bitmapset`
 /// (`bitmapword[]`) layout `has_partition_attrs` consumes.
-fn bms_make_singleton(x: i32) -> types_pathnodes::Bitmapset {
+pub(crate) fn bms_make_singleton(x: i32) -> types_pathnodes::Bitmapset {
     let wordnum = (x / BITS_PER_BITMAPWORD) as usize;
     let bitnum = (x % BITS_PER_BITMAPWORD) as u32;
     let mut words = alloc::vec![0u64; wordnum + 1];

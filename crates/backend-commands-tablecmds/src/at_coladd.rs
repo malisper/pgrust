@@ -580,7 +580,7 @@ pub(crate) fn check_for_column_name_collision<'mcx>(
 }
 
 /// `add_column_datatype_dependency(relid, attnum, typid)` (tablecmds.c:7698).
-fn add_column_datatype_dependency(relid: Oid, attnum: i32, typid: Oid) -> PgResult<()> {
+pub(crate) fn add_column_datatype_dependency(relid: Oid, attnum: i32, typid: Oid) -> PgResult<()> {
     let myself = ObjectAddress {
         classId: RelationRelationId,
         objectId: relid,
@@ -595,7 +595,7 @@ fn add_column_datatype_dependency(relid: Oid, attnum: i32, typid: Oid) -> PgResu
 }
 
 /// `add_column_collation_dependency(relid, attnum, collid)` (tablecmds.c:7716).
-fn add_column_collation_dependency(relid: Oid, attnum: i32, collid: Oid) -> PgResult<()> {
+pub(crate) fn add_column_collation_dependency(relid: Oid, attnum: i32, collid: Oid) -> PgResult<()> {
     if OidIsValid(collid) && collid != DEFAULT_COLLATION_OID {
         let myself = ObjectAddress {
             classId: RelationRelationId,
