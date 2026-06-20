@@ -235,6 +235,60 @@ pub fn slot_getattr_impl<'mcx>(
     r.ok_or_else(|| slot_no_payload("slot_getattr"))
 }
 
+/// `render_slot_columns(slot, attnums)` — `ri_ReportViolation`'s slot-rendering
+/// leg (ri_triggers.c:2723-2758): for each 1-based `attnum`, read the attribute
+/// name and `atttypid` from the slot relation's descriptor, fetch the value via
+/// `slot_getattr`, and (when non-NULL) render it with
+/// `getTypeOutputInfo(atttypid)` + `OidOutputFunctionCall`. NULL renders as
+/// `None` (the caller prints the literal `"null"`).
+pub fn render_slot_columns_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: types_ri_triggers::TupleTableSlotRef,
+    attnums: &[i16],
+) -> PgResult<mcx::PgVec<'mcx, types_ri_triggers::ResultColumn<'mcx>>> {
+    let mut out: mcx::PgVec<'mcx, types_ri_triggers::ResultColumn<'mcx>> = mcx::PgVec::new_in(mcx);
+    for &attnum in attnums {
+        // Attribute name + type OID from the slot relation's descriptor.
+        let (name_bytes, atttypid) = CURRENT_TRIGGER_SLOTS.with(
+            |cell| -> PgResult<Option<(Vec<u8>, Oid)>> {
+                let b = cell.borrow();
+                let s = match b.as_ref() {
+                    Some(s) => s,
+                    None => return Ok(None),
+                };
+                if resolve_slot(s, slot.0).is_none() {
+                    return Ok(None);
+                }
+                let att = s.relation.rd_att.attr((attnum as usize) - 1);
+                Ok(Some((att.attname.name_str().to_vec(), att.atttypid)))
+            },
+        )?
+        .ok_or_else(|| slot_no_payload("render_slot_columns"))?;
+
+        let (datum, isnull) = slot_getattr_impl(mcx, slot, attnum)?;
+
+        let value = if isnull {
+            None
+        } else {
+            let (foutoid, _typisvarlena) =
+                backend_utils_cache_lsyscache_seams::get_type_output_info::call(atttypid)?;
+            Some(
+                backend_utils_fmgr_fmgr_seams::oid_output_function_call_datum::call(
+                    mcx, foutoid, datum,
+                )?,
+            )
+        };
+
+        let mut namebuf: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+        namebuf.extend_from_slice(&name_bytes);
+        out.push(types_ri_triggers::ResultColumn {
+            name: namebuf,
+            value,
+        });
+    }
+    Ok(out)
+}
+
 /// `slot->tts_tid` — the TID of the slot's tuple.
 pub fn slot_tid_impl(slot: types_ri_triggers::TupleTableSlotRef) -> ItemPointerData {
     with_slot_tuple(slot.0, |tup, _rel| tup.tuple.t_self)

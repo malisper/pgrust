@@ -321,4 +321,11 @@ pub fn init_seams() {
     s::tg_relation_tuple_satisfies_snapshot_self::set(
         crate::firing::tg_relation_tuple_satisfies_snapshot_self_impl,
     );
+
+    // `ri_ReportViolation`'s violator-column rendering (ri_triggers.c) is declared
+    // in the fmgr seam crate but owned here (it needs the slot-owner's tupdesc +
+    // value deform, then getTypeOutputInfo + OidOutputFunctionCall).
+    backend_utils_fmgr_fmgr_seams::render_slot_columns::set(
+        crate::firing::render_slot_columns_impl,
+    );
 }

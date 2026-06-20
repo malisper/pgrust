@@ -332,6 +332,43 @@ pub fn ATExecAddConstraint<'mcx>(
             lockmode,
         ),
         ConstrType::CONSTR_FOREIGN => {
+            // Assign or validate constraint name (tablecmds.c:9819-9841). C
+            // scribbles the chosen name onto newConstraint->conname before
+            // ATAddForeignKeyConstraint; here we work on an owned copy.
+            let mut new_constraint = new_constraint.clone_in(mcx)?;
+            match &new_constraint.conname {
+                Some(name) => {
+                    if backend_catalog_pg_constraint::ConstraintNameIsUsed(
+                        mcx,
+                        types_catalog::pg_constraint::ConstraintCategory::Relation,
+                        rel.rd_id,
+                        name.as_str(),
+                    )? {
+                        return Err(backend_utils_error::ereport(ERROR)
+                            .errcode(types_error::ERRCODE_DUPLICATE_OBJECT)
+                            .errmsg(format!(
+                                "constraint \"{}\" for relation \"{}\" already exists",
+                                name.as_str(),
+                                rel.name()
+                            ))
+                            .into_error());
+                    }
+                }
+                None => {
+                    let addition =
+                        choose_foreign_key_constraint_name_addition(&new_constraint.fk_attrs);
+                    let conname = backend_catalog_pg_constraint::ChooseConstraintName(
+                        mcx,
+                        &rel.name(),
+                        &addition,
+                        "fkey",
+                        rel.rd_rel.relnamespace,
+                        &[],
+                    )?;
+                    new_constraint.conname = Some(PgString::from_str_in(&conname, mcx)?);
+                }
+            }
+
             // ATAddForeignKeyConstraint(wqueue, tab, rel, newConstraint, recurse,
             // false, lockmode) — validate the FK, create the pg_constraint 'f'
             // row, and install the RI enforcement triggers.
@@ -340,7 +377,7 @@ pub fn ATExecAddConstraint<'mcx>(
                 wqueue,
                 ti,
                 rel,
-                new_constraint,
+                &new_constraint,
                 recurse,
                 false,
                 lockmode,
@@ -350,6 +387,31 @@ pub fn ATExecAddConstraint<'mcx>(
             .errmsg_internal(format!("unrecognized constraint type: {}", other as i32))
             .into_error()),
     }
+}
+
+/// `ChooseForeignKeyConstraintNameAddition(colnames)` (tablecmds.c) — join the
+/// FK column names with `_`, capping the running length at `NAMEDATALEN` (the
+/// "middle" component handed to `ChooseConstraintName`).
+fn choose_foreign_key_constraint_name_addition(fk_attrs: &PgVec<'_, NodePtr<'_>>) -> String {
+    // NAMEDATALEN-1 usable chars; C's strlcpy copies up to NAMEDATALEN-1 bytes
+    // of `name` at the current offset, then breaks once buflen >= NAMEDATALEN.
+    const NAMEDATALEN: usize = 64;
+    let mut buf = String::new();
+    for attr in fk_attrs.iter() {
+        let name = attr.expect_string().sval.as_str();
+        if !buf.is_empty() {
+            buf.push('_');
+        }
+        // strlcpy(buf + buflen, name, NAMEDATALEN): each `name` is already a
+        // validated identifier (< NAMEDATALEN), so it copies whole; the running
+        // buffer then breaks once it reaches NAMEDATALEN (ChooseConstraintName
+        // truncates the final composed name anyway).
+        buf.push_str(name);
+        if buf.len() >= NAMEDATALEN {
+            break;
+        }
+    }
+    buf
 }
 
 // ===========================================================================
