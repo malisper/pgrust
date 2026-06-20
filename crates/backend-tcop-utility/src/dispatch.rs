@@ -718,13 +718,17 @@ pub fn ProcessUtilityForAlterTable<'mcx>(
 /// sub-statements never read params, so `None` is faithful where the dispatch
 /// has no `params` in scope — this owner-installed body receives no params and
 /// passes `None`, matching the `NULL`-receiver / `NULL`-qc subcommand contract.
-pub fn process_utility_wrapper<'mcx>(
+pub fn process_utility_wrapper<'mcx, 'a>(
     mcx: Mcx<'mcx>,
-    stmt: &Node<'mcx>,
+    stmt: &Node<'a>,
     query_string: &str,
     stmt_location: i32,
     stmt_len: i32,
 ) -> PgResult<()> {
+    // `stmt` is only deep-copied into `mcx` (`clone_in`), so its borrow lifetime
+    // is independent of the allocation context `'mcx` — keeping them separate lets
+    // a subcommand re-entry pass a statement that does not live in `mcx` (the now
+    // invariant `Node` would otherwise force `'a == 'mcx`).
     let utility_stmt = mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
     let wrapper = PlannedStmt {
         commandType: types_nodes::nodes::CmdType::CMD_UTILITY,
