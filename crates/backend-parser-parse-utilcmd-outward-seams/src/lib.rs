@@ -26,26 +26,16 @@ use types_nodes::parsestmt::ParseState;
 
 type NodeBox<'mcx> = PgBox<'mcx, Node<'mcx>>;
 
-seam_core::seam!(
-    /// `transformTableLikeClause(cxt, table_like_clause)` (parse_utilcmd.c):
-    /// expand `LIKE <srctable>` into recreated column definitions by reading the
-    /// source relation's `TupleDesc`, defaults, identity, storage, compression,
-    /// comments and NOT NULL constraints through the relcache. Returns the new
-    /// `(columns, nnconstraints, alist, likeclauses)` to fold into the context.
-    /// Relcache/catalog/syscache-bound.
-    pub fn transformTableLikeClause<'mcx>(
-        mcx: Mcx<'mcx>,
-        pstate: &ParseState<'mcx>,
-        relation: NodeBox<'mcx>,
-        table_like_clause: NodeBox<'mcx>,
-        isforeign: bool,
-    ) -> PgResult<(
-        PgVec<'mcx, NodeBox<'mcx>>,
-        PgVec<'mcx, NodeBox<'mcx>>,
-        PgVec<'mcx, NodeBox<'mcx>>,
-        PgVec<'mcx, NodeBox<'mcx>>,
-    )>
-);
+// NOTE: `transformTableLikeClause` formerly lived here as an outward seam, but
+// its body is now a real, grounded port in the owning crate
+// (`backend_parser_parse_utilcmd::like::transformTableLikeClause`): the source
+// relation is opened by name (`relation_openrv`), each non-dropped column is
+// copied into a `ColumnDef` (with GENERATED / IDENTITY / STORAGE / COMPRESSION
+// marked per the INCLUDING options), NOT NULL constraints are reproduced
+// (`RelationGetNotNullConstraints`), column/constraint comments are queued
+// (`GetComment`), and the column-number-dependent legs (DEFAULTS / CONSTRAINTS /
+// INDEXES / STATISTICS) ride on `cxt->likeclauses` for `expandTableLikeClause`.
+// The relcache/syscache substrate it needs is a cycle-free direct dependency.
 
 seam_core::seam!(
     /// The catalog-resident leaf of `transformIndexConstraint` (parse_utilcmd.c):

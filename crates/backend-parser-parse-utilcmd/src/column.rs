@@ -672,7 +672,7 @@ pub(crate) fn make_not_null_constraint<'mcx>(
 }
 
 /// A zeroed `Constraint` skeleton (the `makeNode(Constraint)` palloc0 baseline).
-fn default_constraint<'mcx>(mcx: Mcx<'mcx>) -> Constraint<'mcx> {
+pub(crate) fn default_constraint<'mcx>(mcx: Mcx<'mcx>) -> Constraint<'mcx> {
     Constraint {
         contype: ConstrType::CONSTR_NULL,
         conname: None,

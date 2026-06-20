@@ -99,4 +99,32 @@ backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-s
 backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 backend-commands-tablespace = { path = "../backend-commands-tablespace" }
 
+# transformTableLikeClause: parse-time LIKE expansion — relation_openrv +
+# privilege checks (aclcheck), tupledesc column copy, identity-sequence option
+# extraction (sequence_options), NOT NULL constraint copy
+# (RelationGetNotNullConstraints), and INCLUDING COMMENTS column/constraint
+# comments (GetComment). Cycle-free: none of these owners depend on
+# parse-utilcmd.
+backend-catalog-aclchk = { path = "../backend-catalog-aclchk" }
+backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
+backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
+backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+backend-commands-sequence = { path = "../backend-commands-sequence" }
+backend-commands-comment = { path = "../backend-commands-comment" }
+backend-access-common-toast-compression = { path = "../backend-access-common-toast-compression" }
+types-acl = { path = "../types-acl" }
+
+# expandTableLikeClause: the post-DefineRelation LIKE legs (run from
+# ProcessUtilitySlow). build_attrmap_by_name maps parent attnos to the new
+# child's; map_variable_attnos remaps default/CHECK Var attnos; TupleDescGetDefault
+# fetches cooked defaults; RelationGetIndexList + index_open + the in-crate
+# generateClonedIndexStmt clone parent indexes; nodeToString/string_to_node bridge
+# the CHECK expression. All cycle-free leaves.
+backend-access-common-next = { path = "../backend-access-common-next" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-access-index-indexam = { path = "../backend-access-index-indexam" }
+backend-nodes-outfuncs = { path = "../backend-nodes-outfuncs" }
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
+
 [dev-dependencies]

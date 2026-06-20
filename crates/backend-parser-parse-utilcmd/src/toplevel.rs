@@ -30,7 +30,6 @@ use types_nodes::copy_query::Query;
 use types_nodes::ddlnodes::{CreateStmt, RuleStmt};
 use types_nodes::nodes::{ntag, Node};
 
-use backend_parser_parse_utilcmd_outward_seams as sx;
 use backend_parser_small1::{free_parsestate, make_parsestate};
 use types_storage::lock::NoLock;
 

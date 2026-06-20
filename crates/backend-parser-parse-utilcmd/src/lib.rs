@@ -41,6 +41,7 @@ pub mod column;
 pub mod constraint;
 pub mod fk_check_attrs;
 pub mod index_constraint;
+pub mod expand_like;
 pub mod index_stats;
 pub mod like;
 pub mod partition;
@@ -87,5 +88,12 @@ pub fn init_seams() {
     // outward seam from transformIndexConstraint in this same crate.
     backend_parser_parse_utilcmd_outward_seams::transformIndexConstraintCatalog::set(
         index_constraint::transform_index_constraint_catalog,
+    );
+
+    // The post-DefineRelation CREATE TABLE … (LIKE …) leg, run from
+    // ProcessUtilitySlow once the child table exists (defaults / generated /
+    // CHECK constraints / indexes / constraint comments).
+    backend_tcop_utility_out_seams::expand_table_like_clause::set(
+        expand_like::expandTableLikeClause,
     );
 }

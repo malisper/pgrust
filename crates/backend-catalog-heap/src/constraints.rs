@@ -904,30 +904,30 @@ pub fn AddRelationNewConstraints<'mcx>(
         };
 
         if cdef.contype == ConstrType::CONSTR_CHECK {
-            let expr: Expr;
+            let expr_node: NodePtr<'mcx>;
             if let Some(raw) = cdef.raw_expr.as_ref() {
                 debug_assert!(cdef.cooked_expr.is_none());
                 /*
                  * Transform raw parsetree to executable expression, and verify
                  * it's valid as a CHECK constraint.
                  */
-                expr = cookConstraint(
+                let expr = cookConstraint(
                     mcx,
                     &mut pstate,
                     alloc_in(mcx, (**raw).clone_in(mcx)?)?,
                     &rel.rd_rel.relname.as_str().to_string(),
                 )?;
+                expr_node = expr_to_nodeptr(mcx, expr)?;
             } else {
                 debug_assert!(cdef.cooked_expr.is_some());
-                // expr = stringToNode(cdef->cooked_expr);
-                return Err(ereport(ERROR)
-                    .errmsg_internal(
-                        "AddRelationNewConstraints: stringToNode for cooked CHECK is unported",
-                    )
-                    .into_error());
+                /*
+                 * Here, we assume the parser will only pass us valid CHECK
+                 * expressions, so we do no particular checking.
+                 *   expr = stringToNode(cdef->cooked_expr);
+                 */
+                let cooked = cdef.cooked_expr.as_ref().unwrap().as_str().to_string();
+                expr_node = backend_nodes_read_seams::string_to_node::call(mcx, &cooked)?;
             }
-
-            let expr_node = expr_to_nodeptr(mcx, expr)?;
 
             /*
              * Check name uniqueness, or generate a name if none was given.

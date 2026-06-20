@@ -10,6 +10,9 @@ path = "src/lib.rs"
 
 [dependencies]
 mcx = { path = "../mcx" }
+# stringToNode for cooked CHECK constraints (CREATE TABLE … LIKE INCLUDING
+# CONSTRAINTS feeds AddRelationNewConstraints a cooked_expr). Leaf seam crate.
+backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
