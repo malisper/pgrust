@@ -3407,6 +3407,75 @@ fn function_call_invoke_datum_owned_seam<'mcx>(
     function_call_invoke_datum_core(mcx, fn_oid, collation, nargs, ref_args, fn_expr)
 }
 
+/// Aggregate **final** function form of [`function_call_invoke_datum_owned_seam`]:
+/// like the owned form, but ALSO recovers `fcinfo->args[0]` after the call and
+/// returns it to the caller. A finalfn reads its transition value (`args[0]`)
+/// without consuming it (C: `PG_GETARG_*(0)`); for an `internal`-transtype state
+/// the move-only `Box<dyn Any>` would otherwise be dropped when `fcinfo` drops,
+/// destroying state that a sibling aggregate sharing the same transition still
+/// needs to finalize. The finalfn glue restores the state into `args[0]`
+/// (`set_ref_arg(0, …)`); this seam pulls it back out as `surviving_arg0`.
+fn function_call_finalfn_owned_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    fn_oid: Oid,
+    collation: Oid,
+    args: Vec<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
+    args_null: Vec<bool>,
+    fn_expr: Option<types_core::fmgr::FnExprErased>,
+) -> PgResult<(
+    types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    bool,
+    Option<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
+)> {
+    debug_assert_eq!(args.len(), args_null.len());
+    let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
+    let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
+    for (i, val) in args.into_iter().enumerate() {
+        let (mut nd, refp) = datum_to_ref_arg_owned(val);
+        if args_null[i] {
+            nd.isnull = true;
+        }
+        nargs.push(nd);
+        ref_args.push(if args_null[i] { None } else { refp });
+    }
+
+    let mut resolved = fmgr_info(mcx, fn_oid)?;
+    if let Some(node) = fn_expr {
+        resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(types_fmgr::ExternalFnExpr {
+            tag: 0,
+            node: Some(node),
+        })));
+    }
+    let fn_expr = resolved.finfo.fn_expr.clone();
+    let mut fcinfo = init_fcinfo(Some(resolved.finfo), collation, nargs);
+    let mut flat_ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(ref_args.len());
+    for refp in ref_args {
+        flat_ref_args.push(detoast_ref_arg_if_toasted(mcx, refp)?);
+    }
+    fcinfo.ref_args = flat_ref_args;
+    fcinfo.debug_assert_ref_null_consistency();
+    fcinfo.isnull = false;
+    let word = function_call_invoke_with_expr(mcx, &resolved.resolution, &mut fcinfo, fn_expr)?;
+    let isnull = fcinfo.isnull;
+    let ref_result = fcinfo.take_ref_result();
+    // Recover the transition value the finalfn read out of `args[0]` (the glue
+    // restores an `internal` state there; a by-value/varlena `args[0]` carries no
+    // referent and yields `None`, which is fine — the caller still holds its copy).
+    let surviving_arg0 = match fcinfo.take_ref_arg(0) {
+        Some(payload) => Some(ref_out_to_datum(mcx, Datum::from_usize(0), Some(payload))?),
+        None => None,
+    };
+    if isnull {
+        return Ok((
+            types_tuple::backend_access_common_heaptuple::Datum::null(),
+            true,
+            surviving_arg0,
+        ));
+    }
+    let result = ref_out_to_datum(mcx, word, ref_result)?;
+    Ok((result, false, surviving_arg0))
+}
+
 /// `CreateConversionCommand`'s conversion-function empty-input self-test
 /// (conversioncmds.c):
 /// ```c
@@ -4210,6 +4279,9 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::set(function_call_invoke_datum_seam);
     backend_utils_fmgr_fmgr_seams::function_call_invoke_datum_owned::set(
         function_call_invoke_datum_owned_seam,
+    );
+    backend_utils_fmgr_fmgr_seams::function_call_finalfn_owned::set(
+        function_call_finalfn_owned_seam,
     );
     // The planner const-folder's `evaluate_expr` fmgr leg (clauses.c): fmgr owns
     // the function-by-OID invocation over constant args.

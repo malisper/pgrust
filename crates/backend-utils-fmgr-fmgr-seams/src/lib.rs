@@ -1033,6 +1033,34 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `FunctionCallInvoke(fcinfo)` of an aggregate **final** function over the
+    /// canonical [`Datum`] lane, taking arguments by value. Identical to
+    /// [`function_call_invoke_datum_owned`] except it ALSO returns `args[0]` — the
+    /// transition value — back to the caller untouched.
+    ///
+    /// C's `finalize_aggregate` passes the transition value to the finalfn via
+    /// `fcinfo->args[0].value` and a finalfn reads it with `PG_GETARG_*(0)` WITHOUT
+    /// consuming it: the state stays live in the aggcontext so that several
+    /// aggregates sharing one transition state (e.g. `sum(numeric)` and
+    /// `avg(numeric)`, which share `numeric_avg_accum`) each finalize against the
+    /// same state in turn. In the owned model the `internal`-transtype state is a
+    /// move-only `Box<dyn Any>` on `args[0]`; this seam recovers it from
+    /// `fcinfo->args[0]` after the call (the finalfn glue restores it there) and
+    /// hands it back as `surviving_arg0` so the executor can put it back into the
+    /// shared pergroup state. `surviving_arg0` is `None` for a by-value /
+    /// non-internal transition value (which the caller still holds a copy of) or a
+    /// finalfn that has no `args[0]`.
+    pub fn function_call_finalfn_owned<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        fn_oid: Oid,
+        collation: Oid,
+        args: Vec<Datum<'mcx>>,
+        args_null: Vec<bool>,
+        fn_expr: Option<types_core::fmgr::FnExprErased>,
+    ) -> PgResult<(Datum<'mcx>, bool, Option<Datum<'mcx>>)>
+);
+
+seam_core::seam!(
     /// `construct_array_builtin(datums, n, CSTRINGOID)` +
     /// `DatumGetInt32(OidFunctionCall1(typmodin, PointerGetDatum(arrtypmod)))`
     /// (parse_type.c `typenameTypeMod`): apply a type's `typmodin` function to

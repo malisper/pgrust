@@ -160,6 +160,18 @@ fn ret_internal(fcinfo: &mut FunctionCallInfoBaseData, state: Box<dyn core::any:
     Datum::from_usize(0)
 }
 
+/// Restore an `internal` transition state into `args[0]` after a *final*
+/// function read it.  C's `PG_GETARG_POINTER(0)` does NOT consume the state: a
+/// finalfn only reads it, and when several aggregates share one transition state
+/// (e.g. `sum(numeric)` and `avg(numeric)`, which share `numeric_avg_accum`),
+/// each one's finalfn reads the same live state in turn.  The owned model carries
+/// that state as a move-only `Box<dyn Any>` on `ref_args[0]`; `take_*_state`
+/// moved it out to downcast, so put it back here so the owned-finalfn seam can
+/// hand it back to the executor for the next sharing aggregate's finalfn.
+fn keep_internal(fcinfo: &mut FunctionCallInfoBaseData, state: Box<dyn core::any::Any>) {
+    fcinfo.set_ref_arg(0, RefPayload::Internal(state));
+}
+
 /// `PG_RETURN_NUMERIC(image)` — by-ref numeric result. Header-ful everywhere:
 /// the `RefPayload::Varlena` result lane carries the complete header-ful varlena
 /// image verbatim (the numeric core's full image; `numeric_with_header` is
@@ -215,20 +227,30 @@ fn fc_numeric_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_numeric_avg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     match take_numeric_state(fcinfo) {
         None => ret_null(fcinfo),
-        Some(carrier) => match run_final(|m| aggregate::numeric_avg(m, &carrier.state)) {
-            Some(image) => ret_numeric(fcinfo, image),
-            None => ret_null(fcinfo),
-        },
+        Some(carrier) => {
+            let out = run_final(|m| aggregate::numeric_avg(m, &carrier.state));
+            // C `PG_GETARG_POINTER(0)` does not consume the state; restore it for
+            // any aggregate sharing this transition state (e.g. sum + avg).
+            keep_internal(fcinfo, carrier);
+            match out {
+                Some(image) => ret_numeric(fcinfo, image),
+                None => ret_null(fcinfo),
+            }
+        }
     }
 }
 
 fn fc_numeric_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     match take_numeric_state(fcinfo) {
         None => ret_null(fcinfo),
-        Some(carrier) => match run_final(|m| aggregate::numeric_sum(m, &carrier.state)) {
-            Some(image) => ret_numeric(fcinfo, image),
-            None => ret_null(fcinfo),
-        },
+        Some(carrier) => {
+            let out = run_final(|m| aggregate::numeric_sum(m, &carrier.state));
+            keep_internal(fcinfo, carrier);
+            match out {
+                Some(image) => ret_numeric(fcinfo, image),
+                None => ret_null(fcinfo),
+            }
+        }
     }
 }
 
@@ -239,12 +261,16 @@ fn numeric_stddev_final(
 ) -> Datum {
     match take_numeric_state(fcinfo) {
         None => ret_null(fcinfo),
-        Some(carrier) => match run_final(|m| {
-            aggregate::numeric_stddev_internal(m, &carrier.state, variance, sample)
-        }) {
-            Some(image) => ret_numeric(fcinfo, image),
-            None => ret_null(fcinfo),
-        },
+        Some(carrier) => {
+            let out = run_final(|m| {
+                aggregate::numeric_stddev_internal(m, &carrier.state, variance, sample)
+            });
+            keep_internal(fcinfo, carrier);
+            match out {
+                Some(image) => ret_numeric(fcinfo, image),
+                None => ret_null(fcinfo),
+            }
+        }
     }
 }
 
@@ -348,20 +374,28 @@ fn fc_int8_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_numeric_poly_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     match take_poly_state(fcinfo) {
         None => ret_null(fcinfo),
-        Some(state) => match run_final(|m| aggregate::numeric_poly_sum(m, &state)) {
-            Some(image) => ret_numeric(fcinfo, image),
-            None => ret_null(fcinfo),
-        },
+        Some(state) => {
+            let out = run_final(|m| aggregate::numeric_poly_sum(m, &state));
+            keep_internal(fcinfo, state);
+            match out {
+                Some(image) => ret_numeric(fcinfo, image),
+                None => ret_null(fcinfo),
+            }
+        }
     }
 }
 
 fn fc_numeric_poly_avg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     match take_poly_state(fcinfo) {
         None => ret_null(fcinfo),
-        Some(state) => match run_final(|m| aggregate::numeric_poly_avg(m, &state)) {
-            Some(image) => ret_numeric(fcinfo, image),
-            None => ret_null(fcinfo),
-        },
+        Some(state) => {
+            let out = run_final(|m| aggregate::numeric_poly_avg(m, &state));
+            keep_internal(fcinfo, state);
+            match out {
+                Some(image) => ret_numeric(fcinfo, image),
+                None => ret_null(fcinfo),
+            }
+        }
     }
 }
 
@@ -372,12 +406,16 @@ fn poly_stddev_final(
 ) -> Datum {
     match take_poly_state(fcinfo) {
         None => ret_null(fcinfo),
-        Some(state) => match run_final(|m| {
-            aggregate::numeric_poly_stddev_internal(m, &state, variance, sample)
-        }) {
-            Some(image) => ret_numeric(fcinfo, image),
-            None => ret_null(fcinfo),
-        },
+        Some(state) => {
+            let out = run_final(|m| {
+                aggregate::numeric_poly_stddev_internal(m, &state, variance, sample)
+            });
+            keep_internal(fcinfo, state);
+            match out {
+                Some(image) => ret_numeric(fcinfo, image),
+                None => ret_null(fcinfo),
+            }
+        }
     }
 }
 

@@ -336,6 +336,18 @@ impl FunctionCallInfoBaseData {
         self.ref_args.get_mut(index).and_then(|slot| slot.take())
     }
 
+    /// Install a by-reference payload for argument `index`, growing `ref_args`
+    /// with empty slots as needed. An aggregate **final** function restores the
+    /// `internal` transition state it read (C `PG_GETARG_POINTER(0)` does not
+    /// consume it) so the executor can hand the live state to the next aggregate
+    /// sharing the same transition state.
+    pub fn set_ref_arg(&mut self, index: usize, payload: RefPayload) {
+        if self.ref_args.len() <= index {
+            self.ref_args.resize_with(index + 1, || None);
+        }
+        self.ref_args[index] = Some(payload);
+    }
+
     /// Store the by-reference result (C: a pointer-`Datum` return).
     pub fn set_ref_result(&mut self, payload: RefPayload) {
         self.ref_result = Some(payload);
