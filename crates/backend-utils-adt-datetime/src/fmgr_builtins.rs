@@ -746,9 +746,13 @@ fn ret_int64_numeric(fcinfo: &mut FunctionCallInfoBaseData, i: i64) -> Datum {
 // --- TIMETZ (date.c) -------------------------------------------------------
 
 fn fc_timetz_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    // C: `escontext = (Node *) fcinfo->context`. Copy the input first since
+    // `arg_cstring` borrows `fcinfo` immutably while `escontext_mut` needs
+    // `&mut`. With no soft sink installed escontext is None and a syntax/range
+    // error throws, as before.
+    let s = arg_cstring(fcinfo, 0).to_string();
     let typmod = arg_i32(fcinfo, 2);
-    match crate::timetz::timetz_in(s, typmod) {
+    match crate::timetz::timetz_in(&s, typmod, fcinfo.escontext_mut()) {
         Ok(t) => ret_timetz(fcinfo, &t),
         Err(e) => raise(e),
     }

@@ -31,7 +31,7 @@ use types_error::{
     ERRCODE_INVALID_PARAMETER_VALUE,
 };
 use types_datetime::{fsec_t, TimeADT, TimeOffset};
-use types_error::{PgError, PgResult};
+use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 
 use crate::decode::{DecodeTimeOnly, DecodeUnits, ParseDateTime};
 use crate::encode::EncodeTimeOnly;
@@ -75,7 +75,11 @@ pub fn timetz2tm(time: &TimeTzADT, tm: &mut pg_tm, fsec: &mut fsec_t, tzp: &mut 
 // ---------------------------------------------------------------------------
 
 /// `timetz_in()` CORE -- parse a TIMETZ text string at the given typmod.
-pub fn timetz_in(str: &str, typmod: i32) -> PgResult<TimeTzADT> {
+pub fn timetz_in(
+    str: &str,
+    typmod: i32,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<TimeTzADT> {
     let mut field: Vec<String> = Vec::new();
     let mut ftype: Vec<i32> = Vec::new();
     let mut nf = 0usize;
@@ -108,14 +112,16 @@ pub fn timetz_in(str: &str, typmod: i32) -> PgResult<TimeTzADT> {
         );
     }
     if dterr != 0 {
-        // C: DateTimeParseError(dterr, &extra, str, "time with time zone", ...)
-        // maps each dterr code to its own SQLSTATE.
-        return Err(crate::date::datetime_parse_error_for(
-            dterr,
-            str,
-            "time with time zone",
-            &extra,
-        ));
+        // C: DateTimeParseError(dterr, &extra, str, "time with time zone",
+        //    NULL, escontext) — maps each dterr code to its own SQLSTATE and
+        //    ereturns: with a soft sink the error is saved and a (discarded)
+        //    value returned Ok; without one it throws. pg_input_is_valid /
+        //    pg_input_error_info on a timetz literal rely on the soft path.
+        return ereturn(
+            escontext,
+            TimeTzADT::default(),
+            crate::date::datetime_parse_error_for(dterr, str, "time with time zone", &extra),
+        );
     }
 
     let mut result = tm2timetz(&tt, fsec, tz);
@@ -526,7 +532,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         set_date_style(USE_ISO_DATES);
-        timetz_in(s, -1).unwrap()
+        timetz_in(s, -1, None).unwrap()
     }
 
     #[test]
@@ -536,7 +542,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         set_date_style(USE_ISO_DATES);
         for s in ["12:00:00+00", "12:00:00-05", "23:59:59+10", "00:00:00+00"] {
-            let t = timetz_in(s, -1).unwrap();
+            let t = timetz_in(s, -1, None).unwrap();
             assert_eq!(timetz_out(&t), s, "round trip failed for {s}");
         }
     }
@@ -554,13 +560,13 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         set_date_style(USE_ISO_DATES);
 
-        let err = timetz_in("25:00:00+00", -1).unwrap_err();
+        let err = timetz_in("25:00:00+00", -1, None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_DATETIME_FIELD_OVERFLOW);
 
-        let err = timetz_in("12:00:00+16:00", -1).unwrap_err();
+        let err = timetz_in("12:00:00+16:00", -1, None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE);
 
-        let err = timetz_in("not a time", -1).unwrap_err();
+        let err = timetz_in("not a time", -1, None).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_INVALID_DATETIME_FORMAT);
     }
 
