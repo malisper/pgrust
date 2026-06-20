@@ -603,6 +603,22 @@ fn finalize_node_specific<'mcx>(
                     bms::bms_add_members(mcx, context.paramids.take(), cp.as_deref())?;
             }
         }
+        types_nodes::nodes::ntag::T_BitmapOr => {
+            let bo = plan.as_bitmapor_mut().unwrap();
+            for child in bo.bitmapplans.iter_mut() {
+                let cp = finalize_plan(
+                    mcx,
+                    root,
+                    run,
+                    Some(child),
+                    *gather_param,
+                    valid_params_owned.as_deref(),
+                    scan_params_owned.as_deref(),
+                )?;
+                context.paramids =
+                    bms::bms_add_members(mcx, context.paramids.take(), cp.as_deref())?;
+            }
+        }
         types_nodes::nodes::ntag::T_NestLoop => {
             let nl = plan.as_nestloop_mut().unwrap();
             if let Some(jq) = nl.join.joinqual.as_ref() {

@@ -1838,10 +1838,9 @@ pub fn set_plan_refs<'mcx>(
 
     // Plan-type-specific fixes. We match on the `Node` enum variant directly
     // (the model's source of truth). Several arms `return` (no tail recursion).
-    // NOTE: `LockRows` and `BitmapOr` are NOT represented as `Node` variants in
-    // this repo's enum (verified against nodes.rs), so they cannot reach this
-    // dispatch; their C arms have no place to land and are therefore absent (a
-    // plan carrying them is unconstructible in this model).
+    // NOTE: `BitmapAnd`/`BitmapOr` ARE represented as `Node` variants and are
+    // handled below (recurse over `bitmapplans`). `LockRows` is folded into the
+    // `ModifyTable`/rowmark handling and has no standalone arm here.
     match plan.node_tag() {
         // -- plain scan types -------------------------------------------------
         ntag::T_SeqScan
@@ -2074,6 +2073,22 @@ pub fn set_plan_refs<'mcx>(
         // -- BitmapAnd -------------------------------------------------------
         ntag::T_BitmapAnd => {
             if let Some(b) = plan.as_bitmapand_mut() {
+                let kids = core::mem::take(&mut b.bitmapplans);
+                let mut newkids = Vec::with_capacity(kids.len());
+                for k in kids {
+                    newkids.push(set_plan_refs(mcx, run, root, k, rtoffset)?);
+                }
+                b.bitmapplans = newkids;
+            }
+            return Ok(plan);
+        }
+
+        // -- BitmapOr --------------------------------------------------------
+        // C (setrefs.c): `case T_BitmapOr:` — targetlist/qual are NIL (no
+        // tlist/qual fix-up), just recurse `set_plan_refs` over each input
+        // bitmapplan. Mirrors the T_BitmapAnd arm above.
+        ntag::T_BitmapOr => {
+            if let Some(b) = plan.as_bitmapor_mut() {
                 let kids = core::mem::take(&mut b.bitmapplans);
                 let mut newkids = Vec::with_capacity(kids.len());
                 for k in kids {
