@@ -14,7 +14,7 @@
 //! the catalog mid-call); that maps onto `fcinfo->isnull` here.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::Oid;
 
@@ -46,28 +46,21 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("namespace fmgr scratch")
 }
 
-/// Raise a core's `ereport(ERROR)` through the one dispatch point every builtin
-/// crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 /// Run one of the `Option<bool>`-returning `pg_*_is_visible` cores: write the
 /// bool result word, or set `fcinfo->isnull` for the SQL-NULL (object gone).
 #[inline]
 fn vis(
     fcinfo: &mut FunctionCallInfoBaseData,
     core: impl FnOnce(mcx::Mcx<'_>, Oid) -> types_error::PgResult<Option<bool>>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     let oid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    match core(m.mcx(), oid) {
-        Ok(Some(b)) => ret_bool(b),
-        Ok(None) => {
+    match core(m.mcx(), oid)? {
+        Some(b) => Ok(ret_bool(b)),
+        None => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
-        Err(e) => raise(e),
     }
 }
 
@@ -75,57 +68,56 @@ fn vis(
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
-fn fc_pg_table_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_table_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_table_is_visible)
 }
-fn fc_pg_type_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_type_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_type_is_visible)
 }
-fn fc_pg_function_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_function_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_function_is_visible)
 }
-fn fc_pg_operator_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_operator_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_operator_is_visible)
 }
-fn fc_pg_opclass_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_opclass_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_opclass_is_visible)
 }
-fn fc_pg_opfamily_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_opfamily_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_opfamily_is_visible)
 }
-fn fc_pg_collation_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_collation_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_collation_is_visible)
 }
-fn fc_pg_conversion_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_conversion_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_conversion_is_visible)
 }
-fn fc_pg_statistics_obj_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_statistics_obj_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_statistics_obj_is_visible)
 }
-fn fc_pg_ts_parser_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_ts_parser_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_ts_parser_is_visible)
 }
-fn fc_pg_ts_dict_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_ts_dict_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_ts_dict_is_visible)
 }
-fn fc_pg_ts_template_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_ts_template_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_ts_template_is_visible)
 }
-fn fc_pg_ts_config_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_ts_config_is_visible(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     vis(fcinfo, crate::pg_ts_config_is_visible)
 }
 
-fn fc_pg_my_temp_schema(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_oid(crate::pg_my_temp_schema())
+fn fc_pg_my_temp_schema(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_oid(crate::pg_my_temp_schema()))
 }
 
-fn fc_pg_is_other_temp_schema(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_is_other_temp_schema(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let oid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    match crate::pg_is_other_temp_schema(m.mcx(), oid) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+    Ok(ret_bool(crate::pg_is_other_temp_schema(m.mcx(), oid)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -138,16 +130,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `namespace.c` schema-visibility builtin (C: their
@@ -155,7 +150,7 @@ fn builtin(
 /// OIDs/nargs/strict from `pg_proc.dat` (all `proisstrict` default `t`, none
 /// `proretset`).
 pub fn register_namespace_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(2079, "pg_table_is_visible", 1, true, false, fc_pg_table_is_visible),
         builtin(2080, "pg_type_is_visible", 1, true, false, fc_pg_type_is_visible),
         builtin(2081, "pg_function_is_visible", 1, true, false, fc_pg_function_is_visible),
