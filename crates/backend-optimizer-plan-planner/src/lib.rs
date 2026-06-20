@@ -312,11 +312,11 @@ fn standard_planner<'mcx>(
     //        SS_finalize_plan(subroot, subplan); SS_finalize_plan(root, top_plan); }`
     //
     // The `forboth` over `glob->subplans`/`subroots` finalizes each child
-    // subplan *before* the main plan. The per-subplan finalize is not expressible
-    // over the PlannerRun subplan/subroot store (it would need a simultaneous
-    // `&mut subroot` from `run` plus the `&run` deref that
-    // `planner_subplan_get_plan` performs inside `SS_finalize_plan`), so that leg
-    // STAYS behind the keystone panic — but only when subplans actually exist.
+    // subplan *before* the main plan. Each subroot is moved out of the run store
+    // and lent the shared `glob` for the duration of its `SS_finalize_plan`
+    // (mirroring the set_plan_references loop), so the recursion's
+    // `planner_subplan_get_plan(subroot, …)` over a NESTED subplan resolves
+    // against the one shared `glob->subplans` list.
     //
     // For the no-subplan case (the simple INSERT/SELECT and the type tests),
     // `glob->subplans` is empty so the `forboth` is a pure no-op, and the only
@@ -329,23 +329,34 @@ fn standard_planner<'mcx>(
         // forboth(lp, glob->subplans, lr, glob->subroots): SS_finalize_plan on
         // each subplan before the top plan (C:528-535). Each subplan node and
         // its subroot both live in the run store; to finalize a subplan we move
-        // its Plan node out of the store (take_subplan), borrow its subroot +
-        // the run (both shared, for the recursion's `planner_subplan_get_plan`),
-        // run SS_finalize_plan, then put the node back.
+        // its Plan node out of the store (take_subplan), move its subroot out
+        // (take_subroot) and lend it the shared `glob` for the duration of the
+        // call, then put both back. The glob lend is mandatory: C's subroot
+        // shares the one `glob` pointer, and `SS_finalize_plan` recurses into
+        // `planner_subplan_get_plan(subroot, child_plan_id)` to read a NESTED
+        // subplan's `glob->subplans[child_plan_id-1]` (e.g. an `ARRAY(SELECT …
+        // (SELECT …))` — a SubPlan inside a SubPlan). Without the lend the
+        // subroot's `glob` is None and that nested-subplan finalize errors with
+        // `root->glob is NULL`. Mirrors the set_plan_references loop below.
         let subplan_ids: Vec<types_pathnodes::PlanId> = root
             .glob
             .as_ref()
             .map(|g| g.subplans.clone())
             .unwrap_or_default();
         for pid in subplan_ids.iter().copied() {
+            let mut subroot = run.take_subroot(pid);
+            subroot.glob = root.glob.take();
             let mut subplan_node = run.take_subplan(pid)?;
             backend_optimizer_plan_init_subselect::finalize::SS_finalize_plan(
                 mcx,
-                run.resolve_subroot(pid),
+                &subroot,
                 &run,
                 &mut subplan_node,
             )?;
             run.put_subplan(pid, subplan_node);
+            // Move the (possibly accumulated) shared glob back to the parent.
+            root.glob = subroot.glob.take();
+            run.put_subroot(pid, subroot);
         }
 
         // SS_finalize_plan(root, top_plan) (C:536). Walk the top plan tree to
