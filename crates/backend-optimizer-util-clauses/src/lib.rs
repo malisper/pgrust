@@ -193,6 +193,13 @@ pub fn init_seams() {
             .expect("contain_volatile_functions")
     });
 
+    // relation_excluded_by_constraints (plancat.c) reaches
+    // `contain_mutable_functions((Node *) clause)` over a planner-arena handle;
+    // clauses.c owns the predicate, resolve off `root`.
+    backend_optimizer_util_plancat_ext_seams::contain_mutable_functions::set(|root, node| {
+        grounded::contain_mutable_functions(Some(root.node(node)))
+    });
+
     // joinpath.c `paraminfo_get_equal_hashops` lateral-var leg: `IsA(node,
     // PlaceHolderVar)` and `lookup_type_cache(exprType(node), TYPECACHE_HASH_PROC
     // | TYPECACHE_EQ_OPR)` → `Some(eq_opr)` iff both the hash proc and eq operator

@@ -411,6 +411,26 @@ pub fn pull_vars_of_level(node: &Node, levelsup: i32) -> Vec<Expr> {
     context.vars
 }
 
+/// `pull_vars_of_level((Node *) query, levelsup)` over an owned `Query<'mcx>`
+/// (var.c:338). Mirrors [`pull_vars_of_level`] for the case where the passed
+/// `Node` is a `Query`: `query_or_expression_tree_walker` dispatches a top-level
+/// `Query` straight to `query_tree_walker` (no implicit level bump — that is done
+/// by `pull_vars_walker`'s `T_Query` arm only for *nested* sub-queries reached
+/// during the walk). Installs the `pull_vars_of_level_query` seam for
+/// `extract_lateral_references`' `RTE_SUBQUERY` arm.
+pub fn pull_vars_of_level_query(query: &types_nodes::copy_query::Query, levelsup: i32) -> Vec<Expr> {
+    let mut context = PullVarsContext {
+        vars: Vec::new(),
+        sublevels_up: levelsup,
+    };
+    query_tree_walker(
+        query,
+        &mut |n: &Node| pull_vars_walker(n, &mut context),
+        0,
+    );
+    context.vars
+}
+
 /// `pull_vars_walker` (var.c:358).
 fn pull_vars_walker(node: &Node, context: &mut PullVarsContext) -> bool {
     if let Some(expr) = node.as_expr() {
@@ -988,6 +1008,11 @@ pub fn init_seams() {
     // `Node`); var.c is the real owner and installs it here.
     use backend_optimizer_plan_init_subselect_ext_seams as isub;
     isub::pull_vars_of_level_node::set(|node, levelsup| pull_vars_of_level(node, levelsup));
+    // The RTE_SUBQUERY arm walks `rte->subquery` (an owned `Query`, not a `Node`)
+    // through the sibling `_query` seam (same owner, var.c).
+    isub::pull_vars_of_level_query::set(|query, levelsup| {
+        pull_vars_of_level_query(query, levelsup)
+    });
 }
 
 /// `pull_var_clause((Node *) node, flags)` (var.c) — the equivclass-ext seam
