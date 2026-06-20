@@ -101,25 +101,97 @@ std::thread_local! {
 pub static DISABLE_COST: Cost = 1.0e10;
 pub static PARALLEL_LEADER_PARTICIPATION: bool = true;
 
-// enable_* GUCs (default ON).
-pub static ENABLE_SEQSCAN: bool = true;
-pub static ENABLE_INDEXSCAN: bool = true;
-pub static ENABLE_INDEXONLYSCAN: bool = true;
-pub static ENABLE_BITMAPSCAN: bool = true;
-pub static ENABLE_TIDSCAN: bool = true;
-pub static ENABLE_SORT: bool = true;
-pub static ENABLE_INCREMENTAL_SORT: bool = true;
-pub static ENABLE_HASHAGG: bool = true;
-pub static ENABLE_NESTLOOP: bool = true;
-pub static ENABLE_MATERIAL: bool = true;
-pub static ENABLE_MERGEJOIN: bool = true;
-pub static ENABLE_HASHJOIN: bool = true;
-pub static ENABLE_GATHERMERGE: bool = true;
-pub static ENABLE_MEMOIZE: bool = true;
-pub static ENABLE_PARALLEL_APPEND: bool = true;
-pub static ENABLE_PARALLEL_HASH: bool = true;
-// enable_partitionwise_* GUCs default OFF (costsize.c lines 159-160).
-pub static ENABLE_PARTITIONWISE_JOIN: bool = false;
+// enable_* GUCs (costsize.c module globals). In C these are plain `bool`
+// globals the GUC machinery writes when `SET enable_xxx` runs; the cost code
+// reads them directly. Here the GUC engine writes the backing thread-local
+// cells in `guc.rs` (via the installed `set_*` accessors), so each reader must
+// go through the runtime getter — a compile-time `static bool = true` would
+// pin every scan/join method to "enabled" and silently ignore `SET enable_*`.
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_SEQSCAN() -> bool {
+    guc::get_seqscan()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_INDEXSCAN() -> bool {
+    guc::get_indexscan()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_INDEXONLYSCAN() -> bool {
+    guc::get_indexonlyscan()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_BITMAPSCAN() -> bool {
+    guc::get_bitmapscan()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_TIDSCAN() -> bool {
+    guc::get_tidscan()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_SORT() -> bool {
+    guc::get_sort()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_INCREMENTAL_SORT() -> bool {
+    guc::get_incremental_sort()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_HASHAGG() -> bool {
+    guc::get_hashagg()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_NESTLOOP() -> bool {
+    guc::get_nestloop()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_MATERIAL() -> bool {
+    guc::get_material()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_MERGEJOIN() -> bool {
+    guc::get_mergejoin()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_HASHJOIN() -> bool {
+    guc::get_hashjoin()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_GATHERMERGE() -> bool {
+    guc::get_gathermerge()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_MEMOIZE() -> bool {
+    guc::get_memoize()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_PARALLEL_APPEND() -> bool {
+    guc::get_parallel_append()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_PARALLEL_HASH() -> bool {
+    guc::get_parallel_hash()
+}
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_PARTITIONWISE_JOIN() -> bool {
+    guc::get_partitionwise_join()
+}
 
 // Inline GUC accessors so the cost arithmetic reads like the C source. Each
 // reads the runtime-mutable cell (the GUC engine writes them via guc.rs).
@@ -537,7 +609,7 @@ pub fn cost_gather_merge(
     startup_cost += parallel_setup_cost();
     run_cost += parallel_tuple_cost() * new_rows * 1.05;
 
-    let disabled = input_disabled_nodes + (if ENABLE_GATHERMERGE { 0 } else { 1 });
+    let disabled = input_disabled_nodes + (if ENABLE_GATHERMERGE() { 0 } else { 1 });
 
     if let PathNode::GatherMergePath(gmp) = root.path_mut(path_id) {
         gmp.path.rows = new_rows;
@@ -576,7 +648,7 @@ pub(crate) fn cost_gather_merge_owned(
     run_cost += cpu_operator_cost() * path.path.rows;
     startup_cost += parallel_setup_cost();
     run_cost += parallel_tuple_cost() * path.path.rows * 1.05;
-    path.path.disabled_nodes = input_disabled_nodes + (if ENABLE_GATHERMERGE { 0 } else { 1 });
+    path.path.disabled_nodes = input_disabled_nodes + (if ENABLE_GATHERMERGE() { 0 } else { 1 });
     path.path.startup_cost = startup_cost + input_startup_cost;
     path.path.total_cost = startup_cost + run_cost + input_total_cost;
 }
@@ -722,7 +794,7 @@ pub fn cost_sort(
 
     let p = root.path_mut(path_id).base_mut();
     p.rows = tuples;
-    p.disabled_nodes = input_disabled_nodes + (if ENABLE_SORT { 0 } else { 1 });
+    p.disabled_nodes = input_disabled_nodes + (if ENABLE_SORT() { 0 } else { 1 });
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + run_cost;
 }
@@ -743,7 +815,7 @@ pub(crate) fn cost_sort_owned(
         cost_tuplesort(tuples, width, comparison_cost, sort_mem, limit_tuples);
     startup_cost += input_cost;
     path.rows = tuples;
-    path.disabled_nodes = input_disabled_nodes + (if ENABLE_SORT { 0 } else { 1 });
+    path.disabled_nodes = input_disabled_nodes + (if ENABLE_SORT() { 0 } else { 1 });
     path.startup_cost = startup_cost;
     path.total_cost = startup_cost + run_cost;
 }
@@ -956,7 +1028,7 @@ fn cost_incremental_sort_compute<'mcx>(
     run_cost += (cpu_tuple_cost() + comparison_cost) * input_tuples;
     run_cost += 2.0 * cpu_tuple_cost() * input_groups;
 
-    debug_assert!(ENABLE_INCREMENTAL_SORT);
+    debug_assert!(ENABLE_INCREMENTAL_SORT());
 
     Ok((startup_cost, startup_cost + run_cost))
 }
@@ -1022,7 +1094,7 @@ pub fn cost_material(
 
     let p = root.path_mut(path_id).base_mut();
     p.rows = tuples;
-    p.disabled_nodes = input_disabled_nodes + (if ENABLE_MATERIAL { 0 } else { 1 });
+    p.disabled_nodes = input_disabled_nodes + (if ENABLE_MATERIAL() { 0 } else { 1 });
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + run_cost;
 }

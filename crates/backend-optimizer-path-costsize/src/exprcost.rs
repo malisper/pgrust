@@ -70,7 +70,7 @@ pub fn cost_agg<'mcx>(
     } else if aggstrategy == AGG_SORTED || aggstrategy == AGG_MIXED {
         startup_cost = input_startup_cost;
         total_cost = input_total_cost;
-        if aggstrategy == AGG_MIXED && !ENABLE_HASHAGG {
+        if aggstrategy == AGG_MIXED && !ENABLE_HASHAGG() {
             disabled_nodes += 1;
         }
         total_cost += aggcosts.trans_startup;
@@ -83,7 +83,7 @@ pub fn cost_agg<'mcx>(
     } else {
         // AGG_HASHED.
         startup_cost = input_total_cost;
-        if !ENABLE_HASHAGG {
+        if !ENABLE_HASHAGG() {
             disabled_nodes += 1;
         }
         startup_cost += aggcosts.trans_startup;

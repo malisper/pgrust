@@ -75,7 +75,7 @@ pub fn cost_seqscan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
 
     let p = root.path_mut(path_id).base_mut();
     p.rows = rows;
-    p.disabled_nodes = if ENABLE_SEQSCAN { 0 } else { 1 };
+    p.disabled_nodes = if ENABLE_SEQSCAN() { 0 } else { 1 };
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + cpu_run_cost + disk_run_cost;
 }
@@ -216,7 +216,7 @@ pub fn cost_index<'mcx>(
     }
     set_index_rows(root, path_id, new_rows);
 
-    set_index_disabled(root, path_id, if ENABLE_INDEXSCAN { 0 } else { 1 });
+    set_index_disabled(root, path_id, if ENABLE_INDEXSCAN() { 0 } else { 1 });
 
     // amcostestimate (index-AM cost callback).
     let am = cz::amcostestimate::call(root, run, path_id, loop_count);
@@ -590,7 +590,7 @@ pub fn cost_bitmap_heap_scan(
 
     let p = root.path_mut(path_id).base_mut();
     p.rows = rows;
-    p.disabled_nodes = if ENABLE_BITMAPSCAN { 0 } else { 1 };
+    p.disabled_nodes = if ENABLE_BITMAPSCAN() { 0 } else { 1 };
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + run_cost;
 }

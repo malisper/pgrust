@@ -43,14 +43,13 @@ pub mod finalize;
 pub mod subplan;
 
 /// `enable_material` (cost.h GUC) — default true. Read by
-/// `build_subplan` when deciding whether to add a `Material` node. The GUC table
-/// lives in an unported owner; mirror the boot-time default as a local read.
-pub static mut ENABLE_MATERIAL: bool = true;
-
+/// `build_subplan` when deciding whether to add a `Material` node. The GUC's
+/// backing store is owned by costsize.c (`guc.rs` installs the slot accessor);
+/// read the live value through the guc-table slot so `SET enable_material`
+/// takes effect here too, rather than a never-written local mirror.
 #[inline]
 pub fn enable_material() -> bool {
-    // SAFETY: single-threaded planner; mirrors the C global read.
-    unsafe { core::ptr::addr_of!(ENABLE_MATERIAL).read() }
+    backend_utils_misc_guc_tables::vars::enable_material.read()
 }
 
 /* ==========================================================================

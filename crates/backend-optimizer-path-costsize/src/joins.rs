@@ -211,7 +211,7 @@ pub fn initial_cost_nestloop<'mcx>(
         (i.startup_cost, i.total_cost, i.disabled_nodes)
     };
 
-    disabled_nodes = if ENABLE_NESTLOOP { 0 } else { 1 };
+    disabled_nodes = if ENABLE_NESTLOOP() { 0 } else { 1 };
     disabled_nodes += inner_disabled;
     disabled_nodes += outer_disabled;
 
@@ -513,14 +513,14 @@ pub fn initial_cost_mergejoin<'mcx>(
     debug_assert!(outerstartsel <= outerendsel);
     debug_assert!(innerstartsel <= innerendsel);
 
-    disabled_nodes = if ENABLE_MERGEJOIN { 0 } else { 1 };
+    disabled_nodes = if ENABLE_MERGEJOIN() { 0 } else { 1 };
 
     // cost of source data — outer side.
     if !outersortkeys.is_empty() {
         debug_assert!(!ps::pathkeys_contained_in::call(outersortkeys, &outer.pathkeys));
 
         let mut sort_path = make_dummy_sort_path(&outer);
-        if ENABLE_INCREMENTAL_SORT && outer_presorted_keys > 0 {
+        if ENABLE_INCREMENTAL_SORT() && outer_presorted_keys > 0 {
             cost_incremental_sort_owned(
                 &mut sort_path,
                 run,
@@ -731,11 +731,11 @@ pub fn final_cost_mergejoin<'mcx>(
 
     let materialize_inner = if skip_mark_restore {
         false
-    } else if ENABLE_MATERIAL && mat_inner_cost < bare_inner_cost {
+    } else if ENABLE_MATERIAL() && mat_inner_cost < bare_inner_cost {
         true
     } else if innersortkeys_empty && !cz::exec_supports_mark_restore::call(root, inner_id) {
         true
-    } else if ENABLE_MATERIAL
+    } else if ENABLE_MATERIAL()
         && !innersortkeys_empty
         && relation_byte_size(inner_path_rows, inner_pathtarget_width(root, inner_id))
             > work_mem() as f64 * 1024.0
@@ -811,7 +811,7 @@ pub fn initial_cost_hashjoin(
     let numbuckets: i32;
     let numbatches: i32;
 
-    disabled_nodes = if ENABLE_HASHJOIN { 0 } else { 1 };
+    disabled_nodes = if ENABLE_HASHJOIN() { 0 } else { 1 };
     disabled_nodes += inner.disabled_nodes;
     disabled_nodes += outer.disabled_nodes;
 

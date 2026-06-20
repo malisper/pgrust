@@ -60,7 +60,7 @@ pub fn init_seams() {
     cz::cost_bitmap_tree_node::set(crate::scans::cost_bitmap_tree_node);
     cz::cost_sort_label::set(crate::cost_sort_label);
     cz::cost_incremental_sort_label::set(crate::cost_incremental_sort_label);
-    cz::enable_indexonlyscan::set(|| crate::ENABLE_INDEXONLYSCAN);
+    cz::enable_indexonlyscan::set(|| crate::ENABLE_INDEXONLYSCAN());
 
     // `get_tablespace_page_costs(spcid)` (spccache.c). costsize.c owns the
     // `random_page_cost`/`seq_page_cost` GUC defaults the lookup falls back to
@@ -96,7 +96,7 @@ pub fn init_seams() {
     // relnode.c/joinrels.c through the relnode-ext consumer-side seam crate
     // (no owner directory; costsize installs it as the GUC owner).
     backend_optimizer_util_relnode_ext_seams::enable_partitionwise_join::set(
-        || crate::ENABLE_PARTITIONWISE_JOIN,
+        || crate::ENABLE_PARTITIONWISE_JOIN(),
     );
     // `clamp_width_est(tuple_width)` (costsize.c) — relnode.c / joininfo.c /
     // restrictinfo.c each reach it through their own no-owner consumer-side ext
@@ -137,7 +137,7 @@ pub fn init_seams() {
     /* ---- pathnode-seams: cost GUC getters + sizing helpers owned here -- */
     ps::cpu_tuple_cost::set(|| crate::cpu_tuple_cost());
     ps::cpu_operator_cost::set(|| crate::cpu_operator_cost());
-    ps::enable_hashagg::set(|| crate::ENABLE_HASHAGG);
+    ps::enable_hashagg::set(|| crate::ENABLE_HASHAGG());
     ps::sizeof_minimal_tuple_header::set(|| SIZEOF_MINIMAL_TUPLE_HEADER);
     // `work_mem` (utils/guc.c GUC, default 4 MB) read by the cost estimators
     // (`compute_bitmap_pages`, sort/hash sizing). The value is owned by the GUC
