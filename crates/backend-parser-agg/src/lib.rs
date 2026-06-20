@@ -459,14 +459,14 @@ fn check_agglevels_and_constraints<'mcx>(
         AggOrGrouping::Agg(agg) => {
             let mut directargs: Vec<Node> = Vec::new();
             for e in agg.aggdirectargs.iter() {
-                directargs.push(Node::mk_expr(mcx, e.clone()));
+                directargs.push(Node::mk_expr(mcx, e.clone())?);
             }
             let mut args: Vec<Node> = Vec::new();
             for te in agg.args.iter() {
-                args.push(Node::mk_target_entry(mcx, te.clone_in(mcx)?));
+                args.push(Node::mk_target_entry(mcx, te.clone_in(mcx)?)?);
             }
             let filter = match agg.aggfilter.as_deref() {
-                Some(e) => Some(Node::mk_expr(mcx, e.clone())),
+                Some(e) => Some(Node::mk_expr(mcx, e.clone())?),
                 None => None,
             };
             (directargs, args, filter, agg.location)
@@ -474,7 +474,7 @@ fn check_agglevels_and_constraints<'mcx>(
         AggOrGrouping::Grouping(grp) => {
             let mut args: Vec<Node> = Vec::new();
             for e in grp.args.iter() {
-                args.push(Node::mk_expr(mcx, e.clone()));
+                args.push(Node::mk_expr(mcx, e.clone())?);
             }
             (Vec::new(), args, None, grp.location)
         }
@@ -995,8 +995,8 @@ pub fn transformWindowFuncCall<'mcx>(
 ) -> PgResult<types_nodes::primnodes::WindowFunc> {
     let mut wfunc = wfunc;
     // A window function call can't contain another one (but aggs are OK).
-    if pstate.p_hasWindowFuncs && contain_windowfuncs_exprs(pstate_mcx(pstate), &wfunc.args) {
-        let loc = locate_windowfunc_exprs(pstate_mcx(pstate), &wfunc.args);
+    if pstate.p_hasWindowFuncs && contain_windowfuncs_exprs(pstate_mcx(pstate), &wfunc.args)? {
+        let loc = locate_windowfunc_exprs(pstate_mcx(pstate), &wfunc.args)?;
         return Err(ereport(ERROR)
             .errcode(ERRCODE_WINDOWING_ERROR)
             .errmsg("window function calls cannot be nested")
@@ -1181,28 +1181,28 @@ pub fn transformWindowFuncCall<'mcx>(
 }
 
 /// `contain_windowfuncs((Node *) list)` over an `Expr` list.
-fn contain_windowfuncs_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> bool {
+fn contain_windowfuncs_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> types_error::PgResult<bool> {
     for e in args {
         // C wraps the whole list in one Node and walks; an Expr list visits each
         // element. We test each element's subtree via the rewriteManip seam.
-        let n = wrap_expr_ref(mcx, e);
+        let n = wrap_expr_ref(mcx, e)?;
         if backend_rewrite_rewritemanip_seams::contain_windowfuncs::call(&n) {
-            return true;
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }
 
 /// `locate_windowfunc((Node *) list)` over an `Expr` list.
-fn locate_windowfunc_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> i32 {
+fn locate_windowfunc_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> types_error::PgResult<i32> {
     for e in args {
-        let n = wrap_expr_ref(mcx, e);
+        let n = wrap_expr_ref(mcx, e)?;
         let loc = backend_rewrite_rewritemanip_seams::locate_windowfunc::call(&n);
         if loc >= 0 {
-            return loc;
+            return Ok(loc);
         }
     }
-    -1
+    Ok(-1)
 }
 
 /// Wrap an `&Expr` as an owned `Node` for a seam call. The seam takes `&Node`;
@@ -1211,7 +1211,7 @@ fn locate_windowfunc_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> i32 {
 /// for the common scalar/Var/funcexpr argument lists). Aggref cannot be cloned,
 /// but window-func argument lists never contain top-level Aggrefs requiring a
 /// clone at this position (the contain/locate walkers descend, not clone).
-fn wrap_expr_ref<'mcx>(mcx: Mcx<'mcx>, e: &Expr) -> Node<'mcx> {
+fn wrap_expr_ref<'mcx>(mcx: Mcx<'mcx>, e: &Expr) -> types_error::PgResult<Node<'mcx>> {
     // The contain/locate seams take a borrowed Node and never retain it. We
     // build a borrowed view by re-creating a Node referencing a cloned Expr;
     // for Aggref (non-Clone) we cannot, so fall back to a structural clone via
@@ -1366,7 +1366,7 @@ pub fn parseCheckAggregates<'mcx>(
 
     // Flatten join alias vars if any RTE_JOIN entries.
     if has_join_rtes {
-        let qry_node = Node::mk_query(mcx, qry.clone_in(mcx)?);
+        let qry_node = Node::mk_query(mcx, qry.clone_in(mcx)?)?;
         let flat = flatten_group_clauses(mcx, &qry_node, group_clauses)?;
         group_clauses = flat;
     }
@@ -1424,7 +1424,7 @@ pub fn parseCheckAggregates<'mcx>(
 
     // A read-only snapshot of the query used by the seam calls inside the
     // mutator/walker (flatten_join_alias_vars, check_functional_grouping).
-    let qry_snapshot = Node::mk_query(mcx, qry.clone_in(mcx)?);
+    let qry_snapshot = Node::mk_query(mcx, qry.clone_in(mcx)?)?;
 
     // qry->constraintDeps, extended in place by check_functional_grouping.
     let mut constraint_deps: Vec<Oid> = qry.constraintDeps.iter().copied().collect();
@@ -1434,7 +1434,7 @@ pub fn parseCheckAggregates<'mcx>(
     // finalize_grouping_exprs walks the list (modifying GroupingFunc refs).
     let mut tlist_nodes: Vec<Node> = Vec::new();
     for te in tlist.into_iter() {
-        tlist_nodes.push(Node::mk_target_entry(mcx, te));
+        tlist_nodes.push(Node::mk_target_entry(mcx, te)?);
     }
     finalize_grouping_exprs_list(
         mcx,
@@ -1479,7 +1479,7 @@ pub fn parseCheckAggregates<'mcx>(
         // `havingQual` is the concretely-typed `Option<PgBox<Expr>>` view; the
         // grouping-expr helpers below operate on `Node`, so wrap the owned `Expr`
         // into `Node::Expr` here and unwrap back to `Expr` on store-back.
-        let mut clause: Node = Node::mk_expr(mcx, (*having).clone_in(mcx)?);
+        let mut clause: Node = Node::mk_expr(mcx, (*having).clone_in(mcx)?)?;
         clause = finalize_grouping_exprs(
             mcx,
             clause,
@@ -1526,7 +1526,7 @@ pub fn parseCheckAggregates<'mcx>(
 
     // Aggregates can't appear in a recursive term.
     if pstate.p_hasAggs && has_self_ref_rtes {
-        let qry_node = Node::mk_query(mcx, qry.clone_in(mcx)?);
+        let qry_node = Node::mk_query(mcx, qry.clone_in(mcx)?)?;
         let loc = backend_rewrite_rewritemanip_seams::locate_agg_of_level::call(&qry_node, 0);
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INVALID_RECURSION)
@@ -1551,7 +1551,7 @@ fn flatten_group_clauses<'mcx>(
         let flat = backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
             mcx,
             qry_node,
-            Node::mk_target_entry(mcx, tle),
+            Node::mk_target_entry(mcx, tle)?,
         )?;
         match flat.into_targetentry() {
             Some(te) => out.push(te),
@@ -1799,7 +1799,13 @@ fn substitute_grouped_columns_mutator(node: &mut Node, context: &mut SubstituteC
             // grouping_columns are the common Vars, wrapped as nodes.
             let mut grouping_columns: Vec<Node> = Vec::new();
             for e in context.group_clause_common_vars {
-                grouping_columns.push(Node::mk_expr(context.mcx, e.clone()));
+                match Node::mk_expr(context.mcx, e.clone()) {
+                    Ok(n) => grouping_columns.push(n),
+                    Err(err) => {
+                        context.error = Some(err);
+                        return;
+                    }
+                }
             }
             let deps = core::mem::take(context.constraint_deps);
             match backend_catalog_pg_constraint::check_functional_grouping(
@@ -2146,11 +2152,11 @@ fn compute_grouping_refs(
             flat_node = backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
                 context.mcx,
                 context.qry,
-                Node::mk_expr(context.mcx, expr.clone()),
+                Node::mk_expr(context.mcx, expr.clone())?,
             )?;
             flat_node
         } else {
-            Node::mk_expr(context.mcx, expr.clone())
+            Node::mk_expr(context.mcx, expr.clone())?
         };
 
         let cur_expr: &Expr = match expr_node.as_expr() {
