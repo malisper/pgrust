@@ -40,6 +40,7 @@ backend-utils-misc-guc-tables-seams = { path = "../backend-utils-misc-guc-tables
 # Inward seam crates this unit owns / installs into.
 backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
 backend-commands-view-seams = { path = "../backend-commands-view-seams" }
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 
 # Cross-cycle externals consumed through owner -seams crates.
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }

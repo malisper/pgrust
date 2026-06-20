@@ -762,6 +762,45 @@ fn relcache_scan_pg_rewrite(relid: Oid) -> PgResult<Vec<seam::ScannedPgRewrite>>
     Ok(out)
 }
 
+/// `pg_get_ruledef_worker`'s by-OID `pg_rewrite` read (ruleutils.c 597-656).
+/// C runs `SELECT * FROM pg_rewrite WHERE oid = $1` over SPI; we run the
+/// equivalent MVCC scan over `RewriteOidIndexId`. `Ok(None)` on a scan miss
+/// (C: `SPI_processed != 1`). The decoded row is copied into `mcx`.
+fn rule_by_oid(mcx: Mcx<'_>, ruleoid: Oid) -> PgResult<Option<seam::RuleByOid>> {
+    use types_catalog::pg_rewrite::{Anum_pg_rewrite_rulename, RewriteOidIndexId};
+
+    // ScanKeyInit(&skey, Anum_pg_rewrite_oid, BTEqualStrategyNumber, F_OIDEQ,
+    //             ObjectIdGetDatum(ruleoid));
+    let skey = [scan_key_init(
+        Anum_pg_rewrite_oid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(ruleoid),
+    )?];
+
+    let relation = table_open(mcx, RewriteRelationId, AccessShareLock)?;
+    let mut scandesc = systable_beginscan(&relation, RewriteOidIndexId, true, None, &skey)?;
+
+    let result = match systable_getnext(mcx, scandesc.desc_mut())? {
+        None => None,
+        Some(ntp) => {
+            let row = heap_deform_tuple(mcx, &ntp.tuple, &relation.rd_att, &ntp.data)?;
+            Some(seam::RuleByOid {
+                rulename: name_col(&row, Anum_pg_rewrite_rulename, "pg_rewrite.rulename")?,
+                ev_type: col(&row, Anum_pg_rewrite_ev_type, "ev_type")?.as_char() as u8,
+                ev_class: col(&row, Anum_pg_rewrite_ev_class, "ev_class")?.as_oid(),
+                is_instead: col(&row, Anum_pg_rewrite_is_instead, "is_instead")?.as_bool(),
+                ev_qual: text_col_opt(mcx, &row, Anum_pg_rewrite_ev_qual)?,
+                ev_action: text_col_opt(mcx, &row, Anum_pg_rewrite_ev_action)?,
+            })
+        }
+    };
+
+    scandesc.end()?;
+    table_close(relation, AccessShareLock)?;
+    Ok(result)
+}
+
 // ===========================================================================
 // relcache_scan_pg_statistic_ext — RelationGetStatExtList
 // ===========================================================================
@@ -1393,6 +1432,7 @@ pub fn init_decode_seams() {
     seam::scan_pg_amproc::set(scan_pg_amproc);
     seam::relcache_scan_pg_index::set(relcache_scan_pg_index);
     seam::relcache_scan_pg_rewrite::set(relcache_scan_pg_rewrite);
+    seam::rule_by_oid::set(rule_by_oid);
     seam::relcache_scan_pg_statistic_ext::set(relcache_scan_pg_statistic_ext);
     seam::relcache_scan_pg_trigger::set(relcache_scan_pg_trigger);
     seam::relcache_scan_pg_policy::set(relcache_scan_pg_policy);

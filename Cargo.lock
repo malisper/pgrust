@@ -16081,6 +16081,7 @@ dependencies = [
  "backend-rewrite-rewritehandler-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-adt-format-type",
+ "backend-utils-adt-ruleutils-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-seams",
  "backend-utils-misc-guc-tables",
@@ -20416,6 +20417,7 @@ name = "backend-utils-adt-ruleutils"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-relation-seams",
+ "backend-access-index-genam-seams",
  "backend-catalog-namespace-seams",
  "backend-commands-typecmds-seams",
  "backend-nodes-core-seams",
@@ -20423,6 +20425,7 @@ dependencies = [
  "backend-nodes-read-seams",
  "backend-optimizer-util-var-seams",
  "backend-partitioning-partbounds-seams",
+ "backend-rewrite-core",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-ruleutils-seams",
  "backend-utils-cache-lsyscache-seams",

@@ -223,6 +223,97 @@ fn fc_pg_get_constraintdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+/// `pg_get_viewdef(oid) -> text` (oid 1641). prettyFlags = PRETTYFLAG_INDENT,
+/// wrapColumn = WRAP_COLUMN_DEFAULT.
+fn fc_pg_get_viewdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let res = ok(crate::viewdef::pg_get_viewdef_worker(
+        m.mcx(),
+        arg_oid(fcinfo, 0),
+        crate::PRETTYFLAG_INDENT,
+        crate::WRAP_COLUMN_DEFAULT,
+    ));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `pg_get_viewdef_ext(oid, bool) -> text` (oid 2506). prettyFlags =
+/// GET_PRETTY_FLAGS(pretty).
+fn fc_pg_get_viewdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let pretty = arg_bool(fcinfo, 1);
+    let res = ok(crate::viewdef::pg_get_viewdef_worker(
+        m.mcx(),
+        arg_oid(fcinfo, 0),
+        get_pretty_flags(pretty),
+        crate::WRAP_COLUMN_DEFAULT,
+    ));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `pg_get_viewdef_wrap(oid, int4) -> text` (oid 3159). Implies pretty;
+/// prettyFlags = GET_PRETTY_FLAGS(true), wrapColumn = the wrap arg.
+fn fc_pg_get_viewdef_wrap(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let wrap = arg_int32(fcinfo, 1);
+    let res = ok(crate::viewdef::pg_get_viewdef_worker(
+        m.mcx(),
+        arg_oid(fcinfo, 0),
+        get_pretty_flags(true),
+        wrap,
+    ));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `pg_get_ruledef(oid) -> text` (oid 1573). prettyFlags = PRETTYFLAG_INDENT.
+fn fc_pg_get_ruledef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let res = ok(crate::viewdef::pg_get_ruledef_worker(
+        m.mcx(),
+        arg_oid(fcinfo, 0),
+        crate::PRETTYFLAG_INDENT,
+    ));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `pg_get_ruledef_ext(oid, bool) -> text` (oid 2504). prettyFlags =
+/// GET_PRETTY_FLAGS(pretty).
+fn fc_pg_get_ruledef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let pretty = arg_bool(fcinfo, 1);
+    let res = ok(crate::viewdef::pg_get_ruledef_worker(
+        m.mcx(),
+        arg_oid(fcinfo, 0),
+        get_pretty_flags(pretty),
+    ));
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
+/// `GET_PRETTY_FLAGS(pretty)` (ruleutils.c 92): pretty ?
+/// (PRETTYFLAG_PAREN|PRETTYFLAG_INDENT|PRETTYFLAG_SCHEMA) : PRETTYFLAG_INDENT.
+#[inline]
+fn get_pretty_flags(pretty: bool) -> i32 {
+    if pretty {
+        crate::PRETTYFLAG_PAREN | crate::PRETTYFLAG_INDENT | crate::PRETTYFLAG_SCHEMA
+    } else {
+        crate::PRETTYFLAG_INDENT
+    }
+}
+
 /// `pg_get_statisticsobjdef(oid) -> text` (oid 3415). Full CREATE STATISTICS
 /// definition: `pg_get_statisticsobj_worker(statextid, false, true)`.
 fn fc_pg_get_statisticsobjdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
@@ -316,6 +407,14 @@ pub fn register_ruleutils_builtins() {
         // Slice 3: extended-statistics deparse (resolvable; workers seam-and-panic
         // at the unported Form_pg_statistic_ext deform — empty-input psql `\d`
         // describe only needs resolution, see statisticsdef.rs).
+        // Slice 4: view- and rule-definition deparse (ported end-to-end for the
+        // common SELECT-view spine via get_query_def). pg_rewrite is read by the
+        // genam MVCC scan; the action Query is stringToNode'd and deparsed.
+        builtin(1641, "pg_get_viewdef", 1, true, false, fc_pg_get_viewdef),
+        builtin(2506, "pg_get_viewdef_ext", 2, true, false, fc_pg_get_viewdef_ext),
+        builtin(3159, "pg_get_viewdef_wrap", 2, true, false, fc_pg_get_viewdef_wrap),
+        builtin(1573, "pg_get_ruledef", 1, true, false, fc_pg_get_ruledef),
+        builtin(2504, "pg_get_ruledef_ext", 2, true, false, fc_pg_get_ruledef_ext),
         builtin(3415, "pg_get_statisticsobjdef", 1, true, false, fc_pg_get_statisticsobjdef),
         builtin(6174, "pg_get_statisticsobjdef_columns", 1, true, false, fc_pg_get_statisticsobjdef_columns),
         builtin(6173, "pg_get_statisticsobjdef_expressions", 1, true, false, fc_pg_get_statisticsobjdef_expressions),

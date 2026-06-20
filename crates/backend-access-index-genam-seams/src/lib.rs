@@ -246,6 +246,29 @@ pub struct ScannedPgRewrite {
     pub ev_action: Option<String>,
 }
 
+/// One `pg_rewrite` row fetched by rule OID — `pg_get_ruledef_worker`'s
+/// `SELECT * FROM pg_rewrite WHERE oid = $1` (ruleutils.c 597-656). Carries the
+/// scalar `Form_pg_rewrite` columns the renderer reads (`rulename`/`ev_type`/
+/// `ev_class`/`is_instead`) plus the two node-string columns (`ev_qual`/
+/// `ev_action`) as their raw `nodeToString` text.
+#[derive(Clone, Debug)]
+pub struct RuleByOid {
+    /// `NameStr(Form_pg_rewrite.rulename)`.
+    pub rulename: String,
+    /// `char ev_type` — `'1'`..`'4'`.
+    pub ev_type: u8,
+    /// `Oid ev_class` — the rule's event relation.
+    pub ev_class: Oid,
+    /// `bool is_instead`.
+    pub is_instead: bool,
+    /// `text ev_qual` — the qualification `nodeToString` text (the literal
+    /// `<>` for an unconditional rule), or `None` if the column is NULL.
+    pub ev_qual: Option<String>,
+    /// `text ev_action` — the action `List<Query>`'s `nodeToString` text, or
+    /// `None` if NULL.
+    pub ev_action: Option<String>,
+}
+
 /// One decoded `pg_trigger` row as `RelationBuildTriggers` (commands/trigger.c)
 /// consumes it: the `Form_pg_trigger` scalar fields plus the four
 /// variable-length columns the builder needs (`tgattr` int2vector, `tgargs`
@@ -417,6 +440,19 @@ seam_core::seam!(
     /// and sorts the rules by `ruleId`. Can `ereport(ERROR)` (catalog read
     /// failure), carried on `Err`.
     pub fn relcache_scan_pg_rewrite(relid: Oid) -> PgResult<Vec<ScannedPgRewrite>>
+);
+
+seam_core::seam!(
+    /// `pg_get_ruledef_worker`'s by-OID `pg_rewrite` read (ruleutils.c 597-656):
+    /// `systable_beginscan(pg_rewrite, RewriteOidIndexId, oid = ruleoid)` then
+    /// `systable_getnext` + `GETSTRUCT(Form_pg_rewrite)` and the two
+    /// `heap_getattr` node-string columns (`ev_qual`/`ev_action`). `Ok(None)` on
+    /// a scan miss (C: `SPI_processed != 1`). Can `ereport(ERROR)` (catalog read
+    /// failure), carried on `Err`.
+    pub fn rule_by_oid<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        ruleoid: Oid,
+    ) -> PgResult<Option<RuleByOid>>
 );
 
 seam_core::seam!(

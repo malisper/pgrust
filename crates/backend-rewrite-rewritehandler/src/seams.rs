@@ -42,6 +42,12 @@ pub fn init_seams() {
         seam_query_rewrite_canonical,
     );
     backend_rewrite_rewritehandler_seams::acquire_rewrite_locks::set(seam_acquire_rewrite_locks);
+    // The ruleutils deparser declares its own `&mut Query` AcquireRewriteLocks
+    // seam (get_query_def re-locks the deparsed tree). It is the same owner —
+    // install it here over the in-place `AcquireRewriteLocks`.
+    backend_utils_adt_ruleutils_seams::acquire_rewrite_locks::set(
+        seam_acquire_rewrite_locks_inplace,
+    );
     backend_rewrite_rewritehandler_seams::relation_has_security_invoker::set(
         seam_relation_has_security_invoker,
     );
@@ -93,6 +99,19 @@ fn seam_acquire_rewrite_locks<'mcx>(
 ) -> PgResult<types_nodes::copy_query::Query<'mcx>> {
     crate::AcquireRewriteLocks(mcx, &mut parsetree, for_execute, for_update_pushed_down)?;
     Ok(parsetree)
+}
+
+/// `AcquireRewriteLocks(query, forExecute, forUpdatePushedDown)` over the
+/// in-place `&mut Query` — the ruleutils deparser's `get_query_def` re-lock
+/// step (ruleutils.c 5654). Same owner body as `seam_acquire_rewrite_locks`,
+/// matching the ruleutils seam's `&mut Query -> ()` shape.
+fn seam_acquire_rewrite_locks_inplace<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: &mut types_nodes::copy_query::Query<'mcx>,
+    for_execute: bool,
+    for_update_pushed_down: bool,
+) -> PgResult<()> {
+    crate::AcquireRewriteLocks(mcx, parsetree, for_execute, for_update_pushed_down)
 }
 
 /// Legacy opaque `portalcmds::Query` entry. Collapsing this contract into the
