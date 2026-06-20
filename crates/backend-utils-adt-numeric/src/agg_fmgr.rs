@@ -53,20 +53,6 @@ impl NumericAggInternal {
     }
 }
 
-/// Re-raise a builtin's `ereport(ERROR)` through the one dispatch point
-/// (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err)
-}
-
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 /// `PG_ARGISNULL(i)`.
 #[inline]
 fn arg_isnull(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
@@ -191,9 +177,10 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// image out by value (C: the palloc'd result lives in the caller's context).
 fn run_final(
     f: impl for<'mcx> FnOnce(mcx::Mcx<'mcx>) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>,
-) -> Option<Vec<u8>> {
+) -> types_error::PgResult<Option<Vec<u8>>> {
     let m = crate::fmgr_builtins::scratch_mcx();
-    ok(f(m.mcx())).map(|image| image.as_slice().to_vec())
+    let out = f(m.mcx())?.map(|image| image.as_slice().to_vec());
+    Ok(out)
 }
 
 // ===========================================================================
@@ -202,7 +189,10 @@ fn run_final(
 
 /// `numeric_avg_accum`(2858) / `numeric_accum`(1833): accumulate one `numeric`
 /// input into the running state (`calc_sum_x2` selects var/stddev).
-fn numeric_accum_common(fcinfo: &mut FunctionCallInfoBaseData, calc_sum_x2: bool) -> Datum {
+fn numeric_accum_common(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    calc_sum_x2: bool,
+) -> types_error::PgResult<Datum> {
     // state = PG_ARGISNULL(0) ? makeNumericAggState(fcinfo, calcSumX2)
     //                         : (NumericAggState *) PG_GETARG_POINTER(0);
     let mut carrier = take_numeric_state(fcinfo).unwrap_or_else(|| NumericAggInternal::new(calc_sum_x2));
@@ -211,45 +201,45 @@ fn numeric_accum_common(fcinfo: &mut FunctionCallInfoBaseData, calc_sum_x2: bool
     if !arg_isnull(fcinfo, 1) {
         let newval = arg_numeric(fcinfo, 1);
         let ctx_mcx = carrier.ctx.mcx();
-        ok(aggregate::do_numeric_accum(ctx_mcx, &mut carrier.state, &newval));
+        aggregate::do_numeric_accum(ctx_mcx, &mut carrier.state, &newval)?;
     }
-    ret_internal(fcinfo, carrier)
+    Ok(ret_internal(fcinfo, carrier))
 }
 
-fn fc_numeric_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     numeric_accum_common(fcinfo, false)
 }
 
-fn fc_numeric_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     numeric_accum_common(fcinfo, true)
 }
 
-fn fc_numeric_avg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_avg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match take_numeric_state(fcinfo) {
-        None => ret_null(fcinfo),
+        None => Ok(ret_null(fcinfo)),
         Some(carrier) => {
-            let out = run_final(|m| aggregate::numeric_avg(m, &carrier.state));
+            let out = run_final(|m| aggregate::numeric_avg(m, &carrier.state))?;
             // C `PG_GETARG_POINTER(0)` does not consume the state; restore it for
             // any aggregate sharing this transition state (e.g. sum + avg).
             keep_internal(fcinfo, carrier);
-            match out {
+            Ok(match out {
                 Some(image) => ret_numeric(fcinfo, image),
                 None => ret_null(fcinfo),
-            }
+            })
         }
     }
 }
 
-fn fc_numeric_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_sum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match take_numeric_state(fcinfo) {
-        None => ret_null(fcinfo),
+        None => Ok(ret_null(fcinfo)),
         Some(carrier) => {
-            let out = run_final(|m| aggregate::numeric_sum(m, &carrier.state));
+            let out = run_final(|m| aggregate::numeric_sum(m, &carrier.state))?;
             keep_internal(fcinfo, carrier);
-            match out {
+            Ok(match out {
                 Some(image) => ret_numeric(fcinfo, image),
                 None => ret_null(fcinfo),
-            }
+            })
         }
     }
 }
@@ -258,32 +248,32 @@ fn numeric_stddev_final(
     fcinfo: &mut FunctionCallInfoBaseData,
     variance: bool,
     sample: bool,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     match take_numeric_state(fcinfo) {
-        None => ret_null(fcinfo),
+        None => Ok(ret_null(fcinfo)),
         Some(carrier) => {
             let out = run_final(|m| {
                 aggregate::numeric_stddev_internal(m, &carrier.state, variance, sample)
-            });
+            })?;
             keep_internal(fcinfo, carrier);
-            match out {
+            Ok(match out {
                 Some(image) => ret_numeric(fcinfo, image),
                 None => ret_null(fcinfo),
-            }
+            })
         }
     }
 }
 
-fn fc_numeric_var_pop(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_var_pop(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     numeric_stddev_final(fcinfo, true, false)
 }
-fn fc_numeric_var_samp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_var_samp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     numeric_stddev_final(fcinfo, true, true)
 }
-fn fc_numeric_stddev_pop(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_stddev_pop(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     numeric_stddev_final(fcinfo, false, false)
 }
-fn fc_numeric_stddev_samp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_stddev_samp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     numeric_stddev_final(fcinfo, false, true)
 }
 
@@ -293,7 +283,10 @@ fn fc_numeric_stddev_samp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `int2_accum`(1834) / `int4_accum`(1835): accumulate one int input into the
 /// 128-bit state (`calc_sum_x2 = true`, for var/stddev).
-fn poly_accum_common(fcinfo: &mut FunctionCallInfoBaseData, width: u8) -> Datum {
+fn poly_accum_common(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    width: u8,
+) -> types_error::PgResult<Datum> {
     let mut state = take_poly_state(fcinfo)
         .unwrap_or_else(|| Box::new(aggregate::make_int128_agg_state(true)));
     if !arg_isnull(fcinfo, 1) {
@@ -304,13 +297,13 @@ fn poly_accum_common(fcinfo: &mut FunctionCallInfoBaseData, width: u8) -> Datum 
         };
         aggregate::do_int128_accum(&mut state, newval);
     }
-    ret_internal(fcinfo, state)
+    Ok(ret_internal(fcinfo, state))
 }
 
-fn fc_int2_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int2_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     poly_accum_common(fcinfo, 2)
 }
-fn fc_int4_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int4_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     poly_accum_common(fcinfo, 4)
 }
 
@@ -318,83 +311,97 @@ fn fc_int4_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// overflow int128, so int8 uses the wider `NumericAggState` (not the poly
 /// int128 path) — C: `state = makeNumericAggState(fcinfo, true)`;
 /// `do_numeric_accum(state, int64_to_numeric(PG_GETARG_INT64(1)))`.
-fn fc_int8_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut carrier = take_numeric_state(fcinfo).unwrap_or_else(|| NumericAggInternal::new(true));
     if !arg_isnull(fcinfo, 1) {
         let v = fcinfo.arg(1).expect("int8_accum: missing arg 1").value.as_i64();
         let ctx_mcx = carrier.ctx.mcx();
-        let num = ok(crate::convert::int64_to_numeric(ctx_mcx, v));
-        ok(aggregate::do_numeric_accum(ctx_mcx, &mut carrier.state, &num));
+        let num = crate::convert::int64_to_numeric(ctx_mcx, v)?;
+        aggregate::do_numeric_accum(ctx_mcx, &mut carrier.state, &num)?;
     }
-    ret_internal(fcinfo, carrier)
+    Ok(ret_internal(fcinfo, carrier))
 }
 
 /// `int8_accum_inv`(3568): inverse transition for moving-window SUM/AVG(int8).
 /// C: errors on NULL state; `do_numeric_discard(state, int64_to_numeric(...))`
 /// which never fails (all int inputs have dscale 0).
-fn fc_int8_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let mut carrier = take_numeric_state(fcinfo)
-        .unwrap_or_else(|| raise(types_error::PgError::error("int8_accum_inv called with NULL state")));
+fn fc_int8_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let mut carrier = match take_numeric_state(fcinfo) {
+        Some(c) => c,
+        None => {
+            return Err(types_error::PgError::error(
+                "int8_accum_inv called with NULL state",
+            ))
+        }
+    };
     if !arg_isnull(fcinfo, 1) {
         let v = fcinfo.arg(1).expect("int8_accum_inv: missing arg 1").value.as_i64();
         let ctx_mcx = carrier.ctx.mcx();
-        let num = ok(crate::convert::int64_to_numeric(ctx_mcx, v));
-        if !ok(aggregate::do_numeric_discard(ctx_mcx, &mut carrier.state, &num)) {
-            raise(types_error::PgError::error("do_numeric_discard failed unexpectedly"));
+        let num = crate::convert::int64_to_numeric(ctx_mcx, v)?;
+        if !aggregate::do_numeric_discard(ctx_mcx, &mut carrier.state, &num)? {
+            return Err(types_error::PgError::error(
+                "do_numeric_discard failed unexpectedly",
+            ));
         }
     }
-    ret_internal(fcinfo, carrier)
+    Ok(ret_internal(fcinfo, carrier))
 }
 
 /// `int8_avg_accum`(2746): AVG(int8) transition (no sumX2). The int128 sumX can
 /// hold the running sum of int8 inputs, so it uses the poly path with
 /// `calc_sum_x2 = false` — C: `state = makePolyNumAggState(fcinfo, false)`;
 /// `do_int128_accum(state, (int128) PG_GETARG_INT64(1))`.
-fn fc_int8_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut state = take_poly_state(fcinfo)
         .unwrap_or_else(|| Box::new(aggregate::make_int128_agg_state(false)));
     if !arg_isnull(fcinfo, 1) {
         let v = fcinfo.arg(1).expect("int8_avg_accum: missing arg 1").value.as_i64();
         aggregate::do_int128_accum(&mut state, i128::from(v));
     }
-    ret_internal(fcinfo, state)
+    Ok(ret_internal(fcinfo, state))
 }
 
 /// `int8_avg_accum_inv`(3387): inverse transition for moving-window AVG(int8).
-fn fc_int8_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let mut state = take_poly_state(fcinfo)
-        .unwrap_or_else(|| raise(types_error::PgError::error("int8_avg_accum_inv called with NULL state")));
+fn fc_int8_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let mut state = match take_poly_state(fcinfo) {
+        Some(s) => s,
+        None => {
+            return Err(types_error::PgError::error(
+                "int8_avg_accum_inv called with NULL state",
+            ))
+        }
+    };
     if !arg_isnull(fcinfo, 1) {
         let v = fcinfo.arg(1).expect("int8_avg_accum_inv: missing arg 1").value.as_i64();
         aggregate::do_int128_discard(&mut state, i128::from(v));
     }
-    ret_internal(fcinfo, state)
+    Ok(ret_internal(fcinfo, state))
 }
 
-fn fc_numeric_poly_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_poly_sum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match take_poly_state(fcinfo) {
-        None => ret_null(fcinfo),
+        None => Ok(ret_null(fcinfo)),
         Some(state) => {
-            let out = run_final(|m| aggregate::numeric_poly_sum(m, &state));
+            let out = run_final(|m| aggregate::numeric_poly_sum(m, &state))?;
             keep_internal(fcinfo, state);
-            match out {
+            Ok(match out {
                 Some(image) => ret_numeric(fcinfo, image),
                 None => ret_null(fcinfo),
-            }
+            })
         }
     }
 }
 
-fn fc_numeric_poly_avg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_poly_avg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match take_poly_state(fcinfo) {
-        None => ret_null(fcinfo),
+        None => Ok(ret_null(fcinfo)),
         Some(state) => {
-            let out = run_final(|m| aggregate::numeric_poly_avg(m, &state));
+            let out = run_final(|m| aggregate::numeric_poly_avg(m, &state))?;
             keep_internal(fcinfo, state);
-            match out {
+            Ok(match out {
                 Some(image) => ret_numeric(fcinfo, image),
                 None => ret_null(fcinfo),
-            }
+            })
         }
     }
 }
@@ -403,32 +410,32 @@ fn poly_stddev_final(
     fcinfo: &mut FunctionCallInfoBaseData,
     variance: bool,
     sample: bool,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     match take_poly_state(fcinfo) {
-        None => ret_null(fcinfo),
+        None => Ok(ret_null(fcinfo)),
         Some(state) => {
             let out = run_final(|m| {
                 aggregate::numeric_poly_stddev_internal(m, &state, variance, sample)
-            });
+            })?;
             keep_internal(fcinfo, state);
-            match out {
+            Ok(match out {
                 Some(image) => ret_numeric(fcinfo, image),
                 None => ret_null(fcinfo),
-            }
+            })
         }
     }
 }
 
-fn fc_numeric_poly_var_pop(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_poly_var_pop(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     poly_stddev_final(fcinfo, true, false)
 }
-fn fc_numeric_poly_var_samp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_poly_var_samp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     poly_stddev_final(fcinfo, true, true)
 }
-fn fc_numeric_poly_stddev_pop(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_poly_stddev_pop(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     poly_stddev_final(fcinfo, false, false)
 }
-fn fc_numeric_poly_stddev_samp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_poly_stddev_samp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     poly_stddev_final(fcinfo, false, true)
 }
 
@@ -440,7 +447,7 @@ fn fc_numeric_poly_stddev_samp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 pub fn register_numeric_agg_builtins() {
     use crate::fmgr_builtins::builtin;
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // NumericAggState transitions.
         builtin(2858, "numeric_avg_accum", 2, false, false, fc_numeric_avg_accum),
         builtin(1833, "numeric_accum", 2, false, false, fc_numeric_accum),
