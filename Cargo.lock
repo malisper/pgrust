@@ -13706,6 +13706,7 @@ dependencies = [
  "backend-nodes-core",
  "backend-optimizer-util-vars",
  "backend-parser-analyze-seams",
+ "backend-parser-clause-seams",
  "backend-parser-coerce-seams",
  "backend-parser-func",
  "backend-parser-parse-agg-seams",

@@ -103,6 +103,7 @@ const PROVOLATILE_IMMUTABLE: u8 = b'i';
 /// the jsonapi parser).
 pub fn init_seams() {
     fmgr_builtins::register_jsonb_builtins();
+    agg_fmgr::register_jsonb_agg_builtins();
     backend_optimizer_util_clauses_seams::to_jsonb_is_immutable::set(to_jsonb_is_immutable);
 
     // `OidFunctionCall1(outfuncoid, val)` (JSONTYPE_CAST arm) — `fmgr.c`
@@ -141,6 +142,7 @@ fn seam_jsonb_datum_bytes<'mcx>(
     backend_access_common_detoast_seams::detoast_attr::call(mcx, val.as_ref_bytes())
 }
 
+pub mod agg_fmgr;
 pub mod fmgr_builtins;
 
 // ===========================================================================

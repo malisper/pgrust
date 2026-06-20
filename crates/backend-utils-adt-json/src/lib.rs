@@ -38,6 +38,7 @@
 
 extern crate alloc;
 
+pub mod agg_fmgr;
 pub mod fmgr_builtins;
 
 use alloc::string::String;
@@ -1645,6 +1646,7 @@ fn escape_json_with_len_into_pgstring(buf: &mut PgString<'_>, str: &[u8]) -> PgR
 /// `set()` calls; called once from `seams-init::init_all()`.
 pub fn init_seams() {
     fmgr_builtins::register_json_builtins();
+    agg_fmgr::register_json_agg_builtins();
     backend_utils_adt_json_seams::escape_json::set(escape_json_into_pgstring);
     backend_utils_adt_json_seams::escape_json_with_len::set(escape_json_with_len_into_pgstring);
     backend_utils_adt_json_seams::json_encode_datetime::set(JsonEncodeDateTime);

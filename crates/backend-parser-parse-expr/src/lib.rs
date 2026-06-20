@@ -106,12 +106,12 @@ use backend_optimizer_util_vars::var::contain_vars_of_level;
 use types_nodes::nodes::{self, ntag, Node};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::{
-    ArrayExpr, BoolTestType, BooleanTest, CaseExpr, CaseTestExpr, CaseWhen, CoalesceExpr,
+    Aggref, ArrayExpr, BoolTestType, BooleanTest, CaseExpr, CaseTestExpr, CaseWhen, CoalesceExpr,
     CoercionForm, CollateExpr, CurrentOfExpr, Expr, JsonConstructorType, JsonEncoding, JsonFormat,
     JsonFormatType, JsonReturning, JsonValueExpr as CookedJsonValueExpr, JsonValueType,
     MergeSupportFunc, MinMaxExpr, MinMaxOp,
     NamedArgExpr, NullTest, NullTestType, OpExpr, RowCompareExpr, RowExpr, SQLValueFunction, SQLValueFunctionOp,
-    SubscriptingRef, AND_EXPR, NOT_EXPR, OR_EXPR,
+    SubscriptingRef, WindowFunc, AND_EXPR, NOT_EXPR, OR_EXPR,
     XmlExpr as CookedXmlExpr, XmlExprOp,
 };
 use types_nodes::rawnodes::{
@@ -4923,35 +4923,284 @@ fn transformJsonParseExpr<'mcx>(
     )
 }
 
-/// `transformJsonObjectAgg` / `transformJsonArrayAgg` (parse_expr.c:3929/3993).
-/// The aggregate path resolves the underlying `json[b]_object_agg*` /
-/// `json[b]_agg*` aggregate by hard-coded function OID
-/// (`F_JSONB_OBJECT_AGG_*` …) which is not modeled in this port, and routes
-/// through `transformAggregateCall`. Report the gap precisely.
-fn transformJsonObjectAgg<'mcx>(
-    _pstate: &mut ParseState<'mcx>,
-    _agg: types_nodes::rawexprnodes::JsonObjectAgg<'mcx>,
+// fmgroids of the underlying SQL/JSON aggregate functions (fmgroids.h).
+const F_JSON_AGG: Oid = 3175;
+const F_JSON_OBJECT_AGG: Oid = 3197;
+const F_JSONB_AGG: Oid = 3267;
+const F_JSONB_OBJECT_AGG: Oid = 3270;
+const F_JSON_AGG_STRICT: Oid = 6276;
+const F_JSON_OBJECT_AGG_STRICT: Oid = 6280;
+const F_JSON_OBJECT_AGG_UNIQUE: Oid = 6281;
+const F_JSON_OBJECT_AGG_UNIQUE_STRICT: Oid = 6282;
+const F_JSONB_AGG_STRICT: Oid = 6284;
+const F_JSONB_OBJECT_AGG_STRICT: Oid = 6288;
+const F_JSONB_OBJECT_AGG_UNIQUE: Oid = 6289;
+const F_JSONB_OBJECT_AGG_UNIQUE_STRICT: Oid = 6290;
+
+/// `transformJsonAggConstructor(pstate, agg_ctor, returning, args, aggfnoid,
+/// aggtype, ctor_type, unique, absent_on_null)` (parse_expr.c:3849). Builds an
+/// `Aggref` (or `WindowFunc` for `OVER`) over the resolved underlying
+/// `json[b]_*agg*` aggregate and wraps it in a `JsonConstructorExpr`.
+#[allow(clippy::too_many_arguments)]
+fn transformJsonAggConstructor<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    agg_ctor: &types_nodes::rawexprnodes::JsonAggConstructor<'mcx>,
+    returning: JsonReturning,
+    args: Vec<Expr>,
+    aggfnoid: Oid,
+    aggtype: Oid,
+    ctor_type: JsonConstructorType,
+    unique: bool,
+    absent_on_null: bool,
 ) -> PgResult<Expr> {
-    Err(ereport(ERROR)
-        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-        .errmsg("JSON_OBJECTAGG() is not yet supported")
-        .errdetail(
-            "The aggregate variant selection needs the hard-coded json[b]_object_agg* function OIDs (fmgroids) which are not yet modeled.",
-        )
-        .into_error())
+    let mcx = aexpr_clone_ctx(pstate);
+
+    // aggfilter = agg_ctor->agg_filter ? transformWhereClause(...) : NULL
+    let aggfilter = match agg_ctor.agg_filter.as_ref() {
+        Some(af) => {
+            let clause = af.clone_in(mcx)?;
+            backend_parser_clause_seams::transform_where_clause::call(
+                mcx,
+                pstate,
+                Some(clause),
+                ParseExprKind::EXPR_KIND_FILTER,
+                "FILTER",
+            )?
+        }
+        None => None,
+    };
+
+    let node: Expr = if let Some(over) = agg_ctor.over.as_ref() {
+        // window function
+        let wfunc = WindowFunc {
+            winfnoid: aggfnoid,
+            wintype: aggtype,
+            // wincollid and inputcollid will be set by parse_collate.c
+            wincollid: InvalidOid,
+            inputcollid: InvalidOid,
+            args: args.clone(),
+            aggfilter: aggfilter.map(Box::new),
+            runCondition: Vec::new(),
+            // winref will be set by transformWindowFuncCall
+            winref: 0,
+            winstar: false,
+            winagg: true,
+            location: agg_ctor.location,
+        };
+
+        // ordered aggs not allowed in windows yet
+        if !agg_ctor.agg_order.is_empty() {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("aggregate ORDER BY is not implemented for window functions")
+                .errposition(parser_errposition(pstate, agg_ctor.location))
+                .into_error());
+        }
+
+        let windef = over.clone_in(mcx)?;
+        let finished =
+            backend_parser_parse_agg_seams::transform_window_func_call::call(pstate, wfunc, windef)?;
+        Expr::WindowFunc(finished)
+    } else {
+        let aggref = Aggref {
+            aggfnoid,
+            aggtype,
+            // aggcollid and inputcollid will be set by parse_collate.c
+            aggcollid: InvalidOid,
+            inputcollid: InvalidOid,
+            // aggtranstype will be set by planner
+            aggtranstype: InvalidOid,
+            // aggargtypes will be set by transformAggregateCall
+            aggargtypes: Vec::new(),
+            // aggdirectargs and args will be set by transformAggregateCall
+            aggdirectargs: Vec::new(),
+            args: Vec::new(),
+            // aggorder and aggdistinct will be set by transformAggregateCall
+            aggorder: Vec::new(),
+            aggdistinct: Vec::new(),
+            aggfilter: aggfilter.map(Box::new),
+            aggstar: false,
+            aggvariadic: false,
+            aggkind: types_parsenodes::AGGKIND_NORMAL,
+            aggpresorted: false,
+            // agglevelsup will be set by transformAggregateCall
+            agglevelsup: 0,
+            aggsplit: types_nodes::nodeagg::AGGSPLIT_SIMPLE, // planner might change this
+            aggno: -1, // planner will set aggno and aggtransno
+            aggtransno: -1,
+            location: agg_ctor.location,
+        };
+
+        // transformAggregateCall(pstate, aggref, args, agg_ctor->agg_order, false)
+        let mut aggorder: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+        for n in agg_ctor.agg_order.iter() {
+            aggorder.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+        }
+        let finished = backend_parser_parse_agg_seams::transform_aggregate_call::call(
+            pstate, aggref, args, aggorder, false,
+        )?;
+        Expr::Aggref(finished)
+    };
+
+    build_json_constructor_expr(
+        pstate,
+        ctor_type,
+        Vec::new(),
+        Some(node),
+        returning,
+        unique,
+        absent_on_null,
+        agg_ctor.location,
+    )
 }
 
-fn transformJsonArrayAgg<'mcx>(
-    _pstate: &mut ParseState<'mcx>,
-    _agg: types_nodes::rawexprnodes::JsonArrayAgg<'mcx>,
+/// `transformJsonObjectAgg(pstate, agg)` (parse_expr.c:3929). Builds an
+/// `Aggref` calling the underlying `json[b]_object_agg*` aggregate, picking the
+/// variant by `RETURNING json/jsonb` + ABSENT ON NULL + WITH UNIQUE.
+fn transformJsonObjectAgg<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    agg: types_nodes::rawexprnodes::JsonObjectAgg<'mcx>,
 ) -> PgResult<Expr> {
-    Err(ereport(ERROR)
-        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-        .errmsg("JSON_ARRAYAGG() is not yet supported")
-        .errdetail(
-            "The aggregate variant selection needs the hard-coded json[b]_agg* function OIDs (fmgroids) which are not yet modeled.",
-        )
-        .into_error())
+    let kv = agg
+        .arg
+        .as_ref()
+        .ok_or_else(|| PgError::error("JSON_OBJECTAGG(): missing key/value"))?;
+
+    let key_node = boxed_node(
+        kv.key
+            .as_ref()
+            .map(|p| p.clone_in(aexpr_clone_ctx(pstate)))
+            .transpose()?
+            .map(|n| mcx::alloc_in(aexpr_clone_ctx(pstate), n))
+            .transpose()?,
+    );
+    let key = transformExprRecurse(pstate, key_node)?
+        .ok_or_else(|| PgError::error("JSON_OBJECTAGG(): NULL key"))?;
+
+    let val_ve = kv
+        .value
+        .as_ref()
+        .ok_or_else(|| PgError::error("JSON_OBJECTAGG(): missing value"))?;
+    let val = transform_json_value_expr(
+        pstate,
+        "JSON_OBJECTAGG()",
+        val_ve,
+        JsonFormatType::JS_FORMAT_DEFAULT,
+        InvalidOid,
+        false,
+    )?;
+
+    let args = vec![key, val];
+
+    let constructor = agg
+        .constructor
+        .as_ref()
+        .ok_or_else(|| PgError::error("JSON_OBJECTAGG(): missing constructor"))?;
+
+    let returning = transform_json_constructor_output(pstate, constructor.output.as_deref(), &args)?;
+
+    let (aggfnoid, aggtype) =
+        if returning.format.map(|f| f.format_type) == Some(JsonFormatType::JS_FORMAT_JSONB) {
+            let oid = if agg.absent_on_null {
+                if agg.unique {
+                    F_JSONB_OBJECT_AGG_UNIQUE_STRICT
+                } else {
+                    F_JSONB_OBJECT_AGG_STRICT
+                }
+            } else if agg.unique {
+                F_JSONB_OBJECT_AGG_UNIQUE
+            } else {
+                F_JSONB_OBJECT_AGG
+            };
+            (oid, JSONBOID)
+        } else {
+            let oid = if agg.absent_on_null {
+                if agg.unique {
+                    F_JSON_OBJECT_AGG_UNIQUE_STRICT
+                } else {
+                    F_JSON_OBJECT_AGG_STRICT
+                }
+            } else if agg.unique {
+                F_JSON_OBJECT_AGG_UNIQUE
+            } else {
+                F_JSON_OBJECT_AGG
+            };
+            (oid, JSONOID)
+        };
+
+    transformJsonAggConstructor(
+        pstate,
+        constructor,
+        returning,
+        args,
+        aggfnoid,
+        aggtype,
+        JsonConstructorType::JSCTOR_JSON_OBJECTAGG,
+        agg.unique,
+        agg.absent_on_null,
+    )
+}
+
+/// `transformJsonArrayAgg(pstate, agg)` (parse_expr.c:3993). Builds an `Aggref`
+/// calling the underlying `json[b]_agg*` aggregate.
+fn transformJsonArrayAgg<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    agg: types_nodes::rawexprnodes::JsonArrayAgg<'mcx>,
+) -> PgResult<Expr> {
+    let arg_ve = agg
+        .arg
+        .as_ref()
+        .ok_or_else(|| PgError::error("JSON_ARRAYAGG(): missing argument"))?;
+    let arg = transform_json_value_expr(
+        pstate,
+        "JSON_ARRAYAGG()",
+        arg_ve,
+        JsonFormatType::JS_FORMAT_DEFAULT,
+        InvalidOid,
+        false,
+    )?;
+
+    let args = vec![arg];
+
+    let constructor = agg
+        .constructor
+        .as_ref()
+        .ok_or_else(|| PgError::error("JSON_ARRAYAGG(): missing constructor"))?;
+
+    let returning = transform_json_constructor_output(pstate, constructor.output.as_deref(), &args)?;
+
+    let (aggfnoid, aggtype) =
+        if returning.format.map(|f| f.format_type) == Some(JsonFormatType::JS_FORMAT_JSONB) {
+            (
+                if agg.absent_on_null {
+                    F_JSONB_AGG_STRICT
+                } else {
+                    F_JSONB_AGG
+                },
+                JSONBOID,
+            )
+        } else {
+            (
+                if agg.absent_on_null {
+                    F_JSON_AGG_STRICT
+                } else {
+                    F_JSON_AGG
+                },
+                JSONOID,
+            )
+        };
+
+    transformJsonAggConstructor(
+        pstate,
+        constructor,
+        returning,
+        args,
+        aggfnoid,
+        aggtype,
+        JsonConstructorType::JSCTOR_JSON_ARRAYAGG,
+        false,
+        agg.absent_on_null,
+    )
 }
 
 /// `transformJsonIsPredicate(pstate, pred)` (parse_expr.c:4111).

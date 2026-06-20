@@ -263,6 +263,28 @@ fn expr_children_mut<'a>(node: &'a mut Expr) -> alloc::vec::Vec<&'a mut Expr> {
                 out.push(d);
             }
         }
+        // SQL/JSON constructor (`JSON_OBJECT`/`JSON_ARRAY`/`JSON_OBJECTAGG`/
+        // `JSON_ARRAYAGG`/…): `expression_tree_walker` descends into `args`,
+        // `func`, and `coercion`. For the AGG constructor forms the underlying
+        // `Aggref` rides `func`, so this arm is what lets `preprocess_aggref`
+        // number that nested aggregate (without it, `aggno` stays -1).
+        Expr::JsonConstructorExpr(ctor) => {
+            out.extend(ctor.args.iter_mut());
+            if let Some(f) = ctor.func.as_deref_mut() {
+                out.push(f);
+            }
+            if let Some(co) = ctor.coercion.as_deref_mut() {
+                out.push(co);
+            }
+        }
+        Expr::JsonValueExpr(jve) => {
+            if let Some(r) = jve.raw_expr.as_deref_mut() {
+                out.push(r);
+            }
+            if let Some(f) = jve.formatted_expr.as_deref_mut() {
+                out.push(f);
+            }
+        }
         _ => {}
     }
     out
