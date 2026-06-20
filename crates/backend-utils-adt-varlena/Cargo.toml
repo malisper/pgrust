@@ -38,6 +38,7 @@ backend-utils-adt-encode-seams = { path = "../backend-utils-adt-encode-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-utils-adt-pg-locale-seams = { path = "../backend-utils-adt-pg-locale-seams" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+backend-access-common-toast-compression = { path = "../backend-access-common-toast-compression" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }
 backend-parser-scansup-seams = { path = "../backend-parser-scansup-seams" }

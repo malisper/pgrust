@@ -1230,6 +1230,25 @@ fn fc_pg_column_toast_chunk_id(fcinfo: &mut FunctionCallInfoBaseData) -> types_e
     })
 }
 
+/// `pg_column_compression(any)` (varlena.c:5321) -> `text` (OID 2121). The
+/// compression method name of a compressed varlena, or SQL NULL for a
+/// non-varlena type / an uncompressed value. The `text` result payload is
+/// header-less (the boundary frames it via `ret_varlena`).
+fn fc_pg_column_compression(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let m = scratch_mcx();
+    let (typlen, value) = pg_column_arg(m.mcx(), fcinfo)?;
+    let out: Option<Vec<u8>> =
+        (crate::split_format::pg_column_compression(m.mcx(), &value, typlen))?
+            .map(|v| v.as_slice().to_vec());
+    Ok(match out {
+        Some(bytes) => ret_varlena(fcinfo, bytes),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -1472,6 +1491,7 @@ pub fn register_varlena_pg_column_builtins() {
     backend_utils_fmgr_core::register_builtins_native([
         builtin(1269, "pg_column_size", 1, fc_pg_column_size),
         builtin(6316, "pg_column_toast_chunk_id", 1, fc_pg_column_toast_chunk_id),
+        builtin(2121, "pg_column_compression", 1, fc_pg_column_compression),
     ]);
 }
 

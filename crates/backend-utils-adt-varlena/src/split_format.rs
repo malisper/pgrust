@@ -265,13 +265,21 @@ fn cstring_datum_len(_value: &Datum<'_>) -> PgResult<i32> {
 }
 
 /// C: `toast_get_compression_id(varlena)` (access/common/toast_compression.c).
-/// Owner not yet ported.
-fn toast_get_compression_id(_value: &Datum<'_>) -> PgResult<ToastCompressionId> {
-    panic!(
-        "unported owner: access/common/toast_compression.c \
-         toast_get_compression_id (pg_column_compression) — port \
-         backend-access-common-toast-compression"
-    )
+/// The owner (`backend-access-common-toast-compression`) reads the compression
+/// method id off the varlena header (external-on-disk pointer or inline
+/// compressed header); a direct cargo dep (no cycle) is used. The owner's id is
+/// the C `int` code (`TOAST_{PGLZ,LZ4,INVALID}_COMPRESSION_ID` = 0/1/2), mapped
+/// to this crate's [`ToastCompressionId`].
+fn toast_get_compression_id(value: &Datum<'_>) -> PgResult<ToastCompressionId> {
+    use backend_access_common_toast_compression as tc;
+    let cmid = tc::toast_get_compression_id(value.as_ref_bytes());
+    Ok(if cmid == tc::TOAST_PGLZ_COMPRESSION_ID {
+        ToastCompressionId::Pglz
+    } else if cmid == tc::TOAST_LZ4_COMPRESSION_ID {
+        ToastCompressionId::Lz4
+    } else {
+        ToastCompressionId::Invalid
+    })
 }
 
 /// C: `VARATT_IS_EXTERNAL_ONDISK(attr)` test + `VARATT_EXTERNAL_GET_POINTER`'s
