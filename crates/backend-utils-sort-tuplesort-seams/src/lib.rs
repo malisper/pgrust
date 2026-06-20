@@ -165,6 +165,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `tuplesort_skiptuples(state, ntuples, forward)` (tuplesort.c): advance
+    /// `ntuples` tuples in the output without returning them, used by the
+    /// ordered-set percentile finalfns to jump to the target sample row.
+    /// Returns `false` if it ran off the end of the sort. Can read tapes,
+    /// fallible.
+    pub fn tuplesort_skiptuples<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        ntuples: i64,
+        forward: bool,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `tuplesort_reset(state)` (tuplesort.c): reset the sort state to its
     /// initial empty condition, freeing any in-progress sort but keeping the
     /// allocated sort metadata so a fresh batch can be loaded (the incremental

@@ -4144,6 +4144,7 @@ pub fn init_seams() {
     sx::tuplesort_get_stats::set(seam_get_stats);
     sx::tuplesort_end::set(seam_end);
     sx::tuplesort_rescan::set(seam_rescan);
+    sx::tuplesort_skiptuples::set(seam_skiptuples);
     sx::tuplesort_reset::set(seam_reset);
     sx::tuplesort_used_bound::set(seam_used_bound);
     sx::tuplesort_puttupleslot_standalone::set(seam_puttupleslot_standalone);
@@ -4405,6 +4406,14 @@ fn seam_end<'mcx>(mut state: PgBox<'mcx, Tuplesortstate<'mcx>>) -> PgResult<()> 
 
 fn seam_rescan<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()> {
     with_sort_mut(state, tuplesort_rescan)
+}
+
+fn seam_skiptuples<'mcx>(
+    state: &mut Tuplesortstate<'mcx>,
+    ntuples: i64,
+    forward: bool,
+) -> PgResult<bool> {
+    with_sort_mut(state, |s| tuplesort_skiptuples(s, ntuples, forward))
 }
 
 fn seam_markpos<'mcx>(state: &mut Tuplesortstate<'mcx>) -> PgResult<()> {
