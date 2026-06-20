@@ -284,8 +284,15 @@ fn init_fcinfo(
     args: Vec<NullableDatum>,
 ) -> FunctionCallInfoBaseData {
     let nargs = args.len() as i16;
+    // C: a trigger / event-trigger / CALL dispatcher sets `fcinfo->context =
+    // (Node *) &LocTriggerData` on the call frame before FunctionCallInvoke, so
+    // the callee's CALLED_AS_TRIGGER(fcinfo) demux fires. The issuing dispatcher
+    // cannot reach this frame (it is built inside the seam), so it deposits the
+    // node-tag on a thread-local that we read back here. `None` is a plain call.
+    let context = types_fmgr::fmgr::current_call_context_tag()
+        .map(|tag| types_fmgr::fmgr::ContextNode { tag });
     let mut fcinfo =
-        FunctionCallInfoBaseData::new(flinfo.map(Box::new), nargs, collation, None, None);
+        FunctionCallInfoBaseData::new(flinfo.map(Box::new), nargs, collation, context, None);
     fcinfo.args = args;
     fcinfo
 }

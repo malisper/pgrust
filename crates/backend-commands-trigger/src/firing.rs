@@ -410,6 +410,13 @@ pub fn exec_call_trigger_func(trigdata: TriggerData<'static>) -> PgResult<Datum>
     // MyTriggerDepth, and invoke the function with no fmgr arguments and the
     // InvalidOid collation (a trigger function takes no SQL arguments).
     let _guard = CurrentTriggerGuard::install(trigdata);
+    // C: `fcinfo->context = (Node *) &LocTriggerData;` before FunctionCallInvoke
+    // — stamp the T_TriggerData node-tag on the call frame fmgr-core builds, so
+    // the trigger-language handler's CALLED_AS_TRIGGER(fcinfo) demux fires. The
+    // rich payload is the CURRENT_TRIGGER_DATA side-channel installed just above
+    // (read by the tg_* accessors); only the demux tag crosses through fmgr.
+    let _ctx_guard =
+        types_fmgr::fmgr::CallContextTagGuard::install(types_nodes::trigger::T_TriggerData.0 as u32);
     MY_TRIGGER_DEPTH.with(|d| *d.borrow_mut() += 1);
     let result = backend_utils_fmgr_fmgr_seams::function_call_invoke::call(
         tgfoid,

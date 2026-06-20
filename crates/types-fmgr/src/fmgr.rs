@@ -176,6 +176,58 @@ pub struct ContextNode {
     pub tag: u32,
 }
 
+thread_local! {
+    /// The `nodeTag` C would have set on `fcinfo->context` for the fmgr call
+    /// currently being *issued* on this backend thread, or `None`.
+    ///
+    /// In C, a trigger / event-trigger / procedure-CALL dispatcher sets
+    /// `fcinfo->context = (Node *) &LocTriggerData` (etc.) on the call frame it
+    /// builds, so the callee's `CALLED_AS_TRIGGER(fcinfo)` macro (a `nodeTag`
+    /// test on `fcinfo->context`) fires. The idiomatic `function_call_invoke`
+    /// seam re-resolves the function by OID and builds the call frame *inside*
+    /// fmgr-core, so the issuing dispatcher cannot reach into the callee frame to
+    /// stamp `context`. It instead deposits the tag here (RAII-scoped to the
+    /// call), and [`init_fcinfo`](crate)-style frame construction reads it back
+    /// onto `FunctionCallInfoBaseData::context`. The rich payload (the
+    /// `TriggerData` relation / NEW-OLD tuples) rides the dispatcher's own
+    /// per-call side-channel, which the callee reads through the trigger
+    /// accessors; only the tag — the demux discriminant — needs to cross here.
+    static CURRENT_CALL_CONTEXT_TAG: core::cell::Cell<Option<u32>> =
+        const { core::cell::Cell::new(None) };
+}
+
+/// RAII guard depositing `tag` as the context node-tag for the fmgr call about
+/// to be issued, restoring the prior value on drop (so nested fmgr calls — a
+/// trigger function that itself issues calls — see the correct context: the
+/// inner plain call observes `None`, exactly as a freshly-zeroed C `fcinfo`).
+#[must_use]
+pub struct CallContextTagGuard {
+    prev: Option<u32>,
+}
+
+impl CallContextTagGuard {
+    /// Install `tag` as the current fmgr-call context node-tag (C:
+    /// `fcinfo->context = (Node *) node` where `nodeTag(node) == tag`).
+    pub fn install(tag: u32) -> Self {
+        let prev = CURRENT_CALL_CONTEXT_TAG.with(|c| c.replace(Some(tag)));
+        CallContextTagGuard { prev }
+    }
+}
+
+impl Drop for CallContextTagGuard {
+    fn drop(&mut self) {
+        CURRENT_CALL_CONTEXT_TAG.with(|c| c.set(self.prev));
+    }
+}
+
+/// Read (without consuming) the context node-tag deposited for the fmgr call
+/// currently being issued — the value fmgr-core stamps onto the new call
+/// frame's [`FunctionCallInfoBaseData::context`]. `None` is a plain call (C's
+/// freshly-zeroed `fcinfo->context == NULL`).
+pub fn current_call_context_tag() -> Option<u32> {
+    CURRENT_CALL_CONTEXT_TAG.with(|c| c.get())
+}
+
 impl FunctionCallInfoBaseData {
     pub fn new(
         flinfo: Option<Box<FmgrInfo>>,

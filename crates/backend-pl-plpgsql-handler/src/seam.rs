@@ -146,15 +146,20 @@ pub fn called_as_event_trigger(fcinfo: &FunctionCallInfoBaseData) -> bool {
     matches!(&fcinfo.context, Some(c) if c.tag == T_EVENT_TRIGGER_DATA)
 }
 
-/// `(TriggerData *) fcinfo->context` — the live trigger context. The rich
-/// `TriggerData` (relation / NEW-OLD tuples / tupdesc) is not carried through
-/// the tag-only `ContextNode`; the trigger dispatch substrate is not reachable.
+/// `(TriggerData *) fcinfo->context` — the live trigger context.
+///
+/// The rich `TriggerData` (relation / NEW-OLD tuples / tupdesc) cannot ride the
+/// tag-only fmgr `ContextNode`; instead it lives on the firing path's per-call
+/// thread-local side-channel (`commands/trigger.c`'s `LocTriggerData`), which
+/// the trigger executor reads through the `tg_*` accessor seams. Crossing the
+/// fmgr boundary, all `fcinfo->context` carries is the `T_TriggerData` demux
+/// tag — already verified by [`called_as_trigger`] before we get here — so the
+/// `TriggerData` handle returned to `plpgsql_exec_trigger` is the opaque marker
+/// that resolves to that current-trigger side-channel (the `TriggerData(0)`
+/// "the trigger in flight" handle the accessors key off).
 pub fn take_trigger_data(_fcinfo: &mut FunctionCallInfoBaseData) -> TriggerData {
-    panic!(
-        "seam not wired: TriggerData from fcinfo->context (pl_handler.c) — the trigger context \
-         (relation/tuples/tupdesc) is not carried through the tag-only fmgr ContextNode \
-         (trigger substrate)"
-    );
+    debug_assert!(called_as_trigger(_fcinfo));
+    TriggerData(0)
 }
 
 /// `(EventTriggerData *) fcinfo->context` — the live event-trigger context.
