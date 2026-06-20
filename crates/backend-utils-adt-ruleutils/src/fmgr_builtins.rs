@@ -29,8 +29,9 @@ use alloc::vec::Vec;
 use mcx::MemoryContext;
 use types_core::primitive::Oid;
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -72,7 +73,7 @@ fn arg_int32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
 /// on the by-ref lane, header-stripped (the payload bytes), and return the dummy
 /// by-value word.
 #[inline]
-fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
+fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> PgResult<Datum> {
     // string_to_text: prepend the 4-byte varlena header (header-ful image).
     let mut img = Vec::with_capacity(types_datum::varlena::VARHDRSZ + bytes.len());
     img.extend_from_slice(&types_datum::varlena::set_varsize_4b(
@@ -80,14 +81,14 @@ fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     ));
     img.extend_from_slice(&bytes);
     fcinfo.set_ref_result(RefPayload::Varlena(img));
-    Datum::from_usize(0)
+    Ok(Datum::from_usize(0))
 }
 
 /// `PG_RETURN_NULL()`: flag the result NULL and return the dummy word.
 #[inline]
-fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     fcinfo.isnull = true;
-    Datum::from_usize(0)
+    Ok(Datum::from_usize(0))
 }
 
 /// Write a `name` result (C: `PG_RETURN_NAME(Name)`): the fixed
@@ -95,14 +96,14 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// boundary passes by pointer), NUL-filled past the copied bytes. `name` is a
 /// fixed-length-by-ref type, not a varlena — no header.
 #[inline]
-fn ret_name(fcinfo: &mut FunctionCallInfoBaseData, name: &[u8]) -> Datum {
+fn ret_name(fcinfo: &mut FunctionCallInfoBaseData, name: &[u8]) -> PgResult<Datum> {
     const NAMEDATALEN: usize = types_core::fmgr::NAMEDATALEN as usize;
     let mut buf = alloc::vec![0u8; NAMEDATALEN];
     // namestrcpy truncates at NAMEDATALEN-1 and always NUL-terminates.
     let n = name.len().min(NAMEDATALEN - 1);
     buf[..n].copy_from_slice(&name[..n]);
     fcinfo.set_ref_result(RefPayload::Varlena(buf));
-    Datum::from_usize(0)
+    Ok(Datum::from_usize(0))
 }
 
 /// A scratch context for workers that allocate their result through `Mcx`. The
@@ -112,37 +113,17 @@ fn scratch_mcx() -> MemoryContext {
     MemoryContext::new("ruleutils fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `pg_get_expr(pg_node_tree, oid) -> text` (oid 1716). prettyFlags =
 /// PRETTYFLAG_INDENT.
-fn fc_pg_get_expr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_expr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let exprstr = String::from(arg_text_str(fcinfo, 0));
     let relid = arg_oid(fcinfo, 1);
     let m = scratch_mcx();
-    let res = ok(crate::pg_get_expr_worker(
-        m.mcx(),
-        &exprstr,
-        relid,
-        crate::PRETTYFLAG_INDENT,
-    ));
+    let res = crate::pg_get_expr_worker(m.mcx(), &exprstr, relid, crate::PRETTYFLAG_INDENT)?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -151,17 +132,12 @@ fn fc_pg_get_expr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `pg_get_expr_ext(pg_node_tree, oid, bool) -> text` (oid 2509). prettyFlags =
 /// GET_PRETTY_FLAGS(pretty).
-fn fc_pg_get_expr_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_expr_ext(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let exprstr = String::from(arg_text_str(fcinfo, 0));
     let relid = arg_oid(fcinfo, 1);
     let pretty = arg_bool(fcinfo, 2);
     let m = scratch_mcx();
-    let res = ok(crate::pg_get_expr_worker(
-        m.mcx(),
-        &exprstr,
-        relid,
-        crate::get_pretty_flags(pretty),
-    ));
+    let res = crate::pg_get_expr_worker(m.mcx(), &exprstr, relid, crate::get_pretty_flags(pretty))?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -169,10 +145,10 @@ fn fc_pg_get_expr_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 /// `pg_get_indexdef(oid) -> text` (oid 1643). prettyFlags = PRETTYFLAG_INDENT.
-fn fc_pg_get_indexdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_indexdef(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let indexrelid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let res = ok(crate::indexdef::pg_get_indexdef_worker(
+    let res = crate::indexdef::pg_get_indexdef_worker(
         m.mcx(),
         indexrelid,
         0,
@@ -183,7 +159,7 @@ fn fc_pg_get_indexdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         false,
         crate::PRETTYFLAG_INDENT,
         true,
-    ));
+    )?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -192,12 +168,12 @@ fn fc_pg_get_indexdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `pg_get_indexdef_ext(oid, int4, bool) -> text` (oid 2507). prettyFlags =
 /// GET_PRETTY_FLAGS(pretty).
-fn fc_pg_get_indexdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_indexdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let indexrelid = arg_oid(fcinfo, 0);
     let colno = arg_int32(fcinfo, 1);
     let pretty = arg_bool(fcinfo, 2);
     let m = scratch_mcx();
-    let res = ok(crate::indexdef::pg_get_indexdef_worker(
+    let res = crate::indexdef::pg_get_indexdef_worker(
         m.mcx(),
         indexrelid,
         colno,
@@ -208,7 +184,7 @@ fn fc_pg_get_indexdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         false,
         crate::get_pretty_flags(pretty),
         true,
-    ));
+    )?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -219,14 +195,11 @@ fn fc_pg_get_indexdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `pg_authid` row for `roleid` via `SearchSysCache1(AUTHOID, ...)` and return
 /// `rolname`; on cache miss fall back to `unknown (OID=n)`. The result is a
 /// `name` (the fixed `NAMEDATALEN` buffer image).
-fn fc_pg_get_userbyid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_userbyid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let roleid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
     // SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid)) projected to rolname.
-    let rolname = ok(backend_utils_cache_syscache_seams::authid_rolname::call(
-        m.mcx(),
-        roleid,
-    ));
+    let rolname = backend_utils_cache_syscache_seams::authid_rolname::call(m.mcx(), roleid)?;
     let name: Vec<u8> = match rolname {
         Some(s) => s.as_str().as_bytes().to_vec(),
         None => alloc::format!("unknown (OID={roleid})").into_bytes(),
@@ -236,15 +209,15 @@ fn fc_pg_get_userbyid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `pg_get_constraintdef(oid) -> text` (oid 1387). prettyFlags =
 /// PRETTYFLAG_INDENT.
-fn fc_pg_get_constraintdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_constraintdef(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let conid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let res = ok(crate::constraintdef::pg_get_constraintdef_worker(
+    let res = crate::constraintdef::pg_get_constraintdef_worker(
         m.mcx(),
         conid,
         false,
         crate::PRETTYFLAG_INDENT,
-    ));
+    )?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -253,16 +226,16 @@ fn fc_pg_get_constraintdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `pg_get_constraintdef_ext(oid, bool) -> text` (oid 2508). prettyFlags =
 /// GET_PRETTY_FLAGS(pretty).
-fn fc_pg_get_constraintdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_constraintdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let conid = arg_oid(fcinfo, 0);
     let pretty = arg_bool(fcinfo, 1);
     let m = scratch_mcx();
-    let res = ok(crate::constraintdef::pg_get_constraintdef_worker(
+    let res = crate::constraintdef::pg_get_constraintdef_worker(
         m.mcx(),
         conid,
         false,
         crate::get_pretty_flags(pretty),
-    ));
+    )?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -271,14 +244,14 @@ fn fc_pg_get_constraintdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `pg_get_viewdef(oid) -> text` (oid 1641). prettyFlags = PRETTYFLAG_INDENT,
 /// wrapColumn = WRAP_COLUMN_DEFAULT.
-fn fc_pg_get_viewdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_viewdef(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let res = ok(crate::viewdef::pg_get_viewdef_worker(
+    let res = crate::viewdef::pg_get_viewdef_worker(
         m.mcx(),
         arg_oid(fcinfo, 0),
         crate::PRETTYFLAG_INDENT,
         crate::WRAP_COLUMN_DEFAULT,
-    ));
+    )?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -287,15 +260,15 @@ fn fc_pg_get_viewdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `pg_get_viewdef_ext(oid, bool) -> text` (oid 2506). prettyFlags =
 /// GET_PRETTY_FLAGS(pretty).
-fn fc_pg_get_viewdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_viewdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let pretty = arg_bool(fcinfo, 1);
-    let res = ok(crate::viewdef::pg_get_viewdef_worker(
+    let res = crate::viewdef::pg_get_viewdef_worker(
         m.mcx(),
         arg_oid(fcinfo, 0),
         get_pretty_flags(pretty),
         crate::WRAP_COLUMN_DEFAULT,
-    ));
+    )?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -306,21 +279,21 @@ fn fc_pg_get_viewdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `viewoid = RangeVarGetRelid(makeRangeVarFromNameList(textToQualifiedNameList(
 /// viewname)), NoLock, false)`, then the worker with prettyFlags =
 /// PRETTYFLAG_INDENT.
-fn fc_pg_get_viewdef_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_viewdef_name(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let viewname = arg_text_str(fcinfo, 0);
-    let viewoid = ok(backend_catalog_namespace_seams::range_var_get_relid_from_text::call(
+    let viewoid = backend_catalog_namespace_seams::range_var_get_relid_from_text::call(
         m.mcx(),
         viewname,
         0, /* NoLock */
         false,
-    ));
-    let res = ok(crate::viewdef::pg_get_viewdef_worker(
+    )?;
+    let res = crate::viewdef::pg_get_viewdef_worker(
         m.mcx(),
         viewoid,
         crate::PRETTYFLAG_INDENT,
         crate::WRAP_COLUMN_DEFAULT,
-    ));
+    )?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -329,22 +302,22 @@ fn fc_pg_get_viewdef_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `pg_get_viewdef_name_ext(text, bool) -> text` (oid 2505). By qualified name,
 /// prettyFlags = GET_PRETTY_FLAGS(pretty).
-fn fc_pg_get_viewdef_name_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_viewdef_name_ext(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let viewname = arg_text_str(fcinfo, 0);
     let pretty = arg_bool(fcinfo, 1);
-    let viewoid = ok(backend_catalog_namespace_seams::range_var_get_relid_from_text::call(
+    let viewoid = backend_catalog_namespace_seams::range_var_get_relid_from_text::call(
         m.mcx(),
         viewname,
         0, /* NoLock */
         false,
-    ));
-    let res = ok(crate::viewdef::pg_get_viewdef_worker(
+    )?;
+    let res = crate::viewdef::pg_get_viewdef_worker(
         m.mcx(),
         viewoid,
         get_pretty_flags(pretty),
         crate::WRAP_COLUMN_DEFAULT,
-    ));
+    )?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -353,15 +326,15 @@ fn fc_pg_get_viewdef_name_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `pg_get_viewdef_wrap(oid, int4) -> text` (oid 3159). Implies pretty;
 /// prettyFlags = GET_PRETTY_FLAGS(true), wrapColumn = the wrap arg.
-fn fc_pg_get_viewdef_wrap(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_viewdef_wrap(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let wrap = arg_int32(fcinfo, 1);
-    let res = ok(crate::viewdef::pg_get_viewdef_worker(
+    let res = crate::viewdef::pg_get_viewdef_worker(
         m.mcx(),
         arg_oid(fcinfo, 0),
         get_pretty_flags(true),
         wrap,
-    ));
+    )?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -369,13 +342,13 @@ fn fc_pg_get_viewdef_wrap(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 /// `pg_get_ruledef(oid) -> text` (oid 1573). prettyFlags = PRETTYFLAG_INDENT.
-fn fc_pg_get_ruledef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_ruledef(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let res = ok(crate::viewdef::pg_get_ruledef_worker(
+    let res = crate::viewdef::pg_get_ruledef_worker(
         m.mcx(),
         arg_oid(fcinfo, 0),
         crate::PRETTYFLAG_INDENT,
-    ));
+    )?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -384,14 +357,14 @@ fn fc_pg_get_ruledef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `pg_get_ruledef_ext(oid, bool) -> text` (oid 2504). prettyFlags =
 /// GET_PRETTY_FLAGS(pretty).
-fn fc_pg_get_ruledef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_ruledef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let pretty = arg_bool(fcinfo, 1);
-    let res = ok(crate::viewdef::pg_get_ruledef_worker(
+    let res = crate::viewdef::pg_get_ruledef_worker(
         m.mcx(),
         arg_oid(fcinfo, 0),
         get_pretty_flags(pretty),
-    ));
+    )?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -399,10 +372,10 @@ fn fc_pg_get_ruledef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 /// `pg_get_triggerdef(oid) -> text` (oid 1662). pretty = false.
-fn fc_pg_get_triggerdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_triggerdef(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let trigid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let res = ok(crate::triggerdef::pg_get_triggerdef_worker(m.mcx(), trigid, false));
+    let res = crate::triggerdef::pg_get_triggerdef_worker(m.mcx(), trigid, false)?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -410,11 +383,11 @@ fn fc_pg_get_triggerdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 /// `pg_get_triggerdef_ext(oid, bool) -> text` (oid 2730). pretty threaded.
-fn fc_pg_get_triggerdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_triggerdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let trigid = arg_oid(fcinfo, 0);
     let pretty = arg_bool(fcinfo, 1);
     let m = scratch_mcx();
-    let res = ok(crate::triggerdef::pg_get_triggerdef_worker(m.mcx(), trigid, pretty));
+    let res = crate::triggerdef::pg_get_triggerdef_worker(m.mcx(), trigid, pretty)?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -422,10 +395,10 @@ fn fc_pg_get_triggerdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 /// `pg_get_functiondef(oid) -> text` (oid 2098).
-fn fc_pg_get_functiondef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_functiondef(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let funcid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let res = ok(crate::functiondef::pg_get_functiondef(m.mcx(), funcid));
+    let res = crate::functiondef::pg_get_functiondef(m.mcx(), funcid)?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -434,16 +407,16 @@ fn fc_pg_get_functiondef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `pg_get_partkeydef(oid) -> text` (oid 3352). prettyFlags = PRETTYFLAG_INDENT,
 /// attrsOnly = false, missing_ok = true.
-fn fc_pg_get_partkeydef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_partkeydef(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let relid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let res = ok(crate::partkeydef::pg_get_partkeydef_worker(
+    let res = crate::partkeydef::pg_get_partkeydef_worker(
         m.mcx(),
         relid,
         crate::PRETTYFLAG_INDENT,
         false,
         true,
-    ));
+    )?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -463,15 +436,10 @@ fn get_pretty_flags(pretty: bool) -> i32 {
 
 /// `pg_get_statisticsobjdef(oid) -> text` (oid 3415). Full CREATE STATISTICS
 /// definition: `pg_get_statisticsobj_worker(statextid, false, true)`.
-fn fc_pg_get_statisticsobjdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_statisticsobjdef(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let statextid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let res = ok(crate::statisticsdef::pg_get_statisticsobj_worker(
-        m.mcx(),
-        statextid,
-        false,
-        true,
-    ));
+    let res = crate::statisticsdef::pg_get_statisticsobj_worker(m.mcx(), statextid, false, true)?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -480,15 +448,10 @@ fn fc_pg_get_statisticsobjdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `pg_get_statisticsobjdef_columns(oid) -> text` (oid 6174). Columns and
 /// expressions only: `pg_get_statisticsobj_worker(statextid, true, true)`.
-fn fc_pg_get_statisticsobjdef_columns(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_statisticsobjdef_columns(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let statextid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let res = ok(crate::statisticsdef::pg_get_statisticsobj_worker(
-        m.mcx(),
-        statextid,
-        true,
-        true,
-    ));
+    let res = crate::statisticsdef::pg_get_statisticsobj_worker(m.mcx(), statextid, true, true)?;
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
@@ -499,19 +462,23 @@ fn fc_pg_get_statisticsobjdef_columns(fcinfo: &mut FunctionCallInfoBaseData) -> 
 /// `text[]` of the per-expression deparses (ruleutils.c 1838-1900). The
 /// result is a `text` *array* (`construct_array`), whose by-ref array image is
 /// not expressible at this fmgr adapter yet, and the body bottoms out on the
-/// same unported `Form_pg_statistic_ext` deform as the worker. SEAM-AND-PANIC:
+/// same unported `Form_pg_statistic_ext` deform as the worker. SEAM-AND-ERR:
 /// resolvable (so the empty-input psql describe target list type-checks), but
-/// not executable until the catalog deform + text-array result writer land.
-fn fc_pg_get_statisticsobjdef_expressions(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+/// not executable until the catalog deform + text-array result writer land —
+/// surfaced as a clean `feature not supported` error (threaded by the
+/// dispatcher) rather than a panic.
+fn fc_pg_get_statisticsobjdef_expressions(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
     let statextid = arg_oid(fcinfo, 0);
-    panic!(
-        "ruleutils pg_get_statisticsobjdef_expressions(statext {}): the \
+    Err(types_error::PgError::error(alloc::format!(
+        "ruleutils pg_get_statisticsobjdef_expressions(statext {statextid}): the \
          Form_pg_statistic_ext stxexprs deform + text[] (`_text`) array result \
          writer are unported for this entry — the deparse_expression engine is \
          ported, but the catalog read and the array result boundary are not yet \
-         installed",
-        statextid
-    );
+         installed"
+    ))
+    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED))
 }
 
 // ---------------------------------------------------------------------------
@@ -524,16 +491,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: String::from(name),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: String::from(name),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every expressible SQL-callable `ruleutils.c` deparser (C: their
@@ -541,7 +511,7 @@ fn builtin(
 /// OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat` (all of
 /// these are `proisstrict => 't'` default and none `proretset`).
 pub fn register_ruleutils_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // Slice 1: fully working (deparse via the ported get_rule_expr).
         builtin(1716, "pg_get_expr", 2, true, false, fc_pg_get_expr),
         builtin(2509, "pg_get_expr_ext", 3, true, false, fc_pg_get_expr_ext),
@@ -652,11 +622,13 @@ mod tests {
         img.extend_from_slice(payload);
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(img)), None];
 
+        let native =
+            backend_utils_fmgr_core::native_builtin(1716).expect("pg_get_expr registered");
         let entry =
             backend_utils_fmgr_core::fmgr_isbuiltin(1716).expect("pg_get_expr registered");
         assert_eq!(entry.nargs, 2);
         assert!(entry.strict);
-        (entry.func.unwrap())(&mut fcinfo);
+        native(&mut fcinfo).expect("pg_get_expr returned Err");
 
         let out = fcinfo.take_ref_result().expect("pg_get_expr produced a result");
         match out {
