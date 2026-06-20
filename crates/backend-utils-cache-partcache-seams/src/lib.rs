@@ -10,7 +10,9 @@
 //! holds the key.
 
 use mcx::{Mcx, PgBox};
+use types_core::Oid;
 use types_error::PgResult;
+use types_nodes::nodes::Node;
 use types_nodes::partition::PartitionKeyData;
 use types_rel::Relation;
 
@@ -25,4 +27,19 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         rel: Relation<'mcx>,
     ) -> PgResult<Option<PgBox<'mcx, PartitionKeyData<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// `get_partition_qual_relid(relid)` (partcache.c): an expression tree
+    /// describing the relation's partition constraint, allocated in `mcx`.
+    /// Returns the C `NULL` (`Ok(None)`) when the relation is not found, is not
+    /// a partition, or has no partition constraint (a default partition that is
+    /// the only partition). The multi-element implicit-AND list is folded into a
+    /// `BoolExpr(AND_EXPR, ...)`; a single element is returned bare. Reads the
+    /// catalog and opens the relation under `AccessShareLock` (kept for the
+    /// caller to deparse safely), so it can `ereport(ERROR)`.
+    pub fn get_partition_qual_relid<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+    ) -> PgResult<Option<PgBox<'mcx, Node<'mcx>>>>
 );

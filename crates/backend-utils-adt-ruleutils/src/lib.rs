@@ -2900,6 +2900,7 @@ pub use fmgr_builtins::register_ruleutils_builtins;
 pub mod constraintdef;
 pub mod functiondef;
 pub mod indexdef;
+pub mod partconstrdef;
 pub mod partkeydef;
 pub mod statisticsdef;
 pub mod triggerdef;

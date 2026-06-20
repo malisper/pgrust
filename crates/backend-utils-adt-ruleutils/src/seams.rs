@@ -170,6 +170,16 @@ pub fn init_seams() {
         }
     });
 
+    // partition_constraint_def(pk_relid): ri_triggers.c builds the
+    // partition-aware FK enforcement query with
+    // `pg_get_partconstrdef_string(RelationGetRelid(pk_rel), "pk")`. The string
+    // worker returns the plain (no pretty) constraint text with the "pk" alias;
+    // an empty string means "no partition constraint" (a default-only partition
+    // / non-partition), which ri_triggers treats as no extra WHERE clause.
+    backend_utils_adt_ruleutils_seams::partition_constraint_def::set(|mcx, pk_relid| {
+        crate::partconstrdef::pg_get_partconstrdef_string(mcx, pk_relid, "pk")
+    });
+
     // Register the SQL-callable deparser builtins (C: their `fmgr_builtins[]`
     // rows) so by-OID fmgr dispatch resolves them.
     crate::register_ruleutils_builtins();

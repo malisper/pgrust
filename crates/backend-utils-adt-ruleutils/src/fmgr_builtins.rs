@@ -423,6 +423,18 @@ fn fc_pg_get_partkeydef(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum
     }
 }
 
+/// `pg_get_partition_constraintdef(oid) -> text` (oid 3408). The partition
+/// constraint expression as text, NULL when there is no partition constraint.
+fn fc_pg_get_partition_constraintdef(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let relid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let res = crate::partconstrdef::pg_get_partition_constraintdef(m.mcx(), relid)?;
+    match res {
+        Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
+        None => ret_null(fcinfo),
+    }
+}
+
 /// `GET_PRETTY_FLAGS(pretty)` (ruleutils.c 92): pretty ?
 /// (PRETTYFLAG_PAREN|PRETTYFLAG_INDENT|PRETTYFLAG_SCHEMA) : PRETTYFLAG_INDENT.
 #[inline]
@@ -578,6 +590,7 @@ pub fn register_ruleutils_builtins() {
         builtin(2232, "pg_get_function_identity_arguments", 1, true, false, fc_pg_get_function_identity_arguments),
         builtin(2165, "pg_get_function_result", 1, true, false, fc_pg_get_function_result),
         builtin(3352, "pg_get_partkeydef", 1, true, false, fc_pg_get_partkeydef),
+        builtin(3408, "pg_get_partition_constraintdef", 1, true, false, fc_pg_get_partition_constraintdef),
         builtin(3415, "pg_get_statisticsobjdef", 1, true, false, fc_pg_get_statisticsobjdef),
         builtin(6174, "pg_get_statisticsobjdef_columns", 1, true, false, fc_pg_get_statisticsobjdef_columns),
         builtin(6173, "pg_get_statisticsobjdef_expressions", 1, true, false, fc_pg_get_statisticsobjdef_expressions),

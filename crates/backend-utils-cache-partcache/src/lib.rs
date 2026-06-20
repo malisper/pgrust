@@ -534,4 +534,8 @@ pub fn init_seams() {
             )
                 -> PgResult<Option<PgBox<'mcx, NodesPartitionKeyData<'mcx>>>>,
     );
+    backend_utils_cache_partcache_seams::get_partition_qual_relid::set(
+        get_partition_qual_relid
+            as for<'mcx> fn(Mcx<'mcx>, Oid) -> PgResult<Option<PgBox<'mcx, Node<'mcx>>>>,
+    );
 }
