@@ -115,7 +115,7 @@ use types_acl::acl::{ACL_CREATE, ACLCHECK_OK};
 use types_nodes::parsenodes::{OBJECT_SCHEMA, OBJECT_TABLESPACE};
 use types_catalog::catalog::{GLOBALTABLESPACE_OID, TABLESPACE_RELATION_ID};
 use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::catalog::{NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
+use types_core::catalog::{DATABASE_RELATION_ID, NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
 use types_tuple::access::{
     ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
@@ -1503,15 +1503,108 @@ fn ReindexTable<'mcx>(
 /// `ReindexMultipleTables` (indexcmds.c) — REINDEX SCHEMA / SYSTEM / DATABASE.
 /// Deferred: requires per-table transaction control (StartTransactionCommand /
 /// CommitTransactionCommand loop) that is out of scope here.
+/// `ReindexMultipleTables(stmt, params)` (indexcmds.c) — REINDEX SCHEMA /
+/// SYSTEM / DATABASE. Ported faithfully through the argument/permission/
+/// existence validation prologue (object-OID resolution + ownership checks).
+/// The pg_class-scan + per-table separate-transaction loop
+/// (`ReindexMultipleInternal`, which drives `StartTransactionCommand` /
+/// `CommitTransactionCommand` around each `reindex_relation`) is the remaining
+/// success-path keystone; until it lands, a successful validation falls through
+/// to a clean "not yet supported" error rather than fabricating output.
 fn ReindexMultipleTables<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _stmt: &ReindexStmt<'mcx>,
-    _params: &ReindexParams,
+    mcx: Mcx<'mcx>,
+    stmt: &ReindexStmt<'mcx>,
+    params: &ReindexParams,
 ) -> PgResult<()> {
+    use backend_commands_dbcommands_seams as dbcommands_seam;
+    use backend_commands_user_seams as user_seam;
+    use types_nodes::parsenodes::OBJECT_DATABASE;
+
+    // pg_authid.h: OID of the predefined pg_maintain role.
+    const ROLE_PG_MAINTAIN: Oid = 6337;
+
+    let object_name = stmt.name.as_deref();
+    let object_kind = stmt.kind;
+
+    debug_assert!(matches!(
+        object_kind,
+        ReindexObjectType::REINDEX_OBJECT_SCHEMA
+            | ReindexObjectType::REINDEX_OBJECT_SYSTEM
+            | ReindexObjectType::REINDEX_OBJECT_DATABASE
+    ));
+    // This matches the options enforced by the grammar, where the object name
+    // is optional for DATABASE and SYSTEM.
+    debug_assert!(
+        object_name.is_some() || object_kind != ReindexObjectType::REINDEX_OBJECT_SCHEMA
+    );
+
+    if object_kind == ReindexObjectType::REINDEX_OBJECT_SYSTEM
+        && (params.options & REINDEXOPT_CONCURRENTLY) != 0
+    {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("cannot reindex system catalogs concurrently"))
+            .into_error());
+    }
+
+    // Get OID of object to reindex, being the database currently being used by
+    // session for a database or for system catalogs, or the schema defined by
+    // caller. At the same time do permission checks that need different
+    // processing depending on the object type.
+    let user_id = backend_utils_init_miscinit::GetUserId();
+    if object_kind == ReindexObjectType::REINDEX_OBJECT_SCHEMA {
+        let object_oid = namespace_seam::get_namespace_oid::call(
+            object_name.expect("REINDEX SCHEMA requires a schema name"),
+            false,
+        )?;
+
+        if !aclchk_seam::object_ownercheck::call(NAMESPACE_RELATION_ID, object_oid, user_id)?
+            && !user_seam::has_privs_of_role::call(user_id, ROLE_PG_MAINTAIN)?
+        {
+            aclchk_seam::aclcheck_error::call(
+                types_acl::acl::ACLCHECK_NOT_OWNER,
+                OBJECT_SCHEMA,
+                object_name.map(|s| s.to_string()),
+            )?;
+        }
+    } else {
+        let object_oid = backend_commands_tablespace_globals_seams::MyDatabaseId::call()?;
+
+        if let Some(name) = object_name {
+            let current = dbcommands_seam::get_database_name::call(mcx, object_oid)?;
+            let matches = current
+                .as_ref()
+                .map(|s| s.as_str() == name)
+                .unwrap_or(false);
+            if !matches {
+                return Err(ereport(ERROR)
+                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg(format!("can only reindex the currently open database"))
+                    .into_error());
+            }
+        }
+        if !aclchk_seam::object_ownercheck::call(DATABASE_RELATION_ID, object_oid, user_id)?
+            && !user_seam::has_privs_of_role::call(user_id, ROLE_PG_MAINTAIN)?
+        {
+            let dbname = dbcommands_seam::get_database_name::call(mcx, object_oid)?
+                .map(|s| s.as_str().to_string());
+            aclchk_seam::aclcheck_error::call(
+                types_acl::acl::ACLCHECK_NOT_OWNER,
+                OBJECT_DATABASE,
+                dbname,
+            )?;
+        }
+    }
+
+    // Validation passed. The pg_class scan that collects target relids and the
+    // per-relation separate-transaction processing loop
+    // (ReindexMultipleInternal -> StartTransactionCommand / reindex_relation /
+    // CommitTransactionCommand) are not yet ported; report cleanly rather than
+    // fabricate a result.
     Err(ereport(ERROR)
         .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(format!(
-            "REINDEX SCHEMA / SYSTEM / DATABASE is not yet supported"
+            "REINDEX SCHEMA / SYSTEM / DATABASE execution is not yet supported"
         ))
         .into_error())
 }
