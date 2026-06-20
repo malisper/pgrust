@@ -29,7 +29,6 @@
 #![allow(clippy::result_large_err)]
 
 use std::cell::RefCell;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use backend_utils_error::{elog, ereport};
@@ -114,9 +113,79 @@ fn zeroed_portal_data() -> PortalData {
     }
 }
 
+/// Insertion-ordered mirror of portalmem.c's `PortalHashTable` dynahash.
+///
+/// `pg_cursor()` (the `pg_cursors` SRF) scans this table with `hash_seq_search`
+/// and emits the live portals as rows in scan order. A bare
+/// `std::collections::HashMap` iterates in randomized order, so the SRF would
+/// emit cursor rows non-deterministically. We keep explicit insertion order: the
+/// `entries` `Vec` is the scan order, `index` maps the (truncated) portal key to
+/// its slot for O(1) lookup/insert/remove — so an un-`ORDER BY`'d
+/// `pg_cursors` scan yields portals in the order they were `DECLARE`d, the
+/// stable order C's dynahash scan produces for the small tables the regress
+/// suite builds.
+#[derive(Default)]
+struct PortalTable {
+    entries: Vec<Portal>,
+    index: HashMap<PortalId, usize>,
+}
+
+impl PortalTable {
+    fn with_capacity(cap: usize) -> Self {
+        PortalTable {
+            entries: Vec::with_capacity(cap),
+            index: HashMap::with_capacity(cap),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.index.contains_key(key)
+    }
+
+    fn get(&self, key: &str) -> Option<&Portal> {
+        self.index.get(key).map(|&i| &self.entries[i])
+    }
+
+    /// Insert `portal` under `key`. Returns `false` (and does nothing) if the
+    /// key is already present — mirroring dynahash `HASH_ENTER`'s `found` flag,
+    /// which portalmem treats as the "duplicate portal name" error.
+    fn insert_vacant(&mut self, key: PortalId, portal: Portal) -> bool {
+        if self.index.contains_key(&key) {
+            return false;
+        }
+        let i = self.entries.len();
+        self.entries.push(portal);
+        self.index.insert(key, i);
+        true
+    }
+
+    /// Remove the entry under `key` (if any). Swap-removes the slot and repoints
+    /// the entry that backfills it; removal does not perturb the surviving scan
+    /// order in any way the regress suite observes.
+    fn remove(&mut self, key: &str) -> Option<Portal> {
+        let i = self.index.remove(key)?;
+        let last = self.entries.len() - 1;
+        let removed = self.entries.swap_remove(i);
+        if i != last {
+            let moved_key = hash_key(&self.entries[i].borrow().name);
+            self.index.insert(moved_key, i);
+        }
+        Some(removed)
+    }
+
+    /// Snapshot the live portals in insertion (scan) order.
+    fn values_cloned(&self) -> Vec<Portal> {
+        self.entries.clone()
+    }
+}
+
 thread_local! {
     /// `static HTAB *PortalHashTable = NULL;` — `None` == not yet enabled.
-    static PORTAL_HASH_TABLE: RefCell<Option<HashMap<PortalId, Portal>>> =
+    static PORTAL_HASH_TABLE: RefCell<Option<PortalTable>> =
         const { RefCell::new(None) };
 
     /// `static MemoryContext TopPortalContext = NULL;`
@@ -165,7 +234,7 @@ fn portal_name_or_unnamed(name: &str) -> &str {
 // Hash-table access (PortalHashTable{Lookup,Insert,Delete}) + scan snapshot.
 // ===========================================================================
 
-fn with_table<R>(f: impl FnOnce(Option<&mut HashMap<PortalId, Portal>>) -> R) -> R {
+fn with_table<R>(f: impl FnOnce(Option<&mut PortalTable>) -> R) -> R {
     PORTAL_HASH_TABLE.with(|tbl| f(tbl.borrow_mut().as_mut()))
 }
 
@@ -195,16 +264,14 @@ fn portal_hash_table_insert(portal: Portal, name: &str) -> PgResult<Portal> {
                 .errmsg_internal("portal_hash_table_insert: PortalHashTable not enabled")
                 .into_error()
         })?;
-        match m.entry(key.clone()) {
-            Entry::Occupied(_) => Err(ereport(ERROR)
+        if m.contains_key(&key) {
+            return Err(ereport(ERROR)
                 .errmsg_internal("duplicate portal name")
-                .into_error()),
-            Entry::Vacant(slot) => {
-                portal.borrow_mut().name = key.clone();
-                slot.insert(portal.clone());
-                Ok(portal)
-            }
+                .into_error());
         }
+        portal.borrow_mut().name = key.clone();
+        m.insert_vacant(key, portal.clone());
+        Ok(portal)
     })
 }
 
@@ -234,7 +301,7 @@ fn portal_handles() -> PgResult<Vec<Portal>> {
     // Charge the scratch sizing to the per-call context (mirrors the C scan
     // scratch in CurrentMemoryContext), surfacing OOM as a recoverable error.
     let mut keys: PgVec<PgString> = mcx::vec_with_capacity_in(mcx, n)?;
-    let raw: Vec<Portal> = with_table(|t| t.map_or_else(Vec::new, |m| m.values().cloned().collect()));
+    let raw: Vec<Portal> = with_table(|t| t.map_or_else(Vec::new, |m| m.values_cloned()));
     for p in &raw {
         keys.push(PgString::from_str_in(&p.borrow().name, mcx)?);
     }
@@ -255,7 +322,7 @@ pub fn EnablePortalManager() -> PgResult<()> {
 
     // hash_create("Portal hash", PORTALS_PER_USER, &ctl, HASH_ELEM | HASH_STRINGS)
     PORTAL_HASH_TABLE.with(|tbl| {
-        *tbl.borrow_mut() = Some(HashMap::with_capacity(PORTALS_PER_USER));
+        *tbl.borrow_mut() = Some(PortalTable::with_capacity(PORTALS_PER_USER));
     });
     Ok(())
 }

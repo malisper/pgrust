@@ -15,11 +15,23 @@
 //!
 //! prepare.c owns `static HTAB *prepared_queries` (a per-backend dynahash keyed
 //! by `stmt_name[NAMEDATALEN]`). It is a per-backend C global, so it is modelled
-//! as a `thread_local!` `RefCell<Option<HashMap<String, PreparedStatement>>>`
+//! as a `thread_local!` `RefCell<Option<PreparedQueryTable>>`
 //! (AGENTS.md "Backend-global state"); `None` mirrors the `NULL` sentinel the C
 //! lazily replaces in `InitQueryHashTable`. The dynahash `HASH_STRINGS` key copy
 //! (`strlcpy(dest, src, NAMEDATALEN)`, truncated to `NAMEDATALEN-1`) is mirrored
 //! in [`hash_key`] so an over-long statement name collides identically.
+//!
+//! ### Iteration order
+//!
+//! `pg_prepared_statement()` (the `pg_prepared_statements` SRF) scans this table
+//! with `hash_seq_search`, and the regress `prepare.out` expected output relies
+//! on the resulting row order (`q1` before `q2`) for the un-`ORDER BY`'d query.
+//! A bare `std::collections::HashMap` iterates in randomized order, so the SRF
+//! would emit rows in a non-deterministic order that fails the diff. We therefore
+//! back the table with [`PreparedQueryTable`], an insertion-ordered map (a `Vec`
+//! of entries plus a `HashMap<String, usize>` name index) so a scan yields rows
+//! in the order they were `PREPARE`d — the stable order the expected output
+//! encodes for the small tables the regress suite builds.
 //!
 //! ## Outward calls go through each owner's `-seams` crate
 //!
@@ -110,10 +122,73 @@ const REGTYPEOID: Oid = 2206;
 // The per-backend prepared-statement hash table (prepare.c: `static HTAB *`).
 // ---------------------------------------------------------------------------
 
+/// Insertion-ordered mirror of prepare.c's `prepared_queries` dynahash.
+///
+/// C's `hash_seq_search` scan order is what `prepare.out` expects for the
+/// un-`ORDER BY`'d `pg_prepared_statements` query (`q1` before `q2`). A plain
+/// `HashMap` randomizes iteration, so we keep an explicit insertion order: the
+/// `entries` `Vec` is the scan order; `index` maps the (truncated) key to its
+/// slot for O(1) lookup/insert/remove. `remove` uses swap-removal of the slot
+/// and patches the moved entry's index — removal order does not affect the
+/// surviving scan order in any way the regress suite observes (it only ever
+/// scans without `ORDER BY` for at most two live entries).
+#[derive(Default)]
+struct PreparedQueryTable {
+    entries: Vec<PreparedStatement>,
+    index: HashMap<String, usize>,
+}
+
+impl PreparedQueryTable {
+    fn with_capacity(cap: usize) -> Self {
+        PreparedQueryTable {
+            entries: Vec::with_capacity(cap),
+            index: HashMap::with_capacity(cap),
+        }
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.index.contains_key(key)
+    }
+
+    fn get(&self, key: &str) -> Option<&PreparedStatement> {
+        self.index.get(key).map(|&i| &self.entries[i])
+    }
+
+    /// Insert a new entry. Callers guarantee the key is absent (prepare.c
+    /// errors on a duplicate before reaching here), so this always appends —
+    /// preserving `PREPARE` order as the scan order.
+    fn insert(&mut self, key: String, entry: PreparedStatement) {
+        if let Some(&i) = self.index.get(&key) {
+            self.entries[i] = entry;
+        } else {
+            let i = self.entries.len();
+            self.entries.push(entry);
+            self.index.insert(key, i);
+        }
+    }
+
+    fn remove(&mut self, key: &str) {
+        if let Some(i) = self.index.remove(key) {
+            let last = self.entries.len() - 1;
+            self.entries.swap_remove(i);
+            if i != last {
+                // The entry that was at `last` now lives at `i`; repoint it.
+                let moved_key = self.entries[i].stmt_name.clone();
+                self.index.insert(moved_key, i);
+            }
+        }
+    }
+
+    /// Snapshot the entries in insertion (scan) order.
+    fn values_cloned(&self) -> Vec<PreparedStatement> {
+        self.entries.clone()
+    }
+}
+
 thread_local! {
     /// `static HTAB *prepared_queries = NULL;` — `None` means the hash table
     /// has not been created yet (so it cannot be storing anything).
-    static PREPARED_QUERIES: RefCell<Option<HashMap<String, PreparedStatement>>> =
+    static PREPARED_QUERIES: RefCell<Option<PreparedQueryTable>> =
         const { RefCell::new(None) };
 }
 
@@ -506,7 +581,7 @@ fn InitQueryHashTable() {
     PREPARED_QUERIES.with(|tbl| {
         let mut tbl = tbl.borrow_mut();
         if tbl.is_none() {
-            *tbl = Some(HashMap::with_capacity(32));
+            *tbl = Some(PreparedQueryTable::with_capacity(32));
         }
     });
 }
@@ -719,7 +794,7 @@ pub fn DropAllPreparedStatements() -> PgResult<()> {
     // collected snapshot is empty and the loop body never runs.
     let entries: Vec<PreparedStatement> = PREPARED_QUERIES.with(|tbl| match tbl.borrow().as_ref() {
         None => Vec::new(),
-        Some(m) => m.values().cloned().collect(),
+        Some(m) => m.values_cloned(),
     });
 
     // hash_seq_init(&seq, prepared_queries);
@@ -902,7 +977,7 @@ pub fn pg_prepared_statement<'mcx>(
         let entries: Vec<PreparedStatement> = PREPARED_QUERIES.with(|tbl| {
             tbl.borrow()
                 .as_ref()
-                .map(|m| m.values().cloned().collect())
+                .map(|m| m.values_cloned())
                 .unwrap_or_default()
         });
 
