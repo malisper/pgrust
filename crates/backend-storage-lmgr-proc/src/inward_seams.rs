@@ -572,7 +572,10 @@ fn proc_wait_lock_tag(procno: ProcNumber) -> types_storage::lock::LOCKTAG {
 }
 
 fn proc_pgxactoff(procno: ProcNumber) -> i32 {
-    with_proc_by_number(procno, |p| p.pgxactoff)
+    // `pgxactoff` is renumbered cross-process by ProcArrayAdd/Remove, so it lives
+    // in the genuinely-shared PGPROC block — read the canonical shared word, not
+    // the fork-private PGPROC field.
+    crate::proc_shmem::proc_pgxactoff_shared(procno)
 }
 
 fn proc_global_status_flags(pgxactoff: i32) -> u8 {
@@ -638,7 +641,7 @@ fn remove_running_subxids_from_proc(
     let mut not_found = Vec::new();
 
     // mysubxidstat = &ProcGlobal->subxidStates[MyProc->pgxactoff];
-    let pgxactoff = with_my_proc_ref(|p| p.pgxactoff);
+    let pgxactoff = crate::proc_shmem::my_proc_pgxactoff();
 
     with_my_proc(|proc| {
         // Scan children backwards (C: for i = nxids-1; i >= 0; i--).
@@ -759,7 +762,7 @@ fn store_top_xid_in_proc(xid: TransactionId) {
         debug_assert!(!p.subxidStatus.overflowed);
         p.xid = xid;
     });
-    let pgxactoff = with_my_proc_ref(|p| p.pgxactoff);
+    let pgxactoff = crate::proc_shmem::my_proc_pgxactoff();
     crate::proc_shmem::set_proc_array_xid(pgxactoff, xid);
 }
 
@@ -770,7 +773,7 @@ fn store_top_xid_in_proc(xid: TransactionId) {
 /// exceeded. The `pg_write_barrier()` between the slot store and the count bump
 /// is implicit here (single-threaded model under `XidGenLock`).
 fn store_subxid_in_proc(xid: TransactionId) {
-    let pgxactoff = with_my_proc_ref(|p| p.pgxactoff);
+    let pgxactoff = crate::proc_shmem::my_proc_pgxactoff();
     let nxids = with_my_proc_ref(|p| p.subxidStatus.count as i32);
 
     if (nxids as usize) < PGPROC_MAX_CACHED_SUBXIDS {
@@ -834,7 +837,10 @@ fn set_proc_recovery_conflict_pending(procno: ProcNumber, value: bool) {
 }
 
 fn set_proc_pgxactoff(procno: ProcNumber, off: i32) {
-    with_proc_by_number(procno, |p| p.pgxactoff = off);
+    // Write the canonical shared word so the ProcArrayAdd/Remove renumber is
+    // visible to every process (mirrors C's allProcs[procno].pgxactoff in the
+    // shared PGPROC block).
+    crate::proc_shmem::set_proc_pgxactoff_shared(procno, off);
 }
 
 // --- ProcArray group-clear atomics + per-PGPROC group fields ----------------

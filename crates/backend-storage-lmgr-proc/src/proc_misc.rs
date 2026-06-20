@@ -46,15 +46,18 @@ pub fn set_my_proc_in_vacuum_flags(is_wraparound: bool) -> PgResult<()> {
     // LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
     lwlock_seams::lwlock_acquire_proc_array::call(LWLockMode::LW_EXCLUSIVE)?;
 
-    let (flags, pgxactoff) = proc_shmem::with_my_proc(|p| {
+    let flags = proc_shmem::with_my_proc(|p| {
         // MyProc->statusFlags |= PROC_IN_VACUUM;
         p.statusFlags |= PROC_IN_VACUUM;
         // if (params->is_wraparound) MyProc->statusFlags |= PROC_VACUUM_FOR_WRAPAROUND;
         if is_wraparound {
             p.statusFlags |= PROC_VACUUM_FOR_WRAPAROUND;
         }
-        (p.statusFlags, p.pgxactoff)
+        p.statusFlags
     });
+    // MyProc->pgxactoff — the canonical shared offset (renumbered cross-process
+    // by ProcArrayAdd/Remove), not the fork-private PGPROC field.
+    let pgxactoff = proc_shmem::my_proc_pgxactoff();
 
     // ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
     proc_shmem::set_proc_array_status_flags(pgxactoff, flags);

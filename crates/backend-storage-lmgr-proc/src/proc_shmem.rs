@@ -168,6 +168,26 @@ static SHARED_PROC_PIDS: AtomicPtr<i32> = AtomicPtr::new(core::ptr::null_mut());
 /// checks. Set alongside the array.
 static SHARED_PROC_PID_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Base of the genuinely-shared `[i32; total_procs]` `pgxactoff` array (the
+/// canonical `PGPROC.pgxactoff` words — each proc's offset into the dense
+/// `ProcGlobal->xids[]`/`subxidStates[]`/`statusFlags[]` arrays). Set by
+/// [`InitProcGlobal`], NULL until then.
+///
+/// Unlike the read-mostly PGPROC fields owned per-process in [`PROC_GLOBAL`],
+/// `pgxactoff` is rewritten cross-process: `ProcArrayAdd`/`ProcArrayRemove`
+/// (procarray.c) renumber EVERY shifted proc's `pgxactoff` when a proc is
+/// inserted/removed in the sorted `pgprocnos` array — including procs owned by
+/// other backends. C keeps `allProcs[].pgxactoff` in the shared PGPROC block, so
+/// those renumbers are visible everywhere (and `ProcArrayAdd`'s
+/// `Assert(allProcs[this_procno].pgxactoff == index)` holds). With the field
+/// fork-private, a later backend reads its inherited postmaster image (0) and
+/// the assertion fails / `GetSnapshotData` would misindex `xids[]`. So this word
+/// lives in genuine shmem, the same idiom as [`SHARED_PROC_PIDS`].
+static SHARED_PROC_PGXACTOFF: AtomicPtr<i32> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_PGXACTOFF`] (`total_procs`), for bounds checks.
+static SHARED_PROC_PGXACTOFF_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 /// Stable base of the per-process `allProcs` `PGPROC` array (the same buffer
 /// owned by `ProcGlobal->allProcs` in the [`PROC_GLOBAL`] `RefCell`), recorded
 /// by [`InitProcGlobal`] once the array is built. NULL until then.
@@ -725,6 +745,43 @@ fn shared_pid_slot(procno: ProcNumber) -> &'static AtomicI32 {
 
 use core::sync::atomic::AtomicI32;
 
+/// `&ProcGlobal->allProcs[procno].pgxactoff` over the genuinely-shared pgxactoff
+/// array. Panics if `InitProcGlobal` has not run or `procno` is out of range
+/// (caller bugs mirroring the C deref of a slot in the shared PGPROC block).
+fn shared_pgxactoff_slot(procno: ProcNumber) -> &'static AtomicI32 {
+    let base = SHARED_PROC_PGXACTOFF.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC pgxactoff array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_PGXACTOFF_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC pgxactoff index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `i32` words of genuine shared memory and
+    // `idx < count`. `i32`/`AtomicI32` share layout, so the word may be accessed
+    // atomically — the cross-process discipline mirrors C's plain `pgxactoff` int
+    // read/written under ProcArrayLock, with atomics making the per-word access
+    // well-defined under the Rust memory model.
+    unsafe { AtomicI32::from_ptr(base.add(idx)) }
+}
+
+/// `ProcGlobal->allProcs[procno].pgxactoff` — read the canonical (shared) word.
+pub(crate) fn proc_pgxactoff_shared(procno: ProcNumber) -> i32 {
+    shared_pgxactoff_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `ProcGlobal->allProcs[procno].pgxactoff = off` — write the canonical (shared)
+/// word, visible to every process (the `ProcArrayAdd`/`Remove` renumber).
+pub(crate) fn set_proc_pgxactoff_shared(procno: ProcNumber, off: i32) {
+    shared_pgxactoff_slot(procno).store(off, AtomicOrdering::Relaxed);
+}
+
+/// `MyProc->pgxactoff` — this backend's offset read from the canonical shared
+/// word (another process' `ProcArrayAdd`/`Remove` may have renumbered it).
+pub(crate) fn my_proc_pgxactoff() -> i32 {
+    proc_pgxactoff_shared(my_proc_number())
+}
+
 /// Place the genuinely-shared `pid` array (`[i32; total_procs]`, zeroed) and the
 /// `ProcStructLock` spinlock word into real shared memory, recording their base
 /// pointers in the process-globals. Idempotent across `found` (EXEC_BACKEND
@@ -743,6 +800,21 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
     }
     SHARED_PROC_PIDS.store(pid_ptr, AtomicOrdering::Relaxed);
     SHARED_PROC_PID_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // pgxactoff array (the canonical per-proc offset into the dense
+    // xids[]/subxidStates[]/statusFlags[] arrays; rewritten cross-process by
+    // ProcArrayAdd/Remove).
+    let off_size = mul_size(total_procs, size_of::<i32>());
+    let (off_ptr, off_found) = shmem::shmem_init_struct::call("PGPROC pgxactoff words", off_size)?;
+    let off_ptr = off_ptr as *mut i32;
+    if !off_found {
+        // MemSet(0): a fresh PGPROC block (C zeroes it; ProcArrayAdd sets the
+        // real offset when the proc joins the array).
+        // SAFETY: `off_ptr` addresses `off_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(off_ptr as *mut u8, 0, off_size) };
+    }
+    SHARED_PROC_PGXACTOFF.store(off_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_PGXACTOFF_COUNT.store(total_procs, AtomicOrdering::Relaxed);
 
     // ProcStructLock spinlock word
     let lock_size = size_of::<types_storage::storage::Spinlock>();
