@@ -725,6 +725,7 @@ name = "backend-access-gin-core-probe"
 version = "0.0.0"
 dependencies = [
  "backend-access-gin-core-probe-seams",
+ "backend-access-gin-ginutil-seams",
  "backend-access-index-amvalidate-seams",
  "backend-nodes-core-seams",
  "backend-utils-adt-arrayfuncs-seams",
@@ -732,11 +733,13 @@ dependencies = [
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error-seams",
+ "backend-utils-fmgr-core",
  "mcx",
  "types-amvalidate",
  "types-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
  "types-gin",
  "types-hash",
  "types-jsonb",
@@ -20621,6 +20624,8 @@ name = "backend-utils-adt-selfuncs"
 version = "0.0.0"
 dependencies = [
  "backend-access-brin-insert-vacuum-seams",
+ "backend-access-gin-ginutil-seams",
+ "backend-access-index-indexam-seams",
  "backend-catalog-aclchk-seams",
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
@@ -20665,12 +20670,15 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-gin",
  "types-locale",
  "types-nodes",
  "types-pathnodes",
+ "types-rel",
  "types-scan",
  "types-selfuncs",
  "types-statistics",
+ "types-storage",
  "types-tuple",
 ]
 
