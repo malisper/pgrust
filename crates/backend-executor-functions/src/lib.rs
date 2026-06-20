@@ -337,7 +337,8 @@ fn fmgr_sql<'mcx>(
     // same postquel loop with an ACCUMULATING receiver that appends each row's
     // column(s) into the active materialize sink, then signals materialize mode.
     if set_returning {
-        let run_result = run_body_setof(mcx, &querytrees, prosrc.as_str(), params);
+        let run_result =
+            run_body_setof(mcx, &querytrees, prosrc.as_str(), params, &form.proname);
         if pushed_snapshot {
             let _ = snapmgr::pop_active_snapshot::call();
         }
@@ -354,7 +355,7 @@ fn fmgr_sql<'mcx>(
         return Ok(BareDatum::null());
     }
 
-    let run_result = run_body(mcx, &querytrees, prosrc.as_str(), params);
+    let run_result = run_body(mcx, &querytrees, prosrc.as_str(), params, &form.proname);
 
     if pushed_snapshot {
         // Pop even on error so we don't leak the active-snapshot stack.
@@ -735,6 +736,7 @@ fn run_body<'mcx>(
     querytrees: &mcx::PgVec<'mcx, Query<'mcx>>,
     source_text: &str,
     params: ParamListInfo,
+    fname: &str,
 ) -> PgResult<Option<CaptureSlot>> {
     // Rewrite + plan each query. Find the index of the last canSetTag plan: that
     // one delivers the function result.
@@ -768,13 +770,25 @@ fn run_body<'mcx>(
 
     for (i, plan) in plans.iter().enumerate() {
         let is_result = Some(i) == last_setstag;
-        let cap = run_one_query(mcx, plan, source_text, params.clone(), is_result)?;
+        // sql_exec_error_callback (functions.c:1929): any error raised while
+        // executing an identifiable body statement gets the call-stack context
+        // line `SQL function "<fname>" statement <N>` (N = 1-based error_query_index).
+        let cap = run_one_query(mcx, plan, source_text, params.clone(), is_result)
+            .map_err(|e| e.add_context(sql_exec_context(fname, i + 1)))?;
         if is_result {
             captured = cap;
         }
     }
 
     Ok(captured)
+}
+
+/// Format the `sql_exec_error_callback` context line (functions.c:1949): the
+/// running body statement number is 1-based and identifiable, so we always emit
+/// the `statement %d` form here (the `during startup` form covers compile-time
+/// failures, which surface on the parse/plan path, not the execution loop).
+fn sql_exec_context(fname: &str, query_index: usize) -> String {
+    format!("SQL function \"{}\" statement {}", fname, query_index)
 }
 
 /// Run one planned query (`postquel_start` + `postquel_getnext` +
@@ -887,6 +901,7 @@ fn run_body_setof<'mcx>(
     querytrees: &mcx::PgVec<'mcx, Query<'mcx>>,
     source_text: &str,
     params: ParamListInfo,
+    fname: &str,
 ) -> PgResult<()> {
     let mut plans: alloc::vec::Vec<PlannedStmt<'mcx>> = alloc::vec::Vec::new();
     let mut last_setstag: Option<usize> = None;
@@ -916,7 +931,10 @@ fn run_body_setof<'mcx>(
 
     for (i, plan) in plans.iter().enumerate() {
         let is_result = Some(i) == last_setstag;
-        run_one_query_setof(mcx, plan, source_text, params.clone(), is_result)?;
+        // sql_exec_error_callback (functions.c:1929): attach the running
+        // statement's call-stack context line on any execution error.
+        run_one_query_setof(mcx, plan, source_text, params.clone(), is_result)
+            .map_err(|e| e.add_context(sql_exec_context(fname, i + 1)))?;
     }
 
     Ok(())
