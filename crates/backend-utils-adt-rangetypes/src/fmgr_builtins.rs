@@ -38,7 +38,7 @@
 use mcx::{Mcx, MemoryContext};
 use types_datum::Datum;
 use types_error::PgResult;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument / result marshalling between the by-ref bridge and the boundary
@@ -106,38 +106,24 @@ fn scratch_mcx() -> MemoryContext {
     MemoryContext::new("rangetypes fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 /// Move arg `i`'s by-ref `Varlena` image (a serialized `RangeType`) onto the
 /// by-value word as a pointer into `mcx`, the form `DatumGetRangeTypeP` reads.
 /// No-op if the arg has no by-ref `Varlena` payload (e.g. it is SQL NULL — the
 /// strict dispatcher never calls a strict builtin with a NULL arg, but the
 /// agg/non-strict kernels guard with `PG_ARGISNULL`).
-fn stage_range_arg(fcinfo: &mut FunctionCallInfoBaseData, mcx: Mcx<'_>, i: usize) {
+fn stage_range_arg(fcinfo: &mut FunctionCallInfoBaseData, mcx: Mcx<'_>, i: usize) -> PgResult<()> {
     let image: Option<Vec<u8>> = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .map(|b| b.to_vec());
     if let Some(image) = image {
-        let word = ok(range_bytes_to_arg_word(mcx, &image));
+        let word = range_bytes_to_arg_word(mcx, &image)?;
         if let Some(nd) = fcinfo.args.get_mut(i) {
             nd.value = word;
             nd.isnull = false;
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -154,12 +140,12 @@ fn stage_range_arg(fcinfo: &mut FunctionCallInfoBaseData, mcx: Mcx<'_>, i: usize
 /// the kernel, and returns its by-value result word verbatim.
 macro_rules! fc_range_scalar {
     ($fc:ident, $kernel:path, $nrange:expr) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
             let m = scratch_mcx();
             for i in 0..$nrange {
-                stage_range_arg(fcinfo, m.mcx(), i);
+                stage_range_arg(fcinfo, m.mcx(), i)?;
             }
-            ok($kernel(m.mcx(), fcinfo))
+            $kernel(m.mcx(), fcinfo)
         }
     };
 }
@@ -171,20 +157,20 @@ macro_rules! fc_range_scalar {
 /// null word with no by-ref payload.
 macro_rules! fc_range_result {
     ($fc:ident, $kernel:path, $nrange:expr) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
             let m = scratch_mcx();
             for i in 0..$nrange {
-                stage_range_arg(fcinfo, m.mcx(), i);
+                stage_range_arg(fcinfo, m.mcx(), i)?;
             }
-            let word = ok($kernel(m.mcx(), fcinfo));
+            let word = $kernel(m.mcx(), fcinfo)?;
             if fcinfo.result_is_null() || word.as_usize() == 0 {
-                return Datum::null();
+                return Ok(Datum::null());
             }
             // SAFETY: `word` is the address of a plain `RangeType` varlena that
             // the kernel allocated in `m` and that lives until `m` drops below.
             let bytes = unsafe { range_word_to_result_bytes(word) };
             fcinfo.set_ref_result(types_fmgr::RefPayload::Varlena(bytes));
-            Datum::null()
+            Ok(Datum::null())
         }
     };
 }
@@ -260,10 +246,10 @@ fc_range_scalar!(
 
 /// `elem_contained_by_range(anyelement, anyrange) -> bool` (oid 3860). The range
 /// is arg 1, so stage only that one (arg 0 the element keeps its lane).
-fn fc_elem_contained_by_range(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_elem_contained_by_range(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    stage_range_arg(fcinfo, m.mcx(), 1);
-    ok(crate::range_fmgr_boundary::elem_contained_by_range(m.mcx(), fcinfo))
+    stage_range_arg(fcinfo, m.mcx(), 1)?;
+    crate::range_fmgr_boundary::elem_contained_by_range(m.mcx(), fcinfo)
 }
 
 // --- 3-way comparison -> int4 ----------------------------------------------
@@ -330,39 +316,39 @@ fc_range_scalar!(fc_range_upper_inf, crate::range_fmgr_boundary::range_upper_inf
 // --- subdiff support fns (scalar args, float8 result) ----------------------
 
 /// `int4range_subdiff(int4, int4) -> float8` (oid 3922).
-fn fc_int4range_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int4range_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ok(crate::range_fmgr_boundary::int4range_subdiff(m.mcx(), fcinfo))
+    crate::range_fmgr_boundary::int4range_subdiff(m.mcx(), fcinfo)
 }
 
 /// `int8range_subdiff(int8, int8) -> float8` (oid 3923).
-fn fc_int8range_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8range_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ok(crate::range_fmgr_boundary::int8range_subdiff(m.mcx(), fcinfo))
+    crate::range_fmgr_boundary::int8range_subdiff(m.mcx(), fcinfo)
 }
 
 /// `numrange_subdiff(numeric, numeric) -> float8` (oid 3924).
-fn fc_numrange_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numrange_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ok(crate::range_fmgr_boundary::numrange_subdiff(m.mcx(), fcinfo))
+    crate::range_fmgr_boundary::numrange_subdiff(m.mcx(), fcinfo)
 }
 
 /// `daterange_subdiff(date, date) -> float8` (oid 3925).
-fn fc_daterange_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_daterange_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ok(crate::range_fmgr_boundary::daterange_subdiff(m.mcx(), fcinfo))
+    crate::range_fmgr_boundary::daterange_subdiff(m.mcx(), fcinfo)
 }
 
 /// `tsrange_subdiff(timestamp, timestamp) -> float8` (oid 3929).
-fn fc_tsrange_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsrange_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ok(crate::range_fmgr_boundary::tsrange_subdiff(m.mcx(), fcinfo))
+    crate::range_fmgr_boundary::tsrange_subdiff(m.mcx(), fcinfo)
 }
 
 /// `tstzrange_subdiff(timestamptz, timestamptz) -> float8` (oid 3930).
-fn fc_tstzrange_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tstzrange_subdiff(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ok(crate::range_fmgr_boundary::tstzrange_subdiff(m.mcx(), fcinfo))
+    crate::range_fmgr_boundary::tstzrange_subdiff(m.mcx(), fcinfo)
 }
 
 // ---------------------------------------------------------------------------
@@ -375,16 +361,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the expressible `rangetypes.c` builtins (C: their `fmgr_builtins[]`
@@ -400,7 +389,7 @@ fn builtin(
 ///   (`SortSupport` / `VacAttrStats`) executor-owned scratch struct, not
 ///   expressible on the by-ref boundary.
 pub fn register_rangetypes_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // I/O: cstring/internal/bytea <-> anyrange.
         builtin(3834, "range_in", 3, true, false, fc_range_in),
         builtin(3835, "range_out", 1, true, false, fc_range_out),
@@ -601,8 +590,8 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
-        (entry.func.unwrap())(&mut fcinfo).as_bool()
+        let native = backend_utils_fmgr_core::native_builtin(oid).expect("builtin registered native");
+        native(&mut fcinfo).expect("range cmp ok").as_bool()
     }
 
     /// Invoke a registered `(range, range) -> int4` builtin (`range_cmp`).
@@ -617,8 +606,8 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
-        (entry.func.unwrap())(&mut fcinfo).as_i32()
+        let native = backend_utils_fmgr_core::native_builtin(oid).expect("builtin registered native");
+        native(&mut fcinfo).expect("range cmp ok").as_i32()
     }
 
     /// Invoke a registered single-range `-> bool` builtin (`range_empty`).
@@ -627,8 +616,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a.to_vec()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
-        (entry.func.unwrap())(&mut fcinfo).as_bool()
+        let native = backend_utils_fmgr_core::native_builtin(oid).expect("builtin registered native");
+        native(&mut fcinfo).expect("range pred ok").as_bool()
     }
 
     #[test]
@@ -639,8 +628,8 @@ mod tests {
             3834u32, 3835, 3836, 3837, 3855, 3856, 3870, 3868, 3902, 3417, 3850, 3922,
         ] {
             assert!(
-                backend_utils_fmgr_core::fmgr_isbuiltin(oid).is_some(),
-                "range builtin {oid} should be registered"
+                backend_utils_fmgr_core::native_builtin(oid).is_some(),
+                "range builtin {oid} should be registered native"
             );
         }
     }
