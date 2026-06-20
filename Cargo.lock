@@ -12385,6 +12385,7 @@ version = "0.0.0"
 dependencies = [
  "backend-geqo-all-seams",
  "backend-optimizer-path-costsize-seams",
+ "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-path-joinpath",
  "backend-optimizer-path-joinrels-seams",
  "backend-optimizer-util-appendinfo-seams",
