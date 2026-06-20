@@ -82,6 +82,19 @@ fn install() {
     // work_mem default (KB).
     backend_utils_init_small_seams::work_mem::set(|| 4096);
 
+    // The fmgr by-OID dispatch the USER-setof fallthrough (`dispatch_user_setof`)
+    // reaches for an OID with no executor-frame SRF registered. In production this
+    // resolves the OID through the fmgr builtin/pg_proc registry; an unregistered
+    // OID raises `ERRCODE_UNDEFINED_FUNCTION`. Mock it to that miss so the
+    // unregistered-OID test exercises the real "no such function" error path
+    // (which `srf_invoke_by_oid` now propagates as `Err`, no panic).
+    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::set(
+        |_mcx, _fn_oid, _collation, _args, _args_null, _fn_expr| {
+            Err(types_error::PgError::error("function with OID does not exist")
+                .with_sqlstate(types_error::error::ERRCODE_UNDEFINED_FUNCTION))
+        },
+    );
+
     // Register the executor-frame SRF under the test OID.
     register_srf(TEST_SRF_OID, generate_series_step_int4);
     // Register the real int4/int8 generate_series builtins (the SRF
@@ -97,7 +110,9 @@ fn setup() {
 /// executor-frame `PGFunction`. Reads its two int4 args from the call frame,
 /// drives the value-per-call protocol over the `fn_extra` cross-call channel,
 /// and writes `isDone` onto the LIVE `ReturnSetInfo` each call.
-fn generate_series_step_int4<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn generate_series_step_int4<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> types_error::PgResult<Datum<'mcx>> {
     let mcx: Mcx<'mcx> = fcinfo
         .fn_mcxt
         .expect("generate_series: fn_mcxt set by ExecMakeTableFunctionResult");
@@ -155,7 +170,7 @@ fn generate_series_step_int4<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) 
             .expect("resultinfo present for SRF call")
             .isDone = ExprDoneCond::ExprMultipleResult;
         fcinfo.isnull = false;
-        Datum::from_i32(result)
+        Ok(Datum::from_i32(result))
     } else {
         // SRF_RETURN_DONE: end_MultiFuncCall + rsi->isDone = ExprEndResult.
         backend_utils_fmgr_funcapi::srf_support::end_MultiFuncCall(fcinfo)
@@ -166,7 +181,7 @@ fn generate_series_step_int4<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) 
             .expect("resultinfo present for SRF call")
             .isDone = ExprDoneCond::ExprEndResult;
         fcinfo.isnull = true;
-        Datum::from_i32(0)
+        Ok(Datum::from_i32(0))
     }
 }
 
@@ -376,7 +391,10 @@ fn unregistered_srf_oid_errors() {
         fn_mcxt: Some(mcx),
         ..Default::default()
     };
-    let err = srf_invoke_by_oid(424242, &mut frame).unwrap_err();
+    let err = match srf_invoke_by_oid(424242, &mut frame) {
+        Ok(_) => panic!("expected undefined-function error for unregistered OID"),
+        Err(e) => e,
+    };
     assert_eq!(err.sqlstate(), types_error::error::ERRCODE_UNDEFINED_FUNCTION);
 }
 
@@ -405,7 +423,9 @@ static MAT_INSTALL: Once = Once::new();
 /// `isDone = ExprSingleResult`, and a `setResult` tuplestore carrying the rows
 /// {10, 20, 30}. Mirrors a composite/whole-set SRF (`json_each`-shaped) that
 /// builds its whole output in a tuplestore.
-fn materialize_srf<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn materialize_srf<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> types_error::PgResult<Datum<'mcx>> {
     let mcx = fcinfo.fn_mcxt.expect("fn_mcxt set");
     // Seed the drain workspace and hand back a tuplestore (the MockStore payload
     // is a marker; the mocked gettupleslot reads MAT_DRAIN).
@@ -419,7 +439,7 @@ fn materialize_srf<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'
     rsinfo.setResult =
         Tuplestorestate::begin(mcx, MockStore::default()).expect("materialize setResult");
     fcinfo.isnull = false;
-    Datum::default()
+    Ok(Datum::default())
 }
 
 fn install_materialize() {

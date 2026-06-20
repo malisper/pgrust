@@ -28,7 +28,7 @@ use backend_utils_error::ereport;
 use types_core::Oid;
 use types_error::error::ERRCODE_UNDEFINED_FUNCTION;
 use types_error::{PgResult, ERROR};
-use types_nodes::execexpr::PGFunction;
+use types_nodes::execexpr::SrfFunction;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
@@ -36,15 +36,15 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 /// thread-local): the single-user backend dispatches on one thread, and the
 /// registry must be visible to whatever thread runs the dispatch. The stored
 /// `PGFunction` is a plain `fn` pointer (`Send + Sync`).
-fn table() -> &'static Mutex<HashMap<Oid, PGFunction>> {
-    static SRF_TABLE: OnceLock<Mutex<HashMap<Oid, PGFunction>>> = OnceLock::new();
+fn table() -> &'static Mutex<HashMap<Oid, SrfFunction>> {
+    static SRF_TABLE: OnceLock<Mutex<HashMap<Oid, SrfFunction>>> = OnceLock::new();
     SRF_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Register an executor-frame set-returning function under its `pg_proc` OID
 /// (the executor-frame counterpart of adding a `fmgr_builtins[]` row). Returns
 /// the previous registration if the OID was already present.
-pub fn register_srf(foid: Oid, func: PGFunction) -> Option<PGFunction> {
+pub fn register_srf(foid: Oid, func: SrfFunction) -> Option<SrfFunction> {
     table().lock().expect("SRF table lock").insert(foid, func)
 }
 
@@ -85,7 +85,7 @@ pub fn srf_invoke_by_oid<'mcx>(
 ) -> PgResult<SrfDispatch<'mcx>> {
     let func = table().lock().expect("SRF table lock").get(&foid).copied();
     match func {
-        Some(f) => Ok(SrfDispatch::Builtin(f(fcinfo))),
+        Some(f) => Ok(SrfDispatch::Builtin(f(fcinfo)?)),
         None => dispatch_user_setof(foid, fcinfo),
     }
 }

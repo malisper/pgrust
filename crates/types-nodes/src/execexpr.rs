@@ -306,6 +306,17 @@ pub enum MinMaxOp {
 /// owner installs concrete addresses.
 pub type PGFunction = for<'mcx> fn(&mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx>;
 
+/// The Result-native executor-frame set-returning-function callable. C's
+/// `PGFunction` returns a bare `Datum` and raises SQL errors via
+/// `ereport(ERROR)` (a `panic_any` longjmp in the owned model); this shape moves
+/// the error channel into the return value so an SRF body propagates an
+/// `Err(PgError)` with `?` instead of panicking — the SRF counterpart of
+/// `types_fmgr::PgFnNative`. The `backend-executor-execSRF` registry
+/// (`register_srf`) stores these and the executor dispatch (`srf_invoke_by_oid`)
+/// bottoms the `Result` out with `?`.
+pub type SrfFunction =
+    for<'mcx> fn(&mut FunctionCallInfoBaseData<'mcx>) -> types_error::PgResult<Datum<'mcx>>;
+
 /// `ExprStateEvalFunc` (execnodes.h) — `Datum (*)(ExprState *, ExprContext *,
 /// bool *isNull)`: the function that actually evaluates a compiled expression
 /// (set to different bodies depending on expression complexity). The
