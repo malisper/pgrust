@@ -1664,13 +1664,18 @@ fn comparetup_index_btree_tiebreak<'mcx>(
         )?;
 
         let index_name = arg.indexRel.name();
+        // C (tuplesortvariants.c:1686) reports this as ERRCODE_UNIQUE_VIOLATION
+        // with the duplicate-key text carried in a separate errdetail(), not
+        // concatenated onto the primary errmsg.
         let detail = match &key_desc {
             Some(kd) => format!("Key {} is duplicated.", kd.as_str()),
             None => "Duplicate keys exist.".to_string(),
         };
         return Err(PgError::error(format!(
-            "could not create unique index \"{index_name}\": {detail}"
-        )));
+            "could not create unique index \"{index_name}\""
+        ))
+        .with_sqlstate(types_error::error::ERRCODE_UNIQUE_VIOLATION)
+        .with_detail(detail));
     }
 
     // If key values are equal, we sort on ItemPointer (heap TID as the implicit
