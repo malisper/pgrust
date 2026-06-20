@@ -15,7 +15,7 @@
 use mcx::MemoryContext;
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 const VARHDRSZ: usize = 4;
 
@@ -57,63 +57,55 @@ fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, payload: &[u8]) -> Datum {
     Datum::from_usize(0)
 }
 
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 fn scratch_mcx() -> MemoryContext {
     MemoryContext::new("pg_dependencies fmgr scratch")
 }
 
-fn fc_pg_dependencies_in(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_dependencies_in() {
-        Ok(()) => Datum::null(),
-        Err(e) => raise(e),
-    }
+fn fc_pg_dependencies_in(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    crate::pg_dependencies_in()?;
+    Ok(Datum::null())
 }
-fn fc_pg_dependencies_recv(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_dependencies_recv() {
-        Ok(()) => Datum::null(),
-        Err(e) => raise(e),
-    }
+fn fc_pg_dependencies_recv(
+    _fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    crate::pg_dependencies_recv()?;
+    Ok(Datum::null())
 }
-fn fc_pg_dependencies_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_dependencies_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let data = arg_bytea_body(fcinfo, 0).to_vec();
-    match crate::pg_dependencies_out(m.mcx(), &data) {
-        Ok(s) => ret_cstring(fcinfo, s),
-        Err(e) => raise(e),
-    }
+    let s = crate::pg_dependencies_out(m.mcx(), &data)?;
+    Ok(ret_cstring(fcinfo, s))
 }
-fn fc_pg_dependencies_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_dependencies_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let data = arg_bytea_body(fcinfo, 0).to_vec();
-    let payload = match crate::pg_dependencies_send(m.mcx(), &data) {
-        Ok(b) => b.as_slice().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_bytea(fcinfo, &payload)
+    let payload = crate::pg_dependencies_send(m.mcx(), &data)?.as_slice().to_vec();
+    Ok(ret_bytea(fcinfo, &payload))
 }
 
 fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the `pg_dependencies` I/O builtins (C: their `fmgr_builtins[]` rows).
 pub fn register_dependencies_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(3404, "pg_dependencies_in", 1, fc_pg_dependencies_in),
         builtin(3405, "pg_dependencies_out", 1, fc_pg_dependencies_out),
         builtin(3406, "pg_dependencies_recv", 1, fc_pg_dependencies_recv),
