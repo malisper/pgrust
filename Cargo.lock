@@ -1536,19 +1536,25 @@ dependencies = [
 name = "backend-access-heap-heapam-handler-core"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
  "backend-access-heap-heapam",
  "backend-access-heap-heapam-handler-dml-seams",
  "backend-access-heap-heapam-seams",
  "backend-access-heap-heapam-visibility",
  "backend-access-heap-heaptoast",
  "backend-access-heap-pruneheap-seams",
+ "backend-access-heap-rewriteheap",
  "backend-access-index-indexam",
  "backend-access-table-tableam",
  "backend-access-table-tableam-seams",
+ "backend-access-tableam-seams",
+ "backend-access-transam-xact",
  "backend-access-transam-xact-seams",
+ "backend-catalog-catalog",
  "backend-catalog-catalog-seams",
  "backend-catalog-storage-seams",
  "backend-executor-execExpr-seams",
+ "backend-executor-execTuples",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
  "backend-optimizer-path-costsize-seams",
@@ -1566,6 +1572,7 @@ dependencies = [
  "backend-utils-time-snapmgr-seams",
  "mcx",
  "seam-core",
+ "types-cluster",
  "types-core",
  "types-error",
  "types-nodes",
@@ -2984,6 +2991,7 @@ dependencies = [
 name = "backend-access-tableam-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-cluster",
  "types-core",
@@ -12807,6 +12815,7 @@ dependencies = [
  "backend-optimizer-util-vars",
  "backend-parser-analyze",
  "backend-parser-parse-agg-seams",
+ "backend-parser-relation",
  "backend-parser-relation-seams",
  "backend-partitioning-core-seams",
  "backend-rewrite-rewritemanip-seams",

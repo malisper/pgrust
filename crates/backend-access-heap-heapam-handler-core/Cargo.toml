@@ -37,6 +37,21 @@ backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type
 # table_relation_needs_toast_table, table_parallelscan_reinitialize.
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+# relation_copy_for_cluster (CLUSTER / VACUUM FULL heap rewrite) deps:
+#   rewriteheap       — begin/rewrite/dead/end_heap_rewrite (the rewrite engine)
+#   common-heaptuple  — heap_deform_tuple / heap_form_tuple (reform_and_rewrite_tuple)
+#   execTuples        — ExecFetchSlotHeapTuple / ExecDropSingleTupleTableSlot
+#   transam-xact      — TransactionIdIsCurrentTransactionId (in-progress warnings)
+#   catalog-catalog   — IsSystemRelation
+#   types-cluster     — CopyForClusterResult out-params
+backend-access-heap-rewriteheap = { path = "../backend-access-heap-rewriteheap" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-executor-execTuples = { path = "../backend-executor-execTuples" }
+backend-access-transam-xact = { path = "../backend-access-transam-xact" }
+backend-catalog-catalog = { path = "../backend-catalog-catalog" }
+types-cluster = { path = "../types-cluster" }
+# The table_relation_copy_for_cluster seam installed here.
+backend-access-tableam-seams = { path = "../backend-access-tableam-seams" }
 backend-access-index-indexam = { path = "../backend-access-index-indexam" }
 # DML callbacks delegate here (seam-and-panic until the dml stage lands).
 backend-access-heap-heapam-handler-dml-seams = { path = "../backend-access-heap-heapam-handler-dml-seams" }

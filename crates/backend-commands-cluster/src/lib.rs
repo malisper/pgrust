@@ -921,7 +921,7 @@ fn copy_table_data(
     /* Decide whether to use an indexscan or seqscan-and-optional-sort. */
     let use_sort = match OldIndex {
         Some(idx) if relcache::rd_rel_relam::call(&idx)? == BTREE_AM_OID => {
-            planner::plan_cluster_use_sort::call(OldHeap.rd_id, idx.rd_id)?
+            planner::plan_cluster_use_sort::call(mcx, OldHeap.rd_id, idx.rd_id)?
         }
         _ => false,
     };
@@ -959,6 +959,7 @@ fn copy_table_data(
 
     /* Hand off the actual copying to AM specific function. */
     let copied = tableam::table_relation_copy_for_cluster::call(
+        mcx,
         OldHeap,
         NewHeap,
         OldIndex,

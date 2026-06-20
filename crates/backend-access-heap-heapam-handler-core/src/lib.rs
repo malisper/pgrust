@@ -43,6 +43,7 @@ use types_tuple::heaptuple::ItemPointerData;
 
 pub mod analyze_scan;
 pub mod build_scan;
+pub mod copy_for_cluster;
 pub mod validate_scan;
 
 use backend_access_heap_heapam as heapam;
@@ -896,6 +897,12 @@ pub fn init_seams() {
     sx::table_index_build_range_scan::set(build_scan::provider_index_build_range_scan);
     sx::table_index_build_scan::set(build_scan::provider_index_build_scan);
     sx::table_index_validate_scan::set(validate_scan::provider_index_validate_scan);
+
+    // heapam_relation_copy_for_cluster — the heap AM's CLUSTER / VACUUM FULL
+    // table rewrite. cluster.c's copy_table_data dispatches here.
+    backend_access_tableam_seams::table_relation_copy_for_cluster::set(
+        copy_for_cluster::heapam_relation_copy_for_cluster,
+    );
 
     // heapam_estimate_rel_size — the planner-facing table-AM size estimator
     // (plancat's estimate_rel_size dispatches RELKIND_HAS_TABLE_AM here).

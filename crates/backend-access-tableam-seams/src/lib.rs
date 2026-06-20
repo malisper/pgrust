@@ -15,10 +15,11 @@ seam_core::seam!(
     /// `table_relation_copy_for_cluster(OldHeap, NewHeap, OldIndex, use_sort,
     /// OldestXmin, &FreezeXid, &MultiXactCutoff, &num_tuples, &tups_vacuumed,
     /// &tups_recently_dead)` (tableam.h): AM-specific heap rewrite.
-    pub fn table_relation_copy_for_cluster(
-        old_heap: &Relation<'_>,
-        new_heap: &Relation<'_>,
-        old_index: Option<&Relation<'_>>,
+    pub fn table_relation_copy_for_cluster<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        old_heap: &Relation<'mcx>,
+        new_heap: &Relation<'mcx>,
+        old_index: Option<&Relation<'mcx>>,
         use_sort: bool,
         oldest_xmin: TransactionId,
         freeze_xid: TransactionId,
