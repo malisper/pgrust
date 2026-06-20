@@ -7789,7 +7789,14 @@ pub fn init_seams() {
         get: get_debug_parallel_query,
         set: set_debug_parallel_query,
     });
+
+    // set_relation_partition_info / set_baserel_partition_constraint (plancat.c):
+    // the partitioning ext-seams whose bodies live in this crate (substrate-cycle
+    // workaround; see partition_info.rs).
+    partition_info::init_seams();
 }
+
+mod partition_info;
 
 #[cfg(test)]
 mod tests;

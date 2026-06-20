@@ -1015,7 +1015,7 @@ fn get_relation_constraints(
 
     // Add partitioning constraints, if requested.
     if include_partition && ext::relation_is_partition::call(relation_object_id)? {
-        ext::set_baserel_partition_constraint::call(root, rel)?;
+        ext::set_baserel_partition_constraint::call(root, rel, relation_object_id)?;
         let mut pq = root.rel(rel).partition_qual.clone();
         result.append(&mut pq);
     }

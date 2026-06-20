@@ -474,8 +474,13 @@ seam_core::seam!(
     /// `rel->partition_qual` from `RelationGetPartitionQual` (const-folded via
     /// `expression_planner`, Vars stamped to `rel->relid`). Used by
     /// `get_relation_constraints` when `include_partition` and the rel is a
-    /// partition.
-    pub fn set_baserel_partition_constraint(root: &mut PlannerInfo, rel: RelId) -> PgResult<()>
+    /// partition. `relid` carries the relation OID the C reads off the open
+    /// `Relation` (the owner re-opens by OID, the caller's lock is already held).
+    pub fn set_baserel_partition_constraint(
+        root: &mut PlannerInfo,
+        rel: RelId,
+        relid: Oid,
+    ) -> PgResult<()>
 );
 
 /* ---- transaction / recovery / catalog state ------------------------ */

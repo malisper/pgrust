@@ -12529,6 +12529,7 @@ dependencies = [
 name = "backend-optimizer-plan-planner"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-relation-seams",
  "backend-catalog-index-seams",
  "backend-catalog-pg-inherits",
  "backend-executor-execMain-seams",
@@ -12564,14 +12565,17 @@ dependencies = [
  "backend-optimizer-util-pathnode",
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-plancat",
+ "backend-optimizer-util-plancat-ext-seams",
  "backend-optimizer-util-relnode",
  "backend-optimizer-util-vars",
  "backend-parser-analyze",
  "backend-parser-parse-agg-seams",
  "backend-parser-relation-seams",
+ "backend-partitioning-core-seams",
  "backend-rewrite-rewritemanip-seams",
  "backend-utils-adt-selfuncs-seams",
  "backend-utils-cache-lsyscache",
+ "backend-utils-cache-partcache",
  "backend-utils-cache-syscache-seams",
  "backend-utils-init-small",
  "backend-utils-misc-guc-tables",
@@ -12582,6 +12586,8 @@ dependencies = [
  "types-parsenodes",
  "types-pathnodes",
  "types-plancache",
+ "types-rel",
+ "types-storage",
  "types-tuple",
 ]
 

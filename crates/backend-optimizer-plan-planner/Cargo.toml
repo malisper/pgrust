@@ -88,6 +88,17 @@ backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-cost
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 # add_function_cost (windowfunc_cost).
 backend-optimizer-util-plancat = { path = "../backend-optimizer-util-plancat" }
+# set_relation_partition_info / set_baserel_partition_constraint owner bodies
+# (plancat.c). plancat-the-crate declares these ext-seams but can't reach the
+# partcache/partdesc/expression_planner/fmgr substrate without a dependency
+# cycle, so the planner (which sits above plancat and owns expression_planner)
+# installs them here.
+backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
+backend-utils-cache-partcache = { path = "../backend-utils-cache-partcache" }
+backend-partitioning-core-seams = { path = "../backend-partitioning-core-seams" }
+backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
+types-rel = { path = "../types-rel" }
+types-storage = { path = "../types-storage" }
 # get_sortgroupclause_expr (get_number_of_groups GROUP BY estimate).
 backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 # estimate_num_groups (get_number_of_groups GROUP BY estimate).
