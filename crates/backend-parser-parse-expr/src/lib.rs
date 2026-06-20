@@ -5532,11 +5532,32 @@ fn node_location(n: &Node<'_>) -> i32 {
 }
 
 fn parser_errposition_impl(source_text: &str, location: i32) -> PgResult<i32> {
-    // parser_errposition translates a raw location into a 1-based cursor; with a
-    // negative location it is 0. The source-text offset model collapses to the
-    // verbatim location (matching the sibling parser ports).
-    let _ = source_text;
-    Ok(if location < 0 { 0 } else { location })
+    // parser_errposition (parse_node.c):
+    //   pos = pg_mbstrlen_with_len(p_sourcetext, location) + 1;
+    // i.e. the 1-based *character* cursor of the byte offset `location`. A
+    // negative location ("not provided") yields cursor 0. The byte-offset model
+    // must still convert through `pg_mbstrlen_with_len` and add 1, otherwise the
+    // reported caret lands one column to the left of the offending token.
+    if location < 0 {
+        return Ok(0);
+    }
+    // pg_mbstrlen_with_len(p_sourcetext, location): the number of *characters* in
+    // the first `location` bytes of the source. `source_text` is the query string
+    // in the server encoding; as a `&str` it is valid UTF-8, so counting chars up
+    // to the byte offset is exactly that length. Cursor is 1-based, hence `+ 1`.
+    let loc = location as usize;
+    let prefix = if loc >= source_text.len() {
+        source_text
+    } else {
+        // Clamp to a char boundary at/below `loc` (mirrors mbstrlen, which stops
+        // at the last whole character before `limit`).
+        let mut b = loc;
+        while b > 0 && !source_text.is_char_boundary(b) {
+            b -= 1;
+        }
+        &source_text[..b]
+    };
+    Ok(prefix.chars().count() as i32 + 1)
 }
 
 /// Install this crate's inward seams (owner of `backend-parser-parse-expr-seams`).
