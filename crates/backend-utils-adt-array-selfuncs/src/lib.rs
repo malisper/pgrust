@@ -24,10 +24,19 @@
 //!   * the typcache — `lookup_element_cmp_proc`
 //!     (`backend-utils-cache-typcache-seams`), the OID of the element type's
 //!     cached btree `cmp_proc_finfo`;
-//!   * the array value layer — `deconstruct_array`
-//!     (`backend-utils-adt-arrayfuncs-seams`); and
-//!   * the fmgr operator-call layer — `function_call2_coll` for
-//!     `element_compare` (`backend-utils-fmgr-fmgr-seams`).
+//!   * the array value layer — `deconstruct_array_values_bytes`, which decodes
+//!     the const array's on-disk byte image into value-carrying [`DatumV`]
+//!     elements (`backend-utils-adt-arrayfuncs-seams`); and
+//!   * the fmgr operator-call layer — `function_call2_coll_datum` for
+//!     `element_compare` (`backend-utils-fmgr-fmgr-seams`), the
+//!     by-reference-capable lane so a `text`/`numeric`/... element carries its
+//!     varlena payload into the comparison proc.
+//!
+//! The MCELEM/`stavalues` statistics slot values reach `element_compare` the
+//! same way: for a pass-by-reference element type they are re-decoded by value
+//! via `get_attstatsslot_value_datums` (`slot_canon_values`), since the shared
+//! `AttStatsSlot.values` carries them only as non-dereferenceable in-buffer
+//! offsets.
 //!
 //! `root` / `args` / `leftop` / `rightop` are the raw fmgr/planner words
 //! (`PG_GETARG_POINTER` / `Node *`), carried as `Datum` because the
@@ -58,20 +67,22 @@ use types_error::{PgError, PgResult, ERROR};
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{NodeId, PlannerInfo};
 use types_selfuncs::{
-    VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES, STATISTIC_KIND_DECHIST,
+    StatsTuple, VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES, STATISTIC_KIND_DECHIST,
     STATISTIC_KIND_MCELEM,
 };
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
-use backend_utils_adt_arrayfuncs_seams::deconstruct_array;
+use backend_utils_adt_arrayfuncs_seams::deconstruct_array_values_bytes;
 use backend_utils_adt_selfuncs_seams::{
     examine_variable, get_restriction_variable, release_variable_stats,
     statistic_proc_security_check, stats_tuple_stanullfrac,
 };
 use backend_utils_cache_lsyscache_seams::{
-    get_attstatsslot, get_base_element_type, get_typcollation, get_typlenbyvalalign,
+    get_attstatsslot, get_attstatsslot_value_datums, get_base_element_type, get_typbyval,
+    get_typcollation, get_typlenbyvalalign,
 };
 use backend_utils_cache_typcache_seams::lookup_element_cmp_proc;
-use backend_utils_fmgr_fmgr_seams::function_call2_coll;
+use backend_utils_fmgr_fmgr_seams::function_call2_coll_datum;
 
 /// Install every seam this crate owns. The fmgr entry points (`arraycontsel` /
 /// `arraycontjoinsel`) and the planner-internal `scalararraysel_containment`
@@ -216,10 +227,79 @@ impl ElemCmpInfo {
 /// `element_compare(key1, key2, typentry)` (array_selfuncs.c:1164): the in-crate
 /// call site delegates `FunctionCall2Coll(&typentry->cmp_proc_finfo,
 /// typentry->typcollation, d1, d2)` then `DatumGetInt32` to the fmgr seam.
+///
+/// The element values cross the comparator's fmgr boundary as their canonical
+/// by-reference-capable [`DatumV`] images via `function_call2_coll_datum`, so a
+/// pass-by-reference element type (`text`/`varchar`/`numeric`/`name`/`bytea`)
+/// carries its varlena payload into the comparison proc instead of a bare,
+/// non-dereferenceable word.
 #[inline]
-fn element_compare(d1: Datum, d2: Datum, typentry: &ElemCmpInfo) -> PgResult<i32> {
-    let c = function_call2_coll::call(typentry.cmp_proc, typentry.typcollation, d1, d2)?;
+fn element_compare<'mcx>(
+    mcx: Mcx<'mcx>,
+    d1: &DatumV<'mcx>,
+    d2: &DatumV<'mcx>,
+    typentry: &ElemCmpInfo,
+) -> PgResult<i32> {
+    let c = function_call2_coll_datum::call(
+        mcx,
+        typentry.cmp_proc,
+        typentry.typcollation,
+        d1.clone_in(mcx)?,
+        d2.clone_in(mcx)?,
+    )?;
     Ok(c.as_i32())
+}
+
+/// One statistics-slot value as its canonical value-carrying [`DatumV`] image.
+/// The shared `AttStatsSlot.values` carries a by-reference element
+/// (`text`/`numeric`/...) only as a non-dereferenceable in-buffer offset, so a
+/// by-reference element type's slot values are re-decoded by value via
+/// `get_attstatsslot_value_datums` (`canon[i]`, aligned 1:1 with the bare slot).
+/// A pass-by-value element is the bare word wrapped as `ByVal` (no separate
+/// canonical array is fetched). Mirrors `selfuncs`'s `slot_value_canon`.
+#[inline]
+fn slot_value_canon<'mcx>(
+    bare: &[Datum],
+    canon: Option<&PgVec<'mcx, DatumV<'mcx>>>,
+    i: usize,
+) -> PgResult<DatumV<'mcx>> {
+    match canon {
+        Some(c) => Ok(c[i].clone()),
+        None => Ok(DatumV::ByVal(bare[i].as_usize())),
+    }
+}
+
+/// Fetch the canonical value-carrying images of a statistics slot's `stavalues`
+/// array when the element type is pass-by-reference (so the bare-word
+/// `AttStatsSlot.values` offsets cannot be dereferenced at the comparator's fmgr
+/// boundary). Returns `None` for a pass-by-value element type — the bare word is
+/// the value. Mirrors `selfuncs`'s `slot_canon_values`.
+fn slot_canon_values<'mcx>(
+    mcx: Mcx<'mcx>,
+    stats_tuple: StatsTuple,
+    reqkind: i32,
+    reqop: Oid,
+    valuetype: Oid,
+) -> PgResult<Option<PgVec<'mcx, DatumV<'mcx>>>> {
+    if get_typbyval::call(valuetype)? {
+        return Ok(None);
+    }
+    get_attstatsslot_value_datums::call(mcx, stats_tuple, reqkind, reqop)
+}
+
+/// Materialize a statistics slot's `stavalues` as a `Vec<DatumV>` (rich,
+/// by-reference-capable), one entry per bare slot value. Used to feed the MCELEM
+/// elements into the parallel-merge estimators where they reach `element_compare`.
+fn canon_slot_vec<'mcx>(
+    mcx: Mcx<'mcx>,
+    bare: &[Datum],
+    canon: Option<&PgVec<'mcx, DatumV<'mcx>>>,
+) -> PgResult<PgVec<'mcx, DatumV<'mcx>>> {
+    let mut out = vec_with_capacity_in(mcx, bare.len())?;
+    for i in 0..bare.len() {
+        out.push(slot_value_canon(bare, canon, i)?);
+    }
+    Ok(out)
 }
 
 /* ===========================================================================
@@ -276,12 +356,12 @@ pub fn scalararraysel_containment<'mcx>(
         /* qual can't succeed if null on left */
         return Ok(0.0);
     }
-    /* C: `((Const *) leftop)->constvalue` — the by-value/by-ref Datum word.
-     * Use as_byref_word(): the scalar element type can itself be pass-by-
-     * reference (e.g. text), where as_usize() would panic. as_byref_word
-     * returns the scalar word for by-val and the pointer for by-ref, i.e.
-     * the DatumGetPointer view the downstream codecs consume. */
-    let constval = Datum::from_usize(leftconst.constvalue.as_byref_word());
+    /* C: `((Const *) leftop)->constvalue` — the by-value/by-ref Datum. The
+     * scalar element type can itself be pass-by-reference (e.g. text); carry
+     * the canonical value-carrying image (`ByVal` word / `ByRef` payload)
+     * straight to the comparator so the by-reference referent survives the
+     * fmgr boundary in `element_compare`. */
+    let constval = leftconst.constvalue.clone_in(mcx)?;
 
     /* Get element type's default comparison function */
     let typentry = ElemCmpInfo::lookup(elemtype)?;
@@ -313,6 +393,16 @@ pub fn scalararraysel_containment<'mcx>(
             InvalidOid,
             ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS,
         )? {
+            /* Canonical (by-reference-capable) MCELEM values for `element_compare`. */
+            let mcelem_canon = slot_canon_values(
+                mcx,
+                stats_tuple,
+                STATISTIC_KIND_MCELEM,
+                InvalidOid,
+                sslot.valuetype,
+            )?;
+            let mcelem = canon_slot_vec(mcx, sslot.values.as_slice(), mcelem_canon.as_ref())?;
+
             /* For ALL case, also get histogram of distinct-element counts */
             let hslot = if use_or {
                 None
@@ -333,7 +423,8 @@ pub fn scalararraysel_containment<'mcx>(
              */
             if use_or {
                 selec = mcelem_array_contain_overlap_selec(
-                    sslot.values.as_slice(),
+                    mcx,
+                    mcelem.as_slice(),
                     sslot.values.len() as i32,
                     slot_numbers(sslot.numbers.as_slice()),
                     sslot.numbers.len() as i32,
@@ -349,7 +440,7 @@ pub fn scalararraysel_containment<'mcx>(
                 };
                 selec = mcelem_array_contained_selec(
                     mcx,
-                    sslot.values.as_slice(),
+                    mcelem.as_slice(),
                     sslot.values.len() as i32,
                     slot_numbers(sslot.numbers.as_slice()),
                     sslot.numbers.len() as i32,
@@ -366,6 +457,7 @@ pub fn scalararraysel_containment<'mcx>(
             /* No most-common-elements info, so do without */
             if use_or {
                 selec = mcelem_array_contain_overlap_selec(
+                    mcx,
                     &[],
                     0,
                     None,
@@ -401,6 +493,7 @@ pub fn scalararraysel_containment<'mcx>(
         /* No stats at all, so do without */
         if use_or {
             selec = mcelem_array_contain_overlap_selec(
+                mcx,
                 &[],
                 0,
                 None,
@@ -546,11 +639,17 @@ pub fn arraycontsel<'mcx>(
         && element_typeid == get_base_element_type::call(vardata.data().vartype)?
     {
         // C: `((Const *) other)->constvalue` — the raw array varlena Datum.
-        // Arrays are pass-by-reference, so as_usize() would panic; use
-        // as_byref_word() to get the DatumGetPointer view calc_arraycontsel
-        // (DatumGetArrayTypeP / deconstruct_array) needs.
-        let constval = Datum::from_usize(other.constvalue.as_byref_word());
-        selec = calc_arraycontsel(mcx, vardata.data(), constval, element_typeid, operator)?;
+        // Arrays are pass-by-reference; carry the on-disk varlena byte image
+        // (the `Datum::ByRef` payload) to `calc_arraycontsel`, which detoasts +
+        // deconstructs it by value (`deconstruct_array_values_bytes`).
+        let array_bytes = other.constvalue.as_varlena_bytes();
+        selec = calc_arraycontsel(
+            mcx,
+            vardata.data(),
+            &array_bytes,
+            element_typeid,
+            operator,
+        )?;
     } else {
         selec = default_sel(operator);
     }
@@ -576,7 +675,7 @@ pub fn arraycontjoinsel(operator: Oid) -> PgResult<Selectivity> {
 fn calc_arraycontsel(
     mcx: Mcx<'_>,
     vardata: &VariableStatData,
-    constval: Datum,
+    array_bytes: &[u8],
     elemtype: Oid,
     operator: Oid,
 ) -> PgResult<Selectivity> {
@@ -592,12 +691,10 @@ fn calc_arraycontsel(
      * The caller made sure the const is an array with same element type, so
      * get it now.  In C this is `DatumGetArrayTypeP(constval)`, possibly a
      * detoasted copy that is `pfree`d at the end iff it differs from `constval`.
-     * The repo's `deconstruct_array` seam detoasts the array `Datum` internally
-     * and owns / frees any toast copy, so the bookkeeping does not surface here;
-     * the array word is threaded straight to `mcelem_array_selec`.
+     * The repo's `deconstruct_array_values_bytes` seam detoasts the array image
+     * internally and owns / frees any toast copy, so the bookkeeping does not
+     * surface here; the array bytes are threaded straight to `mcelem_array_selec`.
      */
-    let array = constval;
-
     if vardata.stats_tuple.is_some()
         && statistic_proc_security_check::call(vardata, typentry.cmp_proc)?
     {
@@ -611,6 +708,16 @@ fn calc_arraycontsel(
             InvalidOid,
             ATTSTATSSLOT_VALUES | ATTSTATSSLOT_NUMBERS,
         )? {
+            /* Canonical (by-reference-capable) MCELEM values for `element_compare`. */
+            let mcelem_canon = slot_canon_values(
+                mcx,
+                stats_tuple,
+                STATISTIC_KIND_MCELEM,
+                InvalidOid,
+                sslot.valuetype,
+            )?;
+            let mcelem = canon_slot_vec(mcx, sslot.values.as_slice(), mcelem_canon.as_ref())?;
+
             /*
              * For "array <@ const" case we also need histogram of distinct
              * element counts.
@@ -635,9 +742,9 @@ fn calc_arraycontsel(
             /* Use the most-common-elements slot for the array Var. */
             selec = mcelem_array_selec(
                 mcx,
-                array,
+                array_bytes,
                 &typentry,
-                sslot.values.as_slice(),
+                mcelem.as_slice(),
                 sslot.values.len() as i32,
                 slot_numbers(sslot.numbers.as_slice()),
                 sslot.numbers.len() as i32,
@@ -648,8 +755,18 @@ fn calc_arraycontsel(
             /* hslot / sslot free on drop (C: free_attstatsslot). */
         } else {
             /* No most-common-elements info, so do without */
-            selec =
-                mcelem_array_selec(mcx, array, &typentry, &[], 0, None, 0, None, 0, operator)?;
+            selec = mcelem_array_selec(
+                mcx,
+                array_bytes,
+                &typentry,
+                &[],
+                0,
+                None,
+                0,
+                None,
+                0,
+                operator,
+            )?;
         }
 
         /*
@@ -659,7 +776,18 @@ fn calc_arraycontsel(
         selec *= 1.0 - stanullfrac as f64;
     } else {
         /* No stats at all, so do without */
-        selec = mcelem_array_selec(mcx, array, &typentry, &[], 0, None, 0, None, 0, operator)?;
+        selec = mcelem_array_selec(
+            mcx,
+            array_bytes,
+            &typentry,
+            &[],
+            0,
+            None,
+            0,
+            None,
+            0,
+            operator,
+        )?;
         /* we assume no nulls here, so no stanullfrac correction */
     }
 
@@ -674,11 +802,11 @@ fn calc_arraycontsel(
  * and then passes the problem on to mcelem_array_contain_overlap_selec or
  * mcelem_array_contained_selec depending on the operator.
  */
-fn mcelem_array_selec(
-    mcx: Mcx<'_>,
-    array: Datum,
+fn mcelem_array_selec<'mcx>(
+    mcx: Mcx<'mcx>,
+    array_bytes: &[u8],
     typentry: &ElemCmpInfo,
-    mcelem: &[Datum],
+    mcelem: &[DatumV<'mcx>],
     nmcelem: i32,
     numbers: Option<&[f32]>,
     nnumbers: i32,
@@ -690,11 +818,13 @@ fn mcelem_array_selec(
 
     /*
      * Prepare constant array data for sorting.  Sorting lets us find unique
-     * elements and efficiently merge with the MCELEM array.
+     * elements and efficiently merge with the MCELEM array.  The elements are
+     * decoded *by value* (`deconstruct_array_values_bytes`) so a by-reference
+     * element type carries its varlena payload into `element_compare`.
      */
-    let deconstructed = deconstruct_array::call(
+    let deconstructed = deconstruct_array_values_bytes::call(
         mcx,
-        array,
+        array_bytes,
         typentry.type_id,
         typentry.typlen,
         typentry.typbyval,
@@ -702,11 +832,12 @@ fn mcelem_array_selec(
     )?;
     let num_elems = deconstructed.len();
     // C out-params elem_values / elem_nulls, split into parallel buffers so the
-    // null-collapse can compact `elem_values` in place exactly as C does.
-    let mut elem_values = vec_with_capacity_in(mcx, num_elems)?;
+    // null-collapse can compact `elem_values` in place exactly as C does. The
+    // rich `DatumV` is not `Copy`, so the collapse moves elements via swap.
+    let mut elem_values: PgVec<'mcx, DatumV<'mcx>> = vec_with_capacity_in(mcx, num_elems)?;
     let mut elem_nulls = vec_with_capacity_in(mcx, num_elems)?;
     for (d, isnull) in deconstructed.iter() {
-        elem_values.push(*d);
+        elem_values.push(d.clone());
         elem_nulls.push(*isnull);
     }
 
@@ -717,7 +848,9 @@ fn mcelem_array_selec(
         if elem_nulls[i] {
             null_present = true;
         } else {
-            elem_values[nonnull_nitems] = elem_values[i];
+            if nonnull_nitems != i {
+                elem_values.swap(nonnull_nitems, i);
+            }
             nonnull_nitems += 1;
         }
     }
@@ -731,11 +864,12 @@ fn mcelem_array_selec(
     }
 
     /* Sort extracted elements using their default comparison function. */
-    qsort_arg_datum(&mut elem_values[..nonnull_nitems], typentry)?;
+    qsort_arg_datum(mcx, &mut elem_values[..nonnull_nitems], typentry)?;
 
     /* Separate cases according to operator */
     if operator == OID_ARRAY_CONTAINS_OP || operator == OID_ARRAY_OVERLAP_OP {
         selec = mcelem_array_contain_overlap_selec(
+            mcx,
             mcelem,
             nmcelem,
             numbers,
@@ -780,12 +914,13 @@ fn mcelem_array_selec(
  * Both the mcelem and array_data arrays are assumed presorted according
  * to the element type's cmpfunc.  Null elements are not present.
  */
-fn mcelem_array_contain_overlap_selec(
-    mcelem: &[Datum],
+fn mcelem_array_contain_overlap_selec<'mcx>(
+    mcx: Mcx<'mcx>,
+    mcelem: &[DatumV<'mcx>],
     nmcelem: i32,
     mut numbers: Option<&[f32]>,
     nnumbers: i32,
-    array_data: &[Datum],
+    array_data: &[DatumV<'mcx>],
     nitems: i32,
     operator: Oid,
     typentry: &ElemCmpInfo,
@@ -843,7 +978,12 @@ fn mcelem_array_contain_overlap_selec(
 
         /* Ignore any duplicates in the array data. */
         if i > 0
-            && element_compare(array_data[(i - 1) as usize], array_data[i as usize], typentry)? == 0
+            && element_compare(
+                mcx,
+                &array_data[(i - 1) as usize],
+                &array_data[i as usize],
+                typentry,
+            )? == 0
         {
             i += 1;
             continue;
@@ -852,17 +992,19 @@ fn mcelem_array_contain_overlap_selec(
         /* Find the smallest MCELEM >= this array item. */
         if use_bsearch {
             is_match = find_next_mcelem(
+                mcx,
                 mcelem,
                 nmcelem,
-                array_data[i as usize],
+                &array_data[i as usize],
                 &mut mcelem_index,
                 typentry,
             )?;
         } else {
             while mcelem_index < nmcelem {
                 let cmp = element_compare(
-                    mcelem[mcelem_index as usize],
-                    array_data[i as usize],
+                    mcx,
+                    &mcelem[mcelem_index as usize],
+                    &array_data[i as usize],
                     typentry,
                 )?;
 
@@ -923,13 +1065,13 @@ fn mcelem_array_contain_overlap_selec(
  *
  * (See array_selfuncs.c for the full distribution-law derivation.)
  */
-fn mcelem_array_contained_selec(
-    mcx: Mcx<'_>,
-    mcelem: &[Datum],
+fn mcelem_array_contained_selec<'mcx>(
+    mcx: Mcx<'mcx>,
+    mcelem: &[DatumV<'mcx>],
     nmcelem: i32,
     numbers: Option<&[f32]>,
     nnumbers: i32,
-    array_data: &[Datum],
+    array_data: &[DatumV<'mcx>],
     nitems: i32,
     hist: Option<&[f32]>,
     nhist: i32,
@@ -999,7 +1141,12 @@ fn mcelem_array_contained_selec(
 
         /* Ignore any duplicates in the array data. */
         if i > 0
-            && element_compare(array_data[(i - 1) as usize], array_data[i as usize], typentry)? == 0
+            && element_compare(
+                mcx,
+                &array_data[(i - 1) as usize],
+                &array_data[i as usize],
+                typentry,
+            )? == 0
         {
             i += 1;
             continue;
@@ -1012,8 +1159,9 @@ fn mcelem_array_contained_selec(
          */
         while mcelem_index < nmcelem {
             let cmp = element_compare(
-                mcelem[mcelem_index as usize],
-                array_data[i as usize],
+                mcx,
+                &mcelem[mcelem_index as usize],
+                &array_data[i as usize],
                 typentry,
             )?;
 
@@ -1352,10 +1500,11 @@ fn floor_log2(mut n: u32) -> i32 {
  * assume the mcelem elements are distinct so there can't be more than one
  * exact match.)
  */
-fn find_next_mcelem(
-    mcelem: &[Datum],
+fn find_next_mcelem<'mcx>(
+    mcx: Mcx<'mcx>,
+    mcelem: &[DatumV<'mcx>],
     nmcelem: i32,
-    value: Datum,
+    value: &DatumV<'mcx>,
     index: &mut i32,
     typentry: &ElemCmpInfo,
 ) -> PgResult<bool> {
@@ -1366,7 +1515,7 @@ fn find_next_mcelem(
 
     while l <= r {
         i = (l + r) / 2;
-        res = element_compare(mcelem[i as usize], value, typentry)?;
+        res = element_compare(mcx, &mcelem[i as usize], value, typentry)?;
         if res == 0 {
             *index = i;
             return Ok(true);
@@ -1399,17 +1548,21 @@ fn float_compare_desc(d1: f32, d2: f32) -> i32 {
 /// (array_selfuncs.c:476). Sorts the Datums using the element type's default
 /// comparison proc (via the fmgr seam). A comparator error cannot be raised
 /// from a Rust `sort_by` closure, so it is captured and surfaced after the sort.
-fn qsort_arg_datum(slice: &mut [Datum], typentry: &ElemCmpInfo) -> PgResult<()> {
+fn qsort_arg_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    slice: &mut [DatumV<'mcx>],
+    typentry: &ElemCmpInfo,
+) -> PgResult<()> {
     if slice.len() <= 1 {
         return Ok(());
     }
 
     let mut err: Option<PgError> = None;
-    slice.sort_by(|&a, &b| {
+    slice.sort_by(|a, b| {
         if err.is_some() {
             return core::cmp::Ordering::Equal;
         }
-        match element_compare(a, b, typentry) {
+        match element_compare(mcx, a, b, typentry) {
             Ok(c) => c.cmp(&0),
             Err(e) => {
                 err = Some(e);

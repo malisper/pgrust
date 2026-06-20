@@ -18793,6 +18793,7 @@ dependencies = [
  "types-nodes",
  "types-pathnodes",
  "types-selfuncs",
+ "types-tuple",
 ]
 
 [[package]]
