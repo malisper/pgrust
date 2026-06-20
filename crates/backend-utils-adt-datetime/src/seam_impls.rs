@@ -497,6 +497,20 @@ fn seam_timestamptz_pl_interval(
     crate::timestamp::timestamptz_pl_interval(timestamp, &span)
 }
 
+/// `interval_lerp(lo, hi, pct)` — linear interpolation between two intervals
+/// (orderedsetaggs.c). Faithful to the C `DirectFunctionCall2` chain:
+/// `diff = interval_mi(hi, lo); mul = interval_mul(diff, pct);
+/// result = interval_pl(mul, lo)`.
+fn seam_interval_lerp(
+    lo: types_datetime::Interval,
+    hi: types_datetime::Interval,
+    pct: f64,
+) -> types_error::PgResult<types_datetime::Interval> {
+    let diff = crate::interval::interval_mi(&hi, &lo)?;
+    let mul = crate::interval::interval_mul(&diff, pct)?;
+    crate::interval::interval_pl(&mul, &lo)
+}
+
 // ---------------------------------------------------------------------------
 // Install every inward seam this unit owns.
 // ---------------------------------------------------------------------------
@@ -506,6 +520,7 @@ pub fn init_seams() {
     ts::get_current_timestamp::set(crate::timestamp::GetCurrentTimestamp);
     ts::timestamptz_to_time_t::set(crate::convert::timestamptz_to_time_t);
     ts::timestamptz_pl_interval::set(seam_timestamptz_pl_interval);
+    ts::interval_lerp::set(seam_interval_lerp);
     ts::parse_recovery_target_time::set(parse_recovery_target_time);
     ts::timestamp_difference::set(timestamp_difference);
     ts::timestamp_difference_exceeds::set(timestamp_difference_exceeds);

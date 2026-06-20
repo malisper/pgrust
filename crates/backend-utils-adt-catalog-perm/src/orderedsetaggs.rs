@@ -43,6 +43,7 @@ use backend_executor_nodeAgg_aggapi_seams as aggapi;
 use backend_utils_sort_tuplesort_seams as tsort;
 
 const FLOAT8OID: Oid = 701;
+const INTERVALOID: Oid = 1186;
 const AGG_CONTEXT_AGGREGATE: i32 = 1;
 
 pub mod mode;
@@ -495,8 +496,66 @@ fn fc_percentile_disc_final(fcinfo: &mut FunctionCallInfoBaseData) -> Word {
     result
 }
 
-/// `percentile_cont_float8_final(PG_FUNCTION_ARGS)` (3975).
-fn fc_percentile_cont_float8_final(fcinfo: &mut FunctionCallInfoBaseData) -> Word {
+/// `LerpFunc` (C `typedef Datum (*LerpFunc)(Datum lo, Datum hi, double pct)`):
+/// interpolate between two consecutive sorted values as canonical `CDatum`s.
+type LerpFunc = fn(CDatum<'_>, CDatum<'_>, f64) -> CDatum<'static>;
+
+/// `float8_lerp(lo, hi, pct)` (502): the by-value float8 interpolator.
+fn float8_lerp_cdatum(lo: CDatum<'_>, hi: CDatum<'_>, pct: f64) -> CDatum<'static> {
+    let v = float8_lerp(lo.as_f64(), hi.as_f64(), pct);
+    CDatum::from_usize(Word::from_f64(v).as_usize())
+}
+
+/// `interval_lerp(lo, hi, pct)` (511): interpolate two `interval` values via the
+/// `timestamp.c` `interval_mi`/`interval_mul`/`interval_pl` arithmetic seam. The
+/// by-ref interval is carried as its 16-byte LE image on the `CDatum::ByRef`
+/// lane.
+fn interval_lerp_cdatum(lo: CDatum<'_>, hi: CDatum<'_>, pct: f64) -> CDatum<'static> {
+    let lo_iv = cdatum_to_interval(&lo);
+    let hi_iv = cdatum_to_interval(&hi);
+    let result = ok(backend_utils_adt_timestamp_seams::interval_lerp::call(
+        lo_iv, hi_iv, pct,
+    ));
+    interval_to_cdatum(&result)
+}
+
+/// Decode a 16-byte interval image off the by-ref lane into an `Interval`.
+fn cdatum_to_interval(d: &CDatum<'_>) -> types_datetime::Interval {
+    match d {
+        CDatum::ByRef(v) => {
+            let b: alloc::vec::Vec<u8> = v.iter().copied().collect();
+            if b.len() < 16 {
+                raise(PgError::error("interval image < 16 bytes"));
+            }
+            types_datetime::Interval {
+                time: i64::from_le_bytes(b[0..8].try_into().unwrap()),
+                day: i32::from_le_bytes(b[8..12].try_into().unwrap()),
+                month: i32::from_le_bytes(b[12..16].try_into().unwrap()),
+            }
+        }
+        _ => raise(PgError::error(
+            "percentile_cont(interval): sort value is not a by-reference interval",
+        )),
+    }
+}
+
+/// Encode an `Interval` to its 16-byte LE image on the by-ref lane.
+fn interval_to_cdatum(iv: &types_datetime::Interval) -> CDatum<'static> {
+    let mcx = leak_ctx("percentile interval result");
+    let mut img = alloc::vec::Vec::with_capacity(16);
+    img.extend_from_slice(&iv.time.to_le_bytes());
+    img.extend_from_slice(&iv.day.to_le_bytes());
+    img.extend_from_slice(&iv.month.to_le_bytes());
+    CDatum::ByRef(vec_in(mcx, &img))
+}
+
+/// `percentile_cont_final_common(fcinfo, expect_type, lerpfunc)` (525) — the
+/// shared continuous-percentile finalfn body for both float8 and interval.
+fn percentile_cont_final_common(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    expect_type: Oid,
+    lerpfunc: LerpFunc,
+) -> Word {
     if arg_isnull(fcinfo, 1) {
         return ret_null(fcinfo);
     }
@@ -512,7 +571,7 @@ fn fc_percentile_cont_float8_final(fcinfo: &mut FunctionCallInfoBaseData) -> Wor
         restash(fcinfo, osastate);
         return ret_null(fcinfo);
     }
-    if osastate.qstate.sort_col_type != FLOAT8OID {
+    if osastate.qstate.sort_col_type != expect_type {
         raise(PgError::error("percentile_cont: type mismatch"));
     }
 
@@ -537,10 +596,9 @@ fn fc_percentile_cont_float8_final(fcinfo: &mut FunctionCallInfoBaseData) -> Wor
         restash(fcinfo, osastate);
         return ret_null(fcinfo);
     }
-    let first = first_val.as_f64();
 
-    let val = if first_row == second_row {
-        first
+    let val: CDatum<'static> = if first_row == second_row {
+        clone_cdatum_static(&first_val)
     } else {
         let (found2, second_val, isnull2) = with_sortstate_mut(osastate.sort_id, |s| {
             ok(tsort::tuplesort_getdatum::call(s, true, true))
@@ -553,11 +611,39 @@ fn fc_percentile_cont_float8_final(fcinfo: &mut FunctionCallInfoBaseData) -> Wor
             return ret_null(fcinfo);
         }
         let proportion = (percentile * (n - 1.0)) - first_row as f64;
-        float8_lerp(first, second_val.as_f64(), proportion)
+        lerpfunc(
+            clone_cdatum_static(&first_val),
+            clone_cdatum_static(&second_val),
+            proportion,
+        )
     };
 
+    let result = ret_sort_cdatum(fcinfo, val, &osastate.qstate);
     restash(fcinfo, osastate);
-    Word::from_f64(val)
+    result
+}
+
+/// Clone a fetched sort `CDatum` to a `'static` value (by-ref images copy into a
+/// leaked group context, matching the rest of the datum-path lane).
+fn clone_cdatum_static(d: &CDatum<'_>) -> CDatum<'static> {
+    match d {
+        CDatum::ByVal(w) => CDatum::from_usize(*w),
+        CDatum::ByRef(v) => {
+            let mcx = leak_ctx("percentile cont value");
+            CDatum::ByRef(vec_in(mcx, &v.iter().copied().collect::<alloc::vec::Vec<u8>>()))
+        }
+        _ => raise(PgError::error("percentile_cont: unexpected datum shape")),
+    }
+}
+
+/// `percentile_cont_float8_final(PG_FUNCTION_ARGS)` (3975 / C 612).
+fn fc_percentile_cont_float8_final(fcinfo: &mut FunctionCallInfoBaseData) -> Word {
+    percentile_cont_final_common(fcinfo, FLOAT8OID, float8_lerp_cdatum)
+}
+
+/// `percentile_cont_interval_final(PG_FUNCTION_ARGS)` (3977 / C 622).
+fn fc_percentile_cont_interval_final(fcinfo: &mut FunctionCallInfoBaseData) -> Word {
+    percentile_cont_final_common(fcinfo, INTERVALOID, interval_lerp_cdatum)
 }
 
 /// `float8_lerp(lo, hi, pct) = lo + pct * (hi - lo)`.
@@ -593,6 +679,9 @@ pub fn register_orderedset_builtins() {
         entry(3973, "percentile_disc_final", 3, |fc| Ok(fc_percentile_disc_final(fc))),
         entry(3975, "percentile_cont_float8_final", 2, |fc| {
             Ok(fc_percentile_cont_float8_final(fc))
+        }),
+        entry(3977, "percentile_cont_interval_final", 2, |fc| {
+            Ok(fc_percentile_cont_interval_final(fc))
         }),
         entry(3979, "percentile_disc_multi_final", 3, |fc| {
             Ok(multi::fc_percentile_disc_multi_final(fc))

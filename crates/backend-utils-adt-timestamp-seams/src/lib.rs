@@ -34,6 +34,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `interval_lerp(lo, hi, pct)` (`utils/adt/orderedsetaggs.c`): linearly
+    /// interpolate between two `interval` values — `lo + pct*(hi - lo)` — built
+    /// from the `interval_mi`/`interval_mul`/`interval_pl` arithmetic owned by
+    /// `timestamp.c` (C: `DirectFunctionCall2(interval_mi, hi, lo)` etc.). The
+    /// ordered-set `percentile_cont(interval)` finalfn reaches it this way. `Err`
+    /// carries the `interval out of range` `ereport(ERROR)` the arithmetic raises.
+    pub fn interval_lerp(
+        lo: Interval,
+        hi: Interval,
+        pct: f64,
+    ) -> types_error::PgResult<Interval>
+);
+
+seam_core::seam!(
     /// Syntax-only timestamp parse used by `check_recovery_target_time`
     /// (xlogrecovery.c:4948): `ParseDateTime` + `DecodeDateTime` and a final
     /// `tm2timestamp` range check, returning `true` when the string parses to a
