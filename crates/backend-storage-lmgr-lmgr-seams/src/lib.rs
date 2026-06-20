@@ -239,26 +239,32 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `UnlockRelationForExtension(rel, ExclusiveLock)` (lmgr.c) — the release
-    /// half, reached only through [`RelationExtensionLockGuard`].
-    pub fn unlock_relation_for_extension(relid: Oid) -> PgResult<()>
+    /// half, reached only through [`RelationExtensionLockGuard`]. The release tag
+    /// must use the same `lockRelId` (both `dbId` and `relId`) that acquisition
+    /// recorded; a shared relation (e.g. `pg_shdepend`) acquires with
+    /// `dbId = InvalidOid`, so the guard carries `dbId` through to match.
+    pub fn unlock_relation_for_extension(dbid: Oid, relid: Oid) -> PgResult<()>
 );
 
 /// A held relation-extension lock. Releasing it (explicitly or on unwind)
 /// delegates to `UnlockRelationForExtension`. Constructed by the lmgr owner
-/// when installing `lock_relation_for_extension`.
+/// when installing `lock_relation_for_extension`. Carries the full `lockRelId`
+/// (`dbId`, `relId`) so release rebuilds the exact tag acquisition used — for a
+/// shared relation `dbId` is `InvalidOid`, not `MyDatabaseId`.
 #[derive(Debug)]
-pub struct RelationExtensionLockGuard(Option<Oid>);
+pub struct RelationExtensionLockGuard(Option<(Oid, Oid)>);
 
 impl RelationExtensionLockGuard {
-    /// Guard for a lock just acquired on the relation with this OID.
-    pub fn new(relid: Oid) -> Self {
-        RelationExtensionLockGuard(Some(relid))
+    /// Guard for a lock just acquired on the relation with this `lockRelId`
+    /// (`dbId`, `relId`).
+    pub fn new(dbid: Oid, relid: Oid) -> Self {
+        RelationExtensionLockGuard(Some((dbid, relid)))
     }
 
     /// Explicit early release — the C `UnlockRelationForExtension`.
     pub fn release(mut self) -> PgResult<()> {
         match self.0.take() {
-            Some(relid) => unlock_relation_for_extension::call(relid),
+            Some((dbid, relid)) => unlock_relation_for_extension::call(dbid, relid),
             None => Ok(()),
         }
     }
@@ -266,8 +272,8 @@ impl RelationExtensionLockGuard {
 
 impl Drop for RelationExtensionLockGuard {
     fn drop(&mut self) {
-        if let Some(relid) = self.0.take() {
-            let _ = unlock_relation_for_extension::call(relid);
+        if let Some((dbid, relid)) = self.0.take() {
+            let _ = unlock_relation_for_extension::call(dbid, relid);
         }
     }
 }

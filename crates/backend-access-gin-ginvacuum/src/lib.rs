@@ -1266,7 +1266,7 @@ pub fn ginvacuumcleanup<'mcx>(
     }
     let npages = relation_get_number_of_blocks(index)?;
     if need_lock {
-        unlock_relation_for_extension(index.rd_id)?;
+        unlock_relation_for_extension(index)?;
     }
 
     let mut tot_free_pages: BlockNumber = 0;
@@ -1312,7 +1312,7 @@ pub fn ginvacuumcleanup<'mcx>(
     }
     stats.num_pages = relation_get_number_of_blocks(index)?;
     if need_lock {
-        unlock_relation_for_extension(index.rd_id)?;
+        unlock_relation_for_extension(index)?;
     }
 
     Ok(Some(stats))
@@ -1369,8 +1369,8 @@ fn lock_relation_for_extension<'mcx>(rel: &Relation<'mcx>) -> PgResult<()> {
     core::mem::forget(guard);
     Ok(())
 }
-fn unlock_relation_for_extension(relid: Oid) -> PgResult<()> {
-    backend_storage_lmgr_lmgr_seams::unlock_relation_for_extension::call(relid)
+fn unlock_relation_for_extension<'mcx>(rel: &Relation<'mcx>) -> PgResult<()> {
+    backend_storage_lmgr_lmgr_seams::unlock_relation_for_extension::call(rel.rd_locator.dbOid, rel.rd_id)
 }
 fn relation_get_number_of_blocks<'mcx>(rel: &Relation<'mcx>) -> PgResult<BlockNumber> {
     backend_utils_cache_relcache_seams::relation_get_number_of_blocks::call(rel)

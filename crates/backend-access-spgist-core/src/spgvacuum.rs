@@ -962,7 +962,7 @@ fn spgvacuumscan<'mcx>(
         }
         num_pages = relation_get_number_of_blocks(&index)?;
         if need_lock {
-            unlock_relation_for_extension(index.rd_id)?;
+            unlock_relation_for_extension(&index)?;
         }
 
         // Quit if we've scanned the whole relation.
@@ -1177,8 +1177,8 @@ fn lock_relation_for_extension<'mcx>(rel: &Relation<'mcx>) -> PgResult<()> {
 }
 /// `UnlockRelationForExtension(rel, ExclusiveLock)`.
 #[inline]
-fn unlock_relation_for_extension(relid: Oid) -> PgResult<()> {
-    lmgr::unlock_relation_for_extension::call(relid)
+fn unlock_relation_for_extension<'mcx>(rel: &Relation<'mcx>) -> PgResult<()> {
+    lmgr::unlock_relation_for_extension::call(rel.rd_locator.dbOid, rel.rd_id)
 }
 /// `RelationGetNumberOfBlocks(index)`.
 #[inline]
