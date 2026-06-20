@@ -1618,6 +1618,12 @@ pub fn init_seams() {
     backend_optimizer_util_plancat_seams::estimate_rel_size::set(seam_estimate_rel_size);
     backend_optimizer_util_plancat_seams::get_rel_data_width::set(seam_get_rel_data_width);
 
+    // `estimate_rel_size(indexRelation, NULL, ...)` — the index variant of size
+    // estimation get_relation_info uses for a partial/expression index. Owned
+    // here because the RELKIND_INDEX branch of estimate_rel_size lives in
+    // plancat.c (indexes do not go through the table-AM dispatch).
+    ext::table_relation_estimate_size_for_index::set(seam_table_relation_estimate_size_for_index);
+
     // Seams other crates declared awaiting plancat's logic.
     backend_optimizer_util_relnode_ext_seams::get_relation_info::set(seam_get_relation_info);
     backend_optimizer_path_allpaths::seams::relation_excluded_by_constraints::set(
@@ -1664,6 +1670,50 @@ fn seam_estimate_rel_size(
     rel: &types_rel::Relation<'_>,
 ) -> PgResult<(BlockNumber, f64, f64)> {
     estimate_rel_size_impl(rel, None, 0)
+}
+
+/// `estimate_rel_size(indexRelation, NULL, &pages, &tuples, &allvisfrac)`
+/// (plancat.c) for an index relation opened by OID — the index variant of size
+/// estimation used by `get_relation_info` for a partial/expression index (its
+/// `indpred` is non-empty, so the plain `index_number_of_blocks` shortcut is not
+/// taken). C opens the index with `index_open` and calls the SAME
+/// `estimate_rel_size` body; the `RELKIND_INDEX` branch of
+/// [`estimate_rel_size_impl`] supplies the metapage-discounted page/tuple/
+/// allvisfrac math. `attr_widths` is `NULL` (C passes NULL here), so the
+/// no-stats sub-branch estimates the index tuple width from the index relation's
+/// own attribute datatypes.
+fn seam_table_relation_estimate_size_for_index(
+    indexoid: Oid,
+) -> PgResult<(BlockNumber, f64, f64)> {
+    // `index_open(indexoid, NoLock)` — project the index relcache entry to a
+    // borrowed `Relation` value (no close authority; the caller in
+    // get_relation_info owns the lock/open lifecycle). Mirrors the
+    // heapam-handler table-AM estimator's open-by-OID pattern.
+    let scratch = mcx::MemoryContext::new("table_relation_estimate_size_for_index");
+    let data = backend_utils_cache_relcache_seams::relation_id_get_relation::call(
+        scratch.mcx(),
+        indexoid,
+    )?
+    .expect("table_relation_estimate_size_for_index: index must exist in relcache");
+    let rel = types_rel::Relation::open(data, None);
+
+    // `estimate_rel_size(rel, NULL, ...)` — relkind is RELKIND_INDEX, so the
+    // impl takes its index branch. The index branch only reaches
+    // get_rel_data_width_impl when reltuples < 0; an index's attrs are all
+    // positive attnos, so the `i - min_attr` cache index lands the same with a
+    // base of FirstLowInvalidHeapAttributeNumber+1 as C's
+    // `attr_widths - rel->min_attr`.
+    let min_attr = (FirstLowInvalidHeapAttributeNumber + 1) as AttrNumber;
+    let result = estimate_rel_size_impl(&rel, None, min_attr);
+
+    // `relation_id_get_relation` took a fresh pin; release it explicitly
+    // (`index_close(indexRelation, NoLock)`), like the table estimator. Without
+    // this the pin leaks once per planning of any query touching a partial/
+    // expression index, surfacing later as CheckTableNotInUse refusing a
+    // same-session DROP/TRUNCATE.
+    backend_utils_cache_relcache_seams::relation_close::call(indexoid)?;
+
+    result
 }
 
 fn seam_get_rel_data_width(rel: Oid, attr_widths: Option<&mut [i32]>) -> PgResult<i32> {
