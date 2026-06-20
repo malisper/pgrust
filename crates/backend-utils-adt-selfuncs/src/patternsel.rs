@@ -1042,6 +1042,92 @@ fn patternsel<'mcx>(
     )
 }
 
+/// `like_regex_support(rawreq, ptype)` (like_support.c) — the
+/// `SupportRequestSelectivity` branch only: make a function-call selectivity
+/// estimate, just as we'd do if the call were via the corresponding operator.
+/// This is what a `prosupport` selectivity request (e.g. `starts_with` via
+/// `text_starts_with_support` with `Pattern_Type_Prefix`) resolves to. The C
+/// `is_join` branch punts to `DEFAULT_MATCH_SEL`; the restriction branch shares
+/// code with the operator restriction estimators via `patternsel_common`
+/// (oprid = InvalidOid, the support call has only the funcid).
+#[allow(clippy::too_many_arguments)]
+pub fn like_regex_support_selectivity<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    funcid: Oid,
+    args: &[NodeId],
+    var_relid: i32,
+    inputcollid: Oid,
+    is_join: bool,
+    ptype: PatternType,
+) -> PgResult<f64> {
+    if is_join {
+        // For the moment we just punt. If patternjoinsel is ever improved to do
+        // better, this should be made to call it.
+        Ok(DEFAULT_MATCH_SEL)
+    } else {
+        // Share code with operator restriction selectivity functions.
+        patternsel_common(
+            mcx,
+            run,
+            root,
+            InvalidOid,
+            funcid,
+            args,
+            var_relid,
+            inputcollid,
+            ptype,
+            false,
+        )
+    }
+}
+
+/// `function_selectivity`'s `SupportRequestSelectivity` dispatch
+/// (plancat.c -> the function's prosupport). Resolves the function's
+/// `prosupport` (`get_func_support(funcid)`) and, for the like_support.c
+/// pattern support functions, runs the selectivity estimate via
+/// [`like_regex_support_selectivity`] with the prosupport's baked-in pattern
+/// type. Returns `Some(selectivity)` when this unit owns the support function;
+/// `None` (the C "support function fails, use default" path) otherwise.
+#[allow(clippy::too_many_arguments)]
+pub fn func_selectivity_support<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    funcid: Oid,
+    args: &[NodeId],
+    var_relid: i32,
+    inputcollid: Oid,
+    is_join: bool,
+) -> PgResult<Option<f64>> {
+    let prosupport = lsc::get_func_support::call(funcid)?;
+    // Map the function's prosupport (the C `*_support` entry point that bakes in
+    // a Pattern_Type) to its pattern type. Only the like_support.c pattern
+    // support functions implement a SupportRequestSelectivity branch; any other
+    // prosupport returns NULL there, i.e. the historical-default path.
+    let ptype = match prosupport {
+        x if x == F_TEXTLIKE_SUPPORT => PatternType::Like,
+        x if x == F_TEXTICLIKE_SUPPORT => PatternType::LikeIc,
+        x if x == F_TEXTREGEXEQ_SUPPORT => PatternType::Regex,
+        x if x == F_TEXTICREGEXEQ_SUPPORT => PatternType::RegexIc,
+        x if x == F_TEXT_STARTS_WITH_SUPPORT => PatternType::Prefix,
+        _ => return Ok(None),
+    };
+    let sel = like_regex_support_selectivity(
+        mcx,
+        run,
+        root,
+        funcid,
+        args,
+        var_relid,
+        inputcollid,
+        is_join,
+        ptype,
+    )?;
+    Ok(Some(sel))
+}
+
 macro_rules! patternsel_entry {
     ($name:ident, $ptype:expr, $negate:expr, $doc:literal) => {
         #[doc = $doc]

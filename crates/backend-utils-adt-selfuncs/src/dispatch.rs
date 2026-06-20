@@ -223,25 +223,37 @@ pub fn call_oprjoin<'mcx>(
 }
 
 /// `function_selectivity`'s `SupportRequestSelectivity` dispatch over
-/// `get_func_support(funcid)`. No support-function estimator is ported, so this
-/// is seam-and-panic — but `function_selectivity` only reaches it when the
-/// function actually has a `prosupport` (else it returns the 0.3333333
-/// default before calling), so a function without support never panics.
+/// `get_func_support(funcid)`. The like_support.c pattern support functions
+/// (`textlike_support`/`texticlike_support`/`textregexeq_support`/
+/// `texticregexeq_support`/`text_starts_with_support`) implement a
+/// `SupportRequestSelectivity` branch that shares code with the operator
+/// restriction estimators via `patternsel_common`; this delegates to it.
+/// Returns `Some(selectivity)` when this unit owns the support function, or
+/// `None` (the C "support function fails, use default 0.3333333" path) for any
+/// other prosupport.
+///
+/// `function_selectivity` only reaches here when `get_func_support(funcid)` is
+/// valid (else it returns the default before calling).
 pub fn call_func_selectivity_support<'mcx>(
-    _run: &PlannerRun<'mcx>,
-    _root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     funcid: Oid,
-    _args: &[NodeId],
-    _inputcollid: Oid,
-    _is_join: bool,
-    _var_relid: i32,
+    args: &[NodeId],
+    inputcollid: Oid,
+    is_join: bool,
+    var_relid: i32,
     _jointype: i16,
     _sjinfo: Option<&SpecialJoinInfo>,
 ) -> PgResult<Option<f64>> {
-    panic!(
-        "selfuncs: call_func_selectivity_support is unported — the SupportRequestSelectivity \
-         support-function dispatch for funcid {funcid} (the prosupport selectivity estimators) \
-         has no owner; function_selectivity reaches this only when get_func_support(funcid) is set"
+    crate::patternsel::func_selectivity_support(
+        run.mcx(),
+        run,
+        root,
+        funcid,
+        args,
+        var_relid,
+        inputcollid,
+        is_join,
     )
 }
 
