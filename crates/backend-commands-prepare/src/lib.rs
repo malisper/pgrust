@@ -56,6 +56,7 @@ use types_error::{
 use types_nodes::nodes::{CmdType, Node};
 use types_nodes::primnodes::Expr;
 use types_nodes::EStateData;
+use types_nodes::executor::EXEC_FLAG_WITH_NO_DATA;
 use types_explain::ExplainState;
 use types_nodes::params::ParamListInfo;
 use types_nodes::parsestmt::{
@@ -193,11 +194,11 @@ pub fn PrepareQuery<'mcx>(
     if nargs != 0 {
         for tn in stmt.argtypes.iter() {
             // C: typenameTypeId(pstate, tn). The grammar carries each argtype as
-            // a `Node::TypeName(rawnodes::TypeName)`; the seam mirrors
-            // PostgreSQL's own typenameTypeId(NULL, typeName) entry point (it
-            // reads only the TypeName, so pstate is not threaded across).
+            // a `Node::TypeName(rawnodes::TypeName)`; thread `pstate` so a bad
+            // argtype's "type does not exist" error carries the source-text
+            // cursor position (`parser_errposition(pstate, typeName->location)`).
             let raw_tn = (**tn).expect_typename();
-            let toid = parsetype_seam::typename_type_id_raw::call(raw_tn)?;
+            let toid = parsetype_seam::typename_type_id_raw_pstate::call(pstate, raw_tn)?;
             argtypes.push(toid);
         }
     }
@@ -242,7 +243,14 @@ pub fn ExecuteQuery<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'mcx>,
     stmt: &ExecuteStmt<'mcx>,
-    into_clause: Option<&IntoClause<'mcx>>,
+    // `Some(skipData)` selects the `CREATE TABLE ... AS EXECUTE` path. C passes
+    // the whole `IntoClause *`, but the only field this function reads is
+    // `intoClause->skipData` (directly, and through `GetIntoRelEFlags`, whose
+    // sole input is `skipData`), so the owned port carries just that bit. This
+    // lets the standalone-EXECUTE caller and the CTAS-EXECUTE seam (whose
+    // `IntoClause` is the `ddlnodes` view, distinct from `parsestmt`) share one
+    // implementation without bridging the two `IntoClause` newtypes.
+    into_skip_data: Option<bool>,
     params: ParamListInfo,
     dest: DestReceiverHandle,
     qc: Option<&mut QueryCompletion>,
@@ -316,7 +324,7 @@ pub fn ExecuteQuery<'mcx>(
 
     // For CREATE TABLE ... AS EXECUTE, verify the statement produces tuples
     // (a plain SELECT) and set the proper eflags / fetch count.
-    if let Some(into) = into_clause {
+    if let Some(skip_data) = into_skip_data {
         // if (list_length(plan_list) != 1) ereport(ERROR, ... "not a SELECT");
         if plan_list.len() != 1 {
             return Err(PgError::error("prepared statement is not a SELECT")
@@ -330,11 +338,12 @@ pub fn ExecuteQuery<'mcx>(
                 .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE));
         }
 
-        // eflags = GetIntoRelEFlags(intoClause);
-        eflags = createas_seam::get_into_rel_eflags::call(into)?;
+        // eflags = GetIntoRelEFlags(intoClause);  — the C helper's sole input is
+        // intoClause->skipData (createas.c:374-383).
+        eflags = if skip_data { EXEC_FLAG_WITH_NO_DATA } else { 0 };
 
         // if (intoClause->skipData) count = 0; else count = FETCH_ALL;
-        if into.skipData {
+        if skip_data {
             count = 0;
         } else {
             count = FETCH_ALL;
@@ -1056,6 +1065,41 @@ fn execute_query_arm<'mcx>(
     ExecuteQuery(mcx, pstate, s, None, params, dest, qc)
 }
 
+/// `ExecuteQuery(pstate, estmt, into, params, dest, qc)` — the
+/// `CREATE TABLE ... AS EXECUTE` leg, called from `createas.c`'s
+/// `ExecCreateTableAs` through the `backend_commands_createas_seams::execute_query`
+/// seam. C passes the whole `IntoClause *`; the owned port forwards only
+/// `into->skipData` (the sole field `ExecuteQuery` reads on the CTAS path, see
+/// `into_skip_data`). The CTAS receiver (`DR_intorel`) has already been bound to
+/// `into` by `ExecCreateTableAs` before this runs, so `dest` carries it.
+fn execute_query_ctas_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    estmt: ExecuteStmt<'mcx>,
+    into: types_nodes::ddlnodes::IntoClause<'mcx>,
+    _query_string: &str,
+    params: ParamListInfo,
+    dest: DestReceiverHandle,
+    qc: Option<QueryCompletion>,
+) -> PgResult<Option<QueryCompletion>> {
+    // pstate = make_parsestate(NULL); pstate->p_sourcetext = queryString;
+    // (ExecuteQuery only uses the ParseState for EvaluateParams' transformExpr,
+    // which needs it for error positions; a fresh empty ParseState matches C's
+    // make_parsestate(NULL).)
+    let pstate = ParseState::new(mcx)?;
+    // (void) ExecuteQuery(pstate, estmt, into, params, dest, completionTag);
+    let mut qc_owned = qc;
+    ExecuteQuery(
+        mcx,
+        &pstate,
+        &estmt,
+        Some(into.skipData),
+        params,
+        dest,
+        qc_owned.as_mut(),
+    )?;
+    Ok(qc_owned)
+}
+
 /// `case T_ExecuteStmt:` arm of `UtilityReturnsTuples` (utility.c). The C
 /// predicate is infallible (it only reads prepared-statement state); an `Err`
 /// here is an internal-invariant violation, surfaced as a panic.
@@ -1095,4 +1139,7 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::deallocate_query::set(deallocate_query_arm);
     backend_tcop_utility_out_seams::execute_stmt_has_result::set(execute_stmt_has_result_arm);
     backend_tcop_utility_out_seams::execute_stmt_result_desc::set(execute_stmt_result_desc_arm);
+    // `CREATE TABLE ... AS EXECUTE` leg, owned by `createas.c`'s `ExecuteQuery`
+    // (prepare.c) — createas-seams declares it; prepare installs it.
+    createas_seam::execute_query::set(execute_query_ctas_arm);
 }

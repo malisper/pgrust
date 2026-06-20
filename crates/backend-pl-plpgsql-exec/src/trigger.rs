@@ -31,19 +31,11 @@ const TRIGGER_EVENT_UPDATE: u32 = 0x0002;
 const TRIGGER_EVENT_TRUNCATE: u32 = 0x0003;
 const TRIGGER_EVENT_OPMASK: u32 = 0x0003;
 const TRIGGER_EVENT_ROW: u32 = 0x0004;
-// Timing bits (commands/trigger.h:102-105). AFTER is the *absence* of any
-// timing bit (0x0000), so these MUST be tested as
-// `(event & TRIGGER_EVENT_TIMINGMASK) == VALUE` (the C TRIGGER_FIRED_*
-// macros), never as a raw bit-AND — `event & TRIGGER_EVENT_AFTER` is always 0.
 const TRIGGER_EVENT_BEFORE: u32 = 0x0008;
 const TRIGGER_EVENT_AFTER: u32 = 0x0000;
 const TRIGGER_EVENT_INSTEAD: u32 = 0x0010;
 const TRIGGER_EVENT_TIMINGMASK: u32 = 0x0018;
 
-#[inline]
-fn fired_for_row(ev: u32) -> bool {
-    ev & TRIGGER_EVENT_ROW != 0
-}
 #[inline]
 fn fired_before(ev: u32) -> bool {
     ev & TRIGGER_EVENT_TIMINGMASK == TRIGGER_EVENT_BEFORE
@@ -55,6 +47,11 @@ fn fired_after(ev: u32) -> bool {
 #[inline]
 fn fired_instead(ev: u32) -> bool {
     ev & TRIGGER_EVENT_TIMINGMASK == TRIGGER_EVENT_INSTEAD
+}
+
+#[inline]
+fn fired_for_row(ev: u32) -> bool {
+    ev & TRIGGER_EVENT_ROW != 0
 }
 #[inline]
 fn fired_by_insert(ev: u32) -> bool {

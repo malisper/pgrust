@@ -1105,6 +1105,42 @@ pub fn init_seams() {
     backend_parser_scansup_seams::truncate_identifier::set(truncate_identifier);
     backend_parser_scansup_seams::downcase_truncate_identifier::set(downcase_truncate_identifier);
     backend_parser_analyze_seams::make_parsestate::set(make_parsestate);
+    backend_parser_small1_seams::coerce_param_hook::set(coerce_param_hook_seam);
+}
+
+/// `coerce_type`'s `pstate->p_coerce_param_hook(...)` dispatch (parse_coerce.c).
+/// C selects the installed hook by which `setup_parse_*_parameters` ran; the
+/// owned model dispatches on `pstate.p_ref_hook_state`. Only the
+/// variable-parameter case (`setup_parse_variable_parameters`) installs a
+/// coercion hook (`variable_coerce_param_hook`); the fixed-parameter, SQL-
+/// function, and no-hook cases have no `p_coerce_param_hook` (C: "no need to use
+/// p_coerce_param_hook"), so they return `None` to fall through to normal
+/// coercion — exactly what a NULL `p_coerce_param_hook` does.
+fn coerce_param_hook_seam(
+    pstate: &types_nodes::parsestmt::ParseState<'_>,
+    param: &types_nodes::primnodes::Param,
+    target_type_id: Oid,
+    target_type_mod: i32,
+    location: i32,
+) -> PgResult<Option<types_nodes::primnodes::Param>> {
+    match pstate.p_ref_hook_state.as_var_params() {
+        Some(parstate) => {
+            // VarParamState is an `Rc` carrier; clone it out so the call doesn't
+            // alias the `&pstate` borrow `variable_coerce_param_hook` also needs
+            // (for parser_errposition). The shared `Oid` array is the same.
+            let parstate = parstate.clone();
+            let mut p = param.clone();
+            variable_coerce_param_hook(
+                pstate,
+                &parstate,
+                &mut p,
+                target_type_id,
+                target_type_mod,
+                location,
+            )
+        }
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]

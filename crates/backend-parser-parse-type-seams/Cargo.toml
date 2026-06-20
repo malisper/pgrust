@@ -16,3 +16,4 @@ mcx = { path = "../mcx" }
 types-opclass = { path = "../types-opclass" }
 types-parsenodes = { path = "../types-parsenodes" }
 types-nodes = { path = "../types-nodes" }
+types-cluster = { path = "../types-cluster" }

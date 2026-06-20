@@ -13900,6 +13900,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-cluster",
  "types-core",
  "types-error",
  "types-nodes",
@@ -14095,6 +14096,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-cluster",
+ "types-core",
  "types-error",
  "types-nodes",
 ]
