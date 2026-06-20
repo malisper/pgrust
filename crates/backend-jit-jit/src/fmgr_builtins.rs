@@ -8,17 +8,11 @@
 //! / strict / retset are transcribed exactly from `pg_proc.dat`.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// A scratch context for cores that take an `Mcx`.
 fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("jit fmgr scratch")
-}
-
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -26,12 +20,10 @@ fn raise(err: types_error::PgError) -> ! {
 // ---------------------------------------------------------------------------
 
 /// `pg_jit_available()` (OID 315): no args, returns `bool`.
-fn fc_pg_jit_available(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_jit_available(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    match crate::pg_jit_available(m.mcx()) {
-        Ok(d) => d,
-        Err(e) => raise(e),
-    }
+    let d = crate::pg_jit_available(m.mcx())?;
+    Ok(d)
 }
 
 // ---------------------------------------------------------------------------
@@ -44,16 +36,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `jit.c` builtin (C: their `fmgr_builtins[]` rows). Called
@@ -62,7 +57,7 @@ fn builtin(
 /// `provolatile => 'v'`, no `proisstrict` (not strict), `prorettype => 'bool'`
 /// scalar (not retset).
 pub fn register_jit_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(315, "pg_jit_available", 0, true, false, fc_pg_jit_available),
     ]);
 }
