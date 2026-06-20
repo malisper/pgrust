@@ -1288,19 +1288,27 @@ mod recurrence_guard {
         // `heap_getattr`s it against the producing slot's descriptor — both
         // installed by backend-executor-execTuples::init_seams.)
         //
-        // DESIGN_DEBT (TD-FORCESTORE-HEAPTUPLE-DATALESS): `exec_force_store_heap_tuple`
-        // (`ExecForceStoreHeapTuple`) stays uninstalled. The seam carries
-        // `tuple: &HeapTupleData`, but the C body's non-heap-slot branch deforms
-        // the tuple (`heap_deform_tuple(tuple, slot->tts_tupleDescriptor,
-        // slot->tts_values, slot->tts_isnull)`) which needs the user-data area —
-        // and the owned `HeapTupleData` / its callers' `xs_hitup`
-        // (`tableam::IndexScanDesc.xs_hitup: HeapTuple`) carrier carry NO data
-        // area in this model (it lives only in `FormedTuple.data`). Installing a
-        // body that synthesizes an empty data area would silently mis-deform
-        // virtual/minimal target slots. Faithful install needs the tree-wide
-        // carrier-widen of `xs_hitup` (and the seam arg) from data-less
-        // `HeapTuple` to data-bearing `FormedTuple` — same class as the curTuple
-        // widen above, but it crosses the tableam relscan carrier (out of lane).
+        // DESIGN_DEBT (TD-FORCESTORE-HEAPTUPLE-DATALESS): the data-less
+        // `exec_force_store_heap_tuple` (`ExecForceStoreHeapTuple` over
+        // `tuple: &HeapTupleData`) stays uninstalled. The C body's non-heap-slot
+        // branch deforms the tuple (`heap_deform_tuple(tuple, ...)`) which needs
+        // the user-data area, and a bare `HeapTupleData` header carries none (it
+        // lives only in `FormedTuple.data`). The data-BEARING twin
+        // `exec_force_store_formed_heap_tuple` (over `FormedTuple`) IS installed
+        // by backend-executor-execTuples::init_seams. The ANALYZE sample path
+        // (commands/analyze.c FormIndexDatum), the index-only-scan `xs_hitup`
+        // store (nodeIndexonlyscan), and the KNN reorder-queue store
+        // (nodeIndexscan) are now routed through the formed twin — their carriers
+        // (`AnlIndexData` sample `FormedTuple`, the carrier-widened
+        // `IndexScanDesc.xs_hitup: Option<FormedTuple>` fed by GiST
+        // `recontup`/SPGiST `reconTups`, and `ReorderTuple.tuple: FormedTuple`)
+        // all keep the user-data area. The lone remaining consumer of the
+        // data-less seam is the MERGE/UPDATE wholerow-junk path
+        // (nodeModifyTable::merge_matched / exec / delete_exec), whose `oldtuple`
+        // comes from `datum_get_wholerow_heap_tuple` (itself uninstalled, so the
+        // path is unreachable). Unblocking it needs the separate `oldtuple`-chain
+        // carrier-widen across delete/update/merge + the wholerow seam — its own
+        // campaign, kept out of this lane.
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
         // backend-foreign-foreign owns foreign/foreign.c's READ accessors + the
         // FDW-routine resolution AND now the pg_foreign_* catalog-write/DDL seams

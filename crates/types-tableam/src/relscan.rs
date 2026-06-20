@@ -16,7 +16,8 @@ use types_core::primitive::{BlockNumber, InvalidBlockNumber};
 use types_rel::Relation;
 use types_snapshot::SnapshotData;
 use types_storage::RelFileLocator;
-use types_tuple::heaptuple::{HeapTuple, ItemPointerData, TupleDescData};
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
+use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
 use crate::amopaque::AmOpaque;
 use crate::genam::IndexScanInstrumentation;
@@ -220,7 +221,11 @@ pub struct IndexScanDescData<'mcx> {
     /// `struct TupleDescData *xs_itupdesc` — rowtype descriptor of `xs_itup`.
     pub xs_itupdesc: Option<Box<TupleDescData<'mcx>>>,
     /// `HeapTuple xs_hitup` — index data returned by the AM, as a HeapTuple.
-    pub xs_hitup: HeapTuple<'mcx>,
+    /// Owned as a data-bearing [`FormedTuple`] (header + user-data area) so the
+    /// index-only-scan store path can deform it into a virtual/minimal target
+    /// slot (`ExecForceStoreHeapTuple`); a bare `HeapTupleData` header cannot
+    /// reach the column bytes in the owned model.
+    pub xs_hitup: Option<FormedTuple<'mcx>>,
     /// `struct TupleDescData *xs_hitupdesc` — rowtype descriptor of `xs_hitup`.
     pub xs_hitupdesc: Option<Box<TupleDescData<'mcx>>>,
 

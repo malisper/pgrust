@@ -881,11 +881,15 @@ fn compute_index_stats<'mcx>(
             // Reset per-tuple context.
             exec_util_seam::reset_expr_context::call(&mut estate, econtext)?;
 
-            // Store the heap tuple in the slot.
-            slot_seam::exec_force_store_heap_tuple::call(
+            // Store the heap tuple in the slot. The sampled `rows[rowno]` is the
+            // full data-bearing FormedTuple, so route through the formed-tuple
+            // store seam (a partial/expression index's target slot is virtual and
+            // must be deformed from the user-data area).
+            let row_copy = rows[rowno].clone_in(mcx)?;
+            slot_seam::exec_force_store_formed_heap_tuple::call(
                 &mut estate,
                 slot,
-                &rows[rowno].tuple,
+                row_copy,
                 false,
             )?;
 

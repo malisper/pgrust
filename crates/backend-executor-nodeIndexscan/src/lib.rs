@@ -214,13 +214,14 @@ fn IndexNextWithReorder<'mcx>(
             if return_topmost {
                 let tuple = reorderqueue_pop(node, top_idx)?;
                 // Pass 'true', as the tuple in the queue is a palloc'd copy.
-                // ExecForceStoreHeapTuple(rt->htup, slot, true): the C HeapTuple
-                // is the FormedTuple's header (the user-data area rides along in
-                // the FormedTuple, kept alive by `tuple`).
-                execTuples::exec_force_store_heap_tuple::call(
+                // ExecForceStoreHeapTuple(rt->htup, slot, true): the reorder
+                // queue holds the full data-bearing FormedTuple, so route through
+                // the formed-tuple store seam (the user-data area is required to
+                // deform a virtual/minimal target slot).
+                execTuples::exec_force_store_formed_heap_tuple::call(
                     estate,
                     scan_slot,
-                    &tuple.tuple.tuple,
+                    tuple.tuple,
                     true,
                 )?;
                 return Ok(true);

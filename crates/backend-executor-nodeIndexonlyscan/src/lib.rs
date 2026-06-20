@@ -248,6 +248,9 @@ fn IndexOnlyNext<'mcx>(
             // Quick check on the number of fields (Assert in C):
             // slot->tts_tupleDescriptor->natts == scandesc->xs_hitupdesc->natts.
             // ExecForceStoreHeapTuple(scandesc->xs_hitup, slot, false);
+            // The owned `xs_hitup` is a data-bearing `FormedTuple`; route through
+            // the formed-tuple store seam so a virtual/minimal target slot can be
+            // deformed from the user-data area.
             let hitup = node
                 .ioss_ScanDesc
                 .as_ref()
@@ -256,7 +259,7 @@ fn IndexOnlyNext<'mcx>(
                 .as_ref()
                 .unwrap()
                 .clone();
-            execTuples::exec_force_store_heap_tuple::call(estate, scan_slot, &hitup, false)?;
+            execTuples::exec_force_store_formed_heap_tuple::call(estate, scan_slot, hitup, false)?;
         } else if has_itup {
             // StoreIndexTuple(node, slot, scandesc->xs_itup, scandesc->xs_itupdesc);
             StoreIndexTuple(node, estate, scan_slot, econtext)?;
