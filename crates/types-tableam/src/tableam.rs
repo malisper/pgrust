@@ -317,6 +317,30 @@ pub struct TableAmRoutine {
         bistate: Option<&mut BulkInsertStateData>,
     ) -> PgResult<()>,
 
+    /// `tuple_insert_speculative(mcx, rel, slot, cid, options, bistate,
+    /// specToken)` — speculatively insert `slot`, stamped with `spec_token`
+    /// (for ON CONFLICT arbiter-index resolution).
+    pub tuple_insert_speculative: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        slot: &mut SlotData<'mcx>,
+        cid: CommandId,
+        options: i32,
+        bistate: Option<&mut BulkInsertStateData>,
+        spec_token: u32,
+    ) -> PgResult<()>,
+
+    /// `tuple_complete_speculative(mcx, rel, slot, specToken, succeeded)` —
+    /// complete (`succeeded`) or kill (`!succeeded`) a previously speculatively
+    /// inserted tuple.
+    pub tuple_complete_speculative: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        slot: &mut SlotData<'mcx>,
+        spec_token: u32,
+        succeeded: bool,
+    ) -> PgResult<()>,
+
     /// `multi_insert(rel, slots, nslots, cid, options, bistate)`. The owned
     /// model takes the already-fetched per-slot heap tuples as the batch
     /// (`heap_multi_insert` does its own toasting/header stamping); on return the

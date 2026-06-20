@@ -49,7 +49,7 @@ use types_tuple::heaptuple::{HeapTupleHeaderData, ItemPointerData};
 use backend_access_heap_heapam as heapam;
 use backend_access_heap_heapam_seams::HeapUpdateResult;
 use backend_access_heap_heapam_visibility::htup::{
-    HeapTupleHeaderGetXmin, HeapTupleHeaderIsSpeculative, ItemPointerEquals,
+    HeapTupleHeaderGetXmin, HeapTupleHeaderIsSpeculative, ItemPointerEquals, SpecTokenOffsetNumber,
 };
 use backend_access_heap_heapam_visibility::HeapTupleHeaderGetUpdateXid;
 use backend_executor_execTuples_seams as slot_seam;
@@ -93,6 +93,71 @@ fn heapam_tuple_insert<'mcx>(
     heapam::insert::heap_insert(mcx, relation, &mut tuple, cid, options, bistate)?;
 
     slot.base_mut().tts_tid = tuple.tuple.t_self;
+    Ok(())
+}
+
+/// `heapam_tuple_insert_speculative(relation, slot, cid, options, bistate,
+/// specToken)` (heapam_handler.c): like `heapam_tuple_insert`, but sets
+/// `options |= HEAP_INSERT_SPECULATIVE` and stamps the tuple header's
+/// speculative token (`HeapTupleHeaderSetSpeculativeToken`) before
+/// `heap_insert`, so the inserted tuple is marked speculative for ON CONFLICT
+/// arbiter-index resolution.
+#[allow(clippy::too_many_arguments)]
+fn heapam_tuple_insert_speculative<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    cid: CommandId,
+    options: i32,
+    bistate: Option<&mut BulkInsertStateData>,
+    spec_token: u32,
+) -> PgResult<()> {
+    let (mut tuple, _should_free) = slot_seam::exec_fetch_slot_heap_tuple::call(mcx, slot, true)?;
+
+    // options |= HEAP_INSERT_SPECULATIVE;
+    let options = options | heapam::insert::HEAP_INSERT_SPECULATIVE;
+
+    slot.base_mut().tts_tableOid = relation.rd_id;
+    tuple.tuple.t_tableOid = relation.rd_id;
+
+    // HeapTupleHeaderSetSpeculativeToken(tuple->t_data, specToken):
+    //   ItemPointerSet(&(tup)->t_ctid, token, SpecTokenOffsetNumber)
+    let hdr = tuple
+        .tuple
+        .t_data
+        .as_mut()
+        .expect("heapam_tuple_insert_speculative: tuple has no header");
+    hdr.t_ctid = ItemPointerData::new(spec_token, SpecTokenOffsetNumber);
+
+    heapam::insert::heap_insert(mcx, relation, &mut tuple, cid, options, bistate)?;
+
+    slot.base_mut().tts_tid = tuple.tuple.t_self;
+    Ok(())
+}
+
+/// `heapam_tuple_complete_speculative(relation, slot, specToken, succeeded)`
+/// (heapam_handler.c): `ExecFetchSlotHeapTuple`, then
+/// `heap_finish_speculative(relation, &slot->tts_tid)` when `succeeded` else
+/// `heap_abort_speculative(relation, &slot->tts_tid)`. The `specToken` argument
+/// is unused by the heap implementation (it's carried on the tuple header).
+fn heapam_tuple_complete_speculative<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    _spec_token: u32,
+    succeeded: bool,
+) -> PgResult<()> {
+    // (void) ExecFetchSlotHeapTuple(slot, true, &shouldFree);
+    let (_tuple, _should_free) = slot_seam::exec_fetch_slot_heap_tuple::call(mcx, slot, true)?;
+
+    let tid = slot.base().tts_tid;
+    if succeeded {
+        // heap_finish_speculative(relation, &slot->tts_tid);
+        heapam::inplace::heap_finish_speculative(mcx, relation, tid)?;
+    } else {
+        // heap_abort_speculative(relation, &slot->tts_tid);
+        heapam::inplace::heap_abort_speculative(mcx, relation, tid)?;
+    }
     Ok(())
 }
 
@@ -578,6 +643,8 @@ fn heapam_relation_set_new_filelocator(
 pub fn init_seams() {
     use backend_access_heap_heapam_handler_dml_seams as sx;
     sx::heapam_tuple_insert::set(heapam_tuple_insert);
+    sx::heapam_tuple_insert_speculative::set(heapam_tuple_insert_speculative);
+    sx::heapam_tuple_complete_speculative::set(heapam_tuple_complete_speculative);
     sx::heapam_multi_insert::set(heapam_multi_insert);
     sx::heapam_tuple_delete::set(heapam_tuple_delete);
     sx::heapam_tuple_update::set(heapam_tuple_update);

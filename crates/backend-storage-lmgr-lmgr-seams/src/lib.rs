@@ -411,6 +411,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SpeculativeInsertionLockAcquire(xid)` (lmgr.c): take this backend's
+    /// `ExclusiveLock` on its speculative-insertion lock tag and return the
+    /// speculative token used to stamp the in-progress tuple. Reached from
+    /// `ExecInsert`'s ON CONFLICT arbiter path (nodeModifyTable.c). `Err`
+    /// carries the lock-manager `ereport(ERROR)` surface.
+    pub fn speculative_insertion_lock_acquire(xid: TransactionId) -> PgResult<u32>
+);
+
+seam_core::seam!(
+    /// `SpeculativeInsertionLockRelease(xid)` (lmgr.c): release this backend's
+    /// speculative-insertion lock, waking any waiters. Reached from
+    /// `ExecInsert`'s ON CONFLICT arbiter path (nodeModifyTable.c).
+    pub fn speculative_insertion_lock_release(xid: TransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `RelationExtensionLockWaiterCount(relation)` (lmgr.c): how many backends
     /// are waiting on the relation-extension lock for `lock_rel_id` (the
     /// relation's `rd_lockInfo.lockRelId`). hio.c's `RelationGetBufferForTuple`

@@ -267,14 +267,29 @@ pub fn init_seams() {
     // `ExecProject(resultRelInfo->ri_onConflict->oc_ProjInfo)` — project the new
     // tuple version into oc_ProjSlot, returning that slot.
     insert::exec_project_oc::set(|estate, rri| {
+        // The pooled ResultRelInfo and the EState are aliased by `&mut estate`,
+        // so detach the compiled projection out of the pool to satisfy the
+        // borrow checker, run ExecProject, then restore it. A shallow `.clone()`
+        // of the ProjectionInfo would NOT work: `ExprState::clone` is a
+        // handle-only clone that resets `resultslot`/`steps` to None (the
+        // compiled program is never deep-copied), which would make ExecProject
+        // panic with "ProjectionInfo's ExprState has no resultslot". The
+        // projection's identity/contents are unchanged by evaluation —
+        // ExecProject only fills its result slot.
         let mut proj = estate
-            .result_rel(rri)
+            .result_rel_mut(rri)
             .ri_onConflict
-            .as_deref()
-            .and_then(|oc| oc.oc_ProjInfo.as_ref())
-            .map(|p| p.clone())
+            .as_deref_mut()
+            .and_then(|oc| oc.oc_ProjInfo.take())
             .expect("ExecOnConflictUpdate: ri_onConflict->oc_ProjInfo is NULL");
-        backend_executor_execExpr_seams::exec_project_info::call(&mut proj, estate)
+
+        let result = backend_executor_execExpr_seams::exec_project_info::call(&mut proj, estate);
+
+        if let Some(oc) = estate.result_rel_mut(rri).ri_onConflict.as_deref_mut() {
+            oc.oc_ProjInfo = Some(proj);
+        }
+
+        result
     });
 
     // `InstrCountFiltered1(&mtstate->ps, n)` — bump nfiltered1 if instrumented.
@@ -304,6 +319,46 @@ pub fn init_seams() {
     insert::exec_with_check_options::set(|estate, kind, rri, slot| {
         backend_executor_execMain_seams::exec_with_check_options::call(estate, kind, rri, slot)
     });
+
+    // `GetCurrentTransactionId()` then `SpeculativeInsertionLockAcquire(xid)`
+    // (nodeModifyTable.c ExecInsert ON CONFLICT arbiter path): acquire this
+    // backend's speculative-insertion lock and return its token.
+    insert_exec::speculative_insertion_lock_acquire::set(|| {
+        let xid = backend_access_transam_xact_seams::get_current_transaction_id::call()?;
+        backend_storage_lmgr_lmgr_seams::speculative_insertion_lock_acquire::call(xid)
+    });
+
+    // `SpeculativeInsertionLockRelease(GetCurrentTransactionId())`.
+    insert_exec::speculative_insertion_lock_release::set(|| {
+        let xid = backend_access_transam_xact_seams::get_current_transaction_id::call()?;
+        backend_storage_lmgr_lmgr_seams::speculative_insertion_lock_release::call(xid)
+    });
+
+    // `table_tuple_insert_speculative(rel, slot, cid, options, bistate,
+    // specToken)` — insert the slot speculatively, stamped with the token.
+    insert_exec::table_tuple_insert_speculative::set(
+        |estate, rri, slot, cid, options, spec_token| {
+            let rel = crate::exec::relation_alias(estate, rri);
+            let mcx = estate.es_query_cxt;
+            let inslot = estate.slot_data_mut(slot);
+            backend_access_table_tableam::table_tuple_insert_speculative(
+                mcx, &rel, inslot, cid, options, None, spec_token,
+            )
+        },
+    );
+
+    // `table_tuple_complete_speculative(rel, slot, specToken, succeeded)` —
+    // finish (succeeded) or kill the speculatively inserted tuple.
+    insert_exec::table_tuple_complete_speculative::set(
+        |estate, rri, slot, spec_token, succeeded| {
+            let rel = crate::exec::relation_alias(estate, rri);
+            let mcx = estate.es_query_cxt;
+            let inslot = estate.slot_data_mut(slot);
+            backend_access_table_tableam::table_tuple_complete_speculative(
+                mcx, &rel, inslot, spec_token, succeeded,
+            )
+        },
+    );
 
     // `table_tuple_lock(rel, tid, snapshot, slot, cid, mode, LockWaitBlock, 0,
     // tmfd)` — ON CONFLICT locks the conflicting tuple with no FIND_LAST_VERSION.

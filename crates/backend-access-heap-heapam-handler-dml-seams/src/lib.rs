@@ -61,6 +61,40 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `heapam_tuple_insert_speculative(rel, slot, cid, options, bistate,
+    /// specToken)` (heapam_handler.c): `ExecFetchSlotHeapTuple(slot, true,
+    /// &shouldFree)`, `options |= HEAP_INSERT_SPECULATIVE`, stamp
+    /// `tts_tableOid`/`t_tableOid`, `HeapTupleHeaderSetSpeculativeToken(
+    /// tuple->t_data, specToken)`, `heap_insert(...)`, copy `t_self` back into
+    /// `slot->tts_tid`. Owned by `backend-access-heap-heapam-handler-dml`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn heapam_tuple_insert_speculative<'mcx>(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        slot: &mut SlotData<'mcx>,
+        cid: CommandId,
+        options: i32,
+        bistate: Option<&mut BulkInsertStateData>,
+        spec_token: u32,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `heapam_tuple_complete_speculative(rel, slot, specToken, succeeded)`
+    /// (heapam_handler.c): `ExecFetchSlotHeapTuple(slot, true, &shouldFree)`,
+    /// then `heap_finish_speculative(rel, &slot->tts_tid)` when `succeeded`
+    /// else `heap_abort_speculative(rel, &slot->tts_tid)`. Owned by
+    /// `backend-access-heap-heapam-handler-dml`.
+    pub fn heapam_tuple_complete_speculative<'mcx>(
+        mcx: Mcx<'mcx>,
+        rel: &Relation<'mcx>,
+        slot: &mut SlotData<'mcx>,
+        spec_token: u32,
+        succeeded: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `heapam_multi_insert(rel, slots, nslots, cid, options, bistate)`
     /// (heapam_handler.c): fetch each slot's heap tuple
     /// (`ExecFetchSlotHeapTuple`), stamp `tts_tableOid`/`t_tableOid`,

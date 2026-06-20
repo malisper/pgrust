@@ -425,6 +425,31 @@ fn heapam_tuple_insert<'mcx>(
     dml_seam::heapam_tuple_insert::call(mcx, rel, slot, cid, options, bistate)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn heapam_tuple_insert_speculative<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    cid: types_core::xact::CommandId,
+    options: i32,
+    bistate: Option<&mut BulkInsertStateData>,
+    spec_token: u32,
+) -> PgResult<()> {
+    dml_seam::heapam_tuple_insert_speculative::call(
+        mcx, rel, slot, cid, options, bistate, spec_token,
+    )
+}
+
+fn heapam_tuple_complete_speculative<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    spec_token: u32,
+    succeeded: bool,
+) -> PgResult<()> {
+    dml_seam::heapam_tuple_complete_speculative::call(mcx, rel, slot, spec_token, succeeded)
+}
+
 fn heapam_multi_insert<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
@@ -651,6 +676,8 @@ pub fn get_heapam_table_am_routine() -> TableAmRoutine {
         tuple_get_latest_tid: heapam_tuple_get_latest_tid,
 
         tuple_insert: heapam_tuple_insert,
+        tuple_insert_speculative: heapam_tuple_insert_speculative,
+        tuple_complete_speculative: heapam_tuple_complete_speculative,
         multi_insert: heapam_multi_insert,
         tuple_delete: heapam_tuple_delete,
         tuple_update: heapam_tuple_update,

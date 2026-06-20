@@ -880,6 +880,35 @@ pub fn table_tuple_insert<'mcx>(
     (am(rel).tuple_insert)(mcx, rel, slot, cid, options, bistate)
 }
 
+/// `table_tuple_insert_speculative(rel, slot, cid, options, bistate,
+/// specToken)` (tableam.h inline) — speculatively insert `slot`, stamped with
+/// `spec_token`, for ON CONFLICT arbiter-index resolution.
+#[allow(clippy::too_many_arguments)]
+pub fn table_tuple_insert_speculative<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    cid: types_core::xact::CommandId,
+    options: i32,
+    bistate: Option<&mut BulkInsertStateData>,
+    spec_token: u32,
+) -> PgResult<()> {
+    (am(rel).tuple_insert_speculative)(mcx, rel, slot, cid, options, bistate, spec_token)
+}
+
+/// `table_tuple_complete_speculative(rel, slot, specToken, succeeded)`
+/// (tableam.h inline) — complete (`succeeded`) or kill (`!succeeded`) a
+/// previously speculatively inserted tuple.
+pub fn table_tuple_complete_speculative<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    slot: &mut SlotData<'mcx>,
+    spec_token: u32,
+    succeeded: bool,
+) -> PgResult<()> {
+    (am(rel).tuple_complete_speculative)(mcx, rel, slot, spec_token, succeeded)
+}
+
 /// `table_multi_insert(rel, slots, nslots, cid, options, bistate)` (tableam.h
 /// inline) — insert a batch of tuples in one AM call.
 pub fn table_multi_insert<'mcx>(

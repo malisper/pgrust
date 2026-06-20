@@ -3163,8 +3163,14 @@ fn set_modifytable_references<'mcx>(
                         root,
                         PgBox::into_inner(eb),
                         &FixJoinCtx {
-                            outer_itlist: Some(&itlist),
-                            inner_itlist: None,
+                            // C: fix_join_expr(root, set, NULL, itlist, ...) — the
+                            // EXCLUDED index is the INNER itlist, so EXCLUDED Vars
+                            // resolve to INNER_VAR (ExecOnConflictUpdate installs
+                            // the EXCLUDED slot as econtext->ecxt_innertuple); the
+                            // target relation's Vars (acceptable_rel) stay as
+                            // bumped scan Vars.
+                            outer_itlist: None,
+                            inner_itlist: Some(&itlist),
                             acceptable_rel,
                             rtoffset,
                             nrm_match: NRM_EQUAL,
@@ -3184,8 +3190,9 @@ fn set_modifytable_references<'mcx>(
                     root,
                     where_list.into_iter().collect(),
                     &FixJoinCtx {
-                        outer_itlist: Some(&itlist),
-                        inner_itlist: None,
+                        // EXCLUDED index is the INNER itlist (see onConflictSet).
+                        outer_itlist: None,
+                        inner_itlist: Some(&itlist),
                         acceptable_rel,
                         rtoffset,
                         nrm_match: NRM_EQUAL,

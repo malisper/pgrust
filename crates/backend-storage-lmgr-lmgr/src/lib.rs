@@ -1245,6 +1245,8 @@ pub fn init_seams() {
     inward::conditional_xact_lock_table_wait::set(ConditionalXactLockTableWait);
     inward::xact_lock_table_wait::set(seam_xact_lock_table_wait);
     inward::speculative_insertion_wait::set(SpeculativeInsertionWait);
+    inward::speculative_insertion_lock_acquire::set(SpeculativeInsertionLockAcquire);
+    inward::speculative_insertion_lock_release::set(SpeculativeInsertionLockRelease);
     inward::relation_extension_lock_waiter_count::set(|lock_rel_id| {
         RelationExtensionLockWaiterCount(&lock_rel_id)
     });
