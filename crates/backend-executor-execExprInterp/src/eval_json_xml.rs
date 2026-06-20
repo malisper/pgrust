@@ -485,8 +485,14 @@ pub fn ExecEvalJsonIsPredicate<'mcx>(
     }
 
     let res: bool = if arg_type == TEXTOID || arg_type == JSONOID {
-        // json text payload (text/json ByRef carries the header-less payload).
-        let json = js.as_ref_bytes();
+        // A text/json `ByRef` value is the FULL varlena image (4-byte VARHDRSZ
+        // length word + payload); C's ExecEvalJsonIsPredicate detoasts and lexes
+        // `VARDATA_ANY` / `VARSIZE_ANY_EXHDR` — the header-stripped payload. Skip
+        // the VARHDRSZ word so `json_get_first_token` / `json_validate` see the
+        // JSON text, not the length bytes.
+        const VARHDRSZ: usize = 4;
+        let img = js.as_ref_bytes();
+        let json = if img.len() >= VARHDRSZ { &img[VARHDRSZ..] } else { img };
         let mut res = if item_type == Jt::JS_TYPE_ANY {
             true
         } else {
