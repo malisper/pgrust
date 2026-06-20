@@ -210,8 +210,17 @@ pub fn install() {
 
     // --- resowner-seams ----------------------------------------------------
     rs::resource_owner_create_portal::set(|| {
-        // portalmem always passes CurrentResourceOwner as the parent, name "Portal".
-        let parent = CurrentResourceOwner();
+        // C's `CreatePortal` (portalmem.c) creates the portal's resource owner as
+        // a child of `CurTransactionResourceOwner`, NOT the per-command
+        // `CurrentResourceOwner`. A portal can outlive the utility command that
+        // created it (a DECLARE CURSOR portal is fetched by later FETCH commands),
+        // so its owner must be parented under the transaction-lifetime owner;
+        // parenting under the per-command owner would cascade-free the portal
+        // owner when that command's owner is released, leaving a stale handle for
+        // the next FETCH ("stale ResourceOwner" / "resource was not closed").
+        // Fall back to `CurrentResourceOwner` only outside a transaction (the
+        // bootstrap / single-command path where no CurTransaction owner exists).
+        let parent = crate::CurTransactionResourceOwner().or_else(CurrentResourceOwner);
         ResourceOwnerCreate(parent, "Portal").expect("ResourceOwnerCreate(Portal) out of memory")
     });
 

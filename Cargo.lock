@@ -7584,6 +7584,7 @@ dependencies = [
 name = "backend-commands-portalcmds"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-tupdesc-seams",
  "backend-access-transam-xact-seams",
  "backend-commands-portalcmds-seams",
  "backend-executor-execMain-seams",
@@ -7608,6 +7609,7 @@ dependencies = [
  "types-portal",
  "types-scan",
  "types-snapshot",
+ "types-tuple",
 ]
 
 [[package]]
