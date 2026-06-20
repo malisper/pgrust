@@ -295,13 +295,8 @@ seam_core::seam!(
     /// reset `pg_index` validity, and fire the post-reindex hook. Reached from
     /// the non-concurrent `ReindexIndex` command driver (indexcmds.c).
     ///
-    /// Owned by this unit (catalog/index.c). Its substrate
-    /// (`SetReindexProcessing`/`ResetReindexProcessing`,
-    /// `RelationSetNewRelfilenumber`, `reindex_index`'s catalog-validity reset,
-    /// `try_index_open`/`try_table_open`) is not yet ported, so the owner does
-    /// not install this from `init_seams()` and a call panics loudly
-    /// (`mirror-pg-and-panic`) until that lands. `Err` carries the
-    /// build/catalog `ereport(ERROR)` surface.
+    /// Owned by this unit (catalog/index.c) and installed from its
+    /// `init_seams()`. `Err` carries the build/catalog `ereport(ERROR)` surface.
     pub fn reindex_index<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         stmt: &types_nodes::ddlnodes::ReindexStmt<'mcx>,

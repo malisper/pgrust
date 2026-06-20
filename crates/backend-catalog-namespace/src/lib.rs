@@ -79,12 +79,16 @@ use types_error::{
     ERRCODE_UNDEFINED_SCHEMA, ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_namespace::{FuncArgInfo, FuncCandidate, ProcRow};
-use types_nodes::parsenodes::OBJECT_SCHEMA;
+use types_nodes::parsenodes::{OBJECT_INDEX, OBJECT_SCHEMA};
 use types_tuple::access::{
-    RangeVar, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_TOASTVALUE,
+    RangeVar, RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,
+    RELKIND_RELATION, RELKIND_TOASTVALUE,
 };
 use types_syscache::{AUTHMEMROLEMEM, AUTHOID, DATABASEOID, NAMESPACEOID};
-use types_storage::lock::{AccessShareLock, LOCKMODE, NoLock};
+use types_storage::lock::{
+    AccessShareLock, ShareLock, ShareUpdateExclusiveLock, LOCKMODE, NoLock,
+};
+use backend_catalog_index_seams as index_seams;
 
 pub use types_namespace::{
     FuncCandidateList, SearchPathMatcher, TempNamespaceStatus, RVR_MISSING_OK, RVR_NOWAIT,
@@ -141,6 +145,9 @@ pub fn init_seams() {
     );
     backend_catalog_namespace_seams::range_var_get_relid_maintains_table::set(
         crate::RangeVarGetRelidMaintainsTable,
+    );
+    backend_catalog_namespace_seams::range_var_get_relid_for_reindex_index::set(
+        crate::RangeVarGetRelidForReindexIndex,
     );
     // REFRESH MATERIALIZED VIEW (matview.c ExecRefreshMatView) resolves+locks its
     // target through `RangeVarGetRelidExtended(.., RangeVarCallbackMaintainsTable)`.
@@ -705,6 +712,123 @@ pub fn RangeVarGetRelidMaintainsTable(
     let mut callback =
         |relation: &RangeVar, rel_id: Oid, old_rel_id: Oid| -> PgResult<()> {
             RangeVarCallbackMaintainsTable(relation, rel_id, old_rel_id)
+        };
+    RangeVarGetRelidExtended(mcx, relation, lockmode, 0, Some(&mut callback))
+}
+
+/// `RangeVarCallbackForReindexIndex(relation, relId, oldRelId, arg)`
+/// (indexcmds.c): the `REINDEX INDEX` name-lookup callback. Check permissions
+/// on the index's table before acquiring the relation lock; also lock the heap
+/// before the index lock is taken, to avoid deadlocks.
+///
+/// `table_lockmode` is the heap lock level (`ShareLock` for the non-concurrent
+/// case, `ShareUpdateExclusiveLock` for concurrent — matching `reindex_index()`
+/// / `index_concurrently_*()`). `locked_table_oid` tracks the heap lock we hold
+/// across a retry so it can be released if the name now refers to a different
+/// relation. The heap lock acquired here is `keep()`'d (held until transaction
+/// end), mirroring C where it lives in the backend lock table.
+fn RangeVarCallbackForReindexIndex(
+    relation: &RangeVar,
+    rel_id: Oid,
+    old_rel_id: Oid,
+    table_lockmode: LOCKMODE,
+    locked_table_oid: &mut Oid,
+) -> PgResult<()> {
+    /*
+     * If we previously locked some other index's heap, and the name we're
+     * looking up no longer refers to that relation, release the now-useless
+     * lock.
+     */
+    if rel_id != old_rel_id && OidIsValid(*locked_table_oid) {
+        lmgr_seams::unlock_relation_oid::call(*locked_table_oid, table_lockmode)?;
+        *locked_table_oid = InvalidOid;
+    }
+
+    /* If the relation does not exist, there's nothing more to do. */
+    if !OidIsValid(rel_id) {
+        return Ok(());
+    }
+
+    /*
+     * If the relation does exist, check whether it's an index.  But note that
+     * the relation might have been dropped between the time we did the name
+     * lookup and now.  In that case, there's nothing to do.
+     */
+    let relkind = lsyscache_seams::get_rel_relkind::call(rel_id)?;
+    if relkind == 0 {
+        return Ok(());
+    }
+    if relkind != RELKIND_INDEX && relkind != RELKIND_PARTITIONED_INDEX {
+        return ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("\"{}\" is not an index", relation.relname.as_str()))
+            .finish(here("RangeVarCallbackForReindexIndex"));
+    }
+
+    /* Check permissions */
+    let table_oid = index_seams::index_get_relation::call(rel_id, true)?;
+    if OidIsValid(table_oid) {
+        let aclresult = aclchk_seams::pg_class_aclcheck::call(
+            table_oid,
+            miscinit_seams::get_user_id::call(),
+            ACL_MAINTAIN,
+        )?;
+        if aclresult != ACLCHECK_OK {
+            aclchk_seams::aclcheck_error::call(
+                aclresult,
+                OBJECT_INDEX,
+                Some(relation.relname.clone()),
+            )?;
+        }
+    }
+
+    /* Lock heap before index to avoid deadlock. */
+    if rel_id != old_rel_id {
+        /*
+         * If the OID isn't valid, it means the index was concurrently dropped,
+         * which is not a problem for us; just return normally.
+         */
+        if OidIsValid(table_oid) {
+            let guard = lmgr_seams::lock_relation_oid::call(table_oid, table_lockmode)?;
+            guard.keep();
+            *locked_table_oid = table_oid;
+        }
+    }
+
+    Ok(())
+}
+
+/// `RangeVarGetRelidExtended(relation, lockmode, 0,
+/// RangeVarCallbackForReindexIndex, &state)` — resolve+lock a `REINDEX INDEX`
+/// target, running the reindex-index permission callback. Exposed to the
+/// indexcmds command driver via the `range_var_get_relid_for_reindex_index`
+/// seam.
+pub fn RangeVarGetRelidForReindexIndex(
+    mcx: Mcx<'_>,
+    relation: &RangeVar,
+    lockmode: LOCKMODE,
+) -> PgResult<Oid> {
+    /*
+     * The heap lock level should match the table lock in reindex_index() for
+     * the non-concurrent case (ShareLock) and the table locks used by
+     * index_concurrently_*() for the concurrent case (ShareUpdateExclusiveLock).
+     * We derive it from the index lock the caller asked for.
+     */
+    let table_lockmode = if lockmode == ShareUpdateExclusiveLock {
+        ShareUpdateExclusiveLock
+    } else {
+        ShareLock
+    };
+    let mut locked_table_oid = InvalidOid;
+    let mut callback =
+        |relation: &RangeVar, rel_id: Oid, old_rel_id: Oid| -> PgResult<()> {
+            RangeVarCallbackForReindexIndex(
+                relation,
+                rel_id,
+                old_rel_id,
+                table_lockmode,
+                &mut locked_table_oid,
+            )
         };
     RangeVarGetRelidExtended(mcx, relation, lockmode, 0, Some(&mut callback))
 }

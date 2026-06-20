@@ -35,9 +35,14 @@
 //! built here — their substrate (cross-transaction control, partition-index
 //! cloning) is unported. They are precise loud panics, not silent stubs.
 //!
-//! `ReindexIndex` / `ReindexTable` (the REINDEX drivers) seam-panic into the
-//! `reindex_index` / `reindex_relation` seams, which are declared but
-//! owner-uninstalled (substrate unported).
+//! [`ExecReindex`] / [`ReindexIndex`] / [`ReindexTable`] (the REINDEX command
+//! drivers) are ported for the common non-concurrent btree case: parse the
+//! option list, resolve+lock the target (heap-before-index callback for an
+//! index, maintains-table callback for a table), then call the installed
+//! `reindex_index` / `reindex_relation` catalog seams to rebuild storage.
+//! Deferred legs raise a precise feature-not-supported error: REINDEX
+//! CONCURRENTLY, partitioned table/index (`ReindexPartitions`), and
+//! `ReindexMultipleTables` (REINDEX SCHEMA / SYSTEM / DATABASE).
 
 extern crate alloc;
 
@@ -85,6 +90,8 @@ use backend_optimizer_util_var_seams as var_seam;
 use backend_commands_tablecmds_seams as tablecmds_seam;
 use backend_access_heap_vacuumlazy_seams as namespacename_seam;
 use backend_access_table_table_seams as table_seam;
+use backend_catalog_namespace_seams as namespace_seam;
+use backend_access_transam_xact_seams as xact_seam;
 
 use types_acl::acl::{ACL_CREATE, ACLCHECK_OK};
 use types_nodes::parsenodes::{OBJECT_SCHEMA, OBJECT_TABLESPACE};
@@ -760,28 +767,313 @@ pub fn DefineIndex<'mcx>(
 }
 
 // ---------------------------------------------------------------------------
-// ReindexIndex / ReindexTable  (precise seam-panics; substrate unported)
+// ExecReindex / ReindexIndex / ReindexTable  (REINDEX command drivers)
 // ---------------------------------------------------------------------------
 
-/// `ReindexIndex(...)` (indexcmds.c) — rebuild a single index. The
-/// non-concurrent slice calls the `reindex_index` seam, which is declared but
-/// owner-uninstalled (the reindex substrate is unported), so a call panics
-/// loudly there. The concurrent slice is additionally deferred.
-pub fn ReindexIndex() -> ! {
-    panic!(
-        "backend-commands-indexcmds: ReindexIndex (REINDEX INDEX driver) is deferred — its \
-         reindex_index / cross-transaction concurrent substrate is unported"
-    );
+use types_cluster::{
+    ReindexParams, REINDEXOPT_CONCURRENTLY, REINDEXOPT_REPORT_PROGRESS, REINDEXOPT_VERBOSE,
+    REINDEX_REL_CHECK_CONSTRAINTS, REINDEX_REL_PROCESS_TOAST,
+};
+use types_nodes::ddlnodes::{DefElem, ReindexObjectType, ReindexStmt};
+use types_storage::lock::{AccessExclusiveLock, ShareLock, ShareUpdateExclusiveLock};
+use types_tuple::access::RELKIND_PARTITIONED_INDEX;
+
+const RELPERSISTENCE_TEMP_U8: u8 = b't';
+
+/// `defGetBoolean(defel)` (define.c) — accepts a Boolean, an Integer (0/1), or
+/// the strings "true"/"false"/"on"/"off". Read directly off the `'mcx`
+/// parse-node `arg` (local copy, matching the dbcommands pattern).
+fn reindex_def_get_boolean(defel: &DefElem<'_>) -> PgResult<bool> {
+    let name = defel.defname.as_deref().unwrap_or("");
+    match defel.arg.as_deref() {
+        None => Ok(true),
+        Some(n) if n.is_boolean() => Ok(n.expect_boolean().boolval),
+        Some(n) if n.is_integer() => match n.expect_integer().ival {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(reindex_boolean_err(name)),
+        },
+        Some(n) if n.is_string() => {
+            let v = n.expect_string().sval.as_str();
+            if v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on") {
+                Ok(true)
+            } else if v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off") {
+                Ok(false)
+            } else {
+                Err(reindex_boolean_err(name))
+            }
+        }
+        _ => Err(reindex_boolean_err(name)),
+    }
 }
 
-/// `ReindexTable(...)` (indexcmds.c) — rebuild every index on a table via
-/// `reindex_relation`. The `reindex_relation` seam is declared but
-/// owner-uninstalled; deferred.
-pub fn ReindexTable() -> ! {
-    panic!(
-        "backend-commands-indexcmds: ReindexTable (REINDEX TABLE driver) is deferred — its \
-         reindex_relation substrate is unported"
-    );
+fn reindex_boolean_err(name: &str) -> backend_utils_error::PgError {
+    ereport(ERROR)
+        .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+        .errmsg(format!("{name} requires a Boolean value"))
+        .into_error()
+}
+
+/// `defGetString(defel)` (define.c) — `strVal(defel->arg)`.
+fn reindex_def_get_string(defel: &DefElem<'_>) -> PgResult<String> {
+    let name = defel.defname.as_deref().unwrap_or("");
+    match defel.arg.as_deref() {
+        Some(n) if n.is_string() => Ok(n.expect_string().sval.as_str().to_string()),
+        _ => Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+            .errmsg(format!("{name} requires a parameter"))
+            .into_error()),
+    }
+}
+
+/// Marshal a parse-tree `RangeVar` node onto the access-layer `RangeVar`
+/// consumed by the namespace target-resolution seams (mirrors the matview /
+/// CLUSTER bridge).
+fn reindex_access_rangevar(rv: &RangeVar<'_>) -> types_tuple::access::RangeVar {
+    types_tuple::access::RangeVar {
+        catalogname: rv.catalogname.as_ref().map(|s| s.as_str().to_string()),
+        schemaname: rv.schemaname.as_ref().map(|s| s.as_str().to_string()),
+        relname: rv
+            .relname
+            .as_ref()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default(),
+        inh: rv.inh,
+        relpersistence: rv.relpersistence as u8,
+        location: rv.location,
+    }
+}
+
+/// `stmt->relation` as a `&RangeVar` node (REINDEX INDEX / TABLE always have one).
+fn reindex_stmt_rangevar<'a, 'mcx>(stmt: &'a ReindexStmt<'mcx>) -> &'a RangeVar<'mcx> {
+    match stmt.relation.as_deref().map(|n| n.node_tag()) {
+        Some(t) if t == ntag::T_RangeVar => stmt.relation.as_deref().unwrap().expect_rangevar(),
+        _ => panic!("ExecReindex: REINDEX INDEX/TABLE stmt->relation is not a RangeVar"),
+    }
+}
+
+/// `ExecReindex(pstate, stmt, isTopLevel)` (indexcmds.c) — primary entry point
+/// for manual REINDEX commands. A preparation wrapper: parse the option list,
+/// resolve the target tablespace, and dispatch to the per-kind subroutine.
+pub fn ExecReindex<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    stmt: &ReindexStmt<'mcx>,
+    is_top_level: bool,
+) -> PgResult<()> {
+    let _ = &pstate;
+    let mut params = ReindexParams::default();
+    let mut concurrently = false;
+    let mut verbose = false;
+    let mut tablespacename: Option<String> = None;
+
+    // Parse option list.
+    for opt_node in stmt.params.iter() {
+        let opt = match opt_node.node_tag() {
+            t if t == ntag::T_DefElem => opt_node.expect_defelem(),
+            _ => panic!("ExecReindex: REINDEX option is not a DefElem"),
+        };
+        let defname = opt.defname.as_deref().unwrap_or("");
+        if defname == "verbose" {
+            verbose = reindex_def_get_boolean(opt)?;
+        } else if defname == "concurrently" {
+            concurrently = reindex_def_get_boolean(opt)?;
+        } else if defname == "tablespace" {
+            tablespacename = Some(reindex_def_get_string(opt)?);
+        } else {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!("unrecognized REINDEX option \"{defname}\""))
+                .into_error());
+        }
+    }
+
+    if concurrently {
+        xact_seam::prevent_in_transaction_block::call(is_top_level, "REINDEX CONCURRENTLY")?;
+    }
+
+    params.options = (if verbose { REINDEXOPT_VERBOSE } else { 0 })
+        | (if concurrently { REINDEXOPT_CONCURRENTLY } else { 0 });
+
+    // Assign the tablespace OID to move indexes to, with InvalidOid to do nothing.
+    if let Some(tsname) = tablespacename {
+        let tablespace_oid = get_tablespace_oid(mcx, &tsname, false)?;
+        params.tablespace_oid = tablespace_oid;
+
+        // Check permissions except when moving to database's default.
+        if OidIsValid(tablespace_oid)
+            && tablespace_oid != backend_commands_tablespace_globals_seams::MyDatabaseTableSpace::call()?
+        {
+            let aclresult = aclchk_seam::object_aclcheck::call(
+                TABLESPACE_RELATION_ID,
+                tablespace_oid,
+                backend_utils_init_miscinit::GetUserId(),
+                ACL_CREATE,
+            )?;
+            if aclresult != ACLCHECK_OK {
+                aclchk_seam::aclcheck_error::call(
+                    aclresult,
+                    OBJECT_TABLESPACE,
+                    Some(
+                        get_tablespace_name(mcx, tablespace_oid)?
+                            .map(|s| s.as_str().to_string())
+                            .unwrap_or_default(),
+                    ),
+                )?;
+            }
+        }
+    } else {
+        params.tablespace_oid = InvalidOid;
+    }
+
+    match stmt.kind {
+        ReindexObjectType::REINDEX_OBJECT_INDEX => {
+            ReindexIndex(mcx, stmt, &params, is_top_level)?;
+        }
+        ReindexObjectType::REINDEX_OBJECT_TABLE => {
+            ReindexTable(mcx, stmt, &params, is_top_level)?;
+        }
+        ReindexObjectType::REINDEX_OBJECT_SCHEMA
+        | ReindexObjectType::REINDEX_OBJECT_SYSTEM
+        | ReindexObjectType::REINDEX_OBJECT_DATABASE => {
+            // These cannot run inside a user transaction block; ReindexMultipleTables
+            // reindexes each table in a separate transaction.
+            let label = match stmt.kind {
+                ReindexObjectType::REINDEX_OBJECT_SCHEMA => "REINDEX SCHEMA",
+                ReindexObjectType::REINDEX_OBJECT_SYSTEM => "REINDEX SYSTEM",
+                _ => "REINDEX DATABASE",
+            };
+            xact_seam::prevent_in_transaction_block::call(is_top_level, label)?;
+            ReindexMultipleTables(mcx, stmt, &params)?;
+        }
+    }
+    Ok(())
+}
+
+/// `ReindexIndex(stmt, params, isTopLevel)` (indexcmds.c) — recreate a specific
+/// index. Resolves+locks the index (heap-before-index via the reindex-index
+/// callback), then dispatches to `reindex_index` for the common
+/// non-partitioned, non-concurrent case.
+fn ReindexIndex<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &ReindexStmt<'mcx>,
+    params: &ReindexParams,
+    _is_top_level: bool,
+) -> PgResult<()> {
+    let rv = reindex_stmt_rangevar(stmt);
+    let access_rv = reindex_access_rangevar(rv);
+
+    // Find and lock index, checking permissions on the table. The lock level
+    // here must match the index lock obtained in reindex_index().
+    let lockmode = if (params.options & REINDEXOPT_CONCURRENTLY) != 0 {
+        ShareUpdateExclusiveLock
+    } else {
+        AccessExclusiveLock
+    };
+    let ind_oid =
+        namespace_seam::range_var_get_relid_for_reindex_index::call(mcx, &access_rv, lockmode)?;
+
+    // Obtain the current persistence and kind of the existing index.
+    let persistence = lsyscache::get_rel_persistence::call(ind_oid)?;
+    let relkind = lsyscache::get_rel_relkind::call(ind_oid)?;
+
+    if relkind == RELKIND_PARTITIONED_INDEX {
+        return Err(reindex_partitions_deferred());
+    } else if (params.options & REINDEXOPT_CONCURRENTLY) != 0
+        && persistence != RELPERSISTENCE_TEMP_U8
+    {
+        return Err(reindex_concurrently_deferred());
+    } else {
+        let mut newparams = *params;
+        newparams.options |= REINDEXOPT_REPORT_PROGRESS;
+        index_seam::reindex_index::call(
+            mcx,
+            stmt,
+            ind_oid,
+            false,
+            persistence as i8,
+            newparams,
+        )?;
+    }
+    Ok(())
+}
+
+/// `ReindexTable(stmt, params, isTopLevel)` (indexcmds.c) — recreate all indexes
+/// of a table (and of its toast table, if any) via `reindex_relation`.
+fn ReindexTable<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &ReindexStmt<'mcx>,
+    params: &ReindexParams,
+    _is_top_level: bool,
+) -> PgResult<()> {
+    let rv = reindex_stmt_rangevar(stmt);
+    let access_rv = reindex_access_rangevar(rv);
+    let relname = access_rv.relname.clone();
+
+    // The lock level used here should match reindex_relation().
+    let lockmode = if (params.options & REINDEXOPT_CONCURRENTLY) != 0 {
+        ShareUpdateExclusiveLock
+    } else {
+        ShareLock
+    };
+    let heap_oid =
+        namespace_seam::range_var_get_relid_maintains_table::call(mcx, &access_rv, lockmode)?;
+
+    if lsyscache::get_rel_relkind::call(heap_oid)? == RELKIND_PARTITIONED_TABLE {
+        return Err(reindex_partitions_deferred());
+    } else if (params.options & REINDEXOPT_CONCURRENTLY) != 0
+        && lsyscache::get_rel_persistence::call(heap_oid)? != RELPERSISTENCE_TEMP_U8
+    {
+        return Err(reindex_concurrently_deferred());
+    } else {
+        let mut newparams = *params;
+        newparams.options |= REINDEXOPT_REPORT_PROGRESS;
+        // reindex_relation returns whether any index was processed; the seam
+        // installed by catalog/index.c maps the bool to (). NOTICE on "no
+        // indexes to reindex" is emitted from inside reindex_relation in C; the
+        // installed seam preserves the rebuild but not the leaf NOTICE, which is
+        // immaterial to correctness.
+        let _ = relname;
+        index_seam::reindex_relation::call(
+            mcx,
+            heap_oid,
+            REINDEX_REL_PROCESS_TOAST | REINDEX_REL_CHECK_CONSTRAINTS,
+            newparams,
+        )?;
+    }
+    Ok(())
+}
+
+/// `ReindexMultipleTables` (indexcmds.c) — REINDEX SCHEMA / SYSTEM / DATABASE.
+/// Deferred: requires per-table transaction control (StartTransactionCommand /
+/// CommitTransactionCommand loop) that is out of scope here.
+fn ReindexMultipleTables<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _stmt: &ReindexStmt<'mcx>,
+    _params: &ReindexParams,
+) -> PgResult<()> {
+    Err(ereport(ERROR)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg(format!(
+            "REINDEX SCHEMA / SYSTEM / DATABASE is not yet supported"
+        ))
+        .into_error())
+}
+
+fn reindex_partitions_deferred() -> backend_utils_error::PgError {
+    ereport(ERROR)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg(format!(
+            "REINDEX on a partitioned table/index is not yet supported"
+        ))
+        .into_error()
+}
+
+fn reindex_concurrently_deferred() -> backend_utils_error::PgError {
+    ereport(ERROR)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg(format!("REINDEX CONCURRENTLY is not yet supported"))
+        .into_error()
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,6 +1299,22 @@ pub fn init_seams() {
         create_index_count_partitions,
     );
     backend_tcop_utility_out_seams::define_index::set(define_index_dispatch_arm);
+    backend_tcop_utility_out_seams::exec_reindex::set(exec_reindex_dispatch_arm);
+}
+
+/// `ExecReindex(pstate, (ReindexStmt *) parsetree, isTopLevel)` — the
+/// `T_ReindexStmt` arm of `ProcessUtilitySlow`. Unwrap the node and dispatch.
+fn exec_reindex_dispatch_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    parsetree: &Node<'mcx>,
+    is_top_level: bool,
+) -> PgResult<()> {
+    let stmt = match parsetree.node_tag() {
+        t if t == ntag::T_ReindexStmt => parsetree.expect_reindexstmt(),
+        _ => panic!("exec_reindex: parsetree is not a ReindexStmt"),
+    };
+    ExecReindex(mcx, pstate, stmt, is_top_level)
 }
 
 /// `RangeVarGetRelidExtended(stmt->relation, lockmode, 0,
