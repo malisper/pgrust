@@ -716,3 +716,35 @@ fn relation_get_number_of_blocks(rel: &Relation<'_>) -> PgResult<BlockNumber> {
 fn relation_needs_wal(rel: &Relation<'_>) -> bool {
     backend_utils_cache_relcache_seams::relation_needs_wal::call(rel)
 }
+
+// ===========================================================================
+// init_seams — gin-ginbulk owns the `ginbuild` / `ginbuildempty` AM
+// build-dispatch seams (declared in `backend-access-gin-ginutil-seams`).
+//
+// `ginbuild`/`ginbuildempty` (the GIN AM `ambuild`/`ambuildempty` entries) live
+// here, ABOVE the AM-vtable crate (`backend-access-gin-ginutil`) in the dep
+// graph (ginbulk depends on ginutil), so the vtable's adapters
+// (`ginbuild_am`/`ginbuildempty_am`) cannot call them directly. The cross-crate
+// edge is bridged through the `ginbuild`/`ginbuildempty` seams, which this crate
+// installs here: the adapter passes the `IndexInfoCarrier` (#342) through, and
+// this installer downcasts it back to the real
+// `types_nodes::execnodes::IndexInfo<'mcx>` before invoking the build. Mirrors
+// the GiST `gistbuild` and nbtree `btbuild` build-dispatch seams.
+// ===========================================================================
+
+/// Install this crate's inward (build-dispatch) seams.
+pub fn init_seams() {
+    backend_access_gin_ginutil_seams::ginbuild::set(|mcx, heap, index, index_info| {
+        // The dispatch layer (index.c) wraps the caller's owned
+        // `&mut IndexInfo<'mcx>` in the carrier; recover the concrete struct
+        // (tag-checked downcast — a NULL/wrong-type carrier is the C
+        // NULL-pointer programming error).
+        let info = index_info
+            .downcast_mut::<IndexInfo<'_>>()
+            .unwrap_or_else(|| {
+                panic!("ginbuild: IndexInfoCarrier did not carry the expected IndexInfo")
+            });
+        ginbuild(mcx, heap, index, info)
+    });
+    backend_access_gin_ginutil_seams::ginbuildempty::set(|_mcx, index| ginbuildempty(index));
+}

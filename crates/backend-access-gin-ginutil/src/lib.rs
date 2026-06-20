@@ -70,6 +70,7 @@ use types_error::error::{ERRCODE_UNDEFINED_FUNCTION, ERROR};
 use types_error::{PgError, PgResult};
 
 use backend_access_gin_ginutil_seams as sx;
+use backend_access_index_indexam_seams as indexam;
 use backend_utils_cache_relcache_seams as relcache;
 
 use types_core::primitive::{AttrNumber, OffsetNumber, Oid};
@@ -313,24 +314,24 @@ pub fn ginhandler() -> IndexAmRoutine {
 // `ginhandler` for why the build / cross-crate slots are sanctioned panic legs
 // (reached via the #341 index.c dispatch).
 
-/// `ambuild` adapter — `ginbuild` (gin-ginbulk, above this crate) needs the
-/// real `IndexInfo`; reached via the #341 dispatch.
+/// `ambuild` adapter — `ginbuild` (gin-ginbulk) sits above this crate in the dep
+/// graph, so it is reached through the `ginbuild` build-dispatch seam (#341,
+/// owned/installed by gin-ginbulk), which downcasts the `IndexInfoCarrier`
+/// (#342) back to the real `IndexInfo<'mcx>` and drives the serial heap-scan
+/// build. Mirrors the nbtree `btbuild` / GiST `gistbuild` seams.
 fn ginbuild_am<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _heap_relation: &Relation<'mcx>,
-    _index_relation: &Relation<'mcx>,
-    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<IndexBuildResult> {
-    panic!(
-        "ginbuild: index.c build dispatch (#341) not yet ported — \
-         ginbuild lives in backend-access-gin-ginbulk and needs the real IndexInfo"
-    )
+    sx::ginbuild::call(mcx, heap_relation, index_relation, index_info)
 }
 
-/// `ambuildempty` adapter — `ginbuildempty` (gin-ginbulk) not reachable from
-/// this crate; reached via the #341 dispatch.
-fn ginbuildempty_am<'mcx>(_mcx: Mcx<'mcx>, _index_relation: &Relation<'mcx>) -> PgResult<()> {
-    panic!("ginbuildempty: lives in backend-access-gin-ginbulk, not reachable from ginutil (#341)")
+/// `ambuildempty` adapter — `ginbuildempty` (gin-ginbulk) sits above this crate;
+/// reached through the `ginbuildempty` seam (owned/installed by gin-ginbulk).
+fn ginbuildempty_am<'mcx>(mcx: Mcx<'mcx>, index_relation: &Relation<'mcx>) -> PgResult<()> {
+    sx::ginbuildempty::call(mcx, index_relation)
 }
 
 /// `amcostestimate` adapter — `gincostestimate` (selfuncs.c) not reachable;
@@ -502,13 +503,8 @@ pub fn initGinState<'mcx>(index: &Relation<'mcx>, mcx: Mcx<'mcx>) -> PgResult<Gi
         if relcache::index_getprocid::call(index, attnum, GIN_COMPARE_PROC as u16)?
             != InvalidOid
         {
-            state.compareFn[i] = relcache::index_getprocinfo::call(
-                index.rd_id,
-                attnum,
-                GIN_COMPARE_PROC as u16,
-                GIN_OPTIONS_PROC as u16,
-                -1,
-            )?;
+            state.compareFn[i] =
+                indexam::index_getprocinfo::call(index, attnum, GIN_COMPARE_PROC as u16)?;
         } else {
             // lookup_type_cache(attr->atttypid, TYPECACHE_CMP_PROC_FINFO);
             let cmp = sx::gin_lookup_cmp_proc_finfo::call(mcx, attr.atttypid)?;
@@ -527,45 +523,25 @@ pub fn initGinState<'mcx>(index: &Relation<'mcx>, mcx: Mcx<'mcx>) -> PgResult<Gi
         }
 
         // Opclass must always provide extract procs.
-        state.extractValueFn[i] = relcache::index_getprocinfo::call(
-            index.rd_id,
-            attnum,
-            GIN_EXTRACTVALUE_PROC as u16,
-            GIN_OPTIONS_PROC as u16,
-            -1,
-        )?;
-        state.extractQueryFn[i] = relcache::index_getprocinfo::call(
-            index.rd_id,
-            attnum,
-            GIN_EXTRACTQUERY_PROC as u16,
-            GIN_OPTIONS_PROC as u16,
-            -1,
-        )?;
+        state.extractValueFn[i] =
+            indexam::index_getprocinfo::call(index, attnum, GIN_EXTRACTVALUE_PROC as u16)?;
+        state.extractQueryFn[i] =
+            indexam::index_getprocinfo::call(index, attnum, GIN_EXTRACTQUERY_PROC as u16)?;
 
         // Check opclass capability to do tri-state or binary logic consistent
         // check.
         if relcache::index_getprocid::call(index, attnum, GIN_TRICONSISTENT_PROC as u16)?
             != InvalidOid
         {
-            state.triConsistentFn[i] = relcache::index_getprocinfo::call(
-                index.rd_id,
-                attnum,
-                GIN_TRICONSISTENT_PROC as u16,
-                GIN_OPTIONS_PROC as u16,
-                -1,
-            )?;
+            state.triConsistentFn[i] =
+                indexam::index_getprocinfo::call(index, attnum, GIN_TRICONSISTENT_PROC as u16)?;
         }
 
         if relcache::index_getprocid::call(index, attnum, GIN_CONSISTENT_PROC as u16)?
             != InvalidOid
         {
-            state.consistentFn[i] = relcache::index_getprocinfo::call(
-                index.rd_id,
-                attnum,
-                GIN_CONSISTENT_PROC as u16,
-                GIN_OPTIONS_PROC as u16,
-                -1,
-            )?;
+            state.consistentFn[i] =
+                indexam::index_getprocinfo::call(index, attnum, GIN_CONSISTENT_PROC as u16)?;
         }
 
         if state.consistentFn[i].fn_oid == InvalidOid
@@ -586,13 +562,8 @@ pub fn initGinState<'mcx>(index: &Relation<'mcx>, mcx: Mcx<'mcx>) -> PgResult<Gi
         if relcache::index_getprocid::call(index, attnum, GIN_COMPARE_PARTIAL_PROC as u16)?
             != InvalidOid
         {
-            state.comparePartialFn[i] = relcache::index_getprocinfo::call(
-                index.rd_id,
-                attnum,
-                GIN_COMPARE_PARTIAL_PROC as u16,
-                GIN_OPTIONS_PROC as u16,
-                -1,
-            )?;
+            state.comparePartialFn[i] =
+                indexam::index_getprocinfo::call(index, attnum, GIN_COMPARE_PARTIAL_PROC as u16)?;
             state.canPartialMatch[i] = true;
         } else {
             state.canPartialMatch[i] = false;

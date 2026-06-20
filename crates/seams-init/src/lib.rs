@@ -37,6 +37,9 @@ pub fn init_all() {
     backend_access_gin_gininsert::init_seams();
     backend_access_gin_ginscan::init_seams();
     backend_access_gin_ginutil::init_seams();
+    // gin-ginbulk installs the `ginbuild`/`ginbuildempty` AM build-dispatch
+    // seams that gin-ginutil's `ambuild`/`ambuildempty` adapters call (#341).
+    backend_access_gin_ginbulk::init_seams();
     backend_access_gin_ginvacuum::init_seams();
     backend_access_gin_ginxlog::init_seams();
     backend_access_hashvalidate::init_seams();

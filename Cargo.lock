@@ -23794,6 +23794,7 @@ dependencies = [
  "backend-access-common-toast-internals",
  "backend-access-common-tupdesc",
  "backend-access-gin-core-probe",
+ "backend-access-gin-ginbulk",
  "backend-access-gin-ginfast",
  "backend-access-gin-ginget",
  "backend-access-gin-gininsert",
