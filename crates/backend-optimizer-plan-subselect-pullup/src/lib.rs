@@ -512,17 +512,17 @@ pub fn convert_EXISTS_sublink_to_join<'mcx>(
     {
         // OffsetVarNodes((Node *) subselect, rtoffset, 0)
         let mut subselect_node2 = Node::mk_query(mcx, subselect)?;
-        backend_rewrite_core::offset::OffsetVarNodes(&mut subselect_node2, rtoffset, 0);
+        backend_rewrite_core::offset::OffsetVarNodes(&mut subselect_node2, rtoffset, 0, mcx);
         // IncrementVarSublevelsUp((Node *) subselect, -1, 1)
-        backend_rewrite_core::increment::IncrementVarSublevelsUp(&mut subselect_node2, -1, 1)?;
+        backend_rewrite_core::increment::IncrementVarSublevelsUp(&mut subselect_node2, -1, 1, mcx)?;
         subselect = match subselect_node2.into_query() {
             Some(q) => q,
             None => unreachable!(),
         };
     }
     if let Some(wc) = where_clause.as_deref_mut() {
-        backend_rewrite_core::offset::OffsetVarNodes(wc, rtoffset, 0);
-        backend_rewrite_core::increment::IncrementVarSublevelsUp(wc, -1, 1)?;
+        backend_rewrite_core::offset::OffsetVarNodes(wc, rtoffset, 0, mcx);
+        backend_rewrite_core::increment::IncrementVarSublevelsUp(wc, -1, 1, mcx)?;
     }
 
     // Now that the WHERE clause is adjusted to match the parent query

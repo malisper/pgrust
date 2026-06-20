@@ -363,6 +363,7 @@ pub fn map_partition_varattnos<'mcx, 'r>(
                 &part_attmap.attnums,
                 to_rowtype,
                 &mut found_whole_row,
+                mcx,
             )?;
         }
     }

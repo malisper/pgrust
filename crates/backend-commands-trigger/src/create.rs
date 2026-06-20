@@ -724,7 +724,7 @@ fn transform_trigger_when<'mcx>(
     })
 }
 
-fn when_obj_def_err(msg: &str) -> PgResult<WhenTransform<'static>> {
+fn when_obj_def_err<'a>(msg: &str) -> PgResult<WhenTransform<'a>> {
     Err(ereport(ERROR)
         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
         .errmsg(msg.to_string())
