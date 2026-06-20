@@ -1420,11 +1420,70 @@ fn pqe_per_rte<'mcx>(
             _ => {}
         }
 
-        if !run.resolve(root.parse).rtable[i].securityQuals.is_empty() {
-            panic!(
-                "subquery_planner: securityQuals expression preprocessing \
-                 (planner.c:1050-1054) is not wired over the owned RTE model"
-            );
+        // Process each element of the securityQuals list as if it were a
+        // separate qual expression (planner.c:1044-1054). We need to do it this
+        // way to get proper canonicalization of AND/OR structure. In C each
+        // element is treated as `(Node *) lfirst(lcsq)` and re-stored in place;
+        // EXPRKIND_QUAL preprocessing converts it into an implicit-AND sublist.
+        //
+        // In this owned RTE model each securityQuals element is a single
+        // `Node::Expr` (the RLS rewriter and security-barrier-view rewriter both
+        // build one Expr per barrier qual — an OpExpr/BoolExpr/Const, possibly
+        // OR-combined). Take each Expr out, run preprocess_expression with
+        // EXPRKIND_QUAL (flatten_join_alias_vars / eval_const_expressions /
+        // canonicalize_qual / SS_process_sublinks), and write the result back.
+        // The downstream consumer (process_security_barrier_quals in initsplan)
+        // runs each stored element through make_ands_implicit, mirroring C's
+        // make_ands_implicit on the preprocessed Node, so a single canonicalized
+        // Expr is the right stored shape.
+        let n_sec = run.resolve(root.parse).rtable[i].securityQuals.len();
+        for sq in 0..n_sec {
+            // Take the securityQuals element NodePtr out, convert to an owned
+            // Expr, preprocess, and write the result back.
+            let qual_expr: Option<Expr> = {
+                let node = &*run.resolve(root.parse).rtable[i].securityQuals[sq];
+                match node.as_expr() {
+                    Some(e) => Some(e.clone_in(mcx)?),
+                    None => {
+                        return Err(PgError::error(
+                            "subquery_planner: securityQuals element is not an \
+                             expression node",
+                        ));
+                    }
+                }
+            };
+
+            let processed = preprocess_expression(
+                mcx,
+                &mut *root,
+                run,
+                outer_query_ref,
+                qual_expr,
+                EXPRKIND_QUAL,
+            )?;
+
+            // canonicalize_qual may fold a security qual to nothing (e.g. a
+            // constant-true barrier); store NULL in that case. C re-stores the
+            // (possibly NULL) Node pointer in place; here we replace the element
+            // with a freshly-allocated Node::Expr, or a Const-true / NULL marker
+            // when it folds away. A folded-to-NULL barrier means the qual is
+            // unconditionally satisfied, matching C where lfirst(lcsq) becomes
+            // NIL and make_ands_implicit(NULL) yields an empty conjunct list.
+            match processed {
+                Some(pe) => {
+                    run.resolve_mut(root.parse).rtable[i].securityQuals[sq] =
+                        mcx::alloc_in(mcx, Node::mk_expr(mcx, pe)?)?;
+                }
+                None => {
+                    // Folded to constant-true: represent as a Const(true) so the
+                    // element survives as an always-satisfied barrier (matches
+                    // make_ands_implicit over a NULL/true qual yielding no rows
+                    // filtered). Use a boolean true Const.
+                    let true_const = backend_nodes_core::makefuncs::make_bool_const(true, false);
+                    run.resolve_mut(root.parse).rtable[i].securityQuals[sq] =
+                        mcx::alloc_in(mcx, Node::mk_const(mcx, true_const)?)?;
+                }
+            }
         }
     }
     Ok(())
