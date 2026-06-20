@@ -268,6 +268,60 @@ seam_core::seam!(
     ) -> PgResult<RunSelectResult>
 );
 
+/// One already-evaluated `USING` parameter of a dynamic `EXECUTE` (`pl_exec.c`'s
+/// `exec_eval_using_params`): the bare-word value, its is-null flag, and its
+/// resolved type OID. A pass-by-reference value carries its verbatim header-ful
+/// varlena / cstring byte image in `byref` (the bare `value` word is `0` then),
+/// reconstructed into a `Datum::ByRef` by the SPI param-bind; `None` for a
+/// by-value param. The `$i+1` `Param` placeholder in the dynamic query binds to
+/// `params[i]`.
+#[derive(Clone, Debug)]
+pub struct DynUsingParam {
+    pub value: usize,
+    pub isnull: bool,
+    pub typeid: Oid,
+    pub byref: Option<std::vec::Vec<u8>>,
+}
+
+/// The raw result of running a dynamic `EXECUTE` query string (`pl_exec.c`'s
+/// `exec_stmt_dynexecute` / `exec_dynquery_with_params` via
+/// `SPI_execute_extended` / `SPI_cursor_parse_open`): the SPI result code, the
+/// row count, whether a tuple table was produced, the first result row's columns
+/// (for `EXECUTE ... INTO`), and **every** result row's columns (for
+/// `FOR ... IN EXECUTE`). `first_row` is populated when `into` was requested;
+/// `all_rows` when `collect_all` was requested.
+#[derive(Clone, Debug)]
+pub struct DynExecResult {
+    pub code: int32,
+    pub processed: u64,
+    pub returned_tuptable: bool,
+    pub first_row: std::vec::Vec<ExecsqlColumn>,
+    pub all_rows: std::vec::Vec<std::vec::Vec<ExecsqlColumn>>,
+}
+
+seam_core::seam!(
+    /// `exec_stmt_dynexecute` / `exec_dynquery_with_params` core (`pl_exec.c`):
+    /// run the **dynamic** query string `query` (the runtime text after the
+    /// `EXECUTE` keyword) as a one-shot, with the already-evaluated `USING`
+    /// `params` (param id `$i+1`) bound as external params. The query is analyzed
+    /// with NO PL/pgSQL parser hooks — a bareword does not resolve to a variable;
+    /// only `$n` placeholders substitute (their types come from the `params`).
+    /// `into` collects the first row (`EXECUTE ... INTO`); `collect_all` collects
+    /// every row (`FOR ... IN EXECUTE`); `tcount` caps the row count (0 = run to
+    /// completion). All command types — `SELECT`, DML, utility (DDL) — run.
+    ///
+    /// The executor (`pl_exec.c`, this unit) is layered below SPI and reaches the
+    /// SPI one-shot plan surface through this seam; the handler installs it.
+    pub fn exec_dynexecute_via_spi(
+        query: std::string::String,
+        params: std::vec::Vec<DynUsingParam>,
+        read_only: bool,
+        into: bool,
+        collect_all: bool,
+        tcount: i64,
+    ) -> PgResult<DynExecResult>
+);
+
 /// The coerced result of [`exec_cast_value_via_spi`]: the bare-word coerced
 /// datum + its is-null flag, plus — when the target type is pass-by-reference
 /// (`text`/`varchar`/`numeric`/…) — the coerced value's verbatim header-ful

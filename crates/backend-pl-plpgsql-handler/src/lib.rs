@@ -930,6 +930,53 @@ pub fn init_seams() {
         },
     );
 
+    // Install `exec_stmt_dynexecute` / `exec_dynquery_with_params` core
+    // (pl_exec.c): the SPI one-shot surface for a dynamic EXECUTE query string,
+    // with already-evaluated USING params. Runs SELECT / DML / utility; INTO
+    // collects the first row, FOR-IN-EXECUTE collects every row.
+    backend_pl_plpgsql_exec_seams::exec_dynexecute_via_spi::set(
+        |query: String,
+         params: Vec<backend_pl_plpgsql_exec_seams::DynUsingParam>,
+         read_only,
+         into,
+         collect_all,
+         tcount| {
+            let using: Vec<backend_executor_spi::EvalParamValue> = params
+                .into_iter()
+                .map(|p| backend_executor_spi::EvalParamValue {
+                    value: p.value,
+                    isnull: p.isnull,
+                    typeid: p.typeid,
+                    byref: p.byref,
+                })
+                .collect();
+            let r = backend_executor_spi::spi_execsql_dynamic(
+                &query, &using, read_only, into, collect_all, tcount,
+            )?;
+            let map_col = |c: backend_executor_spi::ExecsqlColumn| {
+                backend_pl_plpgsql_exec_seams::ExecsqlColumn {
+                    value: c.value,
+                    isnull: c.isnull,
+                    typeid: c.typeid,
+                    typmod: -1,
+                    name: c.name,
+                    byref: c.byref,
+                }
+            };
+            Ok(backend_pl_plpgsql_exec_seams::DynExecResult {
+                code: r.code,
+                processed: r.processed,
+                returned_tuptable: r.returned_tuptable,
+                first_row: r.first_row.into_iter().map(map_col).collect(),
+                all_rows: r
+                    .all_rows
+                    .into_iter()
+                    .map(|row| row.into_iter().map(map_col).collect())
+                    .collect(),
+            })
+        },
+    );
+
     // Install the `exec_stmt_block` EXCEPTION-leg subtransaction entry points
     // (pl_exec.c keystone #215). The executor unit is layered below xact; the
     // handler (top layer) bridges to the now-ported xact subxact engine. These

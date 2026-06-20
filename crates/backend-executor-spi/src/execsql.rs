@@ -119,6 +119,150 @@ pub fn spi_execsql_collect(
     spi_execsql_inner(query, parsemode, parse_state, read_only, false, true, 0, resolve)
 }
 
+/// `exec_stmt_dynexecute` / `exec_dynquery_with_params` core (`pl_exec.c`): run a
+/// **dynamic** query string `query` (the runtime text after the `EXECUTE`
+/// keyword) as a one-shot, optionally with `USING` parameters.
+///
+/// Unlike [`spi_execsql`], the query text is not a compiled PL/pgSQL expression:
+/// it is analyzed with NO PL/pgSQL parser hooks (a bareword does *not* resolve
+/// to a variable — only `$n` `USING` placeholders are substituted). The `USING`
+/// parameters arrive already evaluated in `params` (param id `$i+1`); their type
+/// OIDs drive `setup_parse_fixed_parameters` so the analyzer knows each
+/// placeholder's type (C: `SPI_execute_extended` / `SPI_cursor_parse_open` with a
+/// `ParamListInfo`, which feeds `fixed_paramref_hook`). `into` collects the first
+/// row; `collect_all` collects every row (FOR-IN-EXECUTE); `tcount` caps the row
+/// count (0 = run to completion). All command types — `SELECT`, DML, and utility
+/// (DDL) — run, mirroring C's `SPI_execute_extended` switch.
+pub fn spi_execsql_dynamic(
+    query: &str,
+    params: &[EvalParamValue],
+    read_only: bool,
+    into: bool,
+    collect_all: bool,
+    tcount: i64,
+) -> PgResult<ExecsqlResult> {
+    let cxt = MemoryContext::new("SPI Dynexecute");
+    let mcx = cxt.mcx();
+    let interned = leak_str_in(mcx, query)?;
+
+    // _SPI_prepare_plan with fixed parameter types (the USING params' type OIDs),
+    // no PL/pgSQL parser hooks. C's `_SPI_prepare_oneshot` for a dynamic query
+    // analyzes with `parse_analyze_fixedparams`.
+    let param_types: Vec<Oid> = params.iter().map(|p| p.typeid).collect();
+    let source = prepare_dynexecute_plan(mcx, interned, &param_types)?;
+
+    // Build the value ParamListInfo directly from the evaluated USING values
+    // (C `exec_eval_using_params` -> the paramLI fed to SPI_execute_extended).
+    let param_li = build_dyn_param_list(params)?;
+
+    // _SPI_execute_plan: GetCachedPlan + push the transaction snapshot + run.
+    let pushed = snapmgr::push_active_snapshot_transaction::call().is_ok();
+    let advance_cid = pushed && !read_only;
+    let out = run_execsql(mcx, source, &param_li, into, collect_all, tcount, advance_cid);
+    if pushed {
+        let _ = snapmgr::pop_active_snapshot::call();
+    }
+    let result = out;
+
+    let _ = plancache::DropCachedPlan(source);
+
+    let result = result?;
+    set_spi_processed(result.processed);
+    Ok(result)
+}
+
+/// `_SPI_prepare_plan` for a dynamic query string: raw_parser(default) ->
+/// CreateCachedPlan + `parse_analyze_fixedparams` (the USING param types, no
+/// PL/pgSQL hooks) + QueryRewrite + CompleteCachedPlan. Returns the completed
+/// source handle.
+fn prepare_dynexecute_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    query: &'mcx str,
+    param_types: &[Oid],
+) -> PgResult<SourceHandle> {
+    // A dynamic EXECUTE string is parsed as a complete top-level statement.
+    let raw_list = backend_parser_driver::raw_parser(mcx, query, RawParseMode::RAW_PARSE_DEFAULT)?;
+
+    if raw_list.len() != 1 {
+        return Err(backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("cannot insert multiple commands into a prepared statement")
+            .into_error());
+    }
+    let parsetree = &raw_list[0];
+
+    let command_tag = backend_tcop_utility_seams::create_command_tag::call(&parsetree.stmt)?;
+    let plansource = plancache::CreateCachedPlan(parsetree, query, command_tag)?;
+
+    let query_node = backend_parser_analyze::parse_analyze_fixedparams(
+        mcx,
+        parsetree,
+        query,
+        param_types,
+    )?;
+    let querytree_list = backend_rewrite_rewritehandler::QueryRewrite(mcx, query_node)?;
+
+    plancache::CompleteCachedPlan(
+        plansource,
+        &querytree_list,
+        param_types,
+        param_types.len() as i32,
+        false, // has_parser_setup (fixed param types, not a parser hook)
+        types_nodes::copy_query::CURSOR_OPT_PARALLEL_OK
+            | types_nodes::portalcmds::CURSOR_OPT_GENERIC_PLAN,
+        false, // fixed_result
+    )?;
+
+    Ok(plansource)
+}
+
+/// `exec_eval_using_params` result -> `ParamListInfo` (`pl_exec.c`): build the
+/// value param list from the already-evaluated USING values, param id `$i+1`
+/// (index `i`). Returns `None` when there are no params (C's NIL fast path).
+fn build_dyn_param_list(params: &[EvalParamValue]) -> PgResult<ParamListInfo> {
+    if params.is_empty() {
+        return Ok(None);
+    }
+
+    let num_params = params.len();
+
+    let ctx: &'static MemoryContext = allocator_api2::boxed::Box::leak(
+        allocator_api2::boxed::Box::new(MemoryContext::new("PL/pgSQL Dyn Param List")),
+    );
+    let pmcx: Mcx<'static> = ctx.mcx();
+
+    let mut plist: Vec<ParamExternData<'static>> = Vec::with_capacity(num_params);
+    for p in params {
+        // A pass-by-reference value (text/varchar/numeric/...) carries its
+        // header-ful byte image in `byref`; rebuild it as a live `Datum::ByRef`
+        // rooted in the param-list context.
+        let value = match &p.byref {
+            Some(bytes) if !p.isnull => RichDatum::from_byref_bytes_in(pmcx, bytes)?,
+            _ => RichDatum::from_usize(p.value),
+        };
+        plist.push(ParamExternData {
+            value,
+            isnull: p.isnull,
+            // exec_eval_using_params always marks USING params PARAM_FLAG_CONST
+            // (they are only used with one-shot plans).
+            pflags: PARAM_FLAG_CONST,
+            ptype: p.typeid,
+        });
+    }
+
+    Ok(Some(std::rc::Rc::new(ParamListInfoData {
+        param_fetch: false,
+        param_fetch_arg: None,
+        param_compile: false,
+        param_compile_arg: None,
+        parser_setup: false,
+        parser_setup_arg: None,
+        param_values_str: None,
+        num_params: num_params as i32,
+        params: plist,
+    })))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spi_execsql_inner(
     query: &str,

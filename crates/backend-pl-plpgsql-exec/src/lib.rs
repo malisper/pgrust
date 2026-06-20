@@ -73,6 +73,9 @@ const INVALID_OID: Oid = 0;
 /// `UNKNOWNOID` (705).
 const UNKNOWNOID: Oid = 705;
 
+/// `TEXTOID` (25).
+const TEXTOID: Oid = 25;
+
 /// `VOIDOID` (2278).
 const VOIDOID: Oid = 2278;
 
@@ -551,7 +554,7 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
             PLpgSQL_stmt::Raise(s) => exec_stmt_raise(estate, s),
             PLpgSQL_stmt::Assert(_) => exec_stmt_assert(estate),
             PLpgSQL_stmt::Execsql(s) => exec_stmt_execsql(estate, s),
-            PLpgSQL_stmt::Dynexecute(_) => exec_stmt_dynexecute(estate),
+            PLpgSQL_stmt::Dynexecute(s) => exec_stmt_dynexecute(estate, s),
             PLpgSQL_stmt::Dynfors(s) => exec_stmt_dynfors(estate, s),
             PLpgSQL_stmt::Open(_) => exec_stmt_open(estate),
             PLpgSQL_stmt::Fetch(_) => exec_stmt_fetch(estate),
@@ -2705,11 +2708,173 @@ fn exec_move_row_into_target(
     Ok(())
 }
 
-fn exec_stmt_dynexecute(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
-    panic!(
-        "seam not wired: exec_stmt_dynexecute (pl_exec.c) — exec_eval_expr(querystring) + \
-         SPI_execute / exec_eval_using_params / exec_move_row (SPI + fmgr)"
-    );
+/// `exec_eval_using_params(estate, params)` (pl_exec.c 8869) — evaluate the
+/// `USING` clause expressions of a dynamic `EXECUTE` into a list of already-
+/// evaluated param values (the analogue of C's `ParamListInfo`). Each param is
+/// evaluated with `exec_eval_expr`; an `unknown`-typed result is coerced to
+/// `text` (C: "treat 'unknown' parameters as text, since that's what most people
+/// would expect"); a pass-by-reference value carries its image. `exec_eval_cleanup`
+/// runs after each param (C copies the value into the stmt_mcontext first; the
+/// owned model carries the by-ref image in `byref`, which outlives the cleanup).
+fn exec_eval_using_params(
+    estate: &mut PLpgSQL_execstate,
+    params: &[types_plpgsql::PLpgSQL_expr],
+) -> types_error::PgResult<Vec<exec_seams::DynUsingParam>> {
+    // Fast path for no parameters (C returns NULL paramLI).
+    if params.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out: Vec<exec_seams::DynUsingParam> = Vec::with_capacity(params.len());
+    for param in params {
+        let (value, isnull, mut ptype, _ptypmod) = exec_eval_expr_impl(estate, param)?;
+        let mut byref = estate.last_eval_byref.take();
+        let mut bare = value.as_usize();
+
+        if ptype == UNKNOWNOID {
+            // Treat 'unknown' parameters as text, since that's what most people
+            // would expect. (C: prm->ptype = TEXTOID; prm->value =
+            // CStringGetTextDatum(DatumGetCString(prm->value)).) Render the
+            // unknown value to its C-string text, then reframe it as a header-ful
+            // `text` varlena image so the executor reads a varlena.
+            let s = convert_value_to_string(value, byref.clone(), ptype)?;
+            ptype = TEXTOID;
+            if !isnull {
+                let (_d, image) = exec_seams::cstring_to_text_datum::call(s)?;
+                byref = Some(image);
+                bare = 0;
+            }
+        }
+
+        out.push(exec_seams::DynUsingParam {
+            value: bare,
+            isnull,
+            typeid: ptype,
+            byref,
+        });
+        exec_eval_cleanup(estate);
+    }
+
+    Ok(out)
+}
+
+/// `exec_stmt_dynexecute(estate, stmt)` (pl_exec.c 4440) — execute a dynamic SQL
+/// query string built at runtime (`EXECUTE '<sql>' [INTO target] [USING ...]`).
+/// Evaluate the query-string expression to text, evaluate the USING params, run
+/// the string as a one-shot SQL statement (any command type), and — for INTO —
+/// move the first result row into the target (with the STRICT / too-many-rows
+/// checks).
+fn exec_stmt_dynexecute(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_dynexecute,
+) -> PLpgSQL_rc_result {
+    let query_expr = stmt
+        .query
+        .as_deref()
+        .expect("EXECUTE carries a query-string expression");
+
+    // First we evaluate the string expression after the EXECUTE keyword. Its
+    // result is the querystring we have to execute.
+    let (value, isnull, restype, _restypmod) = exec_eval_expr_impl(estate, query_expr)?;
+    if isnull {
+        return Err(types_error::PgError::error(
+            "query string argument of EXECUTE is null".to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+    }
+    // Get the C-String representation (convert_value_to_string).
+    let byref = estate.last_eval_byref.take();
+    let querystr = convert_value_to_string(value, byref, restype)?;
+    exec_eval_cleanup(estate);
+
+    // Execute the query without preparing a saved plan, with the USING params.
+    let using = exec_eval_using_params(estate, &stmt.params)?;
+
+    let result = exec_seams::exec_dynexecute_via_spi::call(
+        querystr.clone(),
+        using,
+        estate.readonly_func,
+        stmt.into, // collect first row when INTO
+        false,     // collect_all
+        0,         // run to completion
+    )?;
+
+    let exec_res = result.code;
+    match exec_res {
+        exec_seams::SPI_OK_SELECT
+        | exec_seams::SPI_OK_INSERT
+        | exec_seams::SPI_OK_UPDATE
+        | exec_seams::SPI_OK_DELETE
+        | exec_seams::SPI_OK_INSERT_RETURNING
+        | exec_seams::SPI_OK_UPDATE_RETURNING
+        | exec_seams::SPI_OK_DELETE_RETURNING
+        | exec_seams::SPI_OK_UTILITY
+        | exec_seams::SPI_OK_REWRITTEN => {}
+        // A zero return implies the querystring contained no commands.
+        0 => {}
+        exec_seams::SPI_OK_SELINTO => {
+            // We want to disallow SELECT INTO for now, because its behavior is
+            // not consistent with SELECT INTO in a normal plpgsql context.
+            return Err(types_error::PgError::error(
+                "EXECUTE of SELECT ... INTO is not implemented".to_string(),
+            )
+            .with_hint(
+                "You might want to use EXECUTE ... INTO or EXECUTE CREATE TABLE ... AS instead."
+                    .to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+        }
+        exec_seams::SPI_ERROR_COPY => {
+            return Err(types_error::PgError::error(
+                "cannot COPY to/from client in PL/pgSQL".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+        }
+        _ => {
+            return Err(types_error::PgError::error(format!(
+                "SPI_execute_extended failed executing query \"{querystr}\": code {exec_res}"
+            )));
+        }
+    }
+
+    // Save result info for GET DIAGNOSTICS.
+    estate.eval_processed = result.processed;
+
+    // Process INTO if present.
+    if stmt.into {
+        // If the statement did not return a tuple table, complain.
+        if !result.returned_tuptable {
+            return Err(types_error::PgError::error(
+                "INTO used with a command that cannot return data".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR));
+        }
+
+        let target = stmt.target.as_deref().expect("INTO carries a target");
+        let n = result.processed;
+
+        if n == 0 {
+            // If STRICT and no row, throw; otherwise set target to NULL(s).
+            if stmt.strict {
+                return Err(types_error::PgError::error("query returned no rows".to_string())
+                    .with_sqlstate(types_error::ERRCODE_NO_DATA_FOUND));
+            }
+            exec_move_row_into_target(estate, target, &[])?;
+        } else {
+            if n > 1 && stmt.strict {
+                return Err(types_error::PgError::error(
+                    "query returned more than one row".to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_TOO_MANY_ROWS));
+            }
+            // Put the first result row into the target.
+            exec_move_row_into_target(estate, target, &result.first_row)?;
+        }
+        // Clean up after exec_move_row().
+        exec_eval_cleanup(estate);
+    }
+
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
 /// `exec_stmt_dynfors(estate, stmt)` (pl_exec.c 5497) — FOR rec/row IN EXECUTE
@@ -2763,29 +2928,24 @@ fn exec_dynquery_with_params(
     let querystr = convert_value_to_string(value, byref, restype)?;
     exec_eval_cleanup(estate);
 
-    if !params.is_empty() {
-        // exec_eval_using_params + SPI_cursor_open_with_args (dynamic-param
-        // substrate). The FOR-IN-EXECUTE without USING is the common shape;
-        // the USING leg stays loud until the dynamic-param plan path lands.
-        panic!(
-            "seam not wired: exec_dynquery_with_params USING leg (pl_exec.c) — \
-             exec_eval_using_params + SPI_cursor_open_with_args (dynamic-param substrate)"
-        );
-    }
+    // exec_eval_using_params(estate, params): evaluate the USING expressions.
+    let using = exec_eval_using_params(estate, params)?;
 
-    // Run the dynamic query as a top-level SQL statement. It is parsed in the
-    // default raw-parse mode (a complete statement, not a PL/pgSQL expression),
-    // with an empty PL/pgSQL parse state (the query text has no compiled
-    // variable references — any value substitution is via the USING params,
-    // handled above).
-    let empty_parse_state =
-        types_nodes::parsestmt::PlpgsqlExprParseState::new(Default::default(), INVALID_OID);
-    exec_run_select_rows(
-        estate,
-        &querystr,
-        types_plpgsql::RawParseMode::RAW_PARSE_DEFAULT,
-        empty_parse_state,
-    )
+    // Run the dynamic query as a top-level SQL statement (SPI_cursor_parse_open
+    // in C), collecting every result row for the FOR-IN-EXECUTE iteration. The
+    // owned model materializes all rows up front (the portal/cursor leg is a
+    // separate keystone); the observable iteration is identical.
+    let result = exec_seams::exec_dynexecute_via_spi::call(
+        querystr,
+        using,
+        estate.readonly_func,
+        false, // into
+        true,  // collect_all
+        0,     // run to completion
+    )?;
+
+    estate.eval_processed = result.processed;
+    Ok(result.all_rows)
 }
 
 // NB: the FOR-IN-EXECUTE USING leg above stays a loud `panic!` (unported
