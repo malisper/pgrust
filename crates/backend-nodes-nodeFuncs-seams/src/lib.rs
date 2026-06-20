@@ -43,6 +43,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `exprIsLengthCoercion(expr, &coercedTypmod)` (nodeFuncs.c) — detect
+    /// whether `expr` is a length-coercion cast (a FuncExpr/ArrayCoerceExpr that
+    /// applies a typmod, e.g. `numeric(16,4)` / `varchar(8)`). Returns
+    /// `(true, coercedTypmod)` with the coerced type modifier, or `(false, -1)`.
+    /// Pure node inspection. Used by ruleutils' cast deparse to print the typmod
+    /// on the target type name. `Err` carries an unexpected-node `elog(ERROR)`.
+    pub fn expr_is_length_coercion(expr: &Expr) -> PgResult<(bool, i32)>
+);
+
+seam_core::seam!(
     /// `get_call_expr_argtype(expr, argnum)` (fmgr.c) — the declared type of the
     /// `argnum`'th argument of a call expression (the `IsA` dispatch over
     /// `FuncExpr`/`OpExpr`/`DistinctExpr`/`ScalarArrayOpExpr`/`NullIfExpr`/

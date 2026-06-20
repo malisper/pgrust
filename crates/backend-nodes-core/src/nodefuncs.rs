@@ -1802,6 +1802,7 @@ pub fn init_seams() {
     use backend_nodes_nodeFuncs_seams as seams;
 
     seams::expr_type_info::set(seam_expr_type_info);
+    seams::expr_is_length_coercion::set(seam_expr_is_length_coercion);
     seams::expr_type::set(seam_expr_type);
     seams::call_expr_argtype::set(seam_call_expr_argtype);
     seams::get_call_expr_argtype_expr::set(seam_get_call_expr_argtype_expr);
@@ -2025,6 +2026,11 @@ fn seam_expr_type_info(
         typmod: expr_typmod(Some(expr))?,
         collation: expr_collation(Some(expr))?,
     })
+}
+
+/// `exprIsLengthCoercion(expr, &coercedTypmod)` seam adapter.
+fn seam_expr_is_length_coercion(expr: &Expr) -> PgResult<(bool, i32)> {
+    expr_is_length_coercion(Some(expr))
 }
 
 /// `exprType(ExternalFnExpr)` seam (fmgr `get_fn_expr_rettype` path).

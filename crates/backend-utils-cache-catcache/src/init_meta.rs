@@ -357,8 +357,23 @@ pub fn cache_tupdesc_is_valid(cache_id: i32) -> bool {
 /// Read access to `cache->cc_tupdesc`: runs `f` with a borrow of the
 /// descriptor. Panics if not loaded (callers check `cache_tupdesc_is_valid` /
 /// run phase 2 first, as `SysCacheGetAttr` does).
+///
+/// IMPORTANT: `f` is *not* run while the `TUPDESC_STORE` `RefCell` borrow is
+/// held. `f` is typically `heap_deform_tuple` over a catalog tuple; deforming a
+/// TOASTed catalog tuple re-enters the catcache (TOAST fetch → index scan →
+/// relcache build → `SearchSysCache`), which calls `with_cache_tupdesc` again.
+/// Holding the store borrow across that re-entrant call trips
+/// "RefCell already borrowed" (the C `cc_tupdesc` is a bare pointer with no such
+/// guard). So we resolve the descriptor pointer under a short borrow, release
+/// the borrow, then call `f`. The descriptor lives in the CacheMemoryContext
+/// analog (`TUPDESC_STORE`'s `McxOwned`), which persists for the whole backend
+/// life and is never freed or relocated once a cache is initialized, so the
+/// pointer stays valid across `f`.
 pub fn with_cache_tupdesc(cache_id: i32, f: &mut dyn FnMut(&TupleDescData<'_>)) {
-    with_tupdesc_store(|store| {
+    // Resolve a stable pointer to the stored TupleDescData under a short borrow.
+    // The store's `'mcx` is an HRTB that can't escape the closure, so we erase it
+    // to `'static` for the carrier pointer and reattach a fresh lifetime below.
+    let td_ptr: *const TupleDescData<'static> = with_tupdesc_store(|store| {
         let (_, td) = store
             .descs
             .iter()
@@ -366,6 +381,15 @@ pub fn with_cache_tupdesc(cache_id: i32, f: &mut dyn FnMut(&TupleDescData<'_>)) 
             .unwrap_or_else(|| {
                 panic!("with_cache_tupdesc: cc_tupdesc for cache id {cache_id} not loaded")
             });
-        f(td);
+        // The PgBox's target is pinned in the store's MemoryContext for the
+        // backend's life; a raw pointer outlives this borrow safely.
+        (&**td as *const TupleDescData<'_>) as *const TupleDescData<'static>
     });
+    // SAFETY: `td_ptr` points into the CacheMemoryContext-analog store, which is
+    // never freed or moved for an initialized cache (see the doc comment). The
+    // borrow that produced it has been released, so `f` may freely re-enter the
+    // catcache (and `with_cache_tupdesc`) without a double-borrow panic. The
+    // `'static` is a carrier only; `f` accepts any lifetime (`&TupleDescData<'_>`).
+    let td: &TupleDescData<'static> = unsafe { &*td_ptr };
+    f(td);
 }

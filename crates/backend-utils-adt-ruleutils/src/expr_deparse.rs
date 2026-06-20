@@ -1262,9 +1262,21 @@ fn get_func_expr_inner(
     {
         let arg = expr_arg(args, 0)?;
         let rettype = f.funcresulttype;
-        // exprIsLengthCoercion would yield the coerced typmod; that helper is
-        // unported, so we use -1 (the common non-length-coercion case).
-        let coerced_typmod = -1;
+        // exprIsLengthCoercion((Node *) expr, &coercedTypmod): a length-coercion
+        // cast (e.g. numeric(16,4) / varchar(8)) carries its typmod in the
+        // function's int4 second argument, which we must print on the target
+        // type name. Non-length coercions yield -1.
+        let coerced_typmod = match enclosing {
+            Some(e) => {
+                backend_nodes_nodeFuncs_seams::expr_is_length_coercion::call(e)?.1
+            }
+            None => {
+                // The enclosing FuncExpr node is what C passes; reconstruct it
+                // when the caller didn't thread it through.
+                let f_expr = Expr::FuncExpr(f.clone());
+                backend_nodes_nodeFuncs_seams::expr_is_length_coercion::call(&f_expr)?.1
+            }
+        };
         get_coercion_expr_e(arg, context, rettype, coerced_typmod, enclosing)?;
         return Ok(());
     }
