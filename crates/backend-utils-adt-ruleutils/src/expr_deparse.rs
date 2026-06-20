@@ -449,6 +449,10 @@ pub fn get_rule_expr(
         // "emit the component items comma-separated with no surrounding
         // decoration" — C reaches this by passing a List* as a Node*.
         get_rule_expr_list(list, context, showimplicit)?;
+    } else if let Some(spec) = node.as_partitionboundspec() {
+        // C `case T_PartitionBoundSpec:` (ruleutils.c 10429-10486). Reached via
+        // pg_get_expr(relpartbound, ...) for a partition's `FOR VALUES …` clause.
+        get_rule_partition_bound_spec(spec, context)?;
     } else if let Some(expr) = node.as_expr() {
         get_rule_expr_e(expr, context, showimplicit)?;
     } else {
@@ -2423,6 +2427,74 @@ fn get_coercion_expr_e(
 /* -------------------------------------------------------------------------- *
  * get_const_expr (+ get_const_collation, simple_quote_literal) — C 11464-11613.
  * -------------------------------------------------------------------------- */
+
+/// C `get_rule_expr`'s `case T_PartitionBoundSpec:` (ruleutils.c 10429-10486) —
+/// render a partition's `FOR VALUES …` / `DEFAULT` bound clause for HASH, LIST
+/// and RANGE strategies (and the DEFAULT partition).
+fn get_rule_partition_bound_spec(
+    spec: &types_nodes::ddlnodes::PartitionBoundSpec<'_>,
+    context: &mut DeparseContext<'_>,
+) -> PgResult<()> {
+    // if (spec->is_default) { appendStringInfoString(buf, "DEFAULT"); break; }
+    if spec.is_default {
+        str_(context, "DEFAULT")?;
+        return Ok(());
+    }
+
+    match spec.strategy {
+        // PARTITION_STRATEGY_HASH = 'h'
+        s if s == b'h' as i8 => {
+            // appendStringInfoString(buf, "FOR VALUES");
+            // appendStringInfo(buf, " WITH (modulus %d, remainder %d)", ...);
+            str_(context, "FOR VALUES")?;
+            str_(
+                context,
+                &alloc::format!(
+                    " WITH (modulus {}, remainder {})",
+                    spec.modulus,
+                    spec.remainder
+                ),
+            )?;
+        }
+
+        // PARTITION_STRATEGY_LIST = 'l'
+        s if s == b'l' as i8 => {
+            // appendStringInfoString(buf, "FOR VALUES IN (");
+            str_(context, "FOR VALUES IN (")?;
+            let mut sep = "";
+            for cell in spec.listdatums.iter() {
+                // Const *val = lfirst_node(Const, cell); get_const_expr(val, context, -1);
+                str_(context, sep)?;
+                get_const_expr(cell, context, -1)?;
+                sep = ", ";
+            }
+            ch_(context, b')')?;
+        }
+
+        // PARTITION_STRATEGY_RANGE = 'r'
+        s if s == b'r' as i8 => {
+            // appendStringInfo(buf, "FOR VALUES FROM %s TO %s",
+            //     get_range_partbound_string(spec->lowerdatums),
+            //     get_range_partbound_string(spec->upperdatums));
+            let mcx = context.buf.allocator();
+            let lower = get_range_partbound_string(mcx, spec.lowerdatums.as_slice())?;
+            let upper = get_range_partbound_string(mcx, spec.upperdatums.as_slice())?;
+            str_(context, "FOR VALUES FROM ")?;
+            str_(context, &lower)?;
+            str_(context, " TO ")?;
+            str_(context, &upper)?;
+        }
+
+        other => {
+            return Err(elog_error(alloc::format!(
+                "unrecognized partition strategy: {}",
+                other
+            )));
+        }
+    }
+
+    Ok(())
+}
 
 /// `get_range_partbound_string(bound_datums)` (ruleutils.c 13676) — a C-string
 /// representation of one range partition bound, e.g. `(0)`, `(MINVALUE, 5)`.
