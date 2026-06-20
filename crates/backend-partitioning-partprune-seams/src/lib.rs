@@ -54,14 +54,25 @@ seam_core::seam!(
     /// `get_matching_partitions(context, pruning_steps)` (partprune.c): run the
     /// pruning steps against the current comparison values and return the set
     /// of surviving partition indexes (a `None` result is the C NULL/empty
-    /// set). The context's lazily-resolved `stepcmpfuncs` are filled in place,
-    /// and pruning-expression evaluation reads the EState (the owned model
-    /// threads it where C reaches it via `context->exprcontext->ecxt_estate`);
-    /// the result allocates in `mcx` (C: `context->ppccontext`). `Err` carries
-    /// the comparison/eval `ereport(ERROR)`s and OOM.
+    /// set). `pruning_steps` is the executor's per-partrel step list (the
+    /// `Opaque`-carried `PartitionPruneStep` payload, downcast by the caller);
+    /// the context's lazily-resolved `stepcmpfuncs` are filled in place, and
+    /// non-Const step expressions are evaluated via `context.exprstates` over
+    /// `context.exprcontext` (`partkey_datum_from_expr`'s ExprState leg), reading
+    /// the EState where C reaches it via `context->exprcontext->ecxt_estate`; the
+    /// result allocates in `mcx` (C: `context->ppccontext`). `Err` carries the
+    /// comparison/eval `ereport(ERROR)`s and OOM.
+    ///
+    /// NOT YET INSTALLED — the run-time kernel-evaluation leg (the
+    /// `partkey_datum_from_expr` ExprState evaluation + the bound-math over the
+    /// executor's `PartitionPruneContext` for all three strategies) is the
+    /// remaining follow-on. The whole planner -> setrefs -> execMain pipeline is
+    /// wired and reaches this seam; a generic-plan `WHERE a = $1` errors here
+    /// until the body lands.
     pub fn get_matching_partitions<'mcx>(
         mcx: Mcx<'mcx>,
         context: &mut PartitionPruneContext<'mcx>,
+        pruning_steps: &[types_nodes::partprune_carrier::PartitionPruneStep],
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>>
 );

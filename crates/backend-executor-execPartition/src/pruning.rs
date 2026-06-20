@@ -1057,15 +1057,22 @@ pub(crate) fn find_matching_subplans_recurse<'mcx>(
     // across the recursion / mutation in the loop below.
     let partset: Option<PgBox<'mcx, Bitmapset<'mcx>>>;
     if initial_prune && has_initial {
+        // Extract the step list (owned) before borrowing initial_context mut.
+        let steps =
+            downcast_steps(&prunedata.partrelprunedata[pprune_index].initial_pruning_steps);
         partset = partprune_seams::get_matching_partitions::call(
             mcx,
             &mut prunedata.partrelprunedata[pprune_index].initial_context,
+            &steps,
             estate,
         )?;
     } else if !initial_prune && has_exec {
+        let steps =
+            downcast_steps(&prunedata.partrelprunedata[pprune_index].exec_pruning_steps);
         partset = partprune_seams::get_matching_partitions::call(
             mcx,
             &mut prunedata.partrelprunedata[pprune_index].exec_context,
+            &steps,
             estate,
         )?;
     } else {
