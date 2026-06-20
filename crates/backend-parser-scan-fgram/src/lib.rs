@@ -460,6 +460,24 @@ impl<'a> Scanner<'a> {
         self.yylloc
     }
 
+    /// `scanner_errposition(location)` (scan.l:1340) -- convert a byte
+    /// `location` within the scan buffer to the 1-based character cursor used in
+    /// user-facing error/warning positions (`errposition`). Returns `0` ("no
+    /// position") for an unknown (`< 0`) location or an encoding failure, matching
+    /// the C path (which reports `0` rather than escalating while building a
+    /// report). Used by the `core_yylex` seam to position the deferred scanner
+    /// warnings (`check_string_escape_warning`).
+    pub fn scanner_errposition(&self, location: i32) -> i32 {
+        if location < 0 {
+            return 0;
+        }
+        // C: pg_mbstrlen_with_len(scanbuf, location) + 1.
+        match backend_utils_mb::pg_mbstrlen_with_len(self.scanbuf, location) {
+            Ok(n) => n + 1,
+            Err(_) => 0,
+        }
+    }
+
     /// `SET_YYLLOC()` -- record the current token's start location.
     #[inline]
     fn set_yylloc(&mut self) {

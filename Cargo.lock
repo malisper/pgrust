@@ -13743,9 +13743,11 @@ version = "0.0.0"
 dependencies = [
  "backend-parser-scan-fgram",
  "backend-parser-scansup-fgram",
+ "backend-utils-error",
  "backend-utils-error-fgram",
  "backend-utils-mb-fgram",
  "pgrust-pg-ffi-fgram",
+ "types-error",
 ]
 
 [[package]]
@@ -22246,6 +22248,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-hash-pg-crc"
+version = "0.0.0"
+dependencies = [
+ "backend-utils-fmgr-core",
+ "port-crc32c",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+]
+
+[[package]]
 name = "backend-utils-hash-small-seams"
 version = "0.0.0"
 dependencies = [
@@ -24612,6 +24625,7 @@ dependencies = [
  "backend-utils-fmgr-dfmgr",
  "backend-utils-fmgr-funcapi",
  "backend-utils-hash-dynahash",
+ "backend-utils-hash-pg-crc",
  "backend-utils-init-miscinit",
  "backend-utils-init-postinit",
  "backend-utils-init-small",

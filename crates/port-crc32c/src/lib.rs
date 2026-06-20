@@ -10,7 +10,7 @@
 //! every consumer in this tree runs little-endian and the seam signature is
 //! the little-endian `u32`. The table carries the little-endian values only.
 
-mod legacy;
+pub mod legacy;
 mod table;
 
 pub use legacy::legacy_crc32_lexeme;

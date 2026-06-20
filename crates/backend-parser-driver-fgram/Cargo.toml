@@ -13,5 +13,10 @@ crate-type = ["rlib"]
 backend-parser-scan = { package = "backend-parser-scan-fgram", path = "../backend-parser-scan-fgram" }
 backend-parser-scansup = { package = "backend-parser-scansup-fgram", path = "../backend-parser-scansup-fgram" }
 backend-utils-error = { package = "backend-utils-error-fgram", path = "../backend-utils-error-fgram" }
+# The live client error path (the non-fgram error crate whose report sink the
+# backend wires to the frontend) — used to surface the deferred scanner warnings
+# (`check_string_escape_warning`) the same way `ereport(WARNING)` does elsewhere.
+backend-utils-error-live = { package = "backend-utils-error", path = "../backend-utils-error" }
+types-error-live = { package = "types-error", path = "../types-error" }
 backend-utils-mb = { package = "backend-utils-mb-fgram", path = "../backend-utils-mb-fgram" }
 pgrust-pg-ffi = { package = "pgrust-pg-ffi-fgram", path = "../pgrust-pg-ffi-fgram" }

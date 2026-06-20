@@ -1,0 +1,17 @@
+[package]
+name = "backend-utils-hash-pg-crc"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_utils_hash_pg_crc"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+types-error = { path = "../types-error" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+port-crc32c = { path = "../port-crc32c" }

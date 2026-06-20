@@ -500,6 +500,7 @@ backend-utils-adt-jsonpath = { path = "../backend-utils-adt-jsonpath" }
 backend-utils-adt-jsonpath-gram = { path = "../backend-utils-adt-jsonpath-gram" }
 backend-utils-adt-like = { path = "../backend-utils-adt-like" }
 backend-utils-adt-cryptohashfuncs = { path = "../backend-utils-adt-cryptohashfuncs" }
+backend-utils-hash-pg-crc = { path = "../backend-utils-hash-pg-crc" }
 common-md5 = { path = "../common-md5" }
 common-cryptohash = { path = "../common-cryptohash" }
 backend-utils-adt-encode = { path = "../backend-utils-adt-encode" }

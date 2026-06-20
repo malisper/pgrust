@@ -193,8 +193,21 @@ impl<'a> BaseLexer<'a> {
     /// 1-based character cursor position (matching C, where scanner errors are
     /// reported through `scanner_errposition`).
     fn core_yylex(&mut self) -> Result<Token, ParseError> {
+        let warned = self.scanner.warnings.len();
         match self.scanner.core_yylex() {
-            Ok(tok) => Ok(tok),
+            Ok(tok) => {
+                // Emit any newly-collected scanner warnings. scan.l
+                // `check_string_escape_warning`/`check_escape_warning` issue these
+                // `ereport(WARNING)`s inline while scanning a string literal
+                // ("nonstandard use of \\ / \' / escape in a string literal"); the
+                // safe-Rust scanner instead defers them onto `scanner.warnings`, so
+                // this token boundary is where we replay them, in scan order, with
+                // the literal-start `errposition` (`lexer_errposition()`).
+                if self.scanner.warnings.len() > warned {
+                    self.emit_scanner_warnings(warned);
+                }
+                Ok(tok)
+            }
             Err(e) => {
                 let mut pe: ParseError = e.into();
                 // A `yyerror`-path error is rendered by `scanner_yyerror`, which
@@ -209,6 +222,33 @@ impl<'a> BaseLexer<'a> {
                 }
                 Err(pe)
             }
+        }
+    }
+
+    /// Replay the deferred scanner warnings at indices `from..` as
+    /// `ereport(WARNING, ...)`. Mirrors scan.l's
+    /// `check_string_escape_warning`/`check_escape_warning`: SQLSTATE
+    /// `ERRCODE_NONSTANDARD_USE_OF_ESCAPE_CHARACTER`, the scanner's static
+    /// message/hint, and the literal-start byte `location` run through
+    /// `scanner_errposition` (`lexer_errposition()`). A WARNING does not longjmp,
+    /// so `finish` returns `Ok(())`; an unexpected error while emitting is dropped
+    /// rather than aborting the parse (the C path cannot fail here either).
+    fn emit_scanner_warnings(&self, from: usize) {
+        for w in &self.scanner.warnings[from..] {
+            let cursor = self.scanner.scanner_errposition(w.location);
+            // Emit through the live client error path (`backend-utils-error`, the
+            // non-fgram crate whose `ThrowErrorData`/report sink the backend wires
+            // to the frontend — the same path `ereport(WARNING)` uses elsewhere).
+            let _ = backend_utils_error_live::ereport(types_error_live::error::WARNING)
+                .errcode(types_error_live::SqlState(w.sqlstate.0))
+                .errmsg(w.message)
+                .errhint(w.hint)
+                .errposition(cursor)
+                .finish(types_error_live::pg_error::ErrorLocation::new(
+                    "scan.l",
+                    1424,
+                    "check_string_escape_warning",
+                ));
         }
     }
 

@@ -521,6 +521,7 @@ pub fn init_all() {
     common_md5::init_seams();
     common_cryptohash::init_seams();
     backend_utils_adt_cryptohashfuncs::init_seams();
+    backend_utils_hash_pg_crc::init_seams();
     backend_utils_adt_encode::init_seams();
     backend_utils_adt_multirangetypes::init_seams();
     backend_utils_adt_network::init_seams();
