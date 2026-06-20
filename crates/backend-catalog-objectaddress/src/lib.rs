@@ -37,7 +37,10 @@ pub mod description;
 pub mod fmgr_builtins;
 pub mod fmgr_sql;
 pub mod identity;
+pub mod amop_amproc_lookup;
 pub mod auth_member_lookup;
+pub mod default_acl_lookup;
+pub mod policy_lookup;
 pub mod rewrite_lookup;
 pub mod trigger_lookup;
 pub mod type_description;
@@ -89,6 +92,30 @@ pub fn init_seams() {
     // through this — used to build the DROP ROLE dependency DETAIL.
     backend_utils_cache_syscache_seams::auth_member_member_role::set(
         auth_member_lookup::auth_member_member_role,
+    );
+
+    // pg_amop / pg_amproc by-oid projections (no AMOPOID/AMPROCOID syscache
+    // exists): the `getObjectDescription` OCLASS_AMOP / OCLASS_AMPROC legs fetch
+    // the support-operator / support-procedure rows by oid through these.
+    backend_utils_cache_syscache_seams::amop_description_row::set(
+        amop_amproc_lookup::amop_description_row,
+    );
+    backend_utils_cache_syscache_seams::amproc_description_row::set(
+        amop_amproc_lookup::amproc_description_row,
+    );
+
+    // pg_default_acl by-oid projection (no DEFACLOID syscache exists): the
+    // `getObjectDescription` OCLASS_DEFACL leg fetches
+    // `(defaclrole, defaclnamespace, defaclobjtype)` by oid through this.
+    backend_utils_cache_syscache_seams::default_acl_row::set(
+        default_acl_lookup::default_acl_row,
+    );
+
+    // pg_policy by-oid projection (no POLICYOID syscache exists): the
+    // `getObjectDescription` OCLASS_POLICY leg fetches `(polrelid, polname)` by
+    // policy oid through this.
+    backend_utils_cache_syscache_seams::policy_relid_name::set(
+        policy_lookup::policy_relid_name,
     );
 
     // Register this crate's SQL-callable fmgr builtins (C: their

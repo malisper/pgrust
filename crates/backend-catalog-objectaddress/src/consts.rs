@@ -160,7 +160,17 @@ pub const Anum_pg_am_oid: i16 = 1;
 pub const Anum_pg_am_amname: i16 = 2;
 // pg_amop / pg_amproc
 pub const Anum_pg_amop_oid: i16 = 1;
+pub const Anum_pg_amop_amopfamily: i16 = 2;
+pub const Anum_pg_amop_amoplefttype: i16 = 3;
+pub const Anum_pg_amop_amoprighttype: i16 = 4;
+pub const Anum_pg_amop_amopstrategy: i16 = 5;
+pub const Anum_pg_amop_amopopr: i16 = 7;
 pub const Anum_pg_amproc_oid: i16 = 1;
+pub const Anum_pg_amproc_amprocfamily: i16 = 2;
+pub const Anum_pg_amproc_amproclefttype: i16 = 3;
+pub const Anum_pg_amproc_amprocrighttype: i16 = 4;
+pub const Anum_pg_amproc_amprocnum: i16 = 5;
+pub const Anum_pg_amproc_amproc: i16 = 6;
 // pg_cast
 pub const Anum_pg_cast_oid: i16 = 1;
 pub const Anum_pg_cast_castsource: i16 = 2;
@@ -270,6 +280,7 @@ pub const Anum_pg_trigger_tgname: i16 = 4;
 // pg_policy
 pub const Anum_pg_policy_oid: i16 = 1;
 pub const Anum_pg_policy_polname: i16 = 2;
+pub const Anum_pg_policy_polrelid: i16 = 3;
 // pg_event_trigger
 pub const Anum_pg_event_trigger_oid: i16 = 1;
 pub const Anum_pg_event_trigger_evtname: i16 = 2;
