@@ -244,12 +244,12 @@ fn DefineVirtualRelation<'mcx>(
                     name: None,
                     num: 0,
                     newowner: None,
-                    def: Some(alloc_in(mcx, Node::mk_column_def(mcx, def.clone_in(mcx)?))?),
+                    def: Some(alloc_in(mcx, Node::mk_column_def(mcx, def.clone_in(mcx)?)?)?),
                     behavior: DROP_RESTRICT,
                     missing_ok: false,
                     recurse: false,
                 };
-                atcmds.push(alloc_in(mcx, Node::mk_alter_table_cmd(mcx, atcmd))?);
+                atcmds.push(alloc_in(mcx, Node::mk_alter_table_cmd(mcx, atcmd)?)?);
             }
 
             /* EventTriggerAlterTableStart called by ProcessUtilitySlow */
@@ -284,13 +284,13 @@ fn DefineVirtualRelation<'mcx>(
             name: None,
             num: 0,
             newowner: None,
-            def: Some(alloc_in(mcx, Node::mk_list(mcx, options))?),
+            def: Some(alloc_in(mcx, Node::mk_list(mcx, options)?)?),
             behavior: DROP_RESTRICT,
             missing_ok: false,
             recurse: false,
         };
         let mut atcmds: PgVec<NodePtr> = vec_with_capacity_in(mcx, 1)?;
-        atcmds.push(alloc_in(mcx, Node::mk_alter_table_cmd(mcx, replace_cmd))?);
+        atcmds.push(alloc_in(mcx, Node::mk_alter_table_cmd(mcx, replace_cmd)?)?);
         AlterTableInternal(mcx, view_oid, &atcmds, true)?;
 
         /*
@@ -321,10 +321,10 @@ fn DefineVirtualRelation<'mcx>(
          */
         let mut table_elts: PgVec<NodePtr> = vec_with_capacity_in(mcx, attr_list.len())?;
         for def in attr_list.into_iter() {
-            table_elts.push(alloc_in(mcx, Node::mk_column_def(mcx, def))?);
+            table_elts.push(alloc_in(mcx, Node::mk_column_def(mcx, def)?)?);
         }
         let create_stmt = CreateStmt {
-            relation: Some(alloc_in(mcx, Node::mk_range_var(mcx, relation))?),
+            relation: Some(alloc_in(mcx, Node::mk_range_var(mcx, relation)?)?),
             tableElts: table_elts,
             inhRelations: vec_with_capacity_in(mcx, 0)?,
             partbound: None,
@@ -713,7 +713,7 @@ fn make_check_option_defelem<'mcx>(
         defaction: DefElemAction::DEFELEM_UNSPEC,
         location: -1,
     };
-    alloc_in(mcx, Node::mk_def_elem(mcx, defelem))
+    alloc_in(mcx, Node::mk_def_elem(mcx, defelem)?)
 }
 
 /// `view->relpersistence` read for the owned `RangeVar` node, tolerating a NULL

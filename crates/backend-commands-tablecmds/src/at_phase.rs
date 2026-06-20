@@ -1052,7 +1052,7 @@ pub(crate) fn ATPrepCmd<'mcx>(
 
     // Add the subcommand to the appropriate list for phase 2.
     // tab->subcmds[pass] = lappend(tab->subcmds[pass], cmd);
-    let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd))?;
+    let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?;
     wqueue[tab_idx].subcmds[pass as usize].push(node);
 
     Ok(())

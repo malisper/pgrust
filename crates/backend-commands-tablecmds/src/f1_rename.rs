@@ -129,17 +129,17 @@ pub fn define_sequence_relation<'mcx>(
     /* SEQ_COL_LASTVAL: makeColumnDef("last_value", INT8OID, -1, InvalidOid) */
     let mut last_value = make_column_def(mcx, "last_value", INT8OID, -1, InvalidOid)?;
     last_value.is_not_null = true;
-    table_elts.push(alloc_in(mcx, Node::mk_column_def(mcx, last_value))?);
+    table_elts.push(alloc_in(mcx, Node::mk_column_def(mcx, last_value)?)?);
 
     /* SEQ_COL_LOG: makeColumnDef("log_cnt", INT8OID, -1, InvalidOid) */
     let mut log_cnt = make_column_def(mcx, "log_cnt", INT8OID, -1, InvalidOid)?;
     log_cnt.is_not_null = true;
-    table_elts.push(alloc_in(mcx, Node::mk_column_def(mcx, log_cnt))?);
+    table_elts.push(alloc_in(mcx, Node::mk_column_def(mcx, log_cnt)?)?);
 
     /* SEQ_COL_CALLED: makeColumnDef("is_called", BOOLOID, -1, InvalidOid) */
     let mut is_called = make_column_def(mcx, "is_called", BOOLOID, -1, InvalidOid)?;
     is_called.is_not_null = true;
-    table_elts.push(alloc_in(mcx, Node::mk_column_def(mcx, is_called))?);
+    table_elts.push(alloc_in(mcx, Node::mk_column_def(mcx, is_called)?)?);
 
     /*
      * stmt->relation = seq->sequence;

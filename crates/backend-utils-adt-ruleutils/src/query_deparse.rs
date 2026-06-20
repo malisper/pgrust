@@ -453,9 +453,9 @@ fn flatten_group_exprs_targetlist<'mcx>(
     let hq = query
         .havingQual
         .as_deref()
-        .map(|e| -> PgResult<_> { Ok(Node::mk_expr(mcx, e.clone_in(mcx)?)) })
+        .map(|e| -> PgResult<_> { Ok(Node::mk_expr(mcx, e.clone_in(mcx)?)?) })
         .transpose()?
-        .unwrap_or(Node::mk_list(mcx, PgVec::new_in(mcx)));
+        .unwrap_or(Node::mk_list(mcx, PgVec::new_in(mcx))?);
     let boxed = mcx::alloc_in(mcx, hq)?;
     let _ = backend_utils_adt_ruleutils_seams::flatten_group_exprs::call(mcx, &snapshot, &boxed)?;
     // (Unreachable: the seam owner is unported and panics. Kept to wire the
@@ -698,13 +698,13 @@ fn get_select_query_def<'mcx>(
     // LIMIT / OFFSET
     if let Some(off) = query.limitOffset.as_deref() {
         append_context_keyword(context, " OFFSET ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 0)?;
-        get_rule_expr(&Node::mk_expr(mcx, off.clone_in(mcx)?), context, false)?;
+        get_rule_expr(&Node::mk_expr(mcx, off.clone_in(mcx)?)?, context, false)?;
     }
     if let Some(cnt) = query.limitCount.as_deref() {
         if query.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES {
             append_context_keyword(context, " FETCH FIRST ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 0)?;
             ch_(context, b'(')?;
-            get_rule_expr(&Node::mk_expr(mcx, cnt.clone_in(mcx)?), context, false)?;
+            get_rule_expr(&Node::mk_expr(mcx, cnt.clone_in(mcx)?)?, context, false)?;
             ch_(context, b')')?;
             str_(context, " ROWS WITH TIES")?;
         } else {
@@ -713,10 +713,10 @@ fn get_select_query_def<'mcx>(
                 if c.constisnull {
                     str_(context, "ALL")?;
                 } else {
-                    get_rule_expr(&Node::mk_expr(mcx, cnt.clone_in(mcx)?), context, false)?;
+                    get_rule_expr(&Node::mk_expr(mcx, cnt.clone_in(mcx)?)?, context, false)?;
                 }
             } else {
-                get_rule_expr(&Node::mk_expr(mcx, cnt.clone_in(mcx)?), context, false)?;
+                get_rule_expr(&Node::mk_expr(mcx, cnt.clone_in(mcx)?)?, context, false)?;
             }
         }
     }
@@ -904,7 +904,7 @@ fn get_basic_select_query<'mcx>(
     // HAVING
     if let Some(hq) = query.havingQual.as_deref() {
         append_context_keyword(context, " HAVING ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 0)?;
-        get_rule_expr(&Node::mk_expr(mcx, hq.clone_in(mcx)?), context, false)?;
+        get_rule_expr(&Node::mk_expr(mcx, hq.clone_in(mcx)?)?, context, false)?;
     }
 
     // WINDOW
@@ -946,7 +946,7 @@ fn get_target_list<'mcx>(
         let attname: Option<PgString<'mcx>> = match tle.expr.as_deref() {
             Some(Expr::Var(var)) => get_variable(var, 0, true, context)?,
             Some(e) => {
-                get_rule_expr(&Node::mk_expr(mcx, e.clone_in(mcx)?), context, true)?;
+                get_rule_expr(&Node::mk_expr(mcx, e.clone_in(mcx)?)?, context, true)?;
                 if context.colNamesVisible {
                     None
                 } else {
@@ -1184,7 +1184,7 @@ fn get_rule_sortgroupclause<'mcx>(
     } else if let Some(expr) = expr_opt.as_ref() {
         match expr {
             Expr::Const(_) => {
-                get_const_expr(&Node::mk_expr(mcx, expr.clone_in(mcx)?), context, 1)?;
+                get_const_expr(&Node::mk_expr(mcx, expr.clone_in(mcx)?)?, context, 1)?;
             }
             Expr::Var(var) => {
                 let save = context.varInOrderBy;
@@ -1201,7 +1201,7 @@ fn get_rule_sortgroupclause<'mcx>(
                 if need_paren {
                     ch_(context, b'(')?;
                 }
-                get_rule_expr(&Node::mk_expr(mcx, expr.clone_in(mcx)?), context, true)?;
+                get_rule_expr(&Node::mk_expr(mcx, expr.clone_in(mcx)?)?, context, true)?;
                 if need_paren {
                     ch_(context, b')')?;
                 }
@@ -1528,7 +1528,7 @@ fn get_insert_query_def<'mcx>(
         let q = quote_identifier(mcx, an.as_str())?;
         str_(context, q.as_str())?;
         let expr = tle.expr.as_deref().ok_or_else(|| missing_field("INSERT TLE.expr"))?;
-        let s = process_indirection(mcx, &Node::mk_expr(mcx, expr.clone_in(mcx)?), context)?;
+        let s = process_indirection(mcx, &Node::mk_expr(mcx, expr.clone_in(mcx)?)?, context)?;
         stripped.try_reserve(1).map_err(|_| mcx.oom(0))?;
         stripped.push(s);
     }
@@ -1655,7 +1655,7 @@ fn get_update_query_targetlist_def<'mcx>(
                 if let Some(e @ Expr::SubLink(sl)) = tle.expr.as_deref() {
                     if sl.subLinkType == types_nodes::primnodes::SubLinkType::MultiExpr {
                         ma_sublinks.try_reserve(1).map_err(|_| mcx.oom(0))?;
-                        ma_sublinks.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?))?);
+                        ma_sublinks.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
                     }
                 }
             }
@@ -1694,7 +1694,7 @@ fn get_update_query_targetlist_def<'mcx>(
 
         // Indirection.
         let expr = tle.expr.as_deref().ok_or_else(|| missing_field("UPDATE TLE.expr"))?;
-        let mut emitted = process_indirection(mcx, &Node::mk_expr(mcx, expr.clone_in(mcx)?), context)?;
+        let mut emitted = process_indirection(mcx, &Node::mk_expr(mcx, expr.clone_in(mcx)?)?, context)?;
 
         // Multiassignment skip-until-last.
         if cur_ma_active {
@@ -1775,7 +1775,7 @@ fn get_merge_query_def<'mcx>(
     get_from_clause(mcx, query, " USING ", context)?;
     append_context_keyword(context, " ON ", -PRETTYINDENT_STD, PRETTYINDENT_STD, 2)?;
     let mjc = query.mergeJoinCondition.as_deref().ok_or_else(|| missing_field("MERGE mergeJoinCondition"))?;
-    get_rule_expr(&Node::mk_expr(mcx, mjc.clone_in(mcx)?), context, false)?;
+    get_rule_expr(&Node::mk_expr(mcx, mjc.clone_in(mcx)?)?, context, false)?;
 
     // any NOT MATCHED BY SOURCE?
     let mut have_nmbs = false;
@@ -1825,7 +1825,7 @@ fn get_merge_query_def<'mcx>(
                     let q = quote_identifier(mcx, an.as_str())?;
                     str_(context, q.as_str())?;
                     let expr = tle.expr.as_deref().ok_or_else(|| missing_field("MERGE INSERT TLE.expr"))?;
-                    let s = process_indirection(mcx, &Node::mk_expr(mcx, expr.clone_in(mcx)?), context)?;
+                    let s = process_indirection(mcx, &Node::mk_expr(mcx, expr.clone_in(mcx)?)?, context)?;
                     stripped.try_reserve(1).map_err(|_| mcx.oom(0))?;
                     stripped.push(s);
                 }
@@ -2150,12 +2150,12 @@ fn get_function_rte<'mcx>(
                 if let Some(f) = rtfunc.funcexpr.as_deref().and_then(|n| n.as_funcexpr()) {
                     for a in f.args.iter() {
                         allargs.try_reserve(1).map_err(|_| mcx.oom(0))?;
-                        allargs.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, a.clone_in(mcx)?))?);
+                        allargs.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, a.clone_in(mcx)?)?)?);
                     }
                 }
             }
             str_(context, "UNNEST(")?;
-            let list = mcx::alloc_in(mcx, Node::mk_list(mcx, allargs))?;
+            let list = mcx::alloc_in(mcx, Node::mk_list(mcx, allargs)?)?;
             get_rule_expr(&list, context, true)?;
             ch_(context, b')')?;
         } else {
@@ -2324,14 +2324,14 @@ fn get_tablesample_def<'mcx>(
                 str_(context, ", ")?;
             }
             nargs += 1;
-            get_rule_expr(&Node::mk_expr(mcx, a.clone_in(mcx)?), context, false)?;
+            get_rule_expr(&Node::mk_expr(mcx, a.clone_in(mcx)?)?, context, false)?;
         }
     }
     ch_(context, b')')?;
 
     if let Some(rep) = tablesample.repeatable.as_deref() {
         str_(context, " REPEATABLE (")?;
-        get_rule_expr(&Node::mk_expr(mcx, rep.clone_in(mcx)?), context, false)?;
+        get_rule_expr(&Node::mk_expr(mcx, rep.clone_in(mcx)?)?, context, false)?;
         ch_(context, b')')?;
     }
     Ok(())
@@ -2499,7 +2499,7 @@ fn clone_node_list_from_tles<'mcx>(
     let mut out = PgVec::new_in(mcx);
     out.try_reserve(tl.len()).map_err(|_| mcx.oom(0))?;
     for t in tl.iter() {
-        out.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, t.clone_in(mcx)?))?);
+        out.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, t.clone_in(mcx)?)?)?);
     }
     Ok(out)
 }
@@ -2513,7 +2513,7 @@ fn node_list<'mcx>(
     for n in items.iter() {
         out.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
     }
-    Ok(Node::mk_list(mcx, out))
+    Ok(Node::mk_list(mcx, out)?)
 }
 
 fn clone_opt_tupdesc<'mcx>(

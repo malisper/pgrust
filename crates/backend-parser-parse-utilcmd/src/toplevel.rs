@@ -213,7 +213,7 @@ pub fn transformCreateStmt<'mcx>(
     stmt.nnconstraints = core::mem::replace(&mut cxt.nnconstraints, PgVec::new_in(mcx));
 
     let mut result = core::mem::replace(&mut cxt.blist, PgVec::new_in(mcx));
-    result.push(mcx::alloc_in(mcx, Node::mk_create_stmt(mcx, stmt))?);
+    result.push(mcx::alloc_in(mcx, Node::mk_create_stmt(mcx, stmt)?)?);
     let alist = core::mem::replace(&mut cxt.alist, PgVec::new_in(mcx));
     result.extend(alist);
     result.extend(save_alist);
@@ -435,7 +435,7 @@ pub fn transformRuleStmt<'mcx>(
             backend_parser_parse_collate::assign_expr_collations(Some(&pstate), expr)?;
         }
         match e {
-            Some(expr) => Some(Node::mk_expr(mcx, expr)),
+            Some(expr) => Some(Node::mk_expr(mcx, expr)?),
             None => None,
         }
     };
@@ -561,7 +561,7 @@ pub fn transformRuleStmt<'mcx>(
                     Some(i) => sub_query_at(&top_subqry, i)?,
                     None => &top_subqry,
                 };
-                let sub_qry_node = Node::mk_query(mcx, sub_qry.clone_in(mcx)?);
+                let sub_qry_node = Node::mk_query(mcx, sub_qry.clone_in(mcx)?)?;
                 let has_old = backend_rewrite_core::walkers::rangeTableEntry_used(
                     &sub_qry_node,
                     PRS2_OLD_VARNO,
@@ -678,7 +678,7 @@ pub fn transformRuleStmt<'mcx>(
                     types_nodes::rawnodes::RangeTblRef {
                         rtindex: s_old_rtindex,
                     },
-                );
+                )?;
                 if let Some(jt) = sub_qry_mut.jointree.as_mut() {
                     jt.fromlist.push(mcx::alloc_in(mcx, rtr)?);
                 }

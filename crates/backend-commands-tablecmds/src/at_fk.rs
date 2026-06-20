@@ -1243,7 +1243,7 @@ fn addFkRecurseReferencing<'mcx>(
             // the owned NewConstraint rides the constraint Node on `qual`.
             let qual = mcx::alloc_in(
                 mcx,
-                Node::mk_constraint(mcx, fkconstraint.clone_in(mcx)?),
+                Node::mk_constraint(mcx, fkconstraint.clone_in(mcx)?)?,
             )?;
             let newcon = NewConstraint {
                 name,
@@ -1457,7 +1457,7 @@ use types_catalog::pg_trigger::{
 /// `makeString(s)` as a `Node*`.
 fn make_string<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
     let sval = PgString::from_str_in(s, mcx)?;
-    mcx::alloc_in(mcx, Node::mk_string(mcx, types_nodes::value::StringNode { sval }))
+    mcx::alloc_in(mcx, Node::mk_string(mcx, types_nodes::value::StringNode { sval })?)
 }
 
 /// `SystemFuncName(name)` — a `pg_catalog`-qualified function-name list.

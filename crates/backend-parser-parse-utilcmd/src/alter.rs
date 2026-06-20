@@ -91,7 +91,7 @@ fn make_type_name_node<'mcx>(mcx: Mcx<'mcx>, type_oid: Oid, typmod: i32) -> PgRe
                 arrayBounds: PgVec::new_in(mcx),
                 location: -1,
             },
-        ),
+        )?,
     )
 }
 
@@ -113,7 +113,7 @@ fn make_def_elem_node<'mcx>(
                 defaction: DEFELEM_UNSPEC,
                 location,
             },
-        ),
+        )?,
     )
 }
 
@@ -167,7 +167,7 @@ fn make_alter_cmd<'mcx>(
                 missing_ok: false,
                 recurse: false,
             },
-        ),
+        )?,
     )
 }
 
@@ -255,7 +255,7 @@ pub fn transformAlterTableStmt<'mcx>(
                 // transformColumnDefinition(&cxt, def): processes the column's
                 // inline constraints (incl. moving a DEFAULT into def->raw_default)
                 // and appends the transformed column to cxt.columns.
-                let def_ptr = mcx::alloc_in(mcx, Node::mk_column_def(mcx, def))?;
+                let def_ptr = mcx::alloc_in(mcx, Node::mk_column_def(mcx, def)?)?;
                 transformColumnDefinition(&mut cxt, def_ptr)?;
 
                 // Pull the transformed ColumnDef back out of cxt.columns.
@@ -279,8 +279,8 @@ pub fn transformAlterTableStmt<'mcx>(
                 // All constraints are processed in other ways; remove the
                 // original list before the column is reattached to the cmd.
                 transformed.constraints = PgVec::new_in(mcx);
-                cmd.def = Some(mcx::alloc_in(mcx, Node::mk_column_def(mcx, transformed))?);
-                newcmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd))?);
+                cmd.def = Some(mcx::alloc_in(mcx, Node::mk_column_def(mcx, transformed)?)?);
+                newcmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?);
             }
 
             AT_AddConstraint => {
@@ -319,7 +319,7 @@ pub fn transformAlterTableStmt<'mcx>(
                         EXPR_KIND_ALTER_COL_TRANSFORM,
                     )?;
                     def.cooked_default = match cooked {
-                        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
+                        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
                         None => None,
                     };
                 }
@@ -356,12 +356,12 @@ pub fn transformAlterTableStmt<'mcx>(
                             missing_ok: false,
                         };
                         cxt.blist
-                            .push(mcx::alloc_in(mcx, Node::mk_alter_seq_stmt(mcx, altseqstmt))?);
+                            .push(mcx::alloc_in(mcx, Node::mk_alter_seq_stmt(mcx, altseqstmt)?)?);
                     }
                 }
 
-                cmd.def = Some(mcx::alloc_in(mcx, Node::mk_column_def(mcx, def))?);
-                newcmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd))?);
+                cmd.def = Some(mcx::alloc_in(mcx, Node::mk_column_def(mcx, def)?)?);
+                newcmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?);
             }
 
             AT_AddIdentity => {
@@ -402,8 +402,8 @@ pub fn transformAlterTableStmt<'mcx>(
                     true,
                 )?;
 
-                cmd.def = Some(mcx::alloc_in(mcx, Node::mk_column_def(mcx, newdef))?);
-                newcmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd))?);
+                cmd.def = Some(mcx::alloc_in(mcx, Node::mk_column_def(mcx, newdef)?)?);
+                newcmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?);
             }
 
             AT_SetIdentity => {
@@ -447,11 +447,11 @@ pub fn transformAlterTableStmt<'mcx>(
                         missing_ok: false,
                     };
                     cxt.blist
-                        .push(mcx::alloc_in(mcx, Node::mk_alter_seq_stmt(mcx, seqstmt))?);
+                        .push(mcx::alloc_in(mcx, Node::mk_alter_seq_stmt(mcx, seqstmt)?)?);
                 }
 
-                cmd.def = Some(mcx::alloc_in(mcx, Node::mk_list(mcx, newdef))?);
-                newcmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd))?);
+                cmd.def = Some(mcx::alloc_in(mcx, Node::mk_list(mcx, newdef)?)?);
+                newcmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?);
             }
 
             AT_AttachPartition | AT_DetachPartition => {
@@ -465,14 +465,14 @@ pub fn transformAlterTableStmt<'mcx>(
                     None => unreachable!("partition cmd: cmd.def is not a PartitionCmd"),
                 };
                 partcmd.bound = bound;
-                cmd.def = Some(mcx::alloc_in(mcx, Node::mk_partition_cmd(mcx, partcmd))?);
-                newcmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd))?);
+                cmd.def = Some(mcx::alloc_in(mcx, Node::mk_partition_cmd(mcx, partcmd)?)?);
+                newcmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?);
             }
 
             _ => {
                 // Subcommand types that don't require transformation: emit
                 // unchanged.
-                newcmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd))?);
+                newcmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?);
             }
         }
     }
@@ -542,7 +542,7 @@ pub fn transformAlterTableStmt<'mcx>(
         after.push(n);
     }
 
-    let stmt_ptr = mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, stmt))?;
+    let stmt_ptr = mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, stmt)?)?;
     Ok((stmt_ptr, before, after))
 }
 
@@ -558,7 +558,7 @@ fn build_seq_rangevar<'mcx>(mcx: Mcx<'mcx>, seq_relid: Oid) -> PgResult<NodePtr<
         relname.as_deref().unwrap_or(""),
         -1,
     )?;
-    mcx::alloc_in(mcx, Node::mk_range_var(mcx, rv))
+    mcx::alloc_in(mcx, Node::mk_range_var(mcx, rv)?)
 }
 
 /// `ereport(ERROR, column "%s" of relation "%s" does not exist)`.

@@ -701,7 +701,7 @@ pub fn ExplainNode<'es, 'p>(
         {
             let exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = rcq.iter().cloned().collect();
             let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
-            let node = Node::mk_expr(mcx, anded);
+            let node = Node::mk_expr(mcx, anded)?;
 
             let useprefix = es.rtable_names.len() > 1 || es.verbose;
 
@@ -734,7 +734,7 @@ pub fn ExplainNode<'es, 'p>(
         // node = (Node *) make_ands_explicit(qual);
         let exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = qual.iter().cloned().collect();
         let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
-        let node = Node::mk_expr(mcx, anded);
+        let node = Node::mk_expr(mcx, anded)?;
 
         let useprefix = matches!(plan_node.node_tag(), ntag::T_SubqueryScan) || es.verbose;
 
@@ -1114,7 +1114,7 @@ fn show_sort_group_keys<'es, 'p>(
             .expect("show_sort_group_keys: TargetEntry has no expr");
 
         // Deparse the expression, showing any top-level cast (showImplicit=true).
-        let expr_node = Node::mk_expr(mcx, target_expr.clone_in(mcx)?);
+        let expr_node = Node::mk_expr(mcx, target_expr.clone_in(mcx)?)?;
         let exprstr = ruleutils_s::deparse_expr_for_plan::call(
             mcx,
             &es_pstmt,

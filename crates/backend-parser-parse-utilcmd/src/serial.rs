@@ -77,7 +77,7 @@ fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
             StringNode {
                 sval: PgString::from_str_in(s, mcx)?,
             },
-        ),
+        )?,
     )
 }
 
@@ -97,7 +97,7 @@ fn make_type_name_node<'mcx>(mcx: Mcx<'mcx>, type_oid: Oid, typmod: i32) -> PgRe
                 arrayBounds: PgVec::new_in(mcx),
                 location: -1,
             },
-        ),
+        )?,
     )
 }
 
@@ -249,21 +249,21 @@ pub fn generateSerialExtraStmts<'mcx>(
     if OidIsValid(seqtypid) {
         let as_arg = make_type_name_node(mcx, seqtypid, -1)?;
         let as_def = make_def_elem(mcx, "as", Some(as_arg), -1)?;
-        create_options.push(mcx::alloc_in(mcx, Node::mk_def_elem(mcx, as_def))?);
+        create_options.push(mcx::alloc_in(mcx, Node::mk_def_elem(mcx, as_def)?)?);
     }
     for o in kept_options.into_iter() {
         create_options.push(o);
     }
 
     let seqstmt = CreateSeqStmt {
-        sequence: Some(mcx::alloc_in(mcx, Node::mk_range_var(mcx, seq_rangevar))?),
+        sequence: Some(mcx::alloc_in(mcx, Node::mk_range_var(mcx, seq_rangevar)?)?),
         options: create_options,
         ownerId: owner_id,
         for_identity,
         if_not_exists: false,
     };
     cxt.blist
-        .push(mcx::alloc_in(mcx, Node::mk_create_seq_stmt(mcx, seqstmt))?);
+        .push(mcx::alloc_in(mcx, Node::mk_create_seq_stmt(mcx, seqstmt)?)?);
 
     // Store the identity sequence name on the column.
     column.identitySequence = Some(mcx::alloc_in(
@@ -277,18 +277,18 @@ pub fn generateSerialExtraStmts<'mcx>(
     attnamelist.push(make_string_node(mcx, snamespace.as_str())?);
     attnamelist.push(make_string_node(mcx, &relname)?);
     attnamelist.push(make_string_node(mcx, &colname)?);
-    let attnamelist_node = mcx::alloc_in(mcx, Node::mk_list(mcx, attnamelist))?;
+    let attnamelist_node = mcx::alloc_in(mcx, Node::mk_list(mcx, attnamelist)?)?;
     let owned_by = make_def_elem(mcx, "owned_by", Some(attnamelist_node), -1)?;
     let mut alt_options: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
-    alt_options.push(mcx::alloc_in(mcx, Node::mk_def_elem(mcx, owned_by))?);
+    alt_options.push(mcx::alloc_in(mcx, Node::mk_def_elem(mcx, owned_by)?)?);
 
     let altseqstmt = AlterSeqStmt {
-        sequence: Some(mcx::alloc_in(mcx, Node::mk_range_var(mcx, alt_rangevar))?),
+        sequence: Some(mcx::alloc_in(mcx, Node::mk_range_var(mcx, alt_rangevar)?)?),
         options: alt_options,
         for_identity,
         missing_ok: false,
     };
-    let altseq_node = mcx::alloc_in(mcx, Node::mk_alter_seq_stmt(mcx, altseqstmt))?;
+    let altseq_node = mcx::alloc_in(mcx, Node::mk_alter_seq_stmt(mcx, altseqstmt)?)?;
 
     if col_exists {
         cxt.blist.push(altseq_node);

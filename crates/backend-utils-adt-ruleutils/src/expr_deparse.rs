@@ -2416,7 +2416,7 @@ fn get_tle_expr_by_resno<'mcx>(
         if let Some(tle) = n.as_targetentry() {
             if tle.resno == resno {
                 return match tle.expr.as_ref() {
-                    Some(e) => Ok(Some(Node::mk_expr(mcx, (**e).clone_in(mcx)?))),
+                    Some(e) => Ok(Some(Node::mk_expr(mcx, (**e).clone_in(mcx)?)?)),
                     None => Ok(None),
                 };
             }
@@ -2599,7 +2599,7 @@ pub fn get_variable<'mcx>(
         // return NULL;
         // OUTER_VAR/INNER_VAR/INDEX_VAR resolution walks the plan tlists, rendering
         // the resolved referent into context->buf (no refname returned).
-        let node = Node::mk_expr(context.buf.allocator(), Expr::Var(var.clone()));
+        let node = Node::mk_expr(context.buf.allocator(), Expr::Var(var.clone()))?;
         resolve_special_varno(&node, context)?;
         return Ok(None);
     }

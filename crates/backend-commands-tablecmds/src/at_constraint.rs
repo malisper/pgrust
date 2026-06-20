@@ -156,7 +156,7 @@ pub fn ATPrepAddPrimaryKey<'mcx>(
         // This column is not already not-null, so add it to the queue.
         // nnconstr = makeNotNullConstraint(column);
         let nnconstr = make_not_null_constraint(mcx, colname)?;
-        let nndef = mcx::alloc_in(mcx, Node::mk_constraint(mcx, nnconstr))?;
+        let nndef = mcx::alloc_in(mcx, Node::mk_constraint(mcx, nnconstr)?)?;
 
         // newcmd = makeNode(AlterTableCmd);
         // newcmd->subtype = AT_AddConstraint;
@@ -187,7 +187,7 @@ fn make_not_null_constraint<'mcx>(mcx: Mcx<'mcx>, colname: &str) -> PgResult<Con
     let sval = PgString::from_str_in(colname, mcx)?;
     keys.push(mcx::alloc_in(
         mcx,
-        Node::mk_string(mcx, types_nodes::value::StringNode { sval }),
+        Node::mk_string(mcx, types_nodes::value::StringNode { sval })?,
     )?);
     Ok(Constraint {
         contype: ConstrType::CONSTR_NOTNULL,
@@ -390,7 +390,7 @@ pub fn ATAddCheckNNConstraint<'mcx>(
 
     // newcons = AddRelationNewConstraints(rel, NIL, list_make1(copyObject(constr)),
     //     recursing || is_readd, !recursing, is_readd, NULL);
-    let constr_copy = mcx::alloc_in(mcx, Node::mk_constraint(mcx, constr.clone_in(mcx)?))?;
+    let constr_copy = mcx::alloc_in(mcx, Node::mk_constraint(mcx, constr.clone_in(mcx)?)?)?;
     let new_constraints = [constr_copy];
     let newcons = backend_catalog_heap::AddRelationNewConstraints(
         mcx,

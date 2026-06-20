@@ -1220,7 +1220,7 @@ pub fn set_deparse_for_query<'mcx>(
     // If it's a utility query, it won't have a jointree.
     if let Some(jointree) = query.jointree.as_ref() {
         // Detect whether global uniqueness of USING names is needed.
-        let jt = Node::mk_from_expr(mcx, clone_fromexpr(mcx, jointree)?);
+        let jt = Node::mk_from_expr(mcx, clone_fromexpr(mcx, jointree)?)?;
         dpns.unique_using = has_dangerous_join_using(mcx, dpns, &jt)?;
 
         // Select names for USING-merged columns via a recursive jointree pass.
@@ -2240,7 +2240,7 @@ fn tlist_as_node_vec<'mcx>(
     if let Some(tl) = tlist {
         out.try_reserve(tl.len()).map_err(|_| mcx.oom(0))?;
         for tle in tl.iter() {
-            out.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle.clone_in(mcx)?))?);
+            out.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle.clone_in(mcx)?)?)?);
         }
     }
     Ok(out)
@@ -3139,7 +3139,7 @@ mod tests {
                 varattno,
                 ..Default::default()
             };
-            jav.push(mcx::alloc_in(mcx, Node::mk_var(mcx, v)).unwrap());
+            jav.push(mcx::alloc_in(mcx, Node::mk_var(mcx, v)?).unwrap());
         }
         jrte.joinaliasvars = jav;
         jrte.joinleftcols = {
@@ -3170,8 +3170,8 @@ mod tests {
         let join = JoinExpr {
             jointype: types_nodes::jointype::JoinType::JOIN_INNER,
             isNatural: false,
-            larg: Some(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 })).unwrap()),
-            rarg: Some(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 2 })).unwrap()),
+            larg: Some(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 })?).unwrap()),
+            rarg: Some(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 2 })?).unwrap()),
             usingClause: {
                 let mut v = PgVec::new_in(mcx);
                 v.push(make_string(mcx, "k"));
@@ -3185,7 +3185,7 @@ mod tests {
         let fromexpr = FromExpr {
             fromlist: {
                 let mut v = PgVec::new_in(mcx);
-                v.push(mcx::alloc_in(mcx, Node::mk_join_expr(mcx, join)).unwrap());
+                v.push(mcx::alloc_in(mcx, Node::mk_join_expr(mcx, join)?).unwrap());
                 v
             },
             quals: None,

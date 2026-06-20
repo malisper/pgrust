@@ -98,9 +98,9 @@ pub fn ATParseTransformCmd<'mcx>(
         alias: None,
         location: -1,
     };
-    let relation_node = mcx::alloc_in(mcx, Node::mk_range_var(mcx, rangevar))?;
+    let relation_node = mcx::alloc_in(mcx, Node::mk_range_var(mcx, rangevar)?)?;
 
-    let cmd_node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd.clone_in(mcx)?))?;
+    let cmd_node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd.clone_in(mcx)?)?)?;
     let mut cmds: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
     cmds.push(cmd_node);
 
@@ -110,7 +110,7 @@ pub fn ATParseTransformCmd<'mcx>(
         objtype: types_nodes::parsenodes::OBJECT_TABLE,
         missing_ok: false,
     };
-    let atstmt_node = mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, atstmt))?;
+    let atstmt_node = mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, atstmt)?)?;
 
     // Transform the AlterTableStmt.
     let query_string = context.query_string.unwrap_or("");
@@ -188,7 +188,7 @@ pub fn ATParseTransformCmd<'mcx>(
             )));
         } else if pass > cur_pass {
             // Queue it up for later.
-            let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd2))?;
+            let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd2)?)?;
             wqueue[ti].subcmds[pass as usize].push(node);
         } else {
             // At most one subcommand for the current pass — the transformed

@@ -67,7 +67,7 @@ pub fn transformFKConstraints<'mcx>(
                 missing_ok: false,
                 recurse: false,
             };
-            cmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, altercmd))?);
+            cmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, altercmd)?)?);
         }
 
         let alterstmt = AlterTableStmt {
@@ -77,7 +77,7 @@ pub fn transformFKConstraints<'mcx>(
             missing_ok: false,
         };
         cxt.alist
-            .push(mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, alterstmt))?);
+            .push(mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, alterstmt)?)?);
     }
     Ok(())
 }

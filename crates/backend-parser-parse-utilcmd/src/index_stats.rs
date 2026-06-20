@@ -48,7 +48,7 @@ pub fn transformIndexStmt<'mcx>(
 
     // Nothing to do if statement already transformed.
     if stmt.transformed {
-        return mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, stmt));
+        return mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, stmt)?);
     }
 
     // Set up pstate.
@@ -75,7 +75,7 @@ pub fn transformIndexStmt<'mcx>(
             assign_expr_collations(Some(&pstate), e)?;
         }
         stmt.whereClause = match where_expr {
-            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
+            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
             None => None,
         };
     }
@@ -107,7 +107,7 @@ pub fn transformIndexStmt<'mcx>(
     // Mark statement as successfully transformed.
     stmt.transformed = true;
 
-    mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, stmt))
+    mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, stmt)?)
 }
 
 /// The per-`IndexElem` expression transform from `transformIndexStmt`.
@@ -136,7 +136,7 @@ fn transform_index_elem_expr<'mcx>(
         assign_expr_collations(Some(pstate), e)?;
     }
     ielem.expr = match t {
-        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
+        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
         None => None,
     };
     Ok(())
@@ -161,7 +161,7 @@ pub fn transformStatsStmt<'mcx>(
 
     // Nothing to do if statement already transformed.
     if stmt.transformed {
-        return mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt));
+        return mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt)?);
     }
 
     // Set up pstate.
@@ -201,7 +201,7 @@ pub fn transformStatsStmt<'mcx>(
     // Mark statement as successfully transformed.
     stmt.transformed = true;
 
-    mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt))
+    mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt)?)
 }
 
 /// The per-`StatsElem` expression transform from `transformStatsStmt`.
@@ -222,7 +222,7 @@ fn transform_stats_elem_expr<'mcx>(
         assign_expr_collations(Some(pstate), e)?;
     }
     selem.expr = match t {
-        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
+        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
         None => None,
     };
     Ok(())

@@ -178,10 +178,10 @@ fn transformPartitionSpec<'mcx>(
             /* we have to fix its collations too */
             let mut transformed_expr = transformed.expect("transformExpr of a non-NULL partition expression");
             backend_parser_parse_collate::assign_expr_collations(Some(&pstate), &mut transformed_expr)?;
-            new_elem.expr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, transformed_expr))?);
+            new_elem.expr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, transformed_expr)?)?);
         }
 
-        new_params.push(mcx::alloc_in(mcx, Node::mk_partition_elem(mcx, new_elem))?);
+        new_params.push(mcx::alloc_in(mcx, Node::mk_partition_elem(mcx, new_elem)?)?);
     }
 
     Ok(PartitionSpec {
@@ -313,7 +313,7 @@ fn ComputePartitionAttrs<'mcx>(
                     .expect("CollateExpr.arg is NOT NULL");
                 stripped = inner.clone_in(mcx)?;
             }
-            let stripped_node = Node::mk_expr(mcx, stripped.clone_in(mcx)?);
+            let stripped_node = Node::mk_expr(mcx, stripped.clone_in(mcx)?)?;
 
             /* Examine all columns in the partition key expression. */
             let mut expr_attrs = backend_optimizer_util_vars::var::pull_varattnos(
@@ -562,9 +562,9 @@ pub fn define_relation_partspec<'mcx>(
         let mut cells: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
             mcx::vec_with_capacity_in(mcx, partexprs.len())?;
         for e in partexprs.into_iter() {
-            cells.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?);
+            cells.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?);
         }
-        Some(Node::mk_list(mcx, cells))
+        Some(Node::mk_list(mcx, cells)?)
     };
 
     backend_catalog_heap::StorePartitionKey(

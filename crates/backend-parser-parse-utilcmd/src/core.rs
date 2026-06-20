@@ -29,7 +29,7 @@ pub fn make_string<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
         mcx,
         Node::mk_string(mcx, StringNode {
             sval: PgString::from_str_in(s, mcx)?,
-        }),
+        })?,
     )
 }
 

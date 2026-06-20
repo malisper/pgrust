@@ -994,7 +994,7 @@ fn make_check_carrier<'mcx>(
     c.initially_valid = false; /* is_local: inherited CHECK is not local */
     c.is_no_inherit = false;
     c.location = 1; /* inhcount = 1 */
-    alloc_in(mcx, Node::mk_constraint(mcx, c))
+    alloc_in(mcx, Node::mk_constraint(mcx, c)?)
 }
 
 /// Build the `Node::Constraint` carrier for an inherited not-null constraint.
@@ -1010,7 +1010,7 @@ fn make_notnull_carrier<'mcx>(
         None => None,
     };
     c.location = attnum as i32;
-    alloc_in(mcx, Node::mk_constraint(mcx, c))
+    alloc_in(mcx, Node::mk_constraint(mcx, c)?)
 }
 
 fn empty_constraint<'mcx>(mcx: Mcx<'mcx>, contype: ConstrType) -> PgResult<Constraint<'mcx>> {
@@ -1062,7 +1062,7 @@ const BOGUS_DEFAULT_MARKER: i32 = i32::MIN;
 fn make_bogus_marker<'mcx>(mcx: Mcx<'mcx>) -> PgResult<NodePtr<'mcx>> {
     let mut c = empty_constraint(mcx, ConstrType::CONSTR_DEFAULT)?;
     c.location = BOGUS_DEFAULT_MARKER;
-    alloc_in(mcx, Node::mk_constraint(mcx, c))
+    alloc_in(mcx, Node::mk_constraint(mcx, c)?)
 }
 
 fn is_bogus_marker(node: Option<&Node<'_>>) -> bool {

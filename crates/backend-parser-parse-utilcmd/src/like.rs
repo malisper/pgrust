@@ -113,7 +113,7 @@ pub fn transformOfType<'mcx>(
         let mut n =
             make_column_def(mcx, attname, attr.atttypid, attr.atttypmod, attr.attcollation)?;
         n.is_from_type = true;
-        cxt.columns.push(mcx::alloc_in(mcx, Node::mk_column_def(mcx, n))?);
+        cxt.columns.push(mcx::alloc_in(mcx, Node::mk_column_def(mcx, n)?)?);
     }
     // `ReleaseTupleDesc(tupdesc)` — the owned copy drops here.
     drop(tupdesc);

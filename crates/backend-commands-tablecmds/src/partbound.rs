@@ -198,7 +198,7 @@ pub fn transformPartitionBound<'mcx>(
                 )?;
 
                 // Don't add to the result if the value is a duplicate.
-                let value_node = Node::mk_expr(mcx, Expr::Const(value));
+                let value_node = Node::mk_expr(mcx, Expr::Const(value))?;
                 let mut duplicate = false;
                 for existing in new_listdatums.iter() {
                     if backend_nodes_equalfuncs_seams::equal_node::call(existing, &value_node) {
@@ -333,7 +333,7 @@ fn transformPartitionRangeBounds<'mcx>(
             }
             prd = Some(PartitionRangeDatum {
                 kind: PartitionRangeDatumKind::Value,
-                value: Some(alloc_in(mcx, Node::mk_expr(mcx, Expr::Const(value)))?),
+                value: Some(alloc_in(mcx, Node::mk_expr(mcx, Expr::Const(value))?)?),
                 location: -1,
             });
         }
