@@ -255,7 +255,7 @@ fn init_sexpr<'mcx>(
     input_collation: Oid,
     sexpr: &mut SetExprState<'mcx>,
     allow_srf: bool,
-    _need_desc_for_srf: bool,
+    need_desc_for_srf: bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // C: aclresult = object_aclcheck(ProcedureRelationId, foid, GetUserId(),
@@ -338,9 +338,109 @@ fn init_sexpr<'mcx>(
     // (the caller set funcReturnsSet; keep them in sync for the ProjectSet path.)
 
     // C: funcResultStore = NULL; funcResultSlot = NULL; shutdown_reg = false;
+    //    funcResultDesc = NULL; funcReturnsTuple = false; setArgsValid = false;
     sexpr.funcResultStore = None;
     sexpr.funcResultSlot = None;
     sexpr.shutdown_reg = false;
+    sexpr.funcResultDesc = None;
+    sexpr.funcReturnsTuple = false;
+    sexpr.setArgsValid = false;
+
+    // C (execSRF.c init_sexpr):
+    //   /* If function returns set, prepare a resultinfo node for communication */
+    //   if (sexpr->func.fn_retset && needDescForSRF)
+    //   {
+    //       TypeFuncClass functypclass;
+    //       Oid          funcrettype;
+    //       TupleDesc    tupdesc;
+    //       functypclass = get_expr_result_type(sexpr->expr, &funcrettype, &tupdesc);
+    //       if (functypclass == TYPEFUNC_COMPOSITE ||
+    //           functypclass == TYPEFUNC_COMPOSITE_DOMAIN)
+    //       {
+    //           sexpr->funcReturnsTuple = true;
+    //           sexpr->funcResultDesc = CreateTupleDescCopy(tupdesc);
+    //       }
+    //       else if (functypclass == TYPEFUNC_SCALAR)
+    //       {
+    //           sexpr->funcReturnsTuple = false;
+    //           tupdesc = CreateTemplateTupleDesc(1);
+    //           TupleDescInitEntry(tupdesc, 1, NULL, funcrettype, -1, 0);
+    //           TupleDescInitEntryCollation(tupdesc, 1, exprCollation((Node *) sexpr->expr));
+    //           sexpr->funcResultDesc = tupdesc;
+    //       }
+    //       else if (functypclass == TYPEFUNC_RECORD)
+    //       {
+    //           /* leave funcResultDesc = NULL; nodeFunctionscan will set up */
+    //       }
+    //       else
+    //       {
+    //           /* crummy error message, but parser should have caught this */
+    //           elog(ERROR, "function in FROM has unsupported return type");
+    //       }
+    //   }
+    //
+    // This precomputes `funcResultDesc` (the `expectedDesc` the materialize-mode
+    // SRF protocol reads through `MAT_SRF_USE_EXPECTED_DESC`). Without it, a
+    // SCALAR SETOF function called in a targetlist (ProjectSet path, e.g.
+    // `SELECT jsonb_array_elements(...)`) reaches `InitMaterializedSRF` with a
+    // NULL `expectedDesc` and errors "materialize mode required, but it is not
+    // allowed in this context".
+    if sexpr.func.fn_retset && need_desc_for_srf {
+        let per_query = estate.es_query_cxt;
+        // C: get_expr_result_type((Node *) sexpr->expr, &funcrettype, &tupdesc).
+        // The owned `sexpr->expr` is an `Expr`; wrap it in a `Node` for the
+        // funcapi classifier (which dispatches on the node tag).
+        let expr_node = {
+            let e = sexpr
+                .expr
+                .as_deref()
+                .expect("init_sexpr: sexpr->expr set by the caller")
+                .clone_in(per_query)?;
+            mcx::alloc_in(per_query, types_nodes::nodes::Node::mk_expr(per_query, e)?)?
+        };
+        let resolved = backend_utils_fmgr_funcapi::result_type::get_expr_result_type(
+            per_query,
+            Some(&expr_node),
+        )?;
+        match resolved.class {
+            Some(types_nodes::funcapi::TypeFuncClass::Composite)
+            | Some(types_nodes::funcapi::TypeFuncClass::CompositeDomain) => {
+                // Composite data type, e.g. a table's row type.
+                sexpr.funcReturnsTuple = true;
+                let src = resolved
+                    .result_tuple_desc
+                    .as_deref()
+                    .expect("get_expr_result_type: COMPOSITE class with NULL tupdesc");
+                let copy = backend_access_common_tupdesc::CreateTupleDescCopy(per_query, src)?;
+                sexpr.funcResultDesc = Some(mcx::alloc_in(per_query, copy)?);
+            }
+            Some(types_nodes::funcapi::TypeFuncClass::Scalar) => {
+                // Base data type, i.e. scalar — build a 1-column descriptor.
+                let funcrettype = resolved.result_type_id.unwrap_or_default();
+                let td = backend_access_common_tupdesc::CreateTemplateTupleDesc(per_query, 1)?;
+                let mut td = mcx::alloc_in(per_query, td)?;
+                backend_access_common_tupdesc::TupleDescInitEntry(
+                    &mut td, 1, None, funcrettype, -1, 0,
+                )?;
+                let collation =
+                    backend_nodes_core::nodefuncs::expr_collation(sexpr.expr.as_deref())?;
+                backend_access_common_tupdesc::TupleDescInitEntryCollation(&mut td, 1, collation)?;
+                sexpr.funcReturnsTuple = false;
+                sexpr.funcResultDesc = Some(td);
+            }
+            Some(types_nodes::funcapi::TypeFuncClass::Record) => {
+                // Indeterminate rowtype — leave funcResultDesc = NULL; the
+                // FunctionScan path resolves a RECORD result from column defs.
+            }
+            _ => {
+                // crummy error message, but parser should have caught this.
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INTERNAL_ERROR)
+                    .errmsg("function in FROM has unsupported return type")
+                    .into_error());
+            }
+        }
+    }
 
     Ok(())
 }
