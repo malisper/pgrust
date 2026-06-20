@@ -18,6 +18,7 @@ use types_core::Oid;
 
 const OIDOID: Oid = 26;
 const INT4OID: Oid = 23;
+const TEXTOID: Oid = 25;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -170,6 +171,81 @@ fn fc_pg_get_object_address(
     Ok(ret_record(fcinfo, rec))
 }
 
+/// Build a `text` value `DatumV` (header-ful varlena image) from an optional
+/// string column, or a NULL column. Returns `(value, isnull)`.
+fn text_col<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    s: Option<&str>,
+) -> types_error::PgResult<(DatumV<'mcx>, bool)> {
+    match s {
+        None => Ok((DatumV::null(), true)),
+        Some(s) => {
+            let total = s.len() + 4;
+            let mut img = Vec::with_capacity(total);
+            img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+            img.extend_from_slice(s.as_bytes());
+            Ok((DatumV::from_byref_bytes_in(mcx, &img)?, false))
+        }
+    }
+}
+
+/// `pg_identify_object(classid oid, objid oid, objsubid int4)
+/// -> record(type text, schema text, name text, identity text)`
+/// (objectaddress.c 4248).
+fn fc_pg_identify_object(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let classid = arg_oid(fcinfo, 0);
+    let objid = arg_oid(fcinfo, 1);
+    let objsubid = arg_i32(fcinfo, 2);
+
+    let m = scratch_mcx();
+    let row = crate::fmgr_sql::pg_identify_object(m.mcx(), classid, objid, objsubid)?;
+
+    let coltypes = [TEXTOID, TEXTOID, TEXTOID, TEXTOID];
+    let (c0, n0) = text_col(m.mcx(), row.type_.as_deref())?;
+    let (c1, n1) = text_col(m.mcx(), row.schema.as_deref())?;
+    let (c2, n2) = text_col(m.mcx(), row.name.as_deref())?;
+    let (c3, n3) = text_col(m.mcx(), row.identity.as_deref())?;
+    let values = [c0, c1, c2, c3];
+    let nulls = [n0, n1, n2, n3];
+    let rec = backend_utils_fmgr_funcapi_seams::record_from_values::call(
+        m.mcx(),
+        &coltypes,
+        &values,
+        &nulls,
+    )?;
+    Ok(ret_record(fcinfo, rec))
+}
+
+/// `pg_get_acl(classid oid, objid oid, objsubid int4) -> aclitem[]`
+/// (objectaddress.c). Returns the object's ACL array, or NULL.
+fn fc_pg_get_acl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let classid = arg_oid(fcinfo, 0);
+    let objid = arg_oid(fcinfo, 1);
+    let objsubid = arg_i32(fcinfo, 2);
+
+    let m = scratch_mcx();
+    // Materialize the array image bytes out of the `m` borrow before re-borrowing
+    // `fcinfo` for the result write.
+    let bytes: Option<Vec<u8>> =
+        match crate::fmgr_sql::pg_get_acl(m.mcx(), classid, objid, objsubid)? {
+            None => None,
+            // aclitem[] is a by-reference array image; carry it verbatim.
+            Some(DatumV::ByRef(b)) => Some(b.as_slice().to_vec()),
+            Some(other) => {
+                panic!("pg_get_acl: expected ByRef aclitem[] Datum, got {other:?}")
+            }
+        };
+    match bytes {
+        None => Ok(ret_null(fcinfo)),
+        Some(b) => {
+            fcinfo.set_ref_result(RefPayload::Varlena(b));
+            Ok(Datum::from_usize(0))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -222,5 +298,18 @@ pub fn register_objectaddress_builtins() {
             false,
             fc_pg_get_object_address,
         ),
+        // pg_identify_object: oid '3839', proargtypes 'oid oid int4',
+        // prorettype 'record'; provolatile 's', not strict, not retset.
+        builtin(
+            3839,
+            "pg_identify_object",
+            3,
+            false,
+            false,
+            fc_pg_identify_object,
+        ),
+        // pg_get_acl: oid '6385', proargtypes 'oid oid int4',
+        // prorettype '_aclitem'; provolatile 's', not strict, not retset.
+        builtin(6385, "pg_get_acl", 3, false, false, fc_pg_get_acl),
     ]);
 }

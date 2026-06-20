@@ -310,6 +310,175 @@ fn fc_json_object_two_arg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error:
 }
 
 // ---------------------------------------------------------------------------
+// VARIADIC-"any" constructors (json.c): json_build_object / json_build_array.
+//
+// C entry point:
+//     nargs = extract_variadic_args(fcinfo, 0, true, &args, &types, &nulls);
+//     if (nargs < 0) PG_RETURN_NULL();
+//     PG_RETURN_DATUM(json_build_*_worker(nargs, args, nulls, types, ...));
+// `extract_variadic_args(fcinfo, variadic_start=0, convert_unknown=true)`
+// (funcapi.c) is reproduced by [`extract_variadic_args`], mirroring the proven
+// jsonb.c form (the variadic-array deconstruct seam is jsonb-owned; the
+// extraction logic is identical).
+// ---------------------------------------------------------------------------
+
+/// `UNKNOWNOID` / `TEXTOID` (pg_type.dat): the unknown→text coercion of
+/// `extract_variadic_args(..., convert_unknown=true)`.
+const UNKNOWNOID: types_core::Oid = 705;
+const TEXTOID_VARIADIC: types_core::Oid = 25;
+
+/// The extracted variadic argument vectors (`Datum *args`, `Oid *types`,
+/// `bool *nulls`), or `None` for the C `nargs < 0` `PG_RETURN_NULL()` case
+/// (`VARIADIC NULL`). The `Datum`s are canonical `types_tuple::Datum`s living in
+/// the supplied scratch `mcx`.
+struct VariadicArgs<'mcx> {
+    args: Vec<ValDatum<'mcx>>,
+    types: Vec<types_core::Oid>,
+    nulls: Vec<bool>,
+}
+
+/// `extract_variadic_args(fcinfo, variadic_start, convert_unknown=true, ...)`
+/// (funcapi.c). `None` is the C `return -1` (`VARIADIC NULL`).
+fn extract_variadic_args<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+    variadic_start: usize,
+) -> types_error::PgResult<Option<VariadicArgs<'mcx>>> {
+    let variadic = fmgr_core::get_fn_expr_variadic(fcinfo.flinfo.as_deref());
+
+    if variadic {
+        // Assert(PG_NARGS() == variadic_start + 1);
+        // if (PG_ARGISNULL(variadic_start)) return -1;
+        if fcinfo.arg(variadic_start).map(|d| d.isnull).unwrap_or(true) {
+            return Ok(None);
+        }
+        // array_in = PG_GETARG_ARRAYTYPE_P(variadic_start); element_type =
+        // ARR_ELEMTYPE(array_in); deconstruct_array(...) — all element types
+        // are element_type.
+        let array_image = arg_value(mcx, fcinfo, variadic_start)?;
+        let array_bytes = match array_image {
+            ValDatum::ByRef(b) => b.as_slice().to_vec(),
+            _ => panic!("json variadic: VARIADIC array arg not on the by-ref lane"),
+        };
+        let (element_type, elems): (types_core::Oid, Vec<(ValDatum<'mcx>, bool)>) =
+            backend_utils_adt_jsonb_seams::extract_variadic_array::call(mcx, &array_bytes)?;
+        let n = elems.len();
+        let mut args = Vec::with_capacity(n);
+        let mut nulls = Vec::with_capacity(n);
+        let mut types = Vec::with_capacity(n);
+        for (d, isnull) in elems {
+            args.push(d);
+            nulls.push(isnull);
+            types.push(element_type);
+        }
+        Ok(Some(VariadicArgs { args, types, nulls }))
+    } else {
+        // nargs = PG_NARGS() - variadic_start;
+        let nargs = (fcinfo.nargs as usize).saturating_sub(variadic_start);
+        let mut args = Vec::with_capacity(nargs);
+        let mut nulls = Vec::with_capacity(nargs);
+        let mut types = Vec::with_capacity(nargs);
+
+        for i in 0..nargs {
+            let idx = i + variadic_start;
+            let is_null = fcinfo.arg(idx).map(|d| d.isnull).unwrap_or(false);
+            let mut typ = fn_expr_argtype(fcinfo, idx as i32);
+
+            // Turn an `unknown`-type constant (a cstring on the by-ref lane)
+            // into text — the only `unknown` arg the json builders can see is
+            // such a literal.
+            let value: ValDatum<'mcx> = if typ == UNKNOWNOID {
+                if is_null {
+                    typ = TEXTOID_VARIADIC;
+                    ValDatum::null()
+                } else if let Some(s) = fcinfo.ref_arg(idx).and_then(|p| p.as_cstring()) {
+                    typ = TEXTOID_VARIADIC;
+                    // args_res[i] = CStringGetTextDatum(PG_GETARG_POINTER(i));
+                    backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, s)?
+                } else {
+                    ValDatum::null()
+                }
+            } else if is_null {
+                ValDatum::null()
+            } else {
+                // No conversion needed, just take the datum as given.
+                arg_value(mcx, fcinfo, idx)?
+            };
+
+            // if (!OidIsValid(types_res[i]) || (convert_unknown && types_res[i]
+            // == UNKNOWNOID)) ereport(ERROR, ...).
+            if typ == 0 || typ == UNKNOWNOID {
+                return Err(PgError::error(alloc::format!(
+                    "could not determine data type for argument {}",
+                    i + 1
+                ))
+                .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+            }
+
+            args.push(value);
+            nulls.push(is_null);
+            types.push(typ);
+        }
+
+        Ok(Some(VariadicArgs { args, types, nulls }))
+    }
+}
+
+/// `json_build_object(PG_FUNCTION_ARGS)` (json.c) — oid 3200.
+fn fc_json_build_object(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let m = scratch_mcx();
+    let mcx = m.mcx();
+    let extracted = extract_variadic_args(mcx, fcinfo, 0)?;
+    let out = match extracted {
+        Some(v) => crate::json_build_object(mcx, Some((&v.args, &v.nulls, &v.types)))?,
+        None => None,
+    };
+    match out {
+        Some(bytes) => Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec())),
+        None => {
+            fcinfo.set_result_null(true);
+            Ok(Datum::from_usize(0))
+        }
+    }
+}
+
+/// `json_build_object_noargs(PG_FUNCTION_ARGS)` (json.c) — oid 3201.
+fn fc_json_build_object_noargs(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let m = scratch_mcx();
+    let bytes = crate::json_build_object_noargs(m.mcx())?.as_slice().to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
+}
+
+/// `json_build_array(PG_FUNCTION_ARGS)` (json.c) — oid 3198.
+fn fc_json_build_array(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let m = scratch_mcx();
+    let mcx = m.mcx();
+    let extracted = extract_variadic_args(mcx, fcinfo, 0)?;
+    let out = match extracted {
+        Some(v) => crate::json_build_array(mcx, Some((&v.args, &v.nulls, &v.types)))?,
+        None => None,
+    };
+    match out {
+        Some(bytes) => Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec())),
+        None => {
+            fcinfo.set_result_null(true);
+            Ok(Datum::from_usize(0))
+        }
+    }
+}
+
+/// `json_build_array_noargs(PG_FUNCTION_ARGS)` (json.c) — oid 3199.
+fn fc_json_build_array_noargs(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let m = scratch_mcx();
+    let bytes = crate::json_build_array_noargs(m.mcx())?.as_slice().to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 

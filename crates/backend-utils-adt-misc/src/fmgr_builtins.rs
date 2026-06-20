@@ -27,12 +27,18 @@
 //!   The value core (`current_query`) exists, but the input is not expressible
 //!   here, so the row is skipped rather than hollow-registered.
 //!
-//! The set-returning / variadic `misc.c` rows (`pg_num_nulls`/`pg_num_nonnulls`
-//! variadic shapes, `pg_get_keywords`, `pg_get_catalog_foreign_keys`,
-//! `pg_tablespace_databases`, `pg_collation_for`/`pg_typeof`/
-//! `any_value_transfn`) are not part of this lane's row list. `parse_ident`
-//! (OID 1268) IS registered: its `text[]` result is assembled from the
-//! identifier parts via the arrayfuncs `build_text_array_nullable` seam.
+//! The variadic count functions (`pg_num_nulls`/`pg_num_nonnulls`, OIDs
+//! 438/440), `pg_collation_for` (OID 3162), `pg_typeof` (OID 1619) and
+//! `any_value_transfn` (OID 6292) ARE registered: the variadic `VARIADIC "any"`
+//! frame is read via `get_fn_expr_variadic` (separate args vs a single
+//! `ArrayType` image), and the static arg-type / collation come off
+//! `get_fn_expr_argtype` / `fcinfo.fncollation`. `parse_ident` (OID 1268) IS
+//! registered: its `text[]` result is assembled from the identifier parts via
+//! the arrayfuncs `build_text_array_nullable` seam.
+//!
+//! The set-returning `misc.c` rows (`pg_get_keywords`,
+//! `pg_get_catalog_foreign_keys`, `pg_tablespace_databases`) are not part of
+//! this lane's row list — they need the SRF tuplestore boundary.
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
@@ -324,6 +330,119 @@ fn fc_pg_typeof(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<
     Ok(Datum::from_oid(crate::pg_typeof(arg0_type)))
 }
 
+/// `pg_collation_for(any)` (misc.c:1037) -> `text` (OID 3162). Not strict
+/// (`proisstrict => 'f'`): the result depends on the argument's static type and
+/// the call's collation, not its runtime value. The arg-type OID comes from
+/// `get_fn_expr_argtype(fcinfo->flinfo, 0)` and the collation from
+/// `PG_GET_COLLATION()` (`fcinfo.fncollation`), exactly as C does. Returns NULL
+/// for the two `PG_RETURN_NULL` cases (no static type / no collation).
+fn fc_pg_collation_for(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let arg0_type =
+        backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 0);
+    let collation = fcinfo.fncollation;
+    let m = scratch_mcx();
+    let out: Option<Vec<u8>> = crate::pg_collation_for(m.mcx(), arg0_type, collation)?
+        .map(|v| v.as_slice().to_vec());
+    Ok(ret_text_opt(fcinfo, out))
+}
+
+/// `ARR_NDIM(a)` — the `ndim` field at offset 4 of the header-ful flat
+/// `ArrayType` image.
+#[inline]
+fn arr_ndim(a: &[u8]) -> i32 {
+    i32::from_ne_bytes([a[4], a[5], a[6], a[7]])
+}
+
+/// `ARR_HASNULL(a)` — `(a)->dataoffset != 0` (the `dataoffset` field at offset 8).
+#[inline]
+fn arr_hasnull(a: &[u8]) -> bool {
+    i32::from_ne_bytes([a[8], a[9], a[10], a[11]]) != 0
+}
+
+/// `ARR_DIMS(a)[i]` — dimension `i` at `sizeof(ArrayType) + i*sizeof(int)`.
+/// `sizeof(ArrayType)` is 16 (`vl_len_`, `ndim`, `dataoffset`, `elemtype`).
+#[inline]
+fn arr_dim(a: &[u8], i: usize) -> i32 {
+    let off = 16 + i * 4;
+    i32::from_ne_bytes([a[off], a[off + 1], a[off + 2], a[off + 3]])
+}
+
+/// `ARR_NULLBITMAP(a)` — the null bitmap bytes, or `None` when the array has no
+/// bitmap (`!ARR_HASNULL`). C: `sizeof(ArrayType) + 2*sizeof(int)*ARR_NDIM(a)`.
+#[inline]
+fn arr_nullbitmap<'a>(a: &'a [u8]) -> Option<&'a [u8]> {
+    if !arr_hasnull(a) {
+        return None;
+    }
+    let off = 16 + 2 * 4 * arr_ndim(a) as usize;
+    Some(&a[off..])
+}
+
+/// Build the `CountNullsArgs` view from the fmgr frame for `pg_num_nulls` /
+/// `pg_num_nonnulls` (C: `count_nulls`). When the call is `VARIADIC arr`
+/// (`get_fn_expr_variadic`), read the single array arg's header; otherwise count
+/// the per-argument SQL-NULL flags. Returns `None` only in the variadic-NULL
+/// case (C: `count_nulls` returns false → `PG_RETURN_NULL`).
+///
+/// The variadic array crosses on the by-ref lane as its header-ful `ArrayType`
+/// image; the executor builds this array in memory, so it is never TOAST-ed
+/// (C's defensive `PG_GETARG_ARRAYTYPE_P` detoast is a no-op here).
+fn count_nulls_result(fcinfo: &FunctionCallInfoBaseData) -> Option<(i32, i32)> {
+    if backend_utils_fmgr_core::get_fn_expr_variadic(fcinfo.flinfo.as_deref()) {
+        // Assert(PG_NARGS() == 1).
+        if fcinfo.arg(0).map(|d| d.isnull).unwrap_or(true) {
+            // VARIADIC NULL -> NULL.
+            return None;
+        }
+        let arr = fcinfo
+            .ref_arg(0)
+            .and_then(|p| p.as_varlena())
+            .expect("pg_num_nulls: variadic array arg missing from by-ref lane");
+        let ndim = arr_ndim(arr);
+        // nitems = ArrayGetNItems(ndim, dims) = product of dims (0 when ndim==0).
+        let mut nitems: i32 = if ndim > 0 { 1 } else { 0 };
+        for i in 0..ndim as usize {
+            nitems = nitems.saturating_mul(arr_dim(arr, i));
+        }
+        let bitmap = arr_nullbitmap(arr);
+        crate::count_nulls(&crate::CountNullsArgs::Variadic {
+            arg_is_null: false,
+            nitems,
+            bitmap,
+        })
+    } else {
+        // Separate arguments: one isnull flag per fmgr arg.
+        let nargs = fcinfo.nargs();
+        let isnull: Vec<bool> = (0..nargs)
+            .map(|i| fcinfo.arg(i).map(|d| d.isnull).unwrap_or(false))
+            .collect();
+        crate::count_nulls(&crate::CountNullsArgs::Separate(&isnull))
+    }
+}
+
+/// `pg_num_nulls(VARIADIC "any")` (misc.c:161) -> `int4` (OID 438). Not strict
+/// (`proisstrict => 'f'`) and variadic; nargs is the pg_proc `1`.
+fn fc_pg_num_nulls(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    match count_nulls_result(fcinfo) {
+        Some((_nargs, nulls)) => Ok(ret_i32(nulls)),
+        None => {
+            fcinfo.set_result_null(true);
+            Ok(Datum::from_usize(0))
+        }
+    }
+}
+
+/// `pg_num_nonnulls(VARIADIC "any")` (misc.c:177) -> `int4` (OID 440).
+fn fc_pg_num_nonnulls(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    match count_nulls_result(fcinfo) {
+        Some((nargs, nulls)) => Ok(ret_i32(nargs - nulls)),
+        None => {
+            fcinfo.set_result_null(true);
+            Ok(Datum::from_usize(0))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -441,5 +560,12 @@ pub fn register_misc_builtins() {
         builtin(1268, "parse_ident", 2, true, false, fc_parse_ident),
         // 1619 pg_typeof(any)                  -> regtype (proisstrict => 'f')
         builtin(1619, "pg_typeof", 1, false, false, fc_pg_typeof),
+        // 3162 pg_collation_for(any)           -> text    (proisstrict => 'f')
+        builtin(3162, "pg_collation_for", 1, false, false, fc_pg_collation_for),
+        // 438  num_nulls(VARIADIC "any")       -> int4    (variadic, proisstrict 'f')
+        // C prosrc is `pg_num_nulls`; nargs is the pg_proc `1` (the variadic any).
+        builtin(438, "pg_num_nulls", 1, false, false, fc_pg_num_nulls),
+        // 440  num_nonnulls(VARIADIC "any")    -> int4    (variadic, proisstrict 'f')
+        builtin(440, "pg_num_nonnulls", 1, false, false, fc_pg_num_nonnulls),
     ]);
 }
