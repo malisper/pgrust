@@ -53,23 +53,34 @@ pub struct ReplaceRelidContext {
 /// `ChangeVarNodesWalkExpression((Node *) rinfo->clause, context)`: it adjusts
 /// `Var.varno` / `varnullingrels` / PHV rels / RangeTblRef etc. The arena `Expr`
 /// is lifetime-free, so it is wrapped as a `Node::Expr` for the standalone walk.
-pub(crate) fn change_relids_in_node(root: &mut PlannerInfo, id: NodeId, ctx: ReplaceRelidContext) {
+pub(crate) fn change_relids_in_node<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    id: NodeId,
+    ctx: ReplaceRelidContext,
+) -> types_error::PgResult<()> {
     // Wrap a clone of the arena Expr as a `Node` so the standalone walker owns a
     // `&mut Node`, then store the walked result back (mirroring the C in-place
-    // mutation through the `(Node *) rinfo->clause` pointer). The arena `Expr` is
-    // lifetime-free, so `Node::Expr` is valid for any `'mcx`.
-    let mut node = Node::Expr(root.node(id).clone());
-    ChangeVarNodes(&mut node, ctx.rt_index, ctx.new_index, 0);
+    // mutation through the `(Node *) rinfo->clause` pointer). The opaque `Node` is
+    // allocated in `mcx`.
+    let mut node = Node::mk_expr(mcx, root.node(id).clone())?;
+    ChangeVarNodes(&mut node, ctx.rt_index, ctx.new_index, 0, mcx);
     // ChangeVarNodes never changes the top-level node kind for an Expr input.
     let walked = node
         .into_expr()
         .unwrap_or_else(|| unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"));
     *root.node_mut(id) = walked;
+    Ok(())
 }
 
 /// `replace_relid_callback`'s RestrictInfo branch (analyzejoins.c:1708) for a
 /// planner [`RinfoId`].
-pub fn change_relids_in_rinfo(root: &mut PlannerInfo, id: RinfoId, ctx: ReplaceRelidContext) {
+pub fn change_relids_in_rinfo<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    id: RinfoId,
+    ctx: ReplaceRelidContext,
+) -> types_error::PgResult<()> {
     let rt_index = ctx.rt_index;
     let new_index = ctx.new_index;
 
@@ -88,11 +99,11 @@ pub fn change_relids_in_rinfo(root: &mut PlannerInfo, id: RinfoId, ctx: ReplaceR
     if in_clause || in_required {
         // ChangeVarNodesWalkExpression((Node *) rinfo->clause, context);
         let clause_id = root.rinfo(id).clause;
-        change_relids_in_node(root, clause_id, ctx);
+        change_relids_in_node(mcx, root, clause_id, ctx)?;
 
         // ChangeVarNodesWalkExpression((Node *) rinfo->orclause, context);
         if let Some(orclause_id) = root.rinfo(id).orclause {
-            change_relids_in_orclause(root, orclause_id, ctx);
+            change_relids_in_orclause(mcx, root, orclause_id, ctx)?;
         }
 
         let new_clause_relids = relids::adjust_relid_set(
@@ -141,6 +152,7 @@ pub fn change_relids_in_rinfo(root: &mut PlannerInfo, id: RinfoId, ctx: ReplaceR
     if do_selfjoin_check {
         try_selfjoin_nulltest_rewrite(root, id);
     }
+    Ok(())
 }
 
 /// Recurse through a BoolExpr `orclause`'s embedded `RestrictInfo` children,
@@ -149,19 +161,25 @@ pub fn change_relids_in_rinfo(root: &mut PlannerInfo, id: RinfoId, ctx: ReplaceR
 /// Non-RestrictInfo children are plain expressions adjusted via the standalone
 /// walker (the orclause is `make_sub_restrictinfos` output: AND/OR of
 /// `Expr::RestrictInfo` handles).
-fn change_relids_in_orclause(root: &mut PlannerInfo, id: NodeId, ctx: ReplaceRelidContext) {
+fn change_relids_in_orclause<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    id: NodeId,
+    ctx: ReplaceRelidContext,
+) -> types_error::PgResult<()> {
     // Collect nested RestrictInfo handles (depth-first), so we can recurse with
     // `&mut PlannerInfo` without aliasing the arena entry being read.
     let mut nested: Vec<RinfoId> = Vec::new();
     collect_nested_rinfos(root, id, &mut nested);
     if nested.is_empty() {
         // No embedded RestrictInfos: adjust the expression in place directly.
-        change_relids_in_node(root, id, ctx);
-        return;
+        change_relids_in_node(mcx, root, id, ctx)?;
+        return Ok(());
     }
     for rid in nested {
-        change_relids_in_rinfo(root, rid, ctx);
+        change_relids_in_rinfo(mcx, root, rid, ctx)?;
     }
+    Ok(())
 }
 
 /// Depth-first collect every `Expr::RestrictInfo(RinfoRef)` handle reachable
@@ -220,9 +238,15 @@ fn try_selfjoin_nulltest_rewrite(root: &mut PlannerInfo, id: RinfoId) {
 /// `ChangeVarNodesExtended((Node *) em->em_expr, from, to, 0,
 /// replace_relid_callback)` for an [`EmId`]: the EM expr contains no embedded
 /// RestrictInfos, so it is a plain expression adjustment.
-pub fn change_relids_in_em(root: &mut PlannerInfo, id: EmId, ctx: ReplaceRelidContext) {
+pub fn change_relids_in_em<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    id: EmId,
+    ctx: ReplaceRelidContext,
+) -> types_error::PgResult<()> {
     let expr_id = root.em(id).em_expr;
-    change_relids_in_node(root, expr_id, ctx);
+    change_relids_in_node(mcx, root, expr_id, ctx)?;
+    Ok(())
 }
 
 /// `ChangeVarNodesExtended((Node *) root->parse, from, to, 0,
@@ -258,7 +282,7 @@ pub fn change_relids_in_query(
     );
     let mut node = Node::mk_query(mcx, query)?;
 
-    let mut skip_rtr = |n: &mut Node, _c: &mut ChangeVarNodesContext| -> bool {
+    let mut skip_rtr = |n: &mut Node<'_>, _c: &mut ChangeVarNodesContext| -> bool {
         matches!(n.node_tag(), t if t == ntag::T_RangeTblRef)
     };
     ChangeVarNodesExtended(
@@ -267,6 +291,7 @@ pub fn change_relids_in_query(
         ctx.new_index,
         0,
         Some(&mut skip_rtr),
+        mcx,
     );
 
     let walked = node
@@ -283,21 +308,23 @@ pub fn change_relids_in_query(
 /// handles (processed_tlist) recurse into the entry's `expr` child handle (C's
 /// expression walker descends through the TargetEntry); `SortGroupClause` handles
 /// (processed_groupClause) carry no Vars, so they are no-ops.
-pub fn change_relids_in_node_list(
+pub fn change_relids_in_node_list<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     root: &mut PlannerInfo,
     ids: &[types_pathnodes::NodeId],
     ctx: ReplaceRelidContext,
-) {
+) -> types_error::PgResult<()> {
     use types_pathnodes::ArenaNode;
     for &id in ids {
         match &root.node_arena[id.index()] {
-            ArenaNode::Expr(_) => change_relids_in_node(root, id, ctx),
+            ArenaNode::Expr(_) => change_relids_in_node(mcx, root, id, ctx)?,
             ArenaNode::TargetEntry(te) => {
                 let expr_id = te.expr;
-                change_relids_in_node(root, expr_id, ctx);
+                change_relids_in_node(mcx, root, expr_id, ctx)?;
             }
             // SortGroupClause / other non-expression arena nodes hold no Vars.
             _ => {}
         }
     }
+    Ok(())
 }

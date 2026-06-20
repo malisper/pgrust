@@ -107,12 +107,13 @@ pub fn remove_useless_joins<'mcx>(
 /// (`subst > 0`, rename) path.
 fn remove_rel_from_query<'mcx>(
     root: &mut PlannerInfo,
-    _run: &PlannerRun<'mcx>,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     subst: i32,
     sjinfo: Option<&SpecialJoinInfo>,
     joinrelids: Option<&Relids>,
 ) -> PgResult<()> {
+    let mcx = run.mcx();
     let relid = root.rel(rel).relid as i32;
     let ojrelid = sjinfo.map(|s| s.ojrelid as i32);
 
@@ -161,10 +162,11 @@ fn remove_rel_from_query<'mcx>(
             let semi_rhs: Vec<types_pathnodes::NodeId> =
                 root.join_info_list[idx].semi_rhs_exprs.clone();
             crate::change_relids::change_relids_in_node_list(
+                mcx,
                 root,
                 &semi_rhs,
                 ReplaceRelidContext { rt_index: relid, new_index: subst },
-            );
+            )?;
         }
     }
 
@@ -230,10 +232,11 @@ fn remove_rel_from_query<'mcx>(
         /* ChangeVarNodesExtended((Node *) phv->phexpr, relid, subst, …). */
         let phexpr_id = root.phinfo(ph_id).ph_var_phexpr;
         change_relids_in_node(
+            mcx,
             root,
             phexpr_id,
             ReplaceRelidContext { rt_index: relid, new_index: subst },
-        );
+        )?;
         kept.push(ph_id);
     }
     root.placeholder_list = kept;
@@ -249,7 +252,7 @@ fn remove_rel_from_query<'mcx>(
             || sjinfo.is_none()
             || ojrelid.map_or(false, |oj| relids::is_member(oj, &root.ec(ec_id).ec_relids));
         if touched {
-            remove_rel_from_eclass(root, ec_id, sjinfo, relid, subst);
+            remove_rel_from_eclass(mcx, root, ec_id, sjinfo, relid, subst)?;
         }
     }
 
@@ -283,10 +286,11 @@ fn remove_rel_from_query<'mcx>(
             let lateral_vars: Vec<types_pathnodes::NodeId> =
                 root.rel(otherrel).lateral_vars.clone();
             crate::change_relids::change_relids_in_node_list(
+                mcx,
                 root,
                 &lateral_vars,
                 ReplaceRelidContext { rt_index: relid, new_index: subst },
-            );
+            )?;
         }
     }
     Ok(())
@@ -400,13 +404,14 @@ fn remove_rel_from_restrictinfo(
 /// Fixes up the EC and EM relid sets and drops empty members; updates the source
 /// clauses' relid bits. `sjinfo == None` is the self-join (`subst > 0`) rename
 /// path; `Some` is the left-join (`subst <= 0`) deletion path.
-fn remove_rel_from_eclass(
+fn remove_rel_from_eclass<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     root: &mut PlannerInfo,
     ec_id: types_pathnodes::EcId,
     sjinfo: Option<&SpecialJoinInfo>,
     relid: i32,
     subst: i32,
-) {
+) -> types_error::PgResult<()> {
     let ojrelid = sjinfo.map(|s| s.ojrelid as i32);
 
     /* Fix up the EC's overall relids. */
@@ -458,15 +463,17 @@ fn remove_rel_from_eclass(
         } else {
             /* sjinfo == NULL (self-join): ChangeVarNodesExtended(rinfo, ...). */
             crate::change_relids::change_relids_in_rinfo(
+                mcx,
                 root,
                 rinfo,
                 crate::change_relids::ReplaceRelidContext { rt_index: relid, new_index: subst },
-            );
+            )?;
         }
     }
 
     /* Drop already-derived clauses (base restriction clauses we don't need). */
     backend_optimizer_path_equivclass::ec_clear_derived_clauses(root, ec_id);
+    Ok(())
 }
 
 /// `remove_rel_from_joinlist(joinlist, relid, nremoved)` (analyzejoins.c:789).
@@ -799,7 +806,7 @@ fn remove_self_joins_one_group<'mcx>(
 
             // Separate self-join quals ("x = x") from other quals ("a = b").
             let (mut selfjoinquals, otherjoinquals) =
-                split_selfjoin_quals(root, run, &restrictlist);
+                split_selfjoin_quals(root, run, &restrictlist)?;
 
             debug_assert_eq!(
                 restrictlist.len(),
@@ -830,7 +837,7 @@ fn remove_self_joins_one_group<'mcx>(
 
             // Validate inner baserestrictinfo matches the unique-index clauses.
             let krel_relid = root.rel(krel).relid as i32;
-            if !match_unique_clauses(root, run, rrel, &uclauses, krel_relid) {
+            if !match_unique_clauses(root, run, rrel, &uclauses, krel_relid)? {
                 continue;
             }
 
@@ -854,7 +861,7 @@ fn split_selfjoin_quals<'mcx>(
     root: &PlannerInfo,
     run: &PlannerRun<'mcx>,
     joinquals: &[RinfoId],
-) -> (Vec<RinfoId>, Vec<RinfoId>) {
+) -> types_error::PgResult<(Vec<RinfoId>, Vec<RinfoId>)> {
     let mcx = run.mcx();
     let mut sjoinquals: Vec<RinfoId> = Vec::new();
     let mut ojoinquals: Vec<RinfoId> = Vec::new();
@@ -891,17 +898,16 @@ fn split_selfjoin_quals<'mcx>(
         // ChangeVarNodesExtended(rightexpr, right_singleton, left_singleton, 0).
         let from = relids::get_singleton_member(&rinfo.right_relids).unwrap_or(-1);
         let to = relids::get_singleton_member(&rinfo.left_relids).unwrap_or(-1);
-        change_expr_relids_standalone(&mut rightexpr, from, to);
+        change_expr_relids_standalone(mcx, &mut rightexpr, from, to)?;
 
         if backend_optimizer_path_equivclass_ext_seams::equal::call(&leftexpr, &rightexpr) {
             sjoinquals.push(rinfo_id);
         } else {
             ojoinquals.push(rinfo_id);
         }
-        let _ = mcx;
     }
 
-    (sjoinquals, ojoinquals)
+    Ok((sjoinquals, ojoinquals))
 }
 
 /// `RelabelType` strip — `if (IsA(x, RelabelType)) x = ((RelabelType *)x)->arg`.
@@ -918,13 +924,19 @@ fn strip_relabel(e: Expr) -> Expr {
 /// over a standalone leaf [`Expr`] (no embedded planner RestrictInfo): the
 /// callback's only relevant branch is the RangeTblRef skip, which a leaf clause
 /// expr never contains, so plain `ChangeVarNodes` suffices.
-fn change_expr_relids_standalone(expr: &mut Expr, from: i32, to: i32) {
+fn change_expr_relids_standalone<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    expr: &mut Expr,
+    from: i32,
+    to: i32,
+) -> types_error::PgResult<()> {
     let owned = core::mem::replace(expr, dummy_expr());
-    let mut node = types_nodes::nodes::Node::Expr(owned);
-    backend_rewrite_core::change::ChangeVarNodes(&mut node, from, to, 0);
+    let mut node = types_nodes::nodes::Node::mk_expr(mcx, owned)?;
+    backend_rewrite_core::change::ChangeVarNodes(&mut node, from, to, 0, mcx);
     *expr = node
         .into_expr()
         .unwrap_or_else(|| unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"));
+    Ok(())
 }
 
 /// A throwaway [`Expr`] used as the `mem::replace` placeholder; immediately
@@ -942,10 +954,10 @@ fn match_unique_clauses<'mcx>(
     outer: RelId,
     uclauses: &[RinfoId],
     relid: i32,
-) -> bool {
+) -> types_error::PgResult<bool> {
     let outer_relid = root.rel(outer).relid as i32;
     debug_assert!(outer_relid > 0 && relid > 0);
-    let _ = run;
+    let mcx = run.mcx();
 
     for &rinfo_id in uclauses {
         let rinfo = root.rinfo(rinfo_id);
@@ -957,12 +969,12 @@ fn match_unique_clauses<'mcx>(
 
         // clause = copyObject(rinfo->clause); ChangeVarNodes(clause, relid, outer->relid).
         let mut clause = root.node(rinfo.clause).clone();
-        change_expr_relids_standalone(&mut clause, relid, outer_relid);
+        change_expr_relids_standalone(mcx, &mut clause, relid, outer_relid)?;
 
         let left_empty = relids::is_empty(&rinfo.left_relids);
         let (iclause, c1) = op_sides(&clause, left_empty);
         let (Some(iclause), Some(c1)) = (iclause, c1) else {
-            return false;
+            return Ok(false);
         };
 
         let mut matched = false;
@@ -986,10 +998,10 @@ fn match_unique_clauses<'mcx>(
             }
         }
         if !matched {
-            return false;
+            return Ok(false);
         }
     }
-    true
+    Ok(true)
 }
 
 /// For an OpExpr clause, return `(iclause, c1)`:
@@ -1085,8 +1097,8 @@ fn update_eclasses<'mcx>(
     ec: types_pathnodes::EcId,
     from: i32,
     to: i32,
-) {
-    let _ = run;
+) -> types_error::PgResult<()> {
+    let mcx = run.mcx();
     debug_assert!(root.ec(ec).ec_childmembers.iter().all(|v| v.is_empty()));
 
     // --- members ---
@@ -1107,10 +1119,11 @@ fn update_eclasses<'mcx>(
         }
         // ChangeVarNodesExtended((Node *) em->em_expr, from, to, 0, ...).
         crate::change_relids::change_relids_in_em(
+            mcx,
             root,
             em_id,
             crate::change_relids::ReplaceRelidContext { rt_index: from, new_index: to },
-        );
+        )?;
 
         // Drop if redundant with an already-kept member.
         let mut is_redundant = false;
@@ -1148,10 +1161,11 @@ fn update_eclasses<'mcx>(
 
         // ChangeVarNodesExtended((Node *) rinfo, from, to, 0, replace_relid_callback).
         crate::change_relids::change_relids_in_rinfo(
+            mcx,
             root,
             rinfo_id,
             crate::change_relids::ReplaceRelidContext { rt_index: from, new_index: to },
-        );
+        )?;
 
         let mut is_redundant = false;
         let clause_relids = relids::copy(&root.rinfo(rinfo_id).clause_relids);
@@ -1175,6 +1189,7 @@ fn update_eclasses<'mcx>(
     root.ec_mut(ec).ec_sources = new_sources;
     let new_relids = relids::adjust_relid_set(&root.ec(ec).ec_relids, from, to);
     root.ec_mut(ec).ec_relids = new_relids;
+    Ok(())
 }
 
 /// `remove_self_join_rel(root, kmark, rmark, toKeep, toRemove, restrictlist)`
@@ -1191,6 +1206,7 @@ fn remove_self_join_rel<'mcx>(
     to_remove: RelId,
     restrictlist: &[RinfoId],
 ) -> types_error::PgResult<()> {
+    let mcx = run.mcx();
     let keep_relid = root.rel(to_keep).relid as i32;
     let remove_relid = root.rel(to_remove).relid as i32;
     debug_assert!(keep_relid > 0);
@@ -1210,7 +1226,7 @@ fn remove_self_join_rel<'mcx>(
     for rinfo_id in joininfos {
         let req = relids::copy(&root.rinfo(rinfo_id).required_relids);
         backend_optimizer_util_joininfo::remove_join_clause_from_rels(run, root, rinfo_id, &req);
-        crate::change_relids::change_relids_in_rinfo(root, rinfo_id, ctx);
+        crate::change_relids::change_relids_in_rinfo(mcx, root, rinfo_id, ctx)?;
 
         if relids::membership_is_multiple(&root.rinfo(rinfo_id).required_relids) {
             jinfo_candidates.push(rinfo_id);
@@ -1226,7 +1242,7 @@ fn remove_self_join_rel<'mcx>(
     }
     let baserestricts = root.rel(to_remove).baserestrictinfo.clone();
     for rinfo_id in baserestricts {
-        crate::change_relids::change_relids_in_rinfo(root, rinfo_id, ctx);
+        crate::change_relids::change_relids_in_rinfo(mcx, root, rinfo_id, ctx)?;
         if relids::membership_is_multiple(&root.rinfo(rinfo_id).required_relids) {
             jinfo_candidates.push(rinfo_id);
         } else {
@@ -1250,7 +1266,7 @@ fn remove_self_join_rel<'mcx>(
             break;
         }
         let ec_id = types_pathnodes::EcId(ei as u32);
-        update_eclasses(root, run, ec_id, remove_relid, keep_relid);
+        update_eclasses(root, run, ec_id, remove_relid, keep_relid)?;
         let cur = relids::copy(&root.rel(to_keep).eclass_indexes);
         root.rel_mut(to_keep).eclass_indexes = relids::add_member(cur, ei);
     }
@@ -1263,7 +1279,7 @@ fn remove_self_join_rel<'mcx>(
         .map(|t| t.exprs.clone())
         .unwrap_or_default();
     for node_id in remove_exprs {
-        crate::change_relids::change_relids_in_node(root, node_id, ctx);
+        crate::change_relids::change_relids_in_node(mcx, root, node_id, ctx)?;
         let keep_exprs = root
             .rel(to_keep)
             .reltarget
@@ -1326,9 +1342,9 @@ fn remove_self_join_rel<'mcx>(
 
     // Replace varno in root targetlist and HAVING (grouping) clause.
     let tlist = root.processed_tlist.clone();
-    crate::change_relids::change_relids_in_node_list(root, &tlist, ctx);
+    crate::change_relids::change_relids_in_node_list(mcx, root, &tlist, ctx)?;
     let gclause = root.processed_groupClause.clone();
-    crate::change_relids::change_relids_in_node_list(root, &gclause, ctx);
+    crate::change_relids::change_relids_in_node_list(mcx, root, &gclause, ctx)?;
 
     root.all_result_relids =
         relids::adjust_relid_set(&root.all_result_relids, remove_relid, keep_relid);
