@@ -28,7 +28,7 @@
 //! and is left to its own (materialized-SRF) registration.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::{Oid, TimestampTz, XLogRecPtr};
 
@@ -116,87 +116,94 @@ fn ret_oid_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<Oid>) -> Datum {
     }
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
-fn fc_pg_replication_origin_create(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_replication_origin_create(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let name = arg_text(fcinfo, 0);
-    ret_oid(ok(crate::pg_replication_origin_create(name)))
+    Ok(ret_oid(crate::pg_replication_origin_create(name)?))
 }
 
-fn fc_pg_replication_origin_drop(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_replication_origin_drop(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let name = arg_text(fcinfo, 0);
-    ok(crate::pg_replication_origin_drop(name));
-    ret_void()
+    crate::pg_replication_origin_drop(name)?;
+    Ok(ret_void())
 }
 
-fn fc_pg_replication_origin_oid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_replication_origin_oid(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let name = arg_text(fcinfo, 0);
-    let res = ok(crate::pg_replication_origin_oid(name));
-    ret_oid_opt(fcinfo, res)
+    let res = crate::pg_replication_origin_oid(name)?;
+    Ok(ret_oid_opt(fcinfo, res))
 }
 
-fn fc_pg_replication_origin_session_setup(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_replication_origin_session_setup(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let name = arg_text(fcinfo, 0);
-    ok(crate::pg_replication_origin_session_setup(name));
-    ret_void()
+    crate::pg_replication_origin_session_setup(name)?;
+    Ok(ret_void())
 }
 
-fn fc_pg_replication_origin_session_reset(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ok(crate::pg_replication_origin_session_reset());
-    ret_void()
+fn fc_pg_replication_origin_session_reset(
+    _fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    crate::pg_replication_origin_session_reset()?;
+    Ok(ret_void())
 }
 
-fn fc_pg_replication_origin_session_is_setup(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(ok(crate::pg_replication_origin_session_is_setup()))
+fn fc_pg_replication_origin_session_is_setup(
+    _fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::pg_replication_origin_session_is_setup()?))
 }
 
-fn fc_pg_replication_origin_xact_reset(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ok(crate::pg_replication_origin_xact_reset());
-    ret_void()
+fn fc_pg_replication_origin_xact_reset(
+    _fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    crate::pg_replication_origin_xact_reset()?;
+    Ok(ret_void())
 }
 
-fn fc_pg_replication_origin_session_progress(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_replication_origin_session_progress(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let flush = arg_bool(fcinfo, 0);
-    let res = ok(crate::pg_replication_origin_session_progress(flush));
-    ret_lsn_opt(fcinfo, res)
+    let res = crate::pg_replication_origin_session_progress(flush)?;
+    Ok(ret_lsn_opt(fcinfo, res))
 }
 
-fn fc_pg_replication_origin_xact_setup(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_replication_origin_xact_setup(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let location = arg_lsn(fcinfo, 0);
     let timestamp = arg_timestamptz(fcinfo, 1);
-    ok(crate::pg_replication_origin_xact_setup(location, timestamp));
-    ret_void()
+    crate::pg_replication_origin_xact_setup(location, timestamp)?;
+    Ok(ret_void())
 }
 
-fn fc_pg_replication_origin_advance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_replication_origin_advance(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let name = arg_text(fcinfo, 0);
     let remote_commit = arg_lsn(fcinfo, 1);
-    ok(crate::pg_replication_origin_advance(name, remote_commit));
-    ret_void()
+    crate::pg_replication_origin_advance(name, remote_commit)?;
+    Ok(ret_void())
 }
 
-fn fc_pg_replication_origin_progress(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_replication_origin_progress(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let name = arg_text(fcinfo, 0);
     let flush = arg_bool(fcinfo, 1);
-    let res = ok(crate::pg_replication_origin_progress(name, flush));
-    ret_lsn_opt(fcinfo, res)
+    let res = crate::pg_replication_origin_progress(name, flush)?;
+    Ok(ret_lsn_opt(fcinfo, res))
 }
 
 // ---------------------------------------------------------------------------
@@ -209,16 +216,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the `pg_replication_origin_*` builtins (C: their `fmgr_builtins[]`
@@ -226,7 +236,7 @@ fn builtin(
 /// transcribed exactly from `pg_proc.dat`; none set `proisstrict` explicitly,
 /// so all default to strict (`'t'`), and none are set-returning.
 pub fn register_backend_replication_logical_origin_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(6003, "pg_replication_origin_create", 1, true, false, fc_pg_replication_origin_create),
         builtin(6004, "pg_replication_origin_drop", 1, true, false, fc_pg_replication_origin_drop),
         builtin(6005, "pg_replication_origin_oid", 1, true, false, fc_pg_replication_origin_oid),
