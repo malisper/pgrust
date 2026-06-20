@@ -579,7 +579,15 @@ impl core::fmt::Debug for FunctionCallInfoBaseData {
 }
 
 /// `FmgrInfo` (`fmgr.h`) — the resolved lookup info for a function.
-#[derive(Clone, Debug)]
+///
+/// `Clone`/`Debug` are hand-written (not derived) because [`fn_extra_user`] is a
+/// type-erased `Box<dyn Any>` that is neither `Clone` nor `Debug`. Cloning an
+/// `FmgrInfo` resets that handler-private cache to `None`, which is faithful to
+/// C: C never deep-copies `fn_extra` (callees share the SAME `FmgrInfo *` for
+/// the cache to survive across calls; a fresh `FmgrInfo` always has
+/// `fn_extra == NULL`, and the handler rebuilds the cache on its first call into
+/// the new frame). This mirrors the `internal_args` reset-on-clone discipline in
+/// `FunctionCallInfoBaseData::clone`.
 pub struct FmgrInfo {
     /// `PGFunction fn_addr` — the resolved callable.
     pub fn_addr: PGFunction,
@@ -593,18 +601,36 @@ pub struct FmgrInfo {
     pub fn_retset: bool,
     /// `unsigned char fn_stats`.
     pub fn_stats: u8,
-    /// `void *fn_extra` — handler-private cache.
+    /// `void *fn_extra` — the fmgr-internal half of the handler-private cache
+    /// (the per-argument by-ref marshal plan the interp fmgr bridge owns). The
+    /// *generic* `void *fn_extra` a builtin owns is [`fn_extra_user`].
     pub fn_extra: Option<Box<FmgrInfoExtra>>,
+    /// `void *fn_extra` — the GENERIC handler-private cache slot. C builtins
+    /// stash an arbitrary owned struct here (`palloc`'d into `fn_mcxt`) and read
+    /// it back, downcast, on subsequent calls within the same query: ordered-set
+    /// aggregates cache `OSAPerQueryState`, regexp caches the compiled pattern,
+    /// typmodin/out cache parsed modifiers, range/record typcache, etc. The
+    /// owned model carries it type-erased; set via [`set_fn_extra`], read via
+    /// [`fn_extra_user_ref`]/[`fn_extra_user_mut`] with a checked downcast.
+    ///
+    /// `Send` so the carrier matches the rest of the fmgr ABI surface; the cache
+    /// is single-backend-thread-confined in practice (it never crosses threads,
+    /// exactly like C's `fn_extra`).
+    pub fn_extra_user: Option<Box<dyn Any + Send>>,
     /// `fmNodePtr fn_expr` — the expression node representing the call.
     pub fn_expr: Option<Box<FnExpr>>,
 }
 
 // C's `FmgrInfo.fn_mcxt` (the `MemoryContext` callees charge longer-lived
-// `fn_extra` caches to) is NOT a field here: this repo has no ambient/stored
-// allocation context — the allocation target is the `Mcx<'mcx>` threaded as a
-// parameter to the `fmgr_info`/`fmgr_security_definer` family. The
-// `fmgr_security_definer` cache is allocated into a per-call context the handler
-// builds locally, so no stored context is needed.
+// `fn_extra` caches to) is NOT a stored field here: this repo has no
+// ambient/stored allocation context — the allocation target is the `Mcx<'mcx>`
+// threaded as a parameter to the `fmgr_info`/`fmgr_security_definer` family, and
+// the generic [`fn_extra_user`] cache is an owned `Box` whose Rust lifetime is
+// the `FmgrInfo`'s own (which the executor pins to `fn_mcxt`'s context for the
+// duration the cache must live — the per-query aggregate context for ordered-set
+// aggregates). A builtin that, in C, would `MemoryContextAlloc(fn_mcxt, ...)`
+// instead boxes its state and hands it to [`set_fn_extra`]; the box is dropped
+// when the `FmgrInfo` is (i.e. when `fn_mcxt` would be reset/deleted in C).
 
 impl FmgrInfo {
     pub fn empty() -> Self {
@@ -616,12 +642,93 @@ impl FmgrInfo {
             fn_retset: false,
             fn_stats: TRACK_FUNC_OFF,
             fn_extra: None,
+            fn_extra_user: None,
             fn_expr: None,
         }
     }
 
     pub fn set_expr(&mut self, expr: Option<Box<FnExpr>>) {
         self.fn_expr = expr;
+    }
+
+    /// Store a handler-private cache value in the generic `fn_extra` slot
+    /// (C: `fcinfo->flinfo->fn_extra = MemoryContextAlloc(fn_mcxt, sizeof(T));
+    /// ... = state`). Replaces any prior value (the old box is dropped, as C's
+    /// `fn_mcxt` reset would have freed the prior allocation). Take a `T: Any +
+    /// Send`.
+    pub fn set_fn_extra<T: Any + Send>(&mut self, state: T) {
+        self.fn_extra_user = Some(Box::new(state));
+    }
+
+    /// `true` when the generic `fn_extra` slot is populated (C: `fn_extra !=
+    /// NULL`, the "is this the first call?" test ordered-set aggregates run).
+    pub fn has_fn_extra(&self) -> bool {
+        self.fn_extra_user.is_some()
+    }
+
+    /// CHECKED `&T` downcast of the generic `fn_extra` cache (C: the unchecked
+    /// `(T *) fcinfo->flinfo->fn_extra` cast). `None` when the slot is empty
+    /// (C: `fn_extra == NULL`). Panics loudly on a type mismatch — a wiring bug
+    /// C would silently corrupt memory on.
+    pub fn fn_extra_user_ref<T: Any>(&self) -> Option<&T> {
+        let any = self.fn_extra_user.as_ref()?;
+        match any.downcast_ref::<T>() {
+            Some(t) => Some(t),
+            None => panic!(
+                "fmgr fn_extra: downcast_ref to {} failed",
+                core::any::type_name::<T>()
+            ),
+        }
+    }
+
+    /// CHECKED `&mut T` downcast of the generic `fn_extra` cache; same
+    /// loud-panic-on-mismatch contract as [`fn_extra_user_ref`].
+    pub fn fn_extra_user_mut<T: Any>(&mut self) -> Option<&mut T> {
+        let any = self.fn_extra_user.as_mut()?;
+        match any.downcast_mut::<T>() {
+            Some(t) => Some(t),
+            None => panic!(
+                "fmgr fn_extra: downcast_mut to {} failed",
+                core::any::type_name::<T>()
+            ),
+        }
+    }
+}
+
+impl Clone for FmgrInfo {
+    /// Clones every real field; the generic [`fn_extra_user`] cache resets to
+    /// `None` (it is neither `Clone` nor meaningfully copyable — a cloned frame
+    /// is a fresh `FmgrInfo` with `fn_extra == NULL`, and the handler rebuilds
+    /// the cache on first call). Same discipline as
+    /// `FunctionCallInfoBaseData::clone`'s `internal_args` reset.
+    fn clone(&self) -> Self {
+        Self {
+            fn_addr: self.fn_addr,
+            fn_oid: self.fn_oid,
+            fn_nargs: self.fn_nargs,
+            fn_strict: self.fn_strict,
+            fn_retset: self.fn_retset,
+            fn_stats: self.fn_stats,
+            fn_extra: self.fn_extra.clone(),
+            fn_extra_user: None,
+            fn_expr: self.fn_expr.clone(),
+        }
+    }
+}
+
+impl core::fmt::Debug for FmgrInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FmgrInfo")
+            .field("fn_addr", &self.fn_addr.map(|_| "<fn>"))
+            .field("fn_oid", &self.fn_oid)
+            .field("fn_nargs", &self.fn_nargs)
+            .field("fn_strict", &self.fn_strict)
+            .field("fn_retset", &self.fn_retset)
+            .field("fn_stats", &self.fn_stats)
+            .field("fn_extra", &self.fn_extra)
+            .field("has_fn_extra_user", &self.fn_extra_user.is_some())
+            .field("fn_expr", &self.fn_expr)
+            .finish()
     }
 }
 
@@ -648,4 +755,66 @@ pub struct FmgrBuiltin {
     pub retset: bool,
     /// `PGFunction func`.
     pub func: PGFunction,
+}
+
+#[cfg(test)]
+mod fn_extra_tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq)]
+    struct OsaCache {
+        rescan_needed: bool,
+        sort_col_type: Oid,
+    }
+
+    #[test]
+    fn fn_extra_set_get_downcast_roundtrip() {
+        let mut fi = FmgrInfo::empty();
+        assert!(!fi.has_fn_extra());
+        assert!(fi.fn_extra_user_ref::<OsaCache>().is_none());
+
+        fi.set_fn_extra(OsaCache {
+            rescan_needed: true,
+            sort_col_type: 701,
+        });
+        assert!(fi.has_fn_extra());
+        let got = fi.fn_extra_user_ref::<OsaCache>().expect("cache present");
+        assert_eq!(
+            got,
+            &OsaCache {
+                rescan_needed: true,
+                sort_col_type: 701
+            }
+        );
+
+        // mutate in place (handler updates its cache on a later call)
+        fi.fn_extra_user_mut::<OsaCache>().unwrap().rescan_needed = false;
+        assert!(!fi.fn_extra_user_ref::<OsaCache>().unwrap().rescan_needed);
+    }
+
+    #[test]
+    fn fn_extra_resets_on_clone() {
+        // C never deep-copies fn_extra; a cloned FmgrInfo is a fresh frame with
+        // fn_extra == NULL.
+        let mut fi = FmgrInfo::empty();
+        fi.set_fn_extra(OsaCache {
+            rescan_needed: true,
+            sort_col_type: 701,
+        });
+        let clone = fi.clone();
+        assert!(fi.has_fn_extra(), "original keeps its cache");
+        assert!(!clone.has_fn_extra(), "clone is a fresh frame, cache cleared");
+    }
+
+    #[test]
+    #[should_panic(expected = "downcast_ref")]
+    fn fn_extra_wrong_type_panics_loudly() {
+        let mut fi = FmgrInfo::empty();
+        fi.set_fn_extra(OsaCache {
+            rescan_needed: true,
+            sort_col_type: 701,
+        });
+        // Wrong target type — a wiring bug C would silently corrupt memory on.
+        let _ = fi.fn_extra_user_ref::<u64>();
+    }
 }
