@@ -456,6 +456,7 @@ pub fn heap_create_with_catalog<'mcx>(
     allow_system_table_mods: bool,
     is_internal: bool,
     relrewrite: Oid,
+    cooked_constraints: &[types_nodes::nodes::NodePtr<'_>],
 ) -> PgResult<Oid> {
     /* By default set to InvalidOid unless overridden by binary-upgrade */
     let mut relfilenumber: RelFileNumber = InvalidOid;
@@ -816,12 +817,20 @@ pub fn heap_create_with_catalog<'mcx>(
     /*
      * Store any supplied CHECK constraints and defaults.
      *
-     * The inward `heap_create_with_catalog` call surface carries no cooked
-     * constraints (the C `cooked_constraints == NIL` branch), so StoreConstraints
-     * is a no-op (nothing to do). The constraint-cooker family is deeper-keystone
-     * blocked (see the crate-level STOP note).
+     * `cooked_constraints` is the C `list_concat(cookedDefaults, old_constraints)`
+     * — pre-cooked CHECK constraints and column defaults inherited from parent
+     * relations.  The carrier nodes arrive from the caller's arena, so clone
+     * them into this function's `mcx` to unify with `new_rel_desc`'s lifetime
+     * before handing them to StoreConstraints.
      */
-    // StoreConstraints(new_rel_desc, NIL, is_internal) — returns immediately.
+    if !cooked_constraints.is_empty() {
+        let mut cooked: alloc::vec::Vec<types_nodes::nodes::NodePtr<'mcx>> =
+            alloc::vec::Vec::with_capacity(cooked_constraints.len());
+        for c in cooked_constraints.iter() {
+            cooked.push(mcx::alloc_in(mcx, (**c).clone_in(mcx)?)?);
+        }
+        crate::constraints::StoreConstraints(mcx, &new_rel_desc, &cooked, is_internal)?;
+    }
 
     /*
      * If there's a special on-commit action, remember it.

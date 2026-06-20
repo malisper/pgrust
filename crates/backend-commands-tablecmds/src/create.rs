@@ -16,7 +16,7 @@ use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
-use types_nodes::ddlnodes::CreateStmt;
+use types_nodes::ddlnodes::{ConstrType, CreateStmt};
 use types_nodes::nodes::{ntag, Node, NodePtr};
 use types_nodes::primnodes::OnCommitAction;
 use types_nodes::rawnodes::{ColumnDef, RangeVar, TypeName};
@@ -710,11 +710,14 @@ pub fn define_relation<'mcx>(
 
     /*
      * Create the relation. Inherited defaults and CHECK constraints are passed
-     * in for immediate handling. (The owned `cooked_constraints` list — C
-     * `list_concat(cookedDefaults, old_constraints)` — is dropped by the
-     * heap_create_with_catalog seam, which takes the trimmed argument struct.)
+     * in for immediate handling (C `list_concat(cookedDefaults, old_constraints)`),
+     * stored by heap_create_with_catalog -> StoreConstraints.
      */
-    let _cooked_constraints = list_concat(cooked_defaults, old_constraints);
+    let cooked_constraints = list_concat(cooked_defaults, old_constraints);
+    let mut cooked_vec: PgVec<NodePtr> = vec_with_capacity_in(mcx, cooked_constraints.len())?;
+    for c in cooked_constraints.into_iter() {
+        cooked_vec.push(c);
+    }
     let relation_id = heap_create_with_catalog::call(HeapCreateWithCatalogArgs {
         relname: relname.clone(),
         relnamespace: namespace_id,
@@ -735,6 +738,7 @@ pub fn define_relation<'mcx>(
         allow_system_table_mods: ts_globals_seam::allowSystemTableMods::call()?,
         is_internal: false,
         relrewrite: InvalidOid,
+        cooked_constraints: cooked_vec,
     })?;
 
     /*
@@ -1318,11 +1322,18 @@ fn nodes_to_columndefs<'mcx>(
 /// cooked-constraints list. The repo's owned model wraps the cooked expression
 /// directly; the catalog owner consumes it.
 fn make_cooked_default<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _attnum: AttrNumber,
+    mcx: Mcx<'mcx>,
+    attnum: AttrNumber,
     expr: NodePtr<'mcx>,
 ) -> PgResult<NodePtr<'mcx>> {
-    Ok(expr)
+    // Carry the cooked default as a CONSTR_DEFAULT `Constraint`, matching the
+    // CookedConstraint that StoreConstraints consumes: `raw_expr` holds the
+    // cooked default expression and `location` carries the attnum (the cooked
+    // node's `attnum` field in C).
+    let mut c = crate::mergeattr::empty_constraint(mcx, ConstrType::CONSTR_DEFAULT)?;
+    c.raw_expr = Some(expr);
+    c.location = attnum as i32;
+    alloc_in(mcx, Node::mk_constraint(mcx, c)?)
 }
 
 /// `list_concat(a, b)` for two owned node lists.

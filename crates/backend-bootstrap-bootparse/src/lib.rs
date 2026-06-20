@@ -433,6 +433,7 @@ fn boot_create_stmt(mcx: Mcx<'static>, p: &mut Parser) -> PgResult<()> {
                 allow_system_table_mods: true,
                 is_internal: false,
                 relrewrite: types_core::primitive::InvalidOid,
+                cooked_constraints: PgVec::new_in(mcx),
             },
         )?;
 

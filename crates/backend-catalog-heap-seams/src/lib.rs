@@ -5,10 +5,11 @@
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use types_cluster::RelOptionsToken;
 use types_core::primitive::{Oid, RelFileNumber, TransactionId};
 use types_error::PgResult;
+use types_nodes::nodes::NodePtr;
 use types_nodes::primnodes::OnCommitAction;
 use types_rel::Relation;
 use types_tuple::heaptuple::TupleDescData;
@@ -16,9 +17,10 @@ use types_tuple::heaptuple::TupleDescData;
 /// Arguments to [`heap_create_with_catalog`], mirroring the C
 /// `heap_create_with_catalog(...)` parameter list (catalog/heap.c) trimmed to
 /// the fields the current callers supply. The C `TupleDesc tupdesc` crosses
-/// by value as an owned [`TupleDescData`]; `cooked_constraints` is NIL and the
-/// `ObjectAddress *typaddress` out-parameter is NULL at the current call
-/// sites, so neither is carried.
+/// by value as an owned [`TupleDescData`]; `cooked_constraints` is carried as
+/// a `PgVec` of `Node::Constraint` carriers (the C `cooked_constraints` list).
+/// The `ObjectAddress *typaddress` out-parameter is NULL at the current call
+/// sites, so it is not carried.
 #[derive(Debug)]
 pub struct HeapCreateWithCatalogArgs<'mcx> {
     /// `const char *relname`.
@@ -61,6 +63,12 @@ pub struct HeapCreateWithCatalogArgs<'mcx> {
     pub is_internal: bool,
     /// `Oid relrewrite`.
     pub relrewrite: Oid,
+    /// `List *cooked_constraints` — pre-cooked CHECK constraints and column
+    /// defaults inherited from parent relations (the C
+    /// `list_concat(cookedDefaults, old_constraints)`). Each element is a
+    /// `Node::Constraint` carrier (CONSTR_CHECK / CONSTR_DEFAULT), consumed by
+    /// `StoreConstraints`. Empty at non-inheriting call sites.
+    pub cooked_constraints: PgVec<'mcx, NodePtr<'mcx>>,
 }
 
 seam_core::seam!(

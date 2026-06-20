@@ -1013,7 +1013,10 @@ fn make_notnull_carrier<'mcx>(
     alloc_in(mcx, Node::mk_constraint(mcx, c)?)
 }
 
-fn empty_constraint<'mcx>(mcx: Mcx<'mcx>, contype: ConstrType) -> PgResult<Constraint<'mcx>> {
+pub(crate) fn empty_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    contype: ConstrType,
+) -> PgResult<Constraint<'mcx>> {
     Ok(Constraint {
         contype,
         conname: None,

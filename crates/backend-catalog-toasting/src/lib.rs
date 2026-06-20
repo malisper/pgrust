@@ -296,6 +296,7 @@ fn create_toast_table<'mcx>(
         allow_system_table_mods: true,
         is_internal: true,
         relrewrite: OIDOldToast,
+        cooked_constraints: mcx::PgVec::new_in(mcx),
     })?;
     assert!(toast_relid != InvalidOid); // Assert(toast_relid != InvalidOid);
 

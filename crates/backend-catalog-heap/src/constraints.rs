@@ -665,7 +665,7 @@ pub fn StoreConstraints<'mcx>(
                     con.is_enforced,
                     !con.skip_validation,
                     con.initially_valid, // is_local carried in initially_valid for cooked
-                    0,
+                    con.location as i16, // inhcount carried in location for cooked (CookedConstraint.inhcount)
                     con.is_no_inherit,
                     is_internal,
                 )?;

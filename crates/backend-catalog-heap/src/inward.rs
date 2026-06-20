@@ -51,6 +51,7 @@ fn heap_create_with_catalog_seam(args: HeapCreateWithCatalogArgs<'_>) -> PgResul
         args.allow_system_table_mods,
         args.is_internal,
         args.relrewrite,
+        &args.cooked_constraints,
     )
 }
 
@@ -109,6 +110,7 @@ fn heap_create_with_catalog_transient_seam<'mcx>(
         true,  /* allow_system_table_mods */
         true,  /* is_internal */
         old_heap_oid, /* relrewrite */
+        &[],   /* cooked_constraints: a transient heap carries none */
     )
 }
 
