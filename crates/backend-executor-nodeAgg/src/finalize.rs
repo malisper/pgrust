@@ -74,6 +74,11 @@ pub fn finalize_aggregate<'mcx>(
     peragg: &AggStatePerAggData<'mcx>,
     pergroupstate: &mut AggStatePerGroupData<'mcx>,
     estate: &mut EStateData<'mcx>,
+    // The direct arguments, already evaluated (`ExecEvalExpr` over
+    // `peragg->aggdirectargs`) by the caller — which holds the `&mut ExprState`
+    // and `&mut EState` the evaluator needs. C evaluates them inline here; the
+    // owned model evaluates them in the loop above to avoid a double-`&mut`.
+    direct_args: &[(Datum<'mcx>, bool)],
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS);
     // bool anynull = false;
@@ -110,14 +115,11 @@ pub fn finalize_aggregate<'mcx>(
     //     i++;
     // }
     let mut i: i32 = 1;
-    if let Some(directargs) = peragg.aggdirectargs.as_ref() {
-        for expr in directargs.iter() {
-            let (value, isnull) = exec_eval_expr_direct_arg(aggstate, expr);
-            final_args.push(value);
-            final_arg_isnull.push(isnull);
-            anynull |= isnull;
-            i += 1;
-        }
+    for (value, isnull) in direct_args.iter() {
+        final_args.push(value.clone());
+        final_arg_isnull.push(*isnull);
+        anynull |= *isnull;
+        i += 1;
     }
 
     let result_val;
@@ -344,13 +346,13 @@ fn pertrans_for<'a, 'mcx>(
 /// direct argument (ordered-set aggregates). The compiled-expression evaluator
 /// is the execExpr owner's; no seam carries it into this path yet.
 fn exec_eval_expr_direct_arg<'mcx>(
-    _aggstate: &AggStateData<'mcx>,
-    _expr: &ExprState,
-) -> (Datum<'mcx>, bool) {
-    panic!(
-        "backend-executor-nodeAgg::finalize_aggregate: ExecEvalExpr of a finalfn direct \
-         argument is owned by the not-yet-ported execExpr unit; no seam yet"
-    );
+    expr: &mut ExprState<'mcx>,
+    econtext_id: types_nodes::EcxtId,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    // ExecEvalExpr(expr, aggstate->ss.ps.ps_ExprContext, &isnull) —
+    // ExecEvalExprSwitchContext over the per-tuple context of ps_ExprContext.
+    backend_executor_execExpr_seams::exec_eval_expr_switch_context::call(expr, econtext_id, estate)
 }
 
 /// `fcinfo->args[i].value = v; fcinfo->args[i].isnull = isnull;` on the
@@ -682,7 +684,7 @@ pub fn finalize_aggregates<'mcx>(
     // (the C aliases peraggs = aggstate->peragg as a separate parameter).
     let numaggs = aggstate.numaggs;
     let aggsplit = aggstate.aggsplit;
-    let peragg_vec = aggstate.peragg.take().expect("peragg array set");
+    let mut peragg_vec = aggstate.peragg.take().expect("peragg array set");
 
     // econtext = aggstate->ss.ps.ps_ExprContext;
     let econtext_id = aggstate
@@ -692,14 +694,25 @@ pub fn finalize_aggregates<'mcx>(
         .expect("ps_ExprContext set");
 
     for aggno in 0..numaggs {
-        let peragg = &peragg_vec[aggno as usize];
-        let transno = peragg.transno;
+        let transno = peragg_vec[aggno as usize].transno;
         let pergroupstate = &mut pergroup[transno as usize];
 
         let (value, isnull) = if do_aggsplit_skipfinal(aggsplit) {
+            let peragg = &peragg_vec[aggno as usize];
             finalize_partialaggregate(aggstate, peragg, pergroupstate)?
         } else {
-            finalize_aggregate(aggstate, peragg, pergroupstate, estate)?
+            // Evaluate the direct args first (needs `&mut ExprState` + `&mut
+            // EState`), then hand the values to finalize_aggregate (which needs
+            // `&peragg`). C evaluates them inline; the owned model splits the
+            // borrows. ExecEvalExpr(directarg, ps_ExprContext, &isnull).
+            let mut direct_args: alloc::vec::Vec<(Datum<'mcx>, bool)> = alloc::vec::Vec::new();
+            if let Some(directargs) = peragg_vec[aggno as usize].aggdirectargs.as_mut() {
+                for expr in directargs.iter_mut() {
+                    direct_args.push(exec_eval_expr_direct_arg(expr, econtext_id, estate)?);
+                }
+            }
+            let peragg = &peragg_vec[aggno as usize];
+            finalize_aggregate(aggstate, peragg, pergroupstate, estate, &direct_args)?
         };
 
         // aggvalues[aggno] = value; aggnulls[aggno] = isnull;
