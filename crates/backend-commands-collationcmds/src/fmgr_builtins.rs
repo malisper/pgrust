@@ -11,7 +11,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::Oid;
 
@@ -64,37 +64,31 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("collationcmds fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `pg_import_system_collations(regnamespace) -> int4` (collationcmds.c:835).
 /// The core returns the count of collations created; `PG_RETURN_INT32`.
-fn fc_pg_import_system_collations(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_import_system_collations(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let nspid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    match crate::pg_import_system_collations(m.mcx(), nspid) {
-        Ok(ncreated) => ret_i32(ncreated),
-        Err(e) => raise(e),
-    }
+    Ok(ret_i32(crate::pg_import_system_collations(m.mcx(), nspid)?))
 }
 
 /// `pg_collation_actual_version(oid) -> text` (collationcmds.c:506). The core
 /// returns `Option<String>`: `Some` → `PG_RETURN_TEXT_P`, `None` →
 /// `PG_RETURN_NULL` (the collation has no recorded actual version).
-fn fc_pg_collation_actual_version(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_collation_actual_version(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let collid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    match crate::pg_collation_actual_version(m.mcx(), collid) {
-        Ok(Some(version)) => ret_text(fcinfo, version),
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+    match crate::pg_collation_actual_version(m.mcx(), collid)? {
+        Some(version) => Ok(ret_text(fcinfo, version)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 
@@ -108,16 +102,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every SQL-callable `collationcmds.c` builtin (C: their
@@ -125,7 +122,7 @@ fn builtin(
 /// OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat`
 /// (both default `proisstrict => 't'`, default `proretset => 'f'`, nargs 1).
 pub fn register_collationcmds_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // proargtypes => 'regnamespace' (nargs 1); prorettype => 'int4'.
         builtin(
             3445,
