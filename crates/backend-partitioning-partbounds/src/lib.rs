@@ -1117,12 +1117,12 @@ fn invalid_object_def_detail(msg: String, detail: String) -> PgError {
 /// verify the new partition bound is valid and does not overlap any existing
 /// partition. Faithful 1:1 port; the parent's `PartitionKey`/`PartitionDesc` are
 /// passed in by the caller.
-pub fn check_new_partition_bound<'mcx>(
+pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
     mcx: Mcx<'mcx>,
     relname: &str,
-    key: &PartitionKeyData<'mcx>,
-    partdesc: &PartitionDescData<'mcx>,
-    spec: &PartitionBoundSpec<'mcx>,
+    key: &PartitionKeyData<'k>,
+    partdesc: &PartitionDescData<'d>,
+    spec: &PartitionBoundSpec<'s>,
 ) -> PgResult<()> {
     let boundinfo = partdesc.boundinfo.as_deref();
     let mut with: i32 = -1;
@@ -1359,7 +1359,7 @@ fn get_qual_from_partbound_seam<'mcx>(
     let exprs = qual::get_qual_from_partbound(mcx, key, spec)?;
     let mut out: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
     for e in exprs {
-        out.push(Node::Expr(e));
+        out.push(Node::mk_expr(mcx, e)?);
     }
     Ok(out)
 }

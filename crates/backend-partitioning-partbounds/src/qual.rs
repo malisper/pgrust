@@ -85,9 +85,10 @@ fn is_polymorphic_type(typid: Oid) -> bool {
 }
 
 /// Wrap a freshly built `Expr` as a `Node` (the implicit-AND list element type
-/// the qual seam returns; the elements are always `Expr` leaves).
-fn node(e: Expr) -> Node<'static> {
-    Node::Expr(e)
+/// the qual seam returns; the elements are always `Expr` leaves), allocating the
+/// opaque node in `mcx`.
+fn node<'mcx>(mcx: Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
+    Node::mk_expr(mcx, e)
 }
 
 /// Extract the `Const` carried by a `PartitionRangeDatum`/`spec->listdatums`
@@ -412,7 +413,7 @@ fn get_range_key_properties<'mcx>(
 
 /// Read a `PartitionRangeDatum` out of a bound's `lowerdatums`/`upperdatums`
 /// node-pointer list.
-fn range_datum<'a>(n: &'a Node<'a>) -> PgResult<&'a PartitionRangeDatum<'a>> {
+fn range_datum<'a, 'mcx>(n: &'a Node<'mcx>) -> PgResult<&'a PartitionRangeDatum<'mcx>> {
     n.as_partitionrangedatum()
         .ok_or_else(|| elog("range bound element is not a PartitionRangeDatum"))
 }
@@ -718,7 +719,7 @@ pub fn qual_from_partbound_seam<'mcx, 'p>(
     let exprs = get_qual_from_partbound(mcx, &key, &bound)?;
     parent_rel.close(NoLock)?;
     for e in exprs {
-        out.push(node(e));
+        out.push(node(mcx, e)?);
     }
     Ok(out)
 }
