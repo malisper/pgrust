@@ -342,3 +342,29 @@ seam_core::seam!(
     /// the varlena substrate, so the handler installs it.
     pub fn cstring_to_text_datum(s: std::string::String) -> PgResult<(usize, std::vec::Vec<u8>)>
 );
+
+seam_core::seam!(
+    /// `DirectFunctionCall1(namein, CStringGetDatum(s))` — build a `name` value
+    /// (the fixed 64-byte NUL-padded `NameData` buffer) from `s`. Used by
+    /// `plpgsql_fulfill_promise` for the `name`-typed trigger promises
+    /// (`TG_NAME` / `TG_TABLE_NAME` / `TG_TABLE_SCHEMA`). Returns the verbatim
+    /// header-less `NameData` byte image (the by-ref lane carries it).
+    pub fn cstring_to_name_datum(s: std::string::String) -> PgResult<std::vec::Vec<u8>>
+);
+
+seam_core::seam!(
+    /// `get_namespace_name(nspoid)` (`lsyscache.c`) — the schema name for a
+    /// namespace OID (`TG_TABLE_SCHEMA`). Returns the server-encoded bytes.
+    pub fn get_namespace_name(nspoid: Oid) -> PgResult<std::string::String>
+);
+
+seam_core::seam!(
+    /// `construct_array(elems, n, TEXTOID, -1, false, TYPALIGN_INT)` over the
+    /// trigger's textual arguments — build the `TG_ARGV` `text[]` value. Each
+    /// element is `Some(bytes)` for a present argument (server-encoded text) or
+    /// `None` for a NULL element. Returns the verbatim header-ful array varlena
+    /// byte image (the by-ref lane carries it).
+    pub fn construct_text_array_datum(
+        elems: std::vec::Vec<Option<std::vec::Vec<u8>>>,
+    ) -> PgResult<std::vec::Vec<u8>>
+);

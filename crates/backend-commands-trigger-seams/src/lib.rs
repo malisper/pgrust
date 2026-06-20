@@ -161,6 +161,35 @@ seam_core::seam!(
     ) -> PgResult<Option<types_tuple::heaptuple::HeapTupleData<'mcx>>>
 );
 seam_core::seam!(
+    /// The fully-formed OLD/NEW tuple a row trigger is firing on, addressed by
+    /// the `tg_trigslot`/`tg_newslot` marker — the `FormedTuple` (header + user
+    /// data) the trigger manager materialized for this call. `Ok(None)` mirrors
+    /// the C `TupIsNull(slot)` (no tuple in that slot). Used by
+    /// `plpgsql_exec_trigger` to populate the NEW/OLD expanded records via
+    /// `expanded_record_set_tuple`.
+    pub fn tg_slot_formed_tuple<'mcx>(
+        mcx: Mcx<'mcx>,
+        slot: TupleTableSlotRef,
+    ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `trigger->tgnargs` — the number of textual arguments declared for the
+    /// trigger (`TG_NARGS` in PL/pgSQL). Resolves off the current `tg_trigger`.
+    pub fn tg_nargs(trigdata: TriggerDataRef) -> i32
+);
+seam_core::seam!(
+    /// `trigger->tgargs[i]` — the i-th textual trigger argument
+    /// (`TG_ARGV[i]` in PL/pgSQL), copied into `mcx`. `Ok(None)` for an
+    /// out-of-range index (the C `i >= tgnargs` case yields a NULL element).
+    pub fn tg_argv<'mcx>(
+        mcx: Mcx<'mcx>,
+        trigdata: TriggerDataRef,
+        i: i32,
+    ) -> PgResult<Option<PgVec<'mcx, u8>>>
+);
+
+seam_core::seam!(
     /// `trigger->tgconstraint`.
     pub fn trigger_constraint(trigger: TriggerRef) -> Oid
 );

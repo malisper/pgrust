@@ -33,8 +33,10 @@
 
 #![allow(non_camel_case_types, non_snake_case)]
 
+mod erh_table;
 mod mem;
 mod seam;
+mod trigger;
 
 use types_plpgsql::{
     int32, Datum, EState, Oid, PLpgSQL_condition, PLpgSQL_datum, PLpgSQL_datum_type,
@@ -45,7 +47,23 @@ use types_plpgsql::{
     PLPGSQL_OTHERS,
 };
 
-use backend_pl_plpgsql_exec_seams as exec_seams;
+pub(crate) use backend_pl_plpgsql_exec_seams as exec_seams;
+
+/// Run `f` with a fresh, call-scoped `Mcx` (a private `MemoryContext` that lives
+/// only for the closure). Used by the trigger driver to call the `mcx`-taking
+/// trigger-data accessors (`tg_relation` / `tg_argv` / `tg_slot_formed_tuple`)
+/// where the produced value is consumed (copied out / used to build a record)
+/// before the context drops. The C analogue is allocating in
+/// `CurrentMemoryContext` and freeing after use.
+pub(crate) fn with_query_mcx<R>(f: impl for<'mcx> FnOnce(mcx::Mcx<'mcx>) -> R) -> R {
+    let ctx = mcx::MemoryContext::new("PL/pgSQL trigger scratch");
+    f(ctx.mcx())
+}
+
+/// The rich, lifetime-bearing value [`Datum`] the expanded-record substrate
+/// reads/writes (`ByVal` word / `ByRef` varlena image / `Composite` / …), as
+/// distinct from PL/pgSQL's bare-word [`Datum`] (`types_datum::Datum`).
+use types_tuple::backend_access_common_heaptuple::Datum as RichDatum;
 
 /// `InvalidOid` — the zero OID sentinel.
 const INVALID_OID: Oid = 0;
@@ -821,6 +839,11 @@ fn exec_stmt_return(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_return) 
                 estate.rettype = rettype;
                 estate.retval = retval;
                 estate.retisnull = retisnull;
+                // A composite (REC/ROW) return carries its HeapTupleHeader
+                // varlena image out-of-band (set by exec_eval_datum); move it
+                // into the durable return slot so the trigger / function result
+                // path can deposit the tuple.
+                estate.retval_byref = estate.last_eval_byref.take();
             }
             other => seam::elog_unrecognized_dtype_exec(other),
         }
@@ -877,7 +900,7 @@ fn exec_return_simple_var(estate: &mut PLpgSQL_execstate, dno: int32) {
 }
 
 /// `exec_set_found(estate, state)` (pl_exec.c) — set the FOUND variable.
-fn exec_set_found(estate: &mut PLpgSQL_execstate, state: bool) {
+pub(crate) fn exec_set_found(estate: &mut PLpgSQL_execstate, state: bool) {
     let dno = estate.found_varno;
     let mut var = take_var(estate, dno);
     assign_simple_var(estate, &mut var, Datum::from_bool(state), false, false);
@@ -886,7 +909,7 @@ fn exec_set_found(estate: &mut PLpgSQL_execstate, state: bool) {
 
 /// `exec_eval_cleanup(estate)` (pl_exec.c) — release temporary memory used by
 /// expression / subselect evaluation.
-fn exec_eval_cleanup(estate: &mut PLpgSQL_execstate) {
+pub(crate) fn exec_eval_cleanup(estate: &mut PLpgSQL_execstate) {
     if estate.eval_tuptable.is_some() {
         // SPI_freetuptable(estate->eval_tuptable) — value/SPI substrate.
         estate.eval_tuptable = None;
@@ -939,11 +962,64 @@ fn build_plpgsql_parse_state(
                     }
                 }
             }
-            // REC variables are composite; a bareword reference to a whole record
-            // in a scalar expression is the composite-Datum path (not the simple
-            // scalar Param case). Skip here — a reference to one would fall to the
-            // standard resolution and error, exactly as an unported leg.
-            types_plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_REC => {}
+            // A REC variable: register each of its RECFIELD children under the
+            // qualified key `<recname>.<fieldname>` (the C `plpgsql_pre_column_ref`
+            // resolving `rec.field` to the RECFIELD datum's Param). The field's
+            // type is resolved against the record's live expanded header (the
+            // comp↔exec `plpgsql_exec_get_datum_type_info` RECFIELD edge). A whole
+            // record bareword (`rec` alone) also resolves, to the REC datum's
+            // composite Param.
+            types_plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_REC => {
+                let rec_dno = ns.itemno;
+                if rec_dno < 0 || (rec_dno as usize) >= estate.datums.len() {
+                    cur = ns.prev.as_deref();
+                    continue;
+                }
+                let rec_name = ns.name.to_ascii_lowercase();
+                let handle = match &estate.datums[rec_dno as usize] {
+                    PLpgSQL_datum::Rec(rec) => rec.erh.as_ref().map(|h| h.0).unwrap_or(0),
+                    _ => 0,
+                };
+                // Whole-record reference (`rec`) — a composite Param of the
+                // record's runtime rowtype.
+                if let Some((rtype, rtypmod)) = record_rowtype(estate, rec_dno, handle) {
+                    names.entry(rec_name.clone()).or_insert(PlpgsqlParamInfo {
+                        dno: rec_dno,
+                        typeid: rtype,
+                        typmod: rtypmod,
+                        collation: INVALID_OID,
+                    });
+                }
+                // Field references (`rec.field`) — each RECFIELD child datum.
+                for d in estate.datums.iter() {
+                    if let PLpgSQL_datum::Recfield(rf) = d {
+                        if rf.recparentno != rec_dno {
+                            continue;
+                        }
+                        let key = format!("{}.{}", rec_name, rf.fieldname.to_ascii_lowercase());
+                        if names.contains_key(&key) {
+                            continue;
+                        }
+                        let finfo = if handle != 0 {
+                            resolve_recfield_finfo(handle, &rf.fieldname)
+                        } else {
+                            None
+                        };
+                        // When the field type cannot be resolved (no live header
+                        // or absent field), fall back to the compiled finfo / a
+                        // text-ish default so the Param still binds; the runtime
+                        // fetch reads the real value.
+                        let (typeid, typmod, collation) = match finfo {
+                            Some(fi) => (fi.ftypeid, fi.ftypmod, fi.fcollation),
+                            None => (rf.finfo.ftypeid, rf.finfo.ftypmod, rf.finfo.fcollation),
+                        };
+                        names.insert(
+                            key,
+                            PlpgsqlParamInfo { dno: rf.dno, typeid, typmod, collation },
+                        );
+                    }
+                }
+            }
             types_plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_LABEL => {}
         }
         cur = ns.prev.as_deref();
@@ -952,13 +1028,180 @@ fn build_plpgsql_parse_state(
     PlpgsqlExprParseState::new(names, input_collation)
 }
 
-/// Build the per-datum value snapshot (`setup_param_list` material): for every
-/// scalar VAR/PROMISE datum, its current `(value, isnull, typeid)`; a `None`
-/// entry for a non-scalar datum (ROW/REC/RECFIELD), which a simple scalar
-/// expression never binds as a Param.
-fn build_datum_snapshot(
+/// Project a rich expanded-record field [`RichDatum`] (the
+/// `expanded_record_fetch_field` result) onto the PL/pgSQL param-bind shape:
+/// a by-value word with no image, or a `0` word + the verbatim header-ful
+/// varlena / cstring / composite image. Mirrors how a by-reference VAR carries
+/// its image out-of-band (the bare `value` word is `0`).
+fn rich_datum_to_param(value: &RichDatum<'_>, isnull: bool, typeid: Oid) -> exec_seams::EvalParamValue {
+    if isnull {
+        return exec_seams::EvalParamValue { value: 0, isnull: true, typeid, byref: None };
+    }
+    match value {
+        RichDatum::ByVal(w) => exec_seams::EvalParamValue {
+            value: *w,
+            isnull: false,
+            typeid,
+            byref: None,
+        },
+        RichDatum::ByRef(b) => exec_seams::EvalParamValue {
+            value: 0,
+            isnull: false,
+            typeid,
+            byref: Some(b.as_slice().to_vec()),
+        },
+        RichDatum::Cstring(s) => exec_seams::EvalParamValue {
+            value: 0,
+            isnull: false,
+            typeid,
+            byref: Some(s.as_bytes().to_vec()),
+        },
+        RichDatum::Composite(_) | RichDatum::Expanded(_) => {
+            // A composite/expanded field value flattens to its header-ful varlena
+            // image (datumCopy's flatten), bound as a by-reference Param.
+            exec_seams::EvalParamValue {
+                value: 0,
+                isnull: false,
+                typeid,
+                byref: Some(value.as_varlena_bytes().into_owned()),
+            }
+        }
+        RichDatum::Internal(_) => exec_seams::EvalParamValue {
+            value: 0,
+            isnull: true,
+            typeid,
+            byref: None,
+        },
+    }
+}
+
+/// Resolve a RECFIELD's `(fnumber, ftypeid)` against the parent record's live
+/// expanded header by NAME — the runtime equivalent of C's
+/// `if (recfield->rectupledescid != erh->er_tupdesc_id) { instantiate +
+/// expanded_record_lookup_field }`. The compiler leaves `finfo` zeroed (its
+/// fnumber is only valid once the live tupdesc is known), so we look it up here
+/// each access (uncached; correct, just not memoized on the recfield). Returns
+/// `None` for a non-existent field (a reference to an absent column reads NULL).
+fn resolve_recfield_finfo(
+    handle: u64,
+    fieldname: &str,
+) -> Option<types_plpgsql::ExpandedRecordFieldInfo> {
+    erh_table::with_erh_mut(handle, |mcx, erh| {
+        match backend_utils_adt_misc2::expandedrecord::expanded_record_lookup_field(
+            mcx, erh, fieldname,
+        ) {
+            Ok(Some(fi)) => Some(types_plpgsql::ExpandedRecordFieldInfo {
+                fnumber: fi.fnumber,
+                ftypeid: fi.ftypeid,
+                ftypmod: fi.ftypmod,
+                fcollation: fi.fcollation,
+            }),
+            Ok(None) => None,
+            Err(e) => std::panic::panic_any(e),
+        }
+    })
+    .flatten()
+}
+
+/// The runtime composite `(typeid, typmod)` of a REC datum: its live expanded
+/// header's `er_typeid`/`er_typmod` if assigned, else its declared `rectypeid`
+/// with typmod -1. `None` only for a non-REC datum.
+fn record_rowtype(
     estate: &PLpgSQL_execstate,
+    rec_dno: int32,
+    handle: u64,
+) -> Option<(Oid, int32)> {
+    let declared = match &estate.datums[rec_dno as usize] {
+        PLpgSQL_datum::Rec(rec) => rec.rectypeid,
+        _ => return None,
+    };
+    if handle != 0 {
+        if let Some((typeid, typmod)) =
+            erh_table::with_erh(handle, |_mcx, erh| (erh.er_typeid, erh.er_typmod))
+        {
+            return Some((typeid, typmod));
+        }
+    }
+    Some((declared, -1))
+}
+
+/// The refname of the REC datum at `dno` (for error messages).
+fn record_name_for(estate: &PLpgSQL_execstate, dno: int32) -> String {
+    match &estate.datums[dno as usize] {
+        PLpgSQL_datum::Rec(rec) => rec.refname.clone(),
+        _ => "record".to_string(),
+    }
+}
+
+/// Snapshot one RECFIELD datum (`NEW.a`-style reference) as a param value: read
+/// the live field off the parent record's expanded header through the
+/// [`erh_table`] side-table. Returns `None` when the parent record has no live
+/// header (the field reads as NULL via the surrounding `None`-default).
+fn snapshot_recfield(
+    estate: &PLpgSQL_execstate,
+    rf: &types_plpgsql::PLpgSQL_recfield,
+) -> Option<exec_seams::EvalParamValue> {
+    let parent = &estate.datums[rf.recparentno as usize];
+    let PLpgSQL_datum::Rec(rec) = parent else {
+        return None;
+    };
+    let handle = rec.erh.as_ref().map(|h| h.0).unwrap_or(0);
+    if handle == 0 {
+        // Unassigned record: the field reads as NULL.
+        return Some(exec_seams::EvalParamValue {
+            value: 0,
+            isnull: true,
+            typeid: INVALID_OID,
+            byref: None,
+        });
+    }
+    let finfo = resolve_recfield_finfo(handle, &rf.fieldname)?;
+    erh_table::with_erh_mut(handle, |mcx, erh| {
+        match backend_utils_adt_misc2::expandedrecord::expanded_record_fetch_field(
+            mcx,
+            erh,
+            finfo.fnumber,
+        ) {
+            Ok((value, isnull)) => rich_datum_to_param(&value, isnull, finfo.ftypeid),
+            Err(e) => std::panic::panic_any(e),
+        }
+    })
+}
+
+/// Fulfill every still-pending `DTYPE_PROMISE` variable (`plpgsql_fulfill_promise`).
+/// C fulfills a promise lazily when `exec_eval_datum` first reads it; the param
+/// snapshot below is such a read, so we fulfill the whole set here (idempotent —
+/// each fulfilled promise clears its flag to `PLPGSQL_PROMISE_NONE`).
+fn fulfill_pending_promises(estate: &mut PLpgSQL_execstate) {
+    let ndatums = estate.datums.len();
+    for dno in 0..ndatums {
+        let pending = matches!(
+            &estate.datums[dno],
+            PLpgSQL_datum::Var(v)
+                if v.promise != PLpgSQL_promise_type::PLPGSQL_PROMISE_NONE
+        );
+        if pending {
+            let mut var = take_var(estate, dno as int32);
+            seam::plpgsql_fulfill_promise(estate, &mut var);
+            put_var(estate, dno as int32, var);
+        }
+    }
+}
+
+/// Build the per-datum value snapshot (`setup_param_list` material): for every
+/// scalar VAR/PROMISE datum, its current `(value, isnull, typeid)`; for a
+/// RECFIELD, the live field value off the parent record's expanded header; a
+/// `None` entry for a ROW/REC datum (bound as a whole-row Param elsewhere, not a
+/// scalar field reference a simple expression binds).
+fn build_datum_snapshot(
+    estate: &mut PLpgSQL_execstate,
 ) -> std::vec::Vec<Option<exec_seams::EvalParamValue>> {
+    // A DTYPE_PROMISE variable computes its value lazily on first read (C's
+    // `exec_eval_datum` calls `plpgsql_fulfill_promise`). The param snapshot is a
+    // read, so fulfill any pending promises (TG_OP / TG_NAME / …) before
+    // projecting their values; fulfillment is idempotent (the promise flag clears
+    // to NONE).
+    fulfill_pending_promises(estate);
     let mut snap = std::vec::Vec::with_capacity(estate.datums.len());
     for d in estate.datums.iter() {
         match d {
@@ -974,10 +1217,130 @@ fn build_datum_snapshot(
                     byref: v.value_byref.clone(),
                 }));
             }
+            PLpgSQL_datum::Recfield(rf) => snap.push(snapshot_recfield(estate, rf)),
             _ => snap.push(None),
         }
     }
     snap
+}
+
+/// `exec_eval_datum(estate, datum, &typeid, &typetypmod, &value, &isnull)`
+/// (pl_exec.c 5577) — read the current value of a VAR/ROW/REC/RECFIELD datum.
+/// Returns `(typeid, typetypmod, value_word, isnull)`; a by-reference / composite
+/// result carries its verbatim image out-of-band in `estate.last_eval_byref`
+/// (the bare-word `value` is `0` then), mirroring the expression-eval channel.
+fn exec_eval_datum_impl(
+    estate: &mut PLpgSQL_execstate,
+    datum: &PLpgSQL_datum,
+) -> (Oid, int32, Datum, bool) {
+    use backend_utils_adt_misc2::expandedrecord as er;
+    estate.last_eval_byref = None;
+    match datum {
+        PLpgSQL_datum::Var(var) => {
+            // typeid = var->datatype->typoid; typetypmod = var->datatype->atttypmod.
+            let t = var.datatype.as_ref().expect("VAR datum has a datatype");
+            let (typeid, typmod) = (t.typoid, t.atttypmod);
+            estate.last_eval_byref = var.value_byref.clone();
+            (typeid, typmod, var.value, var.isnull)
+        }
+        PLpgSQL_datum::Recfield(rf) => {
+            // Read the field off the parent record's live expanded header,
+            // resolving the field by NAME against the live tupdesc.
+            let parent = &estate.datums[rf.recparentno as usize];
+            let PLpgSQL_datum::Rec(rec) = parent else {
+                panic!("RECFIELD parent is not a REC datum");
+            };
+            let handle = rec.erh.as_ref().map(|h| h.0).unwrap_or(0);
+            if handle == 0 {
+                return (INVALID_OID, -1, Datum::null(), true);
+            }
+            let Some(finfo) = resolve_recfield_finfo(handle, &rf.fieldname) else {
+                std::panic::panic_any(
+                    types_error::PgError::error(format!(
+                        "record \"{}\" has no field \"{}\"",
+                        record_name_for(estate, rf.recparentno),
+                        rf.fieldname
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+                );
+            };
+            let (value_word, byref, isnull) = erh_table::with_erh_mut(handle, |mcx, erh| {
+                match er::expanded_record_fetch_field(mcx, erh, finfo.fnumber) {
+                    Ok((value, isnull)) => rich_datum_to_word(&value, isnull),
+                    Err(e) => std::panic::panic_any(e),
+                }
+            })
+            .unwrap_or((0usize, None, true));
+            estate.last_eval_byref = byref;
+            (finfo.ftypeid, finfo.ftypmod, Datum::from_usize(value_word), isnull)
+        }
+        PLpgSQL_datum::Rec(rec) => {
+            // The whole record as a composite value (rec->erh->er_typeid).
+            let handle = rec.erh.as_ref().map(|h| h.0).unwrap_or(0);
+            let result = erh_table::with_erh(handle, |mcx, erh| {
+                let typeid = erh.er_typeid;
+                let typmod = erh.er_typmod;
+                match er::expanded_record_get_tuple(mcx, erh) {
+                    Ok(Some(ft)) => (typeid, typmod, Some(ft.to_datum_image()), false),
+                    Ok(None) => (typeid, typmod, None, true),
+                    Err(e) => std::panic::panic_any(e),
+                }
+            });
+            match result {
+                Some((typeid, typmod, Some(image), false)) => {
+                    estate.last_eval_byref = Some(image);
+                    (typeid, typmod, Datum::from_usize(0), false)
+                }
+                Some((typeid, typmod, _, _)) => (typeid, typmod, Datum::null(), true),
+                None => (rec.rectypeid, -1, Datum::null(), true),
+            }
+        }
+        PLpgSQL_datum::Row(_) => {
+            // A ROW datum's whole-row read (build a tuple from its fields) is the
+            // ROW-deconstruction substrate; not reached by the REC/trigger path.
+            panic!(
+                "seam not wired: exec_eval_datum ROW arm (pl_exec.c) — ROW \
+                 whole-row tuple build (row-deconstruction value substrate)"
+            );
+        }
+    }
+}
+
+/// Build a rich [`RichDatum`] (in `mcx`) from a PL/pgSQL value: a by-reference
+/// image (`Some(bytes)`) becomes `ByRef` (the verbatim header-ful varlena /
+/// cstring bytes copied into `mcx`); otherwise the bare `word` becomes `ByVal`.
+/// A NULL is `ByVal(0)` (the field-set call passes `isnull` separately).
+fn word_to_rich_datum<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    word: Datum,
+    byref: Option<Vec<u8>>,
+    isnull: bool,
+) -> RichDatum<'mcx> {
+    if isnull {
+        return RichDatum::null();
+    }
+    match byref {
+        Some(bytes) => RichDatum::ByRef(mcx::slice_in(mcx, &bytes).unwrap_or_else(|e| std::panic::panic_any(e))),
+        None => RichDatum::from_usize(word.as_usize()),
+    }
+}
+
+/// Project a rich field [`RichDatum`] to a PL/pgSQL `(bare_word, byref_image,
+/// isnull)` triple (the bare word is `0` for a by-reference / composite value,
+/// whose verbatim image rides `byref_image`).
+fn rich_datum_to_word(value: &RichDatum<'_>, isnull: bool) -> (usize, Option<Vec<u8>>, bool) {
+    if isnull {
+        return (0, None, true);
+    }
+    match value {
+        RichDatum::ByVal(w) => (*w, None, false),
+        RichDatum::ByRef(b) => (0, Some(b.as_slice().to_vec()), false),
+        RichDatum::Cstring(s) => (0, Some(s.as_bytes().to_vec()), false),
+        RichDatum::Composite(_) | RichDatum::Expanded(_) => {
+            (0, Some(value.as_varlena_bytes().into_owned()), false)
+        }
+        RichDatum::Internal(_) => (0, None, true),
+    }
 }
 
 /// `exec_eval_expr(estate, expr, &isNull, &rettype, &rettypmod)` (pl_exec.c) —
@@ -1162,12 +1525,63 @@ fn exec_assign_value_byref_impl(
             }
         }
         PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
-            // RECFIELD assignment (expanded-record field set) — composite
-            // substrate, out of scope.
-            panic!(
-                "seam not wired: exec_assign_value RECFIELD (pl_exec.c) — \
-                 expanded_record_set_field (expanded-record value substrate)"
+            // `NEW.b := <value>` (pl_exec.c 5183) — set a field of the parent
+            // record's live expanded header. The C reads the field type off
+            // `recfield->finfo` (instantiating + re-looking-up the field if the
+            // record's tupdesc changed); here the compiled `finfo` already names
+            // the field number + type, so cast to the field type then store.
+            let (recparentno, fieldname) = {
+                let PLpgSQL_datum::Recfield(rf) = &estate.datums[target_dno as usize] else {
+                    unreachable!("RECFIELD dispatch on non-RECFIELD datum");
+                };
+                (rf.recparentno, rf.fieldname.clone())
+            };
+
+            // Resolve the parent record's live expanded header.
+            let handle = {
+                let PLpgSQL_datum::Rec(rec) = &estate.datums[recparentno as usize] else {
+                    panic!("RECFIELD parent is not a REC datum");
+                };
+                rec.erh.as_ref().map(|h| h.0).unwrap_or(0)
+            };
+            if handle == 0 {
+                std::panic::panic_any(
+                    types_error::PgError::error(format!(
+                        "record \"{}\" is not assigned yet",
+                        record_name_for(estate, recparentno)
+                    ))
+                    .with_detail(
+                        "The tuple structure of a not-yet-assigned record is indeterminate."
+                            .to_string(),
+                    ),
+                );
+            }
+
+            // Resolve the field by NAME against the live tupdesc.
+            let Some(finfo) = resolve_recfield_finfo(handle, &fieldname) else {
+                std::panic::panic_any(
+                    types_error::PgError::error(format!(
+                        "record \"{}\" has no field \"{}\"",
+                        record_name_for(estate, recparentno),
+                        fieldname
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN),
+                );
+            };
+
+            // exec_cast_value(value -> field type), threading the by-ref image.
+            let (newvalue, isnull, newbyref) = exec_cast_value_with_byref(
+                estate, value, value_byref, isnull, valtype, valtypmod, finfo.ftypeid, finfo.ftypmod,
             );
+
+            erh_table::with_erh_mut(handle, |mcx, erh| {
+                let rich = word_to_rich_datum(mcx, newvalue, newbyref, isnull);
+                if let Err(e) = backend_utils_adt_misc2::expandedrecord::expanded_record_set_field_internal(
+                    mcx, erh, finfo.fnumber, rich, isnull, true, true,
+                ) {
+                    std::panic::panic_any(e);
+                }
+            });
         }
     }
 }
@@ -2058,7 +2472,7 @@ pub fn plpgsql_estate_setup(
 /// ROW/RECFIELD are shared read-only. In the owned model every datum is cloned
 /// into the execstate's `datums` Vec (the clone is value-equivalent; ROW and
 /// RECFIELD carry only read-only cached data).
-fn copy_plpgsql_datums(estate: &mut PLpgSQL_execstate, func: &PLpgSQL_function) {
+pub(crate) fn copy_plpgsql_datums(estate: &mut PLpgSQL_execstate, func: &PLpgSQL_function) {
     let ndatums = estate.ndatums as usize;
     let mut datums = Vec::with_capacity(ndatums);
     for i in 0..ndatums {
@@ -2243,14 +2657,10 @@ pub fn plpgsql_exec_function(
 /// `plpgsql_exec_trigger(func, trigdata)` (pl_exec.c) — the DML-trigger
 /// executor entry.
 pub fn plpgsql_exec_trigger(
-    _func: &PLpgSQL_function,
-    _trigdata: types_plpgsql::TriggerData,
+    func: &PLpgSQL_function,
+    trigdata: types_plpgsql::TriggerData,
 ) -> Datum {
-    panic!(
-        "seam not wired: plpgsql_exec_trigger (pl_exec.c) — trigger NEW/OLD row setup \
-         (heaptuple + tupdesc substrate) + plpgsql_estate_setup + exec_toplevel_block + \
-         exec_move_row result (executor + SPI substrate)"
-    );
+    trigger::plpgsql_exec_trigger_impl(func, trigdata)
 }
 
 /// `plpgsql_exec_event_trigger(func, trigdata)` (pl_exec.c) — the event-trigger
@@ -2502,7 +2912,7 @@ fn func_is_procedure(_estate: &PLpgSQL_execstate) -> bool {
 /// (`var->freeval`) — needs `DeleteExpandedObject`/`pfree`. Neither fires for
 /// the common in-atomic, non-freeable, non-toast store (e.g. the FOUND magic
 /// var or a bool/int assignment).
-fn assign_simple_var(
+pub(crate) fn assign_simple_var(
     estate: &mut PLpgSQL_execstate,
     var: &mut PLpgSQL_var,
     newvalue: Datum,

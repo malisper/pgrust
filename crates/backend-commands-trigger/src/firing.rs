@@ -169,6 +169,27 @@ fn with_slot_tuple<R>(
     })
 }
 
+/// `tg_slot_formed_tuple(slot)` — the fully-formed OLD/NEW tuple the marker
+/// addresses on the per-call slot side-channel, copied into `mcx`. `Ok(None)`
+/// when no slot side-channel is installed or the addressed slot is empty (the C
+/// `TupIsNull(slot)`).
+pub fn tg_slot_formed_tuple_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: types_ri_triggers::TupleTableSlotRef,
+) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>> {
+    CURRENT_TRIGGER_SLOTS.with(|cell| {
+        let b = cell.borrow();
+        let Some(s) = b.as_ref() else {
+            return Ok(None);
+        };
+        let tup = match resolve_slot(s, slot.0) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        Ok(Some(tup.clone_in(mcx)?))
+    })
+}
+
 // ---- slot value accessors (the owner side of the `slot_*` seams) -----------
 //
 // The RI procs read the OLD/NEW tuple values through `slot_getattr` /

@@ -1,0 +1,452 @@
+//! `plpgsql_exec_trigger` (pl_exec.c) and the trigger/record value legs it
+//! needs: the `TG_*` promise fulfillment, the OLD/NEW record population
+//! (`exec_move_row_from_datum` / `exec_move_row` NULL row), and the
+//! before-trigger result-tuple handoff.
+//!
+//! These all bottom out in the expanded-record substrate
+//! (`backend_utils_adt_misc2::expandedrecord`) reached through the call-scoped
+//! [`crate::erh_table`] side-table, and in the trigger-manager data accessors
+//! (`backend_commands_trigger_seams`) which resolve off the firing path's
+//! per-call side-channel.
+
+use backend_commands_trigger_seams as trig;
+use backend_utils_adt_misc2::expandedrecord as er;
+use mcx::{Mcx, MemoryContext};
+use types_plpgsql::{
+    int32, Datum, ExpandedRecordHeader as ErhHandle, PLpgSQL_datum, PLpgSQL_execstate,
+    PLpgSQL_function, PLpgSQL_promise_type, PLpgSQL_rc, PLpgSQL_var,
+};
+use types_ri_triggers::{TriggerDataRef, TupleTableSlotRef};
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
+
+/// The current-trigger marker handle (`TriggerData(0)`), the only value the
+/// trigger-data accessors key off (the rich payload rides the firing path's
+/// per-call side-channel).
+const TRIG_CURRENT: TriggerDataRef = TriggerDataRef(0);
+
+// ---- TriggerEvent bit tests (commands/trigger.h) --------------------------
+const TRIGGER_EVENT_INSERT: u32 = 0x0000;
+const TRIGGER_EVENT_DELETE: u32 = 0x0001;
+const TRIGGER_EVENT_UPDATE: u32 = 0x0002;
+const TRIGGER_EVENT_TRUNCATE: u32 = 0x0003;
+const TRIGGER_EVENT_OPMASK: u32 = 0x0003;
+const TRIGGER_EVENT_ROW: u32 = 0x0004;
+const TRIGGER_EVENT_BEFORE: u32 = 0x0008;
+const TRIGGER_EVENT_AFTER: u32 = 0x0010;
+const TRIGGER_EVENT_INSTEAD: u32 = 0x0020;
+
+#[inline]
+fn fired_for_row(ev: u32) -> bool {
+    ev & TRIGGER_EVENT_ROW != 0
+}
+#[inline]
+fn fired_by_insert(ev: u32) -> bool {
+    ev & TRIGGER_EVENT_OPMASK == TRIGGER_EVENT_INSERT
+}
+#[inline]
+fn fired_by_update(ev: u32) -> bool {
+    ev & TRIGGER_EVENT_OPMASK == TRIGGER_EVENT_UPDATE
+}
+#[inline]
+fn fired_by_delete(ev: u32) -> bool {
+    ev & TRIGGER_EVENT_OPMASK == TRIGGER_EVENT_DELETE
+}
+
+/// Make a fresh call-scoped expanded-record header from a tuple descriptor,
+/// register it in the [`crate::erh_table`] side-table, and return its handle.
+/// (The C `make_expanded_record_from_tupdesc(tupdesc, estate->datum_context)`.)
+fn build_erh_from_tupdesc(
+    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+) -> ErhHandle {
+    let ctx = Box::new(MemoryContext::new("PL/pgSQL expanded record"));
+    let header: ExpandedRecordHeader<'static> = {
+        let mcx: Mcx<'static> = unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) };
+        er::make_expanded_record_from_tupdesc(mcx, tupdesc)
+            .unwrap_or_else(|e| std::panic::panic_any(e))
+    };
+    ErhHandle(crate::erh_table::register(ctx, header))
+}
+
+type ExpandedRecordHeader<'mcx> = er::ExpandedRecordHeader<'mcx>;
+
+// ===========================================================================
+// plpgsql_fulfill_promise — TG_* (and FOUND etc) promise variables.
+// ===========================================================================
+
+/// `plpgsql_fulfill_promise(estate, var)` (pl_exec.c 1364) — compute and assign a
+/// `DTYPE_PROMISE` variable's promised value on first read. The trigger
+/// promises (`TG_NAME`/`TG_WHEN`/`TG_LEVEL`/`TG_OP`/`TG_RELID`/`TG_TABLE_NAME`/
+/// `TG_TABLE_SCHEMA`/`TG_NARGS`/`TG_ARGV`) read off the firing trigger's data;
+/// non-trigger promises (`SQLSTATE`/`SQLERRM` etc) are out of this leg.
+pub fn plpgsql_fulfill_promise_impl(estate: &mut PLpgSQL_execstate, var: &mut PLpgSQL_var) {
+    use PLpgSQL_promise_type::*;
+    let promise = var.promise;
+    // Mark the promise as fulfilled (so we don't recompute) — C resets
+    // var->promise = PLPGSQL_PROMISE_NONE before assigning.
+    var.promise = PLPGSQL_PROMISE_NONE;
+
+    // Build the promised value as a `(bare_word, byref_image, isnull)` triple,
+    // then store it on the var. By-reference promises (`text` / `name` /
+    // `text[]`) carry their verbatim header-ful/`NameData` image out-of-band in
+    // `value_byref` (bare word `0`) so the by-ref fmgr lane reconstructs the
+    // value; `oid`/`int4` are by-value words (no image).
+    let (word, byref, isnull): (usize, Option<Vec<u8>>, bool) = match promise {
+        PLPGSQL_PROMISE_NONE => return,
+        PLPGSQL_PROMISE_TG_NAME => (0, Some(name_image(&bytes_to_string(read_trigger_name()))), false),
+        PLPGSQL_PROMISE_TG_WHEN => {
+            let ev = trig::tg_event::call(TRIG_CURRENT);
+            let s = if ev & TRIGGER_EVENT_BEFORE != 0 {
+                "BEFORE"
+            } else if ev & TRIGGER_EVENT_AFTER != 0 {
+                "AFTER"
+            } else if ev & TRIGGER_EVENT_INSTEAD != 0 {
+                "INSTEAD OF"
+            } else {
+                unreachable!("unrecognized trigger execution time")
+            };
+            (0, Some(text_image(s)), false)
+        }
+        PLPGSQL_PROMISE_TG_LEVEL => {
+            let ev = trig::tg_event::call(TRIG_CURRENT);
+            (0, Some(text_image(if fired_for_row(ev) { "ROW" } else { "STATEMENT" })), false)
+        }
+        PLPGSQL_PROMISE_TG_OP => {
+            let ev = trig::tg_event::call(TRIG_CURRENT);
+            let s = if fired_by_insert(ev) {
+                "INSERT"
+            } else if fired_by_update(ev) {
+                "UPDATE"
+            } else if fired_by_delete(ev) {
+                "DELETE"
+            } else if ev & TRIGGER_EVENT_OPMASK == TRIGGER_EVENT_TRUNCATE {
+                "TRUNCATE"
+            } else {
+                unreachable!("unrecognized trigger action")
+            };
+            (0, Some(text_image(s)), false)
+        }
+        PLPGSQL_PROMISE_TG_RELID => {
+            let oid = trig::tg_relation_oid::call(TRIG_CURRENT);
+            (oid as usize, None, false)
+        }
+        PLPGSQL_PROMISE_TG_TABLE_NAME => {
+            (0, Some(name_image(&bytes_to_string(read_relation_name()))), false)
+        }
+        PLPGSQL_PROMISE_TG_TABLE_SCHEMA => {
+            let ns = trig::tg_relation_namespace::call(TRIG_CURRENT);
+            let name = crate::exec_seams::get_namespace_name::call(ns)
+                .unwrap_or_else(|e| std::panic::panic_any(e));
+            (0, Some(name_image(&name)), false)
+        }
+        PLPGSQL_PROMISE_TG_NARGS => {
+            let n = trig::tg_nargs::call(TRIG_CURRENT);
+            (n as u32 as usize, None, false)
+        }
+        PLPGSQL_PROMISE_TG_ARGV => {
+            let n = trig::tg_nargs::call(TRIG_CURRENT);
+            let mut args: Vec<Option<Vec<u8>>> = Vec::with_capacity(n.max(0) as usize);
+            for i in 0..n {
+                let v = crate::with_query_mcx(|mcx| {
+                    trig::tg_argv::call(mcx, TRIG_CURRENT, i)
+                        .map(|opt| opt.map(|b| b.as_slice().to_vec()))
+                })
+                .unwrap_or_else(|e| std::panic::panic_any(e));
+                args.push(v);
+            }
+            let image = crate::exec_seams::construct_text_array_datum::call(args)
+                .unwrap_or_else(|e| std::panic::panic_any(e));
+            (0, Some(image), false)
+        }
+        PLPGSQL_PROMISE_TG_EVENT | PLPGSQL_PROMISE_TG_TAG => {
+            panic!(
+                "plpgsql_fulfill_promise: event-trigger promise reached in a DML \
+                 trigger context (TG_EVENT/TG_TAG)"
+            );
+        }
+    };
+
+    crate::assign_simple_var(estate, var, Datum::from_usize(word), isnull, false);
+    // assign_simple_var clears value_byref (a by-value store); set the by-ref
+    // image for the by-reference promises so the snapshot/SPI bind carries it.
+    if !isnull {
+        var.value_byref = byref;
+    }
+}
+
+/// `CStringGetTextDatum(s)` image — a header-ful `text` varlena byte image,
+/// stamped exactly like `Varlena::from_image` (`SET_VARSIZE_4B`).
+fn text_image(s: &str) -> Vec<u8> {
+    const VARHDRSZ: usize = 4;
+    let bytes = s.as_bytes();
+    let mut image = vec![0u8; VARHDRSZ + bytes.len()];
+    image[..VARHDRSZ].copy_from_slice(&types_datum::varlena::set_varsize_4b(VARHDRSZ + bytes.len()));
+    image[VARHDRSZ..].copy_from_slice(bytes);
+    image
+}
+
+/// `namein(s)` image — the fixed 64-byte NUL-padded `NameData` (header-less).
+fn name_image(s: &str) -> Vec<u8> {
+    const NAMEDATALEN: usize = 64;
+    let bytes = s.as_bytes();
+    let n = bytes.len().min(NAMEDATALEN - 1);
+    let mut image = vec![0u8; NAMEDATALEN];
+    image[..n].copy_from_slice(&bytes[..n]);
+    image
+}
+
+fn bytes_to_string(b: Vec<u8>) -> String {
+    String::from_utf8_lossy(&b).into_owned()
+}
+
+/// `NameGetDatum(tg_trigger->tgname)` bytes (server-encoded), via the seam.
+fn read_trigger_name() -> Vec<u8> {
+    let trig_ref = trig::tg_trigger::call(TRIG_CURRENT);
+    crate::with_query_mcx(|mcx| {
+        trig::trigger_name::call(mcx, trig_ref).map(|b| b.as_slice().to_vec())
+    })
+    .unwrap_or_else(|e| std::panic::panic_any(e))
+}
+
+/// `RelationGetRelationName(tg_relation)` bytes, via the seam.
+fn read_relation_name() -> Vec<u8> {
+    crate::with_query_mcx(|mcx| {
+        trig::tg_relation_name::call(mcx, TRIG_CURRENT).map(|b| b.as_slice().to_vec())
+    })
+    .unwrap_or_else(|e| std::panic::panic_any(e))
+}
+
+// ===========================================================================
+// exec_move_row_from_datum / exec_move_row(NULL) — populate a REC target.
+// ===========================================================================
+
+/// `exec_move_row_from_datum(estate, rec, value)` (pl_exec.c 7616) — assign a
+/// composite datum into a REC target by building an expanded record from it.
+/// The bare-word path (no by-ref image) is only reachable for a by-value
+/// composite, which does not occur; the real entry is the by-ref variant.
+pub fn exec_move_row_from_datum_impl(
+    estate: &mut PLpgSQL_execstate,
+    target_dno: int32,
+    value: Datum,
+) {
+    exec_move_row_from_datum_byref_impl(estate, target_dno, value, None);
+}
+
+/// `exec_move_row_from_datum` with the composite value's verbatim
+/// `HeapTupleHeader` varlena image (the by-ref companion; the bare `value` word
+/// is `0` then). Builds an expanded record from the deserialized tuple and
+/// installs it as the REC's live header.
+pub fn exec_move_row_from_datum_byref_impl(
+    estate: &mut PLpgSQL_execstate,
+    target_dno: int32,
+    _value: Datum,
+    byref: Option<Vec<u8>>,
+) {
+    let Some(image) = byref else {
+        panic!(
+            "exec_move_row_from_datum: composite source has no by-reference image \
+             (a by-value composite is not representable here)"
+        );
+    };
+
+    let ctx = Box::new(MemoryContext::new("PL/pgSQL expanded record"));
+    let header: ExpandedRecordHeader<'static> = {
+        let mcx: Mcx<'static> = unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) };
+        let ft: FormedTuple<'static> = FormedTuple::from_datum_image(mcx, &image)
+            .unwrap_or_else(|e| std::panic::panic_any(e));
+        er::make_expanded_record_from_datum(mcx, &ft).unwrap_or_else(|e| std::panic::panic_any(e))
+    };
+    let handle = ErhHandle(crate::erh_table::register(ctx, header));
+    set_rec_erh(estate, target_dno, Some(handle));
+}
+
+/// `exec_move_row(estate, rec, NULL, NULL)` (pl_exec.c) — clear a REC target to
+/// the unassigned (NULL) state: drop any live expanded header.
+pub fn exec_move_row_null_impl(estate: &mut PLpgSQL_execstate, target_dno: int32) {
+    set_rec_erh(estate, target_dno, None);
+}
+
+/// Set (or clear) a REC datum's expanded-header handle.
+fn set_rec_erh(estate: &mut PLpgSQL_execstate, dno: int32, handle: Option<ErhHandle>) {
+    match &mut estate.datums[dno as usize] {
+        PLpgSQL_datum::Rec(rec) => rec.erh = handle,
+        _ => panic!("set_rec_erh: datum {dno} is not a REC"),
+    }
+}
+
+// ===========================================================================
+// plpgsql_exec_trigger — the DML-trigger executor entry (pl_exec.c 935).
+// ===========================================================================
+
+/// `plpgsql_exec_trigger(func, trigdata)` (pl_exec.c 935) — run a DML trigger
+/// function: set up NEW/OLD expanded records from the firing tuples, run the
+/// body, and return the result tuple a BEFORE/INSTEAD-OF row trigger asked to
+/// apply (deposited on the firing path's return-tuple channel).
+pub fn plpgsql_exec_trigger_impl(
+    func: &PLpgSQL_function,
+    _trigdata: types_plpgsql::TriggerData,
+) -> Datum {
+    // Save any outer call's live expanded-record table (a trigger that fires a
+    // query that fires another trigger nests here); restored before return so the
+    // outer call's records survive our `clear()`. New records this call registers
+    // are 1-based from an empty table.
+    let saved_erh = crate::erh_table::take_all();
+
+    // Setup the execution state. (No simple_eval_estate/resowner — C passes NULL;
+    // the SPI bracket the call handler opened owns the eval econtext.)
+    let mut estate = crate::plpgsql_estate_setup(func, None, None, None);
+
+    // estate.trigdata = trigdata (the current-trigger marker).
+    estate.trigdata = Some(types_plpgsql::TriggerData(0));
+
+    // Make local execution copies of all the datums.
+    estate.err_text = Some(crate::mem::sdup("during initialization of execution state"));
+    crate::copy_plpgsql_datums(&mut estate, func);
+
+    let tg_event = trig::tg_event::call(TRIG_CURRENT);
+
+    // Put the OLD and NEW tuples into record variables. We set up expanded
+    // records for BOTH even though only one may have a value (so record refs
+    // succeed regardless of the current trigger type; an unsupplied field reads
+    // NULL). tupdesc = RelationGetDescr(trigdata->tg_relation).
+    let new_varno = func.new_varno;
+    let old_varno = func.old_varno;
+
+    let (new_handle, old_handle) = crate::with_query_mcx(|mcx| {
+        let rel = trig::tg_relation::call(mcx, TRIG_CURRENT)?;
+        let tupdesc = &rel.rd_att;
+        let new_h = build_erh_from_tupdesc(tupdesc);
+        let old_h = build_erh_from_tupdesc(tupdesc);
+        Ok::<_, types_error::PgError>((new_h, old_h))
+    })
+    .unwrap_or_else(|e| std::panic::panic_any(e));
+
+    if new_varno >= 0 {
+        set_rec_erh(&mut estate, new_varno, Some(new_handle));
+    }
+    if old_varno >= 0 {
+        set_rec_erh(&mut estate, old_varno, Some(old_handle));
+    }
+
+    // Populate the appropriate record(s) from the firing tuples.
+    if !fired_for_row(tg_event) {
+        // Per-statement triggers don't use OLD/NEW.
+    } else if fired_by_insert(tg_event) {
+        set_record_from_slot(&mut estate, new_varno, TupleTableSlotRef(SLOT_TRIG));
+    } else if fired_by_update(tg_event) {
+        set_record_from_slot(&mut estate, new_varno, TupleTableSlotRef(SLOT_NEW));
+        set_record_from_slot(&mut estate, old_varno, TupleTableSlotRef(SLOT_TRIG));
+    } else if fired_by_delete(tg_event) {
+        set_record_from_slot(&mut estate, old_varno, TupleTableSlotRef(SLOT_TRIG));
+    } else {
+        panic!("unrecognized trigger action: not INSERT, DELETE, or UPDATE");
+    }
+
+    // (SPI_register_trigger_data for transition tables is the SPI-trigger leg;
+    // a plain BEFORE ROW trigger uses no transition tables.)
+
+    estate.err_text = Some(crate::mem::sdup("during function entry"));
+    crate::exec_set_found(&mut estate, false);
+
+    // Run the toplevel block.
+    estate.err_text = None;
+    let action = func
+        .action
+        .as_deref()
+        .expect("compiled trigger function has an action block");
+    let rc = crate::exec_toplevel_block(&mut estate, action);
+    if rc != PLpgSQL_rc::PLPGSQL_RC_RETURN {
+        estate.err_text = None;
+        crate::seam::ereport_no_return_statement();
+    }
+
+    estate.err_text = Some(crate::mem::sdup("during function exit"));
+
+    if estate.retisset {
+        std::panic::panic_any(
+            types_error::PgError::error("trigger procedure cannot return a set".to_string())
+                .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+        );
+    }
+
+    // Build the result tuple: NULL (do nothing) for a NULL return or a
+    // per-statement trigger; otherwise the returned composite, deposited on the
+    // firing path's BEFORE-trigger return-tuple channel. The deposit must
+    // OUTLIVE this call — the firing path's `decode_before_trigger_result` takes
+    // it back (and clones it into the query context) only after
+    // `ExecCallTriggerFunc` (= this fmgr call) returns. So the bytes ride a
+    // leaked, backend-lifetime context, mirroring C's BEFORE-trigger tuple
+    // allocated in the firing query context (and matching how the SQLERRM-var
+    // text image is built in this crate).
+    let deposited: Option<FormedTuple<'static>> =
+        if estate.retisnull || !fired_for_row(tg_event) {
+            None
+        } else {
+            // estate.retval is the returned composite (rec_new/rec_old): its
+            // HeapTupleHeader varlena image rides estate.retval_byref.
+            let image = estate.retval_byref.clone().unwrap_or_else(|| {
+                std::panic::panic_any(
+                    types_error::PgError::error(
+                        "returned row structure does not match the structure of the triggering table"
+                            .to_string(),
+                    )
+                    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
+                )
+            });
+            let ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("PL/pgSQL trigger result")));
+            let ft = FormedTuple::from_datum_image(ctx.mcx(), &image)
+                .unwrap_or_else(|e| std::panic::panic_any(e));
+            Some(ft)
+        };
+
+    // Deposit the result row on the BEFORE-trigger return-tuple channel; the
+    // firing path takes it back (and clones it) after this call returns.
+    trig::set_before_trigger_result_tuple::call(deposited);
+
+    // Clean up the call-scoped expanded records, then restore the outer call's
+    // table.
+    crate::exec_eval_cleanup(&mut estate);
+    crate::erh_table::clear();
+    crate::erh_table::restore_all(saved_erh);
+
+    // Return the sentinel Datum (the real tuple rode the channel).
+    Datum::from_usize(0)
+}
+
+/// Populate a REC variable from the firing trigger's OLD/NEW slot tuple.
+fn set_record_from_slot(
+    estate: &mut PLpgSQL_execstate,
+    rec_dno: int32,
+    slot: TupleTableSlotRef,
+) {
+    if rec_dno < 0 {
+        return;
+    }
+    let handle = match &estate.datums[rec_dno as usize] {
+        PLpgSQL_datum::Rec(rec) => rec.erh.as_ref().map(|h| h.0).unwrap_or(0),
+        _ => panic!("set_record_from_slot: datum {rec_dno} is not a REC"),
+    };
+    if handle == 0 {
+        return;
+    }
+    crate::with_query_mcx(|mcx| {
+        let formed = trig::tg_slot_formed_tuple::call(mcx, slot)?;
+        if let Some(ft) = formed {
+            crate::erh_table::with_erh_mut(handle, |emcx, erh| {
+                er::expanded_record_set_tuple(emcx, erh, Some(&ft_into(emcx, &ft)), true, false)
+            });
+        }
+        Ok::<(), types_error::PgError>(())
+    })
+    .unwrap_or_else(|e| std::panic::panic_any(e));
+}
+
+/// Re-anchor a `FormedTuple` into the expanded record's own context.
+fn ft_into<'mcx>(mcx: Mcx<'mcx>, ft: &FormedTuple<'_>) -> FormedTuple<'mcx> {
+    ft.clone_in(mcx).unwrap_or_else(|e| std::panic::panic_any(e))
+}
+
+// The slot markers the firing path publishes (mirrored from
+// backend-commands-trigger's ri_accessors).
+const SLOT_TRIG: u64 = 1;
+const SLOT_NEW: u64 = 2;

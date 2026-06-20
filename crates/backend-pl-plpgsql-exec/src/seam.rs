@@ -128,13 +128,10 @@ pub fn exec_eval_boolean(estate: &mut PLpgSQL_execstate, expr: &PLpgSQL_expr) ->
 /// (pl_exec.c): read the current value of a VAR/ROW/REC/RECFIELD datum.
 /// Returns `(typeid, typetypmod, value, isnull)`.
 pub fn exec_eval_datum(
-    _estate: &mut PLpgSQL_execstate,
-    _datum: &PLpgSQL_datum,
+    estate: &mut PLpgSQL_execstate,
+    datum: &PLpgSQL_datum,
 ) -> (Oid, int32, Datum, bool) {
-    panic!(
-        "seam not wired: exec_eval_datum (pl_exec.c) — composite/expanded-record \
-         deconstruction + heap_getattr (value substrate)"
-    );
+    super::exec_eval_datum_impl(estate, datum)
 }
 
 /// `exec_cast_value(estate, value, &isnull, valtype, valtypmod, reqtype,
@@ -166,11 +163,8 @@ pub fn exec_run_select(
 
 /// `plpgsql_fulfill_promise(estate, var)` (pl_exec.c): compute and assign a
 /// DTYPE_PROMISE variable's promised value on first read.
-pub fn plpgsql_fulfill_promise(_estate: &mut PLpgSQL_execstate, _var: &mut PLpgSQL_var) {
-    panic!(
-        "seam not wired: plpgsql_fulfill_promise (pl_exec.c) — promise value \
-         computation (trigger/SRF context substrate) + assign_simple_var"
-    );
+pub fn plpgsql_fulfill_promise(estate: &mut PLpgSQL_execstate, var: &mut PLpgSQL_var) {
+    super::trigger::plpgsql_fulfill_promise_impl(estate, var);
 }
 
 /// The varlena R/W-expanded / flat-array commandeering leg of the
@@ -188,14 +182,23 @@ pub fn arg_store_expanded_object(_value: Datum) {
 /// `exec_move_row_from_datum(estate, rec, value)` (pl_exec.c): assign a
 /// composite datum into a REC/ROW target. Record deconstruction substrate.
 pub fn exec_move_row_from_datum(
-    _estate: &mut PLpgSQL_execstate,
-    _target_dno: int32,
-    _value: Datum,
+    estate: &mut PLpgSQL_execstate,
+    target_dno: int32,
+    value: Datum,
 ) {
-    panic!(
-        "seam not wired: exec_move_row_from_datum (pl_exec.c) — composite/expanded-record \
-         deconstruction + assign (value substrate)"
-    );
+    super::trigger::exec_move_row_from_datum_impl(estate, target_dno, value);
+}
+
+/// `exec_move_row_from_datum` carrying the source composite value's by-reference
+/// image (the verbatim header-ful `HeapTupleHeader` varlena bytes); the bare
+/// `value` word is `0` then.
+pub fn exec_move_row_from_datum_byref(
+    estate: &mut PLpgSQL_execstate,
+    target_dno: int32,
+    value: Datum,
+    byref: Option<std::vec::Vec<u8>>,
+) {
+    super::trigger::exec_move_row_from_datum_byref_impl(estate, target_dno, value, byref);
 }
 
 /// `ereport(ERROR, ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT)`
@@ -231,11 +234,8 @@ pub fn coerce_function_result_tuple(_estate: &mut PLpgSQL_execstate) {
 
 /// `exec_move_row(estate, var, NULL, NULL)` (pl_exec.c): clear a REC/ROW to
 /// the NULL row.
-pub fn exec_move_row_null(_estate: &mut PLpgSQL_execstate, _target_dno: int32) {
-    panic!(
-        "seam not wired: exec_move_row (pl_exec.c, NULL row) — record/row \
-         deconstruction + assign (value substrate)"
-    );
+pub fn exec_move_row_null(estate: &mut PLpgSQL_execstate, target_dno: int32) {
+    super::trigger::exec_move_row_null_impl(estate, target_dno);
 }
 
 /// The CASE temp-var datatype rebuild (`exec_stmt_case`): when the test-expr's

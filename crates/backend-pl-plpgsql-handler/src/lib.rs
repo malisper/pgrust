@@ -861,6 +861,89 @@ pub fn init_seams() {
         Ok((ptr, image_copy))
     });
 
+    // Install `namein`-style `name` Datum construction for the `name`-typed
+    // trigger promises (TG_NAME / TG_TABLE_NAME / TG_TABLE_SCHEMA). A `name`
+    // value crosses the PL/pgSQL scalar boundary as a bare-word pointer at a
+    // fixed 64-byte NUL-padded `NameData` buffer (the raw-name convention), in a
+    // backend-lifetime context like the SQLERRM text image above.
+    backend_pl_plpgsql_exec_seams::cstring_to_name_datum::set(|s: String| {
+        const NAMEDATALEN: usize = 64;
+        let bytes = s.as_bytes();
+        // namein truncates at NAMEDATALEN-1 and NUL-pads to NAMEDATALEN.
+        let n = bytes.len().min(NAMEDATALEN - 1);
+        let mut image = vec![0u8; NAMEDATALEN];
+        image[..n].copy_from_slice(&bytes[..n]);
+        Ok(image)
+    });
+
+    // `get_namespace_name(nspoid)` for TG_TABLE_SCHEMA — delegate to lsyscache.
+    backend_pl_plpgsql_exec_seams::get_namespace_name::set(|nspoid| {
+        let ctx = mcx::MemoryContext::new("PL/pgSQL nspname scratch");
+        let r = backend_utils_cache_lsyscache_seams::get_namespace_name::call(ctx.mcx(), nspoid)?
+            .map(|s| s.as_str().to_string());
+        match r {
+            Some(s) => Ok(s),
+            None => Err(types_error::PgError::error(format!(
+                "cache lookup failed for namespace {nspoid}"
+            ))),
+        }
+    });
+
+    // `construct_array(elems, n, TEXTOID, -1, false, 'i')` for the TG_ARGV
+    // text[] promise. Each element is a header-ful `text` varlena; the resulting
+    // array varlena rides a bare-word pointer in a backend-lifetime context.
+    backend_pl_plpgsql_exec_seams::construct_text_array_datum::set(|elems| {
+        const TEXTOID: types_core::Oid = 25;
+        const TYPALIGN_INT: u8 = b'i';
+        let ctx: &'static mcx::MemoryContext = PLPGSQL_ERRVAR_CONTEXT.with(|c| {
+            *c.get_or_init(|| {
+                Box::leak(Box::new(mcx::MemoryContext::new("PL/pgSQL error-var text")))
+            })
+        });
+        let mcx = ctx.mcx();
+        // Build a bare-word `text` element Datum (a pointer at a header-ful
+        // varlena image in `mcx`) per argument; a NULL element rides the nulls
+        // bitmap. The images live in the leaked context, so the pointers stay
+        // valid through construct_md_array (which copies the bytes in).
+        let mut datums: Vec<types_datum::datum::Datum> = Vec::with_capacity(elems.len());
+        let mut nulls: Vec<bool> = Vec::with_capacity(elems.len());
+        for e in &elems {
+            match e {
+                Some(bytes) => {
+                    let mut image = mcx::vec_with_capacity_in::<u8>(mcx, bytes.len() + VARHDRSZ)?;
+                    image.extend_from_slice(&[0u8; VARHDRSZ]);
+                    image.extend_from_slice(bytes);
+                    let image = types_datum::Varlena::from_image(image).into_image();
+                    datums.push(types_datum::datum::Datum::from_usize(image.as_ptr() as usize));
+                    core::mem::forget(image);
+                    nulls.push(false);
+                }
+                None => {
+                    datums.push(types_datum::datum::Datum::from_usize(0));
+                    nulls.push(true);
+                }
+            }
+        }
+        let has_nulls = nulls.iter().any(|&n| n);
+        let dims = [datums.len() as i32];
+        let lbs = [1i32];
+        let arr = backend_utils_adt_arrayfuncs::construct::construct_md_array(
+            mcx,
+            &datums,
+            if has_nulls { Some(&nulls) } else { None },
+            1,
+            &dims,
+            &lbs,
+            TEXTOID,
+            -1,
+            false,
+            TYPALIGN_INT,
+        )?;
+        // Hand back the verbatim array varlena byte image (the by-ref lane
+        // carries it into the TG_ARGV variable).
+        Ok(arr.as_slice().to_vec())
+    });
+
     register_handler_builtins();
 
     // Register `$libdir/plpgsql` with the in-process ported-library loader

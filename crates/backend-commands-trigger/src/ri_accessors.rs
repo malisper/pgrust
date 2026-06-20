@@ -178,6 +178,32 @@ pub fn tg_relation_att_collation_impl(_trigdata: TriggerDataRef, attnum: i16) ->
     .unwrap_or_else(|_| panic!("tg_relation_att_collation: no active tg_relation"))
 }
 
+/// `trigdata->tg_trigtuple` — the OLD/row-being-modified `HeapTuple` the trigger
+/// manager handed the trigger function, copied into `mcx`. `Ok(None)` mirrors a
+/// NULL `tg_trigtuple`.
+pub fn tg_trigtuple_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    _trigdata: TriggerDataRef,
+) -> PgResult<Option<types_tuple::heaptuple::HeapTupleData<'mcx>>> {
+    with_current_trigger_data(|td| match td.and_then(|t| t.tg_trigtuple.as_ref()) {
+        Some(tup) => Ok(Some(tup.clone_in(mcx)?)),
+        None => Ok(None),
+    })
+}
+
+/// `trigdata->tg_newtuple` — the NEW `HeapTuple` (for an UPDATE) the trigger
+/// manager handed the trigger function, copied into `mcx`. `Ok(None)` mirrors a
+/// NULL `tg_newtuple`.
+pub fn tg_newtuple_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    _trigdata: TriggerDataRef,
+) -> PgResult<Option<types_tuple::heaptuple::HeapTupleData<'mcx>>> {
+    with_current_trigger_data(|td| match td.and_then(|t| t.tg_newtuple.as_ref()) {
+        Some(tup) => Ok(Some(tup.clone_in(mcx)?)),
+        None => Ok(None),
+    })
+}
+
 // ---- trigger field reads (trigger->tg*) -----------------------------------
 
 /// Run `f` with the current `TriggerData`'s `tg_trigger`, or raise the protocol
@@ -222,6 +248,28 @@ pub fn trigger_name_impl<'mcx>(
     with_tg_trigger("trigger_name", |t| mcx::slice_in(mcx, t.tgname.as_bytes()))?
 }
 
+/// `trigger->tgnargs` — number of textual trigger arguments (`TG_NARGS`).
+pub fn tg_nargs_impl(_trigdata: TriggerDataRef) -> i32 {
+    with_tg_trigger("tg_nargs", |t| t.tgnargs as i32)
+        .unwrap_or_else(|_| panic!("tg_nargs: no active tg_trigger"))
+}
+
+/// `trigger->tgargs[i]` — the i-th textual trigger argument (`TG_ARGV[i]`),
+/// copied into `mcx`. `Ok(None)` for an out-of-range index.
+pub fn tg_argv_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    _trigdata: TriggerDataRef,
+    i: i32,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    with_tg_trigger("tg_argv", |t| {
+        if i < 0 || i as usize >= t.tgargs.len() {
+            Ok(None)
+        } else {
+            Ok(Some(mcx::slice_in(mcx, t.tgargs[i as usize].as_bytes())?))
+        }
+    })?
+}
+
 /// Install the `TriggerData`/`Trigger` field accessors that resolve off the
 /// current-trigger side-channel.  The slot-value accessors (`slot_getattr`,
 /// `slot_attisnull`, `slot_tid`, `slot_is_current_xact_tuple`,
@@ -248,6 +296,12 @@ pub fn init_seams() {
     s::tg_relation_att_name::set(tg_relation_att_name_impl);
     s::tg_relation_att_type::set(tg_relation_att_type_impl);
     s::tg_relation_att_collation::set(tg_relation_att_collation_impl);
+
+    s::tg_trigtuple::set(tg_trigtuple_impl);
+    s::tg_newtuple::set(tg_newtuple_impl);
+    s::tg_slot_formed_tuple::set(crate::firing::tg_slot_formed_tuple_impl);
+    s::tg_nargs::set(tg_nargs_impl);
+    s::tg_argv::set(tg_argv_impl);
 
     s::trigger_constraint::set(trigger_constraint_impl);
     s::trigger_constrrelid::set(trigger_constrrelid_impl);

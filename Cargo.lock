@@ -14213,13 +14213,18 @@ dependencies = [
 name = "backend-pl-plpgsql-exec"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-trigger-seams",
  "backend-pl-plpgsql-exec-seams",
+ "backend-utils-adt-misc2",
  "mcx",
  "types-core",
  "types-datum",
  "types-error",
  "types-nodes",
  "types-plpgsql",
+ "types-rel",
+ "types-ri-triggers",
+ "types-trigger",
  "types-tuple",
 ]
 
@@ -14279,6 +14284,7 @@ dependencies = [
  "backend-pl-plpgsql-exec",
  "backend-pl-plpgsql-exec-seams",
  "backend-pl-plpgsql-funcs",
+ "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-varlena",
  "backend-utils-cache-lsyscache-seams",

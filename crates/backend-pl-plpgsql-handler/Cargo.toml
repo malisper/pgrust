@@ -67,3 +67,6 @@ backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 types-tuple = { path = "../types-tuple" }
 types-catalog = { path = "../types-catalog" }
+
+# construct_array for the TG_ARGV text[] promise (plpgsql_fulfill_promise).
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
