@@ -26,6 +26,17 @@ use crate::util::{
     relids_is_member, relids_overlap, restriction_is_or_clause, INVALID_OID,
 };
 
+/// Deep-copy a slice of `Expr` into `mcx` via `Expr::clone_in` (C copyObject).
+/// The derived `Expr::clone` panics on an owned-subtree child
+/// (`Aggref`/`SubLink`/`SubPlan`).
+fn clone_exprs_in(exprs: &[Expr], mcx: Mcx<'_>) -> Result<Vec<Expr>, types_error::PgError> {
+    let mut out = Vec::with_capacity(exprs.len());
+    for e in exprs {
+        out.push(e.clone_in(mcx)?);
+    }
+    Ok(out)
+}
+
 /* ==========================================================================
  * build_paths_for_OR.
  * ======================================================================== */
@@ -169,6 +180,7 @@ fn or_arg_index_match_cmp_group(a: &OrArgIndexMatch, b: &OrArgIndexMatch) -> cor
 /// folded into a SAOP. Returns the processed list of OR-clause argument nodes;
 /// when nothing groups, returns the original arg list unchanged.
 pub fn group_similar_or_args(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     rel: RelId,
     rinfo: RinfoId,
@@ -176,12 +188,14 @@ pub fn group_similar_or_args(
     let relid = root.rel(rel).relid;
 
     let orclause_id = root.rinfo(rinfo).orclause.expect("RestrictInfo without orclause");
-    let orargs: Vec<Expr> = root
-        .node(orclause_id)
-        .as_boolexpr()
-        .expect("orclause must be a BoolExpr")
-        .args
-        .clone();
+    let orargs: Vec<Expr> = clone_exprs_in(
+        &root
+            .node(orclause_id)
+            .as_boolexpr()
+            .expect("orclause must be a BoolExpr")
+            .args,
+        mcx,
+    )?;
     let n = orargs.len();
 
     // Utility pass: fill the OrArgIndexMatch for each argument.
@@ -200,19 +214,29 @@ pub fn group_similar_or_args(
         // OR arms are RestrictInfo handles (Expr::RestrictInfo); deref to the
         // wrapped clause. A usable arm is a binary OpExpr (mirrors
         // "IsA(arg, RestrictInfo) && IsA(argrinfo->clause, OpExpr)").
-        if let Some(clause) = orarg_clause(root, arg).as_opexpr() {
-            let clause = clause.clone();
+        // Deep-copy the arm's clause via `clone_in` (it must outlive the
+        // `&mut root` `node_uses_relid` calls below; a derived `.clone()` panics
+        // on an owned-subtree child).
+        let clause_owned = match orarg_clause(root, arg).as_opexpr() {
+            Some(_) => match orarg_clause(root, arg).clone_in(mcx)? {
+                Expr::OpExpr(o) => Some(o),
+                _ => None,
+            },
+            None => None,
+        };
+        if let Some(clause) = clause_owned {
             let mut opno = clause.opno;
             if clause.args.len() == 2 {
-                // Ignore a RelabelType above each operand.
-                let leftop = peel_relabel(&clause.args[0]).clone();
-                let rightop = peel_relabel(&clause.args[1]).clone();
+                // Ignore a RelabelType above each operand (deep copies, taken
+                // from the cloned-in OpExpr).
+                let leftop = peel_relabel(&clause.args[0]).clone_in(mcx)?;
+                let rightop = peel_relabel(&clause.args[1]).clone_in(mcx)?;
 
                 // (indexkey op const) or (const op indexkey)? We don't know the
                 // index yet, so distinguish key/const by relid membership of the
                 // operand sub-trees (pull_varnos via the joinpath seam).
-                let left_uses = node_uses_relid(root, &leftop, relid)?;
-                let right_uses = node_uses_relid(root, &rightop, relid)?;
+                let left_uses = node_uses_relid(mcx, root, &leftop, relid)?;
+                let right_uses = node_uses_relid(mcx, root, &rightop, relid)?;
                 let non_const_expr: Option<Expr>;
                 if right_uses
                     && !left_uses
@@ -222,13 +246,13 @@ pub fn group_similar_or_args(
                     if opno == INVALID_OID {
                         non_const_expr = None; // commutator doesn't exist
                     } else {
-                        non_const_expr = Some(rightop.clone());
+                        non_const_expr = Some(rightop);
                     }
                 } else if left_uses
                     && !right_uses
                     && !contain_volatile_functions(Some(&rightop))?
                 {
-                    non_const_expr = Some(leftop.clone());
+                    non_const_expr = Some(leftop);
                 } else {
                     non_const_expr = None;
                 }
@@ -303,7 +327,7 @@ pub fn group_similar_or_args(
         if is_boundary {
             if i - group_start == 1 {
                 // One clause in group: add it "as is".
-                result.push(orargs[matches[group_start].argindex as usize].clone());
+                result.push(orargs[matches[group_start].argindex as usize].clone_in(mcx)?);
             } else {
                 // Two or more clauses: create a nested OR. `rargs` holds the arm
                 // RestrictInfo handles (as C keeps the RestrictInfo* nodes);
@@ -312,8 +336,8 @@ pub fn group_similar_or_args(
                 let mut args: Vec<Expr> = Vec::new();
                 let mut rargs: Vec<Expr> = Vec::new();
                 for j in group_start..i {
-                    let arg = orargs[matches[j].argindex as usize].clone();
-                    args.push(orarg_clause(root, &arg).clone());
+                    let arg = orargs[matches[j].argindex as usize].clone_in(mcx)?;
+                    args.push(orarg_clause(root, &arg).clone_in(mcx)?);
                     rargs.push(arg);
                 }
                 let or_args_node = make_orclause(args);
@@ -374,11 +398,12 @@ fn peel_relabel(op: &Expr) -> &Expr {
 /// the node reference range-table index `relid`? Built into the arena to reuse
 /// the joinpath `pull_varnos(root, NodeId)` seam.
 fn node_uses_relid(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     op: &Expr,
     relid: types_core::primitive::Index,
 ) -> Result<bool, types_error::PgError> {
-    let id = root.alloc_node(op.clone());
+    let id = root.alloc_node(op.clone_in(mcx)?);
     let varnos = backend_optimizer_path_joinpath_seams::pull_varnos::call(root, id);
     Ok(relids_is_member(relid as i32, &varnos))
 }
@@ -406,12 +431,14 @@ pub fn make_bitmap_paths_for_or_group<'mcx>(
 
     // The group's arms (BoolExpr args of ri->orclause).
     let orclause_id = root.rinfo(ri).orclause.expect("RestrictInfo without orclause");
-    let args: Vec<Expr> = root
-        .node(orclause_id)
-        .as_boolexpr()
-        .expect("orclause must be a BoolExpr")
-        .args
-        .clone();
+    let args: Vec<Expr> = clone_exprs_in(
+        &root
+            .node(orclause_id)
+            .as_boolexpr()
+            .expect("orclause must be a BoolExpr")
+            .args,
+        mcx,
+    )?;
 
     // First, try to match the whole group to one index.
     let orargs = [ri];
@@ -486,13 +513,15 @@ pub fn generate_bitmap_or_paths<'mcx>(
         let mut pathlist_ok = true;
 
         // Group similar OR-clause arguments.
-        let original_args: Vec<Expr> = root
-            .node(root.rinfo(rinfo).orclause.expect("orclause"))
-            .as_boolexpr()
-            .expect("orclause must be a BoolExpr")
-            .args
-            .clone();
-        let grouped_args = group_similar_or_args(root, rel, rinfo)?;
+        let original_args: Vec<Expr> = clone_exprs_in(
+            &root
+                .node(root.rinfo(rinfo).orclause.expect("orclause"))
+                .as_boolexpr()
+                .expect("orclause must be a BoolExpr")
+                .args,
+            mcx,
+        )?;
+        let grouped_args = group_similar_or_args(mcx, root, rel, rinfo)?;
 
         // If grouping changed the arg list, drop rinfo from the "other" context
         // to avoid de-facto duplicated index clauses.
@@ -510,10 +539,10 @@ pub fn generate_bitmap_or_paths<'mcx>(
                 // C reads ((BoolExpr *) orarg)->args, whose elements are
                 // themselves RestrictInfo* arms.
                 let andargs_nodes: Vec<Expr> =
-                    orarg_clause(root, orarg).as_boolexpr().unwrap().args.clone();
+                    clone_exprs_in(&orarg_clause(root, orarg).as_boolexpr().unwrap().args, mcx)?;
                 let mut andargs: Vec<RinfoId> = Vec::new();
                 for a in &andargs_nodes {
-                    andargs.push(orarg_to_rinfo(root, a));
+                    andargs.push(orarg_to_rinfo(mcx, root, a)?);
                 }
                 let mut il = build_paths_for_OR(mcx, root, run, rel, &andargs, &all_clauses)?;
                 // Recurse in case there are sub-ORs.
@@ -523,7 +552,7 @@ pub fn generate_bitmap_or_paths<'mcx>(
                 indlist = il;
             } else if orarg_is_or_clause(root, orarg) {
                 // A grouped sub-OR RestrictInfo: build bitmap paths for the group.
-                let ri = orarg_to_rinfo(root, orarg);
+                let ri = orarg_to_rinfo(mcx, root, orarg)?;
                 let il = make_bitmap_paths_for_or_group(
                     mcx,
                     root,
@@ -543,7 +572,7 @@ pub fn generate_bitmap_or_paths<'mcx>(
             } else {
                 // A simple arm: use the existing arm RestrictInfo directly
                 // (C does `orargs = list_make1(castNode(RestrictInfo, orarg))`).
-                let ri = orarg_to_rinfo(root, orarg);
+                let ri = orarg_to_rinfo(mcx, root, orarg)?;
                 let orargs = [ri];
                 indlist = build_paths_for_OR(mcx, root, run, rel, &orargs, &all_clauses)?;
             }
@@ -576,12 +605,18 @@ pub fn generate_bitmap_or_paths<'mcx>(
 /// handle, return that existing `RinfoId`; otherwise wrap the bare clause node
 /// in a fresh simple `RestrictInfo` (mirrors `IsA(arg, RestrictInfo) ?
 /// castNode(...) : ...`).
-fn orarg_to_rinfo(root: &mut PlannerInfo, orarg: &Expr) -> RinfoId {
+fn orarg_to_rinfo(
+    mcx: Mcx<'_>,
+    root: &mut PlannerInfo,
+    orarg: &Expr,
+) -> Result<RinfoId, types_error::PgError> {
     if let Expr::RestrictInfo(r) = orarg {
-        RinfoId::from(*r)
+        Ok(RinfoId::from(*r))
     } else {
-        let aid = root.alloc_node(orarg.clone());
-        restrictinfo::make_simple_restrictinfo::call(root, aid)
+        // Deep-copy via `clone_in` (a derived `.clone()` panics on an
+        // owned-subtree child).
+        let aid = root.alloc_node(orarg.clone_in(mcx)?);
+        Ok(restrictinfo::make_simple_restrictinfo::call(root, aid))
     }
 }
 
@@ -600,8 +635,14 @@ fn orarg_clause<'a>(root: &'a PlannerInfo, orarg: &'a Expr) -> &'a Expr {
 /// Owned-clone variant of [`orarg_clause`] for callers that need to release the
 /// `&PlannerInfo` borrow before taking `&mut PlannerInfo`. Returns the arm's
 /// underlying clause node (deref'ing an [`Expr::RestrictInfo`] handle).
-pub fn orarg_clause_owned(root: &PlannerInfo, orarg: &Expr) -> Option<Expr> {
-    Some(orarg_clause(root, orarg).clone())
+pub fn orarg_clause_owned(
+    mcx: Mcx<'_>,
+    root: &PlannerInfo,
+    orarg: &Expr,
+) -> Result<Option<Expr>, types_error::PgError> {
+    // Deep-copy via `clone_in` (C copyObject); a derived `Expr::clone` panics on
+    // an owned-subtree child (`Aggref`/`SubLink`/`SubPlan`).
+    Ok(Some(orarg_clause(root, orarg).clone_in(mcx)?))
 }
 
 /// Is this grouped OR arm itself an OR clause (a sub-OR `BoolExpr`)? Looks

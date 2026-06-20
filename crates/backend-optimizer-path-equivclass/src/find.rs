@@ -139,18 +139,28 @@ pub fn relation_can_be_sorted_early(
         return false;
     }
 
-    let target_exprs: Vec<Expr> = {
+    // Working context for transient deep copies of the reltarget exprs; they are
+    // only inspected (`find_ec_member_matching_expr` / `find_computable_ec_member`),
+    // never stored, so a function-scoped context is correct. `clone_in` is
+    // required because the derived `Expr::clone` panics on an owned-subtree child.
+    let work_ctx = mcx::MemoryContext::new("relation_can_be_sorted_early");
+    let work_mcx = work_ctx.mcx();
+    let target_expr_ids: Vec<types_pathnodes::NodeId> = {
         let relopt = root.rel(rel);
         let target = relopt
             .reltarget
             .as_ref()
             .expect("relation_can_be_sorted_early: rel has no reltarget");
-        target
-            .exprs
-            .iter()
-            .map(|&nid| root.node(nid).clone())
-            .collect()
+        target.exprs.clone()
     };
+    let target_exprs: Vec<Expr> = target_expr_ids
+        .iter()
+        .map(|&nid| {
+            root.node(nid)
+                .clone_in(work_mcx)
+                .expect("relation_can_be_sorted_early: clone_in target expr")
+        })
+        .collect();
     let rel_relids = root.rel(rel).relids.clone();
 
     /* try to find an EM directly matching some reltarget member */

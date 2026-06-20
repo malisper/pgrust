@@ -82,8 +82,10 @@ pub fn ec_member_matches_indexcol(
         return false;
     }
 
-    let em_expr = root.node(em.em_expr).clone();
-    match_index_to_operand(root, &em_expr, indexcol, index)
+    // Borrow the EM expr for the read-only `match_index_to_operand` (a derived
+    // `.clone()` would panic on an owned-subtree child).
+    let em_expr: &Expr = root.node(em.em_expr);
+    match_index_to_operand(root, em_expr, indexcol, index)
 }
 
 /// `relation_has_unique_index_for(root, rel, restrictlist, exprlist, oprlist)`

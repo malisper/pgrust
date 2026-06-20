@@ -317,9 +317,12 @@ pub fn process_equivalence<'mcx>(
                 continue;
             }
 
+            // Borrow the stored EM expr for the read-only `equal` (a derived
+            // `.clone()` would panic on an owned-subtree child).
+            let cur_em_expr_id = root.em(cur_em).em_expr;
             if ec1.is_none()
                 && item1_type == root.em(cur_em).em_datatype
-                && ec_seam::equal::call(&item1, &root.node(root.em(cur_em).em_expr).clone())
+                && ec_seam::equal::call(&item1, root.node(cur_em_expr_id))
             {
                 ec1 = Some(cur_ec);
                 em1 = Some(cur_em);
@@ -329,7 +332,7 @@ pub fn process_equivalence<'mcx>(
             }
             if ec2.is_none()
                 && item2_type == root.em(cur_em).em_datatype
-                && ec_seam::equal::call(&item2, &root.node(root.em(cur_em).em_expr).clone())
+                && ec_seam::equal::call(&item2, root.node(cur_em_expr_id))
             {
                 ec2 = Some(cur_ec);
                 em2 = Some(cur_em);

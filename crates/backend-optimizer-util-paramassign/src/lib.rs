@@ -664,7 +664,9 @@ pub fn process_subquery_nestloop_params(
 ) -> PgResult<()> {
     for &lc in subplan_params {
         let pitem = root.planner_param_item(lc).clone();
-        let item_expr = root.node(pitem.item).clone();
+        // Deep-copy via `Expr::clone_in` (a derived `Expr::clone` panics on a
+        // context-allocated child such as a PHV over an `Aggref`/`SubLink`).
+        let item_expr = root.node(pitem.item).clone_in(mcx)?;
 
         match item_expr {
             Expr::Var(var) => {

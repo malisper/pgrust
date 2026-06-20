@@ -50,9 +50,18 @@ pub fn add_join_clause_to_rels<'mcx>(
     restrictinfo: RinfoId,
     join_relids: &Relids,
 ) -> PgResult<()> {
-    // Don't add the clause if it is always true.
-    let clause_expr = root.node(root.rinfo(restrictinfo).clause).clone();
-    if ext_seam::restriction_is_always_true::call(root, &clause_expr) {
+    // Don't add the clause if it is always true.  Borrow the clause `&Expr`
+    // for the read-only always-true / always-false inspections (a derived
+    // `Expr::clone` panics on a context-allocated child); compute both flags in
+    // the borrow scope so the borrow is released before any `&mut root` use.
+    let (is_always_true, is_always_false) = {
+        let clause_expr: &Expr = root.node(root.rinfo(restrictinfo).clause);
+        (
+            ext_seam::restriction_is_always_true::call(root, clause_expr),
+            ext_seam::restriction_is_always_false::call(root, clause_expr),
+        )
+    };
+    if is_always_true {
         return Ok(());
     }
 
@@ -60,7 +69,7 @@ pub fn add_join_clause_to_rels<'mcx>(
     // false.  Keep the same rinfo_serial, and reset the last_rinfo_serial
     // counter, to ensure the "same" qual condition gets identical serial numbers.
     let mut restrictinfo = restrictinfo;
-    if ext_seam::restriction_is_always_false::call(root, &clause_expr) {
+    if is_always_false {
         let ri = root.rinfo(restrictinfo).clone();
         let save_rinfo_serial = ri.rinfo_serial;
         let save_last_rinfo_serial = root.last_rinfo_serial;

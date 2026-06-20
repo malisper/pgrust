@@ -1302,7 +1302,7 @@ fn try_partitionwise_join<'mcx>(
         // Construct restrictions applicable to the child join from those for the
         // parent join.
         let child_restrictlist =
-            appendinfo::adjust_appendrel_attrs_restrictlist::call(root, parent_restrictlist, &appinfos)?;
+            appendinfo::adjust_appendrel_attrs_restrictlist::call(mcx, root, parent_restrictlist, &appinfos)?;
 
         // Find or construct the child join's RelOptInfo.
         let mut child_joinrel = root.rel(joinrel).part_rels[cnt_parts];

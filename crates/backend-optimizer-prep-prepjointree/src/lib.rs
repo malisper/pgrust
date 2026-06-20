@@ -253,7 +253,7 @@ pub fn reduce_outer_joins<'mcx>(
         let empty = ExprRelids { words: Vec::new() };
         backend_rewrite_core::remove_nulling_relids_in_query(parse, &state2.inner_reduced, &empty);
         // There could be references in the append_rel_list, too.
-        remove_nulling_relids_in_append_rel_list(root, &state2.inner_reduced, &empty);
+        remove_nulling_relids_in_append_rel_list(mcx, root, &state2.inner_reduced, &empty)?;
     }
 
     // Partially-reduced full joins have to be done one at a time, since they'll
@@ -266,10 +266,11 @@ pub fn reduce_outer_joins<'mcx>(
             &statep.unreduced_side,
         );
         remove_nulling_relids_in_append_rel_list(
+            mcx,
             root,
             &full_join_relids,
             &statep.unreduced_side,
-        );
+        )?;
     }
 
     Ok(())
@@ -281,10 +282,11 @@ pub fn reduce_outer_joins<'mcx>(
 /// handles). Resolve each to its `Expr`, run the expression-tree
 /// `remove_nulling_relids` over it, and write it back.
 fn remove_nulling_relids_in_append_rel_list(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     removable: &ExprRelids,
     except: &ExprRelids,
-) {
+) -> PgResult<()> {
     // Collect the NodeIds first (borrow of append_rel_list) to avoid holding it
     // while we mutate the node_arena.
     let mut ids: Vec<types_pathnodes::NodeId> = Vec::new();
@@ -302,13 +304,15 @@ fn remove_nulling_relids_in_append_rel_list(
         // Clone the arena Expr into a Node, mutate, write back. (`Expr` is not
         // `Default`, so we can't `mem::take`; the clone is the owned-tree
         // analogue of the C copy-mutator, which copies each Var/PHV before
-        // editing its nullingrels anyway.)
-        let mut node = Node::Expr(root.node(id).clone());
+        // editing its nullingrels anyway.) Deep-copy via `clone_in` — the
+        // derived `Expr::clone` panics on an owned-subtree child.
+        let mut node = Node::Expr(root.node(id).clone_in(mcx)?);
         backend_rewrite_core::remove_nulling_relids(&mut node, removable, except);
         if let Some(e) = node.into_expr() {
             *root.node_mut(id) = e;
         }
     }
+    Ok(())
 }
 
 // ===========================================================================

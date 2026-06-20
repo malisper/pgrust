@@ -356,17 +356,22 @@ pub fn predicate_implied_by(
     clause_list: &[NodeId],
     weak: bool,
 ) -> bool {
-    let predicate = resolve_nodes(root, predicate_list);
-    let clause = resolve_nodes(root, clause_list);
     let cx = mcx::MemoryContext::new("predicate_implied_by transient");
+    let predicate = resolve_nodes(cx.mcx(), root, predicate_list)
+        .unwrap_or_else(|e| panic!("predicate_implied_by: {e:?}"));
+    let clause = resolve_nodes(cx.mcx(), root, clause_list)
+        .unwrap_or_else(|e| panic!("predicate_implied_by: {e:?}"));
     predicate_implied_by_impl(cx.mcx(), &predicate, &clause, weak)
         .unwrap_or_else(|e| panic!("predicate_implied_by: {e:?}"))
 }
 
 /// Resolve a list of arena handles to owned `Expr` values (the proof engine
 /// reads them; cloning matches the consumer, which already clones `indpred`).
-fn resolve_nodes(root: &PlannerInfo, ids: &[NodeId]) -> Vec<Expr> {
-    ids.iter().map(|&id| root.node(id).clone()).collect()
+fn resolve_nodes(mcx: Mcx<'_>, root: &PlannerInfo, ids: &[NodeId]) -> PgResult<Vec<Expr>> {
+    // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+    // owned-subtree child (e.g. a qual carrying a SubLink/Aggref/SubPlan). The
+    // owned copies live only as long as the transient proof context.
+    ids.iter().map(|&id| root.node(id).clone_in(mcx)).collect()
 }
 
 /// `predicate_implied_by(predicate, clause, weak)` over bare owned `Expr`
@@ -434,9 +439,11 @@ pub fn predicate_refuted_by(
     clause_list: &[NodeId],
     weak: bool,
 ) -> bool {
-    let predicate = resolve_nodes(root, predicate_list);
-    let clause = resolve_nodes(root, clause_list);
     let cx = mcx::MemoryContext::new("predicate_refuted_by transient");
+    let predicate = resolve_nodes(cx.mcx(), root, predicate_list)
+        .unwrap_or_else(|e| panic!("predicate_refuted_by: {e:?}"));
+    let clause = resolve_nodes(cx.mcx(), root, clause_list)
+        .unwrap_or_else(|e| panic!("predicate_refuted_by: {e:?}"));
     predicate_refuted_by_impl(cx.mcx(), &predicate, &clause, weak)
         .unwrap_or_else(|e| panic!("predicate_refuted_by: {e:?}"))
 }

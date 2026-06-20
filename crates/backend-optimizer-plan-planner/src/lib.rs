@@ -2199,13 +2199,15 @@ fn grouping_planner<'mcx>(
             // wflists = find_window_functions((Node *) processed_tlist,
             //   list_length(parse->windowClause)).
             let max_win_ref = run.resolve(root.parse).windowClause.len() as u32;
-            let tlist_exprs: Vec<Expr> = root
+            // Borrow each tlist expr (`find_window_functions_in_exprs` only
+            // inspects them); a derived `.clone()` would panic on a
+            // context-allocated child (Aggref/SubLink/SubPlan).
+            let tlist_refs: Vec<&Expr> = root
                 .processed_tlist
                 .iter()
                 .map(|&id| root.targetentry(id).expr)
-                .map(|eid| root.node(eid).clone())
+                .map(|eid| root.node(eid))
                 .collect();
-            let tlist_refs: Vec<&Expr> = tlist_exprs.iter().collect();
             let lists = backend_optimizer_util_clauses::find_window_functions_in_exprs(
                 &tlist_refs,
                 max_win_ref,
@@ -3835,9 +3837,11 @@ fn get_windowclause_startup_tuples<'mcx>(
         // DEFAULT_INEQ_SEL = 1/3 (selfuncs.h).
         const INT2OID: types_core::primitive::Oid = 21;
         const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
-        // try and figure out the value specified in the endOffset.
-        let end_off_node = end_off_id.map(|id| root.node(id).clone());
-        let end_offset_value = if let Some(c) = end_off_node.as_ref().and_then(|e| e.as_const()) {
+        // try and figure out the value specified in the endOffset. Borrow the
+        // node (only inspected here); a derived `.clone()` would panic on a
+        // context-allocated child.
+        let end_off_node: Option<&Expr> = end_off_id.map(|id| root.node(id));
+        let end_offset_value = if let Some(c) = end_off_node.and_then(|e| e.as_const()) {
             if c.constisnull {
                 // NULLs aren't allowed; pretend just the first row is needed.
                 1.0
@@ -6168,7 +6172,9 @@ fn make_sort_input_target<'mcx>(
     // pulled Var/Aggref/WindowFunc/PHV into the arena to obtain its handle.
     let mut postponable_vars: Vec<types_pathnodes::NodeId> = Vec::new();
     for &col in &postponable_cols {
-        let node = Node::mk_expr(run.mcx(), root.node(col).clone());
+        // Deep-copy via `clone_in` (C copyObject); a derived `Expr::clone`
+        // panics on a context-allocated child (Aggref/SubLink/SubPlan).
+        let node = Node::mk_expr(run.mcx(), root.node(col).clone_in(run.mcx())?);
         for v in backend_optimizer_util_vars::pull_var_clause(&node, pvc_flags) {
             postponable_vars.push(root.alloc_node(v));
         }

@@ -479,6 +479,7 @@ fn adjust_appendrel_attrs_mutator(
 /// `RestrictInfo`. Returns the translated `RestrictInfo` value; the driver
 /// interns its clause/orclause and stores it.
 fn adjust_restrictinfo(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     oldinfo_id: RinfoId,
     appinfos: &[AppendRelInfo],
@@ -486,14 +487,19 @@ fn adjust_restrictinfo(
     // Copy all flat-copiable fields (notably including rinfo_serial).
     let mut newinfo: RestrictInfo = root.rinfo(oldinfo_id).clone();
 
-    // Recursively fix the clause itself.
-    let clause_expr = root.node(newinfo.clause).clone();
+    // Recursively fix the clause itself. Deep-copy via `clone_in` into the
+    // planner arena `mcx` (the value is moved into `adjust_appendrel_attrs` and
+    // the translated node is interned back into `root`'s node arena, so its
+    // owned `PgBox`/`PgVec` children must outlive the whole run — a transient
+    // context would dangle). A derived `.clone()` panics on an owned-subtree
+    // child such as a `SubLink`/`SubPlan` correlated-subquery operand.
+    let clause_expr = root.node(newinfo.clause).clone_in(mcx)?;
     let new_clause = adjust_appendrel_attrs(root, clause_expr, appinfos)?;
     newinfo.clause = root.alloc_node(new_clause);
 
     // and the modified version, if an OR clause.
     if let Some(orclause_id) = newinfo.orclause {
-        let or_expr = root.node(orclause_id).clone();
+        let or_expr = root.node(orclause_id).clone_in(mcx)?;
         let new_or = adjust_appendrel_attrs(root, or_expr, appinfos)?;
         newinfo.orclause = Some(root.alloc_node(new_or));
     }
@@ -742,7 +748,7 @@ pub fn get_translated_update_targetlist(
 
     if relid == result_relation {
         // Non-inheritance case: copy the processed_tlist (caller may scribble).
-        let tlist = copy_targetentry_handles(root, &root.processed_tlist.clone());
+        let tlist = copy_targetentry_handles(mcx, root, &root.processed_tlist.clone())?;
         let colnos = if want_update_colnos {
             Some(root.update_colnos.clone())
         } else {
@@ -1153,11 +1159,17 @@ fn relids_del_member(relids: Relids, x: i32) -> Relids {
 
 /// `copyObject((List *) root->processed_tlist)` — duplicate a TargetEntry handle
 /// list, deep-copying each TargetEntry node into a fresh arena handle.
-fn copy_targetentry_handles(root: &mut PlannerInfo, handles: &[NodeId]) -> Vec<NodeId> {
+fn copy_targetentry_handles(
+    mcx: Mcx<'_>,
+    root: &mut PlannerInfo,
+    handles: &[NodeId],
+) -> PgResult<Vec<NodeId>> {
     let mut out = Vec::with_capacity(handles.len());
     for &h in handles {
         let te = root.targetentry(h).clone();
-        let expr = root.node(te.expr).clone();
+        // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+        // owned-subtree child.
+        let expr = root.node(te.expr).clone_in(mcx)?;
         let expr_id = root.alloc_node(expr);
         let new_te = types_pathnodes::TargetEntryNode {
             expr: expr_id,
@@ -1165,14 +1177,14 @@ fn copy_targetentry_handles(root: &mut PlannerInfo, handles: &[NodeId]) -> Vec<N
         };
         out.push(root.alloc_targetentry(new_te));
     }
-    out
+    Ok(out)
 }
 
 /// Translate a TargetEntry handle list down through inheritance levels (the
 /// `(List *) adjust_appendrel_attrs_multilevel(root, processed_tlist, ...)` of
 /// `get_translated_update_targetlist`).
 fn adjust_targetlist_multilevel(
-    _mcx: Mcx<'_>,
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     handles: &[NodeId],
     childrel: RelId,
@@ -1181,7 +1193,9 @@ fn adjust_targetlist_multilevel(
     let mut out = Vec::with_capacity(handles.len());
     for &h in handles {
         let te = root.targetentry(h).clone();
-        let expr = root.node(te.expr).clone();
+        // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+        // owned-subtree child.
+        let expr = root.node(te.expr).clone_in(mcx)?;
         let new_expr = adjust_appendrel_attrs_multilevel(root, expr, childrel, parentrel)?;
         let expr_id = root.alloc_node(new_expr);
         let new_te = types_pathnodes::TargetEntryNode {
@@ -1253,13 +1267,14 @@ fn seam_adjust_appendrel_attrs(
 /// `(List *) adjust_appendrel_attrs(root, restrictlist, nappinfos, appinfos)` —
 /// the RestrictInfo-list specialization joinrels/allpaths consume.
 fn seam_adjust_appendrel_attrs_restrictlist(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     restrictlist: &[RinfoId],
     appinfos: &[AppendRelInfo],
 ) -> PgResult<Vec<RinfoId>> {
     let mut out = Vec::with_capacity(restrictlist.len());
     for &ri in restrictlist {
-        out.push(adjust_restrictinfo(root, ri, appinfos)?);
+        out.push(adjust_restrictinfo(mcx, root, ri, appinfos)?);
     }
     Ok(out)
 }

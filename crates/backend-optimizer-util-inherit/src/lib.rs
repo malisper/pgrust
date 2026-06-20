@@ -793,7 +793,9 @@ pub fn apply_child_basequals<'mcx>(
         let (clause, is_pushed_down, has_clone, is_clone, security_level) = {
             let rinfo = root.rinfo(rinfo_id);
             (
-                root.node(rinfo.clause).clone(),
+                // Deep-copy via `clone_in` — the derived `Expr::clone` panics on
+                // an owned-subtree child (e.g. a subquery qual carrying a SubLink).
+                root.node(rinfo.clause).clone_in(mcx)?,
                 rinfo.is_pushed_down,
                 rinfo.has_clone,
                 rinfo.is_clone,
@@ -841,8 +843,9 @@ pub fn apply_child_basequals<'mcx>(
                 None,
             )?;
 
-            // Proven always false / always true?
-            let clause_expr = root.node(root.rinfo(childrinfo).clause).clone();
+            // Proven always false / always true? Deep-copy via `clone_in` — the
+            // derived `Expr::clone` panics on an owned-subtree child.
+            let clause_expr = root.node(root.rinfo(childrinfo).clause).clone_in(mcx)?;
             if joinext::restriction_is_always_false::call(root, &clause_expr) {
                 return Ok(false);
             }

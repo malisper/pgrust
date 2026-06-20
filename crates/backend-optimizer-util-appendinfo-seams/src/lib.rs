@@ -39,7 +39,8 @@ seam_core::seam!(
     /// `(List *) adjust_appendrel_attrs(root, (Node *) restrictlist, nappinfos,
     /// appinfos)` (appendinfo.c) — translate a parent-join `RestrictInfo` list
     /// (carried as `RinfoId` handles) into the child join's restrictlist.
-    pub fn adjust_appendrel_attrs_restrictlist(
+    pub fn adjust_appendrel_attrs_restrictlist<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
         restrictlist: &[RinfoId],
         appinfos: &[AppendRelInfo],

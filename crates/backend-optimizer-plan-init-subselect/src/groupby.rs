@@ -76,10 +76,12 @@ pub fn remove_useless_groupby_columns(root: &mut PlannerInfo, run: &PlannerRun<'
         let sgc_info = nf::sortgroupclause_info::call(root, sgc);
         let tle = nf::get_sortgroupref_tle::call(root, sgc_info.tle_sort_group_ref, &target_list);
         let te_info = nf::targetentry_info::call(root, tle);
-        let expr = root.node(te_info.expr).clone();
+        // Borrow the tlist expr (only inspected for a Var); a derived `.clone()`
+        // would panic on a context-allocated child.
+        let expr: &types_nodes::primnodes::Expr = root.node(te_info.expr);
 
         // Ignore non-Vars and Vars from other query levels.
-        let var = match &expr {
+        let var = match expr {
             types_nodes::primnodes::Expr::Var(v) if v.varlevelsup == 0 => v.clone(),
             _ => continue,
         };
@@ -194,9 +196,11 @@ pub fn remove_useless_groupby_columns(root: &mut PlannerInfo, run: &PlannerRun<'
             let sgc_info = nf::sortgroupclause_info::call(root, sgc);
             let tle = nf::get_sortgroupref_tle::call(root, sgc_info.tle_sort_group_ref, &target_list);
             let te_info = nf::targetentry_info::call(root, tle);
-            let expr = root.node(te_info.expr).clone();
+            // Borrow the tlist expr (only inspected for a Var); a derived
+            // `.clone()` would panic on a context-allocated child.
+            let expr: &types_nodes::primnodes::Expr = root.node(te_info.expr);
 
-            let keep = match &expr {
+            let keep = match expr {
                 types_nodes::primnodes::Expr::Var(v) if v.varlevelsup == 0 => {
                     !is_member(
                         v.varattno as i32 - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER,

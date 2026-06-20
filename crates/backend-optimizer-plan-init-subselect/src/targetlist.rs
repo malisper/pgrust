@@ -185,9 +185,11 @@ pub fn rebuild_joinclause_attr_needed(
             if bms::relids_membership::call(&required_relids) == 2
             /* BMS_MULTIPLE */
             {
-                let clause = root.node(clause_id).clone();
+                // Borrow the clause (only walked read-only by pull_var_clause);
+                // a derived `.clone()` would panic on a context-allocated child.
+                let clause: &types_nodes::primnodes::Expr = root.node(clause_id);
                 let vars = eqext::pull_var_clause::call(
-                    &clause,
+                    clause,
                     PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS,
                 );
 

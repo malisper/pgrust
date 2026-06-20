@@ -387,8 +387,10 @@ pub fn replace_nestloop_params(
     expr: NodeId,
 ) -> PgResult<NodeId> {
     // No setup needed for tree walk, so away we go.
-    // Resolve the node to an owned Expr (the mutator rebuilds it).
-    let node = root.node(expr).clone();
+    // Resolve the node to an owned Expr (the mutator rebuilds it). Deep-copy via
+    // `clone_in` (a derived `Expr::clone` panics on an owned-subtree child such
+    // as a `SubPlan`/`SubLink`/`Aggref`).
+    let node = root.node(expr).clone_in(mcx)?;
     let mut err: Option<PgError> = None;
     let out = replace_nestloop_params_mutator(mcx, root, node, &mut err);
     if let Some(e) = err {
@@ -1148,9 +1150,9 @@ fn build_scan_qual<'mcx>(
     for &cid in clauses {
         let expr: Expr = if has_param_info {
             let replaced = replace_nestloop_params(mcx, root, cid)?;
-            root.node(replaced).clone()
+            root.node(replaced).clone_in(mcx)?
         } else {
-            root.node(cid).clone()
+            root.node(cid).clone_in(mcx)?
         };
         out.push(expr);
     }
@@ -1372,7 +1374,7 @@ fn fix_indexqual_references(
         for &rinfo in &iclause.indexquals {
             let clause_id = root.rinfo(rinfo).clause;
             stripped_indexquals.push(clause_id);
-            let clause = root.node(clause_id).clone();
+            let clause = root.node(clause_id).clone_in(mcx)?;
             let fixed = fix_indexqual_clause(
                 mcx,
                 root,
@@ -1416,7 +1418,7 @@ fn fix_indexorderby_references(
 
     let mut fixed_indexorderbys: Vec<Expr> = Vec::new();
     for (&clause_id, &indexcol) in indexorderbys.iter().zip(indexorderbycols.iter()) {
-        let clause = root.node(clause_id).clone();
+        let clause = root.node(clause_id).clone_in(mcx)?;
         // fix_indexqual_clause with indexcolnos = NIL.
         let fixed = fix_indexqual_clause(mcx, root, &index, indexcol, clause, &[])?;
         fixed_indexorderbys.push(fixed);
@@ -1593,8 +1595,10 @@ fn create_indexscan_plan<'mcx>(
         //     predicate_implied_by(list_make1(rinfo->clause),
         //                          stripped_indexquals, false)
         let clause_id = root.rinfo(rinfo).clause;
-        let clause_expr = root.node(clause_id).clone();
-        if !contain_mutable_functions(Some(&clause_expr))? {
+        // Borrow the clause for the read-only mutability test (a derived
+        // `.clone()` panics on an owned-subtree child).
+        let clause_expr: &Expr = root.node(clause_id);
+        if !contain_mutable_functions(Some(clause_expr))? {
             let single = [clause_id];
             if predtest::predicate_implied_by::call(root, &single, &stripped_indexquals, false) {
                 continue; // provably implied by indexquals
@@ -1639,8 +1643,10 @@ fn create_indexscan_plan<'mcx>(
         // Assert(list_length(pathkeys) == list_length(indexorderbys)).
         debug_assert_eq!(pathkeys.len(), indexorderbys_orig.len());
         for (pathkey, &expr_id) in pathkeys.iter().zip(indexorderbys_orig.iter()) {
-            let expr = root.node(expr_id).clone();
-            let exprtype = backend_nodes_core::nodefuncs::expr_type(Some(&expr))?;
+            // Borrow for the read-only `expr_type` (a derived `.clone()` panics
+            // on an owned-subtree child).
+            let expr: &Expr = root.node(expr_id);
+            let exprtype = backend_nodes_core::nodefuncs::expr_type(Some(expr))?;
             // Get sort operator from opfamily.
             let sortop = lsyscache::get_opfamily_member_for_cmptype::call(
                 pathkey.pk_opfamily,
@@ -1799,10 +1805,12 @@ fn create_bitmap_scan_plan<'mcx>(
         }
         let clause_id = ri.clause;
         // list_member(indexquals, clause): equal() over the stripped indexquals.
-        let clause_expr = root.node(clause_id).clone();
+        // Borrow the clause for the read-only `equal`/mutability tests (a derived
+        // `.clone()` panics on an owned-subtree child).
+        let clause_expr: &Expr = root.node(clause_id);
         if indexquals
             .iter()
-            .any(|&iq| equal_expr_seam::call(root.node(iq), &clause_expr))
+            .any(|&iq| equal_expr_seam::call(root.node(iq), clause_expr))
         {
             continue; // simple duplicate
         }
@@ -1814,7 +1822,7 @@ fn create_bitmap_scan_plan<'mcx>(
         }
         // !contain_mutable_functions(clause) &&
         //     predicate_implied_by(list_make1(clause), indexquals, false)
-        if !contain_mutable_functions(Some(&clause_expr))? {
+        if !contain_mutable_functions(Some(clause_expr))? {
             let single = [clause_id];
             if predtest::predicate_implied_by::call(root, &single, &indexquals, false) {
                 continue; // provably implied by indexquals
@@ -1963,14 +1971,14 @@ fn create_bitmap_subplan<'mcx>(
                 if sub.qual.is_empty() {
                     const_true_subqual = true;
                 } else if !const_true_subqual {
-                    let exprs = node_list_to_expr_vec_std(root, &sub.qual);
+                    let exprs = node_list_to_expr_vec_std(mcx, root, &sub.qual)?;
                     let anded = make_ands_explicit(exprs);
                     subquals.push(root.alloc_node(anded));
                 }
                 if sub.indexqual.is_empty() {
                     const_true_subindexqual = true;
                 } else if !const_true_subindexqual {
-                    let exprs = node_list_to_expr_vec_std(root, &sub.indexqual);
+                    let exprs = node_list_to_expr_vec_std(mcx, root, &sub.indexqual)?;
                     let anded = make_ands_explicit(exprs);
                     subindexquals.push(root.alloc_node(anded));
                 }
@@ -2003,7 +2011,7 @@ fn create_bitmap_subplan<'mcx>(
             } else if subquals.len() <= 1 {
                 subquals
             } else {
-                let exprs = node_list_to_expr_vec_std(root, &subquals);
+                let exprs = node_list_to_expr_vec_std(mcx, root, &subquals)?;
                 alloc::vec![root.alloc_node(make_orclause(exprs))]
             };
             let indexqual = if const_true_subindexqual {
@@ -2011,7 +2019,7 @@ fn create_bitmap_subplan<'mcx>(
             } else if subindexquals.len() <= 1 {
                 subindexquals
             } else {
-                let exprs = node_list_to_expr_vec_std(root, &subindexquals);
+                let exprs = node_list_to_expr_vec_std(mcx, root, &subindexquals)?;
                 alloc::vec![root.alloc_node(make_orclause(exprs))]
             };
 
@@ -2171,15 +2179,23 @@ fn node_list_to_expr_vec<'mcx>(
 ) -> PgResult<PgVec<'mcx, Expr>> {
     let mut out = vec_with_capacity_in(mcx, nodes.len())?;
     for &nid in nodes {
-        out.push(root.node(nid).clone());
+        out.push(root.node(nid).clone_in(mcx)?);
     }
     Ok(out)
 }
 
 /// Resolve a list of bare clause arena handles into a plain `Vec<Expr>` (for
 /// `make_ands_explicit` / `make_orclause`, which take owned expression lists).
-fn node_list_to_expr_vec_std(root: &PlannerInfo, nodes: &[NodeId]) -> Vec<Expr> {
-    nodes.iter().map(|&nid| root.node(nid).clone()).collect()
+fn node_list_to_expr_vec_std<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    nodes: &[NodeId],
+) -> PgResult<Vec<Expr>> {
+    let mut out = Vec::with_capacity(nodes.len());
+    for &nid in nodes {
+        out.push(root.node(nid).clone_in(mcx)?);
+    }
+    Ok(out)
 }
 
 /// Resolve a list of bare clause arena handles into an owned plan-node
@@ -2194,7 +2210,7 @@ fn build_node_list_to_expr_field<'mcx>(
     }
     let mut out = vec_with_capacity_in(mcx, nodes.len())?;
     for &nid in nodes {
-        out.push(root.node(nid).clone());
+        out.push(root.node(nid).clone_in(mcx)?);
     }
     Ok(Some(out))
 }
@@ -2694,7 +2710,10 @@ fn create_tidscan_plan<'mcx>(
     let mut scan_clauses = scan_clauses;
     if tidquals.len() > 1 {
         // make_orclause(tidquals) over the bare exprs.
-        let or_exprs: Vec<Expr> = tidquals.iter().map(|&n| root.node(n).clone()).collect();
+        let mut or_exprs: Vec<Expr> = Vec::with_capacity(tidquals.len());
+        for &n in &tidquals {
+            or_exprs.push(root.node(n).clone_in(mcx)?);
+        }
         let orclause = make_orclause(or_exprs);
         // list_difference(scan_clauses, list_make1(orclause)): drop any
         // scan_clause that equal()s the OR clause.
@@ -2707,14 +2726,13 @@ fn create_tidscan_plan<'mcx>(
     // Replace any outer-relation variables with nestloop params.
     if has_param_info {
         let mut err: Option<PgError> = None;
-        tidquals = tidquals
-            .into_iter()
-            .map(|n| {
-                let e = root.node(n).clone();
-                let out = replace_nestloop_params_expr(mcx, root, e, &mut err);
-                root.alloc_node(out)
-            })
-            .collect();
+        let mut new_tidquals: Vec<NodeId> = Vec::with_capacity(tidquals.len());
+        for n in tidquals.into_iter() {
+            let e = root.node(n).clone_in(mcx)?;
+            let out = replace_nestloop_params_expr(mcx, root, e, &mut err);
+            new_tidquals.push(root.alloc_node(out));
+        }
+        tidquals = new_tidquals;
         if let Some(e) = err {
             return Err(e);
         }
@@ -2727,7 +2745,7 @@ fn create_tidscan_plan<'mcx>(
     } else {
         let mut out = vec_with_capacity_in(mcx, tidquals.len())?;
         for &n in tidquals.iter() {
-            out.push(root.node(n).clone());
+            out.push(root.node(n).clone_in(mcx)?);
         }
         Some(out)
     };
@@ -2835,14 +2853,13 @@ fn create_tidrangescan_plan<'mcx>(
     // Replace any outer-relation variables with nestloop params.
     if has_param_info {
         let mut err: Option<PgError> = None;
-        tidrangequals = tidrangequals
-            .into_iter()
-            .map(|n| {
-                let e = root.node(n).clone();
-                let out = replace_nestloop_params_expr(mcx, root, e, &mut err);
-                root.alloc_node(out)
-            })
-            .collect();
+        let mut new_tidrangequals: Vec<NodeId> = Vec::with_capacity(tidrangequals.len());
+        for n in tidrangequals.into_iter() {
+            let e = root.node(n).clone_in(mcx)?;
+            let out = replace_nestloop_params_expr(mcx, root, e, &mut err);
+            new_tidrangequals.push(root.alloc_node(out));
+        }
+        tidrangequals = new_tidrangequals;
         if let Some(e) = err {
             return Err(e);
         }
@@ -2854,7 +2871,7 @@ fn create_tidrangescan_plan<'mcx>(
     } else {
         let mut out = vec_with_capacity_in(mcx, tidrangequals.len())?;
         for &n in tidrangequals.iter() {
-            out.push(root.node(n).clone());
+            out.push(root.node(n).clone_in(mcx)?);
         }
         Some(out)
     };
@@ -3612,7 +3629,7 @@ fn create_memoize_plan<'mcx>(
     let mut param_exprs: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, nkeys)?;
     for &cid in &path_param_exprs {
         let replaced = replace_nestloop_params(mcx, root, cid)?;
-        param_exprs.push(root.node(replaced).clone());
+        param_exprs.push(root.node(replaced).clone_in(mcx)?);
     }
 
     // Assert(nkeys > 0);
@@ -4116,11 +4133,11 @@ fn create_limit_plan<'mcx>(
     // best_path->limitOffset / limitCount are bare expr node handles; clone the
     // Expr out of the arena into the owned plan node.
     let limit_offset = match limit_offset_id {
-        Some(id) => Some(mcx::alloc_in(mcx, root.node(id).clone())?),
+        Some(id) => Some(mcx::alloc_in(mcx, root.node(id).clone_in(mcx)?)?),
         None => None,
     };
     let limit_count = match limit_count_id {
-        Some(id) => Some(mcx::alloc_in(mcx, root.node(id).clone())?),
+        Some(id) => Some(mcx::alloc_in(mcx, root.node(id).clone_in(mcx)?)?),
         None => None,
     };
 
@@ -5365,7 +5382,7 @@ fn node_ids_to_expr_list<'mcx>(
     }
     let mut out = vec_with_capacity_in(mcx, ids.len())?;
     for &id in ids {
-        out.push(root.node(id).clone());
+        out.push(root.node(id).clone_in(mcx)?);
     }
     Ok(Some(out))
 }
@@ -5683,8 +5700,10 @@ fn create_hashjoin_plan<'mcx>(
 
     // Remove the hashclauses from the join qual clauses (qpqual remainder).
     let hashclauses_actual = get_actual_clauses(root, &path_hashclauses);
-    let hashclauses_actual_exprs: Vec<Expr> =
-        hashclauses_actual.iter().map(|&id| root.node(id).clone()).collect();
+    let mut hashclauses_actual_exprs: Vec<Expr> = Vec::with_capacity(hashclauses_actual.len());
+    for &id in &hashclauses_actual {
+        hashclauses_actual_exprs.push(root.node(id).clone_in(mcx)?);
+    }
     joinclauses = list_difference_exprs(root, &joinclauses, &hashclauses_actual_exprs);
 
     if has_param_info {
@@ -5989,8 +6008,10 @@ fn create_mergejoin_plan<'mcx>(
     // Remove the mergeclauses from the join qual clauses, leaving the quals to
     // be checked as qpquals.
     let mergeclauses_actual = get_actual_clauses(root, &path_mergeclauses);
-    let mergeclauses_actual_exprs: Vec<Expr> =
-        mergeclauses_actual.iter().map(|&id| root.node(id).clone()).collect();
+    let mut mergeclauses_actual_exprs: Vec<Expr> = Vec::with_capacity(mergeclauses_actual.len());
+    for &id in &mergeclauses_actual {
+        mergeclauses_actual_exprs.push(root.node(id).clone_in(mcx)?);
+    }
     joinclauses = list_difference_exprs(root, &joinclauses, &mergeclauses_actual_exprs);
 
     // Replace any outer-relation variables with nestloop params. There should
@@ -6929,9 +6950,16 @@ fn create_windowagg_plan<'mcx>(
     let run_condition = nodes_to_expr_qual(mcx, root, &run_cond_ids)?;
     let qual = nodes_to_expr_qual(mcx, root, &qual_ids)?;
 
-    // The frame start/end offset expressions are arena Expr handles.
-    let start_offset = start_off_id.map(|id| root.node(id).clone());
-    let end_offset = end_off_id.map(|id| root.node(id).clone());
+    // The frame start/end offset expressions are arena Expr handles. Deep-copy
+    // via `clone_in` (a derived `.clone()` panics on an owned-subtree child).
+    let start_offset = match start_off_id {
+        Some(id) => Some(root.node(id).clone_in(mcx)?),
+        None => None,
+    };
+    let end_offset = match end_off_id {
+        Some(id) => Some(root.node(id).clone_in(mcx)?),
+        None => None,
+    };
 
     // wc->name -> owned PgString.
     let win_name: Option<PgString<'mcx>> = match win_name {

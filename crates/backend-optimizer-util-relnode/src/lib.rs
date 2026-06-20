@@ -29,6 +29,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use mcx::Mcx;
 use types_error::PgResult;
 use types_nodes::primnodes::{Expr, ExprRelids};
 
@@ -623,6 +624,7 @@ pub fn build_join_rel<'mcx>(
      * Fill the joinrel's tlist with just the Vars and PHVs needed above.
      */
     build_joinrel_tlist(
+        run.mcx(),
         root,
         joinrel,
         outer_rel,
@@ -631,6 +633,7 @@ pub fn build_join_rel<'mcx>(
         sjinfo.jointype == JOIN_FULL,
     )?;
     build_joinrel_tlist(
+        run.mcx(),
         root,
         joinrel,
         inner_rel,
@@ -659,7 +662,7 @@ pub fn build_join_rel<'mcx>(
     root.rel_mut(joinrel).has_eclass_joins = has_eclass_joins;
 
     /* Store the partition information. */
-    build_joinrel_partition_info(root, joinrel, outer_rel, inner_rel, sjinfo, &restrictlist)?;
+    build_joinrel_partition_info(run.mcx(), root, joinrel, outer_rel, inner_rel, sjinfo, &restrictlist)?;
 
     /* Set estimates of the joinrel's size. */
     ext::set_joinrel_size_estimates::call(run, root, joinrel, outer_rel, inner_rel, sjinfo, &restrictlist)?;
@@ -763,12 +766,12 @@ pub fn build_child_join_rel<'mcx>(
     set_foreign_rel_properties(root, joinrel, outer_rel, inner_rel);
 
     /* Set up reltarget struct */
-    build_child_join_reltarget(root, parent_joinrel, joinrel, appinfos)?;
+    build_child_join_reltarget(run.mcx(), root, parent_joinrel, joinrel, appinfos)?;
 
     /* Construct joininfo list. */
     let parent_joininfo = root.rel(parent_joinrel).joininfo.clone();
     let new_joininfo =
-        appendinfo::adjust_appendrel_attrs_restrictlist::call(root, &parent_joininfo, appinfos)?;
+        appendinfo::adjust_appendrel_attrs_restrictlist::call(run.mcx(), root, &parent_joininfo, appinfos)?;
     root.rel_mut(joinrel).joininfo = new_joininfo;
 
     /* Lateral relids referred in child join == those of the parent. */
@@ -782,7 +785,7 @@ pub fn build_child_join_rel<'mcx>(
     root.rel_mut(joinrel).has_eclass_joins = pej;
 
     /* Is the join between partitions itself partitioned? */
-    build_joinrel_partition_info(root, joinrel, outer_rel, inner_rel, sjinfo, restrictlist)?;
+    build_joinrel_partition_info(run.mcx(), root, joinrel, outer_rel, inner_rel, sjinfo, restrictlist)?;
 
     /* Child joinrel is parallel safe if parent is parallel safe. */
     let pcp = root.rel(parent_joinrel).consider_parallel;
@@ -836,6 +839,7 @@ pub fn min_join_parameterization(
 /// `build_joinrel_tlist(root, joinrel, input_rel, sjinfo, pushed_down_joins,
 /// can_null)` (relnode.c).
 fn build_joinrel_tlist(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     joinrel: RelId,
     input_rel: RelId,
@@ -849,7 +853,10 @@ fn build_joinrel_tlist(
     let input_exprs: Vec<NodeId> = root.rel(input_rel).reltarget.as_ref().unwrap().exprs.clone();
 
     for var_id in input_exprs {
-        let node = root.node(var_id).clone();
+        // Deep-copy via `Expr::clone_in` — the value must outlive the
+        // `&mut root` calls below (`find_placeholder_info`, `alloc_node`), and a
+        // derived `Expr::clone` panics on a context-allocated child.
+        let node = root.node(var_id).clone_in(mcx)?;
 
         /* For a PlaceHolderVar, look up the PlaceHolderInfo. */
         if node.is_placeholdervar() {
@@ -863,7 +870,7 @@ fn build_joinrel_tlist(
                  */
                 let out_id;
                 if can_null {
-                    let mut phv = node.clone();
+                    let mut phv = node.clone_in(mcx)?;
                     let phv_inner = phv
                         .as_placeholdervar_mut()
                         .expect("node.is_placeholdervar() checked above");
@@ -1586,6 +1593,7 @@ pub fn get_param_path_clause_serials(root: &PlannerInfo, path: types_pathnodes::
 /// `build_joinrel_partition_info(root, joinrel, outer_rel, inner_rel, sjinfo,
 /// restrictlist)` (relnode.c).
 fn build_joinrel_partition_info(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     joinrel: RelId,
     outer_rel: RelId,
@@ -1611,7 +1619,7 @@ fn build_joinrel_partition_info(
         || !root.rel(outer_rel).consider_partitionwise_join
         || !root.rel(inner_rel).consider_partitionwise_join
         || outer_scheme != inner_scheme
-        || !have_partkey_equi_join(root, joinrel, outer_rel, inner_rel, sjinfo.jointype, restrictlist)?
+        || !have_partkey_equi_join(mcx, root, joinrel, outer_rel, inner_rel, sjinfo.jointype, restrictlist)?
     {
         debug_assert!(!is_partitioned_rel(root.rel(joinrel)));
         return Ok(());
@@ -1661,6 +1669,7 @@ fn is_partitioned_rel(rel: &types_pathnodes::RelOptInfo) -> bool {
 /// `have_partkey_equi_join(root, joinrel, rel1, rel2, jointype, restrictlist)`
 /// (relnode.c).
 fn have_partkey_equi_join(
+    mcx: Mcx<'_>,
     root: &PlannerInfo,
     joinrel: RelId,
     rel1: RelId,
@@ -1697,31 +1706,34 @@ fn have_partkey_equi_join(
             continue;
         }
 
-        /* Should be OK to assume it's an OpExpr. */
+        /* Should be OK to assume it's an OpExpr.  Borrow the OpExpr; its
+         * operands are deep-copied via `Expr::clone_in` (a derived `Expr::clone`
+         * panics on a context-allocated operand) since they are moved through
+         * `remove_nulling_relids` and matched against the partition keys. */
         let opexpr = root
             .node(ri.clause)
             .expect_opexpr()
-            .expect("castNode(OpExpr, rinfo->clause)")
-            .clone();
+            .expect("castNode(OpExpr, rinfo->clause)");
+        let opexpr_opno = opexpr.opno;
 
         /* Match the operands to the relation. */
         let (mut expr1, mut expr2): (Expr, Expr);
         if bms::relids_is_subset::call(&ri.left_relids, &root.rel(rel1).relids)
             && bms::relids_is_subset::call(&ri.right_relids, &root.rel(rel2).relids)
         {
-            expr1 = opexpr.args[0].clone();
-            expr2 = opexpr.args[1].clone();
+            expr1 = opexpr.args[0].clone_in(mcx)?;
+            expr2 = opexpr.args[1].clone_in(mcx)?;
         } else if bms::relids_is_subset::call(&ri.left_relids, &root.rel(rel2).relids)
             && bms::relids_is_subset::call(&ri.right_relids, &root.rel(rel1).relids)
         {
-            expr1 = opexpr.args[1].clone();
-            expr2 = opexpr.args[0].clone();
+            expr1 = opexpr.args[1].clone_in(mcx)?;
+            expr2 = opexpr.args[0].clone_in(mcx)?;
         } else {
             continue;
         }
 
         /* Is the join operator strict? */
-        let strict_op = lsyscache::op_strict::call(opexpr.opno)?;
+        let strict_op = lsyscache::op_strict::call(opexpr_opno)?;
 
         /*
          * Vars in the partition keys have no varnullingrels, but expr1/expr2 do
@@ -1827,13 +1839,21 @@ fn have_partkey_equi_join(
 
         let mut found = false;
         'outer: for &e1 in rel1_partexprs.iter() {
-            let expr1 = root.node(e1).clone();
+            // Deep-copy via `Expr::clone_in` (a derived `Expr::clone` panics on a
+            // context-allocated child); these are passed by value into
+            // `exprs_known_equal`.
+            let expr1 = root.node(e1).clone_in(mcx)?;
             let exprcoll1 = eq_ext::expr_collation::call(&expr1);
 
             for &e2 in rel2_partexprs.iter() {
-                let expr2 = root.node(e2).clone();
+                let expr2 = root.node(e2).clone_in(mcx)?;
 
-                if equivclass::exprs_known_equal::call(root, expr1.clone(), expr2.clone(), btree_opfamily) {
+                if equivclass::exprs_known_equal::call(
+                    root,
+                    expr1.clone_in(mcx)?,
+                    expr2.clone_in(mcx)?,
+                    btree_opfamily,
+                ) {
                     /*
                      * Ensure the expression collation matches the partition key.
                      */
@@ -1973,9 +1993,15 @@ fn set_joinrel_partition_key_exprs(
                 let rargs = list_concat_copy(&inner_expr, &inner_null_expr);
                 for &larg in largs.iter() {
                     for &rarg in rargs.iter() {
-                        let larg_expr = root.node(larg).clone();
-                        let rarg_expr = root.node(rarg).clone();
-                        let c = ext::make_coalesce_expr::call(&larg_expr, &rarg_expr);
+                        // Borrow both operands for the read-only
+                        // `make_coalesce_expr` (a derived `Expr::clone` panics on
+                        // a context-allocated child); the borrows are released
+                        // before the `&mut root` `alloc_node`.
+                        let c = {
+                            let larg_expr: &Expr = root.node(larg);
+                            let rarg_expr: &Expr = root.node(rarg);
+                            ext::make_coalesce_expr::call(larg_expr, rarg_expr)
+                        };
                         let cid = root.alloc_node(c);
                         nullable_partexpr.push(cid);
                     }
@@ -2011,6 +2037,7 @@ fn list_concat_copy(a: &[NodeId], b: &[NodeId]) -> Vec<NodeId> {
 /// `build_child_join_reltarget(root, parentrel, childrel, nappinfos, appinfos)`
 /// (relnode.c).
 fn build_child_join_reltarget(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     parentrel: RelId,
     childrel: RelId,
@@ -2020,7 +2047,10 @@ fn build_child_join_reltarget(
     let parent_exprs = root.rel(parentrel).reltarget.as_ref().unwrap().exprs.clone();
     let mut child_exprs: Vec<NodeId> = Vec::with_capacity(parent_exprs.len());
     for e in parent_exprs {
-        let node = root.node(e).clone();
+        // Deep-copy via `Expr::clone_in` (moved into `adjust_appendrel_attrs_node`
+        // / the arena under `&mut root`; a derived `Expr::clone` panics on a
+        // context-allocated child).
+        let node = root.node(e).clone_in(mcx)?;
         let adjusted = ext::adjust_appendrel_attrs_node::call(root, node, appinfos)?;
         child_exprs.push(root.alloc_node(adjusted));
     }

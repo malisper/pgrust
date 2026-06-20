@@ -26,11 +26,19 @@ pub fn match_index_to_operand(
     indexcol: usize,
     index: &IndexOptInfo,
 ) -> bool {
-    // Ignore any PlaceHolderVar node contained in the operand.
-    let operand_owned: Expr = strip_phvs_in_index_operand(operand.clone());
+    // Ignore any PlaceHolderVar node contained in the operand. Only build an
+    // owned, stripped copy when a strippable PHV is actually present; otherwise
+    // borrow the operand as-is. (A blanket `operand.clone()` here would invoke
+    // the derived `Expr::clone`, which panics on an owned-subtree child such as
+    // an `Aggref`/`SubLink`/`SubPlan` index expression.)
+    let operand_owned: Option<Expr> = if contain_strippable_phv_walker(operand) {
+        Some(strip_phvs_in_index_operand_mutator(operand.clone()))
+    } else {
+        None
+    };
 
     // Ignore any (nested) RelabelType nodes above the operand.
-    let mut operand: &Expr = &operand_owned;
+    let mut operand: &Expr = operand_owned.as_ref().unwrap_or(operand);
     while operand.is_relabeltype() {
         match operand.as_relabeltype().unwrap().arg.as_deref() {
             Some(arg) => operand = arg,

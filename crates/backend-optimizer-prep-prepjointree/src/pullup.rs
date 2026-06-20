@@ -787,11 +787,11 @@ fn pull_up_simple_subquery<'mcx>(
     // upper query's. We have to fix the subquery's append_rel_list too.
     let rtoffset = parse.rtable.len() as i32;
     offset_var_nodes_in_query(mcx, &mut subquery, rtoffset, 0);
-    offset_var_nodes_in_append_rel_list(&mut subroot, rtoffset, 0);
+    offset_var_nodes_in_append_rel_list(mcx, &mut subroot, rtoffset, 0)?;
 
     // Upper-level vars in subquery are now one level closer to their parent.
     increment_var_sublevels_up_in_query(mcx, &mut subquery, -1, 1)?;
-    increment_var_sublevels_up_in_append_rel_list(&mut subroot, -1, 1)?;
+    increment_var_sublevels_up_in_append_rel_list(mcx, &mut subroot, -1, 1)?;
 
     // The subquery's targetlist items are now in the appropriate form to insert
     // into the top query, except that we may need to wrap them in
@@ -3163,7 +3163,12 @@ fn increment_var_sublevels_up_in_query<'mcx>(
 
 /// `OffsetVarNodes((Node *) subroot->append_rel_list, rtoffset, 0)`: each
 /// AppendRelInfo's relid-bearing children are its translated_vars (arena Exprs).
-fn offset_var_nodes_in_append_rel_list(subroot: &mut PlannerInfo, offset: i32, sublevels_up: i32) {
+fn offset_var_nodes_in_append_rel_list(
+    mcx: Mcx<'_>,
+    subroot: &mut PlannerInfo,
+    offset: i32,
+    sublevels_up: i32,
+) -> PgResult<()> {
     let mut ids: Vec<NodeId> = Vec::new();
     for ai in subroot.append_rel_list.iter() {
         for &id in ai.translated_vars.iter() {
@@ -3173,7 +3178,9 @@ fn offset_var_nodes_in_append_rel_list(subroot: &mut PlannerInfo, offset: i32, s
         }
     }
     for id in ids {
-        let mut node = Node::Expr(subroot.node(id).clone());
+        // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+        // owned-subtree child.
+        let mut node = Node::Expr(subroot.node(id).clone_in(mcx)?);
         OffsetVarNodes(&mut node, offset, sublevels_up);
         if let Some(e) = node.into_expr() {
             *subroot.node_mut(id) = e;
@@ -3183,10 +3190,12 @@ fn offset_var_nodes_in_append_rel_list(subroot: &mut PlannerInfo, offset: i32, s
     // OffsetVarNodes over the append_rel_list list adjusts only the Var nodes
     // within translated_vars (parent_relid/child_relid are plain ints not Vars),
     // matching this walk.
+    Ok(())
 }
 
 /// `IncrementVarSublevelsUp((Node *) subroot->append_rel_list, -1, 1)`.
 fn increment_var_sublevels_up_in_append_rel_list(
+    mcx: Mcx<'_>,
     subroot: &mut PlannerInfo,
     delta: i32,
     min_sublevels_up: i32,
@@ -3200,7 +3209,9 @@ fn increment_var_sublevels_up_in_append_rel_list(
         }
     }
     for id in ids {
-        let mut node = Node::Expr(subroot.node(id).clone());
+        // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+        // owned-subtree child.
+        let mut node = Node::Expr(subroot.node(id).clone_in(mcx)?);
         IncrementVarSublevelsUp(&mut node, delta, min_sublevels_up)?;
         if let Some(e) = node.into_expr() {
             *subroot.node_mut(id) = e;

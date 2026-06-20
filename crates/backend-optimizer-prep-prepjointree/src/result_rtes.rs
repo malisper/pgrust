@@ -139,7 +139,7 @@ pub fn remove_useless_result_rtes<'mcx>(
         let removable = relids_to_expr_relids(dropped_outer_joins.as_deref());
         let empty = ExprRelids { words: Vec::new() };
         backend_rewrite_core::remove_nulling_relids_in_query(parse, &removable, &empty);
-        remove_nulling_relids_in_append_rel_list(root, &removable, &empty);
+        remove_nulling_relids_in_append_rel_list(mcx, root, &removable, &empty)?;
     }
 
     // Remove any PlanRowMark referencing an RTE_RESULT RTE: required for ones we
@@ -580,7 +580,7 @@ fn find_dependent_phvs_walker(node: &Node, context: &mut FindDependentPhvsContex
 /// `find_dependent_phvs(root, varno)` (prepjointree.c:4048). Are there any PHVs
 /// whose relids are exactly `{varno}` anywhere in the Query (and append_rel_list)?
 fn find_dependent_phvs<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     parse: &Query<'mcx>,
     varno: i32,
@@ -596,7 +596,7 @@ fn find_dependent_phvs<'mcx>(
         return Ok(true);
     }
     // The append_rel_list could be populated already; check translated_vars too.
-    if find_dependent_phvs_in_append_rel_list(root, &mut context) {
+    if find_dependent_phvs_in_append_rel_list(mcx, root, &mut context)? {
         return Ok(true);
     }
     Ok(false)
@@ -605,21 +605,24 @@ fn find_dependent_phvs<'mcx>(
 /// `expression_tree_walker((Node *) root->append_rel_list, ...)` over the arena
 /// `translated_vars` Exprs.
 fn find_dependent_phvs_in_append_rel_list(
+    mcx: Mcx<'_>,
     root: &PlannerInfo,
     context: &mut FindDependentPhvsContext,
-) -> bool {
+) -> PgResult<bool> {
     for appinfo in root.append_rel_list.iter() {
         for &id in appinfo.translated_vars.iter() {
             if id == NodeId::default() {
                 continue;
             }
-            let node = Node::Expr(root.node(id).clone());
+            // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+            // owned-subtree child.
+            let node = Node::Expr(root.node(id).clone_in(mcx)?);
             if find_dependent_phvs_walker(&node, context) {
-                return true;
+                return Ok(true);
             }
         }
     }
-    false
+    Ok(false)
 }
 
 /// `find_dependent_phvs_in_jointree(root, node, varno)` (prepjointree.c:4070)
@@ -812,7 +815,7 @@ fn substitute_phv_relids_in_node(node: &mut Node, varno: i32, subrelids: &ExprRe
 /// `subrelids_bms` is the `'mcx` Relids (for `bms_singleton_member`); `subrelids`
 /// is its lifetime-free [`ExprRelids`] form (for the PHV editor).
 pub(crate) fn fix_append_rel_relids<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     varno: i32,
     subrelids_bms: Option<&Bitmapset>,
@@ -843,7 +846,9 @@ pub(crate) fn fix_append_rel_relids<'mcx>(
     }
     // Second pass: fix PHVs in the translated_vars arena Exprs.
     for id in to_fix {
-        let mut node = Node::Expr(root.node(id).clone());
+        // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+        // owned-subtree child.
+        let mut node = Node::Expr(root.node(id).clone_in(mcx)?);
         substitute_phv_relids_in_node(&mut node, varno, subrelids);
         if let Some(e) = node.into_expr() {
             *root.node_mut(id) = e;
@@ -1132,10 +1137,11 @@ fn clone_relids<'mcx>(mcx: Mcx<'mcx>, a: Option<&Bitmapset>) -> PgResult<Relids<
 /// run the expression-tree `remove_nulling_relids` over each arena
 /// `translated_vars` Expr and write it back.
 fn remove_nulling_relids_in_append_rel_list(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     removable: &ExprRelids,
     except: &ExprRelids,
-) {
+) -> PgResult<()> {
     let mut ids: Vec<NodeId> = Vec::new();
     for appinfo in root.append_rel_list.iter() {
         for &id in appinfo.translated_vars.iter() {
@@ -1146,12 +1152,15 @@ fn remove_nulling_relids_in_append_rel_list(
         }
     }
     for id in ids {
-        let mut node = Node::Expr(root.node(id).clone());
+        // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+        // owned-subtree child.
+        let mut node = Node::Expr(root.node(id).clone_in(mcx)?);
         backend_rewrite_core::remove_nulling_relids(&mut node, removable, except);
         if let Some(e) = node.into_expr() {
             *root.node_mut(id) = e;
         }
     }
+    Ok(())
 }
 
 // ===========================================================================

@@ -40,7 +40,6 @@ use types_error::PgResult;
 use types_nodes::nodes::{ntag, Node};
 use types_nodes::primnodes::Expr;
 use types_pathnodes::{Bitmapset, NodeId, PlannerInfo, Relids};
-use types_core::primitive::{InvalidOid, Oid};
 
 // `FirstLowInvalidHeapAttributeNumber` (access/sysattr.h) = -7. var.c offsets
 // attribute numbers by this so system attributes fit a bitmap; matches

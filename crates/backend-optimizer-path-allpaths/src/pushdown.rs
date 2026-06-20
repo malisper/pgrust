@@ -32,14 +32,25 @@ use types_error::{PgError, PgResult};
 use types_nodes::copy_query::Query;
 use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::RangeTblEntry;
-use types_nodes::primnodes::{Expr, OpExpr, WindowFunc};
+use types_nodes::primnodes::{Expr, OpExpr};
 use types_nodes::rawnodes::{SortGroupClause, WindowClause, SETOP_EXCEPT};
-use types_pathnodes::{PlannerInfo, RelId, Relids};
+use types_pathnodes::{NodeId, PlannerInfo, RelId, Relids, RinfoId};
 
 use backend_nodes_core::makefuncs::make_and_qual;
 use backend_nodes_core::nodefuncs::{
     expr_collation, expr_type, expr_typmod, expression_returns_set, set_opfuncid,
 };
+
+/// Deep-copy a slice of `Expr` into `mcx` via `Expr::clone_in` (C copyObject).
+/// The derived `Expr::clone` panics on an owned-subtree child
+/// (`Aggref`/`SubLink`/`SubPlan`).
+fn clone_exprs_in(exprs: &[Expr], mcx: Mcx<'_>) -> PgResult<Vec<Expr>> {
+    let mut out = Vec::with_capacity(exprs.len());
+    for e in exprs {
+        out.push(e.clone_in(mcx)?);
+    }
+    Ok(out)
+}
 
 /* ==========================================================================
  * pushdown_safety_info struct + UNSAFE_* bit flags (allpaths.c:52-67)
@@ -432,6 +443,7 @@ fn target_is_in_sort_list_clauses(
 /// clause is what carries volatile funcs — we pass the clause for that walk too,
 /// faithful because a RestrictInfo holds no volatile funcs outside its clause).
 pub(crate) fn qual_is_pushdown_safe(
+    mcx: Mcx<'_>,
     _subquery: &Query<'_>,
     rti: Index,
     clause: &Expr,
@@ -458,8 +470,9 @@ pub(crate) fn qual_is_pushdown_safe(
         return Ok(PushdownSafe::Unsafe);
     }
 
-    // Examine all Vars used in clause.
-    let clause_node = Node::Expr(clause.clone());
+    // Examine all Vars used in clause. Deep-copy via `clone_in` (the derived
+    // `Expr::clone` panics on an owned-subtree child).
+    let clause_node = Node::mk_expr(mcx, clause.clone_in(mcx)?);
     let vars = backend_optimizer_util_vars::var::pull_var_clause(
         &clause_node,
         backend_optimizer_util_vars::var::PVC_INCLUDE_PLACEHOLDERS,
@@ -533,7 +546,7 @@ pub(crate) fn subquery_push_qual<'mcx>(
     } else {
         // Replace outer Vars in the qual with copies of the subquery's tlist
         // expressions. ReplaceVarsFromTargetList works over a Node in place.
-        let mut qual_node = Node::Expr(qual.clone());
+        let mut qual_node = Node::mk_expr(mcx, qual.clone_in(mcx)?);
         let mut has_sublinks = Some(subquery.hasSubLinks);
         backend_rewrite_core::replace::ReplaceVarsFromTargetList(
             &mut qual_node,
@@ -562,7 +575,11 @@ pub(crate) fn subquery_push_qual<'mcx>(
             || !subquery.groupingSets.is_empty()
             || subquery.havingQual.is_some()
         {
-            let existing = subquery.havingQual.take().map(|b| (*b).clone());
+            let existing = subquery
+                .havingQual
+                .take()
+                .map(|b| (*b).clone_in(mcx))
+                .transpose()?;
             subquery.havingQual = make_and_qual(existing, new_qual)
                 .map(|e| mcx::alloc_in(mcx, e))
                 .transpose()?;
@@ -571,7 +588,12 @@ pub(crate) fn subquery_push_qual<'mcx>(
                 .jointree
                 .as_mut()
                 .ok_or_else(|| PgError::error("subquery_push_qual: subquery has no jointree"))?;
-            let existing = jt.quals.as_ref().and_then(|n| node_as_expr(n).cloned());
+            let existing = jt
+                .quals
+                .as_ref()
+                .and_then(|n| node_as_expr(n))
+                .map(|e| e.clone_in(mcx))
+                .transpose()?;
             jt.quals = make_and_qual(existing, new_qual)
                 .map(|e| mcx::alloc_in(mcx, Node::mk_expr(mcx, e)))
                 .transpose()?;
@@ -642,8 +664,10 @@ pub(crate) fn check_and_push_window_quals(
     let Expr::OpExpr(_) = clause else {
         return Ok(true);
     };
-    let mut opexpr = match clause {
-        Expr::OpExpr(o) => o.clone(),
+    // Deep-copy the OpExpr via `clone_in` (the derived `Expr::clone` panics on
+    // an owned-subtree operand).
+    let mut opexpr = match clause.clone_in(mcx)? {
+        Expr::OpExpr(o) => o,
         _ => unreachable!(),
     };
     if opexpr.args.len() != 2 {
@@ -664,14 +688,17 @@ pub(crate) fn check_and_push_window_quals(
                 .ok_or_else(|| PgError::error("check_and_push_window_quals: bad varattno"))?;
             if let Some(tle) = subquery.targetList.get(idx) {
                 let resno = tle.resno;
-                if let Some(Expr::WindowFunc(wfunc)) = tle.expr.as_deref() {
-                    let wfunc = wfunc.clone();
+                if matches!(tle.expr.as_deref(), Some(Expr::WindowFunc(_))) {
+                    // Deep-copy via `clone_in` — the node must outlive the
+                    // `&mut subquery` call below and the derived `Expr::clone`
+                    // panics on an owned-subtree child.
+                    let wfunc_node = tle.expr.as_deref().unwrap().clone_in(mcx)?;
                     let mut keep_original = true;
                     if find_window_run_conditions(
                         mcx,
                         subquery,
                         resno,
-                        &wfunc,
+                        &wfunc_node,
                         &opexpr,
                         true,
                         &mut keep_original,
@@ -692,14 +719,15 @@ pub(crate) fn check_and_push_window_quals(
                 .ok_or_else(|| PgError::error("check_and_push_window_quals: bad varattno"))?;
             if let Some(tle) = subquery.targetList.get(idx) {
                 let resno = tle.resno;
-                if let Some(Expr::WindowFunc(wfunc)) = tle.expr.as_deref() {
-                    let wfunc = wfunc.clone();
+                if matches!(tle.expr.as_deref(), Some(Expr::WindowFunc(_))) {
+                    // Deep-copy via `clone_in` (see the var1 branch above).
+                    let wfunc_node = tle.expr.as_deref().unwrap().clone_in(mcx)?;
                     let mut keep_original = true;
                     if find_window_run_conditions(
                         mcx,
                         subquery,
                         resno,
-                        &wfunc,
+                        &wfunc_node,
                         &opexpr,
                         false,
                         &mut keep_original,
@@ -724,10 +752,10 @@ pub(crate) fn check_and_push_window_quals(
 /// in which case this returns `false` and leaves `*keep_original = true`.
 #[allow(clippy::too_many_arguments)]
 fn find_window_run_conditions(
-    _mcx: Mcx<'_>,
+    mcx: Mcx<'_>,
     subquery: &mut Query<'_>,
     attno: AttrNumber,
-    wfunc: &WindowFunc,
+    wfunc_node: &Expr,
     opexpr: &OpExpr,
     wfunc_left: bool,
     keep_original: &mut bool,
@@ -739,10 +767,13 @@ fn find_window_run_conditions(
     // already the WindowFunc — a RelabelType wrapper would have been a different
     // Expr variant and check_and_push_window_quals would not have matched it as
     // a WindowFunc tlist entry. Faithful: only WindowFuncs reach here.)
+    let wfunc = match wfunc_node {
+        Expr::WindowFunc(w) => w,
+        _ => return Ok(false),
+    };
 
     // Can't use it if there are subplans in the WindowFunc.
-    let wfunc_node = Expr::WindowFunc(wfunc.clone());
-    if backend_optimizer_util_clauses::grounded::contain_subplans(Some(&wfunc_node))? {
+    if backend_optimizer_util_clauses::grounded::contain_subplans(Some(wfunc_node))? {
         return Ok(false);
     }
 
@@ -779,8 +810,22 @@ fn find_window_run_conditions(
 
     // Examine the operator's btree interpretations to pick the run operator.
     let opinfos =
-        backend_utils_cache_lsyscache_seams::get_op_index_interpretation::call(_mcx, opexpr.opno)?;
+        backend_utils_cache_lsyscache_seams::get_op_index_interpretation::call(mcx, opexpr.opno)?;
 
+    // Deep-copy the OpExpr (the derived `Expr::clone` panics on an owned-subtree
+    // operand; `clone_exprs_in` routes each arg through `Expr::clone_in`).
+    let clone_runopexpr = |o: &OpExpr| -> PgResult<OpExpr> {
+        Ok(OpExpr {
+            opno: o.opno,
+            opfuncid: o.opfuncid,
+            opresulttype: o.opresulttype,
+            opretset: o.opretset,
+            opcollid: o.opcollid,
+            inputcollid: o.inputcollid,
+            args: clone_exprs_in(&o.args, mcx)?,
+            location: o.location,
+        })
+    };
     let mut runopexpr: Option<OpExpr> = None;
     let mut runoperator = types_core::primitive::InvalidOid;
 
@@ -791,7 +836,7 @@ fn find_window_run_conditions(
                 || (!wfunc_left && (monotonic & MONOTONICFUNC_DECREASING) != 0)
             {
                 *keep_original = false;
-                runopexpr = Some(opexpr.clone());
+                runopexpr = Some(clone_runopexpr(opexpr)?);
                 runoperator = opexpr.opno;
             }
             break;
@@ -800,14 +845,14 @@ fn find_window_run_conditions(
                 || (!wfunc_left && (monotonic & MONOTONICFUNC_INCREASING) != 0)
             {
                 *keep_original = false;
-                runopexpr = Some(opexpr.clone());
+                runopexpr = Some(clone_runopexpr(opexpr)?);
                 runoperator = opexpr.opno;
             }
             break;
         } else if cmptype == COMPARE_EQ {
             if (monotonic & MONOTONICFUNC_BOTH) == MONOTONICFUNC_BOTH {
                 *keep_original = false;
-                runopexpr = Some(opexpr.clone());
+                runopexpr = Some(clone_runopexpr(opexpr)?);
                 runoperator = opexpr.opno;
                 break;
             }
@@ -819,7 +864,7 @@ fn find_window_run_conditions(
                 COMPARE_LE
             };
             *keep_original = true;
-            runopexpr = Some(opexpr.clone());
+            runopexpr = Some(clone_runopexpr(opexpr)?);
             runoperator = backend_utils_cache_lsyscache_seams::get_opfamily_member_for_cmptype::call(
                 opinfo.opfamily_id,
                 opinfo.oplefttype,
@@ -889,29 +934,28 @@ pub(crate) fn remove_unused_subquery_outputs<'mcx>(
     // Collect output column numbers used by the upper query.
     let relid = root.rel(rel).relid as i32;
 
-    // pull_varattnos over rel->reltarget->exprs.
-    let reltarget_exprs: Vec<Expr> = {
+    // pull_varattnos over rel->reltarget->exprs. Deep-copy each expr via
+    // `clone_in` (the derived `Expr::clone` panics on an owned-subtree child).
+    let reltarget_expr_ids: Vec<NodeId> = {
         let rt = root
             .rel(rel)
             .reltarget
             .as_ref()
             .ok_or_else(|| PgError::error("remove_unused_subquery_outputs: rel has no reltarget"))?;
-        rt.exprs.iter().map(|nid| root.node(*nid).clone()).collect()
+        rt.exprs.clone()
     };
-    for e in reltarget_exprs.iter() {
-        let n = Node::mk_expr(mcx, e.clone());
+    for nid in reltarget_expr_ids.iter() {
+        let e = root.node(*nid).clone_in(mcx)?;
+        let n = Node::mk_expr(mcx, e);
         attrs_used = pull_varattnos_relids(mcx, &n, relid, attrs_used)?;
     }
 
     // pull_varattnos over each un-pushed-down baserestrictinfo clause.
-    let base_rinfo_clauses: Vec<Expr> = root
-        .rel(rel)
-        .baserestrictinfo
-        .iter()
-        .map(|rid| root.node(root.rinfo(*rid).clause).clone())
-        .collect();
-    for c in base_rinfo_clauses.iter() {
-        let n = Node::mk_expr(mcx, c.clone());
+    let base_rinfo_ids: Vec<RinfoId> = root.rel(rel).baserestrictinfo.clone();
+    for rid in base_rinfo_ids.iter() {
+        let clause_id = root.rinfo(*rid).clause;
+        let c = root.node(clause_id).clone_in(mcx)?;
+        let n = Node::mk_expr(mcx, c);
         attrs_used = pull_varattnos_relids(mcx, &n, relid, attrs_used)?;
     }
 

@@ -875,9 +875,13 @@ fn split_selfjoin_quals<'mcx>(
 
         let clause = root.node(rinfo.clause);
         let (left_arg, right_arg) = match clause {
-            Expr::OpExpr(op) if op.args.len() == 2 => {
-                (op.args[0].clone(), op.args[1].clone())
-            }
+            // Deep-copy the operands via `Expr::clone_in` (they are taken by
+            // value into strip_relabel and mutated; a derived `Expr::clone`
+            // panics on a context-allocated child).
+            Expr::OpExpr(op) if op.args.len() == 2 => (
+                op.args[0].clone_in(mcx).expect("clone_in"),
+                op.args[1].clone_in(mcx).expect("clone_in"),
+            ),
             _ => {
                 ojoinquals.push(rinfo_id);
                 continue;
@@ -905,10 +909,12 @@ fn split_selfjoin_quals<'mcx>(
 }
 
 /// `RelabelType` strip — `if (IsA(x, RelabelType)) x = ((RelabelType *)x)->arg`.
-fn strip_relabel(e: Expr) -> Expr {
-    if let Expr::RelabelType(r) = &e {
-        if let Some(arg) = &r.arg {
-            return (**arg).clone();
+fn strip_relabel(mut e: Expr) -> Expr {
+    if let Expr::RelabelType(r) = &mut e {
+        if let Some(arg) = r.arg.take() {
+            // Move the contained arg out by value (no derived `Expr::clone`,
+            // which would panic on a context-allocated child).
+            return *arg;
         }
     }
     e
@@ -956,7 +962,9 @@ fn match_unique_clauses<'mcx>(
         );
 
         // clause = copyObject(rinfo->clause); ChangeVarNodes(clause, relid, outer->relid).
-        let mut clause = root.node(rinfo.clause).clone();
+        // Deep-copy via `Expr::clone_in` (a derived `Expr::clone` panics on a
+        // context-allocated child).
+        let mut clause = root.node(rinfo.clause).clone_in(run.mcx()).expect("clone_in");
         change_expr_relids_standalone(&mut clause, relid, outer_relid);
 
         let left_empty = relids::is_empty(&rinfo.left_relids);
@@ -1115,14 +1123,17 @@ fn update_eclasses<'mcx>(
         // Drop if redundant with an already-kept member.
         let mut is_redundant = false;
         let em_relids = relids::copy(&root.em(em_id).em_relids);
-        let em_expr = root.node(root.em(em_id).em_expr).clone();
+        // Borrow the EM expr (only inspected by `equal`); a derived `.clone()`
+        // would panic on a context-allocated child.
+        let em_expr_id = root.em(em_id).em_expr;
+        let em_expr: &Expr = root.node(em_expr_id);
         for &other_id in &new_members {
             if !relids::equal(&root.em(other_id).em_relids, &em_relids) {
                 continue;
             }
             if backend_optimizer_path_equivclass_ext_seams::equal::call(
                 root.node(root.em(other_id).em_expr),
-                &em_expr,
+                em_expr,
             ) {
                 is_redundant = true;
                 break;
@@ -1155,14 +1166,17 @@ fn update_eclasses<'mcx>(
 
         let mut is_redundant = false;
         let clause_relids = relids::copy(&root.rinfo(rinfo_id).clause_relids);
-        let clause = root.node(root.rinfo(rinfo_id).clause).clone();
+        // Borrow the clause (only inspected by `equal`); a derived `.clone()`
+        // would panic on a context-allocated child.
+        let clause_id = root.rinfo(rinfo_id).clause;
+        let clause: &Expr = root.node(clause_id);
         for &other_id in &new_sources {
             if !relids::equal(&root.rinfo(other_id).clause_relids, &clause_relids) {
                 continue;
             }
             if backend_optimizer_path_equivclass_ext_seams::equal::call(
                 root.node(root.rinfo(other_id).clause),
-                &clause,
+                clause,
             ) {
                 is_redundant = true;
                 break;

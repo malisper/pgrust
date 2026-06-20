@@ -110,6 +110,7 @@ pub fn init_seams() {
 
     use types_pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId, RinfoId};
     use types_core::primitive::Oid;
+    use types_nodes::primnodes::Expr;
     use types_error::PgResult;
 
     // create_index_paths / check_index_predicates allocate; the registry seam
@@ -181,8 +182,8 @@ pub fn init_seams() {
     );
     ix::match_index_to_operand::set(
         |root: &PlannerInfo, operand: NodeId, indexcol: i32, index: &IndexOptInfo| -> bool {
-            let expr = root.node(operand).clone();
-            operand::match_index_to_operand(root, &expr, indexcol as usize, index)
+            let expr: &Expr = root.node(operand);
+            operand::match_index_to_operand(root, expr, indexcol as usize, index)
         },
     );
 }

@@ -635,8 +635,11 @@ fn reconsider_outer_join_clause<'mcx>(
         .expect("reconsider_outer_join_clause: clause is not an OpExpr");
     let opno = opexpr.opno;
     let collation = opexpr.inputcollid;
-    let leftop = opexpr.args[0].clone();
-    let rightop = opexpr.args[1].clone();
+    // Deep-copy via `clone_in` — the operands are moved into
+    // `build_implied_join_equality` (the derived `Expr::clone` panics on an
+    // owned-subtree child).
+    let leftop = opexpr.args[0].clone_in(run.mcx())?;
+    let rightop = opexpr.args[1].clone_in(run.mcx())?;
 
     let (left_type, right_type) = cat::op_input_types::call(opno).expect("op_input_types");
     let (outervar, innervar, inner_datatype, inner_relids) = if outer_on_left {
@@ -741,8 +744,10 @@ fn reconsider_full_join_clause<'mcx>(
     let opno = opexpr.opno;
     let collation = opexpr.inputcollid;
     let (left_type, right_type) = cat::op_input_types::call(opno).expect("op_input_types");
-    let leftvar = opexpr.args[0].clone();
-    let rightvar = opexpr.args[1].clone();
+    // Deep-copy via `clone_in` — moved into `build_implied_join_equality` (the
+    // derived `Expr::clone` panics on an owned-subtree child).
+    let leftvar = opexpr.args[0].clone_in(run.mcx())?;
+    let rightvar = opexpr.args[1].clone_in(run.mcx())?;
     let left_relids = root.rinfo(rinfo).left_relids.clone();
     let right_relids = root.rinfo(rinfo).right_relids.clone();
     let mergeopfamilies = root.rinfo(rinfo).mergeopfamilies.clone();
@@ -775,8 +780,10 @@ fn reconsider_full_join_clause<'mcx>(
             if cexpr.args.len() != 2 {
                 continue;
             }
-            let cfirst = cexpr.args[0].clone();
-            let csecond = cexpr.args[1].clone();
+            // Deep-copy via `clone_in` — moved into `remove_nulling_relids` (the
+            // derived `Expr::clone` panics on an owned-subtree child).
+            let cfirst = cexpr.args[0].clone_in(run.mcx())?;
+            let csecond = cexpr.args[1].clone_in(run.mcx())?;
             /* strip the full join from the COALESCE args' nullingrels */
             let cfirst = ec_seam::remove_nulling_relids::call(
                 cfirst,
@@ -853,9 +860,10 @@ fn reconsider_full_join_clause<'mcx>(
     Ok(false)
 }
 
-/// Resolve a RestrictInfo's clause node to an owned [`Expr`].
-fn em_expr_of_clause(root: &PlannerInfo, rinfo: RinfoId) -> types_nodes::primnodes::Expr {
-    root.node(root.rinfo(rinfo).clause).clone()
+/// Resolve a RestrictInfo's clause node to a borrowed [`Expr`] (read-only; a
+/// derived `.clone()` would panic on an owned-subtree child).
+fn em_expr_of_clause(root: &PlannerInfo, rinfo: RinfoId) -> &types_nodes::primnodes::Expr {
+    root.node(root.rinfo(rinfo).clause)
 }
 
 #[allow(unused_imports)]

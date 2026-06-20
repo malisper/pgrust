@@ -588,7 +588,7 @@ pub fn build_index_paths<'mcx>(
     } else if index.amcanorderbyop && pathkeys_possibly_useful {
         // Generate ordering operators for query_pathkeys (or a prefix).
         let query_pathkeys = root.query_pathkeys.clone();
-        let (oc, occ) = match_pathkeys_to_index(root, index, &query_pathkeys);
+        let (oc, occ) = match_pathkeys_to_index(mcx, root, index, &query_pathkeys)?;
         orderbyclauses = oc;
         orderbyclausecols = occ;
         if root.query_pathkeys.len() == orderbyclauses.len() {

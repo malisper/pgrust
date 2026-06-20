@@ -54,11 +54,15 @@ pub struct ReplaceRelidContext {
 /// `Var.varno` / `varnullingrels` / PHV rels / RangeTblRef etc. The arena `Expr`
 /// is lifetime-free, so it is wrapped as a `Node::Expr` for the standalone walk.
 pub(crate) fn change_relids_in_node(root: &mut PlannerInfo, id: NodeId, ctx: ReplaceRelidContext) {
-    // Wrap a clone of the arena Expr as a `Node` so the standalone walker owns a
-    // `&mut Node`, then store the walked result back (mirroring the C in-place
-    // mutation through the `(Node *) rinfo->clause` pointer). The arena `Expr` is
-    // lifetime-free, so `Node::Expr` is valid for any `'mcx`.
-    let mut node = Node::Expr(root.node(id).clone());
+    // Move the arena `Expr` out (leaving a cheap leaf placeholder) and wrap it as
+    // a `Node` so the standalone walker owns a `&mut Node`, then store the walked
+    // result back (mirroring the C in-place mutation through the
+    // `(Node *) rinfo->clause` pointer). Taking the value by `mem::replace`
+    // avoids a derived `Expr::clone`, which would panic on a context-allocated
+    // child (Aggref/SubLink/SubPlan). The arena `Expr` is lifetime-free, so
+    // `Node::Expr` is valid for any `'mcx`.
+    let taken = core::mem::replace(root.node_mut(id), Expr::Var(Default::default()));
+    let mut node = Node::Expr(taken);
     ChangeVarNodes(&mut node, ctx.rt_index, ctx.new_index, 0);
     // ChangeVarNodes never changes the top-level node kind for an Expr input.
     let walked = node

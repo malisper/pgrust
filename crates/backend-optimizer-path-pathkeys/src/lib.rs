@@ -741,7 +741,14 @@ pub fn build_index_pathkeys(
         // We assume we don't need to make a copy of the tlist item.
         // indexkey = indextle->expr.
         let indexkey_id = nf::targetentry_info::call(root, indextle_id).expr;
-        let indexkey = root.node(indexkey_id).clone();
+        // Deep-copy via `clone_in` — `indexkey` outlives the `&mut root`
+        // `make_pathkey_from_sortinfo` call (the derived `Expr::clone` panics on
+        // an owned-subtree child). copyObject only fails on OOM (which aborts in
+        // C), so an error here is unrecoverable like C's palloc failure.
+        let indexkey = root
+            .node(indexkey_id)
+            .clone_in(mcx)
+            .expect("build_index_pathkeys: clone_in indexkey");
 
         let (reverse_sort, nulls_first) = if scan_direction_is_backward(scandir) {
             (!index.reverse_sort[i], !index.nulls_first[i])
@@ -842,19 +849,22 @@ pub fn matches_boolean_partition_clause(
     partrel: RelId,
     partkeycol: i32,
 ) -> bool {
-    let clause = root.node(root.rinfo(rinfo).clause).clone();
+    // Borrow the clause / partition-key expr for the read-only `equal` tests (a
+    // derived `.clone()` would panic on an owned-subtree child).
+    let clause_id = root.rinfo(rinfo).clause;
+    let clause: &types_nodes::primnodes::Expr = root.node(clause_id);
     // partexpr = (Node *) linitial(partrel->partexprs[partkeycol]).
     let partexpr_id = root.rel(partrel).partexprs[partkeycol as usize][0];
-    let partexpr = root.node(partexpr_id).clone();
+    let partexpr: &types_nodes::primnodes::Expr = root.node(partexpr_id);
 
     // Direct match?
-    if nf::equal::call(&partexpr, &clause) {
+    if nf::equal::call(partexpr, clause) {
         return true;
     }
     // NOT clause?
-    if nf::is_notclause::call(&clause) {
-        let arg = nf::get_notclausearg::call(&clause);
-        if nf::equal::call(&partexpr, arg) {
+    if nf::is_notclause::call(clause) {
+        let arg = nf::get_notclausearg::call(clause);
+        if nf::equal::call(partexpr, arg) {
             return true;
         }
     }
@@ -889,7 +899,13 @@ pub fn build_partition_pathkeys(
     for i in 0..partnatts as usize {
         // keyCol = (Expr *) linitial(partrel->partexprs[i]).
         let key_col_id = root.rel(partrel).partexprs[i][0];
-        let key_col = root.node(key_col_id).clone();
+        // Deep-copy via `clone_in` — `key_col` outlives the `&mut root`
+        // `make_pathkey_from_sortinfo` call (the derived `Expr::clone` panics on
+        // an owned-subtree child). copyObject only fails on OOM (aborts in C).
+        let key_col = root
+            .node(key_col_id)
+            .clone_in(mcx)
+            .expect("build_partition_pathkeys: clone_in key_col");
 
         let (opfamily, opcintype, partcollation) = {
             let part_scheme = root.rel(partrel).part_scheme.as_ref().unwrap();
@@ -989,6 +1005,14 @@ pub fn convert_subquery_pathkeys(
     let outer_query_keys = root.query_pathkeys.len();
     let rel_relids = bms::relids_copy::call(&root.rel(rel).relids);
 
+    // Working context for the transient deep copies of EM/TLE expressions below.
+    // They are only inspected (`equal`) / fed by value into
+    // `canonicalize_ec_expression`, never stored, so a function-scoped context is
+    // correct. `clone_in` is required because the derived `Expr::clone` panics on
+    // an owned-subtree child (`Aggref`/`SubLink`/`SubPlan`).
+    let work_ctx = mcx::MemoryContext::new("convert_subquery_pathkeys");
+    let work_mcx = work_ctx.mcx();
+
     for sub_pathkey in subquery_pathkeys {
         let sub_eclass = sub_pathkey
             .pk_eclass
@@ -1057,7 +1081,14 @@ pub fn convert_subquery_pathkeys(
                 debug_assert!(!root.em(sub_member).em_is_child);
                 let (sub_expr, sub_expr_type) = {
                     let em = root.em(sub_member);
-                    (root.node(em.em_expr).clone(), em.em_datatype)
+                    let datatype = em.em_datatype;
+                    let em_expr_id = em.em_expr;
+                    (
+                        root.node(em_expr_id)
+                            .clone_in(work_mcx)
+                            .expect("convert_subquery_pathkeys: clone_in sub_expr"),
+                        datatype,
+                    )
                 };
                 let sub_expr_coll = ec_collation;
 
@@ -1071,7 +1102,10 @@ pub fn convert_subquery_pathkeys(
                     // The TLE matches if it matches after sort-key
                     // canonicalization (sub_expr went through the same process).
                     let tle_expr_id = nf::targetentry_info::call(root, tle).expr;
-                    let tle_expr_raw = root.node(tle_expr_id).clone();
+                    let tle_expr_raw = root
+                        .node(tle_expr_id)
+                        .clone_in(work_mcx)
+                        .expect("convert_subquery_pathkeys: clone_in tle_expr_raw");
                     let tle_expr = equivclass::canonicalize_ec_expression(
                         tle_expr_raw,
                         sub_expr_type,
@@ -1344,16 +1378,29 @@ pub fn initialize_mergeclause_eclasses(root: &mut PlannerInfo, restrictinfo: Rin
         debug_assert!(rinfo.right_ec.is_none());
     }
 
+    // Working context for the transient deep copies of the operands. They are
+    // fed by value into `get_eclass_for_sort_expr`, which re-allocates them into
+    // the planner arena (`alloc_node` copies the value), so a function-scoped
+    // context is correct. `clone_in` is required because the derived `Expr::clone`
+    // panics on an owned-subtree child.
+    let work_ctx = mcx::MemoryContext::new("initialize_mergeclause_eclasses");
+    let work_mcx = work_ctx.mcx();
+
     // clause = restrictinfo->clause, an OpExpr; read opno/inputcollid + operands.
-    let clause = root.node(root.rinfo(restrictinfo).clause).clone();
-    let opexpr = clause
+    let clause_id = root.rinfo(restrictinfo).clause;
+    let opexpr = root
+        .node(clause_id)
         .as_opexpr()
         .expect("initialize_mergeclause_eclasses: clause is not an OpExpr");
     let opno = opexpr.opno;
     let inputcollid = opexpr.inputcollid;
     // get_leftop(clause) / get_rightop(clause) — args[0] / args[1].
-    let leftop = opexpr.args[0].clone();
-    let rightop = opexpr.args[1].clone();
+    let leftop = opexpr.args[0]
+        .clone_in(work_mcx)
+        .expect("initialize_mergeclause_eclasses: clone_in leftop");
+    let rightop = opexpr.args[1]
+        .clone_in(work_mcx)
+        .expect("initialize_mergeclause_eclasses: clone_in rightop");
     let mergeopfamilies = root.rinfo(restrictinfo).mergeopfamilies.clone();
 
     // Need the declared input types of the operator.
