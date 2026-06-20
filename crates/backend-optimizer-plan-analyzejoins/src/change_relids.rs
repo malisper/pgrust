@@ -241,7 +241,7 @@ pub fn change_relids_in_query(
     run: &mut types_pathnodes::planner_run::PlannerRun<'_>,
     parse: types_pathnodes::QueryId,
     ctx: ReplaceRelidContext,
-) {
+) -> types_error::PgResult<()> {
     use backend_rewrite_core::change::{
         ChangeVarNodesContext, ChangeVarNodesExtended,
     };
@@ -256,7 +256,7 @@ pub fn change_relids_in_query(
         run.resolve_mut(parse),
         types_nodes::copy_query::Query::new(mcx),
     );
-    let mut node = Node::mk_query(mcx, query);
+    let mut node = Node::mk_query(mcx, query)?;
 
     let mut skip_rtr = |n: &mut Node, _c: &mut ChangeVarNodesContext| -> bool {
         matches!(n.node_tag(), t if t == ntag::T_RangeTblRef)
@@ -273,6 +273,7 @@ pub fn change_relids_in_query(
         .into_query()
         .unwrap_or_else(|| unreachable!("ChangeVarNodes returned a non-Query for a Query input"));
     *run.resolve_mut(parse) = walked;
+    Ok(())
 }
 
 /// `ChangeVarNodesExtended((Node *) node, from, to, 0, replace_relid_callback)`

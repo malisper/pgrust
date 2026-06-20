@@ -552,7 +552,7 @@ pub fn remove_useless_self_joins<'mcx>(
     root: &mut PlannerInfo,
     run: &mut PlannerRun<'mcx>,
     joinlist: Vec<JoinlistNode>,
-) -> Vec<JoinlistNode> {
+) -> types_error::PgResult<Vec<JoinlistNode>> {
     // C: `if (!enable_self_join_elimination || joinlist == NIL ||
     //        (list_length(joinlist) == 1 && !IsA(linitial(joinlist), List)))
     //         return joinlist;`
@@ -560,15 +560,15 @@ pub fn remove_useless_self_joins<'mcx>(
         || joinlist.is_empty()
         || (joinlist.len() == 1 && matches!(joinlist[0], JoinlistNode::Rel(_)))
     {
-        return joinlist;
+        return Ok(joinlist);
     }
 
     // toRemove = remove_self_joins_recurse(root, joinlist, toRemove);
     let mut to_remove: Relids = None;
-    to_remove = remove_self_joins_recurse(root, run, &joinlist, to_remove);
+    to_remove = remove_self_joins_recurse(root, run, &joinlist, to_remove)?;
 
     if relids::is_empty(&to_remove) {
-        return joinlist;
+        return Ok(joinlist);
     }
 
     // Restore the removed relations' RangeTblRefs to the joinlist (delete them).
@@ -583,7 +583,7 @@ pub fn remove_useless_self_joins<'mcx>(
         joinlist = remove_rel_from_joinlist(joinlist, relid, &mut nremoved);
     }
 
-    joinlist
+    Ok(joinlist)
 }
 
 /// `bms_next_member` over a [`Relids`] (signed-relid iterator, start at -1).
@@ -611,7 +611,7 @@ fn remove_self_joins_recurse<'mcx>(
     run: &mut PlannerRun<'mcx>,
     joinlist: &[JoinlistNode],
     mut to_remove: Relids,
-) -> Relids {
+) -> types_error::PgResult<Relids> {
     let result_relation = run.resolve(root.parse).resultRelation;
     let merge_target = run.resolve(root.parse).mergeTargetRelation;
 
@@ -633,7 +633,7 @@ fn remove_self_joins_recurse<'mcx>(
                 }
             }
             JoinlistNode::Sub(sublist) => {
-                to_remove = remove_self_joins_recurse(root, run, sublist, to_remove);
+                to_remove = remove_self_joins_recurse(root, run, sublist, to_remove)?;
             }
         }
     }
@@ -641,7 +641,7 @@ fn remove_self_joins_recurse<'mcx>(
     let num_rels = relids::num_members(&relids);
     // Need at least two relations for the join.
     if num_rels < 2 {
-        return to_remove;
+        return Ok(to_remove);
     }
 
     // Build a candidate array of (relid, reloid) and sort it by reloid.
@@ -676,7 +676,7 @@ fn remove_self_joins_recurse<'mcx>(
                 // Iterate while the group keeps shrinking and stays multiple.
                 loop {
                     debug_assert!(!relids::overlap(&group, &to_remove));
-                    let removed = remove_self_joins_one_group(root, run, &group);
+                    let removed = remove_self_joins_one_group(root, run, &group)?;
                     to_remove = relids::add_members(to_remove, &removed);
                     group = relids::difference(&group, &removed);
                     if relids::is_empty(&removed) || !relids::membership_is_multiple(&group) {
@@ -693,7 +693,7 @@ fn remove_self_joins_recurse<'mcx>(
     }
 
     debug_assert!(relids::is_empty(&relids));
-    to_remove
+    Ok(to_remove)
 }
 
 /// `remove_self_joins_one_group(root, relids)` (analyzejoins.c:2140) — find and
@@ -702,7 +702,7 @@ fn remove_self_joins_one_group<'mcx>(
     root: &mut PlannerInfo,
     run: &mut PlannerRun<'mcx>,
     group: &Relids,
-) -> Relids {
+) -> types_error::PgResult<Relids> {
     let mut result: Relids = None;
 
     let mut r: i32 = -1;
@@ -835,7 +835,7 @@ fn remove_self_joins_one_group<'mcx>(
             }
 
             // Remove rrel from the planner structures and the corresponding mark.
-            remove_self_join_rel(root, run, kmark, rmark, krel, rrel, &restrictlist);
+            remove_self_join_rel(root, run, kmark, rmark, krel, rrel, &restrictlist)?;
 
             result = relids::add_member(result, r);
 
@@ -844,7 +844,7 @@ fn remove_self_joins_one_group<'mcx>(
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// `split_selfjoin_quals(root, joinquals, &selfjoinquals, &otherjoinquals, from,
@@ -1190,7 +1190,7 @@ fn remove_self_join_rel<'mcx>(
     to_keep: RelId,
     to_remove: RelId,
     restrictlist: &[RinfoId],
-) {
+) -> types_error::PgResult<()> {
     let keep_relid = root.rel(to_keep).relid as i32;
     let remove_relid = root.rel(to_remove).relid as i32;
     debug_assert!(keep_relid > 0);
@@ -1315,7 +1315,7 @@ fn remove_self_join_rel<'mcx>(
     }
 
     // Replace varno in all the query structures (except RangeTblRef).
-    crate::change_relids::change_relids_in_query(run, root.parse, ctx);
+    crate::change_relids::change_relids_in_query(run, root.parse, ctx)?;
 
     // Replace links in the planner info: full relid rename across SpecialJoinInfo
     // sets / semi_rhs_exprs, PlaceHolderVars, all EquivalenceClasses, the
@@ -1345,5 +1345,6 @@ fn remove_self_join_rel<'mcx>(
     backend_optimizer_path_equivclass::rebuild_eclass_attr_needed(root)
         .expect("rebuild_eclass_attr_needed");
     backend_optimizer_plan_small_seams::rebuild_lateral_attr_needed::call(root, run);
+    Ok(())
 }
 

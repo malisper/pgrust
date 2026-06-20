@@ -288,7 +288,7 @@ pub fn query_planner<'mcx>(
     /*
      * Remove self joins on a unique column.
      */
-    joinlist = analyzejoins_seam::remove_useless_self_joins::call(root, run, joinlist);
+    joinlist = analyzejoins_seam::remove_useless_self_joins::call(root, run, joinlist)?;
 
     /*
      * Now distribute "placeholders" to base rels as needed.  This has to be

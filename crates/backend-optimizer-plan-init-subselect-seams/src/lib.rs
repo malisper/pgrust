@@ -51,5 +51,5 @@ seam_core::seam!(
         root: &mut PlannerInfo,
         run: &mut PlannerRun<'mcx>,
         joinlist: alloc::vec::Vec<JoinlistNode>,
-    ) -> alloc::vec::Vec<JoinlistNode>
+    ) -> types_error::PgResult<alloc::vec::Vec<JoinlistNode>>
 );

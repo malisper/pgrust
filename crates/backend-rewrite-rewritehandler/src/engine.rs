@@ -92,7 +92,7 @@ fn get_generated_columns<'mcx>(
         {
             let defexpr = build_generation_expression(mcx, rel, (i + 1) as i32)?;
             // ChangeVarNodes(defexpr, 1, rt_index, 0)
-            let mut defnode = Node::mk_expr(mcx, defexpr);
+            let mut defnode = Node::mk_expr(mcx, defexpr)?;
             ChangeVarNodes(&mut defnode, 1, rt_index, 0);
             let defexpr = defnode
                 .into_expr()
@@ -207,8 +207,8 @@ fn process_matched_tle<'mcx>(
         }
     }
     if !equal_node(
-        &Node::mk_expr(mcx, priorbottom.clone()),
-        &Node::mk_expr(mcx, src_input.clone()),
+        &Node::mk_expr(mcx, priorbottom.clone())?,
+        &Node::mk_expr(mcx, src_input.clone())?,
     ) {
         return Err(PgError::new(
             ERROR,
@@ -670,7 +670,7 @@ pub fn rewriteValuesRTE<'mcx>(
                 // unused column -> NULL const
                 if bms_is_member(i as i32, unused_cols) {
                     let nc = make_null_const(mcx, def.typeId, def.typeMod, def.collation)?;
-                    new_list.push(alloc_in(mcx, Node::mk_const(mcx, nc))?);
+                    new_list.push(alloc_in(mcx, Node::mk_const(mcx, nc)?)?);
                     continue;
                 }
                 if attrno == 0 {
@@ -702,12 +702,12 @@ pub fn rewriteValuesRTE<'mcx>(
                         )?
                     }
                 };
-                new_list.push(alloc_in(mcx, Node::mk_expr(mcx, new_expr))?);
+                new_list.push(alloc_in(mcx, Node::mk_expr(mcx, new_expr)?)?);
             } else {
                 new_list.push(alloc_in(mcx, col.clone_in(mcx)?)?);
             }
         }
-        new_values.push(alloc_in(mcx, Node::mk_list(mcx, new_list))?);
+        new_values.push(alloc_in(mcx, Node::mk_list(mcx, new_list)?)?);
     }
 
     parsetree.rtable[(rti - 1) as usize].values_lists = new_values;
@@ -732,12 +732,12 @@ pub fn rewriteValuesRTEToNulls<'mcx>(
         for col in sublist.iter() {
             if let Some(Expr::SetToDefault(def)) = (**col).as_expr() {
                 let nc = make_null_const(mcx, def.typeId, def.typeMod, def.collation)?;
-                new_list.push(alloc_in(mcx, Node::mk_const(mcx, nc))?);
+                new_list.push(alloc_in(mcx, Node::mk_const(mcx, nc)?)?);
             } else {
                 new_list.push(alloc_in(mcx, col.clone_in(mcx)?)?);
             }
         }
-        new_values.push(alloc_in(mcx, Node::mk_list(mcx, new_list))?);
+        new_values.push(alloc_in(mcx, Node::mk_list(mcx, new_list)?)?);
     }
     parsetree.rtable[(rti - 1) as usize].values_lists = new_values;
     Ok(())
@@ -908,7 +908,7 @@ pub fn AcquireRewriteLocks<'mcx>(
                         newaliasvars.push(aliasitem);
                     } else {
                         let nc = make_null_const(mcx, var_type, var_typmod, var_coll)?;
-                        newaliasvars.push(alloc_in(mcx, Node::mk_const(mcx, nc))?);
+                        newaliasvars.push(alloc_in(mcx, Node::mk_const(mcx, nc)?)?);
                     }
                 }
                 parsetree.rtable[rt_index - 1].joinaliasvars = newaliasvars;
@@ -1006,7 +1006,7 @@ pub fn rewriteRuleAction<'mcx>(
         };
 
         // OffsetVarNodes(sub_action, rt_length, 0); OffsetVarNodes(rule_qual, ...)
-        let mut sub_node = Node::mk_query(mcx, core_clone(sub_action, mcx)?);
+        let mut sub_node = Node::mk_query(mcx, core_clone(sub_action, mcx)?)?;
         OffsetVarNodes(&mut sub_node, rt_length, 0);
         // references to OLD should point at original rt_index
         ChangeVarNodes(&mut sub_node, PRS2_OLD_VARNO + rt_length, rt_index, 0);
@@ -1030,7 +1030,7 @@ pub fn rewriteRuleAction<'mcx>(
     for rte in sub_action.rtable.iter_mut() {
         if rte.rtekind == RTEKind::RTE_SUBQUERY && !rte.lateral {
             if let Some(subq) = rte.subquery.as_deref() {
-                let sn = Node::mk_query(mcx, core_clone(subq, mcx)?);
+                let sn = Node::mk_query(mcx, core_clone(subq, mcx)?)?;
                 if contain_vars_of_level(&sn, 1) {
                     rte.lateral = true;
                 }
@@ -1239,7 +1239,7 @@ pub fn rewriteRuleAction<'mcx>(
         } else {
             ReplaceVarsNoMatchOption::SubstituteNull
         };
-        let mut sub_node = Node::mk_query(mcx, core_clone(sub_action, mcx)?);
+        let mut sub_node = Node::mk_query(mcx, core_clone(sub_action, mcx)?)?;
         let mut outer = None;
         ReplaceVarsFromTargetList(
             &mut sub_node,
@@ -1284,7 +1284,7 @@ pub fn rewriteRuleAction<'mcx>(
             PgVec::new_in(mcx);
         let mut had_sublink = rule_action.hasSubLinks;
         for tle in parsetree.returningList.iter() {
-            let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?);
+            let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?)?;
             let mut outer = Some(had_sublink);
             ReplaceVarsFromTargetList(
                 &mut node,
@@ -1319,7 +1319,7 @@ pub fn rewriteRuleAction<'mcx>(
         if parsetree.hasSubLinks && !rule_action.hasSubLinks {
             for tle in rule_action.returningList.iter() {
                 if let Some(e) = tle.expr.as_deref() {
-                    if checkExprHasSubLink(&Node::mk_expr(mcx, e.clone())) {
+                    if checkExprHasSubLink(&Node::mk_expr(mcx, e.clone())?) {
                         rule_action.hasSubLinks = true;
                         break;
                     }
@@ -1570,7 +1570,7 @@ fn ApplyRetrieveRule<'mcx>(
     if let Some(eref) = rte.eref.as_deref_mut() {
         while (eref.colnames.len() as i32) < num_cols {
             eref.colnames
-                .push(alloc_in(mcx, Node::mk_string(mcx, make_string(mcx, "?column?")?))?);
+                .push(alloc_in(mcx, Node::mk_string(mcx, make_string(mcx, "?column?")?)?)?);
         }
     }
 
@@ -2030,7 +2030,7 @@ fn rewriteTargetView<'mcx>(
         .map(|t| t.clone_in(mcx))
         .collect::<PgResult<_>>()?;
     for tle in view_targetlist.iter_mut() {
-        let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?);
+        let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?)?;
         ChangeVarNodes(&mut node, base_rt_index, new_rt_index, 0);
         *tle = node.into_targetentry().unwrap_or_else(|| unreachable!());
     }
@@ -2087,7 +2087,7 @@ fn rewriteTargetView<'mcx>(
     // the appropriate base-relation column instead.
     {
         let view_rte = parsetree.rtable[view_rte_idx].clone_in(mcx)?;
-        let mut node = Node::mk_query(mcx, parsetree);
+        let mut node = Node::mk_query(mcx, parsetree)?;
         let mut outer = None;
         ReplaceVarsFromTargetList(
             &mut node,
@@ -2107,7 +2107,7 @@ fn rewriteTargetView<'mcx>(
     // Update all other RTI references that point to the view (e.g.
     // resultRelation) to point to the new base relation instead.
     {
-        let mut node = Node::mk_query(mcx, parsetree);
+        let mut node = Node::mk_query(mcx, parsetree)?;
         ChangeVarNodes(&mut node, view_result_relation, new_rt_index, 0);
         parsetree = node.into_query().unwrap_or_else(|| unreachable!());
     }
@@ -2236,7 +2236,7 @@ fn rewriteTargetView<'mcx>(
             let existing_wcos: Vec<NodePtr<'mcx>> =
                 parsetree.withCheckOptions.drain(..).collect();
             let mut new_wcos = PgVec::new_in(mcx);
-            new_wcos.push(alloc_in(mcx, Node::mk_with_check_option(mcx, wco))?);
+            new_wcos.push(alloc_in(mcx, Node::mk_with_check_option(mcx, wco)?)?);
             new_wcos.extend(existing_wcos);
             parsetree.withCheckOptions = new_wcos;
             if !parsetree.hasSubLinks && added_sublink {
@@ -2908,7 +2908,7 @@ fn set_cte_query<'mcx>(
     q: Query<'mcx>,
 ) -> PgResult<()> {
     if let Some(cte) = cte_mut(node) {
-        cte.ctequery = Some(alloc_in(mcx, Node::mk_query(mcx, q))?);
+        cte.ctequery = Some(alloc_in(mcx, Node::mk_query(mcx, q)?)?);
     }
     Ok(())
 }
