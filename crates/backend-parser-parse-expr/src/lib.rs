@@ -3677,16 +3677,43 @@ fn transformParamRef<'mcx>(
                 Some(sql_fn_make_param(&pinfo, paramno, pref.location)?)
             }
         }
+        // plpgsql_param_ref (pl_comp.c:1056): a `$n` ParamRef resolves through the
+        // plpgsql namespace under the synthesized name `"$n"`. PL/pgSQL registers
+        // every function argument in the namespace under BOTH its declared name
+        // and `$1`/`$2`/… (pl_comp.c `add_parameter_name`), so a user-written
+        // `$1` in a plpgsql expression resolves to the matching argument datum's
+        // Param exactly like the bareword does — via make_datum_param (paramid =
+        // dno + 1). A name not in the namespace returns NULL (the generic error
+        // below). The owned pre-resolved `names` map carries the `"$n"` keys, so
+        // look the synthesized name up there.
+        ParseRefHookState::PlpgsqlExpr(state) => {
+            let pname = alloc::format!("${}", pref.number);
+            match state.names.get(&pname) {
+                Some(info) => {
+                    // make_datum_param: PARAM_EXTERN with paramid = dno + 1.
+                    let mut paramcollid = info.collation;
+                    if !OidIsValid(paramcollid) && OidIsValid(state.input_collation) {
+                        paramcollid = state.input_collation;
+                    }
+                    let param = types_nodes::primnodes::Param {
+                        paramkind: types_nodes::primnodes::PARAM_EXTERN,
+                        paramid: info.dno + 1,
+                        paramtype: info.typeid,
+                        paramtypmod: info.typmod,
+                        paramcollid,
+                        location: pref.location,
+                    };
+                    // Record the referenced datum number (expr->paramnos).
+                    state.record_paramno(info.dno);
+                    Some(param)
+                }
+                None => None,
+            }
+        }
         // A domain CHECK parse state installs no paramref hook (C
         // `p_paramref_hook == NULL`): a `$n` reference falls to the generic
-        // "there is no parameter $n" error below. A PL/pgSQL expression resolves
-        // variable references through the pre-columnref hook (as barewords), not
-        // through `$n` ParamRefs, so a literal `$n` in a PL/pgSQL expression has
-        // no parameter (C `plpgsql_param_ref` only matches the `$n` form plpgsql
-        // itself synthesizes, never user `$n` text).
-        ParseRefHookState::None
-        | ParseRefHookState::PlpgsqlExpr(_)
-        | ParseRefHookState::DomainCheckValue(_) => None,
+        // "there is no parameter $n" error below.
+        ParseRefHookState::None | ParseRefHookState::DomainCheckValue(_) => None,
     };
 
     // if (result == NULL) ereport(ERROR, "there is no parameter $%d", ...)
