@@ -11,8 +11,9 @@
 //! exactly from `pg_proc.dat`.
 
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Result writers.
@@ -44,12 +45,12 @@ fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
 /// `PG_RETURN_DATUM(CStringGetTextDatum(GetSystemUser()))`. The value core
 /// returns `Option<String>` — `None` is C's NULL return, `Some(s)` is the
 /// `auth_method:authn_id` text.
-fn fc_system_user(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_system_user(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     match crate::system_user() {
-        Some(s) => ret_text(fcinfo, s),
+        Some(s) => Ok(ret_text(fcinfo, s)),
         None => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
     }
 }
@@ -64,23 +65,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    func: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        func,
+    )
 }
 
 /// Register every `miscinit.c` SQL-callable builtin (C: their `fmgr_builtins[]`
 /// rows). Called from this crate's `init_seams()`. OID / nargs / strict / retset
 /// transcribed exactly from `pg_proc.dat`.
 pub fn register_miscinit_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // 6311  system_user()  -> text   (nargs 0, strict, not retset)
         builtin(6311, "system_user", 0, true, false, fc_system_user),
     ]);
