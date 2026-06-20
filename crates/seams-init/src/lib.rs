@@ -470,6 +470,7 @@ pub fn init_all() {
     backend_utils_adt_misc::init_seams();
     backend_catalog_aclchk::init_seams();
     backend_utils_adt_acl::init_seams();
+    backend_utils_adt_catalog_perm::init_seams();
     backend_utils_adt_datetime::init_seams();
     backend_utils_adt_array_selfuncs::init_seams();
     backend_utils_adt_geo_selfuncs::init_seams();

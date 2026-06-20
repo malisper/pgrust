@@ -19139,6 +19139,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-catalog-perm"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-nodeAgg-aggapi-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-fmgr-core",
+ "backend-utils-fmgr-fmgr-seams",
+ "backend-utils-sort-tuplesort-seams",
+ "mcx",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-nodes",
+ "types-parsenodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-catalog-perm-seams"
 version = "0.0.0"
 dependencies = [
@@ -24479,6 +24501,7 @@ dependencies = [
  "backend-utils-adt-arrayutils",
  "backend-utils-adt-ascii",
  "backend-utils-adt-cash",
+ "backend-utils-adt-catalog-perm",
  "backend-utils-adt-char",
  "backend-utils-adt-cryptohashfuncs",
  "backend-utils-adt-datetime",
