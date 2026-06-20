@@ -1242,12 +1242,12 @@ fn literal_from(literal: &[u8], l: usize) -> &[u8] {
 
 /// `pg_mbstrlen_with_len(s, len)` (pg_proc.c:1118,1131).
 fn pg_mbstrlen_with_len(s: &[u8], len: i32) -> PgResult<i32> {
-    Ok(backend_utils_mb_mbutils_seams::pg_mbstrlen_with_len::call(s, len))
+    backend_utils_mb_mbutils_seams::pg_mbstrlen_with_len::call(s, len)
 }
 
 /// `pg_mblen(s)` (pg_proc.c:1184, `pg_mblen_cstr`) — the slice-bounded variant.
 fn pg_mblen(s: &[u8]) -> PgResult<i32> {
-    Ok(backend_utils_mb_mbutils_seams::pg_mblen_range::call(s))
+    backend_utils_mb_mbutils_seams::pg_mblen_range::call(s)
 }
 
 /// Install this unit's outward consumer seam: `functioncmds.c` reaches

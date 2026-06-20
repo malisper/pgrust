@@ -233,8 +233,15 @@ fn parser_errposition_src(source: Option<&str>, location: i32) -> i32 {
         return 0;
     }
     match source {
+        // The query string is valid in the server encoding, so the
+        // `report_invalid_encoding` path is dead; report 0 ("no position") if it
+        // somehow fires rather than escalate while building an error.
         Some(s) => {
-            backend_utils_mb_mbutils_seams::pg_mbstrlen_with_len::call(s.as_bytes(), location) + 1
+            match backend_utils_mb_mbutils_seams::pg_mbstrlen_with_len::call(s.as_bytes(), location)
+            {
+                Ok(n) => n + 1,
+                Err(_) => 0,
+            }
         }
         None => 0,
     }

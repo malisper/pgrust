@@ -1383,28 +1383,17 @@ pub fn init_seams() {
     seams::pg_server_to_client::set(pg_server_to_client);
     seams::pg_client_to_server::set(pg_client_to_server);
     // The `pg_mbstrlen_with_len`/`pg_mbcharcliplen`/`pg_mblen_range` seams are
-    // declared infallible (`-> i32`). C's bodies CAN `report_invalid_encoding`
-    // (ereport ERROR), but only for byte sequences that are invalid in the
-    // database encoding — and mbutils.c documents that these functions must only
-    // be called on strings already verified (a prior `pg_verify_mbstr*`). For a
-    // correct (verified) caller the error path is dead; if a caller violates that
-    // invariant we surface it loudly rather than longjmp, matching the seam's
-    // infallible contract its consumers were written against.
-    seams::pg_mbstrlen_with_len::set(|mbstr, limit| {
-        pg_mbstrlen_with_len(mbstr, limit)
-            .expect("pg_mbstrlen_with_len on a string not valid in the database encoding")
-    });
+    // fallible (`-> PgResult<i32>`). C's bodies `report_invalid_encoding`
+    // (ereport ERROR, via longjmp) on a byte sequence invalid in the database
+    // encoding; we carry that `PgError` on `Err` so it flows through the normal
+    // ereport→ERROR rendering at the caller (the regression suite exercises this
+    // on truncated/invalid multibyte strings).
+    seams::pg_mbstrlen_with_len::set(pg_mbstrlen_with_len);
     seams::pg_mbcliplen::set(pg_mbcliplen);
-    seams::pg_mbcharcliplen::set(|mbstr, len, limit| {
-        pg_mbcharcliplen(mbstr, len, limit)
-            .expect("pg_mbcharcliplen on a string not valid in the database encoding")
-    });
+    seams::pg_mbcharcliplen::set(pg_mbcharcliplen);
     seams::pg_mb2wchar_with_len::set(pg_mb2wchar_with_len);
     seams::pg_wchar2mb_with_len::set(pg_wchar2mb_with_len);
-    seams::pg_mblen_range::set(|mbstr| {
-        pg_mblen_range(mbstr)
-            .expect("pg_mblen_range on a string not valid in the database encoding")
-    });
+    seams::pg_mblen_range::set(pg_mblen_range);
     seams::pg_database_encoding_max_length::set(pg_database_encoding_max_length);
     seams::get_database_encoding::set(GetDatabaseEncoding);
     seams::get_database_encoding_name::set(GetDatabaseEncodingName);

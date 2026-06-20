@@ -1263,7 +1263,7 @@ pub fn executor_errposition(estate: Option<&EStateData<'_>>, location: i32) -> P
         return Ok(0);
     };
     // Convert offset to character number
-    let pos = mbutils_seams::pg_mbstrlen_with_len::call(source_text.as_bytes(), location) + 1;
+    let pos = mbutils_seams::pg_mbstrlen_with_len::call(source_text.as_bytes(), location)? + 1;
     // And pass it to the ereport mechanism
     backend_utils_error::errposition(pos)?;
     Ok(0)

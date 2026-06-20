@@ -111,7 +111,7 @@ pub fn replace_text_regexp<'mcx>(
             let chunk_len = charlen_to_bytelen(
                 &src_text[start_off..],
                 (pmatch[0].rm_so - data_pos as i64) as i32,
-            );
+            )?;
             buf.extend_from_slice(&src_text[start_off..start_off + chunk_len as usize]);
             // C: advance start_ptr over that text to avoid rescans.
             start_off += chunk_len as usize;
@@ -127,7 +127,7 @@ pub fn replace_text_regexp<'mcx>(
                 src_text,
                 start_off,
                 data_pos,
-            );
+            )?;
         } else {
             // C: appendStringInfoText(&buf, replace_text).
             buf.extend_from_slice(replace_text);
@@ -137,7 +137,7 @@ pub fn replace_text_regexp<'mcx>(
         start_off += charlen_to_bytelen(
             &src_text[start_off..],
             pmatch[0].rm_eo as i32 - data_pos,
-        ) as usize;
+        )? as usize;
         data_pos = pmatch[0].rm_eo as i32;
 
         // C: if we only want to replace one occurrence, we're done.
@@ -210,7 +210,7 @@ fn append_stringinfo_regexp_substr(
     src_text: &[u8],
     start_off: usize,
     data_pos: i32,
-) {
+) -> PgResult<()> {
     let p_end = replace_text.len();
     let mut p = 0usize;
 
@@ -273,10 +273,11 @@ fn append_stringinfo_regexp_substr(
             chunk_start_off += charlen_to_bytelen(
                 &src_text[chunk_start_off..],
                 (so - data_pos as i64) as i32,
-            ) as usize;
+            )? as usize;
             let chunk_len =
-                charlen_to_bytelen(&src_text[chunk_start_off..], (eo - so) as i32) as usize;
+                charlen_to_bytelen(&src_text[chunk_start_off..], (eo - so) as i32)? as usize;
             str.extend_from_slice(&src_text[chunk_start_off..chunk_start_off + chunk_len]);
         }
     }
+    Ok(())
 }

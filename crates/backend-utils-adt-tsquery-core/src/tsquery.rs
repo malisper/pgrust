@@ -1364,7 +1364,7 @@ fn isoperator(buffer: &[u8], off: usize) -> bool {
 /// `pg_mblen_cstr(buffer + off)` — the leading multibyte character's length.
 #[inline]
 fn pg_mblen(buffer: &[u8], off: usize) -> PgResult<i32> {
-    Ok(mb::pg_mblen_range::call(&buffer[off..]))
+    mb::pg_mblen_range::call(&buffer[off..])
 }
 
 /// `in->curpol->qoperator.oper`, for an operator `QueryItem`.

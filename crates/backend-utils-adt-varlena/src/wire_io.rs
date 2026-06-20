@@ -126,7 +126,7 @@ fn pstrdup<'mcx>(mcx: Mcx<'mcx>, str: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
 ///
 /// C: `PG_RETURN_INT32(text_length(str))`.
 pub fn textlen(t: &[u8]) -> PgResult<i32> {
-    Ok(keystone::text_length(t))
+    keystone::text_length(t)
 }
 
 /// C: `textoctetlen(PG_FUNCTION_ARGS)` — physical (byte) length.

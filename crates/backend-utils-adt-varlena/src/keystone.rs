@@ -237,10 +237,13 @@ pub fn text_to_cstring_buffer(src: &[u8], dst: &mut [u8]) -> usize {
 /// In C the fast path uses `toast_raw_datum_size(str) - VARHDRSZ` to avoid
 /// detoasting; the carrier here is already the detoasted payload, so the byte
 /// length is exactly the payload length.
-pub fn text_length(payload: &[u8]) -> i32 {
+pub fn text_length(payload: &[u8]) -> PgResult<i32> {
     if mb::pg_database_encoding_max_length::call() == 1 {
-        payload.len() as i32
+        Ok(payload.len() as i32)
     } else {
+        // C: pg_mbstrlen_with_len, which report_invalid_encoding's (ereport
+        // ERROR, via longjmp) on a byte sequence invalid in the database
+        // encoding; carried on Err.
         mb::pg_mbstrlen_with_len::call(payload, payload.len() as i32)
     }
 }
@@ -263,17 +266,20 @@ pub fn text_catenate<'mcx>(mcx: Mcx<'mcx>, t1: &[u8], t2: &[u8]) -> PgResult<PgV
 /// range-clamped mbutils seam, which never reads past the slice end).
 ///
 /// The caller guarantees `p` holds at least `n` complete characters.
-pub fn charlen_to_bytelen(p: &[u8], n: i32) -> i32 {
+pub fn charlen_to_bytelen(p: &[u8], n: i32) -> PgResult<i32> {
     if mb::pg_database_encoding_max_length::call() == 1 {
-        n
+        Ok(n)
     } else {
         let mut off = 0usize;
         let mut remaining = n;
         while remaining > 0 && off < p.len() {
-            off += mb::pg_mblen_range::call(&p[off..]).max(1) as usize;
+            // C: pg_mblen (unbounded). The range-clamped seam never reads past
+            // the slice end and report_invalid_encoding's (carried on Err) only
+            // on a byte sequence invalid in the database encoding.
+            off += mb::pg_mblen_range::call(&p[off..])?.max(1) as usize;
             remaining -= 1;
         }
-        off as i32
+        Ok(off as i32)
     }
 }
 

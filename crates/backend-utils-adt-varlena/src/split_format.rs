@@ -524,18 +524,19 @@ fn null_identifier() -> types_error::PgError {
         .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
 }
 
-fn unrecognized_specifier(fmt: &[u8], cp: usize) -> types_error::PgError {
+fn unrecognized_specifier(fmt: &[u8], cp: usize) -> PgResult<types_error::PgError> {
     // C: errmsg("unrecognized format() type specifier \"%.*s\"",
     //           pg_mblen_range(cp, end_ptr), cp). pg_mblen_range never reads
-    //  past the slice end.
-    let n = mb::pg_mblen_range::call(&fmt[cp..]).max(1) as usize;
+    //  past the slice end; a byte sequence invalid in the database encoding
+    //  surfaces as that report_invalid_encoding error instead (propagated).
+    let n = mb::pg_mblen_range::call(&fmt[cp..])?.max(1) as usize;
     let bytes = &fmt[cp..(cp + n).min(fmt.len())];
-    types_error::PgError::error(format!(
+    Ok(types_error::PgError::error(format!(
         "unrecognized format() type specifier \"{}\"",
         String::from_utf8_lossy(bytes)
     ))
     .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
-    .with_hint("For a single \"%\" use \"%%\".")
+    .with_hint("For a single \"%\" use \"%%\"."))
 }
 
 fn insufficient_data() -> types_error::PgError {
@@ -1183,7 +1184,7 @@ pub fn split_text<'mcx>(
         // C:4958 while (inputstring_len > 0).
         while remaining > 0 {
             // C:4960 chunk_len = pg_mblen_range(start_ptr, end_ptr).
-            let chunk_len = mb::pg_mblen_range::call(&input_bytes[start_off..inputstring_len]).max(1) as usize;
+            let chunk_len = mb::pg_mblen_range::call(&input_bytes[start_off..inputstring_len])?.max(1) as usize;
 
             // C:4965 cstring_to_text_with_len(start_ptr, chunk_len).
             let chunk = &input_bytes[start_off..start_off + chunk_len];
@@ -1917,7 +1918,7 @@ pub fn text_format_append_string<'mcx>(
     }
 
     // C: len = pg_mbstrlen(str).
-    let len = mb::pg_mbstrlen_with_len::call(str, str.len() as i32);
+    let len = mb::pg_mbstrlen_with_len::call(str, str.len() as i32)?;
     if align_to_left {
         // C: left justify.
         append_bytes(buf, str)?;
@@ -2036,7 +2037,7 @@ pub fn text_format<'mcx>(
 
         // C:6021-6026 main conversion specifier must be one of s/I/L.
         if !matches!(fmt_bytes[cp], b's' | b'I' | b'L') {
-            return Err(unrecognized_specifier(fmt_bytes, cp));
+            return Err(unrecognized_specifier(fmt_bytes, cp)?);
         }
 
         // C:6029-6086 If indirect width was specified, get its value.
@@ -2096,7 +2097,7 @@ pub fn text_format<'mcx>(
             }
             _ => {
                 // C:6142-6147 should not get here (checked above).
-                return Err(unrecognized_specifier(fmt_bytes, cp));
+                return Err(unrecognized_specifier(fmt_bytes, cp)?);
             }
         }
 

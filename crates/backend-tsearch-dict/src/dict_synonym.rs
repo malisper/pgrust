@@ -26,7 +26,7 @@ use crate::{config_file_error, invalid_param, is_space, DEFAULT_COLLATION_OID};
 fn findwrd(line: &[u8], mut pos: usize, want_flags: bool) -> PgResult<Option<(usize, usize, u16)>> {
     // Skip leading spaces: while (*in && isspace(*in)) in += pg_mblen_cstr(in);
     while pos < line.len() && line[pos] != 0 && is_space(line[pos]) {
-        pos += pg_mblen_range::call(&line[pos..]) as usize;
+        pos += pg_mblen_range::call(&line[pos..])? as usize;
     }
 
     // Return NULL on empty lines: if (*in == '\0') { *end = NULL; return NULL; }
@@ -40,7 +40,7 @@ fn findwrd(line: &[u8], mut pos: usize, want_flags: bool) -> PgResult<Option<(us
     // Find end of word: while (*in && !isspace(*in)) { lastchar = in; in += pg_mblen_cstr(in); }
     while pos < line.len() && line[pos] != 0 && !is_space(line[pos]) {
         lastchar = pos;
-        pos += pg_mblen_range::call(&line[pos..]) as usize;
+        pos += pg_mblen_range::call(&line[pos..])? as usize;
     }
 
     // if (in - lastchar == 1 && t_iseq(lastchar, '*') && flags)

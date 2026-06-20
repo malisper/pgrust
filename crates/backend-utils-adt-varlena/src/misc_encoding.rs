@@ -167,8 +167,8 @@ pub fn varstr_levenshtein_less_equal(
     trusted: bool,
 ) -> PgResult<i32> {
     // C:110-111 m = pg_mbstrlen_with_len(source, slen); n = pg_mbstrlen_with_len(target, tlen);
-    let m0 = mb::pg_mbstrlen_with_len::call(source, slen);
-    let n0 = mb::pg_mbstrlen_with_len::call(target, tlen);
+    let m0 = mb::pg_mbstrlen_with_len::call(source, slen)?;
+    let n0 = mb::pg_mbstrlen_with_len::call(target, tlen)?;
 
     // C:117-120 empty-string fast paths.
     if m0 == 0 {
@@ -225,7 +225,7 @@ pub fn varstr_levenshtein_less_equal(
         let mut v: Vec<i32> = Vec::with_capacity((m0 + 1) as usize);
         let mut off = 0usize;
         for _ in 0..m0 {
-            let cl = mb::pg_mblen_range::call(&source[off..]);
+            let cl = mb::pg_mblen_range::call(&source[off..])?;
             v.push(cl);
             off += cl as usize;
         }
@@ -257,7 +257,7 @@ pub fn varstr_levenshtein_less_equal(
     while j < n {
         // C:229 y_char_len = (n != tlen + 1) ? pg_mblen_range(y, tend) : 1;
         let y_char_len = if n != tlen + 1 {
-            mb::pg_mblen_range::call(&target[y_off..])
+            mb::pg_mblen_range::call(&target[y_off..])?
         } else {
             1
         };
@@ -517,7 +517,7 @@ pub fn unicode_assigned(input: &[u8]) -> PgResult<bool> {
     }
 
     // C:6588 size = pg_mbstrlen_with_len(VARDATA_ANY(input), VARSIZE_ANY_EXHDR(input));
-    let size = mb::pg_mbstrlen_with_len::call(input, input.len() as i32);
+    let size = mb::pg_mbstrlen_with_len::call(input, input.len() as i32)?;
 
     // C:6589-6599 walk each character.
     let mut p = input;
@@ -575,7 +575,7 @@ pub fn unicode_normalize_func<'mcx>(
     let nform = unicode_norm_form_from_string(form)?;
 
     // C:6620 size = pg_mbstrlen_with_len(...);
-    let size = mb::pg_mbstrlen_with_len::call(t, t.len() as i32) as usize;
+    let size = mb::pg_mbstrlen_with_len::call(t, t.len() as i32)? as usize;
 
     // C:6621-6629 convert to pg_wchar.
     let input_chars = input_to_wchars(mcx, t, size)?;
@@ -614,7 +614,7 @@ pub fn unicode_is_normalized(mcx: Mcx<'_>, t: &[u8], form: &[u8]) -> PgResult<bo
     let nform = unicode_norm_form_from_string(form)?;
 
     // C:6688 size = pg_mbstrlen_with_len(...);
-    let size = mb::pg_mbstrlen_with_len::call(t, t.len() as i32) as usize;
+    let size = mb::pg_mbstrlen_with_len::call(t, t.len() as i32)? as usize;
 
     // C:6689-6697 convert to pg_wchar.
     let input_chars = input_to_wchars(mcx, t, size)?;

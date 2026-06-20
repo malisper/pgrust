@@ -109,7 +109,11 @@ impl TSVectorParseStateData {
 
     /// `pg_mblen_cstr(state->prsbuf)` — byte length of the current character.
     fn mblen(&self) -> usize {
-        mb::pg_mblen_range::call(&self.buf[self.prsbuf..]) as usize
+        // C's `pg_mblen_cstr` does not validate; the range-clamped seam only
+        // Errs when the leading char would overrun the slice, where the clamped
+        // length is the slice length (dead error path falls back there).
+        let rest = &self.buf[self.prsbuf..];
+        mb::pg_mblen_range::call(rest).unwrap_or(rest.len() as i32) as usize
     }
 
     /// `atoi(state->prsbuf)`. The sole caller wraps this in `LIMITPOS(...)`,

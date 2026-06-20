@@ -915,7 +915,13 @@ fn invalid_bytea_syntax() -> PgError {
 /// `.min(rest.len())` clamp is defensive only — `pg_mblen_range` already clamps
 /// the length to the slice end. `pg_mblen_range` crosses the mbutils seam.
 fn mb_snippet(rest: &[u8]) -> String {
-    let n = (pg_mblen_range::call(rest) as usize).min(rest.len());
+    // `pg_mblen_range` `report_invalid_encoding`s if the leading character's
+    // length would extend past the slice end. This snippet is rendered while
+    // *building* an error message (the caller returns `PgError`, not
+    // `PgResult`), so there is nowhere to propagate a second error to; an
+    // overrunning length means "the whole remaining slice", which the
+    // `.min(rest.len())` clamp already yields. Fall back to that on `Err`.
+    let n = (pg_mblen_range::call(rest).unwrap_or(rest.len() as i32) as usize).min(rest.len());
     String::from_utf8_lossy(&rest[..n]).into_owned()
 }
 

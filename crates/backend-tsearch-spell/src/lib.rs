@@ -406,7 +406,11 @@ fn pg_mblen(s: &[u8]) -> usize {
     if s.is_empty() {
         return 1;
     }
-    backend_utils_mb_mbutils_seams::pg_mblen_range::call(s) as usize
+    // C's `pg_mblen` does not validate (never `report_invalid_encoding`s); the
+    // range-clamped seam can only Err if the leading char would overrun the
+    // slice, in which case the clamped length is the slice length — that dead
+    // path falls back to `s.len()` rather than escalate.
+    backend_utils_mb_mbutils_seams::pg_mblen_range::call(s).unwrap_or(s.len() as i32) as usize
 }
 
 /// `pg_mblen` over a non-empty slice, clamped to `s.len()` so the byte length

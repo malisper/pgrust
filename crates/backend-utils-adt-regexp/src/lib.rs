@@ -326,7 +326,10 @@ pub fn parse_re_flags(opts: Option<&[u8]>) -> PgResult<PgReFlags> {
 /// pg_mblen_range(opt_p + i, opt_p + opt_len), opt_p + i)` ereport shared by
 /// `parse_re_flags` and `textregexreplace`.
 fn invalid_re_option(opt: &[u8]) -> PgError {
-    let mblen = (mb::pg_mblen_range::call(opt) as usize).min(opt.len());
+    // Rendered while building a PgError; the seam only Errs on a
+    // slice-overrunning leading char, where the clamped length is the slice
+    // length — the `.min(opt.len())` clamp already yields that, so fall back.
+    let mblen = (mb::pg_mblen_range::call(opt).unwrap_or(opt.len() as i32) as usize).min(opt.len());
     PgError::error(format!(
         "invalid regular expression option: \"{}\"",
         String::from_utf8_lossy(&opt[..mblen])
@@ -584,7 +587,7 @@ pub fn similar_escape_internal<'mcx>(
                 e = None; // no escape character
             } else {
                 if elen > 1 {
-                    let escape_mblen = mb::pg_mbstrlen_with_len::call(esc, elen as i32);
+                    let escape_mblen = mb::pg_mbstrlen_with_len::call(esc, elen as i32)?;
                     if escape_mblen > 1 {
                         return Err(PgError::error("invalid escape string")
                             .with_sqlstate(ERRCODE_INVALID_ESCAPE_SEQUENCE)
@@ -634,7 +637,7 @@ pub fn similar_escape_internal<'mcx>(
         // character representation cannot contain the representation of a
         // valid single-byte character.)
         if elen > 1 {
-            let mblen = (mb::pg_mblen_range::call(&p_bytes[p..]) as usize).min(plen_left);
+            let mblen = (mb::pg_mblen_range::call(&p_bytes[p..])? as usize).min(plen_left);
             if mblen > 1 {
                 // slow, multi-byte path
                 if afterescape {
