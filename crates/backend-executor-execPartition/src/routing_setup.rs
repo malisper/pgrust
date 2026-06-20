@@ -378,6 +378,7 @@ pub(crate) fn ExecInitPartitionDispatchInfo<'mcx>(
 /// close, FDW shutdown can `elog(ERROR)`).
 pub fn ExecCleanupTupleRouting<'mcx>(
     mtstate: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
     proute: &mut PartitionTupleRouting<'mcx>,
 ) -> PgResult<()> {
     let _ = mtstate;
@@ -418,26 +419,21 @@ pub fn ExecCleanupTupleRouting<'mcx>(
     // FDW EndForeignInsert reads ri_FdwRoutine, absent from the trimmed
     // ResultRelInfo; it lands with the full nodeModifyTable ResultRelInfo, and is
     // a no-op for every relation the trimmed type can represent
-    // (ri_FdwRoutine == NULL).  The non-borrowed leaf partitions, however, must
-    // have their indices closed (ExecCloseIndices) before the relation is closed
-    // (table_close).  ExecCloseIndices is owned by execIndexing.c, which has no
-    // seam crate authored yet — consistent with this crate's other blocked-owner
-    // sites (ExecInitPartitionInfo's ExecOpenIndices), the close of a routed leaf
-    // partition's indices cannot run until that owner lands; panic loudly rather
-    // than silently leak the index opens.
+    // (ri_FdwRoutine == NULL).  The non-borrowed leaf partitions have their
+    // indices closed (ExecCloseIndices, execIndexing.c) before the relation is
+    // closed (table_close).  Leaf partitions borrowed from the owning
+    // ModifyTableState are skipped — the borrower closes them.
     for i in 0..proute.num_partitions as usize {
         if proute.is_borrowed_rel[i] {
             continue;
         }
-        // The relation is closed in the same step as ExecCloseIndices in C;
-        // splitting them (close the rel now, leak the indices) would be a worse
-        // half-port than refusing the whole non-borrowed close until the
-        // ExecCloseIndices owner exists.
-        panic!(
-            "ExecCleanupTupleRouting: closing a routed (non-borrowed) leaf \
-             partition needs ExecCloseIndices (execIndexing.c), whose seam owner \
-             has not landed"
-        );
+        let rri = proute.partitions[i];
+        // ExecCloseIndices(resultRelInfo);
+        backend_executor_execIndexing_seams::exec_close_indices::call(estate, rri)?;
+        // table_close(resultRelInfo->ri_RelationDesc, NoLock);
+        if let Some(reldesc) = estate.result_rel_mut(rri).ri_RelationDesc.take() {
+            reldesc.close(NoLock)?;
+        }
     }
 
     Ok(())

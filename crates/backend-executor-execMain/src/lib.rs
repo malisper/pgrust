@@ -657,8 +657,15 @@ pub fn standard_ExecutorEnd(query_desc: &mut QueryDesc) -> PgResult<()> {
     query_desc.with_estate_mut(|estate| {
         estate.es_finished = true;
     });
-    // FreeExecutorState(estate): the per-query context (and the EState/plan-state
-    // tree it holds) is freed when the caller drops the QueryDesc bundle.
+    // FreeExecutorState(estate): the per-query *memory* context (and the
+    // EState/plan-state tree it holds) is freed when the caller drops the
+    // QueryDesc bundle, but the non-memory teardown C's FreeExecutorState runs
+    // must happen here — in particular it destroys `es_partition_directory`,
+    // releasing (forgetting) the relcache pins the planner/executor partition
+    // routing took (`RelationIncrementReferenceCount` registers each with the
+    // current resource owner). Without this, those pins outlive the resource
+    // owner and a partitioned INSERT/SELECT reports "resource was not closed".
+    query_desc.with_estate_mut(execUtils::free_executor_state_teardown)?;
     Ok(())
 }
 

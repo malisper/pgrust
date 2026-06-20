@@ -35,6 +35,7 @@ backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" 
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
+backend-executor-execIndexing-seams = { path = "../backend-executor-execIndexing-seams" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-nodeModifyTable-seams = { path = "../backend-executor-nodeModifyTable-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }

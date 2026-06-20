@@ -533,7 +533,7 @@ pub struct RtePermInfoId(pub u32);
  * ======================================================================== */
 
 /// `PlannerGlobal` — global information for one planner run.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct PlannerGlobal {
     /// `List *subplans` — Plans for SubPlan nodes. C holds owned `Plan *`; the
     /// owned plan trees live in the [`planner_run::PlannerRun`] subplan store and
@@ -612,6 +612,15 @@ pub struct PlannerGlobal {
     pub parallel_mode_needed: bool,
     /// `char maxParallelHazard`.
     pub max_parallel_hazard: i8,
+    /// `PartitionDirectory partition_directory` — created on first need by
+    /// `set_relation_partition_info` (plancat.c) to keep a consistent
+    /// `PartitionDesc` for each partitioned relation across the planner run.
+    /// Carried as an [`types_nodes::Opaque`] handle (`None` = the C `NULL`):
+    /// `types-pathnodes` cannot name the owner type
+    /// (`backend-partitioning-partdesc::PartitionDirectory`) without a
+    /// dependency cycle, so the owner downcasts the boxed value, exactly as
+    /// `EState::es_partition_directory` does for the executor.
+    pub partition_directory: types_nodes::Opaque,
 }
 
 /* ==========================================================================

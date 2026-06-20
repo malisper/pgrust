@@ -9339,6 +9339,7 @@ dependencies = [
  "backend-catalog-aclchk-seams",
  "backend-catalog-partition-seams",
  "backend-executor-execExpr-seams",
+ "backend-executor-execIndexing-seams",
  "backend-executor-execMain-seams",
  "backend-executor-execPartition-seams",
  "backend-executor-execTuples-seams",

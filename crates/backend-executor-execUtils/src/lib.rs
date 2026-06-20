@@ -313,7 +313,15 @@ pub fn free_executor_state_in<'mcx>(
 /// Shared teardown for both the `McxOwned` and boxed `EState` forms: shut down
 /// and free any remaining `ExprContext`s (firing shutdown callbacks newest
 /// first), then release the JIT context and partition directory.
-fn free_executor_state_teardown(estate: &mut EStateData<'_>) -> PgResult<()> {
+///
+/// Exposed for `standard_ExecutorEnd` (execMain.c), which in C calls
+/// `FreeExecutorState(estate)` after `ExecEndPlan`; the owned model frees the
+/// EState's memory when the `QueryDesc` bundle drops, but the non-memory
+/// teardown here (firing ExprContext shutdown callbacks, and crucially
+/// destroying `es_partition_directory` so its relcache pins are forgotten from
+/// the resource owner before the resource owner is released) must run
+/// explicitly during executor end.
+pub fn free_executor_state_teardown(estate: &mut EStateData<'_>) -> PgResult<()> {
     // C: `while (estate->es_exprcontexts) FreeExprContext(linitial(...), true)`
     // — newest first (lcons order); the pool equivalent is highest index first.
     for i in (0..estate.es_exprcontexts.len()).rev() {

@@ -148,7 +148,7 @@ pub fn ExecFindPartition<'mcx>(
                     .unwrap()
                     .oids[partidx as usize];
                 let found_rri = backend_executor_execMain_seams::exec_lookup_result_rel_by_oid::call(
-                    mtstate, part_oid, true, false,
+                    mtstate, estate, part_oid, true, false,
                 )?;
                 if let Some(found_rri) = found_rri {
                     // Verify this ResultRelInfo allows INSERTs.

@@ -828,7 +828,9 @@ pub fn ExecEndModifyTable<'mcx>(
     // Close all the partitioned tables, leaf partitions, and their indices and
     // release the slot used for tuple routing, if set.
     if let Some(mut proute) = node.mt_partition_tuple_routing.take() {
-        backend_executor_execPartition_seams::exec_cleanup_tuple_routing::call(node, &mut proute)?;
+        backend_executor_execPartition_seams::exec_cleanup_tuple_routing::call(
+            node, estate, &mut proute,
+        )?;
 
         // if (node->mt_root_tuple_slot) ExecDropSingleTupleTableSlot(...);
         //

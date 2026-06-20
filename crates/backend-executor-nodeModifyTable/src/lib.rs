@@ -296,4 +296,20 @@ fn install_delete_seams() {
     de::exec_get_returning_slot::set(|estate, rri| {
         backend_executor_execMain_seams::exec_get_returning_slot::call(estate, rri)
     });
+
+    // `ExecLookupResultRelByOid` (nodeModifyTable.c) is homed in this crate
+    // (it owns `ModifyTableState`), but its consumer is execPartition's
+    // tuple-routing (`ExecFindPartition`), which reaches it through the
+    // execMain-seams declaration. Install the real body here.
+    backend_executor_execMain_seams::exec_lookup_result_rel_by_oid::set(
+        |node, estate, resultoid, missing_ok, update_cache| {
+            lifecycle::ExecLookupResultRelByOid(
+                node,
+                estate,
+                resultoid,
+                missing_ok,
+                update_cache,
+            )
+        },
+    );
 }

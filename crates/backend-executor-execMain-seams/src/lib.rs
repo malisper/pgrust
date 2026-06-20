@@ -254,6 +254,7 @@ seam_core::seam!(
     /// result relation OID %u")`, carried on `Err`.
     pub fn exec_lookup_result_rel_by_oid<'mcx>(
         node: &mut types_nodes::ModifyTableState<'mcx>,
+        estate: &mut types_nodes::EStateData<'mcx>,
         resultoid: types_core::Oid,
         missing_ok: bool,
         update_cache: bool,
