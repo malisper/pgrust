@@ -885,6 +885,10 @@ pub fn init_seams() {
     // reading MyBackendType; the global lives in globals.c but the accessor is
     // miscinit-owned, so install the utility-out copy here.
     backend_tcop_utility_out_seams::my_backend_type::set(GetMyBackendType);
+    // ProcessUtility's CHECKPOINT privilege check (utility.c:951) reads the
+    // current user OID through the utility-out-seams copy. C: `Oid GetUserId(void)`
+    // (infallible); the body is miscinit-owned, so install it here.
+    backend_tcop_utility_out_seams::get_user_id::set(GetUserId);
     // plancache's GetCachedPlan revalidation slice (backendstate-pc-seams):
     // get_user_id is this crate's body; row_security reads the guc-tables slot
     // (the `plan_cache_mode` member is installed by plancache itself).

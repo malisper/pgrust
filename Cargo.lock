@@ -18918,6 +18918,7 @@ dependencies = [
  "backend-commands-user-seams",
  "backend-foreign-foreign-seams",
  "backend-lib-bloomfilter-seams",
+ "backend-tcop-utility-out-seams",
  "backend-utils-adt-acl-seams",
  "backend-utils-adt-regproc-seams",
  "backend-utils-adt-varlena-seams",

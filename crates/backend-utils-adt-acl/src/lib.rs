@@ -62,6 +62,15 @@ pub fn init_seams() {
         role_membership::has_privs_of_role(member, role)
             .expect("has_privs_of_role catalog lookup failed")
     });
+    // ProcessUtility's CHECKPOINT privilege check (utility.c:951) reaches
+    // has_privs_of_role through the tcop utility-out-seams copy. C:
+    // `bool has_privs_of_role(Oid, Oid)`; the owner body carries the per-owner
+    // error channel (PgResult) for the catalog membership scan, so unwrap to the
+    // bare bool the predicate uses (mirrors the guc_funcs install above).
+    backend_tcop_utility_out_seams::has_privs_of_role::set(|member, role| {
+        role_membership::has_privs_of_role(member, role)
+            .expect("has_privs_of_role catalog lookup failed")
+    });
     backend_utils_adt_acl_seams::get_rolespec_oid::set(role_membership::get_rolespec_oid);
     backend_utils_adt_acl_seams::get_role_oid::set(role_membership::get_role_oid);
     backend_utils_adt_acl_seams::initialize_acl::set(role_membership::initialize_acl);
