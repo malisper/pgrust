@@ -36,6 +36,7 @@ backend-executor-execUtils = { path = "../backend-executor-execUtils" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-execJunk = { path = "../backend-executor-execJunk" }
 backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
+types-dest = { path = "../types-dest" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 
 # Seam crate this unit OWNS (the executor-driver / EvalPlanQual / constraint /

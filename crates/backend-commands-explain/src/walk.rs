@@ -659,32 +659,47 @@ pub fn ExplainNode<'es, 'p>(
     // We have to forcibly clean up the instrumentation state because we haven't
     // done ExecutorEnd yet. `if (planstate->instrument) InstrEndLoop(...)`.
     //
-    // InstrEndLoop folds an in-progress loop into the totals; it is a no-op once
-    // `running == false`. In the EXPLAIN ANALYZE flow ExplainNode runs only after
-    // ExecutorRun + ExecutorFinish have completed, so every node's instrument has
-    // `running == false` (looped or never-executed) and InstrEndLoop has nothing
-    // left to fold. The `instrument` slot is reached through the immutable
-    // `ps_head()` borrow, so the still-running case (which cannot occur here)
-    // cannot be finalized in place; surface it loudly rather than print stale
-    // totals.
-    if let Some(instr) = planstate.ps_head().instrument.as_deref() {
-        if instr.running {
-            panic!(
-                "ExplainNode: InstrEndLoop on a still-running node needs &mut instrument \
-                 (cannot occur after ExecutorFinish in EXPLAIN ANALYZE)"
-            );
+    // InstrEndLoop (instrument.c) folds the current in-progress cycle into the
+    // accumulated totals: a node that produced rows but was never loop-ended
+    // (the common single-scan EXPLAIN ANALYZE case — the scan stops at EOF, which
+    // sets `starttime = 0` via InstrStopNode but leaves `running = true` until a
+    // rescan or this finalize) still has `nloops == 0` and its per-cycle counters
+    // in `firsttuple`/`counter`/`tuplecount`. C mutates the instrument in place;
+    // the owned `PlanStateNode` is borrowed immutably here, so we replicate
+    // InstrEndLoop's arithmetic locally to produce the same folded
+    // `(nloops, startup, total, ntuples)` the ANALYZE block reads — the values
+    // are deterministic from the current fields and the instrument is not read
+    // again, so the local fold is behaviorally identical to the in-place mutate.
+    //
+    // C precondition: `InstrEndLoop` elogs ERROR if `starttime` is non-zero
+    // ("InstrEndLoop called on running node"); after ExecutorFinish every node
+    // has been stopped (InstrStopNode zeroes `starttime`), so a non-zero
+    // `starttime` is a genuine internal inconsistency — surface it.
+    let instr_totals = match planstate.ps_head().instrument.as_deref() {
+        Some(i) if es.analyze => {
+            if i.running {
+                if !i.starttime.is_zero() {
+                    return Err(backend_utils_error::ereport(types_error::ERROR)
+                        .errmsg_internal("InstrEndLoop called on running node")
+                        .into_error());
+                }
+                // Accumulate this cycle's per-cycle counters into the totals
+                // (the `instr->startup += firsttuple; total += counter; ntuples
+                // += tuplecount; nloops += 1` of InstrEndLoop).
+                let totaltime = i.counter.get_double();
+                Some((
+                    i.nloops + 1.0,
+                    i.startup + i.firsttuple,
+                    i.total + totaltime,
+                    i.ntuples + i.tuplecount,
+                ))
+            } else {
+                // Already loop-ended (or never executed): the totals are final.
+                Some((i.nloops, i.startup, i.total, i.ntuples))
+            }
         }
-    }
-
-    // ANALYZE actual-rows/timing block:
-    //   if (es->analyze && instrument && instrument->nloops > 0) { ... }
-    //   else if (es->analyze) { " (never executed)" / zeroed properties }
-    let instr_totals = planstate
-        .ps_head()
-        .instrument
-        .as_deref()
-        .filter(|_| es.analyze)
-        .map(|i| (i.nloops, i.startup, i.total, i.ntuples));
+        _ => None,
+    };
     if let Some((nloops_raw, startup, total, ntuples)) = instr_totals {
         if nloops_raw > 0.0 {
             let nloops = nloops_raw;

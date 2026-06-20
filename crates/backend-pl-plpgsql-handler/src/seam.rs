@@ -347,7 +347,7 @@ fn compile_proc_from_row(
 
     // The compile body `ereport`s on a faulty function; that propagates as a
     // PgError panic caught at the PGFunction boundary (== C's longjmp).
-    Ok(backend_pl_plpgsql_comp::plpgsql_compile_from_source(&facts))
+    backend_pl_plpgsql_comp::plpgsql_compile_from_source(&facts)
 }
 
 // --- validator substrate -----------------------------------------------------

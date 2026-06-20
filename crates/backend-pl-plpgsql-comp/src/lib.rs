@@ -21,6 +21,7 @@
 #![allow(non_camel_case_types, non_snake_case)]
 
 mod mem;
+mod rowtupdesc_table;
 mod seam;
 
 use core::cell::RefCell;
@@ -562,7 +563,7 @@ pub fn plpgsql_build_record(
 /// build is a tupdesc-owner callee reached via [`seam::build_row_tupledesc`]
 /// (mirror-PG-and-panic until the handle model unifies).  The member-type
 /// extraction is done here regardless, matching the C control flow.
-fn build_row_from_vars(vars: &[i32]) -> PLpgSQL_row {
+fn build_row_from_vars(vars: &[i32]) -> PgResult<PLpgSQL_row> {
     let numvars = vars.len() as i32;
     let mut fieldnames: Vec<String> = mem::vwithcap(numvars as usize);
     let mut varnos: Vec<i32> = mem::vwithcap(numvars as usize);
@@ -596,9 +597,9 @@ fn build_row_from_vars(vars: &[i32]) -> PLpgSQL_row {
         mem::vpush(&mut varnos, var_dno);
     }
 
-    let rowtupdesc = seam::build_row_tupledesc(&members);
+    let rowtupdesc = seam::build_row_tupledesc(&members)?;
 
-    PLpgSQL_row {
+    Ok(PLpgSQL_row {
         dtype: PLpgSQL_datum_type::PLPGSQL_DTYPE_ROW,
         dno: 0,
         refname: mem::sdup("(unnamed row)"),
@@ -610,7 +611,7 @@ fn build_row_from_vars(vars: &[i32]) -> PLpgSQL_row {
         nfields: numvars,
         fieldnames,
         varnos,
-    }
+    })
 }
 
 /// One member column of a row's `rowtupdesc` (the per-member type facts the
@@ -1469,10 +1470,10 @@ pub fn plpgsql_build_cursor_variable(
 }
 
 /// Build the unnamed ROW datum collecting a cursor's scalar args.
-pub fn plpgsql_build_cursor_arg_row(lineno: i32, args: Vec<i32>) -> i32 {
-    let mut row = build_row_from_vars(&args);
+pub fn plpgsql_build_cursor_arg_row(lineno: i32, args: Vec<i32>) -> PgResult<i32> {
+    let mut row = build_row_from_vars(&args)?;
     row.lineno = lineno;
-    plpgsql_adddatum(PLpgSQL_datum::Row(mem::boxed(row)))
+    Ok(plpgsql_adddatum(PLpgSQL_datum::Row(mem::boxed(row))))
 }
 
 /// Build the record loop variable for `FOR rec IN <query>` loops.
@@ -1695,7 +1696,7 @@ pub fn plpgsql_compile_inline(proc_source: String) -> PLpgSQL_function {
 /// `plpgsql_compile` cold path, owned-inputs form (`plpgsql_compile_callback`'s
 /// non-trigger scalar/procedure branch).  Trigger / event-trigger functions
 /// take the gated trigtype branches and are not handled on this cold path.
-pub fn plpgsql_compile_from_source(facts: &ProcCompileFacts) -> PLpgSQL_function {
+pub fn plpgsql_compile_from_source(facts: &ProcCompileFacts) -> PgResult<PLpgSQL_function> {
     let mut num_out_args: i32 = 0;
     let mut in_arg_varnos: Vec<i32> = Vec::new();
     let mut out_arg_variables: Vec<i32> = Vec::new();
@@ -1746,7 +1747,7 @@ pub fn plpgsql_compile_from_source(facts: &ProcCompileFacts) -> PLpgSQL_function
             &mut num_out_args,
             &mut in_arg_varnos,
             &mut out_arg_variables,
-        );
+        )?;
     }
 
     set_curr_compile_field(|f| f.fn_readonly = facts.provolatile != PROVOLATILE_VOLATILE);
@@ -1789,7 +1790,7 @@ pub fn plpgsql_compile_from_source(facts: &ProcCompileFacts) -> PLpgSQL_function
     PLPGSQL_ERROR_FUNCNAME.with(|f| *f.borrow_mut() = None);
     set_check_syntax(false);
 
-    take_curr_compile()
+    Ok(take_curr_compile())
 }
 
 /// `plpgsql_resolve_polymorphic_argtypes` (pl_comp.c) — given the declared
@@ -1866,7 +1867,7 @@ fn compile_scalar_function_setup(
     num_out_args: &mut i32,
     in_arg_varnos: &mut Vec<i32>,
     out_arg_variables: &mut Vec<i32>,
-) {
+) -> PgResult<()> {
     plpgsql_start_datums();
 
     // Resolve any polymorphic argument types to the concrete call types (or the
@@ -1943,7 +1944,7 @@ fn compile_scalar_function_setup(
     if *num_out_args > 1
         || (*num_out_args == 1 && curr_compile_field(|f| f.fn_prokind) == PROKIND_PROCEDURE)
     {
-        let row = build_row_from_vars(out_arg_variables);
+        let row = build_row_from_vars(out_arg_variables)?;
         let row_dno = plpgsql_adddatum(PLpgSQL_datum::Row(mem::boxed(row)));
         set_curr_compile_field(|f| f.out_param_varno = row_dno);
     } else if *num_out_args == 1 {
@@ -2015,6 +2016,8 @@ fn compile_scalar_function_setup(
         );
         let _ = plpgsql_build_variable("$0", 0, dt, true);
     }
+
+    Ok(())
 }
 
 fn with_curr_compile_mut(f: impl FnOnce(&mut PLpgSQL_function)) {
@@ -2148,7 +2151,7 @@ pub fn init_seams() {
         },
     );
     comp_seams::plpgsql_build_cursor_arg_row::set(|lineno, args| {
-        Ok(plpgsql_build_cursor_arg_row(lineno, args))
+        plpgsql_build_cursor_arg_row(lineno, args)
     });
     comp_seams::plpgsql_build_datatype_arrayof::set(|elem| {
         plpgsql_build_datatype_arrayof(Box::new(elem))

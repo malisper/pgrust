@@ -358,16 +358,92 @@ fn run_one_execsql_stmt<'mcx>(
         return Ok((code, 0, false, Vec::new(), Vec::new()));
     }
 
-    // A utility statement goes through ProcessUtility (the non-SELECT utility
-    // leg). PL/pgSQL embedded utility statements (e.g. CREATE TABLE inside a
-    // function body) reach the utility executor, which is the separate ported
-    // ProcessUtility slow path; for the DML/SELECT shapes here it does not occur.
+    // A utility statement (e.g. EXPLAIN, or an embedded CREATE/DROP inside a
+    // PL/pgSQL function body) goes through ProcessUtility, not the executor
+    // (C `_SPI_execute_plan`: `if (stmt->utilityStmt != NULL)` →
+    // `ProcessUtility(stmt, …, dest, &qc)`). A row-returning utility (EXPLAIN /
+    // SHOW / a PORTAL_UTIL_SELECT) writes its tuples into the SPI dest receiver
+    // exactly as a SELECT would, so the FOR-loop / RETURN QUERY / INTO callers
+    // collect them the same way.
     if operation == CmdType::CMD_UTILITY {
-        return Err(backend_utils_error::ereport(ERROR)
-            .errmsg_internal(
-                "PL/pgSQL embedded utility statement not supported on the prepared-plan path",
-            )
-            .into_error());
+        let receiver = create_spi_dest_receiver();
+
+        // The per-utility working context (C: CurrentMemoryContext during the
+        // portal's utility run). standard_ProcessUtility's readOnlyTree
+        // copyObject + make_parsestate allocations live here; the context is
+        // dropped when this returns. Nothing the dispatch returns escapes it
+        // (qc is owned, the rows are copied out of the receiver below).
+        let ucx = MemoryContext::new("SPI Execsql ProcessUtility");
+        let ucx_mcx = ucx.mcx();
+        let mut qc = types_portal::QueryCompletion::default();
+
+        // Copy the PlannedStmt into the per-utility scratch context so the
+        // statement and the working `mcx` share its lifetime (the owned analogue
+        // of C's stable `PlannedStmt *`); a row-returning utility routes its rows
+        // to the SPI receiver, never back into the caller's plan storage.
+        let pstmt = stmt.clone_in(ucx_mcx)?;
+
+        // C passes PROCESS_UTILITY_QUERY (a plain function-body call is the
+        // atomic context).
+        backend_tcop_utility_seams::process_utility::call(
+            ucx_mcx,
+            &pstmt,
+            "",
+            true, // readOnlyTree: protect the plancache's node tree (C true)
+            types_nodes::parsestmt::ProcessUtilityContext::PROCESS_UTILITY_QUERY,
+            param_li.clone(),
+            receiver,
+            &mut qc,
+        )?;
+
+        let (columns, raw_rows) = take_spi_raw_result(receiver);
+
+        // C: `res = SPI_OK_UTILITY;` and `_SPI_current->processed =
+        // _SPI_current->tuptable->numvals` when the utility returned tuples.
+        let processed = raw_rows.len() as u64;
+
+        // A row-returning utility (EXPLAIN/SHOW/etc.) leaves a tuple table, just
+        // like a SELECT; classify it as row-returning so the callers collect.
+        let returns_rows = !columns.is_empty();
+        let returned_tuptable = returns_rows;
+
+        let project_row = |row: &Vec<RawCol>| -> Vec<ExecsqlColumn> {
+            row.iter()
+                .enumerate()
+                .map(|(i, col): (usize, &RawCol)| ExecsqlColumn {
+                    value: col.value,
+                    isnull: col.isnull,
+                    typeid: columns
+                        .get(i)
+                        .map(|c| c.typeid)
+                        .unwrap_or(types_core::InvalidOid),
+                    name: columns.get(i).map(|c| c.name.clone()).unwrap_or_default(),
+                    byref: col.byref.clone(),
+                })
+                .collect()
+        };
+
+        let first_row: Vec<ExecsqlColumn> = if into && returns_rows {
+            match raw_rows.first() {
+                Some(row) => project_row(row),
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        let all_rows: Vec<Vec<ExecsqlColumn>> = if collect_all && returns_rows {
+            raw_rows.iter().map(project_row).collect()
+        } else {
+            Vec::new()
+        };
+
+        return Ok((
+            SPI_OK_UTILITY,
+            processed,
+            returned_tuptable,
+            first_row,
+            all_rows,
+        ));
     }
 
     // A row-returning statement (SELECT, or DML RETURNING) collects into a

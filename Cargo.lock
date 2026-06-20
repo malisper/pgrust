@@ -9392,6 +9392,7 @@ dependencies = [
  "seam-core",
  "types-acl",
  "types-core",
+ "types-dest",
  "types-error",
  "types-execparallel",
  "types-nodes",
@@ -14382,6 +14383,7 @@ dependencies = [
 name = "backend-pl-plpgsql-comp"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-tupdesc",
  "backend-catalog-namespace-seams",
  "backend-parser-driver-seams",
  "backend-parser-parse-type",

@@ -296,20 +296,51 @@ pub fn check_sql_expr(
 }
 
 /// `CreateTemplateTupleDesc(numvars)` + per-member `TupleDescInitEntry` /
-/// `TupleDescInitEntryCollation` (`build_row_from_vars`).  In `types-plpgsql`
-/// the row's `rowtupdesc` is an opaque handle with no in-repo constructor, so
-/// the genuine tupdesc build is the tupdesc owner's; until the handle model
-/// unifies this mirror-PG-and-panics for a non-empty row.  An empty member list
-/// (numvars == 0) yields no descriptor.
-pub fn build_row_tupledesc(members: &[crate::RowMember]) -> Option<types_plpgsql::TupleDesc> {
+/// `TupleDescInitEntryCollation` (`build_row_from_vars`, pl_comp.c:1838).  Builds
+/// the genuine composite `TupleDesc` for a compiled row variable: a fresh
+/// template descriptor with one entry per member, each carrying the member's
+/// name/typoid/typmod and collation.
+///
+/// In `types-plpgsql` the row's `rowtupdesc` field is a lifetime-free `u64`
+/// handle (the compiled structs are `Clone + Debug`), so the real
+/// `TupleDescData` is built in a private backend-lifetime `MemoryContext` —
+/// the analogue of the C compile context that owns `rowtupdesc` for the
+/// cached function's life — and registered in [`crate::rowtupdesc_table`],
+/// which returns the 1-based handle.  An empty member list (numvars == 0)
+/// yields no descriptor (the C NULL).
+pub fn build_row_tupledesc(
+    members: &[crate::RowMember],
+) -> types_error::PgResult<Option<types_plpgsql::TupleDesc>> {
     if members.is_empty() {
-        return None;
+        return Ok(None);
     }
-    panic!(
-        "plpgsql compile: build_row_from_vars rowtupdesc ({} members) not reachable \
-         (TupleDesc opaque-handle model has no in-repo constructor)",
-        members.len()
-    )
+
+    // The C compile context analogue: a private context whose arena backs the
+    // descriptor (and the column names it owns) for the backend's lifetime.
+    let ctx = Box::new(mcx::MemoryContext::new("PL/pgSQL row tupdesc"));
+    let mcx: mcx::Mcx<'static> =
+        unsafe { core::mem::transmute::<mcx::Mcx<'_>, mcx::Mcx<'static>>(ctx.mcx()) };
+
+    // CreateTemplateTupleDesc(numvars).
+    let mut td = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, members.len() as i32)?;
+
+    // Per member: TupleDescInitEntry(rowtupdesc, i+1, refname, typoid, typmod, 0)
+    // then TupleDescInitEntryCollation(rowtupdesc, i+1, typcoll).
+    for (i, m) in members.iter().enumerate() {
+        let attno = (i + 1) as i16;
+        backend_access_common_tupdesc::TupleDescInitEntry(
+            &mut td,
+            attno,
+            Some(&m.attname),
+            m.typoid,
+            m.typmod,
+            0,
+        )?;
+        backend_access_common_tupdesc::TupleDescInitEntryCollation(&mut td, attno, m.typcoll)?;
+    }
+
+    let handle = crate::rowtupdesc_table::register(ctx, td);
+    Ok(Some(types_plpgsql::TupleDesc(handle)))
 }
 
 /// `cached_function_compile(fcinfo, fn_extra, plpgsql_compile_callback, …)` +
