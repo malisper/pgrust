@@ -3306,15 +3306,16 @@ fn add_modifytable_to_path<'mcx>(
              is not ported"
         );
     }
-    if command_type == CmdType::CMD_MERGE {
-        panic!(
-            "grouping_planner: MERGE ModifyTable (planner.c:2095) — \
-             mergeActionList / mergeJoinCondition carriers are not ported"
-        );
-    }
-    if has_merge_action {
-        panic!("grouping_planner: ModifyTable mergeActionList is not ported");
-    }
+    // Single-relation MERGE (planner.c:2094-2097): C aliases
+    // mergeActionLists = list_make1(parse->mergeActionList) and
+    // mergeJoinConditions = list_make1(parse->mergeJoinCondition) into the path.
+    // In this owned model those lists live on `parse` and are read directly by
+    // create_modifytable_plan / make_modifytable (the same parse-direct pattern
+    // used for ON CONFLICT). The path therefore carries only a presence signal:
+    // a one-element marker outer list so create_modifytable_plan's MERGE branch
+    // (`operation == CMD_MERGE`) fires. The actual MergeAction / join-condition
+    // resolution happens in createplan against `run.resolve(root.parse)`.
+    let _ = has_merge_action;
     if has_wco {
         panic!(
             "grouping_planner: ModifyTable WITH CHECK OPTION \

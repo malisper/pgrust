@@ -222,28 +222,43 @@ pub fn ExecMergeMatched<'mcx>(
             // MergeActionState *relaction = (MergeActionState *) lfirst(l);
             // CmdType commandType = relaction->mas_action->commandType;
             //
-            // Snapshot the per-action data off the (now-owned)
-            // `ri_MergeActions[action_kind][idx]` — `commandType`/`matchKind`
-            // from `mas_action`, and clones of the `mas_whenqual`/`mas_proj`
-            // exec-state structs so the `estate` borrow is free for the
-            // `ExecQual`/`ExecProject` owner seams. Mirrors `ExecMergeNotMatched`.
+            // Snapshot the per-action scalars and MOVE the compiled
+            // `mas_whenqual` / `mas_proj` out of the pooled
+            // `ri_MergeActions[action_kind][idx]` (leaving `None`). A compiled
+            // `ExprState` / `ProjectionInfo` cannot be `.clone()`d (the step
+            // program is context-allocated; the derived clone is a loud guard)
+            // and cannot be borrowed `&mut` while `estate` is borrowed `&mut`.
+            // We restore them into the pool as soon as the qual test and (for
+            // UPDATE) the projection are done, so a re-entry / EvalPlanQual retry
+            // finds them. Faithful to C aliasing the same ExprState.
             let (command_type, action_match_kind, action_overriding, mut whenqual, mut proj) = {
-                let action = &estate.result_rel(result_rel_info).ri_MergeActions
+                let action = &mut estate.result_rel_mut(result_rel_info).ri_MergeActions
                     [action_kind as usize]
-                    .as_ref()
+                    .as_mut()
                     .expect("matched MERGE action list present")[idx];
                 let mas_action = action
                     .mas_action
                     .as_ref()
                     .expect("MergeActionState has a MergeAction");
-                (
-                    mas_action.commandType,
-                    mas_action.matchKind,
-                    mas_action.overriding,
-                    action.mas_whenqual.as_ref().map(|w| (**w).clone()),
-                    action.mas_proj.as_ref().map(|p| (**p).clone()),
-                )
+                let command_type = mas_action.commandType;
+                let action_match_kind = mas_action.matchKind;
+                let action_overriding = mas_action.overriding;
+                let whenqual = action.mas_whenqual.take();
+                let proj = action.mas_proj.take();
+                (command_type, action_match_kind, action_overriding, whenqual, proj)
             };
+
+            // Restore the moved-out compiled states into the pooled action.
+            macro_rules! restore_matched_action_states {
+                () => {{
+                    let action = &mut estate.result_rel_mut(result_rel_info).ri_MergeActions
+                        [action_kind as usize]
+                        .as_mut()
+                        .expect("matched MERGE action list present")[idx];
+                    action.mas_whenqual = whenqual.take();
+                    action.mas_proj = proj.take();
+                }};
+            }
             let result: TM_Result;
             let mut update_cxt = UpdateContext {
                 crossPartUpdate: false,
@@ -263,6 +278,7 @@ pub fn ExecMergeMatched<'mcx>(
                 None => true,
             };
             if !passed {
+                restore_matched_action_states!();
                 idx += 1;
                 continue;
             }
@@ -301,6 +317,10 @@ pub fn ExecMergeMatched<'mcx>(
                     let projected =
                         backend_executor_execExpr_seams::exec_project_info::call(proj, estate)?;
                     newslot = Some(projected);
+
+                    // whenqual + proj are no longer needed this iteration; put
+                    // them back so an EvalPlanQual retry re-entry finds them.
+                    restore_matched_action_states!();
 
                     // mtstate->mt_merge_action = relaction;
                     //
@@ -411,6 +431,8 @@ pub fn ExecMergeMatched<'mcx>(
                 }
 
                 CmdType::CMD_DELETE => {
+                    // whenqual + proj are no longer needed this iteration.
+                    restore_matched_action_states!();
                     // mtstate->mt_merge_action = relaction; (see the CMD_UPDATE
                     // arm — materialize an owned MergeActionState for the active
                     // action so consumers attribute the running WHEN clause.)
@@ -504,6 +526,8 @@ pub fn ExecMergeMatched<'mcx>(
                 }
 
                 CmdType::CMD_NOTHING => {
+                    // whenqual + proj are no longer needed this iteration.
+                    restore_matched_action_states!();
                     // Doing nothing is always OK.
                     result = TM_Result::TM_Ok;
                 }

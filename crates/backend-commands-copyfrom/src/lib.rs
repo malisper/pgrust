@@ -787,6 +787,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
             rri,
             types_nodes::nodes::CmdType::CMD_INSERT,
             types_nodes::nodes::OnConflictAction::ONCONFLICT_NONE,
+            &[], /* mergeActions: COPY is INSERT-only */
         )?;
 
         // ExecOpenIndices(resultRelInfo, false);

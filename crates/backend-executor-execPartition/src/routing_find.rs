@@ -161,6 +161,7 @@ pub fn ExecFindPartition<'mcx>(
                         found_rri,
                         CmdType::CMD_INSERT,
                         on_conflict_action,
+                        &[], /* mergeActions: tuple routing is INSERT-only */
                     )?;
 
                     // Initialize info to insert tuples routed to this partition.

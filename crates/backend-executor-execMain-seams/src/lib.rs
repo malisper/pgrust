@@ -311,13 +311,16 @@ seam_core::seam!(
     /// `CheckValidResultRel(resultRelInfo, operation, onConflictAction,
     /// mergeActions)` (execMain.c): verify the result relation (id into the
     /// EState pool) is a valid target for the given command, raising the
-    /// appropriate `ereport(ERROR)` otherwise (carried on `Err`). The
-    /// `merge_actions` list is passed empty by the partition-routing caller.
+    /// appropriate `ereport(ERROR)` otherwise (carried on `Err`). For a MERGE
+    /// (`operation == CMD_MERGE`) `merge_action_cmds` carries the per-result-rel
+    /// MergeAction command types (C's `mergeActions`), each of which is
+    /// replica-identity checked; for non-MERGE it is empty.
     pub fn check_valid_result_rel<'mcx>(
         estate: &mut types_nodes::EStateData<'mcx>,
         result_rel_info: types_nodes::RriId,
         operation: types_nodes::nodes::CmdType,
         on_conflict_action: types_nodes::nodes::OnConflictAction,
+        merge_action_cmds: &[types_nodes::nodes::CmdType],
     ) -> types_error::PgResult<()>
 );
 

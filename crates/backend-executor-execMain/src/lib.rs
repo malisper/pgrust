@@ -1505,8 +1505,8 @@ fn InitResultRelInfo<'mcx>(
 /// mergeActions)` (execMain.c) — verify the result relation is a valid target
 /// for the command.
 ///
-/// The seam drops `mergeActions` (the partition-routing / nodeModifyTable
-/// callers pass NIL on the live paths). MERGE-action validation and the
+/// For MERGE, `merge_action_cmds` carries the per-result-rel MergeAction command
+/// types (C's `mergeActions`); each is replica-identity checked. The
 /// view / materialized-view / foreign-table arms are gated as unported (they
 /// need owners — `view_has_instead_trigger`, the FDW vtable — that are off the
 /// INSERT-into-table path).
@@ -1516,6 +1516,7 @@ fn CheckValidResultRel<'mcx>(
     result_rel_info: types_nodes::RriId,
     operation: CmdType,
     on_conflict_action: types_nodes::nodes::OnConflictAction,
+    merge_action_cmds: &[CmdType],
 ) -> PgResult<()> {
     use types_tuple::access::{
         RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
@@ -1543,12 +1544,15 @@ fn CheckValidResultRel<'mcx>(
     if relkind == RELKIND_RELATION || relkind == RELKIND_PARTITIONED_TABLE {
         // For MERGE, check each action; for others, check the operation itself.
         if operation == CmdType::CMD_MERGE {
-            // mergeActions is always NIL at the live call sites (the seam drops
-            // it). A non-empty list would require iterating MergeAction nodes.
-            return Err(unported(
-                "CheckValidResultRel: CMD_MERGE replica-identity check \
-                 (mergeActions are not carried on the seam)",
-            ));
+            // foreach_node(MergeAction, action, mergeActions)
+            //     CheckCmdReplicaIdentity(resultRel, action->commandType);
+            for &action_cmd in merge_action_cmds {
+                execReplication_seams::check_cmd_replica_identity::call(
+                    mcx,
+                    &result_rel,
+                    action_cmd,
+                )?;
+            }
         } else {
             execReplication_seams::check_cmd_replica_identity::call(mcx, &result_rel, operation)?;
         }

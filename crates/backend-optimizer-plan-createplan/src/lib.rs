@@ -4387,9 +4387,6 @@ fn create_modifytable_plan<'mcx>(
         panic!("create_modifytable_plan: WITH CHECK OPTION lists not yet ported");
     }
     let returning_lists: Vec<Vec<NodeId>> = p.returningLists.clone();
-    if !p.mergeActionLists.is_empty() || !p.mergeJoinConditions.is_empty() {
-        panic!("create_modifytable_plan: MERGE action/join-condition lists not yet ported");
-    }
 
     // Resolve the ON CONFLICT clause (carried as a presence marker in the path)
     // into the executor-shaped plan data. infer_arbiter_indexes needs &mut root,
@@ -4606,6 +4603,45 @@ fn make_modifytable<'mcx>(
         ),
     };
 
+    // MERGE: build mergeActionLists / mergeJoinConditions from parse->
+    // mergeActionList / parse->mergeJoinCondition (createplan.c:7253-7254, where
+    // they alias the path's list_make1 of the parse fields). Single result
+    // relation here, so each is a one-element outer list. The Var references are
+    // fixed up later by setrefs.c.
+    let (merge_action_lists_field, merge_join_conditions_field): (
+        Option<PgVec<'mcx, PgVec<'mcx, types_nodes::modifytable::MergeAction<'mcx>>>>,
+        Option<PgVec<'mcx, Option<PgVec<'mcx, Expr>>>>,
+    ) = if operation == types_pathnodes::CMD_MERGE {
+        let parse = run.resolve(root.parse);
+
+        // list_make1(parse->mergeActionList): one inner list of MergeActions.
+        let mut inner_actions = vec_with_capacity_in(mcx, parse.mergeActionList.len())?;
+        for action_node in parse.mergeActionList.iter() {
+            let src = action_node
+                .as_mergeaction()
+                .expect("make_modifytable: mergeActionList entry is a MergeAction");
+            inner_actions.push(convert_merge_action(mcx, src)?);
+        }
+        let mut outer_actions = vec_with_capacity_in(mcx, 1)?;
+        outer_actions.push(inner_actions);
+
+        // list_make1(parse->mergeJoinCondition): one inner join-condition list.
+        let join_cond: Option<PgVec<'mcx, Expr>> = match parse.mergeJoinCondition.as_deref() {
+            Some(expr) => {
+                let mut v = vec_with_capacity_in(mcx, 1)?;
+                v.push(expr.clone_in(mcx)?);
+                Some(v)
+            }
+            None => None,
+        };
+        let mut outer_conds = vec_with_capacity_in(mcx, 1)?;
+        outer_conds.push(join_cond);
+
+        (Some(outer_actions), Some(outer_conds))
+    } else {
+        (None, None)
+    };
+
     let node = ModifyTable {
         plan: plan_base,
         operation: cmdtype_path_to_node(operation),
@@ -4631,10 +4667,82 @@ fn make_modifytable<'mcx>(
         onConflictWhere: oc_where,
         exclRelRTI: oc_excl_rel_rti,
         exclRelTlist: oc_excl_rel_tlist,
-        mergeActionLists: None,
-        mergeJoinConditions: None,
+        mergeActionLists: merge_action_lists_field,
+        mergeJoinConditions: merge_join_conditions_field,
     };
     Ok(node)
+}
+
+/// Convert the parse-tree (rawnodes) `MergeAction` node carried in
+/// `parse->mergeActionList` into the executor-shaped (modifytable) `MergeAction`
+/// for the `ModifyTable` plan node. Mirrors the C aliasing in `make_modifytable`
+/// (`node->mergeActionLists = mergeActionLists`, themselves
+/// `list_make1(parse->mergeActionList)`); here we deep-convert because the two
+/// representations differ (rawnodes carries `Node *` handles for qual/targetList;
+/// the executor form carries the implicit-AND `Expr` list and owned
+/// `TargetEntry`s). `setrefs.c` later fixes up the Var references.
+fn convert_merge_action<'mcx>(
+    mcx: Mcx<'mcx>,
+    src: &types_nodes::rawnodes::MergeAction<'mcx>,
+) -> PgResult<types_nodes::modifytable::MergeAction<'mcx>> {
+    use types_nodes::modifytable::MergeAction as ExecMergeAction;
+
+    // qual: `Node *` (implicit-AND `List` of `Expr`) -> Option<PgVec<Expr>>.
+    let qual: Option<PgVec<'mcx, Expr>> = match src.qual.as_deref() {
+        Some(node) => Some(node_to_expr_list(mcx, node)?),
+        None => None,
+    };
+
+    // targetList: List of `TargetEntry` nodes -> Option<PgVec<TargetEntry>>.
+    let target_list: Option<PgVec<'mcx, TargetEntry<'mcx>>> = if src.targetList.is_empty() {
+        None
+    } else {
+        let mut v = vec_with_capacity_in(mcx, src.targetList.len())?;
+        for tle_node in src.targetList.iter() {
+            let tle = tle_node
+                .as_targetentry()
+                .expect("convert_merge_action: targetList entry is a TargetEntry");
+            v.push(tle.clone_in(mcx)?);
+        }
+        Some(v)
+    };
+
+    // updateColnos: integer List -> Option<PgVec<i32>>.
+    let update_colnos: Option<PgVec<'mcx, i32>> = if src.updateColnos.is_empty() {
+        None
+    } else {
+        let mut v = vec_with_capacity_in(mcx, src.updateColnos.len())?;
+        for &c in src.updateColnos.iter() {
+            v.push(c);
+        }
+        Some(v)
+    };
+
+    Ok(ExecMergeAction {
+        matchKind: src.matchKind,
+        commandType: src.commandType,
+        overriding: src.r#override,
+        qual,
+        targetList: target_list,
+        updateColnos: update_colnos,
+    })
+}
+
+/// Cast a `Node *` qual into the implicit-AND `Expr` list the executor consumes
+/// (`(List *) qual` fed to `ExecInitQual`). The MERGE WHEN qual is carried by the
+/// parser as a single transformed bool `Expr` wrapped in a `Node` (an implicit
+/// one-clause AND list), so we yield a single-element `Expr` list.
+fn node_to_expr_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &Node<'mcx>,
+) -> PgResult<PgVec<'mcx, Expr>> {
+    let expr = node
+        .as_expr()
+        .expect("node_to_expr_list: qual node is an Expr")
+        .clone_in(mcx)?;
+    let mut v = vec_with_capacity_in(mcx, 1)?;
+    v.push(expr);
+    Ok(v)
 }
 
 /// Resolved, executor-shaped ON CONFLICT data, mirroring the

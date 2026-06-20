@@ -134,10 +134,16 @@ pub fn ExecMergeNotMatched<'mcx>(
         // ExprState pi_state / ProjectionInfo are small trimmed structs; clone
         // the action's whenqual + projection out of the pool so the estate
         // borrow is free for ExecQual / ExecProject / ExecInsert.
-        let (command_type, action_match_kind, action_overriding, mut whenqual, proj) = {
-            let action = &estate.result_rel(result_rel_info).ri_MergeActions
+        // A compiled `ExprState` / `ProjectionInfo` cannot be `.clone()`d (the
+        // step program is context-allocated; the derived clone is a loud guard)
+        // and cannot be borrowed `&mut` while `estate` is also borrowed `&mut`
+        // because it lives inside `estate`. So we MOVE it out of the pooled
+        // `MergeActionState` (leaving `None`), use it, and restore it before the
+        // loop continues. This faithfully mirrors C aliasing the same ExprState.
+        let (command_type, action_match_kind, action_overriding, mut whenqual, mut proj) = {
+            let action = &mut estate.result_rel_mut(result_rel_info).ri_MergeActions
                 [MERGE_WHEN_NOT_MATCHED_BY_TARGET as usize]
-                .as_ref()
+                .as_mut()
                 .expect("not-matched-by-target action list present")[idx];
             let mas_action = action
                 .mas_action
@@ -146,10 +152,23 @@ pub fn ExecMergeNotMatched<'mcx>(
             let command_type = mas_action.commandType;
             let action_match_kind = mas_action.matchKind;
             let action_overriding = mas_action.overriding;
-            let whenqual = action.mas_whenqual.as_ref().map(|w| (**w).clone());
-            let proj = action.mas_proj.as_ref().map(|p| (**p).clone());
+            let whenqual = action.mas_whenqual.take();
+            let proj = action.mas_proj.take();
             (command_type, action_match_kind, action_overriding, whenqual, proj)
         };
+
+        // Restore the moved-out compiled states into the pooled action (called
+        // before every loop exit so a later iteration / re-entry finds them).
+        macro_rules! restore_action_states {
+            () => {{
+                let action = &mut estate.result_rel_mut(result_rel_info).ri_MergeActions
+                    [MERGE_WHEN_NOT_MATCHED_BY_TARGET as usize]
+                    .as_mut()
+                    .expect("not-matched-by-target action list present")[idx];
+                action.mas_whenqual = whenqual.take();
+                action.mas_proj = proj.take();
+            }};
+        }
 
         // Test condition, if any.  In the absence of any condition, we perform
         // the action unconditionally (ExecQual returns true with no conditions).
@@ -161,6 +180,7 @@ pub fn ExecMergeNotMatched<'mcx>(
             None => true,
         };
         if !passed {
+            restore_action_states!();
             continue;
         }
 
@@ -171,9 +191,11 @@ pub fn ExecMergeNotMatched<'mcx>(
                 // projection was already built to use the root's descriptor, so
                 // we don't need to map the tuple here.
                 //   newslot = ExecProject(action->mas_proj);
-                let mut proj = proj.expect("CMD_INSERT MERGE action has a projection");
+                let proj_box = proj
+                    .as_mut()
+                    .expect("CMD_INSERT MERGE action has a projection");
                 let newslot =
-                    backend_executor_execExpr_seams::exec_project_info::call(&mut proj, estate)?;
+                    backend_executor_execExpr_seams::exec_project_info::call(&mut **proj_box, estate)?;
 
                 // mtstate->mt_merge_action = action;
                 //
@@ -233,6 +255,7 @@ pub fn ExecMergeNotMatched<'mcx>(
 
         // We've activated one of the WHEN clauses, so we don't search further.
         // This is required behaviour, not an optimization.
+        restore_action_states!();
         break;
     }
 

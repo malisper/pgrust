@@ -3186,12 +3186,132 @@ fn set_modifytable_references<'mcx>(
             .as_ref()
             .map(|l| !l.is_empty())
             .unwrap_or(false);
-        if has_wco || has_merge {
+        if has_wco {
             return Err(PgError::error(
-                "set_plan_refs(T_ModifyTable): WCO / MERGE \
+                "set_plan_refs(T_ModifyTable): WCO \
                  fix-up (fix_join_expr / build_tlist_index over source \
                  tlists) is not ported",
             ));
+        }
+
+        // MERGE fix-up (setrefs.c:1155). The MERGE plan right-joins target and
+        // source; INSERT/UPDATE action targetlists + quals and the join
+        // condition reference the source relation, which appears as the subplan
+        // output. We resolve those source Vars to INNER_VAR against an index
+        // over subplan->targetlist (the executor sets ecxt_innertuple to the
+        // subplan tuple); target-relation (resultrel) Vars are left as bumped
+        // scan Vars (ecxt_scantuple). Single result relation here, so the
+        // forthree over mergeActionLists/mergeJoinConditions/resultRelations is
+        // a single iteration.
+        if has_merge {
+            let nt = num_exec_tlist(&m.plan);
+            let nq = num_exec_qual(&m.plan);
+
+            // itlist = build_tlist_index(subplan->targetlist).
+            let subplan = m.plan.lefttree.as_deref().ok_or_else(|| {
+                PgError::error("set_modifytable_references: MERGE ModifyTable has no subplan")
+            })?;
+            let subplan_tl = subplan.plan_head().targetlist.as_deref().unwrap_or(&[]);
+            let itlist = build_tlist_index(subplan_tl, mcx)?;
+
+            let result_rels: Vec<i32> = m
+                .resultRelations
+                .as_deref()
+                .map(|v| v.iter().map(|&i| i as i32).collect())
+                .unwrap_or_default();
+
+            // Fix each action's targetList + qual.
+            let action_lists = m.mergeActionLists.take().unwrap_or_else(|| PgVec::new_in(mcx));
+            let mut new_action_lists: PgVec<PgVec<types_nodes::modifytable::MergeAction>> =
+                PgVec::new_in(mcx);
+            for (li, alist) in action_lists.into_iter().enumerate() {
+                let resultrel = *result_rels.get(li).unwrap_or(&0) as Index;
+                let mut new_alist: PgVec<types_nodes::modifytable::MergeAction> = PgVec::new_in(mcx);
+                for mut action in alist.into_iter() {
+                    // action->targetList = fix_join_expr(root, action->targetList,
+                    //   NULL, itlist, resultrel, rtoffset, NRM_EQUAL, NUM_EXEC_TLIST).
+                    if let Some(tl) = action.targetList.take() {
+                        let mut new_tl: PgVec<TargetEntry> = PgVec::new_in(mcx);
+                        for mut tle in tl.into_iter() {
+                            if let Some(eb) = tle.expr.take() {
+                                let fixed = fix_join_expr_mutator(
+                                    mcx,
+                                    root,
+                                    PgBox::into_inner(eb),
+                                    &FixJoinCtx {
+                                        outer_itlist: None,
+                                        inner_itlist: Some(&itlist),
+                                        acceptable_rel: resultrel,
+                                        rtoffset,
+                                        nrm_match: NRM_EQUAL,
+                                        num_exec: nt,
+                                    },
+                                )?;
+                                tle.expr = Some(mcx::alloc_in(mcx, fixed)?);
+                            }
+                            new_tl.push(tle);
+                        }
+                        action.targetList = Some(new_tl);
+                    }
+
+                    // action->qual = fix_join_expr(root, (List *) action->qual,
+                    //   NULL, itlist, resultrel, rtoffset, NRM_EQUAL, NUM_EXEC_QUAL).
+                    if let Some(qual_list) = action.qual.take() {
+                        let fixed = fix_join_expr(
+                            mcx,
+                            root,
+                            qual_list.into_iter().collect(),
+                            &FixJoinCtx {
+                                outer_itlist: None,
+                                inner_itlist: Some(&itlist),
+                                acceptable_rel: resultrel,
+                                rtoffset,
+                                nrm_match: NRM_EQUAL,
+                                num_exec: nq,
+                            },
+                        )?;
+                        let mut nq_list: PgVec<Expr> = PgVec::new_in(mcx);
+                        for e in fixed {
+                            nq_list.push(e);
+                        }
+                        action.qual = Some(nq_list);
+                    }
+                    new_alist.push(action);
+                }
+                new_action_lists.push(new_alist);
+            }
+            m.mergeActionLists = Some(new_action_lists);
+
+            // Fix each join condition: newMJC = fix_join_expr(...).
+            let join_conds = m.mergeJoinConditions.take().unwrap_or_else(|| PgVec::new_in(mcx));
+            let mut new_mjc: PgVec<Option<PgVec<Expr>>> = PgVec::new_in(mcx);
+            for (li, jc) in join_conds.into_iter().enumerate() {
+                let resultrel = *result_rels.get(li).unwrap_or(&0) as Index;
+                match jc {
+                    Some(cond_list) => {
+                        let fixed = fix_join_expr(
+                            mcx,
+                            root,
+                            cond_list.into_iter().collect(),
+                            &FixJoinCtx {
+                                outer_itlist: None,
+                                inner_itlist: Some(&itlist),
+                                acceptable_rel: resultrel,
+                                rtoffset,
+                                nrm_match: NRM_EQUAL,
+                                num_exec: nq,
+                            },
+                        )?;
+                        let mut nc: PgVec<Expr> = PgVec::new_in(mcx);
+                        for e in fixed {
+                            nc.push(e);
+                        }
+                        new_mjc.push(Some(nc));
+                    }
+                    None => new_mjc.push(None),
+                }
+            }
+            m.mergeJoinConditions = Some(new_mjc);
         }
 
         // ON CONFLICT DO UPDATE fix-up (setrefs.c:1090). The SET targetlist and

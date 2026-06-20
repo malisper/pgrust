@@ -320,14 +320,21 @@ pub fn ExecInitModifyTable<'mcx>(
             }
 
             // Verify result relation is a valid target for the current operation.
+            //   List *mergeActions = NIL;
+            //   if (node->mergeActionLists)
+            //       mergeActions = list_nth(node->mergeActionLists, i);
             //   CheckValidResultRel(resultRelInfo, operation, node->onConflictAction,
             //                       mergeActions);
+            let merge_actions: Option<&[MergeAction<'mcx>]> = match node.mergeActionLists.as_ref() {
+                Some(mal) => Some(list_nth_ref(mal, i)?.as_slice()),
+                None => None,
+            };
             check_valid_result_rel(
                 estate,
                 cur,
                 operation,
                 node.onConflictAction,
-                /* mergeActions = */ None,
+                merge_actions,
             )?;
         }
     }
@@ -845,9 +852,9 @@ fn exec_init_result_relation<'mcx>(
 
 /// `CheckValidResultRel(resultRelInfo, operation, onConflictAction,
 /// mergeActions)` (execMain.c): verify the relation is a valid target for the
-/// operation. Routed through the execMain owner seam (its `check_valid_result_rel`
-/// takes the `(estate, rri, operation, on_conflict_action)` tuple; the
-/// `mergeActions` argument is consumed by the owner's own plan-node view).
+/// operation. Routed through the execMain owner seam. For MERGE the per-action
+/// command types are threaded so the owner replica-identity-checks each
+/// (C: `foreach_node(MergeAction, action, mergeActions)`).
 fn check_valid_result_rel<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
@@ -855,12 +862,15 @@ fn check_valid_result_rel<'mcx>(
     on_conflict_action: OnConflictAction,
     merge_actions: Option<&[MergeAction<'mcx>]>,
 ) -> PgResult<()> {
-    let _ = merge_actions;
+    let cmds: alloc::vec::Vec<CmdType> = merge_actions
+        .map(|acts| acts.iter().map(|a| a.commandType).collect())
+        .unwrap_or_default();
     backend_executor_execMain_seams::check_valid_result_rel::call(
         estate,
         result_rel_info,
         operation,
         on_conflict_action,
+        &cmds,
     )
 }
 

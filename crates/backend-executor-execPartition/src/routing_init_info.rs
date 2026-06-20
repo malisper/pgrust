@@ -108,6 +108,7 @@ pub(crate) fn ExecInitPartitionInfo<'mcx>(
         leaf_part_rri_id,
         CmdType::CMD_INSERT,
         on_conflict_action,
+        &[], /* mergeActions: tuple routing is INSERT-only */
     )?;
 
     // Open partition indices.  The user may have asked to check for conflicts

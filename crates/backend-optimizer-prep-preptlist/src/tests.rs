@@ -58,7 +58,7 @@ fn select_targetlist_is_cloned_into_processed_tlist() {
 
     let mut root = PlannerInfo::default();
 
-    preprocess_targetlist(mcx, &mut root, &mut parse).unwrap();
+    preprocess_targetlist(mcx, &mut root, &mut parse, &[]).unwrap();
 
     // processed_tlist carries one NodeId handle per source TLE.
     assert_eq!(root.processed_tlist.len(), 2);
@@ -95,7 +95,7 @@ fn empty_select_targetlist_yields_empty_processed_tlist() {
     parse.commandType = CmdType::CMD_SELECT;
     let mut root = PlannerInfo::default();
 
-    preprocess_targetlist(mcx, &mut root, &mut parse).unwrap();
+    preprocess_targetlist(mcx, &mut root, &mut parse, &[]).unwrap();
     assert!(root.processed_tlist.is_empty());
 }
 

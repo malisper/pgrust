@@ -139,14 +139,10 @@ pub fn preprocess_targetlist<'mcx>(
         }
         CmdType::CMD_SELECT => materialize_tlist(mcx, root, parse)?,
         CmdType::CMD_DELETE | CmdType::CMD_MERGE => {
-            // DELETE has no tlist expansion; MERGE per-action handling is
-            // deferred to the MERGE-analyze family.
-            if command_type == CmdType::CMD_MERGE {
-                panic!(
-                    "preprocess_targetlist: MERGE per-action targetlist / join-condition Var \
-                     collection not yet ported (needs the MERGE-analyze family)"
-                );
-            }
+            // DELETE has no tlist expansion. For MERGE the base targetlist is
+            // `parse->targetList` exactly as for DELETE; the per-action
+            // targetlists and join-condition Vars are handled in the dedicated
+            // MERGE stanza below (C:163-244), after add_row_identity_columns.
             materialize_tlist(mcx, root, parse)?
         }
         other => panic!("preprocess_targetlist: unexpected command type {other:?}"),
@@ -182,6 +178,103 @@ pub fn preprocess_targetlist<'mcx>(
             result_relation as u32,
         )?;
         tlist = core::mem::take(&mut root.processed_tlist);
+    }
+
+    // C 163-244: MERGE per-action targetlist + join-condition Var collection.
+    //
+    // For MERGE we handle the targetlist of each MergeAction separately. An
+    // INSERT action's targetList gets the same expand_insert_targetlist
+    // treatment as a regular INSERT; an UPDATE action's column numbers are
+    // collected into action->updateColnos. Then, for each action, we add
+    // resjunk entries for any Vars / PlaceHolderVars used in the action's
+    // targetlist and WHEN condition (qual) that belong to relations other than
+    // the target. Finally we do the same for parse->mergeJoinCondition. We
+    // don't expect aggregates or window functions here.
+    if command_type == CmdType::CMD_MERGE {
+        let target_rel = target_relation
+            .as_ref()
+            .expect("preprocess_targetlist: MERGE with no result relation (rewriter bug)");
+
+        let n_actions = parse.mergeActionList.len();
+        for ai in 0..n_actions {
+            // action->commandType decides INSERT-expand vs UPDATE-colno.
+            let action_cmd = {
+                let action = parse.mergeActionList[ai]
+                    .as_mergeaction()
+                    .expect("preprocess_targetlist: mergeActionList entry is a MergeAction");
+                action.commandType
+            };
+
+            if action_cmd == CmdType::CMD_INSERT {
+                // action->targetList = expand_insert_targetlist(root,
+                //                          action->targetList, target_relation);
+                let expanded = expand_insert_targetlist_owned(mcx, root, parse, ai, target_rel)?;
+                let action = parse.mergeActionList[ai]
+                    .as_mergeaction_mut()
+                    .expect("preprocess_targetlist: mergeActionList entry is a MergeAction");
+                action.targetList = expanded;
+            } else if action_cmd == CmdType::CMD_UPDATE {
+                // action->updateColnos =
+                //     extract_update_targetlist_colnos(action->targetList);
+                let colnos = extract_update_targetlist_colnos_owned(mcx, parse, ai);
+                let action = parse.mergeActionList[ai]
+                    .as_mergeaction_mut()
+                    .expect("preprocess_targetlist: mergeActionList entry is a MergeAction");
+                action.updateColnos = colnos;
+            }
+
+            // vars = pull_var_clause((Node *) list_concat_copy(
+            //              (List *) action->qual, action->targetList),
+            //              PVC_INCLUDE_PLACEHOLDERS);
+            // We walk each qual Expr and each targetList TLE's expr in turn,
+            // unioning the pulled Vars (equivalent to walking the concatenated
+            // C List node). qual comes first to match list_concat_copy order.
+            let mut vars: alloc::vec::Vec<types_nodes::primnodes::Expr> = alloc::vec::Vec::new();
+            {
+                let action = parse.mergeActionList[ai]
+                    .as_mergeaction()
+                    .expect("preprocess_targetlist: mergeActionList entry is a MergeAction");
+                if let Some(qual) = action.qual.as_deref() {
+                    // action->qual is a `Node *` (an implicit-AND `List` of
+                    // quals); pull_var_clause walks it directly.
+                    let node = qual.clone_in(mcx)?;
+                    for v in backend_optimizer_util_vars::pull_var_clause(
+                        mcx,
+                        &node,
+                        backend_optimizer_util_vars::PVC_INCLUDE_PLACEHOLDERS,
+                    )? {
+                        vars.push(v);
+                    }
+                }
+                for tle_node in action.targetList.iter() {
+                    let tle = tle_node.as_targetentry().expect(
+                        "preprocess_targetlist: MERGE action targetList entry is a TargetEntry",
+                    );
+                    if let Some(expr) = tle.expr.as_deref() {
+                        let node = types_nodes::nodes::Node::mk_expr(mcx, expr.clone_in(mcx)?)?;
+                        for v in backend_optimizer_util_vars::pull_var_clause(
+                            mcx,
+                            &node,
+                            backend_optimizer_util_vars::PVC_INCLUDE_PLACEHOLDERS,
+                        )? {
+                            vars.push(v);
+                        }
+                    }
+                }
+            }
+            merge_add_junk_vars(root, &mut tlist, vars, result_relation)?;
+        }
+
+        // C 229-244: same treatment for parse->mergeJoinCondition.
+        if let Some(cond) = parse.mergeJoinCondition.as_deref() {
+            let node = types_nodes::nodes::Node::mk_expr(mcx, cond.clone_in(mcx)?)?;
+            let vars = backend_optimizer_util_vars::pull_var_clause(
+                mcx,
+                &node,
+                backend_optimizer_util_vars::PVC_INCLUDE_PLACEHOLDERS,
+            )?;
+            merge_add_junk_vars(root, &mut tlist, vars, result_relation)?;
+        }
     }
 
     // C 229-287: rowMarks junk-column stanza (FOR UPDATE/SHARE locking +
@@ -545,6 +638,213 @@ pub fn extract_update_targetlist_colnos(
         let tle = root.targetentry_mut(id);
         if !tle.resjunk {
             update_colnos.push(tle.resno);
+        }
+        tle.resno = nextresno;
+        nextresno += 1;
+    }
+    update_colnos
+}
+
+// ===========================================================================
+// MERGE per-action helpers (preptlist.c:163-244)
+// ===========================================================================
+
+/// Append resjunk `TargetEntry`s to `tlist` for the `vars` pulled from a MERGE
+/// action's targetlist+qual or from the join condition. Mirrors the inner
+/// `foreach(l2, vars)` loop of the C MERGE stanza (preptlist.c:207-227): skip a
+/// `Var` of the target relation (it refers to the actual heap tuple) and any Var
+/// already present in `tlist`; otherwise append a resjunk TLE.
+fn merge_add_junk_vars(
+    root: &mut PlannerInfo,
+    tlist: &mut alloc::vec::Vec<NodeId>,
+    vars: alloc::vec::Vec<types_nodes::primnodes::Expr>,
+    result_relation: i32,
+) -> PgResult<()> {
+    for var in vars.into_iter() {
+        // if (IsA(var, Var) && var->varno == result_relation) continue;
+        if let Some(v) = var.as_var() {
+            if v.varno == result_relation {
+                continue; // don't need it
+            }
+        }
+
+        // if (tlist_member((Expr *) var, tlist)) continue;
+        let already = tlist.iter().any(|&id| {
+            let expr_id = root.targetentry(id).expr;
+            backend_nodes_equalfuncs_seams::equal_expr::call(&var, root.node(expr_id))
+        });
+        if already {
+            continue; // already got it
+        }
+
+        // tle = makeTargetEntry((Expr *) var, list_length(tlist)+1, NULL, true);
+        let expr_id = root.alloc_node(var);
+        let resno = (tlist.len() + 1) as AttrNumber;
+        let te = TargetEntryNode {
+            expr: expr_id,
+            resno,
+            resname: None,
+            ressortgroupref: 0,
+            resorigtbl: InvalidOid,
+            resorigcol: 0,
+            resjunk: true,
+        };
+        tlist.push(root.alloc_targetentry(te));
+    }
+    Ok(())
+}
+
+/// `expand_insert_targetlist(root, action->targetList, rel)` for a MERGE INSERT
+/// action (preptlist.c:382, MERGE call site preptlist.c:178). Identical logic to
+/// [`expand_insert_targetlist`] but operates on the owned `TargetEntry` node list
+/// carried by `parse.mergeActionList[action_idx].targetList` (a
+/// `PgVec<NodePtr>`), returning a fresh owned `PgVec<NodePtr>` of `TargetEntry`
+/// nodes (the form `action->targetList` is reassigned in C).
+fn expand_insert_targetlist_owned<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    parse: &Query<'mcx>,
+    action_idx: usize,
+    rel: &Relation<'mcx>,
+) -> PgResult<mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>>> {
+    use types_nodes::nodes::Node;
+
+    let action = parse.mergeActionList[action_idx]
+        .as_mergeaction()
+        .expect("expand_insert_targetlist_owned: mergeActionList entry is a MergeAction");
+    let old_tlist = &action.targetList;
+
+    let mut new_tlist: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
+        mcx::PgVec::new_in(mcx);
+
+    let numattrs = rel.rd_att.natts;
+    // Index into the supplied (owned) parser tlist.
+    let mut tlist_pos: usize = 0;
+
+    let mut attrno: AttrNumber = 1;
+    while (attrno as i32) <= numattrs {
+        let att_tup = rel.rd_att.attr((attrno - 1) as usize);
+
+        // Try to consume the next supplied TLE if it matches this attribute.
+        let mut matched: Option<types_nodes::primnodes::TargetEntry<'mcx>> = None;
+        if let Some(old_node) = old_tlist.get(tlist_pos) {
+            let old_tle = old_node.as_targetentry().expect(
+                "expand_insert_targetlist_owned: action targetList entry is a TargetEntry",
+            );
+            if !old_tle.resjunk && old_tle.resno == attrno {
+                matched = Some(old_tle.clone_in(mcx)?);
+                tlist_pos += 1;
+            }
+        }
+
+        let new_tle: types_nodes::primnodes::TargetEntry<'mcx> = match matched {
+            Some(tle) => tle,
+            None => {
+                // Didn't find a matching tlist entry; make a NULL one.
+                let new_expr: Expr = if att_tup.attisdropped {
+                    Expr::Const(backend_nodes_core::makefuncs::make_const(
+                        mcx,
+                        INT4OID,
+                        -1,
+                        InvalidOid,
+                        4,
+                        Datum::ByVal(0),
+                        true,
+                        true,
+                    )?)
+                } else if att_tup.attgenerated != 0 {
+                    let (base_type_id, base_type_mod) =
+                        backend_utils_cache_lsyscache_seams::get_base_type_and_typmod::call(
+                            att_tup.atttypid,
+                        )?;
+                    let type_mod = if base_type_id == att_tup.atttypid {
+                        att_tup.atttypmod
+                    } else {
+                        base_type_mod
+                    };
+                    Expr::Const(backend_nodes_core::makefuncs::make_const(
+                        mcx,
+                        base_type_id,
+                        type_mod,
+                        att_tup.attcollation,
+                        att_tup.attlen as i32,
+                        Datum::ByVal(0),
+                        true,
+                        att_tup.attbyval,
+                    )?)
+                } else {
+                    backend_parser_coerce_seams::coerce_null_to_domain::call(
+                        mcx,
+                        att_tup.atttypid,
+                        att_tup.atttypmod,
+                        att_tup.attcollation,
+                        att_tup.attlen as i32,
+                        att_tup.attbyval,
+                    )?
+                };
+
+                let resname =
+                    alloc::string::String::from_utf8_lossy(att_tup.attname.name_str())
+                        .into_owned();
+                backend_nodes_core::makefuncs::make_target_entry(
+                    mcx,
+                    new_expr,
+                    attrno,
+                    Some(resname.as_str()),
+                    false,
+                )?
+            }
+        };
+
+        new_tlist.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, new_tle)?)?);
+        attrno += 1;
+    }
+
+    // Remaining tlist entries must be resjunk; append them with renumbered resnos.
+    while let Some(old_node) = old_tlist.get(tlist_pos) {
+        let old_tle = old_node.as_targetentry().expect(
+            "expand_insert_targetlist_owned: resjunk action targetList entry is a TargetEntry",
+        );
+        if !old_tle.resjunk {
+            return Err(types_error::PgError::error(alloc::string::String::from(
+                "targetlist is not sorted correctly",
+            )));
+        }
+        let mut te = old_tle.clone_in(mcx)?;
+        te.resno = attrno;
+        new_tlist.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, te)?)?);
+        attrno += 1;
+        tlist_pos += 1;
+    }
+
+    let _ = root;
+    Ok(new_tlist)
+}
+
+/// `extract_update_targetlist_colnos(action->targetList)` for a MERGE UPDATE
+/// action (preptlist.c:347, MERGE call site preptlist.c:181). Same logic as
+/// [`extract_update_targetlist_colnos`] but operates on the owned `TargetEntry`
+/// node list `parse.mergeActionList[action_idx].targetList`: collect each
+/// non-resjunk TLE's `resno` (the target column number) and renumber the TLEs to
+/// the consecutive 1..n convention, returning the collected column numbers.
+fn extract_update_targetlist_colnos_owned<'mcx>(
+    parse_mcx: mcx::Mcx<'mcx>,
+    parse: &mut Query<'mcx>,
+    action_idx: usize,
+) -> mcx::PgVec<'mcx, i32> {
+    let action = parse.mergeActionList[action_idx]
+        .as_mergeaction_mut()
+        .expect("extract_update_targetlist_colnos_owned: mergeActionList entry is a MergeAction");
+
+    let mut update_colnos: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(parse_mcx);
+    let mut nextresno: AttrNumber = 1;
+    for tle_node in action.targetList.iter_mut() {
+        let tle = tle_node.as_targetentry_mut().expect(
+            "extract_update_targetlist_colnos_owned: action targetList entry is a TargetEntry",
+        );
+        if !tle.resjunk {
+            // updateColnos is a `List *` of plain ints carried as PgVec<i32>.
+            update_colnos.push(tle.resno as i32);
         }
         tle.resno = nextresno;
         nextresno += 1;
