@@ -1923,6 +1923,153 @@ fn exec_stmt_forc(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
     );
 }
 
+/// Read a declared record/row/scalar variable's current value into a column
+/// series — the `stmt->retvarno >= 0` arm of `exec_stmt_return_next`
+/// (pl_exec.c 3355). Mirrors the C switch on `retvar->dtype`:
+///
+/// * VAR / PROMISE: a single scalar column (C: `tuplestore_putvalues(... &var->value)`).
+/// * REC: read the expanded record's current fields (C:
+///   `expanded_record_get_tuple` + `convert_tuples_by_position` +
+///   `tuplestore_puttuple`).
+/// * ROW: read each scalar field of the row (C: `make_tuple_from_row`).
+///
+/// The per-position type coercion (`convert_tuples_by_position` /
+/// `exec_cast_value`) is the identity for the common case where the variable's
+/// rowtype matches the function's result rowtype (`RETURN NEXT r` over a loop
+/// variable declared as the function's SETOF rowtype). The columns are
+/// delivered in position order to `materialize_sink_into_rsinfo`, which forms
+/// the result tuple against the function's `expectedDesc`.
+fn read_retvar_into_columns(
+    estate: &mut PLpgSQL_execstate,
+    retvarno: int32,
+) -> Vec<exec_seams::ExecsqlColumn> {
+    use backend_utils_adt_misc2::expandedrecord as er;
+
+    match datum_dtype(&estate.datums[retvarno as usize]) {
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR | PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE => {
+            // A scalar SETOF (a 1-column result): read the single variable value.
+            // A PROMISE is fulfilled first (C: plpgsql_fulfill_promise).
+            if datum_dtype(&estate.datums[retvarno as usize])
+                == PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE
+            {
+                let mut var = take_var(estate, retvarno);
+                seam::plpgsql_fulfill_promise(estate, &mut var);
+                put_var(estate, retvarno, var);
+            }
+            let datum = estate.datums[retvarno as usize].clone();
+            let (typeid, typmod, value, isnull) = exec_eval_datum_impl(estate, &datum);
+            let byref = estate.last_eval_byref.take();
+            std::vec![exec_seams::ExecsqlColumn {
+                value: value.as_usize(),
+                isnull,
+                typeid,
+                typmod,
+                name: std::string::String::new(),
+                byref,
+            }]
+        }
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => {
+            // Read the REC's live expanded record: fetch each field through the
+            // expanded-record reader. An empty/NULL record reads every field as
+            // NULL (C: instantiate_empty_record_variable -> a row of NULLs).
+            let handle = match &estate.datums[retvarno as usize] {
+                PLpgSQL_datum::Rec(rec) => rec.erh.as_ref().map(|h| h.0).unwrap_or(0),
+                _ => unreachable!("REC dtype is a Rec datum"),
+            };
+            let cols: Option<Vec<exec_seams::ExecsqlColumn>> = erh_table::with_erh_mut(
+                handle,
+                |mcx, erh| -> Vec<exec_seams::ExecsqlColumn> {
+                    // Ensure the tupdesc is available (C: expanded_record_get_tupdesc),
+                    // then read each field by position.
+                    er::expanded_record_fetch_tupdesc(mcx, erh)
+                        .unwrap_or_else(|e| std::panic::panic_any(e));
+                    let attrs: Vec<(Oid, int32, std::string::String)> = erh
+                        .er_tupdesc
+                        .as_ref()
+                        .expect("REC tupdesc fetched")
+                        .attrs
+                        .iter()
+                        .map(|a| {
+                            (
+                                a.atttypid,
+                                a.atttypmod,
+                                std::string::String::from_utf8_lossy(a.attname.name_str())
+                                    .into_owned(),
+                            )
+                        })
+                        .collect();
+                    let mut out = Vec::with_capacity(attrs.len());
+                    for (i, (typeid, typmod, name)) in attrs.into_iter().enumerate() {
+                        let (value, isnull) =
+                            er::expanded_record_fetch_field(mcx, erh, (i + 1) as i32)
+                                .unwrap_or_else(|e| std::panic::panic_any(e));
+                        let (word, byref, isn) = rich_datum_to_word(&value, isnull);
+                        out.push(exec_seams::ExecsqlColumn {
+                            value: word,
+                            isnull: isn,
+                            typeid,
+                            typmod,
+                            name,
+                            byref,
+                        });
+                    }
+                    out
+                },
+            );
+            cols.unwrap_or_default()
+        }
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_ROW => {
+            // `make_tuple_from_row`: read each scalar field's current value.
+            let varnos = match &estate.datums[retvarno as usize] {
+                PLpgSQL_datum::Row(r) => r.varnos.clone(),
+                _ => unreachable!("ROW dtype is a Row datum"),
+            };
+            let mut out = Vec::with_capacity(varnos.len());
+            for field_dno in varnos {
+                if field_dno < 0 {
+                    // Dropped column placeholder → a NULL column.
+                    out.push(exec_seams::ExecsqlColumn {
+                        value: 0,
+                        isnull: true,
+                        typeid: INVALID_OID,
+                        typmod: -1,
+                        name: std::string::String::new(),
+                        byref: None,
+                    });
+                    continue;
+                }
+                let field_datum = estate.datums[field_dno as usize].clone();
+                let (typeid, typmod, value, isnull) =
+                    exec_eval_datum_impl(estate, &field_datum);
+                let byref = estate.last_eval_byref.take();
+                out.push(exec_seams::ExecsqlColumn {
+                    value: value.as_usize(),
+                    isnull,
+                    typeid,
+                    typmod,
+                    name: std::string::String::new(),
+                    byref,
+                });
+            }
+            out
+        }
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
+            // RETURN NEXT of a single record field → a 1-column row.
+            let datum = estate.datums[retvarno as usize].clone();
+            let (typeid, typmod, value, isnull) = exec_eval_datum_impl(estate, &datum);
+            let byref = estate.last_eval_byref.take();
+            std::vec![exec_seams::ExecsqlColumn {
+                value: value.as_usize(),
+                isnull,
+                typeid,
+                typmod,
+                name: std::string::String::new(),
+                byref,
+            }]
+        }
+    }
+}
+
 /// `exec_stmt_return_next(estate, stmt)` (pl_exec.c 4116) — RETURN NEXT.
 /// Evaluate the row/value and append it to the function's SRF result tuplestore
 /// (the live materialize sink). The scalar-expression form (`RETURN NEXT
@@ -1946,10 +2093,13 @@ fn exec_stmt_return_next(
     }
 
     if stmt.retvarno >= 0 {
-        // RETURN NEXT over a declared record/row/scalar variable — the
-        // tuple-deform (`exec_move_row` / variable-image) leg. Loud until the
-        // composite RETURN NEXT path lands.
-        seam::return_next_var_loud(estate, stmt.retvarno);
+        // RETURN NEXT over a declared record/row/scalar variable (pl_exec.c
+        // 3355). C reads the variable's current value, coerces it to the
+        // function's result rowtype, and `tuplestore_puttuple`/`putvalues` it.
+        // In the owned model the result tuplestore is the active materialize
+        // sink; we read the variable's columns and deposit one row.
+        let columns = read_retvar_into_columns(estate, stmt.retvarno);
+        seam::put_rows_into_sink(std::vec![columns]);
         return PLpgSQL_rc::PLPGSQL_RC_OK;
     }
 

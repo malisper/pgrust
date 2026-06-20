@@ -268,21 +268,31 @@ fn fmgr_sql<'mcx>(
         .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
     }
 
-    // Composite / whole-row results need the JunkFilter row-coercion path.
-    let returns_tuple = rettype == RECORDOID || {
-        // type_is_rowtype: a composite type. get_typlenbyval reports typlen=-1
-        // for a varlena but does not distinguish composites; use the typtype via
-        // the rettype != base classification is out of scope here — a composite
-        // rettype reaches the "whole tuple" branch in C. For the scalar port we
-        // detect it by the body producing more than one column at run time; the
-        // single-column scalar path covers the common case. Treat RECORD as the
-        // only explicit whole-row trigger.
-        false
-    };
-    if returns_tuple {
+    // Composite / whole-row results: `RETURNS [SETOF] <composite>` (a named
+    // rowtype) or `RETURNS TABLE(...)` (RECORD). C's `init_sql_fcache` sets
+    // `fcache->returnsTuple = type_is_rowtype(rettype)`; `postquel_execute`
+    // routes the final SELECT's columns through the JunkFilter into a composite
+    // result tuple (`coerce_fn_result_tuple`).
+    //
+    // For the SETOF (SFRM_Materialize) case the whole-row coercion is the
+    // identity over the result query's columns: each result row IS the composite
+    // value, delivered column-by-column to `rsinfo->setResult` (the materialize
+    // sink). The accumulating receiver (`accum_receive`) already pushes the WHOLE
+    // row (every result column) per row, and the SRF dispatcher
+    // (`materialize_sink_into_rsinfo`, with `returns_tuple == true`) rebuilds the
+    // tuplestore against the caller's `expectedDesc` — so a composite/TABLE SETOF
+    // function flows through the SETOF path below with no extra work.
+    //
+    // The NON-set composite case (`RETURNS <composite>`, a single composite
+    // Datum result, no SETOF) still needs the scalar `coerce_fn_result_tuple`
+    // (heap_form_tuple of the final SELECT's columns -> HeapTupleHeaderGetDatum);
+    // that leg is not yet ported and stays loud.
+    let returns_tuple =
+        rettype == RECORDOID || lsyscache_seams::type_is_rowtype::call(rettype)?;
+    if returns_tuple && !set_returning {
         return Err(PgError::error(
-                "fmgr_sql: composite / whole-row SQL-function results are not yet \
-                 supported (needs the JunkFilter row-coercion path)",
+                "fmgr_sql: composite / whole-row (non-SETOF) SQL-function results are \
+                 not yet supported (needs the coerce_fn_result_tuple path)",
             )
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
     }
