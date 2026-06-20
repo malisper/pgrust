@@ -48,6 +48,7 @@ const AGG_CONTEXT_AGGREGATE: i32 = 1;
 
 pub mod mode;
 pub mod multi;
+pub mod tuple;
 
 // ===========================================================================
 // Small helpers (the PG_* macro surface).
@@ -178,6 +179,41 @@ pub(crate) struct OSAPerQueryState {
     /// Cached `mode()` equality function OID (`get_opcode(eqOperator)`), lazily
     /// resolved on first `mode_final` call. `0` is C's `!OidIsValid(fn_oid)`.
     pub(crate) equal_fn_oid: Oid,
+    /// Tuple-path (`use_tuples=true`) per-query state: the multi-column sort
+    /// keys. `None` for the single-datum path. Built by `ordered_set_startup`'s
+    /// `use_tuples` branch (C `OSAPerQueryState.numSortCols`/`sortColIdx`/...).
+    pub(crate) tuple: Option<TupleQueryState>,
+    /// `aggref->aggkind == AGGKIND_HYPOTHETICAL`.
+    pub(crate) is_hypothetical: bool,
+    /// `list_length(aggref->args)` — the number of (non-flag) aggregated
+    /// columns; the hypothetical flag column's `sortColIdx` is this + 1.
+    pub(crate) num_aggref_args: i32,
+}
+
+/// The multi-column sort keys for the `use_tuples` path (`OSAPerQueryState`
+/// fields populated only when `use_tuples`).
+#[derive(Clone)]
+pub(crate) struct TupleQueryState {
+    pub(crate) num_sort_cols: i32,
+    pub(crate) sort_col_idx: alloc::vec::Vec<types_core::AttrNumber>,
+    pub(crate) sort_operators: alloc::vec::Vec<Oid>,
+    pub(crate) eq_operators: alloc::vec::Vec<Oid>,
+    pub(crate) sort_collations: alloc::vec::Vec<Oid>,
+    pub(crate) sort_nulls_firsts: alloc::vec::Vec<bool>,
+    /// The aggregated-input columns' `(typid, typmod, collation)` (the
+    /// `ExecTypeFromTL(aggref->args)` recipe). For a hypothetical aggregate the
+    /// INT4 flag column is appended in `tuple::build_tupdesc`, mirroring the C
+    /// `CreateTemplateTupleDesc(natts+1)` hack. Stored per-query, replayed per
+    /// group (the owned `TupleDesc` is context-bound and rebuilt each group).
+    pub(crate) col_recipe: alloc::vec::Vec<ColRecipe>,
+}
+
+/// One aggregated-input column of the tuple-path descriptor recipe.
+#[derive(Clone)]
+pub(crate) struct ColRecipe {
+    pub(crate) typid: Oid,
+    pub(crate) typmod: i32,
+    pub(crate) collation: Oid,
 }
 
 /// `OSAPerGroupState` — the `internal` transition value.
@@ -186,6 +222,10 @@ pub(crate) struct OSAPerGroupState {
     pub(crate) sort_id: SortStateId,
     pub(crate) number_of_rows: i64,
     pub(crate) sort_done: bool,
+    /// The standalone input/retrieve slot for the tuple path (C
+    /// `qstate->tupslot`, a `MakeSingleTupleTableSlot` slot). `None` on the
+    /// datum path. Held in a leaked group-lifespan context like the sort.
+    pub(crate) tupslot: Option<Box<types_nodes::tuptable::SlotData<'static>>>,
 }
 
 // ===========================================================================
@@ -194,7 +234,7 @@ pub(crate) struct OSAPerGroupState {
 
 /// `ordered_set_shutdown(Datum arg)` — release the sort's temp files. The
 /// owned-model callback arg is the [`SortStateId`].
-fn ordered_set_shutdown<'mcx>(_mcx: Mcx<'mcx>, arg: CDatum<'mcx>) -> PgResult<()> {
+pub(crate) fn ordered_set_shutdown<'mcx>(_mcx: Mcx<'mcx>, arg: CDatum<'mcx>) -> PgResult<()> {
     let id = arg.as_usize() as SortStateId;
     end_sortstate(id)
 }
@@ -266,6 +306,9 @@ fn build_or_get_qstate(fcinfo: &mut FunctionCallInfoBaseData) -> OSAPerQueryStat
         sort_collation,
         sort_nulls_first: sortcl.nulls_first,
         equal_fn_oid: 0,
+        tuple: None,
+        is_hypothetical: false,
+        num_aggref_args: args.len() as i32,
     };
 
     if let Some(flinfo) = fcinfo.flinfo.as_mut() {
@@ -321,6 +364,7 @@ fn new_group_state(
         sort_id,
         number_of_rows: 0,
         sort_done: false,
+        tupslot: None,
     })
 }
 
@@ -690,5 +734,17 @@ pub fn register_orderedset_builtins() {
             Ok(multi::fc_percentile_cont_float8_multi_final(fc))
         }),
         entry(3985, "mode_final", 2, |fc| Ok(mode::fc_mode_final(fc))),
+        entry(3971, "ordered_set_transition_multi", 2, |fc| {
+            Ok(tuple::fc_ordered_set_transition_multi(fc))
+        }),
+        entry(3987, "hypothetical_rank_final", 2, |fc| {
+            Ok(tuple::fc_hypothetical_rank_final(fc))
+        }),
+        entry(3989, "hypothetical_percent_rank_final", 2, |fc| {
+            Ok(tuple::fc_hypothetical_percent_rank_final(fc))
+        }),
+        entry(3991, "hypothetical_cume_dist_final", 2, |fc| {
+            Ok(tuple::fc_hypothetical_cume_dist_final(fc))
+        }),
     ]);
 }

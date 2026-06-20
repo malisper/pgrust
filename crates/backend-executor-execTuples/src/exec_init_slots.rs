@@ -1070,6 +1070,7 @@ pub fn init_seams() {
     // Standalone-slot forms (incremental sort's group_pivot / transfer_tuple).
     seams::slot_getattr_standalone::set(seam_slot_getattr_standalone);
     seams::exec_clear_tuple_standalone::set(seam_exec_clear_tuple_standalone);
+    seams::store_virtual_values_standalone::set(seam_store_virtual_values_standalone);
     seams::exec_copy_slot_standalone::set(seam_exec_copy_slot_standalone);
     seams::exec_copy_pool_slot_into_standalone::set(seam_exec_copy_pool_slot_into_standalone);
 }
@@ -1086,6 +1087,26 @@ fn seam_slot_getattr_standalone<'mcx>(
 /// Seam `exec_clear_tuple_standalone` — `ExecClearTuple` over a standalone slot.
 fn seam_exec_clear_tuple_standalone<'mcx>(slot: &mut SlotData<'mcx>) -> PgResult<()> {
     crate::slot_store_fetch::ExecClearTuple(slot)
+}
+
+/// Seam `store_virtual_values_standalone` — the standalone-slot analogue of
+/// [`seam_store_virtual_values`]: `ExecClearTuple(slot); memcpy(tts_values,
+/// values); memcpy(tts_isnull, isnull); ExecStoreVirtualTuple(slot)` operating
+/// directly on a `&mut SlotData` (no `EState` pool resolution).
+fn seam_store_virtual_values_standalone<'mcx>(
+    slot: &mut SlotData<'mcx>,
+    values: &[Datum<'mcx>],
+    isnull: &[bool],
+) -> PgResult<()> {
+    crate::slot_store_fetch::ExecClearTuple(slot)?;
+    let base = slot.base_mut();
+    for (i, v) in values.iter().enumerate() {
+        base.tts_values[i] = v.clone();
+    }
+    for (i, n) in isnull.iter().enumerate() {
+        base.tts_isnull[i] = *n;
+    }
+    crate::slot_store_fetch::ExecStoreVirtualTuple(slot)
 }
 
 /// Seam `exec_copy_slot_standalone` — `ExecCopySlot` between two standalone

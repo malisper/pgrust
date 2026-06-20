@@ -27,3 +27,6 @@ backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 types-datetime = { path = "../types-datetime" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-access-common-toastdesc-seams = { path = "../backend-access-common-toastdesc-seams" }
+backend-access-common-tupdesc-seams = { path = "../backend-access-common-tupdesc-seams" }

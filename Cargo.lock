@@ -19142,6 +19142,9 @@ dependencies = [
 name = "backend-utils-adt-catalog-perm"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-toastdesc-seams",
+ "backend-access-common-tupdesc-seams",
+ "backend-executor-execTuples-seams",
  "backend-executor-nodeAgg-aggapi-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-utils-adt-arrayfuncs-seams",

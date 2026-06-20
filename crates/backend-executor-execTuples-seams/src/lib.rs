@@ -843,6 +843,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecClearTuple(slot); memcpy(slot->tts_values, values); memcpy(
+    /// slot->tts_isnull, isnull); ExecStoreVirtualTuple(slot)` (tuptable.h) for a
+    /// STANDALONE [`SlotData`] (one made by `MakeSingleTupleTableSlot`, held
+    /// outside any `es_tupleTable` pool): fill the virtual slot's per-column
+    /// payload and mark it as holding a valid virtual tuple. The standalone
+    /// analogue of [`store_virtual_values`]; used by the ordered-set
+    /// `ordered_set_transition_multi` / `hypothetical_*_final` finalfns, which own
+    /// their input slot directly (no `EState`). Fallible on OOM / the slot-ops
+    /// `ereport(ERROR)` paths.
+    pub fn store_virtual_values_standalone<'mcx>(
+        slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+        values: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+        isnull: &[bool],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecCopySlot(dstslot, srcslot)` (tuptable.h) with BOTH slots standalone
     /// [`SlotData`]s (the incremental-sort `ExecCopySlot(group_pivot,
     /// transfer_tuple)`): copy the source slot's tuple into the destination.
