@@ -1460,6 +1460,13 @@ pub fn init_seams() {
         grant_exec::execute_grant_stmt(mcx, stmt)
     });
 
+    // ExecuteGrantStmt (fast utility path): the same GRANT/REVOKE executor
+    // installed onto the non-event-trigger out-seam (utility.c
+    // `ProcessUtilitySlow` fast leg / standard_ProcessUtility GrantStmt arm).
+    backend_tcop_utility_out_seams::execute_grant_stmt::set(|mcx, stmt| {
+        grant_exec::execute_grant_stmt(mcx, stmt)
+    });
+
     // ExecAlterDefaultPrivilegesStmt: the ALTER DEFAULT PRIVILEGES executor.
     // Parses the statement and writes/updates a pg_default_acl row per
     // (role, schema) combination via SetDefaultACL. (`pstate` is only used by
