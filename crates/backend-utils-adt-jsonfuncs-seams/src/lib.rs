@@ -28,6 +28,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `json_categorize_type(typoid, true, &tcategory, &outfuncoid)` —
+    /// the `is_jsonb = true` classification `jsonb.c` uses (`add_jsonb`,
+    /// `jsonb_agg_transfn`, `jsonb_object_agg_transfn`, ...). Differs from
+    /// [`categorize_type`] only at `JSONBOID`, which classifies as
+    /// `JSONTYPE_JSONB` (binary splice) rather than `JSONTYPE_JSON` (text
+    /// reparse).
+    pub fn jsonb_categorize_type(typoid: Oid) -> PgResult<(JsonTypeCategory, Oid)>
+);
+
+seam_core::seam!(
     /// `func_volatile(funcid)` — the catalog volatility of a function as the
     /// `PROVOLATILE_*` byte (`'i'`/`'s'`/`'v'`). Used by `to_json_is_immutable`.
     pub fn func_volatile(funcid: Oid) -> PgResult<u8>

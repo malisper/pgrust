@@ -34,6 +34,42 @@ use backend_utils_fmgr_fmgr_seams as fmgr_seams;
 
 use crate::categorize::json_categorize_type;
 
+/// The `variadic` branch of `extract_variadic_args` (funcapi.c) for the
+/// VARIADIC-"any" jsonb builders: `array_in = PG_GETARG_ARRAYTYPE_P(...);
+/// element_type = ARR_ELEMTYPE(array_in); get_typlenbyvalalign(element_type,
+/// ...); deconstruct_array(array_in, element_type, typlen, typbyval, typalign,
+/// &args, &nulls, &nargs);`. Returns the common element type OID and the
+/// per-element `(Datum, isnull)` pairs (each element a canonical header-ful
+/// by-reference value the per-type output functions already consume). Installed
+/// onto `backend_utils_adt_jsonb_seams::extract_variadic_array`.
+pub fn extract_variadic_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    array_image: &Datum<'mcx>,
+) -> PgResult<(Oid, Vec<(Datum<'mcx>, bool)>)> {
+    // array_in = PG_GETARG_ARRAYTYPE_P(variadic_start): detoast the array
+    // varlena (DatumGetArrayTypeP).
+    let v = backend_access_common_detoast_seams::detoast_attr::call(mcx, array_image.as_ref_bytes())?;
+
+    // element_type = ARR_ELEMTYPE(array_in);
+    let element_type = foundation::arr_elemtype(&v);
+
+    // get_typlenbyvalalign(element_type, &typlen, &typbyval, &typalign);
+    let attrs = get_typlenbyvalalign(element_type)?;
+
+    // deconstruct_array(array_in, element_type, typlen, typbyval, typalign,
+    // &args_res, &nulls_res, &nargs): the canonical-value element walk.
+    let elems = backend_utils_adt_arrayfuncs::construct::deconstruct_array_values(
+        mcx,
+        &v,
+        element_type,
+        attrs.typlen as i32,
+        attrs.typbyval,
+        attrs.typalign as u8,
+    )?;
+
+    Ok((element_type, elems.as_slice().to_vec()))
+}
+
 /// `OidOutputFunctionCall(outfuncoid, val)` (fmgr.c): the resolved type output
 /// function's text representation of `val` (NUL-excluded bytes). Routes to the
 /// fmgr-core `oid_output_function_call` seam (the real owner).

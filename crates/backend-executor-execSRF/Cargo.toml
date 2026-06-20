@@ -81,6 +81,10 @@ backend-utils-adt-xid8funcs = { path = "../backend-utils-adt-xid8funcs" }
 # / json_object_keys_worker).
 backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
 
+# jsonb_path_query / _tz (OIDs 4006/1179): the set-returning jsonpath query value
+# cores (jsonb_path_query[_tz] -> Vec<jsonb image>), materialized one row per item.
+backend-utils-adt-jsonpath-exec = { path = "../backend-utils-adt-jsonpath-exec" }
+
 # unnest(anymultirange) (OID 1293): the member-range materializer
 # (multirange_unnest_images) over multirange_get_typcache + multirange_get_range.
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }

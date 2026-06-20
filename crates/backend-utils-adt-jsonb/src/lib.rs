@@ -837,7 +837,7 @@ pub fn jsonb_float8(jb: &[u8]) -> PgResult<Option<f64>> {
 
 /// C: `to_jsonb_is_immutable(Oid typoid)`.
 pub fn to_jsonb_is_immutable(typoid: Oid) -> PgResult<bool> {
-    let (tcategory, outfuncoid) = catalog_fmgr::categorize_type::call(typoid)?;
+    let (tcategory, outfuncoid) = catalog_fmgr::jsonb_categorize_type::call(typoid)?;
 
     match tcategory {
         JsonTypeCategory::JSONTYPE_NULL
@@ -866,7 +866,7 @@ pub fn to_jsonb<'mcx>(mcx: Mcx<'mcx>, val: &Datum<'mcx>, val_type: Oid) -> PgRes
         return Err(PgError::error("could not determine input data type")
             .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
-    let (tcategory, outfuncoid) = catalog_fmgr::categorize_type::call(val_type)?;
+    let (tcategory, outfuncoid) = catalog_fmgr::jsonb_categorize_type::call(val_type)?;
     datum_to_jsonb(mcx, val, tcategory, outfuncoid)
 }
 
@@ -1402,7 +1402,7 @@ fn add_jsonb<'mcx>(
     let (tcategory, outfuncoid) = if is_null {
         (JsonTypeCategory::JSONTYPE_NULL, 0)
     } else {
-        catalog_fmgr::categorize_type::call(val_type)?
+        catalog_fmgr::jsonb_categorize_type::call(val_type)?
     };
 
     datum_to_jsonb_internal(mcx, val, is_null, result, tcategory, outfuncoid, key_scalar)
@@ -1604,7 +1604,7 @@ pub fn jsonb_agg_transfn_worker<'mcx>(
             }
             let mut s = JsonbAggState::default();
             s.res.res = pushJsonbValue(&mut s.res.parse_state, WJB_BEGIN_ARRAY, None)?;
-            let (cat, out) = catalog_fmgr::categorize_type::call(arg_type)?;
+            let (cat, out) = catalog_fmgr::jsonb_categorize_type::call(arg_type)?;
             s.val_category = Some(cat);
             s.val_output_func = out;
             s
@@ -1751,7 +1751,7 @@ pub fn jsonb_object_agg_transfn_worker<'mcx>(
                 return Err(PgError::error("could not determine input data type")
                     .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
             }
-            let (kcat, kout) = catalog_fmgr::categorize_type::call(key_arg_type)?;
+            let (kcat, kout) = catalog_fmgr::jsonb_categorize_type::call(key_arg_type)?;
             s.key_category = Some(kcat);
             s.key_output_func = kout;
 
@@ -1759,7 +1759,7 @@ pub fn jsonb_object_agg_transfn_worker<'mcx>(
                 return Err(PgError::error("could not determine input data type")
                     .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
             }
-            let (vcat, vout) = catalog_fmgr::categorize_type::call(val_arg_type)?;
+            let (vcat, vout) = catalog_fmgr::jsonb_categorize_type::call(val_arg_type)?;
             s.val_category = Some(vcat);
             s.val_output_func = vout;
             s

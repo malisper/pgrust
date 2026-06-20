@@ -102,4 +102,25 @@ seam_core::seam!(
     pub fn numeric_int8(num: &[u8]) -> PgResult<i64>
 );
 
+seam_core::seam!(
+    /// The `variadic` branch of `extract_variadic_args` (funcapi.c) for the
+    /// VARIADIC-"any" jsonb builders (`jsonb_build_object` / `jsonb_build_array`
+    /// called as `f(VARIADIC arr)`): take the single trailing array argument's
+    /// on-disk varlena image (the `Datum::ByRef` lane bytes) and expand it into
+    /// per-element `(Datum, isnull)` pairs plus the common element type OID.
+    ///
+    /// Mirrors C exactly: `array_in = PG_GETARG_ARRAYTYPE_P(variadic_start);
+    /// element_type = ARR_ELEMTYPE(array_in); get_typlenbyvalalign(element_type,
+    /// ...); deconstruct_array(array_in, element_type, typlen, typbyval,
+    /// typalign, &args_res, &nulls_res, &nargs);` — every `types_res[i]` is set
+    /// to `element_type`. The element `Datum`s are materialized in the canonical
+    /// header-ful by-reference form the per-type output functions consume.
+    /// Installed by `backend-utils-adt-jsonfuncs` (which owns `arrayfuncs` +
+    /// `lsyscache`).
+    pub fn extract_variadic_array<'mcx>(
+        mcx: Mcx<'mcx>,
+        array_image: &Datum<'mcx>,
+    ) -> PgResult<(Oid, alloc::vec::Vec<(Datum<'mcx>, bool)>)>
+);
+
 extern crate alloc;
