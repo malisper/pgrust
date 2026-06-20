@@ -9611,6 +9611,7 @@ dependencies = [
  "backend-utils-adt-tsvector-core",
  "backend-utils-adt-varlena",
  "backend-utils-adt-varlena-seams",
+ "backend-utils-adt-xid8funcs",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",

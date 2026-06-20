@@ -289,7 +289,18 @@ fn format_type_with_typemod<'mcx>(
     type_oid: Oid,
     typemod: i32,
 ) -> PgResult<PgString<'mcx>> {
-    match backend_utils_adt_format_type_seams::format_type_extended::call(mcx, type_oid, typemod, 0)? {
+    // C `format_type_with_typemod` calls `format_type_extended(type_oid, typemod,
+    // FORMAT_TYPE_TYPEMOD_GIVEN)` (format_type.c). The flag is essential: with it,
+    // built-in types whose typmod-(-1) form differs from their no-typmod form (e.g.
+    // `bit`, reported as the quoted `"bit"` so the parser won't assign a bogus
+    // BIT(1) typmod) fall through to the quoted generic name instead of the
+    // unquoted special case.
+    match backend_utils_adt_format_type_seams::format_type_extended::call(
+        mcx,
+        type_oid,
+        typemod,
+        backend_utils_adt_format_type_seams::FORMAT_TYPE_TYPEMOD_GIVEN,
+    )? {
         Some(s) => Ok(s),
         // flags=0 never sets FORMAT_TYPE_INVALID_AS_NULL, so None cannot occur;
         // guard it as an internal error rather than silently emitting nothing.

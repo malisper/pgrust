@@ -83,6 +83,7 @@ mod pg_get_multixact_members;
 mod pg_get_catalog_foreign_keys;
 mod pg_partition_tree;
 mod pg_prepared_xact;
+mod pg_snapshot_xip;
 mod aclexplode;
 mod system_srf;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
@@ -204,6 +205,10 @@ pub fn init_seams() {
     // `backend-access-transam-twophase::pg_prepared_xact_rows` over the live
     // `TwoPhaseState` via `with_twophase_state`).
     pg_prepared_xact::register_pg_prepared_xact();
+    // `pg_snapshot_xip(pg_snapshot)` (OID 5064) — the value-per-call SRF emitting
+    // the snapshot's in-progress `xip[]` as `setof xid8` (its value sequence is
+    // `backend-utils-adt-xid8funcs::pg_snapshot_xip`).
+    pg_snapshot_xip::register_pg_snapshot_xip();
     // `aclexplode(aclitem[])` (OID 1689) — the materialize-mode SRF expanding an
     // acl array into one `(grantor oid, grantee oid, privilege_type text,
     // is_grantable bool)` row per set privilege bit (its per-bit expansion core
