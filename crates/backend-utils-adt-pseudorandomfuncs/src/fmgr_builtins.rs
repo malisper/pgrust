@@ -16,7 +16,8 @@
 //! docs describe).
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_error::PgResult;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -65,59 +66,45 @@ fn ret_i64(v: i64) -> Datum {
     Datum::from_i64(v)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `drandom(PG_FUNCTION_ARGS)` — `random()` (no args), returns `float8`.
-fn fc_drandom(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::drandom())
+fn fc_drandom(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_f64(crate::drandom()))
 }
 
 /// `drandom_normal(PG_FUNCTION_ARGS)` — `random_normal(mean, stddev)`,
 /// returns `float8`.
-fn fc_drandom_normal(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_drandom_normal(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let mean = arg_f64(fcinfo, 0);
     let stddev = arg_f64(fcinfo, 1);
-    ret_f64(crate::drandom_normal(mean, stddev))
+    Ok(ret_f64(crate::drandom_normal(mean, stddev)))
 }
 
 /// `int4random(PG_FUNCTION_ARGS)` — `random(int4 min, int4 max)`, returns `int4`.
-fn fc_int4random(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int4random(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let rmin = arg_i32(fcinfo, 0);
     let rmax = arg_i32(fcinfo, 1);
-    match crate::int4random(rmin, rmax) {
-        Ok(v) => ret_i32(v),
-        Err(e) => raise(e),
-    }
+    Ok(ret_i32(crate::int4random(rmin, rmax)?))
 }
 
 /// `setseed(PG_FUNCTION_ARGS)` — `setseed(float8)`, returns `void`.
 ///
 /// C reads `PG_GETARG_FLOAT8(0)`, calls `setseed`, then `PG_RETURN_VOID()`
 /// (which is `(Datum) 0`).
-fn fc_setseed(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_setseed(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let seed = arg_f64(fcinfo, 0);
-    match crate::setseed(seed) {
-        Ok(()) => Datum::from_usize(0),
-        Err(e) => raise(e),
-    }
+    crate::setseed(seed)?;
+    Ok(Datum::from_usize(0))
 }
 
 /// `int8random(PG_FUNCTION_ARGS)` — `random(int8 min, int8 max)`, returns `int8`.
-fn fc_int8random(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8random(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let rmin = arg_i64(fcinfo, 0);
     let rmax = arg_i64(fcinfo, 1);
-    match crate::int8random(rmin, rmax) {
-        Ok(v) => ret_i64(v),
-        Err(e) => raise(e),
-    }
+    Ok(ret_i64(crate::int8random(rmin, rmax)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -130,16 +117,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every scalar `pseudorandomfuncs.c` builtin (C: their
@@ -148,7 +138,7 @@ fn builtin(
 /// (none set `proisstrict`/`proretset` explicitly, so all take the BKI
 /// defaults: `proisstrict => 't'`, `proretset => 'f'`).
 pub fn register_pseudorandomfuncs_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(1598, "drandom", 0, true, false, fc_drandom),
         builtin(1599, "setseed", 1, true, false, fc_setseed),
         builtin(6212, "drandom_normal", 2, true, false, fc_drandom_normal),
