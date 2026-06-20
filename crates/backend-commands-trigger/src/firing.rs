@@ -1570,11 +1570,90 @@ fn has_noncloned_pk_fkey_trigger_impl<'mcx>(
 /// the catalog-read DDL leg; the `missing_ok` branch + the exact ereport are
 /// owned here so the error path is faithful once the scan seam lands.
 fn get_trigger_oid_impl(relid: Oid, trigname: &str, missing_ok: bool) -> PgResult<Oid> {
-    // Both the found and missing_ok paths require the pg_trigger systable scan
-    // (pg_trigger_oid_by_relid_name) to know whether the trigger exists; that is
-    // the catalog-read DDL substrate, loud until it lands.
-    let _ = (relid, trigname, missing_ok);
-    deferred_ddl("get_trigger_oid (pg_trigger scan)", 1371)
+    // The C `get_trigger_oid` allocates in CurrentMemoryContext; the inward seam
+    // carries no `mcx`, so wrap the scan in a scratch context (cf.
+    // RemoveRewriteRuleById's install wrapper).
+    let ctx = mcx::MemoryContext::new("get_trigger_oid");
+    get_trigger_oid_scan(ctx.mcx(), relid, trigname, missing_ok)
+}
+
+/// `get_trigger_oid(relid, trigname, missing_ok)` (trigger.c:1371-1415) — open
+/// `pg_trigger`, `systable_beginscan` over `TriggerRelidNameIndexId` keyed on
+/// `(tgrelid = relid, tgname = trigname)`, return the first matching row's oid.
+fn get_trigger_oid_scan<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    trigname: &str,
+    missing_ok: bool,
+) -> PgResult<Oid> {
+    use backend_access_common_scankey::ScanKeyInit;
+    use backend_access_index_genam_seams as genam_seams;
+    use types_catalog::pg_trigger as pt;
+    use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
+    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use types_storage::lock::AccessShareLock;
+    use types_tuple::backend_access_common_heaptuple::Datum as ScanDatum;
+
+    // tgrel = table_open(TriggerRelationId, AccessShareLock);
+    let tgrel =
+        backend_access_table_table_seams::table_open::call(mcx, pt::TriggerRelationId, AccessShareLock)?;
+
+    // ScanKeyInit(&skey[0], Anum_pg_trigger_tgrelid, BTEqualStrategyNumber, F_OIDEQ, relid)
+    let mut k0 = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut k0,
+        pt::Anum_pg_trigger_tgrelid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        ScanDatum::from_oid(relid),
+    )?;
+    // ScanKeyInit(&skey[1], Anum_pg_trigger_tgname, BTEqualStrategyNumber, F_NAMEEQ, trigname)
+    let mut k1 = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut k1,
+        pt::Anum_pg_trigger_tgname,
+        BTEqualStrategyNumber,
+        F_NAMEEQ,
+        ScanDatum::ByRef(mcx::slice_in(mcx, trigname.as_bytes())?),
+    )?;
+    let keys = [k0, k1];
+
+    // tgscan = systable_beginscan(tgrel, TriggerRelidNameIndexId, true, NULL, 2, skey);
+    let mut scan = genam_seams::systable_beginscan::call(
+        &tgrel,
+        pt::TriggerRelidNameIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+
+    // tup = systable_getnext(tgscan);
+    let oid = if let Some(tup) = genam_seams::systable_getnext::call(mcx, scan.desc_mut())? {
+        // oid = ((Form_pg_trigger) GETSTRUCT(tup))->oid;
+        let cols = backend_access_common_heaptuple::heap_deform_tuple(
+            mcx,
+            &tup.tuple,
+            &tgrel.rd_att,
+            &tup.data,
+        )?;
+        cols[pt::Anum_pg_trigger_oid as usize - 1].0.as_oid()
+    } else if !missing_ok {
+        // ereport(ERROR, ERRCODE_UNDEFINED_OBJECT,
+        //   "trigger \"%s\" for table \"%s\" does not exist", trigname, get_rel_name(relid));
+        let relname = backend_utils_cache_lsyscache::relation::get_rel_name(mcx, relid)?
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        let _ = scan;
+        tgrel.close(AccessShareLock)?;
+        return Err(trigger_not_found(trigname, &relname));
+    } else {
+        INVALID_OID
+    };
+
+    // systable_endscan(tgscan); table_close(tgrel, AccessShareLock);
+    let _ = scan;
+    tgrel.close(AccessShareLock)?;
+    Ok(oid)
 }
 
 /// Helper that builds the C `ERRCODE_UNDEFINED_OBJECT` "trigger does not exist"

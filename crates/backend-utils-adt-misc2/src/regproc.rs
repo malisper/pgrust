@@ -843,11 +843,14 @@ pub fn regtypein(
      */
     let soft = escontext.is_some();
     match parse_type::parse_type_string::call(typ_name_or_oid, soft)? {
-        Some((result, _typmod)) => Ok(Some(result)),
-        None => {
-            // Soft error: parseTypeString reported into escontext.
+        Ok((result, _typmod)) => Ok(Some(result)),
+        Err(soft_err) => {
+            // Soft error: parseTypeString reported it. C threads the same
+            // escontext through, so the error lands directly in the caller's
+            // sink — mirror that by saving the real PgError (message/detail/
+            // hint/sqlstate) into our escontext, not just a bare flag.
             if let Some(ctx) = escontext {
-                ctx.mark_error_occurred();
+                ctx.save(soft_err);
             }
             // C still does PG_RETURN_OID(result) with result possibly
             // InvalidOid; the SQL function returns NULL only because the
@@ -871,8 +874,9 @@ pub fn to_regtype(mcx: Mcx<'_>, typ_name: &str) -> PgResult<Option<Oid>> {
 pub fn to_regtypemod(_mcx: Mcx<'_>, typ_name: &str) -> PgResult<Option<i32>> {
     /* We rely on parseTypeString to parse the input. */
     match parse_type::parse_type_string::call(typ_name, true)? {
-        Some((_typid, typmod)) => Ok(Some(typmod)),
-        None => Ok(None),
+        Ok((_typid, typmod)) => Ok(Some(typmod)),
+        // Soft failure: the type name did not resolve; return NULL.
+        Err(_soft_err) => Ok(None),
     }
 }
 
@@ -1383,10 +1387,12 @@ pub fn parseNameAndArgTypes(
             /* Use full parser to resolve the type name */
             let soft = escontext.is_some();
             match parse_type::parse_type_string::call(typename, soft)? {
-                Some((tid, _typmod)) => typeid = tid,
-                None => {
+                Ok((tid, _typmod)) => typeid = tid,
+                Err(soft_err) => {
+                    // Reflect the soft `ereturn` (with its real message) into the
+                    // caller's escontext — C threads the same context through.
                     if let Some(ctx) = escontext.as_deref_mut() {
-                        ctx.mark_error_occurred();
+                        ctx.save(soft_err);
                     }
                     return Ok(None);
                 }

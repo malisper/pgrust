@@ -912,6 +912,11 @@ seam!(
     pub fn create_publication<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
 );
 seam!(
+    /// `CreateConversionCommand(stmt)` (conversioncmds.c) — CREATE CONVERSION
+    /// (utility.c:1718). Returns the new conversion's `ObjectAddress`.
+    pub fn create_conversion_command<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
     /// `AlterPublication(pstate, stmt)` (publicationcmds.c) — ALTER PUBLICATION
     /// (utility.c:1849). `AlterPublication` calls
     /// `EventTriggerCollectSimpleCommand` directly, so the dispatcher sets

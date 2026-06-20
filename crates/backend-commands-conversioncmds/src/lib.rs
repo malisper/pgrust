@@ -191,8 +191,56 @@ pub fn CreateConversionCommand(mcx: Mcx<'_>, stmt: &CreateConversionStmt) -> PgR
     )
 }
 
-/// `conversioncmds.c` owns no inward seam — `CreateConversionCommand` is invoked
-/// directly by the (unported) utility-command dispatcher, not across a cycle.
-/// The empty body keeps the crate uniform with its siblings and satisfies the
-/// seam-wiring guard.
-pub fn init_seams() {}
+/// `ProcessUtilitySlow`'s `T_CreateConversionStmt` arm (utility.c:1718): decode
+/// the arena [`types_nodes::nodes::Node`] into the owned
+/// [`types_nodes::parsenodes::CreateConversionStmt`] (the `List *` of `String`
+/// name components flattened to `Vec<String>`) and run `CreateConversionCommand`.
+fn create_conversion_command_seam<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    let ccs = match stmt.as_createconversionstmt() {
+        Some(s) => s,
+        None => {
+            return Err(types_error::PgError::error(
+                "create_conversion_command_seam: statement is not a CreateConversionStmt",
+            ))
+        }
+    };
+
+    // `conversion_name` / `func_name`: `List *` of `String` nodes -> Vec<String>.
+    fn name_components(
+        list: &[types_nodes::nodes::NodePtr<'_>],
+        what: &str,
+    ) -> PgResult<Vec<String>> {
+        let mut out = Vec::with_capacity(list.len());
+        for n in list.iter() {
+            match n.as_string() {
+                Some(s) => out.push(s.sval.as_str().to_string()),
+                None => {
+                    return Err(types_error::PgError::error(format!(
+                        "CREATE CONVERSION: {what} element is not a String"
+                    )))
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    let owned = CreateConversionStmt {
+        conversion_name: name_components(&ccs.conversion_name, "conversion name")?,
+        for_encoding_name: ccs.for_encoding_name.as_ref().map(|s| s.as_str().to_string()),
+        to_encoding_name: ccs.to_encoding_name.as_ref().map(|s| s.as_str().to_string()),
+        func_name: name_components(&ccs.func_name, "function name")?,
+        def: ccs.def,
+    };
+    CreateConversionCommand(mcx, &owned)
+}
+
+/// `conversioncmds.c` owns no inward seam, but it installs the
+/// `ProcessUtilitySlow` `CREATE CONVERSION` outward arm (utility.c:1718) into
+/// `backend-tcop-utility-out-seams` so the dispatcher can reach its
+/// already-ported `CreateConversionCommand` driver.
+pub fn init_seams() {
+    backend_tcop_utility_out_seams::create_conversion_command::set(create_conversion_command_seam);
+}

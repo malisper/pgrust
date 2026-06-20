@@ -17,15 +17,18 @@ seam_core::seam!(
     /// `DOUBLE PRECISION`, decoration, etc.) to its type OID and typmod.
     ///
     /// The owned model folds the C out-parameters and boolean return into the
-    /// result: `Ok(Some((typeid, typmod)))` is the C `true` return, and
-    /// `Ok(None)` is the C `false` return — only reachable when a soft-error
-    /// `ErrorSaveContext` was supplied (modeled by `soft = true`). With
-    /// `soft = false` (no soft-error context) a bad type name propagates as a
-    /// hard error on `Err`.
+    /// result: the outer `Ok(Ok((typeid, typmod)))` is the C `true` return, and
+    /// `Ok(Err(soft_error))` is the C `false` return — only reachable when a
+    /// soft-error `ErrorSaveContext` was supplied (modeled by `soft = true`).
+    /// The inner `Err` carries the soft-failed `ereturn`'s `PgError` so the
+    /// caller can reflect its message/detail/hint/sqlstate into its own
+    /// `ErrorSaveContext` (C threads the *same* escontext through, so the error
+    /// lands directly in the caller's sink). With `soft = false` (no soft-error
+    /// context) a bad type name propagates as a hard error on the outer `Err`.
     pub fn parse_type_string(
         string: &str,
         soft: bool,
-    ) -> PgResult<Option<(Oid, i32)>>
+    ) -> PgResult<Result<(Oid, i32), types_error::PgError>>
 );
 
 seam_core::seam!(

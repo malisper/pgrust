@@ -25,6 +25,7 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 
 # outward seam crates (callees; panic until owners land)
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 common-encnames-seams = { path = "../common-encnames-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-catalog-pg-conversion-seams = { path = "../backend-catalog-pg-conversion-seams" }

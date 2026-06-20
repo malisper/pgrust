@@ -704,7 +704,12 @@ pub fn typeStringToTypeName(
      * yields exactly one decoded TypeName node (the C
      * linitial_node(TypeName, raw_parsetree_list)).
      */
-    let typeName = backend_parser_driver_seams::raw_parse_type_name::call(s.to_string())?;
+    // C pushes `pts_error_callback` as an errcontext for the duration of the
+    // parse, so any `ereport` raised inside `raw_parser` (e.g. a syntax error)
+    // gets `errcontext("invalid type name \"%s\"", str)`. Mirror that by
+    // appending the same context line to a hard error raised by the parse.
+    let typeName = backend_parser_driver_seams::raw_parse_type_name::call(s.to_string())
+        .map_err(|e| e.add_context(format!("invalid type name \"{s}\"")))?;
 
     /* The grammar allows SETOF in TypeName, but we don't want that here. */
     if typeName.setof {
@@ -1233,13 +1238,37 @@ fn seam_typename_type_id_from_defelem(
 
 /// `parse_type_string(str, soft)` — `parseTypeString(str, &typeid, &typmod,
 /// escontext)` with the out-params/boolean folded into the result.
-fn seam_parse_type_string(string: &str, soft: bool) -> PgResult<Option<(Oid, i32)>> {
+fn seam_parse_type_string(
+    string: &str,
+    soft: bool,
+) -> PgResult<Result<(Oid, i32), types_error::PgError>> {
     let scratch = mcx::MemoryContext::new("parse_type_string");
     if soft {
+        // C threads the caller's escontext straight through; here the boundary
+        // takes only `soft`, so capture the soft `ereturn` into a local
+        // ErrorSaveContext and hand the recorded PgError back to the caller, who
+        // reflects it into its own sink (preserving message/detail/hint/sqlstate).
         let mut escontext = SoftErrorContext::new(true);
-        parseTypeString(scratch.mcx(), string, Some(&mut escontext))
+        match parseTypeString(scratch.mcx(), string, Some(&mut escontext))? {
+            Some(pair) => Ok(Ok(pair)),
+            None => {
+                // A soft failure recorded its error into escontext. Surface it so
+                // the caller carries the real message (e.g. `pg_input_error_info`).
+                let err = escontext.take_error().unwrap_or_else(|| {
+                    types_error::PgError::error("invalid type name").with_sqlstate(
+                        types_error::ERRCODE_SYNTAX_ERROR,
+                    )
+                });
+                Ok(Err(err))
+            }
+        }
     } else {
-        parseTypeString(scratch.mcx(), string, None)
+        match parseTypeString(scratch.mcx(), string, None)? {
+            Some(pair) => Ok(Ok(pair)),
+            // With escontext = None, parseTypeString hard-raises on failure
+            // (Err), so the Ok(None) arm is unreachable.
+            None => unreachable!("parseTypeString(str, NULL) never returns Ok(None)"),
+        }
     }
 }
 

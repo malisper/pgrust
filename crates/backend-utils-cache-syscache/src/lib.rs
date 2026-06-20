@@ -1197,6 +1197,7 @@ pub fn init_seams() {
     s::tsconfigoid_exists::set(projections::tsconfigoid_exists);
     s::tsdictoid_exists::set(projections::tsdictoid_exists);
     s::namespaceoid_exists::set(projections::namespaceoid_exists);
+    s::search_syscache1_tid::set(projections::search_syscache1_tid);
     s::type_exists::set(projections::type_exists);
     s::statext_exists::set(projections::statext_exists);
     s::ts_parser_exists::set(projections::ts_parser_exists);

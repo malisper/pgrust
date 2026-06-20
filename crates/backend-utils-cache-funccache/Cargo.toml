@@ -15,6 +15,7 @@ types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
 types-funccache = { path = "../types-funccache" }
+types-plpgsql = { path = "../types-plpgsql" }
 
 backend-utils-error = { path = "../backend-utils-error" }
 common-hashfn = { path = "../common-hashfn" }

@@ -4882,6 +4882,20 @@ pub(crate) fn namespaceoid_exists(nsp_oid: Oid) -> PgResult<bool> {
     exists1(NAMESPACEOID, SysCacheKey::Value(KeyDatum::from_oid(nsp_oid)))
 }
 
+/// `SearchSysCache1(cacheId, ObjectIdGetDatum(key))` + `tup->t_self` + `ReleaseSysCache`
+/// (dependency.c `DropObjectById`): generic dynamic-`cacheId` lookup-by-OID
+/// returning the row's heap TID for a subsequent `CatalogTupleDelete`, or `None`
+/// on a cache miss (the caller raises its own "cache lookup failed"). Only the
+/// TID escapes; the tuple is released with the scratch context.
+pub(crate) fn search_syscache1_tid(
+    cache_id: i32,
+    key: Oid,
+) -> PgResult<Option<types_tuple::heaptuple::ItemPointerData>> {
+    let scratch = MemoryContext::new("search_syscache1_tid probe");
+    let tup = SearchSysCache1(scratch.mcx(), cache_id, SysCacheKey::Value(KeyDatum::from_oid(key)))?;
+    Ok(tup.map(|t| t.tuple.t_self))
+}
+
 pub(crate) fn type_exists(typname: &str, namespace_id: Oid) -> PgResult<bool> {
     exists2(
         TYPENAMENSP,

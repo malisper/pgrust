@@ -729,10 +729,31 @@ fn elog_warning(msg: &str) {
 // Seam installation
 // ===========================================================================
 
-/// Install this crate's inward seams. funccache owns no inward seams that other
-/// crates call across a cycle today; the trigger-context and proc-projection
-/// seams it *consumes* are owned and installed by the trigger / syscache crates.
-pub fn init_seams() {}
+/// Install this crate's inward seams.
+///
+/// The trigger-context and proc-projection seams funccache *consumes* are owned
+/// and installed by the trigger / syscache crates. funccache owns the
+/// `cfunc_use_count` projection: a procedural language reads `cfunc->use_count`
+/// back through its opaque `CachedFunction` header handle (PL/pgSQL's
+/// `plpgsql_free_function_memory` "Better not call this on an in-use function"
+/// assert). The handle is the funccache-cache locator; a handle of `0` is a
+/// `PLpgSQL_function` that was never entered into the funccache cache (e.g. an
+/// inline `DO` block, or a freshly `palloc0`-built struct) — its embedded
+/// `CachedFunction` header is zero-initialized, so `use_count` reads as `0`,
+/// exactly as in C.
+pub fn init_seams() {
+    backend_utils_cache_funccache_seams::cfunc_use_count::set(cfunc_use_count_impl);
+}
+
+/// `cfunc->use_count` read through the opaque `CachedFunction` handle. See
+/// [`init_seams`]. Handle `0` is the never-cached / zero-initialized header
+/// (`use_count == 0`). A nonzero handle would index a live cache entry once the
+/// funccache↔language `fn_extra` bridge is wired; until then it is unreachable
+/// and resolves the same zero header.
+fn cfunc_use_count_impl(cfunc: types_plpgsql::CachedFunction) -> u64 {
+    let _ = cfunc;
+    0
+}
 
 #[cfg(test)]
 mod tests {

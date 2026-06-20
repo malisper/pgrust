@@ -1633,13 +1633,14 @@ mod recurrence_guard {
         //     unique_key_recheck (constraint.c) reads; the firing path carries
         //     them on the TriggerData but these owner-homed seams have no consumer
         //     wired through them yet.
-        //   * RemoveTriggerById / renametrig — the unported catalog-write DDL leg
-        //     (CreateTrigger family: systable scans over pg_trigger, renametrig
-        //     partition recursion, RangeVarGetRelidExtended callbacks).
+        //   * renametrig — the unported catalog-write DDL leg
+        //     (CreateTrigger family: renametrig partition recursion,
+        //     RangeVarGetRelidExtended callbacks). `RemoveTriggerById` is now
+        //     ported + installed (backend-commands-trigger remove.rs), so its
+        //     entry is deleted.
         // Install + DELETE each as that substrate / DDL family lands.
         ("backend_commands_trigger", "tg_trigtuple"),
         ("backend_commands_trigger", "tg_newtuple"),
-        ("backend_commands_trigger", "RemoveTriggerById"),
         ("backend_commands_trigger", "renametrig"),
         //
         // -- backend-access-index-genam (build_index_value_description unported) --

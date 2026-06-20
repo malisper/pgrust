@@ -53,6 +53,9 @@ backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-s
 backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
+backend-catalog-pg-class-seams = { path = "../backend-catalog-pg-class-seams" }
+backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }
+backend-utils-init-small = { path = "../backend-utils-init-small" }
 backend-parser-func = { path = "../backend-parser-func" }
 backend-parser-relation = { path = "../backend-parser-relation" }
 # CreateTrigger WHEN-clause transform (transform_trigger_when in create.rs).

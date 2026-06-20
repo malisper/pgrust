@@ -1709,16 +1709,32 @@ pub fn input_function_call_safe_typed<'mcx>(
     let fn_oid = flinfo.fn_oid;
     let arg_ref = RefPayload::Cstring(input.unwrap_or("").to_string());
     let mut fcinfo = init_io3_ref(flinfo, arg_ref, typioparam, typmod);
-    let result = match function_call_invoke(mcx, res, &mut fcinfo) {
-        Ok(result) => result,
-        Err(e) => match escontext {
-            Some(ctx) => {
-                ctx.save(e);
-                return Ok(None);
+    // C `InputFunctionCallSafe`: install the soft-error sink on the frame
+    // (`fcinfo->context = (Node *) escontext`) and call the input function with
+    // NO surrounding try/catch. The input function decides which of its errors
+    // are recoverable: a recoverable one `ereturn`s into the frame's escontext
+    // (caught below by `soft_error_occurred`), while a non-recoverable
+    // `ereport(ERROR)` (e.g. a raw-parser syntax error inside `regtypein`)
+    // propagates as a hard `Err` even under a soft request. Blanket-folding every
+    // `Err` into the escontext (the old behavior) wrongly soft-caught those hard
+    // errors.
+    let mut escontext = escontext;
+    if let Some(caller) = escontext.as_ref() {
+        fcinfo.set_escontext(types_error::SoftErrorContext::new(caller.details_wanted()));
+    }
+    let invoke = function_call_invoke(mcx, res, &mut fcinfo);
+    // C: if (SOFT_ERROR_OCCURRED(escontext)) return false; (here: Ok(None)).
+    if fcinfo.soft_error_occurred() {
+        if let Some(caller) = escontext {
+            match fcinfo.escontext.as_mut().and_then(|c| c.take_error()) {
+                Some(captured) => caller.save(captured),
+                None => caller.mark_error_occurred(),
             }
-            None => return Err(e),
-        },
-    };
+        }
+        return Ok(None);
+    }
+    // A hard `ereport(ERROR)` propagates even under a soft request.
+    let result = invoke?;
     let isnull = fcinfo.result_is_null();
     if input.is_none() {
         if !isnull {

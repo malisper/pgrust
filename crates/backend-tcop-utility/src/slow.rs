@@ -528,7 +528,12 @@ fn process_utility_slow_body<'mcx>(
             command_collected = true;
         }
 
-        // The extension / FDW / subscription / transform / cast / conversion /
+        t if t == ntag::T_CreateConversionStmt => {
+            // address = CreateConversionCommand((CreateConversionStmt *) parsetree);
+            address = rt::create_conversion_command::call(mcx, parsetree)?;
+        }
+
+        // The extension / FDW / subscription / transform / cast /
         // language / user-mapping / import-foreign-schema DDL arms
         // (utility.c:1395-1581). Their owners are not yet ported; route them to
         // one documented seam-panic so the unported set is a single loud panic
