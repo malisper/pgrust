@@ -164,8 +164,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (2556, "pg_tablespace_databases", BuiltinGapKind::NotRegistered),
     (2560, "pg_postmaster_start_time", BuiltinGapKind::NotRegistered),
     (2561, "pg_blocking_pids", BuiltinGapKind::NotRegistered),
-    (2597, "domain_in", BuiltinGapKind::NotRegistered),
-    (2598, "domain_recv", BuiltinGapKind::NotRegistered),
     (2599, "pg_timezone_abbrevs_abbrevs", BuiltinGapKind::NotRegistered),
     (2625, "pg_ls_dir_1arg", BuiltinGapKind::NotRegistered),
     (2700, "gin_cmp_prefix", BuiltinGapKind::NotRegistered),

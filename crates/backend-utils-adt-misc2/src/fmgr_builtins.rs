@@ -1254,6 +1254,60 @@ fn builtin(
     )
 }
 
+// ===========================================================================
+// domains.c — domain type I/O (`domain_in` / `domain_recv`). Both are
+// `proisstrict => 'f'` (not strict): `domain_in` tolerates a NULL string and
+// returns NULL for a NULL `typioparam`; `domain_recv` likewise. The result is
+// the base type's `Datum` (by-value scalar, or an owned by-reference value for
+// a domain over a varlena / fixed-len-by-ref base), mapped onto the frame via
+// `ret_value_datum`.
+// ===========================================================================
+
+/// `domain_in(cstring, oid, int4)` fmgr-frame entry (C: `domain_in`). Not
+/// strict: arg0 NULL → NULL base string; arg1 (the domain type OID) NULL →
+/// `PG_RETURN_NULL()`. arg2 (`typmod`) is the unused third I/O argument.
+fn fc_domain_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    // PG_ARGISNULL(0) ? string = NULL : PG_GETARG_CSTRING(0).
+    let string: Option<String> = if arg_is_null(fcinfo, 0) {
+        None
+    } else {
+        Some(arg_cstring(fcinfo, 0).to_string())
+    };
+    // PG_ARGISNULL(1) ? PG_RETURN_NULL() : domainType = PG_GETARG_OID(1).
+    if arg_is_null(fcinfo, 1) {
+        return Ok(ret_null(fcinfo));
+    }
+    let domain_type = arg_oid(fcinfo, 1);
+    let typmod = if arg_is_null(fcinfo, 2) { -1 } else { arg_i32(fcinfo, 2) };
+    let m = scratch_mcx();
+    let value = crate::domains::domain_in(m.mcx(), string.as_deref(), domain_type, typmod)?;
+    Ok(ret_value_datum(fcinfo, value))
+}
+
+/// `domain_recv(internal, oid, int4)` fmgr-frame entry (C: `domain_recv`). Not
+/// strict: arg0 (the `StringInfo` message buffer) NULL → NULL base value; arg1
+/// (the domain type OID) NULL → `PG_RETURN_NULL()`. The wire buffer arrives on
+/// the by-ref lane as its raw bytes (the same convention `reg*recv` uses).
+fn fc_domain_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    if arg_is_null(fcinfo, 1) {
+        return Ok(ret_null(fcinfo));
+    }
+    let domain_type = arg_oid(fcinfo, 1);
+    let typmod = if arg_is_null(fcinfo, 2) { -1 } else { arg_i32(fcinfo, 2) };
+    let buf: Vec<u8> = if arg_is_null(fcinfo, 0) {
+        Vec::new()
+    } else {
+        fcinfo
+            .ref_arg(0)
+            .and_then(|p| p.as_varlena())
+            .expect("domain_recv: by-ref StringInfo arg missing from by-ref lane")
+            .to_vec()
+    };
+    let m = scratch_mcx();
+    let value = crate::domains::domain_recv(m.mcx(), &buf, domain_type, typmod)?;
+    Ok(ret_value_datum(fcinfo, value))
+}
+
 /// Register every SQL-callable builtin of this unit whose types are expressible
 /// at the current fmgr boundary (C: their `fmgr_builtins[]` rows) as
 /// **Result-native** (the panic→Result migration; see
@@ -1262,6 +1316,9 @@ fn builtin(
 /// `pg_proc.dat`.
 pub fn register_misc2_builtins() {
     backend_utils_fmgr_core::register_builtins_native([
+        // ---- domains.c: domain type I/O (not strict) ----
+        builtin(2597, "domain_in", 3, false, false, fc_domain_in),
+        builtin(2598, "domain_recv", 3, false, false, fc_domain_recv),
         // ---- regproc.c: reg* I/O ----
         builtin(44, "regprocin", 1, true, false, fc_regprocin),
         builtin(45, "regprocout", 1, true, false, fc_regprocout),

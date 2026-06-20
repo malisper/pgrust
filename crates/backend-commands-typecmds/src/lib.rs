@@ -2553,9 +2553,9 @@ use types_catalog::pg_constraint::{ConstraintCategory, CONSTRAINT_CHECK, CONSTRA
 use types_error::ERRCODE_INVALID_COLUMN_REFERENCE;
 
 /// `F_DOMAIN_IN` (fmgroids.h) — `domain_in`.
-const F_DOMAIN_IN: Oid = 4150;
+const F_DOMAIN_IN: Oid = 2597;
 /// `F_DOMAIN_RECV` (fmgroids.h) — `domain_recv`.
-const F_DOMAIN_RECV: Oid = 4151;
+const F_DOMAIN_RECV: Oid = 2598;
 
 /// `RELKIND_COMPOSITE_TYPE` ('c'), as `u8` (matches `get_rel_relkind`).
 const RELKIND_COMPOSITE_TYPE: u8 = b'c';
