@@ -60,6 +60,8 @@ backend-catalog-pg-inherits-seams = { path = "../backend-catalog-pg-inherits-sea
 backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
 backend-catalog-index = { path = "../backend-catalog-index" }
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }

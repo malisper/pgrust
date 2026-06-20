@@ -29,6 +29,7 @@
 
 mod at_altertype;
 mod at_attach;
+mod at_attach_idx;
 mod at_detach;
 mod at_coladd;
 mod at_coldrop;

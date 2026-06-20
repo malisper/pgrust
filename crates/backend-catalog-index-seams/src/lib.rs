@@ -136,6 +136,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `validatePartitionedIndex`'s pg_index update (tablecmds.c:21877):
+    /// transactionally set `pg_index.indisvalid = true` for a partitioned index
+    /// once all of its leaf partitions have a matching valid index. Like
+    /// [`index_mark_invalid`] this is an ordinary `CatalogTupleUpdate` (not the
+    /// non-transactional CONCURRENTLY `index_set_state_flags` path). `Err`
+    /// carries the catalog `ereport(ERROR)` surface (incl. `cache lookup
+    /// failed for index %u`).
+    pub fn index_mark_valid(index_relation_id: types_core::primitive::Oid) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ResetReindexState(nestLevel)` — forget any active REINDEX at abort.
     pub fn reset_reindex_state(nest_level: i32)
 );

@@ -712,6 +712,35 @@ fn index_mark_invalid_catalog(index_relation_id: Oid) -> PgResult<bool> {
     Ok(true)
 }
 
+/// `validatePartitionedIndex`'s pg_index update (tablecmds.c:21877): set
+/// `indisvalid = true` transactionally for the partitioned index. Returns
+/// `false` if the pg_index row is gone (the `cache lookup failed` ereport is
+/// raised by the caller seam, mirroring `index_mark_invalid_catalog`).
+fn index_mark_valid_catalog(index_relation_id: Oid) -> PgResult<bool> {
+    let ctx = MemoryContext::new("index_mark_valid_catalog");
+    let mcx = ctx.mcx();
+    let pg_index = table_open(mcx, types_core::catalog::INDEX_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_index, ANUM_PG_INDEX_INDEXRELID, index_relation_id)?
+    else {
+        pg_index.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+    let (values, nulls) = deform(mcx, &pg_index, &oldtup)?;
+    let mut values = values;
+    let mut nulls = nulls;
+    let mut replaces = vec![false; values.len()];
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        ANUM_PG_INDEX_INDISVALID,
+        Datum::from_bool(true),
+    );
+    modify_and_update(mcx, &pg_index, &oldtup, &values, &nulls, &replaces)?;
+    pg_index.close(RowExclusiveLock)?;
+    Ok(true)
+}
+
 /// `set_col(values, nulls, replaces, anum, datum)` — write a 1-based column.
 fn set_col<'mcx>(
     values: &mut [Datum<'mcx>],
@@ -3078,6 +3107,17 @@ pub fn install() {
     // clear of DefineIndex's partitioned-recursion invalidate_parent path.
     backend_catalog_index_seams::index_mark_invalid::set(|relid| {
         if !index_mark_invalid_catalog(relid)? {
+            return Err(PgError::error(format!(
+                "cache lookup failed for index {relid}"
+            )));
+        }
+        Ok(())
+    });
+
+    // index_mark_valid catalog body (tablecmds.c validatePartitionedIndex): set
+    // pg_index `indisvalid = true` once all leaf partitions have a valid index.
+    backend_catalog_index_seams::index_mark_valid::set(|relid| {
+        if !index_mark_valid_catalog(relid)? {
             return Err(PgError::error(format!(
                 "cache lookup failed for index {relid}"
             )));

@@ -1714,7 +1714,7 @@ fn ATExecCmd<'mcx>(
                 if owned_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
                     crate::at_attach::ATExecAttachPartition(mcx, wqueue, &owned_rel, pc)
                 } else {
-                    unported("ATTACH PARTITION on a partitioned index (ATExecAttachPartitionIdx)");
+                    crate::at_attach_idx::ATExecAttachPartitionIdx(mcx, &owned_rel, pc)
                 }
             })();
             wqueue[ti].rel = Some(owned_rel);
