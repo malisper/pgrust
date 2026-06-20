@@ -26,7 +26,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use backend_utils_fmgr_core as fmgr_core;
 /// The unified value type the cores consume (`types_tuple::Datum`).
@@ -131,28 +131,13 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("json fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // I/O adapters (json.c).
 // ---------------------------------------------------------------------------
 
 /// `json_in(cstring) -> json` (oid 321). The validated text bytes become the
 /// `json` value's content; cross back on the by-ref lane header-stripped.
-fn fc_json_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: `json_in` forwards `fcinfo->context` (the soft `ErrorSaveContext`) to
     // `json_errsave_error`. Copy the cstring to an owned buffer first so the
     // immutable `fcinfo` borrow is released before taking the `&mut` escontext
@@ -161,8 +146,8 @@ fn fc_json_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let escontext = fcinfo.escontext_mut();
     // Copy out of the scratch arena before it drops (the result borrows `m`).
-    let bytes = ok(crate::json_in(m.mcx(), &s, escontext)).map(|image| image.as_slice().to_vec());
-    match bytes {
+    let bytes = crate::json_in(m.mcx(), &s, escontext)?.map(|image| image.as_slice().to_vec());
+    Ok(match bytes {
         // Validated text becomes the `json` value's content bytes.
         Some(b) => ret_varlena(fcinfo, b),
         // Soft parse failure (`ereturn(escontext, (Datum) 0, ...)`): SQL NULL.
@@ -170,39 +155,39 @@ fn fc_json_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
             fcinfo.set_result_null(true);
             Datum::from_usize(0)
         }
-    }
+    })
 }
 
 /// `json_out(json) -> cstring` (oid 322): a `json` value is its own text.
-fn fc_json_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let json = arg_text_payload(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(crate::json_out(m.mcx(), json));
-    ret_cstring(fcinfo, String::from_utf8_lossy(bytes.as_slice()).into_owned())
+    let bytes = crate::json_out(m.mcx(), json)?;
+    Ok(ret_cstring(fcinfo, String::from_utf8_lossy(bytes.as_slice()).into_owned()))
 }
 
 /// `json_recv(internal) -> json` (oid 323): read + validate the message bytes.
-fn fc_json_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let buf = arg_text_payload(fcinfo, 0);
     let m = scratch_mcx();
-    let image = ok(crate::json_recv(m.mcx(), buf));
-    ret_varlena(fcinfo, image.as_slice().to_vec())
+    let image = crate::json_recv(m.mcx(), buf)?;
+    Ok(ret_varlena(fcinfo, image.as_slice().to_vec()))
 }
 
 /// `json_send(json) -> bytea` (oid 324): the text bytes framed by the wire
 /// layer; the body is the value's content bytes.
-fn fc_json_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let json = arg_text_payload(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(crate::json_send(m.mcx(), json));
-    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+    let bytes = crate::json_send(m.mcx(), json)?;
+    Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec()))
 }
 
 /// `json_typeof(json) -> text` (oid 3968).
-fn fc_json_typeof(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_typeof(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let json = arg_text_payload(fcinfo, 0);
-    let typ = ok(crate::json_typeof(json));
-    ret_varlena(fcinfo, typ.as_bytes().to_vec())
+    let typ = crate::json_typeof(json)?;
+    Ok(ret_varlena(fcinfo, typ.as_bytes().to_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -218,47 +203,47 @@ fn arg_bool(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
 /// `to_json(anyelement) -> json` (oid 3176). `val_type =
 /// get_fn_expr_argtype(flinfo, 0)` resolves the polymorphic input type, then
 /// the value is classified + rendered by the core.
-fn fc_to_json(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_json(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val_type = fn_expr_argtype(fcinfo, 0);
     let m = scratch_mcx();
-    let val = ok(arg_value(m.mcx(), fcinfo, 0));
-    let bytes = ok(crate::to_json(m.mcx(), &val, val_type));
-    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+    let val = arg_value(m.mcx(), fcinfo, 0)?;
+    let bytes = crate::to_json(m.mcx(), &val, val_type)?;
+    Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec()))
 }
 
 /// `array_to_json(anyarray) -> json` (oid 3153). The element type is read from
 /// the array image by the core (`deconstruct_array`); no `flinfo` lookup needed.
-fn fc_array_to_json(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_array_to_json(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let array = ok(arg_value(m.mcx(), fcinfo, 0));
-    let bytes = ok(crate::array_to_json(m.mcx(), &array));
-    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+    let array = arg_value(m.mcx(), fcinfo, 0)?;
+    let bytes = crate::array_to_json(m.mcx(), &array)?;
+    Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec()))
 }
 
 /// `array_to_json(anyarray, bool) -> json` (oid 3154): optional pretty-printing.
-fn fc_array_to_json_pretty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_array_to_json_pretty(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let use_line_feeds = arg_bool(fcinfo, 1);
     let m = scratch_mcx();
-    let array = ok(arg_value(m.mcx(), fcinfo, 0));
-    let bytes = ok(crate::array_to_json_pretty(m.mcx(), &array, use_line_feeds));
-    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+    let array = arg_value(m.mcx(), fcinfo, 0)?;
+    let bytes = crate::array_to_json_pretty(m.mcx(), &array, use_line_feeds)?;
+    Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec()))
 }
 
 /// `row_to_json(record) -> json` (oid 3155).
-fn fc_row_to_json(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_row_to_json(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let row = ok(arg_value(m.mcx(), fcinfo, 0));
-    let bytes = ok(crate::row_to_json(m.mcx(), &row));
-    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+    let row = arg_value(m.mcx(), fcinfo, 0)?;
+    let bytes = crate::row_to_json(m.mcx(), &row)?;
+    Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec()))
 }
 
 /// `row_to_json(record, bool) -> json` (oid 3156): optional pretty-printing.
-fn fc_row_to_json_pretty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_row_to_json_pretty(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let use_line_feeds = arg_bool(fcinfo, 1);
     let m = scratch_mcx();
-    let row = ok(arg_value(m.mcx(), fcinfo, 0));
-    let bytes = ok(crate::row_to_json_pretty(m.mcx(), &row, use_line_feeds));
-    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+    let row = arg_value(m.mcx(), fcinfo, 0)?;
+    let bytes = crate::row_to_json_pretty(m.mcx(), &row, use_line_feeds)?;
+    Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec()))
 }
 
 /// Deconstruct a `text[]` argument into `(ndim, dims, payload-or-null)` via the
@@ -296,23 +281,23 @@ fn split_payloads(elems: &[Option<Vec<u8>>]) -> (Vec<&[u8]>, Vec<bool>) {
 
 /// `json_object(text[]) -> json` (oid 3202): a one- or two-dimensional text
 /// array of alternating key/value pairs.
-fn fc_json_object(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_object(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let (ndim, dims, elems) = ok(text_array_arg(m.mcx(), fcinfo, 0));
+    let (ndim, dims, elems) = text_array_arg(m.mcx(), fcinfo, 0)?;
     let (datums, nulls) = split_payloads(&elems);
-    let bytes = ok(crate::json_object(m.mcx(), ndim, &dims, &datums, &nulls));
-    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+    let bytes = crate::json_object(m.mcx(), ndim, &dims, &datums, &nulls)?;
+    Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec()))
 }
 
 /// `json_object(text[], text[]) -> json` (oid 3203): separate key and value
 /// text arrays.
-fn fc_json_object_two_arg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_object_two_arg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let (nkdims, _kdims, kelems) = ok(text_array_arg(m.mcx(), fcinfo, 0));
-    let (nvdims, _vdims, velems) = ok(text_array_arg(m.mcx(), fcinfo, 1));
+    let (nkdims, _kdims, kelems) = text_array_arg(m.mcx(), fcinfo, 0)?;
+    let (nvdims, _vdims, velems) = text_array_arg(m.mcx(), fcinfo, 1)?;
     let (key_datums, key_nulls) = split_payloads(&kelems);
     let (val_datums, val_nulls) = split_payloads(&velems);
-    let bytes = ok(crate::json_object_two_arg(
+    let bytes = crate::json_object_two_arg(
         m.mcx(),
         nkdims,
         nvdims,
@@ -320,8 +305,8 @@ fn fc_json_object_two_arg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         &key_nulls,
         &val_datums,
         &val_nulls,
-    ));
-    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+    )?;
+    Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -334,22 +319,27 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
-/// Register the expressible scalar `json.c` builtins. Called from this crate's
-/// `init_seams()`. OIDs/nargs/strict/retset transcribed from `pg_proc.dat`.
+/// Register the expressible scalar `json.c` builtins as **Result-native** (the
+/// panic→Result migration; see `docs/proposals/panic-to-result-migration.md`).
+/// Called from this crate's `init_seams()`. OIDs/nargs/strict/retset transcribed
+/// from `pg_proc.dat`.
 pub fn register_json_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(321, "json_in", 1, true, false, fc_json_in),
         builtin(322, "json_out", 1, true, false, fc_json_out),
         builtin(323, "json_recv", 1, true, false, fc_json_recv),
