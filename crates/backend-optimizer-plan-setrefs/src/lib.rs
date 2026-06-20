@@ -3308,12 +3308,51 @@ fn set_modifytable_references<'mcx>(
             .as_ref()
             .map(|l| !l.is_empty())
             .unwrap_or(false);
+        // splan->withCheckOptionLists = fix_scan_list(root,
+        //     splan->withCheckOptionLists, rtoffset, 1) (setrefs.c:1072).
+        // WCO quals reference the result relation's columns as plain scan Vars
+        // (evaluated against the new-tuple scantuple slot), so this is a
+        // scan-level fix-up — offset each Var's rtindex by rtoffset. The list is
+        // a List-of-List-of-WithCheckOption; fix the qual Expr inside each WCO
+        // node. (NOT a join-expr fix-up: WCO does not reference the subplan
+        // output.)
         if has_wco {
-            return Err(PgError::error(
-                "set_plan_refs(T_ModifyTable): WCO \
-                 fix-up (fix_join_expr / build_tlist_index over source \
-                 tlists) is not ported",
-            ));
+            let wco_lists = m
+                .withCheckOptionLists
+                .take()
+                .unwrap_or_else(|| PgVec::new_in(mcx));
+            let mut new_wco_lists: PgVec<PgVec<Node>> = PgVec::new_in(mcx);
+            for sublist in wco_lists.into_iter() {
+                let mut new_sub: PgVec<Node> = PgVec::new_in(mcx);
+                for wco_node in sublist.into_iter() {
+                    let mut wco_node = wco_node;
+                    let qual_opt = {
+                        let wco = wco_node.as_withcheckoption_mut().ok_or_else(|| {
+                            PgError::error(
+                                "set_modifytable_references: WCO list element is not a \
+                                 WithCheckOption node",
+                            )
+                        })?;
+                        wco.qual.take()
+                    };
+                    if let Some(qual) = qual_opt {
+                        let qual_node = mcx::PgBox::into_inner(qual);
+                        let expr = qual_node.into_expr().ok_or_else(|| {
+                            PgError::error(
+                                "set_modifytable_references: WCO qual is not an Expr node",
+                            )
+                        })?;
+                        let fixed = fix_scan_expr(mcx, root, expr, rtoffset, 1.0)?;
+                        let wco = wco_node
+                            .as_withcheckoption_mut()
+                            .expect("WCO node checked above");
+                        wco.qual = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, fixed)?)?);
+                    }
+                    new_sub.push(wco_node);
+                }
+                new_wco_lists.push(new_sub);
+            }
+            m.withCheckOptionLists = Some(new_wco_lists);
         }
 
         // MERGE fix-up (setrefs.c:1155). The MERGE plan right-joins target and

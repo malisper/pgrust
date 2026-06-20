@@ -383,17 +383,100 @@ pub fn exec_project_new_tuple<'mcx>(
 /// (`ri_WithCheckOptions` is stored as plain `Node`s with no Expr-list path), so
 /// this is blocked on that not-yet-modeled WCO qual view.
 pub fn exec_init_with_check_options<'mcx>(
-    _mtstate: &mut ModifyTableState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    _result_rel_info: RriId,
-    _wco_list: &[Node<'mcx>],
+    mtstate: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    result_rel_info: RriId,
+    wco_list: &[Node<'mcx>],
 ) -> PgResult<()> {
-    panic!(
-        "execExpr-modify::exec_init_with_check_options: per-WCO ExecInitQual(wco->qual) is \
-         blocked on the not-yet-modeled WithCheckOption node in types-nodes (the per-rel WCO \
-         list is a List of WithCheckOption nodes; without that node the individual wco->qual \
-         Expr-lists cannot be extracted to feed execExpr_core::exec_init_qual)"
-    )
+    // nodeModifyTable.c ExecInitModifyTable, per-rel WCO loop:
+    //   foreach(ll, wcoList) {
+    //       WithCheckOption *wco = lfirst(ll);
+    //       ExprState *wcoExpr = ExecInitQual((List *) wco->qual, &mtstate->ps);
+    //       wcoExprs = lappend(wcoExprs, wcoExpr);
+    //   }
+    //   resultRelInfo->ri_WithCheckOptions = wcoList;
+    //   resultRelInfo->ri_WithCheckOptionExprs = wcoExprs;
+    //
+    // `wco->qual` is the canonicalized barrier/with-check qual Node; C casts it
+    // to `(List *)` and feeds ExecInitQual, which reads it as an implicit-AND
+    // list. Mirror that by splitting the qual Expr with make_ands_implicit. A
+    // real RLS / view WCO always carries a non-trivial qual, so the compiled
+    // ExprState is always present (a NULL qual would compile to the C NULL
+    // ExprState == always-true; we never store that for an aligned WCO because
+    // ri_WithCheckOptionExprs holds non-optional ExprStates — matching the fact
+    // that every WCO the rewriter emits has a qual).
+    let mcx = estate.es_query_cxt;
+    let mut wco_exprs: mcx::PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> =
+        mcx::PgVec::new_in(mcx);
+    let mut stored_wcos: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+
+    for wco_node in wco_list.iter() {
+        let wco = wco_node.as_withcheckoption().ok_or_else(|| {
+            types_error::PgError::error(
+                "ExecInitModifyTable: WITH CHECK OPTION list element is not a \
+                 WithCheckOption node",
+            )
+        })?;
+
+        // (List *) wco->qual: split the qual Expr into its implicit-AND conjuncts.
+        let qual_expr: Option<Expr> = match wco.qual.as_deref() {
+            None => None,
+            Some(q) => q.as_expr().map(|e| e.clone_in(mcx)).transpose()?,
+        };
+        let conjuncts = backend_nodes_core::makefuncs::make_ands_implicit(qual_expr);
+
+        let wco_expr = execExpr_core::exec_init_qual(
+            if conjuncts.is_empty() {
+                None
+            } else {
+                Some(conjuncts.as_slice())
+            },
+            &mut mtstate.ps,
+            estate,
+        )?;
+
+        match wco_expr {
+            Some(es) => wco_exprs.push(es),
+            None => {
+                // The qual const-folded to TRUE (make_ands_implicit drops a
+                // constant-true input → empty conjunct list → C's
+                // ExecInitQual(NIL) == NULL ExprState == always-true). C stores
+                // that NULL and ExecQual(NULL) returns true. `ri_WithCheckOptionExprs`
+                // holds non-optional ExprStates here, so compile a trivially-true
+                // ExprState from a single TRUE Const to keep the slot aligned and
+                // semantically always-passing.
+                let true_const = backend_nodes_core::makefuncs::make_bool_const(true, false);
+                let true_clause = [Expr::Const(true_const)];
+                let es = execExpr_core::exec_init_qual(
+                    Some(&true_clause),
+                    &mut mtstate.ps,
+                    estate,
+                )?
+                .ok_or_else(|| {
+                    types_error::PgError::error(
+                        "ExecInitModifyTable: failed to compile always-true WCO ExprState",
+                    )
+                })?;
+                wco_exprs.push(es);
+            }
+        }
+
+        stored_wcos.push(wco_node.clone_in(mcx)?);
+    }
+
+    let rri = estate.result_rel_mut(result_rel_info);
+    rri.ri_has_with_check_options = !stored_wcos.is_empty();
+    rri.ri_WithCheckOptions = if stored_wcos.is_empty() {
+        None
+    } else {
+        Some(stored_wcos)
+    };
+    rri.ri_WithCheckOptionExprs = if wco_exprs.is_empty() {
+        None
+    } else {
+        Some(wco_exprs)
+    };
+    Ok(())
 }
 
 /// Build the RETURNING projection for one result relation

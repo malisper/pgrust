@@ -4380,12 +4380,6 @@ fn create_modifytable_plan<'mcx>(
     let row_marks: Vec<NodeId> = p.rowMarks.clone();
     let onconflict = p.onconflict;
     let epq_param = p.epqParam;
-    // INSERT-spine bound: WCO/RETURNING/MERGE legs need their node lists
-    // resolved out of the arena into owned plan structures, which the executor
-    // ModifyTable does not yet consume; defer them loudly when present.
-    if !p.withCheckOptionLists.is_empty() {
-        panic!("create_modifytable_plan: WITH CHECK OPTION lists not yet ported");
-    }
     let returning_lists: Vec<Vec<NodeId>> = p.returningLists.clone();
 
     // Resolve the ON CONFLICT clause (carried as a presence marker in the path)
@@ -4517,6 +4511,30 @@ fn make_modifytable<'mcx>(
             }
             Some(outer)
         };
+
+    // withCheckOptionLists = list_make1(parse->withCheckOptions) for the single-
+    // relation case (planner.c:2090). The owned WithCheckOption list lives on
+    // parse->withCheckOptions (the planner carries only a presence signal); deep-
+    // copy it into the plan arena as one per-result-rel sublist of WithCheckOption
+    // nodes (one entry, since this is the non-inherited single-rel ModifyTable
+    // path; the inherited BMS_MULTIPLE per-leaf case is panic-guarded earlier in
+    // grouping_planner). The executor ExecInitModifyTable compiles each node's
+    // qual into ri_WithCheckOptionExprs.
+    let with_check_option_lists_field: Option<PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>> = {
+        let n = run.resolve(root.parse).withCheckOptions.len();
+        if n == 0 {
+            None
+        } else {
+            let mut inner: PgVec<'mcx, Node<'mcx>> = vec_with_capacity_in(mcx, n)?;
+            for i in 0..n {
+                let wco_node = &*run.resolve(root.parse).withCheckOptions[i];
+                inner.push(wco_node.clone_in(mcx)?);
+            }
+            let mut outer: PgVec<'mcx, PgVec<'mcx, Node<'mcx>>> = vec_with_capacity_in(mcx, 1)?;
+            outer.push(inner);
+            Some(outer)
+        }
+    };
 
     // returningOldAlias / returningNewAlias come off root->parse.
     let parse = run.resolve(root.parse);
@@ -4651,7 +4669,7 @@ fn make_modifytable<'mcx>(
         partColsUpdated: part_cols_updated,
         resultRelations: result_relations_field,
         updateColnosLists: update_colnos_lists_field,
-        withCheckOptionLists: None,
+        withCheckOptionLists: with_check_option_lists_field,
         returningOldAlias: returning_old_alias,
         returningNewAlias: returning_new_alias,
         returningLists: returning_lists_field,

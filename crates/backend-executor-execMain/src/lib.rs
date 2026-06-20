@@ -2156,6 +2156,173 @@ fn ExecRelCheck<'mcx>(
     Ok(None)
 }
 
+/// `ExecWithCheckOptions(kind, resultRelInfo, slot, estate)` (execMain.c):
+/// evaluate the result relation's WITH CHECK OPTION / RLS with-check policies of
+/// the given `kind` against the tuple in `slot`, `ereport(ERROR)`ing on the
+/// first violation. WCOs of other kinds are skipped.
+pub fn ExecWithCheckOptions<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    kind: i32,
+    result_rel_info: types_nodes::RriId,
+    slot: types_nodes::SlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+
+    // econtext = GetPerTupleExprContext(estate); econtext->ecxt_scantuple = slot;
+    let econtext = execUtils::MakePerTupleExprContext(estate)?;
+    estate.ecxt_mut(econtext).ecxt_scantuple = Some(slot);
+
+    // forboth(l1, ri_WithCheckOptions, l2, ri_WithCheckOptionExprs).
+    // Take the compiled ExprState list out of the ResultRelInfo so we can hold a
+    // &mut to a state AND a &mut to estate during ExecQual (the ExprState is
+    // interpreter scratch owned by the query context; moving the Vec out and
+    // back is sound — nothing else aliases it during this call). Restored before
+    // every return path via the `restore` closure pattern below.
+    let n = estate
+        .result_rel(result_rel_info)
+        .ri_WithCheckOptions
+        .as_ref()
+        .map(|v| v.len())
+        .unwrap_or(0);
+
+    let mut wco_exprs = estate
+        .result_rel_mut(result_rel_info)
+        .ri_WithCheckOptionExprs
+        .take();
+
+    for i in 0..n {
+        // wco->kind (read the WithCheckOption node at index i).
+        let wco_kind = {
+            let wcos = estate
+                .result_rel(result_rel_info)
+                .ri_WithCheckOptions
+                .as_ref()
+                .expect("ExecWithCheckOptions: ri_WithCheckOptions vanished");
+            let wco = wcos[i].as_withcheckoption().ok_or_else(|| {
+                types_error::PgError::error(
+                    "ExecWithCheckOptions: ri_WithCheckOptions element is not a \
+                     WithCheckOption node",
+                )
+            })?;
+            wco.kind
+        };
+
+        // Skip any WCOs which are not the kind we are looking for now.
+        if wco_kind as i32 != kind {
+            continue;
+        }
+
+        // if (!ExecQual(wcoExpr, econtext)) { ... violation ... }
+        let passed = {
+            let state = wco_exprs
+                .as_mut()
+                .and_then(|arr| arr.get_mut(i))
+                .expect("ExecWithCheckOptions: ri_WithCheckOptionExprs shorter than options");
+            execExpr::exec_qual(&mut **state, econtext, estate)?
+        };
+
+        if passed {
+            continue;
+        }
+
+        // Violation: build the appropriate error per WCO kind.
+        // Re-read the WCO node's relname / polname for the message.
+        let (relname, polname): (alloc::string::String, Option<alloc::string::String>) = {
+            let wcos = estate
+                .result_rel(result_rel_info)
+                .ri_WithCheckOptions
+                .as_ref()
+                .expect("ExecWithCheckOptions: ri_WithCheckOptions vanished");
+            let wco = wcos[i]
+                .as_withcheckoption()
+                .expect("ExecWithCheckOptions: WCO node");
+            (
+                wco.relname
+                    .as_ref()
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default(),
+                wco.polname.as_ref().map(|s| s.as_str().to_string()),
+            )
+        };
+
+        match wco_kind {
+            types_nodes::rawnodes::WCO_VIEW_CHECK => {
+                // For a view WCO we can show the failing row when the user could
+                // view the relation directly. convert_routed_slot_for_error maps
+                // a routed slot back to the root tupdesc (the C
+                // ri_RootResultRelInfo path).
+                let (root_relid, desc_slot, rel_name) =
+                    convert_routed_slot_for_error(estate, result_rel_info, slot)?;
+                let modified_cols = constraint_modified_cols(estate, result_rel_info)?;
+                let val_desc =
+                    build_slot_value_desc(estate, root_relid, desc_slot, modified_cols.as_deref())?;
+                let mut err = ereport(ERROR)
+                    .errcode(types_error::ERRCODE_WITH_CHECK_OPTION_VIOLATION)
+                    .errmsg(alloc::format!(
+                        "new row violates check option for view \"{}\"",
+                        rel_name
+                    ));
+                if let Some(vd) = val_desc {
+                    err = err.errdetail(alloc::format!("Failing row contains {}.", vd.as_str()));
+                }
+                return Err(err.into_error());
+            }
+            types_nodes::rawnodes::WCO_RLS_INSERT_CHECK
+            | types_nodes::rawnodes::WCO_RLS_UPDATE_CHECK => {
+                return Err(rls_with_check_violation(
+                    polname.as_deref(),
+                    &relname,
+                    "new row violates row-level security policy \"{p}\" for table \"{t}\"",
+                    "new row violates row-level security policy for table \"{t}\"",
+                ));
+            }
+            types_nodes::rawnodes::WCO_RLS_MERGE_UPDATE_CHECK
+            | types_nodes::rawnodes::WCO_RLS_MERGE_DELETE_CHECK => {
+                return Err(rls_with_check_violation(
+                    polname.as_deref(),
+                    &relname,
+                    "target row violates row-level security policy \"{p}\" (USING expression) for table \"{t}\"",
+                    "target row violates row-level security policy (USING expression) for table \"{t}\"",
+                ));
+            }
+            types_nodes::rawnodes::WCO_RLS_CONFLICT_CHECK => {
+                return Err(rls_with_check_violation(
+                    polname.as_deref(),
+                    &relname,
+                    "new row violates row-level security policy \"{p}\" (USING expression) for table \"{t}\"",
+                    "new row violates row-level security policy (USING expression) for table \"{t}\"",
+                ));
+            }
+        }
+    }
+
+    // All checks of this kind passed: restore the compiled ExprState list onto
+    // the ResultRelInfo so later rows / later WCO kinds can be re-evaluated.
+    estate
+        .result_rel_mut(result_rel_info)
+        .ri_WithCheckOptionExprs = wco_exprs;
+
+    Ok(())
+}
+
+/// Build an RLS with-check / USING-violation error (ERRCODE_INSUFFICIENT_PRIVILEGE),
+/// choosing the named-policy vs unnamed-policy message form.
+fn rls_with_check_violation(
+    polname: Option<&str>,
+    relname: &str,
+    with_policy: &str,
+    without_policy: &str,
+) -> types_error::PgError {
+    let msg = match polname {
+        Some(p) => with_policy.replace("{p}", p).replace("{t}", relname),
+        None => without_policy.replace("{t}", relname),
+    };
+    ereport(ERROR)
+        .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+        .errmsg(msg)
+        .into_error()
+}
+
 /// `ExecPartitionCheck(resultRelInfo, slot, estate, emitError)` (execMain.c):
 /// check that the tuple in `slot` meets the relation's partition constraint.
 pub fn ExecPartitionCheck<'mcx>(
@@ -3121,6 +3288,7 @@ pub fn init_seams() {
     seams::exec_check_permissions_select::set(exec_check_permissions_select);
     seams::exec_check_one_rel_perms_view::set(exec_check_one_rel_perms_view);
     seams::exec_build_slot_value_description::set(ExecBuildSlotValueDescription);
+    seams::exec_with_check_options::set(ExecWithCheckOptions);
     seams::init_result_rel_info::set(InitResultRelInfo);
     seams::check_valid_result_rel::set(CheckValidResultRel);
     seams::eval_plan_qual_init::set(EvalPlanQualInit);

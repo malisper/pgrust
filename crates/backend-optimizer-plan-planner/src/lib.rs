@@ -3394,12 +3394,13 @@ fn add_modifytable_to_path<'mcx>(
     // (`operation == CMD_MERGE`) fires. The actual MergeAction / join-condition
     // resolution happens in createplan against `run.resolve(root.parse)`.
     let _ = has_merge_action;
-    if has_wco {
-        panic!(
-            "grouping_planner: ModifyTable WITH CHECK OPTION \
-             (parse->withCheckOptions) is not ported"
-        );
-    }
+    // withCheckOptionLists = list_make1(parse->withCheckOptions) for the single-
+    // relation case (planner.c:2090). Like ON CONFLICT / MERGE / RETURNING, the
+    // owned WithCheckOption list lives on `parse->withCheckOptions` and is read
+    // directly by create_modifytable_plan; the path/plan carrier needs only a
+    // presence signal (createplan materializes the per-rel WCO node list from
+    // parse). So the path carries an empty list and `has_wco` flows via parse.
+    let _ = has_wco;
 
     // Single-relation INSERT/UPDATE/DELETE (C:2082-2093). rootRelation = 0
     // (there's no separate root rel). updateColnosLists is set for UPDATE.
