@@ -37,8 +37,9 @@
 use std::string::{String, ToString};
 
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
@@ -118,54 +119,39 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("tsvector fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters — I/O.
 // ---------------------------------------------------------------------------
 
-fn fc_tsvectorin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsvectorin(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // C: `escontext = (Node *) fcinfo->context`. Copy the input first since
     // `arg_cstring` borrows `fcinfo` immutably while `escontext_mut` needs
     // `&mut`. A lexer/syntax error returns NULL through a soft sink (else
     // throws); with no sink installed escontext is None and the error throws.
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let m = scratch_mcx();
-    match ok(crate::io::tsvectorin(m.mcx(), &s, fcinfo.escontext_mut())) {
-        Some(image) => ret_varlena_image(fcinfo, image),
-        None => Datum::null(),
+    match crate::io::tsvectorin(m.mcx(), &s, fcinfo.escontext_mut())? {
+        Some(image) => Ok(ret_varlena_image(fcinfo, image)),
+        None => Ok(Datum::null()),
     }
 }
 
-fn fc_tsvectorout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsvectorout(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::io::tsvectorout(m.mcx(), arg_tsvector(fcinfo, 0)));
-    ret_cstring(fcinfo, out)
+    let out = crate::io::tsvectorout(m.mcx(), arg_tsvector(fcinfo, 0))?;
+    Ok(ret_cstring(fcinfo, out))
 }
 
-fn fc_tsvectorsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsvectorsend(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let image = ok(crate::io::tsvectorsend(m.mcx(), arg_tsvector(fcinfo, 0)));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::io::tsvectorsend(m.mcx(), arg_tsvector(fcinfo, 0))?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
 /// `tsvectorrecv(internal)` — the wire `StringInfo` message arrives on the
 /// by-ref lane as its raw bytes; rebuild a `StringInfo` (cursor 0) in a scratch
 /// context and hand it to the value core, which returns the header-ful image.
-fn fc_tsvectorrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsvectorrecv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let src = fcinfo
         .ref_arg(0)
         .and_then(|p| p.as_varlena())
@@ -173,62 +159,62 @@ fn fc_tsvectorrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let mut data = mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(src.len()).is_err() {
-        raise(types_error::PgError::error("out of memory"));
+        return Err(types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(src);
     let mut buf = StringInfo::from_vec(data);
-    let image = ok(crate::io::tsvectorrecv(m.mcx(), &mut buf));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::io::tsvectorrecv(m.mcx(), &mut buf)?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — comparison.
 // ---------------------------------------------------------------------------
 
-fn fc_tsvector_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::op::tsvector_cmp(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1)))
+fn fc_tsvector_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_i32(crate::op::tsvector_cmp(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1))))
 }
-fn fc_tsvector_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::op::tsvector_eq(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1)))
+fn fc_tsvector_eq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::op::tsvector_eq(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1))))
 }
-fn fc_tsvector_ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::op::tsvector_ne(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1)))
+fn fc_tsvector_ne(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::op::tsvector_ne(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1))))
 }
-fn fc_tsvector_lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::op::tsvector_lt(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1)))
+fn fc_tsvector_lt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::op::tsvector_lt(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1))))
 }
-fn fc_tsvector_le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::op::tsvector_le(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1)))
+fn fc_tsvector_le(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::op::tsvector_le(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1))))
 }
-fn fc_tsvector_gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::op::tsvector_gt(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1)))
+fn fc_tsvector_gt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::op::tsvector_gt(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1))))
 }
-fn fc_tsvector_ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::op::tsvector_ge(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1)))
+fn fc_tsvector_ge(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::op::tsvector_ge(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1))))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — scalar manipulation.
 // ---------------------------------------------------------------------------
 
-fn fc_tsvector_strip(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let image = ok(crate::op::tsvector_strip(arg_tsvector(fcinfo, 0)));
-    ret_varlena_image(fcinfo, image)
+fn fc_tsvector_strip(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let image = crate::op::tsvector_strip(arg_tsvector(fcinfo, 0))?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
-fn fc_tsvector_setweight(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsvector_setweight(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let cw = arg_char(fcinfo, 1);
-    let image = ok(crate::op::tsvector_setweight(arg_tsvector(fcinfo, 0), cw));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::op::tsvector_setweight(arg_tsvector(fcinfo, 0), cw)?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
-fn fc_tsvector_concat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let image = ok(crate::op::tsvector_concat(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1)));
-    ret_varlena_image(fcinfo, image)
+fn fc_tsvector_concat(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let image = crate::op::tsvector_concat(arg_tsvector(fcinfo, 0), arg_tsvector(fcinfo, 1))?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
-fn fc_tsvector_length(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::op::tsvector_length(arg_tsvector(fcinfo, 0)))
+fn fc_tsvector_length(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_i32(crate::op::tsvector_length(arg_tsvector(fcinfo, 0))))
 }
 
 // ---------------------------------------------------------------------------
@@ -243,61 +229,61 @@ fn fc_tsvector_length(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // VERBATIM via `ret_varlena_image`.
 // ---------------------------------------------------------------------------
 
-fn fc_tsvector_filter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsvector_filter(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let tsin = arg_tsvector(fcinfo, 0);
     let weights = arg_tsvector(fcinfo, 1);
-    let image = ok(crate::op::tsvector_filter_datum(tsin, weights));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::op::tsvector_filter_datum(tsin, weights)?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
-fn fc_tsvector_setweight_by_filter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsvector_setweight_by_filter(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let cw = arg_char(fcinfo, 1);
     let tsin = arg_tsvector(fcinfo, 0);
     let lexemes = arg_tsvector(fcinfo, 2);
-    let image = ok(crate::op::tsvector_setweight_by_filter_datum(tsin, cw, lexemes));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::op::tsvector_setweight_by_filter_datum(tsin, cw, lexemes)?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
-fn fc_tsvector_delete_str(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsvector_delete_str(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // `tsvector text` — the `text` lexeme crosses header-ful; the core reads its
     // payload after the 4-byte VARHDRSZ length word.
     let tsin = arg_tsvector(fcinfo, 0);
     let lexeme = arg_text(fcinfo, 1);
-    let image = ok(crate::op::tsvector_delete_str(tsin, lexeme));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::op::tsvector_delete_str(tsin, lexeme)?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
-fn fc_tsvector_delete_arr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsvector_delete_arr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let tsin = arg_tsvector(fcinfo, 0);
     let lexemes = arg_tsvector(fcinfo, 1);
-    let image = ok(crate::op::tsvector_delete_arr_datum(tsin, lexemes));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::op::tsvector_delete_arr_datum(tsin, lexemes)?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
-fn fc_tsvector_to_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let image = ok(crate::op::tsvector_to_array(arg_tsvector(fcinfo, 0)));
-    ret_varlena_image(fcinfo, image)
+fn fc_tsvector_to_array(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let image = crate::op::tsvector_to_array(arg_tsvector(fcinfo, 0))?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
-fn fc_array_to_tsvector(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let image = ok(crate::op::array_to_tsvector_datum(arg_tsvector(fcinfo, 0)));
-    ret_varlena_image(fcinfo, image)
+fn fc_array_to_tsvector(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let image = crate::op::array_to_tsvector_datum(arg_tsvector(fcinfo, 0))?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — @@ match operators (tsvector @@ tsquery).
 // ---------------------------------------------------------------------------
 
-fn fc_ts_match_vq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ts_match_vq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let vec = arg_tsvector(fcinfo, 0);
     let query = arg_tsvector(fcinfo, 1);
-    ret_bool(ok(crate::op::ts_match_vq(vec, query)))
+    Ok(ret_bool(crate::op::ts_match_vq(vec, query)?))
 }
 
-fn fc_ts_match_qv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ts_match_qv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let query = arg_tsvector(fcinfo, 0);
     let vec = arg_tsvector(fcinfo, 1);
-    ret_bool(ok(crate::op::ts_match_qv(query, vec)))
+    Ok(ret_bool(crate::op::ts_match_qv(query, vec)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -308,16 +294,19 @@ fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `tsvector` builtin whose value core is ported and whose
@@ -326,7 +315,7 @@ fn builtin(
 /// OIDs/nargs from `pg_proc.dat`; every row here is `proisstrict => 't'` and not
 /// retset.
 pub fn register_tsvector_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- I/O ----
         builtin(3610, "tsvectorin", 1, fc_tsvectorin),
         builtin(3611, "tsvectorout", 1, fc_tsvectorout),
