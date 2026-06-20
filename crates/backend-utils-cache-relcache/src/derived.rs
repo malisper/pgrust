@@ -766,10 +766,10 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
         // (rather than at store) avoids ALTER TABLE OWNER having to rewrite the
         // stored rules. setRuleCheckAsUser is owned by rewriteDefine.c.
         for action in actions.iter_mut() {
-            set_rule_check_as_user_seam::call(action, check_as_user);
+            set_rule_check_as_user_seam::call(cache_mcx, action, check_as_user);
         }
         if let Some(q) = qual.as_deref_mut() {
-            set_rule_check_as_user_node_seam::call(q, check_as_user);
+            set_rule_check_as_user_node_seam::call(cache_mcx, q, check_as_user);
         }
 
         rules.push(RewriteRule {

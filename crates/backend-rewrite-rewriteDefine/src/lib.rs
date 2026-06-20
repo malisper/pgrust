@@ -758,25 +758,23 @@ fn checkRuleResultList<'mcx>(
 
 /// `setRuleCheckAsUser(node, userid)` — recursively set `checkAsUser` to
 /// `userid` in all `RTEPermissionInfo`s of a query/expression tree.
-pub fn setRuleCheckAsUser(node: &mut Node<'_>, userid: Oid) {
-    setRuleCheckAsUser_walker(node, userid);
+pub fn setRuleCheckAsUser<'mcx>(mcx: Mcx<'mcx>, node: &mut Node<'mcx>, userid: Oid) {
+    setRuleCheckAsUser_walker(mcx, node, userid);
 }
 
-fn setRuleCheckAsUser_walker(node: &mut Node<'_>, userid: Oid) -> bool {
+fn setRuleCheckAsUser_walker<'mcx>(mcx: Mcx<'mcx>, node: &mut Node<'mcx>, userid: Oid) -> bool {
     if let Some(qry) = node.as_query_mut() {
-        setRuleCheckAsUser_Query(qry, userid);
+        setRuleCheckAsUser_Query(mcx, qry, userid);
         return false;
     }
-    let scratch = mcx::MemoryContext::new("setRuleCheckAsUser scratch");
-    let scratch_mcx = scratch.mcx();
     backend_nodes_core::node_walker::expression_tree_walker_mut(
         node,
-        &mut |child| setRuleCheckAsUser_walker(child, userid),
-        scratch_mcx,
+        &mut |child| setRuleCheckAsUser_walker(mcx, child, userid),
+        mcx,
     )
 }
 
-fn setRuleCheckAsUser_Query(qry: &mut Query<'_>, userid: Oid) {
+fn setRuleCheckAsUser_Query<'mcx>(mcx: Mcx<'mcx>, qry: &mut Query<'mcx>, userid: Oid) {
     /* Set in all RTEPermissionInfos for this query. */
     for perminfo in qry.rteperminfos.iter_mut() {
         perminfo.checkAsUser = userid;
@@ -786,7 +784,7 @@ fn setRuleCheckAsUser_Query(qry: &mut Query<'_>, userid: Oid) {
     for rte in qry.rtable.iter_mut() {
         if rte.rtekind == RTEKind::RTE_SUBQUERY {
             if let Some(subquery) = rte.subquery.as_deref_mut() {
-                setRuleCheckAsUser_Query(subquery, userid);
+                setRuleCheckAsUser_Query(mcx, subquery, userid);
             }
         }
     }
@@ -794,7 +792,7 @@ fn setRuleCheckAsUser_Query(qry: &mut Query<'_>, userid: Oid) {
     /* Recurse into subquery-in-WITH */
     for cte in qry.cteList.iter_mut() {
         if let Some(ctequery) = cte.as_query_mut() {
-            setRuleCheckAsUser_Query(ctequery, userid);
+            setRuleCheckAsUser_Query(mcx, ctequery, userid);
         }
     }
 
@@ -809,8 +807,9 @@ fn setRuleCheckAsUser_Query(qry: &mut Query<'_>, userid: Oid) {
             | backend_nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES;
         backend_nodes_core::node_walker::query_tree_mutator(
             qry,
-            &mut |node| setRuleCheckAsUser_walker(node, userid),
+            &mut |node| setRuleCheckAsUser_walker(mcx, node, userid),
             flags,
+            mcx,
         );
     }
 }
@@ -819,14 +818,14 @@ fn setRuleCheckAsUser_Query(qry: &mut Query<'_>, userid: Oid) {
 /// at a `Query` (the rule-action shape the relcache holds). C calls
 /// `setRuleCheckAsUser((Node *) rule->actions, userid)`; the owned model holds
 /// each action as a `Query` value, so the relcache invokes this per action.
-fn set_rule_check_as_user_seam(query: &mut Query<'_>, userid: Oid) {
-    setRuleCheckAsUser_Query(query, userid);
+fn set_rule_check_as_user_seam<'mcx>(mcx: Mcx<'mcx>, query: &mut Query<'mcx>, userid: Oid) {
+    setRuleCheckAsUser_Query(mcx, query, userid);
 }
 
 /// `set_rule_check_as_user_node` seam entry — apply [`setRuleCheckAsUser`] to a
 /// generic expression `Node` (the rule `qual`).
-fn set_rule_check_as_user_node_seam(node: &mut Node<'_>, userid: Oid) {
-    setRuleCheckAsUser(node, userid);
+fn set_rule_check_as_user_node_seam<'mcx>(mcx: Mcx<'mcx>, node: &mut Node<'mcx>, userid: Oid) {
+    setRuleCheckAsUser(mcx, node, userid);
 }
 
 /* ===========================================================================

@@ -17,7 +17,11 @@ seam_core::seam!(
     /// as the view owner, so every cached rule-action Query has its
     /// `checkAsUser` stamped with the owner's role here. The walk is infallible
     /// (a pure field mutation), so the seam returns `()`.
-    pub fn set_rule_check_as_user(query: &mut types_nodes::copy_query::Query<'_>, userid: Oid)
+    pub fn set_rule_check_as_user<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        query: &mut types_nodes::copy_query::Query<'mcx>,
+        userid: Oid,
+    )
 );
 
 seam_core::seam!(
@@ -25,5 +29,9 @@ seam_core::seam!(
     /// expression `Node` — used for the rule's `qual` (`rule->qual`), which may
     /// embed SubLink subselects whose RTEPermissionInfos also need stamping.
     /// Infallible field mutation.
-    pub fn set_rule_check_as_user_node(node: &mut types_nodes::nodes::Node<'_>, userid: Oid)
+    pub fn set_rule_check_as_user_node<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        node: &mut types_nodes::nodes::Node<'mcx>,
+        userid: Oid,
+    )
 );
