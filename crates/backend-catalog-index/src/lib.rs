@@ -437,6 +437,10 @@ pub fn BuildIndexInfo<'mcx>(
         ii_Summarizing: amsummarizing,
         ii_WithoutOverlaps: indisexclusion && indisunique,
         ii_IndexAttrNumbers: Default::default(),
+        // C `makeIndexInfo`: `ii->ii_Context = CurrentMemoryContext;` — the
+        // context that owns this IndexInfo (and into which later fix-ups, e.g.
+        // BuildSpeculativeIndexInfo's ii_Unique* arrays, allocate).
+        ii_Context: Some(mcx),
         ..Default::default()
     };
 
@@ -2768,6 +2772,8 @@ pub fn BuildDummyIndexInfo<'mcx>(
         ii_Summarizing: amsummarizing,
         ii_WithoutOverlaps: indisexclusion && indisunique,
         ii_IndexAttrNumbers: Default::default(),
+        // C `makeIndexInfo`: `ii->ii_Context = CurrentMemoryContext;`.
+        ii_Context: Some(mcx),
         ..Default::default()
     };
 

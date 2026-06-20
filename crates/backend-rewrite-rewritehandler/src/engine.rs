@@ -2453,15 +2453,60 @@ fn RewriteQuery<'mcx>(
                     parsetree.targetList = new_tlist;
                 }
 
-                if let Some(oc) = parsetree.onConflict.as_deref() {
-                    if oc.action == OnConflictAction::ONCONFLICT_UPDATE {
-                        return Err(elog(
-                            "RewriteQuery: ON CONFLICT DO UPDATE set-list rewrite \
-                             (rewriteTargetListIU over onConflictSet) needs the EXCLUDED \
-                             tlist handling and is out of the common INSERT spine (owner: \
-                             backend-rewrite-rewritehandler)",
-                        ));
+                // C `rewriteHandler.c`:
+                //   if (parsetree->onConflict &&
+                //       parsetree->onConflict->action == ONCONFLICT_UPDATE)
+                //       parsetree->onConflict->onConflictSet =
+                //           rewriteTargetListIU(parsetree->onConflict->onConflictSet,
+                //                               CMD_UPDATE, parsetree->override,
+                //                               rt_entry_relation, NULL, 0, NULL);
+                //
+                // The DO UPDATE SET targetlist references the EXCLUDED pseudo
+                // relation (already in the rtable from analysis); it is
+                // normalized against the real target relation's tupdesc exactly
+                // like an UPDATE targetlist (defaults applied, dup assignments
+                // merged, junk sorted last), with no VALUES RTE.
+                let do_update = matches!(
+                    parsetree.onConflict.as_deref(),
+                    Some(oc) if oc.action == OnConflictAction::ONCONFLICT_UPDATE
+                );
+                if do_update {
+                    // Downcast the `PgVec<NodePtr>` SET list to `TargetEntry`s
+                    // (the stored form is the raw-node list, mirroring C's
+                    // `List *onConflictSet` of TargetEntry).
+                    let oc = parsetree.onConflict.as_deref().unwrap();
+                    let mut old_set: Vec<types_nodes::primnodes::TargetEntry<'mcx>> =
+                        Vec::with_capacity(oc.onConflictSet.len());
+                    for tle_node in oc.onConflictSet.iter() {
+                        let Some(tle) = (**tle_node).as_targetentry() else {
+                            return Err(elog(
+                                "onConflictSet entry is not a TargetEntry",
+                            ));
+                        };
+                        old_set.push(tle.clone_in(mcx)?);
                     }
+
+                    let mut unused = None;
+                    let new_set = rewriteTargetListIU(
+                        mcx,
+                        &old_set,
+                        CmdType::CMD_UPDATE,
+                        parsetree.r#override,
+                        &rt_entry_relation,
+                        None,
+                        0,
+                        &mut unused,
+                    )?;
+
+                    // Box the rewritten `TargetEntry`s back into the
+                    // `PgVec<NodePtr>` SET list.
+                    let mut new_set_nodes: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+                    for tle in new_set.into_iter() {
+                        new_set_nodes
+                            .push(alloc_in(mcx, Node::TargetEntry(tle))?);
+                    }
+                    let oc = parsetree.onConflict.as_deref_mut().unwrap();
+                    oc.onConflictSet = new_set_nodes;
                 }
             }
             CmdType::CMD_UPDATE => {

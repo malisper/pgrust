@@ -250,7 +250,7 @@ seam_core::seam!(
     /// (tuptable.h) followed by `DatumGetTransactionId`: fetch the slot tuple's
     /// `xmin` as `(xmin, isnull)`.
     pub fn slot_get_xmin<'mcx>(
-        estate: &EStateData<'mcx>,
+        estate: &mut EStateData<'mcx>,
         slot: SlotId,
     ) -> PgResult<(types_core::TransactionId, bool)>
 );

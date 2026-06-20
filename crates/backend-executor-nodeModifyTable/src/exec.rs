@@ -661,7 +661,10 @@ fn relation_relid(estate: &EStateData<'_>, rri: RriId) -> types_core::Oid {
 }
 
 /// An `alias()` of `ri_RelationDesc` (shared, no release authority).
-fn relation_alias<'mcx>(estate: &EStateData<'mcx>, rri: RriId) -> types_rel::Relation<'mcx> {
+pub(crate) fn relation_alias<'mcx>(
+    estate: &EStateData<'mcx>,
+    rri: RriId,
+) -> types_rel::Relation<'mcx> {
     estate
         .result_rel(rri)
         .ri_RelationDesc
@@ -671,7 +674,7 @@ fn relation_alias<'mcx>(estate: &EStateData<'mcx>, rri: RriId) -> types_rel::Rel
 }
 
 /// `SnapshotAny` (snapmgr) — the static "any tuple visible" snapshot.
-fn snapshot_any() -> Option<types_snapshot::SnapshotData> {
+pub(crate) fn snapshot_any() -> Option<types_snapshot::SnapshotData> {
     Some(types_snapshot::SnapshotData::sentinel(types_snapshot::SnapshotType::SNAPSHOT_ANY))
 }
 

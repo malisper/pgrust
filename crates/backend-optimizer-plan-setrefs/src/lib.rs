@@ -3109,12 +3109,95 @@ fn set_modifytable_references<'mcx>(
             .as_ref()
             .map(|l| !l.is_empty())
             .unwrap_or(false);
-        if has_wco || has_onconflict || has_merge {
+        if has_wco || has_merge {
             return Err(PgError::error(
-                "set_plan_refs(T_ModifyTable): WCO / ON CONFLICT / MERGE \
-                 fix-up (fix_join_expr / build_tlist_index over exclRelTlist+source \
+                "set_plan_refs(T_ModifyTable): WCO / MERGE \
+                 fix-up (fix_join_expr / build_tlist_index over source \
                  tlists) is not ported",
             ));
+        }
+
+        // ON CONFLICT DO UPDATE fix-up (setrefs.c:1090). The SET targetlist and
+        // its WHERE qual reference the EXCLUDED pseudo relation; resolve their
+        // Vars against an index built over splan->exclRelTlist (the EXCLUDED
+        // tlist), keeping target-relation Vars (acceptable_rel = the first
+        // resultRelation, still un-bumped here) as plain bumped Vars.
+        //
+        //   itlist = build_tlist_index(splan->exclRelTlist);
+        //   splan->onConflictSet =
+        //       fix_join_expr(root, splan->onConflictSet, NULL, itlist,
+        //                     linitial_int(splan->resultRelations),
+        //                     rtoffset, NUM_EXEC_TLIST(plan));
+        //   splan->onConflictWhere =
+        //       fix_join_expr(root, splan->onConflictWhere, NULL, itlist,
+        //                     linitial_int(splan->resultRelations),
+        //                     rtoffset, NUM_EXEC_QUAL(plan));
+        if has_onconflict {
+            let acceptable_rel = m
+                .resultRelations
+                .as_deref()
+                .and_then(|v| v.first())
+                .copied()
+                .ok_or_else(|| {
+                    PgError::error(
+                        "set_modifytable_references: ON CONFLICT ModifyTable has no \
+                         resultRelations",
+                    )
+                })? as Index;
+
+            let nt = num_exec_tlist(&m.plan);
+            let nq = num_exec_qual(&m.plan);
+
+            let itlist = build_tlist_index(
+                m.exclRelTlist.as_deref().unwrap_or(&[]),
+                mcx,
+            )?;
+
+            // onConflictSet: TargetEntry list — fix each tle->expr.
+            let set_list = m.onConflictSet.take().unwrap_or_else(|| PgVec::new_in(mcx));
+            let mut new_set: PgVec<TargetEntry> = PgVec::new_in(mcx);
+            for mut tle in set_list {
+                if let Some(eb) = tle.expr.take() {
+                    let fixed = fix_join_expr_mutator(
+                        mcx,
+                        root,
+                        PgBox::into_inner(eb),
+                        &FixJoinCtx {
+                            outer_itlist: Some(&itlist),
+                            inner_itlist: None,
+                            acceptable_rel,
+                            rtoffset,
+                            nrm_match: NRM_EQUAL,
+                            num_exec: nt,
+                        },
+                    )?;
+                    tle.expr = Some(mcx::alloc_in(mcx, fixed)?);
+                }
+                new_set.push(tle);
+            }
+            m.onConflictSet = Some(new_set);
+
+            // onConflictWhere: implicit-AND list of Expr.
+            if let Some(where_list) = m.onConflictWhere.take() {
+                let fixed = fix_join_expr(
+                    mcx,
+                    root,
+                    where_list.into_iter().collect(),
+                    &FixJoinCtx {
+                        outer_itlist: Some(&itlist),
+                        inner_itlist: None,
+                        acceptable_rel,
+                        rtoffset,
+                        nrm_match: NRM_EQUAL,
+                        num_exec: nq,
+                    },
+                )?;
+                let mut nw: PgVec<Expr> = PgVec::new_in(mcx);
+                for e in fixed {
+                    nw.push(e);
+                }
+                m.onConflictWhere = Some(nw);
+            }
         }
 
         // Pass each per-resultrel returningList through

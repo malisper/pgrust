@@ -207,6 +207,184 @@ pub fn init_seams() {
         Ok(new_slot)
     });
 
+    // ON CONFLICT DO UPDATE field-projection seams over the `OnConflictSetState`
+    // (`resultRelInfo->ri_onConflict`) built by ExecInitModifyTable.
+
+    // `existing = resultRelInfo->ri_onConflict->oc_Existing;`
+    insert::oc_existing_slot::set(|estate, rri| {
+        estate
+            .result_rel(rri)
+            .ri_onConflict
+            .as_deref()
+            .and_then(|oc| oc.oc_Existing)
+            .expect("ExecOnConflictUpdate: ri_onConflict->oc_Existing is NULL")
+    });
+
+    // `resultRelInfo->ri_onConflict->oc_ProjSlot`
+    insert::oc_proj_slot::set(|estate, rri| {
+        estate
+            .result_rel(rri)
+            .ri_onConflict
+            .as_deref()
+            .and_then(|oc| oc.oc_ProjSlot)
+            .expect("ExecOnConflictUpdate: ri_onConflict->oc_ProjSlot is NULL")
+    });
+
+    // econtext->ecxt_scantuple = existing; ecxt_innertuple = excludedSlot;
+    // ecxt_outertuple = NULL  (install ON CONFLICT tuples for SET WHERE/projection).
+    insert::oc_set_econtext_tuples::set(|estate, mtstate, existing, excluded_slot| {
+        let econtext = mtstate
+            .ps
+            .ps_ExprContext
+            .expect("ON CONFLICT DO UPDATE node has an expression context");
+        let ecxt = estate.ecxt_mut(econtext);
+        ecxt.ecxt_scantuple = Some(existing);
+        ecxt.ecxt_innertuple = Some(excluded_slot);
+        ecxt.ecxt_outertuple = None;
+    });
+
+    // `ExecQual(resultRelInfo->ri_onConflict->oc_WhereClause, econtext)` — a NULL
+    // WHERE clause is always-true.
+    insert::exec_qual_oc_where::set(|estate, mtstate, rri| {
+        let econtext = mtstate
+            .ps
+            .ps_ExprContext
+            .expect("ON CONFLICT DO UPDATE node has an expression context");
+        let mut where_clause = estate
+            .result_rel(rri)
+            .ri_onConflict
+            .as_deref()
+            .and_then(|oc| oc.oc_WhereClause.as_ref())
+            .map(|w| w.clone());
+        match where_clause.as_mut() {
+            Some(state) => {
+                backend_executor_execExpr_seams::exec_qual::call(state, econtext, estate)
+            }
+            None => Ok(true),
+        }
+    });
+
+    // `ExecProject(resultRelInfo->ri_onConflict->oc_ProjInfo)` — project the new
+    // tuple version into oc_ProjSlot, returning that slot.
+    insert::exec_project_oc::set(|estate, rri| {
+        let mut proj = estate
+            .result_rel(rri)
+            .ri_onConflict
+            .as_deref()
+            .and_then(|oc| oc.oc_ProjInfo.as_ref())
+            .map(|p| p.clone())
+            .expect("ExecOnConflictUpdate: ri_onConflict->oc_ProjInfo is NULL");
+        backend_executor_execExpr_seams::exec_project_info::call(&mut proj, estate)
+    });
+
+    // `InstrCountFiltered1(&mtstate->ps, n)` — bump nfiltered1 if instrumented.
+    insert::instr_count_filtered1::set(|mtstate, n| {
+        if let Some(instr) = mtstate.ps.instrument.as_deref_mut() {
+            instr.nfiltered1 += n as f64;
+        }
+    });
+
+    // `resultRelInfo->ri_needLockTagTuple`
+    insert::ri_need_lock_tag_tuple::set(|estate, rri| {
+        estate.result_rel(rri).ri_needLockTagTuple
+    });
+
+    // `resultRelInfo->ri_WithCheckOptions != NIL`
+    insert::ri_has_with_check_options::set(|estate, rri| {
+        estate
+            .result_rel(rri)
+            .ri_WithCheckOptions
+            .as_ref()
+            .map(|l| !l.is_empty())
+            .unwrap_or(false)
+    });
+
+    // `ExecWithCheckOptions(kind, resultRelInfo, slot, estate)` — delegate to the
+    // execMain owner seam.
+    insert::exec_with_check_options::set(|estate, kind, rri, slot| {
+        backend_executor_execMain_seams::exec_with_check_options::call(estate, kind, rri, slot)
+    });
+
+    // `table_tuple_lock(rel, tid, snapshot, slot, cid, mode, LockWaitBlock, 0,
+    // tmfd)` — ON CONFLICT locks the conflicting tuple with no FIND_LAST_VERSION.
+    insert::table_tuple_lock::set(|estate, rri, tid, snapshot, slot, cid, mode, tmfd| {
+        let rel = crate::exec::relation_alias(estate, rri);
+        let mcx = estate.es_query_cxt;
+        let inslot = estate.slot_data_mut(slot);
+        backend_access_table_tableam::table_tuple_lock(
+            mcx,
+            &rel,
+            tid,
+            &snapshot,
+            inslot,
+            cid,
+            mode,
+            types_tableam::tableam::LockWaitPolicy::LockWaitBlock,
+            0,
+            tmfd,
+        )
+    });
+
+    // `table_tuple_fetch_row_version(rel, tid, SnapshotAny, slot)`
+    insert::table_tuple_fetch_row_version_any::set(|estate, rri, tid, slot| {
+        let rel = crate::exec::relation_alias(estate, rri);
+        let mcx = estate.es_query_cxt;
+        let snapshot_any = crate::exec::snapshot_any();
+        let inslot = estate.slot_data_mut(slot);
+        backend_access_table_tableam::table_tuple_fetch_row_version(
+            mcx,
+            &rel,
+            tid,
+            &snapshot_any,
+            inslot,
+        )
+    });
+
+    // `slot_getsysattr(slot, MinTransactionIdAttributeNumber, &isnull)` then
+    // `DatumGetTransactionId` — the slot tuple's xmin.
+    insert::slot_get_xmin::set(|estate, slot| {
+        let mcx = estate.es_query_cxt;
+        let s = estate.slot_data_mut(slot);
+        let (datum, isnull) = backend_executor_execTuples_seams::slot_getsysattr::call(
+            mcx,
+            s,
+            types_tuple::heaptuple::MinTransactionIdAttributeNumber,
+        )?;
+        Ok((datum.as_u32(), isnull))
+    });
+
+    // The ON CONFLICT path re-uses the same small EState/slot/xact projections
+    // declared in the `insert` module (distinct seam slots from the `de`
+    // family); install them with the identical bodies.
+
+    // `context->estate->es_snapshot`
+    insert::es_snapshot::set(|estate| estate.es_snapshot.as_deref().cloned());
+
+    // `IsolationUsesXactSnapshot()` (xact.h).
+    insert::isolation_uses_xact_snapshot::set(|| {
+        backend_access_transam_xact_seams::isolation_uses_xact_snapshot::call()
+    });
+
+    // `ExecClearTuple(slot)` (execTuples.c).
+    insert::exec_clear_tuple::set(|estate, slot| {
+        backend_executor_execTuples_seams::exec_clear_tuple::call(estate, slot)
+    });
+
+    // `ExecMaterializeSlot(slot)` (execTuples.c).
+    insert::exec_materialize_slot::set(|estate, slot| {
+        backend_executor_execTuples_seams::exec_materialize_slot::call(estate, slot)
+    });
+
+    // `*returning != NULL && ri_projectReturning->pi_state.flags & EEO_FLAG_HAS_OLD`
+    insert::ri_returning_has_old::set(|estate, rri| {
+        estate
+            .result_rel(rri)
+            .ri_projectReturning
+            .as_ref()
+            .map(|p| (p.pi_state.flags & types_nodes::execexpr::EEO_FLAG_HAS_OLD) != 0)
+            .unwrap_or(false)
+    });
+
     install_delete_seams();
 }
 
