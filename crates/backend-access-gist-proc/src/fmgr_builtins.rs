@@ -36,7 +36,7 @@
 //! (every row is `proisstrict => 't'` — the default — and not retset).
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// The shared fmgr-frame entry point for every GiST opclass support proc. In
 /// the owned model the GiST access method invokes these procs through the typed
@@ -46,30 +46,35 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 /// non-`None` callable (matching C's table, where `fn_addr` is the real C
 /// function). It raises a clear error if a future fmgr-frame call site is added,
 /// pointing at the dispatch seam to use instead.
-fn fc_gist_support_via_dispatch(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_gist_support_via_dispatch(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let foid = fcinfo
         .flinfo
         .as_ref()
         .map(|fi| fi.fn_oid)
         .unwrap_or(0);
-    std::panic::panic_any(types_error::PgError::error(format!(
+    Err(types_error::PgError::error(format!(
         "GiST support function (OID {foid}) must be invoked through the typed \
          opclass dispatch (backend-access-gist-dispatch-seams), not the fmgr \
          frame; the owned GiST access method dispatches these by FmgrInfo.fn_oid"
-    )));
+    )))
 }
 
-fn builtin(foid: u32, name: &str, nargs: i16) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        // Every gistproc.c support proc is proisstrict => 't' (the default) and
-        // not proretset in pg_proc.dat.
-        strict: true,
-        retset: false,
-        func: Some(fc_gist_support_via_dispatch),
-    }
+fn builtin(foid: u32, name: &str, nargs: i16) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            // Every gistproc.c support proc is proisstrict => 't' (the default)
+            // and not proretset in pg_proc.dat.
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        fc_gist_support_via_dispatch,
+    )
 }
 
 /// Register the `fmgr_builtins[]` rows for every GiST box/point/polygon/circle
@@ -79,7 +84,7 @@ fn builtin(foid: u32, name: &str, nargs: i16) -> BuiltinFunction {
 /// (without which `CREATE INDEX ... USING gist` errors `internal function "..."
 /// is not in internal lookup table`). OIDs / nargs from `pg_proc.dat`.
 pub fn register_gist_proc_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- box opclass ----
         builtin(2578, "gist_box_consistent", 5),
         builtin(2581, "gist_box_penalty", 3),
