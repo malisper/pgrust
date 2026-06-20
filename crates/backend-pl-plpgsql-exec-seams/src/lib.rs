@@ -326,14 +326,19 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `CStringGetTextDatum(s)` (`builtins.h` / `varlena.c cstring_to_text`):
-    /// build a `text` Datum from an owned Rust `String`, returned as the
-    /// bare-word datum (`DatumGetPointer` view). Used by the EXCEPTION handler to
-    /// bind the SQLSTATE and SQLERRM special variables (`assign_error_vars`) and
-    /// by `exec_stmt_getdiag`. The result word points at a header-ful `text`
-    /// varlena allocated in a backend-lifetime context (mirroring how
+    /// build a `text` Datum from an owned Rust `String`. Used by the EXCEPTION
+    /// handler to bind the SQLSTATE and SQLERRM special variables
+    /// (`assign_error_vars`) and by `exec_stmt_getdiag`. Returns
+    /// `(word, image)`: the `DatumGetPointer` bare-word view AND the verbatim
+    /// header-ful `text` varlena byte image. The word points at the same
+    /// backend-lifetime varlena the image holds (mirroring how
     /// `CStringGetTextDatum` palloc's in `CurrentMemoryContext`), so the bytes
-    /// outlive the call and the caller stores the word straight into the target
-    /// `text` variable. The executor is layered below the varlena substrate, so
-    /// the handler installs it.
-    pub fn cstring_to_text_datum(s: std::string::String) -> PgResult<usize>
+    /// outlive the call. The caller stores the word into the target `text`
+    /// variable AND threads the image into the variable's `value_byref`
+    /// out-of-band companion, so a later expression evaluation (e.g.
+    /// `RETURN SQLERRM`, a text comparison over the special var) binds the rich
+    /// `Datum::ByRef` instead of a bare word that the varlena fmgr cores reject
+    /// ("by-ref arg missing from by-ref lane"). The executor is layered below
+    /// the varlena substrate, so the handler installs it.
+    pub fn cstring_to_text_datum(s: std::string::String) -> PgResult<(usize, std::vec::Vec<u8>)>
 );

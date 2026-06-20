@@ -466,12 +466,20 @@ fn assign_error_vars(
 /// The text bytes live in a backend-lifetime context (the `cstring_to_text_datum`
 /// seam), so the stored bare-word pointer stays valid and `freeable` is false.
 fn assign_text_var(estate: &mut PLpgSQL_execstate, dno: int32, s: String) {
-    let datum = match exec_seams::cstring_to_text_datum::call(s) {
-        Ok(d) => Datum::from_usize(d),
+    let (datum, image) = match exec_seams::cstring_to_text_datum::call(s) {
+        Ok((d, image)) => (Datum::from_usize(d), image),
         Err(e) => std::panic::panic_any(e),
     };
     let mut var = take_var(estate, dno);
     assign_simple_var(estate, &mut var, datum, false, false);
+    // `text` is pass-by-reference: the bare-word `value` alone cannot be read
+    // back across the fmgr boundary (the varlena cmp cores demand a by-ref
+    // payload). Thread the verbatim header-ful varlena image into the var's
+    // out-of-band `value_byref` companion so a later expression evaluation over
+    // this special var (e.g. `RETURN SQLERRM`, a text comparison) binds the rich
+    // `Datum::ByRef`. `assign_simple_var` cleared the companion for the bare-word
+    // store above; set the image here (mirroring the by-ref arg-store leg).
+    var.value_byref = Some(image);
     put_var(estate, dno, var);
 }
 

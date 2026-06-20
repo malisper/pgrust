@@ -850,8 +850,15 @@ pub fn init_seams() {
         // lifetime of the variable that now holds the pointer, like C's palloc).
         let image = varlena.into_image();
         let ptr = image.as_ptr() as usize;
+        // Hand back a copy of the verbatim header-ful varlena bytes so the caller
+        // (`assign_text_var`) can populate the variable's `value_byref`
+        // out-of-band companion. Without this image the special var would carry
+        // only the bare word, and a later read across the fmgr boundary (e.g.
+        // `RETURN SQLERRM`, a text comparison) would see no by-ref payload and
+        // panic in the varlena cmp cores.
+        let image_copy = image.to_vec();
         core::mem::forget(image);
-        Ok(ptr)
+        Ok((ptr, image_copy))
     });
 
     register_handler_builtins();
