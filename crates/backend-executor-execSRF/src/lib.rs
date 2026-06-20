@@ -391,6 +391,113 @@ fn init_expr_list<'mcx>(
     Ok(out)
 }
 
+/// Rebuild the live `ReturnSetInfo`'s materialize result (`setResult` tuplestore
+/// + `setDesc`) from a USER (plpgsql/SQL) SETOF function's `MatSrfSink`, the
+/// owned-model counterpart of `fmgr_sql`/`plpgsql_call_handler` filling
+/// `rsinfo->setResult`/`setDesc` in place. Sets `returnMode = SFRM_Materialize`
+/// so the caller takes the Materialize branch and (after the loop) cross-checks
+/// `setDesc` against `expectedDesc`.
+fn materialize_sink_into_rsinfo<'mcx>(
+    rsinfo: &mut ReturnSetInfo<'mcx>,
+    sink: types_fmgr::mat_srf::MatSrfSink,
+    expected_desc: &TupleDescData<'mcx>,
+    funcrettype: Oid,
+    returns_tuple: bool,
+    random_access: bool,
+    per_query: Mcx<'mcx>,
+) -> PgResult<()> {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+
+    // C: `rsinfo.returnMode = SFRM_Materialize;` (the callee chose materialize).
+    rsinfo.returnMode = SetFunctionReturnMode::Materialize;
+    rsinfo.isDone = ExprDoneCond::ExprSingleResult;
+
+    // Build the result descriptor: a composite/whole-row SETOF function returns
+    // rows shaped like `expectedDesc`; a scalar SETOF function returns a single
+    // column whose type is `funcrettype` (C's `CreateTemplateTupleDesc(1)` +
+    // `TupleDescInitEntry`). Both are charged to the per-query context.
+    let result_desc: PgBox<'mcx, TupleDescData<'mcx>> = if returns_tuple {
+        mcx::alloc_in(per_query, expected_desc.clone_in(per_query)?)?
+    } else {
+        let td = backend_access_common_tupdesc::CreateTemplateTupleDesc(per_query, 1)?;
+        let mut td = mcx::alloc_in(per_query, td)?;
+        backend_access_common_tupdesc::TupleDescInitEntry(
+            &mut td,
+            1,
+            Some("column"),
+            funcrettype,
+            -1,
+            0,
+        )?;
+        td
+    };
+
+    // C: `rsinfo.setResult = tuplestore_begin_heap(...);`
+    let ts = backend_utils_sort_storage_seams::tuplestore_begin_heap::call(
+        per_query,
+        random_access,
+        false,
+        backend_utils_init_small_seams::work_mem::call(),
+    )?;
+    rsinfo.setResult = allocator_api2::boxed::Box::into_inner(ts);
+
+    // Append each materialized row. A by-value column carries its bare word
+    // (`ByVal`); a by-reference column carries its owned varlena/cstring/composite
+    // image — the same `(value | ref_payload, isnull)` split the producer
+    // (`fmgr_sql` capture receiver / plpgsql RETURN NEXT) emitted. The columns are
+    // parallel to `result_desc`.
+    let natts = result_desc.natts.max(0) as usize;
+    for row in sink.rows.into_iter() {
+        let mut values: alloc::vec::Vec<CanonDatum> = alloc::vec::Vec::with_capacity(natts);
+        let mut nulls: alloc::vec::Vec<bool> = alloc::vec::Vec::with_capacity(natts);
+        for col in row.into_iter() {
+            if col.isnull {
+                values.push(CanonDatum::default());
+                nulls.push(true);
+                continue;
+            }
+            let v = match col.ref_payload {
+                None => CanonDatum::ByVal(col.value),
+                Some(types_fmgr::boundary::RefPayload::Varlena(b)) => {
+                    CanonDatum::ByRef(mcx::slice_in(per_query, b.as_slice())?)
+                }
+                Some(types_fmgr::boundary::RefPayload::Cstring(s)) => CanonDatum::Cstring(s),
+                Some(types_fmgr::boundary::RefPayload::Composite(b)) => {
+                    CanonDatum::ByRef(mcx::slice_in(per_query, b.as_slice())?)
+                }
+                Some(_) => {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_INTERNAL_ERROR)
+                        .errmsg(
+                            "SETOF function materialize sink: Expanded/Internal column \
+                             value not supported",
+                        )
+                        .into_error());
+                }
+            };
+            values.push(v);
+            nulls.push(false);
+        }
+        // Pad a short row to the descriptor width with NULLs (defensive; a
+        // well-formed producer emits `natts` columns per row).
+        while values.len() < natts {
+            values.push(CanonDatum::default());
+            nulls.push(true);
+        }
+        backend_utils_sort_storage_seams::tuplestore_putvalues::call(
+            &mut rsinfo.setResult,
+            &result_desc,
+            &values,
+            &nulls,
+        )?;
+    }
+
+    // C: `rsinfo.setDesc = <the descriptor the function built>`. The caller's
+    // post-loop `tupledesc_match(expectedDesc, setDesc)` validates it.
+    rsinfo.setDesc = Some(result_desc);
+    Ok(())
+}
+
 // ===========================================================================
 //  ExecMakeTableFunctionResult (execSRF.c:100) — the K2 value-per-call loop
 // ===========================================================================
@@ -491,13 +598,33 @@ fn ExecMakeTableFunctionResult<'mcx>(
                 fcinfo.resultinfo.as_mut().unwrap().isDone =
                     ExprDoneCond::ExprSingleResult;
                 let foid = setexpr.func.fn_oid;
-                let res = srf_invoke_by_oid(foid, fcinfo)?;
+                let dispatch = srf_invoke_by_oid(foid, fcinfo)?;
                 let isnull = fcinfo.isnull;
                 rsinfo = fcinfo
                     .resultinfo
                     .take()
                     .expect("ExecMakeTableFunctionResult: resultinfo round-trip");
-                (res, isnull)
+                match dispatch {
+                    srf_registry::SrfDispatch::Builtin(res) => (res, isnull),
+                    srf_registry::SrfDispatch::Materialized(sink) => {
+                        // A USER (plpgsql/SQL) SETOF function ran the
+                        // SFRM_Materialize protocol through the fmgr path: rebuild
+                        // the live ReturnSetInfo's tuplestore + descriptor from the
+                        // sink, exactly as C's `fmgr_sql`/`plpgsql` filled
+                        // `rsinfo->setResult`/`setDesc`. Then the Materialize branch
+                        // below sees `returnMode == SFRM_Materialize` and breaks.
+                        materialize_sink_into_rsinfo(
+                            &mut rsinfo,
+                            sink,
+                            expected_desc,
+                            funcrettype,
+                            returns_tuple,
+                            random_access,
+                            per_query,
+                        )?;
+                        (Datum::default(), true)
+                    }
+                }
             } else {
                 // C: result = ExecEvalExpr(setexpr->elidedFuncState, econtext,
                 //                          &fcinfo->isnull); rsinfo.isDone = ExprSingleResult;
@@ -1006,6 +1133,12 @@ fn ExecMakeFunctionResultSet<'mcx>(
                 setDesc: None,
             };
             let foid = fcache.func.fn_oid;
+            // For a USER SETOF function in a targetlist, the result-column type
+            // (scalar) / row-ness (composite) come from the expression type.
+            let funcrettype_tl =
+                backend_nodes_core::nodefuncs::expr_type(fcache.expr.as_deref())?;
+            let returns_tuple_tl =
+                backend_utils_cache_lsyscache_seams::type_is_rowtype::call(funcrettype_tl)?;
             let fcinfo = fcache
                 .fcinfo
                 .as_mut()
@@ -1013,12 +1146,38 @@ fn ExecMakeFunctionResultSet<'mcx>(
             fcinfo.isnull = false;
             fcinfo.fn_mcxt = Some(estate.es_query_cxt);
             fcinfo.resultinfo = Some(core::mem::take(&mut rsinfo));
-            let res = srf_invoke_by_oid(foid, fcinfo)?;
+            let dispatch = srf_invoke_by_oid(foid, fcinfo)?;
             let isnull = fcinfo.isnull;
             rsinfo = fcinfo
                 .resultinfo
                 .take()
                 .expect("ExecMakeFunctionResultSet: resultinfo round-trip");
+            let res = match dispatch {
+                srf_registry::SrfDispatch::Builtin(d) => d,
+                srf_registry::SrfDispatch::Materialized(sink) => {
+                    // A USER (plpgsql/SQL) SETOF function in a targetlist: rebuild
+                    // the live ReturnSetInfo's materialize tuplestore from the
+                    // sink, then fall into the Materialize branch below (which
+                    // drains it row-by-row via exec_prepare_tuplestore_result).
+                    let exp = match rsinfo.expectedDesc.as_deref() {
+                        Some(d) => d.clone_in(estate.es_query_cxt)?,
+                        None => backend_access_common_tupdesc::CreateTemplateTupleDesc(
+                            estate.es_query_cxt,
+                            0,
+                        )?,
+                    };
+                    materialize_sink_into_rsinfo(
+                        &mut rsinfo,
+                        sink,
+                        &exp,
+                        funcrettype_tl,
+                        returns_tuple_tl,
+                        false,
+                        estate.es_query_cxt,
+                    )?;
+                    Datum::default()
+                }
+            };
             result = res;
             result_isnull = isnull;
             this_isdone = rsinfo.isDone;

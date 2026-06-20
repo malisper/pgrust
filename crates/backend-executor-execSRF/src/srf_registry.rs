@@ -53,24 +53,126 @@ pub fn srf_is_registered(foid: Oid) -> bool {
     table().lock().expect("SRF table lock").contains_key(&foid)
 }
 
+/// The outcome of dispatching one SRF call frame: either a builtin
+/// executor-frame `PGFunction` produced a per-call (or in-frame materialize)
+/// `Datum` result, or a USER (plpgsql/SQL) function ran the SFRM_Materialize
+/// protocol through the fmgr path and filled a [`types_fmgr::mat_srf::MatSrfSink`]
+/// with the whole tuplestore.
+pub enum SrfDispatch<'mcx> {
+    /// A builtin executor-frame SRF ran over the live frame (its `resultinfo`
+    /// carries the `ReturnSetInfo` it read/wrote). The `Datum` is its result
+    /// word (value-per-call) or the materialize-mode sentinel.
+    Builtin(Datum<'mcx>),
+    /// A non-builtin (USER plpgsql/SQL) SETOF function ran in materialize mode
+    /// through the fmgr dispatch (`function_call_invoke_datum` ->
+    /// fmgr_sql / plpgsql_call_handler) and filled the materialize sink with the
+    /// complete row set + column-type descriptor.
+    Materialized(types_fmgr::mat_srf::MatSrfSink),
+}
+
 /// `FunctionCallInvoke(fcinfo)` for a set-returning function (execSRF.c) —
 /// resolve `foid` in the executor-frame SRF table and dispatch the callable
 /// over the LIVE call frame (whose `resultinfo` carries the `ReturnSetInfo` the
-/// callee reads/writes). `Err` for an OID that has no executor-frame SRF
-/// registered (the C `fmgr_isbuiltin` miss for this ABI).
+/// callee reads/writes). For an OID that has no executor-frame SRF registered
+/// (a USER plpgsql/SQL function — the C `fmgr_isbuiltin` miss for this ABI),
+/// fall through to the fmgr `FunctionCallInvoke` path with a live materialize
+/// sink, exactly as C's `ExecMakeTableFunctionResult` points
+/// `fcinfo->resultinfo` at a `ReturnSetInfo` and lets `fmgr_sql` /
+/// `plpgsql_call_handler` fill `setResult`/`setDesc`.
 pub fn srf_invoke_by_oid<'mcx>(
     foid: Oid,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> PgResult<Datum<'mcx>> {
+) -> PgResult<SrfDispatch<'mcx>> {
     let func = table().lock().expect("SRF table lock").get(&foid).copied();
     match func {
-        Some(f) => Ok(f(fcinfo)),
-        None => Err(ereport(ERROR)
-            .errcode(ERRCODE_UNDEFINED_FUNCTION)
-            .errmsg(alloc::format!(
-                "set-returning function with OID {foid} is not registered in the \
-                 executor-frame SRF table (no executor-frame PGFunction)"
-            ))
-            .into_error()),
+        Some(f) => Ok(SrfDispatch::Builtin(f(fcinfo))),
+        None => dispatch_user_setof(foid, fcinfo),
     }
+}
+
+/// Dispatch a USER (plpgsql / SQL-language) SETOF function through the fmgr
+/// by-OID path, threading the live materialize sink. The executor frame already
+/// holds the evaluated args (`ExecEvalFuncArgs`); reconstruct the canonical
+/// `Datum` arg vector C's `FunctionCallInvoke` would pass, push the sink with
+/// the caller's `allowedModes`, resolve+invoke the function (which reaches
+/// `fmgr_sql`/`plpgsql_call_handler`, sees the active sink, and materializes),
+/// then take the filled sink back.
+fn dispatch_user_setof<'mcx>(
+    foid: Oid,
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<SrfDispatch<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+
+    // The per-call memory context the resolved fmgr call charges its scratch to
+    // (and the arena a by-reference canonical argument image is cloned into).
+    let mcx = fcinfo
+        .fn_mcxt
+        .expect("dispatch_user_setof: fn_mcxt set by ExecMakeTableFunctionResult");
+    let collation = fcinfo.fncollation;
+
+    // Reconstruct the canonical argument vector from the executor call frame:
+    // a by-value arg is its bare word; a by-reference arg's owned image lives in
+    // the `ref_args[i]` side channel (the same split `ExecEvalFuncArgs` wrote).
+    let nargs = fcinfo.args.len();
+    let mut args: alloc::vec::Vec<CanonDatum<'mcx>> = alloc::vec::Vec::with_capacity(nargs);
+    let mut nulls: alloc::vec::Vec<bool> = alloc::vec::Vec::with_capacity(nargs);
+    for i in 0..nargs {
+        let isnull = fcinfo.args[i].isnull;
+        nulls.push(isnull);
+        if isnull {
+            args.push(CanonDatum::null());
+            continue;
+        }
+        match fcinfo.ref_arg(i) {
+            Some(types_nodes::fmgr::FmgrArgRef::Varlena(b)) => {
+                args.push(CanonDatum::ByRef(mcx::slice_in(mcx, b.as_slice())?));
+            }
+            Some(types_nodes::fmgr::FmgrArgRef::Cstring(s)) => {
+                args.push(CanonDatum::Cstring(s.clone()));
+            }
+            None => {
+                args.push(CanonDatum::ByVal(fcinfo.args[i].value.as_usize()));
+            }
+        }
+    }
+
+    // The allowed return modes the caller (ExecMakeTableFunctionResult) set on
+    // its live ReturnSetInfo — the materialize sink mirrors them so the callee
+    // can verify `allowedModes & SFRM_Materialize`.
+    let allowed_modes = fcinfo
+        .resultinfo
+        .as_ref()
+        .map(|r| r.allowedModes)
+        .unwrap_or(0);
+
+    // Push the live materialize sink (C: point fcinfo->resultinfo at the
+    // ReturnSetInfo) for the duration of the call; the RAII guard pops it even
+    // if the callee `ereport(ERROR)`s (unwinds).
+    let guard = types_fmgr::mat_srf::push(allowed_modes);
+
+    // FunctionCallInvoke over the fmgr home: resolves the OID (plpgsql/SQL ->
+    // fmgr_sql / plpgsql_call_handler) and runs the body. For a materialize SETOF
+    // function the rows arrive via the sink and the scalar word is the NULL
+    // sentinel; for a NON-set function in the FROM clause (a single-row table
+    // function — C still drives it through ExecMakeTableFunctionResult, with the
+    // ValuePerCall path delivering one row) the scalar word IS the single result.
+    let invoke = backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::call(
+        mcx, foid, collation, &args, &nulls, None,
+    );
+
+    let sink = guard.take();
+    let (result, result_isnull) = invoke?;
+
+    if sink.materialized {
+        // A SETOF function delivered its whole result set into the sink.
+        return Ok(SrfDispatch::Materialized(sink));
+    }
+
+    // The function did NOT materialize: it is a non-set function reached through
+    // the table-function path (RETURNS <scalar|composite>, one row). Hand the
+    // single scalar/composite Datum back through the ValuePerCall branch — the
+    // caller sees `returnMode == SFRM_ValuePerCall` / `isDone == ExprSingleResult`
+    // (the live ReturnSetInfo's defaults, untouched) and stores exactly one row.
+    fcinfo.isnull = result_isnull;
+    Ok(SrfDispatch::Builtin(result))
 }

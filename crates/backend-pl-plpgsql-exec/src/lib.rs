@@ -537,7 +537,7 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
             PLpgSQL_stmt::ForeachA(s) => exec_stmt_foreach_a(estate, s),
             PLpgSQL_stmt::Exit(s) => exec_stmt_exit(estate, s),
             PLpgSQL_stmt::Return(s) => exec_stmt_return(estate, s),
-            PLpgSQL_stmt::ReturnNext(_) => exec_stmt_return_next(estate),
+            PLpgSQL_stmt::ReturnNext(s) => exec_stmt_return_next(estate, s),
             PLpgSQL_stmt::ReturnQuery(s) => exec_stmt_return_query(estate, s),
             PLpgSQL_stmt::Raise(s) => exec_stmt_raise(estate, s),
             PLpgSQL_stmt::Assert(_) => exec_stmt_assert(estate),
@@ -1923,11 +1923,60 @@ fn exec_stmt_forc(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
     );
 }
 
-fn exec_stmt_return_next(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
-    panic!(
-        "seam not wired: exec_stmt_return_next (pl_exec.c) — tuplestore_puttuple + \
-         exec_eval_expr / exec_move_row (SRF tuple-store + value substrate)"
-    );
+/// `exec_stmt_return_next(estate, stmt)` (pl_exec.c 4116) — RETURN NEXT.
+/// Evaluate the row/value and append it to the function's SRF result tuplestore
+/// (the live materialize sink). The scalar-expression form (`RETURN NEXT
+/// <expr>`) — the common SETOF-of-scalar case — is ported here: evaluate the
+/// expression and append a single-column row. The record/row-variable forms
+/// (`stmt->retvarno >= 0`) need the `exec_move_row` tuple-deform path and stay
+/// loud.
+fn exec_stmt_return_next(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_return_next,
+) -> PLpgSQL_rc {
+    // C: if (!estate->retisset) ereport(ERROR, "cannot use RETURN NEXT in a
+    //    non-SETOF function").
+    if !estate.retisset {
+        std::panic::panic_any(
+            types_error::PgError::error(
+                "cannot use RETURN NEXT in a non-SETOF function".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+        );
+    }
+
+    if stmt.retvarno >= 0 {
+        // RETURN NEXT over a declared record/row/scalar variable — the
+        // tuple-deform (`exec_move_row` / variable-image) leg. Loud until the
+        // composite RETURN NEXT path lands.
+        seam::return_next_var_loud(estate, stmt.retvarno);
+        return PLpgSQL_rc::PLPGSQL_RC_OK;
+    }
+
+    if let Some(expr) = stmt.expr.as_deref() {
+        // C: tupmap / coercion of the value to the function's element type, then
+        // `tuplestore_putvalues(estate->tuple_store, tupdesc, &retval, &isNull)`.
+        let (value, isnull, _rettype, _rettypmod) = seam::exec_eval_expr(estate, expr);
+        let byref = estate.last_eval_byref.take();
+        // Build one single-column row and deposit it into the materialize sink
+        // (the `ReturnSetInfo.setResult` tuplestore the executor-frame SRF
+        // dispatcher threaded onto the call). The column crosses as the
+        // `(value | byref image, isnull)` split `ExecsqlColumn` carries.
+        let col = crate::exec_seams::ExecsqlColumn {
+            value: value.as_usize(),
+            isnull,
+            typeid: _rettype,
+            typmod: _rettypmod,
+            name: std::string::String::new(),
+            byref,
+        };
+        seam::put_rows_into_sink(std::vec![std::vec![col]]);
+        exec_eval_cleanup(estate);
+        return PLpgSQL_rc::PLPGSQL_RC_OK;
+    }
+
+    // RETURN NEXT with neither expr nor retvarno is a parse error C never builds.
+    PLpgSQL_rc::PLPGSQL_RC_OK
 }
 
 /// `exec_stmt_return_query(estate, stmt)` (pl_exec.c 4046) — RETURN QUERY [EXECUTE].

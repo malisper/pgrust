@@ -13,6 +13,10 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
+# The SETOF (RETURN QUERY / RETURN NEXT) materialize sink: the live
+# ReturnSetInfo the executor-frame SRF dispatch threads across the dual-home
+# fcinfo boundary (types_fmgr::mat_srf).
+types-fmgr = { path = "../types-fmgr" }
 types-plpgsql = { path = "../types-plpgsql" }
 types-tuple = { path = "../types-tuple" }
 types-nodes = { path = "../types-nodes" }
