@@ -370,6 +370,17 @@ pub fn performDeletion(
 
     reportDependentObjects(&targetObjects, behavior, flags, Some(object))?;
 
+    // For a concurrent drop, the object-deletion subroutine commits the current
+    // transaction (DROP INDEX CONCURRENTLY), so we must not keep pg_depend open
+    // across deleteObjectsInList — that would leak the relcache reference past
+    // the commit (dependency.c closes/reopens depRel around doDeletion()). The
+    // Rust deleteOneObject opens its own scratch pg_depend after doDeletion, so
+    // we simply close ours here and don't reopen.
+    if (flags & seams::PERFORM_DELETION_CONCURRENTLY) != 0 {
+        depRel.close(RowExclusiveLock)?;
+        return deleteObjectsInList(&targetObjects, flags);
+    }
+
     deleteObjectsInList(&targetObjects, flags)?;
 
     depRel.close(RowExclusiveLock)
@@ -416,6 +427,13 @@ pub fn performMultipleDeletions(
         None
     };
     reportDependentObjects(&targetObjects, behavior, flags, orig)?;
+
+    // See performDeletion: a concurrent drop commits the transaction inside
+    // doDeletion(), so pg_depend must not stay open across deleteObjectsInList.
+    if (flags & seams::PERFORM_DELETION_CONCURRENTLY) != 0 {
+        depRel.close(RowExclusiveLock)?;
+        return deleteObjectsInList(&targetObjects, flags);
+    }
 
     deleteObjectsInList(&targetObjects, flags)?;
 
