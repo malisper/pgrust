@@ -197,7 +197,7 @@ pub fn inline_sql_function<'mcx>(
         )?;
         match coerced {
             Some(mut c) => {
-                backend_parser_parse_collate::assign_expr_collations(None, &mut c)?;
+                backend_parser_parse_collate::assign_expr_collations_in(mcx, &mut c)?;
                 newexpr = c;
             }
             None => {

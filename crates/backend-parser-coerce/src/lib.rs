@@ -2754,6 +2754,14 @@ pub fn init_seams() {
     s::coerce_null_to_domain::set(coerce_null_to_domain);
     s::check_valid_polymorphic_signature::set(check_valid_polymorphic_signature);
     s::check_valid_internal_signature::set(seam_check_valid_internal_signature);
+
+    // Cross-crate install: `IsBinaryCoercibleWithCast(srctype, targettype,
+    // &castoid)` (parse_coerce.c, body here) is reached by functioncmds.c
+    // (CreateCast's argument / return-type binary-coercibility checks) through
+    // the functioncmds-seams channel; parse_coerce.c is its real owner.
+    backend_commands_functioncmds_seams::is_binary_coercible_with_cast::set(
+        |source_type, target_type| IsBinaryCoercibleWithCast(source_type, target_type),
+    );
 }
 
 /// Seam adapter for `check_valid_internal_signature`: the direct body is

@@ -133,11 +133,27 @@ struct AssignCollationsContext<'p, 'mcx> {
     collation2: Oid,
     /// location of expr that set collation2.
     location2: i32,
+    /// Arena the in-place `Node` walker uses to wrap `Expr` children as opaque
+    /// `Node`s. C uses raw pointers and needs no arena; the port's walker does.
+    /// When `pstate` is `Some`, the arena is recovered from it (the walked tree
+    /// lives in the query mcx); when `pstate` is `None` (utility commands /
+    /// SQL-function inlining that process an expression without a `ParseState`),
+    /// the caller supplies it here.
+    mcx_override: Option<mcx::Mcx<'mcx>>,
 }
 
 impl<'p, 'mcx> AssignCollationsContext<'p, 'mcx> {
     /// A fresh context for a new tree walk (parse_collate.c:182-186,213-216).
     fn fresh(pstate: Option<&'p ParseState<'mcx>>) -> Self {
+        Self::fresh_in(pstate, None)
+    }
+
+    /// A fresh context that carries an explicit walker arena, for the
+    /// `pstate == None` callers (the arena cannot be recovered from a pstate).
+    fn fresh_in(
+        pstate: Option<&'p ParseState<'mcx>>,
+        mcx_override: Option<mcx::Mcx<'mcx>>,
+    ) -> Self {
         Self {
             pstate,
             collation: InvalidOid,
@@ -146,6 +162,30 @@ impl<'p, 'mcx> AssignCollationsContext<'p, 'mcx> {
             // Set these fields just to suppress uninitialized-value warnings:
             collation2: InvalidOid,
             location2: -1,
+            mcx_override,
+        }
+    }
+
+    /// A fresh per-level child context (parse_collate.c: each recursion level
+    /// gets its own local `loccontext`). Inherits the parent's pstate **and**
+    /// the walker-arena override so the `pstate == None` arena survives nested
+    /// recursion (the C code carries the pstate through `context->pstate`; the
+    /// override rides alongside for the same reason).
+    fn fresh_child(&self) -> Self {
+        Self::fresh_in(self.pstate, self.mcx_override)
+    }
+
+    /// The arena the in-place `Node` walker wraps `Expr` children in: the
+    /// query mcx (recovered from the pstate), or the caller-supplied override
+    /// when there is no pstate.
+    fn walker_mcx(&self) -> mcx::Mcx<'mcx> {
+        if let Some(pstate) = self.pstate {
+            *pstate.p_rtable.allocator()
+        } else {
+            self.mcx_override.expect(
+                "assign_collations: a None pstate requires an explicit walker arena \
+                 (use assign_expr_collations_in)",
+            )
         }
     }
 }
@@ -325,6 +365,45 @@ pub fn assign_expr_collations(pstate: Option<&ParseState<'_>>, expr: &mut Expr) 
     assign_collations_walker_expr(expr, &mut context)
 }
 
+/// `assign_expr_collations()` re-entered from inside an ongoing walk: process
+/// `expr` independently (its own fresh per-level context, exactly as the public
+/// entry does) but inherit the parent context's walker arena so a `None`-pstate
+/// walk keeps its arena across the re-entry.
+fn assign_expr_collations_ctx(
+    parent: &AssignCollationsContext<'_, '_>,
+    expr: &mut Expr,
+) -> PgResult<()> {
+    let mut context = parent.fresh_child();
+    assign_collations_walker_expr(expr, &mut context)
+}
+
+/// `assign_list_collations()` re-entered from inside an ongoing walk (same
+/// arena-inheritance rationale as [`assign_expr_collations_ctx`]).
+fn assign_list_collations_ctx(
+    parent: &AssignCollationsContext<'_, '_>,
+    exprs: &mut [Expr],
+) -> PgResult<()> {
+    for node in exprs.iter_mut() {
+        let mut context = parent.fresh_child();
+        assign_collations_walker_expr(node, &mut context)?;
+    }
+    Ok(())
+}
+
+/// `assign_expr_collations()` for callers that have no [`ParseState`] (a `NULL`
+/// pstate in C — utility commands / SQL-function inlining that process a bare
+/// expression). C needs no arena because it walks raw pointers; the port's
+/// in-place `Node` walker wraps `Expr` children as opaque `Node`s and so needs
+/// an arena, which the caller supplies here. Behaviourally identical to
+/// `assign_expr_collations(None, expr)` apart from threading the walker arena.
+pub fn assign_expr_collations_in<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    expr: &mut Expr,
+) -> PgResult<()> {
+    let mut context = AssignCollationsContext::fresh_in(None, Some(mcx));
+    assign_collations_walker_expr(expr, &mut context)
+}
+
 /// `assign_expr_collations()` applied to a generic `Node` (the `void *` the C
 /// `assign_query_collations_walker` passes). For the `Node::Expr` arm this is
 /// the expression walk; the non-expression `Node` arms (jointree members,
@@ -389,7 +468,7 @@ fn assign_collations_walker<'mcx>(
     context: &mut AssignCollationsContext<'_, 'mcx>,
 ) -> PgResult<()> {
     // Prepare for recursion: each level has its own local context.
-    let mut loccontext = AssignCollationsContext::fresh(context.pstate);
+    let mut loccontext = context.fresh_child();
 
     let collation: Oid;
     let strength: CollateStrength;
@@ -482,7 +561,7 @@ fn assign_collations_walker_expr(
     expr: &mut Expr,
     context: &mut AssignCollationsContext<'_, '_>,
 ) -> PgResult<()> {
-    let mut loccontext = AssignCollationsContext::fresh(context.pstate);
+    let mut loccontext = context.fresh_child();
 
     let collation: Oid;
     let strength: CollateStrength;
@@ -529,7 +608,7 @@ fn assign_collations_walker_expr(
         Expr::RowExpr(re) => {
             // RowExpr is special: the subexpressions are independent; we don't
             // complain if some have incompatible explicit collations.
-            assign_list_collations(context.pstate, &mut re.args)?;
+            assign_list_collations_ctx(context, &mut re.args)?;
             // The result is always composite, never collatable: stop here.
             return Ok(()); // done
         }
@@ -668,7 +747,7 @@ fn assign_collations_walker_expr(
                         _ => unreachable!(),
                     };
                     if let Some(aggfilter) = aggref.aggfilter.as_deref_mut() {
-                        assign_expr_collations(context.pstate, aggfilter)?;
+                        assign_expr_collations_ctx(context, aggfilter)?;
                     }
                 }
                 Expr::WindowFunc(_) => {
@@ -680,7 +759,7 @@ fn assign_collations_walker_expr(
                     };
                     assign_collations_list_walker(&mut wfunc.args, &mut loccontext)?;
                     if let Some(aggfilter) = wfunc.aggfilter.as_deref_mut() {
-                        assign_expr_collations(context.pstate, aggfilter)?;
+                        assign_expr_collations_ctx(context, aggfilter)?;
                     }
                 }
                 Expr::CaseExpr(_) => {
@@ -716,10 +795,10 @@ fn assign_collations_walker_expr(
                         _ => unreachable!(),
                     };
                     for e in sbsref.refupperindexpr.iter_mut().flatten() {
-                        assign_expr_collations(context.pstate, e)?;
+                        assign_expr_collations_ctx(context, e)?;
                     }
                     for e in sbsref.reflowerindexpr.iter_mut().flatten() {
-                        assign_expr_collations(context.pstate, e)?;
+                        assign_expr_collations_ctx(context, e)?;
                     }
                     if let Some(refexpr) = sbsref.refexpr.as_deref_mut() {
                         assign_collations_walker_expr(refexpr, &mut loccontext)?;
@@ -798,13 +877,9 @@ fn recurse_children<'mcx>(
     let mut err: Option<types_error::PgError> = None;
     // The in-place walker wraps each `Expr` child as a transient opaque `Node`
     // tied to the walked tree's context (`'mcx`); recover that context from the
-    // pstate (the tree being collated lives in the query mcx). Every real caller
-    // passes `Some(pstate)`.
-    let mcx: mcx::Mcx<'mcx> = *loccontext
-        .pstate
-        .expect("recurse_children: assign_collations requires a pstate (for the query mcx)")
-        .p_rtable
-        .allocator();
+    // pstate (the tree being collated lives in the query mcx), or from the
+    // caller-supplied override when there is no pstate.
+    let mcx: mcx::Mcx<'mcx> = loccontext.walker_mcx();
     expression_tree_walker_mut(
         node,
         &mut |child: &mut Node<'mcx>| match assign_collations_walker(child, loccontext) {
@@ -831,13 +906,10 @@ fn recurse_expr_children<'mcx>(
     loccontext: &mut AssignCollationsContext<'_, 'mcx>,
 ) -> PgResult<()> {
     // Wrap the Expr into an opaque `Node` (allocated in the query mcx, recovered
-    // from the pstate) so the Node-level in-place walker enumerates its children.
-    // The wrapper is written back so any in-place mutation is preserved.
-    let mcx: mcx::Mcx<'mcx> = *loccontext
-        .pstate
-        .expect("recurse_expr_children: assign_collations requires a pstate (for the query mcx)")
-        .p_rtable
-        .allocator();
+    // from the pstate, or from the caller-supplied override when there is no
+    // pstate) so the Node-level in-place walker enumerates its children. The
+    // wrapper is written back so any in-place mutation is preserved.
+    let mcx: mcx::Mcx<'mcx> = loccontext.walker_mcx();
     let placeholder = Expr::Var(types_nodes::primnodes::Var::default());
     let mut wrapped = Node::mk_expr(mcx, core::mem::replace(expr, placeholder))?;
     let res = recurse_children(&mut wrapped, loccontext);
@@ -959,7 +1031,7 @@ fn assign_aggregate_collations(
         let resjunk = tle.resjunk;
         if let Some(e) = tle.expr.as_deref_mut() {
             if resjunk {
-                assign_expr_collations(loccontext.pstate, e)?;
+                assign_expr_collations_ctx(loccontext, e)?;
             } else {
                 assign_collations_walker_expr(e, loccontext)?;
             }
@@ -992,7 +1064,7 @@ fn assign_ordered_set_collations(
             if merge_sort_collations {
                 assign_collations_walker_expr(e, loccontext)?;
             } else {
-                assign_expr_collations(loccontext.pstate, e)?;
+                assign_expr_collations_ctx(loccontext, e)?;
             }
         }
     }

@@ -1429,6 +1429,26 @@ pub fn init_seams() {
         },
     );
 
+    // Cross-crate install: `LookupFuncWithArgs(objtype, func, missing_ok)`
+    // (parse_func.c, body here) is reached by functioncmds.c (CreateCast's
+    // COERCION_METHOD_FUNCTION lookup, and DROP CAST function resolution)
+    // through the functioncmds-seams channel. The decl carries `objtype` as a
+    // raw `i32` (the C `ObjectType` enum value) and the `ObjectWithArgs` as a
+    // `Node`; downcast it to the parser's `ObjectWithArgs` carrier and route to
+    // the object-type-aware body. CreateCast always passes `OBJECT_FUNCTION`.
+    backend_commands_functioncmds_seams::lookup_func_with_args::set(
+        |objtype, func, missing_ok| {
+            let objtype = ObjectType::from_i32(objtype).ok_or_else(|| {
+                internal_error("LookupFuncWithArgs: out-of-range ObjectType")
+            })?;
+            let owa = func.as_objectwithargs().ok_or_else(|| {
+                internal_error("LookupFuncWithArgs: expected ObjectWithArgs node")
+            })?;
+            let scratch = mcx::MemoryContext::new("functioncmds LookupFuncWithArgs");
+            lookup_func_with_args_for_objtype(scratch.mcx(), objtype, owa, missing_ok)
+        },
+    );
+
     // Cross-crate install: `recheck_cast_function_args` (clauses.c:4382, the
     // const-fold simplify path) re-runs the parser's type resolution over the
     // (reordered / default-expanded) argument list. The decl lives on

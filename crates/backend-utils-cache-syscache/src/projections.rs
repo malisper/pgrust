@@ -769,6 +769,55 @@ pub(crate) fn search_proc_oid_sql(
     }))
 }
 
+/// `SearchSysCache1(PROCOID, funcid)` + `GETSTRUCT` of the pg_proc form fields
+/// `CreateCast` reads (functioncmds.c). The cast function has at most three
+/// arguments, so `proargtypes` is materialised into a fixed `[Oid; 3]` (entries
+/// past `pronargs` left `InvalidOid`, matching the values `CreateCast` never
+/// indexes). `Ok(None)` on a cache miss.
+pub(crate) fn fetch_cast_func_form(
+    func_id: Oid,
+) -> PgResult<Option<backend_commands_functioncmds_seams::CastFuncForm>> {
+    let scratch = MemoryContext::new("syscache fetch_cast_func_form projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(func_id)))?;
+    let Some(tup) = tuple else { return Ok(None) };
+
+    let pronargs = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)?;
+    let prorettype = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prorettype)?;
+    let prokind = getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_prokind)?;
+    let proretset = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?;
+
+    // proargtypes is an oidvector (BKI_FORCE_NOT_NULL); read element OIDs off the
+    // on-disk image (== C's proc->proargtypes.values[..pronargs]).
+    let proargtypes_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargtypes)?;
+    let bytes = match &proargtypes_datum {
+        Datum::ByRef(b) => &b[..],
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
+            return Err(PgError::error(
+                "syscache fetch_cast_func_form: proargtypes attribute is by-value",
+            ))
+        }
+    };
+    let proargtypes_vec = arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, bytes)?;
+    let mut proargtypes = [crate::InvalidOid; 3];
+    for (i, oid) in proargtypes_vec.iter().take(3).enumerate() {
+        proargtypes[i] = *oid;
+    }
+
+    ReleaseSysCache(tup);
+    Ok(Some(backend_commands_functioncmds_seams::CastFuncForm {
+        pronargs,
+        prorettype,
+        proargtypes,
+        prokind,
+        proretset,
+    }))
+}
+
 /// `SearchSysCache1(PROCOID, funcid)` + `GETSTRUCT->proisstrict` (`func_strict`,
 /// lsyscache.c). `Ok(None)` on a cache miss.
 pub(crate) fn proc_isstrict(funcid: Oid) -> PgResult<Option<bool>> {

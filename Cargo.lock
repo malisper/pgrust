@@ -13671,6 +13671,7 @@ name = "backend-parser-coerce"
 version = "0.0.0"
 dependencies = [
  "backend-catalog-pg-inherits-seams",
+ "backend-commands-functioncmds-seams",
  "backend-nodes-core",
  "backend-parser-coerce-seams",
  "backend-parser-parse-type",

@@ -87,7 +87,8 @@ fn implicit_collation_bubbles_to_op_input() {
     install_seams();
     // a = b where a has foo, b has default → non-default beats default → foo.
     let mut e = bool_op(vec![text_var(FOO_COLL), text_var(DEFAULT_COLLATION_OID)]);
-    assign_expr_collations(None, &mut e).unwrap();
+    let cx = mcx::MemoryContext::new("test");
+    assign_expr_collations_in(cx.mcx(), &mut e).unwrap();
     if let Expr::OpExpr(o) = &e {
         assert_eq!(o.inputcollid, FOO_COLL);
         // BOOLOID isn't collatable → output collation InvalidOid.
@@ -103,7 +104,8 @@ fn conflicting_implicit_collations_yield_invalid_input() {
     // a = b with two different non-default implicit collations → CONFLICT →
     // inputcollid becomes InvalidOid (no eager error; might fail at runtime).
     let mut e = bool_op(vec![text_var(FOO_COLL), text_var(BAR_COLL)]);
-    assign_expr_collations(None, &mut e).unwrap();
+    let cx = mcx::MemoryContext::new("test");
+    assign_expr_collations_in(cx.mcx(), &mut e).unwrap();
     if let Expr::OpExpr(o) = &e {
         assert_eq!(o.inputcollid, InvalidOid);
     } else {
@@ -128,7 +130,8 @@ fn collate_expr_forces_explicit_collation() {
         location: -1,
     });
     let mut e = bool_op(vec![lhs, rhs]);
-    let res = assign_expr_collations(None, &mut e);
+    let cx = mcx::MemoryContext::new("test");
+    let res = assign_expr_collations_in(cx.mcx(), &mut e);
     assert!(res.is_err(), "expected explicit-collation conflict error");
 }
 
@@ -165,7 +168,8 @@ fn noncollatable_inputs_give_none() {
         location: -1,
     });
     // Should not error; inner ops get foo inputcollid, the AND stays noncollatable.
-    assign_expr_collations(None, &mut e).unwrap();
+    let cx = mcx::MemoryContext::new("test");
+    assign_expr_collations_in(cx.mcx(), &mut e).unwrap();
     if let Expr::BoolExpr(b) = &e {
         for a in &b.args {
             if let Expr::OpExpr(o) = a {

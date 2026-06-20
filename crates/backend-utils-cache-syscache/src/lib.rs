@@ -906,6 +906,11 @@ pub fn init_seams() {
     );
     // fmgr_sql_validator's PROCOID read (pg_proc.c:851); syscache.c is its owner.
     backend_catalog_pg_proc_seams::search_proc_oid_sql::set(projections::search_proc_oid_sql);
+    // CreateCast's PROCOID read of the cast function's pg_proc form
+    // (functioncmds.c); syscache.c is its owner.
+    backend_commands_functioncmds_seams::fetch_cast_func_form::set(
+        projections::fetch_cast_func_form,
+    );
     backend_utils_cache_syscache_seams::lookup_enum_by_oid::set(projections::lookup_enum_by_oid);
     backend_utils_cache_syscache_seams::lookup_enum_by_typoid_name::set(
         projections::lookup_enum_by_typoid_name,
