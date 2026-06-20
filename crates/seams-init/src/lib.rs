@@ -200,6 +200,10 @@ pub fn init_all() {
     backend_commands_tablespace::init_seams();
     backend_commands_trigger::init_seams();
     backend_commands_tsearchcmds::init_seams();
+    backend_catalog_pg_ts::init_seams();
+    backend_tsearch_dict_init_dispatch::init_seams();
+    backend_tsearch_ts_locale::init_seams();
+    backend_tsearch_ts_utils::init_seams();
     backend_commands_typecmds::init_seams();
     backend_conv_utf8_and_big5::init_seams();
     backend_conv_utf8_and_cyrillic::init_seams();

@@ -1409,20 +1409,12 @@ fn def_get_string<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem<'mcx>) -> PgResult<Strin
             if b.boolval { "true" } else { "false" }.to_string()
         }
         ntag::T_String => arg.expect_string().sval.as_str().to_string(),
-        ntag::T_TypeName | ntag::T_List | ntag::T_A_Star => {
-            /*
-             * defGetString also renders TypeName / List / A_Star; those forms
-             * never reach serialize_deflist (options always carry a scalar
-             * value node), so guard loudly rather than reach into an unported
-             * renderer.
-             */
-            return Err(ereport(ERROR)
-                .errmsg_internal(format!(
-                    "unexpected node type for serialized dictionary option: {}",
-                    arg.node_tag()
-                ))
-                .into_error());
-        }
+        /* case T_TypeName: return TypeNameToString((TypeName *) def->arg); */
+        ntag::T_TypeName => type_name_to_string(arg.expect_typename())?,
+        /* case T_List: return NameListToString((List *) def->arg); */
+        ntag::T_List => name_list_to_string(arg.expect_list())?,
+        /* case T_A_Star: return pstrdup("*"); */
+        ntag::T_A_Star => "*".to_string(),
         _ => {
             return Err(ereport(ERROR)
                 .errmsg_internal(format!("unrecognized node type: {}", arg.node_tag()))
@@ -1431,6 +1423,62 @@ fn def_get_string<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem<'mcx>) -> PgResult<Strin
     };
     let _ = mcx;
     Ok(s)
+}
+
+/// `TypeNameToString(typeName)` / `appendTypeNameToBuffer` (parse_type.c:433),
+/// for the `defGetString` `T_TypeName` case. A `DefElem` option arg's `TypeName`
+/// always carries `names` (it is a parsed identifier, never an internal
+/// `typeOid`-only node), so the `format_type_be` fallback branch is unreachable
+/// here and guarded loudly rather than reaching the unported renderer.
+fn type_name_to_string(tn: &types_nodes::rawnodes::TypeName) -> PgResult<String> {
+    let mut out = String::new();
+    if !tn.names.is_empty() {
+        /* Emit possibly-qualified name as-is. */
+        for (i, name) in tn.names.iter().enumerate() {
+            if i != 0 {
+                out.push('.');
+            }
+            let node = &**name;
+            match node.node_tag() {
+                ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+                _ => return Err(unexpected_node_in_name_list()),
+            }
+        }
+    } else {
+        return Err(ereport(ERROR)
+            .errmsg_internal(
+                "text search dictionary option TypeName carries no name \
+                 (internal typeOid-only form unsupported here)",
+            )
+            .into_error());
+    }
+
+    /* Decoration considered by LookupTypeName. */
+    if tn.pct_type {
+        out.push_str("%TYPE");
+    }
+    if !tn.arrayBounds.is_empty() {
+        out.push_str("[]");
+    }
+    Ok(out)
+}
+
+/// `NameListToString(names)` (namespace.c) for the `defGetString` `T_List` case:
+/// `'.'`-joined `String` cells, `A_Star` rendered as `*`.
+fn name_list_to_string(names: &[NodePtr]) -> PgResult<String> {
+    let mut out = String::new();
+    for (i, node) in names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node = &**node;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            ntag::T_A_Star => out.push('*'),
+            _ => return Err(unexpected_node_in_name_list()),
+        }
+    }
+    Ok(out)
 }
 
 /// `defGetQualifiedName(defel)` (define.c:238), specialized to yield the name

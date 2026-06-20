@@ -4971,7 +4971,9 @@ fn define_stmt_seam<'mcx>(
     pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
-    use types_nodes::parsenodes::{OBJECT_AGGREGATE, OBJECT_OPERATOR, OBJECT_TYPE};
+    use types_nodes::parsenodes::{
+        OBJECT_AGGREGATE, OBJECT_OPERATOR, OBJECT_TSCONFIGURATION, OBJECT_TSDICTIONARY, OBJECT_TYPE,
+    };
 
     let ds = match stmt.as_definestmt() {
         Some(d) => d,
@@ -5026,6 +5028,22 @@ fn define_stmt_seam<'mcx>(
                 ds.oldstyle,
                 &definition,
                 ds.replace,
+            )
+        }
+        OBJECT_TSDICTIONARY => {
+            // Assert(stmt->args == NIL).
+            backend_commands_tsearchcmds::DefineTSDictionary(mcx, &ds.defnames, &ds.definition)
+        }
+        OBJECT_TSCONFIGURATION => {
+            // Assert(stmt->args == NIL).  `copied` is the C `&secondaryObject`
+            // out-parameter (set when CREATE ... COPY references a source
+            // config); the primary address is the function's return value.
+            let mut copied: Option<ObjectAddress> = None;
+            backend_commands_tsearchcmds::DefineTSConfiguration(
+                mcx,
+                &ds.defnames,
+                &ds.definition,
+                &mut copied,
             )
         }
         _ => Err(PgError::error(format!(

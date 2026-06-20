@@ -5894,6 +5894,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-catalog-pg-ts"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-scankey",
+ "backend-access-index-genam-seams",
+ "backend-access-table-table",
+ "backend-catalog-catalog",
+ "backend-catalog-indexing",
+ "backend-catalog-indexing-seams",
+ "backend-commands-tsearchcmds-seams",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-cache-syscache",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-catalog-pg-type"
 version = "0.0.0"
 dependencies = [
@@ -8391,6 +8416,7 @@ dependencies = [
  "backend-commands-opclasscmds-seams",
  "backend-commands-operatorcmds",
  "backend-commands-tablecmds-seams",
+ "backend-commands-tsearchcmds",
  "backend-commands-typecmds-seams",
  "backend-nodes-core",
  "backend-optimizer-util-var-seams",
@@ -18294,6 +18320,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tsearch-dict-init-dispatch"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define-seams",
+ "backend-commands-tsearchcmds-seams",
+ "backend-tsearch-dict",
+ "backend-tsearch-ispell-regis",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-error",
+]
+
+[[package]]
 name = "backend-tsearch-dict-seams"
 version = "0.0.0"
 dependencies = [
@@ -18386,10 +18426,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-tsearch-ts-locale"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-file-fd",
+ "backend-tsearch-parse-seams",
+ "backend-tsearch-ts-locale-seams",
+ "backend-utils-mb-mbutils-seams",
+ "mcx",
+]
+
+[[package]]
 name = "backend-tsearch-ts-locale-seams"
 version = "0.0.0"
 dependencies = [
  "seam-core",
+]
+
+[[package]]
+name = "backend-tsearch-ts-utils"
+version = "0.0.0"
+dependencies = [
+ "backend-tsearch-ts-locale-seams",
+ "backend-tsearch-ts-utils-seams",
+ "backend-utils-adt-formatting-seams",
+ "backend-utils-error",
+ "backend-utils-init-small",
+ "backend-utils-mb-mbutils-seams",
+ "common-path-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-tsearch",
 ]
 
 [[package]]
@@ -24058,6 +24126,7 @@ dependencies = [
  "backend-catalog-pg-range",
  "backend-catalog-pg-shdepend",
  "backend-catalog-pg-subscription",
+ "backend-catalog-pg-ts",
  "backend-catalog-pg-type",
  "backend-catalog-storage",
  "backend-catalog-toasting",
@@ -24363,9 +24432,12 @@ dependencies = [
  "backend-timezone-pgtz",
  "backend-timezone-strftime",
  "backend-tsearch-dict",
+ "backend-tsearch-dict-init-dispatch",
  "backend-tsearch-ispell-regis",
  "backend-tsearch-parse",
  "backend-tsearch-spell",
+ "backend-tsearch-ts-locale",
+ "backend-tsearch-ts-utils",
  "backend-utils-activity-pgstat",
  "backend-utils-activity-pgstat-backend",
  "backend-utils-activity-pgstat-database",
