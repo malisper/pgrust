@@ -222,6 +222,27 @@ pub fn coerce_set_result(_estate: &mut PLpgSQL_execstate) {
     );
 }
 
+/// `exec_stmt_return_query` per-row deposit into the function's SRF result
+/// tuplestore (pl_exec.c 4046): push each materialized result row into
+/// `estate->tuple_store` (the `ReturnSetInfo.setResult` the executor-frame SRF
+/// caller threaded onto the call frame). The query run is already ported (the
+/// materialize-all `exec_run_select` / `exec_dynquery_with_params`); only this
+/// sink stays loud, because a SETOF PL/pgSQL function is not yet routed through
+/// the executor-frame SRF dispatch (`srf_invoke_by_oid` has no entry for
+/// per-user PL/pgSQL function OIDs) so no live `ReturnSetInfo` reaches the
+/// execstate — the dual-home `types_fmgr`↔`types_nodes` fcinfo keystone.
+pub fn return_query_put_rows(
+    _estate: &mut PLpgSQL_execstate,
+    _rows: std::vec::Vec<std::vec::Vec<crate::exec_seams::ExecsqlColumn>>,
+) {
+    panic!(
+        "seam not wired: exec_stmt_return_query tuplestore sink (pl_exec.c) — \
+         tuplestore_puttupleslot into ReturnSetInfo.setResult (SRF tuple-store \
+         handoff; blocked on executor-frame SRF dispatch for PL/pgSQL SETOF \
+         function OIDs — the dual-home fcinfo keystone)"
+    );
+}
+
 /// The composite-result coercion leg of `plpgsql_exec_function` (pl_exec.c):
 /// coerce a tuple result to the declared rowtype, handling dropped columns, and
 /// copy it out to the upper executor context. Tupdesc/heaptuple value substrate.

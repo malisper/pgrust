@@ -801,6 +801,61 @@ pub fn init_seams() {
         },
     );
 
+    // Install `exec_run_select` materialize-all (pl_exec.c): the FOR-loop /
+    // RETURN QUERY iteration path. Runs the query through the SPI plan surface
+    // and hands back every result row's columns (the materialize-all analogue of
+    // C's portal-fetch loop; SPI_cursor_open is a separate keystone, so this
+    // collects all rows up front — the observable iteration is identical).
+    backend_pl_plpgsql_exec_seams::exec_run_select_via_spi::set(
+        |query: String,
+         parse_mode,
+         parse_state,
+         datum_snapshot: Vec<Option<backend_pl_plpgsql_exec_seams::EvalParamValue>>,
+         read_only| {
+            let mut resolve = |dno: i32| -> PgResult<backend_executor_spi::EvalParamValue> {
+                match datum_snapshot.get(dno as usize).and_then(|o| o.as_ref()) {
+                    Some(v) => Ok(backend_executor_spi::EvalParamValue {
+                        value: v.value,
+                        isnull: v.isnull,
+                        typeid: v.typeid,
+                        byref: v.byref.clone(),
+                    }),
+                    None => Err(types_error::PgError::error(format!(
+                        "PL/pgSQL FOR-query references datum {dno} that is not a scalar variable"
+                    ))),
+                }
+            };
+            let r = backend_executor_spi::spi_execsql_collect(
+                &query,
+                parse_mode,
+                parse_state,
+                read_only,
+                &mut resolve,
+            )?;
+            Ok(backend_pl_plpgsql_exec_seams::RunSelectResult {
+                code: r.code,
+                processed: r.processed,
+                returned_tuptable: r.returned_tuptable,
+                all_rows: r
+                    .all_rows
+                    .into_iter()
+                    .map(|row| {
+                        row.into_iter()
+                            .map(|c| backend_pl_plpgsql_exec_seams::ExecsqlColumn {
+                                value: c.value,
+                                isnull: c.isnull,
+                                typeid: c.typeid,
+                                typmod: -1,
+                                name: c.name,
+                                byref: c.byref,
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            })
+        },
+    );
+
     // Install the `exec_stmt_block` EXCEPTION-leg subtransaction entry points
     // (pl_exec.c keystone #215). The executor unit is layered below xact; the
     // handler (top layer) bridges to the now-ported xact subxact engine. These

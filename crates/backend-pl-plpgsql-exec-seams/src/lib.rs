@@ -234,6 +234,40 @@ seam_core::seam!(
     ) -> PgResult<ExecsqlResult>
 );
 
+/// The raw result of running a query for the FOR-loop / RETURN QUERY iteration
+/// path (`pl_exec.c`'s `exec_run_select` + `exec_for_query`): the SPI return
+/// code, the row count, and **every** result row's columns (the materialize-all
+/// analogue of C's portal-fetch loop — each row is iterated, in order).
+#[derive(Clone, Debug)]
+pub struct RunSelectResult {
+    pub code: int32,
+    pub processed: u64,
+    pub returned_tuptable: bool,
+    /// All result rows, each a vector of its columns.
+    pub all_rows: std::vec::Vec<std::vec::Vec<ExecsqlColumn>>,
+}
+
+seam_core::seam!(
+    /// `exec_run_select(estate, query, 0, NULL)` materialize-all path
+    /// (`pl_exec.c`): prepare the embedded `query` (in its `parse_mode`, with the
+    /// PL/pgSQL parser hooks installed), bind the referenced scalar datums from
+    /// `datum_snapshot`, run it, and return **every** result row's columns for
+    /// the FOR-loop / RETURN QUERY iteration (`exec_for_query`). Unlike the
+    /// portal/cursor leg (`SPI_cursor_open` keystone), this materializes all rows
+    /// up front; the observable iteration (every row, in order) is identical to
+    /// C's batched portal fetch.
+    ///
+    /// The executor unit is layered below SPI and reaches the SPI plan surface
+    /// through this seam; the handler (top layer, with SPI access) installs it.
+    pub fn exec_run_select_via_spi(
+        query: std::string::String,
+        parse_mode: types_parsenodes::RawParseMode,
+        parse_state: types_nodes::parsestmt::PlpgsqlExprParseState,
+        datum_snapshot: std::vec::Vec<Option<EvalParamValue>>,
+        read_only: bool,
+    ) -> PgResult<RunSelectResult>
+);
+
 /// The coerced result of [`exec_cast_value_via_spi`]: the bare-word coerced
 /// datum + its is-null flag, plus — when the target type is pass-by-reference
 /// (`text`/`varchar`/`numeric`/…) — the coerced value's verbatim header-ful

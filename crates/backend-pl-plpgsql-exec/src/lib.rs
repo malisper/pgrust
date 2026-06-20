@@ -532,18 +532,18 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
             PLpgSQL_stmt::Loop(s) => exec_stmt_loop(estate, s),
             PLpgSQL_stmt::While(s) => exec_stmt_while(estate, s),
             PLpgSQL_stmt::Fori(s) => exec_stmt_fori(estate, s),
-            PLpgSQL_stmt::Fors(_) => exec_stmt_fors(estate),
+            PLpgSQL_stmt::Fors(s) => exec_stmt_fors(estate, s),
             PLpgSQL_stmt::Forc(_) => exec_stmt_forc(estate),
             PLpgSQL_stmt::ForeachA(s) => exec_stmt_foreach_a(estate, s),
             PLpgSQL_stmt::Exit(s) => exec_stmt_exit(estate, s),
             PLpgSQL_stmt::Return(s) => exec_stmt_return(estate, s),
             PLpgSQL_stmt::ReturnNext(_) => exec_stmt_return_next(estate),
-            PLpgSQL_stmt::ReturnQuery(_) => exec_stmt_return_query(estate),
+            PLpgSQL_stmt::ReturnQuery(s) => exec_stmt_return_query(estate, s),
             PLpgSQL_stmt::Raise(s) => exec_stmt_raise(estate, s),
             PLpgSQL_stmt::Assert(_) => exec_stmt_assert(estate),
             PLpgSQL_stmt::Execsql(s) => exec_stmt_execsql(estate, s),
             PLpgSQL_stmt::Dynexecute(_) => exec_stmt_dynexecute(estate),
-            PLpgSQL_stmt::Dynfors(_) => exec_stmt_dynfors(estate),
+            PLpgSQL_stmt::Dynfors(s) => exec_stmt_dynfors(estate, s),
             PLpgSQL_stmt::Open(_) => exec_stmt_open(estate),
             PLpgSQL_stmt::Fetch(_) => exec_stmt_fetch(estate),
             PLpgSQL_stmt::Close(_) => exec_stmt_close(estate),
@@ -1685,6 +1685,78 @@ fn exec_run_select_impl(
     result.code
 }
 
+/// `exec_run_select(estate, expr, 0, NULL)` for the FOR-loop / RETURN QUERY
+/// iteration (pl_exec.c 5753): run the query (a SELECT) and return **all** its
+/// result rows, each as a vector of columns. The C portal/cursor path
+/// (`SPI_cursor_open` + batched `SPI_cursor_fetch`) is replaced by a
+/// materialize-all over the SPI plan surface (the `SPI_cursor_open` keystone is
+/// separate); the observable iteration — every row, in order — is identical.
+fn exec_run_select_rows(
+    estate: &mut PLpgSQL_execstate,
+    query: &str,
+    parse_mode: types_plpgsql::RawParseMode,
+    parse_state: types_nodes::parsestmt::PlpgsqlExprParseState,
+) -> Vec<Vec<exec_seams::ExecsqlColumn>> {
+    let snapshot = build_datum_snapshot(estate);
+    let result = match exec_seams::exec_run_select_via_spi::call(
+        query.to_string(),
+        parse_mode,
+        parse_state,
+        snapshot,
+        estate.readonly_func,
+    ) {
+        Ok(r) => r,
+        Err(e) => std::panic::panic_any(e),
+    };
+    estate.eval_processed = result.processed;
+    result.all_rows
+}
+
+/// `exec_for_query(estate, stmt, portal, prefetch_ok)` (pl_exec.c 6011) — the
+/// shared FOR-loop-over-a-query driver. For each fetched row, assign it into the
+/// loop variable (`exec_move_row`), run the loop body (`exec_stmts`), and honor
+/// EXIT / CONTINUE. `FOUND` is set true iff at least one row was fetched. The
+/// rows arrive already materialized (the `SPI_cursor_open` + batched
+/// `SPI_cursor_fetch` of C is the materialize-all `exec_run_select_rows`).
+fn exec_for_query(
+    estate: &mut PLpgSQL_execstate,
+    loopvar: &types_plpgsql::PLpgSQL_variable,
+    body: &[PLpgSQL_stmt],
+    label: Option<&str>,
+    rows: Vec<Vec<exec_seams::ExecsqlColumn>>,
+) -> PLpgSQL_rc {
+    let mut rc = PLpgSQL_rc::PLPGSQL_RC_OK;
+    let mut found = false;
+
+    for row in &rows {
+        found = true;
+
+        // exec_move_row(estate, var, tuple, tupdesc) — assign the fetched row
+        // into the loop's record / row variable.
+        exec_move_row_into_target(estate, loopvar, row);
+
+        // Execute the statements.
+        let body_rc = exec_stmts(estate, body);
+
+        match loop_rc_processing(estate, label, body_rc) {
+            LoopRc::Break(r) => {
+                rc = r;
+                break;
+            }
+            LoopRc::Continue(_) => {}
+        }
+    }
+
+    // Set the FOUND variable to indicate the result of executing the loop
+    // (namely, whether we looped one or more times). This must be set last so
+    // that it does not interfere with the value of FOUND inside the loop.
+    exec_set_found(estate, found);
+
+    // SPI_cursor_close(portal) — the materialize-all path holds no live portal,
+    // so there is nothing to close (the rows were fully fetched up front).
+    rc
+}
+
 // ===========================================================================
 // Value-substrate statement arms — dispatch targets with LOUD bodies. Each is a
 // whole-statement SQL/value leg (SPI / executor / fmgr), not control flow.
@@ -1816,11 +1888,32 @@ fn exec_stmt_getdiag(
     PLpgSQL_rc::PLPGSQL_RC_OK
 }
 
-fn exec_stmt_fors(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
-    panic!(
-        "seam not wired: exec_stmt_fors (pl_exec.c) — exec_run_select + exec_for_query \
-         (SPI plan surface)"
-    );
+/// `exec_stmt_fors(estate, stmt)` (pl_exec.c 2766) — FOR rec/row IN SELECT ...
+/// LOOP. Open the query (via the materialize-all `exec_run_select`) and run the
+/// shared FOR-loop driver over its rows.
+fn exec_stmt_fors(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_fors,
+) -> PLpgSQL_rc {
+    let expr = stmt.query.as_deref().expect("FOR-IN-SELECT carries a query");
+    let loopvar = stmt
+        .var
+        .as_deref()
+        .expect("FOR-IN-SELECT carries a loop variable");
+
+    // exec_run_select(estate, stmt->query, 0, &portal) — run the query and
+    // collect every result row.
+    let input_collation = INVALID_OID;
+    let parse_state = build_plpgsql_parse_state(estate, expr, input_collation);
+    let rows = exec_run_select_rows(estate, &expr.query, expr.parseMode, parse_state);
+
+    // Execute the loop.
+    let rc = exec_for_query(estate, loopvar, &stmt.body, stmt.label.as_deref(), rows);
+
+    // exec_eval_cleanup + SPI_freetuptable are folded into the materialize-all
+    // teardown (the rows are owned and drop here).
+    exec_eval_cleanup(estate);
+    rc
 }
 
 fn exec_stmt_forc(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
@@ -1837,11 +1930,53 @@ fn exec_stmt_return_next(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
     );
 }
 
-fn exec_stmt_return_query(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
-    panic!(
-        "seam not wired: exec_stmt_return_query (pl_exec.c) — exec_run_select / \
-         exec_dynquery_with_params + tuplestore (SPI plan surface + SRF tuple-store)"
-    );
+/// `exec_stmt_return_query(estate, stmt)` (pl_exec.c 4046) — RETURN QUERY [EXECUTE].
+/// Run the (static or dynamic) query and push every result row into the
+/// function's SRF result tuplestore (via the `ReturnSetInfo`). The query run is
+/// the SPI plan surface (already ported: the `exec_run_select` /
+/// `exec_dynquery_with_params` materialize-all path); the per-row push into the
+/// `ReturnSetInfo.setResult` tuplestore is the SRF tuple-store handoff, which is
+/// only reachable once the executor-frame SRF dispatch routes a SETOF PL/pgSQL
+/// function through `plpgsql_exec_function` with a live `ReturnSetInfo`
+/// (`srf_invoke_by_oid` currently has no executor-frame entry for per-user
+/// PL/pgSQL function OIDs — the dual-home `types_fmgr`↔`types_nodes` fcinfo
+/// keystone). The materialize leg below runs end-to-end; the sink stays loud.
+fn exec_stmt_return_query(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_return_query,
+) -> PLpgSQL_rc {
+    // C: if (!estate->retisset) ereport(ERROR, "cannot use RETURN QUERY in a
+    //    non-SETOF function").
+    if !estate.retisset {
+        std::panic::panic_any(
+            types_error::PgError::error(
+                "cannot use RETURN QUERY in a non-SETOF function".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR),
+        );
+    }
+
+    // Run the query, collecting every result row (static query → exec_run_select;
+    // dynamic RETURN QUERY EXECUTE → exec_dynquery_with_params).
+    let rows = if let Some(query) = stmt.query.as_deref() {
+        let input_collation = INVALID_OID;
+        let parse_state = build_plpgsql_parse_state(estate, query, input_collation);
+        exec_run_select_rows(estate, &query.query, query.parseMode, parse_state)
+    } else {
+        exec_dynquery_with_params(estate, &stmt.dynquery, &stmt.params)
+    };
+
+    // Push each row into the function's SRF result tuplestore. The tuplestore +
+    // its descriptor live on the `ReturnSetInfo` the executor-frame SRF caller
+    // threads onto the call frame; the owned execstate holds only opaque handles
+    // for them, so the per-row deposit crosses the SRF tuple-store seam (the
+    // handler installs it over the live `ReturnSetInfo` once SETOF PL/pgSQL
+    // dispatch lands). `tuple_store_puttuple_rows` mirrors C's
+    // `tuplestore_puttupleslot` loop in `exec_stmt_return_query`.
+    seam::return_query_put_rows(estate, rows);
+
+    exec_eval_cleanup(estate);
+    PLpgSQL_rc::PLPGSQL_RC_OK
 }
 
 /// `exec_stmt_raise(estate, stmt)` (pl_exec.c 3725) — build a message and throw
@@ -2327,11 +2462,80 @@ fn exec_stmt_dynexecute(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
     );
 }
 
-fn exec_stmt_dynfors(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
-    panic!(
-        "seam not wired: exec_stmt_dynfors (pl_exec.c) — exec_dynquery_with_params + \
-         exec_for_query (SPI plan surface)"
-    );
+/// `exec_stmt_dynfors(estate, stmt)` (pl_exec.c 5497) — FOR rec/row IN EXECUTE
+/// <text> [USING ...] LOOP. Evaluate the dynamic query string, open it (via the
+/// materialize-all `exec_dynquery_with_params`), and run the shared FOR-loop
+/// driver over its rows.
+fn exec_stmt_dynfors(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_dynfors,
+) -> PLpgSQL_rc {
+    let loopvar = stmt
+        .var
+        .as_deref()
+        .expect("FOR-IN-EXECUTE carries a loop variable");
+
+    let rows = exec_dynquery_with_params(estate, &stmt.query, &stmt.params);
+
+    let rc = exec_for_query(estate, loopvar, &stmt.body, stmt.label.as_deref(), rows);
+
+    exec_eval_cleanup(estate);
+    rc
+}
+
+/// `exec_dynquery_with_params(estate, dynquery, params, ...)` (pl_exec.c 8359) —
+/// evaluate the dynamic query-string expression to a text value, then run it as
+/// a top-level SQL statement, collecting every result row. The USING-parameter
+/// leg (`exec_eval_using_params` → `SPI_cursor_open_with_args`) is the dynamic
+/// param substrate; it stays loud until that lands (the FOR-IN-EXECUTE shapes
+/// without USING run end-to-end). Returns the materialized rows.
+fn exec_dynquery_with_params(
+    estate: &mut PLpgSQL_execstate,
+    dynquery: &Option<Box<types_plpgsql::PLpgSQL_expr>>,
+    params: &[types_plpgsql::PLpgSQL_expr],
+) -> Vec<Vec<exec_seams::ExecsqlColumn>> {
+    let dynquery = dynquery
+        .as_deref()
+        .expect("FOR-IN-EXECUTE carries a query-string expression");
+
+    // Evaluate the string expression (querystr = exec_eval_expr(dynquery)).
+    let (value, isnull, restype, _restypmod) = exec_eval_expr_impl(estate, dynquery);
+    if isnull {
+        std::panic::panic_any(
+            types_error::PgError::error(
+                "query string argument of EXECUTE is null".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
+        );
+    }
+    // convert_value_to_string(estate, query, restype) — render the value to text.
+    let byref = estate.last_eval_byref.take();
+    let querystr = convert_value_to_string(value, byref, restype);
+    exec_eval_cleanup(estate);
+
+    if !params.is_empty() {
+        // exec_eval_using_params + SPI_cursor_open_with_args (dynamic-param
+        // substrate). The FOR-IN-EXECUTE without USING is the common shape;
+        // the USING leg stays loud until the dynamic-param plan path lands.
+        panic!(
+            "seam not wired: exec_dynquery_with_params USING leg (pl_exec.c) — \
+             exec_eval_using_params + SPI_cursor_open_with_args (dynamic-param substrate)"
+        );
+    }
+
+    // Run the dynamic query as a top-level SQL statement. It is parsed in the
+    // default raw-parse mode (a complete statement, not a PL/pgSQL expression),
+    // with an empty PL/pgSQL parse state (the query text has no compiled
+    // variable references — any value substitution is via the USING params,
+    // handled above).
+    let empty_parse_state =
+        types_nodes::parsestmt::PlpgsqlExprParseState::new(Default::default(), INVALID_OID);
+    exec_run_select_rows(
+        estate,
+        &querystr,
+        types_plpgsql::RawParseMode::RAW_PARSE_DEFAULT,
+        empty_parse_state,
+    )
 }
 
 fn exec_stmt_open(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
