@@ -2483,6 +2483,50 @@ pub fn pop_child_plan<'mcx>(
     *dpns = save_dpns;
 }
 
+/// `push_ancestor_plan(dpns, ancestor_cell, save_dpns)` (`ruleutils.c`
+/// 5310-5326) — transfer deparsing attention to an ancestor plan node when
+/// expanding a `Param` reference, so the ancestor's own `Param`/special-Var
+/// references resolve. `ancestor_index` is the position of the target ancestor
+/// in `dpns.ancestors`; the new ancestor list is the tail *after* that cell
+/// (C: `list_copy_tail(dpns->ancestors, list_cell_number(...) + 1)`). The target
+/// ancestor node is supplied separately (C reads it via `lfirst(ancestor_cell)`)
+/// so the caller need not re-borrow `dpns.ancestors` while it is being rebuilt.
+pub fn push_ancestor_plan<'mcx, 'p>(
+    mcx: Mcx<'mcx>,
+    dpns: &mut DeparseNamespace<'mcx>,
+    ancestor_index: usize,
+    plan: &Node<'p>,
+) -> PgResult<DeparseNamespace<'mcx>> {
+    // *save_dpns = *dpns;  (owned model: deep-clone the namespace to restore.)
+    let save = clone_namespace(mcx, dpns)?;
+
+    // dpns->ancestors = list_copy_tail(dpns->ancestors, cell_number + 1);
+    let mut new_ancestors = PgVec::new_in(mcx);
+    let tail_start = ancestor_index + 1;
+    if tail_start < dpns.ancestors.len() {
+        new_ancestors
+            .try_reserve(dpns.ancestors.len() - tail_start)
+            .map_err(|_| mcx.oom(0))?;
+        for a in dpns.ancestors.iter().skip(tail_start) {
+            new_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+        }
+    }
+    dpns.ancestors = new_ancestors;
+
+    // set_deparse_plan(dpns, plan);
+    set_deparse_plan(mcx, dpns, plan)?;
+    Ok(save)
+}
+
+/// `pop_ancestor_plan(dpns, save_dpns)` (`ruleutils.c` 5331-5338) — restore the
+/// namespace saved by `push_ancestor_plan`.
+pub fn pop_ancestor_plan<'mcx>(
+    dpns: &mut DeparseNamespace<'mcx>,
+    save_dpns: DeparseNamespace<'mcx>,
+) {
+    *dpns = save_dpns;
+}
+
 /* -------------------------------------------------------------------------- *
  * The plan-tree deparse-context entry points (ruleutils.c 3777-3868).
  * -------------------------------------------------------------------------- */

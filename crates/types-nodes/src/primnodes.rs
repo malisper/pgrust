@@ -2441,6 +2441,22 @@ fn clone_subplan_static<'b>(
 #[derive(Debug)]
 pub struct SubPlanExpr(pub Box<SubPlan<'static>>);
 
+impl SubPlanExpr {
+    /// Build a `SubPlanExpr` from a live `SubPlan<'b>` by deep-cloning it into
+    /// `mcx` and erasing the lifetime parameter to the `Expr` tree's notional
+    /// `'static` (the sanctioned node-opaque convention, mirroring
+    /// `Expr::clone_in`'s `SubPlan` arm). Used to wrap a plan-tree `SubPlan` as
+    /// an `Expr::SubPlan` ancestor node for ruleutils' deparse-namespace.
+    pub fn from_subplan<'b>(mcx: Mcx<'b>, sp: &SubPlan<'_>) -> PgResult<Self> {
+        let owned: SubPlan<'b> = sp.clone_in(mcx)?;
+        // SAFETY: fully owned in mcx after clone_in; lifetime-parameter-only
+        // erase to the Expr tree's 'static notional lifetime (cf.
+        // clone_subplan_static / query_into_static).
+        let owned_static: SubPlan<'static> = unsafe { core::mem::transmute(owned) };
+        Ok(SubPlanExpr(Box::new(owned_static)))
+    }
+}
+
 impl Clone for SubPlanExpr {
     fn clone(&self) -> Self {
         panic!(

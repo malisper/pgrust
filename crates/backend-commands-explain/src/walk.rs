@@ -705,7 +705,11 @@ pub fn ExplainNode<'es, 'p>(
             .and_then(|r| r.resconstantqual.as_ref())
             .filter(|q| !q.is_empty())
         {
-            let exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = rcq.iter().cloned().collect();
+            let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+                alloc::vec::Vec::with_capacity(rcq.len());
+            for e in rcq.iter() {
+                exprs.push(e.clone_in(mcx)?);
+            }
             let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
             let node = Node::mk_expr(mcx, anded);
 
@@ -900,28 +904,38 @@ pub fn ExplainNode<'es, 'p>(
         .unwrap_or(false);
     let haschildren = has_init || has_outer || has_inner || has_members || has_sub;
 
-    if haschildren {
+    // ancestors = lcons(plan, ancestors): prepend this Plan node (cloned into
+    // the 'es formatting arena, matching es->pstmt) for the children's deparse,
+    // so PARAM_EXEC / OUTER_VAR resolution can reach this node as an ancestor.
+    // The owned model rebuilds the list (the C list_delete_first at block end is
+    // implicit: `child_ancestors` is simply dropped and `ancestors` is reused).
+    let child_ancestors: PgVec<'es, PgBox<'es, Node<'es>>> = if haschildren {
         fmt::ExplainOpenGroup("Plans", Some("Plans"), false, es)?;
-        // ancestors = lcons(plan, ancestors): prepend this Plan node. The
-        // ancestor list is consumed only by deparse (PARAM_EXEC resolution),
-        // which the structural slice never reaches; carry it forward unchanged.
-    }
+        let mut v: PgVec<'es, PgBox<'es, Node<'es>>> = PgVec::new_in(mcx);
+        v.try_reserve(ancestors.len() + 1).map_err(|_| mcx.oom(0))?;
+        v.push(mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?);
+        for a in ancestors.iter() {
+            v.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+        }
+        v
+    } else {
+        PgVec::new_in(mcx)
+    };
 
-    // initPlan-s: SubPlanState detail reaches deparse; gate loudly if present.
+    // initPlan-s.
     if has_init {
-        panic!(
-            "ExplainNode: initPlan-s need ExplainSubPlans (SubPlan deparse, ruleutils \
-             unported) — structural EXPLAIN only"
-        );
+        if let Some(initplans) = head.initPlan.as_ref() {
+            ExplainSubPlans(es, mcx, initplans, &child_ancestors, "InitPlan")?;
+        }
     }
 
     // lefttree (Outer).
     if let Some(outer) = planstate.outer_plan_state() {
-        ExplainNode(es, mcx, outer, ancestors, Some("Outer"), None)?;
+        ExplainNode(es, mcx, outer, &child_ancestors, Some("Outer"), None)?;
     }
     // righttree (Inner).
     if let Some(inner) = head.righttree.as_deref() {
-        ExplainNode(es, mcx, inner, ancestors, Some("Inner"), None)?;
+        ExplainNode(es, mcx, inner, &child_ancestors, Some("Inner"), None)?;
     }
 
     // Special member-node children (explain.c:2042-2065): Append/MergeAppend
@@ -934,16 +948,15 @@ pub fn ExplainNode<'es, 'p>(
         plan_node.node_tag()
     {
         if let Some(members) = planstate.member_input_states() {
-            ExplainMemberNodes(es, mcx, &members, ancestors)?;
+            ExplainMemberNodes(es, mcx, &members, &child_ancestors)?;
         }
     }
 
     // subPlan-s.
     if has_sub {
-        panic!(
-            "ExplainNode: subPlan-s need ExplainSubPlans (SubPlan deparse, ruleutils \
-             unported) — structural EXPLAIN only"
-        );
+        if let Some(subplans) = head.subPlan.as_ref() {
+            ExplainSubPlans(es, mcx, subplans, &child_ancestors, "SubPlan")?;
+        }
     }
 
     if haschildren {
@@ -981,7 +994,13 @@ fn show_scan_qual<'es, 'p>(
         return Ok(());
     };
     // node = (Node *) make_ands_explicit(qual);
-    let exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = qual.iter().cloned().collect();
+    // Deep-clone via clone_in: a qual may carry a SubPlan / Aggref child, on
+    // which a bare derived `Expr::clone()` panics (clone-in convention).
+    let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+        alloc::vec::Vec::with_capacity(qual.len());
+    for e in qual.iter() {
+        exprs.push(e.clone_in(mcx)?);
+    }
     let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
     let node = Node::mk_expr(mcx, anded);
 
@@ -1025,6 +1044,60 @@ fn ExplainMemberNodes<'es, 'p>(
     //     ExplainNode(planstates[j], ancestors, "Member", NULL, es);
     for child in planstates {
         ExplainNode(es, mcx, child, ancestors, Some("Member"), None)?;
+    }
+    Ok(())
+}
+
+/// `ExplainSubPlans(plans, ancestors, relationship, es)` (explain.c:4561) —
+/// explain a list of `SubPlanState`s (a plan node's initPlan or subPlan list).
+/// Each physical subplan (`plan_id`) is printed only once across the whole plan
+/// tree (`es->printed_subplans`). The `SubPlan` node is treated as an ancestor
+/// of the plan node(s) within it, so ruleutils.c can resolve the referents of
+/// subplan parameters (`find_param_referent` / `find_param_generator`).
+#[allow(non_snake_case)]
+fn ExplainSubPlans<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plans: &PgVec<'p, types_nodes::execexpr::SubPlanState<'p>>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+    relationship: &str,
+) -> PgResult<()> {
+    use backend_nodes_core::bitmapset::{bms_add_member, bms_is_member};
+
+    for sps in plans.iter() {
+        let Some(sp) = sps.subplan.as_deref() else {
+            continue;
+        };
+
+        // Print a subplan only once (track plan_id across the plan tree).
+        if bms_is_member(sp.plan_id, es.printed_subplans.as_deref()) {
+            continue;
+        }
+        es.printed_subplans =
+            Some(bms_add_member(mcx, es.printed_subplans.take(), sp.plan_id)?);
+
+        // ancestors = lcons(sp, ancestors): treat the SubPlan node as an
+        // ancestor so ruleutils can find subplan-parameter referents.
+        let sub_node = Node::mk_expr(
+            mcx,
+            types_nodes::primnodes::Expr::SubPlan(
+                types_nodes::primnodes::SubPlanExpr::from_subplan(mcx, sp)?,
+            ),
+        );
+        let mut child_ancestors: PgVec<'es, PgBox<'es, Node<'es>>> = PgVec::new_in(mcx);
+        child_ancestors
+            .try_reserve(ancestors.len() + 1)
+            .map_err(|_| mcx.oom(0))?;
+        child_ancestors.push(mcx::alloc_in(mcx, sub_node)?);
+        for a in ancestors.iter() {
+            child_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+        }
+
+        // ExplainNode(sps->planstate, ancestors, relationship, sp->plan_name, es).
+        let plan_name = sp.plan_name.as_ref().map(|s| s.as_str());
+        if let Some(child_ps) = sps.planstate.as_deref() {
+            ExplainNode(es, mcx, child_ps, &child_ancestors, Some(relationship), plan_name)?;
+        }
     }
     Ok(())
 }
