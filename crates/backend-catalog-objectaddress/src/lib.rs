@@ -42,6 +42,7 @@ pub mod auth_member_lookup;
 pub mod default_acl_lookup;
 pub mod policy_lookup;
 pub mod rewrite_lookup;
+pub mod sql_drop_describe;
 pub mod trigger_lookup;
 pub mod type_description;
 
@@ -65,6 +66,9 @@ pub fn init_seams() {
     seams::get_object_attnum_oid::set(properties::get_object_attnum_oid);
     seams::get_object_oid_index::set(properties::get_object_oid_index);
     seams::get_object_class_descr::set(properties::get_object_class_descr);
+    seams::event_trigger_describe_dropped_object::set(
+        sql_drop_describe::event_trigger_describe_dropped_object,
+    );
 
     // pg_rewrite by-oid projections (no RULEOID syscache exists): the
     // `getObjectDescription` / `getObjectIdentityParts` / `RemoveRewriteRuleById`

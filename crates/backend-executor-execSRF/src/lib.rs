@@ -82,6 +82,7 @@ mod pg_listening_channels;
 mod pg_get_multixact_members;
 mod pg_get_catalog_foreign_keys;
 mod pg_partition_tree;
+mod pg_event_trigger_dropped_objects;
 mod pg_lock_status;
 mod pg_prepared_xact;
 mod pg_snapshot_xip;
@@ -210,6 +211,9 @@ pub fn init_seams() {
 
     // `pg_lock_status` (OID 1371) — the `pg_locks` view's underlying SRF.
     pg_lock_status::register_pg_lock_status();
+    // `pg_event_trigger_dropped_objects` (OID 3566) — the `sql_drop`
+    // event-trigger SRF listing the command's dropped objects.
+    pg_event_trigger_dropped_objects::register_pg_event_trigger_dropped_objects();
     // `pg_snapshot_xip(pg_snapshot)` (OID 5064) — the value-per-call SRF emitting
     // the snapshot's in-progress `xip[]` as `setof xid8` (its value sequence is
     // `backend-utils-adt-xid8funcs::pg_snapshot_xip`).

@@ -41,7 +41,8 @@ use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
 use types_catalog::pg_event_trigger::PgEventTriggerInsertRow;
 use types_core::primitive::{InvalidOid, Oid};
 use types_error::{
-    PgError, PgResult, ERROR, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
+    PgError, PgResult, ERROR, ERRCODE_DUPLICATE_OBJECT,
+    ERRCODE_E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT,
 };
@@ -58,8 +59,11 @@ use backend_utils_misc_guc_tables::vars;
 use backend_catalog_aclchk_seams as aclchk_seams;
 use backend_catalog_indexing_seams as indexing_seams;
 use backend_catalog_objectaccess_seams as objectaccess_seams;
+use backend_utils_adt_arrayfuncs_seams as arrayfuncs_seams;
+use backend_utils_adt_varlena_seams as varlena_seams;
 use backend_utils_cache_syscache_seams as syscache_seams;
 use backend_utils_error::ereport;
+use backend_utils_fmgr_funcapi_seams as funcapi_seams;
 
 use types_nodes::parsestmt::CommandTag;
 
@@ -395,6 +399,201 @@ pub fn event_trigger_sql_drop(parsetree: &Node) -> PgResult<()> {
     });
 
     res
+}
+
+/// `EventTriggerSQLDropAddObject(object, original, normal)` (event_trigger.c) —
+/// record a dropped object in the current `sql_drop` collection state, so
+/// `pg_event_trigger_dropped_objects` can later report it. Called from
+/// `deleteObjectsInList` (dependency.c) for every dropped object when a
+/// `sql_drop` (or `ddl_command_end`) trigger / affected-object statistics make
+/// `trackDroppedObjectsNeeded()` true.
+///
+/// No-op without an active state (`currentEventTriggerState == NULL`). The
+/// descriptive-field computation (`obtain_object_name_namespace` +
+/// `getObjectIdentityParts` + `getObjectTypeDescription`) runs in
+/// `backend-catalog-objectaddress` via the `event_trigger_describe_dropped_object`
+/// seam (where the `ObjectProperty` / identity machinery lives); this function
+/// owns only the list append, in the state's private `cmd_cxt` arena (the C
+/// `MemoryContextSwitchTo(currentEventTriggerState->cxt)`).
+pub fn event_trigger_sql_drop_add_object(
+    object: &ObjectAddress,
+    original: bool,
+    normal: bool,
+) -> PgResult<()> {
+    if !state_is_set() {
+        return Ok(());
+    }
+
+    // Assert(EventTriggerSupportsObject(object)); — the dependency.c caller
+    // already gates on this, but mirror the C contract defensively.
+    debug_assert!(event_trigger_supports_object(object));
+
+    // Compute the descriptive fields where the catalog machinery lives. This is
+    // charged to a transient scratch context (the strings are copied into owned
+    // `String`s before it is dropped); the C does this work in `state->cxt`, but
+    // since the carrier is owned (`String`s, not arena pointers) the scratch
+    // context's lifetime is irrelevant to the stored result.
+    let scratch = MemoryContext::new("EventTriggerSQLDropAddObject describe");
+    let info = backend_catalog_objectaddress_seams::event_trigger_describe_dropped_object::call(
+        scratch.mcx(),
+        object,
+    )?;
+
+    // `obtain_object_name_namespace` decided this object is not ours (a foreign
+    // temp object): record nothing (the C `pfree(obj); return;`).
+    if !info.report {
+        return Ok(());
+    }
+
+    let obj = SQLDropObject {
+        address: *object,
+        schemaname: info.schemaname,
+        objname: info.objname,
+        objidentity: info.objidentity,
+        objecttype: info.objecttype,
+        addrnames: info.addrnames,
+        addrargs: info.addrargs,
+        original,
+        normal,
+        istemp: info.istemp,
+    };
+
+    CURRENT_STATE.with(|s| {
+        let mut stack = s.borrow_mut();
+        let st = match stack.last_mut() {
+            Some(st) => st,
+            None => return Ok(()),
+        };
+        // slist_push_head(&SQLDropList, &obj->next): C prepends, so the list is
+        // in reverse-insertion order; `pg_event_trigger_dropped_objects`
+        // `slist_foreach`es it in that same head-first order. We push to the
+        // front of the Vec to match the reported order exactly.
+        st.sql_drop_list
+            .try_reserve(1)
+            .map_err(|_| st.cmd_cxt.oom(core::mem::size_of::<SQLDropObject>()))?;
+        st.sql_drop_list.insert(0, obj);
+        Ok(())
+    })
+}
+
+/// `pg_event_trigger_dropped_objects()` (event_trigger.c) — the `sql_drop`
+/// event-trigger SRF that returns one row per object the current command
+/// dropped, reading `currentEventTriggerState->SQLDropList`. Faithful PG 18.3
+/// 12-column layout: `classid`, `objid`, `objsubid`, `original`, `normal`,
+/// `is_temporary`, `object_type`, `schema_name`, `object_name`,
+/// `object_identity`, `address_names`, `address_args`.
+///
+/// `mcx` is the per-query context the C function's `CStringGetTextDatum` /
+/// `strlist_to_textarray` palloc in (the fmgr adapter passes `fcinfo->fn_mcxt`).
+pub fn pg_event_trigger_dropped_objects<'mcx>(
+    mcx: Mcx<'mcx>,
+    fcinfo: &mut types_nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
+
+    const PG_EVENT_TRIGGER_DROPPED_OBJECTS_COLS: usize = 12;
+
+    // Protect this function from being called out of context.
+    let ok = CURRENT_STATE.with(|s| {
+        s.borrow()
+            .last()
+            .map(|st| st.in_sql_drop)
+            .unwrap_or(false)
+    });
+    if !ok {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED)
+            .errmsg(
+                "pg_event_trigger_dropped_objects() can only be called in a sql_drop event trigger function"
+                    .to_string(),
+            )
+            .into_error());
+    }
+
+    // Build tuplestore to hold the result rows.
+    funcapi_seams::InitMaterializedSRF::call(fcinfo, 0)?;
+
+    // Snapshot the rows we need to report. `slist_foreach` over the C
+    // head-pushed `SQLDropList` walks it in head-first order; our `sql_drop_list`
+    // is already maintained in that same order (front insertion), so a forward
+    // iteration reproduces the C report order. We clone the descriptive fields
+    // out of the thread-local so the borrow is released before we re-enter the
+    // tuplestore append (which can `ereport`).
+    let rows: Vec<SQLDropObject> = CURRENT_STATE.with(|s| {
+        s.borrow()
+            .last()
+            .map(|st| st.sql_drop_list.clone())
+            .unwrap_or_default()
+    });
+
+    let rsinfo = fcinfo
+        .resultinfo
+        .as_mut()
+        .expect("InitMaterializedSRF establishes fcinfo->resultinfo");
+
+    for obj in &rows {
+        let mut values: [DatumV<'mcx>; PG_EVENT_TRIGGER_DROPPED_OBJECTS_COLS] =
+            core::array::from_fn(|_| DatumV::null());
+        let mut nulls = [false; PG_EVENT_TRIGGER_DROPPED_OBJECTS_COLS];
+
+        // classid / objid / objsubid
+        values[0] = DatumV::from_oid(obj.address.classId);
+        values[1] = DatumV::from_oid(obj.address.objectId);
+        values[2] = DatumV::from_i32(obj.address.objectSubId);
+        // original / normal / is_temporary
+        values[3] = DatumV::from_bool(obj.original);
+        values[4] = DatumV::from_bool(obj.normal);
+        values[5] = DatumV::from_bool(obj.istemp);
+
+        // object_type (NOT NULL: getObjectTypeDescription(false))
+        match &obj.objecttype {
+            Some(t) => values[6] = varlena_seams::cstring_to_text_v::call(mcx, t)?,
+            None => nulls[6] = true,
+        }
+        // schema_name
+        match &obj.schemaname {
+            Some(s) => values[7] = varlena_seams::cstring_to_text_v::call(mcx, s)?,
+            None => nulls[7] = true,
+        }
+        // object_name
+        match &obj.objname {
+            Some(s) => values[8] = varlena_seams::cstring_to_text_v::call(mcx, s)?,
+            None => nulls[8] = true,
+        }
+        // object_identity
+        match &obj.objidentity {
+            Some(s) => values[9] = varlena_seams::cstring_to_text_v::call(mcx, s)?,
+            None => nulls[9] = true,
+        }
+
+        // address_names / address_args (text[] columns)
+        match &obj.addrnames {
+            Some(names) => {
+                let elems: Vec<Option<&[u8]>> =
+                    names.iter().map(|s| Some(s.as_bytes())).collect();
+                values[10] =
+                    DatumV::ByRef(arrayfuncs_seams::build_text_array_nullable::call(mcx, &elems)?);
+                // addrargs ? strlist_to_textarray(addrargs)
+                //          : construct_empty_array(TEXTOID)
+                let arg_elems: Vec<Option<&[u8]>> = match &obj.addrargs {
+                    Some(args) => args.iter().map(|s| Some(s.as_bytes())).collect(),
+                    None => Vec::new(),
+                };
+                values[11] = DatumV::ByRef(
+                    arrayfuncs_seams::build_text_array_nullable::call(mcx, &arg_elems)?,
+                );
+            }
+            None => {
+                nulls[10] = true;
+                nulls[11] = true;
+            }
+        }
+
+        funcapi_seams::materialized_srf_putvalues::call(rsinfo, &values, &nulls)?;
+    }
+
+    // return (Datum) 0;
+    Ok(DatumV::null())
 }
 
 // ===========================================================================
@@ -877,6 +1076,59 @@ pub fn event_trigger_collect_simple_command_reindex(
         // copyObject into the state's private arena, wrapped as a Node.
         let copied_stmt = stmt.clone_in(st.cmd_cxt.mcx())?;
         let copied = Node::mk_reindex_stmt(st.cmd_cxt.mcx(), copied_stmt)?;
+        // SAFETY: `copied` lives in `cmd_cxt`; `command_list` is dropped before
+        // `cmd_cxt` (field order in `EventTriggerQueryState`), so the copy never
+        // outlives its arena — same invariant as the generic collector above.
+        let copied: Node<'static> =
+            unsafe { core::mem::transmute::<Node<'_>, Node<'static>>(copied) };
+
+        let command = CollectedCommand {
+            in_extension,
+            parsetree: copied,
+            address,
+            secondary_object,
+        };
+
+        st.command_list
+            .try_reserve(1)
+            .map_err(|_| st.cmd_cxt.oom(core::mem::size_of::<CollectedCommand>()))?;
+        st.command_list.push(command);
+        Ok(())
+    })
+}
+
+/// `EventTriggerCollectSimpleCommand(address, secondaryObject, (Node *) stmt)`
+/// (event_trigger.c) for an `AlterPublicationStmt` — the CREATE/ALTER PUBLICATION
+/// command-collection path (publicationcmds.c `PublicationAddTables` /
+/// `PublicationAddSchemas` / `AlterPublicationOptions`). No-op without an active
+/// collection state (the standalone / no-trigger case), matching the C early
+/// `return`. The active path takes the already-`copyObject`'d statement (the
+/// caller clones it into the planner/utility arena before handing it over),
+/// re-copies it into the state's private `cmd_cxt` arena, wraps it as a `Node`,
+/// and appends a `CollectedCommand`, exactly like the `CreateSchemaStmt` /
+/// `ReindexStmt` collectors above (an `AlterPublicationStmt` is an ordinary
+/// parse-tree node, so this path is fully modelled).
+pub fn event_trigger_collect_simple_command_publication(
+    address: ObjectAddress,
+    secondary_object: ObjectAddress,
+    stmt: types_nodes::ddlnodes::AlterPublicationStmt<'_>,
+) -> PgResult<()> {
+    if !collecting() {
+        return Ok(());
+    }
+
+    let in_extension = extension_seams::creating_extension::call();
+
+    CURRENT_STATE.with(|s| {
+        let mut stack = s.borrow_mut();
+        let st = match stack.last_mut() {
+            Some(st) => st,
+            None => return Ok(()),
+        };
+
+        // copyObject into the state's private arena, wrapped as a Node.
+        let copied_stmt = stmt.clone_in(st.cmd_cxt.mcx())?;
+        let copied = Node::mk_alter_publication_stmt(st.cmd_cxt.mcx(), copied_stmt)?;
         // SAFETY: `copied` lives in `cmd_cxt`; `command_list` is dropped before
         // `cmd_cxt` (field order in `EventTriggerQueryState`), so the copy never
         // outlives its arena — same invariant as the generic collector above.
@@ -1697,14 +1949,14 @@ pub fn init_seams() {
     });
 
     // Inward seams (callers: tcop/utility dispatch via the out-seams above; and
-    // catalog/dependency.c's drop-time `sql_drop` collection gate). Only the
-    // pure-table / cache-lookup members of this unit's seam crate land here; the
-    // catalog-heavy `EventTriggerSQLDropAddObject` body and the
-    // CREATE/ALTER/owner collection routines are the deeper sub-campaign and
-    // stay uninstalled (unreachable in standalone, where
-    // `trackDroppedObjectsNeeded` is false so the drop loop never calls them).
+    // catalog/dependency.c's drop-time `sql_drop` collection gate).
     backend_commands_event_trigger_seams::trackDroppedObjectsNeeded::set(
         track_dropped_objects_needed,
+    );
+    // catalog/dependency.c's drop loop records each dropped object here once a
+    // sql_drop / ddl_command_end trigger makes `trackDroppedObjectsNeeded` true.
+    backend_commands_event_trigger_seams::EventTriggerSQLDropAddObject::set(
+        event_trigger_sql_drop_add_object,
     );
     backend_commands_event_trigger_seams::EventTriggerSupportsObject::set(|object| {
         Ok(event_trigger_supports_object(object))
@@ -1735,6 +1987,9 @@ pub fn init_seams() {
     );
     backend_commands_event_trigger_seams::event_trigger_collect_simple_command_reindex::set(
         event_trigger_collect_simple_command_reindex,
+    );
+    backend_commands_event_trigger_seams::event_trigger_collect_simple_command_publication::set(
+        event_trigger_collect_simple_command_publication,
     );
     backend_commands_event_trigger_seams::event_trigger_table_rewrite::set(
         event_trigger_table_rewrite,

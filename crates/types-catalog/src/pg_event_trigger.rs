@@ -60,3 +60,34 @@ pub struct PgEventTriggerInsertRow {
     pub evtenabled: i8,
     pub evttags: Option<Vec<String>>,
 }
+
+/// The descriptive fields `EventTriggerSQLDropAddObject` (`event_trigger.c`)
+/// computes for a dropped object before pushing the `SQLDropObject` onto the
+/// current event-trigger state's `SQLDropList` — i.e. the result of
+/// `obtain_object_name_namespace` (schema/name + the temp-namespace filter
+/// decision), `getObjectIdentityParts` (`objidentity` + `addrnames`/`addrargs`)
+/// and `getObjectTypeDescription` (`objecttype`).
+///
+/// `pg_event_trigger_dropped_objects` later reports these. The owning crate
+/// (`backend-catalog-objectaddress`) computes this bundle natively via a seam,
+/// because that is where the `ObjectProperty` table / `get_object_identity_parts`
+/// / temp-namespace machinery lives; `event_trigger.c`'s caller only owns the
+/// `currentEventTriggerState` list it appends to.
+///
+/// `report == false` mirrors the C early `return` in `obtain_object_name_namespace`
+/// (an "any temp namespace" object that is not my own temp schema): the object
+/// must NOT be recorded at all.
+#[derive(Clone, Debug, Default)]
+pub struct SqlDropObjectInfo {
+    /// `obj->report` — whether the object should be recorded (`false` = skip).
+    pub report: bool,
+    pub schemaname: Option<String>,
+    pub objname: Option<String>,
+    pub objidentity: Option<String>,
+    pub objecttype: Option<String>,
+    /// `obj->addrnames` — `getObjectIdentityParts` qualified-name components.
+    pub addrnames: Option<Vec<String>>,
+    /// `obj->addrargs` — `getObjectIdentityParts` argument-type components.
+    pub addrargs: Option<Vec<String>>,
+    pub istemp: bool,
+}

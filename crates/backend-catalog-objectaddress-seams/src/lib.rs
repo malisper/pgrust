@@ -120,3 +120,22 @@ seam_core::seam!(
     /// description of catalog `classId`, used in error messages.
     pub fn get_object_class_descr(class_id: Oid) -> PgResult<&'static str>
 );
+
+seam_core::seam!(
+    /// The descriptive-field computation `EventTriggerSQLDropAddObject`
+    /// (`event_trigger.c`) performs for a dropped object: the
+    /// `obtain_object_name_namespace` schema/name + temp-namespace filter
+    /// (including the `NamespaceRelationId` / `AttrDefaultRelationId` /
+    /// `TriggerRelationId` / `PolicyRelationId` special cases),
+    /// `getObjectIdentityParts` and `getObjectTypeDescription`. Owned by
+    /// objectaddress because the `ObjectProperty` table and identity/type
+    /// machinery live there; `event_trigger.c`'s caller only owns the
+    /// `currentEventTriggerState->SQLDropList` it appends the result to.
+    ///
+    /// Returns `info.report == false` for an object in another backend's temp
+    /// namespace (the C early `return` that records nothing).
+    pub fn event_trigger_describe_dropped_object<'mcx>(
+        mcx: Mcx<'mcx>,
+        object: &ObjectAddress,
+    ) -> PgResult<types_catalog::pg_event_trigger::SqlDropObjectInfo>
+);
