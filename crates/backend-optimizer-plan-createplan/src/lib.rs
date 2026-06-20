@@ -3900,8 +3900,26 @@ fn prepare_sort_from_pathkeys<'mcx>(
             Some(resno) => resno,
             None => {
                 // No matching tlist item; look for a computable expression.
-                let em_id = find_computable_ec_member(root, ec_id, &[], relids, false)
-                    .ok_or_else(|| PgError::error("could not find pathkey item to sort"))?;
+                // C (createplan.c:6411) passes the input plan's targetlist
+                // exprs so find_computable_ec_member can check that every Var of
+                // a candidate EM is available from the subplan's output.
+                // Deep-copy via `clone_in` (a shallow `.clone()` panics on
+                // owned-subtree Exprs such as Aggref/SubLink).
+                let mut tlist_exprs: Vec<Expr> = Vec::new();
+                for tle in lefttree
+                    .plan_head()
+                    .targetlist
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                {
+                    if let Some(e) = tle.expr.as_deref() {
+                        tlist_exprs.push(e.clone_in(mcx)?);
+                    }
+                }
+                let em_id =
+                    find_computable_ec_member(root, ec_id, &tlist_exprs, relids, false)
+                        .ok_or_else(|| PgError::error("could not find pathkey item to sort"))?;
                 pk_datatype = root.em(em_id).em_datatype;
                 // em_expr to be copied into a resjunk targetentry.
                 let resjunk_expr = root.node(root.em(em_id).em_expr).clone();

@@ -800,9 +800,13 @@ fn byte_at(bytes: &[u8], idx: usize) -> u8 {
 
 /// Faithful subset of C `strtoul(start, &badp, 10)` over a NUL-terminated
 /// string, for the `tidin` parser: skips leading whitespace and an optional
-/// sign (tid only ever feeds non-negative coordinates, but C's strtoul accepts
-/// the same grammar), consumes decimal digits, and reports the byte offset of
-/// the first unconsumed character (`badp`). Returns `None` on the C error
+/// sign, consumes decimal digits, and reports the byte offset of the first
+/// unconsumed character (`badp`). C `strtoul` parses the magnitude as an
+/// `unsigned long` and, for a leading `-`, returns the two's-complement
+/// negation of that unsigned value (e.g. `strtoul("-1") == ULONG_MAX`); tid.c
+/// RELIES on this so that `'(-1,0)'::tid` yields `BlockNumber` 4294967295 and
+/// `'(0,-1)'::tid` overflows USHRT_MAX and is rejected. We model `unsigned long`
+/// as 64-bit (LP64, matching darwin/linux64). Returns `None` on the C error
 /// conditions tid.c checks via `errno` (no digits consumed → returns 0 with
 /// `badp == start`, which the caller's delimiter check rejects; or overflow of
 /// `unsigned long`). Returns `Some(value)` otherwise.
@@ -813,7 +817,9 @@ fn strtoul(bytes: &[u8], start: usize) -> (Option<u64>, usize) {
         i += 1;
     }
     // optional sign
+    let mut negative = false;
     if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+        negative = bytes[i] == b'-';
         i += 1;
     }
 
@@ -838,6 +844,12 @@ fn strtoul(bytes: &[u8], start: usize) -> (Option<u64>, usize) {
     if overflow {
         // C: errno == ERANGE. tid.c checks `errno` and treats it as invalid.
         return (None, i);
+    }
+
+    // C strtoul negates the unsigned magnitude in place (modular two's
+    // complement) for a leading '-'; e.g. strtoul("-1") == ULONG_MAX.
+    if negative {
+        value = value.wrapping_neg();
     }
 
     (Some(value), i)

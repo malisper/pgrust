@@ -56,6 +56,11 @@ fn type_name(tn: &PTypeName<'_>) -> PgResult<TypeName> {
         setof: tn.setof,
         pct_type: tn.pct_type,
         typemod: tn.typemod,
+        arrayBounds: tn
+            .arrayBounds
+            .iter()
+            .map(|n| (**n).as_integer().map(|i| i.ival).unwrap_or(-1))
+            .collect(),
         location: tn.location,
     })
 }

@@ -1322,8 +1322,66 @@ pub fn init_seams() {
     });
     s::MatViewIncrementalMaintenanceIsEnabled::set(MatViewIncrementalMaintenanceIsEnabled);
 
+    // The utility dispatcher (ProcessUtilitySlow) reaches ExecRefreshMatView
+    // through tcop-utility-out-seams; install the dispatch-shape adapter that
+    // downcasts the utility Node and marshals the QueryCompletion.
+    backend_tcop_utility_out_seams::exec_refresh_mat_view::set(exec_refresh_mat_view_utility);
+
     // The DR_transientrel receiver (CreateTransientRelDestReceiver +
     // transientrel_startup/receive/shutdown/destroy) is owned in-crate and
     // registered into the backend-tcop-dest value-router (see
     // CreateTransientRelDestReceiver), mirroring createas's DR_intorel.
+}
+
+/// Dispatch-shape adapter for `backend_tcop_utility_out_seams::exec_refresh_mat_view`.
+/// Mirrors createas's `exec_create_table_as_utility`: downcast the utility
+/// `Node` to its `RefreshMatViewStmt` variant, project the parse node onto the
+/// value-shaped `types_matview::RefreshMatViewStmt` that `ExecRefreshMatView`
+/// consumes, then marshal the `QueryCompletion` in/out.
+fn exec_refresh_mat_view_utility<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+    query_string: &str,
+    qc: Option<&mut types_portal::QueryCompletion>,
+) -> PgResult<ObjectAddress> {
+    let rmv = match stmt.as_refreshmatviewstmt() {
+        Some(s) => s,
+        None => panic!("exec_refresh_mat_view: utilityStmt is not a RefreshMatViewStmt"),
+    };
+    // stmt->relation is a RangeVar (never NULL in a well-formed parse).
+    let rel_node = match rmv.relation.as_deref().and_then(types_nodes::nodes::Node::as_rangevar) {
+        Some(rv) => rv,
+        None => panic!("exec_refresh_mat_view: stmt->relation is not a RangeVar"),
+    };
+    let owned = RefreshMatViewStmt {
+        concurrent: rmv.concurrent,
+        skipData: rmv.skip_data,
+        relation: types_tuple::access::RangeVar {
+            catalogname: rel_node.catalogname.as_ref().map(|s| s.as_str().to_string()),
+            schemaname: rel_node.schemaname.as_ref().map(|s| s.as_str().to_string()),
+            relname: rel_node
+                .relname
+                .as_ref()
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default(),
+            inh: rel_node.inh,
+            relpersistence: rel_node.relpersistence as u8,
+            location: rel_node.location,
+        },
+    };
+
+    // The out-seam carries the portal `QueryCompletion`; `ExecRefreshMatView`
+    // consumes the matview-crate one (same `{commandTag, nprocessed}` shape).
+    let qc_in = qc.as_deref().map(|q| QueryCompletion {
+        commandTag: types_core::cmdtag::CommandTag(q.commandTag),
+        nprocessed: q.nprocessed,
+    });
+    let (address, qc_out) = ExecRefreshMatView(mcx, &owned, query_string, qc_in)?;
+    if let (Some(slot), Some(filled)) = (qc, qc_out) {
+        *slot = types_portal::QueryCompletion {
+            commandTag: filled.commandTag.0,
+            nprocessed: filled.nprocessed,
+        };
+    }
+    Ok(address)
 }

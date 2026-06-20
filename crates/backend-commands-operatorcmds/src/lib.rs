@@ -99,6 +99,11 @@ fn to_resolver_typename(tn: &TypeName) -> types_opclass::TypeName {
         setof: tn.setof,
         pct_type: tn.pct_type,
         typemod: tn.typemod,
+        arrayBounds: tn
+            .arrayBounds
+            .iter()
+            .map(|n| n.as_integer().map(|i| i.ival).unwrap_or(-1))
+            .collect(),
         location: tn.location,
     }
 }

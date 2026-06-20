@@ -57,6 +57,12 @@ pub struct TypeName {
     pub pct_type: bool,
     /// prespecified type modifier.
     pub typemod: i32,
+    /// `List *arrayBounds` — array bounds, projected to the integer dimension
+    /// bound of each `[]`/`[n]` (`-1` for an unbounded `[]`). The resolver
+    /// (`LookupTypeName`) only inspects emptiness: a non-empty list means the
+    /// type is an array, so it returns `get_array_type(elem)` instead of the
+    /// element type. Empty = scalar type.
+    pub arrayBounds: Vec<i32>,
     /// token location, or -1 if unknown.
     pub location: i32,
 }

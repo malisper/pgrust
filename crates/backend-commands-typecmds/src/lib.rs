@@ -412,6 +412,14 @@ fn to_resolver_typename(tn: &TypeName) -> types_opclass::TypeName {
         setof: tn.setof,
         pct_type: tn.pct_type,
         typemod: tn.typemod,
+        // Project `List *arrayBounds` (Integer A_Const nodes; `-1` for an
+        // unbounded `[]`). The resolver inspects emptiness so that `int[]`
+        // resolves to the array type, not the element type.
+        arrayBounds: tn
+            .arrayBounds
+            .iter()
+            .map(|n| n.as_integer().map(|i| i.ival).unwrap_or(-1))
+            .collect(),
         location: tn.location,
     }
 }
@@ -2562,6 +2570,7 @@ fn type_name_from_namelist(names: &[String]) -> types_opclass::TypeName {
         setof: false,
         pct_type: false,
         typemod: -1,
+        arrayBounds: Vec::new(),
         location: -1,
     }
 }

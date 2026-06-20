@@ -1448,7 +1448,15 @@ fn from_opclass_typename(tn: &types_opclass::TypeName) -> TypeName {
         pct_type: tn.pct_type,
         typmods: Vec::new(),
         typemod: tn.typemod,
-        arrayBounds: Vec::new(),
+        // Rebuild the `List *arrayBounds` (Integer A_Const nodes) so
+        // LookupTypeName takes its `get_array_type` branch for array types
+        // (e.g. a domain over `int[]`). C carries the raw A_Const dims; only
+        // emptiness drives resolution, but we round-trip the integer bound.
+        arrayBounds: tn
+            .arrayBounds
+            .iter()
+            .map(|&b| Node::Integer(types_parsenodes::Integer { ival: b }))
+            .collect(),
         location: tn.location,
     }
 }

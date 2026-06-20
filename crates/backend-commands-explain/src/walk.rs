@@ -690,6 +690,40 @@ pub fn ExplainNode<'es, 'p>(
         es.str.try_push('\n')?;
     }
 
+    // T_Result: `show_upper_qual(resconstantqual, "One-Time Filter")` runs
+    // BEFORE the generic `Filter:` line (explain.c:2234). `show_upper_qual`
+    // uses `useprefix = list_length(es->rtable) > 1 || es->verbose`.
+    if plan_node.node_tag() == ntag::T_Result {
+        if let Some(rcq) = plan_node
+            .as_result()
+            .and_then(|r| r.resconstantqual.as_ref())
+            .filter(|q| !q.is_empty())
+        {
+            let exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = rcq.iter().cloned().collect();
+            let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
+            let node = Node::mk_expr(mcx, anded);
+
+            let useprefix = es.rtable_names.len() > 1 || es.verbose;
+
+            let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+            let es_pstmt = es
+                .pstmt
+                .as_deref()
+                .expect("EXPLAIN: es->pstmt must be set before deparse");
+            let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+                mcx,
+                es_pstmt,
+                &es.rtable_names,
+                &plan_owned,
+                ancestors,
+                &node,
+                useprefix,
+                false,
+            )?;
+            fmt::ExplainPropertyText("One-Time Filter", exprstr.as_str(), es)?;
+        }
+    }
+
     // The per-node detail switch (show_plan_tlist / show_*_qual / show_sort_keys
     // / instrumentation counts). `show_scan_qual(plan->qual, "Filter", ...)`:
     // deparse the (AND of the) qual conditions and emit them as a `Filter:` line.
