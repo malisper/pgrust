@@ -74,6 +74,11 @@ mod regexp_split;
 mod srf_registry;
 mod unnest;
 mod multirange_unnest;
+mod tsvector_unnest;
+mod pg_get_keywords;
+mod pg_tablespace_databases;
+mod pg_listening_channels;
+mod pg_get_multixact_members;
 mod system_srf;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
 
@@ -152,6 +157,28 @@ pub fn init_seams() {
     // serialization core is
     // `backend-utils-adt-multirangetypes::operators::multirange_unnest_images`).
     multirange_unnest::register_multirange_unnest();
+    // `tsvector_unnest(tsvector)` (OID 3322) — the materialize-mode SRF behind
+    // `unnest(tsvector)`, emitting one `(lexeme text, positions int2[], weights
+    // "char"[])` row per WordEntry (its decode core is
+    // `backend-utils-adt-tsvector-core::op::tsvector_unnest`).
+    tsvector_unnest::register_tsvector_unnest();
+    // `pg_get_keywords()` (OID 1686) — the materialize-mode SRF emitting one
+    // `(word text, catcode "char", barelabel bool, catdesc text, baredesc text)`
+    // row per grammar keyword (its render core is
+    // `backend-utils-adt-misc::pg_get_keywords`).
+    pg_get_keywords::register_pg_get_keywords();
+    // `pg_tablespace_databases(oid)` (OID 2556) — the materialize-mode SRF
+    // emitting one `oid` per database directory under a tablespace (its
+    // directory-scan core is `backend-utils-adt-misc::pg_tablespace_databases`).
+    pg_tablespace_databases::register_pg_tablespace_databases();
+    // `pg_listening_channels()` (OID 3035) — the materialize-mode SRF emitting one
+    // `text` per LISTENed channel (its collector core is
+    // `backend-commands-async::pg_listening_channels_rows`).
+    pg_listening_channels::register_pg_listening_channels();
+    // `pg_get_multixact_members(xid)` (OID 3819) — the materialize-mode SRF
+    // emitting one `(xid, mode text)` per MultiXact member (its resolver core is
+    // `backend-access-transam-multixact::pg_get_multixact_members`).
+    pg_get_multixact_members::register_pg_get_multixact_members();
     // `pg_options_to_table(text[])` (OID 2289) and `pg_prepared_statement()` (OID
     // 2510) — the materialize-mode system SRFs whose `(mcx, fcinfo)` bodies drive
     // `InitMaterializedSRF`/`materialized_srf_putvalues` themselves (cores in

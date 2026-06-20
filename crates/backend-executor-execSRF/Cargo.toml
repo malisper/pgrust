@@ -71,8 +71,9 @@ types-numeric = { path = "../types-numeric" }
 backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
 
 # unnest(tsvector) (OID 3322): the (lexeme, positions, weights) row materializer
-# (tsvector_unnest).
+# (tsvector_unnest), and its int2[] / text[] (`"char"[]`) array constructors.
 backend-utils-adt-tsvector-core = { path = "../backend-utils-adt-tsvector-core" }
+backend-utils-adt-array-more-seams = { path = "../backend-utils-adt-array-more-seams" }
 
 # json_array_elements / json_array_elements_text / json_object_keys (OIDs
 # 3955/3969/3957): the json (text) SAX-callback collection cores (elements_worker
@@ -82,6 +83,14 @@ backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
 # unnest(anymultirange) (OID 1293): the member-range materializer
 # (multirange_unnest_images) over multirange_get_typcache + multirange_get_range.
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
+
+# pg_get_multixact_members(xid) (OID 3819): the (xid, mode) member resolver
+# (GetMultiXactIdMembers + mxstatus_to_string).
+backend-access-transam-multixact = { path = "../backend-access-transam-multixact" }
+
+# pg_listening_channels() (OID 3035): the listenChannels collector
+# (pg_listening_channels_rows).
+backend-commands-async = { path = "../backend-commands-async" }
 
 # pg_options_to_table(text[]) (OID 2289): the (option_name, option_value)
 # materialize-mode SRF body (untransformRelOptions + materialized_srf_putvalues).
