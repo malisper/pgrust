@@ -2196,7 +2196,7 @@ fn set_scan_node_refs<'mcx>(
                     if let Some(e) = funcexpr {
                         let fixed = fix_scan_expr(mcx, root, e, rtoffset, 1.0)?;
                         functions[f].funcexpr =
-                            Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, fixed))?);
+                            Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, fixed)?)?);
                     }
                 }
             }
@@ -2550,7 +2550,7 @@ fn fix_join_expr_nodelist<'mcx>(
     for n in list {
         let e = node_into_expr(n)?;
         let fixed = fix_join_expr_mutator(mcx, root, e, ctx)?;
-        out.push(Node::mk_expr(mcx, fixed));
+        out.push(Node::mk_expr(mcx, fixed)?);
     }
     Ok(Some(out))
 }
@@ -2570,7 +2570,7 @@ fn fix_upper_nodelist<'mcx>(
     for n in list {
         let e = node_into_expr(n)?;
         let fixed = fix_upper_expr(mcx, root, e, ctx)?;
-        out.push(Node::mk_expr(mcx, fixed));
+        out.push(Node::mk_expr(mcx, fixed)?);
     }
     Ok(Some(out))
 }
@@ -2923,7 +2923,7 @@ fn set_subqueryscan_references<'mcx>(
         // otherwise have done on it (no set_upper_references — a SubqueryScan is
         // created with correct references to its subplan's outputs already).
         fix_scan_common(root, &mut sqs.scan, rtoffset, mcx)?;
-        Ok(Node::mk_subquery_scan(mcx, sqs))
+        Ok(Node::mk_subquery_scan(mcx, sqs)?)
     }
 }
 
@@ -3581,7 +3581,7 @@ fn extract_query_dependencies_value<'mcx>(
     for query in query_list.iter() {
         // Wrap the borrowed Query as the `Node::Query` the walker expects. The
         // walker only reads it, so a clone of the owned value tree is faithful.
-        let node = Node::mk_query(_mcx, query.clone_in(_mcx)?);
+        let node = Node::mk_query(_mcx, query.clone_in(_mcx)?)?;
         if extract_query_dependencies_walker(&node, &mut ctx)? {
             break;
         }
@@ -3614,7 +3614,7 @@ pub fn extract_expr_dependencies_value<'mcx>(
     };
     // (void) extract_query_dependencies_walker(result, &root); — `result` is a
     // bare Expr, wrapped as the `Node::Expr` the walker dispatches on.
-    let node = Node::mk_expr(_mcx, expr.clone());
+    let node = Node::mk_expr(_mcx, expr.clone())?;
     extract_query_dependencies_walker(&node, &mut ctx)?;
     Ok(ext::QueryDependenciesValue {
         relation_oids: ctx.relation_oids,

@@ -327,7 +327,7 @@ fn extractRemainingColumns<'mcx>(
                     pstate,
                     &src_nscolumns[(attnum - 1) as usize],
                 )?),
-            ));
+            )?);
             /* Copy the input relation's nscolumn data for this column */
             res_nscolumns.push(src_nscolumns[(attnum - 1) as usize]);
             colcount += 1;
@@ -369,13 +369,13 @@ fn transformJoinUsingClause<'mcx>(
         let e = make_a_expr(
             A_Expr_Kind::AEXPR_OP,
             name,
-            Some(alloc_in(mcx, Node::mk_var(mcx, lvar.clone()))?),
-            Some(alloc_in(mcx, Node::mk_var(mcx, rvar.clone()))?),
+            Some(alloc_in(mcx, Node::mk_var(mcx, lvar.clone())?)?),
+            Some(alloc_in(mcx, Node::mk_var(mcx, rvar.clone())?)?),
             -1,
         );
 
         /* Prepare to combine into an AND clause, if multiple join columns */
-        andargs.push(Node::mk_a_expr(mcx, e));
+        andargs.push(Node::mk_a_expr(mcx, e)?);
     }
 
     /* Only need an AND if there's more than one join column */
@@ -394,7 +394,7 @@ fn transformJoinUsingClause<'mcx>(
             boolop: AND_EXPR,
             args,
             location: -1,
-        })
+        })?
     };
 
     /*
@@ -617,7 +617,7 @@ fn transformRangeFunction<'mcx>(
                         COERCE_EXPLICIT_CALL,
                         fc.location,
                     )?;
-                    let newfc_node = Node::mk_func_call(mcx, newfc);
+                    let newfc_node = Node::mk_func_call(mcx, newfc)?;
 
                     let newfexpr = transformExpr(
                         pstate,
@@ -625,7 +625,7 @@ fn transformRangeFunction<'mcx>(
                         ParseExprKind::EXPR_KIND_FROM_FUNCTION,
                     )?
                     .ok_or_else(|| elog_error("transformRangeFunction: transformExpr returned NULL"))?;
-                    let newfexpr_node = Node::mk_expr(mcx, newfexpr);
+                    let newfexpr_node = Node::mk_expr(mcx, newfexpr)?;
 
                     /* nodeFunctionscan.c requires SRFs to be at top level */
                     check_srf_top_level(pstate, last_srf.as_ref(), &newfexpr_node)?;
@@ -654,7 +654,7 @@ fn transformRangeFunction<'mcx>(
             ParseExprKind::EXPR_KIND_FROM_FUNCTION,
         )?
         .ok_or_else(|| elog_error("transformRangeFunction: transformExpr returned NULL"))?;
-        let newfexpr_node = Node::mk_expr(mcx, newfexpr);
+        let newfexpr_node = Node::mk_expr(mcx, newfexpr)?;
 
         /* nodeFunctionscan.c requires SRFs to be at top level */
         check_srf_top_level(pstate, last_srf.as_ref(), &newfexpr_node)?;
@@ -952,7 +952,7 @@ fn transformFromClauseItem<'mcx>(
 
             let rtindex = nsitem.p_rtindex;
             let namespace = alloc::vec![nsitem];
-            let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex });
+            let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex })?;
             Ok((rtr, namespace))
         }
         ntag::T_RangeSubselect => {
@@ -961,7 +961,7 @@ fn transformFromClauseItem<'mcx>(
             let nsitem = transformRangeSubselect(mcx, pstate, rs)?;
             let rtindex = nsitem.p_rtindex;
             let namespace = alloc::vec![nsitem];
-            let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex });
+            let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex })?;
             Ok((rtr, namespace))
         }
         ntag::T_RangeFunction => {
@@ -970,7 +970,7 @@ fn transformFromClauseItem<'mcx>(
             let nsitem = transformRangeFunction(mcx, pstate, rf)?;
             let rtindex = nsitem.p_rtindex;
             let namespace = alloc::vec![nsitem];
-            let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex });
+            let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex })?;
             Ok((rtr, namespace))
         }
         /*
@@ -1020,7 +1020,7 @@ fn transformFromClauseItem<'mcx>(
             /* Transform TABLESAMPLE details and attach to the RTE */
             let tablesample = transformRangeTableSample(mcx, pstate, rts)?;
             pstate.p_rtable[(top_rtindex - 1) as usize].tablesample =
-                Some(alloc_in(mcx, Node::mk_table_sample_clause(mcx, tablesample))?);
+                Some(alloc_in(mcx, Node::mk_table_sample_clause(mcx, tablesample)?)?);
 
             Ok((rel, namespace))
         }
@@ -1250,7 +1250,7 @@ fn transform_from_clause_item_join<'mcx>(
 
         /* Construct the generated JOIN ON clause */
         let quals = transformJoinUsingClause(mcx, pstate, &l_usingvars, &r_usingvars)?;
-        j.quals = Some(alloc_in(mcx, Node::mk_expr(mcx, quals))?);
+        j.quals = Some(alloc_in(mcx, Node::mk_expr(mcx, quals)?)?);
     } else if j.quals.is_some() {
         /* User-written ON-condition; transform it */
         let quals_node = j
@@ -1259,7 +1259,7 @@ fn transform_from_clause_item_join<'mcx>(
             .unwrap()
             .clone_in(mcx)?;
         let quals = transformJoinOnClause(mcx, pstate, quals_node, &mut my_namespace)?;
-        j.quals = Some(alloc_in(mcx, Node::mk_expr(mcx, quals))?);
+        j.quals = Some(alloc_in(mcx, Node::mk_expr(mcx, quals)?)?);
     } else {
         /* CROSS JOIN: no quals */
     }
@@ -1468,7 +1468,7 @@ fn transform_from_clause_item_join<'mcx>(
 
     /* C: *top_nsitem = nsitem; *namespace = lappend(my_namespace, nsitem). */
     my_namespace.push(nsitem);
-    Ok((Node::mk_join_expr(mcx, j), my_namespace))
+    Ok((Node::mk_join_expr(mcx, j)?, my_namespace))
 }
 
 // ===========================================================================
@@ -1641,7 +1641,7 @@ fn buildMergedJoinVar<'mcx>(
      */
     assign_expr_collations(Some(pstate), &mut res_node)?;
 
-    Ok((Node::mk_expr(mcx, res_node), which))
+    Ok((Node::mk_expr(mcx, res_node)?, which))
 }
 
 // ===========================================================================
@@ -1749,7 +1749,7 @@ fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
         mcx,
         Node::mk_string(mcx, types_nodes::value::StringNode {
             sval: mcx::PgString::from_str_in(s, mcx)?,
-        }),
+        })?,
     )
 }
 
@@ -2043,7 +2043,7 @@ fn store_back_funcexprs<'mcx>(
 ) -> PgResult<()> {
     debug_assert_eq!(funcexprs.len(), exprs.len());
     for (slot, e) in funcexprs.iter_mut().zip(exprs.into_iter()) {
-        *slot = alloc_in(mcx, Node::mk_expr(mcx, e))?;
+        *slot = alloc_in(mcx, Node::mk_expr(mcx, e)?)?;
     }
     Ok(())
 }
@@ -2058,6 +2058,6 @@ fn funcexprs_as_list_node<'mcx>(
     for n in funcexprs.iter() {
         v.push(alloc_in(mcx, (**n).clone_in(mcx)?)?);
     }
-    Ok(Node::mk_list(mcx, v))
+    Ok(Node::mk_list(mcx, v)?)
 }
 

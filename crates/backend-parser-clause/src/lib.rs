@@ -137,7 +137,7 @@ fn tle_expr_node<'mcx>(mcx: mcx::Mcx<'mcx>, tle: &TargetEntry<'mcx>) -> PgResult
         .as_deref()
         .cloned()
         .expect("TargetEntry.expr must be present");
-    Ok(Node::mk_expr(mcx, expr))
+    Ok(Node::mk_expr(mcx, expr)?)
 }
 
 /// `tle->expr` as a borrowed [`Expr`] for `exprType`/`equal`/`strip_*`.
@@ -234,7 +234,7 @@ pub(crate) fn checkExprIsVarFree<'mcx>(
     constructName: &str,
 ) -> PgResult<()> {
     let mcx: Mcx<'mcx> = *pstate.p_rtable.allocator();
-    let node = Node::mk_expr(mcx, n.clone());
+    let node = Node::mk_expr(mcx, n.clone())?;
     if contain_vars_of_level(&node, 0) {
         let location = locate_var_of_level(&node, 0);
         return Err(ereport(ERROR)
@@ -547,7 +547,7 @@ fn flatten_grouping_sets<'mcx>(
                     nodes_into_pgvec(mcx, result_set)?,
                     gset.location,
                 );
-                return Ok(Flattened::One(alloc_in(mcx, Node::mk_grouping_set(mcx, gs))?));
+                return Ok(Flattened::One(alloc_in(mcx, Node::mk_grouping_set(mcx, gs)?)?));
             } else {
                 return Ok(Flattened::Many(result_set));
             }
@@ -604,7 +604,7 @@ fn flattened_to_node<'mcx>(
              * a single `T_List` cell, which transformGroupingSet later reaches
              * via `IsA(n, List)`.
              */
-            Ok(alloc_in(mcx, Node::mk_list(mcx, nodes_into_pgvec(mcx, nodes)?))?)
+            Ok(alloc_in(mcx, Node::mk_list(mcx, nodes_into_pgvec(mcx, nodes)?)?)?)
         }
     }
 }
@@ -763,7 +763,7 @@ fn transformGroupingSet<'mcx>(
                     refs_to_int_pgvec(mcx, &l)?,
                     loc,
                 );
-                content.push(alloc_in(mcx, Node::mk_grouping_set(mcx, gs))?);
+                content.push(alloc_in(mcx, Node::mk_grouping_set(mcx, gs)?)?);
             }
             ntag::T_GroupingSet => {
                 let gset2 = n.expect_groupingset();
@@ -792,7 +792,7 @@ fn transformGroupingSet<'mcx>(
                     refs_to_int_pgvec(mcx, &[ref_])?,
                     loc,
                 );
-                content.push(alloc_in(mcx, Node::mk_grouping_set(mcx, gs))?);
+                content.push(alloc_in(mcx, Node::mk_grouping_set(mcx, gs)?)?);
             }
         }
     }
@@ -807,7 +807,7 @@ fn transformGroupingSet<'mcx>(
     }
 
     let gs = make_grouping_set(gset.kind, nodes_into_pgvec(mcx, content)?, gset.location);
-    Ok(Node::mk_grouping_set(mcx, gs))
+    Ok(Node::mk_grouping_set(mcx, gs)?)
 }
 
 /// `transformGroupClause(...)` — parse_clause.c:2631
@@ -846,7 +846,7 @@ pub fn transformGroupClause<'mcx>(
     if flat_grouplist.is_empty() && hasGroupingSets {
         let loc = list_exprLocation(grouplist)?;
         let gs = make_grouping_set(GroupingSetKind::GROUPING_SET_EMPTY, empty_pgvec(mcx)?, loc);
-        flat_grouplist.push(alloc_in(mcx, Node::mk_grouping_set(mcx, gs))?);
+        flat_grouplist.push(alloc_in(mcx, Node::mk_grouping_set(mcx, gs)?)?);
     }
 
     for gexpr in flat_grouplist.iter() {
@@ -892,7 +892,7 @@ pub fn transformGroupClause<'mcx>(
                         refs_to_int_pgvec(mcx, &[ref_])?,
                         loc,
                     );
-                    gsets.push(alloc_in(mcx, Node::mk_grouping_set(mcx, gs))?);
+                    gsets.push(alloc_in(mcx, Node::mk_grouping_set(mcx, gs)?)?);
                 }
             }
         }
@@ -1446,7 +1446,7 @@ fn refs_to_int_pgvec<'mcx>(
 ) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>> {
     let mut v = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, refs.len())?;
     for &r in refs.iter() {
-        let cell = alloc_in(mcx, Node::mk_integer(mcx, Integer { ival: r as i32 }))?;
+        let cell = alloc_in(mcx, Node::mk_integer(mcx, Integer { ival: r as i32 })?)?;
         v.try_reserve(1).map_err(|_| mcx.oom(0))?;
         v.push(cell);
     }

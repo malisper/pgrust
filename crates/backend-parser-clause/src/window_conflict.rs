@@ -485,7 +485,7 @@ fn transformFrameOffset<'mcx>(
     /* Disallow variables in frame offsets */
     crate::checkExprIsVarFree(pstate, &node, constructName)?;
 
-    Ok((Some(Node::mk_expr(mcx, node)), inRangeFunc))
+    Ok((Some(Node::mk_expr(mcx, node)?), inRangeFunc))
 }
 
 // ===========================================================================
@@ -546,14 +546,14 @@ fn resolve_unique_index_expr<'mcx>(
                     mcx,
                     Node::mk_string(mcx, StringNode {
                         sval: PgString::from_str_in(name, mcx)?,
-                    }),
+                    })?,
                 )?;
                 fields.try_reserve(1).map_err(|_| mcx.oom(0))?;
                 fields.push(field);
                 Node::mk_column_ref(mcx, ColumnRef {
                     fields,
                     location: infer.location,
-                })
+                })?
             }
             Some(expr) => expr.clone_in(mcx)?,
         };
@@ -756,7 +756,7 @@ fn sortgroupclauses_to_node_vec<'mcx>(
 ) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>> {
     let mut v = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, clauses.len())?;
     for cl in clauses.iter() {
-        let cell = alloc_in(mcx, Node::mk_sort_group_clause(mcx, *cl))?;
+        let cell = alloc_in(mcx, Node::mk_sort_group_clause(mcx, *cl)?)?;
         v.try_reserve(1).map_err(|_| mcx.oom(0))?;
         v.push(cell);
     }
