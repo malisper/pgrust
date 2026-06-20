@@ -32,6 +32,30 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `index_insert(indexRelation, values, isnull, heap_t_ctid, heapRelation,
+    /// checkUnique, indexUnchanged, indexInfo)` (indexam.c): insert one index
+    /// tuple, dispatching to the index AM's `aminsert`. Returns the `aminsert`
+    /// boolean. The `IndexInfoCarrier` carries the live executor
+    /// `IndexInfo<'mcx>` for the AM. Reached cross-crate (the heap AM's
+    /// `index_validate_scan` inserts missing entries during CREATE INDEX
+    /// CONCURRENTLY's validation phase); owned by
+    /// `backend-access-index-indexam`, which installs it from `init_seams()`.
+    /// `Err` carries the AM's `ereport(ERROR)` (incl. unique violation) surface.
+    #[allow(clippy::type_complexity)]
+    pub fn index_insert<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        index_relation: &types_rel::Relation<'mcx>,
+        values: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+        isnull: &[bool],
+        heap_t_ctid: &types_tuple::heaptuple::ItemPointerData,
+        heap_relation: &types_rel::Relation<'mcx>,
+        check_unique: types_tableam::amapi::IndexUniqueCheck,
+        index_unchanged: bool,
+        index_info: &mut types_tableam::index_info_carrier::IndexInfoCarrier<'_, 'mcx>,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     /// `index_getprocinfo(irel, attnum, procnum)` (indexam.c): the cached fmgr
     /// lookup info for a support procedure (only the default functions are
     /// cached). The relcache owner holds + lazily initializes the

@@ -541,3 +541,76 @@ seam_core::seam!(
     /// `pg_atomic_read_u32(VacuumSharedCostBalance)`.
     pub fn vacuum_shared_cost_balance_read() -> PgResult<u32>
 );
+
+// =======================================================================
+// Generic IndexBulkDeleteCallback registry (C: the `(callback, callback_state)`
+// pair handed to `index_bulk_delete`).
+//
+// In C, `index_bulk_delete(info, stats, callback, callback_state)` takes an
+// `IndexBulkDeleteCallback callback` (a function pointer) plus its opaque
+// `void *callback_state`; each index AM's `ambulkdelete` invokes
+// `callback(&heaptid, callback_state)` for every index entry, treating the
+// `bool` result as "this entry should be deleted". VACUUM passes a
+// dead-membership test; `validate_index` passes a TID *collector* that always
+// returns false (it abuses the bulkdelete scan to gather every index TID).
+//
+// The owned-model `ambulkdelete` carries the callback as a `u64` handle (the
+// inward `vacuum_tid_is_dead` seam). To support both the VACUUM dead-test and
+// the `validate_index` collector behind that single handle, this registry maps
+// a handle to a live `FnMut(ItemPointerData) -> bool` closure. Registrants
+// (VACUUM's TidStore test; `validate_index`'s collector) `register` a closure
+// and the `vacuum_tid_is_dead` seam body resolves+invokes it. Backend-local
+// (the C callback state is backend-local for the duration of one bulkdelete),
+// modeled as a `thread_local` keyed by a monotonically-increasing handle.
+// =======================================================================
+pub mod bulk_delete_callback {
+    use super::ItemPointerData;
+    use core::cell::RefCell;
+    extern crate alloc;
+    use alloc::boxed::Box;
+    use alloc::collections::BTreeMap;
+
+    type Cb = Box<dyn FnMut(ItemPointerData) -> bool>;
+
+    thread_local! {
+        static REG: RefCell<BTreeMap<u64, Cb>> = RefCell::new(BTreeMap::new());
+        static NEXT: RefCell<u64> = const { RefCell::new(1) };
+    }
+
+    /// Register a bulk-delete callback closure; returns its handle (the
+    /// `callback_state` token threaded through `index_bulk_delete`).
+    pub fn register(cb: Cb) -> u64 {
+        let key = NEXT.with(|n| {
+            let mut n = n.borrow_mut();
+            // Reserve a high bit so these handles never collide with the
+            // VACUUM TidStore ids (which are small `ts.id`s).
+            let k = *n | (1u64 << 62);
+            *n += 1;
+            k
+        });
+        REG.with(|r| r.borrow_mut().insert(key, cb));
+        key
+    }
+
+    /// Invoke the registered closure for `handle` (mutating its state), or
+    /// return `None` if no closure is registered under that handle (the caller
+    /// then falls back to the VACUUM TidStore path).
+    pub fn invoke(handle: u64, tid: ItemPointerData) -> Option<bool> {
+        REG.with(|r| {
+            let mut reg = r.borrow_mut();
+            reg.get_mut(&handle).map(|cb| cb(tid))
+        })
+    }
+
+    /// Drop the closure registered under `handle` (end of the bulkdelete scan).
+    pub fn unregister(handle: u64) {
+        REG.with(|r| {
+            r.borrow_mut().remove(&handle);
+        });
+    }
+
+    /// Is `handle` one of our generic-closure handles (vs a VACUUM TidStore id)?
+    pub fn is_closure_handle(handle: u64) -> bool {
+        (handle & (1u64 << 62)) != 0
+    }
+}

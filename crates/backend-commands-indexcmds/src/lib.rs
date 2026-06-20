@@ -91,7 +91,14 @@ use backend_commands_tablecmds_seams as tablecmds_seam;
 use backend_access_heap_vacuumlazy_seams as namespacename_seam;
 use backend_access_table_table_seams as table_seam;
 use backend_catalog_namespace_seams as namespace_seam;
+use backend_storage_lmgr_lmgr_seams as lmgr_seam;
+use backend_storage_lmgr_lock_seams as lock_seam;
+use backend_storage_lmgr_proc_seams as proc_seam;
+use backend_storage_ipc_procarray_seams as procarray_seam;
+use backend_utils_time_snapmgr_seams as snapmgr_seam;
 use backend_access_transam_xact_seams as xact_seam;
+use backend_utils_cache_inval_seams as inval_seam;
+use backend_utils_cache_relcache_seams as relcache_seam;
 
 use types_acl::acl::{ACL_CREATE, ACLCHECK_OK};
 use types_nodes::parsenodes::{OBJECT_SCHEMA, OBJECT_TABLESPACE};
@@ -145,6 +152,16 @@ const PROGRESS_CREATEIDX_ACCESS_METHOD_OID: i32 = 8;
 const PROGRESS_CREATEIDX_PARTITIONS_DONE: i32 = 14;
 const PROGRESS_CREATEIDX_COMMAND_CREATE: i64 = 1;
 const PROGRESS_CREATEIDX_COMMAND_CREATE_CONCURRENTLY: i64 = 2;
+/// `PROGRESS_CREATEIDX_PHASE` — AM-agnostic phase number param index.
+const PROGRESS_CREATEIDX_PHASE: i32 = 9;
+/// Phases of CREATE INDEX advertised via `PROGRESS_CREATEIDX_PHASE`.
+const PROGRESS_CREATEIDX_PHASE_WAIT_1: i64 = 1;
+const PROGRESS_CREATEIDX_PHASE_WAIT_2: i64 = 3;
+const PROGRESS_CREATEIDX_PHASE_WAIT_3: i64 = 7;
+/// `PROGRESS_WAITFOR_*` — the WaitForLockers/WaitForOlderSnapshots params.
+const PROGRESS_WAITFOR_TOTAL: i32 = 3;
+const PROGRESS_WAITFOR_DONE: i32 = 4;
+const PROGRESS_WAITFOR_CURRENT_PID: i32 = 5;
 
 /// `SECURITY_RESTRICTED_OPERATION` (`miscadmin.h`).
 const SECURITY_RESTRICTED_OPERATION: i32 = 1 << 1;
@@ -205,9 +222,9 @@ pub fn CheckPredicate(mcx: Mcx<'_>, predicate: Expr) -> PgResult<()> {
 /// check_not_in_use, skip_build, quiet)`.
 ///
 /// Ported for the non-concurrent, non-partitioned core (the high-value CREATE
-/// INDEX command path). The CONCURRENTLY tail and the partitioned-table
-/// recursion are precise seam-panics — see the module docs and
-/// [`define_index_concurrent_tail`] / [`define_index_partition_recursion`].
+/// INDEX command path) plus the CREATE INDEX CONCURRENTLY multi-transaction
+/// build/validate tail. The partitioned-table recursion is a precise
+/// seam-panic — see the module docs and [`define_index_partition_recursion`].
 ///
 /// Returns the [`ObjectAddress`] of the created index.
 pub fn DefineIndex<'mcx>(
@@ -761,9 +778,225 @@ pub fn DefineIndex<'mcx>(
         return Ok(address);
     }
 
-    // CONCURRENTLY build/validate state machine. DEFERRED.
+    // ---------------------------------------------------------------------
+    // CONCURRENTLY build/validate state machine (indexcmds.c:1619-1829).
+    // ---------------------------------------------------------------------
+
+    // Save lockrelid and locktag for below, then close rel (keep the lock).
+    let heaprelid = relcache_seam::rel_lock_relid::call(rel.rd_id)?;
+    let heaplocktag = lmgr_seam::set_locktag_relation::call(heaprelid.dbId, heaprelid.relId);
     owner_table_close(rel, types_storage::lock::NoLock)?;
-    Err(define_index_concurrent_tail())
+
+    // For a concurrent build, we must make the catalog entries visible to other
+    // transactions before we start to build the index (the new index is marked
+    // not indisready / not indisvalid, so no one inserts into it or uses it for
+    // queries). Commit our current transaction so the index becomes visible;
+    // then start another. Before committing, take a session-level lock on the
+    // table so neither it nor the index can be dropped before we finish (cannot
+    // block — we already hold the same lock within our transaction).
+    lmgr_seam::lock_relation_id_for_session::call(heaprelid, ShareUpdateExclusiveLock_v())?;
+
+    snapmgr_seam::pop_active_snapshot::call()?;
+    xact_seam::commit_transaction_command::call()?;
+    xact_seam::start_transaction_command::call()?;
+
+    // Tell concurrent index builds to ignore us, if index qualifies.
+    if safe_index {
+        proc_seam::set_indexsafe_procflags::call()?;
+    }
+
+    // The index is now visible, so we can report the OID; include the report for
+    // the beginning of phase 2.
+    pgstat_progress_update_param(PROGRESS_CREATEIDX_INDEX_OID as i32, index_relation_id as i64);
+    pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE, PROGRESS_CREATEIDX_PHASE_WAIT_1);
+
+    // Phase 2: wait until no running transaction could have the table open with
+    // the old list of indexes. ShareLock considers transactions holding locks
+    // that permit writing to the table. (Real lock acquisition, not a sleep, so
+    // deadlocks are detected.)
+    lmgr_seam::wait_for_lockers::call(heaplocktag, ShareLock_v(), true)?;
+
+    // Set ActiveSnapshot since functions in the indexes may need it.
+    snapmgr_seam::push_active_snapshot::call(alloc::rc::Rc::new(
+        snapmgr_seam::get_transaction_snapshot::call()?,
+    ))?;
+
+    // Perform concurrent build of the index (first pass).
+    backend_catalog_index::index_concurrently_build(mcx, table_id, index_relation_id)?;
+
+    // We can do away with our snapshot.
+    snapmgr_seam::pop_active_snapshot::call()?;
+
+    // Commit this transaction to make the indisready update visible.
+    xact_seam::commit_transaction_command::call()?;
+    xact_seam::start_transaction_command::call()?;
+
+    if safe_index {
+        proc_seam::set_indexsafe_procflags::call()?;
+    }
+
+    // Phase 3: once again wait until no transaction can have the table open with
+    // the index marked read-only for updates.
+    pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE, PROGRESS_CREATEIDX_PHASE_WAIT_2);
+    lmgr_seam::wait_for_lockers::call(heaplocktag, ShareLock_v(), true)?;
+
+    // Take the "reference snapshot" validate_index() uses to filter candidate
+    // tuples; also set ActiveSnapshot to it (functions in indexes may need one).
+    let snapshot = snapmgr_seam::register_snapshot::call(
+        snapmgr_seam::get_transaction_snapshot::call()?,
+    )?;
+    snapmgr_seam::push_active_snapshot::call(alloc::rc::Rc::new(snapshot.clone()))?;
+
+    // Scan the index and the heap, insert any missing index entries (2nd pass).
+    backend_catalog_index::validate_index(mcx, table_id, index_relation_id, Some(snapshot.clone()))?;
+
+    // Drop the reference snapshot. We must do this before waiting out other
+    // snapshot holders, else we deadlock against other CREATE INDEX CONCURRENTLY
+    // processes (which would see our snapshot as one they must wait for). But
+    // first, save the snapshot's xmin to use as limitXmin for the wait.
+    let limit_xmin = snapshot.xmin;
+
+    snapmgr_seam::pop_active_snapshot::call()?;
+    snapmgr_seam::unregister_snapshot::call(snapshot);
+
+    // The snapshot subsystem could still hold registered snapshots that pin our
+    // advertised xmin (serializable xact snapshot; the CatalogSnapshot). To
+    // avoid deadlocks, commit + start yet another transaction and do our wait
+    // before any snapshot has been taken in it.
+    xact_seam::commit_transaction_command::call()?;
+    xact_seam::start_transaction_command::call()?;
+
+    if safe_index {
+        proc_seam::set_indexsafe_procflags::call()?;
+    }
+
+    // The index is now valid in the sense that it contains all currently
+    // interesting tuples; but it might not contain tuples deleted just before
+    // the reference snap was taken, so wait out any transactions that might have
+    // older snapshots.
+    pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE, PROGRESS_CREATEIDX_PHASE_WAIT_3);
+    WaitForOlderSnapshots(mcx, limit_xmin, true)?;
+
+    // Updating pg_index might involve TOAST access, so ensure a valid snapshot.
+    snapmgr_seam::push_active_snapshot::call(alloc::rc::Rc::new(
+        snapmgr_seam::get_transaction_snapshot::call()?,
+    ))?;
+
+    // Index can now be marked valid -- update its pg_index entry.
+    backend_catalog_index::index_set_state_flags(
+        mcx,
+        index_relation_id,
+        backend_catalog_index_seams::IndexStateFlagsAction::SetValid,
+    )?;
+
+    snapmgr_seam::pop_active_snapshot::call()?;
+
+    // The pg_index update causes backends (including us) to refresh the index's
+    // relcache entry; also send a relcache inval on the parent table to force
+    // replanning of cached plans, so existing sessions can use the new index.
+    inval_seam::cache_invalidate_relcache::call(heaprelid.relId)?;
+
+    // Release the session-level lock on the parent table.
+    lmgr_seam::unlock_relation_id_for_session::call(heaprelid, ShareUpdateExclusiveLock_v())?;
+
+    pgstat_progress_end_command();
+
+    Ok(address)
+}
+
+/// `ShareUpdateExclusiveLock` (`storage/lockdefs.h`).
+fn ShareUpdateExclusiveLock_v() -> types_storage::lock::LOCKMODE {
+    4
+}
+
+/// `ShareLock` (`storage/lockdefs.h`).
+fn ShareLock_v() -> types_storage::lock::LOCKMODE {
+    5
+}
+
+/// `WaitForOlderSnapshots(limitXmin, progress)` (commands/indexcmds.c) — wait
+/// for transactions that might have an older snapshot than `limitXmin`, used at
+/// the end of a concurrent index build. Obtain the VXIDs of such transactions
+/// (excluding autovacuum / VACUUM / safe-IC backends, and other DBs) and wait
+/// for each individually, rechecking the live set each iteration so a backend
+/// that goes idle-in-transaction with xmin 0 stops being waited on.
+///
+/// In single-backend mode `GetCurrentVirtualXIDs` reports no other backends, so
+/// this returns immediately.
+pub fn WaitForOlderSnapshots<'mcx>(
+    mcx: Mcx<'mcx>,
+    limit_xmin: types_core::TransactionId,
+    progress: bool,
+) -> PgResult<()> {
+    use types_storage::storage::{PROC_IN_SAFE_IC, PROC_IN_VACUUM, PROC_IS_AUTOVACUUM};
+
+    let exclude_vacuum = (PROC_IS_AUTOVACUUM | PROC_IN_VACUUM | PROC_IN_SAFE_IC) as i32;
+
+    // old_snapshots = GetCurrentVirtualXIDs(limitXmin, true, false,
+    //                     PROC_IS_AUTOVACUUM | PROC_IN_VACUUM | PROC_IN_SAFE_IC,
+    //                     &n_old_snapshots);
+    let mut old_snapshots = procarray_seam::get_current_virtual_xids::call(
+        mcx,
+        limit_xmin,
+        true,
+        false,
+        exclude_vacuum,
+    )?;
+    let n_old_snapshots = old_snapshots.len();
+
+    if progress {
+        pgstat_progress_update_param(PROGRESS_WAITFOR_TOTAL, n_old_snapshots as i64);
+    }
+
+    for i in 0..n_old_snapshots {
+        if !old_snapshots[i].is_valid() {
+            continue; // found uninteresting in a previous cycle
+        }
+
+        if i > 0 {
+            // See if anything's changed: re-read the live VXID set and forget
+            // any old snapshot whose VXID is no longer present.
+            let newer_snapshots = procarray_seam::get_current_virtual_xids::call(
+                mcx,
+                limit_xmin,
+                true,
+                false,
+                exclude_vacuum,
+            )?;
+            for j in i..n_old_snapshots {
+                if !old_snapshots[j].is_valid() {
+                    continue;
+                }
+                let still_present = newer_snapshots.iter().any(|nv| {
+                    nv.procNumber == old_snapshots[j].procNumber
+                        && nv.localTransactionId == old_snapshots[j].localTransactionId
+                });
+                if !still_present {
+                    old_snapshots[j] = types_core::xact::VirtualTransactionId::invalid();
+                }
+            }
+        }
+
+        if old_snapshots[i].is_valid() {
+            if progress {
+                // Publish who we're going to wait for (best-effort pid lookup).
+                let pid = procarray_seam::proc_number_get_proc_pid::call(
+                    old_snapshots[i].procNumber,
+                );
+                if pid != 0 {
+                    pgstat_progress_update_param(PROGRESS_WAITFOR_CURRENT_PID, pid as i64);
+                }
+            }
+            // VirtualXactLock(old_snapshots[i], true): wait for the xact to end.
+            lock_seam::virtual_xact_lock::call(old_snapshots[i], true)?;
+        }
+
+        if progress {
+            pgstat_progress_update_param(PROGRESS_WAITFOR_DONE, (i + 1) as i64);
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,15 +1312,6 @@ fn reindex_concurrently_deferred() -> backend_utils_error::PgError {
 // ---------------------------------------------------------------------------
 // Deferred DefineIndex tails (precise panics)
 // ---------------------------------------------------------------------------
-
-fn define_index_concurrent_tail() -> backend_utils_error::PgError {
-    panic!(
-        "backend-commands-indexcmds: DefineIndex CREATE INDEX CONCURRENTLY tail is deferred — \
-         the multi-transaction build/validate state machine (index_concurrently_build, \
-         validate_index, WaitForLockers, WaitForOlderSnapshots, session-lock + snapshot dance) \
-         is unported"
-    );
-}
 
 fn define_index_partition_recursion() -> backend_utils_error::PgError {
     panic!(

@@ -99,6 +99,45 @@ seam_core::seam!(
     ) -> PgResult<f64>
 );
 
+/// The owned-model `ValidateIndexState` counters (catalog/index.c) the
+/// `table_index_validate_scan` seam mutates: heap tuples scanned and missing
+/// tuples inserted. (The `itups` count and the sorted TID `tuplesort` itself
+/// live in `validate_index`, above the seam; the scan reads TIDs through the
+/// `get_next_index_tid` closure.)
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ValidateScanCounters {
+    /// `double htups` — heap tuples scanned.
+    pub htups: f64,
+    /// `double tups_inserted` — missing tuples inserted into the index.
+    pub tups_inserted: f64,
+}
+
+seam_core::seam!(
+    /// `table_index_validate_scan(table_rel, index_rel, index_info, snapshot,
+    /// state)` (tableam.h): the second heap scan of a concurrent index build.
+    /// Scan the heap under `snapshot` and "merge join" it against the sorted
+    /// TID list already in the index, inserting any missing tuples. The sorted
+    /// TIDs are pulled through `get_next_index_tid` (the owned-model stand-in
+    /// for the inline `tuplesort_getdatum(state->tuplesort, ...)` — the
+    /// tuplesort is owned by `validate_index`, above this seam): it returns the
+    /// next encoded int64 TID, or `None` at end of sort. `counters` accumulates
+    /// the scan's `htups` / `tups_inserted`. `Err` carries the scan /
+    /// `index_insert` `ereport(ERROR)` surface.
+    ///
+    /// Owned by the heap AM (`access/heap/heapam_handler.c`); a call panics
+    /// until the heap validate-scan provider is installed.
+    #[allow(clippy::type_complexity)]
+    pub fn table_index_validate_scan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        table_rel: &types_rel::Relation<'mcx>,
+        index_rel: &types_rel::Relation<'mcx>,
+        index_info: &mut types_nodes::execnodes::IndexInfo<'mcx>,
+        snapshot: types_tableam::tableam::Snapshot,
+        counters: &mut ValidateScanCounters,
+        get_next_index_tid: &mut dyn FnMut() -> PgResult<Option<i64>>,
+    ) -> PgResult<()>
+);
+
 seam_core::seam!(
     /// `GetTableAmRoutine(amhandler)` (access/table/tableamapi.c): call the
     /// table AM's handler function (`OidFunctionCall0(amhandler)` returning a

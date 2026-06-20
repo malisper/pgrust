@@ -188,7 +188,7 @@ pub use nodesetop::{
     SETOP_HASHED, SETOP_SORTED, T_SetOp, T_SetOpState,
 };
 pub use nodesort::{
-    SharedSortInfo, Sort, SortStateData, Tuplesortstate, TuplesortInstrumentation,
+    SharedSortInfo, Sort, SortStateData, Tuplesortstate, TuplesortInstrumentation, ValidateIndexState,
     TuplesortMethod, TuplesortSpaceType, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE,
     TUPLESORT_RANDOMACCESS,
 };

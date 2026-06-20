@@ -71,6 +71,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetCurrentVirtualXIDs(limitXmin, excludeXmin0, allDbs, excludeVacuum,
+    /// &nvxids)` (procarray.c) — the VXIDs of currently-running backends whose
+    /// xmin is `<= limitXmin` (and which pass the `excludeVacuum` status-flag
+    /// filter / `allDbs` DB filter), used by `WaitForOlderSnapshots` during a
+    /// concurrent index build. The C terminator + out-param count are dropped;
+    /// the result vector's length is the count, allocated in `mcx`.
+    pub fn get_current_virtual_xids<'mcx>(
+        mcx: Mcx<'mcx>,
+        limit_xmin: TransactionId,
+        exclude_xmin0: bool,
+        all_dbs: bool,
+        exclude_vacuum: i32,
+    ) -> PgResult<PgVec<'mcx, VirtualTransactionId>>
+);
+
+seam_core::seam!(
     /// `ProcArrayApplyRecoveryInfo(running)`.
     pub fn proc_array_apply_recovery_info(running: &RunningTransactionsData<'_>) -> PgResult<()>
 );

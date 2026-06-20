@@ -21,3 +21,4 @@ types-scan = { path = "../types-scan" }
 types-snapshot = { path = "../types-snapshot" }
 types-nbtree = { path = "../types-nbtree" }
 types-tidbitmap = { path = "../types-tidbitmap" }
+types-tableam = { path = "../types-tableam" }

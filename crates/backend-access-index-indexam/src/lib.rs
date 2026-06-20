@@ -65,6 +65,7 @@ pub fn init_seams() {
     seams::index_getprocinfo::set(index_getprocinfo);
     seams::index_getprocid::set(index_getprocid);
     seams::index_opclass_options::set(index_opclass_options);
+    seams::index_insert::set(index_insert);
 
     // Scan lifecycle + retrieval seams. The seam decls carry node-/SlotId-shaped
     // params (so the executor consumers barely change); each `seam_*` wrapper

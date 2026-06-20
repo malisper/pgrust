@@ -43,6 +43,7 @@ use types_tuple::heaptuple::ItemPointerData;
 
 pub mod analyze_scan;
 pub mod build_scan;
+pub mod validate_scan;
 
 use backend_access_heap_heapam as heapam;
 use backend_access_heap_heapam_handler_dml_seams as dml_seam;
@@ -894,6 +895,7 @@ pub fn init_seams() {
     // execnodes::IndexInfo + mcx through their ambuild signatures.
     sx::table_index_build_range_scan::set(build_scan::provider_index_build_range_scan);
     sx::table_index_build_scan::set(build_scan::provider_index_build_scan);
+    sx::table_index_validate_scan::set(validate_scan::provider_index_validate_scan);
 
     // heapam_estimate_rel_size — the planner-facing table-AM size estimator
     // (plancat's estimate_rel_size dispatches RELKIND_HAS_TABLE_AM here).

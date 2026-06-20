@@ -1108,6 +1108,7 @@ pub(crate) fn install() {
     seams::store_top_xid_in_proc::set(store_top_xid_in_proc);
     seams::store_subxid_in_proc::set(store_subxid_in_proc);
     seams::set_my_proc_status_flags::set(set_my_proc_status_flags);
+    seams::set_indexsafe_procflags::set(crate::proc_misc::set_indexsafe_procflags);
     seams::prepared_xact_procno::set(prepared_xact_procno);
     seams::set_delay_chkpt_start::set(set_delay_chkpt_start);
     seams::set_delay_chkpt_complete::set(set_delay_chkpt_complete);

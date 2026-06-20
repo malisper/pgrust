@@ -57,7 +57,7 @@ const INVALID_OFFSET_NUMBER: u16 = 0;
 
 /// `HeapTupleIsHeapOnly(tuple)` — `t_data->t_infomask2 & HEAP_ONLY_TUPLE`
 /// (htup_details.h).
-fn heap_tuple_is_heap_only(tuple: &HeapTupleData<'_>) -> bool {
+pub(crate) fn heap_tuple_is_heap_only(tuple: &HeapTupleData<'_>) -> bool {
     let hdr = tuple
         .t_data
         .as_ref()
@@ -105,7 +105,7 @@ fn heapam_scan_get_blocks_done(scan: &mut TableScanDescData<'_>) -> BlockNumber 
 /// `expr_states` are the compiled `ii_ExpressionsState` (built once by the
 /// caller, the C "first time through" leg, hoisted out of the per-tuple call).
 #[allow(clippy::type_complexity)]
-fn form_index_datum<'mcx>(
+pub(crate) fn form_index_datum<'mcx>(
     index_info: &types_nodes::execnodes::IndexInfo<'mcx>,
     expr_states: &mut PgVec<'mcx, mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>,
     slot: types_nodes::SlotId,
@@ -671,13 +671,13 @@ fn ereport_warning_concurrent_delete(rel: &Relation<'_>) -> PgResult<()> {
 }
 
 /// `RelationGetRelationName(rel)`.
-fn rel_name(rel: &Relation<'_>) -> String {
+pub(crate) fn rel_name(rel: &Relation<'_>) -> String {
     rel.rd_rel.relname.to_string()
 }
 
 /// `root_offsets[offnum - 1]`, or `InvalidOffsetNumber` if the offset is out of
 /// the (re)built map.
-fn offset_root(root_offsets: &[u16], offnum: u16) -> u16 {
+pub(crate) fn offset_root(root_offsets: &[u16], offnum: u16) -> u16 {
     let idx = offnum as usize;
     if idx == 0 || idx > root_offsets.len() {
         INVALID_OFFSET_NUMBER
@@ -687,7 +687,7 @@ fn offset_root(root_offsets: &[u16], offnum: u16) -> u16 {
 }
 
 /// `OffsetNumberIsValid(offnum)` (off.h).
-fn offset_number_is_valid(offnum: u16) -> bool {
+pub(crate) fn offset_number_is_valid(offnum: u16) -> bool {
     offnum != INVALID_OFFSET_NUMBER
 }
 
