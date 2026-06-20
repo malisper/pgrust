@@ -167,6 +167,20 @@ pub fn array_unnest<'mcx>(
     mcx: Mcx<'mcx>,
     array: &'mcx [u8],
 ) -> PgResult<PgVec<'mcx, (ArrayElementDatum<'mcx>, bool)>> {
+    // C: arr = PG_GETARG_ANY_ARRAY_P(0) == DatumGetArrayTypeP == pg_detoast_datum.
+    // A stored array column (e.g. pg_proc.proallargtypes) arrives heap-packed
+    // with a 1-byte SHORT varlena header; the `foundation::arr_*` readers below
+    // read `ArrayType` fields at FIXED 4-byte-header offsets (elemtype at byte
+    // 12), so a short image misreads ARR_ELEMTYPE as ARR_DIMS[0] ("cache lookup
+    // failed for type N"). detoast_attr expands a short header to 4-byte; run it
+    // so every field read sees a normalized header. (No-op on an already-4-byte
+    // uncompressed image — VARATT_IS_4B_U.)
+    let array: &'mcx [u8] = if !array.is_empty() && (array[0] & 0x03) != 0x00 {
+        let detoasted = backend_access_common_detoast_seams::detoast_attr::call(mcx, array)?;
+        &*detoasted.leak()
+    } else {
+        array
+    };
     let element_type = foundation::arr_elemtype(array);
     let ndim = foundation::arr_ndim(array);
     let numelems = arrayutils::array_get_n_items::call(ndim, &dims_vec(array))?;

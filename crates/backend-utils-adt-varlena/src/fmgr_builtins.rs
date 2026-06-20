@@ -91,6 +91,44 @@ fn detoast_varlena_args(fcinfo: &mut FunctionCallInfoBaseData) {
     }
 }
 
+/// Fully detoast an ARRAY argument on the by-ref lane in place (C
+/// `PG_GETARG_ARRAYTYPE_P(i)` == `DatumGetArrayTypeP` == `pg_detoast_datum`).
+///
+/// Unlike [`detoast_varlena_args`] — which deliberately leaves a SHORT (1-byte
+/// header) varlena untouched because the `text`/`bytea` cores read it via
+/// `vardata_any_slice` (header-size-aware) — the array cores and the
+/// `array_to_text_elements` seam read the `ArrayType` struct fields at FIXED
+/// 4-byte-header offsets (`arr_elemtype` at byte 12, `arr_ndim` at 4). A stored
+/// array column (e.g. `pg_proc.proallargtypes`) arrives heap-packed with a
+/// 1-byte short header; reading offset 12 off it lands inside `ARR_DIMS[0]`
+/// (the element count) and yields a bogus element-type OID ("cache lookup
+/// failed for type N"). C avoids this because `PG_GETARG_ARRAYTYPE_P` runs the
+/// full `detoast_attr`, which expands a short header to a 4-byte one. Mirror
+/// that here for the array arg so every `ARR_*` field read sees a 4-byte header.
+fn detoast_array_arg(fcinfo: &mut FunctionCallInfoBaseData, i: usize) {
+    let needs = match fcinfo.ref_arg(i).and_then(|p| p.as_varlena()) {
+        // VARATT_IS_4B_U (uncompressed 4-byte header): already normalized, no-op.
+        Some(image) if !image.is_empty() => (image[0] & 0x03) != 0x00,
+        _ => false,
+    };
+    if !needs {
+        return;
+    }
+    let m = scratch_mcx();
+    let detoasted: Vec<u8> = {
+        let image = fcinfo.ref_arg(i).and_then(|p| p.as_varlena()).unwrap();
+        match backend_access_common_detoast_seams::detoast_attr::call(m.mcx(), image) {
+            Ok(v) => v.as_slice().to_vec(),
+            // A detoast failure (missing chunk, etc.) is an ereport(ERROR) in C;
+            // leaving the original image surfaces it on the next core read.
+            Err(_) => return,
+        }
+    };
+    if let Some(RefPayload::Varlena(b)) = fcinfo.ref_arg_mut(i) {
+        *b = detoasted;
+    }
+}
+
 /// A `text`/`bytea`/`name` arg's `VARDATA_ANY` payload bytes. Under the
 /// header-ful-everywhere convention the by-ref lane carries the full varlena
 /// image; this reads the payload by skipping the header. The image may be EITHER
@@ -974,6 +1012,10 @@ fn fc_text_to_array_null(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::
 }
 fn fc_array_to_text(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
+    // C: arr = PG_GETARG_ARRAYTYPE_P(0) — fully detoasts (short→4-byte) before
+    // ARR_ELEMTYPE reads offset 12. The text-arg sweep above leaves short
+    // headers packed, so the array arg needs its own full detoast.
+    detoast_array_arg(fcinfo, 0);
     let m = scratch_mcx();
     let elemtype = arr_elemtype(arg_array_image(fcinfo, 0));
     let v = arg_array_datum(m.mcx(), fcinfo, 0)?;
@@ -986,6 +1028,9 @@ fn fc_array_to_text_null(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::
     // C `array_to_text_null` is `proisstrict => 'f'`: the array (arg0) and
     // `fldsep` (arg1) are still required (C reads them unconditionally), only
     // `null_string` (arg2) may be NULL.
+    // C: PG_GETARG_ARRAYTYPE_P(0) fully detoasts (short→4-byte) before the
+    // ARR_ELEMTYPE read at offset 12.
+    detoast_array_arg(fcinfo, 0);
     let m = scratch_mcx();
     let elemtype = arr_elemtype(arg_array_image(fcinfo, 0));
     let v = arg_array_datum(m.mcx(), fcinfo, 0)?;
