@@ -71,14 +71,24 @@ seam_core::seam!(
     /// `remove_useless_result_rtes(root)` (prepjointree.c): remove `RTE_RESULT`
     /// RTEs from the join tree and elide single-child `FromExpr`s, fixing up
     /// `PlaceHolderVar` phrels (`substitute_phv_relids`) and dropped-outer-join
-    /// nulling refs (`remove_nulling_relids`). Mutates `parse` (jointree, PHVs,
-    /// rowMarks) and `root.append_rel_list`. **FAMILY 5, ported now** (installed
-    /// by the owner's `init_seams`). `Err` carries the bitmapset-allocation
-    /// `ereport(ERROR)` surface.
+    /// nulling refs (`remove_nulling_relids`). Mutates `parse` (jointree, PHVs)
+    /// and `root.append_rel_list`; also filters `root.rowMarks`, dropping any
+    /// `PlanRowMark` whose `rti` resolves to an `RTE_RESULT` RTE. **FAMILY 5,
+    /// ported now** (installed by the owner's `init_seams`). `Err` carries the
+    /// bitmapset-allocation `ereport(ERROR)` surface.
+    ///
+    /// `rowmark_rtis` is the `rti` of each `root.rowMarks[i]`, resolved by the
+    /// caller from the [`PlannerRun`](types_pathnodes::planner_run::PlannerRun)
+    /// rowmark store (the crate's deliberate model: `parse` and the rowmark
+    /// values are resolved out of the run by the planner driver and threaded in,
+    /// so this owner never holds `run` itself). It is parallel to `root.rowMarks`
+    /// (same length, same order); the C `foreach(cell, root->rowMarks)` reads
+    /// `rc->rti` from each, which these values carry.
     pub fn remove_useless_result_rtes<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut types_pathnodes::PlannerInfo,
         parse: &mut types_nodes::copy_query::Query<'mcx>,
+        rowmark_rtis: &[types_core::Index],
     ) -> types_error::PgResult<()>
 );
 

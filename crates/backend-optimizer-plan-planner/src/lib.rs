@@ -2062,8 +2062,24 @@ fn subquery_planner_carried<'mcx>(
             backend_optimizer_prep_prepjointree::reduce_outer_joins(mcx, &mut root, parse)?;
         }
         if has_result_rtes || has_outer_joins {
+            // C `remove_useless_result_rtes` reads `rc->rti` for each
+            // `root->rowMarks` `PlanRowMark *` to drop the ones referencing an
+            // `RTE_RESULT` RTE. `root.rowMarks` carries `PlanRowMarkId` handles
+            // into the run's rowmark store; the owner does not hold `run`, so
+            // resolve each handle's `rti` here (parallel to `root.rowMarks`) and
+            // thread it in.
+            let rowmark_rtis: Vec<types_core::Index> = root
+                .rowMarks
+                .iter()
+                .map(|&id| run.resolve_rowmark(id).rti)
+                .collect();
             let parse = run.resolve_mut(root.parse);
-            backend_optimizer_prep_prepjointree::remove_useless_result_rtes(mcx, &mut root, parse)?;
+            backend_optimizer_prep_prepjointree::remove_useless_result_rtes(
+                mcx,
+                &mut root,
+                parse,
+                &rowmark_rtis,
+            )?;
         }
 
         // grouping_planner(root, tuple_fraction, setops) (C:1221).

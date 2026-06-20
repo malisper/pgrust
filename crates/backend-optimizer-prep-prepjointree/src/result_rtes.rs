@@ -103,6 +103,7 @@ pub fn remove_useless_result_rtes<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     parse: &mut Query<'mcx>,
+    rowmark_rtis: &[types_core::Index],
 ) -> PgResult<()> {
     let mut dropped_outer_joins: Relids = None;
 
@@ -142,21 +143,46 @@ pub fn remove_useless_result_rtes<'mcx>(
         remove_nulling_relids_in_append_rel_list(mcx, root, &removable, &empty)?;
     }
 
-    // Remove any PlanRowMark referencing an RTE_RESULT RTE: required for ones we
-    // just removed, allowed (and beneficial) for surviving ones. `root->rowMarks`
-    // is a `List *` of `PlanRowMark *`; in this repo it is carried as a
-    // `Vec<NodeId>` of opaque handles with no backing store yet (PlanRowMarks are
-    // produced by `preprocess_rowmarks` in planmain.c, still unported, which runs
-    // before this pass). The list is therefore always empty on every currently
-    // reachable path; when it is non-empty we cannot resolve `rc->rti` to filter
-    // by RTE_RESULT, so we seam-and-panic rather than silently skip required
-    // removals (the PlanRowMark-carrier keystone must land first).
+    // Remove any PlanRowMark referencing an RTE_RESULT RTE.  We obviously must do
+    // that for any RTE_RESULT that we just removed.  But one for a RTE that we did
+    // not remove can be dropped anyway: since the RTE has only one possible output
+    // row, there is no need for EPQ to mark and restore that row.
+    //
+    // It's necessary, not optional, to remove the PlanRowMark for a surviving
+    // RTE_RESULT RTE; otherwise we'll generate a whole-row Var for the RTE_RESULT,
+    // which the executor has no support for.
+    //
+    //     foreach(cell, root->rowMarks)
+    //     {
+    //         PlanRowMark *rc = (PlanRowMark *) lfirst(cell);
+    //         if (rt_fetch(rc->rti, root->parse->rtable)->rtekind == RTE_RESULT)
+    //             root->rowMarks = foreach_delete_current(root->rowMarks, cell);
+    //     }
+    //
+    // `root->rowMarks` is a `List *` of owned `PlanRowMark *`; here it is the
+    // parallel pair (`root.rowMarks: Vec<PlanRowMarkId>`, handles into the
+    // `PlannerRun` rowmark store) and `rowmark_rtis[i] == resolve_rowmark(root.
+    // rowMarks[i]).rti` (the run-resolved `rc->rti`, supplied by the caller since
+    // this owner does not hold `run`).  `rt_fetch(rti, rtable)` is the 1-based
+    // `parse.rtable[rti - 1]`.  We retain by position, dropping each rowmark whose
+    // `rti` resolves to an `RTE_RESULT` RTE.
+    debug_assert_eq!(root.rowMarks.len(), rowmark_rtis.len());
     if !root.rowMarks.is_empty() {
-        panic!(
-            "remove_useless_result_rtes: root.rowMarks PlanRowMark filtering not yet ported — \
-             PlanRowMark is carried as an unresolved NodeId handle (no arena store / `rti` \
-             accessor); needs the PlanRowMark-carrier keystone (preprocess_rowmarks owner)"
-        );
+        let mut kept: Vec<types_pathnodes::PlanRowMarkId> =
+            Vec::with_capacity(root.rowMarks.len());
+        for (i, &rmid) in root.rowMarks.iter().enumerate() {
+            let rti = rowmark_rtis[i];
+            // rt_fetch(rti, parse.rtable) — 1-based.
+            let is_result_rte = parse
+                .rtable
+                .get((rti - 1) as usize)
+                .map(|rte| rte.rtekind == RTEKind::RTE_RESULT)
+                .unwrap_or(false);
+            if !is_result_rte {
+                kept.push(rmid);
+            }
+        }
+        root.rowMarks = kept;
     }
 
     Ok(())
