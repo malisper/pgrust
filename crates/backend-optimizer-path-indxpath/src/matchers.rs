@@ -189,7 +189,7 @@ pub fn match_clause_to_indexcol(
     if clause.is_opexpr() {
         match_opclause_to_indexcol(mcx, root, rinfo, indexcol, index)
     } else if clause.is_funcexpr() {
-        match_funcclause_to_indexcol(root, rinfo, indexcol, index)
+        match_funcclause_to_indexcol(mcx, root, rinfo, indexcol, index)
     } else if clause.is_scalararrayopexpr() {
         Ok(match_saopclause_to_indexcol(mcx, root, rinfo, indexcol, index)?)
     } else if clause.is_rowcompareexpr() {
@@ -294,7 +294,7 @@ pub fn match_boolean_index_clause(
     };
     let op_id = root.alloc_node(op);
     let derived = backend_optimizer_util_restrictinfo_seams::make_simple_restrictinfo::call(
-        root, op_id,
+        mcx, root, op_id,
     );
     Ok(Some(IndexClause {
         rinfo: Some(rinfo),
@@ -372,7 +372,7 @@ pub fn match_opclause_to_indexcol(
         }
         // Operator not in the index's opfamily: try the support function.
         let funcid = resolve_opfuncid(opfuncid, expr_op)?;
-        return get_index_clause_from_support(root, rinfo, funcid, 0, indexcol, index);
+        return get_index_clause_from_support(mcx, root, rinfo, funcid, 0, indexcol, index);
     }
 
     // Case 2: (const op indexkey). Use it only if the operator commutes.
@@ -394,7 +394,7 @@ pub fn match_opclause_to_indexcol(
         }
         // Operator (or its commutator) not in the index's opfamily: support fn.
         let funcid = resolve_opfuncid(opfuncid, expr_op)?;
-        return get_index_clause_from_support(root, rinfo, funcid, 1, indexcol, index);
+        return get_index_clause_from_support(mcx, root, rinfo, funcid, 1, indexcol, index);
     }
 
     Ok(None)
@@ -418,6 +418,7 @@ fn resolve_opfuncid(opfuncid: Oid, opno: Oid) -> PgResult<Oid> {
 /// (indxpath.c:3023) — handle the `FuncExpr` case via the planner support
 /// function.
 pub fn match_funcclause_to_indexcol(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     rinfo: RinfoId,
     indexcol: usize,
@@ -437,6 +438,7 @@ pub fn match_funcclause_to_indexcol(
         };
         if matched {
             return get_index_clause_from_support(
+                mcx,
                 root,
                 rinfo,
                 funcid,
@@ -459,6 +461,7 @@ pub fn match_funcclause_to_indexcol(
 /// `OidFunctionCall1` fmgr dispatch over the `SupportRequestIndexCondition` node
 /// is the genuine cross-subsystem boundary (seam-and-panic).
 pub fn get_index_clause_from_support(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     rinfo: RinfoId,
     funcid: Oid,
@@ -493,7 +496,7 @@ pub fn get_index_clause_from_support(
     for clause in sresult {
         let node_id = root.alloc_node(clause);
         let ri = backend_optimizer_util_restrictinfo_seams::make_simple_restrictinfo::call(
-            root, node_id,
+            mcx, root, node_id,
         );
         indexquals.push(ri);
     }
@@ -909,7 +912,7 @@ pub fn expand_indexqual_rowcompare(
         };
         let rc_id = root.alloc_node(Expr::RowCompareExpr(rc));
         let ri = backend_optimizer_util_restrictinfo_seams::make_simple_restrictinfo::call(
-            root, rc_id,
+            mcx, root, rc_id,
         );
         indexquals = vec![ri];
     } else {
@@ -926,7 +929,7 @@ pub fn expand_indexqual_rowcompare(
         );
         let op_id = root.alloc_node(op);
         let ri = backend_optimizer_util_restrictinfo_seams::make_simple_restrictinfo::call(
-            root, op_id,
+            mcx, root, op_id,
         );
         indexquals = vec![ri];
     }
@@ -1123,7 +1126,7 @@ pub fn match_orclause_to_indexcol(
     // Build an IndexClause based on the SAOP node. It's not lossy.
     let saop_id = root.alloc_node(saopexpr);
     let ri = backend_optimizer_util_restrictinfo_seams::make_simple_restrictinfo::call(
-        root, saop_id,
+        mcx, root, saop_id,
     );
     Ok(Some(IndexClause {
         rinfo: Some(rinfo),

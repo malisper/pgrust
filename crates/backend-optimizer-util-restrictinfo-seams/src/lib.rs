@@ -16,7 +16,11 @@ seam_core::seam!(
     /// `make_restrictinfo`) — wrap a bare clause node (already allocated into the
     /// arena, identified by `NodeId`) in a fresh `RestrictInfo`, pushed into the
     /// arena, and return its handle. Used to wrap each derived index qual.
-    pub fn make_simple_restrictinfo(root: &mut PlannerInfo, clause: NodeId) -> RinfoId
+    pub fn make_simple_restrictinfo(
+        mcx: mcx::Mcx<'_>,
+        root: &mut PlannerInfo,
+        clause: NodeId,
+    ) -> RinfoId
 );
 
 seam_core::seam!(
@@ -28,6 +32,7 @@ seam_core::seam!(
     /// push it into the arena. Used by `group_similar_or_args` to build nested OR
     /// sub-restrictinfos.
     pub fn make_plain_restrictinfo(
+        mcx: mcx::Mcx<'_>,
         root: &mut PlannerInfo,
         clause: NodeId,
         orclause: NodeId,

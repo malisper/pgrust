@@ -831,6 +831,7 @@ pub fn apply_child_basequals<'mcx>(
             }
 
             let childrinfo = backend_optimizer_util_joininfo::restrictinfo::make_restrictinfo(
+                mcx,
                 root,
                 onecq,
                 is_pushed_down,
@@ -866,6 +867,7 @@ pub fn apply_child_basequals<'mcx>(
     for qualset in security_qual_sets {
         for qual in qualset {
             let ri = backend_optimizer_util_joininfo::restrictinfo::make_restrictinfo(
+                mcx,
                 root,
                 qual,
                 true,

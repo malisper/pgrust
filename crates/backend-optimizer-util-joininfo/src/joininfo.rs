@@ -76,6 +76,7 @@ pub fn add_join_clause_to_rels<'mcx>(
 
         let false_const = Expr::Const(make_bool_const(false, false));
         restrictinfo = make_restrictinfo(
+            run.mcx(),
             root,
             false_const,
             ri.is_pushed_down,

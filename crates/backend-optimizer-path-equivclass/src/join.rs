@@ -604,6 +604,7 @@ fn throw_back_dummy<'mcx>(
     let ri = root.rinfo(rinfo).clone();
     let bool_true = ec_seam::make_bool_const::call(true, false);
     let dummy = ec_seam::make_restrictinfo::call(
+        run.mcx(),
         root,
         bool_true,
         ri.is_pushed_down,

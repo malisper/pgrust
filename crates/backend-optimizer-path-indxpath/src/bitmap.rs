@@ -359,6 +359,7 @@ pub fn group_similar_or_args(
                 let incompatible_relids = relids_copy(&root.rinfo(rinfo).incompatible_relids);
                 let outer_relids = relids_copy(&root.rinfo(rinfo).outer_relids);
                 let subrinfo = restrictinfo::make_plain_restrictinfo::call(
+                    mcx,
                     root,
                     clause_id,
                     orclause_id,
@@ -459,7 +460,7 @@ pub fn make_bitmap_paths_for_or_group<'mcx>(
     let mut split_ok = true;
     for arg in &args {
         let arg_id = root.alloc_node(arg.clone());
-        let arg_ri = restrictinfo::make_simple_restrictinfo::call(root, arg_id);
+        let arg_ri = restrictinfo::make_simple_restrictinfo::call(mcx, root, arg_id);
         let orargs = [arg_ri];
         let indlist = build_paths_for_OR(mcx, root, run, rel, &orargs, other_clauses)?;
         if indlist.is_empty() {
@@ -616,7 +617,7 @@ fn orarg_to_rinfo(
         // Deep-copy via `clone_in` (a derived `.clone()` panics on an
         // owned-subtree child).
         let aid = root.alloc_node(orarg.clone_in(mcx)?);
-        Ok(restrictinfo::make_simple_restrictinfo::call(root, aid))
+        Ok(restrictinfo::make_simple_restrictinfo::call(mcx, root, aid))
     }
 }
 

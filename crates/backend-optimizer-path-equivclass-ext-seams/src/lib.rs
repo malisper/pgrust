@@ -139,6 +139,7 @@ seam_core::seam!(
     /// outer_relids)` (restrictinfo.c) — build a RestrictInfo, returning its
     /// arena handle.
     pub fn make_restrictinfo(
+        mcx: mcx::Mcx<'_>,
         root: &mut PlannerInfo,
         clause: Expr,
         is_pushed_down: bool,

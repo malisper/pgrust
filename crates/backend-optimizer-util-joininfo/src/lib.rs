@@ -93,7 +93,8 @@ pub fn init_seams() {
 
     // restrictinfo.c — equivclass-ext-seams (consumed by equivclass.c).
     ec_ext_seam::make_restrictinfo::set(
-        |root,
+        |mcx,
+         root,
          clause,
          is_pushed_down,
          has_clone,
@@ -104,6 +105,7 @@ pub fn init_seams() {
          incompatible_relids,
          outer_relids| {
             make_restrictinfo(
+                mcx,
                 root,
                 clause,
                 is_pushed_down,
@@ -123,18 +125,19 @@ pub fn init_seams() {
     // restrictinfo.h macro `make_restrictinfo(root, clause, true, false, false,
     // false, 0, NULL, NULL, NULL)`. The seam identifies the clause by `NodeId`;
     // the body resolves it to the arena `Expr` and forwards the macro defaults.
-    rinfo_seam::make_simple_restrictinfo::set(|root, clause| {
+    rinfo_seam::make_simple_restrictinfo::set(|mcx, root, clause| {
         // Deep-copy the interned clause via `Expr::clone_in` (the derived
         // `Expr::clone` panics on a context-allocated child such as
         // `Aggref`/`SubLink`/`SubPlan`); the owned copy is then moved into the
-        // arena by `make_restrictinfo`. The transient context mirrors the
-        // inward-seam convention used in indxpath.
-        let ctx = mcx::MemoryContext::new("make_simple_restrictinfo");
+        // arena by `make_restrictinfo`. Clone into the caller's long-lived
+        // planner-run `mcx` so the copy survives interning (a transient context
+        // would dangle on drop).
         let clause_expr = root
             .node(clause)
-            .clone_in(ctx.mcx())
+            .clone_in(mcx)
             .expect("make_simple_restrictinfo: clause clone_in");
         make_restrictinfo(
+            mcx,
             root,
             clause_expr,
             true,  // is_pushed_down
@@ -153,7 +156,8 @@ pub fn init_seams() {
     // (restrictinfo-seams), used by `group_similar_or_args` to build nested OR
     // sub-restrictinfos. The seam carries clause+orclause as arena `NodeId`s.
     rinfo_seam::make_plain_restrictinfo::set(
-        |root,
+        |mcx,
+         root,
          clause,
          orclause,
          is_pushed_down,
@@ -167,18 +171,20 @@ pub fn init_seams() {
             // Deep-copy the interned clause / orclause via `Expr::clone_in`
             // (a derived `Expr::clone` panics on a context-allocated child);
             // both owned copies are moved into the arena by
-            // `make_plain_restrictinfo`.
-            let ctx = mcx::MemoryContext::new("make_plain_restrictinfo");
+            // `make_plain_restrictinfo`. Clone into the caller's long-lived
+            // planner-run `mcx` so the copies survive interning (a transient
+            // context would dangle on drop).
             let clause_expr = root
                 .node(clause)
-                .clone_in(ctx.mcx())
+                .clone_in(mcx)
                 .expect("make_plain_restrictinfo: clause clone_in");
             let orclause_expr = Some(
                 root.node(orclause)
-                    .clone_in(ctx.mcx())
+                    .clone_in(mcx)
                     .expect("make_plain_restrictinfo: orclause clone_in"),
             );
             make_plain_restrictinfo(
+                mcx,
                 root,
                 clause_expr,
                 orclause_expr,

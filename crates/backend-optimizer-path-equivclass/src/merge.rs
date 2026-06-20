@@ -267,6 +267,7 @@ pub fn process_equivalence<'mcx>(
             let ntest = ec_seam::make_is_not_null::call(item1);
             let ri = root.rinfo(restrictinfo).clone();
             let newri = ec_seam::make_restrictinfo::call(
+                run.mcx(),
                 root,
                 ntest,
                 ri.is_pushed_down,

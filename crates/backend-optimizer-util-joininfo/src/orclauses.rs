@@ -188,6 +188,7 @@ fn consider_new_or_clause<'mcx>(
     // base restriction clause.
     let security_level = root.rinfo(join_or_rinfo).security_level;
     let or_rinfo = make_restrictinfo(
+        run.mcx(),
         root,
         orclause,
         true,

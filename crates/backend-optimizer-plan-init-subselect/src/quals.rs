@@ -190,6 +190,7 @@ pub fn distribute_qual_to_rels<'mcx>(
 
     // Build the RestrictInfo node itself.
     let mut restrictinfo = eqext::make_restrictinfo::call(
+        run.mcx(),
         root,
         copy_clause_in(run, clause),
         is_pushed_down,
@@ -403,6 +404,7 @@ fn add_base_clause_to_rel<'mcx>(
 
             let false_const = eqext::make_bool_const::call(false, false);
             restrictinfo = eqext::make_restrictinfo::call(
+                run.mcx(),
                 root,
                 false_const,
                 is_pushed_down,
@@ -747,6 +749,7 @@ pub fn process_implied_equality<'mcx>(
 
     // Build the RestrictInfo node itself.
     let restrictinfo = eqext::make_restrictinfo::call(
+        run.mcx(),
         root,
         copy_clause_in(run, &clause),
         true,  // is_pushed_down
@@ -804,6 +807,7 @@ pub fn build_implied_join_equality<'mcx>(
 
     // Build the RestrictInfo node itself.
     let restrictinfo = eqext::make_restrictinfo::call(
+        run.mcx(),
         root,
         clause,
         true,  // is_pushed_down

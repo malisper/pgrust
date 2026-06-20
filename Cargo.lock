@@ -12375,6 +12375,7 @@ dependencies = [
 name = "backend-optimizer-path-equivclass-ext-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -13481,6 +13482,7 @@ dependencies = [
 name = "backend-optimizer-util-restrictinfo-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
