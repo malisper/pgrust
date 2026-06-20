@@ -38,6 +38,33 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Lift a range *element* bound value word (`RangeBound.val`) into the rich
+    /// canonical [`DatumV`] (`ByVal` for a by-value subtype; `ByRef` over a copy of
+    /// the element's header-ful image for a by-reference subtype). The form a
+    /// subtype support function (e.g. the element `hash` proc) must receive on the
+    /// owned fmgr boundary's by-reference-capable `*_coll_datum` lane. The element
+    /// type metadata comes off `typcache->rngelemtype`. `Err` carries OOM copying
+    /// a by-reference image.
+    pub fn range_elem_word_to_canon<'mcx>(
+        mcx: Mcx<'mcx>,
+        typcache: &TypeCacheEntry,
+        word: Datum,
+    ) -> PgResult<DatumV<'mcx>>
+);
+
+seam_core::seam!(
+    /// `DatumGetInt32(FunctionCall2Coll(&typcache->rng_cmp_proc_finfo,
+    /// typcache->rng_collation, v1, v2))` (rangetypes.c): compare two range
+    /// *element* bound values (`RangeBound.val` words) with the subtype's `cmp`
+    /// support function, returning the sign of `v1 <=> v2`. The element words may
+    /// be by-reference (e.g. `numeric` pointers into a multirange image); this
+    /// threads them onto the proper fmgr lane (canonical `Datum`), unlike a bare
+    /// `function_call2_coll` over the scalar words. `Err` carries the support
+    /// function's `ereport(ERROR)`s.
+    pub fn range_cmp_elem_values(typcache: &TypeCacheEntry, v1: Datum, v2: Datum) -> PgResult<i32>
+);
+
+seam_core::seam!(
     /// `FunctionCall2Coll(&typcache->rng_subdiff_finfo, rng_collation, v1, v2)`
     /// returning `DatumGetFloat8(..)` (rangetypes_selfuncs.c usage): the
     /// subtype's `subdiff` distance between two bound values. `Err` carries the

@@ -99,6 +99,27 @@ fn cmp_elem_words(typcache: &TypeCacheEntry, a: Datum, b: Datum) -> PgResult<i32
     Ok(r.as_i32())
 }
 
+/// Seam `range_elem_word_to_canon`: lift a range element bound value word into the
+/// rich canonical `Datum` (`ByVal`/`ByRef`). A thin re-export of the in-crate
+/// [`elem_word_to_canon`] so the sibling multirange unit's element `hash` lane can
+/// reuse the exact by-reference handling.
+pub fn range_elem_word_to_canon<'mcx>(
+    mcx: Mcx<'mcx>,
+    typcache: &TypeCacheEntry,
+    word: Datum,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    elem_word_to_canon(mcx, typcache, word)
+}
+
+/// Seam `range_cmp_elem_values`: compare two range *element* bound values
+/// (`RangeBound.val` words) via the subtype's `cmp` support function, threading a
+/// by-reference element (e.g. a `numeric` pointer) onto the proper fmgr lane.
+/// Mirrors the in-crate [`cmp_elem_words`]; exposed so the sibling multirange
+/// unit's element-bsearch comparison can reuse the exact by-reference handling.
+pub fn range_cmp_elem_values(typcache: &TypeCacheEntry, v1: Datum, v2: Datum) -> PgResult<i32> {
+    cmp_elem_words(typcache, v1, v2)
+}
+
 /// `RangeTypeGetOid(r)` (rangetypes.h:35): `(r)->rangetypid`.
 #[inline]
 fn range_type_get_oid(r: RangeTypeP<'_>) -> Oid {

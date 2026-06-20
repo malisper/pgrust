@@ -118,6 +118,23 @@ fn getarg_multirange<'mcx>(
     ok(crate::typcache_io::datum_get_multirange_type_p(mcx, word))
 }
 
+/// `PG_GETARG_DATUM(i)` for an `anyelement` arg: the bound-comparison kernels
+/// receive the element value as a bare `Datum` word (C: `PG_GETARG_DATUM`). A
+/// by-value element rides the scalar word directly; a by-reference element (e.g.
+/// `numeric`) crosses the owned fmgr boundary on the by-ref lane as a
+/// `RefPayload::Varlena`, so stage its header-ful image into `mcx` and hand back
+/// the pointer word the subtype `cmp` (`range_cmp_elem_values`) dereferences.
+fn getarg_elem_word<'mcx>(
+    fcinfo: &FunctionCallInfoBaseData,
+    mcx: Mcx<'mcx>,
+    i: usize,
+) -> Datum {
+    match fcinfo.ref_arg(i).and_then(|p| p.as_varlena()) {
+        Some(image) => ok(mr_bytes_to_arg_word(mcx, image)),
+        None => fcinfo.arg(i).map(|nd| nd.value).unwrap_or_else(Datum::null),
+    }
+}
+
 /// `PG_GETARG_CSTRING(i)`: the input cstring on the by-ref lane.
 fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
     fcinfo
@@ -428,7 +445,17 @@ macro_rules! fc_mr_bound {
             let mr = getarg_multirange(fcinfo, m.mcx(), 0);
             let rangetyp = rangetyp_of(mr);
             match ok($core(&rangetyp, mr)) {
-                Some(d) => d,
+                // `PG_RETURN_DATUM(bound.val)`: a by-value subtype returns the bare
+                // word; a by-reference subtype (`numeric`/`text`/...) rides the
+                // by-ref result lane as a header-ful varlena image (mirroring
+                // `range_lower`/`range_upper`'s `return_elem`).
+                Some(d) => match crate::serialize_core::bound_elem_canon(&rangetyp, d) {
+                    crate::serialize_core::BoundElem::ByVal(w) => w,
+                    crate::serialize_core::BoundElem::ByRef(image) => {
+                        fcinfo.set_ref_result(RefPayload::Varlena(image));
+                        Datum::null()
+                    }
+                },
                 None => {
                     fcinfo.set_result_null(true);
                     Datum::null()
@@ -451,7 +478,7 @@ fc_mr_bound!(fc_multirange_upper, crate::operators::multirange_upper);
 fn fc_multirange_contains_elem(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-    let val = fcinfo.arg(1).map(|nd| nd.value).unwrap_or_else(Datum::null);
+    let val = getarg_elem_word(fcinfo, m.mcx(), 1);
     let rangetyp = rangetyp_of(mr);
     Datum::from_bool(ok(crate::operators::multirange_contains_elem_internal(
         &rangetyp, mr, val,
@@ -461,7 +488,7 @@ fn fc_multirange_contains_elem(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `elem_contained_by_multirange(anyelement, anymultirange) -> bool` (oid 4252).
 fn fc_elem_contained_by_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
-    let val = fcinfo.arg(0).map(|nd| nd.value).unwrap_or_else(Datum::null);
+    let val = getarg_elem_word(fcinfo, m.mcx(), 0);
     let mr = getarg_multirange(fcinfo, m.mcx(), 1);
     let rangetyp = rangetyp_of(mr);
     Datum::from_bool(ok(crate::operators::multirange_contains_elem_internal(

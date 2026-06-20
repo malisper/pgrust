@@ -197,6 +197,33 @@ pub fn datum_get_multirange_type_p<'mcx>(
     })
 }
 
+/// `DatumGetMultirangeTypeP(d)` for the value-carrying canonical `Datum` arm: the
+/// on-disk `MultirangeType` varlena image rides `Datum::ByRef` (header included),
+/// so read it from the element image bytes rather than from a pointer word.
+///
+/// This is the by-reference counterpart of [`datum_get_multirange_type_p`],
+/// mirroring `datum_get_range_type_p_value` in the range crate: a planner
+/// `Const`'s `constvalue` for a by-reference multirange carries the varlena image
+/// by value, whose bare-word surrogate would be a non-dereferenceable in-buffer
+/// offset (the source of "Datum: scalar accessor called on a by-reference value"
+/// in `multirangesel`). Detoasts only a compressed/external image, copying into
+/// `mcx`. `Err` carries detoast `ereport(ERROR)`s and OOM.
+pub fn datum_get_multirange_type_p_value<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+) -> PgResult<MultirangeTypeP<'mcx>> {
+    // The element image bytes (the verbatim on-disk varlena, header included).
+    let var_bytes = value.as_ref_bytes();
+    let detoasted = pg_detoast_datum(mcx, var_bytes)?;
+    let ptr = detoasted.as_ptr() as *const MultirangeType;
+    core::mem::forget(detoasted);
+
+    Ok(MultirangeTypeP {
+        ptr,
+        _marker: core::marker::PhantomData,
+    })
+}
+
 /// Seam `multirange_is_empty` — `MultirangeIsEmpty(DatumGetMultirangeTypeP(attval))`
 /// (execIndexing.c's `ExecWithoutOverlapsNotEmpty`): detoast the by-reference
 /// multirange value and report whether it has zero member ranges.

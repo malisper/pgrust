@@ -292,6 +292,86 @@ fn elem_type(rangetyp: &TypeCacheEntry) -> ElemType {
     }
 }
 
+/// `VARHDRSZ` (varatt.h): the 4-byte length header of an uncompressed varlena.
+const VARHDRSZ: usize = 4;
+/// `VARHDRSZ_SHORT` (varatt.h): the 1-byte length header of a packed varlena.
+const VARHDRSZ_SHORT: usize = 1;
+
+/// The canonical, header-FUL owned image of a by-reference range *element* value
+/// at `ptr`, given its subtype `typlen` — the form the fmgr by-reference lane
+/// (`RefPayload::Varlena`) and every adt value core expect.
+///
+/// Mirrors `byref_elem_headerful_image` in `backend-utils-adt-rangetypes`: a
+/// multirange serializes its bound values exactly as a range does (via
+/// `datum_write`), so a packable varlena subtype (`numeric`/`text`) may be stored
+/// with a 1-byte SHORT header. The fmgr by-reference lane carries an already-
+/// detoasted 4-byte-header varlena, so a short-header bound image must be
+/// un-packed to the 4-byte form here.
+///
+/// * `typlen == -1` (varlena): un-pack a short header to 4-byte form; a 4-byte
+///   image crosses verbatim.
+/// * `typlen > 0` (fixed-length by-reference, e.g. `macaddr`/`uuid`): exactly
+///   `typlen` raw bytes, copied verbatim.
+///
+/// # Safety
+/// `ptr` must point at a live, fully-detoasted element image of the indicated
+/// subtype that stays valid for the read.
+unsafe fn byref_elem_headerful_image(ptr: *const u8, typlen: i16) -> std::vec::Vec<u8> {
+    if typlen != -1 {
+        debug_assert!(typlen > 0, "by-reference range element typlen must be -1 or > 0");
+        return core::slice::from_raw_parts(ptr, typlen as usize).to_vec();
+    }
+    let b0 = *ptr;
+    if (b0 & 0x01) == 0x01 && b0 != 0x01 {
+        // VARATT_IS_1B (short 1-byte header, but not 1B_E external): rebuild the
+        // 4-byte-header form. The short length includes its own 1-byte header.
+        let short_len = ((b0 >> 1) & 0x7f) as usize;
+        let payload_len = short_len - VARHDRSZ_SHORT;
+        let total = VARHDRSZ + payload_len;
+        let mut out = std::vec::Vec::with_capacity(total);
+        out.resize(VARHDRSZ, 0);
+        set_varsize_4b(out.as_mut_ptr(), total as u32);
+        let payload = core::slice::from_raw_parts(ptr.add(VARHDRSZ_SHORT), payload_len);
+        out.extend_from_slice(payload);
+        out
+    } else {
+        // Plain 4-byte-header varlena: crosses verbatim.
+        let len = varsize_4b(ptr) as usize;
+        core::slice::from_raw_parts(ptr, len).to_vec()
+    }
+}
+
+/// The canonical form of a range/multirange *element* bound `Datum` (`lower.val`/
+/// `upper.val` from [`multirange_get_bounds`]) for crossing the fmgr boundary as
+/// an `anyelement` result, mirroring `range_lower`/`range_upper`'s `return_elem`.
+pub enum BoundElem {
+    /// A by-value subtype: the machine word IS the value; return it verbatim.
+    ByVal(Datum),
+    /// A by-reference subtype: the header-ful varlena image rides the by-ref
+    /// result lane as a `RefPayload::Varlena`.
+    ByRef(std::vec::Vec<u8>),
+}
+
+/// `PG_RETURN_DATUM(bound.val)` for a multirange element result: for a by-value
+/// subtype the bare word; for a by-reference subtype (`numeric`/`text`/...) the
+/// pointer word is un-packed to a header-ful image carried on the by-ref result
+/// lane (a bare pointer word would dangle and the caller's `ref_out_to_datum`
+/// would mis-read it — the source of "by-ref `numeric` arg missing from by-ref
+/// lane").
+pub fn bound_elem_canon(rangetyp: &TypeCacheEntry, val: Datum) -> BoundElem {
+    let elem = elem_type(rangetyp);
+    if elem.typbyval {
+        return BoundElem::ByVal(val);
+    }
+    let ptr = val.as_usize() as *const u8;
+    debug_assert!(!ptr.is_null(), "infinite/absent bounds are guarded before here");
+    // SAFETY: for a by-reference element the bound `Datum` is a live pointer into
+    // the detoasted multirange varlena image that stays valid across this call,
+    // exactly as C dereferences it.
+    let image = unsafe { byref_elem_headerful_image(ptr, elem.typlen) };
+    BoundElem::ByRef(image)
+}
+
 // ---------------------------------------------------------------------------
 // Serialization layer (multirangetypes.c).
 // ---------------------------------------------------------------------------

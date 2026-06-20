@@ -13,9 +13,8 @@ use types_error::{PgError, PgResult, ERROR};
 use types_rangetypes::{MultirangeTypeP, RangeBound, RangeTypeP, RANGE_EMPTY};
 
 use backend_utils_adt_rangetypes_seams::{
-    bounds_adjacent, range_cmp_bounds, range_deserialize, range_get_flags,
+    bounds_adjacent, range_cmp_bounds, range_cmp_elem_values, range_deserialize, range_get_flags,
 };
-use backend_utils_fmgr_fmgr_seams::function_call2_coll;
 
 use crate::serialize_core::{multirange_get_bounds, multirange_get_range};
 
@@ -142,27 +141,21 @@ fn multirange_elem_bsearch_comparison(
 ) -> PgResult<i32> {
     let val = *key;
 
+    // C: `DatumGetInt32(FunctionCall2Coll(&typcache->rng_cmp_proc_finfo,
+    // typcache->rng_collation, lower->val, *key))`. The element values may be
+    // by-reference (e.g. `numeric` of a `nummultirange`), so go through the
+    // by-reference-capable element-value compare (canonical-Datum lane) rather
+    // than the bare-word `function_call2_coll`, which would leave the by-ref
+    // referent empty ("by-ref `numeric` arg missing from by-ref lane").
     if !lower.infinite {
-        let cmp = function_call2_coll::call(
-            typcache.rng_cmp_proc_finfo.fn_oid,
-            typcache.rng_collation,
-            lower.val,
-            val,
-        )?
-        .as_i32();
+        let cmp = range_cmp_elem_values::call(typcache, lower.val, val)?;
         if cmp > 0 || (cmp == 0 && !lower.inclusive) {
             return Ok(-1);
         }
     }
 
     if !upper.infinite {
-        let cmp = function_call2_coll::call(
-            typcache.rng_cmp_proc_finfo.fn_oid,
-            typcache.rng_collation,
-            upper.val,
-            val,
-        )?
-        .as_i32();
+        let cmp = range_cmp_elem_values::call(typcache, upper.val, val)?;
         if cmp < 0 || (cmp == 0 && !upper.inclusive) {
             return Ok(1);
         }

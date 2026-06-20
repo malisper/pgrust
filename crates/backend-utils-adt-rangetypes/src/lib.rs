@@ -86,6 +86,8 @@ pub fn init_seams() {
     use backend_utils_adt_rangetypes_seams as seams;
 
     seams::range_cmp_bounds::set(range_bounds_compare::range_cmp_bounds);
+    seams::range_cmp_elem_values::set(range_bounds_compare::range_cmp_elem_values);
+    seams::range_elem_word_to_canon::set(range_bounds_compare::range_elem_word_to_canon);
     seams::range_subdiff::set(range_canonical_subdiff_hash::range_subdiff);
     seams::range_get_typcache::set(range_bounds_compare::range_get_typcache);
     seams::range_serialize::set(range_repr_serialize::range_serialize_seam);

@@ -11,6 +11,7 @@ use types_core::primitive::Oid;
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_rangetypes::{MultirangeTypeP, RangeBound, RangeTypeP};
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 seam_core::seam!(
     /// `multirange_get_typcache(fcinfo, mltrngtypid)` (multirangetypes.c): the
@@ -52,6 +53,21 @@ seam_core::seam!(
     pub fn datum_get_multirange_type_p<'mcx>(
         mcx: Mcx<'mcx>,
         d: Datum,
+    ) -> PgResult<MultirangeTypeP<'mcx>>
+);
+
+seam_core::seam!(
+    /// `DatumGetMultirangeTypeP(d)` (multirangetypes.h) for a value-carrying
+    /// canonical [`DatumV`] whose on-disk `MultirangeType` varlena image rides the
+    /// `Datum::ByRef` arm (header included). Unlike [`datum_get_multirange_type_p`],
+    /// which interprets the `Datum` word as a bare pointer, this reads the image
+    /// bytes directly -- the form needed for a planner `Const`'s by-reference
+    /// `constvalue` in `multirangesel`, whose bare-word surrogate would be a
+    /// non-dereferenceable in-buffer offset. Detoasts only a compressed/external
+    /// image, copying into `mcx`. `Err` carries detoast `ereport(ERROR)`s and OOM.
+    pub fn datum_get_multirange_type_p_value<'mcx>(
+        mcx: Mcx<'mcx>,
+        value: &DatumV<'mcx>,
     ) -> PgResult<MultirangeTypeP<'mcx>>
 );
 

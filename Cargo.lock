@@ -19989,6 +19989,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-rangetypes",
+ "types-tuple",
 ]
 
 [[package]]
