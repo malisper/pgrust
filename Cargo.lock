@@ -2740,6 +2740,7 @@ dependencies = [
  "backend-access-spg-proc-seams",
  "backend-access-spg-text",
  "backend-utils-adt-geo-ops-seams",
+ "backend-utils-adt-geo-spgist-only",
  "backend-utils-adt-network-spgist",
  "backend-utils-adt-rangetypes-spgist",
  "mcx",

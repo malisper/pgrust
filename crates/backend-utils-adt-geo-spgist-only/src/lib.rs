@@ -107,6 +107,53 @@ pub struct RectBox {
     pub range_box_y: RangeBox,
 }
 
+impl RectBox {
+    /// Decode a `RectBox` from its raw in-memory image (`sizeof(RectBox)` ==
+    /// 64 bytes: 8 native-endian `float8`s, in struct-field order
+    /// `range_box_x{left{low,high},right{low,high}}, range_box_y{...}`).
+    ///
+    /// This is the SP-GiST traversal-value byte buffer the core seam carries as
+    /// an owned `Vec<u8>` (C stores `(void *) RectBox *`); the box opclass
+    /// round-trips it through the typed dispatch.
+    ///
+    /// Panics on a too-short image — a caller bug, as C would misread too.
+    #[inline]
+    pub fn from_datum_bytes(bytes: &[u8]) -> RectBox {
+        let f = |off: usize| f64::from_ne_bytes(bytes[off..off + 8].try_into().unwrap());
+        RectBox {
+            range_box_x: RangeBox {
+                left: Range { low: f(0), high: f(8) },
+                right: Range { low: f(16), high: f(24) },
+            },
+            range_box_y: RangeBox {
+                left: Range { low: f(32), high: f(40) },
+                right: Range { low: f(48), high: f(56) },
+            },
+        }
+    }
+
+    /// Serialize this `RectBox` to its raw in-memory image (64 bytes, see
+    /// [`RectBox::from_datum_bytes`]).
+    #[inline]
+    pub fn to_datum_bytes(&self) -> [u8; 64] {
+        let mut out = [0u8; 64];
+        let vals = [
+            self.range_box_x.left.low,
+            self.range_box_x.left.high,
+            self.range_box_x.right.low,
+            self.range_box_x.right.high,
+            self.range_box_y.left.low,
+            self.range_box_y.left.high,
+            self.range_box_y.right.low,
+            self.range_box_y.right.high,
+        ];
+        for (i, v) in vals.iter().enumerate() {
+            out[i * 8..i * 8 + 8].copy_from_slice(&v.to_ne_bytes());
+        }
+        out
+    }
+}
+
 // ===========================================================================
 // Helpers
 // ===========================================================================

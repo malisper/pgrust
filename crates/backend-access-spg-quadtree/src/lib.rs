@@ -695,8 +695,57 @@ fn decode_orderby_points(orderbys: &[types_scan::scankey::ScanKeyData<'_>]) -> V
 
 use backend_access_spg_kdtree as kd;
 use backend_access_spg_text as text;
+use backend_utils_adt_geo_spgist_only as boxq;
 use backend_utils_adt_network_spgist as inet;
 use backend_utils_adt_rangetypes_spgist as range;
+
+// ---------------------------------------------------------------------------
+// `spg_box_quad_*` support-procedure OIDs (pg_proc.dat 5012-5016). The box
+// opclass bodies live in `backend-utils-adt-geo-spgist-only` (which models the
+// plain working in/out structs, not the typed `spgt::` carriers), so the arms
+// below follow the quad-tree's own-body pattern: decode the typed Datums into
+// the box working structs, call the body, then re-encode the result into the
+// typed `spgt::` out. (Contrast the `range::`/`text::` arms, whose bodies take
+// the typed carriers directly.)
+// ---------------------------------------------------------------------------
+
+/// `F_SPG_BOX_QUAD_CONFIG` — `spg_box_quad_config` (pg_proc.dat oid 5012).
+pub const F_SPG_BOX_QUAD_CONFIG: Oid = 5012;
+/// `F_SPG_BOX_QUAD_CHOOSE` — `spg_box_quad_choose` (pg_proc.dat oid 5013).
+pub const F_SPG_BOX_QUAD_CHOOSE: Oid = 5013;
+/// `F_SPG_BOX_QUAD_PICKSPLIT` — `spg_box_quad_picksplit` (pg_proc.dat oid 5014).
+pub const F_SPG_BOX_QUAD_PICKSPLIT: Oid = 5014;
+/// `F_SPG_BOX_QUAD_INNER_CONSISTENT` — `spg_box_quad_inner_consistent` (oid 5015).
+pub const F_SPG_BOX_QUAD_INNER_CONSISTENT: Oid = 5015;
+/// `F_SPG_BOX_QUAD_LEAF_CONSISTENT` — `spg_box_quad_leaf_consistent` (oid 5016).
+pub const F_SPG_BOX_QUAD_LEAF_CONSISTENT: Oid = 5016;
+
+/// `BoxPGetDatum(b)` — encode a `box` into a by-reference index-context `Datum`.
+fn box_get_datum<'mcx>(mcx: Mcx<'mcx>, b: &BOX) -> PgResult<Datum<'mcx>> {
+    Ok(Datum::ByRef(mcx::slice_in(mcx, &b.to_datum_bytes())?))
+}
+
+/// Decode a typed scankey array into the box opclass' [`boxq::SpgScanKey`]
+/// working form: `sk_subtype` distinguishes a `box` argument
+/// (`DatumGetBoxP`) from a `polygon` argument (`DatumGetPolygonP(..)->boundbox`).
+fn decode_box_scankeys(
+    scankeys: &[types_scan::scankey::ScanKeyData<'_>],
+) -> Vec<boxq::SpgScanKey> {
+    scankeys
+        .iter()
+        .map(|sk| {
+            let sk_subtype = sk.sk_subtype;
+            let bbox = if sk_subtype == boxq::POLYGONOID {
+                backend_utils_adt_geo_ops_seams::poly_query_boundbox::call(
+                    sk.sk_argument.as_ref_bytes(),
+                )
+            } else {
+                datum_get_box(&sk.sk_argument)
+            };
+            boxq::SpgScanKey { sk_strategy: sk.sk_strategy as u16, sk_subtype, bbox }
+        })
+        .collect()
+}
 
 /// `unrecognized SP-GiST support function OID` — a dispatch to an OID no
 /// installed opclass owns (mirror-PG-and-panic: the SP-GiST core only ever
@@ -742,6 +791,11 @@ fn dispatch_config(
             // (ANYRANGEOID prefix / VOIDOID label / no explicit leaf type).
             range::spg_range_quad_config(_in, out);
             return Ok(());
+        }
+        F_SPG_BOX_QUAD_CONFIG => {
+            let mut cfg = boxq::SpgConfigOut::default();
+            boxq::spg_box_quad_config(&mut cfg);
+            (cfg.prefixType, cfg.labelType, cfg.leafType, cfg.canReturnData, cfg.longValuesOK)
         }
         _ => return Err(unrecognized_proc(proc_oid, "config")),
     };
@@ -803,6 +857,25 @@ fn dispatch_choose<'mcx>(
                 nodeN: local_out.nodeN,
                 levelAdd: local_out.levelAdd,
                 restDatum: point_get_datum(mcx, &local_out.rest_point)?,
+            });
+            Ok(())
+        }
+        F_SPG_BOX_QUAD_CHOOSE => {
+            let local_in = boxq::SpgChooseIn {
+                prefix_box: if in_.hasPrefix {
+                    datum_get_box(&in_.prefixDatum)
+                } else {
+                    BOX::default()
+                },
+                leaf_box: datum_get_box(&in_.leafDatum),
+                allTheSame: in_.allTheSame,
+            };
+            let mut local_out = boxq::SpgChooseOut::default();
+            boxq::spg_box_quad_choose(&local_in, &mut local_out);
+            out.result = spgt::spgChooseOutResult::MatchNode(spgt::spgChooseOutMatchNode {
+                nodeN: local_out.nodeN,
+                levelAdd: local_out.levelAdd,
+                restDatum: box_get_datum(mcx, &local_out.rest_box)?,
             });
             Ok(())
         }
@@ -868,6 +941,28 @@ fn dispatch_picksplit<'mcx>(
                 .collect::<PgResult<Vec<_>>>()?;
             Ok(())
         }
+        F_SPG_BOX_QUAD_PICKSPLIT => {
+            let local_in = boxq::SpgPickSplitIn {
+                boxes: in_.datums.iter().map(datum_get_box).collect(),
+            };
+            let mut local_out = boxq::SpgPickSplitOut::default();
+            boxq::spg_box_quad_picksplit(&local_in, &mut local_out);
+            out.hasPrefix = local_out.hasPrefix;
+            out.prefixDatum = if local_out.hasPrefix {
+                Some(box_get_datum(mcx, &local_out.prefix_box)?)
+            } else {
+                None
+            };
+            out.nNodes = local_out.nNodes;
+            out.nodeLabels = None;
+            out.mapTuplesToNodes = local_out.mapTuplesToNodes;
+            out.leafTupleDatums = local_out
+                .leafTupleDatums
+                .iter()
+                .map(|b| box_get_datum(mcx, b))
+                .collect::<PgResult<Vec<_>>>()?;
+            Ok(())
+        }
         text::F_SPG_TEXT_PICKSPLIT => text::spg_text_picksplit(mcx, in_, out),
         inet::F_INET_SPG_PICKSPLIT => inet::inet_spg_picksplit(mcx, in_, out),
         range::F_SPG_RANGE_QUAD_PICKSPLIT => range::spg_range_quad_picksplit(mcx, in_, out),
@@ -927,6 +1022,38 @@ fn dispatch_inner_consistent<'mcx>(
             kd::spg_kd_inner_consistent(&local_in, &mut local_out)?;
             write_inner_out(out, local_out.nNodes, local_out.nodeNumbers, local_out.levelAdds, &local_out.traversalValues, local_out.distances)
         }
+        F_SPG_BOX_QUAD_INNER_CONSISTENT => {
+            let local_in = boxq::SpgInnerConsistentIn {
+                scankeys: decode_box_scankeys(&in_.scankeys),
+                orderby_points: decode_orderby_points(&in_.orderbys),
+                norderbys: in_.norderbys(),
+                traversalValue: in_
+                    .traversalValue
+                    .as_ref()
+                    .map(|b| boxq::RectBox::from_datum_bytes(b)),
+                allTheSame: in_.allTheSame,
+                prefix_box: if in_.hasPrefix {
+                    datum_get_box(&in_.prefixDatum)
+                } else {
+                    BOX::default()
+                },
+                nNodes: in_.nNodes,
+            };
+            let mut local_out = boxq::SpgInnerConsistentOut::default();
+            boxq::spg_box_quad_inner_consistent(&local_in, &mut local_out)?;
+            out.nNodes = local_out.nNodes;
+            out.nodeNumbers = local_out.nodeNumbers;
+            // The box opclass never adjusts the descent level.
+            out.levelAdds = Vec::new();
+            out.reconstructedValues = Vec::new();
+            out.traversalValues = local_out
+                .traversalValues
+                .iter()
+                .map(|rb| Some(rb.to_datum_bytes().to_vec()))
+                .collect();
+            out.distances = local_out.distances;
+            Ok(())
+        }
         text::F_SPG_TEXT_INNER_CONSISTENT => text::spg_text_inner_consistent(_mcx, in_, out),
         inet::F_INET_SPG_INNER_CONSISTENT => inet::inet_spg_inner_consistent(in_, out),
         range::F_SPG_RANGE_QUAD_INNER_CONSISTENT => {
@@ -980,6 +1107,30 @@ fn dispatch_leaf_consistent<'mcx>(
             out.leafValue = Some(point_get_datum(mcx, &local_out.leaf_point)?);
             out.recheck = local_out.recheck;
             out.recheckDistances = false;
+            out.distances = local_out.distances;
+            Ok(res)
+        }
+        F_SPG_BOX_QUAD_LEAF_CONSISTENT => {
+            let local_in = boxq::SpgLeafConsistentIn {
+                scankeys: decode_box_scankeys(&in_.scankeys),
+                orderby_points: decode_orderby_points(&in_.orderbys),
+                norderbys: in_.norderbys(),
+                orderby0_distfnoid: in_
+                    .orderbys
+                    .first()
+                    .map(|sk| sk.sk_func.fn_oid)
+                    .unwrap_or(0),
+                leaf_box: datum_get_box(&in_.leafDatum),
+                returnData: in_.returnData,
+            };
+            let mut local_out = boxq::SpgLeafConsistentOut::default();
+            let res = boxq::spg_box_quad_leaf_consistent(&local_in, &mut local_out)?;
+            out.leafValue = match local_out.leafValue {
+                Some(b) => Some(box_get_datum(mcx, &b)?),
+                None => None,
+            };
+            out.recheck = local_out.recheck;
+            out.recheckDistances = local_out.recheckDistances;
             out.distances = local_out.distances;
             Ok(res)
         }

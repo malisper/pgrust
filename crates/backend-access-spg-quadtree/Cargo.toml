@@ -22,3 +22,4 @@ backend-access-spg-kdtree = { path = "../backend-access-spg-kdtree" }
 backend-access-spg-text = { path = "../backend-access-spg-text" }
 backend-utils-adt-network-spgist = { path = "../backend-utils-adt-network-spgist" }
 backend-utils-adt-rangetypes-spgist = { path = "../backend-utils-adt-rangetypes-spgist" }
+backend-utils-adt-geo-spgist-only = { path = "../backend-utils-adt-geo-spgist-only" }
