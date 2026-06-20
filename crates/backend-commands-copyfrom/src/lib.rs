@@ -649,8 +649,15 @@ pub fn BeginCopyFrom<'mcx>(
 /// (no-transcoding branch). Binary's `CopyFromBinaryStart` (the header read) is
 /// gated upstream.
 fn copy_from_start(cstate: &mut CopyParseState<'_>) -> PgResult<()> {
-    debug_assert!(!cstate.need_transcoding, "transcoding gated in BeginCopyFrom");
-    // input_buf aliases raw_buf (input_is_raw = true), set in BeginCopyFrom.
+    // NB: `cstate.need_transcoding` may be set — `BeginCopyFrom` configures the
+    // file→server conversion (conversion_proc + sized input_buf) when the file
+    // encoding differs from the database encoding, and the text/CSV read loop
+    // (copyfromparse `CopyConvertBuf`) handles it. C's `CopyFromTextLikeStart`
+    // has no transcoding restriction here either. (A stale debug_assert that
+    // forbade transcoding used to panic every transcoding COPY FROM — e.g.
+    // `COPY ... FROM ... WITH (ENCODING 'LATIN1')` — in debug builds.)
+    // input_buf aliases raw_buf only when input_is_raw (no transcoding); when
+    // transcoding it is a separate sized buffer, both set in BeginCopyFrom.
     cstate.input_reached_eof = false;
     // initStringInfo(&cstate->line_buf);
     cstate.line_buf = Vec::new();
