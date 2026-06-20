@@ -1048,7 +1048,14 @@ pub fn distribute_row_identity_vars(
             has_delete_row_trigger,
             result_relation,
         )?;
-        backend_access_table_table_seams::relation_close::call(target_rte_relid, NO_LOCK)?;
+        // C: `table_close(target_relation, NoLock)` — consume the owning carrier
+        // opened above so its single relcache-pin release runs here and its Drop
+        // closer is disarmed. Using the by-OID `relation_close(target_rte_relid)`
+        // instead decremented the relcache refcount but left `target_relation`
+        // armed, so its end-of-scope Drop double-released the pin (rd_refcnt
+        // underflow at xact end for an inherited UPDATE/DELETE — e.g. a FOR
+        // UPDATE cursor over an inheritance parent).
+        target_relation.close(NO_LOCK)?;
         // Re-run build_base_rel_tlists to propagate the added columns.
         initsplan::build_base_rel_tlists::call(root, run);
         // There are no ROWID_VAR Vars in this case, so we're done.
