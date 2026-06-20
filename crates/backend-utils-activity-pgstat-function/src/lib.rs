@@ -315,7 +315,7 @@ fn function_kind_info() -> PgStat_KindInfo {
         shared_size: core::mem::size_of::<PgStatShared_Function>() as u32,
         snapshot_ctl_off: 0,
         shared_ctl_off: 0,
-        shared_data_off: 0,
+        shared_data_off: core::mem::offset_of!(PgStatShared_Function, stats) as u32,
         shared_data_len: core::mem::size_of::<PgStat_StatFuncEntry>() as u32,
         pending_size: core::mem::size_of::<PgStat_FunctionCounts>() as u32,
         name: "function",

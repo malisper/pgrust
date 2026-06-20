@@ -532,7 +532,7 @@ fn backend_kind_info() -> PgStat_KindInfo {
         shared_size: core::mem::size_of::<PgStatShared_Backend>() as u32,
         snapshot_ctl_off: 0,
         shared_ctl_off: 0,
-        shared_data_off: core::mem::size_of::<PgStatShared_Common>() as u32,
+        shared_data_off: core::mem::offset_of!(PgStatShared_Backend, stats) as u32,
         shared_data_len: core::mem::size_of::<PgStat_Backend>() as u32,
         pending_size: 0,
         name: "backend",

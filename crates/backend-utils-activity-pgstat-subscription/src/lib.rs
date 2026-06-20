@@ -218,7 +218,7 @@ fn subscription_kind_info() -> PgStat_KindInfo {
         shared_size: core::mem::size_of::<PgStatShared_Subscription>() as u32,
         snapshot_ctl_off: 0,
         shared_ctl_off: 0,
-        shared_data_off: 0,
+        shared_data_off: core::mem::offset_of!(PgStatShared_Subscription, stats) as u32,
         shared_data_len: core::mem::size_of::<PgStat_StatSubEntry>() as u32,
         pending_size: core::mem::size_of::<PgStat_BackendSubEntry>() as u32,
         name: "subscription",

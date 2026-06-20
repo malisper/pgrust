@@ -481,16 +481,30 @@ pub fn pgstat_init_snapshot_fixed() -> PgResult<()> {
 /// `shared_data_len` bytes following the common [`PgStatShared_Common`] header.
 ///
 /// This mirrors C's `pgstat_get_entry_data(kind, stats)` (which returns
-/// `(char *) stats + kind_info->shared_data_off`). The per-kind crates register
-/// `shared_data_off == 0` (the typed dispatch makes the C offset meaningless),
-/// so this port uses the only faithful offset: immediately after the header —
-/// the same convention `pgstat_reset_entry` uses to zero the stats body.
+/// `(char *) stats + kind_info->shared_data_off`). `data_off` is the kind's
+/// registered [`shared_data_off`](types_pgstat::pgstat_internal::PgStat_KindInfo::shared_data_off),
+/// i.e. `offset_of!(PgStatShared_<Kind>, stats)`.
+///
+/// It is NOT correct to use `size_of::<PgStatShared_Common>()` here: when the
+/// stats body's first field has a larger alignment than the common header (e.g.
+/// every `PgStat_Counter`/`TimestampTz`-leading body, which is 8-byte aligned,
+/// while `PgStatShared_Common` is only 4-byte aligned and `size_of` == 20),
+/// `#[repr(C)]` pads the embedded `stats` field forward to its alignment
+/// (offset 24). Reading at `size_of::<Common>()` (20) instead of the true
+/// offset (24) reads 4 bytes of padding (zero) as the low word plus the low
+/// half of the first counter as the high word — yielding `value << 32` for
+/// every flushed counter. The writers reach `stats` via field access (the true
+/// `offset_of!`), so the reader must use the same offset.
 ///
 /// # Safety
 /// `shared_stats` must point at a live `PgStatShared_*` whose stats body is at
-/// least `len` bytes; the entry's content lock should be held by the caller.
-unsafe fn entry_data_bytes(shared_stats: *const PgStatShared_Common, len: usize) -> Box<[u8]> {
-    let data_off = core::mem::size_of::<PgStatShared_Common>();
+/// `data_off` and at least `len` bytes; the entry's content lock should be held
+/// by the caller.
+unsafe fn entry_data_bytes(
+    shared_stats: *const PgStatShared_Common,
+    data_off: usize,
+    len: usize,
+) -> Box<[u8]> {
     let base = (shared_stats as *const u8).add(data_off);
     let mut out = alloc::vec![0u8; len].into_boxed_slice();
     core::ptr::copy_nonoverlapping(base, out.as_mut_ptr(), len);
@@ -577,7 +591,8 @@ fn pgstat_build_snapshot() -> PgResult<()> {
         let guard =
             lwlock::lwlock_acquire::call(lock, LW_SHARED, proc_seams::my_proc_number::call())?;
         // SAFETY: lock held; stats body is at least `len` bytes after the header.
-        let data = unsafe { entry_data_bytes(stats_data, len) };
+        let data =
+            unsafe { entry_data_bytes(stats_data, kind_info.info.shared_data_off as usize, len) };
         drop(guard);
 
         // pgstat_snapshot_insert(stats, key): new entry, must not be found.
@@ -678,13 +693,16 @@ pub fn pgstat_fetch_entry(
     let len = kind_info
         .map(|ki| ki.info.shared_data_len as usize)
         .unwrap_or(0);
+    let data_off = kind_info
+        .map(|ki| ki.info.shared_data_off as usize)
+        .unwrap_or(0);
 
     // Copy the stats body out under a shared content lock.
     // SAFETY: just-resolved live reference still in pgStatEntryRefHash.
     let e = unsafe { er.get() };
     shmem::pgstat_lock_entry_shared(e, false)?;
     // SAFETY: shared_stats points at a live PgStatShared_Common; lock held.
-    let data = unsafe { entry_data_bytes(e.shared_stats, len) };
+    let data = unsafe { entry_data_bytes(e.shared_stats, data_off, len) };
     shmem::pgstat_unlock_entry(e)?;
 
     // Cache the copy for stable repeated reads (cache/snapshot modes).
@@ -739,9 +757,13 @@ pub fn pgstat_reset_entry(
         unsafe {
             // Zero the per-kind stats following the common header.
             if let Some(ki) = kind_info {
-                let data_off = core::mem::size_of::<
-                    types_pgstat::pgstat_internal::PgStatShared_Common,
-                >();
+                // The kind's registered offset of the embedded `stats` body
+                // (`offset_of!(PgStatShared_<Kind>, stats)`), NOT
+                // `size_of::<PgStatShared_Common>()`: an 8-byte-aligned stats
+                // body is padded past the 4-byte-aligned common header, so the
+                // two differ (see `entry_data_bytes`). Zeroing at the wrong
+                // offset would leave the first counter dirty / clobber padding.
+                let data_off = ki.info.shared_data_off as usize;
                 let data_len = ki.info.shared_data_len as usize;
                 if data_len > 0 {
                     let base = (er.shared_stats as *mut u8).add(data_off);
