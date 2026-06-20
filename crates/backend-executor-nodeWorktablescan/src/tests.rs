@@ -1,8 +1,13 @@
 //! Tests for the `nodeWorktablescan` node logic.
 //!
-//! The genuinely-external operations are reached through this unit's seam
-//! crate; the seam slots are process-global, so the fixtures install them once
-//! and route per-test outcomes through thread-locals guarded by a serial lock.
+//! The node now reaches the ancestor `RecursiveUnion`'s shared working-table
+//! tuplestore through the `EState.es_recursive_shared[wtParam]` side-table
+//! (`RecursiveUnionSharedState`) rather than a private seam family. These unit
+//! tests exercise the side-table-driven legs directly — resolution
+//! (`resolve_rustate`), the deposit (`publish_wtparam_slot`), the access method
+//! (`WorkTableScanNext`), and rescan — mocking only the sort-storage tuplestore
+//! seams the node calls. The full `ExecScan` driver path (qual/projection/EPQ)
+//! is covered end-to-end by the regression suite (`with.sql`).
 
 use super::*;
 
@@ -11,120 +16,51 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use mcx::MemoryContext;
-use types_nodes::execnodes::ScanStateData;
-use types_nodes::executor::TupleTableSlot;
-use types_nodes::nodeworktablescan::RecursiveUnionStateData;
+use types_nodes::execnodes::{RecursiveUnionSharedState, ScanStateData};
+use types_nodes::executor::{TupleTableSlot, TTS_FLAG_EMPTY};
+use types_nodes::nodeworktablescan::WorkTableScan;
+use types_nodes::Tuplestorestate;
 
 thread_local! {
-    static LOG: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
-    /// Verdict `tuplestore_gettupleslot` returns.
+    /// Verdict the mocked `tuplestore_gettupleslot` returns.
     static GETTUPLE: RefCell<bool> = const { RefCell::new(false) };
+    /// Set true when the mocked `tuplestore_rescan` fires.
+    static RESCANNED: RefCell<bool> = const { RefCell::new(false) };
 }
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
-fn log(s: &'static str) {
-    LOG.with(|l| l.borrow_mut().push(s));
-}
-
-fn log_snapshot() -> Vec<&'static str> {
-    LOG.with(|l| l.borrow().clone())
-}
-
+/// Install mocks for the sort-storage tuplestore seams the node calls.
 fn install() {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
-    use seam::*;
-
-    init_plan_state_links::set(|node, _plan, _estate| {
-        log("init_plan_state_links");
-        node.rustate = None;
-        Ok(())
-    });
-    exec_assign_expr_context::set(|_, _| {
-        log("exec_assign_expr_context");
-        Ok(())
-    });
-    exec_init_result_type_tl::set(|_, _| {
-        log("exec_init_result_type_tl");
-        Ok(())
-    });
-    exec_init_scan_tuple_slot::set(|_, _| {
-        log("exec_init_scan_tuple_slot");
-        Ok(())
-    });
-    exec_init_qual::set(|_, _, _| {
-        log("exec_init_qual");
-        Ok(())
-    });
-    resolve_rustate::set(|node, estate| {
-        log("resolve_rustate");
-        node.rustate = Some(Box::new(RecursiveUnionStateData::new_in(estate.es_query_cxt)));
-        Ok(())
-    });
-    exec_assign_scan_type_from_rustate::set(|_, _| {
-        log("exec_assign_scan_type_from_rustate");
-        Ok(())
-    });
-    exec_assign_scan_projection_info::set(|_, _| {
-        log("exec_assign_scan_projection_info");
-        Ok(())
-    });
-    tuplestore_gettupleslot::set(|node, estate| {
-        log("tuplestore_gettupleslot");
+    tuplestore::tuplestore_gettupleslot::set(|_state, _fwd, _copy, slot, estate| {
         let loaded = GETTUPLE.with(|g| *g.borrow());
-        if let Some(id) = node.ss.ss_ScanTupleSlot {
-            let slot = estate.slot_mut(id);
-            if loaded {
-                slot.tts_flags &= !TTS_FLAG_EMPTY;
-            } else {
-                slot.tts_flags |= TTS_FLAG_EMPTY;
-            }
+        let s = estate.slot_mut(slot);
+        if loaded {
+            s.tts_flags &= !TTS_FLAG_EMPTY;
+        } else {
+            s.tts_flags |= TTS_FLAG_EMPTY;
         }
         Ok(loaded)
     });
-    tuplestore_rescan::set(|_, _| {
-        log("tuplestore_rescan");
+    tuplestore::tuplestore_rescan::set(|_state| {
+        RESCANNED.with(|r| *r.borrow_mut() = true);
         Ok(())
     });
-    exec_clear_result_tuple_slot::set(|_, _| {
-        log("exec_clear_result_tuple_slot");
-        Ok(())
-    });
-    exec_scan_rescan::set(|_, _| {
-        log("exec_scan_rescan");
-        Ok(())
-    });
-    check_for_interrupts::set(|| Ok(()));
-    es_epq_active_present::set(|_| Ok(false));
-    reset_per_tuple_expr_context::set(|_, _| Ok(()));
-    set_econtext_scantuple_to_scan_slot::set(|_, _| Ok(()));
-    exec_clear_scan_tuple::set(|node, estate| {
-        if let Some(id) = node.ss.ss_ScanTupleSlot {
-            estate.slot_mut(id).tts_flags |= TTS_FLAG_EMPTY;
-        }
-        Ok(())
-    });
-    exec_clear_proj_result_slot::set(|_, _| Ok(()));
-    exec_qual::set(|_, _| Ok(true));
-    exec_project::set(|_, _| Ok(true));
-    scan_scanrelid::set(|_| Ok(1));
-    epq_param_is_member_of_ext_param::set(|_| Ok(false));
-    epq_relsubs_done::set(|_, _| Ok(false));
-    epq_set_relsubs_done::set(|_, _, _| Ok(()));
-    epq_relsubs_slot_present::set(|_, _| Ok(false));
-    epq_load_relsubs_slot::set(|_, _| Ok(()));
-    epq_relsubs_rowmark_present::set(|_, _| Ok(false));
-    eval_plan_qual_fetch_row_mark::set(|_, _| Ok(false));
+    // The generic ExecScanReScan driver (exec_scan_rescan_worktable) lives in the
+    // execScan crate; mock it to a no-op here (its behavior is covered by the
+    // execScan crate's own tests / the regression suite).
+    execScan::exec_scan_rescan_worktable::set(|_node, _estate| Ok(()));
 }
 
 fn setup() -> MutexGuard<'static, ()> {
     let g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     install();
-    LOG.with(|l| l.borrow_mut().clear());
     GETTUPLE.with(|x| *x.borrow_mut() = false);
+    RESCANNED.with(|x| *x.borrow_mut() = false);
     g
 }
 
@@ -133,6 +69,22 @@ fn empty_state<'mcx>() -> WorkTableScanStateData<'mcx> {
         ss: ScanStateData::default(),
         rustate: None,
     }
+}
+
+/// Claim `es_recursive_shared[wt_param]` with a working-table tuplestore.
+fn claim_shared(estate: &mut EStateData<'_>, wt_param: i32) {
+    let idx = wt_param as usize;
+    while estate.es_recursive_shared.len() <= idx {
+        estate.es_recursive_shared.push(None);
+    }
+    let working = alloc_in(estate.es_query_cxt, Tuplestorestate::default()).unwrap();
+    estate.es_recursive_shared[idx] = Some(RecursiveUnionSharedState {
+        working_table: Some(working),
+        intermediate_table: None,
+        recursing: false,
+        intermediate_empty: true,
+        result_tupdesc: None,
+    });
 }
 
 // --- WorkTableScanRecheck ---
@@ -146,7 +98,7 @@ fn recheck_always_true() {
     assert!(WorkTableScanRecheck(&mut st, &mut estate).unwrap());
 }
 
-// --- WorkTableScanNext ---
+// --- WorkTableScanNext (reads the working_table from the side-table) ---
 
 #[test]
 fn next_loads_tuple_from_working_table() {
@@ -154,10 +106,11 @@ fn next_loads_tuple_from_working_table() {
     GETTUPLE.with(|x| *x.borrow_mut() = true);
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
-    let mut st = empty_state();
     let qcxt = estate.es_query_cxt;
+    claim_shared(&mut estate, 0);
+    let mut st = empty_state();
+    st.rustate = Some(0); // resolved to wtParam 0
     st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(qcxt)).unwrap());
-    st.rustate = Some(Box::new(RecursiveUnionStateData::new_in(ctx.mcx())));
 
     let have = WorkTableScanNext(&mut st, &mut estate).unwrap();
     assert!(have);
@@ -165,6 +118,12 @@ fn next_loads_tuple_from_working_table() {
         estate.slot(st.ss.ss_ScanTupleSlot.unwrap()).tts_flags & TTS_FLAG_EMPTY,
         0
     );
+    // The working_table PgBox was put back after the fetch (take/put).
+    assert!(estate.es_recursive_shared[0]
+        .as_ref()
+        .unwrap()
+        .working_table
+        .is_some());
 }
 
 #[test]
@@ -172,10 +131,11 @@ fn next_returns_false_when_exhausted() {
     let _g = setup();
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
-    let mut st = empty_state();
     let qcxt = estate.es_query_cxt;
+    claim_shared(&mut estate, 0);
+    let mut st = empty_state();
+    st.rustate = Some(0);
     st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(qcxt)).unwrap());
-    st.rustate = Some(Box::new(RecursiveUnionStateData::new_in(ctx.mcx())));
 
     let have = WorkTableScanNext(&mut st, &mut estate).unwrap();
     assert!(!have);
@@ -185,72 +145,90 @@ fn next_returns_false_when_exhausted() {
     );
 }
 
-// --- ExecWorkTableScan ---
+// --- resolve_rustate ---
 
 #[test]
-fn exec_resolves_rustate_on_first_call() {
+fn resolve_records_wtparam_index() {
     let _g = setup();
-    GETTUPLE.with(|x| *x.borrow_mut() = true);
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
+    claim_shared(&mut estate, 3);
     let mut st = empty_state();
-    let qcxt = estate.es_query_cxt;
-    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(qcxt)).unwrap());
-    st.rustate = None;
+    // ss.ps.plan must be a WorkTableScan carrying wtParam=3.
+    let plan = WorkTableScan { wtParam: 3, ..Default::default() };
+    let node = alloc_in(
+        estate.es_query_cxt,
+        types_nodes::nodes::Node::mk_work_table_scan(estate.es_query_cxt, plan).unwrap(),
+    )
+    .unwrap();
+    // SAFETY: the Node lives in the per-query context for the test duration.
+    st.ss.ps.plan = Some(unsafe { &*(node.as_ref() as *const _) });
 
-    let out = ExecWorkTableScan(&mut st, &mut estate).unwrap();
-    assert!(out);
-    assert!(st.rustate.is_some());
-    assert_eq!(
-        log_snapshot(),
-        vec![
-            "resolve_rustate",
-            "exec_assign_scan_type_from_rustate",
-            "exec_assign_scan_projection_info",
-            "tuplestore_gettupleslot",
-        ]
-    );
+    resolve_rustate(&mut st, &mut estate).unwrap();
+    assert_eq!(st.rustate, Some(3));
 }
 
 #[test]
-fn exec_skips_resolution_when_rustate_set() {
+fn resolve_errors_when_shared_state_absent() {
     let _g = setup();
-    GETTUPLE.with(|x| *x.borrow_mut() = true);
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state();
-    let qcxt = estate.es_query_cxt;
-    st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(qcxt)).unwrap());
-    st.rustate = Some(Box::new(RecursiveUnionStateData::new_in(ctx.mcx())));
+    let plan = WorkTableScan { wtParam: 0, ..Default::default() };
+    let node = alloc_in(
+        estate.es_query_cxt,
+        types_nodes::nodes::Node::mk_work_table_scan(estate.es_query_cxt, plan).unwrap(),
+    )
+    .unwrap();
+    st.ss.ps.plan = Some(unsafe { &*(node.as_ref() as *const _) });
 
-    let out = ExecWorkTableScan(&mut st, &mut estate).unwrap();
-    assert!(out);
-    assert_eq!(log_snapshot(), vec!["tuplestore_gettupleslot"]);
+    // No RecursiveUnion has published its shared state -> error (the C Assert).
+    assert!(resolve_rustate(&mut st, &mut estate).is_err());
 }
 
-// --- ExecInitWorkTableScan ---
+// --- publish_wtparam_slot (the deposit) ---
 
 #[test]
-fn init_builds_state_and_defers_projection() {
+fn publish_hoists_tuplestores_into_side_table() {
     let _g = setup();
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
-    let plan = WorkTableScan::default();
+    let qcxt = estate.es_query_cxt;
+    let mut rustate =
+        types_nodes::noderecursiveunion::RecursiveUnionStateData::new_in(qcxt);
+    rustate.working_table = Some(alloc_in(qcxt, Tuplestorestate::default()).unwrap());
+    rustate.intermediate_table = Some(alloc_in(qcxt, Tuplestorestate::default()).unwrap());
+    rustate.recursing = false;
+    rustate.intermediate_empty = true;
 
-    let out = ExecInitWorkTableScan(&plan, &mut estate, 0).unwrap();
-    assert!(out.rustate.is_none());
-    assert!(out.ss.ps.resultopsset);
-    assert!(!out.ss.ps.resultopsfixed);
-    assert_eq!(
-        log_snapshot(),
-        vec![
-            "init_plan_state_links",
-            "exec_assign_expr_context",
-            "exec_init_result_type_tl",
-            "exec_init_scan_tuple_slot",
-            "exec_init_qual",
-        ]
-    );
+    publish_wtparam_slot(&mut rustate, &mut estate, 2).unwrap();
+
+    // The tuplestores moved out of the node into es_recursive_shared[2].
+    assert!(rustate.working_table.is_none());
+    assert!(rustate.intermediate_table.is_none());
+    let shared = estate.es_recursive_shared[2].as_ref().unwrap();
+    assert!(shared.working_table.is_some());
+    assert!(shared.intermediate_table.is_some());
+    assert!(shared.intermediate_empty);
+}
+
+#[test]
+fn publish_rejects_double_claim() {
+    let _g = setup();
+    let ctx = MemoryContext::new("per-query");
+    let mut estate = EStateData::new_in(ctx.mcx());
+    let qcxt = estate.es_query_cxt;
+    let mut rustate =
+        types_nodes::noderecursiveunion::RecursiveUnionStateData::new_in(qcxt);
+    rustate.working_table = Some(alloc_in(qcxt, Tuplestorestate::default()).unwrap());
+    publish_wtparam_slot(&mut rustate, &mut estate, 0).unwrap();
+
+    // A second publish for the same wtParam is the C `Assert(prmdata->execPlan
+    // == NULL)` violation.
+    let mut rustate2 =
+        types_nodes::noderecursiveunion::RecursiveUnionStateData::new_in(qcxt);
+    rustate2.working_table = Some(alloc_in(qcxt, Tuplestorestate::default()).unwrap());
+    assert!(publish_wtparam_slot(&mut rustate2, &mut estate, 0).is_err());
 }
 
 // --- ExecReScanWorkTableScan ---
@@ -260,20 +238,22 @@ fn rescan_rescans_tuplestore_when_rustate_set() {
     let _g = setup();
     let ctx = MemoryContext::new("per-query");
     let mut estate = EStateData::new_in(ctx.mcx());
-    let mut st = empty_state();
     let qcxt = estate.es_query_cxt;
-    st.ss.ps.ps_ResultTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(qcxt)).unwrap());
-    st.rustate = Some(Box::new(RecursiveUnionStateData::new_in(ctx.mcx())));
+    claim_shared(&mut estate, 0);
+    let mut st = empty_state();
+    st.rustate = Some(0);
+    // ps_ResultTupleSlot left None so the ExecClearTuple branch is skipped (that
+    // leg is covered by execTuples' own tests).
+    let _ = qcxt;
 
     ExecReScanWorkTableScan(&mut st, &mut estate).unwrap();
-    assert_eq!(
-        log_snapshot(),
-        vec![
-            "exec_clear_result_tuple_slot",
-            "exec_scan_rescan",
-            "tuplestore_rescan",
-        ]
-    );
+    assert!(RESCANNED.with(|r| *r.borrow()));
+    // working_table was put back after the rescan (take/put).
+    assert!(estate.es_recursive_shared[0]
+        .as_ref()
+        .unwrap()
+        .working_table
+        .is_some());
 }
 
 #[test]
@@ -286,5 +266,5 @@ fn rescan_skips_tuplestore_when_rustate_none() {
     st.rustate = None;
 
     ExecReScanWorkTableScan(&mut st, &mut estate).unwrap();
-    assert_eq!(log_snapshot(), vec!["exec_scan_rescan"]);
+    assert!(!RESCANNED.with(|r| *r.borrow()));
 }

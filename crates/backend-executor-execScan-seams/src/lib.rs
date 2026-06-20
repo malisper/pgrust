@@ -281,3 +281,55 @@ seam_core::seam!(
         recheck: NamedTuplestoreScanRecheckMtd,
     ) -> PgResult<Option<SlotId>>
 );
+
+// --- WorkTableScan-specialized entry point ---------------------------------
+// Same `execScan.c` driver, specialized to the work-table-scan node (its own
+// in-crate `WorkTableScanNext`/`WorkTableScanRecheck`). When execScan.c lands it
+// installs one generic implementation; this per-node entry point marshals to it.
+
+use types_nodes::nodeworktablescan::WorkTableScanStateData;
+
+/// `ExecScanAccessMtd`, specialized to a work-table-scan node — returns `true`
+/// when a tuple sits in the node's scan slot, `false` at end-of-scan.
+pub type WorkTableScanAccessMtd =
+    for<'mcx> fn(&mut WorkTableScanStateData<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+/// `ExecScanRecheckMtd`, specialized to a work-table-scan node.
+pub type WorkTableScanRecheckMtd =
+    for<'mcx> fn(&mut WorkTableScanStateData<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+
+seam_core::seam!(
+    /// `ExecScan(&node->ss, accessMtd, recheckMtd)` (execScan.c): run the
+    /// generic scan loop — `ExecScanFetch` (interrupts + the EvalPlanQual
+    /// replacement-tuple decision tree), qual-filter, project — for a
+    /// work-table-scan node. Returns the result slot id of the produced (possibly
+    /// projected) tuple, or `None` at end of scan. `Err` carries the
+    /// qual/projection `ereport(ERROR)`s and OOM. The EPQ branching is owned by
+    /// execScan.c; this node passes its `WorkTableScanNext` / `WorkTableScanRecheck`.
+    pub fn exec_scan_worktable<'mcx>(
+        node: &mut WorkTableScanStateData<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        access: WorkTableScanAccessMtd,
+        recheck: WorkTableScanRecheckMtd,
+    ) -> PgResult<Option<SlotId>>
+);
+
+seam_core::seam!(
+    /// `ExecScanReScan(&node->ss)` (execScan.c): reset the generic scan state
+    /// (rescan EPQ, clear the result slot) at the start of a work-table-scan
+    /// rescan.
+    pub fn exec_scan_rescan_worktable<'mcx>(
+        node: &mut WorkTableScanStateData<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExecAssignScanProjectionInfo(&node->ss)` (execScan.c): set up the
+    /// work-table-scan node's projection, comparing the scan tuple type to the
+    /// result type.
+    pub fn exec_assign_scan_projection_info_worktable<'mcx>(
+        node: &mut WorkTableScanStateData<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()>
+);

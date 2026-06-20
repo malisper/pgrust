@@ -14,7 +14,7 @@ backend-executor-execGrouping-seams = { path = "../backend-executor-execGrouping
 backend-executor-execProcnode-seams = { path = "../backend-executor-execProcnode-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
-backend-executor-nodeWorktablescan-seams = { path = "../backend-executor-nodeWorktablescan-seams" }
+backend-executor-nodeWorktablescan = { path = "../backend-executor-nodeWorktablescan" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

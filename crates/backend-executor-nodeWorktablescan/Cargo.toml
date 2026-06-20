@@ -9,9 +9,13 @@ name = "backend_executor_nodeWorktablescan"
 path = "src/lib.rs"
 
 [dependencies]
-seam-core = { path = "../seam-core" }
 types-error = { path = "../types-error" }
 types-core = { path = "../types-core" }
 types-nodes = { path = "../types-nodes" }
-backend-executor-nodeWorktablescan-seams = { path = "../backend-executor-nodeWorktablescan-seams" }
+types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-executor-execScan-seams = { path = "../backend-executor-execScan-seams" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-utils-sort-storage-seams = { path = "../backend-utils-sort-storage-seams" }

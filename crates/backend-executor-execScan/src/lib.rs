@@ -111,6 +111,13 @@ impl<'mcx> ScanNode<'mcx> for NamedTuplestoreScanState<'mcx> {
     }
 }
 
+impl<'mcx> ScanNode<'mcx> for types_nodes::nodeworktablescan::WorkTableScanStateData<'mcx> {
+    #[inline]
+    fn ss(&mut self) -> &mut ScanStateData<'mcx> {
+        &mut self.ss
+    }
+}
+
 /// Install this crate's implementations into the `execScan` seam slots.
 ///
 /// Every seam declared in `backend-executor-execScan-seams` is set here to the
@@ -131,6 +138,11 @@ pub fn init_seams() {
     execScan_seams::exec_scan_rescan_cte::set(exec_scan_rescan_cte);
     execScan_seams::exec_assign_scan_projection_info_cte::set(exec_assign_scan_projection_info_cte);
     execScan_seams::exec_scan_namedtuplestore::set(exec_scan_namedtuplestore);
+    execScan_seams::exec_scan_worktable::set(exec_scan_worktable);
+    execScan_seams::exec_scan_rescan_worktable::set(exec_scan_rescan_worktable);
+    execScan_seams::exec_assign_scan_projection_info_worktable::set(
+        exec_assign_scan_projection_info_worktable,
+    );
 
     // The TidScan node carries its own node-owned seam crate (the
     // `nodeTidrangescan` precedent) because the shared `execScan-seams` crate is
@@ -290,6 +302,7 @@ fn scan_scanrelid(ss: &ScanStateData<'_>) -> u32 {
         ntag::T_NamedTuplestoreScan => {
             plan.as_namedtuplestorescan().unwrap().scan.scanrelid
         }
+        ntag::T_WorkTableScan => plan.as_worktablescan().unwrap().scan.scanrelid,
         _ => panic!("scan_scanrelid: plan is not a Scan node: {plan:?}"),
     }
 }
@@ -802,4 +815,36 @@ fn exec_scan_namedtuplestore<'mcx>(
     recheck: execScan_seams::NamedTuplestoreScanRecheckMtd,
 ) -> PgResult<Option<SlotId>> {
     exec_scan_core(node, into_slot_access(access), recheck, estate)
+}
+
+/// `exec_scan_worktable` seam — `ExecScan(&node->ss, WorkTableScanNext,
+/// WorkTableScanRecheck)` for a work-table-scan node. The access method is the
+/// node's own `WorkTableScanNext`, which stores the next tuple into
+/// `ss_ScanTupleSlot` and reports a `bool`.
+fn exec_scan_worktable<'mcx>(
+    node: &mut types_nodes::nodeworktablescan::WorkTableScanStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    access: execScan_seams::WorkTableScanAccessMtd,
+    recheck: execScan_seams::WorkTableScanRecheckMtd,
+) -> PgResult<Option<SlotId>> {
+    exec_scan_core(node, into_slot_access(access), recheck, estate)
+}
+
+/// `exec_scan_rescan_worktable` seam — `ExecScanReScan(&node->ss)` for a
+/// work-table-scan node.
+fn exec_scan_rescan_worktable<'mcx>(
+    node: &mut types_nodes::nodeworktablescan::WorkTableScanStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    exec_scan_rescan_ss(&mut node.ss, estate)
+}
+
+/// `exec_assign_scan_projection_info_worktable` seam —
+/// `ExecAssignScanProjectionInfo(&node->ss)` for a work-table-scan node. Same
+/// generic `ExecAssignScanProjectionInfo` over the node's [`ScanStateData`] head.
+fn exec_assign_scan_projection_info_worktable<'mcx>(
+    node: &mut types_nodes::nodeworktablescan::WorkTableScanStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    exec_assign_scan_projection_info(&mut node.ss, estate)
 }

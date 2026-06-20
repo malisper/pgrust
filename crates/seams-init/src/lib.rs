@@ -1377,22 +1377,13 @@ mod recurrence_guard {
         // the recurrence guard already exempts every indexing-seams seam (same
         // as the existing catalog_tuple_insert_pg_namespace/pg_am). They panic
         // until indexing.c lands — sanctioned mirror-pg-and-panic.
-        // DESIGN_DEBT: `publish_wtparam_slot` is the *deposit* end of the
-        // RecursiveUnion<->WorkTableScan cross-node aliasing channel. In C
-        // `ExecInitRecursiveUnion` does `prmdata->value = PointerGetDatum(rustate)`,
-        // storing a *live pointer* to the ancestor's `RecursiveUnionState` into the
-        // reserved `Param` slot (`es_param_exec_vals[wtParam]`), which a descendant
-        // `WorkTableScan` recovers via `resolve_rustate`
-        // (`castNode(RecursiveUnionState, DatumGetPointer(param->value))`). Our
-        // `ParamExecData.value` is the bare-word `Datum(usize)` with no pointer
-        // lane, and `WorkTableScanStateData.rustate` is an owned
-        // `Option<Box<RecursiveUnionStateData>>`, not an alias of the ancestor's
-        // `PgBox`. Installing the deposit faithfully requires the same unported
-        // datum-pointer/handle-arena machinery the recovery side
-        // (`resolve_rustate`, also still seam-and-panic) needs — a contract
-        // redesign of the cross-node aliasing channel, not a `::set()`. Pay down
-        // alongside the `resolve_rustate` recovery channel.
-        ("backend_executor_nodeWorktablescan", "publish_wtparam_slot"),
+        // (The RecursiveUnion<->WorkTableScan cross-node aliasing channel
+        // `publish_wtparam_slot`/`resolve_rustate` is now RESOLVED: the
+        // RecursiveUnion's shared working-table tuplestore is hoisted into the
+        // `EState.es_recursive_shared` side-table keyed by `wtParam` — the
+        // `es_cte_shared` precedent — and nodeRecursiveunion calls
+        // `backend_executor_nodeWorktablescan::publish_wtparam_slot` directly,
+        // so the former CONTRACT_RECONCILE_PENDING entry for it is retired.)
         // nodes-core re-homes these two cross-unit DESIGN_DEBT seams onto its own
         // -seams crate so the guard can track them (see DESIGN_DEBT.md). Both
         // read the unported call-expression node tree (FuncExpr/OpExpr/RowExpr/

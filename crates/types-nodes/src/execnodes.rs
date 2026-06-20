@@ -300,6 +300,51 @@ pub struct CteSharedState<'mcx> {
     pub last_cte_slot: Option<SlotId>,
 }
 
+/// Owned-model carrier for the shared state a `RecursiveUnion` node publishes
+/// for its descendant `WorkTableScan` nodes, keyed by `RecursiveUnion.wtParam`
+/// in [`EStateData::es_recursive_shared`].
+///
+/// In C (`nodeRecursiveunion.c` / `nodeWorktablescan.c`) the `RecursiveUnion`
+/// engine owns the working-table tuplestore (`working_table`), the
+/// intermediate-table tuplestore it swaps with, and the
+/// `recursing`/`intermediate_empty` bookkeeping. `ExecInitRecursiveUnion`
+/// publishes a *live pointer* to its `RecursiveUnionState` into the reserved
+/// work-table `Param` slot (`es_param_exec_vals[wtParam].value =
+/// PointerGetDatum(rustate)`); each descendant `WorkTableScan` recovers that
+/// alias (`node->rustate = DatumGetPointer(param->value)`) and reads
+/// `rustate->working_table`.
+///
+/// The owned model cannot stash a live `&mut RecursiveUnionState` alias in a
+/// `Datum` (the engine borrows itself `&mut` while it drives its inner plan, so
+/// a descendant `WorkTableScan` running *inside* that call could not also borrow
+/// it). So — exactly as the CTE leader's shared store ([`CteSharedState`]) was
+/// hoisted into [`EStateData::es_cte_shared`] keyed by `cteParam` — the
+/// `RecursiveUnion`'s *shared-with-WorkTableScan* fields are hoisted out of the
+/// node into this side-entry keyed by `wtParam`. Both the engine and the scan
+/// reach the working table by `wtParam` index through `&mut EStateData`, which
+/// each already threads, so no aliasing is needed. This carries only the shared
+/// fields, not a node identity — it is not a registry of nodes.
+#[derive(Debug, Default)]
+pub struct RecursiveUnionSharedState<'mcx> {
+    /// `Tuplestorestate *working_table` — the current working table (WT) the
+    /// recursive term's `WorkTableScan` reads from. `None` until the owning
+    /// `RecursiveUnion` publishes it (and after `ExecEndRecursiveUnion` frees it).
+    pub working_table: Option<PgBox<'mcx, crate::funcapi::Tuplestorestate<'mcx>>>,
+    /// `Tuplestorestate *intermediate_table` — accumulates the current
+    /// iteration's rows; swapped with `working_table` each round.
+    pub intermediate_table: Option<PgBox<'mcx, crate::funcapi::Tuplestorestate<'mcx>>>,
+    /// `bool recursing` — are we in the recursive (phase-2) loop yet?
+    pub recursing: bool,
+    /// `bool intermediate_empty` — nothing stashed in the intermediate table?
+    pub intermediate_empty: bool,
+    /// `ExecGetResultType(&rustate->ps)` — the `RecursiveUnion`'s result rowtype,
+    /// which is also the work-table rowtype the `WorkTableScan` scans. Published
+    /// by `ExecInitRecursiveUnion` so `WorkTableScan`'s deferred
+    /// `ExecAssignScanType` (in its first `ExecWorkTableScan`) can read it without
+    /// aliasing the ancestor node.
+    pub result_tupdesc: Option<PgBox<'mcx, TupleDescData<'mcx>>>,
+}
+
 impl Default for ParamExecData<'_> {
     fn default() -> Self {
         // C `palloc0` zero-init: NULL execPlan, NULL value, isnull cleared.
@@ -958,6 +1003,17 @@ pub struct EStateData<'mcx> {
     /// fields out of the node (see [`CteSharedState`]). Grown on demand by
     /// `cte_resolve_leader`; `None` is an unclaimed slot. Empty = no CTEs.
     pub es_cte_shared: PgVec<'mcx, Option<CteSharedState<'mcx>>>,
+    /// Owned-model side-table holding each `RecursiveUnion`'s shared state
+    /// ([`RecursiveUnionSharedState`]), keyed by `RecursiveUnion.wtParam` (the
+    /// same index into `es_param_exec_vals` C uses to publish the live `rustate`
+    /// pointer the descendant `WorkTableScan` recovers). In C the shared
+    /// working-table tuplestore lives in the engine's `RecursiveUnionState` and
+    /// the scan reaches it through an aliasing `rustate` pointer; the owned model
+    /// cannot alias a live (self-borrowing) node, so this hoists the shared fields
+    /// out of the node (see [`RecursiveUnionSharedState`]). Grown on demand by
+    /// `publish_wtparam_slot`; `None` is an unclaimed slot. Empty = no recursive
+    /// CTEs.
+    pub es_recursive_shared: PgVec<'mcx, Option<RecursiveUnionSharedState<'mcx>>>,
     /// `List *es_auxmodifytables` — not-canSetTag ModifyTableStates.
     ///
     /// In C this is a `List` of `ModifyTableState *` aliases to nodes that are
@@ -1068,6 +1124,7 @@ impl<'mcx> EStateData<'mcx> {
             es_subplanstates: PgVec::new_in(mcx),
             es_initplan: PgVec::new_in(mcx),
             es_cte_shared: PgVec::new_in(mcx),
+            es_recursive_shared: PgVec::new_in(mcx),
             // es_auxmodifytables = NIL;
             es_auxmodifytables: PgVec::new_in(mcx),
             // es_per_tuple_exprcontext = NULL;

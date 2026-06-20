@@ -44,12 +44,14 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
+extern crate alloc;
+
 use backend_executor_execAmi_seams as execAmi;
 use backend_executor_execGrouping_seams as execGrouping;
 use backend_executor_execProcnode_seams as execProcnode;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
-use backend_executor_nodeWorktablescan_seams as worktablescan;
+use backend_executor_nodeWorktablescan as worktablescan;
 use backend_nodes_core_seams as bitmapset;
 use backend_tcop_postgres_seams as tcop_postgres;
 use backend_utils_init_small_seams as globals;
@@ -57,6 +59,7 @@ use backend_utils_sort_storage_seams as tuplestore;
 
 use mcx::PgBox;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use types_nodes::execnodes::RecursiveUnionSharedState;
 use types_nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use types_nodes::noderecursiveunion::{RecursiveUnion, RecursiveUnionStateData};
 use types_nodes::nodes::Node;
@@ -77,6 +80,30 @@ fn tup_is_null(slot: Option<SlotId>, estate: &EStateData<'_>) -> bool {
         None => true,
         Some(id) => estate.slot(id).is_empty(),
     }
+}
+
+/// `&mut es_recursive_shared[wtParam]` — the shared state this RecursiveUnion
+/// published at init (`publish_wtparam_slot`), holding the working/intermediate
+/// tuplestores and the `recursing`/`intermediate_empty` bookkeeping. In the
+/// owned model these live in the `EState.es_recursive_shared` side-table (keyed
+/// by `wtParam`) rather than on the node, so the descendant `WorkTableScan` can
+/// reach the working table without aliasing this (self-borrowing) node.
+fn shared_mut<'a, 'mcx>(
+    wt_param: i32,
+    estate: &'a mut EStateData<'mcx>,
+) -> PgResult<&'a mut RecursiveUnionSharedState<'mcx>> {
+    let idx = usize::try_from(wt_param)
+        .map_err(|_| internal("RecursiveUnion: invalid wtParam"))?;
+    estate
+        .es_recursive_shared
+        .get_mut(idx)
+        .and_then(|s| s.as_mut())
+        .ok_or_else(|| internal("RecursiveUnion: shared state not published"))
+}
+
+/// `elog(ERROR, ...)` with the default internal SQLSTATE.
+fn internal(msg: &str) -> PgError {
+    PgError::error(alloc::string::String::from(msg)).with_sqlstate(ERRCODE_INTERNAL_ERROR)
 }
 
 /// `(RecursiveUnion *) node->ps.plan` — recover the plan node the planner
@@ -222,8 +249,13 @@ pub fn ExecRecursiveUnion<'mcx>(
     // CHECK_FOR_INTERRUPTS();
     tcop_postgres::check_for_interrupts::call()?;
 
+    // The working/intermediate tuplestores and the recursing/intermediate_empty
+    // bookkeeping live in `EState.es_recursive_shared[wtParam]` (hoisted off the
+    // node at init so the descendant WorkTableScan can reach the working table).
+
     // 1. Evaluate non-recursive term
-    if !node.recursing {
+    //   if (!node->recursing)
+    if !shared_mut(wt_param, estate)?.recursing {
         loop {
             // slot = ExecProcNode(outerPlan);
             let slot = {
@@ -239,8 +271,7 @@ pub fn ExecRecursiveUnion<'mcx>(
                 break;
             }
             let slot = slot.ok_or_else(|| {
-                PgError::error("ExecRecursiveUnion: ExecProcNode returned a null slot")
-                    .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+                internal("ExecRecursiveUnion: ExecProcNode returned a null slot")
             })?;
             // if (plan->numCols > 0)
             if num_cols > 0 {
@@ -259,16 +290,12 @@ pub fn ExecRecursiveUnion<'mcx>(
             }
             // Each non-duplicate tuple goes to the working table ...
             // tuplestore_puttupleslot(node->working_table, slot);
-            let working = node
-                .working_table
-                .as_deref_mut()
-                .expect("ExecRecursiveUnion: working_table is NULL");
-            tuplestore::tuplestore_puttupleslot::call(working, slot, estate)?;
+            put_into_working(wt_param, slot, estate)?;
             // ... and to the caller
             return Ok(Some(slot));
         }
         // node->recursing = true;
-        node.recursing = true;
+        shared_mut(wt_param, estate)?.recursing = true;
     }
 
     // 2. Execute recursive term
@@ -286,7 +313,7 @@ pub fn ExecRecursiveUnion<'mcx>(
         if tup_is_null(slot, estate) {
             // Done if there's nothing in the intermediate table
             // if (node->intermediate_empty) break;
-            if node.intermediate_empty {
+            if shared_mut(wt_param, estate)?.intermediate_empty {
                 break;
             }
 
@@ -294,23 +321,24 @@ pub fn ExecRecursiveUnion<'mcx>(
             // a fresh intermediate table, so delete the tuples from the current
             // working table and use that as the new intermediate table. This
             // saves a round of free/malloc from creating a new tuple store.
-            // tuplestore_clear(node->working_table);
             {
-                let working = node
-                    .working_table
-                    .as_deref_mut()
-                    .expect("ExecRecursiveUnion: working_table is NULL");
-                tuplestore::tuplestore_clear::call(working);
+                let shared = shared_mut(wt_param, estate)?;
+                // tuplestore_clear(node->working_table);
+                {
+                    let working = shared
+                        .working_table
+                        .as_deref_mut()
+                        .ok_or_else(|| internal("ExecRecursiveUnion: working_table is NULL"))?;
+                    tuplestore::tuplestore_clear::call(working);
+                }
+                // swaptemp = node->working_table;
+                // node->working_table = node->intermediate_table;
+                // node->intermediate_table = swaptemp;
+                core::mem::swap(&mut shared.working_table, &mut shared.intermediate_table);
+                // mark the intermediate table as empty
+                // node->intermediate_empty = true;
+                shared.intermediate_empty = true;
             }
-
-            // swaptemp = node->working_table;
-            // node->working_table = node->intermediate_table;
-            // node->intermediate_table = swaptemp;
-            core::mem::swap(&mut node.working_table, &mut node.intermediate_table);
-
-            // mark the intermediate table as empty
-            // node->intermediate_empty = true;
-            node.intermediate_empty = true;
 
             // reset the recursive term
             // innerPlan->chgParam = bms_add_member(innerPlan->chgParam,
@@ -322,8 +350,7 @@ pub fn ExecRecursiveUnion<'mcx>(
         }
 
         let slot = slot.ok_or_else(|| {
-            PgError::error("ExecRecursiveUnion: ExecProcNode returned a null slot")
-                .with_sqlstate(ERRCODE_INTERNAL_ERROR)
+            internal("ExecRecursiveUnion: ExecProcNode returned a null slot")
         })?;
 
         // if (plan->numCols > 0)
@@ -344,19 +371,52 @@ pub fn ExecRecursiveUnion<'mcx>(
 
         // Else, tuple is good; stash it in intermediate table ...
         // node->intermediate_empty = false;
-        node.intermediate_empty = false;
+        shared_mut(wt_param, estate)?.intermediate_empty = false;
         // tuplestore_puttupleslot(node->intermediate_table, slot);
-        let intermediate = node
-            .intermediate_table
-            .as_deref_mut()
-            .expect("ExecRecursiveUnion: intermediate_table is NULL");
-        tuplestore::tuplestore_puttupleslot::call(intermediate, slot, estate)?;
+        put_into_intermediate(wt_param, slot, estate)?;
         // ... and return it
         return Ok(Some(slot));
     }
 
     // return NULL;
     Ok(None)
+}
+
+/// `tuplestore_puttupleslot(node->working_table, slot)` over the side-table:
+/// take the `working_table` PgBox out so the put can hold `&mut estate` without a
+/// self-alias, then restore it (even on the error path).
+fn put_into_working<'mcx>(
+    wt_param: i32,
+    slot: SlotId,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let mut working = shared_mut(wt_param, estate)?
+        .working_table
+        .take()
+        .ok_or_else(|| internal("ExecRecursiveUnion: working_table is NULL"))?;
+    let res = tuplestore::tuplestore_puttupleslot::call(&mut working, slot, estate);
+    if let Ok(shared) = shared_mut(wt_param, estate) {
+        shared.working_table = Some(working);
+    }
+    res
+}
+
+/// `tuplestore_puttupleslot(node->intermediate_table, slot)` over the side-table
+/// (same take/put pattern as [`put_into_working`]).
+fn put_into_intermediate<'mcx>(
+    wt_param: i32,
+    slot: SlotId,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    let mut intermediate = shared_mut(wt_param, estate)?
+        .intermediate_table
+        .take()
+        .ok_or_else(|| internal("ExecRecursiveUnion: intermediate_table is NULL"))?;
+    let res = tuplestore::tuplestore_puttupleslot::call(&mut intermediate, slot, estate);
+    if let Ok(shared) = shared_mut(wt_param, estate) {
+        shared.intermediate_table = Some(intermediate);
+    }
+    res
 }
 
 /// `LookupTupleHashEntry(node->hashtable, slot, &isnew, NULL)` — find or build
@@ -466,7 +526,7 @@ pub fn ExecInitRecursiveUnion<'mcx>(
     //   Assert(prmdata->execPlan == NULL);
     //   prmdata->value = PointerGetDatum(rustate);
     //   prmdata->isnull = false;
-    worktablescan::publish_wtparam_slot::call(&mut rustate, estate, plan.wtParam)?;
+    worktablescan::publish_wtparam_slot(&mut rustate, estate, plan.wtParam)?;
 
     // Miscellaneous initialization
     //
@@ -479,6 +539,20 @@ pub fn ExecInitRecursiveUnion<'mcx>(
     // tuples, so we have to initialize them.
     // ExecInitResultTypeTL(&rustate->ps);
     execTuples::exec_init_result_type_tl::call(&mut rustate.ps, estate)?;
+
+    // Publish the just-established result rowtype to the side-table so the
+    // descendant WorkTableScan's deferred ExecAssignScanType (which reads
+    // `ExecGetResultType(&rustate->ps)`) can recover it without aliasing this
+    // node. (In C the published `rustate` pointer sees this desc set just
+    // above; here the side-table holds an owned clone, captured now.)
+    {
+        let result_tupdesc: types_tuple::heaptuple::TupleDesc<'mcx> =
+            match rustate.ps.ps_ResultTupleDesc.as_deref() {
+                Some(td) => Some(mcx::alloc_in(mcx, td.clone_in(mcx)?)?),
+                None => None,
+            };
+        shared_mut(plan.wtParam, estate)?.result_tupdesc = result_tupdesc;
+    }
 
     // Initialize result tuple type. (Note: we have to set up the result type
     // before initializing child nodes, because nodeWorktablescan.c expects it
@@ -536,12 +610,17 @@ pub fn ExecEndRecursiveUnion<'mcx>(
     node: &mut RecursiveUnionStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // Release tuplestores
-    if let Some(working) = node.working_table.take() {
-        tuplestore::tuplestore_end::call(working);
-    }
-    if let Some(intermediate) = node.intermediate_table.take() {
-        tuplestore::tuplestore_end::call(intermediate);
+    let wt_param = plan_of(node).wtParam;
+
+    // Release tuplestores. They live in the `es_recursive_shared[wtParam]`
+    // side-table (hoisted off the node at init); take them out and end them.
+    if let Ok(shared) = shared_mut(wt_param, estate) {
+        if let Some(working) = shared.working_table.take() {
+            tuplestore::tuplestore_end::call(working);
+        }
+        if let Some(intermediate) = shared.intermediate_table.take() {
+            tuplestore::tuplestore_end::call(intermediate);
+        }
     }
 
     // free subsidiary stuff including hashtable
@@ -637,15 +716,19 @@ pub fn ExecReScanRecursiveUnion<'mcx>(
         execGrouping::reset_tuple_hash_table::call(hashtable)?;
     }
 
-    // reset processing state
+    // reset processing state (the bookkeeping + tuplestores live in the
+    // `es_recursive_shared[wtParam]` side-table).
+    let shared = shared_mut(wt_param, estate)?;
     node.recursing = false;
     node.intermediate_empty = true;
+    shared.recursing = false;
+    shared.intermediate_empty = true;
     // tuplestore_clear(node->working_table);
-    if let Some(working) = node.working_table.as_deref_mut() {
+    if let Some(working) = shared.working_table.as_deref_mut() {
         tuplestore::tuplestore_clear::call(working);
     }
     // tuplestore_clear(node->intermediate_table);
-    if let Some(intermediate) = node.intermediate_table.as_deref_mut() {
+    if let Some(intermediate) = shared.intermediate_table.as_deref_mut() {
         tuplestore::tuplestore_clear::call(intermediate);
     }
     Ok(())

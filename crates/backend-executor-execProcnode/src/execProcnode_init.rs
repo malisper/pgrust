@@ -242,11 +242,10 @@ pub fn exec_init_node<'mcx>(
         // cycle), so this arm is fully wired. WorkTableScan only appears inside a
         // RecursiveUnion (WITH RECURSIVE).
         ntag::T_WorkTableScan => {
-            let wts = node.expect_worktablescan();
             let s = backend_executor_nodeWorktablescan::ExecInitWorkTableScan(
-                wts, estate, eflags,
+                node, estate, eflags,
             )?;
-            alloc_in(mcx, PlanStateNode::WorkTableScan(alloc_in(mcx, s)?))?
+            alloc_in(mcx, PlanStateNode::WorkTableScan(s))?
         }
 
         // case T_ForeignScan: ExecInitForeignScan((ForeignScan *) node, estate, eflags)

@@ -10829,7 +10829,7 @@ dependencies = [
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
- "backend-executor-nodeWorktablescan-seams",
+ "backend-executor-nodeWorktablescan",
  "backend-nodes-core-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-init-small-seams",
@@ -11191,12 +11191,16 @@ dependencies = [
 name = "backend-executor-nodeWorktablescan"
 version = "0.0.0"
 dependencies = [
- "backend-executor-nodeWorktablescan-seams",
+ "backend-executor-execExpr-seams",
+ "backend-executor-execScan-seams",
+ "backend-executor-execTuples-seams",
+ "backend-executor-execUtils-seams",
+ "backend-utils-sort-storage-seams",
  "mcx",
- "seam-core",
  "types-core",
  "types-error",
  "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]

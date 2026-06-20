@@ -9,8 +9,6 @@
 //! lands (the work-table scan only ever reads it through seams into that
 //! unported owner).
 
-use alloc::boxed::Box;
-
 use crate::execnodes::ScanStateData;
 use crate::nodeindexscan::Scan;
 use crate::nodes::NodeTag;
@@ -63,9 +61,18 @@ impl WorkTableScan<'_> {
 pub struct WorkTableScanStateData<'mcx> {
     /// `ScanState ss` — its first field is `NodeTag`.
     pub ss: ScanStateData<'mcx>,
-    /// `RecursiveUnionState *rustate` — the ancestor `RecursiveUnion`'s executor
-    /// state, owning the work-table tuplestore. `None` (C `NULL`) until the
-    /// first `ExecWorkTableScan` call resolves it from the work-table `Param`
-    /// slot.
-    pub rustate: Option<Box<RecursiveUnionStateData<'mcx>>>,
+    /// `RecursiveUnionState *rustate` — in C, the ancestor `RecursiveUnion`'s
+    /// executor state, owning the work-table tuplestore, recovered from the
+    /// work-table `Param` slot on the first `ExecWorkTableScan` call (`NULL` until
+    /// then).
+    ///
+    /// The owned model cannot hold a live `&mut` alias to the (self-borrowing)
+    /// ancestor node, so — exactly as the C `void *execPlan` became the
+    /// [`ExecPlanLink`](crate::ExecPlanLink) index — the recovered alias is the
+    /// ancestor's `wtParam` index into
+    /// [`EStateData::es_recursive_shared`](crate::execnodes::EStateData::es_recursive_shared),
+    /// where the shared working-table tuplestore actually lives
+    /// ([`RecursiveUnionSharedState`](crate::execnodes::RecursiveUnionSharedState)).
+    /// `None` (C `NULL`) until the first `ExecWorkTableScan` call resolves it.
+    pub rustate: Option<i32>,
 }
