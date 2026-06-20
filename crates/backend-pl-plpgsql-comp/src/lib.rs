@@ -468,6 +468,7 @@ pub fn plpgsql_build_variable(
                 value: Datum::null(),
                 isnull: true,
                 freeval: false,
+                value_byref: None,
                 promise: PLpgSQL_promise_type::PLPGSQL_PROMISE_NONE,
             };
             let dno = plpgsql_adddatum(PLpgSQL_datum::Var(mem::boxed(var)));

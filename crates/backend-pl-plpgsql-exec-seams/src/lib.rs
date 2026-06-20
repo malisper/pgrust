@@ -51,11 +51,18 @@ seam_core::seam!(
 /// One PL/pgSQL scalar datum value bound into a `Param` for expression
 /// evaluation: the bare-word value, its is-null flag, and its type OID
 /// (`estate->datums[dno]` projected to what `setup_param_list` binds).
-#[derive(Clone, Copy, Debug)]
+///
+/// A pass-by-reference scalar datum (a `text`/`varchar`/`numeric` argument or
+/// variable) carries its verbatim header-ful varlena / cstring byte image in
+/// `byref` (the out-of-band companion to the bare `value` word, which is `0` in
+/// that case); the SPI param-bind reconstructs a `Datum::ByRef` from it so the
+/// image survives into the executed plan. `None` for a by-value datum.
+#[derive(Clone, Debug)]
 pub struct EvalParamValue {
     pub value: usize,
     pub isnull: bool,
     pub typeid: Oid,
+    pub byref: Option<std::vec::Vec<u8>>,
 }
 
 /// The raw result of evaluating a PL/pgSQL expression to a single value (the
@@ -166,12 +173,20 @@ pub struct ExecsqlIntoField {
 /// One column value the execsql SELECT-INTO leg returns for a result row: the
 /// bare-word datum, its is-null flag, and the source column type/typmod (so the
 /// caller can cast it into the target variable).
-#[derive(Clone, Copy, Debug)]
+///
+/// A pass-by-reference column (a `text`/`varchar`/`numeric` value fetched into a
+/// scalar INTO target) carries its verbatim header-ful varlena / cstring byte
+/// image in `byref` (the out-of-band companion to the bare `value` word, which
+/// is `0` in that case); the INTO store reconstructs a `Datum::ByRef` from it so
+/// the fetched image survives into the target variable. `None` for a by-value
+/// column.
+#[derive(Clone, Debug)]
 pub struct ExecsqlColumn {
     pub value: usize,
     pub isnull: bool,
     pub typeid: Oid,
     pub typmod: int32,
+    pub byref: Option<std::vec::Vec<u8>>,
 }
 
 /// The raw result of running an embedded SQL statement (`exec_stmt_execsql` via
@@ -216,23 +231,41 @@ seam_core::seam!(
     ) -> PgResult<ExecsqlResult>
 );
 
+/// The coerced result of [`exec_cast_value_via_spi`]: the bare-word coerced
+/// datum + its is-null flag, plus — when the target type is pass-by-reference
+/// (`text`/`varchar`/`numeric`/…) — the coerced value's verbatim header-ful
+/// varlena / cstring byte image (`datumCopy`'d out of the cast working context),
+/// in which case the bare `value` word is `0`. `byref == None` for a by-value
+/// result, where `value` is the scalar word.
+#[derive(Clone, Debug)]
+pub struct CastValueResult {
+    pub value: usize,
+    pub isnull: bool,
+    pub byref: Option<std::vec::Vec<u8>>,
+}
+
 seam_core::seam!(
     /// `exec_cast_value(estate, value, isnull, valtype, valtypmod, reqtype,
     /// reqtypmod)` slow path (`pl_exec.c`'s `do_cast_value` /
     /// `get_cast_hashentry` + `ExecEvalExpr` over the cached cast expression):
     /// coerce `value` from `(valtype, valtypmod)` to `(reqtype, reqtypmod)`. The
     /// executor reaches the coercion/executor substrate through the SPI owner;
-    /// the handler installs it. `value` is the bare-word datum; the result is
-    /// `(value, isnull)`. The no-op relabel case (`valtype == reqtype` and the
-    /// typmod is unconstrained) is handled in-crate and never reaches here.
+    /// the handler installs it. `value` is the bare-word datum and `value_byref`
+    /// its verbatim by-reference image when the source is a pass-by-reference
+    /// type (`None` for by-value); the result is the coerced
+    /// [`CastValueResult`], whose own `byref` carries the coerced value's image
+    /// when the target is pass-by-reference (the bare `value` is `0` then). The
+    /// no-op relabel case (`valtype == reqtype` and the typmod is unconstrained)
+    /// is handled in-crate and never reaches here.
     pub fn exec_cast_value_via_spi(
         value: usize,
+        value_byref: Option<std::vec::Vec<u8>>,
         isnull: bool,
         valtype: Oid,
         valtypmod: int32,
         reqtype: Oid,
         reqtypmod: int32,
-    ) -> PgResult<(usize, bool)>
+    ) -> PgResult<CastValueResult>
 );
 
 seam_core::seam!(

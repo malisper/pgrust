@@ -44,11 +44,17 @@ type SourceHandle = u64;
 /// flag, and the source column type OID (`SPI_gettypeid`). The typmod is not
 /// carried by the SPI column descriptor, so the consumer casts at `-1` (matching
 /// the single-expression evaluator's `rettypmod`).
-#[derive(Clone, Copy)]
+///
+/// A pass-by-reference column (a `text`/`varchar`/`numeric` value) carries its
+/// verbatim header-ful varlena / cstring byte image in `byref` (the bare `value`
+/// word is `0` then), `datumCopy`'d out of the receiver arena so it survives to
+/// the INTO store; `None` for a by-value column.
+#[derive(Clone)]
 pub struct ExecsqlColumn {
     pub value: usize,
     pub isnull: bool,
     pub typeid: Oid,
+    pub byref: Option<Vec<u8>>,
 }
 
 /// The raw result of running an embedded SQL statement: the SPI result code, the
@@ -338,6 +344,7 @@ fn run_one_execsql_stmt<'mcx>(
                     value: col.value,
                     isnull: col.isnull,
                     typeid: columns.get(i).map(|c| c.typeid).unwrap_or(types_core::InvalidOid),
+                    byref: col.byref.clone(),
                 })
                 .collect(),
             None => Vec::new(),

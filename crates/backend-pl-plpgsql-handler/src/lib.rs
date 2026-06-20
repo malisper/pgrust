@@ -235,6 +235,21 @@ pub fn _pg_init() {
 /// `plpgsql_exec_event_trigger`) routes to the loud trigger entries in exec; the
 /// scalar/procedure path runs `plpgsql_exec_function`. `plpgsql_compile` reads
 /// the live `FunctionCallInfo` + catalog (the compile entry is owned by comp).
+/// Flatten a by-reference fmgr argument/value payload (`fcinfo.ref_arg(i)`) to
+/// its verbatim owned byte image. A `Varlena`/`Composite` arm is the header-ful
+/// flat image; a `Cstring` is the NUL-excluded text bytes. The `Expanded` /
+/// `Internal` arms are never a PL/pgSQL scalar argument/value (no flat image),
+/// so they degrade to `None` (treated as by-value — C never reaches them here).
+fn ref_payload_image(p: Option<&types_fmgr::boundary::RefPayload>) -> Option<std::vec::Vec<u8>> {
+    use types_fmgr::boundary::RefPayload;
+    match p {
+        Some(RefPayload::Varlena(b)) => Some(b.clone()),
+        Some(RefPayload::Composite(b)) => Some(b.clone()),
+        Some(RefPayload::Cstring(s)) => Some(s.as_bytes().to_vec()),
+        _ => None,
+    }
+}
+
 pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // nonatomic = fcinfo->context is a CallContext with atomic == false.
     let nonatomic = seam::called_nonatomic(fcinfo);
@@ -252,12 +267,20 @@ pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // The use-count++ / cur_estate save+restore + procedure resowner
     // create/release bookkeeping is the funccache + resowner substrate. The
     // scalar dispatch is the body below.
+    // A pass-by-reference argument (`text`/`varchar`/`numeric`/…) crosses the
+    // fmgr boundary as an owned image in the parallel `ref_args` side-channel
+    // (C's "`args[i].value` is a pointer to `payload`"). Carry the verbatim
+    // header-ful varlena / cstring bytes alongside the bare-word `value` so the
+    // arg-store leg can keep the image in the local variable; a by-value
+    // argument has no `ref_args` entry (`byref == None`).
     let args: Vec<FunctionCallArg> = fcinfo
         .args
         .iter()
-        .map(|a| FunctionCallArg {
+        .enumerate()
+        .map(|(i, a)| FunctionCallArg {
             value: a.value,
             isnull: a.isnull,
+            byref: ref_payload_image(fcinfo.ref_arg(i)),
         })
         .collect();
 
@@ -532,6 +555,9 @@ pub fn init_seams() {
                         value: v.value,
                         isnull: v.isnull,
                         typeid: v.typeid,
+                        // A by-reference datum carries its image; forward it so
+                        // the param-bind reconstructs the rich `Datum::ByRef`.
+                        byref: v.byref.clone(),
                     }),
                     None => Err(types_error::PgError::error(format!(
                         "PL/pgSQL expression references datum {dno} that is not a scalar variable"
@@ -653,20 +679,28 @@ pub fn init_seams() {
     // case (valtype == reqtype, unconstrained typmod) is handled in-crate and
     // never reaches here.
     backend_pl_plpgsql_exec_seams::exec_cast_value_via_spi::set(
-        |value: usize, isnull, valtype, _valtypmod, reqtype, reqtypmod| {
+        |value: usize, value_byref, isnull, valtype, _valtypmod, reqtype, reqtypmod| {
+            use backend_pl_plpgsql_exec_seams::CastValueResult;
             if isnull {
                 // A NULL stays NULL across any cast (the cast expression is
                 // strict for I/O coercion; exec_cast_value returns the input).
-                return Ok((value, true));
+                return Ok(CastValueResult { value, isnull: true, byref: None });
             }
             let cxt = mcx::MemoryContext::new("PL/pgSQL exec_cast_value");
             let mcx = cxt.mcx();
 
-            // Render the source value to its text representation.
+            // Render the source value to its text representation. A by-reference
+            // source carries its image in `value_byref` (the bare `value` word is
+            // `0` then); rebuild a `Datum::ByRef` so the output function reads the
+            // real bytes. A by-value source is the bare scalar word.
             let (typoutput, _typisvarlena) =
                 backend_utils_cache_lsyscache_seams::get_type_output_info::call(valtype)?;
-            let src_datum =
-                types_tuple::backend_access_common_heaptuple::Datum::from_usize(value);
+            let src_datum = match value_byref {
+                Some(image) => types_tuple::backend_access_common_heaptuple::Datum::ByRef(
+                    mcx::slice_in(mcx, &image)?,
+                ),
+                None => types_tuple::backend_access_common_heaptuple::Datum::from_usize(value),
+            };
             let text = backend_utils_fmgr_fmgr_seams::oid_output_function_call::call(
                 mcx, typoutput, &src_datum,
             )?;
@@ -682,10 +716,31 @@ pub fn init_seams() {
                 typioparam,
                 reqtypmod,
             )?;
-            // The result crosses back as a bare word (by-value, or a by-ref
-            // pointer into mcx — the by-ref-Datum keystone). A by-value scalar is
-            // exactly what plpgsql's scalar assignment casts produce.
-            Ok((result.as_usize(), false))
+            // The coerced result crosses back either as a by-value bare word or —
+            // for a pass-by-reference target (`text`/`varchar`/`numeric`/…) — as
+            // its owned varlena / cstring image, `datumCopy`'d out of `mcx` so it
+            // outlives this working context (mirrors the SPI receiver capture).
+            let out = match result {
+                types_tuple::backend_access_common_heaptuple::Datum::ByVal(w) => {
+                    CastValueResult { value: w, isnull: false, byref: None }
+                }
+                types_tuple::backend_access_common_heaptuple::Datum::ByRef(b) => {
+                    CastValueResult { value: 0, isnull: false, byref: Some(b.as_slice().to_vec()) }
+                }
+                types_tuple::backend_access_common_heaptuple::Datum::Cstring(ref sct) => {
+                    CastValueResult {
+                        value: 0,
+                        isnull: false,
+                        byref: Some(sct.as_bytes().to_vec()),
+                    }
+                }
+                other => CastValueResult {
+                    value: 0,
+                    isnull: false,
+                    byref: Some(other.as_varlena_bytes().into_owned()),
+                },
+            };
+            Ok(out)
         },
     );
 
@@ -706,6 +761,9 @@ pub fn init_seams() {
                         value: v.value,
                         isnull: v.isnull,
                         typeid: v.typeid,
+                        // A by-reference datum carries its image; forward it so
+                        // the param-bind reconstructs the rich `Datum::ByRef`.
+                        byref: v.byref.clone(),
                     }),
                     None => Err(types_error::PgError::error(format!(
                         "PL/pgSQL embedded SQL references datum {dno} that is not a scalar variable"
@@ -733,6 +791,9 @@ pub fn init_seams() {
                         isnull: c.isnull,
                         typeid: c.typeid,
                         typmod: -1,
+                        // A by-reference INTO column carries its image; forward
+                        // it so the INTO store keeps the image in the target var.
+                        byref: c.byref,
                     })
                     .collect(),
             })

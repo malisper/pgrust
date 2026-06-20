@@ -521,6 +521,16 @@ pub struct PLpgSQL_var {
     pub isnull: bool,
     pub freeval: bool,
 
+    /// Out-of-band companion to `value` for a pass-by-reference scalar
+    /// (`text`/`varchar`/`numeric`/…): its verbatim header-ful varlena / cstring
+    /// byte image. The bare-word `Datum` (`struct Datum(usize)`) cannot carry a
+    /// by-reference payload, so the image rides alongside (mirroring the
+    /// execstate's `retval_byref`/`last_eval_byref` companions); it is `Some`
+    /// exactly when `value` holds a by-reference datum, `None` for a by-value
+    /// or NULL variable. `build_datum_snapshot` reads it into the param-bind so
+    /// the image survives into expression evaluation.
+    pub value_byref: Option<Vec<u8>>,
+
     /// Which "promised" value to assign if the promise must be honored.
     pub promise: PLpgSQL_promise_type,
 }

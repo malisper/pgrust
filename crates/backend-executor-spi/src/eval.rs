@@ -47,11 +47,19 @@ type SourceHandle = u64;
 /// One PL/pgSQL datum value the caller binds into a `Param` (the value the
 /// `setup_param_list` reads out of `estate->datums[dno]`): the bare-word datum,
 /// its is-null flag, and its type OID.
-#[derive(Clone, Copy)]
+///
+/// A pass-by-reference scalar datum (a `text`/`varchar`/`numeric` argument or
+/// variable) carries its verbatim header-ful varlena / cstring byte image in
+/// `byref` (the bare `value` word is `0` then); `build_param_list`
+/// reconstructs a `Datum::ByRef` from it so the image survives into the bound
+/// `ParamExternData` and the executed plan reads it through `ExecEvalParam*`.
+/// `None` for a by-value datum.
+#[derive(Clone)]
 pub struct EvalParamValue {
     pub value: usize,
     pub isnull: bool,
     pub typeid: Oid,
+    pub byref: Option<Vec<u8>>,
 }
 
 /// The raw result of evaluating a PL/pgSQL expression to a single value: the
@@ -232,21 +240,30 @@ fn build_param_list(
     let num_params = (max_dno + 1) as usize;
 
     // The params must outlive this call's working arena (the executor reads them
-    // during the run); leak a backend-lifetime context for the bound words. The
-    // values are pass-by-value (the PL/pgSQL scalar datum word), so no deep copy
-    // is needed; a by-ref datum would need clone_in here (by-ref keystone).
+    // during the run); leak a backend-lifetime context for the bound words. A
+    // pass-by-value datum is the scalar word itself (no deep copy needed); a
+    // pass-by-reference datum (`text`/`varchar`/`numeric`/…) is rebuilt as a
+    // `Datum::ByRef` from the caller's verbatim image, copied into this leaked
+    // context (`slice_in`, == C's `datumCopy` into the param-list context) so
+    // the image outlives the eval working arena the executor reads it across.
     let ctx: &'static MemoryContext = allocator_api2::boxed::Box::leak(
         allocator_api2::boxed::Box::new(MemoryContext::new("PL/pgSQL Param List")),
     );
-    let _pmcx: Mcx<'static> = ctx.mcx();
+    let pmcx: Mcx<'static> = ctx.mcx();
 
     let mut params: Vec<ParamExternData<'static>> = Vec::with_capacity(num_params);
     let referenced: std::collections::BTreeSet<i32> = dnos.iter().copied().collect();
     for dno in 0..(num_params as i32) {
         if referenced.contains(&dno) {
             let v = resolve(dno)?;
+            let value = match v.byref {
+                Some(image) if !v.isnull => {
+                    RichDatum::ByRef(mcx::slice_in(pmcx, &image)?)
+                }
+                _ => RichDatum::from_usize(v.value),
+            };
             params.push(ParamExternData {
-                value: RichDatum::from_usize(v.value),
+                value,
                 isnull: v.isnull,
                 pflags: PARAM_FLAG_CONST,
                 ptype: v.typeid,

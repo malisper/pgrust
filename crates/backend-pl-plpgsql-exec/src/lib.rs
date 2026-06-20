@@ -852,6 +852,16 @@ fn exec_return_simple_var(estate: &mut PLpgSQL_execstate, dno: int32) {
     estate.retval = value;
     estate.retisnull = isnull;
     estate.rettype = typoid;
+    // A bare `RETURN var` over a pass-by-reference variable (`text`/`numeric`/…)
+    // reads the variable directly (C's exec_stmt_return retvarno fast path), so
+    // its out-of-band `value_byref` image must ride into the durable return slot
+    // — otherwise the bare-word `value` (`0`) is all that crosses the fmgr
+    // boundary and the result is garbage. A by-value variable leaves it None.
+    estate.retval_byref = if !isnull {
+        read_var_value_byref(&estate.datums[dno as usize])
+    } else {
+        None
+    };
 
     if estate.retistuple && !estate.retisnull {
         seam::ereport_return_noncomposite();
@@ -950,6 +960,10 @@ fn build_datum_snapshot(
                     value: v.value.as_usize(),
                     isnull: v.isnull,
                     typeid,
+                    // A pass-by-reference variable carries its image out-of-band
+                    // (the bare `value` word is `0` then); forward it so the SPI
+                    // param-bind reconstructs the rich `Datum::ByRef`.
+                    byref: v.value_byref.clone(),
                 }));
             }
             _ => snap.push(None),
@@ -1028,7 +1042,12 @@ fn exec_assign_expr_impl(
     // simple-expr fast path, not yet wired). exec_eval_expr returns the value +
     // its runtime (type, typmod).
     let (value, isnull, valtype, valtypmod) = exec_eval_expr_impl(estate, expr);
-    exec_assign_value_impl(estate, target_dno, value, isnull, valtype, valtypmod);
+    // A by-reference expression result (`text`/`varchar`/`numeric`/…) carries
+    // its image in `estate.last_eval_byref` (stashed by `exec_eval_expr_impl`);
+    // hand it to the store so a `x := <by-ref expr>` assignment keeps the image
+    // in the target variable.
+    let value_byref = estate.last_eval_byref.take();
+    exec_assign_value_byref_impl(estate, target_dno, value, value_byref, isnull, valtype, valtypmod);
     exec_eval_cleanup(estate);
 }
 
@@ -1040,6 +1059,24 @@ fn exec_assign_value_impl(
     estate: &mut PLpgSQL_execstate,
     target_dno: int32,
     value: Datum,
+    isnull: bool,
+    valtype: Oid,
+    valtypmod: int32,
+) {
+    exec_assign_value_byref_impl(estate, target_dno, value, None, isnull, valtype, valtypmod);
+}
+
+/// `exec_assign_value` carrying the source value's by-reference image
+/// (pl_exec.c 5061). `value_byref` is the verbatim image when `value` is a
+/// pass-by-reference type (the bare `value` word is `0` then); the scalar VAR
+/// store stashes the coerced image into the target variable's `value_byref`
+/// companion so a by-reference value (a `text`/`numeric` SELECT-INTO column,
+/// a `text` assignment RHS) survives in the variable for later evaluation.
+fn exec_assign_value_byref_impl(
+    estate: &mut PLpgSQL_execstate,
+    target_dno: int32,
+    value: Datum,
+    value_byref: Option<Vec<u8>>,
     isnull: bool,
     valtype: Oid,
     valtypmod: int32,
@@ -1057,9 +1094,11 @@ fn exec_assign_value_impl(
             };
 
             // exec_cast_value(value, &isNull, valtype, valtypmod, var->typoid,
-            // var->atttypmod).
-            let (newvalue, isnull) =
-                exec_cast_value_impl(estate, value, isnull, valtype, valtypmod, reqtype, reqtypmod);
+            // var->atttypmod). Thread the by-ref image both ways so a by-ref
+            // source / by-ref target carries its varlena/cstring bytes.
+            let (newvalue, isnull, newbyref) = exec_cast_value_with_byref(
+                estate, value, value_byref, isnull, valtype, valtypmod, reqtype, reqtypmod,
+            );
 
             if isnull && notnull {
                 put_var(estate, target_dno, var);
@@ -1071,19 +1110,34 @@ fn exec_assign_value_impl(
                 );
             }
 
-            // The by-reference copy-into-procedure-context + expand_array /
-            // datumTransfer leg (pl_exec.c 5106) is the by-ref-Datum / expanded-
-            // object value substrate. For a by-value type (the scalar int/bool/
-            // numeric-by-value path) no copy is needed; a by-ref non-null value
-            // would need that transfer (loud).
+            // The by-reference copy-into-procedure-context (pl_exec.c 5106) is
+            // C's `datumCopy(newvalue, false, reqtyplen)` into the function
+            // context. Here the coerced value already arrives as an owned image
+            // (`newbyref`, `datumCopy`'d out of the cast/SPI working context);
+            // store it into the variable's out-of-band `value_byref` companion.
+            // The expanded-object / R-W-array force-expand optimization is the
+            // value substrate and stays loud when no flat image is available.
             if !typbyval && !isnull {
-                put_var(estate, target_dno, var);
-                seam::arg_store_expanded_object(newvalue);
+                match newbyref {
+                    Some(image) => {
+                        // Store a flat by-reference value: a placeholder bare word
+                        // (the real bytes live in `value_byref`, read by the next
+                        // snapshot), plus the owned image.
+                        assign_simple_var(estate, &mut var, Datum::from_usize(0), false, false);
+                        var.value_byref = Some(image);
+                        put_var(estate, target_dno, var);
+                    }
+                    None => {
+                        put_var(estate, target_dno, var);
+                        seam::arg_store_expanded_object(newvalue);
+                    }
+                }
                 return;
             }
 
             // assign_simple_var(estate, var, newvalue, isNull, freeable). For a
             // by-value type freeable is false (pl_exec.c: !typbyval && !isNull).
+            // `assign_simple_var` clears `value_byref` (a by-value store).
             assign_simple_var(estate, &mut var, newvalue, isnull, false);
             put_var(estate, target_dno, var);
         }
@@ -1123,12 +1177,36 @@ fn exec_cast_value_impl(
     reqtype: Oid,
     reqtypmod: int32,
 ) -> (Datum, bool) {
+    // The bare-word variant for by-value targets (FOR-loop bounds cast to int,
+    // etc.): no source image, the coerced image (if any) is dropped.
+    let (v, n, _byref) =
+        exec_cast_value_with_byref(estate, value, None, isnull, valtype, valtypmod, reqtype, reqtypmod);
+    (v, n)
+}
+
+/// `exec_cast_value` carrying the by-reference image both ways (pl_exec.c 7874).
+/// `value_byref` is the source value's verbatim image when it is a
+/// pass-by-reference type (the bare `value` is `0` then); the third result is
+/// the coerced value's image when the *target* is pass-by-reference (a
+/// `text`/`varchar`/`numeric` result), `None` for a by-value result. The
+/// no-op relabel fast path returns the input image unchanged.
+fn exec_cast_value_with_byref(
+    estate: &mut PLpgSQL_execstate,
+    value: Datum,
+    value_byref: Option<Vec<u8>>,
+    isnull: bool,
+    valtype: Oid,
+    valtypmod: int32,
+    reqtype: Oid,
+    reqtypmod: int32,
+) -> (Datum, bool, Option<Vec<u8>>) {
     let _ = estate;
     // pl_exec.c 7882: convert only if the type differs or a constrained typmod
     // differs. Otherwise the value passes through unchanged (the no-op relabel).
     if valtype != reqtype || (valtypmod != reqtypmod && reqtypmod != -1) {
-        let (v, n) = match exec_seams::exec_cast_value_via_spi::call(
+        let r = match exec_seams::exec_cast_value_via_spi::call(
             value.as_usize(),
+            value_byref,
             isnull,
             valtype,
             valtypmod,
@@ -1138,9 +1216,10 @@ fn exec_cast_value_impl(
             Ok(r) => r,
             Err(e) => std::panic::panic_any(e),
         };
-        return (Datum::from_usize(v), n);
+        return (Datum::from_usize(r.value), r.isnull, r.byref);
     }
-    (value, isnull)
+    // No-op relabel: the value (and its by-ref image, if any) passes through.
+    (value, isnull, value_byref)
 }
 
 /// `exec_run_select(estate, expr, maxtuples, portalP)` (pl_exec.c 5753) — run a
@@ -1740,10 +1819,13 @@ fn exec_move_row_into_target(
             // A scalar INTO target takes the first column (C's exec_move_row maps
             // the row's first attribute to the single variable). No row => NULL.
             match columns.first() {
-                Some(c) => exec_assign_value_impl(
+                Some(c) => exec_assign_value_byref_impl(
                     estate,
                     dno,
                     Datum::from_usize(c.value),
+                    // A by-reference fetched column (`text`/`numeric`/…) carries
+                    // its image; thread it into the target variable.
+                    c.byref.clone(),
                     c.isnull,
                     c.typeid,
                     c.typmod,
@@ -1751,13 +1833,53 @@ fn exec_move_row_into_target(
                 None => exec_assign_value_impl(estate, dno, Datum::null(), true, INVALID_OID, -1),
             }
         }
-        PLpgSQL_datum_type::PLPGSQL_DTYPE_ROW
-        | PLpgSQL_datum_type::PLPGSQL_DTYPE_REC
-        | PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
-            // Multi-field ROW / record deconstruction — composite value substrate.
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_ROW => {
+            // `exec_move_row` into a PLpgSQL_row: map each row field's varno to
+            // the matching result column (C's exec_move_row_common, the
+            // attribute-by-position assignment into the row's scalar fields). A
+            // single INTO scalar is wrapped by the compiler in a 1-field ROW
+            // (`make_scalar_list1`); a multi-target INTO list is an N-field ROW.
+            // A missing column (fewer columns than fields) stores NULL into the
+            // remaining fields, exactly as C does. The expanded-record (REC)
+            // and record-field (RECFIELD) deconstruction stays loud.
+            let (nfields, varnos) = match &estate.datums[dno as usize] {
+                PLpgSQL_datum::Row(r) => (r.nfields as usize, r.varnos.clone()),
+                _ => unreachable!("ROW dtype is a Row datum"),
+            };
+            for fno in 0..nfields {
+                let field_dno = varnos[fno];
+                // A `varnos[fno] < 0` marks a dropped column placeholder in C
+                // (skipped); the common scalar-list ROW has all real varnos.
+                if field_dno < 0 {
+                    continue;
+                }
+                match columns.get(fno) {
+                    Some(c) => exec_assign_value_byref_impl(
+                        estate,
+                        field_dno,
+                        Datum::from_usize(c.value),
+                        c.byref.clone(),
+                        c.isnull,
+                        c.typeid,
+                        c.typmod,
+                    ),
+                    None => exec_assign_value_impl(
+                        estate,
+                        field_dno,
+                        Datum::null(),
+                        true,
+                        INVALID_OID,
+                        -1,
+                    ),
+                }
+            }
+        }
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_REC | PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
+            // Expanded-record / record-field deconstruction — composite value
+            // substrate (expanded_record_*), out of scope.
             panic!(
-                "seam not wired: exec_move_row INTO row/record target (pl_exec.c) — \
-                 tuple deconstruction into a multi-field ROW/REC (composite value substrate)"
+                "seam not wired: exec_move_row INTO record (REC/RECFIELD) target (pl_exec.c) — \
+                 expanded-record deconstruction (composite value substrate)"
             );
         }
     }
@@ -1817,10 +1939,18 @@ fn exec_stmt_rollback(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc {
 // ===========================================================================
 
 /// One call argument value (`fcinfo->args[i]` — its `(Datum, isnull)` pair).
-#[derive(Debug, Clone, Copy)]
+///
+/// A pass-by-reference argument (`text`/`varchar`/`numeric`/…) carries its
+/// verbatim header-ful varlena / cstring byte image in `byref` (the bare-word
+/// `value` is `0` then), taken from the live `fcinfo.ref_args[i]` at the fmgr
+/// boundary; the arg-store leg copies it into the target variable's
+/// `value_byref` so the image is available to expression evaluation. `None` for
+/// a by-value argument, where `value` is the scalar word.
+#[derive(Debug, Clone)]
 pub struct FunctionCallArg {
     pub value: Datum,
     pub isnull: bool,
+    pub byref: Option<Vec<u8>>,
 }
 
 /// The result of executing a scalar PL/pgSQL function: the result `Datum`, its
@@ -1974,6 +2104,16 @@ pub fn plpgsql_exec_function(
             | PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE => {
                 let mut var = take_var(&mut estate, n);
                 assign_simple_var(&mut estate, &mut var, arg.value, arg.isnull, false);
+                // A pass-by-reference argument's image (the `fcinfo.ref_args[i]`
+                // varlena/cstring bytes) is carried out-of-band alongside the
+                // bare-word `value` (which is `0` for by-ref); store it into the
+                // variable's `value_byref` companion so expression evaluation can
+                // bind the rich `Datum::ByRef` (e.g. `RETURN s || '!'` over a
+                // `text` argument). `assign_simple_var` cleared it for the by-val
+                // store above; set the image for the by-ref case here.
+                if !arg.isnull && arg.byref.is_some() {
+                    var.value_byref = arg.byref.clone();
+                }
                 // The varlena R/W-expanded-object commandeering + flat-array
                 // force-expand of the C arg loop is an expanded-object
                 // optimization; the value substrate (expand_array /
@@ -1981,8 +2121,16 @@ pub fn plpgsql_exec_function(
                 // store-by-value above is value-equivalent for the in-memory
                 // scalar case the control-flow path exercises.
                 let varlena = var.datatype.as_ref().map(|t| t.typlen) == Some(-1);
+                // C's arg loop force-expands only an expanded datum / R-W array
+                // (`VARATT_IS_EXTERNAL_EXPANDED` / a R-W expandable array); a
+                // plain flat varlena is stored as-is (`datumCopy`). When the
+                // argument arrives as a flat by-reference image (the common
+                // `text`/`varchar`/`numeric` argument), it is already flat — the
+                // store above is faithful and the expand/commandeer leg does not
+                // apply, so skip the loud expanded-object seam.
+                let has_flat_image = arg.byref.is_some();
                 put_var(&mut estate, n, var);
-                if !arg.isnull && varlena {
+                if !arg.isnull && varlena && !has_flat_image {
                     // R/W or array detoast/expand leg (loud value substrate).
                     seam::arg_store_expanded_object(arg.value);
                 }
@@ -2053,12 +2201,19 @@ pub fn plpgsql_exec_function(
             result.value = estate.retval;
             result.byref = estate.retval_byref.take();
         } else {
-            // exec_cast_value to the declared rettype + datumCopy out.
+            // exec_cast_value to the declared rettype + datumCopy out. The
+            // source value may itself be a by-reference type (its image in
+            // `retval_byref`); the coerced result may be by-reference too (e.g.
+            // `RETURN x::text` over an int — a `text` result). Thread the image
+            // both ways so a by-ref-after-cast RETURN crosses the fmgr boundary
+            // through the handler's `set_ref_result`.
             let (retval, retisnull, rettype, fn_rettype) =
                 (estate.retval, estate.retisnull, estate.rettype, estate.fn_rettype);
-            let (v, isnull) = seam::exec_cast_value(
+            let retval_byref = estate.retval_byref.take();
+            let (v, isnull, byref) = exec_cast_value_with_byref(
                 &mut estate,
                 retval,
+                retval_byref,
                 retisnull,
                 rettype,
                 -1,
@@ -2067,6 +2222,7 @@ pub fn plpgsql_exec_function(
             );
             result.value = v;
             result.isnull = isnull;
+            result.byref = byref;
         }
     }
 
@@ -2272,6 +2428,15 @@ fn read_var_value(d: &PLpgSQL_datum) -> (Datum, bool, Oid) {
     }
 }
 
+/// The out-of-band by-reference image of a scalar VAR datum (`value_byref`), the
+/// companion to [`read_var_value`]'s bare word; `None` for a by-value variable.
+fn read_var_value_byref(d: &PLpgSQL_datum) -> Option<Vec<u8>> {
+    match d {
+        PLpgSQL_datum::Var(v) => v.value_byref.clone(),
+        _ => panic!("read_var_value_byref on non-VAR datum"),
+    }
+}
+
 fn discard_temp_var(estate: &mut PLpgSQL_execstate, dno: int32) {
     let mut var = take_var(estate, dno);
     assign_simple_var(estate, &mut var, Datum::null(), true, false);
@@ -2307,6 +2472,7 @@ fn var_placeholder() -> PLpgSQL_datum {
         value: Datum::null(),
         isnull: true,
         freeval: false,
+        value_byref: None,
         promise: PLpgSQL_promise_type::PLPGSQL_PROMISE_NONE,
     }))
 }
@@ -2352,6 +2518,10 @@ fn assign_simple_var(
         var.value = detoasted;
         var.isnull = isnull;
         var.freeval = true;
+        // The bare-word store does not carry a by-ref image; clear the
+        // out-of-band companion so no stale image is read by a later snapshot.
+        // A by-ref caller (arg-store / INTO / cast) sets `value_byref` after.
+        var.value_byref = None;
         var.promise = PLpgSQL_promise_type::PLPGSQL_PROMISE_NONE;
         return;
     }
@@ -2364,6 +2534,10 @@ fn assign_simple_var(
     var.value = newvalue;
     var.isnull = isnull;
     var.freeval = freeable;
+    // The bare-word store does not carry a by-ref image; clear the out-of-band
+    // companion so no stale image is read by a later snapshot. A by-ref caller
+    // (arg-store / INTO / cast) sets `value_byref` after this returns.
+    var.value_byref = None;
     var.promise = PLpgSQL_promise_type::PLPGSQL_PROMISE_NONE;
 }
 
