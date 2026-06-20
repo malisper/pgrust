@@ -63,8 +63,30 @@ pub fn process_utility_slow<'mcx>(
         is_complete_query && rt::event_trigger_begin_complete_query::call()?;
 
     // The C `PG_TRY { body } PG_FINALLY { if (needCleanup) EventTriggerEndCompleteQuery(); }`.
-    // We run the body, capture its result, run the finally, then propagate.
-    let result = process_utility_slow_body(
+    //
+    // The body can leave through three doors: a normal `Ok`, an `Err` (`?`,
+    // standing for the C longjmp), or a Rust *panic* — the unported-boundary
+    // seams (e.g. `EventTriggerAlterTableStart`) abort by panicking, which the
+    // top-level loop catches and turns into an ERROR. C's `PG_FINALLY` runs on
+    // every one of those exits, so the cleanup MUST too. A plain
+    // `if need_cleanup { ... }` after the call is skipped when the body panics,
+    // leaving the pushed `currentEventTriggerState` (and its private
+    // MemoryContext) dangling on the thread-local stack — which later faults at
+    // backend teardown (observed SIGSEGV running fast_default). Run the pop from
+    // a `Drop` guard so it fires on the unwind path as well.
+    struct EndCompleteQueryGuard {
+        need_cleanup: bool,
+    }
+    impl Drop for EndCompleteQueryGuard {
+        fn drop(&mut self) {
+            if self.need_cleanup {
+                rt::event_trigger_end_complete_query::call();
+            }
+        }
+    }
+    let _end_guard = EndCompleteQueryGuard { need_cleanup };
+
+    process_utility_slow_body(
         mcx,
         pstate,
         pstmt,
@@ -75,13 +97,7 @@ pub fn process_utility_slow<'mcx>(
         is_top_level,
         is_complete_query,
         &mut qc,
-    );
-
-    if need_cleanup {
-        rt::event_trigger_end_complete_query::call();
-    }
-
-    result
+    )
 }
 
 /// The `PG_TRY` body of `ProcessUtilitySlow`: the `EventTriggerDDLCommandStart`,
