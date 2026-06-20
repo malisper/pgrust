@@ -640,6 +640,9 @@ pub fn init_seams() {
     core_seam::create_partition_directory::set(create_partition_directory_seam);
     core_seam::partition_directory_lookup::set(partition_directory_lookup_seam);
     core_seam::destroy_partition_directory::set(destroy_partition_directory_seam);
+    backend_partitioning_partdesc_seams::relation_get_partition_desc::set(
+        RelationGetPartitionDesc,
+    );
 }
 
 #[cfg(test)]

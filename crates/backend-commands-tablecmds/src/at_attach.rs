@@ -319,8 +319,22 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
 
     // Generate the partition constraint from the bound spec. If the parent is
     // itself a partition, include its constraint as well.
+    //
+    // For a DEFAULT bound the constraint negates all siblings' bounds, which
+    // get_qual_from_partbound reads off the parent's PartitionDesc; C builds it
+    // fresh with omit_detached=false there, so do the same when needed.
+    let qual_partdesc = if bound.is_default {
+        Some(backend_partitioning_partdesc::RelationGetPartitionDesc(mcx, rel, false)?)
+    } else {
+        None
+    };
     let part_bound_constraint =
-        backend_partitioning_partbounds_seams::get_qual_from_partbound::call(mcx, &key, bound)?;
+        backend_partitioning_partbounds_seams::get_qual_from_partbound::call(
+            mcx,
+            &key,
+            bound,
+            qual_partdesc.as_deref(),
+        )?;
 
     // list_concat_copy(partBoundConstraint, RelationGetPartitionQual(rel)).
     let parent_qual = backend_utils_cache_partcache::RelationGetPartitionQual(mcx, rel)?;

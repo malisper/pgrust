@@ -31,12 +31,13 @@ use types_error::{PgError, PgResult};
 use types_nodes::ddlnodes::{PartitionBoundSpec, PartitionRangeDatum};
 use types_nodes::nodes::Node;
 use types_nodes::partition::{
-    PartitionKeyData, PartitionRangeDatumKind, PartitionStrategy,
+    PartitionDescData, PartitionKeyData, PartitionRangeDatumKind, PartitionStrategy,
 };
 use types_nodes::primnodes::{Const, Expr};
 
 use backend_nodes_core::makefuncs::{
-    make_bool_const, make_bool_expr, make_is_not_null, make_opclause, make_relabel_type, make_var,
+    make_ands_explicit, make_bool_const, make_bool_expr, make_const, make_is_not_null,
+    make_opclause, make_relabel_type, make_var,
 };
 use types_nodes::primnodes::{ArrayExpr, BoolExprType, CoercionForm, NullTest, NullTestType, ScalarArrayOpExpr};
 
@@ -321,6 +322,7 @@ fn get_qual_for_list<'mcx>(
     mcx: Mcx<'mcx>,
     key: &PartitionKeyData<'_>,
     spec: &PartitionBoundSpec<'_>,
+    parent_partdesc: Option<&PartitionDescData<'_>>,
 ) -> PgResult<Vec<Expr>> {
     // Only single-column list partitioning is supported.
     debug_assert!(key.partnatts == 1);
@@ -332,14 +334,59 @@ fn get_qual_for_list<'mcx>(
     let mut list_has_null = false;
 
     if spec.is_default {
-        // Default list partition: the constraint negates equality with all the
-        // datums of the *other* list partitions. That requires reading the
-        // parent's PartitionBoundInfo datums, which needs the partdesc — not
-        // expressible from this low-level crate without a cycle.
-        return Err(elog(
-            "default LIST partition constraint (get_qual_for_list is_default) \
-             is not yet ported in backend-partitioning-partbounds",
-        ));
+        // For the default list partition, collect datums for all the *other*
+        // partitions; the constraint checks that the key equals none of them.
+        // C reads them from `RelationGetPartitionDesc(parent, false)->boundinfo`,
+        // threaded in here as `parent_partdesc` (the partdesc crate depends on
+        // this one, so we cannot reach it directly).
+        let pdesc = parent_partdesc.ok_or_else(|| {
+            elog("default LIST partition constraint requires the parent's PartitionDesc")
+        })?;
+
+        let mut ndatums = 0usize;
+        if let Some(boundinfo) = pdesc.boundinfo.as_ref() {
+            ndatums = boundinfo.ndatums as usize;
+            // partition_bound_accepts_nulls(boundinfo) == (null_index != -1).
+            if boundinfo.null_index != -1 {
+                list_has_null = true;
+            }
+        }
+
+        // If default is the only partition, there need not be any partition
+        // constraint on it.
+        if ndatums == 0 && !list_has_null {
+            return Ok(Vec::new());
+        }
+
+        if let Some(boundinfo) = pdesc.boundinfo.as_ref() {
+            for i in 0..ndatums {
+                // Construct Const from the known-not-null datum, copying the
+                // value so the result outlives the relcache entry.
+                let row = boundinfo.datums.get(i).ok_or_else(|| {
+                    elog("default LIST partition: boundinfo datum index out of range")
+                })?;
+                let src = row.first().ok_or_else(|| {
+                    elog("default LIST partition: boundinfo datum row is empty")
+                })?;
+                let copied = backend_utils_adt_scalar_seams::datum_copy::call(
+                    mcx,
+                    src,
+                    key.parttypbyval[0],
+                    key.parttyplen[0],
+                )?;
+                let val = make_const(
+                    mcx,
+                    key.parttypid[0],
+                    key.parttypmod[0],
+                    key.parttypcoll[0],
+                    key.parttyplen[0] as i32,
+                    copied,
+                    false,
+                    key.parttypbyval[0],
+                )?;
+                elems.push(Expr::Const(val));
+            }
+        }
     } else {
         // Consts for the allowed values, excluding nulls.
         for n in spec.listdatums.iter() {
@@ -358,7 +405,7 @@ fn get_qual_for_list<'mcx>(
         None
     };
 
-    let result = if !list_has_null {
+    let mut result = if !list_has_null {
         // "col IS NOT NULL" ANDed with the main expression.
         let nulltest = make_is_not_null(key_col);
         match opexpr {
@@ -379,7 +426,15 @@ fn get_qual_for_list<'mcx>(
         }
     };
 
-    // is_default handled above (errors). Non-default returns directly.
+    // Applying NOT to a constraint expression inverts the row set here because
+    // the partition constraints we construct never evaluate to NULL (NOT NULL
+    // would be NULL otherwise).
+    if spec.is_default {
+        let ands = make_ands_explicit(result);
+        let not = make_bool_expr(BoolExprType::NOT_EXPR, vec![ands], -1);
+        result = vec![not];
+    }
+
     Ok(result)
 }
 
@@ -429,15 +484,82 @@ fn get_qual_for_range<'mcx>(
     key: &PartitionKeyData<'_>,
     spec: &PartitionBoundSpec<'_>,
     for_default: bool,
+    parent_partdesc: Option<&PartitionDescData<'_>>,
 ) -> PgResult<Vec<Expr>> {
     if spec.is_default {
-        // Negation of the union of all non-default partitions' constraints —
-        // needs the parent's PartitionDesc + each child's relpartbound, which is
-        // out of reach for this low-level crate.
-        return Err(elog(
-            "default RANGE partition constraint (get_qual_for_range is_default) \
-             is not yet ported in backend-partitioning-partbounds",
-        ));
+        // The default range partition holds everything NOT contained in the
+        // non-default siblings: OR each sibling's constraint, AND in the
+        // per-key NOT NULL tests, then negate the whole thing. C reads the
+        // sibling OIDs from `RelationGetPartitionDesc(parent, false)->oids`
+        // (threaded in here as `parent_partdesc`) and each sibling's bound spec
+        // from its `relpartbound` catalog row.
+        let pdesc = parent_partdesc.ok_or_else(|| {
+            elog("default RANGE partition constraint requires the parent's PartitionDesc")
+        })?;
+
+        let mut or_expr_args: Vec<Expr> = Vec::new();
+
+        for k in 0..(pdesc.nparts as usize) {
+            let inhrelid = *pdesc.oids.get(k).ok_or_else(|| {
+                elog("default RANGE partition: partdesc oid index out of range")
+            })?;
+
+            // SearchSysCache1(RELOID, inhrelid) + SysCacheGetAttrNotNull(
+            //   relpartbound) + stringToNode/castNode(PartitionBoundSpec).
+            let text = backend_utils_cache_syscache_seams::pg_class_relpartbound_text::call(
+                inhrelid,
+            )?
+            .ok_or_else(|| {
+                elog(&format!(
+                    "missing relpartbound for partition relation {inhrelid}"
+                ))
+            })?;
+            let bnode = backend_nodes_read_seams::string_to_node::call(mcx, &text)?;
+            let bspec: PgBox<'mcx, PartitionBoundSpec<'mcx>> =
+                match PgBox::into_inner(bnode).into_partitionboundspec() {
+                    Some(spec) => mcx::alloc_in(mcx, spec)?,
+                    None => return Err(elog("expected PartitionBoundSpec")),
+                };
+
+            if !bspec.is_default {
+                // part_qual = get_qual_for_range(parent, bspec, true). The
+                // sibling is non-default, so this recursion never re-enters the
+                // default branch — no partdesc needed (pass None).
+                let part_qual = get_qual_for_range(mcx, key, &bspec, true, None)?;
+
+                // AND the sibling's constraint clauses and add to or_expr_args.
+                or_expr_args.push(if part_qual.len() > 1 {
+                    make_bool_expr(BoolExprType::AND_EXPR, part_qual, -1)
+                } else {
+                    part_qual
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| elog("non-default sibling produced an empty qual"))?
+                });
+            }
+        }
+
+        let mut result: Vec<Expr> = Vec::new();
+        if !or_expr_args.is_empty() {
+            // Combine the non-default constraints with OR, AND in the per-key
+            // NOT NULL tests (omitted from each sibling arm to avoid useless
+            // repetition), then negate: the default holds everything NOT in the
+            // siblings.
+            let mut and_args = get_range_nulltest(mcx, key)?;
+            and_args.push(if or_expr_args.len() > 1 {
+                make_bool_expr(BoolExprType::OR_EXPR, or_expr_args, -1)
+            } else {
+                or_expr_args.into_iter().next().unwrap()
+            });
+            let other_parts_constr = make_bool_expr(BoolExprType::AND_EXPR, and_args, -1);
+            result.push(make_bool_expr(
+                BoolExprType::NOT_EXPR,
+                vec![other_parts_constr],
+                -1,
+            ));
+        }
+
+        return Ok(result);
     }
 
     let mut result: Vec<Expr> = Vec::new();
@@ -670,11 +792,14 @@ pub fn get_qual_from_partbound<'mcx>(
     mcx: Mcx<'mcx>,
     key: &PartitionKeyData<'_>,
     spec: &PartitionBoundSpec<'_>,
+    parent_partdesc: Option<&PartitionDescData<'_>>,
 ) -> PgResult<Vec<Expr>> {
     match key.strategy {
         PartitionStrategy::Hash => get_qual_for_hash(mcx, key, spec),
-        PartitionStrategy::List => get_qual_for_list(mcx, key, spec),
-        PartitionStrategy::Range => get_qual_for_range(mcx, key, spec, false),
+        PartitionStrategy::List => get_qual_for_list(mcx, key, spec, parent_partdesc),
+        PartitionStrategy::Range => {
+            get_qual_for_range(mcx, key, spec, false, parent_partdesc)
+        }
     }
 }
 
@@ -716,7 +841,21 @@ pub fn qual_from_partbound_seam<'mcx, 'p>(
     )?
     .ok_or_else(|| elog("get_qual_from_partbound: parent has no partition key"))?;
 
-    let exprs = get_qual_from_partbound(mcx, &key, &bound)?;
+    // For a DEFAULT partition the constraint is the negation of all siblings'
+    // bounds, which C reads from `RelationGetPartitionDesc(parent, false)`. Fetch
+    // it only when needed (the partdesc crate depends on this one, so the call
+    // crosses the partdesc inward seam). `omit_detached=false` matches C.
+    let pdesc = if bound.is_default {
+        Some(backend_partitioning_partdesc_seams::relation_get_partition_desc::call(
+            mcx,
+            &parent_rel.alias(),
+            false,
+        )?)
+    } else {
+        None
+    };
+
+    let exprs = get_qual_from_partbound(mcx, &key, &bound, pdesc.as_deref())?;
     parent_rel.close(NoLock)?;
     for e in exprs {
         out.push(node(mcx, e)?);

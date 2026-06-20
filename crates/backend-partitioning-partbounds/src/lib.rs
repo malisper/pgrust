@@ -1355,8 +1355,9 @@ fn get_qual_from_partbound_seam<'mcx>(
     mcx: Mcx<'mcx>,
     key: &PartitionKeyData<'_>,
     spec: &PartitionBoundSpec<'_>,
+    parent_partdesc: Option<&PartitionDescData<'_>>,
 ) -> PgResult<PgVec<'mcx, Node<'mcx>>> {
-    let exprs = qual::get_qual_from_partbound(mcx, key, spec)?;
+    let exprs = qual::get_qual_from_partbound(mcx, key, spec, parent_partdesc)?;
     let mut out: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
     for e in exprs {
         out.push(Node::mk_expr(mcx, e)?);

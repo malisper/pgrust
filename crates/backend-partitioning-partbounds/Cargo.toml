@@ -26,4 +26,5 @@ backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-cache-partcache-seams = { path = "../backend-utils-cache-partcache-seams" }
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
+backend-partitioning-partdesc-seams = { path = "../backend-partitioning-partdesc-seams" }
 types-storage = { path = "../types-storage" }

@@ -7932,14 +7932,15 @@ fn preprocess_groupclause<'mcx>(
 pub fn expression_planner<'mcx>(mcx: Mcx<'mcx>, expr: Expr) -> PgResult<Expr> {
     // eval_const_expressions(NULL, expr) (C:6789). The owner takes an Mcx (no
     // PlannerInfo needed; the `NULL` root path).
-    let result = backend_optimizer_util_clauses::eval_const_expressions(mcx, expr)?;
+    let mut result = backend_optimizer_util_clauses::eval_const_expressions(mcx, expr)?;
 
-    // fix_opfuncids((Node *) result) (C:6791). No ported owner exposes a
-    // standalone fix_opfuncids over the arena Expr; eval_const_expressions
-    // already resolves opfuncids during folding, so the post-pass is a structural
-    // no-op here. Mirror PG and panic if a separate fixup were genuinely needed —
-    // but since it would only re-resolve already-set funcids, we return the
-    // folded expr. (Behaviour-preserving: const-folding sets opfuncids.)
+    // fix_opfuncids((Node *) result) (C:6791). Not a no-op: const-folding can
+    // emit nodes with an unresolved opfuncid — e.g. `negate_clause` rewrites
+    // `NOT (a = b)` to a fresh `a <> b` OpExpr with opfuncid = InvalidOid (the
+    // DEFAULT-partition NOT-constraint reaches this) — so resolve any remaining
+    // opfuncids over the whole tree, exactly as C does after eval_const_expressions.
+    backend_nodes_core::nodefuncs::fix_opfuncids(&mut result)?;
+
     Ok(result)
 }
 

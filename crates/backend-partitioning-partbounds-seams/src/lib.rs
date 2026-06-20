@@ -127,10 +127,17 @@ seam_core::seam!(
     /// the parent's `RelationGetPartitionKey`. Returns the qual list as `Node`s
     /// allocated in `mcx`; the construction can `ereport(ERROR)`, carried on
     /// `Err`.
+    ///
+    /// `parent_partdesc` is the parent's `RelationGetPartitionDesc(parent,
+    /// false)` (partbounds.c reads it directly for a DEFAULT partition's
+    /// negated-sibling constraint). It can be `None` when `spec` is not a
+    /// default partition (the only path that consults it); the caller — which
+    /// holds the parent relcache entry — supplies it for the default case.
     pub fn get_qual_from_partbound<'mcx>(
         mcx: Mcx<'mcx>,
         key: &PartitionKeyData<'_>,
         spec: &PartitionBoundSpec<'_>,
+        parent_partdesc: Option<&PartitionDescData<'_>>,
     ) -> PgResult<PgVec<'mcx, Node<'mcx>>>
 );
 

@@ -23,6 +23,9 @@ backend-partitioning-core-seams = { path = "../backend-partitioning-core-seams" 
 backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
 backend-catalog-partition = { path = "../backend-catalog-partition" }
 
+# This unit's own inward seam crate (RelationGetPartitionDesc, installed below).
+backend-partitioning-partdesc-seams = { path = "../backend-partitioning-partdesc-seams" }
+
 # Boundary seams consumed by the build/lookup paths.
 backend-partitioning-partbounds-seams = { path = "../backend-partitioning-partbounds-seams" }
 backend-utils-cache-partcache-seams = { path = "../backend-utils-cache-partcache-seams" }
