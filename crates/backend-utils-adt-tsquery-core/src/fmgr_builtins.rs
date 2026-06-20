@@ -23,8 +23,9 @@
 use std::string::{String, ToString};
 
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_stringinfo::StringInfo;
 
 const VARHDRSZ: usize = 4;
@@ -98,50 +99,38 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("tsquery fmgr scratch")
 }
 
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters — I/O.
 // ---------------------------------------------------------------------------
 
-fn fc_tsqueryin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsqueryin(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let m = scratch_mcx();
     // Forward the soft ErrorSaveContext installed on the frame by
     // InputFunctionCallSafe so a recoverable parse failure `ereturn`s into the
     // sink (returning `Ok(None)`) instead of throwing past `invoke?`.
-    let image = ok(crate::tsquery::tsqueryin(m.mcx(), &s, fcinfo.escontext_mut()));
+    let image = crate::tsquery::tsqueryin(m.mcx(), &s, fcinfo.escontext_mut())?;
     match image {
-        Some(img) => ret_varlena_image(fcinfo, img),
+        Some(img) => Ok(ret_varlena_image(fcinfo, img)),
         // Soft-error path: escontext recorded the failure; return a NULL
         // placeholder the caller discards after `soft_error_occurred()`.
-        None => Datum::null(),
+        None => Ok(Datum::null()),
     }
 }
 
-fn fc_tsqueryout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsqueryout(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::tsquery::tsqueryout(m.mcx(), arg_tsquery(fcinfo, 0)));
-    ret_cstring(fcinfo, out)
+    let out = crate::tsquery::tsqueryout(m.mcx(), arg_tsquery(fcinfo, 0))?;
+    Ok(ret_cstring(fcinfo, out))
 }
 
-fn fc_tsquerysend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquerysend(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let image = ok(crate::tsquery::tsquerysend(m.mcx(), arg_tsquery(fcinfo, 0)));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::tsquery::tsquerysend(m.mcx(), arg_tsquery(fcinfo, 0))?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
-fn fc_tsqueryrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsqueryrecv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let src = fcinfo
         .ref_arg(0)
         .and_then(|p| p.as_varlena())
@@ -149,91 +138,91 @@ fn fc_tsqueryrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let mut data = mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(src.len()).is_err() {
-        raise(types_error::PgError::error("out of memory"));
+        return Err(types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(src);
     let mut buf = StringInfo::from_vec(data);
-    let image = ok(crate::tsquery::tsqueryrecv(m.mcx(), &mut buf));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::tsquery::tsqueryrecv(m.mcx(), &mut buf)?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
 /// `tsquerytree(tsquery) -> text` — the index-searchable subtree as text.
-fn fc_tsquerytree(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquerytree(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let payload = ok(crate::tsquery::tsquerytree(m.mcx(), arg_tsquery(fcinfo, 0)));
-    ret_text(fcinfo, payload)
+    let payload = crate::tsquery::tsquerytree(m.mcx(), arg_tsquery(fcinfo, 0))?;
+    Ok(ret_text(fcinfo, payload))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — comparison.
 // ---------------------------------------------------------------------------
 
-fn fc_tsquery_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_i32(ok(crate::op::tsquery_cmp(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))))
+    Ok(ret_i32(crate::op::tsquery_cmp(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))?))
 }
-fn fc_tsquery_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_eq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_bool(ok(crate::op::tsquery_eq(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))))
+    Ok(ret_bool(crate::op::tsquery_eq(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))?))
 }
-fn fc_tsquery_ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_ne(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_bool(ok(crate::op::tsquery_ne(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))))
+    Ok(ret_bool(crate::op::tsquery_ne(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))?))
 }
-fn fc_tsquery_lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_lt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_bool(ok(crate::op::tsquery_lt(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))))
+    Ok(ret_bool(crate::op::tsquery_lt(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))?))
 }
-fn fc_tsquery_le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_le(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_bool(ok(crate::op::tsquery_le(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))))
+    Ok(ret_bool(crate::op::tsquery_le(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))?))
 }
-fn fc_tsquery_gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_gt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_bool(ok(crate::op::tsquery_gt(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))))
+    Ok(ret_bool(crate::op::tsquery_gt(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))?))
 }
-fn fc_tsquery_ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_ge(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_bool(ok(crate::op::tsquery_ge(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))))
+    Ok(ret_bool(crate::op::tsquery_ge(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))?))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — boolean combinators + numnode.
 // ---------------------------------------------------------------------------
 
-fn fc_tsquery_and(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_and(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let image = ok(crate::op::tsquery_and(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1)));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::op::tsquery_and(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
-fn fc_tsquery_or(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_or(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let image = ok(crate::op::tsquery_or(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1)));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::op::tsquery_or(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
-fn fc_tsquery_not(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_not(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let image = ok(crate::op::tsquery_not(m.mcx(), arg_tsquery(fcinfo, 0)));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::op::tsquery_not(m.mcx(), arg_tsquery(fcinfo, 0))?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
-fn fc_tsquery_phrase(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_phrase(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let image = ok(crate::op::tsquery_phrase(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1)));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::op::tsquery_phrase(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
-fn fc_tsquery_phrase_distance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_phrase_distance(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let dist = arg_i32(fcinfo, 2);
     let m = scratch_mcx();
-    let image = ok(crate::op::tsquery_phrase_distance(
+    let image = crate::op::tsquery_phrase_distance(
         m.mcx(),
         arg_tsquery(fcinfo, 0),
         arg_tsquery(fcinfo, 1),
         dist,
-    ));
-    ret_varlena_image(fcinfo, image)
+    )?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
-fn fc_tsquery_numnode(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::op::tsquery_numnode(arg_tsquery(fcinfo, 0)))
+fn fc_tsquery_numnode(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_i32(crate::op::tsquery_numnode(arg_tsquery(fcinfo, 0))))
 }
 
 // ---------------------------------------------------------------------------
@@ -243,13 +232,13 @@ fn fc_tsquery_numnode(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // cores take an `Mcx` for the transient `QTNode` working trees.
 // ---------------------------------------------------------------------------
 
-fn fc_tsq_mcontains(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsq_mcontains(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_bool(ok(crate::op::tsq_mcontains(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))))
+    Ok(ret_bool(crate::op::tsq_mcontains(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))?))
 }
-fn fc_tsq_mcontained(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsq_mcontained(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_bool(ok(crate::op::tsq_mcontained(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))))
+    Ok(ret_bool(crate::op::tsq_mcontained(m.mcx(), arg_tsquery(fcinfo, 0), arg_tsquery(fcinfo, 1))?))
 }
 
 // ---------------------------------------------------------------------------
@@ -260,23 +249,26 @@ fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `tsquery` builtin whose value core is ported and whose
 /// arg/result types are expressible at the current fmgr boundary. OIDs/nargs
 /// from `pg_proc.dat`; every row is `proisstrict => 't'` and not retset.
 pub fn register_tsquery_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- I/O ----
         builtin(3612, "tsqueryin", 1, fc_tsqueryin),
         builtin(3613, "tsqueryout", 1, fc_tsqueryout),
