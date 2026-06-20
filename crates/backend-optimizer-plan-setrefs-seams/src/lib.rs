@@ -103,8 +103,8 @@ seam_core::seam!(
     /// VALUE counterpart of the handle-based
     /// `backend_nodes_copyfuncs_pc_seams::extract_query_dependencies` that
     /// plancache's F0 de-handle will switch to.
-    pub fn extract_query_dependencies_value<'mcx>(
+    pub fn extract_query_dependencies_value<'mcx, 'q>(
         mcx: mcx::Mcx<'mcx>,
-        query_list: &[types_nodes::copy_query::Query<'mcx>],
+        query_list: &[types_nodes::copy_query::Query<'q>],
     ) -> types_error::PgResult<QueryDependenciesValue>
 );

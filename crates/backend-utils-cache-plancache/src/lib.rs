@@ -1996,7 +1996,15 @@ fn PlanCacheComputeResultDesc(
         },
         PStrat::PORTAL_UTIL_SELECT => {
             match stmt_list.first().and_then(|q| q.utilityStmt.as_deref()) {
-                Some(util) => utility_seams::utility_tuple_descriptor::call(dest.mcx(), util)?,
+                // `Node` is invariant post node-opaque flip, so the borrowed
+                // utility stmt (stmt_list's lifetime) cannot be passed alongside
+                // `dest.mcx()` directly. Clone it into `dest` so both unify at
+                // the descriptor's allocation context (the result lives in `dest`
+                // anyway — the caller's keep-alive contract).
+                Some(util) => {
+                    let util_owned = util.clone_in(dest.mcx())?;
+                    utility_seams::utility_tuple_descriptor::call(dest.mcx(), &util_owned)?
+                }
                 None => None,
             }
         }

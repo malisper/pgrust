@@ -1837,7 +1837,7 @@ fn check_srf_top_level<'mcx>(
 /// (`SELECT * FROM generate_series(1,3)`). Structural equality (`equal()`,
 /// equalfuncs.c) is the faithful proxy: two clones of the same node are equal,
 /// and the same pointer is trivially equal.
-fn nodes_ptr_eq(a: &Node<'_>, b: &Node<'_>) -> bool {
+fn nodes_ptr_eq<'n>(a: &Node<'n>, b: &Node<'n>) -> bool {
     core::ptr::eq(a as *const _, b as *const _)
         || backend_nodes_equalfuncs_seams::equal_node::call(a, b)
 }

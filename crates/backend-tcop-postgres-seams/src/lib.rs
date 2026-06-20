@@ -177,9 +177,9 @@ seam_core::seam!(
     /// `BuildCachedPlan` (plancache.c:1074) is the F0 consumer; this is the
     /// VALUE counterpart of the handle-based
     /// `backend_optimizer_plan_planner_pc_seams::plan_queries`.
-    pub fn pg_plan_queries_value<'mcx>(
+    pub fn pg_plan_queries_value<'mcx, 'q>(
         mcx: mcx::Mcx<'mcx>,
-        querytrees: &[types_nodes::copy_query::Query<'mcx>],
+        querytrees: &[types_nodes::copy_query::Query<'q>],
         query_string: &str,
         cursor_options: i32,
         bound_params: Option<&types_nodes::params::ParamListInfoData<'mcx>>,

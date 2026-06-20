@@ -2892,7 +2892,7 @@ fn parse_func_on_whole_row<'mcx>(
         false,
         location,
     )?;
-    Ok(res.map(Node::Expr))
+    res.map(|e| Node::mk_expr(mcx, e)).transpose()
 }
 
 // ===========================================================================
@@ -3469,7 +3469,7 @@ fn sql_fn_post_column_ref<'mcx>(
             false,
             cref.location,
         )?;
-        return Ok(res.map(Node::Expr));
+        return res.map(|e| Node::mk_expr(mcx, e)).transpose();
     }
 
     Ok(Some(Node::mk_expr(

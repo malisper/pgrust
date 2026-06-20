@@ -3566,9 +3566,9 @@ fn utility_contains_query<'a, 'mcx>(parsetree: Option<&'a Node<'mcx>>) -> Option
 /// is invoked on `(Node *) querytree_list`, and `expression_tree_walker`'s `List`
 /// arm visits each `Query`). The dummy `glob`/`root` are realized as the local
 /// [`ExtractDepsCtx`] accumulators.
-fn extract_query_dependencies_value<'mcx>(
+fn extract_query_dependencies_value<'mcx, 'q>(
     _mcx: Mcx<'mcx>,
-    query_list: &[types_nodes::copy_query::Query<'mcx>],
+    query_list: &[types_nodes::copy_query::Query<'q>],
 ) -> PgResult<ext::QueryDependenciesValue> {
     let mut ctx = ExtractDepsCtx {
         relation_oids: Vec::new(),
