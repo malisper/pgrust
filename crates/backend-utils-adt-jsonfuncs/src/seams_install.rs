@@ -63,4 +63,12 @@ pub fn init_seams() {
     backend_utils_adt_jsonb_seams::extract_variadic_array::set(
         json_render::extract_variadic_array,
     );
+
+    // The `deconstruct_array_builtin(in_array, TEXTOID, ...)` boundary for
+    // `jsonb_object` / `jsonb_object_two_arg` (jsonb.c): the `text[]`-with-dims
+    // explosion needs `arrayfuncs` (owned by `jsonfuncs`); the jsonb crate calls
+    // it through `backend-utils-adt-jsonb-seams`.
+    backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::set(
+        json_render::deconstruct_text_array_with_dims,
+    );
 }

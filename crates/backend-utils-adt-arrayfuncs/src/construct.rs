@@ -3264,6 +3264,63 @@ pub fn deconstruct_text_array_with_ndim_bytes(
     Ok((ndim, out))
 }
 
+/// Like [`deconstruct_text_array_with_ndim_bytes`] but also returns the full
+/// `ARR_DIMS(arr)` vector (the per-dimension extents), for `jsonb_object`'s
+/// `ARR_DIMS(in_array)[0]` (even-element) / `ARR_DIMS(in_array)[1]` (two-column)
+/// `ndims`-dependent shape checks. The element walk is identical; only the dims
+/// vector is additionally captured (copied to an owned `Vec<i32>`).
+pub fn deconstruct_text_array_with_dims_bytes(
+    arr: &[u8],
+) -> PgResult<(i32, alloc::vec::Vec<i32>, alloc::vec::Vec<ArrayElem>)> {
+    let cx = mcx::MemoryContext::new("jsonb deconstruct_text_array_with_dims");
+    let mcx = cx.mcx();
+
+    // DatumGetArrayTypeP(arr) — detoast the array varlena image.
+    let array = detoast_seam::detoast_attr::call(mcx, arr)?;
+
+    let ndim = foundation::arr_ndim(&array);
+    let dims_v = foundation::arr_dims(mcx, &array)?;
+    let dims_owned: alloc::vec::Vec<i32> = dims_v.iter().copied().collect();
+    let nelems = arrayutils_seam::array_get_n_items::call(ndim, &dims_v)?;
+
+    let mut out: alloc::vec::Vec<ArrayElem> = alloc::vec::Vec::with_capacity(nelems as usize);
+
+    // p = ARR_DATA_PTR(array); bitmap = ARR_NULLBITMAP(array); bitmask = 1.
+    // (TEXT: typlen == -1, typbyval == false, typalign == 'i'.)
+    let mut p = foundation::arr_data_ptr_off(&array);
+    let bitmap = foundation::arr_nullbitmap_off(&array);
+    let mut bitmap_byte = bitmap;
+    let mut bitmask: i32 = 1;
+
+    for _ in 0..nelems {
+        let is_null_here = match bitmap_byte {
+            Some(b) => (array[b] as i32 & bitmask) == 0,
+            None => false,
+        };
+        if is_null_here {
+            out.push(ArrayElem { value: alloc::vec::Vec::new(), is_null: true });
+        } else {
+            let (data_off, data_len) = text_element_payload_span(&array, p)?;
+            let payload = array.get(data_off..data_off + data_len).ok_or_else(|| {
+                PgError::error("malformed array (truncated element data)")
+                    .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+            })?;
+            out.push(ArrayElem { value: payload.to_vec(), is_null: false });
+            p = foundation::att_addlength_pointer(p, -1, &array, p);
+            p = foundation::att_align_nominal(p, TYPALIGN_INT);
+        }
+
+        if let Some(b) = bitmap_byte.as_mut() {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                *b += 1;
+                bitmask = 1;
+            }
+        }
+    }
+    Ok((ndim, dims_owned, out))
+}
+
 /// Seam `deconstruct_char_array` — `deconstruct_array_builtin(weights, CHAROID,
 /// &dweights, &nulls, &nweights)` (tsvector_op.c:836). Explode the on-disk
 /// `"char"[]` byte image into per-element `{ DatumGetChar(dweights[i]) as one

@@ -123,4 +123,17 @@ seam_core::seam!(
     ) -> PgResult<(Oid, alloc::vec::Vec<(Datum<'mcx>, bool)>)>
 );
 
+seam_core::seam!(
+    /// `deconstruct_array_builtin(in_array, TEXTOID, &in_datums, &in_nulls,
+    /// &in_count)` (jsonb.c `jsonb_object` / `jsonb_object_two_arg`): explode the
+    /// on-disk `text[]` varlena image into `ARR_NDIM`, the full `ARR_DIMS` vector
+    /// (for the `[0]` even-element / `[1]` two-column shape checks), and the
+    /// per-element text payloads (`None` == SQL NULL — the C `in_nulls[i]` flag;
+    /// `Some(bytes)` == the raw `text` payload, `VARDATA_ANY` with no header).
+    /// Installed by `backend-utils-adt-jsonfuncs` (which owns `arrayfuncs`).
+    pub fn deconstruct_text_array_with_dims(
+        arr: &[u8],
+    ) -> PgResult<(i32, alloc::vec::Vec<i32>, alloc::vec::Vec<Option<alloc::vec::Vec<u8>>>)>
+);
+
 extern crate alloc;

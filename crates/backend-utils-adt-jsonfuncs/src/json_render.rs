@@ -70,6 +70,26 @@ pub fn extract_variadic_array<'mcx>(
     Ok((element_type, elems.as_slice().to_vec()))
 }
 
+/// `deconstruct_array_builtin(in_array, TEXTOID, &in_datums, &in_nulls,
+/// &in_count)` (jsonb.c `jsonb_object` / `jsonb_object_two_arg`): explode the
+/// on-disk `text[]` varlena image into `ARR_NDIM`, the full `ARR_DIMS` vector,
+/// and the per-element text payloads (`None` for an SQL-NULL element, `Some`
+/// = the raw `text` payload bytes). Installed onto
+/// `backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims`.
+pub fn deconstruct_text_array_with_dims(
+    arr: &[u8],
+) -> PgResult<(i32, Vec<i32>, Vec<Option<Vec<u8>>>)> {
+    let (ndim, dims, elems) =
+        backend_utils_adt_arrayfuncs::construct::deconstruct_text_array_with_dims_bytes(arr)?;
+    // Map each `ArrayElem { value, is_null }` to `Option<Vec<u8>>` (the C
+    // `in_nulls[i] ? NULL : in_datums[i]` distinction the jsonb_object cores read).
+    let out = elems
+        .into_iter()
+        .map(|e| if e.is_null { None } else { Some(e.value) })
+        .collect();
+    Ok((ndim, dims, out))
+}
+
 /// `OidOutputFunctionCall(outfuncoid, val)` (fmgr.c): the resolved type output
 /// function's text representation of `val` (NUL-excluded bytes). Routes to the
 /// fmgr-core `oid_output_function_call` seam (the real owner).

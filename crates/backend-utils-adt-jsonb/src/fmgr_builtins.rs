@@ -639,6 +639,50 @@ fn fc_jsonb_build_array_noargs(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// text[]-deconstruction object constructors (jsonb.c):
+// jsonb_object(text[]) / jsonb_object(text[], text[]).
+//
+// C entry points call `deconstruct_array_builtin(in_array, TEXTOID, ...)` then
+// build {key:value} pairs from the flat text datums; `ARR_NDIM`/`ARR_DIMS`
+// drive the even-element / two-column / dimension shape checks. The array
+// deconstruction crosses through `deconstruct_text_array_with_dims` (owned by
+// `jsonfuncs`, which has `arrayfuncs`); the pair-building loop is the ported
+// `crate::jsonb_object` / `crate::jsonb_object_two_arg` core.
+// ---------------------------------------------------------------------------
+
+/// `jsonb_object(text[]) -> jsonb` (oid 3263). The single `text[]` arg arrives
+/// as its detoasted array varlena image on the by-ref lane.
+fn fc_jsonb_object(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let arr = arg_varlena_image(fcinfo, 0);
+    let (ndims, dims, in_datums) =
+        ok(backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::call(arr));
+    let m = scratch_mcx();
+    let image = ok(crate::jsonb_object(m.mcx(), ndims, &dims, &in_datums)).as_slice().to_vec();
+    ret_jsonb(fcinfo, image)
+}
+
+/// `jsonb_object(text[], text[]) -> jsonb` (oid 3264): keys array + values array.
+fn fc_jsonb_object_two_arg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let key_arr = arg_varlena_image(fcinfo, 0);
+    let (nkdims, _kdims, key_datums) =
+        ok(backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::call(key_arr));
+    let val_arr = arg_varlena_image(fcinfo, 1);
+    let (nvdims, _vdims, val_datums) =
+        ok(backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::call(val_arr));
+    let m = scratch_mcx();
+    let image = ok(crate::jsonb_object_two_arg(
+        m.mcx(),
+        nkdims,
+        nvdims,
+        &key_datums,
+        &val_datums,
+    ))
+    .as_slice()
+    .to_vec();
+    ret_jsonb(fcinfo, image)
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -704,6 +748,9 @@ pub fn register_jsonb_builtins() {
         builtin(3272, "jsonb_build_array_noargs", 0, false, false, fc_jsonb_build_array_noargs),
         builtin(3273, "jsonb_build_object", 1, false, false, fc_jsonb_build_object),
         builtin(3274, "jsonb_build_object_noargs", 0, false, false, fc_jsonb_build_object_noargs),
+        // text[]-deconstruction object constructors (jsonb.c): proisstrict t.
+        builtin(3263, "jsonb_object", 1, true, false, fc_jsonb_object),
+        builtin(3264, "jsonb_object_two_arg", 2, true, false, fc_jsonb_object_two_arg),
     ]);
 }
 

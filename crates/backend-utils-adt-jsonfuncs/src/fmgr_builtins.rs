@@ -367,6 +367,69 @@ fn fc_jsonb_set(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_varlena(fcinfo, r.as_slice().to_vec())
 }
 
+/// `jsonb_set_lax(jsonb, text[], jsonb, boolean, text) -> jsonb` (oid 5054).
+///
+/// `proisstrict => 'f'`: any of the 5 args may be SQL NULL. C maps
+/// `PG_ARGISNULL(0|1|3)` -> `PG_RETURN_NULL()`, `PG_ARGISNULL(4)` -> an error,
+/// and `PG_ARGISNULL(2)` (the new value) triggers the lax `null_value_treatment`
+/// dispatch. `json_null` is the on-disk `jsonb` image for the literal `null`
+/// (C's `DirectFunctionCall1(jsonb_in, "null")`), built here as the serialized
+/// `jbvNull` scalar.
+fn fc_jsonb_set_lax(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // PG_ARGISNULL(i): a by-ref arg is NULL when its lane payload is absent and
+    // the nullable-datum flag is set; a by-value arg (bool) reads `isnull`.
+    let isnull = |i: usize| fcinfo.arg(i).map(|d| d.isnull).unwrap_or(true);
+
+    let arg0: Option<&[u8]> =
+        if isnull(0) { None } else { fcinfo.ref_arg(0).and_then(|p| p.as_varlena()) };
+
+    // The `text[]` path arg is deconstructed (with ndim) only when present.
+    let path: Option<(Vec<Option<Vec<u8>>>, i32)> = if isnull(1) {
+        None
+    } else {
+        let bytes = arg_varlena_image(fcinfo, 1);
+        let (ndim, elems) = ok(deconstruct_text_array_with_ndim_bytes(bytes));
+        let p: Vec<Option<Vec<u8>>> = elems
+            .into_iter()
+            .map(|e| if e.is_null { None } else { Some(e.value) })
+            .collect();
+        Some((p, ndim))
+    };
+    let path_ref: Option<(&[Option<Vec<u8>>], i32)> =
+        path.as_ref().map(|(p, n)| (p.as_slice(), *n));
+
+    let newjsonb: Option<&[u8]> =
+        if isnull(2) { None } else { fcinfo.ref_arg(2).and_then(|p| p.as_varlena()) };
+
+    let create: Option<bool> = if isnull(3) { None } else { Some(arg_bool(fcinfo, 3)) };
+
+    let handle_null: Option<Vec<u8>> = if isnull(4) {
+        None
+    } else {
+        Some(arg_text_payload(fcinfo, 4).to_vec())
+    };
+
+    let m = scratch_mcx();
+    // json_null = JsonbValueToJsonb(jbvNull) — the on-disk image for `null`.
+    let json_null = ok(backend_utils_adt_jsonb_util::JsonbValueToJsonb(
+        m.mcx(),
+        &backend_utils_adt_jsonb_util::JsonbValue::null(),
+    ))
+    .as_slice()
+    .to_vec();
+
+    let r = ok(crate::setops::jsonb_set_lax(
+        m.mcx(),
+        arg0,
+        path_ref,
+        newjsonb,
+        create,
+        handle_null.as_deref(),
+        &json_null,
+    ));
+    ret_opt_varlena(fcinfo, r.map(|v| v.as_slice().to_vec()))
+}
+
 /// `jsonb_insert(jsonb, text[], jsonb, bool) -> jsonb` (oid 3579).
 fn fc_jsonb_insert(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
@@ -479,6 +542,8 @@ pub fn register_jsonfuncs_builtins() {
         builtin(3343, "jsonb_delete_array", 2, true, false, fc_jsonb_delete_array),
         builtin(3304, "jsonb_delete_path", 2, true, false, fc_jsonb_delete_path),
         builtin(3305, "jsonb_set", 4, true, false, fc_jsonb_set),
+        // jsonb_set_lax: proisstrict 'f' (handles SQL-NULL new value).
+        builtin(5054, "jsonb_set_lax", 5, false, false, fc_jsonb_set_lax),
         builtin(3579, "jsonb_insert", 4, true, false, fc_jsonb_insert),
         builtin(3306, "jsonb_pretty", 1, true, false, fc_jsonb_pretty),
         // strip_nulls.
