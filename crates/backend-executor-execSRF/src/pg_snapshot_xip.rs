@@ -34,9 +34,20 @@ use crate::register_srf;
 /// `pg_snapshot_xip(pg_snapshot)` (OID 5064).
 const PG_SNAPSHOT_XIP: Oid = 5064;
 
-/// Register `pg_snapshot_xip` in the executor-frame SRF table.
+/// `txid_snapshot_xip(txid_snapshot)` (OID 2947) — the deprecated alias. Its
+/// `pg_proc` entry (pg_proc.dat:10581) shares `prosrc => 'pg_snapshot_xip'` with
+/// OID 5064; `txid_snapshot` is binary-compatible with `pg_snapshot` and `int8`
+/// with `xid8` (both by-value 64-bit), so the same SRF body serves both OIDs.
+/// Without this registration the call resolves to `pg_snapshot_xip` in the fmgr
+/// internal lookup table and errors `internal function "pg_snapshot_xip" is not
+/// in internal lookup table`.
+const TXID_SNAPSHOT_XIP: Oid = 2947;
+
+/// Register `pg_snapshot_xip` (and its `txid_snapshot_xip` alias) in the
+/// executor-frame SRF table.
 pub(crate) fn register_pg_snapshot_xip() {
     register_srf(PG_SNAPSHOT_XIP, pg_snapshot_xip);
+    register_srf(TXID_SNAPSHOT_XIP, pg_snapshot_xip);
 }
 
 /// `funcctx->isDone` write (the `SRF_RETURN_NEXT`/`SRF_RETURN_DONE` `isDone`
