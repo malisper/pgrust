@@ -2566,6 +2566,7 @@ pub fn init_seams() {
     bms::build_child_join_rel::set(seam_build_child_join_rel);
     bms::min_join_parameterization::set(seam_min_join_parameterization);
 
+    pathnode::find_param_path_info::set(find_param_path_info);
     pathnode::get_baserel_parampathinfo::set(seam_get_baserel_parampathinfo);
     pathnode::get_appendrel_parampathinfo::set(seam_get_appendrel_parampathinfo);
     pathnode::get_joinrel_parampathinfo::set(seam_get_joinrel_parampathinfo);

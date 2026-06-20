@@ -558,6 +558,93 @@ pub fn adjust_appendrel_attrs_multilevel(
     adjust_appendrel_attrs(root, node, &appinfos)
 }
 
+/// `(List *) adjust_appendrel_attrs_multilevel(root, (Node *) restrictlist,
+/// child_rel, top_parent)` specialized to a `RestrictInfo` list — the
+/// `ADJUST_CHILD_ATTRS` of a restrictinfo-list field in
+/// `reparameterize_path_by_child` (pathnode.c). Mirrors the level-by-level
+/// recursion of [`adjust_appendrel_attrs_multilevel`], applying the single-level
+/// restrictinfo-list translation at the leaf level.
+pub fn adjust_restrictlist_multilevel(
+    mcx: Mcx<'_>,
+    root: &mut PlannerInfo,
+    restrictlist: &[RinfoId],
+    childrel: RelId,
+    parentrel: RelId,
+) -> PgResult<Vec<RinfoId>> {
+    // Recurse if immediate parent is not the top parent.
+    let immediate_parent = root.rel(childrel).parent;
+    let list: Vec<RinfoId> = if immediate_parent != Some(parentrel) {
+        match immediate_parent {
+            Some(p) => adjust_restrictlist_multilevel(mcx, root, restrictlist, p, parentrel)?,
+            None => return Err(PgError::error("childrel is not a child of parentrel")),
+        }
+    } else {
+        restrictlist.to_vec()
+    };
+    // Now translate for this child.
+    let child_relids = root.rel(childrel).relids.clone();
+    let appinfos = find_appinfos_by_relids(root, &child_relids)?;
+    let mut out = Vec::with_capacity(list.len());
+    for &ri in &list {
+        out.push(adjust_restrictinfo(mcx, root, ri, &appinfos)?);
+    }
+    Ok(out)
+}
+
+/// `(List *) adjust_appendrel_attrs_multilevel(root, (Node *) nodelist,
+/// child_rel, top_parent)` specialized to a list of bare expression node
+/// handles ([`NodeId`]) — `ADJUST_CHILD_ATTRS` of e.g. `param_exprs` /
+/// `pathtarget->exprs` in `reparameterize_path_by_child`.
+pub fn adjust_nodelist_multilevel(
+    mcx: Mcx<'_>,
+    root: &mut PlannerInfo,
+    handles: &[NodeId],
+    childrel: RelId,
+    parentrel: RelId,
+) -> PgResult<Vec<NodeId>> {
+    let mut out = Vec::with_capacity(handles.len());
+    for &h in handles {
+        // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+        // owned-subtree child (SubLink/SubPlan correlated operand).
+        let expr = root.node(h).clone_in(mcx)?;
+        let new_expr = adjust_appendrel_attrs_multilevel(root, expr, childrel, parentrel)?;
+        out.push(root.alloc_node(new_expr));
+    }
+    Ok(out)
+}
+
+/// `(List *) adjust_appendrel_attrs_multilevel(root, (Node *) indexclauses,
+/// child_rel, top_parent)` specialized to an `IndexClause` list —
+/// `ADJUST_CHILD_ATTRS(ipath->indexclauses)` in `reparameterize_path_by_child`.
+/// Each `IndexClause` carries `RestrictInfo` handles (`rinfo` + `indexquals`)
+/// which are translated level-by-level via [`adjust_restrictinfo`].
+pub fn adjust_indexclauses_multilevel(
+    mcx: Mcx<'_>,
+    root: &mut PlannerInfo,
+    indexclauses: &[types_pathnodes::IndexClause],
+    childrel: RelId,
+    parentrel: RelId,
+) -> PgResult<Vec<types_pathnodes::IndexClause>> {
+    let mut out = Vec::with_capacity(indexclauses.len());
+    for ic in indexclauses {
+        let mut new_ic = ic.clone();
+        if let Some(ri) = ic.rinfo {
+            let v = adjust_restrictlist_multilevel(
+                mcx,
+                root,
+                core::slice::from_ref(&ri),
+                childrel,
+                parentrel,
+            )?;
+            new_ic.rinfo = Some(v[0]);
+        }
+        new_ic.indexquals =
+            adjust_restrictlist_multilevel(mcx, root, &ic.indexquals, childrel, parentrel)?;
+        out.push(new_ic);
+    }
+    Ok(out)
+}
+
 /* ==========================================================================
  * adjust_child_relids / adjust_child_relids_multilevel
  * ======================================================================== */
@@ -1234,6 +1321,10 @@ pub fn init_seams() {
     ai::find_appinfos_by_relids::set(find_appinfos_by_relids);
     ai::adjust_child_relids::set(adjust_child_relids);
     ai::adjust_appendrel_attrs_restrictlist::set(seam_adjust_appendrel_attrs_restrictlist);
+    ai::adjust_child_relids_multilevel::set(adjust_child_relids_multilevel);
+    ai::adjust_restrictlist_multilevel::set(adjust_restrictlist_multilevel);
+    ai::adjust_nodelist_multilevel::set(adjust_nodelist_multilevel);
+    ai::adjust_indexclauses_multilevel::set(adjust_indexclauses_multilevel);
     ai::distribute_row_identity_vars::set(distribute_row_identity_vars);
     ai::add_row_identity_columns::set(add_row_identity_columns);
 

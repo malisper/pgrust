@@ -22,7 +22,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use types_error::PgResult;
-use types_pathnodes::{AppendRelInfo, PlannerInfo, Relids, RinfoId};
+use types_pathnodes::{
+    AppendRelInfo, IndexClause, NodeId, PlannerInfo, RelId, Relids, RinfoId,
+};
 
 seam_core::seam!(
     /// `find_appinfos_by_relids(root, relids, &nappinfos)` (appendinfo.c) — the
@@ -45,6 +47,55 @@ seam_core::seam!(
         restrictlist: &[RinfoId],
         appinfos: &[AppendRelInfo],
     ) -> PgResult<Vec<RinfoId>>
+);
+seam_core::seam!(
+    /// `adjust_child_relids_multilevel(root, relids, childrel, parentrel)`
+    /// (appendinfo.c) — translate a parent `Relids` to the child's, across
+    /// possibly multiple inheritance levels. Used by
+    /// `reparameterize_path_by_child` to re-key the `ppi_req_outer`.
+    pub fn adjust_child_relids_multilevel(
+        root: &mut PlannerInfo,
+        relids: &Relids,
+        childrel: RelId,
+        parentrel: RelId,
+    ) -> PgResult<Relids>
+);
+seam_core::seam!(
+    /// `(List *) adjust_appendrel_attrs_multilevel(root, (Node *) restrictlist,
+    /// child_rel, top_parent)` — the multilevel `RestrictInfo`-list translation
+    /// (`ADJUST_CHILD_ATTRS` of a restrictinfo-list field in
+    /// `reparameterize_path_by_child`).
+    pub fn adjust_restrictlist_multilevel<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        restrictlist: &[RinfoId],
+        childrel: RelId,
+        parentrel: RelId,
+    ) -> PgResult<Vec<RinfoId>>
+);
+seam_core::seam!(
+    /// `(List *) adjust_appendrel_attrs_multilevel(root, (Node *) nodelist,
+    /// child_rel, top_parent)` — the multilevel translation of a bare
+    /// expression-node-handle list (`param_exprs` / `pathtarget->exprs`).
+    pub fn adjust_nodelist_multilevel<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        handles: &[NodeId],
+        childrel: RelId,
+        parentrel: RelId,
+    ) -> PgResult<Vec<NodeId>>
+);
+seam_core::seam!(
+    /// `(List *) adjust_appendrel_attrs_multilevel(root, (Node *) indexclauses,
+    /// child_rel, top_parent)` — the multilevel translation of an `IndexClause`
+    /// list (`ADJUST_CHILD_ATTRS(ipath->indexclauses)`).
+    pub fn adjust_indexclauses_multilevel<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        indexclauses: &[IndexClause],
+        childrel: RelId,
+        parentrel: RelId,
+    ) -> PgResult<Vec<IndexClause>>
 );
 seam_core::seam!(
     /// `distribute_row_identity_vars(root)` (appendinfo.c) — distribute any

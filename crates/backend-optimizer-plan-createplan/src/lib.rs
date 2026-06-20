@@ -5774,7 +5774,7 @@ fn create_nestloop_plan<'mcx>(
     // rather than the outer rel itself, fix that.
     let outer_parent = root.path(outerjoinpath).base().parent;
     innerjoinpath =
-        pathnode::reparameterize_path_by_child::call(root, innerjoinpath0, outer_parent)?;
+        pathnode::reparameterize_path_by_child::call(mcx, run, root, innerjoinpath0, outer_parent)?;
     let innerjoinpath = innerjoinpath
         .expect("create_nestloop_plan: reparameterize_path_by_child returned NULL");
 

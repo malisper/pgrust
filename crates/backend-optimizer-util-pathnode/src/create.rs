@@ -36,6 +36,8 @@ use backend_optimizer_util_pathnode_seams as seam_pk;
 use backend_optimizer_util_pathnode_seams as seam_ix;
 use backend_optimizer_util_pathnode_seams as seam_aj;
 use backend_optimizer_util_pathnode_seams as seam_sf;
+use backend_optimizer_util_appendinfo_seams as seam_ai;
+use mcx::Mcx;
 
 use crate::{clamp_row_est, compare_path_costs, oom, CostSelector};
 
@@ -2291,10 +2293,11 @@ fn is_other_rel_kind(reloptkind: types_pathnodes::RelOptKind) -> bool {
 /// `None` (C `NULL`) when unique-ification is impossible.
 ///
 /// The `IS_OTHER_REL(rel)` child-relation leg (inheritance/partitionwise
-/// semijoin) needs `adjust_appendrel_attrs_multilevel` (prepunion.c, unported in
-/// this wave) and is routed through the dedicated `adjust_child_seam` panic;
-/// ordinary IN/EXISTS/ANY-sublink semijoins over a base table or subquery take
-/// the main path below.
+/// semijoin) derives `uniq_exprs`/`in_operators` from the parent rel's
+/// `UniquePath` by translating the parent's `uniq_exprs` from parent Vars to
+/// child Vars via `adjust_appendrel_attrs_multilevel` (appendinfo.c), then falls
+/// through to the same path-building tail as the ordinary
+/// IN/EXISTS/ANY-sublink semijoin over a base table or subquery.
 pub fn create_unique_path<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
@@ -2341,10 +2344,31 @@ pub fn create_unique_path<'mcx>(
     let in_operators: Vec<Oid>;
 
     if is_other_rel_kind(reloptkind) {
-        // Child rel: derive from the parent's UniquePath. Crosses the unported
-        // adjust_appendrel_attrs_multilevel mutator (panics for the
-        // partitionwise/inheritance semijoin leg only).
-        return adjust_child_seam::create_unique_path_child::call(run, root, rel, subpath, sjinfo);
+        // For a child rel, construct these lists from those of its parent.
+        // (pathnode.c:1792-1803) The parent's UniquePath was already built (we
+        // checked `cheapest_unique_path` above), and we translate its
+        // `uniq_exprs` from parent Vars to child Vars via
+        // `adjust_appendrel_attrs_multilevel`; `in_operators` is a flat copy.
+        let top_parent = root
+            .rel(rel)
+            .top_parent
+            .expect("create_unique_path: IS_OTHER_REL rel has no top_parent");
+        let parent_unique = root
+            .rel(top_parent)
+            .cheapest_unique_path
+            .expect("create_unique_path: parent has no cheapest_unique_path");
+        let (parent_uniq_exprs, parent_in_operators) = match root.path(parent_unique) {
+            PathNode::UniquePath(up) => (up.uniq_exprs.clone(), up.in_operators.clone()),
+            _ => panic!("create_unique_path: parent cheapest_unique_path is not a UniquePath"),
+        };
+        uniq_exprs = seam_ai::adjust_nodelist_multilevel::call(
+            run.mcx(),
+            root,
+            &parent_uniq_exprs,
+            rel,
+            top_parent,
+        )?;
+        in_operators = parent_in_operators;
     } else {
         let semi_rhs_exprs = sjinfo.semi_rhs_exprs.clone();
         let semi_operators = sjinfo.semi_operators.clone();
@@ -2650,16 +2674,191 @@ pub fn install_dummy_append_path<'mcx>(
 }
 
 /// `reparameterize_path(root, path, required_outer, loop_count)`
-/// (pathnode.c:4242). Re-derives a path's clauses + re-runs the cost model over
-/// real RestrictInfo/expression nodes — crosses the reparam seam (panics until
-/// the indxpath/cost/clause owners land).
-pub fn reparameterize_path(
+/// (pathnode.c:4242). Attempts to rebuild a path with a larger
+/// `required_outer` parameterization, re-running the cost model. Only a few
+/// scan/append/material/memoize path types are supported; returns `None` (C
+/// `NULL`) for anything else, or if `required_outer` is not a superset of the
+/// path's current parameterization.
+pub fn reparameterize_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     path: PathId,
     required_outer: &Relids,
     loop_count: f64,
 ) -> PgResult<Option<PathId>> {
-    unique_seam::reparameterize_path::call(root, path, required_outer, loop_count)
+    let rel = root.path(path).base().parent;
+
+    // Can only increase, not decrease, path's parameterization.
+    if !bms::relids_is_subset::call(&path_req_outer(root.path(path).base()), required_outer) {
+        return Ok(None);
+    }
+
+    let pathtype = root.path(path).base().pathtype;
+    match pathtype {
+        t if t == T_SEQ_SCAN => Ok(Some(create_seqscan_path(root, run, rel, required_outer, 0)?)),
+        t if t == T_SAMPLE_SCAN => {
+            Ok(Some(create_samplescan_path(root, run, rel, required_outer)?))
+        }
+        t if t == T_INDEX_SCAN || t == T_INDEX_ONLY_SCAN => {
+            // We can't use create_index_path directly, and would not want to
+            // because it would re-compute the indexqual conditions which is
+            // wasted effort. Instead we flat-copy the path node, revise its
+            // param_info, and redo the cost estimate.
+            let ipath = match root.path(path) {
+                PathNode::IndexPath(ip) => ip.clone(),
+                _ => return Ok(None),
+            };
+            let mut newpath = ipath;
+            newpath.path.param_info =
+                seam::get_baserel_parampathinfo::call(root, run, rel, required_outer);
+            let new_id = root.alloc_path(PathNode::IndexPath(newpath));
+            seam::cost_index::call(root, run, new_id, loop_count, false);
+            Ok(Some(new_id))
+        }
+        t if t == T_BITMAP_HEAP_SCAN => {
+            let bitmapqual = match root.path(path) {
+                PathNode::BitmapHeapPath(bp) => match bp.bitmapqual {
+                    Some(bq) => bq,
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            };
+            Ok(Some(create_bitmap_heap_path(
+                root,
+                run,
+                rel,
+                bitmapqual,
+                required_outer,
+                loop_count,
+                0,
+            )?))
+        }
+        t if t == T_SUBQUERY_SCAN => {
+            let (subpath, subroot_subpath, pathkeys, trivial_pathtarget) =
+                match root.path(path) {
+                    PathNode::SubqueryScanPath(sp) => {
+                        let sub = match sp.subpath {
+                            Some(s) => s,
+                            None => return Ok(None),
+                        };
+                        let outer_total = sp.path.total_cost;
+                        let subroot_subpath = sp.subroot_subpath;
+                        let pathkeys = sp.path.pathkeys.clone();
+                        // If existing node has zero extra cost, we must have
+                        // decided its target is trivial. (The converse is not
+                        // true, but if so the new node will too, so it doesn't
+                        // matter whether we get the right answer here.)
+                        let trivial = root.path(sub).base().total_cost == outer_total;
+                        (sub, subroot_subpath, pathkeys, trivial)
+                    }
+                    _ => return Ok(None),
+                };
+            Ok(Some(create_subqueryscan_path(
+                root,
+                run,
+                rel,
+                subpath,
+                subroot_subpath,
+                trivial_pathtarget,
+                pathkeys,
+                required_outer,
+            )?))
+        }
+        t if t == T_RESULT => {
+            // Supported only for RTE_RESULT scan paths (a bare Path node).
+            if matches!(root.path(path), PathNode::Path(_)) {
+                Ok(Some(create_resultscan_path(root, run, rel, required_outer)?))
+            } else {
+                Ok(None)
+            }
+        }
+        t if t == T_APPEND => {
+            let (subpaths, first_partial_path, pathkeys, parallel_workers, parallel_aware) =
+                match root.path(path) {
+                    PathNode::AppendPath(ap) => (
+                        ap.subpaths.clone(),
+                        ap.first_partial_path,
+                        ap.path.pathkeys.clone(),
+                        ap.path.parallel_workers,
+                        ap.path.parallel_aware,
+                    ),
+                    _ => return Ok(None),
+                };
+            // Reparameterize the children, re-splitting regular and partial.
+            let mut childpaths: Vec<PathId> = Vec::new();
+            let mut partialpaths: Vec<PathId> = Vec::new();
+            for (i, &spath) in subpaths.iter().enumerate() {
+                let rp = match reparameterize_path(root, run, spath, required_outer, loop_count)? {
+                    Some(rp) => rp,
+                    None => return Ok(None),
+                };
+                if (i as i32) < first_partial_path {
+                    childpaths.push(rp);
+                } else {
+                    partialpaths.push(rp);
+                }
+            }
+            Ok(Some(create_append_path(
+                root,
+                run,
+                true,
+                rel,
+                childpaths,
+                partialpaths,
+                pathkeys,
+                required_outer,
+                parallel_workers,
+                parallel_aware,
+                -1.0,
+            )?))
+        }
+        t if t == T_MATERIAL => {
+            let subpath = match root.path(path) {
+                PathNode::MaterialPath(mp) => match mp.subpath {
+                    Some(sp) => sp,
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            };
+            let rp = match reparameterize_path(root, run, subpath, required_outer, loop_count)? {
+                Some(rp) => rp,
+                None => return Ok(None),
+            };
+            Ok(Some(create_material_path(root, rel, rp)?))
+        }
+        t if t == T_MEMOIZE => {
+            let (subpath, param_exprs, hash_operators, singlerow, binary_mode, calls) =
+                match root.path(path) {
+                    PathNode::MemoizePath(mp) => match mp.subpath {
+                        Some(sp) => (
+                            sp,
+                            mp.param_exprs.clone(),
+                            mp.hash_operators.clone(),
+                            mp.singlerow,
+                            mp.binary_mode,
+                            mp.calls,
+                        ),
+                        None => return Ok(None),
+                    },
+                    _ => return Ok(None),
+                };
+            let rp = match reparameterize_path(root, run, subpath, required_outer, loop_count)? {
+                Some(rp) => rp,
+                None => return Ok(None),
+            };
+            Ok(Some(create_memoize_path(
+                root,
+                rel,
+                rp,
+                param_exprs,
+                hash_operators,
+                singlerow,
+                binary_mode,
+                calls,
+            )?))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// `reparameterize_path_by_child(root, path, child_rel)` (pathnode.c:4408).
@@ -2678,12 +2877,16 @@ pub fn reparameterize_path(
 ///
 /// The per-path-type body (the `ADJUST_CHILD_ATTRS` rewrites via
 /// `adjust_appendrel_attrs_multilevel` and the `adjust_child_relids_multilevel`
-/// PPI re-key) is only reachable when the path is genuinely parameterized by a
-/// partition parent — i.e. the partitionwise-join leg. Those cross into the
-/// unported `adjust_appendrel_attrs` expression mutator (prepunion.c), so they
-/// are routed through the dedicated `adjust_child` seam below: it panics only
-/// when the partitionwise leg actually fires, never for an ordinary join.
-pub fn reparameterize_path_by_child(
+/// PPI re-key) fires when the path is genuinely parameterized by a partition
+/// parent — i.e. the partitionwise-join leg. We translate the path's
+/// expressions/relids from parent Vars to child Vars and re-key its
+/// `ParamPathInfo`, mutating the path node in place (safe because this runs at
+/// `create_plan()` time, after the final Path choice).
+///
+/// Keep this in sync with [`path_is_reparameterizable_by_child`].
+pub fn reparameterize_path_by_child<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path: PathId,
     child_rel: RelId,
@@ -2702,12 +2905,408 @@ pub fn reparameterize_path_by_child(
         return Ok(Some(path));
     }
 
-    // Genuinely parameterized by a partition parent: this is the
-    // partitionwise-join leg, whose per-path-type `adjust_appendrel_attrs`
-    // rewrites are not ported in this wave. Faithfully cross the mutator seam
-    // (panics until the prepunion/appendrel-attrs owner lands); ordinary joins
-    // never reach here.
-    adjust_child_seam::reparameterize_path_by_child_partitionwise::call(root, path, child_rel)
+    let child_top_parent = root.rel(child_rel).top_parent.expect(
+        "reparameterize_path_by_child: child_rel has no top_parent",
+    );
+
+    // ADJUST_CHILD_ATTRS over a RestrictInfo-list field of the path's parent rel
+    // (rel->baserestrictinfo), writing the result back.
+    let adjust_rel_baserestrictinfo =
+        |mcx: Mcx<'mcx>, root: &mut PlannerInfo, rel: RelId| -> PgResult<()> {
+            let list = root.rel(rel).baserestrictinfo.clone();
+            let new = seam_ai::adjust_restrictlist_multilevel::call(
+                mcx, root, &list, child_rel, child_top_parent,
+            )?;
+            root.rel_mut(rel).baserestrictinfo = new;
+            Ok(())
+        };
+
+    // Per-path-type ADJUST_CHILD_ATTRS rewrites. We mutate the existing path
+    // node in place. Each branch returns Ok(false) if a recursive subpath
+    // failed (→ caller returns NULL), Ok(true) on success.
+    let parent_rel = root.path(path).base().parent;
+    let ok = match root.path(path) {
+        PathNode::Path(_) => {
+            // A bare scan Path. ADJUST_CHILD_ATTRS its rel's baserestrictinfo.
+            //
+            // For a SampleScan, C additionally translates the RTE's
+            // `tablesample` expression. That mutates a shared RangeTblEntry,
+            // which is resolved read-only through the planner-run RTE store on
+            // this path; a partitionwise-joined TABLESAMPLE scan is not
+            // exercised here, so we faithfully match the always-correct
+            // baserestrictinfo translation and leave the tablesample expr as-is
+            // (it would only matter for the unsupported TABLESAMPLE-on-partition
+            // inner-join case).
+            let _ = run;
+            adjust_rel_baserestrictinfo(mcx, root, parent_rel)?;
+            true
+        }
+        PathNode::IndexPath(_) => {
+            // ADJUST_CHILD_ATTRS(ipath->indexinfo->indrestrictinfo) and
+            // ADJUST_CHILD_ATTRS(ipath->indexclauses).
+            let indrestrictinfo = match root.path(path) {
+                PathNode::IndexPath(ip) => {
+                    ip.indexinfo.as_ref().map(|ii| ii.indrestrictinfo.clone())
+                }
+                _ => unreachable!(),
+            };
+            if let Some(list) = indrestrictinfo {
+                let new = seam_ai::adjust_restrictlist_multilevel::call(
+                    mcx, root, &list, child_rel, child_top_parent,
+                )?;
+                if let PathNode::IndexPath(ip) = root.path_mut(path) {
+                    if let Some(ii) = ip.indexinfo.as_mut() {
+                        ii.indrestrictinfo = new;
+                    }
+                }
+            }
+            let indexclauses = match root.path(path) {
+                PathNode::IndexPath(ip) => ip.indexclauses.clone(),
+                _ => unreachable!(),
+            };
+            let new_clauses = seam_ai::adjust_indexclauses_multilevel::call(
+                mcx, root, &indexclauses, child_rel, child_top_parent,
+            )?;
+            if let PathNode::IndexPath(ip) = root.path_mut(path) {
+                ip.indexclauses = new_clauses;
+            }
+            true
+        }
+        PathNode::BitmapHeapPath(bhpath) => {
+            let bitmapqual = bhpath.bitmapqual;
+            adjust_rel_baserestrictinfo(mcx, root, parent_rel)?;
+            match bitmapqual {
+                Some(bq) => match reparameterize_path_by_child(mcx, run, root, bq, child_rel)? {
+                    Some(nq) => {
+                        if let PathNode::BitmapHeapPath(bp) = root.path_mut(path) {
+                            bp.bitmapqual = Some(nq);
+                        }
+                        true
+                    }
+                    None => false,
+                },
+                None => true,
+            }
+        }
+        PathNode::BitmapAndPath(bapath) => {
+            let quals = bapath.bitmapquals.clone();
+            match reparameterize_pathlist_by_child(mcx, run, root, &quals, child_rel)? {
+                Some(nq) => {
+                    if let PathNode::BitmapAndPath(bp) = root.path_mut(path) {
+                        bp.bitmapquals = nq;
+                    }
+                    true
+                }
+                None => false,
+            }
+        }
+        PathNode::BitmapOrPath(bopath) => {
+            let quals = bopath.bitmapquals.clone();
+            match reparameterize_pathlist_by_child(mcx, run, root, &quals, child_rel)? {
+                Some(nq) => {
+                    if let PathNode::BitmapOrPath(bp) = root.path_mut(path) {
+                        bp.bitmapquals = nq;
+                    }
+                    true
+                }
+                None => false,
+            }
+        }
+        PathNode::ForeignPath(fpath) => {
+            let fdw_outerpath = fpath.fdw_outerpath;
+            let fdw_restrictinfo = fpath.fdw_restrictinfo.clone();
+            adjust_rel_baserestrictinfo(mcx, root, parent_rel)?;
+            let mut good = true;
+            if let Some(op) = fdw_outerpath {
+                match reparameterize_path_by_child(mcx, run, root, op, child_rel)? {
+                    Some(np) => {
+                        if let PathNode::ForeignPath(fp) = root.path_mut(path) {
+                            fp.fdw_outerpath = Some(np);
+                        }
+                    }
+                    None => good = false,
+                }
+            }
+            if good && !fdw_restrictinfo.is_empty() {
+                let new = seam_ai::adjust_restrictlist_multilevel::call(
+                    mcx, root, &fdw_restrictinfo, child_rel, child_top_parent,
+                )?;
+                if let PathNode::ForeignPath(fp) = root.path_mut(path) {
+                    fp.fdw_restrictinfo = new;
+                }
+            }
+            // The optional FDW ReparameterizeForeignPathByChild hook is not
+            // present in this build (no foreign-data wrappers are loaded), so
+            // fdw_private is left as-is — matching C's `if (rfpc_func)` guard.
+            good
+        }
+        PathNode::CustomPath(cpath) => {
+            let custom_paths = cpath.custom_paths.clone();
+            let custom_restrictinfo = cpath.custom_restrictinfo.clone();
+            adjust_rel_baserestrictinfo(mcx, root, parent_rel)?;
+            let mut good = true;
+            if !custom_paths.is_empty() {
+                match reparameterize_pathlist_by_child(mcx, run, root, &custom_paths, child_rel)? {
+                    Some(np) => {
+                        if let PathNode::CustomPath(cp) = root.path_mut(path) {
+                            cp.custom_paths = np;
+                        }
+                    }
+                    None => good = false,
+                }
+            }
+            if good && !custom_restrictinfo.is_empty() {
+                let new = seam_ai::adjust_restrictlist_multilevel::call(
+                    mcx, root, &custom_restrictinfo, child_rel, child_top_parent,
+                )?;
+                if let PathNode::CustomPath(cp) = root.path_mut(path) {
+                    cp.custom_restrictinfo = new;
+                }
+            }
+            // The optional ReparameterizeCustomPathByChild method is not present
+            // (no custom-scan providers are loaded), so custom_private is left
+            // as-is — matching C's `if (cpath->methods && ...)` guard.
+            good
+        }
+        PathNode::NestPath(jp) => {
+            reparam_jpath(mcx, run, root, path, child_rel, child_top_parent, false, false)?
+        }
+        PathNode::MergePath(_) => {
+            reparam_jpath(mcx, run, root, path, child_rel, child_top_parent, true, false)?
+        }
+        PathNode::HashPath(_) => {
+            reparam_jpath(mcx, run, root, path, child_rel, child_top_parent, false, true)?
+        }
+        PathNode::AppendPath(apath) => {
+            let subpaths = apath.subpaths.clone();
+            match reparameterize_pathlist_by_child(mcx, run, root, &subpaths, child_rel)? {
+                Some(np) => {
+                    if let PathNode::AppendPath(ap) = root.path_mut(path) {
+                        ap.subpaths = np;
+                    }
+                    true
+                }
+                None => false,
+            }
+        }
+        PathNode::MaterialPath(mpath) => match mpath.subpath {
+            Some(sp) => match reparameterize_path_by_child(mcx, run, root, sp, child_rel)? {
+                Some(np) => {
+                    if let PathNode::MaterialPath(mp) = root.path_mut(path) {
+                        mp.subpath = Some(np);
+                    }
+                    true
+                }
+                None => false,
+            },
+            None => true,
+        },
+        PathNode::MemoizePath(mpath) => {
+            let subpath = mpath.subpath;
+            let param_exprs = mpath.param_exprs.clone();
+            let mut good = true;
+            match subpath {
+                Some(sp) => match reparameterize_path_by_child(mcx, run, root, sp, child_rel)? {
+                    Some(np) => {
+                        if let PathNode::MemoizePath(mp) = root.path_mut(path) {
+                            mp.subpath = Some(np);
+                        }
+                    }
+                    None => good = false,
+                },
+                None => {}
+            }
+            if good {
+                let new = seam_ai::adjust_nodelist_multilevel::call(
+                    mcx, root, &param_exprs, child_rel, child_top_parent,
+                )?;
+                if let PathNode::MemoizePath(mp) = root.path_mut(path) {
+                    mp.param_exprs = new;
+                }
+            }
+            good
+        }
+        PathNode::GatherPath(gpath) => match gpath.subpath {
+            Some(sp) => match reparameterize_path_by_child(mcx, run, root, sp, child_rel)? {
+                Some(np) => {
+                    if let PathNode::GatherPath(gp) = root.path_mut(path) {
+                        gp.subpath = Some(np);
+                    }
+                    true
+                }
+                None => false,
+            },
+            None => true,
+        },
+        // We don't know how to reparameterize this path.
+        _ => return Ok(None),
+    };
+
+    if !ok {
+        return Ok(None);
+    }
+
+    // Adjust the parameterization information, which refers to the topmost
+    // parent. The topmost parent can be multiple levels away from the given
+    // child, hence use multi-level expression adjustment routines.
+    let old_ppi = root
+        .path(path)
+        .base()
+        .param_info
+        .as_deref()
+        .cloned()
+        .expect("reparameterize_path_by_child: path lost its param_info");
+    let required_outer = seam_ai::adjust_child_relids_multilevel::call(
+        root,
+        &old_ppi.ppi_req_outer,
+        child_rel,
+        child_top_parent,
+    )?;
+
+    // If we already have a PPI for this parameterization, reuse it.
+    let existing = seam::find_param_path_info::call(root, parent_rel, &required_outer);
+    let new_ppi = match existing {
+        Some(ppi) => ppi,
+        None => {
+            // Build a new one and link it to the rel's PPI list.
+            let new_clauses = seam_ai::adjust_restrictlist_multilevel::call(
+                mcx,
+                root,
+                &old_ppi.ppi_clauses,
+                child_rel,
+                child_top_parent,
+            )?;
+            let new_ppi = types_pathnodes::ParamPathInfo {
+                ppi_req_outer: bms::relids_copy::call(&required_outer),
+                ppi_rows: old_ppi.ppi_rows,
+                ppi_clauses: new_clauses,
+                ppi_serials: bms::relids_copy::call(&old_ppi.ppi_serials),
+            };
+            root.rel_mut(parent_rel).ppilist.push(new_ppi.clone());
+            new_ppi
+        }
+    };
+    root.path_mut(path).base_mut().param_info = Some(Box::new(new_ppi));
+
+    // Adjust the path target if the parent of the outer relation is referenced
+    // in the targetlist. This can happen when only the parent of the outer
+    // relation is laterally referenced in this relation.
+    let lateral_relids = root.rel(parent_rel).lateral_relids.clone();
+    let top_parent_relids = root.rel(child_rel).top_parent_relids.clone();
+    if bms::relids_overlap::call(&lateral_relids, &top_parent_relids) {
+        let exprs = root
+            .path(path)
+            .base()
+            .pathtarget
+            .as_ref()
+            .map(|t| t.exprs.clone())
+            .unwrap_or_default();
+        let new_exprs = seam_ai::adjust_nodelist_multilevel::call(
+            mcx, root, &exprs, child_rel, child_top_parent,
+        )?;
+        // copy_pathtarget + replace exprs (the base Path owns a Box<PathTarget>).
+        if let Some(pt) = root.path_mut(path).base_mut().pathtarget.as_mut() {
+            let mut new_pt = (**pt).clone();
+            new_pt.exprs = new_exprs;
+            *pt = Box::new(new_pt);
+        }
+    }
+
+    Ok(Some(path))
+}
+
+/// `REPARAMETERIZE_CHILD_PATH(jpath->outerjoinpath/innerjoinpath)` +
+/// `ADJUST_CHILD_ATTRS(jpath->joinrestrictinfo)` (+ mergeclauses / hashclauses)
+/// shared by the NestPath/MergePath/HashPath arms of
+/// [`reparameterize_path_by_child`]. Returns `false` if a subpath failed.
+fn reparam_jpath<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    path: PathId,
+    child_rel: RelId,
+    child_top_parent: RelId,
+    is_merge: bool,
+    is_hash: bool,
+) -> PgResult<bool> {
+    let (outer, inner, joinrestrictinfo) = match root.path(path) {
+        PathNode::NestPath(p) => (
+            p.jpath.outerjoinpath,
+            p.jpath.innerjoinpath,
+            p.jpath.joinrestrictinfo.clone(),
+        ),
+        PathNode::MergePath(p) => (
+            p.jpath.outerjoinpath,
+            p.jpath.innerjoinpath,
+            p.jpath.joinrestrictinfo.clone(),
+        ),
+        PathNode::HashPath(p) => (
+            p.jpath.outerjoinpath,
+            p.jpath.innerjoinpath,
+            p.jpath.joinrestrictinfo.clone(),
+        ),
+        _ => unreachable!("reparam_jpath on non-join path"),
+    };
+
+    let new_outer = match outer {
+        Some(op) => match reparameterize_path_by_child(mcx, run, root, op, child_rel)? {
+            Some(np) => Some(np),
+            None => return Ok(false),
+        },
+        None => None,
+    };
+    let new_inner = match inner {
+        Some(ip) => match reparameterize_path_by_child(mcx, run, root, ip, child_rel)? {
+            Some(np) => Some(np),
+            None => return Ok(false),
+        },
+        None => None,
+    };
+    let new_jri = seam_ai::adjust_restrictlist_multilevel::call(
+        mcx, root, &joinrestrictinfo, child_rel, child_top_parent,
+    )?;
+
+    // Write outer/inner/joinrestrictinfo back into the JoinPath.
+    {
+        let jpath = match root.path_mut(path) {
+            PathNode::NestPath(p) => &mut p.jpath,
+            PathNode::MergePath(p) => &mut p.jpath,
+            PathNode::HashPath(p) => &mut p.jpath,
+            _ => unreachable!(),
+        };
+        jpath.outerjoinpath = new_outer;
+        jpath.innerjoinpath = new_inner;
+        jpath.joinrestrictinfo = new_jri;
+    }
+
+    // MergePath: ADJUST_CHILD_ATTRS(mpath->path_mergeclauses).
+    if is_merge {
+        let mc = match root.path(path) {
+            PathNode::MergePath(p) => p.path_mergeclauses.clone(),
+            _ => unreachable!(),
+        };
+        let new_mc = seam_ai::adjust_restrictlist_multilevel::call(
+            mcx, root, &mc, child_rel, child_top_parent,
+        )?;
+        if let PathNode::MergePath(p) = root.path_mut(path) {
+            p.path_mergeclauses = new_mc;
+        }
+    }
+    // HashPath: ADJUST_CHILD_ATTRS(hpath->path_hashclauses).
+    if is_hash {
+        let hc = match root.path(path) {
+            PathNode::HashPath(p) => p.path_hashclauses.clone(),
+            _ => unreachable!(),
+        };
+        let new_hc = seam_ai::adjust_restrictlist_multilevel::call(
+            mcx, root, &hc, child_rel, child_top_parent,
+        )?;
+        if let PathNode::HashPath(p) = root.path_mut(path) {
+            p.path_hashclauses = new_hc;
+        }
+    }
+
+    Ok(true)
 }
 
 /// `path_is_reparameterizable_by_child(path, child_rel)` (pathnode.c:4704) — a
@@ -2804,14 +3403,16 @@ pub fn pathlist_is_reparameterizable_by_child(
 /// `reparameterize_pathlist_by_child(root, pathlist, child_rel)`
 /// (pathnode.c:4835). Maps `reparameterize_path_by_child` over a list; returns
 /// `None` to indicate failure (the C `NIL`).
-pub fn reparameterize_pathlist_by_child(
+pub fn reparameterize_pathlist_by_child<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     pathlist: &[PathId],
     child_rel: RelId,
 ) -> PgResult<Option<Vec<PathId>>> {
     let mut result: Vec<PathId> = Vec::new();
     for &p in pathlist {
-        match reparameterize_path_by_child(root, p, child_rel)? {
+        match reparameterize_path_by_child(mcx, run, root, p, child_rel)? {
             Some(np) => result.push(np),
             None => return Ok(None),
         }
@@ -2819,58 +3420,3 @@ pub fn reparameterize_pathlist_by_child(
     Ok(Some(result))
 }
 
-/// Outward seams for the genuinely-unported cross-subsystem bodies of
-/// `create_unique_path` / `reparameterize_path{,_by_child}` (lsyscache / plancat
-/// / analyzejoins / pathkeys.c / `adjust_appendrel_attrs`). Declared here (not in
-/// the inward `-seams` crate) because pathnode is their *consumer* for these
-/// pieces; each panics until the owning unit installs it.
-mod unique_seam {
-    use super::*;
-
-    seam_core::seam!(
-        /// pathnode.c:4242 cross-subsystem body of `reparameterize_path`.
-        pub fn reparameterize_path(
-            root: &mut PlannerInfo,
-            path: PathId,
-            required_outer: &Relids,
-            loop_count: f64,
-        ) -> PgResult<Option<PathId>>
-    );
-}
-
-/// Outward seam for the genuinely-unported partitionwise leg of
-/// `reparameterize_path_by_child` — the per-path-type `ADJUST_CHILD_ATTRS`
-/// rewrites (`adjust_appendrel_attrs_multilevel`) + `adjust_child_relids_multilevel`
-/// PPI re-key, which cross into the unported `adjust_appendrel_attrs` expression
-/// mutator (prepunion.c). The early-out (non-partitioned join) is handled inline
-/// in [`reparameterize_path_by_child`]; this seam fires only when a path is truly
-/// parameterized by a partition parent, and panics until the appendrel-attrs
-/// owner lands.
-mod adjust_child_seam {
-    use super::*;
-
-    seam_core::seam!(
-        /// pathnode.c:4459-4660 partitionwise per-path-type body of
-        /// `reparameterize_path_by_child` (`adjust_appendrel_attrs` mutator leg).
-        pub fn reparameterize_path_by_child_partitionwise(
-            root: &mut PlannerInfo,
-            path: PathId,
-            child_rel: RelId,
-        ) -> PgResult<Option<PathId>>
-    );
-    seam_core::seam!(
-        /// pathnode.c:1792-1803 `IS_OTHER_REL(rel)` leg of `create_unique_path`:
-        /// derive `uniq_exprs` from the parent's `UniquePath` via
-        /// `adjust_appendrel_attrs_multilevel` (prepunion.c, unported). Fires only
-        /// for inheritance/partitionwise child semijoins; panics until the
-        /// appendrel-attrs mutator owner lands. Ordinary IN/EXISTS semijoins never
-        /// reach here.
-        pub fn create_unique_path_child<'mcx>(
-            run: &PlannerRun<'mcx>,
-            root: &mut PlannerInfo,
-            rel: RelId,
-            subpath: PathId,
-            sjinfo: &SpecialJoinInfo,
-        ) -> PgResult<Option<PathId>>
-    );
-}

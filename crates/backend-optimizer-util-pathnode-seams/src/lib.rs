@@ -703,8 +703,9 @@ seam_core::seam!(
 seam_core::seam!(
     /// `reparameterize_path(root, path, required_outer, loop_count)`
     /// (pathnode.c:4242).
-    pub fn reparameterize_path(
+    pub fn reparameterize_path<'mcx>(
         root: &mut PlannerInfo,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         path: PathId,
         required_outer: &Relids,
         loop_count: f64,
@@ -772,7 +773,9 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `reparameterize_path_by_child(root, path, child_rel)` (pathnode.c:4408).
-    pub fn reparameterize_path_by_child(
+    pub fn reparameterize_path_by_child<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
         child_rel: RelId,
@@ -870,6 +873,16 @@ seam_core::seam!(
 );
 
 /* --- relnode.c (param_info construction) -------------------------------- */
+seam_core::seam!(
+    /// `find_param_path_info(rel, required_outer)` (relnode.c) — find an
+    /// existing `ParamPathInfo` on `rel` for the given parameterization, or
+    /// `None`. Used by `reparameterize_path_by_child` to reuse a PPI.
+    pub fn find_param_path_info(
+        root: &PlannerInfo,
+        rel: RelId,
+        required_outer: &Relids,
+    ) -> Option<types_pathnodes::ParamPathInfo>
+);
 seam_core::seam!(
     /// `get_baserel_parampathinfo(root, baserel, required_outer)`.
     pub fn get_baserel_parampathinfo<'mcx>(

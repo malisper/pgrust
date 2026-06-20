@@ -26,6 +26,11 @@ backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-cost
 # apply_projection_to_path (pathnode.c) compares two PathTarget tlists with
 # equal() (equalfuncs.c). Leaf seam crate — no cycle.
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
+# reparameterize_path_by_child (pathnode.c:4408) drives appendinfo.c's
+# parent->child attribute translation (adjust_appendrel_attrs_multilevel and the
+# multilevel restrictinfo/node/indexclause list specializations) +
+# adjust_child_relids_multilevel. appendinfo is below pathnode in the DAG.
+backend-optimizer-util-appendinfo-seams = { path = "../backend-optimizer-util-appendinfo-seams" }
 
 [dev-dependencies]
 types-tuple = { path = "../types-tuple" }

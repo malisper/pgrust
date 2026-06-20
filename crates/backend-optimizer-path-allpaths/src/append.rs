@@ -516,7 +516,7 @@ pub fn add_paths_to_append_rel<'mcx>(
                 sp_valid = false;
                 break;
             }
-            match get_cheapest_parameterized_child_path(root, childrel, &required_outer)? {
+            match get_cheapest_parameterized_child_path(root, run, childrel, &required_outer)? {
                 Some(subpath) => accumulate_append_subpath(root, subpath, &mut sp, None),
                 None => {
                     sp_valid = false;
@@ -564,8 +564,9 @@ pub fn add_paths_to_append_rel<'mcx>(
 /// `get_cheapest_parameterized_child_path` (allpaths.c:2047) — the cheapest path
 /// for `rel` with exactly the requested parameterization (reparameterizing an
 /// existing path if needed). `None` if none can be made.
-pub fn get_cheapest_parameterized_child_path(
+pub fn get_cheapest_parameterized_child_path<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rel: RelId,
     required_outer: &Relids,
 ) -> PgResult<Option<PathId>> {
@@ -605,7 +606,7 @@ pub fn get_cheapest_parameterized_child_path(
         }
         // Reparameterize if needed, then recheck cost.
         if !bms::relids_equal::call(&path_req_outer(root, path), required_outer) {
-            match pathnode::reparameterize_path::call(root, path, required_outer, 1.0)? {
+            match pathnode::reparameterize_path::call(root, run, path, required_outer, 1.0)? {
                 Some(rp) => path = rp,
                 None => continue, // failed to reparameterize
             }

@@ -13410,6 +13410,7 @@ dependencies = [
  "backend-nodes-equalfuncs-seams",
  "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-joinpath-seams",
+ "backend-optimizer-util-appendinfo-seams",
  "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-relnode-seams",
  "backend-utils-cache-lsyscache-seams",
