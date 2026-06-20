@@ -2376,6 +2376,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetSysCacheOid1(EVENTTRIGGERNAME, Anum_pg_event_trigger_oid,
+    /// CStringGetDatum(trigname))` — `get_event_trigger_oid`'s OID lookup.
+    /// `Ok(None)` on a cache miss (`!OidIsValid`); the caller raises (or not)
+    /// per its `missing_ok` flag.
+    pub fn event_trigger_oid_by_name(trigname: &str) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache1(EVENTTRIGGEROID, ObjectIdGetDatum(trigoid))` projected to
+    /// the `(evtowner, evtname)` `Form_pg_event_trigger` fields
+    /// `AlterEventTriggerOwner_internal` reads on the by-OID owner-change path
+    /// (REASSIGN OWNED). `Ok(None)` on a cache miss; the caller raises `event
+    /// trigger with OID %u does not exist`.
+    pub fn event_trigger_owner_name<'mcx>(
+        mcx: Mcx<'mcx>,
+        trigoid: Oid,
+    ) -> PgResult<Option<(Oid, PgString<'mcx>)>>
+);
+
+seam_core::seam!(
     /// `SearchSysCacheCopy1(EVENTTRIGGEROID, ObjectIdGetDatum(trigoid))` returned
     /// as the owned writable `FormedTuple` copy (`AlterEventTrigger`'s
     /// `evtenabled` update needs the held tuple for `heap_modify_tuple` over its

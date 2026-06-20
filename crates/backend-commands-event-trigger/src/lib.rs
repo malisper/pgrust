@@ -1335,6 +1335,175 @@ pub fn AlterEventTrigger<'mcx>(mcx: Mcx<'mcx>, trigname: &str, tgenabled: i8) ->
     Ok(trigoid)
 }
 
+/// `get_event_trigger_oid(trigname, missing_ok)` (event_trigger.c:578-590) —
+/// look up an event trigger by name to find its OID. With `missing_ok = false`
+/// a miss raises `ERRCODE_UNDEFINED_OBJECT`; with `missing_ok = true` it returns
+/// `InvalidOid`.
+pub fn get_event_trigger_oid(trigname: &str, missing_ok: bool) -> PgResult<Oid> {
+    let oid = syscache_seams::event_trigger_oid_by_name::call(trigname)?.unwrap_or(InvalidOid);
+    if oid == InvalidOid && !missing_ok {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_OBJECT)
+            .errmsg(format!("event trigger \"{trigname}\" does not exist"))
+            .into_error());
+    }
+    Ok(oid)
+}
+
+/// `AlterEventTriggerOwner_internal` (event_trigger.c:538-571) — the shared
+/// owner-change workhorse. `rel` is the open pg_event_trigger relation; the
+/// caller has already resolved the trigger's `oid`, current `evtowner`, and
+/// `evtname` (for error text) and holds the writable syscache copy `evt_tuple`.
+fn alter_event_trigger_owner_internal<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    evt_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    oid: Oid,
+    evtowner: Oid,
+    evtname: &str,
+    new_owner_id: Oid,
+) -> PgResult<()> {
+    /* if (form->evtowner == newOwnerId) return; */
+    if evtowner == new_owner_id {
+        return Ok(());
+    }
+
+    if !aclchk_seams::object_ownercheck::call(
+        EVENT_TRIGGER_RELATION_ID,
+        oid,
+        backend_utils_init_miscinit::GetUserId(),
+    )? {
+        aclchk_seams::aclcheck_error::call(
+            types_acl::ACLCHECK_NOT_OWNER,
+            OBJECT_EVENT_TRIGGER,
+            Some(evtname.to_string()),
+        )?;
+    }
+
+    /* New owner must be a superuser */
+    if !backend_utils_init_miscinit_seams::superuser_arg::call(new_owner_id)? {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errmsg(format!(
+                "permission denied to change owner of event trigger \"{evtname}\""
+            ))
+            .errhint("The owner of an event trigger must be a superuser.")
+            .into_error());
+    }
+
+    /* form->evtowner = newOwnerId; CatalogTupleUpdate(rel, &tup->t_self, tup); */
+    indexing_seams::catalog_tuple_update_pg_event_trigger_owner::call(
+        mcx,
+        rel,
+        evt_tuple,
+        new_owner_id,
+    )?;
+
+    /* Update owner dependency reference */
+    backend_catalog_pg_shdepend::changeDependencyOnOwner(
+        EVENT_TRIGGER_RELATION_ID,
+        oid,
+        new_owner_id,
+    )?;
+
+    objectaccess_seams::invoke_object_post_alter_hook::call(EVENT_TRIGGER_RELATION_ID, oid, 0)?;
+
+    Ok(())
+}
+
+/// `AlterEventTriggerOwner(const char *name, Oid newOwnerId)`
+/// (event_trigger.c:478-507) — ALTER EVENT TRIGGER ... OWNER TO.
+pub fn AlterEventTriggerOwner<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &str,
+    new_owner_id: Oid,
+) -> PgResult<ObjectAddress> {
+    let rel = backend_access_table_table_seams::table_open::call(
+        mcx,
+        EVENT_TRIGGER_RELATION_ID,
+        types_storage::lock::RowExclusiveLock,
+    )?;
+
+    /* tup = SearchSysCacheCopy1(EVENTTRIGGERNAME, ...) */
+    let (evt_oid, evtowner) = match syscache_seams::event_trigger_by_name::call(mcx, name)? {
+        Some((oid, _evtevent, owner)) => (oid, owner),
+        None => {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!("event trigger \"{name}\" does not exist"))
+                .into_error());
+        }
+    };
+
+    let evt_tuple = syscache_seams::search_syscache_copy_pg_event_trigger_tuple::call(mcx, evt_oid)?
+        .ok_or_else(|| PgError::error(format!("cache lookup failed for event trigger {evt_oid}")))?;
+
+    alter_event_trigger_owner_internal(
+        mcx,
+        &rel,
+        &evt_tuple,
+        evt_oid,
+        evtowner,
+        name,
+        new_owner_id,
+    )?;
+
+    let address = ObjectAddress {
+        classId: EVENT_TRIGGER_RELATION_ID,
+        objectId: evt_oid,
+        objectSubId: 0,
+    };
+
+    rel.close(types_storage::lock::RowExclusiveLock)?;
+
+    Ok(address)
+}
+
+/// `AlterEventTriggerOwner_oid(Oid trigOid, Oid newOwnerId)`
+/// (event_trigger.c:513-533) — change an event trigger's owner by OID (REASSIGN
+/// OWNED / pg_shdepend owner change).
+pub fn alter_event_trigger_owner_oid(trig_oid: Oid, new_owner_id: Oid) -> PgResult<()> {
+    let scratch = MemoryContext::new("AlterEventTriggerOwner_oid");
+    let mcx = scratch.mcx();
+
+    let rel = backend_access_table_table_seams::table_open::call(
+        mcx,
+        EVENT_TRIGGER_RELATION_ID,
+        types_storage::lock::RowExclusiveLock,
+    )?;
+
+    /* tup = SearchSysCacheCopy1(EVENTTRIGGEROID, ObjectIdGetDatum(trigOid)) */
+    let evt_tuple = syscache_seams::search_syscache_copy_pg_event_trigger_tuple::call(mcx, trig_oid)?
+        .ok_or_else(|| {
+            ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!("event trigger with OID {trig_oid} does not exist"))
+                .into_error()
+        })?;
+
+    let (evtowner, evtname) =
+        syscache_seams::event_trigger_owner_name::call(mcx, trig_oid)?.ok_or_else(|| {
+            ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!("event trigger with OID {trig_oid} does not exist"))
+                .into_error()
+        })?;
+
+    alter_event_trigger_owner_internal(
+        mcx,
+        &rel,
+        &evt_tuple,
+        trig_oid,
+        evtowner,
+        evtname.as_str(),
+        new_owner_id,
+    )?;
+
+    rel.close(types_storage::lock::RowExclusiveLock)?;
+
+    Ok(())
+}
+
 // ===========================================================================
 // Seam install.
 // ===========================================================================
@@ -1421,6 +1590,19 @@ pub fn init_seams() {
     backend_commands_event_trigger_seams::EventTriggerSupportsObject::set(|object| {
         Ok(event_trigger_supports_object(object))
     });
+
+    // OID-by-name lookup for ALTER / DROP / COMMENT ON / RENAME EVENT TRIGGER by
+    // name (objectaddress.c's get_object_address dispatch).
+    backend_commands_event_trigger_seams::get_event_trigger_oid::set(get_event_trigger_oid);
+
+    // ALTER EVENT TRIGGER ... OWNER TO (by name) + REASSIGN OWNED (by OID).
+    backend_commands_event_trigger_seams::AlterEventTriggerOwner::set(|name, new_owner_id| {
+        let scratch = MemoryContext::new("AlterEventTriggerOwner");
+        AlterEventTriggerOwner(scratch.mcx(), name, new_owner_id)
+    });
+    backend_commands_event_trigger_seams::alter_event_trigger_owner_oid::set(
+        alter_event_trigger_owner_oid,
+    );
 
     // CREATE/ALTER OPERATOR CLASS/FAMILY command collection (opclasscmds.c).
     // No-ops in standalone (no event-trigger state); the active-collection

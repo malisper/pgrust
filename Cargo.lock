@@ -7011,7 +7011,9 @@ dependencies = [
  "types-nodes",
  "types-opclass",
  "types-portal",
+ "types-rel",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

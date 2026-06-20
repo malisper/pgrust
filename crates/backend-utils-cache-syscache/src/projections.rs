@@ -5584,6 +5584,43 @@ pub(crate) fn event_trigger_name_exists(trigname: &str) -> PgResult<bool> {
     }
 }
 
+/// `GetSysCacheOid1(EVENTTRIGGERNAME, Anum_pg_event_trigger_oid,
+/// CStringGetDatum(trigname))` — `get_event_trigger_oid`'s OID lookup. Returns
+/// `Ok(None)` (mirroring `!OidIsValid`) when no row matches; the caller decides
+/// whether to raise on a miss per `missing_ok`.
+pub(crate) fn event_trigger_oid_by_name(trigname: &str) -> PgResult<Option<Oid>> {
+    let scratch = MemoryContext::new("syscache pg_event_trigger oid-by-name");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, EVENTTRIGGERNAME, SysCacheKey::Str(trigname))?;
+    match tuple {
+        Some(tup) => {
+            let oid = getattr_oid(mcx, EVENTTRIGGERNAME, &tup, Anum_pg_event_trigger_oid_b)?;
+            ReleaseSysCache(tup);
+            Ok(Some(oid))
+        }
+        None => Ok(None),
+    }
+}
+
+/// `SearchSysCache1(EVENTTRIGGEROID, ObjectIdGetDatum(trigoid))` projected to
+/// the `(evtowner, evtname)` `Form_pg_event_trigger` fields
+/// `AlterEventTriggerOwner_internal` reads when invoked by OID (REASSIGN OWNED).
+/// `Ok(None)` on a cache miss; the caller raises `event trigger with OID %u does
+/// not exist`.
+pub(crate) fn event_trigger_owner_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    trigoid: Oid,
+) -> PgResult<Option<(Oid, PgString<'mcx>)>> {
+    let tuple = SearchSysCache1(mcx, EVENTTRIGGEROID, SysCacheKey::Value(KeyDatum::from_oid(trigoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let evtowner = getattr_oid(mcx, EVENTTRIGGEROID, &tup, Anum_pg_event_trigger_evtowner_b)?;
+    let evtname = getattr_name(mcx, EVENTTRIGGEROID, &tup, Anum_pg_event_trigger_evtname_b2)?;
+    ReleaseSysCache(tup);
+    Ok(Some((evtowner, evtname)))
+}
+
 /// `SearchSysCacheCopy1(EVENTTRIGGEROID, ObjectIdGetDatum(trigoid))` returned as
 /// the owned writable `FormedTuple` copy — `AlterEventTrigger`'s `evtenabled`
 /// update needs the held tuple for `heap_modify_tuple` over its `t_self`,

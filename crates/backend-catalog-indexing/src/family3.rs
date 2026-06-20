@@ -914,6 +914,41 @@ fn catalog_tuple_update_pg_event_trigger_enabled<'mcx>(
     crate::keystone::CatalogTupleUpdate(mcx, rel, evt_tuple.tuple.t_self, &mut new_tuple)
 }
 
+/// `AlterEventTriggerOwner_internal`'s pg_event_trigger UPDATE
+/// (commands/event_trigger.c): set the row's `evtowner` to `new_owner_id` and
+/// `CatalogTupleUpdate`. `rel` is the open pg_event_trigger relation; `evt_tuple`
+/// is the writable held copy. `Err` carries the heap/index mutation failure.
+fn catalog_tuple_update_pg_event_trigger_owner<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    evt_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    new_owner_id: types_core::Oid,
+) -> PgResult<()> {
+    use cat::pg_event_trigger as pe;
+
+    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut isnull: mcx::PgVec<'mcx, bool> =
+        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut replaces: mcx::PgVec<'mcx, bool> =
+        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    for _ in 0..pe::Natts_pg_event_trigger {
+        values.push(Datum::null());
+        isnull.push(false);
+        replaces.push(false);
+    }
+
+    let i = pe::Anum_pg_event_trigger_evtowner as usize - 1;
+    replaces[i] = true;
+    values[i] = Datum::from_oid(new_owner_id);
+
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let mut new_tuple = backend_access_common_heaptuple::heap_modify_tuple(
+        mcx, evt_tuple, &tupdesc, &values, &isnull, &replaces,
+    )?;
+    crate::keystone::CatalogTupleUpdate(mcx, rel, evt_tuple.tuple.t_self, &mut new_tuple)
+}
+
 /// `CStringGetByteaDatum` over a raw payload: a `bytea` varlena image (4-byte
 /// header `SET_VARSIZE(len + VARHDRSZ)` then the verbatim bytes). C builds the
 /// `tgargs` bytea as `arg1\0arg2\0...`; this wraps that payload unchanged.
@@ -1106,6 +1141,9 @@ pub fn install() {
     );
     backend_catalog_indexing_seams::catalog_tuple_update_pg_event_trigger_enabled::set(
         catalog_tuple_update_pg_event_trigger_enabled,
+    );
+    backend_catalog_indexing_seams::catalog_tuple_update_pg_event_trigger_owner::set(
+        catalog_tuple_update_pg_event_trigger_owner,
     );
     backend_catalog_indexing_seams::catalog_tuple_update_pg_policy::set(
         catalog_tuple_update_pg_policy,

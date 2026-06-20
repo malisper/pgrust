@@ -1396,6 +1396,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `AlterEventTriggerOwner_internal`'s pg_event_trigger UPDATE
+    /// (commands/event_trigger.c): `form->evtowner = newOwnerId;` over the
+    /// syscache-copied tuple, then `heap_modify_tuple` replacing only the
+    /// `evtowner` column + `CatalogTupleUpdate`. `rel` is the open
+    /// pg_event_trigger relation. `Err` carries the heap/index mutation
+    /// `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_event_trigger_owner<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        rel: &types_rel::Relation<'mcx>,
+        evt_tuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+        new_owner_id: types_core::Oid,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `CreateTrigger`'s pg_trigger INSERT/UPDATE (commands/trigger.c): allocate
     /// the trigger OID (when `row.existing` is `None`) via
     /// `GetNewOidWithIndex(tgrel, TriggerOidIndexId, Anum_pg_trigger_oid)`, build

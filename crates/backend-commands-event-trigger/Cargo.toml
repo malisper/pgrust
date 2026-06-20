@@ -47,3 +47,5 @@ types-datum = { path = "../types-datum" }
 types-acl = { path = "../types-acl" }
 types-storage = { path = "../types-storage" }
 types-portal = { path = "../types-portal" }
+types-rel = { path = "../types-rel" }
+types-tuple = { path = "../types-tuple" }

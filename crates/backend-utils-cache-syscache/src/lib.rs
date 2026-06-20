@@ -1248,6 +1248,8 @@ pub fn init_seams() {
     s::event_trigger_name::set(projections::event_trigger_name);
     s::event_trigger_by_name::set(projections::event_trigger_by_name);
     s::event_trigger_name_exists::set(projections::event_trigger_name_exists);
+    s::event_trigger_oid_by_name::set(projections::event_trigger_oid_by_name);
+    s::event_trigger_owner_name::set(projections::event_trigger_owner_name);
     s::search_syscache_copy_pg_event_trigger_tuple::set(
         projections::search_syscache_copy_pg_event_trigger_tuple,
     );
