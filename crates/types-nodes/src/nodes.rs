@@ -366,6 +366,8 @@ pub enum Node<'mcx> {
     BitmapHeapScan(crate::nodebitmapheapscan::BitmapHeapScan<'mcx>),
     /// `T_Limit`.
     Limit(crate::nodelimit::Limit<'mcx>),
+    /// `T_LockRows`.
+    LockRows(crate::nodelockrows::LockRows<'mcx>),
     /// `T_Unique`.
     Unique(crate::nodeunique::Unique<'mcx>),
     /// `T_Sort`.
@@ -1004,6 +1006,7 @@ impl<'mcx> Node<'mcx> {
             Node::BitmapIndexScan(_) => crate::nodebitmapindexscan::T_BitmapIndexScan,
             Node::BitmapHeapScan(_) => crate::nodebitmapheapscan::T_BitmapHeapScan,
             Node::Limit(_) => T_Limit,
+            Node::LockRows(_) => T_LockRows,
             Node::Unique(_) => crate::nodeunique::T_Unique,
             Node::Sort(_) => T_Sort,
             Node::IncrementalSort(_) => crate::nodeincrementalsort::T_IncrementalSort,
@@ -1286,6 +1289,7 @@ impl<'mcx> Node<'mcx> {
             Node::BitmapIndexScan(m) => &m.scan.plan,
             Node::BitmapHeapScan(m) => &m.scan.plan,
             Node::Limit(m) => &m.plan,
+            Node::LockRows(m) => &m.plan,
             Node::Unique(u) => &u.plan,
             Node::Sort(s) => &s.plan,
             Node::IncrementalSort(s) => &s.sort.plan,
@@ -1347,6 +1351,7 @@ impl<'mcx> Node<'mcx> {
             Node::BitmapIndexScan(m) => &mut m.scan.plan,
             Node::BitmapHeapScan(m) => &mut m.scan.plan,
             Node::Limit(m) => &mut m.plan,
+            Node::LockRows(m) => &mut m.plan,
             Node::Unique(u) => &mut u.plan,
             Node::Sort(s) => &mut s.plan,
             Node::IncrementalSort(s) => &mut s.sort.plan,
@@ -1407,6 +1412,7 @@ impl<'mcx> Node<'mcx> {
             Node::BitmapIndexScan(m) => Ok(Node::BitmapIndexScan(m.clone_in(mcx)?)),
             Node::BitmapHeapScan(m) => Ok(Node::BitmapHeapScan(m.clone_in(mcx)?)),
             Node::Limit(m) => Ok(Node::Limit(m.clone_in(mcx)?)),
+            Node::LockRows(m) => Ok(Node::LockRows(m.clone_in(mcx)?)),
             Node::Unique(u) => Ok(Node::Unique(u.clone_in(mcx)?)),
             Node::Sort(s) => Ok(Node::Sort(s.clone_in(mcx)?)),
             Node::IncrementalSort(s) => Ok(Node::IncrementalSort(s.clone_in(mcx)?)),

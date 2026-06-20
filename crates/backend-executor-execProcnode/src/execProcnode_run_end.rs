@@ -274,6 +274,10 @@ pub fn exec_end_node<'mcx>(
         PlanStateNode::Limit(limit_state) => {
             backend_executor_nodeLimit::ExecEndLimit(limit_state, estate)
         }
+        // case T_LockRowsState: ExecEndLockRows((LockRowsState *) node);
+        PlanStateNode::LockRows(state) => {
+            backend_executor_nodeLockRows::ExecEndLockRows(state, estate)
+        }
         // case T_SortState: ExecEndSort((SortState *) node);
         PlanStateNode::Sort(state) => backend_executor_nodeSort::ExecEndSort(state, estate),
         // case T_IncrementalSortState:
@@ -419,7 +423,7 @@ pub fn exec_end_node<'mcx>(
         | PlanStateNode::WorkTableScan(_) => Ok(()),
 
         // The remaining C arms (T_SampleScanState/
-        // T_IncrementalSortState/T_AggState/T_LockRowsState)
+        // T_IncrementalSortState/T_AggState)
         // operate on node-state variants not yet present in
         // the `#[non_exhaustive]` `PlanStateNode` enum, so their tags cannot occur.
         // The C `default: elog(ERROR, "unrecognized node type")` covers any tag

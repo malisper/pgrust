@@ -14,7 +14,6 @@
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::PgResult;
-use types_rel::RelationData;
 use types_tuple::heaptuple::ItemPointerData;
 
 use crate::execnodes::{PlanStateData, SlotId};
@@ -183,8 +182,11 @@ impl Default for PlanRowMark {
 #[derive(Debug)]
 pub struct ExecRowMark<'mcx> {
     /// `Relation relation` — opened and suitably locked relation. `None` (C
-    /// NULL) for a non-relation rowmark.
-    pub relation: Option<PgBox<'mcx, RelationData<'mcx>>>,
+    /// NULL) for a non-relation rowmark. Stored as the Rc-backed
+    /// [`types_rel::Relation`] alias (the same handle `ExecGetRangeTableRelation`
+    /// returns and `ScanState::ss_currentRelation` holds); `es_relations` owns
+    /// the open, this aliases it.
+    pub relation: Option<types_rel::Relation<'mcx>>,
     /// `Oid relid` — its OID (or InvalidOid, if subquery).
     pub relid: Oid,
     /// `Index rti` — its range table index.
@@ -240,24 +242,14 @@ pub struct ExecAuxRowMarkData<'mcx> {
     pub wholeAttNo: AttrNumber,
 }
 
-/// `EPQState` (`nodes/execnodes.h`) — EvalPlanQual recheck state.
-///
-/// The `nodeLockRows.c` port never inspects this struct's internals — every EPQ
-/// operation (`EvalPlanQualInit`/`Begin`/`Next`/`End`/`SetSlot`/`Slot`) is
-/// reached through the node crate's seams, which own the EvalPlanQual machinery
-/// (`execMain.c`, not yet ported). It is carried here only as `lr_epqstate`'s
-/// type, trimmed to the fields the node-state crate names. Remaining EvalPlanQual
-/// fields (`recheckestate`, `recheckplanstate`, `relsubs_*`, the slot tables)
-/// land with their first real consumer (the execMain EPQ port), per docs/types.md
-/// rule 3.
-#[derive(Debug, Default)]
-pub struct EPQState<'mcx> {
-    /// `int epqParam` — ID of Param to force EPQ re-eval.
-    pub epqParam: i32,
-    /// `List *arowMarks` — list of `ExecAuxRowMark`s (non-locking only), handed
-    /// off to the EPQ machinery by `ExecInitLockRows`.
-    pub arowMarks: Option<PgVec<'mcx, ExecAuxRowMarkData<'mcx>>>,
-}
+/// `EPQState` (`nodes/execnodes.h`) — EvalPlanQual recheck state. The canonical
+/// owned `EPQState` lives in [`crate::execnodes`] (the same struct
+/// `ModifyTableState::mt_epqstate` holds and the execMain EPQ machinery
+/// populates: `relsubs_slot`/`relsubs_rowmark`/`relsubs_done`/`relsubs_blocked`/
+/// `resultRelations`). `LockRowsState::lr_epqstate` carries that canonical type
+/// so the execMain-owned EPQ seams (`EvalPlanQualInit`/`Slot`/`Begin`/`Next`/
+/// `End`) operate on the real fields.
+pub use crate::execnodes::EPQState;
 
 /// `LockRowsState` (`nodes/execnodes.h`) — the `LockRows` executor node's
 /// run-time state.

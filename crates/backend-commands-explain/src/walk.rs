@@ -506,9 +506,10 @@ pub fn ExplainNode<'es, 'p>(
             strategy = Some(st);
             pname = pn.into();
         }
-        // NOTE: the `LockRows` plan node is not modelled in the `Node` enum yet,
-        // so its `ntag::T_LockRows` const is not generated and it cannot reach
-        // this switch; its name case ("LockRows") lands when that variant does.
+        ntag::T_LockRows => {
+            sname = "LockRows";
+            pname = sname.into();
+        }
         ntag::T_Limit => {
             sname = "Limit";
             pname = sname.into();

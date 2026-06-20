@@ -8969,6 +8969,7 @@ dependencies = [
  "backend-executor-nodeIndexonlyscan",
  "backend-executor-nodeIndexscan",
  "backend-executor-nodeLimit",
+ "backend-executor-nodeLockRows",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMemoize",
  "backend-executor-nodeMergeAppend",
@@ -9428,10 +9429,15 @@ dependencies = [
 name = "backend-executor-execProcnode"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-table-tableam",
+ "backend-access-transam-xact",
  "backend-executor-execAmi-seams",
  "backend-executor-execMain-seams",
  "backend-executor-execProcnode-seams",
  "backend-executor-execTuples-seams",
+ "backend-executor-execUtils",
+ "backend-executor-execUtils-seams",
  "backend-executor-instrument-seams",
  "backend-executor-nodeAgg",
  "backend-executor-nodeAppend",
@@ -9452,6 +9458,8 @@ dependencies = [
  "backend-executor-nodeIndexonlyscan",
  "backend-executor-nodeIndexscan",
  "backend-executor-nodeLimit",
+ "backend-executor-nodeLockRows",
+ "backend-executor-nodeLockRows-seams",
  "backend-executor-nodeMaterial",
  "backend-executor-nodeMemoize",
  "backend-executor-nodeMergeAppend",
@@ -9481,9 +9489,13 @@ dependencies = [
  "mcx",
  "pgrust-trace",
  "seam-core",
+ "types-core",
  "types-error",
  "types-nodes",
+ "types-rel",
+ "types-tableam",
  "types-tidbitmap",
+ "types-tuple",
 ]
 
 [[package]]

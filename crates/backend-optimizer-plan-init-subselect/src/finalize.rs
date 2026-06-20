@@ -659,6 +659,15 @@ fn finalize_node_specific<'mcx>(
                 Some(bms::bms_add_member(mcx, valid_params_owned.take(), *locally_added_param)?);
             // wtParam does *not* get added to scan_params.
         }
+        types_nodes::nodes::ntag::T_LockRows => {
+            // Force descendant scan nodes to reference epqParam.
+            let lr = plan.as_lockrows_mut().unwrap();
+            *locally_added_param = lr.epqParam;
+            *valid_params_owned =
+                Some(bms::bms_add_member(mcx, valid_params_owned.take(), *locally_added_param)?);
+            // note we don't add to scan_params... that would force re-eval of
+            // every child scan, which is not what we want.
+        }
         types_nodes::nodes::ntag::T_Agg => {
             let agg = plan.as_agg_mut().unwrap();
             // AGG_HASHED plans need to know which Params are referenced in

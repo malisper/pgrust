@@ -59,7 +59,6 @@ use types_error::{PgError, PgResult};
 use types_nodes::copy_query::Query;
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::{ntag, CmdType, Node};
-use types_nodes::nodelockrows::PlanRowMark;
 use types_nodes::execnodes::RowMarkType;
 use types_nodes::primnodes::Expr;
 use types_nodes::parsenodes::RangeTblEntry;
@@ -454,12 +453,28 @@ fn standard_planner<'mcx>(
     // without inventing GUC values.
     let jit_flags = PGJIT_NONE;
 
-    // rowMarks: glob->finalrowmarks holds PlanRowMarkId handles, but the owned
-    // PlannedStmt models rowMarks as `PgVec<Expr>` (a primnodes Expr list), which
-    // is the wrong carrier for a PlanRowMark. There is no faithful way to project
-    // the resolved PlanRowMark values into that field, so we set None (the empty
-    // case) with this note; finalrowmarks is empty on the simple SELECT path.
-    let row_marks: Option<mcx::PgVec<'mcx, Expr>> = None;
+    // rowMarks: glob->finalrowmarks holds PlanRowMarkId handles into the
+    // PlannerRun rowmark store (set_plan_references flat-copied each
+    // root->rowMarks PlanRowMark here, rti/prti already rtoffset-adjusted). The
+    // PlannedStmt carries the resolved owned PlanRowMark values (the scalar
+    // struct is Copy); InitPlan reads them to build es_rowmarks. On the simple
+    // SELECT path finalrowmarks is empty → None (the C NIL).
+    let row_marks: Option<mcx::PgVec<'mcx, types_nodes::nodelockrows::PlanRowMark>> = {
+        let final_ids: Vec<types_pathnodes::PlanRowMarkId> = root
+            .glob
+            .as_ref()
+            .map(|g| g.finalrowmarks.clone())
+            .unwrap_or_default();
+        if final_ids.is_empty() {
+            None
+        } else {
+            let mut out = mcx::vec_with_capacity_in(mcx, final_ids.len())?;
+            for id in &final_ids {
+                out.push(*run.resolve_rowmark(*id));
+            }
+            Some(out)
+        }
+    };
 
     // unprunableRelids = bms_difference(glob->allRelids, glob->prunableRelids)
     // (planner.c: standard_planner, after set_plan_references populated
@@ -2675,31 +2690,19 @@ fn build_final_paths<'mcx>(
             parse.commandType,
         )
     };
-    if has_rowmarks {
-        // FOR [KEY] UPDATE/SHARE wraps each path in a LockRows node
-        // (create_lockrows_path over root->rowMarks, planner.c:1905-1910). The
-        // upstream analyze/rowmark planning IS ported now (transformLockingClause,
-        // isLockedRefname, preprocess_rowmarks, the preptlist rowmark junk Vars),
-        // so the parse->rowMarks / root->rowMarks (Vec<PlanRowMarkId>) are built
-        // and reach here. The LockRows PATH cannot yet be created faithfully: the
-        // ported create_lockrows_path / LockRowsPath / the LockRows plan node all
-        // carry rowMarks as Vec<NodeId> (the node_arena Expr id-space), the WRONG
-        // id-space for a PlanRowMark (which lives in the PlannerRun rowmark
-        // registry as PlanRowMarkId). Routing root->rowMarks through it would
-        // require either a forbidden cross-id-space token reuse or the cross-crate
-        // PlanRowMark-carrier widen (types-pathnodes LockRowsPath/LockRows.rowMarks
-        // -> Vec<PlanRowMarkId>, create_lockrows_path re-sign, createplan
-        // create_lockrows_plan port [currently seam-panics, createplan.c:1088], +
-        // the LockRows plan-node Node arm). Execution then bottoms out on the
-        // EvalPlanQual executor (ExecLockRows / EPQ re-eval). STOP here: this is
-        // the PlanRowMark-carrier + EPQ keystone, out of planner.c's lane.
-        panic!(
-            "grouping_planner: FOR [KEY] UPDATE/SHARE LockRows path needs the \
-             PlanRowMark-carrier widen (LockRowsPath/LockRows.rowMarks -> \
-             Vec<PlanRowMarkId>) + create_lockrows_plan (createplan.c, unported) + \
-             the EvalPlanQual executor (planner.c:1905)"
-        );
-    }
+    // FOR [KEY] UPDATE/SHARE wraps each surviving path in a LockRows node
+    // (create_lockrows_path over root->rowMarks, planner.c:1905-1910). The
+    // PlanRowMark list lives in the PlannerRun rowmark store keyed by
+    // PlanRowMarkId (the same id-space create_lockrows_path / LockRowsPath /
+    // LockRows now carry); the EvalPlanQual re-eval Param is a fresh special
+    // exec param assigned once for the whole LockRows wrapper, as in C.
+    let lockrows_epq_param: i32 = if has_rowmarks {
+        backend_optimizer_util_paramassign_seams::assign_special_exec_param::call(root)?
+    } else {
+        0
+    };
+    let lockrows_rowmarks: Vec<types_pathnodes::PlanRowMarkId> =
+        if has_rowmarks { root.rowMarks.clone() } else { Vec::new() };
     // If there is a LIMIT/OFFSET clause, each surviving path gets a LimitPath
     // wrapper (create_limit_path, planner.c:1915-1922). limit_needed() is the
     // exact gate (a constant-NULL/zero OFFSET or constant-NULL LIMIT adds no
@@ -2723,11 +2726,23 @@ fn build_final_paths<'mcx>(
         None
     };
 
-    // For each surviving path of current_rel, optionally wrap it in a Limit node,
-    // then (for INSERT/UPDATE/DELETE/MERGE) a ModifyTable node, then shove it into
-    // final_rel (C:1891-2131). LockRows wrappers are guarded out above.
+    // For each surviving path of current_rel, optionally wrap it in a LockRows
+    // node (FOR UPDATE/SHARE), then a Limit node, then (for
+    // INSERT/UPDATE/DELETE/MERGE) a ModifyTable node, then shove it into
+    // final_rel (C:1891-2131).
     let surviving: Vec<PathId> = root.rel(current_rel).pathlist.clone();
     for path in surviving {
+        let path = if has_rowmarks {
+            backend_optimizer_util_pathnode::create::create_lockrows_path(
+                root,
+                final_rel,
+                path,
+                lockrows_rowmarks.clone(),
+                lockrows_epq_param,
+            )?
+        } else {
+            path
+        };
         let path = if limit_needed_flag {
             backend_optimizer_util_pathnode::create::create_limit_path(
                 root,

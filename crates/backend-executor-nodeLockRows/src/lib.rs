@@ -284,7 +284,7 @@ pub fn ExecLockRows<'mcx>(
 /// genuinely-external setup helpers are reached through the seams; the rowmark
 /// partitioning is performed in-crate.
 pub fn ExecInitLockRows<'mcx>(
-    node: &LockRows<'mcx>,
+    node: &'mcx LockRows<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, LockRowsStateData<'mcx>>> {

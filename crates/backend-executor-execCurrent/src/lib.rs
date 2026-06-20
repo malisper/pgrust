@@ -208,7 +208,7 @@ fn resolve_rowmark_strategy(
             None => continue,
         };
         // ... || !RowMarkRequiresRowShareLock(thiserm->markType)
-        if !thiserm.markType.requires_row_share_lock() {
+        if !types_nodes::nodelockrows::RowMarkRequiresRowShareLock(thiserm.markType) {
             continue;
         }
         if thiserm.relid == table_oid {

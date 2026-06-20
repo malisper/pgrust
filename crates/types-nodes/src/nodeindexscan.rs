@@ -359,9 +359,11 @@ pub struct PlannedStmt<'mcx> {
     /// `struct Plan *planTree` — tree of `Plan` nodes (`None` = the C `NULL`).
     pub planTree: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
     /// `List *rowMarks` — a list of `PlanRowMark` nodes (`None` = the C `NIL`).
-    /// portalcmds only tests `rowMarks == NIL`; the elements arrive with the
-    /// planner port.
-    pub rowMarks: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    /// In C a `List *` of owned `PlanRowMark *` flat-copied from
+    /// `glob->finalrowmarks`; the scalar `PlanRowMark` is `Copy`, so the planner
+    /// materializes each resolved value here for `InitPlan`'s `es_rowmarks`
+    /// build (`ExecRowMark` array) and `portalcmds`' `rowMarks == NIL` test.
+    pub rowMarks: Option<PgVec<'mcx, crate::nodelockrows::PlanRowMark>>,
     /// `bool canSetTag` — do we set the command result tag/es_processed?
     /// `PortalGetPrimaryStmt` (portalmem.c) walks the portal's stmt list for
     /// the first stmt with this set.

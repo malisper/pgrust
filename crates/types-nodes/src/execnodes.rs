@@ -855,8 +855,10 @@ pub struct EStateData<'mcx> {
     pub es_range_table_size: usize,
     /// `ExecRowMark **es_rowmarks` — per-RTE `ExecRowMark`s (indexed by RT
     /// index − 1), with `None` entries for RTEs that have no rowmark. Empty =
-    /// the C `NULL` (no FOR UPDATE/SHARE in the query).
-    pub es_rowmarks: PgVec<'mcx, Option<ExecRowMark>>,
+    /// the C `NULL` (no FOR UPDATE/SHARE in the query). Carries the full
+    /// [`crate::nodelockrows::ExecRowMark`] (relation + every C field) that
+    /// `InitPlan` builds and `nodeLockRows` / `execCurrent` read.
+    pub es_rowmarks: PgVec<'mcx, Option<crate::nodelockrows::ExecRowMark<'mcx>>>,
     /// `Relation *es_relations` — array of per-RTE open relations, `None`
     /// until opened. Parallel to `es_range_table`. These handles own the
     /// opens: EState teardown (or abort-path drop) releases them.

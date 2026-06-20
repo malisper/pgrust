@@ -69,6 +69,7 @@ use types_nodes::nodeforeigncustom::Material as MaterialNode;
 use types_nodes::nodesort::Sort;
 use types_nodes::nodememoize::Memoize;
 use types_nodes::nodelimit::Limit as LimitNode;
+use types_nodes::nodelockrows::LockRows as LockRowsNode;
 use types_nodes::nodeprojectset::ProjectSet as ProjectSetNode;
 use types_nodes::nodes::{ntag, Node, NodeTag};
 use types_nodes::nodectescan::CteScan;
@@ -1098,8 +1099,7 @@ pub fn create_plan_recurse<'mcx>(
         T_WindowAgg => create_windowagg_plan(mcx, root, run, best_path),
         T_SetOp => create_setop_plan(mcx, root, run, best_path, flags),
         T_RecursiveUnion => create_recursiveunion_plan(mcx, root, run, best_path),
-        // create_lockrows_plan is not yet ported (PlanRowMark carrier gap); seam.
-        T_LockRows => cp_seam::create_lockrows_plan::call(mcx, root, run, best_path, flags),
+        T_LockRows => create_lockrows_plan(mcx, root, run, best_path, flags),
         T_ModifyTable => create_modifytable_plan(mcx, root, run, best_path),
         T_Limit => create_limit_plan(mcx, root, run, best_path, flags),
         T_GatherMerge => create_gather_merge_plan(mcx, root, run, best_path),
@@ -3400,9 +3400,7 @@ fn is_projection_capable_plan(plan: &Node<'_>) -> bool {
         | ntag::T_Sort
         | ntag::T_Unique
         | ntag::T_SetOp
-        // T_LockRows: has no `Node` arm yet (LockRows plan node unported); it
-        // can't be constructed, so it never reaches here. When the arm lands it
-        // must be added to this not-projection-capable list.
+        | ntag::T_LockRows
         | ntag::T_Limit
         | ntag::T_ModifyTable
         | ntag::T_Append
@@ -4141,6 +4139,71 @@ fn create_limit_plan<'mcx>(
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
     Ok(Node::mk_limit(mcx, plan))
+}
+
+// ===========================================================================
+// LockRows: create_lockrows_plan + make_lockrows (createplan.c:2812/6906).
+// ===========================================================================
+
+/// `create_lockrows_plan(root, best_path, flags)` (createplan.c:2812) — create
+/// a `LockRows` plan node for `SELECT ... FOR [KEY] UPDATE/SHARE`, recursively
+/// building the plan for its subpath.
+fn create_lockrows_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    flags: i32,
+) -> PgResult<Node<'mcx>> {
+    let (subpath, row_mark_ids, epq_param) = match root.path(best_path) {
+        PathNode::LockRowsPath(p) => (p.subpath, p.rowMarks.clone(), p.epqParam),
+        _ => unreachable!("create_lockrows_plan on non-LockRowsPath"),
+    };
+    let subpath = subpath.expect("create_lockrows_plan: LockRowsPath has no subpath");
+
+    // LockRows doesn't project, so tlist requirements pass through.
+    let subplan = create_plan_recurse(mcx, root, run, subpath, flags)?;
+
+    // Resolve each PlanRowMark handle out of the PlannerRun rowmark store into
+    // an owned `PlanRowMark` value carried by the plan node (C: `List *rowMarks`
+    // of `PlanRowMark *`, copied by reference into the LockRows; here the scalar
+    // PlanRowMark is `Copy`, so we materialize the value).
+    let row_marks = if row_mark_ids.is_empty() {
+        None
+    } else {
+        let mut out = vec_with_capacity_in(mcx, row_mark_ids.len())?;
+        for id in &row_mark_ids {
+            out.push(*run.resolve_rowmark(*id));
+        }
+        Some(out)
+    };
+
+    let mut plan = make_lockrows(mcx, subplan, row_marks, epq_param)?;
+
+    copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
+
+    Ok(Node::mk_lock_rows(mcx, plan))
+}
+
+/// `make_lockrows(lefttree, rowMarks, epqParam)` (createplan.c:6906).
+fn make_lockrows<'mcx>(
+    mcx: Mcx<'mcx>,
+    lefttree: Node<'mcx>,
+    row_marks: Option<PgVec<'mcx, types_nodes::nodelockrows::PlanRowMark>>,
+    epq_param: i32,
+) -> PgResult<LockRowsNode<'mcx>> {
+    let tlist = clone_plan_tlist(mcx, &lefttree)?;
+    let mut node = LockRowsNode::default();
+    {
+        let plan: &mut Plan = &mut node.plan;
+        plan.targetlist = tlist;
+        plan.qual = None;
+        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+        plan.righttree = None;
+    }
+    node.rowMarks = row_marks;
+    node.epqParam = epq_param;
+    Ok(node)
 }
 
 // ===========================================================================

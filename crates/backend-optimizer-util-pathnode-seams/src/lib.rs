@@ -32,8 +32,8 @@ use types_error::PgResult;
 use types_pathnodes::optimizer_plan::CostSelector;
 use types_pathnodes::{
     AggSplit, AggStrategy, CmdType, IndexClause, IndexOptInfo, LimitOption, NodeId, PathId, PathKey,
-    PathTarget, PlannerInfo, RelId, Relids, RinfoId, ScanDirection, SetOpCmd, SetOpStrategy,
-    SpecialJoinInfo,
+    PathTarget, PlanRowMarkId, PlannerInfo, RelId, Relids, RinfoId, ScanDirection, SetOpCmd,
+    SetOpStrategy, SpecialJoinInfo,
 };
 
 /// `AggClauseCosts` (nodes/pathnodes.h), trimmed to the field pathnode.c reads
@@ -640,7 +640,7 @@ seam_core::seam!(
         root: &mut PlannerInfo,
         rel: RelId,
         subpath: PathId,
-        row_marks: Vec<NodeId>,
+        row_marks: Vec<PlanRowMarkId>,
         epq_param: i32,
     ) -> PgResult<PathId>
 );

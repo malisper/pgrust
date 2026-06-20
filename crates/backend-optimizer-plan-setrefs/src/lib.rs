@@ -1947,6 +1947,23 @@ pub fn set_plan_refs<'mcx>(
             }
         }
 
+        // -- LockRows --------------------------------------------------------
+        // Like the dummy-tlist plan types, LockRows doesn't evaluate its tlist
+        // or quals; but we must fix up the RT indexes in its rowmarks
+        // (set_plan_refs, setrefs.c).
+        ntag::T_LockRows => {
+            set_dummy_tlist_references(plan.plan_head_mut(), rtoffset, mcx)?;
+            debug_assert!(plan.plan_head().qual.is_none());
+            if let Some(lr) = plan.as_lockrows_mut() {
+                if let Some(marks) = lr.rowMarks.as_mut() {
+                    for rc in marks.iter_mut() {
+                        rc.rti = rc.rti.wrapping_add(rtoffset as u32);
+                        rc.prti = rc.prti.wrapping_add(rtoffset as u32);
+                    }
+                }
+            }
+        }
+
         // -- Agg -------------------------------------------------------------
         ntag::T_Agg => {
             let (combine, grouping_sets) = if let Some(a) = plan.as_agg() {

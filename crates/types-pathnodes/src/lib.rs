@@ -1461,9 +1461,13 @@ pub struct LockRowsPath {
     pub path: Path,
     /// `Path *subpath` — input source (handle into `path_arena`).
     pub subpath: Option<PathId>,
-    /// `List *rowMarks` — PlanRowMarks (opaque node handles).
+    /// `List *rowMarks` — `PlanRowMark`s. In C a `List *` of owned
+    /// `PlanRowMark *`; the owned values live in the [`planner_run::PlannerRun`]
+    /// rowmark store and this list carries the [`PlanRowMarkId`] handles, the
+    /// SAME id-space as `PlannerInfo::rowMarks` (a `PlanRowMark` is not a
+    /// `node_arena` `Expr`, so `NodeId` was the wrong id-space).
     #[allow(non_snake_case)]
-    pub rowMarks: Vec<NodeId>,
+    pub rowMarks: Vec<PlanRowMarkId>,
     /// `int epqParam` — ID of the Param for EvalPlanQual re-eval.
     #[allow(non_snake_case)]
     pub epqParam: i32,

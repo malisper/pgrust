@@ -20,6 +20,7 @@ use types_pathnodes::{
     HashPath, IncrementalSortPath, IndexClause, IndexOptInfo, IndexPath, JoinPath, JoinType,
     LimitOption, LimitPath, LockRowsPath, MaterialPath, MemoizePath, MergeAppendPath, MergePath,
     MinMaxAggInfo, MinMaxAggPath, ModifyTablePath, NestPath, NodeId, NodeTag, Path, PathId, PathKey,
+    PlanRowMarkId,
     PathNode, PathTarget, PlannerInfo, ProjectSetPath, ProjectionPath, QualCost, RecursiveUnionPath,
     RelId, Relids, RinfoId, ScanDirection, SetOpCmd, SetOpPath, SetOpStrategy, SortPath,
     SpecialJoinInfo, SubqueryScanPath, TargetEntryNode, TidPath, TidRangePath, UniquePath,
@@ -2050,7 +2051,7 @@ pub fn create_lockrows_path(
     root: &mut PlannerInfo,
     rel: RelId,
     subpath: PathId,
-    row_marks: Vec<NodeId>,
+    row_marks: Vec<PlanRowMarkId>,
     epq_param: i32,
 ) -> PgResult<PathId> {
     let sp: Path = root.path(subpath).base().clone();
