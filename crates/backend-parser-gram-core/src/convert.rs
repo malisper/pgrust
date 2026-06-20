@@ -101,6 +101,41 @@ fn node_list<'mcx>(mcx: Mcx<'mcx>, l: *mut RawList) -> PgResult<PgVec<'mcx, Node
     Ok(out)
 }
 
+/// `ObjectWithArgs.objargs` / `objfuncargs` (`*mut List` of `*mut Node`) →
+/// `PgVec<NodePtr>`, preserving the grammar's NULL list cell that encodes a
+/// unary operator's missing operand (`NONE`). The C grammar builds e.g.
+/// `DROP OPERATOR # (NONE, type)` as `list_make2(NULL, $4)` (gram.y:9106-9108) —
+/// a `List *` whose first cell is a raw NULL pointer. C `List` legitimately
+/// holds NULL cells; the owned `NodePtr` cannot be NULL, so the NULL cell is
+/// represented as an empty `Node::List` sentinel. Every `objargs`/`objfuncargs`
+/// consumer reads each cell via `.as_typename()` (parse_oper.c `LookupOperWithArgs`
+/// `linitial_node(TypeName,…)`, dropcmds.c `lfirst_node(TypeName,l) != NULL`),
+/// which returns `None`/`InvalidOid` for any non-`TypeName` cell — exactly the
+/// NONE-operand semantics. (Same NULL-cell representation as
+/// [`distinct_clause_list`].) Used ONLY for the two `ObjectWithArgs` lists that
+/// C may build with NULL cells; all other required-child lists keep [`node_req`]'s
+/// strict NULL check.
+fn node_list_nullable<'mcx>(
+    mcx: Mcx<'mcx>,
+    l: *mut RawList,
+) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
+    if l.is_null() {
+        return Ok(PgVec::new_in(mcx));
+    }
+    let list: &RawList = unsafe { &*l };
+    let mut out = mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+    for cell in list.cells() {
+        let np: *mut RawNode = cell.ptr();
+        match node_opt(mcx, np)? {
+            Some(p) => out.push(p),
+            // NULL cell == the NONE operand: encode as empty Node::List, which
+            // `.as_typename()` treats as None (→ InvalidOid) in every consumer.
+            None => out.push(mcx::alloc_in(mcx, Node::mk_list(mcx, PgVec::new_in(mcx)))?),
+        }
+    }
+    Ok(out)
+}
+
 /// `SelectStmt.distinctClause` (`*mut List` of `*mut Node`) → `PgVec<NodePtr>`,
 /// preserving the grammar's `list_make1(NIL)` "SELECT DISTINCT (all columns)"
 /// marker. The C grammar encodes plain DISTINCT (vs DISTINCT ON) as a one-element

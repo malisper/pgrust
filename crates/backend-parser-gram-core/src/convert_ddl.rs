@@ -303,8 +303,8 @@ fn conv_objectwithargs<'mcx>(
     let o = unsafe { &*p };
     Ok(tdn::ObjectWithArgs {
         objname: node_list(mcx, o.objname)?,
-        objargs: node_list(mcx, o.objargs)?,
-        objfuncargs: node_list(mcx, o.objfuncargs)?,
+        objargs: node_list_nullable(mcx, o.objargs)?,
+        objfuncargs: node_list_nullable(mcx, o.objfuncargs)?,
         args_unspecified: o.args_unspecified,
     })
 }
