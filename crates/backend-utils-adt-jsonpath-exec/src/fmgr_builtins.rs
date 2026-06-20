@@ -37,8 +37,9 @@
 //! flag).
 
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::{
     jsonb_path_exists, jsonb_path_exists_opr, jsonb_path_exists_tz, jsonb_path_match,
@@ -99,21 +100,6 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("jsonpath_exec fmgr scratch")
 }
 
-/// Raise a core's `ereport(ERROR)` through the dispatch point every builtin
-/// crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 /// Set a `jsonb` (by-reference) result on the by-ref lane and return the dummy
 /// by-value word. `image` is the full jsonb varlena image (with header).
 #[inline]
@@ -137,38 +123,38 @@ fn ret_bool_tri(fcinfo: &mut FunctionCallInfoBaseData, exists: bool, is_null: bo
 // ---------------------------------------------------------------------------
 
 /// `jsonb_path_exists(jsonb, jsonpath, jsonb, bool) -> bool` (oid 4005).
-fn fc_jsonb_path_exists(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_path_exists(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
     let jp = arg_jsonpath_image(fcinfo, 1);
     let vars = arg_jsonb_image(fcinfo, 2);
     let silent = arg_bool(fcinfo, 3);
     let m = scratch_mcx();
-    let res = ok(jsonb_path_exists(m.mcx(), jb, jp, Some(vars), silent));
+    let res = jsonb_path_exists(m.mcx(), jb, jp, Some(vars), silent)?;
     let (exists, is_null) = path_exists_to_bool(res);
-    ret_bool_tri(fcinfo, exists, is_null)
+    Ok(ret_bool_tri(fcinfo, exists, is_null))
 }
 
 /// `jsonb_path_exists_tz(jsonb, jsonpath, jsonb, bool) -> bool` (oid 1177).
-fn fc_jsonb_path_exists_tz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_path_exists_tz(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
     let jp = arg_jsonpath_image(fcinfo, 1);
     let vars = arg_jsonb_image(fcinfo, 2);
     let silent = arg_bool(fcinfo, 3);
     let m = scratch_mcx();
-    let res = ok(jsonb_path_exists_tz(m.mcx(), jb, jp, Some(vars), silent));
+    let res = jsonb_path_exists_tz(m.mcx(), jb, jp, Some(vars), silent)?;
     let (exists, is_null) = path_exists_to_bool(res);
-    ret_bool_tri(fcinfo, exists, is_null)
+    Ok(ret_bool_tri(fcinfo, exists, is_null))
 }
 
 /// `jsonb_path_exists_opr(jsonb, jsonpath) -> bool` (oid 4010) — the `@?`
 /// operator (`silent = true`, no vars).
-fn fc_jsonb_path_exists_opr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_path_exists_opr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
     let jp = arg_jsonpath_image(fcinfo, 1);
     let m = scratch_mcx();
-    let res = ok(jsonb_path_exists_opr(m.mcx(), jb, jp));
+    let res = jsonb_path_exists_opr(m.mcx(), jb, jp)?;
     let (exists, is_null) = path_exists_to_bool(res);
-    ret_bool_tri(fcinfo, exists, is_null)
+    Ok(ret_bool_tri(fcinfo, exists, is_null))
 }
 
 #[inline]
@@ -185,38 +171,38 @@ fn path_exists_to_bool(res: PathExistsResult) -> (bool, bool) {
 // ---------------------------------------------------------------------------
 
 /// `jsonb_path_match(jsonb, jsonpath, jsonb, bool) -> bool` (oid 4009).
-fn fc_jsonb_path_match(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_path_match(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
     let jp = arg_jsonpath_image(fcinfo, 1);
     let vars = arg_jsonb_image(fcinfo, 2);
     let silent = arg_bool(fcinfo, 3);
     let m = scratch_mcx();
-    let res = ok(jsonb_path_match(m.mcx(), jb, jp, Some(vars), silent));
+    let res = jsonb_path_match(m.mcx(), jb, jp, Some(vars), silent)?;
     let (matched, is_null) = path_match_to_bool(res);
-    ret_bool_tri(fcinfo, matched, is_null)
+    Ok(ret_bool_tri(fcinfo, matched, is_null))
 }
 
 /// `jsonb_path_match_tz(jsonb, jsonpath, jsonb, bool) -> bool` (oid 2030).
-fn fc_jsonb_path_match_tz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_path_match_tz(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
     let jp = arg_jsonpath_image(fcinfo, 1);
     let vars = arg_jsonb_image(fcinfo, 2);
     let silent = arg_bool(fcinfo, 3);
     let m = scratch_mcx();
-    let res = ok(jsonb_path_match_tz(m.mcx(), jb, jp, Some(vars), silent));
+    let res = jsonb_path_match_tz(m.mcx(), jb, jp, Some(vars), silent)?;
     let (matched, is_null) = path_match_to_bool(res);
-    ret_bool_tri(fcinfo, matched, is_null)
+    Ok(ret_bool_tri(fcinfo, matched, is_null))
 }
 
 /// `jsonb_path_match_opr(jsonb, jsonpath) -> bool` (oid 4011) — the `@@`
 /// operator (`silent = true`, no vars).
-fn fc_jsonb_path_match_opr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_path_match_opr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
     let jp = arg_jsonpath_image(fcinfo, 1);
     let m = scratch_mcx();
-    let res = ok(jsonb_path_match_opr(m.mcx(), jb, jp));
+    let res = jsonb_path_match_opr(m.mcx(), jb, jp)?;
     let (matched, is_null) = path_match_to_bool(res);
-    ret_bool_tri(fcinfo, matched, is_null)
+    Ok(ret_bool_tri(fcinfo, matched, is_null))
 }
 
 #[inline]
@@ -233,25 +219,25 @@ fn path_match_to_bool(res: PathMatchResult) -> (bool, bool) {
 // ---------------------------------------------------------------------------
 
 /// `jsonb_path_query_array(jsonb, jsonpath, jsonb, bool) -> jsonb` (oid 4007).
-fn fc_jsonb_path_query_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_path_query_array(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
     let jp = arg_jsonpath_image(fcinfo, 1);
     let vars = arg_jsonb_image(fcinfo, 2);
     let silent = arg_bool(fcinfo, 3);
     let m = scratch_mcx();
-    let image = ok(jsonb_path_query_array(m.mcx(), jb, jp, Some(vars), silent));
-    ret_jsonb(fcinfo, image)
+    let image = jsonb_path_query_array(m.mcx(), jb, jp, Some(vars), silent)?;
+    Ok(ret_jsonb(fcinfo, image))
 }
 
 /// `jsonb_path_query_array_tz(jsonb, jsonpath, jsonb, bool) -> jsonb` (oid 1180).
-fn fc_jsonb_path_query_array_tz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_path_query_array_tz(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
     let jp = arg_jsonpath_image(fcinfo, 1);
     let vars = arg_jsonb_image(fcinfo, 2);
     let silent = arg_bool(fcinfo, 3);
     let m = scratch_mcx();
-    let image = ok(jsonb_path_query_array_tz(m.mcx(), jb, jp, Some(vars), silent));
-    ret_jsonb(fcinfo, image)
+    let image = jsonb_path_query_array_tz(m.mcx(), jb, jp, Some(vars), silent)?;
+    Ok(ret_jsonb(fcinfo, image))
 }
 
 // ---------------------------------------------------------------------------
@@ -259,33 +245,33 @@ fn fc_jsonb_path_query_array_tz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum 
 // ---------------------------------------------------------------------------
 
 /// `jsonb_path_query_first(jsonb, jsonpath, jsonb, bool) -> jsonb` (oid 4008).
-fn fc_jsonb_path_query_first(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_path_query_first(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
     let jp = arg_jsonpath_image(fcinfo, 1);
     let vars = arg_jsonb_image(fcinfo, 2);
     let silent = arg_bool(fcinfo, 3);
     let m = scratch_mcx();
-    match ok(jsonb_path_query_first(m.mcx(), jb, jp, Some(vars), silent)) {
-        Some(image) => ret_jsonb(fcinfo, image),
+    match jsonb_path_query_first(m.mcx(), jb, jp, Some(vars), silent)? {
+        Some(image) => Ok(ret_jsonb(fcinfo, image)),
         None => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
     }
 }
 
 /// `jsonb_path_query_first_tz(jsonb, jsonpath, jsonb, bool) -> jsonb` (oid 2023).
-fn fc_jsonb_path_query_first_tz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_path_query_first_tz(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
     let jp = arg_jsonpath_image(fcinfo, 1);
     let vars = arg_jsonb_image(fcinfo, 2);
     let silent = arg_bool(fcinfo, 3);
     let m = scratch_mcx();
-    match ok(jsonb_path_query_first_tz(m.mcx(), jb, jp, Some(vars), silent)) {
-        Some(image) => ret_jsonb(fcinfo, image),
+    match jsonb_path_query_first_tz(m.mcx(), jb, jp, Some(vars), silent)? {
+        Some(image) => Ok(ret_jsonb(fcinfo, image)),
         None => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
     }
 }
@@ -303,23 +289,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the expressible scalar (non-SRF) `jsonpath_exec.c` predicates and
 /// query helpers. Called from this crate's `init_seams()`. OIDs/nargs/strict/
 /// retset transcribed from `pg_proc.dat`.
 pub fn register_jsonpath_exec_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(4005, "jsonb_path_exists", 4, true, false, fc_jsonb_path_exists),
         builtin(
             1177,
