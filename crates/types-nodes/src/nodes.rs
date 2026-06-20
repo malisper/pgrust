@@ -366,10 +366,19 @@ impl<'mcx> Node<'mcx> {
     /// The wrapped [`crate::primnodes::Expr`], if this is an expression node.
     #[inline]
     pub fn as_expr(&self) -> Option<&crate::primnodes::Expr> {
+        // Gate on `is_expr()` *before* downcasting: `downcast_ref` dereferences
+        // the payload as `NodePayload_Expr`, so calling it on a non-Expr node is
+        // an invalid (misaligned/wrong-type) read. The tag-keyed `downcast_ref`
+        // only guards on `expected == node_tag()`, and we must not hand it a tag
+        // it would accept for a non-Expr payload — so we hand it the Expr tag set
+        // implicitly by checking `is_expr()` first, exactly as `as_expr_mut`/
+        // `into_expr` do.
+        if !self.is_expr() {
+            return None;
+        }
         self.0
             .downcast_ref::<crate::node_payload_gen::NodePayload_Expr<'mcx>>(self.0.node_tag())
             .map(|a| &a.0)
-            .filter(|_| self.is_expr())
     }
     /// The wrapped [`crate::primnodes::Expr`] (mutable).
     #[inline]
