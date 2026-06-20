@@ -827,6 +827,127 @@ fn fc_array_sort_order_nulls_first(fcinfo: &mut FunctionCallInfoBaseData) -> PgR
     Ok(Datum::from_usize(0))
 }
 
+// --- array_fill / array_fill_with_lower_bounds (non-strict) -----------------
+
+/// Deconstruct an `int4[]` dimension/low-bound array argument into its contained
+/// `int` values, mirroring the `array_fill_internal` (arrayfuncs.c) preamble:
+/// reject a multi-dimensional array (`ARR_NDIM(dims) > 1`) and a NULL-containing
+/// array (`array_contains_nulls(dims)`), then read `ARR_DATA_PTR` as `int *` of
+/// length `(ARR_NDIM > 0) ? ARR_DIMS[0] : 0`. The returned Vec is that `int *`
+/// span; for a 0-D array it is empty (C `ndims == 0`).
+fn deconstruct_int4_array(array: &[u8]) -> PgResult<Vec<i32>> {
+    if crate::foundation::arr_ndim(array) > 1 {
+        return Err(types_error::PgError::error("wrong number of array subscripts")
+            .with_sqlstate(types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+            .with_detail("Dimension array must be one dimensional."));
+    }
+    if crate::construct::array_contains_nulls(array) {
+        return Err(types_error::PgError::error("dimension values cannot be null")
+            .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+    }
+    // ndims = number of int values in the (1-D) array's data area.
+    let count = if crate::foundation::arr_ndim(array) > 0 {
+        crate::foundation::arr_dim(array, 0)
+    } else {
+        0
+    };
+    let base = crate::foundation::arr_data_offset(array);
+    let mut out = Vec::with_capacity(count.max(0) as usize);
+    for k in 0..count.max(0) as usize {
+        let off = base + k * 4;
+        out.push(i32::from_ne_bytes([
+            array[off],
+            array[off + 1],
+            array[off + 2],
+            array[off + 3],
+        ]));
+    }
+    Ok(out)
+}
+
+/// Resolve the `value` (anyelement, arg 0) of an `array_fill` call into a bare
+/// `Datum` word (mirroring C's `value = PG_GETARG_DATUM(0)`), plus the resolved
+/// input element type from `get_fn_expr_argtype(flinfo, 0)`. A by-reference
+/// element rides its on-disk bytes on the by-ref lane; the returned word then
+/// points into the held buffer (kept alive by the returned Vec), matching how
+/// `array_fill_internal` later reads/detoasts the value pointer.
+#[allow(clippy::type_complexity)]
+fn resolve_fill_value(
+    fcinfo: &FunctionCallInfoBaseData,
+) -> PgResult<(Oid, Datum, bool, Option<Vec<u8>>)> {
+    let elmtype =
+        backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 0);
+    if !types_core::OidIsValid(elmtype) {
+        return Err(types_error::PgError::error(
+            "could not determine data type of input",
+        ));
+    }
+    if arg_isnull(fcinfo, 0) {
+        return Ok((elmtype, Datum::from_usize(0), true, None));
+    }
+    let s = backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(elmtype)?;
+    if s.typbyval {
+        let word = fcinfo
+            .arg(0)
+            .map(|d| d.value)
+            .unwrap_or(Datum::from_usize(0));
+        Ok((elmtype, word, false, None))
+    } else {
+        let bytes = fcinfo
+            .ref_arg(0)
+            .and_then(|p| p.as_varlena().or_else(|| p.as_cstring().map(|c| c.as_bytes())))
+            .expect("array_fill: by-ref element missing from by-ref lane")
+            .to_vec();
+        let ptr = bytes.as_ptr() as usize;
+        Ok((elmtype, Datum::from_usize(ptr), false, Some(bytes)))
+    }
+}
+
+/// `array_fill(anyelement, int4[]) -> anyarray` (oid 1193). Non-strict.
+fn fc_array_fill(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    if arg_isnull(fcinfo, 1) {
+        return Err(types_error::PgError::error(
+            "dimension array or low bound array cannot be null",
+        )
+        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+    }
+    let dims_img = arg_array_detoast(fcinfo, 1)?;
+    let dims = deconstruct_int4_array(&dims_img)?;
+    let (elmtype, value, isnull, _held) = resolve_fill_value(fcinfo)?;
+    let m = scratch_mcx();
+    let r = crate::sql::array_fill(m.mcx(), value, isnull, elmtype, &dims, &[])?;
+    Ok(ret_varlena(fcinfo, r.as_slice().to_vec()))
+}
+
+/// `array_fill(anyelement, int4[], int4[]) -> anyarray` (oid 1286). Non-strict.
+fn fc_array_fill_with_lower_bounds(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    if arg_isnull(fcinfo, 1) || arg_isnull(fcinfo, 2) {
+        return Err(types_error::PgError::error(
+            "dimension array or low bound array cannot be null",
+        )
+        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+    }
+    let dims_img = arg_array_detoast(fcinfo, 1)?;
+    let lbs_img = arg_array_detoast(fcinfo, 2)?;
+    let dims = deconstruct_int4_array(&dims_img)?;
+    let lbs = deconstruct_int4_array(&lbs_img)?;
+    // C `array_fill_internal` size-checks the explicit low-bound array against
+    // `ndims` (`ndims != ARR_DIMS(lbs)[0]`) — including an explicit empty `{}`
+    // low-bound array against a non-empty dims array. The shared `array_fill`
+    // body treats an empty `lbs` slice as "apply default low bounds" (the no-lbs
+    // path), so an explicit empty `{}` must be range-checked here before the body
+    // could silently default it.
+    if lbs.len() != dims.len() {
+        return Err(types_error::PgError::error("wrong number of array subscripts")
+            .with_sqlstate(types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+            .with_detail("Low bound array has different size than dimensions array."));
+    }
+    let (elmtype, value, isnull, _held) = resolve_fill_value(fcinfo)?;
+    let m = scratch_mcx();
+    let r = crate::sql::array_fill(m.mcx(), value, isnull, elmtype, &dims, &lbs)?;
+    Ok(ret_varlena(fcinfo, r.as_slice().to_vec()))
+}
+
 /// A strict (`proisstrict => 't'`) builtin row.
 fn sbuiltin(
     foid: u32,
@@ -892,5 +1013,8 @@ pub fn register_arrayfuncs_sql_builtins() {
         nbuiltin(3279, "array_positions", 2, fc_array_positions),
         nbuiltin(3167, "array_remove", 2, fc_array_remove),
         nbuiltin(3168, "array_replace", 3, fc_array_replace),
+        // fill (non-strict: a NULL value yields an all-NULL array)
+        nbuiltin(1193, "array_fill", 2, fc_array_fill),
+        nbuiltin(1286, "array_fill_with_lower_bounds", 3, fc_array_fill_with_lower_bounds),
     ]);
 }

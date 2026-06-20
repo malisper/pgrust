@@ -236,6 +236,122 @@ fn fc_array_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum
 }
 
 // ===========================================================================
+// array_agg_array_transfn(4051) / array_agg_array_finalfn(4052).
+//
+// The `anyarray`-input variant: each input is a whole sub-array, accumulated
+// into an `ArrayBuildStateArr` (an (n+1)-dimensional array whose first
+// dimension counts the inputs). Mirrors `array_agg_array_transfn` /
+// `array_agg_array_finalfn` (array_userfuncs.c), built on the
+// `initArrayResultArr`/`accumArrayResultArr`/`makeArrayResultArr` machinery
+// already ported in [`crate::construct`].
+// ===========================================================================
+
+/// `(Node *) aggcontext`-charged `array_agg(anyarray)` build state. Like
+/// [`ArrayAggInternal`], the leaked context backs the state's by-ref sub-array
+/// copies; the state is `'static` for the same reason (per-backend leaked
+/// aggcontext, repo-wide by-ref-free TODO).
+struct ArrayAggArrInternal {
+    ctx: &'static MemoryContext,
+    state: types_datum::array_build::ArrayBuildStateArr,
+}
+
+/// Take the `internal` `ArrayBuildStateArr` transition state out of `args[0]`.
+fn take_array_arr_state(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> Option<Box<ArrayAggArrInternal>> {
+    if arg_isnull(fcinfo, 0) {
+        return None;
+    }
+    match fcinfo.take_ref_arg(0) {
+        Some(RefPayload::Internal(b)) => Some(b.downcast::<ArrayAggArrInternal>().unwrap_or_else(
+            |_| panic!("array_agg_array fn: args[0] internal state is not an ArrayAggArrInternal"),
+        )),
+        Some(other) => {
+            panic!("array_agg_array fn: args[0] is not an internal state ({other:?})")
+        }
+        None => None,
+    }
+}
+
+/// `array_agg_array_transfn`(4051): accumulate one `anyarray` sub-array into the
+/// running `ArrayBuildStateArr`.
+fn fc_array_agg_array_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    // arg1_typeid = get_fn_expr_argtype(fcinfo->flinfo, 1);  (the array type)
+    let arg1_typeid = fn_expr_argtype(fcinfo, 1);
+    if !OidIsValid(arg1_typeid) {
+        return Err(types_error::PgError::error("could not determine input data type")
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+    }
+
+    // AggCheckCallContext: the leaked context inside ArrayAggArrInternal models
+    // the aggcontext the by-OID dispatch cannot thread (see module docs).
+    let mut carrier = match take_array_arr_state(fcinfo) {
+        Some(c) => c,
+        None => {
+            let ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("array_agg_array state")));
+            // initArrayResultArr(arg1_typeid, InvalidOid, aggcontext, false).
+            let state = construct::init_array_result_arr(arg1_typeid, 0, false)?;
+            Box::new(ArrayAggArrInternal { ctx, state })
+        }
+    };
+
+    let ctx_mcx = carrier.ctx.mcx();
+    let disnull = arg_isnull(fcinfo, 1);
+
+    // PG_GETARG_DATUM(1): the input sub-array. accumArrayResultArr disallows a
+    // NULL sub-array; on a NULL arg it raises before dereferencing, so the
+    // pointer-word need only be live when the value is non-NULL. A non-NULL
+    // anyarray rides the by-ref Varlena lane; materialize a pointer-word into a
+    // held buffer that outlives the accum call (mirroring C's bare-pointer
+    // Datum into the argument image, which accumArrayResultArr detoasts/copies).
+    let (dvalue, _held): (Datum, Option<Vec<u8>>) = if disnull {
+        (Datum::from_usize(0), None)
+    } else {
+        let bytes = match fcinfo.ref_arg(1) {
+            Some(RefPayload::Varlena(b)) => b.as_slice().to_vec(),
+            _ => {
+                return Err(types_error::PgError::error(
+                    "array_agg_array_transfn: arg 1 has no by-reference payload on the call frame \
+                     (the dispatcher did not seed ref_args[1] for an anyarray element)",
+                ))
+            }
+        };
+        let ptr = bytes.as_ptr() as usize;
+        (Datum::from_usize(ptr), Some(bytes))
+    };
+
+    // state = accumArrayResultArr(state, PG_GETARG_DATUM(1), PG_ARGISNULL(1),
+    //                             arg1_typeid, aggcontext);
+    let new_state = construct::accum_array_result_arr(
+        ctx_mcx,
+        Some(core::mem::take(&mut carrier.state)),
+        dvalue,
+        disnull,
+        arg1_typeid,
+    )?;
+    carrier.state = new_state;
+
+    Ok(ret_internal(fcinfo, carrier))
+}
+
+/// `array_agg_array_finalfn`(4052): finalize the accumulated (n+1)-D array.
+fn fc_array_agg_array_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    match take_array_arr_state(fcinfo) {
+        // returns null iff no input values
+        None => Ok(ret_null(fcinfo)),
+        Some(carrier) => {
+            // result = makeArrayResultArr(state, CurrentMemoryContext, false);
+            let m = MemoryContext::new("array_agg_array finalfn");
+            let image = construct::make_array_result_arr(m.mcx(), &carrier.state)?
+                .as_slice()
+                .to_vec();
+            Ok(ret_array(fcinfo, image))
+        }
+    }
+}
+
+// ===========================================================================
 // Registration (C: their `fmgr_builtins[]` rows; transition/final functions are
 // `proisstrict => 'f'` — they handle the NULL `internal` running state / NULL
 // input themselves). `array_agg_finalfn` is declared `internal anynonarray`
@@ -246,6 +362,8 @@ pub fn register_array_agg_builtins() {
     backend_utils_fmgr_core::register_builtins_native([
         builtin(2333, "array_agg_transfn", 2, fc_array_agg_transfn),
         builtin(2334, "array_agg_finalfn", 2, fc_array_agg_finalfn),
+        builtin(4051, "array_agg_array_transfn", 2, fc_array_agg_array_transfn),
+        builtin(4052, "array_agg_array_finalfn", 2, fc_array_agg_array_finalfn),
     ]);
 }
 

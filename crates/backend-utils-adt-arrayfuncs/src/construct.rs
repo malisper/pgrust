@@ -959,7 +959,7 @@ pub fn make_md_array_result<'mcx>(
 
 /// `initArrayResultArr(array_type, element_type, rcontext, subcontext)`
 /// (arrayfuncs.c).
-fn init_array_result_arr(
+pub(crate) fn init_array_result_arr(
     array_type: Oid,
     element_type: Oid,
     subcontext: bool,
@@ -997,7 +997,7 @@ fn init_array_result_arr(
 
 /// `accumArrayResultArr(astate, dvalue, disnull, array_type, rcontext)`
 /// (arrayfuncs.c): accumulate one sub-array.
-fn accum_array_result_arr<'mcx>(
+pub(crate) fn accum_array_result_arr<'mcx>(
     mcx: Mcx<'mcx>,
     astate: Option<ArrayBuildStateArr>,
     dvalue: Datum,
@@ -1122,7 +1122,7 @@ fn accum_array_result_arr<'mcx>(
 }
 
 /// `makeArrayResultArr(astate, rcontext, release)` (arrayfuncs.c).
-fn make_array_result_arr<'mcx>(
+pub(crate) fn make_array_result_arr<'mcx>(
     mcx: Mcx<'mcx>,
     astate: &ArrayBuildStateArr,
 ) -> PgResult<PgVec<'mcx, u8>> {
