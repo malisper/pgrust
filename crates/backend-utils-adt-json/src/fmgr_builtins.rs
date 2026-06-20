@@ -15,8 +15,11 @@
 //! frame, calls the matching value core, and writes the result. OIDs / nargs /
 //! strict / retset are transcribed exactly from `pg_proc.dat`.
 //!
-//! The K5-gated variadic-`"any"` constructors (`json_build_object` /
-//! `json_build_array`) and the SRF / aggregate entries are NOT registered here.
+//! The variadic-`"any"` constructors (`json_build_object` / `json_build_array`
+//! and their no-arg empty forms) ARE registered: their arguments are extracted
+//! via `extract_variadic_args` (mirroring jsonb.c), reading per-arg type OIDs
+//! through `get_fn_expr_argtype` (or the VARIADIC array's element type). The SRF
+//! / aggregate entries are NOT registered here.
 //! The `to_json` / `row_to_json` / `array_to_json` / `json_object` family IS
 //! registered: each reads its value arg off the fmgr frame (by-value scalar
 //! word, by-reference varlena, or composite record), resolves the input type's
@@ -356,12 +359,8 @@ fn extract_variadic_args<'mcx>(
         // ARR_ELEMTYPE(array_in); deconstruct_array(...) — all element types
         // are element_type.
         let array_image = arg_value(mcx, fcinfo, variadic_start)?;
-        let array_bytes = match array_image {
-            ValDatum::ByRef(b) => b.as_slice().to_vec(),
-            _ => panic!("json variadic: VARIADIC array arg not on the by-ref lane"),
-        };
         let (element_type, elems): (types_core::Oid, Vec<(ValDatum<'mcx>, bool)>) =
-            backend_utils_adt_jsonb_seams::extract_variadic_array::call(mcx, &array_bytes)?;
+            backend_utils_adt_jsonb_seams::extract_variadic_array::call(mcx, &array_image)?;
         let n = elems.len();
         let mut args = Vec::with_capacity(n);
         let mut nulls = Vec::with_capacity(n);
@@ -408,7 +407,7 @@ fn extract_variadic_args<'mcx>(
             // if (!OidIsValid(types_res[i]) || (convert_unknown && types_res[i]
             // == UNKNOWNOID)) ereport(ERROR, ...).
             if typ == 0 || typ == UNKNOWNOID {
-                return Err(PgError::error(alloc::format!(
+                return Err(types_error::PgError::error(alloc::format!(
                     "could not determine data type for argument {}",
                     i + 1
                 ))
@@ -522,5 +521,11 @@ pub fn register_json_builtins() {
         builtin(3156, "row_to_json_pretty", 2, true, false, fc_row_to_json_pretty),
         builtin(3202, "json_object", 1, true, false, fc_json_object),
         builtin(3203, "json_object_two_arg", 2, true, false, fc_json_object_two_arg),
+        // VARIADIC-"any" constructors: proisstrict 'f', not retset; nargs is the
+        // VARIADIC array slot (1) or 0 for the no-arg empty-constructor form.
+        builtin(3198, "json_build_array", 1, false, false, fc_json_build_array),
+        builtin(3199, "json_build_array_noargs", 0, false, false, fc_json_build_array_noargs),
+        builtin(3200, "json_build_object", 1, false, false, fc_json_build_object),
+        builtin(3201, "json_build_object_noargs", 0, false, false, fc_json_build_object_noargs),
     ]);
 }
