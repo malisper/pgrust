@@ -17,6 +17,7 @@ types-core = { path = "../types-core" }
 types-fmgr = { path = "../types-fmgr" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 types-datum = { path = "../types-datum" }
+port-crc32c = { path = "../port-crc32c" }
 types-tuple = { path = "../types-tuple" }
 types-error = { path = "../types-error" }
 types-locale = { path = "../types-locale" }

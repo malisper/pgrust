@@ -558,6 +558,9 @@ pub fn init_seams() {
     // boundary via `get_fn_expr_argtype` + the lsyscache `get_typlen` seam.
     fmgr_builtins::register_varlena_pg_column_builtins();
 
+    // The `crc32` / `crc32c` `bytea -> int8` checksum builtins (pg_crc.c).
+    fmgr_builtins::register_varlena_crc_builtins();
+
     // The `bytea_output` GUC variable accessor (varlena.c owns the storage;
     // guc_tables.c binds the config_enum's `variable` pointer here). The GUC
     // machinery reads/writes through these accessors and `byteaout` reads the

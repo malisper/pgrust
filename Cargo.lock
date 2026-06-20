@@ -21172,6 +21172,7 @@ dependencies = [
  "common-unicode-category-seams",
  "common-unicode-norm-bitfields",
  "mcx",
+ "port-crc32c",
  "seam-core",
  "types-core",
  "types-datum",

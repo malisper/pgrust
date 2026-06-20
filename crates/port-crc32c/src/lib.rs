@@ -13,6 +13,8 @@
 mod legacy;
 mod table;
 
+pub use legacy::legacy_crc32_lexeme;
+
 use table::PG_CRC32C_TABLE;
 
 /// Accumulate one input byte (the `CRC8` macro, little-endian variant).

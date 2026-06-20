@@ -1438,6 +1438,41 @@ pub fn register_varlena_more_builtins() {
 /// `unknown` I/O pair. Called from this crate's `init_seams()`. OIDs / nargs /
 /// strict / retset transcribed exactly from `pg_proc.dat`; every row here is
 /// `proisstrict => 't'` and not `proretset`.
+/// `crc32_bytea(bytea) -> int8` (pg_crc.c). Traditional reflected CRC-32
+/// (zlib/Ethernet polynomial): `INIT_TRADITIONAL_CRC32` (0xFFFFFFFF) then
+/// `COMP_TRADITIONAL_CRC32` over the detoasted payload then
+/// `FIN_TRADITIONAL_CRC32` (^0xFFFFFFFF). `port_crc32c::legacy_crc32_lexeme`
+/// performs the whole INIT/COMP/FIN triple. C returns `PG_RETURN_INT64(crc)`
+/// where `crc` is a `pg_crc32` (u32) — widened to a non-negative i64.
+fn fc_crc32_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    detoast_varlena_args(fcinfo);
+    let crc = port_crc32c::legacy_crc32_lexeme(arg_bytes(fcinfo, 0));
+    Ok(ret_i64(crc as u64 as i64))
+}
+
+/// `crc32c_bytea(bytea) -> int8` (pg_crc.c). Castagnoli CRC-32C:
+/// `INIT_CRC32C` (0xFFFFFFFF) then `COMP_CRC32C` over the detoasted payload
+/// (`pg_comp_crc32c_sb8`) then `FIN_CRC32C` (^0xFFFFFFFF). Result widened from
+/// `pg_crc32c` (u32) to a non-negative i64 (`PG_RETURN_INT64`).
+fn fc_crc32c_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    detoast_varlena_args(fcinfo);
+    let mut crc: u32 = 0xFFFF_FFFF;
+    crc = port_crc32c::pg_comp_crc32c_sb8(crc, arg_bytes(fcinfo, 0));
+    crc ^= 0xFFFF_FFFF;
+    Ok(ret_i64(crc as u64 as i64))
+}
+
+/// Register the `crc32` / `crc32c` `bytea -> int8` checksum builtins (pg_crc.c).
+/// Both are `proisstrict => 't'`, not retset; OIDs / nargs from `pg_proc.dat`
+/// (6364 `crc32_bytea`, 6365 `crc32c_bytea`). The builtin `name` is the
+/// `prosrc` C symbol.
+pub fn register_varlena_crc_builtins() {
+    backend_utils_fmgr_core::register_builtins_native([
+        builtin(6364, "crc32_bytea", 1, fc_crc32_bytea),
+        builtin(6365, "crc32c_bytea", 1, fc_crc32c_bytea),
+    ]);
+}
+
 pub fn register_varlena_text_bytea_byref_builtins() {
     backend_utils_fmgr_core::register_builtins_native([
         // ---- bytea get/set byte/bit (bytea.rs) ----
