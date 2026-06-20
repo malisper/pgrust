@@ -194,7 +194,7 @@ pub fn pg_analyze_and_rewrite_varparams<'mcx>(
     // PREPARE/plancache consumer reads `Node::Query`).
     let mut query_nodes: PgVec<'mcx, Node<'mcx>> = mcx::vec_with_capacity_in(mcx, query_list.len())?;
     for q in query_list {
-        query_nodes.push(Node::mk_query(mcx, q));
+        query_nodes.push(Node::mk_query(mcx, q)?);
     }
 
     Ok(backend_parser_analyze_seams::AnalyzedVarparams {

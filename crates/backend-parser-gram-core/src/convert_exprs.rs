@@ -27,10 +27,10 @@ fn conv_a_const<'mcx>(mcx: Mcx<'mcx>, p: *mut cs::A_Const) -> PgResult<Node<'mcx
             }),
             tags::T_String => Node::mk_string(mcx, tn_val::StringNode {
                 sval: cstr(mcx, unsafe { c.val.sval.sval })?,
-            }),
+            })?,
             tags::T_BitString => Node::mk_bit_string(mcx, tn_val::BitString {
                 bsval: cstr(mcx, unsafe { c.val.bsval.bsval })?,
-            }),
+            })?,
             other => panic!("gram converter: invalid A_Const ValUnion tag {other}"),
         };
         Some(mcx::alloc_in(mcx, node)?)
@@ -39,7 +39,7 @@ fn conv_a_const<'mcx>(mcx: Mcx<'mcx>, p: *mut cs::A_Const) -> PgResult<Node<'mcx
         val,
         isnull: c.isnull,
         location: c.location,
-    }))
+    })?)
 }
 
 // ---------------------------------------------------------------------------

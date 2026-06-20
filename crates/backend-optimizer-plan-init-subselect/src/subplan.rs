@@ -836,7 +836,7 @@ pub fn SS_process_ctes<'mcx>(
                     None => unreachable!(),
                 };
                 let cq = cte.ctequery.as_deref().unwrap().as_query().unwrap();
-                Node::mk_query(mcx, cq.clone_in(mcx)?)
+                Node::mk_query(mcx, cq.clone_in(mcx)?)?
             };
             let dml = contain_dml(&cte_query_node);
             let outer_selfref = if cterefcount <= 1 {
@@ -1227,7 +1227,7 @@ fn inline_cte_walker_query<'mcx>(
             // with appropriate level adjustment for outer references.
             let mut newquery = ctx.ctequery.clone_in(mcx)?;
             if ctx.levelsup > 0 {
-                let mut nq_node = Node::mk_query(mcx, newquery);
+                let mut nq_node = Node::mk_query(mcx, newquery)?;
                 backend_rewrite_core::increment::IncrementVarSublevelsUp(
                     &mut nq_node,
                     ctx.levelsup as i32,
@@ -1420,7 +1420,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
 
     // The rest of the sub-select must not refer to any Vars of the parent query.
     if backend_optimizer_util_vars::var::contain_vars_of_level(
-        &Node::mk_query(mcx, subselect.clone_in(mcx)?),
+        &Node::mk_query(mcx, subselect.clone_in(mcx)?)?,
         1,
     ) {
         return Ok(None);
@@ -1458,7 +1458,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
                 let leftarg = op.args[0].clone();
                 let rightarg = op.args[1].clone();
                 if backend_optimizer_util_vars::var::contain_vars_of_level(
-                    &Node::mk_expr(mcx, leftarg.clone()),
+                    &Node::mk_expr(mcx, leftarg.clone())?,
                     1,
                 ) {
                     leftargs.push(leftarg);
@@ -1467,7 +1467,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
                     opcollations.push(op.inputcollid);
                     handled = true;
                 } else if backend_optimizer_util_vars::var::contain_vars_of_level(
-                    &Node::mk_expr(mcx, rightarg.clone()),
+                    &Node::mk_expr(mcx, rightarg.clone())?,
                     1,
                 ) {
                     // Commute the clause to put the outer var on the left.
@@ -1539,7 +1539,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
     {
         let mut adjusted: Vec<Expr> = Vec::with_capacity(leftargs.len());
         for l in leftargs.drain(..) {
-            let mut n = Node::mk_expr(mcx, l);
+            let mut n = Node::mk_expr(mcx, l)?;
             backend_rewrite_core::increment::IncrementVarSublevelsUp(&mut n, -1, 1)?;
             adjusted.push(n.into_expr().expect("expected Expr node"));
         }
@@ -1550,7 +1550,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
     if !new_where.is_empty() {
         let explicit = make_ands_explicit(new_where);
         let jt = subselect.jointree.as_mut().unwrap();
-        jt.quals = Some(alloc_in(mcx, Node::mk_expr(mcx, explicit))?);
+        jt.quals = Some(alloc_in(mcx, Node::mk_expr(mcx, explicit)?)?);
     }
 
     // Build a new targetlist for the child + a testexpr for the parent.

@@ -638,7 +638,7 @@ pub fn CreateStatistics<'mcx>(
         for e in &stxexprs {
             items.push(mcx::alloc_in(mcx, e.clone_in(mcx)?)?);
         }
-        Some(Node::mk_list(mcx, items))
+        Some(Node::mk_list(mcx, items)?)
     } else {
         None
     };
