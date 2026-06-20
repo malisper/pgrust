@@ -94,7 +94,38 @@ pub fn inline_sql_function<'mcx>(
         // prepare_sql_fn_parse_info + sql_fn_parser_setup (clauses.c:4674/4690):
         // a `$n` resolves against proargtypes and a body bareword that names an
         // argument resolves to its Param, under the call's input collation.
+        //
+        // prepare_sql_fn_parse_info (functions.c) copies proargtypes, then
+        // RESOLVES any polymorphic declared type to the concrete type implied by
+        // the actual call: `if (IsPolymorphicType(argtype)) argtype =
+        // get_call_expr_argtype(call_expr, argnum)`. Without this, a body Param
+        // `$1` of a `RETURNS anyelement` function keeps the declared
+        // `anyelement` type and the body `$1 + 1` analyzes as
+        // `anyelement + integer` (no such operator) instead of resolving against
+        // the call's concrete argument (e.g. `integer + integer`). The call's
+        // already-simplified actual arguments are exactly `fexpr->args`, so
+        // `get_call_expr_argtype(fexpr, n)` is `exprType(args[n])` here.
         let nargs = form.proargtypes.len();
+        let mut argtypes = form.proargtypes.clone();
+        for (argnum, argtype) in argtypes.iter_mut().enumerate() {
+            if is_polymorphic_type(*argtype) {
+                // get_call_expr_argtype(call_expr, argnum): the nth actual
+                // argument's resolved type. The args slice is the FuncExpr's
+                // already-simplified argument list (the same nodes
+                // get_call_expr_argtype would read off the FuncExpr).
+                let resolved = match args.get(argnum) {
+                    Some(a) => expr_type(Some(a))?,
+                    None => InvalidOid,
+                };
+                if resolved == InvalidOid {
+                    return Err(PgError::error(format!(
+                        "could not determine actual type of argument declared {}",
+                        *argtype
+                    )));
+                }
+                *argtype = resolved;
+            }
+        }
         let argnames = match &form.proargnames {
             Some(names) if names.len() >= nargs && nargs > 0 => Some(names.clone()),
             _ => None,
@@ -102,7 +133,7 @@ pub fn inline_sql_function<'mcx>(
         let pinfo = types_nodes::parsestmt::SqlFnParseInfo::new(
             form.proname.clone(),
             input_collid,
-            form.proargtypes.clone(),
+            argtypes,
             argnames,
         );
         crate::parse_analyze_sql_function(mcx, &raw_list[0], prosrc_mcx, pinfo)?
@@ -350,6 +381,30 @@ fn substitute_actual_parameters<'mcx>(
         Some(e) => Err(e),
         None => Ok(out),
     }
+}
+
+/// `IsPolymorphicType(typid)` (catalog/pg_type.h:313) — the union of polymorphic
+/// type families 1 and 2, a pure OID comparison (mirrors
+/// `backend-catalog-pg-proc`'s private copy).
+fn is_polymorphic_type(typid: Oid) -> bool {
+    use types_tuple::heaptuple::{
+        ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
+        ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
+        ANYNONARRAYOID, ANYRANGEOID,
+    };
+    // IsPolymorphicTypeFamily1
+    typid == ANYELEMENTOID
+        || typid == ANYARRAYOID
+        || typid == ANYNONARRAYOID
+        || typid == ANYENUMOID
+        || typid == ANYRANGEOID
+        || typid == ANYMULTIRANGEOID
+        // IsPolymorphicTypeFamily2
+        || typid == ANYCOMPATIBLEOID
+        || typid == ANYCOMPATIBLEARRAYOID
+        || typid == ANYCOMPATIBLENONARRAYOID
+        || typid == ANYCOMPATIBLERANGEOID
+        || typid == ANYCOMPATIBLEMULTIRANGEOID
 }
 
 /// A trivially-cheap leaf for the multi-use expensiveness gate: `Var` / `Const`
