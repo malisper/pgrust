@@ -845,8 +845,8 @@ pub fn DefineIndex<'mcx>(
                 }
 
                 let childidxs =
-                    relcache_seam::relation_get_index_list::call(mcx, childrel.alias())?;
-                let attmap = backend_access_common_next::build_attrmap_by_name(
+                    relcache_seam::relation_get_index_list::call(mcx, &childrel)?;
+                let attmap = backend_access_common_next::attmap::build_attrmap_by_name(
                     mcx,
                     &childrel.rd_att,
                     &rel.rd_att,
@@ -933,7 +933,7 @@ pub fn DefineIndex<'mcx>(
                         utilcmd_seam::generateClonedIndexStmt::call(
                             mcx,
                             None,
-                            parent_index.alias(),
+                            &parent_index,
                             &attmap,
                         )?;
 
