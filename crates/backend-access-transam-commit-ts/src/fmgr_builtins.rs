@@ -18,7 +18,7 @@
 //! and are left to their own registration.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::{TimestampTz, TransactionId};
 
@@ -54,30 +54,16 @@ fn ret_timestamptz_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<Timestam
     }
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
-fn fc_pg_xact_commit_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_xact_commit_timestamp(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let xid = arg_xid(fcinfo, 0);
-    let res = crate::with_commit_ts_state(|state| crate::pg_xact_commit_timestamp(state, xid));
-    let ts = ok(res);
-    ret_timestamptz_opt(fcinfo, ts)
+    let ts = crate::with_commit_ts_state(|state| crate::pg_xact_commit_timestamp(state, xid))?;
+    Ok(ret_timestamptz_opt(fcinfo, ts))
 }
 
 // ---------------------------------------------------------------------------
@@ -90,16 +76,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the commit-timestamp builtins (C: their `fmgr_builtins[]` rows).
@@ -107,7 +96,7 @@ fn builtin(
 /// exactly from `pg_proc.dat`; `pg_xact_commit_timestamp` has no explicit
 /// `proisstrict`, so it defaults to strict (`'t'`), and is not set-returning.
 pub fn register_backend_access_transam_commit_ts_builtins() {
-    backend_utils_fmgr_core::register_builtins([builtin(
+    backend_utils_fmgr_core::register_builtins_native([builtin(
         3581,
         "pg_xact_commit_timestamp",
         1,
