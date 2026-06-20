@@ -692,16 +692,59 @@ fn clean_op_stack(
     Ok(())
 }
 
+/// The parser-stack handle handed to a [`PushvalFn`] callback.
+///
+/// In C, `pushval_morph` (to_tsany.c) receives the opaque `TSQueryParserState`
+/// and drives it with `pushValue` / `pushStop` / `pushOperator`. This struct is
+/// the Rust analogue: it wraps the in-flight parser state + soft-error context
+/// and exposes exactly those three stack operations, so an out-of-crate
+/// `pushval` (the morphology callback) can build the polish-notation node list
+/// without seeing `ParserStateData`'s internals.
+pub struct QueryBuilder<'a, 'mcx, 'e> {
+    state: &'a mut ParserStateData<'mcx>,
+    escontext: &'a mut Option<&'e mut SoftErrorContext>,
+}
+
+impl QueryBuilder<'_, '_, '_> {
+    /// `pushValue(state, strval, lenval, weight, prefix)` (tsquery.c:601).
+    pub fn push_value(
+        &mut self,
+        strval: &[u8],
+        lenval: usize,
+        weight: i16,
+        prefix: bool,
+    ) -> PgResult<()> {
+        push_value(self.state, self.escontext, strval, lenval, weight, prefix)
+    }
+
+    /// `pushStop(state)` (tsquery.c:615).
+    pub fn push_stop(&mut self) -> PgResult<()> {
+        push_stop(self.state)
+    }
+
+    /// `pushOperator(state, oper, distance)` (tsquery.c:584).
+    pub fn push_operator(&mut self, oper: i8, distance: i16) -> PgResult<()> {
+        push_operator(self.state, oper, distance)
+    }
+}
+
+/// A `pushval` callback (`PushFunction` in C): invoked by [`makepol`] for each
+/// `Val` token. `(builder, strval, lenval, weight, prefix)`. The in-tree
+/// default is `pushval_asis` (a single `pushValue`); `pushval_morph`
+/// (to_tsany.c) is supplied from out of crate for the `to_tsquery` family.
+pub type PushvalFn<'a> =
+    dyn FnMut(&mut QueryBuilder<'_, '_, '_>, &[u8], usize, i16, bool) -> PgResult<()> + 'a;
+
 /// `makepol(state, pushval, opaque)` (tsquery.c:671).
 ///
-/// The C `pushval` callback is one of `pushval_asis` (the only built-in
-/// `PushFunction` in this TU) — it just calls `pushValue`. Web/plain callers
-/// also use `pushval_asis`. The callback indirection collapses to a direct
-/// `pushValue` here; were a morphology callback ever needed it would be a
-/// closure parameter.
+/// `pushval` is the `PushFunction` callback. For the in-tree `tsqueryin` /
+/// web / plain callers it is `pushval_asis` (a direct `pushValue`); the
+/// `to_tsquery` family supplies `pushval_morph` (to_tsany.c) over the same
+/// [`QueryBuilder`] handle.
 fn makepol(
     state: &mut ParserStateData<'_>,
     escontext: &mut Option<&mut SoftErrorContext>,
+    pushval: &mut PushvalFn<'_>,
 ) -> PgResult<()> {
     let mut opstack = [OperatorElement { op: 0, distance: 0 }; STACKDEPTH];
     let mut lenstack = 0usize;
@@ -720,14 +763,15 @@ fn makepol(
                 // pushval(opaque, state, strval, lenval, weight, prefix)
                 let lenval = tok.strval.len();
                 let strval = core::mem::take(&mut tok.strval);
-                push_value(state, escontext, &strval, lenval, tok.weight, tok.prefix)?;
+                let mut builder = QueryBuilder { state, escontext };
+                pushval(&mut builder, &strval, lenval, tok.weight, tok.prefix)?;
             }
             TokenType::Opr => {
                 clean_op_stack(state, &mut opstack, &mut lenstack, tok.operator)?;
                 push_op_stack(&mut opstack, &mut lenstack, tok.operator, tok.weight)?;
             }
             TokenType::Open => {
-                makepol(state, escontext)?;
+                makepol(state, escontext, pushval)?;
             }
             TokenType::Close => {
                 clean_op_stack(state, &mut opstack, &mut lenstack, OP_OR /* lowest */)?;
@@ -844,7 +888,29 @@ pub fn parse_tsquery(
     mcx: Mcx<'_>,
     buf: &[u8],
     flags: i32,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<Vec<u8>>> {
+    // `pushval_asis(state, strval, lenval, weight, prefix)` (tsquery.c:806) —
+    // the only in-tree `PushFunction`: a single `pushValue`. The `tsqueryin`,
+    // plain, and web callers all use it.
+    let mut asis = |b: &mut QueryBuilder<'_, '_, '_>,
+                    strval: &[u8],
+                    lenval: usize,
+                    weight: i16,
+                    prefix: bool|
+     -> PgResult<()> { b.push_value(strval, lenval, weight, prefix) };
+    parse_tsquery_with_pushval(mcx, buf, flags, escontext, &mut asis)
+}
+
+/// `parse_tsquery(buf, pushval, opaque, flags, escontext)` (tsquery.c:816) with
+/// an explicit `pushval` `PushFunction` — the form the `to_tsquery` family
+/// (to_tsany.c) uses with `pushval_morph`.
+pub fn parse_tsquery_with_pushval(
+    mcx: Mcx<'_>,
+    buf: &[u8],
+    flags: i32,
     mut escontext: Option<&mut SoftErrorContext>,
+    pushval: &mut PushvalFn<'_>,
 ) -> PgResult<Option<Vec<u8>>> {
     // plain should not be used with web
     debug_assert!((flags & (P_TSQ_PLAIN | P_TSQ_WEB)) != (P_TSQ_PLAIN | P_TSQ_WEB));
@@ -881,7 +947,7 @@ pub fn parse_tsquery(
     };
 
     // parse query & make polish notation (postfix, but in reverse order)
-    let res = makepol(&mut state, &mut escontext);
+    let res = makepol(&mut state, &mut escontext, pushval);
 
     tsvparser::close_tsvector_parser::call(state.valstate);
 
