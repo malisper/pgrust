@@ -11,7 +11,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::Oid;
 
@@ -64,12 +64,6 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("objectaddress fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
@@ -77,7 +71,7 @@ fn raise(err: types_error::PgError) -> ! {
 /// `pg_describe_object(classid oid, objid oid, objsubid int4) -> text`
 /// (objectaddress.c 4220). The C wraps `getObjectDescription`'s cstring into a
 /// `text` varlena, or returns NULL for "pinned" pg_depend items.
-fn fc_pg_describe_object(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_describe_object(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let classid = arg_oid(fcinfo, 0);
     let objid = arg_oid(fcinfo, 1);
     let objsubid = arg_i32(fcinfo, 2);
@@ -86,14 +80,13 @@ fn fc_pg_describe_object(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // Lower the borrowed `PgString` to an owned byte image while `m` is still
     // alive, then write to the frame (the `text` framing is the boundary's).
     let bytes: Option<Vec<u8>> =
-        match crate::fmgr_sql::pg_describe_object(m.mcx(), classid, objid, objsubid) {
-            Ok(Some(s)) => Some(s.as_bytes().to_vec()),
-            Ok(None) => None,
-            Err(e) => raise(e),
+        match crate::fmgr_sql::pg_describe_object(m.mcx(), classid, objid, objsubid)? {
+            Some(s) => Some(s.as_bytes().to_vec()),
+            None => None,
         };
     match bytes {
-        Some(b) => ret_text(fcinfo, b),
-        None => ret_null(fcinfo),
+        Some(b) => Ok(ret_text(fcinfo, b)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 
@@ -107,16 +100,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every SQL-callable `objectaddress.c` builtin whose boundary types
@@ -124,7 +120,7 @@ fn builtin(
 /// `init_seams()`. OIDs/nargs/strict/retset transcribed exactly from
 /// `pg_proc.dat`.
 pub fn register_objectaddress_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // pg_describe_object: oid '3537', proargtypes 'oid oid int4',
         // prorettype 'text'; no proisstrict (=> strict false), no proretset.
         builtin(
