@@ -235,6 +235,8 @@ pub const Anum_pg_authid_oid: i16 = 1;
 pub const Anum_pg_authid_rolname: i16 = 2;
 // pg_auth_members
 pub const Anum_pg_auth_members_oid: i16 = 1;
+pub const Anum_pg_auth_members_roleid: i16 = 2;
+pub const Anum_pg_auth_members_member: i16 = 3;
 pub const Anum_pg_auth_members_grantor: i16 = 4;
 // pg_rewrite
 pub const Anum_pg_rewrite_oid: i16 = 1;

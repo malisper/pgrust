@@ -37,6 +37,7 @@ pub mod description;
 pub mod fmgr_builtins;
 pub mod fmgr_sql;
 pub mod identity;
+pub mod auth_member_lookup;
 pub mod rewrite_lookup;
 pub mod trigger_lookup;
 pub mod type_description;
@@ -80,6 +81,14 @@ pub fn init_seams() {
     );
     backend_utils_cache_syscache_seams::trigger_name_relid::set(
         trigger_lookup::trigger_name_relid,
+    );
+
+    // pg_auth_members by-oid projection (no by-oid syscache exists): the
+    // `getObjectDescription` / `getObjectIdentityParts` role-membership legs
+    // (AuthMemRelationId) fetch `(member, roleid)` by pg_auth_members oid
+    // through this — used to build the DROP ROLE dependency DETAIL.
+    backend_utils_cache_syscache_seams::auth_member_member_role::set(
+        auth_member_lookup::auth_member_member_role,
     );
 
     // Register this crate's SQL-callable fmgr builtins (C: their
