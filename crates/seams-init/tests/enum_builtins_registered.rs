@@ -6,7 +6,7 @@
 //! ENUM` walls on the unported `DefineEnum`/XLog driver path), so this asserts
 //! the registration wiring this crate's `init_seams` performs.
 
-use backend_utils_fmgr_core::fmgr_isbuiltin;
+use backend_utils_fmgr_core::{fmgr_isbuiltin, native_builtin};
 
 /// (oid, name, nargs, strict) transcribed from `fmgrtab.c`.
 const ENUM_BUILTINS: &[(u32, &str, i16, bool)] = &[
@@ -40,6 +40,13 @@ fn enum_builtins_resolve_by_oid_after_init() {
         assert_eq!(entry.nargs, nargs, "nargs mismatch for {name} (oid {oid})");
         assert_eq!(entry.strict, strict, "strict mismatch for {name} (oid {oid})");
         assert!(!entry.retset, "{name} (oid {oid}) must not be retset");
-        assert!(entry.func.is_some(), "{name} (oid {oid}) has no callable");
+        // enum.c builtins have been migrated to the Result-native fmgr shape
+        // (panic→Result Phase 2): the metadata row carries `func: None`, and the
+        // callable lives in the `NATIVE` overlay. Accept either a legacy
+        // `PGFunction` or a registered Result-native body.
+        assert!(
+            entry.func.is_some() || native_builtin(oid).is_some(),
+            "{name} (oid {oid}) has no callable (neither legacy nor native)"
+        );
     }
 }
