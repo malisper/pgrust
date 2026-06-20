@@ -557,13 +557,29 @@ pub fn ExecIndexScan<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // If we have runtime keys and they've not already been set up, do it now.
-    let (num_runtime_keys, ready, num_orderby) = match pstate {
-        types_nodes::PlanStateNode::IndexScan(n) => {
-            (n.iss_NumRuntimeKeys, n.iss_RuntimeKeysReady, n.iss_NumOrderByKeys)
-        }
+    //
+    //   if (node->iss_NumRuntimeKeys != 0 && !node->iss_RuntimeKeysReady)
+    //       ExecReScan((PlanState *) node);
+    //
+    // A node whose `chgParam` is still set has not yet been rescanned for the
+    // current parameter values: its immediate parent deliberately left it to be
+    // "re-scanned by first ExecProcNode" (e.g. `ExecReScanNestLoop` /
+    // `ExecReScanMemoize` skip rescanning a child whose chgParam is non-NULL).
+    // For a parameterized index scan, recomputing the runtime keys here is that
+    // deferred rescan; without it the scankeys keep the previous parameter's
+    // values and the scan returns the same tuples for every outer row (the
+    // classic Memoize-over-parameterized-IndexScan collapse). Dispatch through
+    // the generic ExecReScan so it recomputes the keys *and* clears chgParam.
+    let (num_runtime_keys, ready, num_orderby, chg_param_set) = match pstate {
+        types_nodes::PlanStateNode::IndexScan(n) => (
+            n.iss_NumRuntimeKeys,
+            n.iss_RuntimeKeysReady,
+            n.iss_NumOrderByKeys,
+            n.ss.ps.chgParam.is_some(),
+        ),
         _ => return Err(elog("ExecIndexScan dispatched to wrong node type")),
     };
-    if num_runtime_keys != 0 && !ready {
+    if (num_runtime_keys != 0 && !ready) || chg_param_set {
         // Generic ExecReScan dispatcher (execAmi): instrument loop end, chgParam
         // propagation, expr-context rescan, then dispatch to ExecReScanIndexScan.
         execAmi::exec_re_scan::call(pstate, estate)?;
