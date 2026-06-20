@@ -30,7 +30,8 @@ use types_core::catalog::BTREE_AM_OID;
 use types_core::Oid;
 
 use types_storage::lock::{AccessShareLock, NoLock};
-use backend_access_common_relation::relation_open;
+use backend_access_common_relation::{relation_open, relation_openrv};
+use types_tuple::{RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 
 use backend_optimizer_util_plancat_ext_seams as plancat_ext;
 use backend_parser_parse_utilcmd_outward_seams as sx;
@@ -623,6 +624,8 @@ pub fn transform_index_constraint_catalog<'mcx>(
         for (kidx, key_node) in con.keys.iter().enumerate() {
             let key = str_val(key_node);
             let mut found = false;
+            #[allow(unused_assignments)]
+            let mut key_typid = InvalidOid;
             let mut col_idx: Option<usize> = None;
 
             for (i, c) in columns.iter().enumerate() {
@@ -674,23 +677,21 @@ pub fn transform_index_constraint_catalog<'mcx>(
                 // A system column in the new table; accept it (never null).
                 found = true;
             } else if !inh_relations.is_empty() {
-                // Inherited tables: C searches each parent's TupleDesc for the
-                // key column (table_openrv + RelationGetDescr per parent, plus
-                // a PRIMARY-KEY not-null addition and atttypid capture for the
-                // WITHOUT OVERLAPS check). That requires opening each parent
-                // relation by name through the relcache, which is not reachable
-                // here. Stop loudly and recoverably rather than crash; if the
-                // column truly lives only in a parent, DefineIndex would resolve
-                // it, but we cannot confirm `found` without the relcache.
-                return Err(ereport(ERROR)
-                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                    .errmsg(alloc::format!(
-                        "column \"{}\" named in key is not in the new table; \
-                         resolving inherited columns in a key constraint is not yet supported",
-                        key
-                    ))
-                    .errposition(parser_errposition(pstate, con.location))
-                    .into_error());
+                // Inherited tables: search each parent's TupleDesc for the key
+                // column (table_openrv + RelationGetDescr per parent). On a
+                // match, a PRIMARY KEY also adds a NOT NULL constraint for the
+                // inherited column, and we capture the column's type OID for the
+                // WITHOUT OVERLAPS check.
+                let (inh_found, inh_typid) =
+                    find_inherited_key_column(mcx, &inh_relations, key)?;
+                if inh_found {
+                    found = true;
+                    key_typid = inh_typid;
+                    if is_primary {
+                        let nn = make_not_null_constraint(mcx, key)?;
+                        extra_nn.push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn)?)?);
+                    }
+                }
             }
 
             if !found && !isalter {
@@ -731,6 +732,12 @@ pub fn transform_index_constraint_catalog<'mcx>(
             // recoverably rather than crash.
             if con.without_overlaps && kidx == n_keys - 1 {
                 if found {
+                    // `key_typid` (captured from an inherited parent's
+                    // attribute above, or from the new column's TypeName via
+                    // typenameTypeId) is what C feeds to type_is_range /
+                    // type_is_multirange here; that type-cache check is not yet
+                    // reachable, so stop loudly.
+                    let _ = key_typid;
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                         .errmsg("WITHOUT OVERLAPS constraints are not yet supported")
@@ -777,18 +784,14 @@ pub fn transform_index_constraint_catalog<'mcx>(
             if plancat_ext::system_attribute_by_name::call(key)?.is_some() {
                 found = true;
             } else if !inh_relations.is_empty() {
-                // INCLUDE column resolved only via an inherited parent: same
-                // table_openrv-by-name relcache need as the key path above.
-                // Stop loudly and recoverably rather than crash.
-                return Err(ereport(ERROR)
-                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                    .errmsg(alloc::format!(
-                        "column \"{}\" named in INCLUDE is not in the new table; \
-                         resolving inherited columns is not yet supported",
-                        key
-                    ))
-                    .errposition(parser_errposition(pstate, con.location))
-                    .into_error());
+                // INCLUDE column resolved only via an inherited parent: search
+                // each parent's TupleDesc, like the key path above. No NOT NULL
+                // marking and no duplicate-column complaint for INCLUDE columns.
+                let (inh_found, _inh_typid) =
+                    find_inherited_key_column(mcx, &inh_relations, key)?;
+                if inh_found {
+                    found = true;
+                }
             }
         }
 
@@ -811,6 +814,77 @@ pub fn transform_index_constraint_catalog<'mcx>(
     drop(columns);
 
     Ok((index, extra_nn))
+}
+
+/// Search the inherited parent relations for a key/INCLUDE column named `key`.
+///
+/// Mirrors the `else if (cxt->inhRelations)` branch of `transformIndexConstraint`
+/// (`parse_utilcmd.c`): for each parent `RangeVar` it does `table_openrv` with
+/// `AccessShareLock`, checks the relkind, then walks the parent's `TupleDesc`
+/// looking for a non-dropped attribute whose name equals `key`. On a match it
+/// records `found = true` and captures the column's `atttypid` (used by the
+/// caller for the WITHOUT OVERLAPS range-type check).
+///
+/// Returns `(found, typid)`.
+fn find_inherited_key_column<'mcx>(
+    mcx: Mcx<'mcx>,
+    inh_relations: &PgVec<'mcx, NodePtr<'mcx>>,
+    key: &str,
+) -> PgResult<(bool, Oid)> {
+    let mut found = false;
+    let mut typid = InvalidOid;
+
+    for inh_node in inh_relations.iter() {
+        let inh = inh_node.as_ref().as_rangevar().unwrap_or_else(|| {
+            unreachable!(
+                "transformIndexConstraint: inhRelations entry is not a RangeVar: {}",
+                inh_node.as_ref().node_tag()
+            )
+        });
+        let access_rv = crate::like::access_range_var(inh);
+
+        let rel = relation_openrv(mcx, &access_rv, AccessShareLock)?;
+
+        // Check user requested inheritance from valid relkind.
+        let relkind = rel.rd_rel.relkind;
+        if relkind != RELKIND_RELATION
+            && relkind != RELKIND_FOREIGN_TABLE
+            && relkind != RELKIND_PARTITIONED_TABLE
+        {
+            let relname = inh.relname.as_ref().map(PgString::as_str).unwrap_or("");
+            rel.close(NoLock)?;
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(alloc::format!(
+                    "inherited relation \"{}\" is not a table or foreign table",
+                    relname
+                ))
+                .into_error());
+        }
+
+        let natts = rel.rd_att.natts as usize;
+        for count in 0..natts {
+            let inhattr = rel.rd_att.attr(count);
+            if inhattr.attisdropped {
+                continue;
+            }
+            if inhattr.attname.name_str() == key.as_bytes() {
+                found = true;
+                typid = inhattr.atttypid;
+                break;
+            }
+        }
+
+        // table_close(rel, NoLock): release the relcache reference but keep the
+        // AccessShareLock for the duration of the transaction.
+        rel.close(NoLock)?;
+
+        if found {
+            break;
+        }
+    }
+
+    Ok((found, typid))
 }
 
 fn opt_clone<'mcx>(mcx: Mcx<'mcx>, s: &Option<PgString<'_>>) -> PgResult<Option<PgString<'mcx>>> {
