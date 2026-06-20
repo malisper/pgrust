@@ -9552,6 +9552,9 @@ dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-common-tupdesc",
  "backend-access-transam-multixact",
+ "backend-access-transam-twophase",
+ "backend-catalog-partition-seams",
+ "backend-catalog-pg-inherits-seams",
  "backend-commands-async",
  "backend-commands-prepare",
  "backend-executor-execExpr-seams",
@@ -9560,6 +9563,7 @@ dependencies = [
  "backend-foreign-foreign",
  "backend-nodes-core",
  "backend-tcop-postgres-seams",
+ "backend-utils-adt-acl",
  "backend-utils-adt-array-more-seams",
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-datetime",
@@ -9583,6 +9587,7 @@ dependencies = [
  "backend-utils-sort-storage-seams",
  "mcx",
  "seam-core",
+ "types-acl",
  "types-array",
  "types-core",
  "types-datetime",
@@ -9591,6 +9596,7 @@ dependencies = [
  "types-fmgr",
  "types-nodes",
  "types-numeric",
+ "types-storage",
  "types-tuple",
 ]
 

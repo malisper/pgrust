@@ -763,17 +763,69 @@ pub fn makeaclitem_impl(
     Ok(result)
 }
 
+/// Decode an `AclItem` from its 16-byte `repr(C)` image — the per-element
+/// window an `aclitem[]` array deconstruction (`array_unnest`) hands back, or
+/// `PG_GETARG_ACLITEM_P`'s by-reference pointer image. Mirrors the C in-memory
+/// `AclItem` layout: `ai_grantee` (Oid/u32), `ai_grantor` (Oid/u32), `ai_privs`
+/// (u64), all native-endian.
+pub fn aclitem_from_image(bytes: &[u8]) -> AclItem {
+    assert!(bytes.len() >= 16, "aclitem image too short");
+    let grantee = u32::from_ne_bytes(bytes[0..4].try_into().unwrap());
+    let grantor = u32::from_ne_bytes(bytes[4..8].try_into().unwrap());
+    let privs = u64::from_ne_bytes(bytes[8..16].try_into().unwrap());
+    AclItem { ai_grantee: grantee, ai_grantor: grantor, ai_privs: privs }
+}
+
+/// One expanded `aclexplode` row: `(grantor oid, grantee oid, privilege_type
+/// text, is_grantable bool)` — the C `values[0..4]` of a single emitted tuple.
+pub struct AclExplodeRow {
+    /// `values[0] = ObjectIdGetDatum(aidata->ai_grantor)`.
+    pub grantor: Oid,
+    /// `values[1] = ObjectIdGetDatum(aidata->ai_grantee)`.
+    pub grantee: Oid,
+    /// `values[2] = convert_aclright_to_string(priv_bit)` — a static keyword.
+    pub privilege_type: &'static str,
+    /// `values[3] = (ACLITEM_GET_GOPTIONS(*aidata) & priv_bit) != 0`.
+    pub is_grantable: bool,
+}
+
 /// `aclexplode` (acl.c) — SQL SRF: expand an acl array into rows.
 ///
-/// The set-returning-function machinery (`FuncCallContext`, `SRF_*`,
-/// `heap_form_tuple`, `TupleDesc` build) is the not-yet-ported fmgr/SRF layer;
-/// the argless scaffold signature carries none of it, so this panics loudly
-/// until that boundary lands.
-pub fn aclexplode() -> PgResult<()> {
-    panic!(
-        "backend-utils-adt-acl::acl_ops::aclexplode: fmgr SRF machinery not yet \
-         ported"
-    )
+/// The C function is a value-per-call SRF that walks the `AclItem` array
+/// (`ACL_DAT(acl)`/`ACL_NUM(acl)`), and for each item scans the
+/// `N_ACL_RIGHTS` privilege bits, emitting one `(grantor, grantee,
+/// privilege_type, is_grantable)` row per privilege bit that is set in the
+/// item's lower-32 privilege word. The emitted set is fully determined by the
+/// input array, so this pure-data core renders the whole row series up front
+/// (the executor-frame SRF driver then materializes it); the per-call
+/// `FuncCallContext`/`SRF_*`/`heap_form_tuple` protocol is the executor-frame
+/// driver's concern, not this unit's.
+///
+/// `acl` is the deconstructed `AclItem` slice (`ACL_DAT(acl)`); the C
+/// `check_acl(acl)` header validation (`ndim == 1`, no nulls, `elemtype ==
+/// ACLITEMOID`) is a property of the absent varlena/array header, so there is
+/// nothing to validate here.
+pub fn aclexplode(acl: &[AclItem]) -> alloc::vec::Vec<AclExplodeRow> {
+    // C: aidat = ACL_DAT(acl); while (idx[0] < ACL_NUM(acl)) { for each of the
+    // N_ACL_RIGHTS privilege bits: if the priv bit is set, emit a row }.
+    let mut rows: alloc::vec::Vec<AclExplodeRow> = alloc::vec::Vec::new();
+    for aidata in acl {
+        for bit in 0..types_acl::N_ACL_RIGHTS {
+            // priv_bit = UINT64CONST(1) << idx[1].
+            let priv_bit: AclMode = 1u64 << bit;
+            if aclitem_get_privs(*aidata) & priv_bit != 0 {
+                rows.push(AclExplodeRow {
+                    grantor: aidata.ai_grantor,
+                    grantee: aidata.ai_grantee,
+                    // convert_aclright_to_string takes the bit as an i32 (the C
+                    // arg is `int`); priv_bit fits in 32 bits here.
+                    privilege_type: convert_aclright_to_string(priv_bit as i32),
+                    is_grantable: aclitem_get_goptions(*aidata) & priv_bit != 0,
+                });
+            }
+        }
+    }
+    rows
 }
 
 /// `convert_aclright_to_string` (acl.c) — privilege bit to its keyword text.

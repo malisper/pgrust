@@ -80,6 +80,10 @@ mod pg_get_keywords;
 mod pg_tablespace_databases;
 mod pg_listening_channels;
 mod pg_get_multixact_members;
+mod pg_get_catalog_foreign_keys;
+mod pg_partition_tree;
+mod pg_prepared_xact;
+mod aclexplode;
 mod system_srf;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
 
@@ -180,6 +184,31 @@ pub fn init_seams() {
     // emitting one `(xid, mode text)` per MultiXact member (its resolver core is
     // `backend-access-transam-multixact::pg_get_multixact_members`).
     pg_get_multixact_members::register_pg_get_multixact_members();
+    // `pg_get_catalog_foreign_keys()` (OID 6159) — the materialize-mode SRF
+    // emitting one `(fktable regclass, fkcols text[], pktable regclass, pkcols
+    // text[], is_array bool, is_opt bool)` per `sys_fk_relationships[]` entry
+    // (its render core is
+    // `backend-utils-adt-misc::pg_get_catalog_foreign_keys`; the text[] columns
+    // are built with `construct_text_array`).
+    pg_get_catalog_foreign_keys::register_pg_get_catalog_foreign_keys();
+    // `pg_partition_tree(regclass)` (OID 3423) and `pg_partition_ancestors(regclass)`
+    // (OID 3425) — the materialize-mode partition-hierarchy SRFs (their traversal
+    // cores are `backend-catalog-pg-inherits::find_all_inheritors` and
+    // `backend-catalog-partition::get_partition_ancestors`; the per-row
+    // parent/isleaf/level computation is the partitionfuncs.c inner block).
+    pg_partition_tree::register_pg_partition_tree();
+    pg_partition_tree::register_pg_partition_ancestors();
+    // `pg_prepared_xact()` (OID 1065) — the materialize-mode SRF emitting one
+    // `(transaction xid, gid text, prepared timestamptz, ownerid oid, dbid oid)`
+    // per valid prepared transaction (its locked snapshot-and-project core is
+    // `backend-access-transam-twophase::pg_prepared_xact_rows` over the live
+    // `TwoPhaseState` via `with_twophase_state`).
+    pg_prepared_xact::register_pg_prepared_xact();
+    // `aclexplode(aclitem[])` (OID 1689) — the materialize-mode SRF expanding an
+    // acl array into one `(grantor oid, grantee oid, privilege_type text,
+    // is_grantable bool)` row per set privilege bit (its per-bit expansion core
+    // is `backend-utils-adt-acl::acl_ops::aclexplode`).
+    aclexplode::register_aclexplode();
     // `pg_options_to_table(text[])` (OID 2289) and `pg_prepared_statement()` (OID
     // 2510) — the materialize-mode system SRFs whose `(mcx, fcinfo)` bodies drive
     // `InitMaterializedSRF`/`materialized_srf_putvalues` themselves (cores in

@@ -107,6 +107,22 @@ backend-commands-prepare = { path = "../backend-commands-prepare" }
 # (ExprSingleResult) path, like the json_to_record family.
 backend-utils-misc-more = { path = "../backend-utils-misc-more" }
 backend-utils-adt-misc2 = { path = "../backend-utils-adt-misc2" }
+# pg_get_catalog_foreign_keys() (OID 6159): the sys_fk_relationships[] render core
+# (its fk/pk text[] columns built via construct_text_array).
+# pg_partition_tree/pg_partition_ancestors (OIDs 3423/3425): the partition-tree
+# traversal cores (find_all_inheritors / get_partition_ancestors) + the
+# relkind/relispartition guard seams (syscache / lsyscache).
+backend-catalog-pg-inherits-seams = { path = "../backend-catalog-pg-inherits-seams" }
+backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+types-storage = { path = "../types-storage" }
+# pg_prepared_xact() (OID 1065): the locked snapshot-and-project core over the
+# live TwoPhaseState (pg_prepared_xact_rows / with_twophase_state).
+backend-access-transam-twophase = { path = "../backend-access-transam-twophase" }
+# aclexplode(aclitem[]) (OID 1689): the per-bit privilege expansion core
+# (acl_ops::aclexplode) + the AclItem image decoder.
+backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
+types-acl = { path = "../types-acl" }
 
 # Shared type stack + allocator + error.
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
@@ -121,4 +137,3 @@ mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 
 [dev-dependencies]
-backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
