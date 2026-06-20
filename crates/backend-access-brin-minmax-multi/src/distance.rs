@@ -11,7 +11,8 @@
 //! by-reference lane) and the `float8` result.
 
 use types_datum::Datum as WordDatum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_error::PgResult;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use backend_utils_adt_numeric_seams as numeric;
 
@@ -250,98 +251,98 @@ const VARHDRSZ: usize = 4;
 // fcinfo wrappers (PG_FUNCTION_ARGS -> PG_RETURN_FLOAT8).
 // ---------------------------------------------------------------------------
 
-fn fc_float4(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
+fn fc_float4(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
     let a1 = f32::from_bits(arg_word(fcinfo, 0) as u32);
     let a2 = f32::from_bits(arg_word(fcinfo, 1) as u32);
-    ret_float8(dist_float4(a1, a2))
+    Ok(ret_float8(dist_float4(a1, a2)))
 }
 
-fn fc_float8(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
+fn fc_float8(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
     let a1 = f64::from_bits(arg_word(fcinfo, 0) as u64);
     let a2 = f64::from_bits(arg_word(fcinfo, 1) as u64);
-    ret_float8(dist_float8(a1, a2))
+    Ok(ret_float8(dist_float8(a1, a2)))
 }
 
-fn fc_int2(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
-    ret_float8(dist_int2(arg_word(fcinfo, 0) as i16, arg_word(fcinfo, 1) as i16))
+fn fc_int2(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
+    Ok(ret_float8(dist_int2(arg_word(fcinfo, 0) as i16, arg_word(fcinfo, 1) as i16)))
 }
 
-fn fc_int4(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
-    ret_float8(dist_int4(arg_word(fcinfo, 0) as i32, arg_word(fcinfo, 1) as i32))
+fn fc_int4(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
+    Ok(ret_float8(dist_int4(arg_word(fcinfo, 0) as i32, arg_word(fcinfo, 1) as i32)))
 }
 
-fn fc_int8(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
-    ret_float8(dist_int8(arg_word(fcinfo, 0) as i64, arg_word(fcinfo, 1) as i64))
+fn fc_int8(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
+    Ok(ret_float8(dist_int8(arg_word(fcinfo, 0) as i64, arg_word(fcinfo, 1) as i64)))
 }
 
-fn fc_date(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
-    ret_float8(dist_date(arg_word(fcinfo, 0) as i32, arg_word(fcinfo, 1) as i32))
+fn fc_date(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
+    Ok(ret_float8(dist_date(arg_word(fcinfo, 0) as i32, arg_word(fcinfo, 1) as i32)))
 }
 
-fn fc_time(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
-    ret_float8(dist_time(arg_word(fcinfo, 0) as i64, arg_word(fcinfo, 1) as i64))
+fn fc_time(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
+    Ok(ret_float8(dist_time(arg_word(fcinfo, 0) as i64, arg_word(fcinfo, 1) as i64)))
 }
 
-fn fc_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
-    ret_float8(dist_timestamp(arg_word(fcinfo, 0) as i64, arg_word(fcinfo, 1) as i64))
+fn fc_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
+    Ok(ret_float8(dist_timestamp(arg_word(fcinfo, 0) as i64, arg_word(fcinfo, 1) as i64)))
 }
 
-fn fc_pg_lsn(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
-    ret_float8(dist_pg_lsn(arg_word(fcinfo, 0) as u64, arg_word(fcinfo, 1) as u64))
+fn fc_pg_lsn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
+    Ok(ret_float8(dist_pg_lsn(arg_word(fcinfo, 0) as u64, arg_word(fcinfo, 1) as u64)))
 }
 
-fn fc_tid(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
+fn fc_tid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
     let a = parse_tid(arg_bytes(fcinfo, 0));
     let b = parse_tid(arg_bytes(fcinfo, 1));
-    ret_float8(dist_tid(a, b))
+    Ok(ret_float8(dist_tid(a, b)))
 }
 
-fn fc_uuid(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
+fn fc_uuid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
     let mut u1 = [0u8; 16];
     let mut u2 = [0u8; 16];
     u1.copy_from_slice(&arg_bytes(fcinfo, 0)[..16]);
     u2.copy_from_slice(&arg_bytes(fcinfo, 1)[..16]);
-    ret_float8(dist_uuid(&u1, &u2))
+    Ok(ret_float8(dist_uuid(&u1, &u2)))
 }
 
-fn fc_macaddr(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
+fn fc_macaddr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
     let mut a = [0u8; 6];
     let mut b = [0u8; 6];
     a.copy_from_slice(&arg_bytes(fcinfo, 0)[..6]);
     b.copy_from_slice(&arg_bytes(fcinfo, 1)[..6]);
-    ret_float8(dist_macaddr(&a, &b))
+    Ok(ret_float8(dist_macaddr(&a, &b)))
 }
 
-fn fc_macaddr8(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
+fn fc_macaddr8(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
     let mut a = [0u8; 8];
     let mut b = [0u8; 8];
     a.copy_from_slice(&arg_bytes(fcinfo, 0)[..8]);
     b.copy_from_slice(&arg_bytes(fcinfo, 1)[..8]);
-    ret_float8(dist_macaddr8(&a, &b))
+    Ok(ret_float8(dist_macaddr8(&a, &b)))
 }
 
-fn fc_timetz(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
+fn fc_timetz(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
     let a = parse_timetz(arg_bytes(fcinfo, 0));
     let b = parse_timetz(arg_bytes(fcinfo, 1));
-    ret_float8(dist_timetz(a, b))
+    Ok(ret_float8(dist_timetz(a, b)))
 }
 
-fn fc_interval(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
+fn fc_interval(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
     let a = parse_interval(arg_bytes(fcinfo, 0));
     let b = parse_interval(arg_bytes(fcinfo, 1));
-    ret_float8(dist_interval(a, b))
+    Ok(ret_float8(dist_interval(a, b)))
 }
 
-fn fc_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
+fn fc_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
     let a1 = arg_bytes(fcinfo, 0);
     let a2 = arg_bytes(fcinfo, 1);
-    ret_float8(dist_numeric(a1, a2))
+    Ok(ret_float8(dist_numeric(a1, a2)))
 }
 
-fn fc_inet(fcinfo: &mut FunctionCallInfoBaseData) -> WordDatum {
+fn fc_inet(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<WordDatum> {
     let ia = parse_inet(arg_bytes(fcinfo, 0));
     let ib = parse_inet(arg_bytes(fcinfo, 1));
-    ret_float8(dist_inet(ia.0, &ia.1, ia.2, ib.0, &ib.1, ib.2))
+    Ok(ret_float8(dist_inet(ia.0, &ia.1, ia.2, ib.0, &ib.1, ib.2)))
 }
 
 // ---------------------------------------------------------------------------
@@ -409,16 +410,19 @@ const F_BRIN_MINMAX_MULTI_DISTANCE_TIMESTAMP: u32 = 4637;
 fn builtin(
     foid: u32,
     name: &str,
-    func: fn(&mut FunctionCallInfoBaseData) -> WordDatum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: alloc::string::String::from(name),
-        nargs: 2,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    func: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: alloc::string::String::from(name),
+            nargs: 2,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        func,
+    )
 }
 
 /// Register the 17 minmax-multi distance functions as fmgr builtins, so the
@@ -426,7 +430,7 @@ fn builtin(
 /// (C: their `fmgr_builtins[]` rows). Called from the BRIN dispatch installer's
 /// `init_seams()`.
 pub fn register_distance_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(F_BRIN_MINMAX_MULTI_DISTANCE_INT2, "brin_minmax_multi_distance_int2", fc_int2),
         builtin(F_BRIN_MINMAX_MULTI_DISTANCE_INT4, "brin_minmax_multi_distance_int4", fc_int4),
         builtin(F_BRIN_MINMAX_MULTI_DISTANCE_INT8, "brin_minmax_multi_distance_int8", fc_int8),
