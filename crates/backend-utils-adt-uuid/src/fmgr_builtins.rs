@@ -160,12 +160,17 @@ fn ok<T>(r: types_error::PgResult<T>) -> T {
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
-/// `uuid_in(cstring) -> uuid` (oid 2952). A hard parse is used at this boundary
-/// (the soft `ErrorSaveContext` is not modeled on the fmgr frame, matching every
-/// other adt `_in`); `string_to_uuid` rethrows the syntax error as `Err`.
+/// `uuid_in(cstring) -> uuid` (oid 2952). C: `escontext = (Node *) fcinfo->context`
+/// — thread the soft `ErrorSaveContext` off the fmgr frame into `string_to_uuid`,
+/// so a bad token `ereturn`s INTO the escontext (the soft path that
+/// `pg_input_is_valid` / `pg_input_error_info` rely on) instead of throwing a hard
+/// error. With no soft sink installed the escontext is `None` and the syntax error
+/// is thrown as `Err`, as before.
 fn fc_uuid_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
-    let uuid = ok(crate::uuid_in(s.as_bytes(), None));
+    // `arg_cstring` borrows `fcinfo` immutably while `escontext_mut()` needs
+    // `&mut`; copy the input to an owned string first.
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let uuid = ok(crate::uuid_in(s.as_bytes(), fcinfo.escontext_mut()));
     ret_uuid(fcinfo, uuid)
 }
 
