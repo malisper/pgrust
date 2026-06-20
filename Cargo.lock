@@ -16329,6 +16329,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-rewrite-rewriteSearchCycle"
+version = "0.0.0"
+dependencies = [
+ "backend-nodes-core",
+ "backend-parser-analyze",
+ "backend-rewrite-core",
+ "backend-utils-error",
+ "mcx",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-nodes",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-rewrite-rewritehandler"
 version = "0.0.0"
 dependencies = [
@@ -16347,6 +16363,7 @@ dependencies = [
  "backend-parser-coerce",
  "backend-parser-relation",
  "backend-rewrite-core",
+ "backend-rewrite-rewriteSearchCycle",
  "backend-rewrite-rewritehandler-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-adt-format-type",

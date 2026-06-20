@@ -38,6 +38,7 @@ mod special;
 mod update_delete;
 
 pub use locking::{applyLockingClause, transformLockingClause, CheckSelectLocking, LCS_asString};
+pub use setop::makeSortGroupClauseForSetOp;
 
 /// `ereport(ERROR, errmsg_internal(...))` shorthand for the panics-as-errors in
 /// logic this unit owns.

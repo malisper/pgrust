@@ -1695,14 +1695,24 @@ pub fn fireRIRrules<'mcx>(
     let orig_result_relation = parsetree.resultRelation;
 
     // Expand SEARCH and CYCLE clauses in CTEs.
+    //
+    // This is just a convenient place to do this, since we are already looking
+    // at each Query. (rewriteHandler.c:1999)
     for i in 0..parsetree.cteList.len() {
-        let needs = cte_has_search_or_cycle(&parsetree.cteList[i]);
-        if needs {
-            return Err(elog(
-                "fireRIRrules: rewriteSearchAndCycle (recursive-CTE SEARCH/CYCLE \
-                 expansion) is not ported (owner: backend-parser-cte); not part of the \
-                 common rewrite spine",
-            ));
+        if cte_has_search_or_cycle(&parsetree.cteList[i]) {
+            // cte = rewriteSearchAndCycle(cte); lfirst(lc) = cte;
+            let old = core::mem::replace(
+                &mut parsetree.cteList[i],
+                // placeholder; overwritten just below
+                alloc_in(mcx, Node::mk_string(mcx, make_string(mcx, "")?)?)?,
+            );
+            let cte = PgBox::into_inner(old).into_commontableexpr().ok_or_else(|| {
+                elog("fireRIRrules: cteList entry is not a CommonTableExpr")
+            })?;
+            let rewritten =
+                backend_rewrite_rewriteSearchCycle::rewriteSearchAndCycle(mcx, cte)?;
+            parsetree.cteList[i] =
+                alloc_in(mcx, Node::mk_common_table_expr(mcx, rewritten)?)?;
         }
     }
 
