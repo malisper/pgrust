@@ -9839,6 +9839,7 @@ dependencies = [
  "backend-access-transam-parallel",
  "backend-catalog-aclchk-seams",
  "backend-catalog-objectaccess-seams",
+ "backend-executor-execAmi-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execGrouping-seams",
  "backend-executor-execProcnode-seams",

@@ -989,13 +989,21 @@ seam_core::seam!(
     /// function (e.g. `pg_notify`) receiving a NULL argument needs the flag
     /// threaded alongside (mirrors `function_call_invoke_datum_owned`). An empty
     /// slice means "no argument is NULL".
+    /// `fn_expr` is the call node `ExecInitFunc` stamped onto the step's
+    /// `FmgrInfo` (`fmgr_info_set_expr`), passed as the already-erased
+    /// [`FnExprErased`] (a cheap `Rc` handle) rather than a borrowed `Expr` so
+    /// the per-call dispatch re-stamps it onto the re-resolved `FmgrInfo` with a
+    /// `Rc::clone` instead of a deep `clone_in` of the whole expression tree.
+    /// Deep-cloning per call is catastrophic on a hot path (e.g. a 100M-row
+    /// nested-loop join qual), so the erased handle is threaded straight through.
+    /// `None` is C's `flinfo->fn_expr == NULL` (a non-polymorphic call).
     pub fn function_call_invoke_datum<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         fn_oid: Oid,
         collation: Oid,
         args: &[Datum<'mcx>],
         args_null: &[bool],
-        fn_expr: Option<&types_nodes::primnodes::Expr>,
+        fn_expr: Option<types_core::fmgr::FnExprErased>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );
 
@@ -1020,7 +1028,7 @@ seam_core::seam!(
         collation: Oid,
         args: Vec<Datum<'mcx>>,
         args_null: Vec<bool>,
-        fn_expr: Option<&types_nodes::primnodes::Expr>,
+        fn_expr: Option<types_core::fmgr::FnExprErased>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );
 

@@ -118,13 +118,13 @@ fn func_step_inputs<'mcx>(
 fn func_step_fn_expr<'a, 'mcx>(
     state: &'a ExprState<'mcx>,
     op: usize,
-) -> Option<&'a types_nodes::primnodes::Expr> {
+) -> Option<types_core::fmgr::FnExprErased> {
+    // Hand the by-OID fmgr dispatch the call node as the cheap `Rc`-backed erased
+    // handle the step's `FmgrInfo` was stamped with (`fmgr_info_set_expr` at
+    // `ExecInitFunc` time), NOT a borrow that the dispatch would have to deep-clone
+    // per call. Re-stamping the re-resolved `FmgrInfo` is then a `Rc::clone`.
     match step_data(state, op) {
-        ExprEvalStepData::Func { finfo, .. } => finfo
-            .as_ref()?
-            .fn_expr
-            .as_ref()?
-            .downcast_ref::<types_nodes::primnodes::Expr>(),
+        ExprEvalStepData::Func { finfo, .. } => finfo.as_ref()?.fn_expr.clone(),
         _ => None,
     }
 }
@@ -502,13 +502,11 @@ fn hashdatum_step_inputs<'mcx>(
 fn hashdatum_step_fn_expr<'a, 'mcx>(
     state: &'a ExprState<'mcx>,
     op: usize,
-) -> Option<&'a types_nodes::primnodes::Expr> {
+) -> Option<types_core::fmgr::FnExprErased> {
+    // Cheap `Rc` clone of the step's stamped call node, not a borrow the by-OID
+    // dispatch would deep-clone per call (see `func_step_fn_expr`).
     match step_data(state, op) {
-        ExprEvalStepData::HashDatum { finfo, .. } => finfo
-            .as_ref()?
-            .fn_expr
-            .as_ref()?
-            .downcast_ref::<types_nodes::primnodes::Expr>(),
+        ExprEvalStepData::HashDatum { finfo, .. } => finfo.as_ref()?.fn_expr.clone(),
         _ => None,
     }
 }

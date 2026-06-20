@@ -3203,7 +3203,7 @@ fn function_call_invoke_datum_core<'mcx>(
     collation: Oid,
     nargs: Vec<NullableDatum>,
     ref_args: Vec<Option<RefPayload>>,
-    fn_expr: Option<&types_nodes::primnodes::Expr>,
+    fn_expr: Option<types_core::fmgr::FnExprErased>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     let mut resolved = fmgr_info(mcx, fn_oid)?;
 
@@ -3212,15 +3212,17 @@ fn function_call_invoke_datum_core<'mcx>(
     // `flinfo->fn_expr`; the callee's `get_fn_expr_rettype/argtype` read it for
     // polymorphic-type resolution. The owned by-OID re-resolution above produced
     // a fresh `FmgrInfo` with `fn_expr == None`, so stamp the executor's call
-    // node onto it (carried erased through the tag-only `FnExpr::External`). This
-    // is the only divergence-bridge: the rest of the call frame is unchanged.
-    if let Some(expr) = fn_expr {
-        // clone_in: the call node may carry an Aggref (a HAVING qual operator),
-        // whose context-allocated TargetEntry args a bare derived `.clone()`
-        // panics on.
+    // node onto it (carried erased through the tag-only `FnExpr::External`).
+    //
+    // `fn_expr` arrives already erased (the `Rc`-backed `FnExprErased` the step's
+    // `FmgrInfo` was stamped with at `ExecInitFunc` time). Re-stamping is a cheap
+    // `Rc::clone` (the move below), NOT a per-call deep `clone_in` of the whole
+    // expression tree — deep-cloning here is catastrophic on a hot dispatch path
+    // (a 100M-iteration nested-loop join qual was effectively hung on it).
+    if let Some(node) = fn_expr {
         resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(types_fmgr::ExternalFnExpr {
             tag: 0,
-            node: Some(types_core::fmgr::FnExprErased::new(expr.clone_in(mcx)?)),
+            node: Some(node),
         })));
     }
 
@@ -3262,7 +3264,7 @@ fn function_call_invoke_datum_seam<'mcx>(
     collation: Oid,
     args: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
     args_null: &[bool],
-    fn_expr: Option<&types_nodes::primnodes::Expr>,
+    fn_expr: Option<types_core::fmgr::FnExprErased>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     // Build the `fcinfo->args[]` frame: by-value word lane + by-reference side
     // channel. The canonical `Datum::ByVal(0)` word cannot encode SQL NULL, so
@@ -3295,7 +3297,7 @@ fn function_call_invoke_datum_owned_seam<'mcx>(
     collation: Oid,
     args: Vec<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
     args_null: Vec<bool>,
-    fn_expr: Option<&types_nodes::primnodes::Expr>,
+    fn_expr: Option<types_core::fmgr::FnExprErased>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     debug_assert_eq!(args.len(), args_null.len());
     let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
