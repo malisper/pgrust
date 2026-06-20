@@ -142,6 +142,26 @@ pub fn init_seams() {
         crate::deparse_expression(mcx, &expr, mcx::PgVec::new_in(mcx), false, false)
     });
 
+    // pg_get_partkeydef_columns (ruleutils.c 1924): the columns-only variant of
+    // the partition-key deparser. C calls
+    // `pg_get_partkeydef_worker(relid, GET_PRETTY_FLAGS(pretty), attrsOnly=true,
+    // missing_ok=false)`. With missing_ok=false the worker never returns NULL
+    // (it ereports on a missing/non-partitioned relation), so unwrap the Option.
+    backend_utils_adt_ruleutils_seams::pg_get_partkeydef_columns::set(|mcx, relid, pretty| {
+        match crate::partkeydef::pg_get_partkeydef_worker(
+            mcx,
+            relid,
+            crate::get_pretty_flags(pretty),
+            true,
+            false,
+        )? {
+            Some(s) => Ok(s),
+            None => Err(types_error::PgError::error(alloc::format!(
+                "could not get partition key for relation {relid}"
+            ))),
+        }
+    });
+
     // Register the SQL-callable deparser builtins (C: their `fmgr_builtins[]`
     // rows) so by-OID fmgr dispatch resolves them.
     crate::register_ruleutils_builtins();
