@@ -17,8 +17,9 @@
 //! crate docs). Only the scalar / text transaction-id functions register.
 
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::FullTransactionId;
 
@@ -75,12 +76,6 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
@@ -88,33 +83,29 @@ fn raise(err: types_error::PgError) -> ! {
 /// `pg_current_xact_id() -> xid8` (xid8funcs.c:333) and its `int8`-typed alias
 /// `txid_current()`. The core assigns + returns the top FXID (erroring during
 /// recovery); both prorettypes store the same 64-bit word.
-fn fc_pg_current_xact_id(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_current_xact_id(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let _ = fcinfo;
-    match crate::pg_current_xact_id() {
-        Ok(fxid) => ret_fxid(fxid),
-        Err(e) => raise(e),
-    }
+    let fxid = crate::pg_current_xact_id()?;
+    Ok(ret_fxid(fxid))
 }
 
 /// `pg_current_xact_id_if_assigned() -> xid8 or NULL` (xid8funcs.c:351) and its
 /// `int8`-typed alias `txid_current_if_assigned()`. `None` is `PG_RETURN_NULL`.
-fn fc_pg_current_xact_id_if_assigned(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_current_xact_id_if_assigned() {
-        Ok(Some(fxid)) => ret_fxid(fxid),
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+fn fc_pg_current_xact_id_if_assigned(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    match crate::pg_current_xact_id_if_assigned()? {
+        Some(fxid) => Ok(ret_fxid(fxid)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 
 /// `pg_xact_status(xid8) -> text or NULL` (xid8funcs.c:639) and its `int8`-typed
 /// alias `txid_status(int8)`. The core returns the status string or `None`
 /// (wrapped / truncated / too-old XID → `PG_RETURN_NULL`).
-fn fc_pg_xact_status(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_xact_status(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let fxid = arg_fxid(fcinfo, 0);
-    match crate::pg_xact_status(fxid) {
-        Ok(Some(status)) => ret_text(fcinfo, status),
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+    match crate::pg_xact_status(fxid)? {
+        Some(status) => Ok(ret_text(fcinfo, status)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 
@@ -139,45 +130,48 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
 /// header-ful varlena image. Forward the soft `ErrorSaveContext` installed on
 /// the frame by InputFunctionCallSafe so a recoverable parse failure `ereturn`s
 /// into the sink (returning `Ok(None)`) instead of throwing past `invoke?`.
-fn fc_pg_snapshot_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_snapshot_in(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // Copy the cstring first: `arg_cstring` borrows `fcinfo` immutably while
     // `escontext_mut` needs it mutably.
     let s = arg_cstring(fcinfo, 0).to_owned();
-    match crate::pg_snapshot_in(&s, fcinfo.escontext_mut()) {
-        Ok(Some(snap)) => {
+    match crate::pg_snapshot_in(&s, fcinfo.escontext_mut())? {
+        Some(snap) => {
             fcinfo.set_ref_result(RefPayload::Varlena(snap.to_varlena_bytes()));
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
         // Soft-error path: escontext recorded the failure; return a NULL
         // placeholder the caller discards after `soft_error_occurred()`.
-        Ok(None) => Datum::null(),
-        Err(e) => raise(e),
+        None => Ok(Datum::null()),
     }
 }
 
 /// `pg_snapshot_out(pg_snapshot) -> cstring` (xid8funcs.c:435). The arg arrives
 /// as the header-ful `pg_snapshot` varlena image on the by-ref lane; reconstruct
 /// it and format `xmin:xmax:xip,...`.
-fn fc_pg_snapshot_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_snapshot_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = fcinfo
         .ref_arg(0)
         .and_then(|p| p.as_varlena())
         .expect("pg_snapshot_out: by-ref pg_snapshot arg missing from by-ref lane");
-    let snap = crate::PgSnapshot::from_varlena_bytes(image)
-        .unwrap_or_else(|| raise(types_error::PgError::error("invalid pg_snapshot image")));
+    let snap = match crate::PgSnapshot::from_varlena_bytes(image) {
+        Some(snap) => snap,
+        None => return Err(types_error::PgError::error("invalid pg_snapshot image")),
+    };
     let s = crate::pg_snapshot_out(&snap);
-    ret_cstring(fcinfo, s)
+    Ok(ret_cstring(fcinfo, s))
 }
 
 /// Read a by-ref `pg_snapshot` arg as a reconstructed [`crate::PgSnapshot`].
 #[inline]
-fn arg_snapshot(fcinfo: &FunctionCallInfoBaseData, i: usize) -> crate::PgSnapshot {
+fn arg_snapshot(fcinfo: &FunctionCallInfoBaseData, i: usize) -> PgResult<crate::PgSnapshot> {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("xid8funcs fn: by-ref pg_snapshot arg missing from by-ref lane");
-    crate::PgSnapshot::from_varlena_bytes(image)
-        .unwrap_or_else(|| raise(types_error::PgError::error("invalid pg_snapshot image")))
+    match crate::PgSnapshot::from_varlena_bytes(image) {
+        Some(snap) => Ok(snap),
+        None => Err(types_error::PgError::error("invalid pg_snapshot image")),
+    }
 }
 
 /// Set a `pg_snapshot` (varlena) result on the by-ref lane.
@@ -189,54 +183,50 @@ fn ret_snapshot(fcinfo: &mut FunctionCallInfoBaseData, snap: &crate::PgSnapshot)
 
 /// `pg_current_snapshot() -> pg_snapshot` (xid8funcs.c:480). No args; takes the
 /// current snapshot and returns its header-ful varlena image.
-fn fc_pg_current_snapshot(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_current_snapshot() {
-        Ok(snap) => ret_snapshot(fcinfo, &snap),
-        Err(e) => raise(e),
-    }
+fn fc_pg_current_snapshot(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let snap = crate::pg_current_snapshot()?;
+    Ok(ret_snapshot(fcinfo, &snap))
 }
 
 /// `pg_snapshot_recv(internal) -> pg_snapshot` (xid8funcs.c:451). The wire
 /// message arrives verbatim on the by-ref lane; a `Pq8Cursor` walks it.
-fn fc_pg_snapshot_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_snapshot_recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image: Vec<u8> = fcinfo
         .ref_arg(0)
         .and_then(|p| p.as_varlena())
         .unwrap_or(&[])
         .to_vec();
     let mut cur = crate::Pq8Cursor::new(&image);
-    match crate::pg_snapshot_recv(&mut cur) {
-        Ok(snap) => ret_snapshot(fcinfo, &snap),
-        Err(e) => raise(e),
-    }
+    let snap = crate::pg_snapshot_recv(&mut cur)?;
+    Ok(ret_snapshot(fcinfo, &snap))
 }
 
 /// `pg_snapshot_send(pg_snapshot) -> bytea` (xid8funcs.c:495). The core emits
 /// the raw wire bytes; `pq_endtypsend` wraps them into a header-ful `bytea`.
-fn fc_pg_snapshot_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let snap = arg_snapshot(fcinfo, 0);
+fn fc_pg_snapshot_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let snap = arg_snapshot(fcinfo, 0)?;
     let wire = crate::pg_snapshot_send(&snap);
     fcinfo.set_ref_result(RefPayload::Varlena(varlena_image(&wire)));
-    Datum::from_usize(0)
+    Ok(Datum::from_usize(0))
 }
 
 /// `pg_visible_in_snapshot(xid8, pg_snapshot) -> bool` (xid8funcs.c:554).
-fn fc_pg_visible_in_snapshot(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_visible_in_snapshot(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let value = arg_fxid(fcinfo, 0);
-    let snap = arg_snapshot(fcinfo, 1);
-    Datum::from_bool(crate::pg_visible_in_snapshot(value, &snap))
+    let snap = arg_snapshot(fcinfo, 1)?;
+    Ok(Datum::from_bool(crate::pg_visible_in_snapshot(value, &snap)))
 }
 
 /// `pg_snapshot_xmin(pg_snapshot) -> xid8` (xid8funcs.c:568).
-fn fc_pg_snapshot_xmin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let snap = arg_snapshot(fcinfo, 0);
-    ret_fxid(crate::pg_snapshot_xmin(&snap))
+fn fc_pg_snapshot_xmin(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let snap = arg_snapshot(fcinfo, 0)?;
+    Ok(ret_fxid(crate::pg_snapshot_xmin(&snap)))
 }
 
 /// `pg_snapshot_xmax(pg_snapshot) -> xid8` (xid8funcs.c:582).
-fn fc_pg_snapshot_xmax(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let snap = arg_snapshot(fcinfo, 0);
-    ret_fxid(crate::pg_snapshot_xmax(&snap))
+fn fc_pg_snapshot_xmax(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let snap = arg_snapshot(fcinfo, 0)?;
+    Ok(ret_fxid(crate::pg_snapshot_xmax(&snap)))
 }
 
 // ---------------------------------------------------------------------------
@@ -249,16 +239,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every scalar / text `xid8funcs.c` builtin (C: their
@@ -267,7 +260,7 @@ fn builtin(
 /// `proisstrict => 't'`, none `proretset`). The `int8`-typed `txid_*` aliases
 /// share the same prosrc cores as their `xid8` counterparts.
 pub fn register_xid8funcs_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- current transaction id (no args) ----
         builtin(2943, "pg_current_xact_id", 0, true, false, fc_pg_current_xact_id),
         builtin(5059, "pg_current_xact_id", 0, true, false, fc_pg_current_xact_id),
