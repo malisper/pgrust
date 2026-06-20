@@ -462,12 +462,24 @@ pub fn heap_page_prune_and_freeze<'mcx>(
     // ---- Phase 1: scan the page, compute HTSV, queue HOT-chain roots and
     // heap-only items. This reads the page; the freeze/scan plan is built off a
     // snapshot copy of the page bytes (the caller holds the cleanup lock). ----
-    let page_bytes = bufmgr_seam::buffer_get_page::call(mcx, buffer)?;
+    let mut page_bytes = bufmgr_seam::buffer_get_page::call(mcx, buffer)?;
     let do_hint_existing_prune_xid;
     let page_is_full_pre;
+    let maxoff;
+    // Hint bits set by HeapTupleSatisfiesVacuumHorizon (via SetHintBits) during
+    // the per-tuple HTSV computation below. In C, t_data aliases the shared
+    // buffer page so SetHintBits writes HEAP_XMIN_COMMITTED (etc.) straight into
+    // the page; here HTSV runs against a detached header copy, so we collect the
+    // resulting infomask per (item byte offset) and (a) write it back into the
+    // snapshot page bytes so the all_visible recheck in
+    // heap_prune_record_unchanged_lp_normal sees the committed hint, and (b)
+    // persist it to the real buffer (mark_buffer_dirty_hint) after the scan.
+    // Without this, a freshly-inserted-and-committed page never reads as
+    // all-visible, so VACUUM never sets PD_ALL_VISIBLE / the visibility map.
+    let mut hint_updates: Vec<(usize, u16)> = Vec::new();
     {
         let page = PageRef::new(page_bytes.as_slice())?;
-        let maxoff = PageGetMaxOffsetNumber(&page);
+        maxoff = PageGetMaxOffsetNumber(&page);
         do_hint_existing_prune_xid = page.pd_prune_xid();
         page_is_full_pre = PageIsFull(&page);
 
@@ -510,6 +522,7 @@ pub fn heap_page_prune_and_freeze<'mcx>(
             let item = PageGetItem(&page, &itemid)?;
             let htup = HeapTupleHeaderData::read_on_page(mcx, item)?;
             let is_heap_only = HeapTupleHeaderIsHeapOnly(&htup);
+            let infomask_before = htup.t_infomask;
 
             let mut tup = HeapTupleData {
                 t_len: backend_storage_page::ItemIdGetLength(&itemid) as u32,
@@ -522,6 +535,14 @@ pub fn heap_page_prune_and_freeze<'mcx>(
             let res = heap_prune_satisfies_vacuum(&prstate, &mut tup, buffer)?;
             prstate.htsv[offnum as usize] = res as i8;
 
+            // Persist any hint bits SetHintBits applied to the detached header.
+            let infomask_after = tup.t_data.as_ref().unwrap().t_infomask;
+            if infomask_after != infomask_before {
+                // On-page infomask byte offset = item start + 20 (read_on_page).
+                let item_off = backend_storage_page::ItemIdGetOffset(&itemid) as usize;
+                hint_updates.push((item_off + 20, infomask_after));
+            }
+
             if !is_heap_only {
                 prstate.root_items[prstate.nroot_items] = offnum;
                 prstate.nroot_items += 1;
@@ -532,6 +553,18 @@ pub fn heap_page_prune_and_freeze<'mcx>(
 
             offnum = OffsetNumberPrev(offnum);
         }
+    }
+
+    // Apply the HTSV hint bits to the snapshot page so the chain / heap-only
+    // processing (and the all_visible recheck) reads the committed hints.
+    for &(off, infomask) in &hint_updates {
+        if off + 2 <= page_bytes.len() {
+            page_bytes[off..off + 2].copy_from_slice(&infomask.to_ne_bytes());
+        }
+    }
+
+    {
+        let page = PageRef::new(page_bytes.as_slice())?;
 
         // ---- Process HOT chains in ascending offset order. ----
         for i in (0..prstate.nroot_items).rev() {
@@ -640,6 +673,24 @@ pub fn heap_page_prune_and_freeze<'mcx>(
         debug_assert!(!prstate.pagefrz.freeze_required);
         prstate.all_frozen = false;
         prstate.nfrozen = 0; // avoid miscounts in instrumentation
+    }
+
+    // Persist the HEAP_XMIN_COMMITTED / HEAP_XMAX_* hint bits SetHintBits set on
+    // the page during the HTSV scan. In C these were written through the aliased
+    // t_data pointer straight into the shared buffer during
+    // HeapTupleSatisfiesVacuumHorizon; here we replay the captured infomask
+    // changes into the real page and flag it dirty-hint (non-WAL-logged), exactly
+    // as SetHintBits' MarkBufferDirtyHint does.
+    if !hint_updates.is_empty() {
+        bufmgr_seam::with_buffer_page::call(buffer, &mut |bytes| {
+            for &(off, infomask) in &hint_updates {
+                if off + 2 <= bytes.len() {
+                    bytes[off..off + 2].copy_from_slice(&infomask.to_ne_bytes());
+                }
+            }
+            Ok(())
+        })?;
+        bufmgr_seam::mark_buffer_dirty_hint::call(buffer, true);
     }
 
     // ---- Critical section: apply the planned changes. The whole apply runs in
