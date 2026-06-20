@@ -101,7 +101,9 @@ impl IndexOnlyScan<'_> {
                 Some(list) => {
                     let mut out = vec_with_capacity_in(mcx, list.len())?;
                     for e in list.iter() {
-                        out.push(e.clone());
+                        // Deep-copy via `clone_in`, not the derived `Expr::clone`
+                        // (which panics on a `SubPlan` arm).
+                        out.push(e.clone_in(mcx)?);
                     }
                     Ok(Some(out))
                 }

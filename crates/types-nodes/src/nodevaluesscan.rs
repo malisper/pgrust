@@ -40,7 +40,9 @@ impl<'mcx> ValuesScan<'mcx> {
         for sublist in self.values_lists.iter() {
             let mut row = vec_with_capacity_in(mcx, sublist.len())?;
             for e in sublist.iter() {
-                row.push(e.clone());
+                // Deep-copy via `clone_in`, not the derived `Expr::clone`
+                // (which panics on a `SubPlan` arm).
+                row.push(e.clone_in(mcx)?);
             }
             values_lists.push(row);
         }

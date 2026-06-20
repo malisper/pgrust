@@ -31,7 +31,9 @@ impl TidRangeScan<'_> {
             Some(quals) => {
                 let mut out = vec_with_capacity_in(mcx, quals.len())?;
                 for q in quals.iter() {
-                    out.push(q.clone());
+                    // Deep-copy via `clone_in`, not the derived `Expr::clone`
+                    // (which panics on a `SubPlan` arm).
+                    out.push(q.clone_in(mcx)?);
                 }
                 Some(out)
             }

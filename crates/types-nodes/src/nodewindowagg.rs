@@ -243,7 +243,9 @@ fn clone_opt_expr_vec<'b>(
         Some(v) => {
             let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
             for x in v.iter() {
-                out.push(x.clone());
+                // Deep-copy via `clone_in`, not the derived `Expr::clone`
+                // (which panics on a `SubPlan` arm).
+                out.push(x.clone_in(mcx)?);
             }
             Ok(Some(out))
         }

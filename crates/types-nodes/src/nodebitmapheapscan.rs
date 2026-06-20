@@ -264,7 +264,9 @@ impl BitmapHeapScan<'_> {
     ) -> types_error::PgResult<BitmapHeapScan<'b>> {
         let mut bitmapqualorig = mcx::vec_with_capacity_in(mcx, self.bitmapqualorig.len())?;
         for e in self.bitmapqualorig.iter() {
-            bitmapqualorig.push(e.clone());
+            // Deep-copy via `clone_in`, not the derived `Expr::clone`
+            // (which panics on a `SubPlan` arm).
+            bitmapqualorig.push(e.clone_in(mcx)?);
         }
         Ok(BitmapHeapScan {
             scan: self.scan.clone_in(mcx)?,

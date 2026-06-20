@@ -115,7 +115,9 @@ impl Memoize<'_> {
         }
         let mut param_exprs = mcx::vec_with_capacity_in(mcx, self.param_exprs.len())?;
         for e in self.param_exprs.iter() {
-            param_exprs.push(e.clone());
+            // Deep-copy via `clone_in`, not the derived `Expr::clone`
+            // (which panics on a `SubPlan` arm).
+            param_exprs.push(e.clone_in(mcx)?);
         }
         Ok(Memoize {
             plan: self.plan.clone_in(mcx)?,

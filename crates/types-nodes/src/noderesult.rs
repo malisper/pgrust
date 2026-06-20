@@ -53,7 +53,14 @@ impl Result<'_> {
             Some(list) => {
                 let mut out = mcx::vec_with_capacity_in(mcx, list.len())?;
                 for e in list.iter() {
-                    out.push(e.clone());
+                    // Deep-copy each qual `Expr` via `clone_in`, not the derived
+                    // `Expr::clone()`: the one-time `resconstantqual` filter of a
+                    // gating Result node can contain a `SubPlan` (e.g. the
+                    // constant-folded qual of `WHERE 1 IN (SELECT ...)`), and the
+                    // derived clone panics on the `SubPlan` arm
+                    // (`SubPlanExpr::clone`). `clone_in` routes it through
+                    // `SubPlan::clone_in`.
+                    out.push(e.clone_in(mcx)?);
                 }
                 Some(out)
             }
