@@ -385,6 +385,45 @@ pub fn transformExprRecurse<'mcx>(
             transformJsonIsPredicate(pstate, expr.into_jsonispredicate().unwrap())?
         }
 
+        // T_CurrentOfExpr → transformCurrentOfExpr(pstate, (CurrentOfExpr *) expr)
+        // (parse_expr.c:301). The raw grammar emits `WHERE CURRENT OF cursor` as a
+        // `Node::CurrentOfExpr` carrying the lifetime-bound raw form; lift its
+        // fields into the primnodes `CurrentOfExpr` the transform expects.
+        ntag::T_CurrentOfExpr => {
+            let raw = expr.into_currentofexpr().unwrap();
+            let cexpr = CurrentOfExpr {
+                cvarno: raw.cvarno,
+                cursor_name: raw.cursor_name.as_ref().map(|s| s.as_str().into()),
+                cursor_param: raw.cursor_param,
+            };
+            transformCurrentOfExpr(pstate, cexpr)?
+        }
+
+        // T_SetToDefault → ereport(ERROR, "DEFAULT is not allowed in this
+        // context") (parse_expr.c:307). DEFAULT must have been processed by the
+        // caller in every place it is legal.
+        ntag::T_SetToDefault => {
+            let s = expr.into_settodefault().unwrap();
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg("DEFAULT is not allowed in this context")
+                .errposition(parser_errposition(pstate, s.location))
+                .into_error());
+        }
+
+        // T_CaseTestExpr / T_Var → pass through untransformed (parse_expr.c:325).
+        // CaseTestExpr is injected fully-formed; an already-transformed Var is
+        // tolerated (transformJoinUsingClause builds untransformed operator trees
+        // over transformed Vars).
+        ntag::T_CaseTestExpr => Expr::CaseTestExpr(expr.into_casetestexpr().unwrap()),
+        ntag::T_Var => Expr::Var(expr.into_var().unwrap()),
+
+        // T_MergeSupportFunc → transformMergeSupportFunc(pstate,
+        // (MergeSupportFunc *) expr) (parse_expr.c).
+        ntag::T_MergeSupportFunc => {
+            transformMergeSupportFunc(pstate, expr.into_mergesupportfunc().unwrap())?
+        }
+
         // Expr-carried nodes that reach the dispatcher untransformed-or-recursed.
         // DEFAULT must have been processed by the caller (handled in the
         // `Node::Expr(SetToDefault)` arm of `transform_expr_node`).
