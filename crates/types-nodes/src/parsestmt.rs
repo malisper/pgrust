@@ -692,6 +692,25 @@ impl<'mcx> ParseState<'mcx> {
 
         out.p_lateral_active = self.p_lateral_active;
 
+        // The nulling-rels list is also part of the spine an upper-level Var
+        // reference reads: a correlated subquery resolves an outer-query Var via
+        // `parentParseState` and then `markNullableIfNeeded` consults the
+        // ancestor's `p_nullingrels[varno-1]` to set the Var's `varnullingrels`
+        // (so a reference to the nullable side of an outer join, made inside a
+        // SubLink, is correctly marked nulled by that join). Without this copy
+        // the cloned ancestor's `p_nullingrels` is empty and the correlated Var
+        // gets no nullingrels, diverging from C (which holds the parent by a
+        // live back-pointer) and tripping setrefs' `wrong varnullingrels` check.
+        // This list is never mutated through the clone (markNullableIfNeeded
+        // only reads it), so no merge-back step is needed.
+        out.p_nullingrels = PgVec::new_in(mcx);
+        out.p_nullingrels
+            .try_reserve(self.p_nullingrels.len())
+            .map_err(|_| mcx.oom(self.p_nullingrels.len()))?;
+        for bms in self.p_nullingrels.iter() {
+            out.p_nullingrels.push(bms.clone_in(mcx)?);
+        }
+
         out.p_parent_cte = match self.p_parent_cte.as_deref() {
             Some(c) => Some(PgBox::new_in(c.clone_in(mcx)?, mcx)),
             None => None,
