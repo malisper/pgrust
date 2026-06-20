@@ -91,3 +91,12 @@ backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" 
 # `BufferManagerShmemSize`/`Init` read the `NBuffers` GUC global (the C
 # bufmgr.c global).
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+# The AIO buffer-readv completion callbacks + the synchronous read syscall the
+# buffer manager owns (bufmgr.c buffer_readv_complete / buffer_stage_common /
+# the smgrreadv issued by mdstartreadv under io_method=sync), installed into the
+# aio-completion seams. The AIO engine drives them by handle index; the bufmgr
+# reads the handle's target/handle data + distilled result through the
+# aio-methods accessors. aio-methods depends on bufmgr-*seams*, not bufmgr, so
+# this dependency is acyclic (verified by `cargo tree`).
+backend-storage-aio-completion-seams = { path = "../backend-storage-aio-completion-seams" }
+backend-storage-aio-methods = { path = "../backend-storage-aio-methods" }

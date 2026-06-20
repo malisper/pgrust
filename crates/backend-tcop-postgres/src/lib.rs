@@ -248,27 +248,17 @@ pub fn init_seams() {
     s::pg_plan_queries_value::set(
         |mcx, querytrees, query_string, cursor_options, bound_params| {
             // The value body owns its querytree list (C scribbles on / copies
-            // them); clone the borrowed slice into `mcx`. `boundParams` is now a
-            // real value `ParamListInfo` (param-list de-handle landed); a Some
-            // (custom-plan parameter substitution) still needs the planner-side
-            // `glob->boundParams` const-fold leg (`standard_planner` does not yet
-            // take boundParams) — mirror PG and panic precisely rather than
-            // silently dropping it. The generic-plan / simple-Query path passes
-            // None and runs end-to-end; the executor binds params at run time
-            // off `es_param_list_info`.
-            if bound_params.is_some() {
-                panic!(
-                    "pg_plan_queries_value: custom-plan boundParams const-folding \
-                     needs the planner `glob->boundParams` leg (standard_planner \
-                     does not yet take boundParams); only reached for parameterized \
-                     custom plans, not the generic-plan / simple-Query path"
-                );
-            }
+            // them); clone the borrowed slice into `mcx`. `boundParams` is the
+            // real value `ParamListInfo`: `None` (the generic-plan / simple-Query
+            // path) leaves `glob->boundParams` NULL, a `Some` (custom-plan
+            // parameter substitution) is recorded on `glob->boundParams` by the
+            // planner so a PARAM_EXTERN `$n` const-folds to its bound `Const`
+            // (mirroring C `pg_plan_queries` → `pg_plan_query(.., boundParams)`).
             let mut owned: mcx::PgVec<'_, _> = mcx::PgVec::new_in(mcx);
             for q in querytrees.iter() {
                 owned.push(q.clone_in(mcx)?);
             }
-            simple_query::pg_plan_queries(mcx, owned, query_string, cursor_options)
+            simple_query::pg_plan_queries(mcx, owned, query_string, cursor_options, bound_params)
         },
     );
 

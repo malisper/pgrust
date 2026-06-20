@@ -567,22 +567,31 @@ fn set_pg_database_invalid_inplace<'mcx>(
     let key = name_key(mcx, cat::Anum_pg_database_datname as AttrNumber, dbname)?;
     let keys = [key];
 
-    // The mutate callback overwrites the fixed-width datconnlimit column in the
-    // tuple's user-data area. The column is a 4-byte int4 at the fixed offset
-    // the descriptor places it (preceded by the fixed-width oid/datname/datdba/
-    // encoding/datlocprovider/datistemplate/datallowconn/dathasloginevt
-    // columns); rather than recompute the offset here, the owner of the in-place
-    // flow (genam) re-deforms against the descriptor and re-forms the one column
-    // — see the seam contract. The callback writes the little-endian int4 value
-    // DATCONNLIMIT_INVALID_DB into the column the owner addresses.
-    let mut mutate = |datconnlimit_bytes: &mut [u8]| -> PgResult<bool> {
+    // The mutate callback receives the live tuple's full user-data area (C's
+    // `GETSTRUCT(tup)` — the whole `Form_pg_database` image), exactly as the
+    // genam in-place owner passes it. C's dropdb does:
+    //   datform = (Form_pg_database) GETSTRUCT(tup);
+    //   datform->datconnlimit = DATCONNLIMIT_INVALID_DB;
+    // i.e. it writes the int4 field at its fixed struct offset. We mirror that
+    // by overwriting the 4 bytes at `datconnlimit`'s offset. Every column before
+    // datconnlimit is fixed-width and NOT NULL in pg_database, so the offset is
+    // a stable constant:
+    //   oid(4) + datname(NameData = NAMEDATALEN) + datdba(4) + encoding(4)
+    //   + datlocprovider(1) + datistemplate(1) + datallowconn(1)
+    //   + dathasloginevt(1)
+    // datconnlimit (int4) is already 4-byte aligned at that point, so no
+    // padding is inserted.
+    const DATCONNLIMIT_OFFSET: usize =
+        4 + NAMEDATALEN as usize + 4 + 4 + 1 + 1 + 1 + 1;
+    let mut mutate = |struct_bytes: &mut [u8]| -> PgResult<bool> {
         let v = (cat::DATCONNLIMIT_INVALID_DB as i32).to_ne_bytes();
-        if datconnlimit_bytes.len() != v.len() {
+        let end = DATCONNLIMIT_OFFSET + v.len();
+        if struct_bytes.len() < end {
             return Err(PgError::error(
-                "set_pg_database_invalid_inplace: datconnlimit column is not 4 bytes",
+                "set_pg_database_invalid_inplace: pg_database tuple shorter than datconnlimit offset",
             ));
         }
-        datconnlimit_bytes.copy_from_slice(&v);
+        struct_bytes[DATCONNLIMIT_OFFSET..end].copy_from_slice(&v);
         // dropdb always overwrites datconnlimit → always dirty (always _finish).
         Ok(true)
     };

@@ -80,6 +80,7 @@ pub fn ExecBitmapOr() -> PgResult<()> {
 /// ```
 pub fn ExecInitBitmapOr<'mcx>(
     mcx: Mcx<'mcx>,
+    plan_node: &'mcx types_nodes::nodes::Node<'mcx>,
     node: &'mcx BitmapOr<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
@@ -117,7 +118,9 @@ pub fn ExecInitBitmapOr<'mcx>(
     // through the tuple-at-a-time convention (a BitmapOr is always run through
     // `MultiExecProcNode`). The owned dispatch never calls a BitmapOr's
     // `ExecProcNode`, so the stub has no slot to occupy.
-    let ps = types_nodes::execnodes::PlanStateData::default();
+    let mut ps = types_nodes::execnodes::PlanStateData::default();
+    //   bitmaporstate->ps.plan = (Plan *) node;
+    ps.plan = Some(plan_node);
 
     // call ExecInitNode on each of the plans to be executed and save the
     // results into the array "bitmapplanstates".

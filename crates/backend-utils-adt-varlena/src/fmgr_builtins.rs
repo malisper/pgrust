@@ -391,10 +391,20 @@ fn fc_textsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_varlena(fcinfo, bytes)
 }
 fn fc_byteain(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // Copy the cstring out first so the immutable arg borrow ends before we take
+    // the `&mut` escontext frame (C: `byteain` reads `fcinfo->context`).
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let m = scratch_mcx();
-    let out = ok(crate::bytea::byteain(m.mcx(), &s)).to_vec();
-    ret_varlena(fcinfo, out)
+    // C: `byteain` threads `fcinfo->context` (the soft-error sink) into the hex
+    // and escape parse-error paths; a recoverable error lands in the frame
+    // escontext and yields `Ok(None)` (SQL NULL), which `pg_input_is_valid`
+    // reads back via `soft_error_occurred`.
+    let out = ok(crate::bytea::byteain(m.mcx(), &s, fcinfo.escontext_mut()))
+        .map(|v| v.to_vec());
+    match out {
+        Some(bytes) => ret_varlena(fcinfo, bytes),
+        None => Datum::null(),
+    }
 }
 fn fc_byteaout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     detoast_varlena_args(fcinfo);

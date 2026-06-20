@@ -30,8 +30,13 @@ pub const BOOL_HASH_FAM_OID: Oid = 2222;
 /// `FirstNormalObjectId` (transam.h) — OIDs below this are built-in.
 pub const FIRST_NORMAL_OBJECT_ID: Oid = 16384;
 
-/// `FirstLowInvalidHeapAttributeNumber` (sysattr.h) — system-attr offset base.
-pub const FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER: i32 = -8;
+/// `FirstLowInvalidHeapAttributeNumber` (sysattr.h) = -7 — system-attr offset
+/// base (TableOidAttributeNumber is -6, FirstLowInvalid is one past it). This
+/// must match var.c's `pull_varattnos` offset (also -7); using -8 here shifted
+/// the index-canreturn bitmap by one column relative to attrs_used, so
+/// `check_index_only`'s subset test always failed and no index-only scan was
+/// ever generated.
+pub const FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER: i32 = -7;
 
 /// btree strategy numbers (stratnum.h).
 pub const BT_LESS_STRATEGY_NUMBER: i32 = 1;

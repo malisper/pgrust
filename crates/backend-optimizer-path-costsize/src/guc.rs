@@ -17,7 +17,7 @@ macro_rules! enable_guc {
         std::thread_local! {
             static $cell: core::cell::Cell<bool> = const { core::cell::Cell::new($default) };
         }
-        fn $get() -> bool {
+        pub(crate) fn $get() -> bool {
             $cell.with(core::cell::Cell::get)
         }
         fn $set(value: bool) {

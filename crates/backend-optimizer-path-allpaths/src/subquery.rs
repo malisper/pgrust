@@ -103,7 +103,9 @@ pub fn set_subquery_pathlist<'mcx>(
             // clause = (Node *) rinfo->clause — an arena expr; materialize an
             // owned copy to push into / test against the owned subquery.
             let clause_id = root.rinfo(rinfo_id).clause;
-            let clause = root.node(clause_id).clone();
+            // Deep-copy via `clone_in` (the derived `Expr::clone` panics on an
+            // owned-subtree child).
+            let clause = root.node(clause_id).clone_in(mcx)?;
 
             match crate::pushdown::qual_is_pushdown_safe(mcx, &subquery, rti, &clause, &safety_info)? {
                 crate::pushdown::PushdownSafe::Safe => {

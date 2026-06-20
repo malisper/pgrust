@@ -358,7 +358,7 @@ fn ExecScanSubPlan<'mcx>(
                 econtext,
                 arrayfuncs::ArrayBuildCtx::PerTuple,
                 astate,
-                word(&attr.value),
+                attr.value,
                 attr.isnull,
                 firstColType,
             )?;
@@ -414,15 +414,34 @@ fn ExecScanSubPlan<'mcx>(
     if subLinkType == SubLinkType::Array {
         // We return the result in the caller's context.
         //   result = makeArrayResultAny(astate, oldcontext, true);
-        // `oldcontext` is the entry-time per-tuple eval context. The arrayfuncs
-        // owner is un-migrated, so the array varlena comes back as a bare word;
-        // carry it into the canonical value's by-value arm (the C `Datum`).
-        result = from_word(arrayfuncs::make_array_result_any::call(
+        // C builds the final array varlena in `oldcontext` (the entry-time
+        // per-tuple eval context) and relies on the caller's bulk
+        // per-tuple-context reset to free it on the next outer tuple. In the
+        // owned model that reset asserts every allocation it owns has already
+        // been dropped, so a varlena that must survive into the caller's
+        // projection (i.e. past the next reset) cannot live in per-tuple
+        // memory. We therefore build the result array in the per-query context
+        // — a longer-lived allocation reclaimed at query end — exactly as the
+        // ARRAY[] constructor (execExprInterp eval_array) and array subscripting
+        // already do for the same reason. The transient `astate` accumulator
+        // stays in per-tuple memory (built/dropped within this call, so its
+        // charge balances before any reset). An array is pass-by-reference, so
+        // the unified `_v` seam hands back a `Datum::ByRef` carrying the array
+        // bytes — the form that rides the by-ref fmgr lane of any downstream
+        // array function.
+        //
+        // Companion fix (this commit): the *element* copies the per-tuple
+        // accumulator makes for a pass-by-ref element type (e.g. text[]) must
+        // likewise not be charged to the caller's per-tuple context, else its
+        // reset asserts a still-charged leak. accumArrayResult now keeps those
+        // copies in the build state's own `byref_storage` (arrayfuncs), mirroring
+        // C's private-subcontext datumCopy.
+        result = arrayfuncs::make_array_result_any_v::call(
             estate,
             econtext,
-            arrayfuncs::ArrayBuildCtx::PerTuple,
+            arrayfuncs::ArrayBuildCtx::PerQuery,
             astate,
-        )?);
+        )?;
     } else if !found {
         // deal with empty subplan result.  result/isNull were previously
         // initialized correctly for all sublink types except EXPR and
@@ -1068,7 +1087,7 @@ pub fn ExecSetParamPlan<'mcx>(
                 econtext,
                 arrayfuncs::ArrayBuildCtx::PerQuery,
                 astate,
-                word(&attr.value),
+                attr.value,
                 attr.isnull,
                 firstColType,
             )?;
@@ -1107,17 +1126,19 @@ pub fn ExecSetParamPlan<'mcx>(
         //   node->curArray = makeArrayResultAny(astate,
         //                                       econtext->ecxt_per_query_memory,
         //                                       true);
-        // pfree(DatumGetPointer(node->curArray)). The array seam still takes the
-        // bare-word `Datum`; project it off the canonical by-value arm.
-        arrayfuncs::pfree_array_datum::call(word(&node.curArray));
-        // The un-migrated arrayfuncs owner returns the array varlena as a bare
-        // word; carry it into the canonical value once and reuse it.
-        let arr = from_word(arrayfuncs::make_array_result_any::call(
+        // pfree(DatumGetPointer(node->curArray)) — a no-op in the owned model
+        // (the array bytes live in their owning context). The previous curArray
+        // is simply dropped/overwritten below.
+        arrayfuncs::pfree_array_datum::call(&node.curArray);
+        // An array is pass-by-reference; the unified `_v` seam returns a
+        // `Datum::ByRef` carrying the array bytes so it rides the by-ref fmgr
+        // lane of any downstream array function.
+        let arr = arrayfuncs::make_array_result_any_v::call(
             estate,
             econtext,
             arrayfuncs::ArrayBuildCtx::PerQuery,
             astate,
-        )?);
+        )?;
         // node->curArray holds the freshly built array value for cross-call reuse.
         node.curArray = arr.clone();
         set_exec_param_clear_execplan(estate, paramid, arr, false)?;

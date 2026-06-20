@@ -153,15 +153,24 @@ fn ok<T>(r: types_error::PgResult<T>) -> T {
 /// `json_in(cstring) -> json` (oid 321). The validated text bytes become the
 /// `json` value's content; cross back on the by-ref lane header-stripped.
 fn fc_json_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    // C: `json_in` forwards `fcinfo->context` (the soft `ErrorSaveContext`) to
+    // `json_errsave_error`. Copy the cstring to an owned buffer first so the
+    // immutable `fcinfo` borrow is released before taking the `&mut` escontext
+    // borrow.
+    let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let m = scratch_mcx();
-    // A swallowed soft error would yield None via an errsave path that does not
-    // run here (hard errors raise above), so the Null arm is unreachable in the
-    // ERROR-context dispatch; produce empty content bytes for completeness.
-    let bytes = ok(crate::json_in(m.mcx(), s.as_bytes()))
-        .map(|image| image.as_slice().to_vec())
-        .unwrap_or_default();
-    ret_varlena(fcinfo, bytes)
+    let escontext = fcinfo.escontext_mut();
+    // Copy out of the scratch arena before it drops (the result borrows `m`).
+    let bytes = ok(crate::json_in(m.mcx(), &s, escontext)).map(|image| image.as_slice().to_vec());
+    match bytes {
+        // Validated text becomes the `json` value's content bytes.
+        Some(b) => ret_varlena(fcinfo, b),
+        // Soft parse failure (`ereturn(escontext, (Datum) 0, ...)`): SQL NULL.
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
 }
 
 /// `json_out(json) -> cstring` (oid 322): a `json` value is its own text.

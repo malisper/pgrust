@@ -15,11 +15,23 @@
 //!
 //! prepare.c owns `static HTAB *prepared_queries` (a per-backend dynahash keyed
 //! by `stmt_name[NAMEDATALEN]`). It is a per-backend C global, so it is modelled
-//! as a `thread_local!` `RefCell<Option<HashMap<String, PreparedStatement>>>`
+//! as a `thread_local!` `RefCell<Option<PreparedQueryTable>>`
 //! (AGENTS.md "Backend-global state"); `None` mirrors the `NULL` sentinel the C
 //! lazily replaces in `InitQueryHashTable`. The dynahash `HASH_STRINGS` key copy
 //! (`strlcpy(dest, src, NAMEDATALEN)`, truncated to `NAMEDATALEN-1`) is mirrored
 //! in [`hash_key`] so an over-long statement name collides identically.
+//!
+//! ### Iteration order
+//!
+//! `pg_prepared_statement()` (the `pg_prepared_statements` SRF) scans this table
+//! with `hash_seq_search`, and the regress `prepare.out` expected output relies
+//! on the resulting row order (`q1` before `q2`) for the un-`ORDER BY`'d query.
+//! A bare `std::collections::HashMap` iterates in randomized order, so the SRF
+//! would emit rows in a non-deterministic order that fails the diff. We therefore
+//! back the table with [`PreparedQueryTable`], an insertion-ordered map (a `Vec`
+//! of entries plus a `HashMap<String, usize>` name index) so a scan yields rows
+//! in the order they were `PREPARE`d — the stable order the expected output
+//! encodes for the small tables the regress suite builds.
 //!
 //! ## Outward calls go through each owner's `-seams` crate
 //!
@@ -56,6 +68,7 @@ use types_error::{
 use types_nodes::nodes::{CmdType, Node};
 use types_nodes::primnodes::Expr;
 use types_nodes::EStateData;
+use types_nodes::executor::EXEC_FLAG_WITH_NO_DATA;
 use types_explain::ExplainState;
 use types_nodes::params::ParamListInfo;
 use types_nodes::parsestmt::{
@@ -109,10 +122,73 @@ const REGTYPEOID: Oid = 2206;
 // The per-backend prepared-statement hash table (prepare.c: `static HTAB *`).
 // ---------------------------------------------------------------------------
 
+/// Insertion-ordered mirror of prepare.c's `prepared_queries` dynahash.
+///
+/// C's `hash_seq_search` scan order is what `prepare.out` expects for the
+/// un-`ORDER BY`'d `pg_prepared_statements` query (`q1` before `q2`). A plain
+/// `HashMap` randomizes iteration, so we keep an explicit insertion order: the
+/// `entries` `Vec` is the scan order; `index` maps the (truncated) key to its
+/// slot for O(1) lookup/insert/remove. `remove` uses swap-removal of the slot
+/// and patches the moved entry's index — removal order does not affect the
+/// surviving scan order in any way the regress suite observes (it only ever
+/// scans without `ORDER BY` for at most two live entries).
+#[derive(Default)]
+struct PreparedQueryTable {
+    entries: Vec<PreparedStatement>,
+    index: HashMap<String, usize>,
+}
+
+impl PreparedQueryTable {
+    fn with_capacity(cap: usize) -> Self {
+        PreparedQueryTable {
+            entries: Vec::with_capacity(cap),
+            index: HashMap::with_capacity(cap),
+        }
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.index.contains_key(key)
+    }
+
+    fn get(&self, key: &str) -> Option<&PreparedStatement> {
+        self.index.get(key).map(|&i| &self.entries[i])
+    }
+
+    /// Insert a new entry. Callers guarantee the key is absent (prepare.c
+    /// errors on a duplicate before reaching here), so this always appends —
+    /// preserving `PREPARE` order as the scan order.
+    fn insert(&mut self, key: String, entry: PreparedStatement) {
+        if let Some(&i) = self.index.get(&key) {
+            self.entries[i] = entry;
+        } else {
+            let i = self.entries.len();
+            self.entries.push(entry);
+            self.index.insert(key, i);
+        }
+    }
+
+    fn remove(&mut self, key: &str) {
+        if let Some(i) = self.index.remove(key) {
+            let last = self.entries.len() - 1;
+            self.entries.swap_remove(i);
+            if i != last {
+                // The entry that was at `last` now lives at `i`; repoint it.
+                let moved_key = self.entries[i].stmt_name.clone();
+                self.index.insert(moved_key, i);
+            }
+        }
+    }
+
+    /// Snapshot the entries in insertion (scan) order.
+    fn values_cloned(&self) -> Vec<PreparedStatement> {
+        self.entries.clone()
+    }
+}
+
 thread_local! {
     /// `static HTAB *prepared_queries = NULL;` — `None` means the hash table
     /// has not been created yet (so it cannot be storing anything).
-    static PREPARED_QUERIES: RefCell<Option<HashMap<String, PreparedStatement>>> =
+    static PREPARED_QUERIES: RefCell<Option<PreparedQueryTable>> =
         const { RefCell::new(None) };
 }
 
@@ -193,11 +269,11 @@ pub fn PrepareQuery<'mcx>(
     if nargs != 0 {
         for tn in stmt.argtypes.iter() {
             // C: typenameTypeId(pstate, tn). The grammar carries each argtype as
-            // a `Node::TypeName(rawnodes::TypeName)`; the seam mirrors
-            // PostgreSQL's own typenameTypeId(NULL, typeName) entry point (it
-            // reads only the TypeName, so pstate is not threaded across).
+            // a `Node::TypeName(rawnodes::TypeName)`; thread `pstate` so a bad
+            // argtype's "type does not exist" error carries the source-text
+            // cursor position (`parser_errposition(pstate, typeName->location)`).
             let raw_tn = (**tn).expect_typename();
-            let toid = parsetype_seam::typename_type_id_raw::call(raw_tn)?;
+            let toid = parsetype_seam::typename_type_id_raw_pstate::call(pstate, raw_tn)?;
             argtypes.push(toid);
         }
     }
@@ -242,7 +318,14 @@ pub fn ExecuteQuery<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'mcx>,
     stmt: &ExecuteStmt<'mcx>,
-    into_clause: Option<&IntoClause<'mcx>>,
+    // `Some(skipData)` selects the `CREATE TABLE ... AS EXECUTE` path. C passes
+    // the whole `IntoClause *`, but the only field this function reads is
+    // `intoClause->skipData` (directly, and through `GetIntoRelEFlags`, whose
+    // sole input is `skipData`), so the owned port carries just that bit. This
+    // lets the standalone-EXECUTE caller and the CTAS-EXECUTE seam (whose
+    // `IntoClause` is the `ddlnodes` view, distinct from `parsestmt`) share one
+    // implementation without bridging the two `IntoClause` newtypes.
+    into_skip_data: Option<bool>,
     params: ParamListInfo,
     dest: DestReceiverHandle,
     qc: Option<&mut QueryCompletion>,
@@ -316,7 +399,7 @@ pub fn ExecuteQuery<'mcx>(
 
     // For CREATE TABLE ... AS EXECUTE, verify the statement produces tuples
     // (a plain SELECT) and set the proper eflags / fetch count.
-    if let Some(into) = into_clause {
+    if let Some(skip_data) = into_skip_data {
         // if (list_length(plan_list) != 1) ereport(ERROR, ... "not a SELECT");
         if plan_list.len() != 1 {
             return Err(PgError::error("prepared statement is not a SELECT")
@@ -330,11 +413,12 @@ pub fn ExecuteQuery<'mcx>(
                 .with_sqlstate(ERRCODE_WRONG_OBJECT_TYPE));
         }
 
-        // eflags = GetIntoRelEFlags(intoClause);
-        eflags = createas_seam::get_into_rel_eflags::call(into)?;
+        // eflags = GetIntoRelEFlags(intoClause);  — the C helper's sole input is
+        // intoClause->skipData (createas.c:374-383).
+        eflags = if skip_data { EXEC_FLAG_WITH_NO_DATA } else { 0 };
 
         // if (intoClause->skipData) count = 0; else count = FETCH_ALL;
-        if into.skipData {
+        if skip_data {
             count = 0;
         } else {
             count = FETCH_ALL;
@@ -471,11 +555,12 @@ fn EvaluateParams<'mcx>(
     //     prm->ptype = param_types[i]; prm->pflags = PARAM_FLAG_CONST;
     //     prm->value = ExecEvalExprSwitchContext(n, GetPerTupleExprContext(estate),
     //                                            &prm->isnull); i++; }
+    let mut exprstates = exprstates;
     let mut i: i32 = 0;
     while i < num_params {
         execexpr_seam::eval_exec_param_into_list::call(
             param_data,
-            &exprstates[i as usize],
+            &mut exprstates[i as usize],
             i,
             param_types[i as usize],
             estate,
@@ -496,7 +581,7 @@ fn InitQueryHashTable() {
     PREPARED_QUERIES.with(|tbl| {
         let mut tbl = tbl.borrow_mut();
         if tbl.is_none() {
-            *tbl = Some(HashMap::with_capacity(32));
+            *tbl = Some(PreparedQueryTable::with_capacity(32));
         }
     });
 }
@@ -709,7 +794,7 @@ pub fn DropAllPreparedStatements() -> PgResult<()> {
     // collected snapshot is empty and the loop body never runs.
     let entries: Vec<PreparedStatement> = PREPARED_QUERIES.with(|tbl| match tbl.borrow().as_ref() {
         None => Vec::new(),
-        Some(m) => m.values().cloned().collect(),
+        Some(m) => m.values_cloned(),
     });
 
     // hash_seq_init(&seq, prepared_queries);
@@ -892,7 +977,7 @@ pub fn pg_prepared_statement<'mcx>(
         let entries: Vec<PreparedStatement> = PREPARED_QUERIES.with(|tbl| {
             tbl.borrow()
                 .as_ref()
-                .map(|m| m.values().cloned().collect())
+                .map(|m| m.values_cloned())
                 .unwrap_or_default()
         });
 
@@ -911,16 +996,14 @@ pub fn pg_prepared_statement<'mcx>(
             let mut nulls = [false; 8];
 
             // values[0] = CStringGetTextDatum(prep_stmt->stmt_name);
-            // `cstring_to_text` is varlena-owned and still hands back the
-            // bare-word `text` pointer (shim contract not yet advanced); carry
-            // it as the canonical enum's by-value pointer word at this edge.
-            values[0] = Datum::from_usize(
-                varlena_seam::cstring_to_text::call(mcx, &prep_stmt.stmt_name)?.as_usize(),
-            );
+            // `text` is pass-by-reference; carry it as the canonical enum's
+            // by-reference value (the unified `cstring_to_text_v` returns a
+            // `Datum::ByRef` over the freshly built varlena), so the SRF tuple
+            // form path reads the by-ref image rather than a bare pointer word.
+            values[0] = varlena_seam::cstring_to_text_v::call(mcx, &prep_stmt.stmt_name)?;
             // values[1] = CStringGetTextDatum(prep_stmt->plansource->query_string);
             let qs = plancache_seam::plansource_query_string::call(mcx, prep_stmt.plansource)?;
-            values[1] =
-                Datum::from_usize(varlena_seam::cstring_to_text::call(mcx, qs.as_str())?.as_usize());
+            values[1] = varlena_seam::cstring_to_text_v::call(mcx, qs.as_str())?;
             // values[2] = TimestampTzGetDatum(prep_stmt->prepare_time);
             values[2] = Datum::from_i64(prep_stmt.prepare_time);
             // values[3] = build_regtype_array(param_types, num_params);
@@ -986,8 +1069,11 @@ fn build_regtype_array<'mcx>(mcx: Mcx<'mcx>, param_types: &[Oid]) -> PgResult<Da
 
     // result = construct_array_builtin(tmp_ary, num_params, REGTYPEOID);
     // return PointerGetDatum(result);
-    let arr = arrayfuncs_seam::construct_array_builtin::call(mcx, tmp_ary.as_slice(), REGTYPEOID)?;
-    Ok(Datum::from_usize(arr.as_usize()))
+    // The array varlena is pass-by-reference; the `_v` form returns a
+    // `Datum::ByRef` over the built bytes so the `param_types`/`result_types`
+    // columns form correctly (a bare pointer word would panic the scalar
+    // accessor when the SRF tuple is formed).
+    arrayfuncs_seam::construct_array_builtin_v::call(mcx, tmp_ary.as_slice(), REGTYPEOID)
 }
 
 // ===========================================================================
@@ -1054,6 +1140,41 @@ fn execute_query_arm<'mcx>(
     ExecuteQuery(mcx, pstate, s, None, params, dest, qc)
 }
 
+/// `ExecuteQuery(pstate, estmt, into, params, dest, qc)` — the
+/// `CREATE TABLE ... AS EXECUTE` leg, called from `createas.c`'s
+/// `ExecCreateTableAs` through the `backend_commands_createas_seams::execute_query`
+/// seam. C passes the whole `IntoClause *`; the owned port forwards only
+/// `into->skipData` (the sole field `ExecuteQuery` reads on the CTAS path, see
+/// `into_skip_data`). The CTAS receiver (`DR_intorel`) has already been bound to
+/// `into` by `ExecCreateTableAs` before this runs, so `dest` carries it.
+fn execute_query_ctas_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    estmt: ExecuteStmt<'mcx>,
+    into: types_nodes::ddlnodes::IntoClause<'mcx>,
+    _query_string: &str,
+    params: ParamListInfo,
+    dest: DestReceiverHandle,
+    qc: Option<QueryCompletion>,
+) -> PgResult<Option<QueryCompletion>> {
+    // pstate = make_parsestate(NULL); pstate->p_sourcetext = queryString;
+    // (ExecuteQuery only uses the ParseState for EvaluateParams' transformExpr,
+    // which needs it for error positions; a fresh empty ParseState matches C's
+    // make_parsestate(NULL).)
+    let pstate = ParseState::new(mcx)?;
+    // (void) ExecuteQuery(pstate, estmt, into, params, dest, completionTag);
+    let mut qc_owned = qc;
+    ExecuteQuery(
+        mcx,
+        &pstate,
+        &estmt,
+        Some(into.skipData),
+        params,
+        dest,
+        qc_owned.as_mut(),
+    )?;
+    Ok(qc_owned)
+}
+
 /// `case T_ExecuteStmt:` arm of `UtilityReturnsTuples` (utility.c). The C
 /// predicate is infallible (it only reads prepared-statement state); an `Err`
 /// here is an internal-invariant violation, surfaced as a panic.
@@ -1093,4 +1214,7 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::deallocate_query::set(deallocate_query_arm);
     backend_tcop_utility_out_seams::execute_stmt_has_result::set(execute_stmt_has_result_arm);
     backend_tcop_utility_out_seams::execute_stmt_result_desc::set(execute_stmt_result_desc_arm);
+    // `CREATE TABLE ... AS EXECUTE` leg, owned by `createas.c`'s `ExecuteQuery`
+    // (prepare.c) — createas-seams declares it; prepare installs it.
+    createas_seam::execute_query::set(execute_query_ctas_arm);
 }

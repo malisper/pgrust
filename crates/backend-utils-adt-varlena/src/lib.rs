@@ -593,4 +593,24 @@ pub fn init_seams() {
     s::text_to_qualified_name_list::set(seam_text_to_qualified_name_list);
     s::text_substr::set(seam_text_substr);
     s::replace_text_regexp::set(seam_replace_text_regexp);
+
+    // `SplitGUCList(rawstring, separator, &namelist)` (varlena.c) — parse a
+    // `GUC_LIST_QUOTE` value into its dequoted identifier elements, for
+    // pg_get_functiondef's proconfig rendering. The body lives in this unit; the
+    // result list crosses by value (owned `String`s) so no `mcx` is threaded out.
+    backend_utils_misc_guc_funcs_seams::split_guc_list::set(|rawstring, separator| {
+        let scratch = mcx::MemoryContext::new("split_guc_list seam");
+        let out: Option<std::vec::Vec<std::string::String>> = {
+            match crate::split_format::split_guc_list(scratch.mcx(), &rawstring, separator as char)? {
+                Some(list) => Some(
+                    list.iter()
+                        .map(|t| std::string::String::from(t.as_str()))
+                        .collect(),
+                ),
+                None => None,
+            }
+        };
+        drop(scratch);
+        Ok(out)
+    });
 }

@@ -67,6 +67,45 @@ pub fn set_my_proc_in_vacuum_flags(is_wraparound: bool) -> PgResult<()> {
     Ok(())
 }
 
+/// `set_indexsafe_procflags(void)` (commands/indexcmds.c) — set
+/// `MyProc->statusFlags |= PROC_IN_SAFE_IC` so concurrent index builds (and
+/// `WaitForOlderSnapshots`) may ignore this backend. Called during a
+/// CONCURRENTLY build for an index that is neither expressional nor partial,
+/// before any xid/xmin is installed in MyProc. Done under `ProcArrayLock`
+/// (exclusive), with the dense `ProcGlobal->statusFlags[MyProc->pgxactoff]`
+/// mirror kept in sync — the exact shape of [`set_my_proc_in_vacuum_flags`].
+///
+/// ```c
+/// LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+/// MyProc->statusFlags |= PROC_IN_SAFE_IC;
+/// ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+/// LWLockRelease(ProcArrayLock);
+/// ```
+pub fn set_indexsafe_procflags() -> PgResult<()> {
+    use types_storage::storage::PROC_IN_SAFE_IC;
+
+    // This should only be called before installing xid or xmin in MyProc;
+    // otherwise concurrent processes could see an Xmin that moves backwards.
+    debug_assert!(proc_shmem::with_my_proc(|p| p.xid == 0 && p.xmin == 0));
+
+    // LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+    lwlock_seams::lwlock_acquire_proc_array::call(LWLockMode::LW_EXCLUSIVE)?;
+
+    // MyProc->statusFlags |= PROC_IN_SAFE_IC;
+    let flags = proc_shmem::with_my_proc(|p| {
+        p.statusFlags |= PROC_IN_SAFE_IC;
+        p.statusFlags
+    });
+
+    // ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+    let pgxactoff = proc_shmem::my_proc_pgxactoff();
+    proc_shmem::set_proc_array_status_flags(pgxactoff, flags);
+
+    // LWLockRelease(ProcArrayLock);
+    lwlock_seams::lwlock_release_proc_array::call()?;
+    Ok(())
+}
+
 /// `MyProc->statusFlags == PROC_IN_VACUUM` (commands/vacuumparallel.c:1007) — a
 /// parallel-vacuum worker must carry ONLY the `PROC_IN_VACUUM` flag (we don't
 /// support parallel vacuum for autovacuum). Used in the worker entry `Assert`.

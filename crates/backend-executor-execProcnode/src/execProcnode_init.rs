@@ -118,7 +118,7 @@ pub fn exec_init_node<'mcx>(
         ntag::T_BitmapOr => {
             let bitmap_or = node.expect_bitmapor();
             let s = backend_executor_nodeBitmapOr::ExecInitBitmapOr(
-                mcx, bitmap_or, estate, eflags,
+                mcx, node, bitmap_or, estate, eflags,
             )?;
             alloc_in(mcx, PlanStateNode::BitmapOr(s))?
         }
@@ -377,7 +377,17 @@ pub fn exec_init_node<'mcx>(
             alloc_in(mcx, PlanStateNode::SetOp(s))?
         }
 
-        // case T_LockRows: ExecInitLockRows(...) (nodeLockRows.c)
+        // case T_LockRows: ExecInitLockRows((LockRows *) node, estate, eflags)
+        ntag::T_LockRows => {
+            let lr = node.expect_lockrows();
+            let mut lrstate = backend_executor_nodeLockRows::ExecInitLockRows(lr, estate, eflags)?;
+            // lrstate->ps.plan = (Plan *) node — the plan back-link (read by
+            // EXPLAIN's ExplainNode). The seam-installed init_plan_state_links
+            // only carries the &LockRows, not the enclosing &'mcx Node, so the
+            // plan-tree alias is wired here where the dispatch holds it.
+            lrstate.ps.plan = Some(node);
+            alloc_in(mcx, PlanStateNode::LockRows(lrstate))?
+        }
 
         // case T_Limit: ExecInitLimit((Limit *) node, estate, eflags)
         ntag::T_Limit => {

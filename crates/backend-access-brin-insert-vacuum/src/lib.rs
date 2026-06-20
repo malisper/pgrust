@@ -56,7 +56,7 @@ use types_storage::buf::{
     BufferIsValid, InvalidBuffer, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
 };
 use types_storage::lock::{AccessShareLock, ShareUpdateExclusiveLock};
-use types_tableam::amapi::IndexUniqueCheck;
+use types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck};
 use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
 use types_tuple::access::RELKIND_INDEX;
@@ -64,20 +64,20 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::ItemPointerData;
 
 use backend_access_brin_pageops::{
-    brin_can_do_samepage_update, brin_doinsert, brin_doupdate, brin_page_cleanup,
-    brinGetTupleForHeapBlock, brinRevmapDesummarizeRange, brinRevmapInitialize,
-    brinRevmapTerminate, read_found_tuple_bytes, BrinRevmap,
+    brin_can_do_samepage_update, brin_create_empty_metapage, brin_create_metapage, brin_doinsert,
+    brin_doupdate, brin_page_cleanup, brinGetTupleForHeapBlock, brinRevmapDesummarizeRange,
+    brinRevmapInitialize, brinRevmapTerminate, read_found_tuple_bytes, BrinRevmap,
 };
 use backend_access_brin_tuple::{
     brin_copy_tuple, brin_deform_tuple, brin_form_placeholder_tuple, brin_form_tuple,
-    brin_memtuple_initialize, brin_new_memtuple,
+    brin_memtuple_initialize, brin_new_memtuple, BrinTupleImage,
 };
 use backend_access_brin_scan::{brin_build_desc, brin_free_desc};
 
 use backend_access_brin_entry_seams as opclass;
 use backend_access_index_indexam_seams::index_open;
-use backend_access_table_table_seams::{relation_close, table_open};
-use backend_access_table_tableam_seams::table_index_build_range_scan;
+use backend_access_table_table_seams::table_open;
+use backend_access_table_tableam_seams::{table_index_build_range_scan, table_index_build_scan};
 use backend_catalog_aclchk_seams::{aclcheck_error, object_ownercheck};
 use backend_catalog_index_seams::{build_index_info, index_get_relation};
 use backend_storage_buffer_bufmgr_seams::{
@@ -163,6 +163,11 @@ pub struct BrinBuildState<'mcx> {
     pub bs_bdesc: BrinDesc<'mcx>,
     /// `bs_dtuple`: the in-memory summary tuple being built.
     pub bs_dtuple: BrinMemTuple<'mcx>,
+    /// `bs_emptyTuple` / `bs_emptyTupleLen`: a cached, formed empty summary
+    /// tuple reused by `brin_fill_empty_ranges` (built lazily on first need).
+    /// (`bytes.len()` is the C `bs_emptyTupleLen`; the C `bs_context` is the
+    /// build memory context, which here is `mcx`, so it needs no field.)
+    pub bs_emptyTuple: Option<BrinTupleImage<'mcx>>,
 }
 
 // ===========================================================================
@@ -445,8 +450,11 @@ pub fn brinvacuumcleanup<'mcx>(
     )?;
     stats.num_index_tuples = num_summarized + num_existing;
 
-    relation_close::call(heap_oid, AccessShareLock)?;
-    drop(heap_rel);
+    // `Relation::close` consumes the handle and runs its single closer; calling
+    // `relation_close::call(oid, ..)` then `drop(heap_rel)` decrements the
+    // relcache refcount twice (the seam call AND the `Relation`'s `Drop`),
+    // underflowing it (`Assert(rd_refcnt > 0)`).
+    heap_rel.close(AccessShareLock)?;
 
     Ok(Some(stats))
 }
@@ -563,8 +571,9 @@ pub fn brin_summarize_range<'mcx>(
     set_user_id_and_sec_context::call(save_userid, save_sec_context);
 
     index_rel.close(ShareUpdateExclusiveLock)?;
-    relation_close::call(heapoid, ShareUpdateExclusiveLock)?;
-    drop(heap_rel);
+    // See the `heap_rel.close` note above: a single consuming close, not
+    // `relation_close::call` + `drop` (which would double-decrement the refcount).
+    heap_rel.close(ShareUpdateExclusiveLock)?;
 
     Ok(num_summarized as i32)
 }
@@ -642,8 +651,9 @@ pub fn brin_desummarize_range<'mcx>(
     }
 
     index_rel.close(ShareUpdateExclusiveLock)?;
-    relation_close::call(heapoid, ShareUpdateExclusiveLock)?;
-    drop(heap_rel);
+    // See the `heap_rel.close` note above: a single consuming close, not
+    // `relation_close::call` + `drop` (which would double-decrement the refcount).
+    heap_rel.close(ShareUpdateExclusiveLock)?;
 
     Ok(())
 }
@@ -682,6 +692,7 @@ fn initialize_brin_buildstate<'mcx>(
         bs_rmAccess: revmap,
         bs_bdesc,
         bs_dtuple,
+        bs_emptyTuple: None,
     })
 }
 
@@ -1001,6 +1012,213 @@ fn form_and_insert_tuple<'mcx>(mcx: Mcx<'mcx>, state: &mut BrinBuildState<'mcx>)
 }
 
 // ===========================================================================
+// brinbuild / brinbuildempty / brinbuildCallback / brin_fill_empty_ranges /
+// brin_build_empty_tuple (brin.c) — the BRIN `ambuild` / `ambuildempty` driver.
+// ===========================================================================
+
+/// `BrinGetPagesPerRange(relation)` (brin.h): the index's pages-per-range,
+/// taken from the `BrinOptions` reloptions if present, else
+/// `BRIN_DEFAULT_PAGES_PER_RANGE`. BRIN reloptions are not yet parsed into the
+/// relcache's trimmed `rd_options` (see `brin_get_auto_summarize`), so — exactly
+/// like that sibling default-on-`None` — the behaviour-preserving value is the C
+/// default (128), which is correct for `USING brin (col)` with no
+/// `pages_per_range` option. When a BRIN reloptions carrier lands in the relcache
+/// trim this reads it instead.
+fn brin_get_pages_per_range(_index: &Relation<'_>) -> BlockNumber {
+    /// `BRIN_DEFAULT_PAGES_PER_RANGE` (brin.h).
+    const BRIN_DEFAULT_PAGES_PER_RANGE: BlockNumber = 128;
+    BRIN_DEFAULT_PAGES_PER_RANGE
+}
+
+/// `brinbuildCallback(index, tid, values, isnull, tupleIsAlive, brstate)`
+/// (brin.c:1004): the per-heap-tuple `IndexBuildCallback`. Accumulate the
+/// current tuple into the running range summary, flushing/inserting completed
+/// ranges (and re-initializing the deformed tuple) at each page-range boundary.
+fn brinbuild_callback<'mcx>(
+    mcx: Mcx<'mcx>,
+    index: &Relation<'mcx>,
+    tid: &ItemPointerData,
+    values: &[Datum<'mcx>],
+    isnull: &[bool],
+    state: &mut BrinBuildState<'mcx>,
+) -> PgResult<()> {
+    let thisblock = item_pointer_get_block_number(tid);
+
+    // If we're in a block that belongs to a future range, summarize what we've
+    // got and start afresh. The scan might have skipped many pages (devoid of
+    // live tuples); make sure to insert index tuples for those too.
+    while thisblock > state.bs_currRangeStart + state.bs_pagesPerRange - 1 {
+        // create the index tuple and insert it
+        form_and_insert_tuple(mcx, state)?;
+
+        // set state to correspond to the next range
+        state.bs_currRangeStart += state.bs_pagesPerRange;
+
+        // re-initialize state for it
+        brin_memtuple_initialize(mcx, &mut state.bs_dtuple, &state.bs_bdesc)?;
+    }
+
+    // Accumulate the current tuple into the running state.
+    add_values_to_range(mcx, index, &state.bs_bdesc, &mut state.bs_dtuple, values, isnull)?;
+    Ok(())
+}
+
+/// `brin_build_empty_tuple(state, blkno)` (brin.c:1107): build the cached empty
+/// summary tuple for `blkno`, allocating it (in the build context, here `mcx`)
+/// on first need and just updating `bt_blkno` thereafter.
+fn brin_build_empty_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &mut BrinBuildState<'mcx>,
+    blkno: BlockNumber,
+) -> PgResult<()> {
+    match &mut state.bs_emptyTuple {
+        None => {
+            let mut dtuple = brin_new_memtuple(mcx, &state.bs_bdesc)?;
+            let (tup, _len) = brin_form_tuple(mcx, &state.bs_bdesc, blkno, &mut dtuple)?;
+            state.bs_emptyTuple = Some(tup);
+        }
+        Some(tup) => {
+            // If we already have an empty tuple, just update the block.
+            tup.set_bt_blkno(blkno);
+        }
+    }
+    Ok(())
+}
+
+/// `brin_fill_empty_ranges(state, prevRange, nextRange)` (brin.c:1133):
+/// backfill the empty (skipped) ranges between `prev_range` and `next_range`
+/// with empty summary tuples.
+fn brin_fill_empty_ranges<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &mut BrinBuildState<'mcx>,
+    prev_range: BlockNumber,
+    next_range: BlockNumber,
+) -> PgResult<()> {
+    // If we already summarized some ranges, start with the next one. Otherwise
+    // start from the first range of the table.
+    let mut blkno = if prev_range == types_core::primitive::InvalidBlockNumber {
+        0
+    } else {
+        prev_range + state.bs_pagesPerRange
+    };
+
+    // Generate empty ranges until we hit the next non-empty range.
+    while blkno < next_range {
+        // Did we already build the empty tuple? If not, do it now.
+        brin_build_empty_tuple(mcx, state, blkno)?;
+        let (bytes, len) = {
+            let tup = state.bs_emptyTuple.as_ref().expect("empty tuple built");
+            (mcx::slice_in(mcx, &tup.bytes)?, tup.bytes.len())
+        };
+        brin_doinsert(
+            mcx,
+            &state.bs_irel,
+            state.bs_pagesPerRange,
+            &mut state.bs_rmAccess,
+            &mut state.bs_currentInsertBuf,
+            blkno,
+            &bytes,
+            len,
+        )?;
+
+        // try next page range
+        blkno += state.bs_pagesPerRange;
+    }
+    Ok(())
+}
+
+/// `brinbuild(heap, index, indexInfo)` (brin.c:1019): build a new BRIN index —
+/// create the metapage + revmap, scan the heap accumulating per-range summaries,
+/// flush them, and backfill trailing empty ranges. Returns the heap/index tuple
+/// counts.
+///
+/// Serial build only: parallel BRIN build (`_brin_begin_parallel` /
+/// `_brin_parallel_merge`) is part of the gated parallel-build path
+/// (`indexInfo.ii_ParallelWorkers > 0`); a serial `CREATE INDEX` never sets it.
+pub fn brinbuild<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap: &Relation<'mcx>,
+    index: &Relation<'mcx>,
+    index_info: &mut types_nodes::execnodes::IndexInfo<'mcx>,
+) -> PgResult<IndexBuildResult> {
+    // We expect to be called exactly once for any index relation.
+    if relation_get_number_of_blocks::call(index)? != 0 {
+        return Err(err(
+            ERRCODE_INTERNAL_ERROR,
+            alloc::format!("index \"{}\" already contains data", index.name()),
+        ));
+    }
+
+    let pages_per_range = brin_get_pages_per_range(index);
+
+    // Create + WAL the metapage (block 0). (Critical section not required:
+    // on error the whole relation's creation is rolled back.)
+    brin_create_metapage(index, pages_per_range)?;
+
+    // Initialize our state, including the deformed tuple state.
+    let (revmap, real_pages_per_range) = brinRevmapInitialize(index.alias())?;
+    let mut state = initialize_brin_buildstate(
+        mcx,
+        index,
+        revmap,
+        real_pages_per_range,
+        relation_get_number_of_blocks::call(heap)?,
+    )?;
+
+    // No parallel index build (ii_ParallelWorkers == 0 for a serial CREATE
+    // INDEX; the parallel leg is gated). Scan the relation. No syncscan: we want
+    // heap blocks in physical order so ranges start from block 0 and the
+    // callback never generates a summary for the same range twice.
+    let reltuples = {
+        let index_alias = index.alias();
+        let st = &mut state;
+        table_index_build_scan::call(
+            mcx,
+            heap,
+            index,
+            index_info,
+            false,
+            true,
+            &mut |tid: ItemPointerData,
+                  values: &[Datum<'mcx>],
+                  isnull: &[bool],
+                  _tuple_is_alive: bool|
+                  -> PgResult<()> {
+                brinbuild_callback(mcx, &index_alias, &tid, values, isnull, st)
+            },
+        )?
+    };
+
+    // Process the final batch. (Note this does not update bs_currRangeStart,
+    // i.e. it stays at the last range added — that's what brin_fill_empty_ranges
+    // expects.)
+    form_and_insert_tuple(mcx, &mut state)?;
+
+    // Backfill the final ranges with empty data.
+    let prev = state.bs_currRangeStart;
+    let next = state.bs_maxRangeStart;
+    brin_fill_empty_ranges(mcx, &mut state, prev, next)?;
+
+    // Release resources.
+    let idxtuples = state.bs_numtuples;
+    brinRevmapTerminate(&state.bs_rmAccess)?;
+    terminate_brin_buildstate(mcx, state)?;
+
+    Ok(IndexBuildResult {
+        heap_tuples: reltuples,
+        index_tuples: idxtuples,
+    })
+}
+
+/// `brinbuildempty(index)` (brin.c:1140): create an empty BRIN index, consisting
+/// of a metapage only, in the index's INIT fork.
+pub fn brinbuildempty<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<()> {
+    let _ = mcx;
+    let pages_per_range = brin_get_pages_per_range(index);
+    brin_create_empty_metapage(index, pages_per_range)
+}
+
+// ===========================================================================
 // union_tuples (brin.c:2031)
 // ===========================================================================
 
@@ -1238,14 +1456,7 @@ fn add_values_to_range<'mcx>(
 // brinGetStats (brin.c:1648)
 // ===========================================================================
 
-/// `BrinStatsData` (brin.h): index statistics.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct BrinStatsData {
-    /// `pagesPerRange`.
-    pub pages_per_range: BlockNumber,
-    /// `revmapNumPages`.
-    pub revmap_num_pages: BlockNumber,
-}
+pub use types_brin::BrinStatsData;
 
 /// `brinGetStats(index, stats)` (brin.c:1648): fetch the index's statistical
 /// data from the metapage.
@@ -1263,6 +1474,17 @@ pub fn brinGetStats<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<Br
         // revmapNumPages = lastRevmapPage - 1
         revmap_num_pages: last_revmap_page - 1,
     })
+}
+
+/// `index_open(indexoid, NoLock); brinGetStats(...); index_close(index, NoLock)`
+/// — the `brin_get_stats` seam body called by `brincostestimate` (selfuncs.c).
+/// The index lock is already held by plancat.c, so `NoLock`.
+fn brin_get_stats<'mcx>(mcx: Mcx<'mcx>, indexoid: Oid) -> PgResult<BrinStatsData> {
+    use types_storage::lock::NoLock;
+    let index_rel = index_open::call(mcx, indexoid, NoLock)?;
+    let stats = brinGetStats(mcx, &index_rel)?;
+    index_rel.close(NoLock)?;
+    Ok(stats)
 }
 
 // ===========================================================================
@@ -1373,6 +1595,19 @@ pub fn init_seams() {
     seams::brinvacuumcleanup::set(brinvacuumcleanup);
     seams::brin_summarize_range::set(brin_summarize_range);
     seams::brin_desummarize_range::set(brin_desummarize_range);
+    seams::brinbuild::set(|mcx, heap, index, carrier| {
+        // index.c wraps the caller's owned `&mut IndexInfo<'mcx>` in the
+        // carrier; recover the concrete struct (tag-checked downcast — a
+        // NULL/wrong-type carrier is the C NULL-pointer programming error).
+        let info = carrier
+            .downcast_mut::<types_nodes::execnodes::IndexInfo<'_>>()
+            .unwrap_or_else(|| {
+                panic!("brinbuild: IndexInfoCarrier did not carry the expected IndexInfo")
+            });
+        brinbuild(mcx, heap, index, info)
+    });
+    seams::brinbuildempty::set(brinbuildempty);
+    seams::brin_get_stats::set(brin_get_stats);
 
     // Register this crate's SQL-callable BRIN range-maintenance builtins into
     // the fmgr-core builtin table (by-OID dispatch / fmgr_isbuiltin).

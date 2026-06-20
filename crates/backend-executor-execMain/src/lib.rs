@@ -324,11 +324,7 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
 
         // Build the ExecRowMark array from PlanRowMark(s), if any.
         if plannedstmt.rowMarks.as_ref().is_some_and(|m| !m.is_empty()) {
-            panic!(
-                "execMain InitPlan: ExecRowMark array build over plannedstmt->rowMarks not \
-                 wired (needs ExecGetRangeTableRelation rowmark open + CheckValidRowMarkRel) — \
-                 #167 F0d"
-            );
+            init_plan_rowmarks(estate)?;
         }
 
         // estate->es_tupleTable = NIL;  (CreateExecutorState left it empty.)
@@ -1182,6 +1178,84 @@ pub fn exec_supports_backward_scan(plan: &PlannedStmt<'_>) -> PgResult<bool> {
 // ExecUpdateLockMode (execMain.c).
 // ===========================================================================
 
+/// Install the outward seams the `GetTupleForTrigger` firing front
+/// (`backend-commands-trigger`) calls to fetch + lock the OLD on-disk tuple.
+/// The trigger manager is below the executor's execUtils/tableam machinery in
+/// the crate DAG, so the bodies live here (execMain owns `ExecUpdateLockMode`,
+/// depends on execUtils for `ExecGetTriggerOldSlot`, and on the tableam crate).
+fn install_get_tuple_for_trigger_seams() {
+    // ExecGetTriggerOldSlot(estate, relinfo) — the relInfo's reusable OLD slot.
+    backend_commands_trigger_seams::exec_get_trigger_old_slot::set(|estate, relinfo| {
+        execUtils::ExecGetTriggerOldSlot(estate, relinfo)
+    });
+
+    // ExecUpdateLockMode(estate, relinfo).
+    backend_commands_trigger_seams::exec_update_lock_mode::set(|estate, relinfo| {
+        ExecUpdateLockMode(estate, relinfo)
+    });
+
+    // table_tuple_lock(rel, tid, es_snapshot, oldslot, es_output_cid, mode,
+    //                  LockWaitBlock, lockflags, &tmfd).
+    backend_commands_trigger_seams::get_tuple_for_trigger_lock::set(
+        |estate, relinfo, tid, oldslot, mode, find_last_version, tmfd| {
+            let mcx = estate.es_query_cxt;
+            let rel = estate
+                .result_rel(relinfo)
+                .ri_RelationDesc
+                .as_ref()
+                .expect("GetTupleForTrigger: result relation has no relation")
+                .alias();
+            let snapshot = estate
+                .es_snapshot
+                .as_deref()
+                .cloned()
+                .expect("GetTupleForTrigger: no active es_snapshot");
+            let cid = estate.es_output_cid;
+            let flags: u8 = if find_last_version {
+                types_tableam::tableam::TUPLE_LOCK_FLAG_FIND_LAST_VERSION
+            } else {
+                0
+            };
+            let inslot = estate.slot_data_mut(oldslot);
+            backend_access_table_tableam::table_tuple_lock(
+                mcx,
+                &rel,
+                tid,
+                &Some(snapshot),
+                inslot,
+                cid,
+                mode,
+                types_tableam::tableam::LockWaitPolicy::LockWaitBlock,
+                flags,
+                tmfd,
+            )
+        },
+    );
+
+    // table_tuple_fetch_row_version(rel, tid, SnapshotAny, oldslot).
+    backend_commands_trigger_seams::get_tuple_for_trigger_fetch::set(
+        |estate, relinfo, tid, oldslot| {
+            let mcx = estate.es_query_cxt;
+            let rel = estate
+                .result_rel(relinfo)
+                .ri_RelationDesc
+                .as_ref()
+                .expect("GetTupleForTrigger: result relation has no relation")
+                .alias();
+            let snapshot_any =
+                Some(types_snapshot::SnapshotData::sentinel(types_snapshot::SnapshotType::SNAPSHOT_ANY));
+            let inslot = estate.slot_data_mut(oldslot);
+            backend_access_table_tableam::table_tuple_fetch_row_version(
+                mcx,
+                &rel,
+                tid,
+                &snapshot_any,
+                inslot,
+            )
+        },
+    );
+}
+
 /// `ExecUpdateLockMode(estate, relinfo)` (execMain.c): the row-lock mode to
 /// acquire on a conflicting tuple before updating. If no key column has been
 /// modified a weaker lock is sufficient (better concurrency).
@@ -1452,6 +1526,161 @@ fn CheckValidResultRel<'mcx>(
     } else {
         Err(types_error::PgError::error(alloc::format!(
             "cannot change relation \"{relname}\""
+        ))
+        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+    }
+}
+
+/// `InitPlan`'s "Build the ExecRowMark array from PlanRowMark(s)" loop
+/// (execMain.c). For each `PlanRowMark` the planner attached to the
+/// `PlannedStmt`, open (and lock, by `ExecGetRangeTableRelation`'s already-held
+/// lock) the marked relation if its rowmark needs a real row, validate it with
+/// `CheckValidRowMarkRel`, build an `ExecRowMark`, and store it in
+/// `estate->es_rowmarks[rti-1]`.
+fn init_plan_rowmarks<'mcx>(estate: &mut types_nodes::EStateData<'mcx>) -> PgResult<()> {
+    use types_nodes::nodelockrows::{
+        ExecRowMark, ROW_MARK_COPY, ROW_MARK_EXCLUSIVE, ROW_MARK_KEYSHARE, ROW_MARK_NOKEYEXCLUSIVE,
+        ROW_MARK_REFERENCE, ROW_MARK_SHARE,
+    };
+
+    let mcx = estate.es_query_cxt;
+    let rtsize = estate.es_range_table_size;
+
+    // estate->es_rowmarks = palloc0(estate->es_range_table_size * sizeof(...));
+    // (allocated only when there are rowmarks, as in C).
+    if estate.es_rowmarks.is_empty() {
+        let mut marks = mcx::vec_with_capacity_in(mcx, rtsize)?;
+        marks.resize_with(rtsize, || None);
+        estate.es_rowmarks = marks;
+    }
+
+    // Snapshot the PlanRowMark scalars out of es_plannedstmt so we can take
+    // `&mut estate` for ExecGetRangeTableRelation without aliasing the borrow.
+    let planned: alloc::vec::Vec<types_nodes::nodelockrows::PlanRowMark> = estate
+        .es_plannedstmt
+        .as_ref()
+        .and_then(|p| p.rowMarks.as_ref())
+        .map(|m| m.iter().copied().collect())
+        .unwrap_or_default();
+
+    for rc in planned {
+        // ignore "parent" rowmarks; they are irrelevant at runtime
+        if rc.isParent {
+            continue;
+        }
+
+        // Ignore RowMarks for RTEs that were pruned in ExecDoInitialPruning.
+        if !backend_nodes_core_seams::bms_is_member::call(
+            rc.rti as i32,
+            estate.es_unpruned_relids.as_deref(),
+        ) {
+            continue;
+        }
+
+        // get relation's OID (will produce InvalidOid if subquery). For a
+        // non-inheritance rowmark (rti == prti) it is the marked RTE's relid.
+        let relid = if rc.rti != rc.prti {
+            // Child of an inheritance tree: the relid is the child RTE's relid.
+            execUtils::exec_rt_fetch(rc.rti, estate).relid
+        } else {
+            execUtils::exec_rt_fetch(rc.rti, estate).relid
+        };
+
+        // Open and validate the relation if the rowmark needs a real row.
+        let relation: Option<types_rel::Relation<'mcx>> = match rc.markType {
+            ROW_MARK_EXCLUSIVE | ROW_MARK_NOKEYEXCLUSIVE | ROW_MARK_SHARE | ROW_MARK_KEYSHARE
+            | ROW_MARK_REFERENCE => {
+                let rel = execUtils::ExecGetRangeTableRelation(estate, rc.rti, false, false)?;
+                CheckValidRowMarkRel(&rel, rc.markType)?;
+                Some(rel)
+            }
+            ROW_MARK_COPY => {
+                // physical copy: no relation needed at this layer.
+                None
+            }
+            _ => {
+                return Err(types_error::PgError::error(alloc::format!(
+                    "unrecognized markType: {}",
+                    rc.markType
+                )))
+            }
+        };
+
+        let erm = ExecRowMark {
+            relation,
+            relid,
+            rti: rc.rti,
+            prti: rc.prti,
+            rowmarkId: rc.rowmarkId,
+            markType: rc.markType,
+            strength: rc.strength,
+            waitPolicy: rc.waitPolicy,
+            ermActive: false,
+            curCtid: types_tuple::heaptuple::ItemPointerData::default(),
+            ermExtra: None,
+        };
+
+        debug_assert!(rc.rti > 0 && (rc.rti as usize) <= rtsize);
+        debug_assert!(estate.es_rowmarks[(rc.rti - 1) as usize].is_none());
+        estate.es_rowmarks[(rc.rti - 1) as usize] = Some(erm);
+    }
+
+    Ok(())
+}
+
+/// `CheckValidRowMarkRel(rel, markType)` (execMain.c) — check that a relation
+/// is a legal target for marking (`FOR UPDATE`/`FOR SHARE`/`REFERENCE`).
+#[allow(non_snake_case)]
+fn CheckValidRowMarkRel<'mcx>(
+    rel: &types_rel::Relation<'mcx>,
+    mark_type: types_nodes::nodelockrows::RowMarkType,
+) -> PgResult<()> {
+    use types_nodes::nodelockrows::{ROW_MARK_COPY, ROW_MARK_REFERENCE};
+    use types_tuple::access::{
+        RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
+        RELKIND_SEQUENCE, RELKIND_TOASTVALUE, RELKIND_VIEW,
+    };
+
+    let relname = rel.name();
+    let relkind = rel.rd_rel.relkind;
+
+    if relkind == RELKIND_RELATION || relkind == RELKIND_PARTITIONED_TABLE {
+        // OK
+        Ok(())
+    } else if relkind == RELKIND_SEQUENCE {
+        Err(types_error::PgError::error(alloc::format!(
+            "cannot lock rows in sequence \"{relname}\""
+        ))
+        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+    } else if relkind == RELKIND_TOASTVALUE {
+        Err(types_error::PgError::error(alloc::format!(
+            "cannot lock rows in TOAST relation \"{relname}\""
+        ))
+        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+    } else if relkind == RELKIND_VIEW {
+        // Allow referencing a view (the planner expands it), but not locking.
+        if mark_type != ROW_MARK_REFERENCE && mark_type != ROW_MARK_COPY {
+            Err(types_error::PgError::error(alloc::format!(
+                "cannot lock rows in view \"{relname}\""
+            ))
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+        } else {
+            Ok(())
+        }
+    } else if relkind == RELKIND_MATVIEW {
+        Err(types_error::PgError::error(alloc::format!(
+            "cannot lock rows in materialized view \"{relname}\""
+        ))
+        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+    } else if relkind == RELKIND_FOREIGN_TABLE {
+        // Okay only if the FDW supports it; no FDW row-locking is modelled.
+        Err(types_error::PgError::error(alloc::format!(
+            "cannot lock rows in foreign table \"{relname}\""
+        ))
+        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+    } else {
+        Err(types_error::PgError::error(alloc::format!(
+            "cannot lock rows in relation \"{relname}\""
         ))
         .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
     }
@@ -2423,6 +2652,8 @@ pub fn init_seams() {
     // ExecSupportsBackwardScan (body in execAmi) + ExecUpdateLockMode.
     seams::exec_supports_backward_scan::set(exec_supports_backward_scan);
     seams::exec_update_lock_mode::set(ExecUpdateLockMode);
+
+    install_get_tuple_for_trigger_seams();
 
     // ExecGetReturningSlot / ExecGetChildToRootMap bodies live in execUtils;
     // execMain owns these seam decls (consumed by nodeModifyTable) and delegates.

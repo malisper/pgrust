@@ -872,19 +872,15 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         // ----- T_NullTest -----
         etag::T_NullTest => {
             let ntest = node.expect_nulltest();
-            if ntest.argisrow {
-                // Row null-test needs a rowcache and the composite-deform path
-                // (ExecEvalRowNull[NotNull]); the rowcache lives in the step,
-                // but the runtime tupdesc lookup is the typcache owner's. The
-                // scalar path below is fully ported; the row path routes loudly.
-                panic!(
-                    "execExpr-core: row NullTest (argisrow) needs the composite-type rowcache \
-                     deform path (typcache owner); scalar NullTest is ported"
-                );
-            }
-            let opcode = match ntest.nulltesttype {
-                NullTestType::IS_NULL => ExprEvalOp::EEOP_NULLTEST_ISNULL,
-                NullTestType::IS_NOT_NULL => ExprEvalOp::EEOP_NULLTEST_ISNOTNULL,
+            // C: pick the scalar vs row opcode by nulltesttype × argisrow. The
+            // row path (EEOP_NULLTEST_ROWIS[NOT]NULL) drives ExecEvalRowNull[NotNull],
+            // which decodes the composite Datum and per-field heap_attisnull tests
+            // it via the typcache rowtype lookup (now ported).
+            let opcode = match (ntest.nulltesttype, ntest.argisrow) {
+                (NullTestType::IS_NULL, false) => ExprEvalOp::EEOP_NULLTEST_ISNULL,
+                (NullTestType::IS_NULL, true) => ExprEvalOp::EEOP_NULLTEST_ROWISNULL,
+                (NullTestType::IS_NOT_NULL, false) => ExprEvalOp::EEOP_NULLTEST_ISNOTNULL,
+                (NullTestType::IS_NOT_NULL, true) => ExprEvalOp::EEOP_NULLTEST_ROWISNOTNULL,
             };
             // first evaluate argument into result variable
             let arg = ntest.arg.as_deref().expect("NullTest.arg present");
@@ -1627,18 +1623,119 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
-        etag::T_FieldStore => panic!(
-            "execExpr-core: FieldStore threads each new field value through \
-             state->innermost_caseval = &values[fieldnum-1] and recurses into \
-             &values[fieldnum-1] (execExpr.c:1581-1586), but the ExprEvalStepData::FieldStore \
-             variant models values/nulls as plain Datum/bool workspace vecs with no per-column \
-             ResultCellId — so neither the innermost_caseval thread nor the per-field recursion \
-             has an arena cell to bind to. The variant also parks the FieldStore node itself as \
-             an opaque address (fstore: usize), but the interpreter's DEFORM/FORM pair needs \
-             fstore->fieldnums. Genuine model gap (gap-2 not extended to FieldStore + parked \
-             node), owned by the nodes/keystone model layer. lookup_rowtype_tupdesc (for natts) \
-             is a landed seam."
-        ),
+        // ----- T_FieldStore -----
+        etag::T_FieldStore => {
+            let fstore = node.expect_fieldstore();
+
+            // /* find out the number of columns in the composite type */
+            // tupDesc = lookup_rowtype_tupdesc(fstore->resulttype, -1);
+            // ncolumns = tupDesc->natts;
+            // ReleaseTupleDesc(tupDesc);
+            let tup_desc = backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(
+                mcx,
+                fstore.resulttype,
+                -1,
+            )?;
+            let ncolumns = tup_desc.natts;
+
+            // /* create workspace for column values */
+            // values = (Datum *) palloc(sizeof(Datum) * ncolumns);
+            // nulls  = (bool  *) palloc(sizeof(bool)  * ncolumns);
+            //
+            // The owned model replaces the two flat workspace arrays with a
+            // per-column arena ResultCellId. Allocate one cell per column up
+            // front; DEFORM writes each, the newval sub-exprs target their
+            // field's cell, and FORM gathers them all into heap_form_tuple.
+            let mut col_cells: PgVec<ResultCellId> =
+                mcx::vec_with_capacity_in(mcx, ncolumns as usize)?;
+            for _ in 0..ncolumns {
+                col_cells.push(new_result_cell(mcx, state)?);
+            }
+
+            // /* create shared composite-type-lookup cache struct */
+            // rowcachep = palloc(sizeof(ExprEvalRowtypeCache));
+            // rowcachep->cacheptr = NULL;
+            //
+            // C shares one rowcachep between the DEFORM and FORM steps; in the
+            // owned model the rowtype lookup goes through the internally-cached
+            // typcache seam (the void* cacheptr cannot round-trip), so the cache
+            // carries no cross-step state — give each step its own default box.
+            let deform_rowcache = mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
+            let form_rowcache = mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
+
+            // /* emit code to evaluate the composite input value */
+            // ExecInitExprRec(fstore->arg, state, resv, resnull);
+            let arg = fstore.arg.as_deref().expect("FieldStore.arg present");
+            exec_init_expr_rec(mcx, arg, state, resv)?;
+
+            // /* next, deform the input tuple into our workspace */
+            // scratch.opcode = EEOP_FIELDSTORE_DEFORM;
+            // scratch.d.fieldstore.fstore   = fstore;
+            // scratch.d.fieldstore.rowcache = rowcachep;
+            // scratch.d.fieldstore.values   = values;
+            // scratch.d.fieldstore.nulls    = nulls;
+            // scratch.d.fieldstore.ncolumns = ncolumns;
+            // ExprEvalPushStep(state, &scratch);
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_FIELDSTORE_DEFORM,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::FieldStore {
+                    resulttype: fstore.resulttype,
+                    rowcache: Some(deform_rowcache),
+                    col_cells: Some(col_cells.clone()),
+                    ncolumns,
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+
+            // /* evaluate new field values, store in workspace columns */
+            // forboth(l1, fstore->newvals, l2, fstore->fieldnums) { ... }
+            debug_assert_eq!(fstore.newvals.len(), fstore.fieldnums.len());
+            for (e, &fieldnum) in fstore.newvals.iter().zip(fstore.fieldnums.iter()) {
+                // if (fieldnum <= 0 || fieldnum > ncolumns)
+                //     elog(ERROR, "field number %d is out of range in FieldStore", ...);
+                if fieldnum <= 0 || fieldnum as i32 > ncolumns {
+                    return Err(types_error::PgError::error(format!(
+                        "field number {fieldnum} is out of range in FieldStore"
+                    )));
+                }
+
+                // The field's workspace cell is both the CaseTestExpr source (so a
+                // nested FieldStore/SubscriptingRef newval can read the old value
+                // being replaced) and the result address for this sub-expression.
+                // In the owned model both halves are the one paired ResultCell.
+                //
+                // save_innermost_caseval = state->innermost_caseval;
+                // state->innermost_caseval = &values[fieldnum - 1];
+                // (innermost_casenull rides along on the same paired cell)
+                let field_cell = col_cells[(fieldnum - 1) as usize];
+                let save_caseval = state.innermost_caseval;
+                state.innermost_caseval = Some(field_cell);
+
+                // ExecInitExprRec(e, state, &values[fieldnum-1], &nulls[fieldnum-1]);
+                exec_init_expr_rec(mcx, e, state, field_cell)?;
+
+                // state->innermost_caseval = save_innermost_caseval;
+                state.innermost_caseval = save_caseval;
+            }
+
+            // /* finally, form result tuple */
+            // scratch.opcode = EEOP_FIELDSTORE_FORM; ... ExprEvalPushStep(state, &scratch);
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_FIELDSTORE_FORM,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::FieldStore {
+                    resulttype: fstore.resulttype,
+                    rowcache: Some(form_rowcache),
+                    col_cells: Some(col_cells),
+                    ncolumns,
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            Ok(())
+        }
         // ----- T_CoerceToDomain -----
         etag::T_CoerceToDomain => {
             let ctest = node.expect_coercetodomain();
@@ -3153,22 +3250,23 @@ thread_local! {
 /// &prm->isnull)`.
 pub fn eval_exec_param_into_list<'mcx>(
     param_li: &mut types_nodes::params::ParamListInfoData<'static>,
-    exprstate: &ExprState<'mcx>,
+    exprstate: &mut ExprState<'mcx>,
     param_index: i32,
     ptype: types_core::Oid,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // ExprState is consumed by-&mut by the evaluator (it threads result cells);
-    // clone the borrowed compiled program into a local the evaluator can drive,
-    // matching the C `ExecEvalExprSwitchContext(n, ...)` which mutates the
-    // ExprState's scratch in place.
-    let mut state = exprstate.clone();
-
     // prm->value = ExecEvalExprSwitchContext(n, GetPerTupleExprContext(estate),
     //                                        &prm->isnull);
+    //
+    // C evaluates the compiled `ExprState` in place — the interpreter threads
+    // its scratch result cells through the *same* state built by
+    // `ExecPrepareExprList`. The state must NOT be cloned: `ExprState::clone`
+    // deliberately drops the compiled `steps` program (it only carries the
+    // lightweight handle fields), so a cloned state has no instructions and
+    // `CheckExprStillValid`/`ExecInterpExpr` would panic ("steps not built").
     let econtext =
         backend_executor_execUtils_seams::get_per_tuple_expr_context::call(estate)?;
-    let (value, isnull) = exec_eval_expr_switch_context(&mut state, econtext, estate)?;
+    let (value, isnull) = exec_eval_expr_switch_context(exprstate, econtext, estate)?;
 
     // Deep-copy the computed value out of the per-tuple context into the param
     // list's backend-lifetime storage (`Datum<'static>`). For a by-value datum

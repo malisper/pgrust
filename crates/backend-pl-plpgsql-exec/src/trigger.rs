@@ -32,8 +32,22 @@ const TRIGGER_EVENT_TRUNCATE: u32 = 0x0003;
 const TRIGGER_EVENT_OPMASK: u32 = 0x0003;
 const TRIGGER_EVENT_ROW: u32 = 0x0004;
 const TRIGGER_EVENT_BEFORE: u32 = 0x0008;
-const TRIGGER_EVENT_AFTER: u32 = 0x0010;
-const TRIGGER_EVENT_INSTEAD: u32 = 0x0020;
+const TRIGGER_EVENT_AFTER: u32 = 0x0000;
+const TRIGGER_EVENT_INSTEAD: u32 = 0x0010;
+const TRIGGER_EVENT_TIMINGMASK: u32 = 0x0018;
+
+#[inline]
+fn fired_before(ev: u32) -> bool {
+    ev & TRIGGER_EVENT_TIMINGMASK == TRIGGER_EVENT_BEFORE
+}
+#[inline]
+fn fired_after(ev: u32) -> bool {
+    ev & TRIGGER_EVENT_TIMINGMASK == TRIGGER_EVENT_AFTER
+}
+#[inline]
+fn fired_instead(ev: u32) -> bool {
+    ev & TRIGGER_EVENT_TIMINGMASK == TRIGGER_EVENT_INSTEAD
+}
 
 #[inline]
 fn fired_for_row(ev: u32) -> bool {
@@ -95,11 +109,11 @@ pub fn plpgsql_fulfill_promise_impl(estate: &mut PLpgSQL_execstate, var: &mut PL
         PLPGSQL_PROMISE_TG_NAME => (0, Some(name_image(&bytes_to_string(read_trigger_name()))), false),
         PLPGSQL_PROMISE_TG_WHEN => {
             let ev = trig::tg_event::call(TRIG_CURRENT);
-            let s = if ev & TRIGGER_EVENT_BEFORE != 0 {
+            let s = if fired_before(ev) {
                 "BEFORE"
-            } else if ev & TRIGGER_EVENT_AFTER != 0 {
+            } else if fired_after(ev) {
                 "AFTER"
-            } else if ev & TRIGGER_EVENT_INSTEAD != 0 {
+            } else if fired_instead(ev) {
                 "INSTEAD OF"
             } else {
                 unreachable!("unrecognized trigger execution time")

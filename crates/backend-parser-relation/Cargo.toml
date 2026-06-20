@@ -31,6 +31,10 @@ backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 # Owner of this crate's inward seams.
 backend-parser-relation-seams = { path = "../backend-parser-relation-seams" }
 
+# Cross-crate install: parser-relation owns get_rte_attribute_name's body, which
+# ruleutils' deparser reaches through this seam.
+backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
+
 # Outward dependency seams (catalog / cache / funcapi callees not yet ported / cyclic).
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }

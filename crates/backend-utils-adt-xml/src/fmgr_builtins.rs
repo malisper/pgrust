@@ -110,10 +110,24 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: Vec<u8>) -> Datum {
 }
 
 /// `xml_in(cstring)` (OID 2893) — parse a `cstring` to the `xml` type.
+///
+/// C: `escontext = (Node *) fcinfo->context` — thread the soft `ErrorSaveContext`
+/// off the fmgr frame into `xml_in`, so a malformed-XML parse `ereturn`s INTO the
+/// escontext (the soft path `pg_input_is_valid` / `pg_input_error_info` rely on)
+/// and returns NULL, instead of throwing a hard error. With no soft sink the
+/// escontext is `None` and the parse error is thrown as `Err`, as before.
 fn fc_xml_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
-    let out = ok(crate::xml_in(s));
-    ret_varlena(fcinfo, out)
+    // `arg_cstring` borrows `fcinfo` immutably while `escontext_mut()` needs
+    // `&mut`; copy the input to an owned string first.
+    let s = arg_cstring(fcinfo, 0).to_string();
+    match ok(crate::xml_in(&s, fcinfo.escontext_mut())) {
+        Some(out) => ret_varlena(fcinfo, out),
+        None => {
+            // C: `if (doc == NULL) PG_RETURN_NULL();`
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
 }
 
 /// `xml_out(xml)` (OID 2894) — render an `xml` value to its `cstring` image.

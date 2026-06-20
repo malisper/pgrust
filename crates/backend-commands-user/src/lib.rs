@@ -227,9 +227,24 @@ fn defel_int(defel: &DefElem) -> i32 {
 }
 
 /// `(List *) defel->arg` — the option's value is a `List *` of `RoleSpec`
+/// nodes (addroleto, rolemembers, adminmembers). A NULL `arg` (e.g.
+/// `CREATE GROUP` with no `USER` clause) is the C `NIL`, an empty list.
+pub fn def_get_rolespec_list(defel: DefElem) -> PgResult<Vec<RoleSpec>> {
+    match defel.arg.as_deref() {
+        None => Ok(Vec::new()),
+        Some(node) => match node.as_list() {
+            Some(items) => Ok(rolespecs(items)),
+            // A bare RoleSpec (single-element list flattened) is tolerated the
+            // same way the C cast would treat a one-node list.
+            None => Ok(node.as_rolespec().cloned().into_iter().collect()),
+        },
+    }
+}
+
+/// `(List *) defel->arg` — the option's value is a `List *` of `RoleSpec`
 /// nodes (addroleto, rolemembers, adminmembers).
 fn defel_rolespec_list(defel: &DefElem) -> PgResult<Vec<RoleSpec>> {
-    seam::def_get_rolespec_list::call(defel.clone())
+    def_get_rolespec_list(defel.clone())
 }
 
 /// Extract the contained `RoleSpec` from a node.
@@ -2822,6 +2837,7 @@ pub fn init_seams() {
     /* Read seams consumed within this crate's command paths. */
     seam::password_encryption::set(|| Ok(get_password_encryption()));
     seam::def_get_string::set(|opt| def_get_string(&opt));
+    seam::def_get_rolespec_list::set(def_get_rolespec_list);
     seam::createrole_self_grant_enabled::set(|| Ok(get_createrole_self_grant_enabled()));
     seam::createrole_self_grant_options::set(|| Ok(get_createrole_self_grant_options()));
 

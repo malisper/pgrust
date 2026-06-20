@@ -21,6 +21,7 @@ types-jsonb = { path = "../types-jsonb" }
 types-jsonfuncs = { path = "../types-jsonfuncs" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-utils-adt-jsonb = { path = "../backend-utils-adt-jsonb" }
+backend-utils-adt-jsonb-seams = { path = "../backend-utils-adt-jsonb-seams" }
 backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 backend-utils-adt-jsonb-util = { path = "../backend-utils-adt-jsonb-util" }
 backend-utils-adt-numeric = { path = "../backend-utils-adt-numeric" }

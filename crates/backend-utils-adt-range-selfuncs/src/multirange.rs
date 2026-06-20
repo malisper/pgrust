@@ -16,7 +16,8 @@ use types_rangetypes::{MultirangeTypeP, RangeBound};
 use types_selfuncs::{VariableStatData, DEFAULT_INEQ_SEL, DEFAULT_MULTIRANGE_INEQ_SEL};
 
 use backend_utils_adt_multirangetypes_seams::{
-    datum_get_multirange_type_p, make_multirange, multirange_get_bounds, multirange_get_typcache,
+    datum_get_multirange_type_p_value, make_multirange, multirange_get_bounds,
+    multirange_get_typcache,
 };
 use backend_utils_adt_rangetypes_seams::range_serialize;
 use backend_utils_adt_selfuncs_seams::get_restriction_variable;
@@ -181,9 +182,12 @@ pub fn multirangesel<'mcx>(
             .type_id;
         if other.consttype == elem_type_id {
             // C: `lower.val = upper.val = other->constvalue;` — a verbatim
-            // Datum-word copy. Pull the machine word out of the canonical
-            // value's by-value arm for the still-shim `RangeBound.val`.
-            let constword = Datum::from_usize(other.constvalue.as_usize());
+            // Datum-word copy. The canonical value is a by-value element's
+            // machine word, or a by-reference element's pointer into its image;
+            // `as_byref_word()` yields the bare/pointer word uniformly (a plain
+            // `.as_usize()` would panic on a by-reference element such as the
+            // `numeric` of a `nummultirange`).
+            let constword = Datum::from_usize(other.constvalue.as_byref_word());
             let lower = RangeBound {
                 val: constword,
                 infinite: false,
@@ -219,12 +223,15 @@ pub fn multirangesel<'mcx>(
             .as_ref()
             .expect("multirange typcache has rngtype");
         if other.consttype == rngtype.type_id {
-            // C: `DatumGetRangeTypeP(other->constvalue)` — the word is a range
-            // varlena pointer; the seam (still shim-typed) detoasts it.
+            // C: `DatumGetRangeTypeP(other->constvalue)` — the canonical
+            // `constvalue` is a by-reference range varlena image (`Datum::ByRef`),
+            // so go through the value-form seam, which reads the image bytes; the
+            // bare-word `datum_get_range_type_p` would panic on the by-reference
+            // value (scalar accessor on a by-ref Datum).
             let constrange =
-                backend_utils_adt_rangetypes_seams::datum_get_range_type_p::call(
+                backend_utils_adt_rangetypes_seams::datum_get_range_type_p_value::call(
                     mcx,
-                    Datum::from_usize(other.constvalue.as_usize()),
+                    &other.constvalue,
                 )?;
             constmultirange =
                 Some(make_multirange::call(mcx, tc.type_id, rngtype, &[constrange])?);
@@ -246,11 +253,14 @@ pub fn multirangesel<'mcx>(
     } else if other.consttype == vardata.data().vartype {
         /* Both sides are the same multirange type */
         let tc = multirange_get_typcache::call(vardata.data().vartype)?;
-        // C: `DatumGetMultirangeTypeP(other->constvalue)` — the word is a
-        // multirange varlena pointer; the seam (still shim-typed) detoasts it.
-        constmultirange = Some(datum_get_multirange_type_p::call(
+        // C: `DatumGetMultirangeTypeP(other->constvalue)` — the canonical
+        // `constvalue` is a by-reference multirange varlena image
+        // (`Datum::ByRef`), so go through the value-form seam, which reads the
+        // image bytes; the bare-word `datum_get_multirange_type_p` would panic on
+        // the by-reference value (scalar accessor on a by-ref Datum).
+        constmultirange = Some(datum_get_multirange_type_p_value::call(
             mcx,
-            Datum::from_usize(other.constvalue.as_usize()),
+            &other.constvalue,
         )?);
         typcache = Some(tc);
     }

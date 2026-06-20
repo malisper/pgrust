@@ -121,8 +121,10 @@ pub fn init_seams() {
     seams::init_array_result_any::set(construct::init_array_result_any);
     seams::accum_array_result_any::set(construct::accum_array_result_any);
     seams::make_array_result_any::set(construct::make_array_result_any);
+    seams::make_array_result_any_v::set(construct::make_array_result_any_v);
     seams::pfree_array_datum::set(construct::pfree_array_datum);
     seams::construct_array_builtin::set(construct::construct_array_builtin);
+    seams::construct_array_builtin_v::set(construct::construct_array_builtin_v);
     seams::construct_array_expr::set(construct::construct_array_expr);
     seams::array_map_deconstruct::set(construct::array_map_deconstruct);
     seams::array_map_build::set(construct::array_map_build);
@@ -133,6 +135,7 @@ pub fn init_seams() {
     seams::decode_text_array_to_strings::set(construct::decode_text_array_to_strings);
     seams::deconstruct_tid_array::set(construct::deconstruct_tid_array);
     seams::construct_text_array::set(construct::construct_text_array);
+    seams::construct_text_array_bytes::set(construct::construct_text_array_bytes_str);
     seams::text_array_out::set(construct::text_array_out);
     seams::build_text_array_nullable::set(construct::build_text_array_nullable);
     seams::build_name_array::set(construct::build_name_array);

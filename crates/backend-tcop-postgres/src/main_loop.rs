@@ -893,30 +893,82 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
     // --- Per-backend signal-handler setup (postgres.c:4213-4252) ---
     //
     // The postmaster blocked all signals before forking, so the handlers are
-    // installed race-free here. Installing them faithfully requires the
-    // per-backend handler set (SignalHandlerForConfigReload, StatementCancelHandler,
-    // die, quickdie, procsignal_sigusr1_handler, FloatExceptionHandler) wired
-    // through pqsignal at the OS level. The handler bodies are owned across
-    // several units (postmaster-interrupt, this crate's interrupt module,
-    // procsignal); the install wiring is process-environment setup not exercised
-    // by the in-process simple-Query path. Skipped-with-note here.
-    //   if (am_walsender) WalSndSignals(); else { pqsignal(...); InitializeTimeouts(); ... }
+    // installed race-free here. We install the regular-backend `pqsignal(...)`
+    // block (the `!am_walsender` arm; walsenders run `WalSndSignals()` from
+    // their own crate). Installing `SIGUSR1 -> procsignal_sigusr1_handler` is
+    // load-bearing: `EmitProcSignalBarrier` (DROP DATABASE / DROP TABLESPACE)
+    // signals every backend, including the emitter itself, and
+    // `WaitForProcSignalBarrier` blocks until every slot's
+    // `pss_barrierGeneration` reaches the new generation. The emitter absorbs
+    // its OWN barrier only when the self-`kill(SIGUSR1)` runs the handler,
+    // which sets `ProcSignalBarrierPending` so the next `CHECK_FOR_INTERRUPTS`
+    // (reached from `ConditionVariableTimedSleep`) calls
+    // `ProcessProcSignalBarrier`. With no SIGUSR1 handler installed the barrier
+    // was never absorbed and DROP DATABASE hung forever in
+    // `WaitForProcSignalBarrier`.
     //
+    //   if (am_walsender) WalSndSignals(); else { pqsignal(...); }
+    if !backend_replication_walsender_seams::am_walsender::call() {
+        use types_signal::SigHandler;
+        let pqsignal = port_pqsignal_seams::pqsignal::call;
+
+        // pqsignal(SIGHUP, SignalHandlerForConfigReload);
+        fn config_reload(_sig: i32) {
+            pm_interrupt::SignalHandlerForConfigReload();
+        }
+        pqsignal(libc::SIGHUP, SigHandler::Handler(config_reload));
+
+        // pqsignal(SIGINT, StatementCancelHandler);  /* cancel current query */
+        pqsignal(
+            libc::SIGINT,
+            SigHandler::Handler(crate::interrupt::StatementCancelHandler),
+        );
+        // pqsignal(SIGTERM, die);  /* cancel current query and exit */
+        pqsignal(libc::SIGTERM, SigHandler::Handler(crate::interrupt::die));
+        // SIGQUIT handler (quickdie) was already set up by InitPostmasterChild;
+        // we must not clobber it (postgres.c keeps it as-is here).
+        // pqsignal(SIGALRM, handle_sig_alarm);  /* installed by InitializeTimeouts() below */
+        // pqsignal(SIGPIPE, SIG_IGN);
+        pqsignal(libc::SIGPIPE, SigHandler::Ignore);
+        // pqsignal(SIGUSR1, procsignal_sigusr1_handler);
+        pqsignal(
+            libc::SIGUSR1,
+            SigHandler::Handler(backend_storage_ipc_procsignal::procsignal_sigusr1_handler_signal),
+        );
+        // pqsignal(SIGUSR2, SIG_IGN);
+        pqsignal(libc::SIGUSR2, SigHandler::Ignore);
+        // pqsignal(SIGFPE, FloatExceptionHandler);  /* exception handler */
+        pqsignal(
+            libc::SIGFPE,
+            SigHandler::Handler(crate::interrupt::float_exception_handler_fn),
+        );
+        // Reset some signals that are accepted by postmaster but not here:
+        // pqsignal(SIGCHLD, SIG_DFL);  /* system() requires this */
+        pqsignal(libc::SIGCHLD, SigHandler::Default);
+    }
+
     // InitializeTimeouts() (postgres.c:4232) IS run here: it establishes the
     // timeout module's per-backend slot table (and the SIGALRM handler), which
     // InitPostgres relies on when it RegisterTimeout()s the deadlock /
-    // statement / lock timeouts. The rest of the pqsignal wiring above is
-    // process-environment setup not exercised by the in-process simple-Query
-    // path and stays skipped-with-note.
+    // statement / lock timeouts.
     backend_utils_misc_timeout_seams::initialize_timeouts::call();
 
     // --- Early initialization (postgres.c:4255) ---
     // BaseInit(): open the per-backend low-level subsystems (smgr, buffers, ...).
     backend_utils_init_miscinit_seams::base_init::call()?;
 
-    // sigprocmask(SIG_SETMASK, &UnBlockSig, NULL): allow SIGINT etc during the
-    // initial transaction. The signal mask is OS state set up by the launcher;
-    // not re-applied here.
+    // sigprocmask(SIG_SETMASK, &UnBlockSig, NULL) (postgres.c:4264): allow
+    // SIGINT etc during the initial transaction. This is load-bearing: the
+    // backend inherits `BlockSig` (all signals blocked) from
+    // InitPostmasterChild, so until we install `UnBlockSig` the SIGUSR1 that
+    // `EmitProcSignalBarrier` sends to this very backend stays pending and is
+    // never delivered to `procsignal_sigusr1_handler` — leaving
+    // `ProcSignalBarrierPending` unset and `WaitForProcSignalBarrier` (DROP
+    // DATABASE / DROP TABLESPACE) blocked forever waiting on this backend's own
+    // slot. `UnBlockSig` is empty (plus SIGURG, added by
+    // InitializeWaitEventSupport), so installing it unblocks SIGUSR1 while
+    // keeping the latch's SIGURG self-wake working.
+    backend_libpq_pqsignal_seams::unblock_signals::call();
 
     // Generate a random cancel key + advertise it (postgres.c:4264). The
     // MyCancelKey storage + advertisement is owned by the proc/cancel-key unit;

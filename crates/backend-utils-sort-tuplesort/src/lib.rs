@@ -1664,13 +1664,18 @@ fn comparetup_index_btree_tiebreak<'mcx>(
         )?;
 
         let index_name = arg.indexRel.name();
+        // C (tuplesortvariants.c:1686) reports this as ERRCODE_UNIQUE_VIOLATION
+        // with the duplicate-key text carried in a separate errdetail(), not
+        // concatenated onto the primary errmsg.
         let detail = match &key_desc {
             Some(kd) => format!("Key {} is duplicated.", kd.as_str()),
             None => "Duplicate keys exist.".to_string(),
         };
         return Err(PgError::error(format!(
-            "could not create unique index \"{index_name}\": {detail}"
-        )));
+            "could not create unique index \"{index_name}\""
+        ))
+        .with_sqlstate(types_error::error::ERRCODE_UNIQUE_VIOLATION)
+        .with_detail(detail));
     }
 
     // If key values are equal, we sort on ItemPointer (heap TID as the implicit
@@ -3799,7 +3804,7 @@ fn tuplesort_gettupleslot_impl<'mcx>(
         }
         // Non-minimal body / no body at end of sort: clear the slot.
         _ => {
-            clear_slot(slot.base_mut());
+            clear_slot(slot);
             Ok(false)
         }
     }
@@ -3921,12 +3926,57 @@ fn store_minimal_into_slot<'mcx>(
     }
 }
 
-/// `ExecClearTuple(slot)` over the owned slot: empty the payload arrays + mark
-/// empty.
-fn clear_slot(slot: &mut TupleTableSlot<'_>) {
-    slot.tts_values.clear();
-    slot.tts_isnull.clear();
-    slot.mark_empty();
+/// `ExecClearTuple(slot)` over the owned slot — dispatch to the per-kind
+/// `*_clear` callback.
+///
+/// Mirrors `tts_{virtual,minimal,heap,buffer_heap}_clear` (execTuples.c): each
+/// releases the slot's *materialized tuple resource* (the virtual `data`
+/// buffer, the minimal/heap tuple) when `TTS_SHOULDFREE` is set, then marks the
+/// slot empty and resets `tts_nvalid`. Critically, none of the C callbacks
+/// touch the `tts_values`/`tts_isnull` arrays — those stay allocated at
+/// `tts_tupleDescriptor->natts` for the slot's lifetime so the *next*
+/// `getsomeattrs` can deform into them. The previous body cleared those arrays,
+/// so a slot reused after an end-of-sort clear (e.g. the incremental-sort
+/// result slot fed into a Unique) deformed into zero-length arrays and panicked
+/// `index out of bounds`. We mark empty and free the per-kind resource only.
+fn clear_slot(slot: &mut SlotData<'_>) {
+    match slot {
+        SlotData::Virtual(s) => {
+            // tts_virtual_clear: free `data` if SHOULDFREE.
+            if s.base.should_free() {
+                s.data.clear();
+                s.base.tts_flags &= !types_slot::TTS_FLAG_SHOULDFREE;
+            }
+            s.base.mark_empty();
+        }
+        SlotData::Minimal(s) => {
+            // tts_minimal_clear: free `mintuple` if SHOULDFREE.
+            if s.base.should_free() {
+                s.mintuple = None;
+                s.base.tts_flags &= !types_slot::TTS_FLAG_SHOULDFREE;
+            }
+            s.off = 0;
+            s.mintuple = None;
+            s.tuple = None;
+            s.base.mark_empty();
+        }
+        SlotData::Heap(s) => {
+            // tts_heap_clear: free `tuple` if SHOULDFREE.
+            if s.base.should_free() {
+                s.tuple = None;
+                s.base.tts_flags &= !types_slot::TTS_FLAG_SHOULDFREE;
+            }
+            s.off = 0;
+            s.tuple = None;
+            s.base.mark_empty();
+        }
+        SlotData::BufferHeap(s) => {
+            // tts_buffer_heap_clear: release buffer (if any) + free tuple.
+            s.base.tuple = None;
+            s.base.off = 0;
+            s.base.base.mark_empty();
+        }
+    }
 }
 
 // ===========================================================================

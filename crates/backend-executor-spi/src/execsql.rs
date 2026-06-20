@@ -36,6 +36,7 @@ use crate::result_code::*;
 use backend_executor_execMain as execmain;
 use backend_utils_cache_plancache as plancache;
 use backend_utils_cache_plancache_seams as plancache_seams;
+use backend_access_transam_xact_seams as xact_seams;
 use backend_utils_time_snapmgr_seams as snapmgr;
 
 type SourceHandle = u64;
@@ -68,6 +69,13 @@ pub struct ExecsqlResult {
     pub processed: u64,
     pub returned_tuptable: bool,
     pub first_row: Vec<ExecsqlColumn>,
+    /// All result rows' columns (for the FOR-loop / RETURN QUERY iteration path,
+    /// `exec_run_select` + `exec_for_query`). Populated only when `collect_all`
+    /// was requested; otherwise empty (the INTO path reads `first_row`). The
+    /// materialize-all analogue of `pl_exec.c`'s portal-fetch loop: C's
+    /// `exec_for_query` fetches batches of 50 rows from a held portal, but the
+    /// observable iteration (every row, in order) is identical.
+    pub all_rows: Vec<Vec<ExecsqlColumn>>,
 }
 
 /// Copy `s` into the arena and return a `&'mcx str`.
@@ -94,6 +102,34 @@ pub fn spi_execsql(
     tcount: i64,
     resolve: &mut dyn FnMut(i32) -> PgResult<EvalParamValue>,
 ) -> PgResult<ExecsqlResult> {
+    spi_execsql_inner(query, parsemode, parse_state, _read_only, into, false, tcount, resolve)
+}
+
+/// `exec_run_select` materialize-all path (`pl_exec.c`): run `query`, collecting
+/// **every** result row's columns into `all_rows` for the FOR-loop /
+/// RETURN QUERY iteration (`exec_for_query`). Equivalent to the INTO path but
+/// without the row cap, keeping all rows rather than only the first.
+pub fn spi_execsql_collect(
+    query: &str,
+    parsemode: RawParseMode,
+    parse_state: PlpgsqlExprParseState,
+    read_only: bool,
+    resolve: &mut dyn FnMut(i32) -> PgResult<EvalParamValue>,
+) -> PgResult<ExecsqlResult> {
+    spi_execsql_inner(query, parsemode, parse_state, read_only, false, true, 0, resolve)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spi_execsql_inner(
+    query: &str,
+    parsemode: RawParseMode,
+    parse_state: PlpgsqlExprParseState,
+    _read_only: bool,
+    into: bool,
+    collect_all: bool,
+    tcount: i64,
+    resolve: &mut dyn FnMut(i32) -> PgResult<EvalParamValue>,
+) -> PgResult<ExecsqlResult> {
     let cxt = MemoryContext::new("SPI Execsql");
     let mcx = cxt.mcx();
     let interned = leak_str_in(mcx, query)?;
@@ -106,7 +142,13 @@ pub fn spi_execsql(
 
     // _SPI_execute_plan: GetCachedPlan + push the transaction snapshot + run.
     let pushed = snapmgr::push_active_snapshot_transaction::call().is_ok();
-    let out = run_execsql(mcx, source, &param_li, into, tcount);
+    // Advance the command counter before each command and update the snapshot
+    // when not read-only and the snapshot is under our control (spi.c:2665) — so
+    // a later statement in the same function/trigger sees the writes of an
+    // earlier one (and a fired AFTER trigger sees the triggering statement's
+    // effects). Skipped for a read-only function (it makes no writes to see).
+    let advance_cid = pushed && !_read_only;
+    let out = run_execsql(mcx, source, &param_li, into, collect_all, tcount, advance_cid);
     if pushed {
         let _ = snapmgr::pop_active_snapshot::call();
     }
@@ -176,15 +218,23 @@ fn build_param_list(
     let ctx: &'static MemoryContext = allocator_api2::boxed::Box::leak(
         allocator_api2::boxed::Box::new(MemoryContext::new("PL/pgSQL Param List")),
     );
-    let _pmcx: Mcx<'static> = ctx.mcx();
+    let pmcx: Mcx<'static> = ctx.mcx();
 
     let mut params: Vec<ParamExternData<'static>> = Vec::with_capacity(num_params);
     let referenced: std::collections::BTreeSet<i32> = dnos.iter().copied().collect();
     for dno in 0..(num_params as i32) {
         if referenced.contains(&dno) {
             let v = resolve(dno)?;
+            // A pass-by-reference value (varchar/text/name/numeric/...) carries
+            // its header-ful byte image in `byref`; rebuild it as a live
+            // `Datum::ByRef` rooted in the param-list context. The bare `value`
+            // word is only meaningful for by-value types (byref == None).
+            let value = match &v.byref {
+                Some(bytes) if !v.isnull => RichDatum::from_byref_bytes_in(pmcx, bytes)?,
+                _ => RichDatum::from_usize(v.value),
+            };
             params.push(ParamExternData {
-                value: RichDatum::from_usize(v.value),
+                value,
                 isnull: v.isnull,
                 pflags: PARAM_FLAG_CONST,
                 ptype: v.typeid,
@@ -219,7 +269,9 @@ fn run_execsql<'mcx>(
     source: SourceHandle,
     param_li: &ParamListInfo,
     into: bool,
+    collect_all: bool,
     tcount: i64,
+    advance_cid: bool,
 ) -> PgResult<ExecsqlResult> {
     let cplan = plancache::GetCachedPlan(source, param_li.clone(), ResourceOwner::NULL, None)?;
     let stmt_list = plancache_seams::cached_plan_stmt_list::call(mcx, CachedPlanHandle(cplan))?;
@@ -228,14 +280,26 @@ fn run_execsql<'mcx>(
     let mut processed: u64 = 0;
     let mut returned_tuptable = false;
     let mut first_row: Vec<ExecsqlColumn> = Vec::new();
+    let mut all_rows: Vec<Vec<ExecsqlColumn>> = Vec::new();
 
     for stmt in stmt_list.iter() {
-        let (c, n, tt, row) = run_one_execsql_stmt(stmt, param_li, into, tcount)?;
+        // spi.c:2665 — advance the command counter before each command and update
+        // the active snapshot's command id, so writes of an earlier command (or
+        // the statement that queued a now-firing AFTER trigger) are visible.
+        if advance_cid {
+            xact_seams::command_counter_increment::call()?;
+            snapmgr::update_active_snapshot_command_id::call()?;
+        }
+        let (c, n, tt, row, rows) =
+            run_one_execsql_stmt(stmt, param_li, into, collect_all, tcount)?;
         code = c;
         processed = n;
         returned_tuptable = tt;
         if !row.is_empty() {
             first_row = row;
+        }
+        if !rows.is_empty() {
+            all_rows = rows;
         }
     }
 
@@ -245,18 +309,21 @@ fn run_execsql<'mcx>(
         processed,
         returned_tuptable,
         first_row,
+        all_rows,
     })
 }
 
 /// `_SPI_pquery` for one PlannedStmt: classify the SPI code from the command
 /// type, run it through the executor to a DestSPI receiver, and collect the
 /// first row's raw columns (for INTO).
+#[allow(clippy::type_complexity)]
 fn run_one_execsql_stmt<'mcx>(
     stmt: &PlannedStmt<'mcx>,
     param_li: &ParamListInfo,
     into: bool,
+    collect_all: bool,
     tcount: i64,
-) -> PgResult<(i32, u64, bool, Vec<ExecsqlColumn>)> {
+) -> PgResult<(i32, u64, bool, Vec<ExecsqlColumn>, Vec<Vec<ExecsqlColumn>>)> {
     let operation = stmt.commandType;
 
     // _SPI_pquery: derive the SPI result code from the planned command type.
@@ -288,7 +355,7 @@ fn run_one_execsql_stmt<'mcx>(
     };
 
     if code == SPI_ERROR_OPUNKNOWN {
-        return Ok((code, 0, false, Vec::new()));
+        return Ok((code, 0, false, Vec::new(), Vec::new()));
     }
 
     // A utility statement goes through ProcessUtility (the non-SELECT utility
@@ -337,25 +404,39 @@ fn run_one_execsql_stmt<'mcx>(
     let returns_rows = matches!(operation, CmdType::CMD_SELECT) || stmt.hasReturning;
     let returned_tuptable = returns_rows;
 
+    // Project one raw row's columns into the ExecsqlColumn shape (the per-column
+    // type OID + name come from the tuple descriptor).
+    let project_row = |row: &Vec<RawCol>| -> Vec<ExecsqlColumn> {
+        row.iter()
+            .enumerate()
+            .map(|(i, col): (usize, &RawCol)| ExecsqlColumn {
+                value: col.value,
+                isnull: col.isnull,
+                typeid: columns.get(i).map(|c| c.typeid).unwrap_or(types_core::InvalidOid),
+                name: columns.get(i).map(|c| c.name.clone()).unwrap_or_default(),
+                byref: col.byref.clone(),
+            })
+            .collect()
+    };
+
     // For INTO, hand back the first row's raw columns.
     let first_row: Vec<ExecsqlColumn> = if into && returns_rows {
         match raw_rows.first() {
-            Some(row) => row
-                .iter()
-                .enumerate()
-                .map(|(i, col): (usize, &RawCol)| ExecsqlColumn {
-                    value: col.value,
-                    isnull: col.isnull,
-                    typeid: columns.get(i).map(|c| c.typeid).unwrap_or(types_core::InvalidOid),
-                    name: columns.get(i).map(|c| c.name.clone()).unwrap_or_default(),
-                    byref: col.byref.clone(),
-                })
-                .collect(),
+            Some(row) => project_row(row),
             None => Vec::new(),
         }
     } else {
         Vec::new()
     };
 
-    Ok((code, processed, returned_tuptable, first_row))
+    // For the FOR-loop / RETURN QUERY iteration (`exec_for_query`), hand back
+    // every result row's columns (the materialize-all analogue of C's portal
+    // fetch loop).
+    let all_rows: Vec<Vec<ExecsqlColumn>> = if collect_all && returns_rows {
+        raw_rows.iter().map(project_row).collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok((code, processed, returned_tuptable, first_row, all_rows))
 }

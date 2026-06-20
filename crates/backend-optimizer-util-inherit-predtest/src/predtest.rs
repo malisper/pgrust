@@ -34,6 +34,24 @@ use types_nodes::primnodes::{
 use types_pathnodes::{NodeId, PlannerInfo};
 use types_error::{PgError, PgResult};
 
+thread_local! {
+    /// Backend-lifetime context backing the by-reference element values stamped
+    /// into the dummy per-element `Const` nodes built by [`arrayconst_components`]
+    /// (`make_dummy_const`). A by-reference array element (text/numeric/…) crosses
+    /// `deconstruct_array_values_bytes` as an `mcx`-allocated `ByRef` image; the
+    /// `Const` node carries a `Datum<'static>`, so the image is `datumCopy`'d into
+    /// this leaked, never-reset context to outlive the per-run `mcx` (mirrors
+    /// `makefuncs::CONST_VALUE_CONTEXT` / parser-coerce's `CONST_VALUE_CONTEXT`).
+    /// By-value elements carry a bare word and need no re-home.
+    static CONST_VALUE_CONTEXT: &'static mcx::MemoryContext =
+        Box::leak(Box::new(mcx::MemoryContext::new("predtest const value")));
+}
+
+/// `Mcx<'static>` for the backend-lifetime [`CONST_VALUE_CONTEXT`].
+fn const_value_mcx() -> Mcx<'static> {
+    CONST_VALUE_CONTEXT.with(|c| c.mcx())
+}
+
 /*
  * Proof attempts involving large arrays in ScalarArrayOpExpr nodes are
  * likely to require O(N^2) time, and more often than not fail anyway.
@@ -158,13 +176,22 @@ fn arrayconst_components<'mcx>(mcx: Mcx<'mcx>, saop_node: &Expr) -> PgResult<Vec
      *                        &elmalign);
      *   deconstruct_array(arrayval, ARR_ELEMTYPE, elmlen, elmbyval, elmalign,
      *                     &elem_values, &elem_nulls, &num_elems);
+     *
+     * The array Const's value is a canonical by-reference value (the on-disk
+     * array varlena image lives in its `ByRef` bytes); read it through the
+     * bytes/value lane — NOT the bare-word `as_usize` surrogate, which panics
+     * the scalar accessor on a by-ref value (and carries no payload). The
+     * value-form `deconstruct_array_values_bytes` yields each element as a
+     * canonical `Datum`, so a by-reference element (text/numeric/...) keeps its
+     * full image rather than collapsing to a bare word (mirrors
+     * `ExecEvalScalarArrayOp`'s deconstruction).
      */
-    let arrdatum = const_value_bare(arrayconst);
-    let elemtype = arrayfuncs::array_get_elemtype::call(mcx, arrdatum)?;
+    let arrbytes = arrayconst.constvalue.as_ref_bytes();
+    let elemtype = arrayfuncs::array_get_elemtype_bytes::call(mcx, arrbytes)?;
     let lbva = lsyscache::get_typlenbyvalalign::call(elemtype)?;
-    let elems = arrayfuncs::deconstruct_array::call(
+    let elems = arrayfuncs::deconstruct_array_values_bytes::call(
         mcx,
-        arrdatum,
+        arrbytes,
         elemtype,
         lbva.typlen,
         lbva.typbyval,
@@ -175,7 +202,7 @@ fn arrayconst_components<'mcx>(mcx: Mcx<'mcx>, saop_node: &Expr) -> PgResult<Vec
     out.try_reserve(elems.len())
         .map_err(|_| oom("arrayconst components"))?;
     for (value, isnull) in elems.iter() {
-        let elem_const = make_dummy_const(arrayconst, elemtype, lbva, *value, *isnull);
+        let elem_const = make_dummy_const(arrayconst, elemtype, lbva, value.clone(), *isnull)?;
         out.push(make_dummy_saop_opexpr(s, scalar.clone(), elem_const));
     }
     Ok(out)
@@ -216,42 +243,44 @@ fn arrayexpr_components(saop_node: &Expr) -> PgResult<Vec<Expr>> {
 ///   const_expr.constbyval = elmbyval;
 ///   const_expr.constvalue = elem_values[i];
 ///   const_expr.constisnull = elem_nulls[i];
-fn make_dummy_const(
+fn make_dummy_const<'mcx>(
     arrayconst: &Const,
     elemtype: Oid,
     lbva: lsyscache::TypLenByValAlign,
-    value: types_datum::datum::Datum,
+    value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     isnull: bool,
-) -> Expr {
+) -> PgResult<Expr> {
     /*
-     * The per-element value comes back as a bare machine word from
-     * deconstruct_array; carry it as the canonical Datum's by-value arm (the
-     * same `as_usize`/`from_usize` word lane clauses.c uses for folded array
-     * Const values).  `constlen`/`constbyval` are stamped from the element
-     * type's `elmlen`/`elmbyval` (the C `state->const_expr.constlen =
-     * state->elmlen; constbyval = state->elmbyval`).
+     * The per-element value comes back from `deconstruct_array_values_bytes` as
+     * a canonical `Datum`; carry it verbatim (a by-reference element keeps its
+     * `ByRef` byte image rather than collapsing to a bare word, which would
+     * panic the scalar accessor / lose the payload).  `constlen`/`constbyval`
+     * are stamped from the element type's `elmlen`/`elmbyval` (the C
+     * `state->const_expr.constlen = state->elmlen; constbyval =
+     * state->elmbyval`).
+     *
+     * The `Const` node's `constvalue` is `Datum<'static>`, but `value` borrows
+     * the per-run `mcx` array buffer; re-home a by-reference image into the
+     * backend-lifetime [`CONST_VALUE_CONTEXT`] (a `datumCopy`, exactly as
+     * `make_const` does) so the stored `Datum<'static>` outlives `mcx`. A
+     * by-value element is a bare word and is freely `'static`.
      */
-    Expr::Const(Const {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    let constvalue: TDatum<'static> = match value {
+        TDatum::ByVal(w) => TDatum::ByVal(w),
+        other => other.clone_in(const_value_mcx())?,
+    };
+    Ok(Expr::Const(Const {
         consttype: elemtype,
         consttypmod: -1,
         constcollid: arrayconst.constcollid,
         constlen: lbva.typlen as i32,
-        constvalue: types_tuple::backend_access_common_heaptuple::Datum::from_usize(value.as_usize()),
+        constvalue,
         constisnull: isnull,
         constbyval: lbva.typbyval,
         // makeConst sets location = -1.
         location: -1,
-    })
-}
-
-
-/// `DatumGetArrayTypeP(const->constvalue)` argument: the array Const's value as
-/// the bare machine word the (still bare-word) `array_get_elemtype` /
-/// `deconstruct_array` seams take (the `as_usize` word lane for folded array
-/// Consts).
-#[inline]
-fn const_value_bare(c: &Const) -> types_datum::datum::Datum {
-    types_datum::datum::Datum::from_usize(c.constvalue.as_usize())
+    }))
 }
 
 /// Build the dummy `scalar saop_op elem` `OpExpr` (mirrors the reusable `OpExpr`
@@ -327,17 +356,22 @@ pub fn predicate_implied_by(
     clause_list: &[NodeId],
     weak: bool,
 ) -> bool {
-    let predicate = resolve_nodes(root, predicate_list);
-    let clause = resolve_nodes(root, clause_list);
     let cx = mcx::MemoryContext::new("predicate_implied_by transient");
+    let predicate = resolve_nodes(cx.mcx(), root, predicate_list)
+        .unwrap_or_else(|e| panic!("predicate_implied_by: {e:?}"));
+    let clause = resolve_nodes(cx.mcx(), root, clause_list)
+        .unwrap_or_else(|e| panic!("predicate_implied_by: {e:?}"));
     predicate_implied_by_impl(cx.mcx(), &predicate, &clause, weak)
         .unwrap_or_else(|e| panic!("predicate_implied_by: {e:?}"))
 }
 
 /// Resolve a list of arena handles to owned `Expr` values (the proof engine
 /// reads them; cloning matches the consumer, which already clones `indpred`).
-fn resolve_nodes(root: &PlannerInfo, ids: &[NodeId]) -> Vec<Expr> {
-    ids.iter().map(|&id| root.node(id).clone()).collect()
+fn resolve_nodes(mcx: Mcx<'_>, root: &PlannerInfo, ids: &[NodeId]) -> PgResult<Vec<Expr>> {
+    // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+    // owned-subtree child (e.g. a qual carrying a SubLink/Aggref/SubPlan). The
+    // owned copies live only as long as the transient proof context.
+    ids.iter().map(|&id| root.node(id).clone_in(mcx)).collect()
 }
 
 /// `predicate_implied_by(predicate, clause, weak)` over bare owned `Expr`
@@ -405,9 +439,11 @@ pub fn predicate_refuted_by(
     clause_list: &[NodeId],
     weak: bool,
 ) -> bool {
-    let predicate = resolve_nodes(root, predicate_list);
-    let clause = resolve_nodes(root, clause_list);
     let cx = mcx::MemoryContext::new("predicate_refuted_by transient");
+    let predicate = resolve_nodes(cx.mcx(), root, predicate_list)
+        .unwrap_or_else(|e| panic!("predicate_refuted_by: {e:?}"));
+    let clause = resolve_nodes(cx.mcx(), root, clause_list)
+        .unwrap_or_else(|e| panic!("predicate_refuted_by: {e:?}"));
     predicate_refuted_by_impl(cx.mcx(), &predicate, &clause, weak)
         .unwrap_or_else(|e| panic!("predicate_refuted_by: {e:?}"))
 }

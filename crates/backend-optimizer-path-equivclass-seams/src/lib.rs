@@ -35,8 +35,9 @@ seam_core::seam!(
     /// the union-find merge core. May rewrite `*p_restrictinfo` (the X=X →
     /// X IS NOT NULL conversion), so the (possibly new) [`RinfoId`] is returned
     /// alongside the bool. Can `palloc`/`ereport`.
-    pub fn process_equivalence(
+    pub fn process_equivalence<'mcx>(
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         restrictinfo: RinfoId,
         jdomain: Relids,
     ) -> PgResult<(bool, RinfoId)>
@@ -136,8 +137,9 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `add_child_rel_equivalences(...)` (equivclass.c:2833).
-    pub fn add_child_rel_equivalences(
+    pub fn add_child_rel_equivalences<'mcx>(
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         appinfo: RelId,
         parent_rel: RelId,
         child_rel: RelId,

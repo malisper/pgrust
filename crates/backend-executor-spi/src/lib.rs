@@ -81,7 +81,7 @@ pub use backbone::*;
 pub use cursor::{spi_cursor_fetch, spi_cursor_tupdesc};
 pub use dest_spi::create_spi_dest_receiver;
 pub use eval::{spi_eval_expr, EvalParamValue, EvalResult};
-pub use execsql::{spi_execsql, ExecsqlColumn, ExecsqlResult};
+pub use execsql::{spi_execsql, spi_execsql_collect, ExecsqlColumn, ExecsqlResult};
 pub use result_code::*;
 pub use select::{spi_execute_select, spi_query_tupdesc};
 

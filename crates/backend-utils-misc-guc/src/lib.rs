@@ -570,6 +570,20 @@ pub fn init_seams() {
         ParseNum::Err { .. } => None,
     });
 
+    // vacuum.c's ExecVacuum parses BUFFER_USAGE_LIMIT via
+    // `parse_int(vac_buffer_size, &result, GUC_UNIT_KB, &hintmsg)`; guc.c owns
+    // parse_int. The seam returns `(ok, result, hintmsg)`.
+    backend_commands_vacuum_seams::parse_int_kb::set(|value| {
+        match units::parse_int(&value, types_guc::GUC_UNIT_KB) {
+            ParseNum::Ok(v) => Ok((true, v, None)),
+            ParseNum::Err { hint } => Ok((
+                false,
+                0,
+                hint.map(alloc::string::ToString::to_string),
+            )),
+        }
+    });
+
     // --- check_GUC_name_for_parameter_acl (guc.c:1410), consumed by
     //     pg_parameter_acl.c's ParameterAclCreate. ---
     s::check_guc_name_for_parameter_acl::set(check_guc_name_for_parameter_acl);

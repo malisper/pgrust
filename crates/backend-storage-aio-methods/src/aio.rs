@@ -263,6 +263,27 @@ pub fn pgaio_io_get_wref(ioh_index: usize) -> PgAioWaitRef {
     }
 }
 
+/// Read the handle's running distilled result (`ioh->distilled_result`), the
+/// `prior_result` a completion callback threads from the previously-run inner
+/// callback. The engine seeds it to `{status: OK, result: ioh->result}` before
+/// dispatching `complete_shared` (`pgaio_io_call_complete_shared`).
+pub fn pgaio_io_get_distilled_result(ioh_index: usize) -> crate::PgAioResult {
+    ioh(ioh_index).data().distilled_result
+}
+
+/// Store the handle's distilled result (`ioh->distilled_result`), the value a
+/// completion callback returns and the engine threads to the next callback /
+/// the issuer's return slot.
+pub fn pgaio_io_set_distilled_result(ioh_index: usize, result: crate::PgAioResult) {
+    ioh(ioh_index).data().distilled_result = result;
+}
+
+/// `ProcNumber pgaio_io_get_owner(PgAioHandle *ioh)` exposed by index for the
+/// buffer-readv completion's `is_temp` owner assertion.
+pub fn pgaio_io_owner(ioh_index: usize) -> i32 {
+    ioh(ioh_index).owner_procno
+}
+
 // ===========================================================================
 // Internal handle helpers
 // ===========================================================================
@@ -522,6 +543,11 @@ fn pgaio_io_reclaim(ioh_index: usize) -> PgResult<()> {
             rr.result = local_result;
             rr.target_data = d.target_data;
             d.report_return = Some(rr);
+            // Publish the completed return into the issuer's backend-local slot
+            // before the handle is recycled (C writes through the caller's
+            // `report_return` pointer, whose storage outlives the handle). The
+            // buffer-read `wait_read_buffers` seam reads it back after the wait.
+            crate::set_pgaio_last_return(ioh_index as u32, rr);
         }
     }
 

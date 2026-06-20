@@ -13,7 +13,9 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use mcx::Mcx;
-use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR};
+use types_error::{
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
+};
 use types_stringinfo::StringInfo;
 use types_tsearch::tsearch::{
     WordEntry, WordEntryPos, DATAHDRSIZE, MAXENTRYPOS, MAXNUMPOS, MAXSTRLEN, MAXSTRPOS, WEP_GETPOS,
@@ -190,13 +192,18 @@ fn elog_internal(msg: &str) -> PgError {
 /// `tsvectorin` (tsvector.c:175) — parse a text `tsvector` literal into the
 /// on-disk `TSVectorData` bytes. `buf` is the input C-string content (without
 /// the trailing NUL).
-pub fn tsvectorin<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<Vec<u8>> {
+pub fn tsvectorin<'mcx>(
+    mcx: Mcx<'mcx>,
+    buf: &[u8],
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<Vec<u8>>> {
     let _ = mcx;
-    // C: state = init_tsvector_parser(buf, 0, escontext);  No soft-error
-    // context here — a parse error is a hard error.
+    // C: state = init_tsvector_parser(buf, 0, escontext);  A lexer/syntax error
+    // ereturns through `escontext`; with a soft sink installed `tsvectorin`
+    // returns NULL (`Ok(None)`), otherwise it throws (`Err`).
     let state = parser::init_tsvector_parser_seam(buf, 0)?;
 
-    let r = tsvectorin_build(state, buf);
+    let r = tsvectorin_build(state, buf, escontext.as_deref_mut());
     parser::close_tsvector_parser_seam(state);
     r
 }
@@ -204,16 +211,18 @@ pub fn tsvectorin<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<Vec<u8>> {
 fn tsvectorin_build(
     state: types_tsearch::tsearch::TsVectorParseStateHandle,
     buf: &[u8],
-) -> PgResult<Vec<u8>> {
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<Vec<u8>>> {
     let _ = buf;
     // arr is the WordEntryIN build array; tmpbuf accumulates lexeme bytes.
     let mut arr: Vec<WordEntryIN> = Vec::new();
     let mut tmpbuf: Vec<u8> = Vec::new();
     let mut len: usize = 0;
 
-    // C: while (gettoken_tsvector(state, &token, &toklen, &pos, &poslen, NULL))
+    // C: while (gettoken_tsvector(state, &token, &toklen, &pos, &poslen, NULL,
+    //          escontext))
     loop {
-        let tok = match parser::gettoken_tsvector_full(state, true, None)? {
+        let tok = match parser::gettoken_tsvector_full(state, true, escontext.as_deref_mut())? {
             Some(t) => t,
             None => break,
         };
@@ -223,26 +232,30 @@ fn tsvectorin_build(
         let poslen = pos.len() as i32;
         let toklen = token.len();
 
+        // C: ereturn(escontext, (Datum) 0, ...) — soft with a sink installed,
+        // hard otherwise.
         if toklen >= MAXSTRLEN as usize {
-            return Err(ereport(ERROR)
+            let err = ereport(ERROR)
                 .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
                 .errmsg(format!(
                     "word is too long ({} bytes, max {} bytes)",
                     toklen as i64,
                     (MAXSTRLEN - 1) as i64
                 ))
-                .into_error());
+                .into_error();
+            return ereturn(escontext.as_deref_mut(), None, err);
         }
 
         if tmpbuf.len() > MAXSTRPOS as usize {
-            return Err(ereport(ERROR)
+            let err = ereport(ERROR)
                 .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
                 .errmsg(format!(
                     "string is too long for tsvector ({} bytes, max {} bytes)",
                     tmpbuf.len() as i64,
                     MAXSTRPOS as i64
                 ))
-                .into_error());
+                .into_error();
+            return ereturn(escontext.as_deref_mut(), None, err);
         }
 
         if len >= arr.len() {
@@ -268,6 +281,15 @@ fn tsvectorin_build(
         len += 1;
     }
 
+    // C: close_tsvector_parser(state); if (SOFT_ERROR_OCCURRED(escontext))
+    //    PG_RETURN_NULL();  A soft lexer/syntax error recorded during
+    // tokenizing returns NULL here (the caller closes the parser).
+    if let Some(ctx) = escontext.as_deref_mut() {
+        if ctx.error_occurred() {
+            return Ok(None);
+        }
+    }
+
     let mut buflen: i32 = 0;
     if len > 0 {
         len = uniqueentry(&mut arr, len as i32, &tmpbuf, &mut buflen)? as usize;
@@ -276,13 +298,14 @@ fn tsvectorin_build(
     }
 
     if buflen > MAXSTRPOS as i32 {
-        return Err(ereport(ERROR)
+        let err = ereport(ERROR)
             .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
             .errmsg(format!(
                 "string is too long for tsvector ({} bytes, max {} bytes)",
                 buflen, MAXSTRPOS
             ))
-            .into_error());
+            .into_error();
+        return ereturn(escontext.as_deref_mut(), None, err);
     }
 
     // totallen = CALCDATASIZE(len, buflen);
@@ -321,7 +344,7 @@ fn tsvectorin_build(
     }
 
     debug_assert_eq!(strbuf_off + stroff, totallen);
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// `tsvectorout` (tsvector.c:314) — render the on-disk `TSVectorData` bytes to

@@ -25,7 +25,8 @@ use types_nodes::nodehash::BufFile;
 use types_storage::storage::Buffer;
 use types_tableam::genam::IndexOrderByDistance;
 use types_tuple::backend_access_common_heaptuple::Datum;
-use types_tuple::heaptuple::{HeapTuple, ItemPointerData, TupleDesc};
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
+use types_tuple::heaptuple::{ItemPointerData, TupleDesc};
 
 // ---------------------------------------------------------------------------
 // gist.h — amproc indexes
@@ -196,8 +197,10 @@ pub struct GISTSearchHeapItem<'mcx> {
     pub recheck: bool,
     /// `bool recheckDistances` — distances must be rechecked.
     pub recheckDistances: bool,
-    /// `HeapTuple recontup` — data reconstructed from the index (IOS).
-    pub recontup: HeapTuple<'mcx>,
+    /// `HeapTuple recontup` — data reconstructed from the index (IOS). Owned as
+    /// a data-bearing [`FormedTuple`] so the user-data area survives to the
+    /// `xs_hitup` store path.
+    pub recontup: Option<FormedTuple<'mcx>>,
     /// `OffsetNumber offnum` — page offset, to mark tuple LP_DEAD.
     pub offnum: OffsetNumber,
 }

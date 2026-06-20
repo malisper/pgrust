@@ -539,6 +539,22 @@ pub(crate) fn oid_is_valid_pub(oid: Oid) -> bool {
     oid_is_valid(oid)
 }
 
+/// `simple_quote_literal(buf, val)` re-exported for the trigger-def module
+/// (the `tgargs` literals render through the same `String`-accumulating helper).
+pub(crate) fn simple_quote_literal_into_pub(buf: &mut alloc::string::String, val: &str) {
+    simple_quote_literal_into(buf, val)
+}
+
+/// `GET_PRETTY_FLAGS(pretty)` (ruleutils.c 92) — re-exported for the trigger-def
+/// module. `pretty ? (PAREN|INDENT|SCHEMA) : INDENT`.
+pub(crate) fn get_pretty_flags_pub(pretty: bool) -> i32 {
+    if pretty {
+        PRETTYFLAG_PAREN | PRETTYFLAG_INDENT | PRETTYFLAG_SCHEMA
+    } else {
+        PRETTYFLAG_INDENT
+    }
+}
+
 /// `get_reloptions(buf, reloptions)` re-exported for the index deparser (opclass
 /// options rendering).
 pub(crate) fn get_reloptions_pub<'mcx>(
@@ -1175,6 +1191,55 @@ pub fn deparse_context_for<'mcx>(
     set_simple_column_names(mcx, &mut dpns)?;
 
     // Return a one-deep namespace stack.
+    let mut stack = PgVec::new_in(mcx);
+    lappend(mcx, &mut stack, dpns)?;
+    Ok(stack)
+}
+
+/// Build the two-deep `old`/`new` deparse namespace stack
+/// `pg_get_triggerdef_worker` uses for a trigger WHEN qualification
+/// (ruleutils.c 1075-1109): two minimal relation RTEs aliased `old`/`new` over
+/// the same trigger relation, then `set_rtable_names` + `set_simple_column_names`.
+/// Returns the one-deep namespace stack (`list_make1(&dpns)`), used with
+/// `varprefix = true` so Vars render as `old.col` / `new.col`.
+pub(crate) fn deparse_context_for_old_new<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    relkind: i8,
+) -> PgResult<PgVec<'mcx, DeparseNamespace<'mcx>>> {
+    let mut dpns = DeparseNamespace::zeroed(mcx);
+
+    let mut make_rte = |name: &str| -> PgResult<RangeTblEntry<'mcx>> {
+        let mut rte = RangeTblEntry::new_in(mcx);
+        rte.rtekind = RTE_RELATION;
+        rte.relid = relid;
+        rte.relkind = relkind;
+        rte.rellockmode = AccessShareLock;
+        let alias = Alias {
+            aliasname: Some(pstrdup(mcx, name)?),
+            colnames: PgVec::new_in(mcx),
+        };
+        rte.alias = Some(mcx::alloc_in(mcx, alias)?);
+        let eref = Alias {
+            aliasname: Some(pstrdup(mcx, name)?),
+            colnames: PgVec::new_in(mcx),
+        };
+        rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+        rte.lateral = false;
+        rte.inh = false;
+        rte.inFromCl = true;
+        Ok(rte)
+    };
+
+    // dpns.rtable = list_make2(oldrte, newrte);
+    let oldrte = make_rte("old")?;
+    let newrte = make_rte("new")?;
+    lappend(mcx, &mut dpns.rtable, oldrte)?;
+    lappend(mcx, &mut dpns.rtable, newrte)?;
+
+    set_rtable_names(mcx, &mut dpns, &[], None)?;
+    set_simple_column_names(mcx, &mut dpns)?;
+
     let mut stack = PgVec::new_in(mcx);
     lappend(mcx, &mut stack, dpns)?;
     Ok(stack)
@@ -2418,6 +2483,50 @@ pub fn pop_child_plan<'mcx>(
     *dpns = save_dpns;
 }
 
+/// `push_ancestor_plan(dpns, ancestor_cell, save_dpns)` (`ruleutils.c`
+/// 5310-5326) — transfer deparsing attention to an ancestor plan node when
+/// expanding a `Param` reference, so the ancestor's own `Param`/special-Var
+/// references resolve. `ancestor_index` is the position of the target ancestor
+/// in `dpns.ancestors`; the new ancestor list is the tail *after* that cell
+/// (C: `list_copy_tail(dpns->ancestors, list_cell_number(...) + 1)`). The target
+/// ancestor node is supplied separately (C reads it via `lfirst(ancestor_cell)`)
+/// so the caller need not re-borrow `dpns.ancestors` while it is being rebuilt.
+pub fn push_ancestor_plan<'mcx, 'p>(
+    mcx: Mcx<'mcx>,
+    dpns: &mut DeparseNamespace<'mcx>,
+    ancestor_index: usize,
+    plan: &Node<'p>,
+) -> PgResult<DeparseNamespace<'mcx>> {
+    // *save_dpns = *dpns;  (owned model: deep-clone the namespace to restore.)
+    let save = clone_namespace(mcx, dpns)?;
+
+    // dpns->ancestors = list_copy_tail(dpns->ancestors, cell_number + 1);
+    let mut new_ancestors = PgVec::new_in(mcx);
+    let tail_start = ancestor_index + 1;
+    if tail_start < dpns.ancestors.len() {
+        new_ancestors
+            .try_reserve(dpns.ancestors.len() - tail_start)
+            .map_err(|_| mcx.oom(0))?;
+        for a in dpns.ancestors.iter().skip(tail_start) {
+            new_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+        }
+    }
+    dpns.ancestors = new_ancestors;
+
+    // set_deparse_plan(dpns, plan);
+    set_deparse_plan(mcx, dpns, plan)?;
+    Ok(save)
+}
+
+/// `pop_ancestor_plan(dpns, save_dpns)` (`ruleutils.c` 5331-5338) — restore the
+/// namespace saved by `push_ancestor_plan`.
+pub fn pop_ancestor_plan<'mcx>(
+    dpns: &mut DeparseNamespace<'mcx>,
+    save_dpns: DeparseNamespace<'mcx>,
+) {
+    *dpns = save_dpns;
+}
+
 /* -------------------------------------------------------------------------- *
  * The plan-tree deparse-context entry points (ruleutils.c 3777-3868).
  * -------------------------------------------------------------------------- */
@@ -2749,8 +2858,11 @@ mod fmgr_builtins;
 pub use fmgr_builtins::register_ruleutils_builtins;
 
 pub mod constraintdef;
+pub mod functiondef;
 pub mod indexdef;
+pub mod partkeydef;
 pub mod statisticsdef;
+pub mod triggerdef;
 pub mod viewdef;
 
 /// `PRETTYFLAG_PAREN` (ruleutils.c 88).

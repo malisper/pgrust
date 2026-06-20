@@ -20,6 +20,7 @@ use types_pathnodes::{
     HashPath, IncrementalSortPath, IndexClause, IndexOptInfo, IndexPath, JoinPath, JoinType,
     LimitOption, LimitPath, LockRowsPath, MaterialPath, MemoizePath, MergeAppendPath, MergePath,
     MinMaxAggInfo, MinMaxAggPath, ModifyTablePath, NestPath, NodeId, NodeTag, Path, PathId, PathKey,
+    PlanRowMarkId,
     PathNode, PathTarget, PlannerInfo, ProjectSetPath, ProjectionPath, QualCost, RecursiveUnionPath,
     RelId, Relids, RinfoId, ScanDirection, SetOpCmd, SetOpPath, SetOpStrategy, SortPath,
     SpecialJoinInfo, SubqueryScanPath, TargetEntryNode, TidPath, TidRangePath, UniquePath,
@@ -217,7 +218,7 @@ pub fn create_samplescan_path<'mcx>(
     pathnode.parallel_workers = 0;
     pathnode.pathkeys = Vec::new();
     let id = root.alloc_path(PathNode::Path(pathnode));
-    seam::cost_samplescan::call(root, id, rel);
+    seam::cost_samplescan::call(run, root, id, rel);
     Ok(id)
 }
 
@@ -2050,7 +2051,7 @@ pub fn create_lockrows_path(
     root: &mut PlannerInfo,
     rel: RelId,
     subpath: PathId,
-    row_marks: Vec<NodeId>,
+    row_marks: Vec<PlanRowMarkId>,
     epq_param: i32,
 ) -> PgResult<PathId> {
     let sp: Path = root.path(subpath).base().clone();

@@ -295,7 +295,12 @@ pub fn after_trigger_begin_query() {
 /// `AfterTriggerEnlargeQueryState()` (trigger.c:5645) — ensure `query_stack`
 /// has a slot for the current `query_depth`, initializing new entries to empty.
 pub fn after_trigger_enlarge_query_state(at: &mut AfterTriggers) {
-    debug_assert!(at.query_depth >= at.query_stack.len() as i32);
+    // C only calls this when `query_depth >= maxquerydepth` (the allocated
+    // capacity). Our `query_stack.len()` plays the role of `maxquerydepth` (it
+    // is the high-water number of allocated levels — `after_trigger_end_query`
+    // resets a level's slot but never shrinks the vector). When a lower-depth
+    // query re-enters after a deeper one finished, the slot already exists, so
+    // this is a no-op (the prior level was reset to empty on its end-query).
     let want = (at.query_depth + 1) as usize;
     while at.query_stack.len() < want {
         at.query_stack.push(QueryLevel {

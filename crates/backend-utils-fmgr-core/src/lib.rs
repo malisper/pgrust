@@ -289,7 +289,16 @@ fn init_fcinfo(
     // the callee's CALLED_AS_TRIGGER(fcinfo) demux fires. The issuing dispatcher
     // cannot reach this frame (it is built inside the seam), so it deposits the
     // node-tag on a thread-local that we read back here. `None` is a plain call.
-    let context = types_fmgr::fmgr::current_call_context_tag()
+    //
+    // We *take* (consume) the tag rather than peek it: C's `fcinfo->context` is
+    // a per-frame field, so the tag must ride onto exactly this one callee frame
+    // and not leak into the calls the callee itself issues. Without consuming, a
+    // trigger function whose body runs SPI queries that invoke ordinary
+    // functions would wrongly stamp T_TriggerData onto those nested frames
+    // (making e.g. a plain 2-arg helper compile as a trigger function). The
+    // dispatcher's RAII guard still restores the prior tag on drop, so a sibling
+    // trigger fired afterwards re-observes it.
+    let context = types_fmgr::fmgr::take_call_context_tag()
         .map(|tag| types_fmgr::fmgr::ContextNode { tag });
     let mut fcinfo =
         FunctionCallInfoBaseData::new(flinfo.map(Box::new), nargs, collation, context, None);
@@ -2954,11 +2963,14 @@ fn input_function_call_safe_seam<'mcx>(
     str_: &str,
     typioparam: Oid,
     typmod: i32,
+    escontext: Option<&mut types_error::SoftErrorContext>,
 ) -> PgResult<Option<Datum>> {
     let resolved = fmgr_info(mcx, function_id)?;
-    // C drives the element input function with a soft-error context so a bad
-    // element is caught rather than aborting; the caller only needs Some/None.
-    let mut escontext = types_error::SoftErrorContext::new(false);
+    // C: `InputFunctionCallSafe(&my_extra->proc, ..., escontext, &result)` —
+    // `array_in` passes its own `escontext` straight through, so a bad element
+    // value lands in the caller's sink (this returns `Ok(None)`). With a `None`
+    // escontext (a hard-error caller) a conversion error escalates to a hard
+    // `Err`, exactly as C's NULL-escontext path does.
     let out = input_function_call_safe_typed(
         mcx,
         &resolved.resolution,
@@ -2966,7 +2978,7 @@ fn input_function_call_safe_seam<'mcx>(
         Some(str_),
         typioparam,
         typmod,
-        Some(&mut escontext),
+        escontext,
     )?;
     // C's `InputFunctionCallSafe` yields a bare `Datum`: a by-value scalar is
     // the machine word; a by-reference element (text/name/numeric/…) is a
@@ -3063,10 +3075,19 @@ fn function_call_invoke_seam(
 ) -> PgResult<(Datum, bool)> {
     let ctx = MemoryContext::new("function_call_invoke");
     let mcx = ctx.mcx();
+    // C: `fcinfo->context = (Node *) &LocTriggerData` is set on THIS call's frame.
+    // The issuing dispatcher deposited the tag on a thread-local; snapshot and
+    // clear it now so the `fmgr_info` resolution below (which may itself issue
+    // nested fmgr calls — catalog lookups) does not consume/observe it. We
+    // re-install it just before `init_fcinfo` so it rides onto exactly the callee
+    // frame, matching C's per-frame `fcinfo->context`.
+    let deposited_ctx = types_fmgr::fmgr::take_call_context_tag();
     let resolved = fmgr_info(mcx, fn_oid)?;
     // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658) — thread
     // the caller's fn_expr before the FmgrInfo is moved into fcinfo.
     let fn_expr = resolved.finfo.fn_expr.clone();
+    // Re-deposit the snapshot tag so `init_fcinfo` consumes it onto this frame.
+    let _ctx_reinstall = deposited_ctx.map(types_fmgr::fmgr::CallContextTagGuard::install);
     let mut fcinfo = init_fcinfo(Some(resolved.finfo), collation, args.to_vec());
     // C: fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo);
     fcinfo.isnull = false;
@@ -3200,7 +3221,7 @@ fn function_call_invoke_datum_core<'mcx>(
     collation: Oid,
     nargs: Vec<NullableDatum>,
     ref_args: Vec<Option<RefPayload>>,
-    fn_expr: Option<&types_nodes::primnodes::Expr>,
+    fn_expr: Option<types_core::fmgr::FnExprErased>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     let mut resolved = fmgr_info(mcx, fn_oid)?;
 
@@ -3209,15 +3230,17 @@ fn function_call_invoke_datum_core<'mcx>(
     // `flinfo->fn_expr`; the callee's `get_fn_expr_rettype/argtype` read it for
     // polymorphic-type resolution. The owned by-OID re-resolution above produced
     // a fresh `FmgrInfo` with `fn_expr == None`, so stamp the executor's call
-    // node onto it (carried erased through the tag-only `FnExpr::External`). This
-    // is the only divergence-bridge: the rest of the call frame is unchanged.
-    if let Some(expr) = fn_expr {
-        // clone_in: the call node may carry an Aggref (a HAVING qual operator),
-        // whose context-allocated TargetEntry args a bare derived `.clone()`
-        // panics on.
+    // node onto it (carried erased through the tag-only `FnExpr::External`).
+    //
+    // `fn_expr` arrives already erased (the `Rc`-backed `FnExprErased` the step's
+    // `FmgrInfo` was stamped with at `ExecInitFunc` time). Re-stamping is a cheap
+    // `Rc::clone` (the move below), NOT a per-call deep `clone_in` of the whole
+    // expression tree — deep-cloning here is catastrophic on a hot dispatch path
+    // (a 100M-iteration nested-loop join qual was effectively hung on it).
+    if let Some(node) = fn_expr {
         resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(types_fmgr::ExternalFnExpr {
             tag: 0,
-            node: Some(types_core::fmgr::FnExprErased::new(expr.clone_in(mcx)?)),
+            node: Some(node),
         })));
     }
 
@@ -3259,7 +3282,7 @@ fn function_call_invoke_datum_seam<'mcx>(
     collation: Oid,
     args: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
     args_null: &[bool],
-    fn_expr: Option<&types_nodes::primnodes::Expr>,
+    fn_expr: Option<types_core::fmgr::FnExprErased>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     // Build the `fcinfo->args[]` frame: by-value word lane + by-reference side
     // channel. The canonical `Datum::ByVal(0)` word cannot encode SQL NULL, so
@@ -3292,7 +3315,7 @@ fn function_call_invoke_datum_owned_seam<'mcx>(
     collation: Oid,
     args: Vec<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
     args_null: Vec<bool>,
-    fn_expr: Option<&types_nodes::primnodes::Expr>,
+    fn_expr: Option<types_core::fmgr::FnExprErased>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     debug_assert_eq!(args.len(), args_null.len());
     let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());

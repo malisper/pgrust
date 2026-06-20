@@ -36,6 +36,9 @@ pub fn init_seams() {
         tupconvert::convert_tuples_by_name_attrmap,
     );
     backend_access_common_next_seams::execute_attr_map_cols::set(tupconvert::execute_attr_map_cols);
+    backend_access_common_next_seams::execute_attr_map_tuple::set(
+        tupconvert::execute_attr_map_tuple,
+    );
 
     // attmap.c map constructor/destructor (backend-access-common-next-seams).
     // The seam contract carries the map by value (`AttrMap`), while this unit's

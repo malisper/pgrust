@@ -15,8 +15,8 @@ use mcx::Mcx;
 use types_cache::typcache::TypeCacheEntry;
 use types_core::primitive::Oid;
 use types_error::{
-    PgError, PgResult, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR,
-    ERRCODE_UNDEFINED_FUNCTION,
+    ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
+    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION,
 };
 use types_rangetypes::{
     RangeBound, RangeTypeP, RANGE_EMPTY, RANGE_EMPTY_LITERAL, RANGE_LB_INC, RANGE_LB_INF,
@@ -24,63 +24,6 @@ use types_rangetypes::{
 };
 
 use crate::range_repr_serialize::{make_range, range_deserialize, range_get_flags};
-
-/// Collapse a canonical input-/receive-function result onto the bare element
-/// word the `RangeBound.val` carrier (`types_datum::Datum`) holds — the C
-/// `Datum` an element's I/O function returns.
-///
-/// A by-value range element (e.g. `int4range`/`tsrange`) IS its machine word. A
-/// by-reference element (e.g. `numrange`/`textrange`) is, in C, a `Pointer` to
-/// the value's varlena image; the owned input function hands it back on the
-/// canonical `ByRef` arm. `range_serialize`'s `datum_compute_size`/`datum_write`
-/// dereference `RangeBound.val` as that pointer (`datum.as_usize() as *const
-/// u8`), so MATERIALIZE the header-ful varlena image into `mcx` and store its
-/// pointer word — exactly the form `DatumGetPointer` expects. (`Cstring` would
-/// be a `cstring`-element range, which has no varlena image; that crosses as the
-/// raw NUL-terminated buffer pointer.)
-fn canon_to_bound_word<'mcx>(
-    mcx: Mcx<'mcx>,
-    d: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
-) -> PgResult<types_datum::datum::Datum> {
-    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
-    match d {
-        CanonDatum::ByVal(w) => Ok(types_datum::datum::Datum::from_usize(w)),
-        CanonDatum::ByRef(b) => Ok(types_datum::datum::Datum::from_usize(
-            materialize_bound_image(mcx, b.as_slice())? as usize,
-        )),
-        CanonDatum::Cstring(s) => {
-            // A `cstring`-element range: store the NUL-terminated buffer pointer.
-            let mut bytes = s.into_bytes();
-            bytes.push(0);
-            Ok(types_datum::datum::Datum::from_usize(
-                materialize_bound_image(mcx, &bytes)? as usize,
-            ))
-        }
-        _ => panic!(
-            "range bound: unexpected canonical element kind (Composite/Expanded/\
-             Internal) from an element I/O function"
-        ),
-    }
-}
-
-/// Copy a by-reference bound's image into `mcx` as an 8-byte-aligned block and
-/// return its base pointer (`PointerGetDatum`). The 8-byte alignment matches
-/// what `palloc` hands a detoasted datum — what the element type's by-reference
-/// accessors and `datum_write`'s `varatt_*` reads rely on.
-fn materialize_bound_image<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<*const u8> {
-    use allocator_api2::alloc::Allocator;
-    use core::alloc::Layout;
-    mcx::check_alloc_size(image.len())?;
-    let layout = Layout::from_size_align(image.len().max(1), 8)
-        .expect("valid range bound image layout");
-    let block = mcx.allocate(layout).map_err(|_| mcx.oom(image.len()))?;
-    let dst = block.as_ptr() as *mut u8;
-    // SAFETY: `dst` heads a freshly allocated image.len()-byte region.
-    unsafe {
-        core::ptr::copy_nonoverlapping(image.as_ptr(), dst, image.len());
-    }
-    Ok(dst as *const u8)
-}
 
 /// `RANGE_HAS_LBOUND(flags)` (rangetypes.h:48).
 #[inline]
@@ -193,20 +136,63 @@ pub fn get_range_io_data(rngtypid: Oid, func: IOFuncSelector) -> PgResult<RangeI
     })
 }
 
-/// `range_in(input, typioparam, typmod)` body (rangetypes.c:90).
+/// Call the element type's text input function on one bound substring,
+/// mirroring C's `InputFunctionCallSafe(&cache->typioproc, bound_str,
+/// cache->typioparam, typmod, escontext, &bound.val)`.
+///
+/// Routes through the SAFE seam (`input_function_call_safe`), forwarding
+/// `escontext` exactly as C forwards `fcinfo->context`. A recoverable (soft)
+/// conversion error returns `Ok(None)` (C's `InputFunctionCallSafe` returning
+/// `false`, with the error already saved into `escontext`), which `range_in`
+/// turns into `PG_RETURN_NULL`. When `escontext` is `None` the seam escalates a
+/// conversion error to a hard `Err`, exactly as C's NULL-escontext path does.
+///
+/// On success the seam yields the bare element `Datum` already in the
+/// `RangeBound.val` word form — a by-value scalar's machine word, or a pointer
+/// into `mcx` to the by-reference element's flattened image (the same shape
+/// `canon_to_bound_word` produces on the hard path) — so no further lowering is
+/// needed.
+fn call_bound_input<'mcx>(
+    mcx: Mcx<'mcx>,
+    cache: &RangeIOData,
+    bound_str: &str,
+    typmod: i32,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<types_datum::datum::Datum>> {
+    fmgr_seams::input_function_call_safe::call(
+        mcx,
+        cache.typiofunc,
+        bound_str,
+        cache.typioparam,
+        typmod,
+        escontext,
+    )
+}
+
+/// `range_in(input, typioparam, typmod, escontext)` body (rangetypes.c:90).
+///
+/// Returns `Ok(None)` for a soft (`escontext`) error (C `PG_RETURN_NULL` after a
+/// recoverable parse / element-input failure); `Ok(Some(range))` on success.
 pub fn range_in<'mcx>(
     mcx: Mcx<'mcx>,
     cache: &RangeIOData,
     input: &str,
     _typmod: i32,
-) -> PgResult<RangeTypeP<'mcx>> {
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<RangeTypeP<'mcx>>> {
     // check_stack_depth(); -- recursion guard, owned by the C runtime.
 
     // C: cache = get_range_io_data(fcinfo, rngtypoid, IOFunc_input); -- the
     // caller resolved it; we receive the resolved cache.
 
     // parse
-    let (flags, lbound_str, ubound_str) = range_parse(input)?;
+    // C: if (!range_parse(input_str, &flags, &lbound_str, &ubound_str, escontext))
+    //        PG_RETURN_NULL();
+    let (flags, lbound_str, ubound_str) =
+        match range_parse(input, escontext.as_deref_mut())? {
+            Some(parsed) => parsed,
+            None => return Ok(None),
+        };
 
     // call element type's input function
     let mut lower = RangeBound::default();
@@ -214,42 +200,23 @@ pub fn range_in<'mcx>(
 
     if range_has_lbound(flags) {
         let lbound_str = lbound_str.expect("RANGE_HAS_LBOUND implies a parsed lower bound string");
-        // C: InputFunctionCallSafe(&cache->typioproc, lbound_str,
-        //                          cache->typioparam, typmod, escontext, &lower.val)
-        //
-        // The scaffold carries no escontext (hard-error caller), so
-        // InputFunctionCallSafe is equivalent to InputFunctionCall: the element
-        // type's text input function is resolved by its OID (`cache.typiofunc`)
-        // and run, raising on error rather than returning the soft-error `false`
-        // that would `PG_RETURN_NULL`. The seam yields the element value as the
-        // canonical `Datum`; `canon_to_bound_word` lowers it to the bare element
-        // word the `RangeBound.val` carrier holds — materializing a by-reference
-        // element's varlena image into `mcx` and storing its pointer.
-        lower.val = canon_to_bound_word(
-            mcx,
-            fmgr_seams::input_function_call::call(
-                mcx,
-                cache.typiofunc,
-                Some(lbound_str.as_str()),
-                cache.typioparam,
-                _typmod,
-            )?,
-        )?;
+        // C: if (!InputFunctionCallSafe(&cache->typioproc, lbound_str,
+        //          cache->typioparam, typmod, escontext, &lower.val))
+        //        PG_RETURN_NULL();
+        match call_bound_input(mcx, cache, lbound_str.as_str(), _typmod, escontext.as_deref_mut())? {
+            Some(val) => lower.val = val,
+            None => return Ok(None),
+        }
     }
     if range_has_ubound(flags) {
         let ubound_str = ubound_str.expect("RANGE_HAS_UBOUND implies a parsed upper bound string");
-        // C: InputFunctionCallSafe(&cache->typioproc, ubound_str,
-        //                          cache->typioparam, typmod, escontext, &upper.val)
-        upper.val = canon_to_bound_word(
-            mcx,
-            fmgr_seams::input_function_call::call(
-                mcx,
-                cache.typiofunc,
-                Some(ubound_str.as_str()),
-                cache.typioparam,
-                _typmod,
-            )?,
-        )?;
+        // C: if (!InputFunctionCallSafe(&cache->typioproc, ubound_str,
+        //          cache->typioparam, typmod, escontext, &upper.val))
+        //        PG_RETURN_NULL();
+        match call_bound_input(mcx, cache, ubound_str.as_str(), _typmod, escontext.as_deref_mut())? {
+            Some(val) => upper.val = val,
+            None => return Ok(None),
+        }
     }
 
     lower.infinite = flags & RANGE_LB_INF != 0;
@@ -260,7 +227,22 @@ pub fn range_in<'mcx>(
     upper.lower = false;
 
     // serialize and canonicalize
-    make_range(mcx, &cache.typcache, &lower, &upper, flags & RANGE_EMPTY != 0)
+    // C: range = make_range(typcache, &lower, &upper, flags & RANGE_EMPTY,
+    //                       escontext); if (!range) PG_RETURN_NULL();
+    //
+    // `make_range` only soft-fails on a discrete canonicalization error
+    // (`range_serialize` reporting "range lower bound must be <= upper bound" is
+    // hard, but a discrete-type canonical proc can ereturn). The owned
+    // `make_range` raises hard here (no escontext arg); that matches every
+    // current caller and the dominant `pg_input_is_valid` cases are the parse /
+    // element-input legs handled above.
+    Ok(Some(make_range(
+        mcx,
+        &cache.typcache,
+        &lower,
+        &upper,
+        flags & RANGE_EMPTY != 0,
+    )?))
 }
 
 /// `range_out(range)` body (rangetypes.c:139): the canonical text form.
@@ -459,17 +441,18 @@ pub fn range_send<'mcx>(
 // ---------------------------------------------------------------------------
 
 /// Inward seam shape for `range_in` (rangetypes-seams). Resolves the input
-/// cache then runs the kernel. The hard-error scaffold has no soft (`escontext`)
-/// failures, so the result is always `Ok(Some(_))` or `Err` (the seam's
-/// `Ok(None)` soft-error case never arises here).
+/// cache then runs the kernel, forwarding `escontext` (C's `fcinfo->context`):
+/// a recoverable parse / element-input error surfaces as `Ok(None)` when
+/// `escontext` is `Some`, or a hard `Err` when `None`.
 pub fn range_in_seam<'mcx>(
     mcx: Mcx<'mcx>,
     input: &str,
     rngtypoid: Oid,
     typmod: i32,
+    escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<Option<RangeTypeP<'mcx>>> {
     let cache = get_range_io_data(rngtypoid, IOFuncSelector::Input)?;
-    Ok(Some(range_in(mcx, &cache, input, typmod)?))
+    range_in(mcx, &cache, input, typmod, escontext)
 }
 
 /// Inward seam shape for `range_out` (rangetypes-seams). The seam returns an
@@ -506,10 +489,14 @@ pub fn range_send_seam(range: RangeTypeP<'_>) -> PgResult<Vec<u8>> {
 /// `range_parse(string, &flags, &lbound, &ubound)` (rangetypes.c:2386): split a
 /// text literal into its flags byte and bound substrings (`None` = infinite).
 ///
-/// The scaffold signature carries no `escontext`, so this is the hard-error
-/// path (C `escontext == NULL`): every malformed-literal `ereturn` becomes a
-/// returned `Err`.
-pub fn range_parse(string: &str) -> PgResult<(u8, Option<String>, Option<String>)> {
+/// `escontext` is C's soft-error sink: every malformed-literal `ereturn`
+/// becomes a soft `Ok(None)` when `escontext` is `Some` (the error saved into
+/// it) or a hard `Err` when `None`. On success returns `Ok(Some((flags,
+/// lbound, ubound)))`.
+pub fn range_parse(
+    string: &str,
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<(u8, Option<String>, Option<String>)>> {
     let bytes = string.as_bytes();
     let mut ptr = 0usize;
     let mut flags: u8 = 0;
@@ -532,10 +519,14 @@ pub fn range_parse(string: &str) -> PgResult<(u8, Option<String>, Option<String>
 
         // should have consumed everything
         if ptr < bytes.len() {
-            return Err(malformed_literal(string).with_detail("Junk after \"empty\" key word."));
+            return ereturn(
+                escontext,
+                None,
+                malformed_literal(string).with_detail("Junk after \"empty\" key word."),
+            );
         }
 
-        return Ok((flags, None, None));
+        return Ok(Some((flags, None, None)));
     }
 
     if ptr < bytes.len() && bytes[ptr] == b'[' {
@@ -544,17 +535,23 @@ pub fn range_parse(string: &str) -> PgResult<(u8, Option<String>, Option<String>
     } else if ptr < bytes.len() && bytes[ptr] == b'(' {
         ptr += 1;
     } else {
-        return Err(
-            malformed_literal(string).with_detail("Missing left parenthesis or bracket.")
+        return ereturn(
+            escontext,
+            None,
+            malformed_literal(string).with_detail("Missing left parenthesis or bracket."),
         );
     }
 
     // C: ptr = range_parse_bound(string, ptr, lbound_str, &infinite, escontext);
-    //    if (ptr == NULL) return false;  -- here the Err already propagated via `?`.
+    //    if (ptr == NULL) return false;  -- here the soft `Ok(None)` propagates.
     //    if (infinite) *flags |= RANGE_LB_INF;
     // range_parse_bound returns "" for the infinite case; C leaves *lbound_str
     // NULL then, which `range_deparse`/`RANGE_HAS_LBOUND` never reads anyway.
-    let (lbound_str, infinite, next) = range_parse_bound(string, ptr)?;
+    let (lbound_str, infinite, next) =
+        match range_parse_bound(string, ptr, escontext.as_deref_mut())? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
     ptr = next;
     let lbound_str = if infinite { None } else { Some(lbound_str) };
     if infinite {
@@ -564,10 +561,18 @@ pub fn range_parse(string: &str) -> PgResult<(u8, Option<String>, Option<String>
     if ptr < bytes.len() && bytes[ptr] == b',' {
         ptr += 1;
     } else {
-        return Err(malformed_literal(string).with_detail("Missing comma after lower bound."));
+        return ereturn(
+            escontext,
+            None,
+            malformed_literal(string).with_detail("Missing comma after lower bound."),
+        );
     }
 
-    let (ubound_str, infinite, next) = range_parse_bound(string, ptr)?;
+    let (ubound_str, infinite, next) =
+        match range_parse_bound(string, ptr, escontext.as_deref_mut())? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
     ptr = next;
     let ubound_str = if infinite { None } else { Some(ubound_str) };
     if infinite {
@@ -581,7 +586,11 @@ pub fn range_parse(string: &str) -> PgResult<(u8, Option<String>, Option<String>
         ptr += 1;
     } else {
         // must be a comma
-        return Err(malformed_literal(string).with_detail("Too many commas."));
+        return ereturn(
+            escontext,
+            None,
+            malformed_literal(string).with_detail("Too many commas."),
+        );
     }
 
     // consume whitespace
@@ -590,12 +599,14 @@ pub fn range_parse(string: &str) -> PgResult<(u8, Option<String>, Option<String>
     }
 
     if ptr < bytes.len() {
-        return Err(
-            malformed_literal(string).with_detail("Junk after right parenthesis or bracket.")
+        return ereturn(
+            escontext,
+            None,
+            malformed_literal(string).with_detail("Junk after right parenthesis or bracket."),
         );
     }
 
-    Ok((flags, lbound_str, ubound_str))
+    Ok(Some((flags, lbound_str, ubound_str)))
 }
 
 /// `range_parse_flags(flags_str)` (rangetypes.c:2311): the `[)`/`(]`/... flags.
@@ -640,15 +651,21 @@ pub fn range_parse_flags(flags_str: &str) -> PgResult<u8> {
 /// `range_parse_bound(string, ptr, &bound, &infinite)` (rangetypes.c:2502):
 /// scan one bound substring, returning `(bound_text, infinite, next_offset)`.
 ///
-/// Hard-error path (scaffold carries no `escontext`): the "Unexpected end of
-/// input" `ereturn`s become a returned `Err`.
-pub fn range_parse_bound(string: &str, ptr: usize) -> PgResult<(String, bool, usize)> {
+/// `escontext` is C's soft-error sink: the "Unexpected end of input" `ereturn`s
+/// become a soft `Ok(None)` when `escontext` is `Some` (error saved) or a hard
+/// `Err` when `None`. On success returns `Ok(Some((bound_text, infinite,
+/// next_offset)))`.
+pub fn range_parse_bound(
+    string: &str,
+    ptr: usize,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<(String, bool, usize)>> {
     let bytes = string.as_bytes();
     let mut ptr = ptr;
 
     // Check for null: a bound terminator right here means no bound.
     if ptr < bytes.len() && (bytes[ptr] == b',' || bytes[ptr] == b')' || bytes[ptr] == b']') {
-        return Ok((String::new(), true, ptr));
+        return Ok(Some((String::new(), true, ptr)));
     }
     // C also enters the else branch when at end-of-string ('\0'); the scan loop
     // then immediately hits ch == '\0' and ereturns. Mirror that.
@@ -669,12 +686,20 @@ pub fn range_parse_bound(string: &str, ptr: usize) -> PgResult<(String, bool, us
         ptr += 1;
 
         if ch == 0 {
-            return Err(malformed_literal(string).with_detail("Unexpected end of input."));
+            return ereturn(
+                escontext,
+                None,
+                malformed_literal(string).with_detail("Unexpected end of input."),
+            );
         }
         if ch == b'\\' {
             // if (*ptr == '\0') ereturn; appendStringInfoChar(&buf, *ptr++);
             if ptr >= bytes.len() {
-                return Err(malformed_literal(string).with_detail("Unexpected end of input."));
+                return ereturn(
+                    escontext,
+                    None,
+                    malformed_literal(string).with_detail("Unexpected end of input."),
+                );
             }
             buf.push(bytes[ptr]);
             ptr += 1;
@@ -696,7 +721,7 @@ pub fn range_parse_bound(string: &str, ptr: usize) -> PgResult<(String, bool, us
     // buf is built from input bytes (which were valid UTF-8 in `string`); the
     // escaping only ever copies whole input bytes, so the result is valid too.
     let bound_str = String::from_utf8(buf).expect("bound bytes are a subsequence of valid UTF-8");
-    Ok((bound_str, false, ptr))
+    Ok(Some((bound_str, false, ptr)))
 }
 
 /// `range_deparse(flags, lbound, ubound)` (rangetypes.c:2571): assemble the

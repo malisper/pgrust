@@ -146,7 +146,7 @@ fn lock_relation_for_extension<'mcx>(rel: &Relation<'mcx>) -> PgResult<()> {
     Ok(())
 }
 fn unlock_relation_for_extension<'mcx>(rel: &Relation<'mcx>) -> PgResult<()> {
-    backend_storage_lmgr_lmgr_seams::unlock_relation_for_extension::call(rel.rd_id)
+    backend_storage_lmgr_lmgr_seams::unlock_relation_for_extension::call(rel.rd_locator.dbOid, rel.rd_id)
 }
 fn record_free_index_page<'mcx>(rel: &Relation<'mcx>, blkno: BlockNumber) -> PgResult<()> {
     backend_storage_freespace_seams::record_free_index_page::call(rel, blkno)

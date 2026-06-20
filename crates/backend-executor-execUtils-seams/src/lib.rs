@@ -247,6 +247,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `MemSet(econtext->ecxt_aggvalues, 0, sizeof(Datum) * numaggs);
+    /// MemSet(econtext->ecxt_aggnulls, 0, sizeof(bool) * numaggs);` —
+    /// forget the current aggregate values held in the pooled ExprContext named
+    /// by `econtext` (a node's `ps_ExprContext`). Used by `ExecReScanAgg` to
+    /// reset the per-output-tuple aggregate value/null arrays before a rescan.
+    /// `numaggs` is the count of aggregate slots to clear (the arrays are sized
+    /// to exactly that count at init).
+    pub fn clear_agg_values<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        econtext: types_nodes::EcxtId,
+        numaggs: i32,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ResetExprContext(node->js.ps.ps_ExprContext)` (executor.h): reset the
     /// node's per-tuple memory context, freeing per-tuple expression storage.
     pub fn reset_per_tuple_expr_context<'mcx>(

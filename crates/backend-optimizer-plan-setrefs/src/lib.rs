@@ -28,7 +28,8 @@ use mcx::{Mcx, PgBox, PgVec};
 use types_error::{PgError, PgResult};
 
 use backend_nodes_core::nodefuncs::{
-    expr_collation, expr_type, expr_typmod, expression_tree_mutator, set_opfuncid, set_sa_opfuncid,
+    expr_collation, expr_type, expr_typmod, expression_tree_mutator, resolved_opfuncid,
+    set_opfuncid, set_sa_opfuncid,
 };
 use backend_nodes_core::makefuncs::{
     flat_copy_target_entry, make_null_const, make_var, make_var_from_target_entry,
@@ -1838,10 +1839,9 @@ pub fn set_plan_refs<'mcx>(
 
     // Plan-type-specific fixes. We match on the `Node` enum variant directly
     // (the model's source of truth). Several arms `return` (no tail recursion).
-    // NOTE: `LockRows` and `BitmapOr` are NOT represented as `Node` variants in
-    // this repo's enum (verified against nodes.rs), so they cannot reach this
-    // dispatch; their C arms have no place to land and are therefore absent (a
-    // plan carrying them is unconstructible in this model).
+    // NOTE: `BitmapAnd`/`BitmapOr` ARE represented as `Node` variants and are
+    // handled below (recurse over `bitmapplans`). `LockRows` is folded into the
+    // `ModifyTable`/rowmark handling and has no standalone arm here.
     match plan.node_tag() {
         // -- plain scan types -------------------------------------------------
         ntag::T_SeqScan
@@ -1943,6 +1943,23 @@ pub fn set_plan_refs<'mcx>(
                 if let Some(cnt) = l.limitCount.take() {
                     let f = fix_scan_expr(mcx, root, PgBox::into_inner(cnt), rtoffset, 1.0)?;
                     l.limitCount = Some(mcx::alloc_in(mcx, f)?);
+                }
+            }
+        }
+
+        // -- LockRows --------------------------------------------------------
+        // Like the dummy-tlist plan types, LockRows doesn't evaluate its tlist
+        // or quals; but we must fix up the RT indexes in its rowmarks
+        // (set_plan_refs, setrefs.c).
+        ntag::T_LockRows => {
+            set_dummy_tlist_references(plan.plan_head_mut(), rtoffset, mcx)?;
+            debug_assert!(plan.plan_head().qual.is_none());
+            if let Some(lr) = plan.as_lockrows_mut() {
+                if let Some(marks) = lr.rowMarks.as_mut() {
+                    for rc in marks.iter_mut() {
+                        rc.rti = rc.rti.wrapping_add(rtoffset as u32);
+                        rc.prti = rc.prti.wrapping_add(rtoffset as u32);
+                    }
                 }
             }
         }
@@ -2057,6 +2074,22 @@ pub fn set_plan_refs<'mcx>(
         // -- BitmapAnd -------------------------------------------------------
         ntag::T_BitmapAnd => {
             if let Some(b) = plan.as_bitmapand_mut() {
+                let kids = core::mem::take(&mut b.bitmapplans);
+                let mut newkids = Vec::with_capacity(kids.len());
+                for k in kids {
+                    newkids.push(set_plan_refs(mcx, run, root, k, rtoffset)?);
+                }
+                b.bitmapplans = newkids;
+            }
+            return Ok(plan);
+        }
+
+        // -- BitmapOr --------------------------------------------------------
+        // C (setrefs.c): `case T_BitmapOr:` — targetlist/qual are NIL (no
+        // tlist/qual fix-up), just recurse `set_plan_refs` over each input
+        // bitmapplan. Mirrors the T_BitmapAnd arm above.
+        ntag::T_BitmapOr => {
+            if let Some(b) = plan.as_bitmapor_mut() {
                 let kids = core::mem::take(&mut b.bitmapplans);
                 let mut newkids = Vec::with_capacity(kids.len());
                 for k in kids {
@@ -3389,21 +3422,22 @@ fn fix_expr_common_value(ctx: &mut ExtractDepsCtx, node: &Expr) -> PgResult<()> 
         Expr::Aggref(a) => record_plan_function_dependency_value(ctx, a.aggfnoid)?,
         Expr::WindowFunc(w) => record_plan_function_dependency_value(ctx, w.winfnoid)?,
         Expr::FuncExpr(f) => record_plan_function_dependency_value(ctx, f.funcid)?,
-        // OpExpr / DistinctExpr / NullIfExpr share the OpExpr struct.
+        // OpExpr / DistinctExpr / NullIfExpr share the OpExpr struct. C scribbles
+        // opfuncid in place via set_opfuncid; this is the read-only VALUE walk, so
+        // resolve the OID without cloning the node (its args may carry an Aggref,
+        // which is not deep-cloneable).
         Expr::OpExpr(op) | Expr::DistinctExpr(op) | Expr::NullIfExpr(op) => {
-            let mut tmp = op.clone();
-            set_opfuncid(&mut tmp)?;
-            record_plan_function_dependency_value(ctx, tmp.opfuncid)?;
+            let opfuncid = resolved_opfuncid(op.opno, op.opfuncid)?;
+            record_plan_function_dependency_value(ctx, opfuncid)?;
         }
         Expr::ScalarArrayOpExpr(saop) => {
-            let mut tmp = saop.clone();
-            set_sa_opfuncid(&mut tmp)?;
-            record_plan_function_dependency_value(ctx, tmp.opfuncid)?;
-            if tmp.hashfuncid != 0 {
-                record_plan_function_dependency_value(ctx, tmp.hashfuncid)?;
+            let opfuncid = resolved_opfuncid(saop.opno, saop.opfuncid)?;
+            record_plan_function_dependency_value(ctx, opfuncid)?;
+            if saop.hashfuncid != 0 {
+                record_plan_function_dependency_value(ctx, saop.hashfuncid)?;
             }
-            if tmp.negfuncid != 0 {
-                record_plan_function_dependency_value(ctx, tmp.negfuncid)?;
+            if saop.negfuncid != 0 {
+                record_plan_function_dependency_value(ctx, saop.negfuncid)?;
             }
         }
         Expr::Const(con) => {

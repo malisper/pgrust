@@ -149,7 +149,11 @@ pub struct WindowFuncLists {
 }
 
 /// `find_window_functions(clause, maxWinRef)` (clauses.c:228).
-pub fn find_window_functions(clause: Option<&Expr>, max_win_ref: u32) -> PgResult<WindowFuncLists> {
+pub fn find_window_functions<'b>(
+    mcx: Mcx<'b>,
+    clause: Option<&Expr>,
+    max_win_ref: u32,
+) -> PgResult<WindowFuncLists> {
     let mut window_funcs: Vec<Vec<Expr>> = Vec::with_capacity((max_win_ref as usize) + 1);
     for _ in 0..=(max_win_ref as usize) {
         window_funcs.push(Vec::new());
@@ -160,7 +164,7 @@ pub fn find_window_functions(clause: Option<&Expr>, max_win_ref: u32) -> PgResul
         window_funcs,
     };
     let mut err: Option<PgError> = None;
-    find_window_functions_walker(clause, &mut lists, &mut err);
+    find_window_functions_walker(mcx, clause, &mut lists, &mut err);
     if let Some(e) = err {
         return Err(e);
     }
@@ -173,7 +177,8 @@ pub fn find_window_functions(clause: Option<&Expr>, max_win_ref: u32) -> PgResul
 /// (which descends List nodes); here the planner's `processed_tlist` is a list
 /// of `TargetEntry` handles, so the caller resolves each entry's expression and
 /// passes the slice.
-pub fn find_window_functions_in_exprs(
+pub fn find_window_functions_in_exprs<'b>(
+    mcx: Mcx<'b>,
     exprs: &[&Expr],
     max_win_ref: u32,
 ) -> PgResult<WindowFuncLists> {
@@ -188,7 +193,7 @@ pub fn find_window_functions_in_exprs(
     };
     let mut err: Option<PgError> = None;
     for expr in exprs {
-        find_window_functions_walker(Some(expr), &mut lists, &mut err);
+        find_window_functions_walker(mcx, Some(expr), &mut lists, &mut err);
         if err.is_some() {
             break;
         }
@@ -199,7 +204,8 @@ pub fn find_window_functions_in_exprs(
     Ok(lists)
 }
 
-fn find_window_functions_walker(
+fn find_window_functions_walker<'b>(
+    mcx: Mcx<'b>,
     node: Option<&Expr>,
     lists: &mut WindowFuncLists,
     err: &mut Option<PgError>,
@@ -214,14 +220,24 @@ fn find_window_functions_walker(
             )));
             return true;
         }
-        lists.window_funcs[wfunc.winref as usize].push(node.clone());
+        // C appends the WindowFunc pointer (`lappend`); the owned model needs a
+        // deep copy. A plain `.clone()` would panic on a context-allocated child
+        // (the WindowFunc's args may carry an Aggref, as in `SUM(SUM(x)) OVER`),
+        // so deep-copy via `Expr::clone_in`.
+        match node.clone_in(mcx) {
+            Ok(copy) => lists.window_funcs[wfunc.winref as usize].push(copy),
+            Err(e) => {
+                *err = Some(e);
+                return true;
+            }
+        }
         lists.num_window_funcs += 1;
         // No need to recurse into the arguments/filter.
         return false;
     }
     // Assert(!IsA(node, SubLink));
     expression_tree_walker(Some(node), &mut |n| {
-        find_window_functions_walker(Some(n), lists, err)
+        find_window_functions_walker(mcx, Some(n), lists, err)
     })
 }
 

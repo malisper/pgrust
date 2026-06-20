@@ -34,12 +34,44 @@ use types_gin::{GinMetaPageData, GinNullCategory};
 use types_rel::Relation;
 use types_scan::scankey::ScanKeyData;
 use types_storage::storage::Buffer;
-use types_tableam::amapi::{IndexUniqueCheck, TIDBitmap};
+use types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck, TIDBitmap};
 use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
 use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::{ItemPointerData, TupleDesc};
+
+seam_core::seam!(
+    /// `ginbuild(heap, index, indexInfo)` (gininsert.c): the GIN AM's `ambuild`
+    /// entry — drive the serial CREATE INDEX build (init metapage/root, scan the
+    /// heap once accumulating entries, dump them into the entry tree, update
+    /// metapage stats + WAL-log) and return the heap/index tuple counts.
+    ///
+    /// `ginbuild`'s real body lives in `backend-access-gin-ginbulk`, which sits
+    /// ABOVE the AM-vtable crate (`backend-access-gin-ginutil`) in the dep graph
+    /// (ginbulk depends on ginutil), so the vtable's `ambuild` adapter cannot
+    /// call it directly. This seam bridges that edge (owner = ginbulk, installed
+    /// from its `init_seams`): the adapter passes the `IndexInfoCarrier` (#342)
+    /// through, and ginbulk downcasts it back to the real
+    /// `types_nodes::execnodes::IndexInfo<'mcx>`. Mirrors the nbtree `btbuild` and
+    /// GiST `gistbuild` build-dispatch seams. `Err` carries the build's
+    /// `ereport(ERROR)` surface.
+    pub fn ginbuild<'mcx, 'a>(
+        mcx: Mcx<'mcx>,
+        heap: &Relation<'mcx>,
+        index: &Relation<'mcx>,
+        index_info: &mut IndexInfoCarrier<'a, 'mcx>,
+    ) -> PgResult<IndexBuildResult>
+);
+
+seam_core::seam!(
+    /// `ginbuildempty(index)` (gininsert.c): the GIN AM's `ambuildempty` entry —
+    /// build an empty GIN index in the init fork (the unlogged-table init image).
+    /// Lives in `backend-access-gin-ginbulk` above the vtable crate, so it is
+    /// reached through this seam (owner = ginbulk). `Err` carries its
+    /// `ereport(ERROR)` surface.
+    pub fn ginbuildempty<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<()>
+);
 
 seam_core::seam!(
     /// `GinGetUseFastUpdate(index)` (gin_private.h:34) — the index's `fastupdate`

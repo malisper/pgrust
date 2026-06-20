@@ -32,21 +32,42 @@ use backend_tcop_postgres_seams as tcop_postgres;
 /// the "real" routine thereafter. Returns the produced tuple's [`SlotId`], or
 /// `None` for the C `NULL` (TupIsNull) return.
 ///
-/// C `ExecProcNode` is the `executor.h` inline macro `node->ExecProcNode(node)`
-/// — it simply invokes the function pointer currently installed on the node.
-/// `ExecSetExecProcNode` (the init family) arms that pointer with
-/// [`exec_proc_node_first`] at init time, so the first call routes through the
+/// C `ExecProcNode` is the `executor.h` inline:
+///
+/// ```c
+/// ExecProcNode(PlanState *node)
+/// {
+///     if (node->chgParam != NULL) /* something changed? */
+///         ExecReScan(node);       /* let ReScan handle this */
+///     return node->ExecProcNode(node);
+/// }
+/// ```
+///
+/// The `chgParam`-triggered `ExecReScan` is part of `ExecProcNode` itself, NOT
+/// the per-node callback: it is what implements the executor contract that a
+/// parent which leaves a child's `chgParam` set (rather than rescanning it
+/// directly) relies on — "the child will be re-scanned by the first
+/// `ExecProcNode`". Nodes like Material/Memoize/Agg/SetOp explicitly defer the
+/// child rescan to this site (see `ExecReScanMemoize`/`ExecReScanMaterial`). The
+/// per-node `ExecProcNode` callback is then armed with [`exec_proc_node_first`]
+/// at init time (`ExecSetExecProcNode`), so the first call routes through the
 /// first-execution wrapper below.
 pub fn exec_proc_node<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
-    // return node->ExecProcNode(node);
     let _trace = pgrust_trace::trace_scope!(
         pgrust_trace::Category::Exec,
         "ExecProcNode {}",
         node.tag()
     );
+
+    // if (node->chgParam != NULL) ExecReScan(node);
+    if node.ps_head().chgParam.is_some() {
+        execAmi::exec_re_scan::call(node, estate)?;
+    }
+
+    // return node->ExecProcNode(node);
     let cb = node.ps_head().ExecProcNode.expect(
         "ExecProcNode called on a node whose ExecProcNode callback was never installed \
          (ExecSetExecProcNode not run)",
@@ -274,6 +295,10 @@ pub fn exec_end_node<'mcx>(
         PlanStateNode::Limit(limit_state) => {
             backend_executor_nodeLimit::ExecEndLimit(limit_state, estate)
         }
+        // case T_LockRowsState: ExecEndLockRows((LockRowsState *) node);
+        PlanStateNode::LockRows(state) => {
+            backend_executor_nodeLockRows::ExecEndLockRows(state, estate)
+        }
         // case T_SortState: ExecEndSort((SortState *) node);
         PlanStateNode::Sort(state) => backend_executor_nodeSort::ExecEndSort(state, estate),
         // case T_IncrementalSortState:
@@ -419,7 +444,7 @@ pub fn exec_end_node<'mcx>(
         | PlanStateNode::WorkTableScan(_) => Ok(()),
 
         // The remaining C arms (T_SampleScanState/
-        // T_IncrementalSortState/T_AggState/T_LockRowsState)
+        // T_IncrementalSortState/T_AggState)
         // operate on node-state variants not yet present in
         // the `#[non_exhaustive]` `PlanStateNode` enum, so their tags cannot occur.
         // The C `default: elog(ERROR, "unrecognized node type")` covers any tag

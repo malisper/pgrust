@@ -218,8 +218,8 @@ pub(crate) const STATISTIC_KIND_HISTOGRAM: i32 = 2;
 
 /// `SelfItemPointerAttributeNumber` (sysattr.h) — the CTID system column, `-1`.
 pub(crate) const SELF_ITEM_POINTER_ATTRIBUTE_NUMBER: i16 = -1;
-/// `TableOidAttributeNumber` (sysattr.h) — the tableoid system column, `-7`.
-pub(crate) const TABLE_OID_ATTRIBUTE_NUMBER: i16 = -7;
+/// `TableOidAttributeNumber` (sysattr.h) — the tableoid system column, `-6`.
+pub(crate) const TABLE_OID_ATTRIBUTE_NUMBER: i16 = -6;
 
 /// `BOOLOID` (pg_type.h) — the `bool` type OID, `16`. `get_variable_numdistinct`
 /// special-cases boolean columns to two distinct values.

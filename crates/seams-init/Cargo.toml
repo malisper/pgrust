@@ -41,6 +41,7 @@ backend-access-gin-core-probe = { path = "../backend-access-gin-core-probe" }
 backend-access-gin-ginfast = { path = "../backend-access-gin-ginfast" }
 backend-access-gin-ginget = { path = "../backend-access-gin-ginget" }
 backend-access-gin-gininsert = { path = "../backend-access-gin-gininsert" }
+backend-access-gin-ginbulk = { path = "../backend-access-gin-ginbulk" }
 backend-access-gin-ginscan = { path = "../backend-access-gin-ginscan" }
 backend-access-gin-ginutil = { path = "../backend-access-gin-ginutil" }
 backend-access-gin-ginvacuum = { path = "../backend-access-gin-ginvacuum" }
@@ -160,6 +161,7 @@ backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-analyze = { path = "../backend-commands-analyze" }
+backend-statistics-core = { path = "../backend-statistics-core" }
 backend-statistics-extended-stats = { path = "../backend-statistics-extended-stats" }
 backend-statistics-mvdistinct = { path = "../backend-statistics-mvdistinct" }
 backend-statistics-dependencies = { path = "../backend-statistics-dependencies" }
@@ -342,6 +344,7 @@ backend-parser-parse-utilcmd = { path = "../backend-parser-parse-utilcmd" }
 backend-parser-small1 = { path = "../backend-parser-small1" }
 backend-parser-driver = { path = "../backend-parser-driver" }
 backend-parser-gram-core = { path = "../backend-parser-gram-core" }
+backend-parser-scan-fgram = { path = "../backend-parser-scan-fgram" }
 backend-port-atomics = { path = "../backend-port-atomics" }
 backend-port-sysv-sema = { path = "../backend-port-sysv-sema" }
 backend-port-sysv-shmem = { path = "../backend-port-sysv-shmem" }
@@ -458,6 +461,7 @@ backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 backend-utils-adt-array-selfuncs = { path = "../backend-utils-adt-array-selfuncs" }
 backend-utils-adt-geo-selfuncs = { path = "../backend-utils-adt-geo-selfuncs" }
 backend-utils-adt-array-typanalyze = { path = "../backend-utils-adt-array-typanalyze" }
+backend-utils-adt-tsvector-typanalyze = { path = "../backend-utils-adt-tsvector-typanalyze" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-dbsize = { path = "../backend-utils-adt-dbsize" }
@@ -516,6 +520,7 @@ backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs
 backend-utils-adt-selfuncs = { path = "../backend-utils-adt-selfuncs" }
 backend-utils-adt-version = { path = "../backend-utils-adt-version" }
 backend-utils-adt-rangetypes = { path = "../backend-utils-adt-rangetypes" }
+backend-utils-adt-rangetypes-gist = { path = "../backend-utils-adt-rangetypes-gist" }
 backend-utils-adt-rangetypes-typanalyze = { path = "../backend-utils-adt-rangetypes-typanalyze" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-scalar-datum-core = { path = "../backend-utils-adt-scalar-datum-core" }

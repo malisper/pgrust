@@ -181,13 +181,19 @@ fn ok<T>(r: types_error::PgResult<T>) -> T {
 // ---------------------------------------------------------------------------
 
 fn fc_aclitemin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    // C: aclitemin(cstring) — hard error context (no soft ErrorSaveContext on
-    // the fmgr frame), matching every adt *in.
+    // C: aclitemin(cstring) — forward the soft ErrorSaveContext installed on the
+    // fmgr frame by InputFunctionCallSafe so a recoverable parse failure
+    // `ereturn`s into the sink (returning `Ok(None)`) instead of throwing past
+    // `invoke?`. `s` is an owned copy so it does not conflict with the mutable
+    // `escontext_mut` borrow.
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
-    let res = ok(crate::aclitem_io::aclitemin(&s, None));
-    let parsed = res.unwrap_or_else(|| {
-        raise(types_error::PgError::error("aclitemin returned NULL"))
-    });
+    let res = ok(crate::aclitem_io::aclitemin(&s, fcinfo.escontext_mut()));
+    // Soft-error path: escontext recorded the failure; return a NULL placeholder
+    // the caller discards after `soft_error_occurred()`.
+    let parsed = match res {
+        Some(p) => p,
+        None => return Datum::null(),
+    };
     // ereport(WARNING) for a defaulted grantor (acl.c).
     if let Some(w) = parsed.warning {
         let _ = backend_utils_error_elog_seams::ereport_msg::call(

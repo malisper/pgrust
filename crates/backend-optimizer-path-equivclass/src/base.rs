@@ -13,7 +13,7 @@ use backend_optimizer_path_equivclass_ext_seams as ec_seam;
 use backend_optimizer_util_relnode_seams as bms;
 
 use crate::derives::ec_add_derived_clause;
-use crate::merge::em_expr;
+use crate::merge::{em_expr_owned, em_expr_ref};
 use crate::relevance::{live_ec_ids, select_equality_operator, BMS_MULTIPLE};
 
 const PVC_RECURSE_AGGREGATES: i32 = 0x0002;
@@ -111,7 +111,7 @@ fn generate_base_implied_equalities_const<'mcx>(
     for &cur_em in &root.ec(ec).ec_members.clone() {
         if root.em(cur_em).em_is_const {
             const_em = Some(cur_em);
-            if em_expr(root, cur_em).is_const() {
+            if em_expr_ref(root, cur_em).is_const() {
                 break;
             }
         }
@@ -138,8 +138,8 @@ fn generate_base_implied_equalities_const<'mcx>(
         /* use the constant's em_jdomain as qualscope */
         let collation = root.ec(ec).ec_collation;
         let min_security = root.ec(ec).ec_min_security;
-        let cur_expr = em_expr(root, cur_em);
-        let const_expr = em_expr(root, const_em);
+        let cur_expr = em_expr_owned(root, run, cur_em)?;
+        let const_expr = em_expr_owned(root, run, const_em)?;
         let const_jd = root
             .em(const_em)
             .em_jdomain
@@ -215,8 +215,8 @@ fn generate_base_implied_equalities_no_const<'mcx>(
 
             let collation = root.ec(ec).ec_collation;
             let min_security = root.ec(ec).ec_min_security;
-            let prev_expr = em_expr(root, prev_em);
-            let cur_expr = em_expr(root, cur_em);
+            let prev_expr = em_expr_owned(root, run, prev_em)?;
+            let cur_expr = em_expr_owned(root, run, cur_em)?;
             let cur_relids = root.em(cur_em).em_relids.clone();
 
             let rinfo = ec_seam::process_implied_equality::call(
@@ -247,9 +247,9 @@ fn generate_base_implied_equalities_no_const<'mcx>(
     /* ensure all Vars used in the member clauses are available at join nodes */
     let members2 = root.ec(ec).ec_members.clone();
     for cur_em in members2 {
-        let emexpr = em_expr(root, cur_em);
+        let emexpr = em_expr_ref(root, cur_em);
         let vars = ec_seam::pull_var_clause::call(
-            &emexpr,
+            emexpr,
             PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS,
         );
         let ec_relids = root.ec(ec).ec_relids.clone();

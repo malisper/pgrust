@@ -810,12 +810,13 @@ fn relation_get_index_expressions<'mcx>(
         // NIL — no expression columns.
         return Ok(None);
     }
-    // An expression column is present: defer to the still-unported node-tree
-    // decode owner (mirror-PG-and-panic). The existing `derived` path keeps the
-    // by-OID caching shell; here we go straight to the node-tree seam.
-    crate::derived::RelationGetIndexExpressions(rel.rd_id)?;
-    // Unreachable until the node-tree decode lands (the call above panics).
-    Ok(None)
+    // An expression column is present: the `indexprs` node-tree decode
+    // (`stringToNode`/`eval_const_expressions`/`fix_opfuncids`) is node
+    // vocabulary owned cross-unit; route through the node-tree owner seam, which
+    // returns the decoded expression list in `mcx`. The owned entry does not
+    // carry the C's `rd_indexprs` memoization, so the tree is re-derived per
+    // call (faithful behavior, minus the cache).
+    backend_utils_cache_relcache_nodexform_seams::index_expressions::call(mcx, rel.rd_id)
 }
 
 /// `RelationGetIndexPredicate(index)` (relcache.c:5210): the index's partial
@@ -852,11 +853,13 @@ fn relation_get_index_predicate<'mcx>(
         // NIL — not a partial index.
         return Ok(None);
     }
-    // A real predicate is present: defer to the still-unported node-tree decode
-    // owner (mirror-PG-and-panic).
-    crate::derived::RelationGetIndexPredicate(rel.rd_id)?;
-    // Unreachable until the node-tree decode lands (the call above panics).
-    Ok(None)
+    // A real predicate is present: the `indpred` node-tree decode
+    // (`stringToNode`/`eval_const_expressions`/`canonicalize_qual`/
+    // `make_ands_implicit`/`fix_opfuncids`) is node vocabulary owned cross-unit;
+    // route through the node-tree owner seam, which returns the implicit-AND
+    // predicate list in `mcx`. The owned entry does not carry the C's
+    // `rd_indpred` memoization, so the tree is re-derived per call.
+    backend_utils_cache_relcache_nodexform_seams::index_predicate::call(mcx, rel.rd_id)
 }
 
 /// `RelationGetDummyIndexExpressions(relation)` (relcache.c:5156): like

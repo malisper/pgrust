@@ -178,6 +178,21 @@ pub fn init_seams() {
         ReScanExprContext(estate.ecxt_mut(econtext))
     });
 
+    // `MemSet(econtext->ecxt_aggvalues, 0, ...); MemSet(econtext->ecxt_aggnulls,
+    // 0, ...)` — forget the current aggregate values (ExecReScanAgg). Zero the
+    // first `numaggs` slots of the pooled ExprContext's agg value/null arrays.
+    backend_executor_execUtils_seams::clear_agg_values::set(|estate, econtext, numaggs| {
+        let ecxt = estate.ecxt_mut(econtext);
+        let n = numaggs as usize;
+        for slot in ecxt.ecxt_aggvalues.iter_mut().take(n) {
+            *slot = Datum::null();
+        }
+        for slot in ecxt.ecxt_aggnulls.iter_mut().take(n) {
+            *slot = false;
+        }
+        Ok(())
+    });
+
     // `GetPerTupleExprContext(estate)` / `MakePerTupleExprContext(estate)`
     // (executor.h): the EState's per-output-tuple ExprContext, created on first
     // use.

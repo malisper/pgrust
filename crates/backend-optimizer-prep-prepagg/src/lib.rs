@@ -234,6 +234,17 @@ fn expr_children_mut<'a>(node: &'a mut Expr) -> alloc::vec::Vec<&'a mut Expr> {
             out.extend(o.args.iter_mut())
         }
         Expr::ScalarArrayOpExpr(s) => out.extend(s.args.iter_mut()),
+        // A WindowFunc's argument (and FILTER) may carry a plain Aggref, as in
+        // `SUM(SUM(x)) OVER (...)`: the inner `SUM(x)` is an ordinary aggregate
+        // computed by the Agg node feeding the WindowAgg, and it must be numbered
+        // here (else `aggno` stays -1 and `ExecInitAgg` indexes `peraggs[-1]`).
+        // `expression_tree_walker` descends into `WindowFunc.args`/`aggfilter`.
+        Expr::WindowFunc(w) => {
+            out.extend(w.args.iter_mut());
+            if let Some(f) = w.aggfilter.as_deref_mut() {
+                out.push(f);
+            }
+        }
         Expr::BoolExpr(b) => out.extend(b.args.iter_mut()),
         Expr::CoalesceExpr(c) => out.extend(c.args.iter_mut()),
         Expr::MinMaxExpr(m) => out.extend(m.args.iter_mut()),

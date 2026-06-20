@@ -35,9 +35,14 @@
 //! built here — their substrate (cross-transaction control, partition-index
 //! cloning) is unported. They are precise loud panics, not silent stubs.
 //!
-//! `ReindexIndex` / `ReindexTable` (the REINDEX drivers) seam-panic into the
-//! `reindex_index` / `reindex_relation` seams, which are declared but
-//! owner-uninstalled (substrate unported).
+//! [`ExecReindex`] / [`ReindexIndex`] / [`ReindexTable`] (the REINDEX command
+//! drivers) are ported for the common non-concurrent btree case: parse the
+//! option list, resolve+lock the target (heap-before-index callback for an
+//! index, maintains-table callback for a table), then call the installed
+//! `reindex_index` / `reindex_relation` catalog seams to rebuild storage.
+//! Deferred legs raise a precise feature-not-supported error: REINDEX
+//! CONCURRENTLY, partitioned table/index (`ReindexPartitions`), and
+//! `ReindexMultipleTables` (REINDEX SCHEMA / SYSTEM / DATABASE).
 
 extern crate alloc;
 
@@ -85,6 +90,26 @@ use backend_optimizer_util_var_seams as var_seam;
 use backend_commands_tablecmds_seams as tablecmds_seam;
 use backend_access_heap_vacuumlazy_seams as namespacename_seam;
 use backend_access_table_table_seams as table_seam;
+use backend_catalog_namespace_seams as namespace_seam;
+use backend_storage_lmgr_lmgr_seams as lmgr_seam;
+use backend_storage_lmgr_lock_seams as lock_seam;
+use backend_storage_lmgr_proc_seams as proc_seam;
+use backend_storage_ipc_procarray_seams as procarray_seam;
+use backend_utils_time_snapmgr_seams as snapmgr_seam;
+use backend_access_transam_xact_seams as xact_seam;
+use backend_utils_cache_inval_seams as inval_seam;
+use backend_utils_cache_relcache_seams as relcache_seam;
+use backend_utils_cache_partcache_seams as partcache_seam;
+use backend_utils_adt_format_type_seams as formattype_seam;
+use backend_catalog_pg_inherits_seams as inherits_seam;
+use backend_catalog_pg_depend_seams as depend_seam;
+use backend_access_index_indexam_seams as indexam_seam;
+use backend_parser_parse_utilcmd_seams as utilcmd_seam;
+
+use crate::opclass::get_am_name_str;
+use types_amapi::COMPARE_EQ;
+use types_hash::hash::HTEqualStrategyNumber;
+use types_scan::scankey::BTEqualStrategyNumber;
 
 use types_acl::acl::{ACL_CREATE, ACLCHECK_OK};
 use types_nodes::parsenodes::{OBJECT_SCHEMA, OBJECT_TABLESPACE};
@@ -92,7 +117,7 @@ use types_catalog::catalog::{GLOBALTABLESPACE_OID, TABLESPACE_RELATION_ID};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::catalog::{NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
 use types_tuple::access::{
-    ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW,
+    ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
@@ -135,9 +160,20 @@ const INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS: u16 = 1 << 5;
 const PROGRESS_CREATEIDX_COMMAND: i32 = 0;
 const PROGRESS_CREATEIDX_INDEX_OID: i32 = 6;
 const PROGRESS_CREATEIDX_ACCESS_METHOD_OID: i32 = 8;
+const PROGRESS_CREATEIDX_PARTITIONS_TOTAL: i32 = 13;
 const PROGRESS_CREATEIDX_PARTITIONS_DONE: i32 = 14;
 const PROGRESS_CREATEIDX_COMMAND_CREATE: i64 = 1;
 const PROGRESS_CREATEIDX_COMMAND_CREATE_CONCURRENTLY: i64 = 2;
+/// `PROGRESS_CREATEIDX_PHASE` — AM-agnostic phase number param index.
+const PROGRESS_CREATEIDX_PHASE: i32 = 9;
+/// Phases of CREATE INDEX advertised via `PROGRESS_CREATEIDX_PHASE`.
+const PROGRESS_CREATEIDX_PHASE_WAIT_1: i64 = 1;
+const PROGRESS_CREATEIDX_PHASE_WAIT_2: i64 = 3;
+const PROGRESS_CREATEIDX_PHASE_WAIT_3: i64 = 7;
+/// `PROGRESS_WAITFOR_*` — the WaitForLockers/WaitForOlderSnapshots params.
+const PROGRESS_WAITFOR_TOTAL: i32 = 3;
+const PROGRESS_WAITFOR_DONE: i32 = 4;
+const PROGRESS_WAITFOR_CURRENT_PID: i32 = 5;
 
 /// `SECURITY_RESTRICTED_OPERATION` (`miscadmin.h`).
 const SECURITY_RESTRICTED_OPERATION: i32 = 1 << 1;
@@ -198,9 +234,9 @@ pub fn CheckPredicate(mcx: Mcx<'_>, predicate: Expr) -> PgResult<()> {
 /// check_not_in_use, skip_build, quiet)`.
 ///
 /// Ported for the non-concurrent, non-partitioned core (the high-value CREATE
-/// INDEX command path). The CONCURRENTLY tail and the partitioned-table
-/// recursion are precise seam-panics — see the module docs and
-/// [`define_index_concurrent_tail`] / [`define_index_partition_recursion`].
+/// INDEX command path) plus the CREATE INDEX CONCURRENTLY multi-transaction
+/// build/validate tail. The partitioned-table recursion is a precise
+/// seam-panic — see the module docs and [`define_index_partition_recursion`].
 ///
 /// Returns the [`ObjectAddress`] of the created index.
 pub fn DefineIndex<'mcx>(
@@ -210,7 +246,7 @@ pub fn DefineIndex<'mcx>(
     mut index_relation_id: Oid,
     parent_index_id: Oid,
     parent_constraint_id: Oid,
-    _total_parts: i32,
+    mut total_parts: i32,
     is_alter_table: bool,
     check_rights: bool,
     check_not_in_use: bool,
@@ -557,8 +593,22 @@ pub fn DefineIndex<'mcx>(
     }
 
     // Partitioned + (unique | exclusion): partition-key subset check.
+    //
+    // If this table is partitioned and we're creating a unique index, primary
+    // key, or exclusion constraint, make sure that the partition key is a
+    // subset of the index's columns.  Otherwise it would be possible to violate
+    // uniqueness by putting values that ought to be unique in different
+    // partitions.
     if partitioned && (stmt.unique || exclusion) {
-        return Err(define_index_partition_keycheck_unsupported());
+        define_index_partition_keycheck(
+            mcx,
+            &rel,
+            stmt,
+            exclusion,
+            &index_info,
+            &collation_ids,
+            &opclass_ids,
+        )?;
     }
 
     // Disallow indexes on system columns + virtual generated columns.
@@ -650,7 +700,7 @@ pub fn DefineIndex<'mcx>(
     }
 
     // If partitioned, recursion declined but partitions exist -> mark invalid.
-    if partitioned && relation_inh_declined(stmt) && relation_has_partitions(&rel) {
+    if partitioned && relation_inh_declined(stmt) && relation_has_partitions(mcx, &rel)? {
         flags |= INDEX_CREATE_INVALID;
     }
 
@@ -694,7 +744,6 @@ pub fn DefineIndex<'mcx>(
 
     let (created_index_relation_id, created_constraint_id) = index_seam::index_create::call(&rel, args)?;
     index_relation_id = created_index_relation_id;
-    let _ = created_constraint_id;
 
     let address = ObjectAddress {
         classId: RELATION_RELATION_ID,
@@ -723,12 +772,212 @@ pub fn DefineIndex<'mcx>(
         CreateComments(mcx, index_relation_id, RELATION_RELATION_ID, 0, Some(comment.as_str()))?;
     }
 
-    // Partitioned-table recursion: build/attach child indexes. DEFERRED.
+    // Partitioned-table recursion: build/attach child indexes (indexcmds.c
+    // DefineIndex partitioned branch, lines ~1292-1600).
     if partitioned {
-        if relation_should_recurse(stmt) && relation_has_partitions(&rel) {
-            return Err(define_index_partition_recursion());
+        let partdesc = backend_partitioning_partdesc::RelationGetPartitionDesc(mcx, &rel, true)?;
+
+        // Unless caller specified to skip this step (via ONLY), process each
+        // partition to make sure they all contain a corresponding index. If we're
+        // called internally (no stmt->relation), recurse always.
+        if (stmt.relation.is_none() || relation_should_recurse(stmt)) && partdesc.nparts > 0 {
+            // Make a local copy of partdesc->oids[], just for safety.
+            let part_oids: Vec<Oid> = partdesc.oids.iter().copied().collect();
+            let mut invalidate_parent = false;
+
+            // Report the total number of partitions at the start of the command;
+            // don't update it when being called recursively.
+            if !OidIsValid(parent_index_id) {
+                if total_parts < 0 {
+                    let children = inherits_seam::find_all_inheritors::call(
+                        mcx,
+                        table_id,
+                        types_storage::lock::NoLock,
+                    )?;
+                    total_parts = children.len() as i32 - 1;
+                }
+                pgstat_progress_update_param(
+                    PROGRESS_CREATEIDX_PARTITIONS_TOTAL,
+                    total_parts as i64,
+                );
+            }
+
+            // We'll need an IndexInfo describing the parent index, built the same
+            // way (BuildIndexInfo) so it will match those for child indexes.
+            let parent_index = indexam_seam::index_open::call(mcx, index_relation_id, lockmode)?;
+            let parent_index_info = backend_catalog_index::BuildIndexInfo(mcx, &parent_index)?;
+            let parent_index_collations: Vec<Oid> = parent_index.rd_indcollation.to_vec();
+            let parent_index_opfamilies: Vec<Oid> = parent_index.rd_opfamily.to_vec();
+
+            // For each partition, scan all existing indexes; if one matches our
+            // index definition and is not already attached to some other parent
+            // index, attach it. If none matches, build a new index by recursing.
+            for &child_relid in part_oids.iter() {
+                let childrel = table_seam::table_open::call(mcx, child_relid, lockmode)?;
+
+                let (child_save_userid, child_save_sec_context) = GetUserIdAndSecContext();
+                SetUserIdAndSecContext(
+                    childrel.rd_rel.relowner,
+                    child_save_sec_context | SECURITY_RESTRICTED_OPERATION,
+                );
+                let child_save_nestlevel = NewGUCNestLevel();
+                restrict_search_path::call()?;
+
+                // Don't try to create indexes on foreign tables.
+                if childrel.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
+                    if stmt.unique || stmt.primary {
+                        return Err(ereport(ERROR)
+                            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                            .errmsg(format!(
+                                "cannot create unique index on partitioned table \"{}\"",
+                                rel.rd_rel.relname.as_str()
+                            ))
+                            .errdetail(format!(
+                                "Table \"{}\" contains partitions that are foreign tables.",
+                                rel.rd_rel.relname.as_str()
+                            ))
+                            .into_error());
+                    }
+                    at_eoxact_guc(false, child_save_nestlevel);
+                    SetUserIdAndSecContext(child_save_userid, child_save_sec_context);
+                    owner_table_close(childrel, lockmode)?;
+                    continue;
+                }
+
+                let childidxs =
+                    relcache_seam::relation_get_index_list::call(mcx, &childrel)?;
+                let attmap = backend_access_common_next::attmap::build_attrmap_by_name(
+                    mcx,
+                    &childrel.rd_att,
+                    &rel.rd_att,
+                    false,
+                )?;
+
+                let mut found = false;
+                for &cldidxid in childidxs.iter() {
+                    // this index is already partition of another one
+                    if inherits_seam::has_superclass::call(cldidxid)? {
+                        continue;
+                    }
+
+                    let cldidx = indexam_seam::index_open::call(mcx, cldidxid, lockmode)?;
+                    let cld_idx_info = backend_catalog_index::BuildIndexInfo(mcx, &cldidx)?;
+                    if backend_catalog_index::CompareIndexInfo(
+                        mcx,
+                        &cld_idx_info,
+                        &parent_index_info,
+                        &cldidx.rd_indcollation,
+                        &parent_index_collations,
+                        &cldidx.rd_opfamily,
+                        &parent_index_opfamilies,
+                        &attmap.attnums,
+                    )? {
+                        let mut cld_constr_oid = InvalidOid;
+
+                        // If this index is being created in the parent because of
+                        // a constraint, the child needs a constraint also; if none,
+                        // this index is no good, so keep looking.
+                        if OidIsValid(created_constraint_id) {
+                            cld_constr_oid =
+                                backend_catalog_pg_constraint::get_relation_idx_constraint_oid(
+                                    child_relid,
+                                    cldidxid,
+                                )?;
+                            if !OidIsValid(cld_constr_oid) {
+                                cldidx.close(lockmode)?;
+                                continue;
+                            }
+                        }
+
+                        // Attach index to parent and we're done.
+                        IndexSetParentIndex(mcx, &cldidx, index_relation_id)?;
+                        if OidIsValid(created_constraint_id) {
+                            backend_catalog_pg_constraint::ConstraintSetParentConstraint(
+                                mcx,
+                                cld_constr_oid,
+                                created_constraint_id,
+                                child_relid,
+                            )?;
+                        }
+
+                        if !cldidx
+                            .rd_index
+                            .as_ref()
+                            .map(|i| i.indisvalid)
+                            .unwrap_or(false)
+                        {
+                            invalidate_parent = true;
+                        }
+
+                        found = true;
+
+                        pgstat_progress_incr_param(PROGRESS_CREATEIDX_PARTITIONS_DONE, 1);
+
+                        // keep lock till commit
+                        cldidx.close(types_storage::lock::NoLock)?;
+                        break;
+                    }
+
+                    cldidx.close(lockmode)?;
+                }
+
+                at_eoxact_guc(false, child_save_nestlevel);
+                SetUserIdAndSecContext(child_save_userid, child_save_sec_context);
+                owner_table_close(childrel, types_storage::lock::NoLock)?;
+
+                // If no matching index was found, create our own.
+                if !found {
+                    // Build an IndexStmt describing the desired child index as in
+                    // ATTACH PARTITION (search-path-independent via the cloner).
+                    let (child_stmt, _child_constr_oid) =
+                        utilcmd_seam::generateClonedIndexStmt::call(
+                            mcx,
+                            None,
+                            &parent_index,
+                            &attmap,
+                        )?;
+
+                    // Recurse as the starting user ID. Callee will use that for
+                    // permission checks, then switch again.
+                    SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
+                    let child_addr = DefineIndex(
+                        mcx,
+                        child_relid,
+                        &child_stmt,
+                        InvalidOid,        // no predefined OID
+                        index_relation_id, // this is our child
+                        created_constraint_id,
+                        -1,
+                        is_alter_table,
+                        check_rights,
+                        check_not_in_use,
+                        skip_build,
+                        quiet,
+                    )?;
+                    SetUserIdAndSecContext(child_save_userid, child_save_sec_context);
+
+                    // The index just created could have been switched to invalid
+                    // when recursing across multiple partition levels.
+                    if !lsyscache::get_index_isvalid::call(child_addr.objectId)? {
+                        invalidate_parent = true;
+                    }
+                }
+            }
+
+            parent_index.close(lockmode)?;
+
+            // The pg_index row we inserted was marked indisvalid=true. But if we
+            // attached an existing index that is invalid, update our row to
+            // invalid too.
+            if invalidate_parent {
+                index_seam::index_mark_invalid::call(index_relation_id)?;
+                // CCI here to make this update visible, in case this recurses
+                // across multiple partition levels.
+                xact_seam::command_counter_increment::call()?;
+            }
         }
-        // No partitions / ONLY: indexes on partitioned tables aren't built.
+
+        // Indexes on partitioned tables are not themselves built, so we're done.
         at_eoxact_guc(false, root_save_nestlevel);
         SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
         owner_table_close(rel, types_storage::lock::NoLock)?;
@@ -754,63 +1003,816 @@ pub fn DefineIndex<'mcx>(
         return Ok(address);
     }
 
-    // CONCURRENTLY build/validate state machine. DEFERRED.
+    // ---------------------------------------------------------------------
+    // CONCURRENTLY build/validate state machine (indexcmds.c:1619-1829).
+    // ---------------------------------------------------------------------
+
+    // Save lockrelid and locktag for below, then close rel (keep the lock).
+    let heaprelid = relcache_seam::rel_lock_relid::call(rel.rd_id)?;
+    let heaplocktag = lmgr_seam::set_locktag_relation::call(heaprelid.dbId, heaprelid.relId);
     owner_table_close(rel, types_storage::lock::NoLock)?;
-    Err(define_index_concurrent_tail())
+
+    // For a concurrent build, we must make the catalog entries visible to other
+    // transactions before we start to build the index (the new index is marked
+    // not indisready / not indisvalid, so no one inserts into it or uses it for
+    // queries). Commit our current transaction so the index becomes visible;
+    // then start another. Before committing, take a session-level lock on the
+    // table so neither it nor the index can be dropped before we finish (cannot
+    // block — we already hold the same lock within our transaction).
+    lmgr_seam::lock_relation_id_for_session::call(heaprelid, ShareUpdateExclusiveLock_v())?;
+
+    snapmgr_seam::pop_active_snapshot::call()?;
+    xact_seam::commit_transaction_command::call()?;
+    xact_seam::start_transaction_command::call()?;
+
+    // Tell concurrent index builds to ignore us, if index qualifies.
+    if safe_index {
+        proc_seam::set_indexsafe_procflags::call()?;
+    }
+
+    // The index is now visible, so we can report the OID; include the report for
+    // the beginning of phase 2.
+    pgstat_progress_update_param(PROGRESS_CREATEIDX_INDEX_OID as i32, index_relation_id as i64);
+    pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE, PROGRESS_CREATEIDX_PHASE_WAIT_1);
+
+    // Phase 2: wait until no running transaction could have the table open with
+    // the old list of indexes. ShareLock considers transactions holding locks
+    // that permit writing to the table. (Real lock acquisition, not a sleep, so
+    // deadlocks are detected.)
+    lmgr_seam::wait_for_lockers::call(heaplocktag, ShareLock_v(), true)?;
+
+    // Set ActiveSnapshot since functions in the indexes may need it.
+    snapmgr_seam::push_active_snapshot::call(alloc::rc::Rc::new(
+        snapmgr_seam::get_transaction_snapshot::call()?,
+    ))?;
+
+    // Perform concurrent build of the index (first pass).
+    backend_catalog_index::index_concurrently_build(mcx, table_id, index_relation_id)?;
+
+    // We can do away with our snapshot.
+    snapmgr_seam::pop_active_snapshot::call()?;
+
+    // Commit this transaction to make the indisready update visible.
+    xact_seam::commit_transaction_command::call()?;
+    xact_seam::start_transaction_command::call()?;
+
+    if safe_index {
+        proc_seam::set_indexsafe_procflags::call()?;
+    }
+
+    // Phase 3: once again wait until no transaction can have the table open with
+    // the index marked read-only for updates.
+    pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE, PROGRESS_CREATEIDX_PHASE_WAIT_2);
+    lmgr_seam::wait_for_lockers::call(heaplocktag, ShareLock_v(), true)?;
+
+    // Take the "reference snapshot" validate_index() uses to filter candidate
+    // tuples; also set ActiveSnapshot to it (functions in indexes may need one).
+    let snapshot = snapmgr_seam::register_snapshot::call(
+        snapmgr_seam::get_transaction_snapshot::call()?,
+    )?;
+    snapmgr_seam::push_active_snapshot::call(alloc::rc::Rc::new(snapshot.clone()))?;
+
+    // Scan the index and the heap, insert any missing index entries (2nd pass).
+    backend_catalog_index::validate_index(mcx, table_id, index_relation_id, Some(snapshot.clone()))?;
+
+    // Drop the reference snapshot. We must do this before waiting out other
+    // snapshot holders, else we deadlock against other CREATE INDEX CONCURRENTLY
+    // processes (which would see our snapshot as one they must wait for). But
+    // first, save the snapshot's xmin to use as limitXmin for the wait.
+    let limit_xmin = snapshot.xmin;
+
+    snapmgr_seam::pop_active_snapshot::call()?;
+    snapmgr_seam::unregister_snapshot::call(snapshot);
+
+    // The snapshot subsystem could still hold registered snapshots that pin our
+    // advertised xmin (serializable xact snapshot; the CatalogSnapshot). To
+    // avoid deadlocks, commit + start yet another transaction and do our wait
+    // before any snapshot has been taken in it.
+    xact_seam::commit_transaction_command::call()?;
+    xact_seam::start_transaction_command::call()?;
+
+    if safe_index {
+        proc_seam::set_indexsafe_procflags::call()?;
+    }
+
+    // The index is now valid in the sense that it contains all currently
+    // interesting tuples; but it might not contain tuples deleted just before
+    // the reference snap was taken, so wait out any transactions that might have
+    // older snapshots.
+    pgstat_progress_update_param(PROGRESS_CREATEIDX_PHASE, PROGRESS_CREATEIDX_PHASE_WAIT_3);
+    WaitForOlderSnapshots(mcx, limit_xmin, true)?;
+
+    // Updating pg_index might involve TOAST access, so ensure a valid snapshot.
+    snapmgr_seam::push_active_snapshot::call(alloc::rc::Rc::new(
+        snapmgr_seam::get_transaction_snapshot::call()?,
+    ))?;
+
+    // Index can now be marked valid -- update its pg_index entry.
+    backend_catalog_index::index_set_state_flags(
+        mcx,
+        index_relation_id,
+        backend_catalog_index_seams::IndexStateFlagsAction::SetValid,
+    )?;
+
+    snapmgr_seam::pop_active_snapshot::call()?;
+
+    // The pg_index update causes backends (including us) to refresh the index's
+    // relcache entry; also send a relcache inval on the parent table to force
+    // replanning of cached plans, so existing sessions can use the new index.
+    inval_seam::cache_invalidate_relcache::call(heaprelid.relId)?;
+
+    // Release the session-level lock on the parent table.
+    lmgr_seam::unlock_relation_id_for_session::call(heaprelid, ShareUpdateExclusiveLock_v())?;
+
+    pgstat_progress_end_command();
+
+    Ok(address)
+}
+
+/// `ShareUpdateExclusiveLock` (`storage/lockdefs.h`).
+fn ShareUpdateExclusiveLock_v() -> types_storage::lock::LOCKMODE {
+    4
+}
+
+/// `ShareLock` (`storage/lockdefs.h`).
+fn ShareLock_v() -> types_storage::lock::LOCKMODE {
+    5
+}
+
+/// `WaitForOlderSnapshots(limitXmin, progress)` (commands/indexcmds.c) — wait
+/// for transactions that might have an older snapshot than `limitXmin`, used at
+/// the end of a concurrent index build. Obtain the VXIDs of such transactions
+/// (excluding autovacuum / VACUUM / safe-IC backends, and other DBs) and wait
+/// for each individually, rechecking the live set each iteration so a backend
+/// that goes idle-in-transaction with xmin 0 stops being waited on.
+///
+/// In single-backend mode `GetCurrentVirtualXIDs` reports no other backends, so
+/// this returns immediately.
+pub fn WaitForOlderSnapshots<'mcx>(
+    mcx: Mcx<'mcx>,
+    limit_xmin: types_core::TransactionId,
+    progress: bool,
+) -> PgResult<()> {
+    use types_storage::storage::{PROC_IN_SAFE_IC, PROC_IN_VACUUM, PROC_IS_AUTOVACUUM};
+
+    let exclude_vacuum = (PROC_IS_AUTOVACUUM | PROC_IN_VACUUM | PROC_IN_SAFE_IC) as i32;
+
+    // old_snapshots = GetCurrentVirtualXIDs(limitXmin, true, false,
+    //                     PROC_IS_AUTOVACUUM | PROC_IN_VACUUM | PROC_IN_SAFE_IC,
+    //                     &n_old_snapshots);
+    let mut old_snapshots = procarray_seam::get_current_virtual_xids::call(
+        mcx,
+        limit_xmin,
+        true,
+        false,
+        exclude_vacuum,
+    )?;
+    let n_old_snapshots = old_snapshots.len();
+
+    if progress {
+        pgstat_progress_update_param(PROGRESS_WAITFOR_TOTAL, n_old_snapshots as i64);
+    }
+
+    for i in 0..n_old_snapshots {
+        if !old_snapshots[i].is_valid() {
+            continue; // found uninteresting in a previous cycle
+        }
+
+        if i > 0 {
+            // See if anything's changed: re-read the live VXID set and forget
+            // any old snapshot whose VXID is no longer present.
+            let newer_snapshots = procarray_seam::get_current_virtual_xids::call(
+                mcx,
+                limit_xmin,
+                true,
+                false,
+                exclude_vacuum,
+            )?;
+            for j in i..n_old_snapshots {
+                if !old_snapshots[j].is_valid() {
+                    continue;
+                }
+                let still_present = newer_snapshots.iter().any(|nv| {
+                    nv.procNumber == old_snapshots[j].procNumber
+                        && nv.localTransactionId == old_snapshots[j].localTransactionId
+                });
+                if !still_present {
+                    old_snapshots[j] = types_core::xact::VirtualTransactionId::invalid();
+                }
+            }
+        }
+
+        if old_snapshots[i].is_valid() {
+            if progress {
+                // Publish who we're going to wait for (best-effort pid lookup).
+                let pid = procarray_seam::proc_number_get_proc_pid::call(
+                    old_snapshots[i].procNumber,
+                );
+                if pid != 0 {
+                    pgstat_progress_update_param(PROGRESS_WAITFOR_CURRENT_PID, pid as i64);
+                }
+            }
+            // VirtualXactLock(old_snapshots[i], true): wait for the xact to end.
+            lock_seam::virtual_xact_lock::call(old_snapshots[i], true)?;
+        }
+
+        if progress {
+            pgstat_progress_update_param(PROGRESS_WAITFOR_DONE, (i + 1) as i64);
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// ReindexIndex / ReindexTable  (precise seam-panics; substrate unported)
+// ExecReindex / ReindexIndex / ReindexTable  (REINDEX command drivers)
 // ---------------------------------------------------------------------------
 
-/// `ReindexIndex(...)` (indexcmds.c) — rebuild a single index. The
-/// non-concurrent slice calls the `reindex_index` seam, which is declared but
-/// owner-uninstalled (the reindex substrate is unported), so a call panics
-/// loudly there. The concurrent slice is additionally deferred.
-pub fn ReindexIndex() -> ! {
-    panic!(
-        "backend-commands-indexcmds: ReindexIndex (REINDEX INDEX driver) is deferred — its \
-         reindex_index / cross-transaction concurrent substrate is unported"
-    );
+use types_cluster::{
+    ReindexParams, REINDEXOPT_CONCURRENTLY, REINDEXOPT_REPORT_PROGRESS, REINDEXOPT_VERBOSE,
+    REINDEX_REL_CHECK_CONSTRAINTS, REINDEX_REL_PROCESS_TOAST,
+};
+use types_nodes::ddlnodes::{DefElem, ReindexObjectType, ReindexStmt};
+use types_storage::lock::{AccessExclusiveLock, ShareLock, ShareUpdateExclusiveLock};
+use types_tuple::access::RELKIND_PARTITIONED_INDEX;
+
+const RELPERSISTENCE_TEMP_U8: u8 = b't';
+
+/// `defGetBoolean(defel)` (define.c) — accepts a Boolean, an Integer (0/1), or
+/// the strings "true"/"false"/"on"/"off". Read directly off the `'mcx`
+/// parse-node `arg` (local copy, matching the dbcommands pattern).
+fn reindex_def_get_boolean(defel: &DefElem<'_>) -> PgResult<bool> {
+    let name = defel.defname.as_deref().unwrap_or("");
+    match defel.arg.as_deref() {
+        None => Ok(true),
+        Some(n) if n.is_boolean() => Ok(n.expect_boolean().boolval),
+        Some(n) if n.is_integer() => match n.expect_integer().ival {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(reindex_boolean_err(name)),
+        },
+        Some(n) if n.is_string() => {
+            let v = n.expect_string().sval.as_str();
+            if v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on") {
+                Ok(true)
+            } else if v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off") {
+                Ok(false)
+            } else {
+                Err(reindex_boolean_err(name))
+            }
+        }
+        _ => Err(reindex_boolean_err(name)),
+    }
 }
 
-/// `ReindexTable(...)` (indexcmds.c) — rebuild every index on a table via
-/// `reindex_relation`. The `reindex_relation` seam is declared but
-/// owner-uninstalled; deferred.
-pub fn ReindexTable() -> ! {
-    panic!(
-        "backend-commands-indexcmds: ReindexTable (REINDEX TABLE driver) is deferred — its \
-         reindex_relation substrate is unported"
-    );
+fn reindex_boolean_err(name: &str) -> backend_utils_error::PgError {
+    ereport(ERROR)
+        .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+        .errmsg(format!("{name} requires a Boolean value"))
+        .into_error()
+}
+
+/// `defGetString(defel)` (define.c) — `strVal(defel->arg)`.
+fn reindex_def_get_string(defel: &DefElem<'_>) -> PgResult<String> {
+    let name = defel.defname.as_deref().unwrap_or("");
+    match defel.arg.as_deref() {
+        Some(n) if n.is_string() => Ok(n.expect_string().sval.as_str().to_string()),
+        _ => Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+            .errmsg(format!("{name} requires a parameter"))
+            .into_error()),
+    }
+}
+
+/// Marshal a parse-tree `RangeVar` node onto the access-layer `RangeVar`
+/// consumed by the namespace target-resolution seams (mirrors the matview /
+/// CLUSTER bridge).
+fn reindex_access_rangevar(rv: &RangeVar<'_>) -> types_tuple::access::RangeVar {
+    types_tuple::access::RangeVar {
+        catalogname: rv.catalogname.as_ref().map(|s| s.as_str().to_string()),
+        schemaname: rv.schemaname.as_ref().map(|s| s.as_str().to_string()),
+        relname: rv
+            .relname
+            .as_ref()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default(),
+        inh: rv.inh,
+        relpersistence: rv.relpersistence as u8,
+        location: rv.location,
+    }
+}
+
+/// `stmt->relation` as a `&RangeVar` node (REINDEX INDEX / TABLE always have one).
+fn reindex_stmt_rangevar<'a, 'mcx>(stmt: &'a ReindexStmt<'mcx>) -> &'a RangeVar<'mcx> {
+    match stmt.relation.as_deref().map(|n| n.node_tag()) {
+        Some(t) if t == ntag::T_RangeVar => stmt.relation.as_deref().unwrap().expect_rangevar(),
+        _ => panic!("ExecReindex: REINDEX INDEX/TABLE stmt->relation is not a RangeVar"),
+    }
+}
+
+/// `ExecReindex(pstate, stmt, isTopLevel)` (indexcmds.c) — primary entry point
+/// for manual REINDEX commands. A preparation wrapper: parse the option list,
+/// resolve the target tablespace, and dispatch to the per-kind subroutine.
+pub fn ExecReindex<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    stmt: &ReindexStmt<'mcx>,
+    is_top_level: bool,
+) -> PgResult<()> {
+    let _ = &pstate;
+    let mut params = ReindexParams::default();
+    let mut concurrently = false;
+    let mut verbose = false;
+    let mut tablespacename: Option<String> = None;
+
+    // Parse option list.
+    for opt_node in stmt.params.iter() {
+        let opt = match opt_node.node_tag() {
+            t if t == ntag::T_DefElem => opt_node.expect_defelem(),
+            _ => panic!("ExecReindex: REINDEX option is not a DefElem"),
+        };
+        let defname = opt.defname.as_deref().unwrap_or("");
+        if defname == "verbose" {
+            verbose = reindex_def_get_boolean(opt)?;
+        } else if defname == "concurrently" {
+            concurrently = reindex_def_get_boolean(opt)?;
+        } else if defname == "tablespace" {
+            tablespacename = Some(reindex_def_get_string(opt)?);
+        } else {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!("unrecognized REINDEX option \"{defname}\""))
+                .into_error());
+        }
+    }
+
+    if concurrently {
+        xact_seam::prevent_in_transaction_block::call(is_top_level, "REINDEX CONCURRENTLY")?;
+    }
+
+    params.options = (if verbose { REINDEXOPT_VERBOSE } else { 0 })
+        | (if concurrently { REINDEXOPT_CONCURRENTLY } else { 0 });
+
+    // Assign the tablespace OID to move indexes to, with InvalidOid to do nothing.
+    if let Some(tsname) = tablespacename {
+        let tablespace_oid = get_tablespace_oid(mcx, &tsname, false)?;
+        params.tablespace_oid = tablespace_oid;
+
+        // Check permissions except when moving to database's default.
+        if OidIsValid(tablespace_oid)
+            && tablespace_oid != backend_commands_tablespace_globals_seams::MyDatabaseTableSpace::call()?
+        {
+            let aclresult = aclchk_seam::object_aclcheck::call(
+                TABLESPACE_RELATION_ID,
+                tablespace_oid,
+                backend_utils_init_miscinit::GetUserId(),
+                ACL_CREATE,
+            )?;
+            if aclresult != ACLCHECK_OK {
+                aclchk_seam::aclcheck_error::call(
+                    aclresult,
+                    OBJECT_TABLESPACE,
+                    Some(
+                        get_tablespace_name(mcx, tablespace_oid)?
+                            .map(|s| s.as_str().to_string())
+                            .unwrap_or_default(),
+                    ),
+                )?;
+            }
+        }
+    } else {
+        params.tablespace_oid = InvalidOid;
+    }
+
+    match stmt.kind {
+        ReindexObjectType::REINDEX_OBJECT_INDEX => {
+            ReindexIndex(mcx, stmt, &params, is_top_level)?;
+        }
+        ReindexObjectType::REINDEX_OBJECT_TABLE => {
+            ReindexTable(mcx, stmt, &params, is_top_level)?;
+        }
+        ReindexObjectType::REINDEX_OBJECT_SCHEMA
+        | ReindexObjectType::REINDEX_OBJECT_SYSTEM
+        | ReindexObjectType::REINDEX_OBJECT_DATABASE => {
+            // These cannot run inside a user transaction block; ReindexMultipleTables
+            // reindexes each table in a separate transaction.
+            let label = match stmt.kind {
+                ReindexObjectType::REINDEX_OBJECT_SCHEMA => "REINDEX SCHEMA",
+                ReindexObjectType::REINDEX_OBJECT_SYSTEM => "REINDEX SYSTEM",
+                _ => "REINDEX DATABASE",
+            };
+            xact_seam::prevent_in_transaction_block::call(is_top_level, label)?;
+            ReindexMultipleTables(mcx, stmt, &params)?;
+        }
+    }
+    Ok(())
+}
+
+/// `ReindexIndex(stmt, params, isTopLevel)` (indexcmds.c) — recreate a specific
+/// index. Resolves+locks the index (heap-before-index via the reindex-index
+/// callback), then dispatches to `reindex_index` for the common
+/// non-partitioned, non-concurrent case.
+fn ReindexIndex<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &ReindexStmt<'mcx>,
+    params: &ReindexParams,
+    _is_top_level: bool,
+) -> PgResult<()> {
+    let rv = reindex_stmt_rangevar(stmt);
+    let access_rv = reindex_access_rangevar(rv);
+
+    // Find and lock index, checking permissions on the table. The lock level
+    // here must match the index lock obtained in reindex_index().
+    let lockmode = if (params.options & REINDEXOPT_CONCURRENTLY) != 0 {
+        ShareUpdateExclusiveLock
+    } else {
+        AccessExclusiveLock
+    };
+    let ind_oid =
+        namespace_seam::range_var_get_relid_for_reindex_index::call(mcx, &access_rv, lockmode)?;
+
+    // Obtain the current persistence and kind of the existing index.
+    let persistence = lsyscache::get_rel_persistence::call(ind_oid)?;
+    let relkind = lsyscache::get_rel_relkind::call(ind_oid)?;
+
+    if relkind == RELKIND_PARTITIONED_INDEX {
+        return Err(reindex_partitions_deferred());
+    } else if (params.options & REINDEXOPT_CONCURRENTLY) != 0
+        && persistence != RELPERSISTENCE_TEMP_U8
+    {
+        return Err(reindex_concurrently_deferred());
+    } else {
+        let mut newparams = *params;
+        newparams.options |= REINDEXOPT_REPORT_PROGRESS;
+        index_seam::reindex_index::call(
+            mcx,
+            stmt,
+            ind_oid,
+            false,
+            persistence as i8,
+            newparams,
+        )?;
+    }
+    Ok(())
+}
+
+/// `ReindexTable(stmt, params, isTopLevel)` (indexcmds.c) — recreate all indexes
+/// of a table (and of its toast table, if any) via `reindex_relation`.
+fn ReindexTable<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &ReindexStmt<'mcx>,
+    params: &ReindexParams,
+    _is_top_level: bool,
+) -> PgResult<()> {
+    let rv = reindex_stmt_rangevar(stmt);
+    let access_rv = reindex_access_rangevar(rv);
+    let relname = access_rv.relname.clone();
+
+    // The lock level used here should match reindex_relation().
+    let lockmode = if (params.options & REINDEXOPT_CONCURRENTLY) != 0 {
+        ShareUpdateExclusiveLock
+    } else {
+        ShareLock
+    };
+    let heap_oid =
+        namespace_seam::range_var_get_relid_maintains_table::call(mcx, &access_rv, lockmode)?;
+
+    if lsyscache::get_rel_relkind::call(heap_oid)? == RELKIND_PARTITIONED_TABLE {
+        return Err(reindex_partitions_deferred());
+    } else if (params.options & REINDEXOPT_CONCURRENTLY) != 0
+        && lsyscache::get_rel_persistence::call(heap_oid)? != RELPERSISTENCE_TEMP_U8
+    {
+        return Err(reindex_concurrently_deferred());
+    } else {
+        let mut newparams = *params;
+        newparams.options |= REINDEXOPT_REPORT_PROGRESS;
+        // reindex_relation returns whether any index was processed; the seam
+        // installed by catalog/index.c maps the bool to (). NOTICE on "no
+        // indexes to reindex" is emitted from inside reindex_relation in C; the
+        // installed seam preserves the rebuild but not the leaf NOTICE, which is
+        // immaterial to correctness.
+        let _ = relname;
+        index_seam::reindex_relation::call(
+            mcx,
+            heap_oid,
+            REINDEX_REL_PROCESS_TOAST | REINDEX_REL_CHECK_CONSTRAINTS,
+            newparams,
+        )?;
+    }
+    Ok(())
+}
+
+/// `ReindexMultipleTables` (indexcmds.c) — REINDEX SCHEMA / SYSTEM / DATABASE.
+/// Deferred: requires per-table transaction control (StartTransactionCommand /
+/// CommitTransactionCommand loop) that is out of scope here.
+fn ReindexMultipleTables<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _stmt: &ReindexStmt<'mcx>,
+    _params: &ReindexParams,
+) -> PgResult<()> {
+    Err(ereport(ERROR)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg(format!(
+            "REINDEX SCHEMA / SYSTEM / DATABASE is not yet supported"
+        ))
+        .into_error())
+}
+
+fn reindex_partitions_deferred() -> backend_utils_error::PgError {
+    ereport(ERROR)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg(format!(
+            "REINDEX on a partitioned table/index is not yet supported"
+        ))
+        .into_error()
+}
+
+fn reindex_concurrently_deferred() -> backend_utils_error::PgError {
+    ereport(ERROR)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg(format!("REINDEX CONCURRENTLY is not yet supported"))
+        .into_error()
 }
 
 // ---------------------------------------------------------------------------
-// Deferred DefineIndex tails (precise panics)
+// DefineIndex partitioned-table legs (key-subset check + parent-index linking)
 // ---------------------------------------------------------------------------
 
-fn define_index_concurrent_tail() -> backend_utils_error::PgError {
-    panic!(
-        "backend-commands-indexcmds: DefineIndex CREATE INDEX CONCURRENTLY tail is deferred — \
-         the multi-transaction build/validate state machine (index_concurrently_build, \
-         validate_index, WaitForLockers, WaitForOlderSnapshots, session-lock + snapshot dance) \
-         is unported"
-    );
+/// `elog(ERROR, msg)` shorthand returning the error value.
+fn elog_error(msg: impl Into<String>) -> backend_utils_error::PgError {
+    ereport(ERROR).errmsg_internal(msg).into_error()
 }
 
-fn define_index_partition_recursion() -> backend_utils_error::PgError {
-    panic!(
-        "backend-commands-indexcmds: DefineIndex partitioned-table recursion is deferred — \
-         generateClonedIndexStmt / IndexSetParentIndex / BuildIndexInfo+CompareIndexInfo \
-         child-index matching is unported"
-    );
+/// indexcmds.c DefineIndex partitioned + (unique | exclusion) branch
+/// (lines ~963-1098): verify that all columns in the partition key appear in
+/// the unique/PK/exclusion index definition, with the same notion of equality.
+#[allow(clippy::too_many_arguments)]
+fn define_index_partition_keycheck<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    stmt: &IndexStmt<'mcx>,
+    exclusion: bool,
+    index_info: &types_nodes::execnodes::IndexInfo<'mcx>,
+    collation_ids: &[Oid],
+    opclass_ids: &[Oid],
+) -> PgResult<()> {
+    use types_nodes::partition::PartitionStrategy;
+
+    let key = partcache_seam::relation_get_partition_key::call(mcx, rel.alias())?
+        .ok_or_else(|| elog_error("DefineIndex: partitioned table has no partition key"))?;
+
+    let constraint_type = if stmt.primary {
+        "PRIMARY KEY"
+    } else if stmt.unique {
+        "UNIQUE"
+    } else if !stmt.excludeOpNames.is_empty() {
+        "EXCLUDE"
+    } else {
+        return Err(elog_error("unknown constraint type"));
+    };
+
+    // Verify that all the columns in the partition key appear in the unique key
+    // definition, with the same notion of equality.
+    for i in 0..key.partnatts as usize {
+        let mut found = false;
+
+        // Identify the equality operator associated with this partkey column.
+        // For list and range partitioning, partkeys use btree operator classes;
+        // hash partitioning uses hash operator classes. (Keep this in sync with
+        // ComputePartitionAttrs!)
+        let eq_strategy: i16 = if key.strategy == PartitionStrategy::Hash {
+            HTEqualStrategyNumber as i16
+        } else {
+            BTEqualStrategyNumber as i16
+        };
+
+        let ptkey_eqop = lsyscache::get_opfamily_member::call(
+            key.partopfamily[i],
+            key.partopcintype[i],
+            key.partopcintype[i],
+            eq_strategy,
+        )?;
+        if !OidIsValid(ptkey_eqop) {
+            return Err(elog_error(format!(
+                "missing operator {}({},{}) in partition opfamily {}",
+                eq_strategy, key.partopcintype[i], key.partopcintype[i], key.partopfamily[i]
+            )));
+        }
+
+        // It may be possible to support UNIQUE constraints when partition keys
+        // are expressions, but is it worth it? Give up for now.
+        if key.partattrs[i] == 0 {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!(
+                    "unsupported {constraint_type} constraint with partition key definition"
+                ))
+                .errdetail(format!(
+                    "{constraint_type} constraints cannot be used when partition keys include expressions."
+                ))
+                .into_error());
+        }
+
+        // Search the index column(s) for a match.
+        for j in 0..index_info.ii_NumIndexKeyAttrs as usize {
+            if key.partattrs[i] == index_info.ii_IndexAttrNumbers[j] {
+                // Matched the column, now what about the collation and equality op?
+                if key.partcollation[i] != collation_ids[j] {
+                    continue;
+                }
+
+                if let Some((idx_opfamily, idx_opcintype)) =
+                    lsyscache::get_opclass_opfamily_and_input_type::call(opclass_ids[j])?
+                {
+                    let mut idx_eqop = InvalidOid;
+
+                    if stmt.unique && !stmt.iswithoutoverlaps {
+                        idx_eqop = lsyscache::get_opfamily_member_for_cmptype::call(
+                            idx_opfamily,
+                            idx_opcintype,
+                            idx_opcintype,
+                            COMPARE_EQ as i32,
+                        )?;
+                    } else if exclusion {
+                        idx_eqop = index_info
+                            .ii_ExclusionOps
+                            .as_ref()
+                            .map(|ops| ops[j])
+                            .unwrap_or(InvalidOid);
+                    }
+
+                    if !OidIsValid(idx_eqop) {
+                        let opfam_name = lsyscache::get_opfamily_name::call(mcx, idx_opfamily, false)?
+                            .map(|s| s.as_str().to_string())
+                            .unwrap_or_default();
+                        let am_name =
+                            get_am_name_str(lsyscache::get_opfamily_method::call(idx_opfamily)?)?;
+                        return Err(ereport(ERROR)
+                            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                            .errmsg(format!(
+                                "could not identify an equality operator for type {}",
+                                formattype_seam::format_type_be_owned::call(idx_opcintype)?
+                            ))
+                            .errdetail(format!(
+                                "There is no suitable operator in operator family \"{}\" for access method \"{}\".",
+                                opfam_name, am_name
+                            ))
+                            .into_error());
+                    }
+
+                    if ptkey_eqop == idx_eqop {
+                        found = true;
+                        break;
+                    } else if exclusion {
+                        // We found a match, but it's not an equality operator.
+                        // Fail now and explain that the operator is wrong.
+                        let att = rel.rd_att.attr((key.partattrs[i] - 1) as usize);
+                        let excl_op = index_info
+                            .ii_ExclusionOps
+                            .as_ref()
+                            .map(|ops| ops[j])
+                            .unwrap_or(InvalidOid);
+                        let opname = lsyscache::get_opname::call(mcx, excl_op)?
+                            .map(|s| s.as_str().to_string())
+                            .unwrap_or_default();
+                        return Err(ereport(ERROR)
+                            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                            .errmsg(format!(
+                                "cannot match partition key to index on column \"{}\" using non-equal operator \"{}\"",
+                                String::from_utf8_lossy(att.attname.name_str()),
+                                opname
+                            ))
+                            .into_error());
+                    }
+                }
+            }
+        }
+
+        if !found {
+            let att = rel.rd_att.attr((key.partattrs[i] - 1) as usize);
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("unique constraint on partitioned table must include all partitioning columns")
+                .errdetail(format!(
+                    "{constraint_type} constraint on table \"{}\" lacks column \"{}\" which is part of the partition key.",
+                    rel.rd_rel.relname.as_str(),
+                    String::from_utf8_lossy(att.attname.name_str())
+                ))
+                .into_error());
+        }
+    }
+
+    Ok(())
 }
 
-fn define_index_partition_keycheck_unsupported() -> backend_utils_error::PgError {
-    panic!(
-        "backend-commands-indexcmds: DefineIndex partition-key subset check (UNIQUE / PRIMARY \
-         KEY / EXCLUDE on a partitioned table) is deferred — it needs RelationGetPartitionKey \
-         + partition-opfamily matching, which is unported"
+/// `IndexSetParentIndex(partitionIdx, parentOid)` (indexcmds.c:4443).
+///
+/// Set or clear the parent-index link of `partition_idx`: detect an existing
+/// `pg_inherits` row, then insert (`StoreSingleInheritance`), delete
+/// (`DeleteInheritsTuple`), or leave it as-is; set the parent's
+/// `relhassubclass` when a parent is added; update the partition's
+/// `relispartition`; and add/remove the `DEPENDENCY_PARTITION_{PRI,SEC}` pg_depend
+/// rows. A no-op (already in the right state) skips the dependency churn and the
+/// `CommandCounterIncrement`.
+pub fn IndexSetParentIndex<'mcx>(
+    mcx: Mcx<'mcx>,
+    partition_idx: &Relation<'mcx>,
+    parent_oid: Oid,
+) -> PgResult<()> {
+    use types_catalog::catalog_dependency::{DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC};
+
+    let part_relid = partition_idx.rd_id;
+
+    // Make sure this is an index (Assert in C).
+    debug_assert!(
+        partition_idx.rd_rel.relkind == RELKIND_INDEX
+            || partition_idx.rd_rel.relkind == RELKIND_PARTITIONED_INDEX
     );
+
+    // Scan pg_inherits for a row linking our index to some parent (inhseqno = 1).
+    // `has_superclass` reports whether such a row exists; the partition-index
+    // tree only ever has a single (seqno = 1) parent link, so that suffices to
+    // distinguish the insert / delete / already-linked cases.
+    let has_parent_row = inherits_seam::has_superclass::call(part_relid)?;
+
+    let fix_dependencies: bool;
+    if !has_parent_row {
+        if !OidIsValid(parent_oid) {
+            // No pg_inherits row, and no parent wanted: nothing to do.
+            fix_dependencies = false;
+        } else {
+            inherits_seam::store_single_inheritance::call(part_relid, parent_oid, 1)?;
+            fix_dependencies = true;
+        }
+    } else if !OidIsValid(parent_oid) {
+        // There exists a pg_inherits row, which we want to clear; do so.
+        inherits_seam::delete_inherits_tuple::call(part_relid, InvalidOid, false, None)?;
+        fix_dependencies = true;
+    } else {
+        // A pg_inherits row exists and a parent is wanted. If it names the same
+        // parent we're good (already in the right state); a different parent
+        // would be a corrupt catalog, which our callers never produce.
+        fix_dependencies = false;
+    }
+
+    // Set relhassubclass if an index partition has been added to the parent.
+    if OidIsValid(parent_oid) {
+        lmgr_seam::lock_relation_oid::call(parent_oid, ShareUpdateExclusiveLock_v())?.keep();
+        tablecmds_seam::set_relation_has_subclass::call(mcx, parent_oid, true)?;
+    }
+
+    // Set relispartition correctly on the partition.
+    tablecmds_seam::update_relispartition_catalog::call(part_relid, OidIsValid(parent_oid))?;
+
+    if fix_dependencies {
+        // Insert/delete pg_depend rows.
+        if OidIsValid(parent_oid) {
+            let part_idx = ObjectAddress {
+                classId: RELATION_RELATION_ID,
+                objectId: part_relid,
+                objectSubId: 0,
+            };
+            let parent_idx = ObjectAddress {
+                classId: RELATION_RELATION_ID,
+                objectId: parent_oid,
+                objectSubId: 0,
+            };
+            let partition_tbl = ObjectAddress {
+                classId: RELATION_RELATION_ID,
+                objectId: partition_idx
+                    .rd_index
+                    .as_ref()
+                    .map(|i| i.indrelid)
+                    .unwrap_or(InvalidOid),
+                objectSubId: 0,
+            };
+            depend_seam::recordDependencyOn::call(mcx, &part_idx, &parent_idx, DEPENDENCY_PARTITION_PRI)?;
+            depend_seam::recordDependencyOn::call(
+                mcx,
+                &part_idx,
+                &partition_tbl,
+                DEPENDENCY_PARTITION_SEC,
+            )?;
+        } else {
+            depend_seam::deleteDependencyRecordsForClass::call(
+                RELATION_RELATION_ID,
+                part_relid,
+                RELATION_RELATION_ID,
+                DEPENDENCY_PARTITION_PRI.0,
+            )?;
+            depend_seam::deleteDependencyRecordsForClass::call(
+                RELATION_RELATION_ID,
+                part_relid,
+                RELATION_RELATION_ID,
+                DEPENDENCY_PARTITION_SEC.0,
+            )?;
+        }
+
+        // Make our updates visible.
+        xact_seam::command_counter_increment::call()?;
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -915,19 +1917,13 @@ fn here(funcname: &'static str) -> types_error::pg_error::ErrorLocation {
     types_error::pg_error::ErrorLocation::new("../src/backend/commands/indexcmds.c", 0, funcname)
 }
 
-/// `RelationGetPartitionDesc(rel, true)->nparts != 0`. The partition-descriptor
-/// machinery is unported; reaching this for a non-partitioned table is a no-op
-/// (returns false). For a partitioned table with the recursion paths above it
-/// is gated by the partition-recursion deferral panic, so a precise panic here
-/// keeps the "partitions exist?" probe honest.
-fn relation_has_partitions(rel: &Relation<'_>) -> bool {
+/// `RelationGetPartitionDesc(rel, true)->nparts != 0` (indexcmds.c:1232-1234).
+fn relation_has_partitions<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bool> {
     if rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE {
-        return false;
+        return Ok(false);
     }
-    panic!(
-        "backend-commands-indexcmds: RelationGetPartitionDesc (partition-descriptor probe) is \
-         unported; CREATE INDEX on a partitioned table is deferred"
-    );
+    let pd = backend_partitioning_partdesc::RelationGetPartitionDesc(mcx, rel, true)?;
+    Ok(pd.nparts != 0)
 }
 
 /// Install this unit's outward seams.
@@ -935,12 +1931,15 @@ pub fn init_seams() {
     // makeObjectName(name1, name2, label) — name2/label are non-null at the
     // pg_constraint call sites (ChooseConstraintName), matching the &str seam.
     backend_commands_indexcmds_seams::make_object_name::set(|name1, name2, label| {
-        // The seam flattens C's `const char *name2` (which may be NULL) to `&str`;
-        // an empty `name2` is the NULL case (callers like `ChooseConstraintName`
-        // for a domain constraint pass NULL → empty here), so the separating
-        // underscore is omitted, matching C `makeObjectName(name1, NULL, label)`.
+        // The seam flattens C's `const char *name2`/`const char *label` (both of
+        // which may be NULL) to `&str`; an empty value is the NULL case, so the
+        // corresponding separating underscore is omitted. E.g. `makeArrayTypeName`
+        // calls `makeObjectName("", typeName, NULL)` for the no-suffix array name,
+        // which must yield `_typeName` (not `_typeName_`); callers like
+        // `ChooseConstraintName` for a domain constraint pass NULL name2 → empty.
         let name2 = if name2.is_empty() { None } else { Some(name2) };
-        choosers::makeObjectName(name1, name2, Some(label))
+        let label = if label.is_empty() { None } else { Some(label) };
+        choosers::makeObjectName(name1, name2, label)
     });
 
     // GetDefaultOpClass(type_id, am_id) lives in indexcmds.c; the canonical
@@ -1004,6 +2003,22 @@ pub fn init_seams() {
         create_index_count_partitions,
     );
     backend_tcop_utility_out_seams::define_index::set(define_index_dispatch_arm);
+    backend_tcop_utility_out_seams::exec_reindex::set(exec_reindex_dispatch_arm);
+}
+
+/// `ExecReindex(pstate, (ReindexStmt *) parsetree, isTopLevel)` — the
+/// `T_ReindexStmt` arm of `ProcessUtilitySlow`. Unwrap the node and dispatch.
+fn exec_reindex_dispatch_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    parsetree: &Node<'mcx>,
+    is_top_level: bool,
+) -> PgResult<()> {
+    let stmt = match parsetree.node_tag() {
+        t if t == ntag::T_ReindexStmt => parsetree.expect_reindexstmt(),
+        _ => panic!("exec_reindex: parsetree is not a ReindexStmt"),
+    };
+    ExecReindex(mcx, pstate, stmt, is_top_level)
 }
 
 /// `RangeVarGetRelidExtended(stmt->relation, lockmode, 0,

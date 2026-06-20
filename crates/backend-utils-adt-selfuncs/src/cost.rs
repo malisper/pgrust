@@ -21,11 +21,12 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::PgResult;
+use types_error::PgError;
 use types_nodes::primnodes::Expr;
 use types_pathnodes::{
     IndexOptInfo, NodeId, PathId, PathNode, PlannerInfo, RinfoId, JOIN_INNER,
 };
-use types_pathnodes::planner_run::PlannerRun;
+use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use types_selfuncs::{VariableStatData, ATTSTATSSLOT_NUMBERS};
 use types_statistics::STATISTIC_KIND_CORRELATION;
 use types_scan::scankey::{BTEqualStrategyNumber, BTLessStrategyNumber};
@@ -36,6 +37,11 @@ use backend_optimizer_path_small_seams as sel;
 use backend_optimizer_path_small_seams::ClauseListEntry;
 use backend_optimizer_util_predtest_seams as predtest;
 use backend_utils_cache_lsyscache_seams as lsc;
+use backend_access_brin_insert_vacuum_seams as brin_iv;
+use backend_access_index_indexam_seams as indexam;
+use backend_access_gin_ginutil_seams as gin;
+use backend_utils_fmgr_fmgr_seams as fmgr;
+use backend_utils_adt_arrayfuncs_seams as arr;
 
 use crate::examine::examine_indexcol_variable;
 use crate::scalar::get_variable_numdistinct;
@@ -726,11 +732,954 @@ pub(crate) fn gistcostestimate<'mcx, 'run>(
     })
 }
 
+/// `spgcostestimate(root, path, loop_count, ...)` (selfuncs.c) — the SP-GiST
+/// index AM's cost estimator. Runs the AM-independent [`genericcostestimate`],
+/// then adds btree-style descent costs. Unlike btree/GiST, SP-GiST first derives
+/// an estimate of the tree height when it is unknown (`tree_height < 0`) by
+/// assuming a fanout of 100, i.e. `log100(pages)`, and caches it back onto the
+/// `IndexOptInfo`. The initial-descent CPU cost uses `ceil(log(N))` (natural log,
+/// since the branching factor isn't necessarily two), and the per-page charge is
+/// computed the same as for btrees (`tree_height + 1`). SP-GiST presets neither
+/// `num_index_tuples` nor `num_sa_scans`, so `num_sa_scans` stays at
+/// `genericcostestimate`'s default of 1. 1:1 with the C body.
+pub(crate) fn spgcostestimate<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    path_id: PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let mut costs = GenericCosts::default();
+    genericcostestimate(mcx, run, root, path_id, loop_count, &mut costs)?;
+
+    // We model index descent costs similarly to those for btree, but to do that
+    // we first need an idea of the tree height. We somewhat arbitrarily assume
+    // that the fanout is 100, meaning the tree height is at most
+    // log100(index->pages). Cache the result back onto the IndexOptInfo via
+    // index->tree_height, as the C body does.
+    let index = {
+        let path = expect_index_path_mut(root, path_id);
+        let index = path
+            .indexinfo
+            .as_mut()
+            .expect("spgcostestimate: indexinfo must be set");
+        if index.tree_height < 0 {
+            // unknown?
+            index.tree_height = if index.pages > 1 {
+                // avoid computing log(0)
+                (((index.pages as f64).ln()) / 100.0f64.ln()) as i32
+            } else {
+                0
+            };
+        }
+        (**index).clone()
+    };
+
+    let cpu_operator_cost = cz::cpu_operator_cost::call();
+
+    // Add a CPU-cost component to represent the costs of initial descent. We just
+    // use log(N) here not log2(N) since the branching factor isn't necessarily
+    // two anyway. As for btree, charge once per SA scan.
+    if index.tuples > 1.0 {
+        // avoid computing log(0)
+        let descent_cost = index.tuples.ln().ceil() * cpu_operator_cost;
+        costs.index_startup_cost += descent_cost;
+        costs.index_total_cost += costs.num_sa_scans * descent_cost;
+    }
+
+    // Likewise add a per-page charge, calculated the same as for btrees.
+    let descent_cost =
+        (index.tree_height as f64 + 1.0) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+    costs.index_startup_cost += descent_cost;
+    costs.index_total_cost += costs.num_sa_scans * descent_cost;
+
+    Ok(AmCostEstimate {
+        index_startup_cost: costs.index_startup_cost,
+        index_total_cost: costs.index_total_cost,
+        index_selectivity: costs.index_selectivity,
+        index_correlation: costs.index_correlation,
+        index_pages: costs.num_index_pages,
+    })
+}
+
+/// `brincostestimate(root, path, loop_count, ...)` (selfuncs.c) — the BRIN
+/// index AM's cost estimator. Estimates the number of block-ranges the scan
+/// touches from the index correlation and qual selectivity, then prices the
+/// revmap (sequential) + regular-page (random) reads plus a per-range bitmap
+/// charge. 1:1 with the C body. Returns the five output cost components.
+pub(crate) fn brincostestimate<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    path_id: PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    /// `BRIN_DEFAULT_PAGES_PER_RANGE` (brin.h).
+    const BRIN_DEFAULT_PAGES_PER_RANGE: f64 = 128.0;
+    /// `REVMAP_PAGE_MAXITEMS` (brin_page.h) for `BLCKSZ == 8192`:
+    /// `(8192 - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(SizeOfBrinSpecial)) /
+    /// sizeof(ItemPointerData)` == `(8192 - 24 - 4) / 6` == `1360`. Only the
+    /// hypothetical-index branch reads it.
+    const REVMAP_PAGE_MAXITEMS: f64 = 1360.0;
+
+    let (index, indexclauses): (IndexOptInfo, Vec<types_pathnodes::IndexClause>) = {
+        let path = expect_index_path(root, path_id);
+        let index = (**path
+            .indexinfo
+            .as_ref()
+            .expect("brincostestimate: indexinfo must be set"))
+        .clone();
+        (index, path.indexclauses.clone())
+    };
+
+    let index_quals: Vec<RinfoId> = {
+        let path = expect_index_path(root, path_id);
+        get_quals_from_indexclauses(path)
+    };
+
+    let num_pages = index.pages as f64;
+    let baserel = index.rel.expect("brincostestimate: index.rel must be set");
+    let baserel_relid = root.rel(baserel).relid as i32;
+    let baserel_pages = root.rel(baserel).pages as f64;
+
+    // RTE must be a plain relation (Assert(rte->rtekind == RTE_RELATION)).
+    {
+        let rte = planner_rt_fetch(run, root, root.rel(baserel).relid);
+        debug_assert_eq!(
+            rte.rtekind,
+            types_nodes::parsenodes::RTEKind::RTE_RELATION
+        );
+    }
+
+    // Fetch estimated page cost for the tablespace containing the index.
+    let spc = cz::get_tablespace_page_costs::call(index.reltablespace);
+    let spc_seq_page_cost = spc.spc_seq_page_cost;
+    let spc_random_page_cost = spc.spc_random_page_cost;
+
+    // Obtain some data from the index itself, if possible. Otherwise invent some
+    // plausible internal statistics based on the relation page count.
+    let (index_ranges, stats_pages_per_range, stats_revmap_num_pages) = if !index.hypothetical {
+        // A lock should have already been obtained on the index in plancat.c.
+        let stats = brin_iv::brin_get_stats::call(mcx, index.indexoid)?;
+        let index_ranges =
+            (baserel_pages / stats.pages_per_range as f64).ceil().max(1.0);
+        (index_ranges, stats.pages_per_range as f64, stats.revmap_num_pages as f64)
+    } else {
+        // Assume default number of pages per range.
+        let index_ranges =
+            (baserel_pages / BRIN_DEFAULT_PAGES_PER_RANGE).ceil().max(1.0);
+        let revmap_num_pages = (index_ranges / REVMAP_PAGE_MAXITEMS) + 1.0;
+        (index_ranges, BRIN_DEFAULT_PAGES_PER_RANGE, revmap_num_pages)
+    };
+
+    // Compute index correlation. Because we can use all index quals equally when
+    // scanning, use the largest absolute correlation among columns used by the
+    // query. Start at the worst case (0); if no stats are found, keep it 0.
+    let mut index_correlation = 0.0f64;
+    for iclause in &indexclauses {
+        let attnum = index.indexkeys[iclause.indexcol as usize];
+
+        // Look up stats for this index column (simple var -> table stats,
+        // expression column -> index stats). `examine_indexcol_variable` handles
+        // both legs (the `indexkeys[col] != 0` vs `== 0` split), exactly as the C
+        // `attnum != 0` branch does.
+        let _ = attnum;
+        let mut vardata = VariableStatData::zeroed(NodeId::default());
+        examine_indexcol_variable(mcx, run, root, &index, iclause.indexcol as usize, &mut vardata)?;
+
+        if let Some(stats_tuple) = vardata.stats_tuple {
+            if let Some(sslot) = lsc::get_attstatsslot::call(
+                mcx,
+                stats_tuple,
+                STATISTIC_KIND_CORRELATION as i32,
+                InvalidOid,
+                ATTSTATSSLOT_NUMBERS,
+            )? {
+                let var_correlation = if sslot.numbers.is_empty() {
+                    0.0f64
+                } else {
+                    (sslot.numbers[0] as f64).abs()
+                };
+                if var_correlation > index_correlation {
+                    index_correlation = var_correlation;
+                }
+            }
+        }
+
+        crate::examine::release_variable_stats(vardata);
+    }
+
+    // Estimate the fraction of main-table tuples matched by the index quals.
+    let qual_selectivity = {
+        let entries: Vec<ClauseListEntry> =
+            index_quals.iter().map(|&r| ClauseListEntry::Rinfo(r)).collect();
+        sel::clauselist_selectivity_mixed::call(
+            run,
+            root,
+            &entries,
+            baserel_relid,
+            JOIN_INNER,
+            None,
+        )?
+    };
+
+    // The minimum possible ranges we could match if all rows were in perfect
+    // order in the table's heap.
+    let minimal_ranges = (index_ranges * qual_selectivity).ceil();
+
+    // Estimate the number of ranges we'll touch using the correlation. Careful
+    // not to divide by zero (we use the absolute value of the correlation).
+    let estimated_ranges = if index_correlation < 1.0e-10 {
+        index_ranges
+    } else {
+        (minimal_ranges / index_correlation).min(index_ranges)
+    };
+
+    // We expect to visit this portion of the table.
+    let selec = crate::clamp_probability(estimated_ranges / index_ranges);
+    let index_selectivity = selec;
+
+    // Compute the index qual costs, much as in genericcostestimate, to add to the
+    // index costs. We can disregard indexorderbys (BRIN doesn't support those).
+    let qual_arg_cost = {
+        let refs: Vec<ClauseRef> =
+            index_quals.iter().map(|&r| ClauseRef::Rinfo(r)).collect();
+        index_other_operands_eval_cost(root, &refs)
+    };
+
+    let cpu_operator_cost = cz::cpu_operator_cost::call();
+
+    // Startup cost: read the whole revmap sequentially, including the index quals.
+    let mut index_startup_cost = spc_seq_page_cost * stats_revmap_num_pages * loop_count;
+    index_startup_cost += qual_arg_cost;
+
+    // Total cost: reading a BRIN index involves back-and-forth over regular pages
+    // (revmap can point to them out of sequential order), so price the regular
+    // pages as random reads.
+    let mut index_total_cost = index_startup_cost
+        + spc_random_page_cost * (num_pages - stats_revmap_num_pages) * loop_count;
+
+    // Charge a small amount per range tuple we expect to match, reflecting the
+    // bitmap-manipulation cost (the BRIN scan sets a bit for each page in a
+    // matching range, so multiply by the pages-per-range).
+    index_total_cost += 0.1 * cpu_operator_cost * estimated_ranges * stats_pages_per_range;
+
+    Ok(AmCostEstimate {
+        index_startup_cost,
+        index_total_cost,
+        index_selectivity,
+        index_correlation,
+        index_pages: num_pages,
+    })
+}
+
+// ===========================================================================
+// GIN cost estimation (gincostestimate + gincost_pattern / gincost_opexpr /
+// gincost_scalararrayopexpr, selfuncs.c). GIN has search behaviour completely
+// different from the other index AMs, so it does not go through
+// genericcostestimate.
+// ===========================================================================
+
+/// `INDEX_MAX_KEYS` (pg_config_manual.h) — the per-attribute scan-flag array
+/// bound. GIN indexes never have more key columns than this.
+const INDEX_MAX_KEYS: usize = 32;
+
+/// `GIN_EXTRACTQUERY_PROC` (access/gin.h) — the GIN opclass support function
+/// number for `extractQuery`.
+const GIN_EXTRACTQUERY_PROC: i16 = 3;
+
+/// `DEFAULT_COLLATION_OID` (pg_collation_d.h) — the collation `extractProc` is
+/// called with when the index column has no collation (matches `initGinState`).
+const DEFAULT_COLLATION_OID: Oid = 100;
+
+/// `BLCKSZ` (pg_config.h) — the page size, used in the item-pointer cross-check
+/// (`numTuples / (BLCKSZ / 3)`).
+const BLCKSZ: f64 = 8192.0;
+
+/// `GinQualCounts` (selfuncs.c) — accumulated counts of the index terms that a
+/// GIN query needs to search for, used to drive `gincostestimate`.
+#[derive(Clone, Debug)]
+struct GinQualCounts {
+    /// `bool attHasFullScan[INDEX_MAX_KEYS]` — per-attribute: a full-index scan
+    /// was requested (a `GIN_SEARCH_MODE_ALL` qual).
+    att_has_full_scan: [bool; INDEX_MAX_KEYS],
+    /// `bool attHasNormalScan[INDEX_MAX_KEYS]` — per-attribute: a normal
+    /// (default / include-empty) scan was requested.
+    att_has_normal_scan: [bool; INDEX_MAX_KEYS],
+    /// `double partialEntries` — estimated number of partial-match entries.
+    partial_entries: f64,
+    /// `double exactEntries` — estimated number of exact-match entries.
+    exact_entries: f64,
+    /// `double searchEntries` — total estimated number of entries searched.
+    search_entries: f64,
+    /// `double arrayScans` — multiplicative count of ScalarArrayOp sub-scans.
+    array_scans: f64,
+}
+
+impl GinQualCounts {
+    /// `memset(&counts, 0, sizeof(counts))` — all-zero, including `arrayScans`
+    /// (the caller sets `arrayScans = 1` separately, as the C does).
+    fn zeroed() -> Self {
+        GinQualCounts {
+            att_has_full_scan: [false; INDEX_MAX_KEYS],
+            att_has_normal_scan: [false; INDEX_MAX_KEYS],
+            partial_entries: 0.0,
+            exact_entries: 0.0,
+            search_entries: 0.0,
+            array_scans: 0.0,
+        }
+    }
+}
+
+/// `gincost_pattern(index, indexcol, clause_op, query, counts)` (selfuncs.c) —
+/// estimate the number of index terms that need to be searched while testing
+/// the given GIN query (`query` is a single key `Datum`), and increment
+/// `*counts`. Returns `Ok(false)` if the query is provably unsatisfiable.
+fn gincost_pattern<'mcx>(
+    mcx: Mcx<'mcx>,
+    index: &IndexOptInfo,
+    indexcol: usize,
+    clause_op: Oid,
+    query: types_tuple::Datum<'mcx>,
+    counts: &mut GinQualCounts,
+) -> PgResult<bool> {
+    debug_assert!((indexcol as i32) < index.nkeycolumns);
+
+    // Get the operator's strategy number within the index opfamily (we don't
+    // need the declared input types, but get_op_opfamily_properties throws if
+    // it fails to find a matching pg_amop entry, which we want).
+    let strategy_op = match lsc::get_op_opfamily_properties::call(
+        clause_op,
+        index.opfamily[indexcol],
+        false,
+        false,
+    )? {
+        Some((strategy, _lefttype, _righttype)) => strategy,
+        // missing_ok = false elog(ERROR)s in C; the seam carries it on Err.
+        None => unreachable!("get_op_opfamily_properties(missing_ok=false) returned None"),
+    };
+
+    // GIN always uses the "default" support functions, which are those with
+    // lefttype == righttype == the opclass' opcintype (see
+    // IndexSupportInitialize in relcache.c).
+    let extract_proc_oid = lsc::get_opfamily_proc::call(
+        index.opfamily[indexcol],
+        index.opcintype[indexcol],
+        index.opcintype[indexcol],
+        GIN_EXTRACTQUERY_PROC,
+    )?;
+
+    if !OidIsValid(extract_proc_oid) {
+        // should not happen; throw same error as index_getprocinfo.
+        return Err(PgError::error(alloc::format!(
+            "missing support function {} for attribute {} of index",
+            GIN_EXTRACTQUERY_PROC,
+            indexcol + 1,
+        )));
+    }
+
+    // Choose collation to pass to extractProc (should match initGinState).
+    let collation = if OidIsValid(index.indexcollations[indexcol]) {
+        index.indexcollations[indexcol]
+    } else {
+        DEFAULT_COLLATION_OID
+    };
+
+    let flinfo = fmgr::fmgr_info::call(mcx, extract_proc_oid)?;
+
+    // set_fn_opclass_options(&flinfo, index->opclassoptions[indexcol]) — the
+    // IndexOptInfo value model does not carry per-column opclass options
+    // (none of the built-in GIN opclasses register any), so this is a no-op
+    // here; see the gincostestimate doc-comment for the deferred bit.
+
+    let result = gin::gin_extract_query::call(
+        mcx,
+        &flinfo,
+        collation,
+        query,
+        strategy_op as u16,
+    )?;
+
+    let nentries = result.query_values.len();
+    let search_mode = result.search_mode;
+
+    if nentries == 0 && search_mode == types_gin::GIN_SEARCH_MODE_DEFAULT {
+        // No match is possible.
+        return Ok(false);
+    }
+
+    for i in 0..nentries {
+        // For partial match we haven't any information to estimate the number
+        // of matched entries in the index, so we just estimate it as 100.
+        if !result.partial_matches.is_empty() && result.partial_matches[i] {
+            counts.partial_entries += 100.0;
+        } else {
+            counts.exact_entries += 1.0;
+        }
+        counts.search_entries += 1.0;
+    }
+
+    if search_mode == types_gin::GIN_SEARCH_MODE_DEFAULT {
+        counts.att_has_normal_scan[indexcol] = true;
+    } else if search_mode == types_gin::GIN_SEARCH_MODE_INCLUDE_EMPTY {
+        // Treat "include empty" like an exact-match item.
+        counts.att_has_normal_scan[indexcol] = true;
+        counts.exact_entries += 1.0;
+        counts.search_entries += 1.0;
+    } else {
+        // It's GIN_SEARCH_MODE_ALL.
+        counts.att_has_full_scan[indexcol] = true;
+    }
+
+    Ok(true)
+}
+
+/// `gincost_opexpr(root, index, indexcol, clause, counts)` (selfuncs.c) —
+/// estimate the search-term counts for a single `OpExpr` GIN index clause.
+fn gincost_opexpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    index: &IndexOptInfo,
+    indexcol: usize,
+    clause: &types_nodes::primnodes::OpExpr,
+    counts: &mut GinQualCounts,
+) -> PgResult<bool> {
+    let clause_op = clause.opno;
+    let operand = clause
+        .args
+        .get(1)
+        .cloned()
+        .expect("gincost_opexpr: OpExpr must have a second argument");
+
+    // Aggressively reduce to a constant, and look through relabeling.
+    let mut operand = sel::estimate_expression_value::call(run, root, &operand)?;
+    if let Expr::RelabelType(r) = &operand {
+        if let Some(arg) = &r.arg {
+            operand = (**arg).clone();
+        }
+    }
+
+    // It's impossible to call the extractQuery method for an unknown operand.
+    // So unless the operand is a Const we can't do much; just assume there will
+    // be one ordinary search entry from the operand at runtime.
+    let c = match &operand {
+        Expr::Const(c) => c,
+        _ => {
+            counts.exact_entries += 1.0;
+            counts.search_entries += 1.0;
+            return Ok(true);
+        }
+    };
+
+    // If the Const is null, there can be no matches.
+    if c.constisnull {
+        return Ok(false);
+    }
+
+    // Otherwise, apply extractQuery and get the actual term counts.
+    gincost_pattern(mcx, index, indexcol, clause_op, c.constvalue.clone(), counts)
+}
+
+/// `gincost_scalararrayopexpr(root, index, indexcol, clause, numIndexEntries,
+/// counts)` (selfuncs.c) — estimate the search-term counts for a single
+/// `ScalarArrayOpExpr` GIN index clause. Each RHS array element gives rise to a
+/// separate indexscan at runtime; we average the counts across the elements and
+/// multiply `counts.arrayScans` by the number of satisfiable elements.
+fn gincost_scalararrayopexpr<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    index: &IndexOptInfo,
+    indexcol: usize,
+    clause: &types_nodes::primnodes::ScalarArrayOpExpr,
+    num_index_entries: f64,
+    counts: &mut GinQualCounts,
+) -> PgResult<bool> {
+    let clause_op = clause.opno;
+    debug_assert!(clause.useOr);
+
+    let rightop = clause
+        .args
+        .get(1)
+        .cloned()
+        .expect("gincost_scalararrayopexpr: SAOP must have a second argument");
+
+    // Aggressively reduce to a constant, and look through relabeling.
+    let mut rightop = sel::estimate_expression_value::call(run, root, &rightop)?;
+    if let Expr::RelabelType(r) = &rightop {
+        if let Some(arg) = &r.arg {
+            rightop = (**arg).clone();
+        }
+    }
+
+    // It's impossible to call the extractQuery method for an unknown operand.
+    // So unless the operand is a Const we can't do much; just assume there will
+    // be one ordinary search entry from each array entry at runtime, and fall
+    // back on a probably-bad estimate of the number of array entries.
+    let c = match &rightop {
+        Expr::Const(c) => c,
+        _ => {
+            let node_id = root.alloc_node(rightop.clone());
+            counts.exact_entries += 1.0;
+            counts.search_entries += 1.0;
+            counts.array_scans *= cz::estimate_array_length::call(root, node_id);
+            return Ok(true);
+        }
+    };
+
+    // If the Const is null, there can be no matches.
+    if c.constisnull {
+        return Ok(false);
+    }
+
+    // Otherwise, extract the array elements and iterate over them.
+    let arraydatum = c.constvalue.clone();
+    // ARR_ELEMTYPE(arrayval): the element type of the RHS array constant.
+    let elem_type = lsc::get_base_element_type::call(c.consttype)?;
+    let s = lsc::get_typlenbyvalalign::call(elem_type)?;
+    let elems = arr::deconstruct_array_v::call(
+        mcx,
+        arraydatum,
+        elem_type,
+        s.typlen,
+        s.typbyval,
+        s.typalign as core::ffi::c_char,
+    )?;
+
+    let mut arraycounts = GinQualCounts::zeroed();
+    let mut num_possible: i32 = 0;
+
+    for (elem_value, elem_isnull) in elems.iter() {
+        // NULL can't match anything, so ignore, as the executor will.
+        if *elem_isnull {
+            continue;
+        }
+
+        // Otherwise, apply extractQuery and get the actual term counts.
+        let mut elemcounts = GinQualCounts::zeroed();
+
+        if gincost_pattern(
+            mcx,
+            index,
+            indexcol,
+            clause_op,
+            elem_value.clone(),
+            &mut elemcounts,
+        )? {
+            // We ignore array elements that are unsatisfiable patterns.
+            num_possible += 1;
+
+            if elemcounts.att_has_full_scan[indexcol]
+                && !elemcounts.att_has_normal_scan[indexcol]
+            {
+                // Full index scan will be required. We treat this as if every
+                // key in the index had been listed in the query.
+                elemcounts.partial_entries = 0.0;
+                elemcounts.exact_entries = num_index_entries;
+                elemcounts.search_entries = num_index_entries;
+            }
+            arraycounts.partial_entries += elemcounts.partial_entries;
+            arraycounts.exact_entries += elemcounts.exact_entries;
+            arraycounts.search_entries += elemcounts.search_entries;
+        }
+    }
+
+    if num_possible == 0 {
+        // No satisfiable patterns in the array.
+        return Ok(false);
+    }
+
+    // Now add the averages to the global counts. This gives an estimate of the
+    // average number of terms searched for in each indexscan, including both
+    // array and non-array qual contributions.
+    let np = num_possible as f64;
+    counts.partial_entries += arraycounts.partial_entries / np;
+    counts.exact_entries += arraycounts.exact_entries / np;
+    counts.search_entries += arraycounts.search_entries / np;
+
+    counts.array_scans *= np;
+
+    Ok(true)
+}
+
+/// `gincostestimate(root, path, loop_count, ...)` (selfuncs.c) — the GIN index
+/// AM's cost estimator. GIN has search behaviour completely different from the
+/// other index types, so it does not use `genericcostestimate`: it reads the
+/// metapage stats (`ginGetStats`), runs the opclass `extractQuery` for each
+/// index qual to count search keys, then prices the pending-list scan, the
+/// entry-tree descent, and the data-page reads. 1:1 with the C body.
+///
+/// Deferred bit: the C `set_fn_opclass_options(&flinfo, opclassoptions[col])`
+/// step is omitted because the `IndexOptInfo` value model does not carry
+/// per-column opclass options; none of the built-in GIN opclasses register any,
+/// so this does not affect the cost for the standard opclasses (array_ops,
+/// tsvector_ops, jsonb_ops, jsonb_path_ops). The faithful `extractQuery` term
+/// counting (exact/partial/searchEntries, ScalarArrayOp averaging) is ported.
+pub(crate) fn gincostestimate<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    path_id: PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let (index, indexclauses): (IndexOptInfo, Vec<types_pathnodes::IndexClause>) = {
+        let path = expect_index_path(root, path_id);
+        let index = (**path
+            .indexinfo
+            .as_ref()
+            .expect("gincostestimate: indexinfo must be set"))
+        .clone();
+        (index, path.indexclauses.clone())
+    };
+
+    let index_quals: Vec<RinfoId> = {
+        let path = expect_index_path(root, path_id);
+        get_quals_from_indexclauses(path)
+    };
+
+    let mut num_pages = index.pages as f64;
+    let num_tuples = index.tuples;
+
+    // Obtain statistical information from the meta page, if possible. Else set
+    // ginStats to zeroes, and we'll cope below.
+    let gin_stats: types_gin::GinStatsData = if !index.hypothetical {
+        // Lock should have already been obtained in plancat.c.
+        let index_rel = indexam::index_open::call(
+            mcx,
+            index.indexoid,
+            types_storage::lock::NoLock,
+        )?;
+        let stats = gin::gin_get_stats::call(&index_rel)?;
+        index_rel.close(types_storage::lock::NoLock)?;
+        types_gin::GinStatsData {
+            nPendingPages: stats.nPendingPages,
+            nTotalPages: stats.nTotalPages,
+            nEntryPages: stats.nEntryPages,
+            nDataPages: stats.nDataPages,
+            nEntries: stats.nEntries,
+            ginVersion: stats.ginVersion,
+        }
+    } else {
+        types_gin::GinStatsData::default()
+    };
+
+    // Assuming we got valid (nonzero) stats at all, nPendingPages can be
+    // trusted, but the other fields are data as of the last VACUUM. We can
+    // scale them up to account for growth since then, but only to 4X; beyond
+    // that, fall back to estimating from the assumed-accurate index size.
+    let num_pending_pages = if (gin_stats.nPendingPages as f64) < num_pages {
+        gin_stats.nPendingPages as f64
+    } else {
+        0.0
+    };
+
+    let num_entry_pages;
+    let num_data_pages;
+    let mut num_entries;
+
+    if num_pages > 0.0
+        && (gin_stats.nTotalPages as f64) <= num_pages
+        && (gin_stats.nTotalPages as f64) > num_pages / 4.0
+        && gin_stats.nEntryPages > 0
+        && gin_stats.nEntries > 0
+    {
+        // The stats seem close enough to sane to be trusted. Scale them by
+        // numPages / nTotalPages to account for growth since the last VACUUM.
+        let scale = num_pages / gin_stats.nTotalPages as f64;
+
+        let mut nep = (gin_stats.nEntryPages as f64 * scale).ceil();
+        let mut ndp = (gin_stats.nDataPages as f64 * scale).ceil();
+        num_entries = (gin_stats.nEntries as f64 * scale).ceil();
+        // Ensure we didn't round up too much.
+        nep = nep.min(num_pages - num_pending_pages);
+        ndp = ndp.min(num_pages - num_pending_pages - nep);
+        num_entry_pages = nep;
+        num_data_pages = ndp;
+    } else {
+        // Hypothetical index, never-vacuumed pre-9.1 index (zero stats), or
+        // grown too much since the last VACUUM. Invent plausible internal
+        // statistics from the index page count (clamped to >= 10 pages):
+        // estimate 90% entry pages, the rest data pages, 100 entries/page.
+        num_pages = num_pages.max(10.0);
+        num_entry_pages = ((num_pages - num_pending_pages) * 0.90).floor();
+        num_data_pages = num_pages - num_pending_pages - num_entry_pages;
+        num_entries = (num_entry_pages * 100.0).floor();
+    }
+
+    // In an empty index, numEntries could be zero. Avoid divide-by-zero.
+    if num_entries < 1.0 {
+        num_entries = 1.0;
+    }
+
+    // If the index is partial, AND the index predicate with the index-bound
+    // quals to produce a more accurate idea of the rows covered.
+    let selectivity_quals = add_predicate_to_index_quals(root, &index, &index_quals)?;
+
+    let baserel = index.rel.expect("gincostestimate: index.rel must be set");
+    let baserel_relid = root.rel(baserel).relid as i32;
+
+    // Estimate the fraction of main-table tuples that will be visited.
+    let index_selectivity = sel::clauselist_selectivity_mixed::call(
+        run,
+        root,
+        &selectivity_quals,
+        baserel_relid,
+        JOIN_INNER,
+        None,
+    )?;
+
+    // Fetch estimated page cost for the tablespace containing the index.
+    let spc = cz::get_tablespace_page_costs::call(index.reltablespace);
+    let spc_random_page_cost = spc.spc_random_page_cost;
+
+    // Generic assumption about index correlation: there isn't any.
+    let index_correlation = 0.0;
+
+    // Examine quals to estimate the number of search entries & partial matches.
+    let mut counts = GinQualCounts::zeroed();
+    counts.array_scans = 1.0;
+    let mut match_possible = true;
+
+    'outer: for iclause in &indexclauses {
+        let indexcol = iclause.indexcol as usize;
+        for &rid in &iclause.indexquals {
+            let clause: Expr = {
+                let clause_node = root.rinfo(rid).clause;
+                root.node(clause_node).clone()
+            };
+
+            match &clause {
+                Expr::OpExpr(op) => {
+                    match_possible =
+                        gincost_opexpr(mcx, run, root, &index, indexcol, op, &mut counts)?;
+                    if !match_possible {
+                        break 'outer;
+                    }
+                }
+                Expr::ScalarArrayOpExpr(saop) => {
+                    match_possible = gincost_scalararrayopexpr(
+                        mcx,
+                        run,
+                        root,
+                        &index,
+                        indexcol,
+                        saop,
+                        num_entries,
+                        &mut counts,
+                    )?;
+                    if !match_possible {
+                        break 'outer;
+                    }
+                }
+                other => {
+                    // shouldn't be anything else for a GIN index.
+                    return Err(PgError::error(alloc::format!(
+                        "unsupported GIN indexqual type: {:?}",
+                        core::mem::discriminant(other)
+                    )));
+                }
+            }
+        }
+    }
+
+    // Fall out if there were any provably-unsatisfiable quals.
+    if !match_possible {
+        return Ok(AmCostEstimate {
+            index_startup_cost: 0.0,
+            index_total_cost: 0.0,
+            index_selectivity: 0.0,
+            index_correlation,
+            index_pages: num_pages,
+        });
+    }
+
+    // If an attribute has a full scan but at the same time doesn't have a normal
+    // scan, we'll have to scan all non-null entries of that attribute. We don't
+    // have per-attribute statistics for GIN, so assume the whole index must be
+    // scanned.
+    let mut full_index_scan = false;
+    for i in 0..index.nkeycolumns as usize {
+        if counts.att_has_full_scan[i] && !counts.att_has_normal_scan[i] {
+            full_index_scan = true;
+            break;
+        }
+    }
+
+    if full_index_scan || index_quals.is_empty() {
+        // Full index scan will be required. Treat this as if every key in the
+        // index had been listed in the query.
+        counts.partial_entries = 0.0;
+        counts.exact_entries = num_entries;
+        counts.search_entries = num_entries;
+    }
+
+    // Will we have more than one iteration of a nestloop scan?
+    let outer_scans = loop_count;
+
+    let cpu_operator_cost = cz::cpu_operator_cost::call();
+    let cpu_index_tuple_cost = cz::cpu_index_tuple_cost::call();
+
+    // Compute cost to begin scan; first of all, pay attention to pending list.
+    let mut entry_pages_fetched = num_pending_pages;
+
+    // Estimate the number of entry pages read. We need to do
+    // counts.searchEntries searches. Use a power function; tuples on leaf pages
+    // is usually much greater. Includes all searches in the entry tree,
+    // including the first entry in the partial-match algorithm.
+    entry_pages_fetched += (counts.search_entries * num_entry_pages.powf(0.15).round()).ceil();
+
+    // Add an estimate of the entry pages read by the partial-match algorithm
+    // (a scan over leaf pages in the entry tree). counts.partialEntries is
+    // pretty bogus, so it might exceed numEntries; clamp the proportion.
+    let mut partial_scale = counts.partial_entries / num_entries;
+    partial_scale = partial_scale.min(1.0);
+
+    entry_pages_fetched += (num_entry_pages * partial_scale).ceil();
+
+    // The partial-match algorithm reads all data pages before the actual scan,
+    // so it's a startup cost. Again, no useful stats, so estimate as proportion.
+    let mut data_pages_fetched = (num_data_pages * partial_scale).ceil();
+
+    let mut index_startup_cost = 0.0f64;
+    let mut index_total_cost = 0.0f64;
+
+    // Add a CPU-cost component for the initial entry-btree descent. We don't
+    // charge I/O for upper btree levels (they stay in cache), but we still do
+    // about log2(N) comparisons; charge one cpu_operator_cost per comparison.
+    // With ScalarArrayOpExprs, charge this once per SA scan; the ones after the
+    // first are not startup cost for the overall plan, so add only to total.
+    if num_entries > 1.0 {
+        // avoid computing log(0)
+        let descent_cost =
+            (num_entries.ln() / 2.0f64.ln()).ceil() * cpu_operator_cost;
+        index_startup_cost += descent_cost * counts.search_entries;
+        index_total_cost += counts.array_scans * descent_cost * counts.search_entries;
+    }
+
+    // Add a cpu cost per entry-page fetched. Not amortized over a loop.
+    index_startup_cost +=
+        entry_pages_fetched * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+    index_total_cost += entry_pages_fetched
+        * counts.array_scans
+        * DEFAULT_PAGE_CPU_MULTIPLIER
+        * cpu_operator_cost;
+
+    // Add a cpu cost per data-page fetched (partial-match data pages), as a
+    // startup cost. Also not amortized over a loop.
+    index_startup_cost +=
+        DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost * data_pages_fetched;
+
+    // Since we add the startup cost to the total cost later on, remove the
+    // initial arrayscan from the total.
+    index_total_cost += data_pages_fetched
+        * (counts.array_scans - 1.0)
+        * DEFAULT_PAGE_CPU_MULTIPLIER
+        * cpu_operator_cost;
+
+    // Cache effects if more than one scan due to nestloops or array quals.
+    // Pro-rated per nestloop scan, but the array qual factor isn't pro-rated.
+    if outer_scans > 1.0 || counts.array_scans > 1.0 {
+        entry_pages_fetched *= outer_scans * counts.array_scans;
+        entry_pages_fetched = cz::index_pages_fetched::call(
+            entry_pages_fetched,
+            num_entry_pages as u32,
+            num_entry_pages,
+            root,
+        );
+        entry_pages_fetched /= outer_scans;
+        data_pages_fetched *= outer_scans * counts.array_scans;
+        data_pages_fetched = cz::index_pages_fetched::call(
+            data_pages_fetched,
+            num_data_pages as u32,
+            num_data_pages,
+            root,
+        );
+        data_pages_fetched /= outer_scans;
+    }
+
+    // Use random page cost because logically-close pages could be far apart on
+    // disk.
+    index_startup_cost += (entry_pages_fetched + data_pages_fetched) * spc_random_page_cost;
+
+    // Compute the number of data pages fetched during the scan. Assume every
+    // entry has the same number of items with no overlap.
+    let mut data_pages_fetched =
+        (num_data_pages * counts.exact_entries / num_entries).ceil();
+
+    // If there's a lot of overlap among the entries (one very frequent entry),
+    // the above can grossly under-estimate. Cross-check against the overall
+    // selectivity: at a minimum, read one item pointer per matching entry.
+    // Average ~3 bytes per item pointer.
+    let data_pages_fetched_by_sel = (index_selectivity * (num_tuples / (BLCKSZ / 3.0))).ceil();
+    if data_pages_fetched_by_sel > data_pages_fetched {
+        data_pages_fetched = data_pages_fetched_by_sel;
+    }
+
+    // Add one page cpu-cost to the startup cost.
+    index_startup_cost +=
+        DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost * counts.search_entries;
+
+    // Add once again a CPU-cost for those data pages, before amortizing for
+    // cache.
+    index_total_cost +=
+        data_pages_fetched * counts.array_scans * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+
+    // Account for cache effects, the same as above.
+    if outer_scans > 1.0 || counts.array_scans > 1.0 {
+        data_pages_fetched *= outer_scans * counts.array_scans;
+        data_pages_fetched = cz::index_pages_fetched::call(
+            data_pages_fetched,
+            num_data_pages as u32,
+            num_data_pages,
+            root,
+        );
+        data_pages_fetched /= outer_scans;
+    }
+
+    // Apply random_page_cost as the cost per page.
+    index_total_cost += index_startup_cost + data_pages_fetched * spc_random_page_cost;
+
+    // Add on index qual eval costs, much as in genericcostestimate. We charge
+    // cpu but can disregard indexorderbys (GIN doesn't support those).
+    let qual_arg_cost = {
+        let refs: Vec<ClauseRef> =
+            index_quals.iter().map(|&r| ClauseRef::Rinfo(r)).collect();
+        index_other_operands_eval_cost(root, &refs)
+    };
+    let qual_op_cost = cpu_operator_cost * index_quals.len() as f64;
+
+    index_startup_cost += qual_arg_cost;
+    index_total_cost += qual_arg_cost;
+
+    // Add a cpu cost per search entry, corresponding to the actual visited
+    // entries.
+    index_total_cost += (counts.search_entries * counts.array_scans) * qual_op_cost;
+    // Now add a cpu cost per tuple in the posting lists / trees.
+    index_total_cost += (num_tuples * index_selectivity) * cpu_index_tuple_cost;
+
+    Ok(AmCostEstimate {
+        index_startup_cost,
+        index_total_cost,
+        index_selectivity,
+        index_correlation,
+        index_pages: data_pages_fetched,
+    })
+}
+
 /// `&mut`-borrow the `IndexPath` for a `PathId`, panicking if it is not one.
 fn expect_index_path(root: &PlannerInfo, path_id: PathId) -> &types_pathnodes::IndexPath {
     match root.path(path_id) {
         PathNode::IndexPath(ip) => ip,
         _ => panic!("expect_index_path: path is not an IndexPath"),
+    }
+}
+
+/// `&mut`-borrow the `IndexPath` for a `PathId`, panicking if it is not one.
+fn expect_index_path_mut(root: &mut PlannerInfo, path_id: PathId) -> &mut types_pathnodes::IndexPath {
+    match root.path_mut(path_id) {
+        PathNode::IndexPath(ip) => ip,
+        _ => panic!("expect_index_path_mut: path is not an IndexPath"),
     }
 }
 
@@ -761,6 +1710,15 @@ pub fn seam_amcostestimate<'mcx>(
         // GIST_AM_OID (pg_am.h) — the GiST access method.
         783 => gistcostestimate(mcx, run, root, path_id, loop_count)
             .expect("gistcostestimate"),
+        // SPGIST_AM_OID (pg_am.h) — the SP-GiST access method.
+        4000 => spgcostestimate(mcx, run, root, path_id, loop_count)
+            .expect("spgcostestimate"),
+        // BRIN_AM_OID (pg_am.h) — the BRIN access method.
+        3580 => brincostestimate(mcx, run, root, path_id, loop_count)
+            .expect("brincostestimate"),
+        // GIN_AM_OID (pg_am.h) — the GIN access method.
+        2742 => gincostestimate(mcx, run, root, path_id, loop_count)
+            .expect("gincostestimate"),
         other => panic!(
             "amcostestimate: no cost estimator ported for index AM oid {}",
             other

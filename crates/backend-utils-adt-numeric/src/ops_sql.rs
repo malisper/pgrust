@@ -1530,14 +1530,17 @@ pub fn seam_numeric_subdiff(v1: Datum<'_>, v2: Datum<'_>) -> PgResult<f64> {
     let ctx = mcx::MemoryContext::new("numrange_subdiff scratch");
     let mcx = ctx.mcx();
 
-    // SAFETY: v1/v2 are pointer-bearing numeric Datums (detoasted by the
-    // caller), so the word points to a numeric varlena whose 4-byte header
-    // encodes the total size. This mirrors C's DirectFunctionCall2(numeric_sub,
-    // v1, v2), which likewise treats the Datum as a `Numeric` pointer.
-    let a = unsafe { numeric_bytes_from_datum(v1) };
-    let b = unsafe { numeric_bytes_from_datum(v2) };
+    // SAFETY: v1/v2 are pointer-bearing numeric Datums, so the word points to a
+    // numeric varlena. This mirrors C's DirectFunctionCall2(numeric_sub, v1, v2),
+    // whose PG_GETARG_NUMERIC does PG_DETOAST_DATUM_PACKED first. The numeric may
+    // carry a 1-byte SHORT varlena header (rangetypes' `datum_write` packs a
+    // small numeric into a range with a short header, rangetypes.c make_range);
+    // `numeric_p?digits`/`numeric_sign` etc. all assume a 4-byte (VARHDRSZ)
+    // header, so normalize a short-header image to a 4-byte-header copy first.
+    let a = unsafe { numeric_image_normalized(mcx, v1)? };
+    let b = unsafe { numeric_image_normalized(mcx, v2)? };
 
-    let diff = numeric_sub(mcx, a, b)?;
+    let diff = numeric_sub(mcx, &a, &b)?;
     numeric_to_float8(&diff)
 }
 
@@ -1620,19 +1623,50 @@ fn special_to_int_error(num: &[u8], type_name: &str) -> PgError {
 }
 
 /// Recover the on-disk `numeric` byte image a pointer-bearing `Datum` refers
-/// to. Reads `VARSIZE_4B` from the varlena header to determine the length.
+/// to, normalized to a 4-byte-header (`VARATT_IS_4B_U`) varlena — the analog of
+/// C's `PG_GETARG_NUMERIC` / `PG_DETOAST_DATUM_PACKED`, which un-packs a short
+/// header before the numeric body accessors run.
+///
+/// Handles the two inline varlena forms a `numeric` Datum can take here:
+///   * 1-byte SHORT header (`VARATT_IS_1B`, low bit set): `VARSIZE_1B = byte0 >>
+///     1`, data starts at offset 1 (no alignment). rangetypes' `datum_write`
+///     packs a small numeric into a serialized range this way, so the bound
+///     value `range_deserialize` hands back is short-headed. We rebuild a fresh
+///     4-byte-header image (`SET_VARSIZE`) over the verbatim numeric body.
+///   * 4-byte header (`VARATT_IS_4B_U`): returned as a verbatim copy.
+///
+/// (Compressed/external forms never appear here — `datum_write` rejects toast
+/// pointers, and an in-range numeric is always stored inline.)
 ///
 /// # Safety
-/// The Datum must be a valid pointer to a 4-byte-header (`VARATT_IS_4B_U`)
-/// `numeric` varlena that lives at least as long as the returned slice.
-unsafe fn numeric_bytes_from_datum<'a>(d: Datum<'_>) -> &'a [u8] {
+/// The Datum must be a valid pointer to an inline (short- or 4-byte-header)
+/// `numeric` varlena.
+unsafe fn numeric_image_normalized<'mcx>(
+    mcx: Mcx<'mcx>,
+    d: Datum<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
     let ptr = d.as_usize() as *const u8;
-    // VARSIZE_4B: native header word >> 2, low 30 bits (little-endian build).
-    let header = core::slice::from_raw_parts(ptr, VARHDRSZ_U);
-    let word = u32::from_ne_bytes([header[0], header[1], header[2], header[3]]);
-    #[cfg(target_endian = "little")]
-    let len = ((word >> 2) & 0x3FFF_FFFF) as usize;
-    #[cfg(target_endian = "big")]
-    let len = (word & 0x3FFF_FFFF) as usize;
-    core::slice::from_raw_parts(ptr, len)
+    let byte0 = *ptr;
+    if byte0 & 0x01 != 0 {
+        // VARATT_IS_1B: 1-byte short header. VARSIZE_1B = byte0 >> 1 (total,
+        // header included); VARDATA_1B = ptr + 1, body length = VARSIZE_1B - 1.
+        let total = (byte0 >> 1) as usize;
+        let body_len = total - 1;
+        let body = core::slice::from_raw_parts(ptr.add(1), body_len);
+        let mut out: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, VARHDRSZ_U + body_len)?;
+        // SET_VARSIZE (4-byte header): total normalized length << 2.
+        out.extend_from_slice(&types_datum::varlena::set_varsize_4b(VARHDRSZ_U + body_len));
+        out.extend_from_slice(body);
+        Ok(out)
+    } else {
+        // VARATT_IS_4B_U: native header word >> 2, low 30 bits.
+        let header = core::slice::from_raw_parts(ptr, VARHDRSZ_U);
+        let word = u32::from_ne_bytes([header[0], header[1], header[2], header[3]]);
+        #[cfg(target_endian = "little")]
+        let len = ((word >> 2) & 0x3FFF_FFFF) as usize;
+        #[cfg(target_endian = "big")]
+        let len = (word & 0x3FFF_FFFF) as usize;
+        let bytes = core::slice::from_raw_parts(ptr, len);
+        mcx::slice_in(mcx, bytes)
+    }
 }

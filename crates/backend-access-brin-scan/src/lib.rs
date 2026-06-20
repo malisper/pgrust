@@ -80,7 +80,7 @@ use backend_access_brin_entry_seams as opclass;
 use backend_catalog_index_seams::index_get_relation;
 use backend_storage_buffer_bufmgr_seams::lock_buffer;
 use backend_storage_buffer_bufmgr_seams::release_buffer;
-use backend_access_table_table_seams::{relation_close, table_open};
+use backend_access_table_table_seams::table_open;
 use backend_nodes_core_seams::tbm_add_page;
 use backend_utils_activity_pgstat_seams::pgstat_count_index_scan;
 use backend_utils_cache_relcache_seams::relation_get_number_of_blocks;
@@ -231,20 +231,28 @@ pub fn brinhandler() -> IndexAmRoutine {
 // index.c dispatch — none of the BRIN build/options fns are ported here).
 // ===========================================================================
 
-/// `ambuild` adapter — `brinbuild` (brin_build) is unported; reached via #341.
+/// `ambuild` adapter — dispatches `brinbuild` (brin.c) through the F3
+/// insert/vacuum crate's seam (which owns the build driver, above this scan
+/// crate in the dep graph). The `IndexInfoCarrier` (#342) is threaded through;
+/// the owner downcasts it back to the concrete `IndexInfo<'mcx>`.
 fn brinbuild_am<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _heap_relation: &Relation<'mcx>,
-    _index_relation: &Relation<'mcx>,
-    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<IndexBuildResult> {
-    panic!("brinbuild: BRIN index build (brin.c) not yet ported — reached via the index.c dispatch (#341)")
+    backend_access_brin_insert_vacuum_seams::brinbuild::call(
+        mcx,
+        heap_relation,
+        index_relation,
+        index_info,
+    )
 }
 
-/// `ambuildempty` adapter — `brinbuildempty` (brin_build) is unported; reached
-/// via #341.
-fn brinbuildempty_am<'mcx>(_mcx: Mcx<'mcx>, _index_relation: &Relation<'mcx>) -> PgResult<()> {
-    panic!("brinbuildempty: BRIN empty-index build (brin.c) not yet ported — reached via #341")
+/// `ambuildempty` adapter — dispatches `brinbuildempty` (brin.c) through the F3
+/// insert/vacuum crate's seam.
+fn brinbuildempty_am<'mcx>(mcx: Mcx<'mcx>, index_relation: &Relation<'mcx>) -> PgResult<()> {
+    backend_access_brin_insert_vacuum_seams::brinbuildempty::call(mcx, index_relation)
 }
 
 /// `amcostestimate` adapter — `brincostestimate` (selfuncs.c) is unported;
@@ -545,8 +553,11 @@ pub fn bringetbitmap<'mcx>(
     let heap_oid = index_get_relation::call(idx_rel.rd_id, false)?;
     let heap_rel = table_open::call(mcx, heap_oid, AccessShareLock)?;
     let nblocks = relation_get_number_of_blocks::call(&heap_rel)?;
-    relation_close::call(heap_oid, AccessShareLock)?;
-    drop(heap_rel);
+    // `Relation::close` consumes the handle and runs its single closer (relcache
+    // decrement + lock release). Using `relation_close::call(oid, ..)` followed by
+    // `drop(heap_rel)` would decrement the refcount twice (the explicit seam call
+    // AND the `Relation`'s own `Drop` closer), underflowing it.
+    heap_rel.close(AccessShareLock)?;
 
     let natts = opaque.bo_bdesc.natts();
 

@@ -113,5 +113,17 @@ backend-storage-ipc-ipci-seams = { path = "../backend-storage-ipc-ipci-seams" }
 backend-postmaster-pmchild-seams = { path = "../backend-postmaster-pmchild-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 
+# Per-backend signal-handler install in PostgresMain (postgres.c:4213-4252):
+# the `pqsignal(...)` block, in particular `pqsignal(SIGUSR1,
+# procsignal_sigusr1_handler)` which lets a backend absorb its own (and
+# others') ProcSignalBarrier — required for DROP DATABASE / DROP TABLESPACE
+# (EmitProcSignalBarrier + WaitForProcSignalBarrier) to terminate.
+port-pqsignal-seams = { path = "../port-pqsignal-seams" }
+types-signal = { path = "../types-signal" }
+# sigprocmask(SIG_SETMASK, &UnBlockSig) in PostgresMain (postgres.c:4264): the
+# backend inherits BlockSig from InitPostmasterChild and must unblock signals
+# so the self-SIGUSR1 from EmitProcSignalBarrier is actually delivered.
+backend-libpq-pqsignal-seams = { path = "../backend-libpq-pqsignal-seams" }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

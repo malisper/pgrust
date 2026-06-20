@@ -182,7 +182,12 @@ impl<'mcx> Parser<'mcx> {
     }
 
     fn set_identifier_lookup(&mut self, mode: IdentifierLookup) {
+        // The authoritative `plpgsql_IdentifierLookup` lives in the compiler
+        // unit (consulted by plpgsql_parse_word/dblword/tripword). Keep the
+        // scanner-instance mirror in sync for `identifier_lookup()` reads, and
+        // push the value across the seam so the resolvers see the right mode.
         self.scanner.identifier_lookup = mode;
+        comp_seam::set_identifier_lookup::call(mode);
     }
 
     fn identifier_lookup(&self) -> IdentifierLookup {

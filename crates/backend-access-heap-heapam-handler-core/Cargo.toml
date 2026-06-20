@@ -37,6 +37,7 @@ backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type
 # table_relation_needs_toast_table, table_parallelscan_reinitialize.
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-access-index-indexam = { path = "../backend-access-index-indexam" }
 # DML callbacks delegate here (seam-and-panic until the dml stage lands).
 backend-access-heap-heapam-handler-dml-seams = { path = "../backend-access-heap-heapam-handler-dml-seams" }
 backend-catalog-storage-seams = { path = "../backend-catalog-storage-seams" }

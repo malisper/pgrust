@@ -123,18 +123,24 @@ pub fn spghandler() -> IndexAmRoutine {
 // (reached via the #341 index.c dispatch).
 // ===========================================================================
 
-/// `ambuild` adapter — `spgbuild` needs the real `IndexInfo`, which the erased
-/// `IndexInfo` carrier cannot supply; reached via the #341 dispatch.
+/// `ambuild` adapter — `spgbuild` lives in this same crate (spgist-core), so the
+/// adapter recovers the real `types_nodes::execnodes::IndexInfo<'mcx>` from the
+/// `IndexInfoCarrier` (#342) via the tag-checked downcast and drives the build
+/// directly — no cross-crate build-dispatch seam is needed (the SP-GiST build
+/// body is not above the vtable crate the way GIN's/GiST's is). Mirrors how the
+/// gist-build/nbtsort installers recover the concrete `IndexInfo` (#341).
 fn spgbuild_am<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _heap_relation: &Relation<'mcx>,
-    _index_relation: &Relation<'mcx>,
-    _index_info: &mut IndexInfoCarrier<'_, 'mcx>,
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfoCarrier<'_, 'mcx>,
 ) -> PgResult<IndexBuildResult> {
-    panic!(
-        "spgbuild: index.c build dispatch (#341) not yet ported — \
-         needs the real types_nodes::execnodes::IndexInfo"
-    )
+    let info = index_info
+        .downcast_mut::<types_nodes::execnodes::IndexInfo<'_>>()
+        .unwrap_or_else(|| {
+            panic!("spgbuild: IndexInfoCarrier did not carry the expected IndexInfo")
+        });
+    crate::spgbuild(mcx, heap_relation, index_relation, info)
 }
 
 /// `ambuildempty` adapter — wires this crate's `spgbuildempty`.

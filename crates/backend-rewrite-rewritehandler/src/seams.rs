@@ -32,6 +32,13 @@ pub fn init_seams() {
     backend_rewrite_rewritehandler_seams::expand_generated_columns_in_expr::set(
         seam_expand_generated_columns_in_expr,
     );
+    // plancat.c's get_relation_constraints expands virtual generated columns in
+    // the constraint-expression list (arena handles); rewriteHandler.c owns the
+    // body. Resolve each handle off `root`, expand, and store the owned result
+    // back into the same arena slot.
+    backend_optimizer_util_plancat_ext_seams::expand_generated_columns_in_expr::set(
+        seam_expand_generated_columns_in_expr_arena,
+    );
     backend_commands_view_seams::view_query_is_auto_updatable::set(
         seam_view_query_is_auto_updatable,
     );
@@ -169,6 +176,32 @@ fn seam_expand_generated_columns_in_expr<'mcx>(
     let result = expand_generated_columns_in_expr(mcx, node, &rel, rt_index);
     rel.close(NoLock)?;
     result
+}
+
+/// plancat-ext variant of `expand_generated_columns_in_expr` over a
+/// planner-arena node list. C calls `expand_generated_columns_in_expr` once per
+/// constraint expression after opening the relation; here the relation is opened
+/// once (NoLock — the caller holds it), and each arena handle is resolved, run
+/// through the owned-`Expr` body in a scratch context (the returned `Expr` is a
+/// self-contained owned node), and stored back into its slot.
+fn seam_expand_generated_columns_in_expr_arena(
+    root: &mut types_pathnodes::PlannerInfo,
+    nodes: &[types_pathnodes::NodeId],
+    relid: Oid,
+    varno: i32,
+) -> PgResult<Vec<types_pathnodes::NodeId>> {
+    let ctx = mcx::MemoryContext::new("expand_generated_columns_in_expr arena");
+    let mcx = ctx.mcx();
+    let rel = backend_access_table_table::table_open(mcx, relid, NoLock)?;
+    for &id in nodes {
+        let node = root.node(id).clone();
+        let expanded = expand_generated_columns_in_expr(mcx, Some(node), &rel, varno)?;
+        if let Some(e) = expanded {
+            *root.node_mut(id) = e;
+        }
+    }
+    rel.close(NoLock)?;
+    Ok(nodes.to_vec())
 }
 
 fn seam_view_query_is_auto_updatable<'mcx>(

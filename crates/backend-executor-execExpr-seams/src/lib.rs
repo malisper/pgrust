@@ -220,7 +220,7 @@ seam_core::seam!(
     /// `exec_prepare_expr_list`. Can `ereport(ERROR)`.
     pub fn eval_exec_param_into_list<'mcx>(
         param_li: &mut types_nodes::params::ParamListInfoData<'static>,
-        exprstate: &types_nodes::execexpr::ExprState<'mcx>,
+        exprstate: &mut types_nodes::execexpr::ExprState<'mcx>,
         param_index: i32,
         ptype: types_core::Oid,
         estate: &mut EStateData<'mcx>,

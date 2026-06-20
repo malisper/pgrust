@@ -110,6 +110,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SystemAttributeByName(attname)` (catalog/heap.c): the system column
+    /// (`ctid`/`xmin`/`cmin`/`xmax`/`cmax`/`tableoid`) named `attname`, or
+    /// `None` if the name is not a system attribute. Projects the fields a
+    /// field-reference resolver reads off the `FormData_pg_attribute`:
+    /// `(attnum, atttypid, atttypmod, attcollation)`. Consumed by
+    /// expandedrecord.c's `expanded_record_lookup_field`.
+    pub fn system_attribute_by_name(attname: &str) -> Option<(i32, Oid, i32, Oid)>
+);
+
+seam_core::seam!(
     /// `RemoveAttributeById(relid, attnum)` (catalog/heap.c): the per-class
     /// `OCLASS_CLASS` column-drop handler dependency.c's `doDeletion` invokes
     /// for a `pg_attribute` (table-column) object. Marks the column dropped.

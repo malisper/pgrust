@@ -970,7 +970,9 @@ pub fn ExecEvalJsonCoercion<'mcx>(
         let (v, n) = read_cell(state, resv);
         let truth = if n { false } else { v.as_bool() };
         let s: &[u8] = if truth { b"true" } else { b"false" };
-        let jb = backend_utils_adt_jsonb::jsonb_in(mcx, s)?;
+        // DirectFunctionCall1: no soft escontext, so this never soft-fails.
+        let jb = backend_utils_adt_jsonb::jsonb_in(mcx, s, None)?
+            .expect("jsonb_in without escontext never soft-fails");
         write_cell(state, resv, Datum::ByRef(mcx::slice_in(mcx, jb.as_slice())?), false);
     }
 

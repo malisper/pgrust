@@ -20,6 +20,9 @@ types-syscache = { path = "../types-syscache" }
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 backend-optimizer-util-predtest-seams = { path = "../backend-optimizer-util-predtest-seams" }
 backend-optimizer-util-inherit-predtest-seams = { path = "../backend-optimizer-util-inherit-predtest-seams" }
+# predtest.c owns predicate_refuted_by, declared in plancat-ext-seams
+# (relation_excluded_by_constraints).
+backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }

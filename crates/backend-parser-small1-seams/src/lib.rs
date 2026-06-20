@@ -20,6 +20,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pstate->p_coerce_param_hook(pstate, param, targetTypeId, targetTypeMod,
+    /// location)` (parse_coerce.c `coerce_type`'s `IsA(node, Param)` arm). The C
+    /// hook is a function pointer on `ParseState` installed by parse_param.c
+    /// (`variable_coerce_param_hook`); the owned model reaches it from
+    /// `coerce_type` (in the lower `backend-parser-coerce`) through this seam,
+    /// dispatching on `pstate.p_ref_hook_state`. Returns the (possibly mutated)
+    /// `Param` to use, or `None` to fall through to the normal coercion path —
+    /// mirroring C's hook returning a transformed `Node *` or `NULL`. Only the
+    /// variable-parameter case installs a coercion hook; the fixed-parameter and
+    /// no-hook cases are an installed no-op returning `None`.
+    pub fn coerce_param_hook(
+        pstate: &ParseState<'_>,
+        param: &types_nodes::primnodes::Param,
+        target_type_id: types_core::primitive::Oid,
+        target_type_mod: i32,
+        location: i32,
+    ) -> PgResult<Option<types_nodes::primnodes::Param>>
+);
+
+seam_core::seam!(
     /// `sbsroutines->transform(sbsref, indirection, pstate, isSlice, isAssignment)`
     /// (parse_node.c `transformContainerSubscripts`): the container-type-specific
     /// subscripting support method (fetched by `getSubscriptingRoutines`) that

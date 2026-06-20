@@ -77,7 +77,7 @@ seam_core::seam!(
     /// build and link the subplan's executor state under the node.
     pub fn exec_init_node_outer<'mcx>(
         lrstate: &mut LockRowsStateData<'mcx>,
-        node: &LockRows<'mcx>,
+        node: &'mcx LockRows<'mcx>,
         estate: &mut EStateData<'mcx>,
         eflags: i32,
     ) -> PgResult<()>

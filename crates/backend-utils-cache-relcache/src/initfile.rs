@@ -530,6 +530,8 @@ pub fn RelationBuildLocalRelation<'mcx>(
             attidentity: satt.attidentity,
             attgenerated: satt.attgenerated,
             attisdropped: satt.attisdropped,
+            attislocal: satt.attislocal,
+            attinhcount: satt.attinhcount,
             attcollation: satt.attcollation,
             attnullability,
         });

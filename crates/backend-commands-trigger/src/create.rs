@@ -640,7 +640,7 @@ fn transform_trigger_when<'mcx>(
     //
     // NB: pull_var_clause is okay here only because we don't allow subselects
     // in WHEN clauses; it would fail to examine the contents of subselects.
-    for var_expr in backend_optimizer_util_vars::pull_var_clause(&when_node, 0) {
+    for var_expr in backend_optimizer_util_vars::pull_var_clause(mcx, &when_node, 0)? {
         let var = var_expr.as_var().ok_or_else(|| {
             ereport(ERROR)
                 .errmsg_internal("trigger WHEN: pull_var_clause returned a non-Var")

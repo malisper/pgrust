@@ -138,9 +138,10 @@ fn write_sortgroupclause_list_field(
     buf.push(')');
 }
 
-/// `_outAggref` (outfuncs.funcs.c). The `aggno`/`aggtransno`/`aggpresorted`
-/// fields carry `pg_node_attr(read_write_ignore)` in C and are NOT serialized;
-/// every other field is emitted in struct order. `args` is a List of
+/// `_outAggref` (outfuncs.funcs.c). PG18 serializes every field in struct order,
+/// INCLUDING `aggpresorted`/`aggno`/`aggtransno` (these are NOT
+/// `pg_node_attr(read_write_ignore)` in PG18 — they are written at
+/// outfuncs.funcs.c:154/157/158 and read by `_readAggref`). `args` is a List of
 /// `TargetEntry`, `aggorder`/`aggdistinct` Lists of `SortGroupClause`, reached
 /// through the framed list writers above (`lib.rs`'s `_outTargetEntry` and the
 /// parse family's `_outSortGroupClause`).
@@ -164,8 +165,14 @@ fn out_aggref(buf: &mut String, n: &types_nodes::primnodes::Aggref, wl: bool) {
     write_bool_field(buf, "aggstar", n.aggstar);
     write_bool_field(buf, "aggvariadic", n.aggvariadic);
     crate::write_char_field(buf, "aggkind", n.aggkind as u8);
+    // PG18 `_outAggref` writes aggpresorted/aggno/aggtransno (outfuncs.funcs.c:
+    // 154,157,158) — they are NOT read_write_ignore. Emit them in struct order so
+    // the OUT/READ round-trip (and stored agg view rules) stay aligned.
+    write_bool_field(buf, "aggpresorted", n.aggpresorted);
     write_uint_field(buf, "agglevelsup", n.agglevelsup);
     write_enum_field(buf, "aggsplit", n.aggsplit);
+    write_int_field(buf, "aggno", n.aggno);
+    write_int_field(buf, "aggtransno", n.aggtransno);
     write_location_field(buf, "location", n.location, wl);
 }
 
@@ -242,10 +249,16 @@ fn out_sublink(buf: &mut String, n: &types_nodes::primnodes::SubLink, wl: bool) 
     write_enum_field(buf, "subLinkType", n.subLinkType as i32);
     write_int_field(buf, "subLinkId", n.subLinkId);
     write_opt_box_expr(buf, "testexpr", &n.testexpr, wl);
-    // WRITE_NODE_FIELD(operName) — a `List *` of String. After analysis operName
-    // is always NIL; the repo trims it from the post-analysis SubLink. C still
-    // writes `:operName <>`.
-    buf.push_str(" :operName <>");
+    // WRITE_NODE_FIELD(operName) — a `List *` of String, the operator name for an
+    // ALL/ANY/ROWCOMPARE sublink (e.g. `("=")`). It survives parse-analysis, so
+    // stored `_RETURN` rules embed it. C's `_outList`/`_outNode` writes `<>` for a
+    // NIL list (EXISTS/EXPR/ARRAY/CTE sublinks) and `("=")` otherwise; mirror that
+    // exactly so `_readSubLink` round-trips (empty Vec == NIL == `<>`).
+    if n.operName.is_empty() {
+        buf.push_str(" :operName <>");
+    } else {
+        write_string_list_field(buf, "operName", &n.operName, wl);
+    }
     // WRITE_NODE_FIELD(subselect) — the embedded sub-Query. The carrier is a
     // `PgBox<Query>` (Query is a serializable node); borrow it and emit the
     // framed `{QUERY ...}` form through the parse family's Query writer. A NULL

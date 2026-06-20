@@ -11,6 +11,9 @@ use types_core::primitive::Oid;
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_rangetypes::{RangeBound, RangeTypeP};
+// Canonical unified value (the Datum-unification keystone): a by-reference
+// `RangeType` array element rides the `Datum::ByRef` arm verbatim.
+use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
 
 // ---------------------------------------------------------------------------
 // Extension for the `backend-utils-adt-multirangetypes` unit.
@@ -32,6 +35,33 @@ seam_core::seam!(
         b1: &RangeBound,
         b2: &RangeBound,
     ) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    /// Lift a range *element* bound value word (`RangeBound.val`) into the rich
+    /// canonical [`DatumV`] (`ByVal` for a by-value subtype; `ByRef` over a copy of
+    /// the element's header-ful image for a by-reference subtype). The form a
+    /// subtype support function (e.g. the element `hash` proc) must receive on the
+    /// owned fmgr boundary's by-reference-capable `*_coll_datum` lane. The element
+    /// type metadata comes off `typcache->rngelemtype`. `Err` carries OOM copying
+    /// a by-reference image.
+    pub fn range_elem_word_to_canon<'mcx>(
+        mcx: Mcx<'mcx>,
+        typcache: &TypeCacheEntry,
+        word: Datum,
+    ) -> PgResult<DatumV<'mcx>>
+);
+
+seam_core::seam!(
+    /// `DatumGetInt32(FunctionCall2Coll(&typcache->rng_cmp_proc_finfo,
+    /// typcache->rng_collation, v1, v2))` (rangetypes.c): compare two range
+    /// *element* bound values (`RangeBound.val` words) with the subtype's `cmp`
+    /// support function, returning the sign of `v1 <=> v2`. The element words may
+    /// be by-reference (e.g. `numeric` pointers into a multirange image); this
+    /// threads them onto the proper fmgr lane (canonical `Datum`), unlike a bare
+    /// `function_call2_coll` over the scalar words. `Err` carries the support
+    /// function's `ereport(ERROR)`s.
+    pub fn range_cmp_elem_values(typcache: &TypeCacheEntry, v1: Datum, v2: Datum) -> PgResult<i32>
 );
 
 seam_core::seam!(
@@ -82,6 +112,22 @@ seam_core::seam!(
     pub fn datum_get_range_type_p<'mcx>(
         mcx: Mcx<'mcx>,
         d: Datum,
+    ) -> PgResult<RangeTypeP<'mcx>>
+);
+
+seam_core::seam!(
+    /// `DatumGetRangeTypeP(d)` (rangetypes.h) for a value-carrying canonical
+    /// [`DatumV`] whose on-disk `RangeType` varlena image rides the
+    /// `Datum::ByRef` arm (header included). Unlike [`datum_get_range_type_p`],
+    /// which interprets the `Datum` word as a bare pointer, this reads the
+    /// element image bytes directly -- the form needed for a by-reference array
+    /// element (e.g. a `pg_statistic` bounds-histogram entry) extracted by
+    /// `get_attstatsslot_value_datums`, whose bare-word surrogate would be a
+    /// non-dereferenceable in-buffer offset. Detoasts only a compressed/external
+    /// image, copying into `mcx`. `Err` carries detoast `ereport(ERROR)`s and OOM.
+    pub fn datum_get_range_type_p_value<'mcx>(
+        mcx: Mcx<'mcx>,
+        value: &DatumV<'mcx>,
     ) -> PgResult<RangeTypeP<'mcx>>
 );
 
@@ -285,17 +331,20 @@ seam_core::seam!(
 // ---------------------------------------------------------------------------
 
 seam_core::seam!(
-    /// `range_in(cstring, rngtypoid, typmod)` (rangetypes.c) invoked via
-    /// `InputFunctionCallSafe`: parse one range literal into a serialized
+    /// `range_in(cstring, rngtypoid, typmod, escontext)` (rangetypes.c) invoked
+    /// via `InputFunctionCallSafe`: parse one range literal into a serialized
     /// `RangeType`, allocated in `mcx`. A soft (`escontext`) error yields
-    /// `Ok(None)` (the C `InputFunctionCallSafe` returning `false`); a hard
-    /// `ereport(ERROR)` is carried on `Err`. `rngtypoid` is the cached
-    /// `typioparam` (the range type OID).
+    /// `Ok(None)` (the C `InputFunctionCallSafe` returning `false`, with the
+    /// error saved into `escontext`); a hard `ereport(ERROR)` is carried on
+    /// `Err`. `rngtypoid` is the cached `typioparam` (the range type OID).
+    /// `escontext` is C's `fcinfo->context`: `Some` makes recoverable parse /
+    /// element-input errors soft (returning `Ok(None)`), `None` makes them hard.
     pub fn range_in<'mcx>(
         mcx: Mcx<'mcx>,
         input: &str,
         rngtypoid: Oid,
         typmod: i32,
+        escontext: Option<&mut types_error::SoftErrorContext>,
     ) -> PgResult<Option<RangeTypeP<'mcx>>>
 );
 

@@ -160,14 +160,27 @@ struct BmrRead {
 impl BmrRead {
     /// Resolve directly off `&Relation` (`rd_locator` / `rd_backend` /
     /// `rd_rel->relpersistence`).
-    fn new(rel: &Relation) -> Self {
-        Self {
+    ///
+    /// `BMR_REL(rel)` in C runs `RelationGetSmgr(rel)`, which lazily `smgropen`s
+    /// the relation and caches the handle on `reln->rd_smgr` before any smgr op.
+    /// This port's smgr surface is keyed by `RelFileLocatorBackend` (no handle is
+    /// threaded), so the SMgrRelation cache entry must already exist in this
+    /// backend's thread-local smgr cache before `smgrreadv`/`smgrnblocks` runs —
+    /// otherwise the md layer panics ("md operation on an unopened
+    /// SMgrRelation"). The single-block `ReadBuffer_common` path opened it
+    /// explicitly, but the multi-block read_stream path (`StartReadBuffers` ->
+    /// `WaitReadBuffers` -> `smgrreadv`) reached the md layer with no entry on a
+    /// cold scan. Doing the `smgropen` here (idempotent) makes every `BMR_REL`
+    /// consumer faithful to `RelationGetSmgr`.
+    fn new(rel: &Relation) -> PgResult<Self> {
+        smgr::smgropen(rel.rd_locator, rel.rd_backend)?;
+        Ok(Self {
             rlocator: RelFileLocatorBackend {
                 locator: rel.rd_locator,
                 backend: rel.rd_backend,
             },
             relpersistence: rel.rd_rel.relpersistence,
-        }
+        })
     }
 }
 
@@ -246,7 +259,7 @@ impl BufferManager {
         // would be likely to get wrong data since we have no visibility into the
         // owning session's local buffers. (RELATION_IS_OTHER_TEMP: a temp
         // relation whose owning backend is not us.)
-        let bmr = BmrRead::new(rel);
+        let bmr = BmrRead::new(rel)?;
         if bmr.relpersistence == RELPERSISTENCE_TEMP
             && bmr.rlocator.backend != backend_storage_lmgr_proc_seams::my_proc_number::call()
         {
@@ -255,12 +268,9 @@ impl BufferManager {
             ));
         }
 
-        // `ReadBuffer_common(reln, RelationGetSmgr(reln), ...)` — the C inline
-        // `RelationGetSmgr(reln)` lazily `smgropen`s the relation and caches it
-        // on `reln->rd_smgr` before the smgr op. `smgropen`/`cache_open` is
-        // idempotent, so call it here to guarantee the SMgrRelation cache entry
-        // exists prior to the `smgrreadv`/`smgrnblocks` inside read_buffer_common.
-        smgr::smgropen(rel.rd_locator, rel.rd_backend)?;
+        // `BmrRead::new` (the `BMR_REL(rel)`/`RelationGetSmgr` analog) has already
+        // `smgropen`ed the relation, so the SMgrRelation cache entry exists prior
+        // to the `smgrreadv`/`smgrnblocks` inside read_buffer_common.
 
         // Read the buffer, and update pgstat counters to reflect a cache hit or
         // miss (done inside ReadBuffer_common / PinBufferForBlock).
@@ -436,7 +446,7 @@ impl BufferManager {
     ) -> PgResult<PrefetchBufferResult> {
         debug_assert_ne!(block_num, InvalidBlockNumber);
 
-        let bmr = BmrRead::new(rel);
+        let bmr = BmrRead::new(rel)?;
         if bmr.relpersistence == RELPERSISTENCE_TEMP {
             // RelationUsesLocalBuffers(reln): a temp relation's pages live in the
             // backend-local pool. see comments in ReadBufferExtended: a temp
@@ -804,7 +814,7 @@ impl BufferManager {
         flags: u32,
         has_strategy: bool,
     ) -> PgResult<(ReadOp, bool)> {
-        let bmr = BmrRead::new(rel);
+        let bmr = BmrRead::new(rel)?;
         let mut operation = ReadBuffersOperation {
             rlocator: bmr.rlocator,
             persistence: bmr.relpersistence,
@@ -840,7 +850,7 @@ impl BufferManager {
         flags: u32,
         has_strategy: bool,
     ) -> PgResult<(ReadOp, bool)> {
-        let bmr = BmrRead::new(rel);
+        let bmr = BmrRead::new(rel)?;
         let mut operation = ReadBuffersOperation {
             rlocator: bmr.rlocator,
             persistence: bmr.relpersistence,
@@ -1103,18 +1113,26 @@ impl BufferManager {
                 // Track the time spent waiting for the IO to complete. As tracking
                 // a wait even if we don't actually need to wait is not cheap, we
                 // first check if the IO is already complete.
-                if operation.io_status == PGAIO_RS_UNKNOWN
-                    && !sb::wref_check_done::call(operation.io_wref)?
-                {
-                    // pgaio_wref_wait(&operation->io_wref): block until done;
+                if operation.io_status == PGAIO_RS_UNKNOWN {
+                    // pgaio_wref_wait(&operation->io_wref): block until done and
                     // refresh the issuer-owned io_return slot with the result.
+                    //
+                    // C only takes the wait-time instrumentation branch when the
+                    // IO is not yet complete (`!pgaio_wref_check_done`), because
+                    // there the completion has already written the result through
+                    // the issuer's `&operation->io_return` pointer. In the
+                    // value-typed engine the completed result is published into a
+                    // backend-local slot that this seam reads back, so we must
+                    // fetch it here whether or not the IO already finished
+                    // (`pgaio_wref_wait` on an already-complete IO returns
+                    // immediately). The `wref_check_done` probe is retained only
+                    // to gate the (deferred) wait-time accounting.
+                    let _already_done = sb::wref_check_done::call(operation.io_wref)?;
                     let (result, status) = sb::wait_read_buffers::call(operation.io_wref)?;
                     operation.io_result = result;
                     operation.io_status = status;
                     // pgstat_count_io_op_time(... wait-time ...): cnt 0, bytes 0,
                     // deferred (instrumentation only).
-                } else {
-                    debug_assert!(sb::wref_check_done::call(operation.io_wref)?);
                 }
 
                 // We now are sure the IO completed. Check the results (reports on

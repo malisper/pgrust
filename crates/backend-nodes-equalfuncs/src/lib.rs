@@ -1321,6 +1321,21 @@ fn equal_multi_assign_ref(
         && a.ncolumns == b.ncolumns
 }
 
+/// `_equalIndexElem` (equalfuncs.funcs.c).
+fn equal_index_elem(
+    a: &types_nodes::ddlnodes::IndexElem<'_>,
+    b: &types_nodes::ddlnodes::IndexElem<'_>,
+) -> bool {
+    equalstr(a.name.as_deref(), b.name.as_deref())
+        && equal_opt_node(a.expr.as_ref(), b.expr.as_ref())
+        && equalstr(a.indexcolname.as_deref(), b.indexcolname.as_deref())
+        && equal_node_list(&a.collation, &b.collation)
+        && equal_node_list(&a.opclass, &b.opclass)
+        && equal_node_list(&a.opclassopts, &b.opclassopts)
+        && a.ordering == b.ordering
+        && a.nulls_ordering == b.nulls_ordering
+}
+
 /// `_equalSortBy` (equalfuncs.funcs.c).
 fn equal_sort_by(
     a: &types_nodes::rawnodes::SortBy<'_>,
@@ -1477,6 +1492,9 @@ pub fn equal_node(a: &Node<'_>, b: &Node<'_>) -> bool {
         }
         (ntag::T_MultiAssignRef, ntag::T_MultiAssignRef) => {
             equal_multi_assign_ref(a.expect_multiassignref(), b.expect_multiassignref())
+        }
+        (ntag::T_IndexElem, ntag::T_IndexElem) => {
+            equal_index_elem(a.expect_indexelem(), b.expect_indexelem())
         }
         (ntag::T_SortBy, ntag::T_SortBy) => equal_sort_by(a.expect_sortby(), b.expect_sortby()),
         (ntag::T_WindowDef, ntag::T_WindowDef) => {

@@ -249,10 +249,23 @@ fn ok<T>(r: types_error::PgResult<T>) -> T {
 
 /// `jsonb_in(cstring) -> jsonb` (oid 3806).
 fn fc_jsonb_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    // C: `jsonb_in` forwards `fcinfo->context` (the soft `ErrorSaveContext`) to
+    // `json_errsave_error`. Copy the cstring to an owned buffer first so the
+    // immutable `fcinfo` borrow is released before taking the `&mut` escontext
+    // borrow.
+    let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let m = scratch_mcx();
-    let image = ok(crate::jsonb_in(m.mcx(), s.as_bytes()));
-    ret_jsonb(fcinfo, image.as_slice().to_vec())
+    let escontext = fcinfo.escontext_mut();
+    // Copy out of the scratch arena before it drops (the result borrows `m`).
+    let image = ok(crate::jsonb_in(m.mcx(), &s, escontext)).map(|img| img.as_slice().to_vec());
+    match image {
+        Some(b) => ret_jsonb(fcinfo, b),
+        // Soft parse failure (`ereturn(escontext, (Datum) 0, ...)`): SQL NULL.
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
 }
 
 /// `jsonb_recv(internal) -> jsonb` (oid 3805): a 1-byte version then JSON text.
@@ -462,6 +475,214 @@ fn fc_jsonb_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 }
 
 // ---------------------------------------------------------------------------
+// VARIADIC-"any" constructors (jsonb.c): jsonb_build_object / jsonb_build_array.
+//
+// C entry point:
+//     nargs = extract_variadic_args(fcinfo, 0, true, &args, &types, &nulls);
+//     if (nargs < 0) PG_RETURN_NULL();
+//     PG_RETURN_DATUM(jsonb_build_*_worker(nargs, args, nulls, types, ...));
+// `extract_variadic_args(fcinfo, variadic_start=0, convert_unknown=true)`
+// (funcapi.c) is reproduced by [`extract_variadic_args`].
+// ---------------------------------------------------------------------------
+
+/// `UNKNOWNOID` / `TEXTOID` (pg_type.dat): the unknown→text coercion of
+/// `extract_variadic_args(..., convert_unknown=true)`.
+const UNKNOWNOID: types_core::Oid = 705;
+const TEXTOID: types_core::Oid = 25;
+
+/// The extracted variadic argument vectors (`Datum *args`, `Oid *types`,
+/// `bool *nulls`), or `None` for the C `nargs < 0` `PG_RETURN_NULL()` case
+/// (`VARIADIC NULL`). The `Datum`s are canonical `types_tuple::Datum`s living in
+/// the supplied scratch `mcx`.
+struct VariadicArgs<'mcx> {
+    args: alloc::vec::Vec<ValDatum<'mcx>>,
+    types: alloc::vec::Vec<types_core::Oid>,
+    nulls: alloc::vec::Vec<bool>,
+}
+
+/// `extract_variadic_args(fcinfo, variadic_start, convert_unknown=true, ...)`
+/// (funcapi.c). `None` is the C `return -1` (`VARIADIC NULL`).
+fn extract_variadic_args<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+    variadic_start: usize,
+) -> Option<VariadicArgs<'mcx>> {
+    let variadic = fmgr_core::get_fn_expr_variadic(fcinfo.flinfo.as_deref());
+
+    if variadic {
+        // Assert(PG_NARGS() == variadic_start + 1);
+        // if (PG_ARGISNULL(variadic_start)) return -1;
+        if fcinfo.arg(variadic_start).map(|d| d.isnull).unwrap_or(true) {
+            return None;
+        }
+        // array_in = PG_GETARG_ARRAYTYPE_P(variadic_start); element_type =
+        // ARR_ELEMTYPE(array_in); deconstruct_array(...) — all element types
+        // are element_type.
+        let array_image = ok(arg_value(mcx, fcinfo, variadic_start));
+        let (element_type, elems): (types_core::Oid, alloc::vec::Vec<(ValDatum<'mcx>, bool)>) = ok(
+            backend_utils_adt_jsonb_seams::extract_variadic_array::call(mcx, &array_image),
+        );
+        let n = elems.len();
+        let mut args = alloc::vec::Vec::with_capacity(n);
+        let mut nulls = alloc::vec::Vec::with_capacity(n);
+        let mut types = alloc::vec::Vec::with_capacity(n);
+        for (d, isnull) in elems {
+            args.push(d);
+            nulls.push(isnull);
+            types.push(element_type);
+        }
+        Some(VariadicArgs { args, types, nulls })
+    } else {
+        // nargs = PG_NARGS() - variadic_start;
+        let nargs = fcinfo.nargs().saturating_sub(variadic_start);
+        let mut args = alloc::vec::Vec::with_capacity(nargs);
+        let mut nulls = alloc::vec::Vec::with_capacity(nargs);
+        let mut types = alloc::vec::Vec::with_capacity(nargs);
+
+        for i in 0..nargs {
+            let idx = i + variadic_start;
+            let is_null = fcinfo.arg(idx).map(|d| d.isnull).unwrap_or(false);
+            let mut typ = fn_expr_argtype(fcinfo, idx as i32);
+
+            // Turn an `unknown`-type constant (a cstring on the by-ref lane)
+            // into text — the only `unknown` arg the jsonb builders can see is
+            // such a literal.
+            let value: ValDatum<'mcx> = if typ == UNKNOWNOID {
+                if is_null {
+                    typ = TEXTOID;
+                    ValDatum::null()
+                } else if let Some(s) = fcinfo.ref_arg(idx).and_then(|p| p.as_cstring()) {
+                    typ = TEXTOID;
+                    // args_res[i] = CStringGetTextDatum(PG_GETARG_POINTER(i));
+                    ok(backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, s))
+                } else {
+                    ValDatum::null()
+                }
+            } else if is_null {
+                ValDatum::null()
+            } else {
+                // No conversion needed, just take the datum as given.
+                ok(arg_value(mcx, fcinfo, idx))
+            };
+
+            // if (!OidIsValid(types_res[i]) || (convert_unknown && types_res[i]
+            // == UNKNOWNOID)) ereport(ERROR, ...).
+            if typ == 0 || typ == UNKNOWNOID {
+                raise(
+                    types_error::PgError::error(alloc::format!(
+                        "could not determine data type for argument {}",
+                        i + 1
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+                );
+            }
+
+            args.push(value);
+            nulls.push(is_null);
+            types.push(typ);
+        }
+
+        Some(VariadicArgs { args, types, nulls })
+    }
+}
+
+/// `jsonb_build_object(PG_FUNCTION_ARGS)` (jsonb.c) — oid 3273.
+fn fc_jsonb_build_object(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let mcx = m.mcx();
+    let extracted = extract_variadic_args(mcx, fcinfo, 0);
+    let image: Option<Vec<u8>> = match &extracted {
+        None => None,
+        Some(v) => ok(crate::jsonb_build_object(mcx, Some((&v.args, &v.types, &v.nulls))))
+            .map(|b| b.as_slice().to_vec()),
+    };
+    match image {
+        Some(buf) => ret_jsonb(fcinfo, buf),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
+/// `jsonb_build_object_noargs(PG_FUNCTION_ARGS)` (jsonb.c) — oid 3274.
+fn fc_jsonb_build_object_noargs(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let image = ok(crate::jsonb_build_object_noargs(m.mcx())).as_slice().to_vec();
+    ret_jsonb(fcinfo, image)
+}
+
+/// `jsonb_build_array(PG_FUNCTION_ARGS)` (jsonb.c) — oid 3271.
+fn fc_jsonb_build_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let mcx = m.mcx();
+    let extracted = extract_variadic_args(mcx, fcinfo, 0);
+    let image: Option<Vec<u8>> = match &extracted {
+        None => None,
+        Some(v) => ok(crate::jsonb_build_array(mcx, Some((&v.args, &v.types, &v.nulls))))
+            .map(|b| b.as_slice().to_vec()),
+    };
+    match image {
+        Some(buf) => ret_jsonb(fcinfo, buf),
+        None => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
+}
+
+/// `jsonb_build_array_noargs(PG_FUNCTION_ARGS)` (jsonb.c) — oid 3272.
+fn fc_jsonb_build_array_noargs(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let m = scratch_mcx();
+    let image = ok(crate::jsonb_build_array_noargs(m.mcx())).as_slice().to_vec();
+    ret_jsonb(fcinfo, image)
+}
+
+// ---------------------------------------------------------------------------
+// text[]-deconstruction object constructors (jsonb.c):
+// jsonb_object(text[]) / jsonb_object(text[], text[]).
+//
+// C entry points call `deconstruct_array_builtin(in_array, TEXTOID, ...)` then
+// build {key:value} pairs from the flat text datums; `ARR_NDIM`/`ARR_DIMS`
+// drive the even-element / two-column / dimension shape checks. The array
+// deconstruction crosses through `deconstruct_text_array_with_dims` (owned by
+// `jsonfuncs`, which has `arrayfuncs`); the pair-building loop is the ported
+// `crate::jsonb_object` / `crate::jsonb_object_two_arg` core.
+// ---------------------------------------------------------------------------
+
+/// `jsonb_object(text[]) -> jsonb` (oid 3263). The single `text[]` arg arrives
+/// as its detoasted array varlena image on the by-ref lane.
+fn fc_jsonb_object(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let arr = arg_varlena_image(fcinfo, 0);
+    let (ndims, dims, in_datums) =
+        ok(backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::call(arr));
+    let m = scratch_mcx();
+    let image = ok(crate::jsonb_object(m.mcx(), ndims, &dims, &in_datums)).as_slice().to_vec();
+    ret_jsonb(fcinfo, image)
+}
+
+/// `jsonb_object(text[], text[]) -> jsonb` (oid 3264): keys array + values array.
+fn fc_jsonb_object_two_arg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let key_arr = arg_varlena_image(fcinfo, 0);
+    let (nkdims, _kdims, key_datums) =
+        ok(backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::call(key_arr));
+    let val_arr = arg_varlena_image(fcinfo, 1);
+    let (nvdims, _vdims, val_datums) =
+        ok(backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::call(val_arr));
+    let m = scratch_mcx();
+    let image = ok(crate::jsonb_object_two_arg(
+        m.mcx(),
+        nkdims,
+        nvdims,
+        &key_datums,
+        &val_datums,
+    ))
+    .as_slice()
+    .to_vec();
+    ret_jsonb(fcinfo, image)
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -522,6 +743,14 @@ pub fn register_jsonb_builtins() {
         builtin(3453, "jsonb_float4", 1, true, false, fc_jsonb_float4),
         builtin(2580, "jsonb_float8", 1, true, false, fc_jsonb_float8),
         builtin(3449, "jsonb_numeric", 1, true, false, fc_jsonb_numeric),
+        // VARIADIC-"any" constructors (jsonb.c): provariadic any, proisstrict f.
+        builtin(3271, "jsonb_build_array", 1, false, false, fc_jsonb_build_array),
+        builtin(3272, "jsonb_build_array_noargs", 0, false, false, fc_jsonb_build_array_noargs),
+        builtin(3273, "jsonb_build_object", 1, false, false, fc_jsonb_build_object),
+        builtin(3274, "jsonb_build_object_noargs", 0, false, false, fc_jsonb_build_object_noargs),
+        // text[]-deconstruction object constructors (jsonb.c): proisstrict t.
+        builtin(3263, "jsonb_object", 1, true, false, fc_jsonb_object),
+        builtin(3264, "jsonb_object_two_arg", 2, true, false, fc_jsonb_object_two_arg),
     ]);
 }
 

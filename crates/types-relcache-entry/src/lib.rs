@@ -222,6 +222,8 @@ impl OwnedTupleDesc {
                 attidentity: a.attidentity,
                 attgenerated: a.attgenerated,
                 attisdropped: a.attisdropped,
+                attislocal: a.attislocal,
+                attinhcount: a.attinhcount,
                 attcollation: a.attcollation,
                 ..types_tuple::heaptuple::FormData_pg_attribute::default()
             })
@@ -417,6 +419,15 @@ pub struct OwnedAttr {
     /// `'\0'`. Copied from the source descriptor by `RelationBuildLocalRelation`.
     pub attgenerated: i8,
     pub attisdropped: bool,
+    /// `bool attislocal` — this column is defined locally in the relation (as
+    /// opposed to being inherited). Copied from the source descriptor by
+    /// `RelationBuildLocalRelation`; read back by `AddNewAttributeTuples` /
+    /// `InsertPgAttributeTuples` when writing the column's `pg_attribute` row.
+    pub attislocal: bool,
+    /// `int16 attinhcount` — the number of direct ancestors this column has
+    /// (zero for a purely-local column). Copied from the source descriptor and
+    /// written into the column's `pg_attribute` row alongside `attislocal`.
+    pub attinhcount: i16,
     pub attcollation: Oid,
     /// `CompactAttribute.attnullability` (`access/tupdesc.h`): one of
     /// `ATTNULLABLE_UNRESTRICTED`/`_UNKNOWN`/`_VALID`/`_INVALID`. The not-null

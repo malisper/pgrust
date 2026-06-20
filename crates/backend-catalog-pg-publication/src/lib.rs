@@ -35,6 +35,8 @@
 
 #![allow(non_snake_case)]
 
+mod fmgr_builtins;
+
 use mcx::{Mcx, PgBox, PgString, PgVec};
 
 use types_catalog::catalog_dependency::{
@@ -97,7 +99,7 @@ use backend_utils_cache_syscache::{
 use types_cache::syscache::SysCacheKey;
 use types_datum::Datum as KeyDatum;
 use types_syscache::syscache_ids::{
-    PUBLICATIONNAMESPACEMAP, PUBLICATIONOID, PUBLICATIONRELMAP,
+    PUBLICATIONNAMESPACEMAP, PUBLICATIONOID, PUBLICATIONRELMAP, RELOID,
 };
 
 /* ==========================================================================
@@ -345,6 +347,46 @@ fn is_publishable_relation(rel: &Relation<'_>) -> PgResult<bool> {
         relnamespace: rel.rd_rel.relnamespace,
     };
     Ok(is_publishable_class(rel.rd_id, &row))
+}
+
+/// `pg_relation_is_publishable(PG_FUNCTION_ARGS)` (pg_publication.c:1453) — the
+/// SQL-callable wrapper. C:
+/// ```c
+/// Oid        relid = PG_GETARG_OID(0);
+/// HeapTuple  tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+/// bool       result;
+/// if (!HeapTupleIsValid(tuple))
+///     PG_RETURN_NULL();
+/// result = is_publishable_class(relid, (Form_pg_class) GETSTRUCT(tuple));
+/// ReleaseSysCache(tuple);
+/// PG_RETURN_BOOL(result);
+/// ```
+/// Returns `Ok(None)` for the C `PG_RETURN_NULL()` (relation gone from the
+/// catalog mid-call); the fmgr adapter maps that onto `fcinfo->isnull`.
+pub fn pg_relation_is_publishable<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<Option<bool>> {
+    let tuple = SearchSysCache1(mcx, RELOID, oid_cache_key(relid))?;
+    let Some(tup) = tuple else {
+        // !HeapTupleIsValid(tuple) -> PG_RETURN_NULL();
+        return Ok(None);
+    };
+
+    // (Form_pg_class) GETSTRUCT(tuple): only the fixed-width columns
+    // is_publishable_class reads (relkind, relpersistence).
+    let (relkind_v, _isnull) = SysCacheGetAttr(mcx, RELOID, &tup, Anum_pg_class_relkind)?;
+    let relkind = relkind_v.as_char() as u8;
+    let (relpersistence_v, _isnull) =
+        SysCacheGetAttr(mcx, RELOID, &tup, Anum_pg_class_relpersistence)?;
+    let relpersistence = relpersistence_v.as_char() as u8;
+
+    let row = PgClassRow {
+        oid: relid,
+        relkind,
+        relpersistence,
+        // Unused by is_publishable_class; filled for shape parity.
+        relispartition: false,
+        relnamespace: 0, // InvalidOid
+    };
+    Ok(Some(is_publishable_class(relid, &row)))
 }
 
 /// `pub_collist_validate(targetrel, columns)` (pg_publication.c:555).
@@ -1375,4 +1417,8 @@ pub fn init_seams() {
     s::publication_add_relation::set(publication_add_relation);
     s::publication_add_schema::set(publication_add_schema);
     s::build_publication_table_rows::set(build_publication_table_rows);
+
+    // Register the SQL-callable `pg_publication.c` builtins (fmgr by-OID
+    // dispatch). Used by psql `\d`/`\d+`: `pg_relation_is_publishable(oid)`.
+    fmgr_builtins::register_pg_publication_builtins();
 }

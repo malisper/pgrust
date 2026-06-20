@@ -82,6 +82,17 @@ fn here(funcname: &'static str) -> ErrorLocation {
 /// Install this unit's inward seam.
 pub fn init_seams() {
     backend_commands_lockcmds_seams::lock_table_command::set(lock_table_command);
+    // The tcop/utility.c dispatch routes LOCK TABLE through its own outward
+    // seam; install the real arm here (the owner crate).
+    backend_tcop_utility_out_seams::lock_table_command::set(lock_table_command_arm);
+}
+
+/// `case T_LockStmt:` (utility.c) — LOCK TABLE.
+fn lock_table_command_arm(parsetree: &Node) -> PgResult<()> {
+    let Some(lockstmt) = parsetree.as_lockstmt() else {
+        panic!("lock_table_command: parse tree is not a LockStmt");
+    };
+    lock_table_command(lockstmt)
 }
 
 /* =========================================================================

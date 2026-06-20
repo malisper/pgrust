@@ -35,7 +35,7 @@ use types_catalog::pg_class::{
     Anum_pg_class_relowner, RelationRelationId,
 };
 use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
-use types_core::primitive::Oid;
+use types_core::primitive::{InvalidOid, Oid};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_GRANT_OPERATION,
     ERRCODE_WRONG_OBJECT_TYPE, ERRCODE_WARNING_PRIVILEGE_NOT_GRANTED,
@@ -54,19 +54,30 @@ use types_tuple::access::{
 
 use backend_utils_error::ereport;
 
-use backend_catalog_objectaddress::consts::NamespaceRelationId;
+use backend_catalog_objectaddress::consts::{
+    NamespaceRelationId, DefaultAclOidIndexId, Anum_pg_default_acl_defaclrole,
+    Anum_pg_default_acl_defaclnamespace, Anum_pg_default_acl_defaclobjtype,
+    Anum_pg_default_acl_defaclacl, DEFACLOBJ_RELATION, DEFACLOBJ_SEQUENCE, DEFACLOBJ_FUNCTION,
+    DEFACLOBJ_TYPE, DEFACLOBJ_NAMESPACE, DEFACLOBJ_LARGEOBJECT,
+};
+use backend_catalog_objectaddress::consts::Anum_pg_default_acl_oid;
 use backend_catalog_objectaddress::properties::{
     get_object_attnum_acl, get_object_attnum_name, get_object_attnum_owner, get_object_catcache_oid,
     get_object_class_descr, get_object_type,
 };
-use backend_utils_adt_acl::acl_ops::{aclmembers, aclupdate, ACL_MODECHG_ADD, ACL_MODECHG_DEL};
+use backend_utils_adt_acl::acl_ops::{
+    aclcopy, aclequal, aclitemsort, aclmembers, aclupdate, make_empty_acl, ACL_MODECHG_ADD,
+    ACL_MODECHG_DEL,
+};
 use backend_utils_adt_acl::acldefault::acldefault;
 use backend_utils_adt_acl::role_membership::{get_rolespec_oid, select_best_grantor};
 
 use backend_access_table_table::{table_close, table_open};
-use backend_access_common_heaptuple::heap_modify_tuple;
-use backend_catalog_indexing::keystone::CatalogTupleUpdate;
-use backend_utils_cache_syscache::{SearchSysCacheLocked1, SysCacheGetAttr, SysCacheGetAttrNotNull};
+use backend_access_common_heaptuple::{heap_form_tuple, heap_modify_tuple};
+use backend_catalog_indexing::keystone::{CatalogTupleInsert, CatalogTupleUpdate};
+use backend_utils_cache_syscache::{
+    SearchSysCache3, SearchSysCacheLocked1, SysCacheGetAttr, SysCacheGetAttrNotNull,
+};
 use types_cache::syscache::SysCacheKey;
 use types_datum::Datum as KeyDatum;
 use types_storage::lock::{AccessShareLock, RowExclusiveLock};
@@ -1139,6 +1150,542 @@ fn rolespec_oid(role: &DdlRoleSpec<'_>, mcx: Mcx<'_>) -> PgResult<Oid> {
     };
     let parse_role = ParseRoleSpec { roletype: role.roletype, rolename };
     get_rolespec_oid(&parse_role, false)
+}
+
+/* ===========================================================================
+ * ALTER DEFAULT PRIVILEGES (aclchk.c)
+ *
+ * `ExecAlterDefaultPrivilegesStmt` parses the statement (target roles, schemas,
+ * object type, embedded GrantStmt action), then for each (role, schema)
+ * combination calls `SetDefaultACL`, which writes/updates a `pg_default_acl`
+ * row holding the default ACL for objects of that type created by that role in
+ * that schema. The new ACL is computed via `merge_acl_with_grant` over the
+ * action's privileges/grantees and written with
+ * `CatalogTupleInsert`/`CatalogTupleUpdate` (or deleted when it collapses back
+ * to the hard-wired default) on `pg_default_acl`, recording the owner and
+ * (for the per-schema case) namespace dependencies.
+ * ========================================================================= */
+
+// `ACL_ALL_RIGHTS_FUNCTION` / `ACL_ALL_RIGHTS_TYPE` / `ACL_ALL_RIGHTS_LARGEOBJECT`
+// (`utils/acl.h`).
+const ACL_ALL_RIGHTS_FUNCTION: AclMode = types_acl::ACL_EXECUTE;
+const ACL_ALL_RIGHTS_TYPE: AclMode = ACL_USAGE;
+const ACL_ALL_RIGHTS_LARGEOBJECT: AclMode = ACL_SELECT | ACL_UPDATE;
+
+/// `InternalDefaultACL` (`aclchk.c`) — the internal form
+/// `ExecAlterDefaultPrivilegesStmt` builds before dispatching to
+/// `SetDefaultACL`.
+struct InternalDefaultACL<'mcx> {
+    roleid: Oid,
+    nspid: Oid,
+    is_grant: bool,
+    objtype: ObjectType,
+    all_privs: bool,
+    privileges: AclMode,
+    grantees: PgVec<'mcx, Oid>,
+    grant_option: bool,
+    behavior: DropBehavior,
+}
+
+/// `ExecAlterDefaultPrivilegesStmt(pstate, stmt)` (aclchk.c). The slow-path leg
+/// installed for `Node::AlterDefaultPrivilegesStmt`.
+pub fn exec_alter_default_privileges_stmt<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'_>) -> PgResult<()> {
+    let Some(stmt) = stmt.as_alterdefaultprivilegesstmt() else {
+        return Err(PgError::error(
+            "exec_alter_default_privileges_stmt: not an AlterDefaultPrivilegesStmt",
+        ));
+    };
+    let Some(action_node) = &stmt.action else {
+        return Err(PgError::error(
+            "ExecAlterDefaultPrivilegesStmt: missing GrantStmt action",
+        ));
+    };
+    let Some(action) = action_node.as_grantstmt() else {
+        return Err(PgError::error(
+            "ExecAlterDefaultPrivilegesStmt: action is not a GrantStmt",
+        ));
+    };
+
+    // Scan the options for the (optional) FOR ROLE and IN SCHEMA lists.
+    // Each DefElem's `arg` holds the `List *` (a Vec of String/RoleSpec nodes).
+    let mut have_nspnames = false;
+    let mut have_rolespecs = false;
+    let mut rolespecs: &[types_nodes::nodes::NodePtr<'_>] = &[];
+    let mut nspnames: &[types_nodes::nodes::NodePtr<'_>] = &[];
+
+    for opt in stmt.options.iter() {
+        let Some(defel) = (**opt).as_defelem() else {
+            return Err(PgError::error(
+                "ExecAlterDefaultPrivilegesStmt: option is not a DefElem",
+            ));
+        };
+        let defname = defel.defname.as_deref().unwrap_or("");
+        if defname == "schemas" {
+            if have_nspnames {
+                backend_catalog_aclchk_seams::error_conflicting_def_elem::call(
+                    defname.to_string(),
+                )?;
+            }
+            have_nspnames = true;
+            nspnames = defel_list(defel)?;
+        } else if defname == "roles" {
+            if have_rolespecs {
+                backend_catalog_aclchk_seams::error_conflicting_def_elem::call(
+                    defname.to_string(),
+                )?;
+            }
+            have_rolespecs = true;
+            rolespecs = defel_list(defel)?;
+        } else {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!("option \"{defname}\" not recognized"))
+                .into_error());
+        }
+    }
+
+    // Build the per-action InternalDefaultACL skeleton (roleid/nspid filled in
+    // per combination below).
+    let mut iacls = InternalDefaultACL {
+        roleid: InvalidOid,
+        nspid: InvalidOid,
+        is_grant: action.is_grant,
+        objtype: action.objtype,
+        all_privs: false,
+        privileges: ACL_NO_RIGHTS,
+        grantees: mcx::vec_with_capacity_in(mcx, action.grantees.len())?,
+        grant_option: action.grant_option,
+        behavior: action.behavior,
+    };
+
+    // Convert the grantee RoleSpec list to an Oid list (PUBLIC -> ACL_ID_PUBLIC).
+    for g in action.grantees.iter() {
+        let Some(rs) = (**g).as_rolespec() else {
+            return Err(PgError::error(
+                "ExecAlterDefaultPrivilegesStmt: grantee is not a RoleSpec",
+            ));
+        };
+        let uid = match rs.roletype {
+            RoleSpecType::Public => ACL_ID_PUBLIC,
+            _ => rolespec_oid(rs, mcx)?,
+        };
+        iacls.grantees.push(uid);
+    }
+
+    // Per-objtype all-privileges mask + error message.
+    let (all_privileges, errormsg): (AclMode, &str) = match action.objtype {
+        ObjectType::Table => (ACL_ALL_RIGHTS_RELATION, "invalid privilege type %s for relation"),
+        ObjectType::Sequence => (ACL_ALL_RIGHTS_SEQUENCE, "invalid privilege type %s for sequence"),
+        ObjectType::Function => (ACL_ALL_RIGHTS_FUNCTION, "invalid privilege type %s for function"),
+        ObjectType::Procedure => (ACL_ALL_RIGHTS_FUNCTION, "invalid privilege type %s for procedure"),
+        ObjectType::Routine => (ACL_ALL_RIGHTS_FUNCTION, "invalid privilege type %s for routine"),
+        ObjectType::Type => (ACL_ALL_RIGHTS_TYPE, "invalid privilege type %s for type"),
+        OBJECT_SCHEMA => (ACL_ALL_RIGHTS_SCHEMA, "invalid privilege type %s for schema"),
+        ObjectType::Largeobject => {
+            (ACL_ALL_RIGHTS_LARGEOBJECT, "invalid privilege type %s for large object")
+        }
+        other => {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!("unrecognized GrantStmt.objtype: {other:?}"))
+                .into_error())
+        }
+    };
+
+    // Convert the privilege list into an AclMode bitmask.
+    if action.privileges.is_empty() {
+        iacls.all_privs = true;
+        iacls.privileges = ACL_NO_RIGHTS;
+    } else {
+        iacls.all_privs = false;
+        iacls.privileges = ACL_NO_RIGHTS;
+        for p in action.privileges.iter() {
+            let Some(privnode) = (**p).as_accesspriv() else {
+                return Err(PgError::error(
+                    "ExecAlterDefaultPrivilegesStmt: privilege is not an AccessPriv",
+                ));
+            };
+            if !privnode.cols.is_empty() {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_GRANT_OPERATION)
+                    .errmsg("default privileges cannot be set for columns".to_string())
+                    .into_error());
+            }
+            let Some(name) = &privnode.priv_name else {
+                return Err(PgError::error("AccessPriv node must specify privilege"));
+            };
+            let priv_bit = string_to_privilege(name.as_str())?;
+            if priv_bit & !all_privileges != 0 {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_GRANT_OPERATION)
+                    .errmsg(errormsg.replace("%s", crate::privilege_to_string(priv_bit)?))
+                    .into_error());
+            }
+            iacls.privileges |= priv_bit;
+        }
+    }
+
+    if rolespecs.is_empty() {
+        // Set permissions for myself.
+        iacls.roleid = backend_utils_init_miscinit_seams::get_user_id::call();
+        set_default_acls_in_schemas(mcx, &mut iacls, nspnames)?;
+    } else {
+        // Set permissions for the named roles.
+        for rolecell in rolespecs.iter() {
+            let Some(rolespec) = (**rolecell).as_rolespec() else {
+                return Err(PgError::error(
+                    "ExecAlterDefaultPrivilegesStmt: role is not a RoleSpec",
+                ));
+            };
+            iacls.roleid = rolespec_oid(rolespec, mcx)?;
+
+            // We insist that calling user be a member of each target role. If
+            // he has that, he could become that role anyway via SET ROLE, so
+            // FOR ROLE is just a syntactic convenience and doesn't give any
+            // special privileges.
+            let user_id = backend_utils_init_miscinit_seams::get_user_id::call();
+            if !backend_utils_adt_acl::role_membership::has_privs_of_role(user_id, iacls.roleid)? {
+                return Err(ereport(ERROR)
+                    .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+                    .errmsg("permission denied to change default privileges".to_string())
+                    .into_error());
+            }
+
+            set_default_acls_in_schemas(mcx, &mut iacls, nspnames)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract the `List *` carried in a DefElem's `arg` as a node slice. The
+/// parser stores the FOR ROLE / IN SCHEMA lists as a `List` node in
+/// `defel->arg`.
+fn defel_list<'a>(
+    defel: &'a types_nodes::ddlnodes::DefElem<'_>,
+) -> PgResult<&'a [types_nodes::nodes::NodePtr<'a>]> {
+    match &defel.arg {
+        None => Ok(&[]),
+        Some(arg) => match (**arg).as_list() {
+            Some(items) => Ok(items),
+            None => Err(PgError::error(
+                "ExecAlterDefaultPrivilegesStmt: DefElem arg is not a List",
+            )),
+        },
+    }
+}
+
+/// `SetDefaultACLsInSchemas(iacls, nspnames)` (aclchk.c): set per-object-type
+/// default ACLs for a single role, either globally (`nspnames` empty -> nspid
+/// = InvalidOid) or for each named schema.
+fn set_default_acls_in_schemas<'mcx>(
+    mcx: Mcx<'mcx>,
+    iacls: &mut InternalDefaultACL<'mcx>,
+    nspnames: &[types_nodes::nodes::NodePtr<'_>],
+) -> PgResult<()> {
+    if nspnames.is_empty() {
+        // Set the database-wide permissions.
+        iacls.nspid = InvalidOid;
+        set_default_acl(mcx, iacls)?;
+    } else {
+        // Set per-schema permissions.
+        for nspcell in nspnames.iter() {
+            let Some(s) = (**nspcell).as_string() else {
+                return Err(PgError::error(
+                    "SetDefaultACLsInSchemas: schema name is not a String node",
+                ));
+            };
+            iacls.nspid = backend_catalog_namespace_seams::get_namespace_oid::call(
+                s.sval.as_str(),
+                false,
+            )?;
+            set_default_acl(mcx, iacls)?;
+        }
+    }
+    Ok(())
+}
+
+/// `SetDefaultACL(iacls)` (aclchk.c): create, update or remove a
+/// `pg_default_acl` entry holding the default ACL described by `iacls`.
+fn set_default_acl<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'mcx>) -> PgResult<()> {
+    use types_catalog::catalog::DEFAULT_ACL_RELATION_ID;
+
+    const DEFACLROLENSPOBJ: i32 = 22;
+    let acl_attnum = Anum_pg_default_acl_defaclacl as i32;
+
+    let mut this_privileges = iacls.privileges;
+
+    let rel = table_open(mcx, DEFAULT_ACL_RELATION_ID, RowExclusiveLock)?;
+
+    // Build the hard-wired default ACL the new ACL is compared against. For a
+    // per-schema entry the "default" is empty (no implicit privileges); for a
+    // global (per-role) entry it is the owner's hard-wired default.
+    let def_acl: &[AclItem] = if iacls.nspid == InvalidOid {
+        acldefault(mcx, iacls.objtype, iacls.roleid)?
+    } else {
+        make_empty_acl(mcx)?
+    };
+
+    // objtype char + adjust ALL-privileges expansion.
+    let objtype: i8 = match iacls.objtype {
+        ObjectType::Table => {
+            if iacls.all_privs && this_privileges == ACL_NO_RIGHTS {
+                this_privileges = ACL_ALL_RIGHTS_RELATION;
+            }
+            DEFACLOBJ_RELATION
+        }
+        ObjectType::Sequence => {
+            if iacls.all_privs && this_privileges == ACL_NO_RIGHTS {
+                this_privileges = ACL_ALL_RIGHTS_SEQUENCE;
+            }
+            DEFACLOBJ_SEQUENCE
+        }
+        ObjectType::Function | ObjectType::Procedure | ObjectType::Routine => {
+            if iacls.all_privs && this_privileges == ACL_NO_RIGHTS {
+                this_privileges = ACL_ALL_RIGHTS_FUNCTION;
+            }
+            DEFACLOBJ_FUNCTION
+        }
+        ObjectType::Type => {
+            if iacls.all_privs && this_privileges == ACL_NO_RIGHTS {
+                this_privileges = ACL_ALL_RIGHTS_TYPE;
+            }
+            DEFACLOBJ_TYPE
+        }
+        OBJECT_SCHEMA => {
+            if iacls.nspid != InvalidOid {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_GRANT_OPERATION)
+                    .errmsg(
+                        "cannot use IN SCHEMA clause when using GRANT/REVOKE ON SCHEMAS"
+                            .to_string(),
+                    )
+                    .into_error());
+            }
+            if iacls.all_privs && this_privileges == ACL_NO_RIGHTS {
+                this_privileges = ACL_ALL_RIGHTS_SCHEMA;
+            }
+            DEFACLOBJ_NAMESPACE
+        }
+        ObjectType::Largeobject => {
+            if iacls.nspid != InvalidOid {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_GRANT_OPERATION)
+                    .errmsg(
+                        "cannot use IN SCHEMA clause when using GRANT/REVOKE ON LARGE OBJECTS"
+                            .to_string(),
+                    )
+                    .into_error());
+            }
+            if iacls.all_privs && this_privileges == ACL_NO_RIGHTS {
+                this_privileges = ACL_ALL_RIGHTS_LARGEOBJECT;
+            }
+            DEFACLOBJ_LARGEOBJECT
+        }
+        other => {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!("unrecognized object type: {other:?}"))
+                .into_error())
+        }
+    };
+
+    // Look up the existing entry, if any.
+    let existing = SearchSysCache3(
+        mcx,
+        DEFACLROLENSPOBJ,
+        SysCacheKey::Value(KeyDatum::from_oid(iacls.roleid)),
+        SysCacheKey::Value(KeyDatum::from_oid(iacls.nspid)),
+        SysCacheKey::Value(KeyDatum::from_char(objtype)),
+    )?;
+
+    // Determine old ACL + members.
+    let old_acl: &[AclItem];
+    let mut old_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let is_new;
+    let existing_oid;
+    match &existing {
+        Some(tuple) => {
+            is_new = false;
+            existing_oid = SysCacheGetAttrNotNull(
+                mcx,
+                DEFACLROLENSPOBJ,
+                tuple,
+                Anum_pg_default_acl_oid as i32,
+            )?
+            .as_oid();
+            let (acl_datum, acl_is_null) =
+                SysCacheGetAttr(mcx, DEFACLROLENSPOBJ, tuple, acl_attnum)?;
+            if acl_is_null {
+                // Existing row but NULL ACL — treat like a fresh default copy.
+                old_acl = aclcopy(mcx, def_acl)?;
+            } else {
+                let raw = match &acl_datum {
+                    Datum::ByRef(b) => &b[..],
+                    _ => {
+                        return Err(PgError::error(
+                            "SetDefaultACL: defaclacl column is not a varlena",
+                        ))
+                    }
+                };
+                let decoded = decode_acl(mcx, raw)?;
+                for m in aclmembers(mcx, decoded)?.iter() {
+                    old_members.push(*m);
+                }
+                old_acl = decoded;
+            }
+        }
+        None => {
+            is_new = true;
+            existing_oid = InvalidOid;
+            // No old entry — base on the hard-wired default (no old members).
+            old_acl = aclcopy(mcx, def_acl)?;
+        }
+    }
+
+    // Generate new ACL. Grantor and owner are both the target role.
+    let new_acl_ref = merge_acl_with_grant(
+        mcx,
+        old_acl,
+        iacls.is_grant,
+        iacls.grant_option,
+        iacls.behavior,
+        &iacls.grantees,
+        this_privileges,
+        iacls.roleid,
+        iacls.roleid,
+    )?;
+
+    // aclitemsort + aclequal both new_acl and def_acl (private copies so we can
+    // sort in place).
+    let new_acl: &mut [AclItem] = {
+        let mut buf = mcx::vec_with_capacity_in::<AclItem>(mcx, new_acl_ref.len())?;
+        for it in new_acl_ref.iter() {
+            buf.push(*it);
+        }
+        buf.leak()
+    };
+    let def_acl_sorted: &mut [AclItem] = {
+        let mut buf = mcx::vec_with_capacity_in::<AclItem>(mcx, def_acl.len())?;
+        for it in def_acl.iter() {
+            buf.push(*it);
+        }
+        buf.leak()
+    };
+    aclitemsort(new_acl);
+    aclitemsort(def_acl_sorted);
+
+    if aclequal(new_acl, def_acl_sorted) {
+        // Default permissions = nothing to store. Remove the entry if it exists.
+        if !is_new {
+            backend_catalog_dependency_seams::perform_deletion::call(
+                DEFAULT_ACL_RELATION_ID,
+                existing_oid,
+                0,
+                DropBehavior::Restrict,
+                0,
+            )?;
+        }
+    } else {
+        let natts = rel.rd_att.natts as usize;
+        let mut values: PgVec<Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut nulls: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut replaces: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        for _ in 0..natts {
+            values.push(Datum::ByVal(0));
+            nulls.push(false);
+            replaces.push(false);
+        }
+
+        let def_acl_oid: Oid;
+        if is_new {
+            def_acl_oid = backend_catalog_catalog::GetNewOidWithIndex(
+                &rel,
+                DefaultAclOidIndexId,
+                Anum_pg_default_acl_oid as types_core::AttrNumber,
+            )?;
+            values[(Anum_pg_default_acl_oid - 1) as usize] = Datum::from_oid(def_acl_oid);
+            values[(Anum_pg_default_acl_defaclrole - 1) as usize] = Datum::from_oid(iacls.roleid);
+            values[(Anum_pg_default_acl_defaclnamespace - 1) as usize] =
+                Datum::from_oid(iacls.nspid);
+            values[(Anum_pg_default_acl_defaclobjtype - 1) as usize] = Datum::from_char(objtype);
+            values[(Anum_pg_default_acl_defaclacl - 1) as usize] = acl_to_datum(mcx, new_acl)?;
+
+            let mut newtuple = heap_form_tuple(mcx, &rel.rd_att, &values, &nulls)
+                .map_err(|e| PgError::error(format!("heap_form_tuple failed: {e:?}")))?;
+            CatalogTupleInsert(mcx, &rel, &mut newtuple)?;
+        } else {
+            let tuple = existing.expect("non-new SetDefaultACL has an existing tuple");
+            def_acl_oid = existing_oid;
+            let aidx = (acl_attnum - 1) as usize;
+            replaces[aidx] = true;
+            values[aidx] = acl_to_datum(mcx, new_acl)?;
+
+            let mut newtuple =
+                heap_modify_tuple(mcx, &tuple, &rel.rd_att, &values, &nulls, &replaces)
+                    .map_err(|e| PgError::error(format!("heap_modify_tuple failed: {e:?}")))?;
+            let otid = tuple.tuple.t_self;
+            CatalogTupleUpdate(mcx, &rel, otid, &mut newtuple)?;
+        }
+
+        // Record dependencies (only for a freshly-created entry).
+        if is_new {
+            backend_catalog_pg_shdepend_seams::recordDependencyOnOwner::call(
+                DEFAULT_ACL_RELATION_ID,
+                def_acl_oid,
+                iacls.roleid,
+            )?;
+            if iacls.nspid != InvalidOid {
+                let myself = types_catalog::catalog_dependency::ObjectAddress {
+                    classId: DEFAULT_ACL_RELATION_ID,
+                    objectId: def_acl_oid,
+                    objectSubId: 0,
+                };
+                let referenced = types_catalog::catalog_dependency::ObjectAddress {
+                    classId: NamespaceRelationId,
+                    objectId: iacls.nspid,
+                    objectSubId: 0,
+                };
+                backend_catalog_pg_depend_seams::recordDependencyOn::call(
+                    mcx,
+                    &myself,
+                    &referenced,
+                    types_catalog::catalog_dependency::DEPENDENCY_AUTO,
+                )?;
+            }
+        }
+
+        // Update the shared dependency ACL info.
+        let mut new_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+        for m in aclmembers(mcx, new_acl)?.iter() {
+            new_members.push(*m);
+        }
+        backend_catalog_pg_shdepend_seams::updateAclDependencies::call(
+            mcx,
+            DEFAULT_ACL_RELATION_ID,
+            def_acl_oid,
+            0,
+            iacls.roleid,
+            old_members,
+            new_members,
+        )?;
+
+        // Post-create / post-alter object-access hooks (no-op in standalone).
+        if is_new {
+            backend_catalog_objectaccess_seams::invoke_object_post_create_hook::call(
+                DEFAULT_ACL_RELATION_ID,
+                def_acl_oid,
+                0,
+            )?;
+        } else {
+            backend_catalog_objectaccess_seams::invoke_object_post_alter_hook::call(
+                DEFAULT_ACL_RELATION_ID,
+                def_acl_oid,
+                0,
+            )?;
+        }
+    }
+
+    table_close(rel, RowExclusiveLock)?;
+    backend_access_transam_xact_seams::command_counter_increment::call()?;
+    Ok(())
 }
 
 /// `ExecuteGrantStmt(stmt)` (aclchk.c). The slow-path leg installed for

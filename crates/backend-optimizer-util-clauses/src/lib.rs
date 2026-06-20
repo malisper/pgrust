@@ -193,6 +193,31 @@ pub fn init_seams() {
             .expect("contain_volatile_functions")
     });
 
+    // relation_excluded_by_constraints (plancat.c) reaches
+    // `contain_mutable_functions((Node *) clause)` over a planner-arena handle;
+    // clauses.c owns the predicate, resolve off `root`.
+    backend_optimizer_util_plancat_ext_seams::contain_mutable_functions::set(|root, node| {
+        grounded::contain_mutable_functions(Some(root.node(node)))
+    });
+
+    // joinpath.c `paraminfo_get_equal_hashops` lateral-var leg: `IsA(node,
+    // PlaceHolderVar)` and `lookup_type_cache(exprType(node), TYPECACHE_HASH_PROC
+    // | TYPECACHE_EQ_OPR)` → `Some(eq_opr)` iff both the hash proc and eq operator
+    // are valid (else Memoize declines). clauses.c owns the planner-arena node →
+    // exprType bridge; the typcache lookup itself crosses to the typcache owner.
+    backend_optimizer_path_joinpath_seams::node_is_placeholdervar::set(|root, node| {
+        matches!(
+            root.node(node),
+            types_nodes::primnodes::Expr::PlaceHolderVar(_)
+        )
+    });
+    backend_optimizer_path_joinpath_seams::expr_hash_eq_operator::set(|root, node| {
+        let typid = backend_nodes_core::nodefuncs::expr_type(Some(root.node(node)))
+            .expect("expr_hash_eq_operator: exprType");
+        backend_utils_cache_typcache_seams::type_hash_eq_operator::call(typid)
+            .expect("expr_hash_eq_operator: lookup_type_cache")
+    });
+
     // get_eclass_for_sort_expr (equivclass.c) rejects an EC sort expression that
     // contains an aggregate or window function; clauses.c owns both predicates.
     // The grounded impls are fallible only on a catalog miss; a propagated error
@@ -225,7 +250,10 @@ pub fn init_seams() {
     // and strips PlaceHolderVars purely structurally). Run the fold in the
     // planner-run context the caller supplies.
     backend_optimizer_path_small_seams::estimate_expression_value::set(|run, _root, node| {
-        fold::estimate_expression_value(run.mcx(), node.clone())
+        // Deep-clone into the planner-run context via `clone_in` (NOT the
+        // derived `.clone()`): the qual may carry context-allocated children
+        // such as SubPlan/AlternativeSubPlan whose derived `Clone` panics.
+        fold::estimate_expression_value(run.mcx(), node.clone_in(run.mcx())?)
     });
     backend_optimizer_path_small_seams::is_pseudo_constant_clause_relids::set(|clause, relids| {
         // C: `if (bms_is_empty(relids) && !contain_volatile_functions(clause))

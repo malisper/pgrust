@@ -59,7 +59,6 @@ use types_error::{PgError, PgResult};
 use types_nodes::copy_query::Query;
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::{ntag, CmdType, Node};
-use types_nodes::nodelockrows::PlanRowMark;
 use types_nodes::execnodes::RowMarkType;
 use types_nodes::primnodes::Expr;
 use types_nodes::parsenodes::RangeTblEntry;
@@ -200,7 +199,21 @@ fn pg_plan_query_impl<'mcx>(
     query_string: &str,
     cursor_options: i32,
 ) -> PgResult<PlannedStmt<'mcx>> {
-    standard_planner(mcx, querytree, query_string, cursor_options)
+    standard_planner(mcx, querytree, query_string, cursor_options, None)
+}
+
+/// `planner(parse, query_string, cursorOptions, boundParams)` (planner.c:286)
+/// with the bound external-parameter values threaded in. Installed as the
+/// `pg_plan_query_params` seam (the tcop value path consumes it for cached /
+/// custom plans).
+fn pg_plan_query_params_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    querytree: &Query<'mcx>,
+    query_string: &str,
+    cursor_options: i32,
+    bound_params: types_nodes::params::ParamListInfo,
+) -> PgResult<PlannedStmt<'mcx>> {
+    standard_planner(mcx, querytree, query_string, cursor_options, bound_params)
 }
 
 /// `standard_planner(parse, query_string, cursorOptions, boundParams)`
@@ -210,10 +223,15 @@ fn standard_planner<'mcx>(
     parse: &Query<'mcx>,
     _query_string: &str,
     cursor_options: i32,
+    bound_params: types_nodes::params::ParamListInfo,
 ) -> PgResult<PlannedStmt<'mcx>> {
     // glob = makeNode(PlannerGlobal); + field init (C:322-345). All other
     // fields are the C zero-defaults via Default.
     let mut glob = PlannerGlobal::default();
+
+    // glob->boundParams = boundParams (planner.c:347) — the const-folder reads
+    // this through `root->glob->boundParams` to substitute PARAM_EXTERN values.
+    glob.bound_params = bound_params;
 
     // Assess parallel-mode feasibility (C:368-384).
     //
@@ -435,12 +453,28 @@ fn standard_planner<'mcx>(
     // without inventing GUC values.
     let jit_flags = PGJIT_NONE;
 
-    // rowMarks: glob->finalrowmarks holds PlanRowMarkId handles, but the owned
-    // PlannedStmt models rowMarks as `PgVec<Expr>` (a primnodes Expr list), which
-    // is the wrong carrier for a PlanRowMark. There is no faithful way to project
-    // the resolved PlanRowMark values into that field, so we set None (the empty
-    // case) with this note; finalrowmarks is empty on the simple SELECT path.
-    let row_marks: Option<mcx::PgVec<'mcx, Expr>> = None;
+    // rowMarks: glob->finalrowmarks holds PlanRowMarkId handles into the
+    // PlannerRun rowmark store (set_plan_references flat-copied each
+    // root->rowMarks PlanRowMark here, rti/prti already rtoffset-adjusted). The
+    // PlannedStmt carries the resolved owned PlanRowMark values (the scalar
+    // struct is Copy); InitPlan reads them to build es_rowmarks. On the simple
+    // SELECT path finalrowmarks is empty → None (the C NIL).
+    let row_marks: Option<mcx::PgVec<'mcx, types_nodes::nodelockrows::PlanRowMark>> = {
+        let final_ids: Vec<types_pathnodes::PlanRowMarkId> = root
+            .glob
+            .as_ref()
+            .map(|g| g.finalrowmarks.clone())
+            .unwrap_or_default();
+        if final_ids.is_empty() {
+            None
+        } else {
+            let mut out = mcx::vec_with_capacity_in(mcx, final_ids.len())?;
+            for id in &final_ids {
+                out.push(*run.resolve_rowmark(*id));
+            }
+            Some(out)
+        }
+    };
 
     // unprunableRelids = bms_difference(glob->allRelids, glob->prunableRelids)
     // (planner.c: standard_planner, after set_plan_references populated
@@ -730,16 +764,10 @@ fn subquery_planner_carried<'mcx>(
         }
     }
 
-    // transform_MERGE_to_join(parse) (C:722). No ported owner.
+    // transform_MERGE_to_join(parse) (C:722). For non-MERGE this is a no-op.
     {
-        let parse = run.resolve(root.parse);
-        if parse.commandType == CmdType::CMD_MERGE {
-            panic!(
-                "subquery_planner: transform_MERGE_to_join (parsenodes/analyze) \
-                 has no ported owner"
-            );
-        }
-        // For non-MERGE, transform_MERGE_to_join is a no-op, so nothing to do.
+        let parse = run.resolve_mut(root.parse);
+        backend_optimizer_prep_prepjointree::transform_MERGE_to_join(mcx, parse)?;
     }
 
     // replace_empty_jointree(parse) (C:728). If the Query's jointree is empty,
@@ -1082,12 +1110,68 @@ fn subquery_planner_carried<'mcx>(
             // exclRelTlist contains only Vars, so no preprocessing needed.
         }
 
-        // mergeActionList (C:965-978). MERGE-only; a SELECT has none.
-        if !run.resolve(root.parse).mergeActionList.is_empty() {
-            panic!(
-                "subquery_planner: mergeActionList expression preprocessing \
-                 (planner.c:965-978) is not wired over the owned Query model"
-            );
+        // mergeActionList (C:965-978). MERGE-only; a SELECT has none. For each
+        // MergeAction, preprocess its targetList (EXPRKIND_TARGET, per
+        // TargetEntry expr) and its qual (EXPRKIND_QUAL). In the owned parse
+        // tree the action lives as a `Node::MergeAction` whose `targetList` is a
+        // `Vec<Node::TargetEntry>` and whose `qual` is an `Option<Node::Expr>`.
+        {
+            let n_actions = run.resolve(root.parse).mergeActionList.len();
+            for ai in 0..n_actions {
+                // action->targetList: preprocess each TargetEntry expr.
+                let n_tle = {
+                    let action = run.resolve(root.parse).mergeActionList[ai]
+                        .as_mergeaction()
+                        .expect("mergeActionList entry is a MergeAction");
+                    action.targetList.len()
+                };
+                for ti in 0..n_tle {
+                    // Take the TargetEntry expr out of the action's node.
+                    let e = {
+                        let action = run.resolve_mut(root.parse).mergeActionList[ai]
+                            .as_mergeaction_mut()
+                            .unwrap();
+                        action.targetList[ti]
+                            .as_targetentry_mut()
+                            .and_then(|tle| tle.expr.take())
+                            .map(mcx::PgBox::into_inner)
+                    };
+                    let processed = preprocess_expression(
+                        mcx, &mut root, run, outer_query_ref, e, EXPRKIND_TARGET,
+                    )?;
+                    let processed = match processed {
+                        Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+                        None => None,
+                    };
+                    let action = run.resolve_mut(root.parse).mergeActionList[ai]
+                        .as_mergeaction_mut()
+                        .unwrap();
+                    if let Some(tle) = action.targetList[ti].as_targetentry_mut() {
+                        tle.expr = processed;
+                    }
+                }
+
+                // action->qual: preprocess the WHEN condition (EXPRKIND_QUAL).
+                let q = {
+                    let action = run.resolve_mut(root.parse).mergeActionList[ai]
+                        .as_mergeaction_mut()
+                        .unwrap();
+                    action
+                        .qual
+                        .take()
+                        .map(mcx::PgBox::into_inner)
+                        .and_then(|node| node.into_expr())
+                };
+                let processed =
+                    preprocess_expression(mcx, &mut root, run, outer_query_ref, q, EXPRKIND_QUAL)?;
+                let action = run.resolve_mut(root.parse).mergeActionList[ai]
+                    .as_mergeaction_mut()
+                    .unwrap();
+                action.qual = match processed {
+                    Some(pe) => Some(mcx::alloc_in(mcx, Node::Expr(pe))?),
+                    None => None,
+                };
+            }
         }
 
         // parse->mergeJoinCondition = preprocess_expression(..., EXPRKIND_QUAL)
@@ -1160,11 +1244,101 @@ fn subquery_planner_carried<'mcx>(
 
                 match rtekind {
                     RTEKind::RTE_RELATION => {
+                        // planner.c:993-998: rte->tablesample =
+                        //   preprocess_expression(root, (Node *) rte->tablesample,
+                        //                         EXPRKIND_TABLESAMPLE).
+                        // C casts the whole TableSampleClause* to a Node and folds it.
+                        // In the owned model the clause is a `Node::TableSampleClause`
+                        // node pointed at by `rte->tablesample`; the only expression
+                        // subtrees it carries are its `args` list and its optional
+                        // `repeatable` Expr. EXPRKIND_TABLESAMPLE runs
+                        // eval_const_expressions (+ SS_process_sublinks /
+                        // SS_replace_correlation_vars), all per-expression and
+                        // recursive, so preprocessing each `args` element and the
+                        // `repeatable` Expr individually is equivalent to folding the
+                        // whole clause node once.
                         if run.resolve(root.parse).rtable[i].tablesample.is_some() {
-                            panic!(
-                                "subquery_planner: TABLESAMPLE expression preprocessing \
-                                 (planner.c:993-998) is not wired over the owned RTE model"
-                            );
+                            // Pull the args + repeatable Exprs out of the clause node.
+                            let (args, repeatable): (Vec<Expr>, Option<Expr>) = {
+                                let parse = run.resolve(root.parse);
+                                let ts_node = parse.rtable[i]
+                                    .tablesample
+                                    .as_deref()
+                                    .expect("tablesample is_some");
+                                match ts_node {
+                                    Node::TableSampleClause(tsc) => {
+                                        let args: Vec<Expr> = match &tsc.args {
+                                            Some(list) => list.iter().cloned().collect(),
+                                            None => Vec::new(),
+                                        };
+                                        let repeatable =
+                                            tsc.repeatable.as_deref().cloned();
+                                        (args, repeatable)
+                                    }
+                                    _ => {
+                                        return Err(types_error::PgError::error(
+                                            "subquery_planner: RTE_RELATION tablesample \
+                                             is not a TableSampleClause node",
+                                        ))
+                                    }
+                                }
+                            };
+
+                            // Preprocess each args element.
+                            let mut new_args: mcx::PgVec<'mcx, Expr> =
+                                mcx::vec_with_capacity_in(mcx, args.len())?;
+                            for e in args.into_iter() {
+                                let pe = preprocess_expression(
+                                    mcx,
+                                    &mut root,
+                                    run,
+                                    outer_query_ref,
+                                    Some(e),
+                                    EXPRKIND_TABLESAMPLE,
+                                )?;
+                                let pe = pe.ok_or_else(|| {
+                                    types_error::PgError::error(
+                                        "subquery_planner: TABLESAMPLE arg folded to NULL",
+                                    )
+                                })?;
+                                new_args.push(pe);
+                            }
+
+                            // Preprocess the optional repeatable Expr.
+                            let new_repeatable: Option<alloc::boxed::Box<Expr>> =
+                                match repeatable {
+                                    Some(e) => {
+                                        let pe = preprocess_expression(
+                                            mcx,
+                                            &mut root,
+                                            run,
+                                            outer_query_ref,
+                                            Some(e),
+                                            EXPRKIND_TABLESAMPLE,
+                                        )?;
+                                        let pe = pe.ok_or_else(|| {
+                                            types_error::PgError::error(
+                                                "subquery_planner: TABLESAMPLE repeatable \
+                                                 folded to NULL",
+                                            )
+                                        })?;
+                                        Some(alloc::boxed::Box::new(pe))
+                                    }
+                                    None => None,
+                                };
+
+                            // Write the preprocessed expressions back into the clause
+                            // node in place.
+                            if let Node::TableSampleClause(tsc) = &mut **run
+                                .resolve_mut(root.parse)
+                                .rtable[i]
+                                .tablesample
+                                .as_mut()
+                                .expect("tablesample is_some")
+                            {
+                                tsc.args = Some(new_args);
+                                tsc.repeatable = new_repeatable;
+                            }
                         }
                     }
                     RTEKind::RTE_SUBQUERY => {
@@ -1204,7 +1378,12 @@ fn subquery_planner_carried<'mcx>(
                                 let mut v = mcx::vec_with_capacity_in(mcx, cols.len())?;
                                 for c in cols.iter() {
                                     match c.as_expr() {
-                                        Some(e) => v.push(e.clone()),
+                                        // Deep-copy through `clone_in` (copyObject shape),
+                                        // not a plain `.clone()`: a VALUES column may be a
+                                        // `SubLink` (e.g. `(select 2)`) whose embedded owned
+                                        // `Query` is context-allocated and panics under the
+                                        // derived `Clone` (mirrors Aggref/SubPlan).
+                                        Some(e) => v.push(e.clone_in(mcx)?),
                                         None => {
                                             return Err(types_error::PgError::error(
                                                 "subquery_planner: VALUES column is not an Expr",
@@ -1780,9 +1959,22 @@ pub fn preprocess_expression<'mcx>(
         };
     }
 
-    // eval_const_expressions (C:1300-1301).
+    // eval_const_expressions (C:1300-1301). C: `eval_const_expressions(root,
+    // expr)` reads `root->glob->boundParams` for the PARAM_EXTERN const-fold;
+    // the custom-plan path (BuildCachedPlan with bound params) supplies them,
+    // the simple-Query / generic-plan path leaves glob->boundParams NULL. The
+    // owned `ParamListInfo` is a shared `Rc` value; clone it (cheap) out of glob
+    // so the borrow handed to the fold is independent of the `&mut root` borrow.
     if kind != EXPRKIND_RTFUNC {
-        expr = backend_optimizer_util_clauses::eval_const_expressions(mcx, expr)?;
+        let bound_params = root
+            .glob
+            .as_ref()
+            .and_then(|g| g.bound_params.clone());
+        expr = backend_optimizer_util_clauses::fold::eval_const_expressions_with_params(
+            mcx,
+            expr,
+            bound_params,
+        )?;
     }
 
     // canonicalize_qual (C:1306-1308).
@@ -2152,14 +2344,17 @@ fn grouping_planner<'mcx>(
             // wflists = find_window_functions((Node *) processed_tlist,
             //   list_length(parse->windowClause)).
             let max_win_ref = run.resolve(root.parse).windowClause.len() as u32;
-            let tlist_exprs: Vec<Expr> = root
+            // Borrow each tlist expr (`find_window_functions_in_exprs` only
+            // inspects them); a derived `.clone()` would panic on a
+            // context-allocated child (Aggref/SubLink/SubPlan).
+            let tlist_refs: Vec<&Expr> = root
                 .processed_tlist
                 .iter()
                 .map(|&id| root.targetentry(id).expr)
-                .map(|eid| root.node(eid).clone())
+                .map(|eid| root.node(eid))
                 .collect();
-            let tlist_refs: Vec<&Expr> = tlist_exprs.iter().collect();
             let lists = backend_optimizer_util_clauses::find_window_functions_in_exprs(
+                mcx,
                 &tlist_refs,
                 max_win_ref,
             )?;
@@ -2327,7 +2522,7 @@ fn grouping_planner<'mcx>(
     // (C:1697-1705); otherwise sort_input_target.
     let _ = has_window;
     let (mut grouping_target, grouping_target_parallel_safe) = if !active_windows.is_empty() {
-        let gt = make_window_input_target(root, &final_target, &active_windows)?;
+        let gt = make_window_input_target(mcx, root, &final_target, &active_windows)?;
         let safe = is_target_exprs_parallel_safe(root, &gt.exprs);
         (gt, safe)
     } else {
@@ -2643,31 +2838,19 @@ fn build_final_paths<'mcx>(
             parse.commandType,
         )
     };
-    if has_rowmarks {
-        // FOR [KEY] UPDATE/SHARE wraps each path in a LockRows node
-        // (create_lockrows_path over root->rowMarks, planner.c:1905-1910). The
-        // upstream analyze/rowmark planning IS ported now (transformLockingClause,
-        // isLockedRefname, preprocess_rowmarks, the preptlist rowmark junk Vars),
-        // so the parse->rowMarks / root->rowMarks (Vec<PlanRowMarkId>) are built
-        // and reach here. The LockRows PATH cannot yet be created faithfully: the
-        // ported create_lockrows_path / LockRowsPath / the LockRows plan node all
-        // carry rowMarks as Vec<NodeId> (the node_arena Expr id-space), the WRONG
-        // id-space for a PlanRowMark (which lives in the PlannerRun rowmark
-        // registry as PlanRowMarkId). Routing root->rowMarks through it would
-        // require either a forbidden cross-id-space token reuse or the cross-crate
-        // PlanRowMark-carrier widen (types-pathnodes LockRowsPath/LockRows.rowMarks
-        // -> Vec<PlanRowMarkId>, create_lockrows_path re-sign, createplan
-        // create_lockrows_plan port [currently seam-panics, createplan.c:1088], +
-        // the LockRows plan-node Node arm). Execution then bottoms out on the
-        // EvalPlanQual executor (ExecLockRows / EPQ re-eval). STOP here: this is
-        // the PlanRowMark-carrier + EPQ keystone, out of planner.c's lane.
-        panic!(
-            "grouping_planner: FOR [KEY] UPDATE/SHARE LockRows path needs the \
-             PlanRowMark-carrier widen (LockRowsPath/LockRows.rowMarks -> \
-             Vec<PlanRowMarkId>) + create_lockrows_plan (createplan.c, unported) + \
-             the EvalPlanQual executor (planner.c:1905)"
-        );
-    }
+    // FOR [KEY] UPDATE/SHARE wraps each surviving path in a LockRows node
+    // (create_lockrows_path over root->rowMarks, planner.c:1905-1910). The
+    // PlanRowMark list lives in the PlannerRun rowmark store keyed by
+    // PlanRowMarkId (the same id-space create_lockrows_path / LockRowsPath /
+    // LockRows now carry); the EvalPlanQual re-eval Param is a fresh special
+    // exec param assigned once for the whole LockRows wrapper, as in C.
+    let lockrows_epq_param: i32 = if has_rowmarks {
+        backend_optimizer_util_paramassign_seams::assign_special_exec_param::call(root)?
+    } else {
+        0
+    };
+    let lockrows_rowmarks: Vec<types_pathnodes::PlanRowMarkId> =
+        if has_rowmarks { root.rowMarks.clone() } else { Vec::new() };
     // If there is a LIMIT/OFFSET clause, each surviving path gets a LimitPath
     // wrapper (create_limit_path, planner.c:1915-1922). limit_needed() is the
     // exact gate (a constant-NULL/zero OFFSET or constant-NULL LIMIT adds no
@@ -2691,11 +2874,23 @@ fn build_final_paths<'mcx>(
         None
     };
 
-    // For each surviving path of current_rel, optionally wrap it in a Limit node,
-    // then (for INSERT/UPDATE/DELETE/MERGE) a ModifyTable node, then shove it into
-    // final_rel (C:1891-2131). LockRows wrappers are guarded out above.
+    // For each surviving path of current_rel, optionally wrap it in a LockRows
+    // node (FOR UPDATE/SHARE), then a Limit node, then (for
+    // INSERT/UPDATE/DELETE/MERGE) a ModifyTable node, then shove it into
+    // final_rel (C:1891-2131).
     let surviving: Vec<PathId> = root.rel(current_rel).pathlist.clone();
     for path in surviving {
+        let path = if has_rowmarks {
+            backend_optimizer_util_pathnode::create::create_lockrows_path(
+                root,
+                final_rel,
+                path,
+                lockrows_rowmarks.clone(),
+                lockrows_epq_param,
+            )?
+        } else {
+            path
+        };
         let path = if limit_needed_flag {
             backend_optimizer_util_pathnode::create::create_limit_path(
                 root,
@@ -2976,7 +3171,10 @@ fn make_group_input_target<'mcx>(
         // recurses into the agg's args rather than pushing the agg itself.
         let scratch = mcx::MemoryContext::new("make_group_input_target pull_var_clause");
         let node = backend_nodes_core::node_walker::node_expr_wrapper(root.node(nid), scratch.mcx());
-        let vars = pull_var_clause(&node, flags);
+        // Deep-copy collected nodes into the planner mcx (re-interned via
+        // `alloc_node` below); a plain `.clone()` panics on a context-allocated
+        // child (Aggref TargetEntry args).
+        let vars = pull_var_clause(mcx, &node, flags)?;
         for v in vars {
             non_group_var_ids.push(root.alloc_node(v));
         }
@@ -3347,6 +3545,7 @@ fn name_active_windows(
 /// columns (window PARTITION/ORDER BY + GROUP BY items) are kept as-is; the rest
 /// are flattened into their component Vars/Aggrefs.
 fn make_window_input_target<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     final_target: &PathTarget,
     active_windows: &[types_pathnodes::NodeId],
@@ -3402,7 +3601,10 @@ fn make_window_input_target<'mcx>(
     for &nid in &flattenable_cols {
         let scratch = mcx::MemoryContext::new("make_window_input_target pull_var_clause");
         let node = backend_nodes_core::node_walker::node_expr_wrapper(root.node(nid), scratch.mcx());
-        let vars = pull_var_clause(&node, flags);
+        // Deep-copy collected nodes into the planner mcx (re-interned via
+        // `alloc_node` below); a plain `.clone()` panics on a context-allocated
+        // child (Aggref TargetEntry args, e.g. `SUM(SUM(x)) OVER ...`).
+        let vars = pull_var_clause(mcx, &node, flags)?;
         for v in vars {
             flattenable_var_ids.push(root.alloc_node(v));
         }
@@ -3663,14 +3865,33 @@ fn create_one_window_path<'mcx>(
 /// cost contribution: `add_function_cost(winfnoid)` startup + per-row, plus
 /// `cost_qual_eval_node(wfunc->args)` + `cost_qual_eval_node(wfunc->aggfilter)`
 /// per-row contributions.
-fn windowfunc_cost_impl(
+fn windowfunc_cost_impl<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     wfunc: types_pathnodes::NodeId,
 ) -> (types_core::primitive::Cost, types_core::primitive::Cost) {
     let Some(w) = root.node(wfunc).as_windowfunc() else {
         panic!("windowfunc_cost: node is not a WindowFunc");
     };
-    let (winfnoid, args, aggfilter) = (w.winfnoid, w.args.clone(), w.aggfilter.clone());
+    // Deep-copy the args/aggfilter into the planner mcx (re-interned via
+    // `alloc_node` below). A plain `.clone()` panics on a context-allocated
+    // child: the WindowFunc args may carry an `Aggref` (e.g. the inner agg of
+    // `SUM(SUM(x)) OVER ...`).
+    let winfnoid = w.winfnoid;
+    let mut args: Vec<Expr> = Vec::with_capacity(w.args.len());
+    for a in w.args.iter() {
+        match a.clone_in(run.mcx()) {
+            Ok(c) => args.push(c),
+            Err(_) => return (0.0, 0.0),
+        }
+    }
+    let aggfilter: Option<Expr> = match &w.aggfilter {
+        Some(f) => match f.clone_in(run.mcx()) {
+            Ok(c) => Some(c),
+            Err(_) => return (0.0, 0.0),
+        },
+        None => None,
+    };
 
     // add_function_cost(root, winfnoid, (Node *) wfunc): startup + per_tuple.
     let (mut startup, mut per_tuple) =
@@ -3688,7 +3909,7 @@ fn windowfunc_cost_impl(
     }
     // cost_qual_eval_node(&argcosts, (Node *) wfunc->aggfilter, root).
     if let Some(f) = aggfilter {
-        let id = root.alloc_node(*f);
+        let id = root.alloc_node(f);
         let qc = backend_optimizer_path_costsize::cost_qual_eval_node(root, id);
         startup += qc.startup;
         per_tuple += qc.per_tuple;
@@ -3788,9 +4009,11 @@ fn get_windowclause_startup_tuples<'mcx>(
         // DEFAULT_INEQ_SEL = 1/3 (selfuncs.h).
         const INT2OID: types_core::primitive::Oid = 21;
         const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;
-        // try and figure out the value specified in the endOffset.
-        let end_off_node = end_off_id.map(|id| root.node(id).clone());
-        let end_offset_value = if let Some(c) = end_off_node.as_ref().and_then(|e| e.as_const()) {
+        // try and figure out the value specified in the endOffset. Borrow the
+        // node (only inspected here); a derived `.clone()` would panic on a
+        // context-allocated child.
+        let end_off_node: Option<&Expr> = end_off_id.map(|id| root.node(id));
+        let end_offset_value = if let Some(c) = end_off_node.and_then(|e| e.as_const()) {
             if c.constisnull {
                 // NULLs aren't allowed; pretend just the first row is needed.
                 1.0
@@ -6121,8 +6344,10 @@ fn make_sort_input_target<'mcx>(
     // pulled Var/Aggref/WindowFunc/PHV into the arena to obtain its handle.
     let mut postponable_vars: Vec<types_pathnodes::NodeId> = Vec::new();
     for &col in &postponable_cols {
-        let node = Node::mk_expr(run.mcx(), root.node(col).clone())?;
-        for v in backend_optimizer_util_vars::pull_var_clause(&node, pvc_flags) {
+        // Deep-copy via `clone_in` (C copyObject); a derived `Expr::clone`
+        // panics on a context-allocated child (Aggref/SubLink/SubPlan).
+        let node = Node::mk_expr(run.mcx(), root.node(col).clone_in(run.mcx())?)?;
+        for v in backend_optimizer_util_vars::pull_var_clause(run.mcx(), &node, pvc_flags)? {
             postponable_vars.push(root.alloc_node(v));
         }
     }
@@ -7713,6 +7938,7 @@ pub fn init_seams() {
     backend_catalog_index_seams::plan_create_index_workers::set(plan_create_index_workers);
 
     backend_optimizer_plan_planner_seams::pg_plan_query::set(pg_plan_query_impl);
+    backend_optimizer_plan_planner_seams::pg_plan_query_params::set(pg_plan_query_params_impl);
     backend_optimizer_plan_planner_seams::plan_cluster_use_sort::set(plan_cluster_use_sort_impl);
     backend_optimizer_plan_planner_seams::select_rowmark_type::set(|rte, strength| {
         select_rowmark_type(rte, strength)

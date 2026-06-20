@@ -64,6 +64,7 @@ use types_xlog_records::multixact::MultiXactStatus;
 // htup_details.h infomask helpers + lock-mask vocabulary already live in the
 // W1 visibility crate; reuse them rather than re-deriving.
 use backend_access_heap_heapam_visibility::htup::HEAP_XMAX_IS_LOCKED_ONLY;
+use backend_access_heap_heapam_visibility::htup::HeapTupleHeaderGetRawXmax;
 use types_tuple::heaptuple::HEAP_XMAX_EXCL_LOCK;
 use backend_access_heap_heapam_visibility::{HeapTupleHeaderGetUpdateXid, HeapTupleSetHintBits};
 
@@ -451,9 +452,21 @@ fn HeapTupleHeaderGetRawCommandId(hdr: &HeapTupleHeaderData) -> CommandId {
 /// F5 FREEZE family's page-bound entry points (declared on the vacuumlazy
 /// owner's `-seams` crate, installed here by the heap AM).
 pub fn init_seams() {
-    // `HeapTupleGetUpdateXid(htup)` reduces to the visibility crate's
-    // `HeapTupleHeaderGetUpdateXid` (header-only multixact resolution).
-    heapam_seam::heap_tuple_get_update_xid::set(|tuple| HeapTupleHeaderGetUpdateXid(tuple));
+    // `HeapTupleGetUpdateXid(htup)` is C's
+    //   MultiXactIdGetUpdateXid(HeapTupleHeaderGetRawXmax(tup), tup->t_infomask)
+    // — it resolves a *multixact* xmax to the member update xid. It must NOT
+    // route back through `HeapTupleHeaderGetUpdateXid`: that function's
+    // live-multixact branch itself calls `HeapTupleGetUpdateXid` (via this very
+    // seam), so wiring the seam to it forms an unbounded self-recursion that
+    // stack-overflows the first time a non-lock-only multixact xmax is seen
+    // (e.g. combocid's `SELECT ... FOR UPDATE` over a row already locked +
+    // updated-then-rolled-back in a subxact). Resolve via the multixact owner.
+    heapam_seam::heap_tuple_get_update_xid::set(|tuple| {
+        multixact_seam::multi_xact_id_get_update_xid::call(
+            HeapTupleHeaderGetRawXmax(tuple),
+            tuple.t_infomask,
+        )
+    });
 
     // `heap_page_tuple_header(buf, offnum)` — deform the on-page
     // `HeapTupleHeader` at `(buf, offnum)`, the analog of C's

@@ -1060,6 +1060,9 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::collation_qualified_name::set(
         projections::collation_qualified_name,
     );
+    backend_utils_cache_syscache_seams::pg_constraint_clone_info::set(
+        projections::pg_constraint_clone_info,
+    );
     backend_utils_cache_syscache_seams::search_pg_class_full_form::set(
         projections::search_pg_class_full_form,
     );
@@ -1108,6 +1111,9 @@ pub fn init_seams() {
     );
     backend_utils_cache_syscache_seams::search_pg_constraintdef_info::set(
         projections::search_pg_constraintdef_info,
+    );
+    backend_utils_cache_syscache_seams::search_pg_functiondef_info::set(
+        projections::search_pg_functiondef_info,
     );
     backend_utils_cache_syscache_seams::fetch_relchecks::set(projections::fetch_relchecks);
     backend_utils_cache_syscache_seams::search_syscache_copy_pg_class_tuple::set(

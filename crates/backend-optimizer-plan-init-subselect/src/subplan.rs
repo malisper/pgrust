@@ -720,8 +720,11 @@ fn test_opexpr_is_hashable(testexpr: &OpExpr, param_ids: &[i32]) -> PgResult<boo
     if contain_exec_param(Some(&testexpr.args[0]), param_ids)? {
         return Ok(false);
     }
-    let scratch = mcx::MemoryContext::new("test_opexpr_is_hashable");
-    let arg1_node = Node::mk_expr(scratch.mcx(), testexpr.args[1].clone())?;
+    // Deep-copy the operand for the read-only walker via `Expr::clone_in` into a
+    // transient scratch context (a derived `Expr::clone` panics on a
+    // context-allocated child).
+    let cx = mcx::MemoryContext::new("test_opexpr_is_hashable scratch");
+    let arg1_node = Node::mk_expr(cx.mcx(), testexpr.args[1].clone_in(cx.mcx())?)?;
     if backend_optimizer_util_vars::var::contain_var_clause(&arg1_node) {
         return Ok(false);
     }
@@ -1049,8 +1052,15 @@ fn contain_dml_walker(node: &Node<'_>) -> bool {
             }
             false
         };
-        let scratch = mcx::MemoryContext::new("contain_dml_walker");
-        let e_node = match Node::mk_expr(scratch.mcx(), e.clone()) {
+        // Deep-copy via `Expr::clone_in` into a transient scratch context for
+        // the read-only walker (a derived `Expr::clone` panics on a
+        // context-allocated child such as a SubLink).
+        let cx = mcx::MemoryContext::new("contain_dml_walker scratch");
+        let owned = match e.clone_in(cx.mcx()) {
+            Ok(o) => o,
+            Err(_) => return true,
+        };
+        let e_node = match Node::mk_expr(cx.mcx(), owned) {
             Ok(n) => n,
             Err(_) => return true,
         };
@@ -1132,9 +1142,14 @@ fn contain_outer_selfref_walker(node: &Node<'_>, depth: &mut u32) -> bool {
             }
             false
         };
-        let scratch = mcx::MemoryContext::new("contain_outer_selfref_walker");
-        if let Ok(e_node) = Node::mk_expr(scratch.mcx(), e.clone()) {
-            backend_nodes_core::node_walker::expression_tree_walker(&e_node, &mut visit);
+        // Deep-copy via `Expr::clone_in` into a transient scratch context for
+        // the read-only walker (a derived `Expr::clone` panics on a
+        // context-allocated child).
+        let cx = mcx::MemoryContext::new("contain_outer_selfref_walker scratch");
+        if let Ok(owned) = e.clone_in(cx.mcx()) {
+            if let Ok(e_node) = Node::mk_expr(cx.mcx(), owned) {
+                backend_nodes_core::node_walker::expression_tree_walker(&e_node, &mut visit);
+            }
         }
         return result;
     }
@@ -1390,19 +1405,28 @@ fn datum_get_int64(d: &types_tuple::backend_access_common_heaptuple::Datum<'_>) 
 /// `contain_vars_of_level((Node *) list, levelsup)` over a slice of `Expr`
 /// conjuncts: true if any element references a Var of the given level.
 fn list_contain_vars_of_level(list: &[Expr], levelsup: i32) -> bool {
-    let scratch = mcx::MemoryContext::new("list_contain_vars_of_level");
-    list.iter().any(|e| match Node::mk_expr(scratch.mcx(), e.clone()) {
-        Ok(n) => backend_optimizer_util_vars::var::contain_vars_of_level(&n, levelsup),
-        Err(_) => false,
+    // The read-only walker needs an owned `Node`; deep-copy each conjunct via
+    // `Expr::clone_in` into a transient scratch context (a derived `Expr::clone`
+    // panics on a context-allocated child such as a SubLink).
+    let cx = mcx::MemoryContext::new("list_contain_vars_of_level scratch");
+    list.iter().any(|e| {
+        let Ok(owned) = e.clone_in(cx.mcx()) else { return false };
+        match Node::mk_expr(cx.mcx(), owned) {
+            Ok(n) => backend_optimizer_util_vars::var::contain_vars_of_level(&n, levelsup),
+            Err(_) => false,
+        }
     })
 }
 
 /// `contain_aggs_of_level((Node *) list, levelsup)` over a slice of `Expr`.
 fn list_contain_aggs_of_level(list: &[Expr], levelsup: i32) -> bool {
-    let scratch = mcx::MemoryContext::new("list_contain_aggs_of_level");
-    list.iter().any(|e| match Node::mk_expr(scratch.mcx(), e.clone()) {
-        Ok(n) => backend_rewrite_core::walkers::contain_aggs_of_level(&n, levelsup),
-        Err(_) => false,
+    let cx = mcx::MemoryContext::new("list_contain_aggs_of_level scratch");
+    list.iter().any(|e| {
+        let Ok(owned) = e.clone_in(cx.mcx()) else { return false };
+        match Node::mk_expr(cx.mcx(), owned) {
+            Ok(n) => backend_rewrite_core::walkers::contain_aggs_of_level(&n, levelsup),
+            Err(_) => false,
+        }
     })
 }
 
@@ -1470,10 +1494,13 @@ fn convert_EXISTS_to_ANY<'mcx>(
         let mut handled = false;
         if let Expr::OpExpr(op) = &clause {
             if hash_ok_operator(op)? {
-                let leftarg = op.args[0].clone();
-                let rightarg = op.args[1].clone();
+                // Deep-copy the operands via `Expr::clone_in` (they are moved
+                // into leftargs/rightargs and new nodes; a derived `Expr::clone`
+                // panics on a context-allocated child).
+                let leftarg = op.args[0].clone_in(mcx)?;
+                let rightarg = op.args[1].clone_in(mcx)?;
                 if backend_optimizer_util_vars::var::contain_vars_of_level(
-                    &Node::mk_expr(mcx, leftarg.clone())?,
+                    &Node::mk_expr(mcx, leftarg.clone_in(mcx)?)?,
                     1,
                 ) {
                     leftargs.push(leftarg);
@@ -1482,14 +1509,19 @@ fn convert_EXISTS_to_ANY<'mcx>(
                     opcollations.push(op.inputcollid);
                     handled = true;
                 } else if backend_optimizer_util_vars::var::contain_vars_of_level(
-                    &Node::mk_expr(mcx, rightarg.clone())?,
+                    &Node::mk_expr(mcx, rightarg.clone_in(mcx)?)?,
                     1,
                 ) {
                     // Commute the clause to put the outer var on the left.
                     let comm = lsyscache::get_commutator::call(op.opno)?;
                     if comm != INVALID_OID {
-                        // build a commuted OpExpr and re-check hashability
-                        let mut commuted = op.clone();
+                        // build a commuted OpExpr and re-check hashability.
+                        // Deep-copy via `Expr::clone_in` (a derived `.clone()`
+                        // panics on a context-allocated child operand).
+                        let mut commuted = match clause.clone_in(mcx)? {
+                            Expr::OpExpr(o) => o,
+                            _ => unreachable!("clause matched Expr::OpExpr above"),
+                        };
                         commuted.opno = comm;
                         if hash_ok_operator(&commuted)? {
                             leftargs.push(rightarg);

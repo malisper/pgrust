@@ -89,3 +89,22 @@ seam_core::seam!(
         value: types_tuple::Datum<'mcx>,
     ) -> types_error::PgResult<i64>
 );
+
+// ---------------------------------------------------------------------------
+// Extension for the `backend-utils-adt-tsvector-typanalyze` unit
+// (`tsearch/ts_typanalyze.c`).
+//
+// `compute_tsvector_stats` accumulates `total_width += VARSIZE_ANY(value)`
+// (ts_typanalyze.c:226) over each sampled (raw, possibly toasted) tsvector
+// value. This crosses into the detoast owner for the `VARSIZE_ANY` decode; the
+// owning unit installs it from its `init_seams()`, until then a call panics
+// loudly.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `VARSIZE_ANY(PTR)` (varatt.h): the on-the-wire size in bytes of any
+    /// varlena form (short / external-pointer / 4-byte header), without
+    /// detoasting. `attr` is the verbatim varlena datum bytes (header
+    /// included). `Err` carries the malformed-vartag `ereport(ERROR)`.
+    pub fn pg_varsize_any(attr: &[u8]) -> types_error::PgResult<usize>
+);

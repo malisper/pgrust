@@ -1,9 +1,9 @@
 //! Unit tests for the array selectivity kernels.
 //!
-//! The fmgr `function_call2_coll` seam is a process-global slot, so the tests
-//! that install it run under a shared mutex and install a single canonical
+//! The fmgr `function_call2_coll_datum` seam is a process-global slot, so the
+//! tests that install it run under a shared mutex and install a single canonical
 //! implementation once for the whole test run (an int4-style comparator that
-//! orders Datum words as signed `i32`s).
+//! orders the by-reference-capable `DatumV` words as signed `i32`s).
 
 use super::*;
 use std::sync::{Mutex, MutexGuard, Once};
@@ -16,20 +16,20 @@ fn seam_lock() -> MutexGuard<'static, ()> {
     SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Install a canonical `function_call2_coll` once: a three-way comparison of
-/// the two Datum words read back as signed `i32` (the int4 `btint4cmp`), with
-/// the result returned as an `int32` Datum (C: `DatumGetInt32`).
+/// Install a canonical `function_call2_coll_datum` once: a three-way comparison
+/// of the two `DatumV` words read back as signed `i32` (the int4 `btint4cmp`),
+/// with the result returned as an `int32` `DatumV` (C: `DatumGetInt32`).
 fn install_seams() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        function_call2_coll::set(|_fn_oid, _coll, a, b| {
+        function_call2_coll_datum::set(|_mcx, _fn_oid, _coll, a, b| {
             use core::cmp::Ordering::*;
-            let r = match a.as_i32().cmp(&b.as_i32()) {
+            let r = match (a.as_i32()).cmp(&b.as_i32()) {
                 Less => -1i32,
                 Equal => 0,
                 Greater => 1,
             };
-            Ok(Datum::from_i32(r))
+            Ok(DatumV::from_i32(r))
         });
     });
 }
@@ -163,9 +163,11 @@ fn overlap_selec_no_stats_contains_single_element() {
     // selec starts at 1.0 and is multiplied once.
     let _g = seam_lock();
     install_seams();
+    let ctx = MemoryContext::new("overlap_selec_no_stats_contains_single_element");
     let typentry = sample_typentry();
-    let array_data = [Datum::from_i32(42)];
+    let array_data = [DatumV::from_i32(42)];
     let selec = mcelem_array_contain_overlap_selec(
+        ctx.mcx(),
         &[],
         0,
         None,
@@ -185,9 +187,11 @@ fn overlap_selec_overlap_starts_at_zero() {
     // e = DEFAULT_CONTAIN_SEL.
     let _g = seam_lock();
     install_seams();
+    let ctx = MemoryContext::new("overlap_selec_overlap_starts_at_zero");
     let typentry = sample_typentry();
-    let array_data = [Datum::from_i32(7)];
+    let array_data = [DatumV::from_i32(7)];
     let selec = mcelem_array_contain_overlap_selec(
+        ctx.mcx(),
         &[],
         0,
         None,
@@ -209,7 +213,7 @@ fn contained_selec_punts_without_numbers() {
     install_seams();
     let ctx = MemoryContext::new("contained_selec_punts_without_numbers");
     let typentry = sample_typentry();
-    let array_data = [Datum::from_i32(1)];
+    let array_data = [DatumV::from_i32(1)];
     let selec = mcelem_array_contained_selec(
         ctx.mcx(),
         &[],
@@ -238,7 +242,7 @@ fn contained_selec_full_path_in_range() {
     let typentry = sample_typentry();
     let numbers = [0.01f32, 0.5, 0.02]; // minfreq, maxfreq, nullelem_freq
     let hist = [0.0f32, 1.0, 1.0]; // count histogram; hist[nhist-1] = avg_count
-    let array_data = [Datum::from_i32(7)];
+    let array_data = [DatumV::from_i32(7)];
     let selec = mcelem_array_contained_selec(
         ctx.mcx(),
         &[], // mcelem

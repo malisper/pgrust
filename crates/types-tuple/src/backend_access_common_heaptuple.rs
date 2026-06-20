@@ -174,6 +174,15 @@ impl Datum<'_> {
     pub fn from_usize(value: usize) -> Self {
         Datum::ByVal(value)
     }
+
+    /// Build a pass-by-reference `Datum::ByRef` from a verbatim header-ful
+    /// varlena / fixed-by-ref byte image, copied into `mcx`. The inverse of
+    /// `as_varlena()`/`as_slice()`: a by-ref value that crossed a value lane as
+    /// an owned byte image (e.g. a PL/pgSQL `EvalParamValue.byref`) is rebuilt
+    /// into a live `Datum` rooted in the caller's context.
+    pub fn from_byref_bytes_in<'b>(mcx: Mcx<'b>, bytes: &[u8]) -> PgResult<Datum<'b>> {
+        Ok(Datum::ByRef(slice_in(mcx, bytes)?))
+    }
     /// C: `as_usize` — the raw machine word.
     #[track_caller]
     pub fn as_usize(&self) -> usize {

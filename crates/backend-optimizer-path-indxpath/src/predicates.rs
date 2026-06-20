@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox};
 use types_nodes::bitmapset::Bitmapset;
+use types_nodes::primnodes::Expr;
 use types_pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId};
 
 use backend_nodes_core::bitmapset::{bms_add_member, bms_is_subset, bms_union};
@@ -181,10 +182,12 @@ pub fn check_index_predicates<'mcx>(
         let mut kept: Vec<types_pathnodes::RinfoId> = Vec::new();
         for &ric in &baserestrictinfo {
             let clause_id = root.rinfo(ric).clause;
-            // predicate_implied_by() assumes first arg is immutable.
-            let clause = root.node(clause_id).clone();
+            // predicate_implied_by() assumes first arg is immutable. Borrow the
+            // clause for the read-only mutability test (a derived `.clone()`
+            // panics on an owned-subtree child).
+            let clause: &Expr = root.node(clause_id);
             let mutable =
-                backend_optimizer_util_clauses::contain_mutable_functions(Some(&clause))?;
+                backend_optimizer_util_clauses::contain_mutable_functions(Some(clause))?;
             if mutable
                 || !predicate_implied_by::call(root, &[clause_id], &indpred, false)
             {
@@ -201,7 +204,7 @@ pub fn check_index_predicates<'mcx>(
 /// (indxpath.c:4362) — is the index column constrained to a constant boolean
 /// value by the query's WHERE clauses?
 pub fn indexcol_is_bool_constant_for_query(
-    _mcx: Mcx<'_>,
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     index: &IndexOptInfo,
     indexcol: i32,
@@ -222,7 +225,10 @@ pub fn indexcol_is_bool_constant_for_query(
             continue;
         }
         // See if we can match the clause's expression to the index column.
-        if match_boolean_index_clause(root, rinfo, indexcol, index).is_some() {
+        if match_boolean_index_clause(mcx, root, rinfo, indexcol, index)
+            .expect("match_boolean_index_clause")
+            .is_some()
+        {
             return true;
         }
     }

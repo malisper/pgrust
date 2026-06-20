@@ -30,6 +30,10 @@ backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-sea
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 # check_stack_depth (postgres.c) guarding the targetlist-SRF recursion.
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+# By-OID fmgr dispatch fall-through for a USER (plpgsql/SQL) SETOF function:
+# `function_call_invoke_datum` resolves the OID and routes to fmgr_sql /
+# plpgsql_call_handler, threading the live materialize sink (types_fmgr::mat_srf).
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 
 # The generate_series(int4/int8) SRFs registered in the executor-frame table:
 # their value cores + the value-per-call funcapi machinery.
@@ -74,11 +78,16 @@ backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
 # (tsvector_unnest), and its int2[] / text[] (`"char"[]`) array constructors.
 backend-utils-adt-tsvector-core = { path = "../backend-utils-adt-tsvector-core" }
 backend-utils-adt-array-more-seams = { path = "../backend-utils-adt-array-more-seams" }
+backend-utils-adt-xid8funcs = { path = "../backend-utils-adt-xid8funcs" }
 
 # json_array_elements / json_array_elements_text / json_object_keys (OIDs
 # 3955/3969/3957): the json (text) SAX-callback collection cores (elements_worker
 # / json_object_keys_worker).
 backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
+
+# jsonb_path_query / _tz (OIDs 4006/1179): the set-returning jsonpath query value
+# cores (jsonb_path_query[_tz] -> Vec<jsonb image>), materialized one row per item.
+backend-utils-adt-jsonpath-exec = { path = "../backend-utils-adt-jsonpath-exec" }
 
 # unnest(anymultirange) (OID 1293): the member-range materializer
 # (multirange_unnest_images) over multirange_get_typcache + multirange_get_range.

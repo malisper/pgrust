@@ -106,6 +106,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `typenameTypeId(pstate, typeName)` (parse_type.c), over the owned-tree
+    /// `rawnodes::TypeName<'mcx>`. Unlike [`typename_type_id_raw`], this threads
+    /// the active `ParseState` so a "type does not exist" error carries the
+    /// source-text cursor position (`parser_errposition(pstate, typeName->location)`)
+    /// — what C's `typenameTypeId(pstate, tn)` produces. Used by `PrepareQuery`,
+    /// whose `pstate->p_sourcetext` is the PREPARE statement string.
+    pub fn typename_type_id_raw_pstate(
+        pstate: &types_cluster::ParseState<'_>,
+        type_name: &types_nodes::rawnodes::TypeName<'_>,
+    ) -> PgResult<Oid>
+);
+
+seam_core::seam!(
     /// `TypeNameListToString(typenames)` (parse_func.c): render a comma-
     /// separated list of raw-parser `TypeName` nodes (a function/aggregate
     /// argument-type list) for an error message, palloc'd in the caller's

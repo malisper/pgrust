@@ -107,11 +107,13 @@ fn raise(err: types_error::PgError) -> ! {
 // ---------------------------------------------------------------------------
 
 fn fc_boolin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
-    // C: boolin(in_str, fcinfo->context). fcinfo->context carries the soft
-    // ErrorSaveContext; at this boundary a hard parse is used (a soft context is
-    // not modeled on the fmgr frame), matching every other adt _in.
-    match crate::boolin(s, None) {
+    // C: boolin(in_str, fcinfo->context). Forward the soft ErrorSaveContext
+    // installed on the frame by InputFunctionCallSafe so a bad spelling
+    // `ereturn`s into the sink (returning the `false` placeholder) instead of
+    // throwing past `invoke?`. Copy the cstring first because `arg_cstring`
+    // borrows `fcinfo` immutably while `escontext_mut` needs it mutably.
+    let s = arg_cstring(fcinfo, 0).to_owned();
+    match crate::boolin(&s, fcinfo.escontext_mut()) {
         Ok(b) => ret_bool(b),
         Err(e) => raise(e),
     }

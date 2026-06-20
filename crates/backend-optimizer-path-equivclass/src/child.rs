@@ -6,6 +6,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use types_error::PgResult;
+use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     EcId, PlannerInfo, RelId, RELOPT_BASEREL, RELOPT_JOINREL, RELOPT_OTHER_JOINREL,
 };
@@ -13,7 +14,7 @@ use types_pathnodes::{
 use backend_optimizer_path_equivclass_ext_seams as ec_seam;
 use backend_optimizer_util_relnode_seams as bms;
 
-use crate::merge::{add_child_eq_member, em_expr};
+use crate::merge::{add_child_eq_member, em_expr_owned, em_expr_ref};
 use crate::relevance::{live_ec_ids, BMS_MULTIPLE};
 
 const PVC_RECURSE_AGGREGATES: i32 = 0x0002;
@@ -28,8 +29,9 @@ const PVC_INCLUDE_PLACEHOLDERS: i32 = 0x0010;
 /// (equivclass.c:2833). `appinfo` is the single [`AppendRelInfo`] (carried by
 /// `RelId` of the child here; the translation is routed through the
 /// appendinfo.c seam).
-pub fn add_child_rel_equivalences(
+pub fn add_child_rel_equivalences<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     appinfo: RelId,
     parent_rel: RelId,
     child_rel: RelId,
@@ -73,7 +75,7 @@ pub fn add_child_rel_equivalences(
                 && !bms::relids_is_empty::call(&em_relids)
             {
                 /* generate the transformed child version */
-                let parent_expr = em_expr(root, cur_em);
+                let parent_expr = em_expr_owned(root, run, cur_em)?;
                 let child_expr = if parent_is_baserel {
                     ec_seam::adjust_appendrel_attrs::call(root, parent_expr, alloc::vec![appinfo])?
                 } else {
@@ -113,8 +115,9 @@ pub fn add_child_rel_equivalences(
 
 /// `add_child_join_rel_equivalences(root, nappinfos, appinfos, parent_joinrel,
 /// child_joinrel)` (equivclass.c:2940). `appinfos` carried as a `Vec<RelId>`.
-pub fn add_child_join_rel_equivalences(
+pub fn add_child_join_rel_equivalences<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     appinfos: Vec<RelId>,
     parent_joinrel: RelId,
     child_joinrel: RelId,
@@ -156,7 +159,7 @@ pub fn add_child_join_rel_equivalences(
                 continue;
             }
             if bms::relids_overlap::call(&em_relids, &top_parent_relids) {
-                let parent_expr = em_expr(root, cur_em);
+                let parent_expr = em_expr_owned(root, run, cur_em)?;
                 let child_expr = if parent_is_joinrel {
                     ec_seam::adjust_appendrel_attrs::call(root, parent_expr, appinfos.clone())?
                 } else {
@@ -283,9 +286,9 @@ pub fn rebuild_eclass_attr_needed(root: &mut PlannerInfo) -> PgResult<()> {
         if root.ec(ec).ec_members.len() > 1 && !root.ec(ec).ec_has_const {
             let members = root.ec(ec).ec_members.clone();
             for cur_em in members {
-                let emexpr = em_expr(root, cur_em);
+                let emexpr = em_expr_ref(root, cur_em);
                 let vars = ec_seam::pull_var_clause::call(
-                    &emexpr,
+                    emexpr,
                     PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS,
                 );
                 let ec_relids = root.ec(ec).ec_relids.clone();

@@ -69,7 +69,7 @@ use types_error::error::{
     ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
-use types_error::{PgError, PgResult};
+use types_error::{PgError, PgResult, SoftErrorContext};
 use types_json::{JsonParseErrorType, JsonTokenType, JsonTypeCategory};
 use types_tuple::heaptuple::{DATEOID, TIMESTAMPOID, TIMESTAMPTZOID};
 
@@ -137,12 +137,22 @@ where
 /// C: `json_in(PG_FUNCTION_ARGS)` (json.c:106).
 ///
 /// `json` is the input cstring's bytes; the internal representation is the same
-/// as text, so on success the validated bytes are returned unchanged. A
-/// swallowed soft error surfaces as `Ok(None)`; a hard error as `Err`.
-pub fn json_in<'mcx>(mcx: Mcx<'mcx>, json: &[u8]) -> PgResult<Option<PgVec<'mcx, u8>>> {
+/// as text, so on success the validated bytes are returned unchanged. C
+/// forwards `fcinfo->context` (the soft `ErrorSaveContext`) so a malformed
+/// input under `pg_input_is_valid` is soft-caught (`ereturn(escontext, NULL,
+/// ...)`); when `escontext` is `Some` a parse failure surfaces as `Ok(None)`,
+/// otherwise it raises as `Err`.
+pub fn json_in<'mcx>(
+    mcx: Mcx<'mcx>,
+    json: &[u8],
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
     let result = jsonapi::parse_validate::call(json)?;
     if result != JsonParseErrorType::JSON_SUCCESS {
-        jsonapi::errsave_error::call(result, json, false)?;
+        // C: json_errsave_error(result, lex, escontext) -> ereturn(escontext,
+        // (Datum) 0, ...). With a live soft sink this returns Ok and we yield a
+        // NULL result; with no sink it raises.
+        jsonapi::errsave_error::call(result, json, false, escontext)?;
         return Ok(None);
     }
     Ok(Some(mcx::slice_in(mcx, json)?))
@@ -166,7 +176,7 @@ pub fn json_send<'mcx>(mcx: Mcx<'mcx>, json: &[u8]) -> PgResult<PgVec<'mcx, u8>>
 pub fn json_recv<'mcx>(mcx: Mcx<'mcx>, str: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     let result = jsonapi::parse_validate::call(str)?;
     if result != JsonParseErrorType::JSON_SUCCESS {
-        jsonapi::errsave_error::call(result, str, false)?;
+        jsonapi::errsave_error::call(result, str, false, None)?;
         // pg_parse_json_or_ereport never returns on failure.
         return Err(unreached_soft_error());
     }
@@ -1534,7 +1544,7 @@ pub fn json_validate(json: &[u8], check_unique_keys: bool, throw_error: bool) ->
 
     if result != JsonParseErrorType::JSON_SUCCESS {
         if throw_error {
-            jsonapi::errsave_error::call(result, json, check_unique_keys)?;
+            jsonapi::errsave_error::call(result, json, check_unique_keys, None)?;
         }
         return Ok(false); // invalid json
     }
@@ -1557,7 +1567,7 @@ pub fn json_typeof(json: &[u8]) -> PgResult<&'static str> {
 
     let (result, token_type) = jsonapi::lex_first_token::call(json);
     if result != JsonParseErrorType::JSON_SUCCESS {
-        jsonapi::errsave_error::call(result, json, false)?;
+        jsonapi::errsave_error::call(result, json, false, None)?;
         // json_errsave_error(..., NULL) does not return on a hard error.
         return Err(unreached_soft_error());
     }

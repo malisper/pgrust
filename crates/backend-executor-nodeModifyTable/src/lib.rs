@@ -395,6 +395,21 @@ pub fn init_seams() {
         )
     });
 
+    // Same fetch, used by the DELETE ... RETURNING path (delete_exec).
+    delete_exec::table_tuple_fetch_row_version_any::set(|estate, rri, tid, slot| {
+        let rel = crate::exec::relation_alias(estate, rri);
+        let mcx = estate.es_query_cxt;
+        let snapshot_any = crate::exec::snapshot_any();
+        let inslot = estate.slot_data_mut(slot);
+        backend_access_table_tableam::table_tuple_fetch_row_version(
+            mcx,
+            &rel,
+            tid,
+            &snapshot_any,
+            inslot,
+        )
+    });
+
     // `slot_getsysattr(slot, MinTransactionIdAttributeNumber, &isnull)` then
     // `DatumGetTransactionId` — the slot tuple's xmin.
     insert::slot_get_xmin::set(|estate, slot| {

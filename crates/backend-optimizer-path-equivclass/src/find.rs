@@ -15,7 +15,7 @@ use backend_optimizer_path_equivclass_ext_seams as ec_seam;
 use backend_optimizer_util_relnode_seams as bms;
 use backend_utils_cache_lsyscache_seams as cat;
 
-use crate::merge::{em_expr, em_value, strip_relabeltypes};
+use crate::merge::{em_expr_ref, em_value, strip_relabeltypes};
 use crate::relevance::{live_ec_ids, new_iterator, oid_is_valid};
 
 /* PVC flags (optimizer.h) */
@@ -95,9 +95,9 @@ pub fn find_computable_ec_member(
         }
 
         /* match if all Vars/quasi-Vars are present in "exprs" */
-        let emexpr_owned = em_expr(root, em_id);
+        let emexpr_owned = em_expr_ref(root, em_id);
         let emvars = ec_seam::pull_var_clause::call(
-            &emexpr_owned,
+            emexpr_owned,
             PVC_INCLUDE_AGGREGATES | PVC_INCLUDE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS,
         );
         let mut all_present = true;
@@ -112,7 +112,7 @@ pub fn find_computable_ec_member(
         }
 
         /* reject non-parallel-safe if requested (expensive, so last) */
-        if require_parallel_safe && !ec_seam::is_parallel_safe::call(root, &emexpr_owned) {
+        if require_parallel_safe && !ec_seam::is_parallel_safe::call(root, emexpr_owned) {
             continue;
         }
 
@@ -139,18 +139,28 @@ pub fn relation_can_be_sorted_early(
         return false;
     }
 
-    let target_exprs: Vec<Expr> = {
+    // Working context for transient deep copies of the reltarget exprs; they are
+    // only inspected (`find_ec_member_matching_expr` / `find_computable_ec_member`),
+    // never stored, so a function-scoped context is correct. `clone_in` is
+    // required because the derived `Expr::clone` panics on an owned-subtree child.
+    let work_ctx = mcx::MemoryContext::new("relation_can_be_sorted_early");
+    let work_mcx = work_ctx.mcx();
+    let target_expr_ids: Vec<types_pathnodes::NodeId> = {
         let relopt = root.rel(rel);
         let target = relopt
             .reltarget
             .as_ref()
             .expect("relation_can_be_sorted_early: rel has no reltarget");
-        target
-            .exprs
-            .iter()
-            .map(|&nid| root.node(nid).clone())
-            .collect()
+        target.exprs.clone()
     };
+    let target_exprs: Vec<Expr> = target_expr_ids
+        .iter()
+        .map(|&nid| {
+            root.node(nid)
+                .clone_in(work_mcx)
+                .expect("relation_can_be_sorted_early: clone_in target expr")
+        })
+        .collect();
     let rel_relids = root.rel(rel).relids.clone();
 
     /* try to find an EM directly matching some reltarget member */
@@ -159,12 +169,14 @@ pub fn relation_can_be_sorted_early(
             None => continue,
             Some(em) => em,
         };
-        let emexpr = root.node(em.em_expr).clone();
+        // Borrow the stored EC-member expr (C reuses the `Expr *`); both checks
+        // only read it. A `.clone()` would panic on owned-subtree Exprs.
+        let emexpr = root.node(em.em_expr);
         /* reject SRFs (can't be computed early) */
-        if ec_seam::expression_returns_set::call(&emexpr) {
+        if ec_seam::expression_returns_set::call(emexpr) {
             continue;
         }
-        if require_parallel_safe && !ec_seam::is_parallel_safe::call(root, &emexpr) {
+        if require_parallel_safe && !ec_seam::is_parallel_safe::call(root, emexpr) {
             continue;
         }
         return true;
@@ -176,8 +188,8 @@ pub fn relation_can_be_sorted_early(
         None => return false,
         Some(em) => em,
     };
-    let emexpr = em_expr(root, em);
-    if ec_seam::expression_returns_set::call(&emexpr) {
+    let emexpr = em_expr_ref(root, em);
+    if ec_seam::expression_returns_set::call(emexpr) {
         return false;
     }
     true
@@ -203,10 +215,10 @@ pub fn exprs_known_equal(root: &PlannerInfo, item1: &Expr, item2: &Expr, opfamil
 
         for &em_id in &ec.ec_members {
             debug_assert!(!root.em(em_id).em_is_child);
-            let emexpr = em_expr(root, em_id);
-            if ec_seam::equal::call(item1, &emexpr) {
+            let emexpr = em_expr_ref(root, em_id);
+            if ec_seam::equal::call(item1, emexpr) {
                 item1member = true;
-            } else if ec_seam::equal::call(item2, &emexpr) {
+            } else if ec_seam::equal::call(item2, emexpr) {
                 item2member = true;
             }
             if item1member && item2member {
@@ -265,8 +277,8 @@ pub fn match_eclasses_to_foreign_key_col(
             debug_assert!(!root.em(em_id).em_is_child);
 
             /* EM must be a Var, possibly with RelabelType */
-            let emexpr = em_expr(root, em_id);
-            let stripped = strip_relabeltypes(&emexpr);
+            let emexpr = em_expr_ref(root, em_id);
+            let stripped = strip_relabeltypes(emexpr);
             let var = match stripped.as_var() {
                 Some(v) => v,
                 None => continue,

@@ -17,9 +17,11 @@
 //!     `newrel == NULL`, NOT-NULL-only path of `ATRewriteTable`
 //!     (tablecmds.c:6126), invoked from [`crate::at_phase::ATRewriteTables`].
 //!
-//! `ATExecAddIndexConstraint` (ADD CONSTRAINT ... USING INDEX) is faithfully
-//! seam-and-panicked: it bottoms out on `index_check_primary_key`
-//! (catalog/index.c) which has no installed seam reachable from this crate.
+//!   - `ATExecAddIndexConstraint` (tablecmds.c:9704) — ADD CONSTRAINT ... USING
+//!     INDEX: promote an existing unique index into a PRIMARY KEY / UNIQUE
+//!     constraint (`BuildIndexInfo` + `index_check_primary_key` +
+//!     `index_constraint_create`, optionally renaming the index to the
+//!     constraint name).
 
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
@@ -34,7 +36,7 @@ use types_nodes::ddlnodes::{
 };
 use types_nodes::nodes::{Node, NodePtr};
 use types_rel::Relation;
-use types_storage::lock::{LOCKMODE, NoLock};
+use types_storage::lock::{AccessShareLock, LOCKMODE, NoLock};
 
 use backend_access_common_relation::relation_open;
 use backend_access_transam_xact::CommandCounterIncrement;
@@ -287,19 +289,120 @@ pub fn ATExecAddIndex<'mcx>(
 // ===========================================================================
 
 /// `ATExecAddIndexConstraint(tab, rel, stmt, lockmode)` (tablecmds.c:9704) —
-/// ADD CONSTRAINT ... USING INDEX. Faithfully seam-and-panicked: it requires
-/// `index_check_primary_key` (catalog/index.c), which has no installed seam
-/// reachable from this crate.
+/// ADD CONSTRAINT ... USING INDEX: promote an existing unique index into a
+/// PRIMARY KEY / UNIQUE constraint. The index was already validated at parse
+/// time (`transformIndexConstraint` USING-INDEX leg); here we build its
+/// `IndexInfo`, run the PRIMARY-KEY checks, and create the catalog entries via
+/// `index_constraint_create`.
 pub fn ATExecAddIndexConstraint<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     _tab: &mut AlteredTableInfo<'mcx>,
-    _rel: &Relation<'mcx>,
-    _stmt: &IndexStmt<'mcx>,
+    rel: &Relation<'mcx>,
+    stmt: &IndexStmt<'mcx>,
     _lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
-    unported(
-        "ADD CONSTRAINT ... USING INDEX (ATExecAddIndexConstraint: needs index_check_primary_key seam + BuildIndexInfo)",
-    );
+    use types_tuple::access::RELKIND_PARTITIONED_TABLE;
+
+    let index_oid = stmt.indexOid;
+
+    // Assert(IsA(stmt, IndexStmt)); Assert(OidIsValid(index_oid));
+    // Assert(stmt->isconstraint);
+    debug_assert!(OidIsValid(index_oid));
+    debug_assert!(stmt.isconstraint);
+
+    // Doing this on partitioned tables is not a simple feature to implement,
+    // so let's punt for now.
+    if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        return Err(backend_utils_error::ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(
+                "ALTER TABLE / ADD CONSTRAINT USING INDEX is not supported on partitioned tables"
+                    .to_string(),
+            )
+            .into_error());
+    }
+
+    // index_rel = index_open(index_oid, AccessShareLock);
+    let index_rel = relation_open(mcx, index_oid, AccessShareLock)?;
+
+    // indexName = pstrdup(RelationGetRelationName(index_rel));
+    let index_name = index_rel.name().to_string();
+
+    // indexInfo = BuildIndexInfo(index_rel);
+    let index_info =
+        backend_catalog_index_seams::build_index_info::call(mcx, &index_rel)?;
+
+    // this should have been checked at parse time
+    if !index_info.ii_Unique {
+        return Err(backend_utils_error::ereport(ERROR)
+            .errmsg_internal(format!("index \"{index_name}\" is not unique"))
+            .into_error());
+    }
+
+    // Determine name to assign to constraint.  We require a constraint to have
+    // the same name as the underlying index; therefore, use the index's
+    // existing name as the default constraint name, and if the user explicitly
+    // gives some other name for the constraint, rename the index to match.
+    let constraint_name: String = match &stmt.idxname {
+        Some(n) => {
+            let cn = n.as_str().to_string();
+            if cn != index_name {
+                backend_utils_error::ereport(types_error::NOTICE)
+                    .errmsg(format!(
+                        "ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index \"{index_name}\" to \"{cn}\""
+                    ))
+                    .finish(here("ATExecAddIndexConstraint"))?;
+                crate::rename::RenameRelationInternal(mcx, index_oid, &cn, false, true)?;
+            }
+            cn
+        }
+        None => index_name.clone(),
+    };
+
+    // Extra checks needed if making primary key.
+    if stmt.primary {
+        backend_catalog_index_seams::index_check_primary_key::call(mcx, rel, &index_info, true)?;
+    }
+
+    // Note we currently don't support EXCLUSION constraints here.
+    let constraint_type = if stmt.primary {
+        types_catalog::pg_constraint::CONSTRAINT_PRIMARY
+    } else {
+        types_catalog::pg_constraint::CONSTRAINT_UNIQUE
+    };
+
+    // Create the catalog entries for the constraint.
+    let mut flags: u16 =
+        INDEX_CONSTR_CREATE_UPDATE_INDEX | INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS;
+    if stmt.initdeferred {
+        flags |= INDEX_CONSTR_CREATE_INIT_DEFERRED;
+    }
+    if stmt.deferrable {
+        flags |= INDEX_CONSTR_CREATE_DEFERRABLE;
+    }
+    if stmt.primary {
+        flags |= INDEX_CONSTR_CREATE_MARK_AS_PRIMARY;
+    }
+
+    let allow_system_table_mods =
+        backend_commands_tablespace_globals_seams::allowSystemTableMods::call()?;
+
+    let address = backend_catalog_index_seams::index_constraint_create::call(
+        rel,
+        index_oid,
+        InvalidOid,
+        &index_info,
+        &constraint_name,
+        constraint_type,
+        flags,
+        allow_system_table_mods,
+        false, // is_internal
+    )?;
+
+    // index_close(index_rel, NoLock);
+    index_rel.close(NoLock)?;
+
+    Ok(address)
 }
 
 // ===========================================================================
@@ -332,6 +435,43 @@ pub fn ATExecAddConstraint<'mcx>(
             lockmode,
         ),
         ConstrType::CONSTR_FOREIGN => {
+            // Assign or validate constraint name (tablecmds.c:9819-9841). C
+            // scribbles the chosen name onto newConstraint->conname before
+            // ATAddForeignKeyConstraint; here we work on an owned copy.
+            let mut new_constraint = new_constraint.clone_in(mcx)?;
+            match &new_constraint.conname {
+                Some(name) => {
+                    if backend_catalog_pg_constraint::ConstraintNameIsUsed(
+                        mcx,
+                        types_catalog::pg_constraint::ConstraintCategory::Relation,
+                        rel.rd_id,
+                        name.as_str(),
+                    )? {
+                        return Err(backend_utils_error::ereport(ERROR)
+                            .errcode(types_error::ERRCODE_DUPLICATE_OBJECT)
+                            .errmsg(format!(
+                                "constraint \"{}\" for relation \"{}\" already exists",
+                                name.as_str(),
+                                rel.name()
+                            ))
+                            .into_error());
+                    }
+                }
+                None => {
+                    let addition =
+                        choose_foreign_key_constraint_name_addition(&new_constraint.fk_attrs);
+                    let conname = backend_catalog_pg_constraint::ChooseConstraintName(
+                        mcx,
+                        &rel.name(),
+                        &addition,
+                        "fkey",
+                        rel.rd_rel.relnamespace,
+                        &[],
+                    )?;
+                    new_constraint.conname = Some(PgString::from_str_in(&conname, mcx)?);
+                }
+            }
+
             // ATAddForeignKeyConstraint(wqueue, tab, rel, newConstraint, recurse,
             // false, lockmode) — validate the FK, create the pg_constraint 'f'
             // row, and install the RI enforcement triggers.
@@ -340,7 +480,7 @@ pub fn ATExecAddConstraint<'mcx>(
                 wqueue,
                 ti,
                 rel,
-                new_constraint,
+                &new_constraint,
                 recurse,
                 false,
                 lockmode,
@@ -350,6 +490,31 @@ pub fn ATExecAddConstraint<'mcx>(
             .errmsg_internal(format!("unrecognized constraint type: {}", other as i32))
             .into_error()),
     }
+}
+
+/// `ChooseForeignKeyConstraintNameAddition(colnames)` (tablecmds.c) — join the
+/// FK column names with `_`, capping the running length at `NAMEDATALEN` (the
+/// "middle" component handed to `ChooseConstraintName`).
+fn choose_foreign_key_constraint_name_addition(fk_attrs: &PgVec<'_, NodePtr<'_>>) -> String {
+    // NAMEDATALEN-1 usable chars; C's strlcpy copies up to NAMEDATALEN-1 bytes
+    // of `name` at the current offset, then breaks once buflen >= NAMEDATALEN.
+    const NAMEDATALEN: usize = 64;
+    let mut buf = String::new();
+    for attr in fk_attrs.iter() {
+        let name = attr.expect_string().sval.as_str();
+        if !buf.is_empty() {
+            buf.push('_');
+        }
+        // strlcpy(buf + buflen, name, NAMEDATALEN): each `name` is already a
+        // validated identifier (< NAMEDATALEN), so it copies whole; the running
+        // buffer then breaks once it reaches NAMEDATALEN (ChooseConstraintName
+        // truncates the final composed name anyway).
+        buf.push_str(name);
+        if buf.len() >= NAMEDATALEN {
+            break;
+        }
+    }
+    buf
 }
 
 // ===========================================================================

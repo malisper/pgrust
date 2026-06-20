@@ -860,6 +860,7 @@ pub fn init_seams() {
     s::lookup_type_name_oid::set(seam_lookup_type_name_oid);
     s::typename_type_id_node::set(seam_typename_type_id_node);
     s::typename_type_id_raw::set(seam_typename_type_id_raw);
+    s::typename_type_id_raw_pstate::set(seam_typename_type_id_raw_pstate);
     s::type_name_list_to_string::set(seam_type_name_list_to_string);
     s::lookup_type_name_oid_owa::set(seam_lookup_type_name_oid_owa);
     s::func_name_as_type::set(seam_func_name_as_type);
@@ -1359,6 +1360,18 @@ fn seam_typename_type_id_raw(type_name: &types_nodes::rawnodes::TypeName<'_>) ->
     let tn = raw_typename_to_parse(type_name)?;
     let scratch = mcx::MemoryContext::new("typenameTypeId");
     typenameTypeId(scratch.mcx(), None, &tn)
+}
+
+/// `typenameTypeId(pstate, typeName)` over a raw-tree `TypeName`, threading the
+/// active `ParseState` so a "type does not exist" error carries the cursor
+/// position (`parser_errposition(pstate, typeName->location)`).
+fn seam_typename_type_id_raw_pstate(
+    pstate: &types_cluster::ParseState<'_>,
+    type_name: &types_nodes::rawnodes::TypeName<'_>,
+) -> PgResult<Oid> {
+    let tn = raw_typename_to_parse(type_name)?;
+    let scratch = mcx::MemoryContext::new("typenameTypeId");
+    typenameTypeId(scratch.mcx(), Some(pstate), &tn)
 }
 
 /// `TypeNameListToString(typenames)` over a list of raw-parser nodes.

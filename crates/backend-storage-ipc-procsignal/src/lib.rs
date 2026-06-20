@@ -753,6 +753,15 @@ pub fn procsignal_sigusr1_handler() {
     backend_storage_ipc_latch_seams::set_latch_my_latch::call();
 }
 
+/// `pqsigfunc`-shaped (`void (*)(int)`) wrapper around
+/// [`procsignal_sigusr1_handler`] for installation via `pqsignal(SIGUSR1,
+/// ...)`. The C handler is `procsignal_sigusr1_handler(SIGNAL_ARGS)` and
+/// ignores `postgres_signal_arg` (it dispatches purely on the multiplexed
+/// proc-signal flags), so the wrapper drops the signal number.
+pub fn procsignal_sigusr1_handler_signal(_postgres_signal_arg: i32) {
+    procsignal_sigusr1_handler();
+}
+
 /// `SendCancelRequest(backendPID, cancel_key, cancel_key_len)` — send a
 /// query cancellation signal to backend.
 ///

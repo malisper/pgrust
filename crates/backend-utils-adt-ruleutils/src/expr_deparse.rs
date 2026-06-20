@@ -289,7 +289,18 @@ fn format_type_with_typemod<'mcx>(
     type_oid: Oid,
     typemod: i32,
 ) -> PgResult<PgString<'mcx>> {
-    match backend_utils_adt_format_type_seams::format_type_extended::call(mcx, type_oid, typemod, 0)? {
+    // C `format_type_with_typemod` calls `format_type_extended(type_oid, typemod,
+    // FORMAT_TYPE_TYPEMOD_GIVEN)` (format_type.c). The flag is essential: with it,
+    // built-in types whose typmod-(-1) form differs from their no-typmod form (e.g.
+    // `bit`, reported as the quoted `"bit"` so the parser won't assign a bogus
+    // BIT(1) typmod) fall through to the quoted generic name instead of the
+    // unquoted special case.
+    match backend_utils_adt_format_type_seams::format_type_extended::call(
+        mcx,
+        type_oid,
+        typemod,
+        backend_utils_adt_format_type_seams::FORMAT_TYPE_TYPEMOD_GIVEN,
+    )? {
         Some(s) => Ok(s),
         // flags=0 never sets FORMAT_TYPE_INVALID_AS_NULL, so None cannot occur;
         // guard it as an internal error rather than silently emitting nothing.
@@ -853,12 +864,11 @@ fn get_rule_expr_e(
             ch_(context, b')')?;
         }
 
-        // --- Prerequisite-blocked arms (need an unported subsystem) ----------
-        Expr::SubPlan(_) => {
-            return Err(deferred(
-                "SubPlan (context->namespaces ancestors / deparse_namespace; #159 plan-tree)",
-            ))
+        Expr::SubPlan(sp) => {
+            get_subplan_expr(&sp.0, context, showimplicit)?;
         }
+
+        // --- Prerequisite-blocked arms (need an unported subsystem) ----------
         Expr::FieldSelect(_) => {
             return Err(deferred(
                 "FieldSelect (get_name_for_var_field; catalog/var-field)",
@@ -1954,18 +1964,393 @@ fn get_currentof_expr(c: &CurrentOfExpr, context: &mut DeparseContext<'_>) -> Pg
  * get_parameter — C 8687-8849 (var_param machinery).
  * -------------------------------------------------------------------------- */
 
-/// `static void get_parameter(Param *param, deparse_context *context)`.
-///
-/// A `Param`'s rendering walks the plan-tree ancestor list
-/// (`find_param_referent`), the subplan-generator list (`find_param_generator`),
-/// and the outermost namespace's function arg names — all `var_param.c` /
-/// `deparse_namespace` machinery that reads a `Plan` tree the planner does not
-/// yet emit (#159). The whole routine panics rather than emit a fabricated `$N`
-/// (which would silently differ from C for PARAM_EXEC / sub-plan params).
-pub fn get_parameter(_param: &Expr, _context: &mut DeparseContext<'_>) -> PgResult<()> {
-    Err(deferred(
-        "get_parameter (find_param_referent / find_param_generator / deparse_namespace; #159 plan-tree)",
-    ))
+/// `find_param_referent(param, context, &dpns, &ancestor_cell)` (`ruleutils.c`
+/// 8455-8556). For a `PARAM_EXEC` Param, walk the head namespace's ancestor
+/// list looking for a `NestLoop` that transmits the param to its inner child
+/// (returning the matching `NestLoopParam.paramval`) or a `SubPlan` that
+/// supplies it as a `parParam`/`args` pair (returning the `arg`, but pointing
+/// the deparse attention at the next non-`SubPlan` ancestor). On success returns
+/// the source expression (cloned into `mcx`) and `Some(ancestor_index)` — the
+/// 0-based position in `dpns.ancestors` to which `push_ancestor_plan` should
+/// transfer attention. Returns `Ok(None)` when no referent is found.
+fn find_param_referent<'mcx>(
+    mcx: Mcx<'mcx>,
+    param: &types_nodes::primnodes::Param,
+    context: &DeparseContext<'mcx>,
+) -> PgResult<Option<(Expr, usize)>> {
+    use types_nodes::nodes::ntag;
+    use types_nodes::primnodes::PARAM_EXEC;
+
+    if param.paramkind != PARAM_EXEC {
+        return Ok(None);
+    }
+
+    // dpns = linitial(context->namespaces); child_plan = dpns->plan;
+    let Some(dpns) = context.namespaces.first() else {
+        return Ok(None);
+    };
+    // child_plan starts at dpns->plan (the current plan node).
+    let mut child_plan: Option<&Node<'mcx>> = dpns.plan.as_deref();
+
+    // foreach(lc, dpns->ancestors)
+    for (idx, ancestor) in dpns.ancestors.iter().enumerate() {
+        let atag = ancestor.node_tag();
+
+        // NestLoops transmit params to their inner child only.
+        if atag == ntag::T_NestLoop {
+            if let Some(nl) = ancestor.as_nestloop() {
+                // child_plan == innerPlan(ancestor)
+                let inner = nl.join.plan.righttree.as_deref();
+                let is_inner = match (child_plan, inner) {
+                    (Some(c), Some(i)) => core::ptr::eq(c, i) || nodes_struct_eq(c, i),
+                    _ => false,
+                };
+                if is_inner {
+                    for nlp in nl.nestParams.iter() {
+                        if nlp.paramno == param.paramid {
+                            // return (Node *) nlp->paramval; attention stays on
+                            // this ancestor (idx).
+                            return Ok(Some((Expr::Var(nlp.paramval.clone()), idx)));
+                        }
+                    }
+                }
+            }
+        }
+
+        // If ancestor is a SubPlan, check the arguments it provides.
+        if atag == ntag::T_SubPlan {
+            if let Some(sp) = ancestor.as_subplan() {
+                let subplan = &sp.0;
+                // forboth(lc3, subplan->parParam, lc4, subplan->args)
+                for (paramid, arg) in subplan.parParam.iter().zip(subplan.args.iter()) {
+                    if *paramid == param.paramid {
+                        // Vars in the arg evaluate in the surrounding context, so
+                        // point attention at the next ancestor that is *not* a
+                        // SubPlan (C: for_each_cell(rest, ancestors, lnext(lc))).
+                        for (rest_idx, ancestor2) in
+                            dpns.ancestors.iter().enumerate().skip(idx + 1)
+                        {
+                            if ancestor2.node_tag() != ntag::T_SubPlan {
+                                let cloned = arg.clone_in(mcx)?;
+                                return Ok(Some((cloned, rest_idx)));
+                            }
+                        }
+                        return Err(elog_error("SubPlan cannot be outermost ancestor".into()));
+                    }
+                }
+                // SubPlan isn't a kind of Plan, so skip the rest.
+                continue;
+            }
+        }
+
+        // No luck, crawl up to next ancestor (child_plan = ancestor).
+        child_plan = Some(ancestor);
+    }
+
+    Ok(None)
+}
+
+/// `find_param_generator(param, context, &column)` (`ruleutils.c` 8569-8657).
+/// For a `PARAM_EXEC` Param, search the innermost plan node's initplans, then
+/// its MULTIEXPR_SUBLINK targetlist SubPlans, then the ancestor SubPlans /
+/// initplans, for a subplan/initplan that emits the param. On success returns
+/// `Some((subplan_name, useHashTable, column))` (cloned name); the caller renders
+/// `(<hashed >name).colN`. Returns `Ok(None)` when no generator is found.
+fn find_param_generator<'mcx>(
+    mcx: Mcx<'mcx>,
+    param: &types_nodes::primnodes::Param,
+    context: &DeparseContext<'mcx>,
+) -> PgResult<Option<(PgString<'mcx>, bool, i32)>> {
+    use types_nodes::nodes::ntag;
+    use types_nodes::primnodes::PARAM_EXEC;
+
+    if param.paramkind != PARAM_EXEC {
+        return Ok(None);
+    }
+
+    let Some(dpns) = context.namespaces.first() else {
+        return Ok(None);
+    };
+
+    // First check the innermost plan node's initplans.
+    if let Some(plan) = dpns.plan.as_deref() {
+        if let Some(res) = find_param_generator_initplan(mcx, param, plan)? {
+            return Ok(Some(res));
+        }
+
+        // The plan's targetlist might contain MULTIEXPR_SUBLINK SubPlans.
+        if let Some(tlist) = plan.plan_head().targetlist.as_ref() {
+            for tle in tlist.iter() {
+                if let Some(expr) = tle.expr.as_deref() {
+                    if let Expr::SubPlan(sp) = expr {
+                        let subplan = &sp.0;
+                        if subplan.subLinkType == SubLinkType::MultiExpr {
+                            for (col, paramid) in subplan.setParam.iter().enumerate() {
+                                if *paramid == param.paramid {
+                                    let name = subplan_name(mcx, subplan)?;
+                                    return Ok(Some((name, subplan.useHashTable, col as i32)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // No luck, so check the ancestor nodes.
+    for ancestor in dpns.ancestors.iter() {
+        if ancestor.node_tag() == ntag::T_SubPlan {
+            if let Some(sp) = ancestor.as_subplan() {
+                let subplan = &sp.0;
+                for (col, paramid) in subplan.paramIds.iter().enumerate() {
+                    if *paramid == param.paramid {
+                        let name = subplan_name(mcx, subplan)?;
+                        return Ok(Some((name, subplan.useHashTable, col as i32)));
+                    }
+                }
+                // SubPlan isn't a kind of Plan, so skip the rest.
+                continue;
+            }
+        }
+
+        // Otherwise it's some kind of Plan node; check its initplans.
+        if let Some(res) = find_param_generator_initplan(mcx, param, ancestor)? {
+            return Ok(Some(res));
+        }
+    }
+
+    Ok(None)
+}
+
+/// `find_param_generator_initplan(param, plan, &column)` (`ruleutils.c`
+/// 8666-8682) — search one Plan node's initplans for one that sets the param.
+fn find_param_generator_initplan<'mcx>(
+    mcx: Mcx<'mcx>,
+    param: &types_nodes::primnodes::Param,
+    plan: &Node<'mcx>,
+) -> PgResult<Option<(PgString<'mcx>, bool, i32)>> {
+    if let Some(initplans) = plan.plan_head().initPlan.as_ref() {
+        for subplan in initplans.iter() {
+            for (col, paramid) in subplan.setParam.iter().enumerate() {
+                if *paramid == param.paramid {
+                    let name = subplan_name(mcx, subplan)?;
+                    return Ok(Some((name, subplan.useHashTable, col as i32)));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Clone a `SubPlan.plan_name` into `mcx` (empty string when the C field is
+/// NULL — `appendStringInfo("%s")` of a NULL would print nothing).
+fn subplan_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    subplan: &types_nodes::primnodes::SubPlan<'_>,
+) -> PgResult<PgString<'mcx>> {
+    match subplan.plan_name.as_ref() {
+        Some(s) => PgString::from_str_in(s.as_str(), mcx),
+        None => PgString::from_str_in("", mcx),
+    }
+}
+
+/// Structural equality of two plan `Node`s used to match `child_plan ==
+/// innerPlan(ancestor)`. The owned model clones plan nodes into the deparse
+/// arena, so the C pointer-identity test cannot be used directly; we compare the
+/// `plan_node_id` (unique across the final plan tree — `setrefs.c` assigns it),
+/// which is exactly the identity the pointer test stands in for.
+fn nodes_struct_eq(a: &Node<'_>, b: &Node<'_>) -> bool {
+    a.plan_head().plan_node_id == b.plan_head().plan_node_id
+}
+
+/// The `T_SubPlan` arm of `get_rule_expr` (`ruleutils.c` 9540-9598). An
+/// already-planned `SubPlan` can only be seen while EXPLAINing a query plan
+/// (never in rule deparse); we don't reconstruct the original SQL, just show the
+/// subLinkType + testexpr (so the referencing Params reveal which subplan), and
+/// note whether it is hashed. While deparsing the testexpr the SubPlan is pushed
+/// onto the head namespace's ancestors so PARAM_EXEC references to its paramIds
+/// resolve (`find_param_referent` / `find_param_generator`).
+fn get_subplan_expr(
+    subplan: &types_nodes::primnodes::SubPlan<'_>,
+    context: &mut DeparseContext<'_>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    match subplan.subLinkType {
+        SubLinkType::Exists => str_(context, "EXISTS(")?,
+        SubLinkType::All => str_(context, "(ALL ")?,
+        SubLinkType::Any => str_(context, "(ANY ")?,
+        // ROWCOMPARE / EXPR: parenthesizing the testexpr is sufficient / no decoration.
+        SubLinkType::RowCompare | SubLinkType::Expr => ch_(context, b'(')?,
+        SubLinkType::MultiExpr => str_(context, "(rescan ")?,
+        SubLinkType::Array => str_(context, "ARRAY(")?,
+        SubLinkType::Cte => str_(context, "CTE(")?,
+    }
+
+    if let Some(testexpr) = subplan.testexpr.as_deref() {
+        let mcx = context.buf.allocator();
+        // Push SubPlan into ancestors list while deparsing testexpr, so we can
+        // handle PARAM_EXEC references to the SubPlan's paramIds.
+        // dpns = linitial(context->namespaces); dpns->ancestors = lcons(subplan, ...).
+        let sub_node = mcx::alloc_in(
+            mcx,
+            Node::mk_expr(
+                mcx,
+                Expr::SubPlan(types_nodes::primnodes::SubPlanExpr::from_subplan(mcx, subplan)?),
+            ),
+        )?;
+        let dpns = &mut context.namespaces[0];
+        let mut new_ancestors = PgVec::new_in(mcx);
+        new_ancestors
+            .try_reserve(dpns.ancestors.len() + 1)
+            .map_err(|_| mcx.oom(0))?;
+        new_ancestors.push(sub_node);
+        for a in dpns.ancestors.iter() {
+            new_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+        }
+        // Save the prior ancestors list to restore (C: list_delete_first).
+        let saved = core::mem::replace(&mut dpns.ancestors, new_ancestors);
+
+        let testexpr_owned = testexpr.clone_in(mcx)?;
+        let node = Node::mk_expr(mcx, testexpr_owned);
+        let r = get_rule_expr(&node, context, showimplicit);
+        // Restore ancestors before propagating any error.
+        context.namespaces[0].ancestors = saved;
+        r?;
+        ch_(context, b')')?;
+    } else {
+        // No referencing Params, so show the SubPlan's name.
+        let mcx = context.buf.allocator();
+        let name = subplan_name(mcx, subplan)?;
+        if subplan.useHashTable {
+            str_(context, "hashed ")?;
+        }
+        str_(context, name.as_str())?;
+        ch_(context, b')')?;
+    }
+    Ok(())
+}
+
+/// `static void get_parameter(Param *param, deparse_context *context)`
+/// (`ruleutils.c` 8687-8849). Render a `Param`:
+/// (a) `PARAM_EXEC` whose value is computed by an ancestor NestLoop/SubPlan —
+///     deparse the source expression (via `find_param_referent`, switching
+///     deparse attention to the ancestor plan with `push_ancestor_plan`);
+/// (b) `PARAM_EXEC` that is a subplan output — render `(<hashed >name).colN`
+///     (via `find_param_generator`);
+/// (c) `PARAM_EXTERN` whose outermost namespace supplies a function arg name —
+///     render the (optionally qualified) argument name;
+/// (d) otherwise — `$N`.
+pub fn get_parameter(expr: &Expr, context: &mut DeparseContext<'_>) -> PgResult<()> {
+    use types_nodes::primnodes::PARAM_EXTERN;
+
+    let param = match expr {
+        Expr::Param(p) => p,
+        _ => return Err(elog_error("get_parameter: node is not a Param".into())),
+    };
+
+    let mcx = context.buf.allocator();
+
+    // (a) Try to locate the expression from which the parameter was computed.
+    if let Some((referent, ancestor_index)) = find_param_referent(mcx, param, context)? {
+        // Switch attention to the ancestor plan node. The target ancestor node
+        // is dpns.ancestors[ancestor_index]; clone it out before mutating dpns.
+        let target = {
+            let dpns = &context.namespaces[0];
+            mcx::alloc_in(mcx, dpns.ancestors[ancestor_index].clone_in(mcx)?)?
+        };
+        let save = crate::push_ancestor_plan(mcx, &mut context.namespaces[0], ancestor_index, &target)?;
+
+        // Force prefixing of Vars (they belong to the ancestor, not the
+        // current scan).
+        let save_varprefix = context.varprefix;
+        context.varprefix = true;
+
+        // A Param's expansion is typically a Var/Aggref/GroupingFunc/Param,
+        // which need no parens; otherwise parenthesize to look atomic.
+        let need_paren = !matches!(
+            referent,
+            Expr::Var(_) | Expr::Aggref(_) | Expr::GroupingFunc(_) | Expr::Param(_)
+        );
+        if need_paren {
+            ch_(context, b'(')?;
+        }
+
+        let node = Node::mk_expr(mcx, referent);
+        get_rule_expr(&node, context, false)?;
+
+        if need_paren {
+            ch_(context, b')')?;
+        }
+
+        context.varprefix = save_varprefix;
+        crate::pop_ancestor_plan(&mut context.namespaces[0], save);
+        return Ok(());
+    }
+
+    // (b) Maybe it's a subplan output — print as a reference to the subplan.
+    if let Some((name, use_hash, column)) = find_param_generator(mcx, param, context)? {
+        // appendStringInfo("(%s%s).col%d", hashed?, plan_name, column+1)
+        str_(context, "(")?;
+        if use_hash {
+            str_(context, "hashed ")?;
+        }
+        str_(context, name.as_str())?;
+        str_(context, ").col")?;
+        str_(context, &itoa(column + 1))?;
+        return Ok(());
+    }
+
+    // (c) PARAM_EXTERN whose outermost namespace provides function arg names.
+    if param.paramkind == PARAM_EXTERN && !context.namespaces.is_empty() {
+        // dpns = llast(context->namespaces)
+        let last_idx = context.namespaces.len() - 1;
+        let argname = {
+            let dpns = &context.namespaces[last_idx];
+            if !dpns.argnames.is_empty()
+                && param.paramid > 0
+                && param.paramid <= dpns.numargs
+            {
+                dpns.argnames
+                    .get((param.paramid - 1) as usize)
+                    .and_then(|a| a.as_ref())
+                    .map(|s| s.as_str().to_string())
+            } else {
+                None
+            }
+        };
+        if let Some(argname) = argname {
+            // Qualify the parameter name if any other namespace has a range
+            // table.
+            let mut should_qualify = false;
+            for depns in context.namespaces.iter() {
+                if !depns.rtable_names.is_empty() {
+                    should_qualify = true;
+                    break;
+                }
+            }
+            if should_qualify {
+                let funcname = context.namespaces[last_idx]
+                    .funcname
+                    .as_ref()
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default();
+                let q = quote_identifier(mcx, &funcname)?;
+                str_(context, q.as_str())?;
+                ch_(context, b'.')?;
+            }
+            let q = quote_identifier(mcx, &argname)?;
+            str_(context, q.as_str())?;
+            return Ok(());
+        }
+    }
+
+    // (d) Not PARAM_EXEC, or couldn't find referent: just print $N.
+    // (C asserts paramkind == PARAM_EXTERN, but prints $N either way.)
+    debug_assert!(param.paramkind == PARAM_EXTERN);
+    str_(context, "$")?;
+    str_(context, &itoa(param.paramid))?;
+    Ok(())
 }
 
 /* -------------------------------------------------------------------------- *
@@ -3143,21 +3528,23 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "get_parameter")]
-    fn parameter_is_seam_and_panic() {
+    fn parameter_extern_renders_dollar_n() {
+        // A PARAM_EXTERN with no function-arg namespace renders as `$N`
+        // (get_parameter's fall-through case (d), ruleutils.c 8842-8848).
         use types_nodes::primnodes::{Param, ParamKind};
         let cx = MemoryContext::new("param");
         let mcx = cx.mcx();
         let mut c = ctx(mcx, 0);
         let p = Expr::Param(Param {
             paramkind: ParamKind::PARAM_EXTERN,
-            paramid: 1,
+            paramid: 5,
             paramtype: 0,
             paramtypmod: -1,
             paramcollid: 0,
             location: -1,
         });
-        let _ = get_parameter(&p, &mut c);
+        get_parameter(&p, &mut c).unwrap();
+        assert_eq!(bufstr(&c), "$5");
     }
 
     #[test]

@@ -75,8 +75,8 @@ use types_pathnodes::{
 /// Install the inward seams owned by equivclass.c. Called once at
 /// single-threaded startup from `seams-init::init_all()`.
 pub fn init_seams() {
-    ec_seam::process_equivalence::set(|root, restrictinfo, jdomain| {
-        process_equivalence(root, restrictinfo, jdomain)
+    ec_seam::process_equivalence::set(|root, run, restrictinfo, jdomain| {
+        process_equivalence(root, run, restrictinfo, jdomain)
     });
     ec_seam::get_eclass_for_sort_expr::set(
         |root, expr, opfamilies, opcintype, collation, sortref, rel, create_it| {
@@ -115,8 +115,8 @@ pub fn init_seams() {
     ec_seam::is_redundant_derived_clause::set(|root, rinfo, clauselist| {
         is_redundant_derived_clause(root, rinfo, &clauselist)
     });
-    ec_seam::add_child_rel_equivalences::set(|root, appinfo, parent_rel, child_rel| {
-        add_child_rel_equivalences(root, appinfo, parent_rel, child_rel)
+    ec_seam::add_child_rel_equivalences::set(|root, run, appinfo, parent_rel, child_rel| {
+        add_child_rel_equivalences(root, run, appinfo, parent_rel, child_rel)
     });
 
     // `EC_MUST_BE_REDUNDANT(eclass)` == `eclass->ec_has_const` (pathnodes.h

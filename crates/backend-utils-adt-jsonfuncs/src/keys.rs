@@ -232,7 +232,7 @@ pub fn json_object_keys_worker(json: &[u8]) -> PgResult<Vec<Vec<u8>>> {
     let result = common_jsonapi_seams::pg_parse_json::call(json, encoding, true, &mut sem)?;
     if result != JsonParseErrorType::JSON_SUCCESS {
         // pg_parse_json_or_ereport: a parse failure raises through json_errsave_error.
-        common_jsonapi_seams::errsave_error::call(result, json, true)?;
+        common_jsonapi_seams::errsave_error::call(result, json, true, None)?;
         unreachable!("errsave_error with no escontext raises");
     }
 

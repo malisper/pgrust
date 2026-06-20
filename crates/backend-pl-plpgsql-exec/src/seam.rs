@@ -214,11 +214,82 @@ pub fn ereport_no_return_statement() -> ! {
 
 /// The set-returning-function result handoff of `plpgsql_exec_function`
 /// (pl_exec.c): validate the `ReturnSetInfo`, set materialize mode, copy the
-/// tuplestore + descriptor out. SRF / tuplestore / executor substrate.
+/// tuplestore + descriptor out.
+///
+/// In the owned model the `ReturnSetInfo.setResult` tuplestore is the
+/// thread-local materialize sink the executor-frame SRF dispatcher
+/// (`execSRF::dispatch_user_setof`) pushed before reaching
+/// `plpgsql_call_handler`. RETURN QUERY / RETURN NEXT already appended every
+/// produced row into that sink (`return_query_put_rows` /
+/// `return_next_put_row`); here we only mark the sink as materialized (C:
+/// `rsi->returnMode = SFRM_Materialize;` — the rows are already in
+/// `rsi->setResult`). An empty result set (no RETURN NEXT/QUERY ran) is still a
+/// valid materialized empty tuplestore.
 pub fn coerce_set_result(_estate: &mut PLpgSQL_execstate) {
+    types_fmgr::mat_srf::with_top(|sink| {
+        if let Some(sink) = sink {
+            sink.materialized = true;
+        }
+    });
+}
+
+/// `exec_stmt_return_query` per-row deposit into the function's SRF result
+/// tuplestore (pl_exec.c 4046): push each materialized result row into
+/// `estate->tuple_store` (the `ReturnSetInfo.setResult` the executor-frame SRF
+/// caller threaded onto the call frame). The query run is already ported (the
+/// materialize-all `exec_run_select` / `exec_dynquery_with_params`); only this
+/// sink stays loud, because a SETOF PL/pgSQL function is not yet routed through
+/// the executor-frame SRF dispatch (`srf_invoke_by_oid` has no entry for
+/// per-user PL/pgSQL function OIDs) so no live `ReturnSetInfo` reaches the
+/// execstate — the dual-home `types_fmgr`↔`types_nodes` fcinfo keystone.
+pub fn return_query_put_rows(
+    _estate: &mut PLpgSQL_execstate,
+    rows: std::vec::Vec<std::vec::Vec<crate::exec_seams::ExecsqlColumn>>,
+) {
+    // Append each materialized result row into the live materialize sink (C:
+    // `tuplestore_puttupleslot(estate->tuple_store, slot)` per row, where
+    // `estate->tuple_store == rsi->setResult`). Each column crosses as the owned
+    // `(value | byref image, isnull)` split — the same shape `ExecsqlColumn`
+    // already carries (a by-reference value's header-ful varlena image is in
+    // `byref`, the bare word `value` is `0` then).
+    put_rows_into_sink(rows);
+}
+
+/// Shared deposit: convert each `ExecsqlColumn` row into a `MatCell` row and
+/// push it onto the active materialize sink. Used by both RETURN QUERY (a whole
+/// batch of rows) and RETURN NEXT (one row at a time).
+pub(crate) fn put_rows_into_sink(
+    rows: std::vec::Vec<std::vec::Vec<crate::exec_seams::ExecsqlColumn>>,
+) {
+    types_fmgr::mat_srf::with_top(|sink| {
+        if let Some(sink) = sink {
+            for row in rows {
+                let cells: std::vec::Vec<types_fmgr::mat_srf::MatCell> = row
+                    .into_iter()
+                    .map(|c| types_fmgr::mat_srf::MatCell {
+                        value: c.value,
+                        ref_payload: c
+                            .byref
+                            .map(types_fmgr::boundary::RefPayload::Varlena),
+                        isnull: c.isnull,
+                    })
+                    .collect();
+                sink.rows.push(cells);
+            }
+        }
+    });
+}
+
+/// `RETURN NEXT <record/row variable>` (pl_exec.c 4116, the `stmt->retvarno >=
+/// 0` arm) — append a declared record/row/scalar variable's current row to the
+/// SRF tuplestore. Needs the `exec_move_row` tuple-deform + per-column-image
+/// path; loud until the composite RETURN NEXT path lands (the scalar
+/// `RETURN NEXT <expr>` form is ported directly in `exec_stmt_return_next`).
+pub fn return_next_var_loud(_estate: &mut PLpgSQL_execstate, _retvarno: int32) {
     panic!(
-        "seam not wired: plpgsql_exec_function SETOF result (pl_exec.c) — \
-         ReturnSetInfo materialize-mode + tuplestore handoff (SRF/executor substrate)"
+        "seam not wired: RETURN NEXT <record/row variable> (pl_exec.c) — \
+         exec_move_row tuple-deform into ReturnSetInfo.setResult (composite \
+         RETURN NEXT path; the scalar RETURN NEXT <expr> form is ported)"
     );
 }
 

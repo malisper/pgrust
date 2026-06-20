@@ -173,3 +173,32 @@ pub struct ProcFormFields {
     pub pronargdefaults: i16,
     pub prorettype: Oid,
 }
+
+/// The deformed `pg_proc` row `pg_get_functiondef` (ruleutils.c 2926-3170) and
+/// its `print_function_*` helpers read: the fixed-width scalar form plus the
+/// by-reference / `pg_node_tree` / array columns the renderer detoasts with
+/// `SysCacheGetAttr*`. Each optional column is `None` when SQL NULL (matching
+/// the C `SysCacheGetAttr(..., &isnull)` reads); `prosrc` is the
+/// `SysCacheGetAttrNotNull` read (always present).
+#[derive(Clone, Debug)]
+pub struct PgFunctiondefInfo {
+    /// `(Form_pg_proc) GETSTRUCT(proctup)` — the fixed-width scalar columns.
+    pub form: ProcFormFields,
+    /// `proconfig` (`text[]` SET clauses), decoded to the `name=value` element
+    /// strings; `None` when SQL NULL.
+    pub proconfig: Option<alloc::vec::Vec<String>>,
+    /// `prosqlbody` (`pg_node_tree` SQL body), as its `nodeToString` text;
+    /// `None` when SQL NULL.
+    pub prosqlbody: Option<String>,
+    /// `probin` (`text` C-language link symbol / bind value); `None` when SQL
+    /// NULL.
+    pub probin: Option<String>,
+    /// `prosrc` (`text` source body) — `SysCacheGetAttrNotNull`, always present.
+    pub prosrc: String,
+    /// `proargdefaults` (`pg_node_tree` default-expression `List`), as its
+    /// `nodeToString` text; `None` when SQL NULL.
+    pub proargdefaults: Option<String>,
+    /// `protrftypes` (`oid[]` TRANSFORM types), decoded to element OIDs; `None`
+    /// when SQL NULL.
+    pub protrftypes: Option<alloc::vec::Vec<Oid>>,
+}

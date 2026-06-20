@@ -38,7 +38,7 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgResult, SoftErrorContext};
 use types_tuple::Datum;
 
 seam_core::seam!(
@@ -47,13 +47,17 @@ seam_core::seam!(
     /// `jsonb_in_*` semantic actions, and return the assembled on-disk `jsonb`
     /// varlena bytes (length header + root container), allocated in `mcx`. The
     /// lexer/parser is the jsonapi subsystem (json's cycle partner), so the
-    /// parse loop is owned by the provider. `Err` carries the parse
-    /// `ereport(ERROR, "invalid input syntax for type json")`.
-    pub fn parse_to_jsonb<'mcx>(
+    /// parse loop is owned by the provider. C forwards `escontext`
+    /// (`fcinfo->context`) to `json_errsave_error`: with a live soft sink a
+    /// parse failure yields `Ok(None)` (`ereturn(escontext, (Datum) 0, ...)`),
+    /// otherwise it raises `Err` (the parse
+    /// `ereport(ERROR, "invalid input syntax for type json")`).
+    pub fn parse_to_jsonb<'mcx, 'e>(
         mcx: Mcx<'mcx>,
         json: &[u8],
         unique_keys: bool,
-    ) -> PgResult<PgVec<'mcx, u8>>
+        escontext: Option<&'e mut SoftErrorContext>,
+    ) -> PgResult<Option<PgVec<'mcx, u8>>>
 );
 
 seam_core::seam!(
@@ -96,6 +100,40 @@ seam_core::seam!(
     /// `DirectFunctionCall1(numeric_int8, num)` — cast on-disk `numeric` bytes
     /// `num` to `int8`. `Err` carries "bigint out of range".
     pub fn numeric_int8(num: &[u8]) -> PgResult<i64>
+);
+
+seam_core::seam!(
+    /// The `variadic` branch of `extract_variadic_args` (funcapi.c) for the
+    /// VARIADIC-"any" jsonb builders (`jsonb_build_object` / `jsonb_build_array`
+    /// called as `f(VARIADIC arr)`): take the single trailing array argument's
+    /// on-disk varlena image (the `Datum::ByRef` lane bytes) and expand it into
+    /// per-element `(Datum, isnull)` pairs plus the common element type OID.
+    ///
+    /// Mirrors C exactly: `array_in = PG_GETARG_ARRAYTYPE_P(variadic_start);
+    /// element_type = ARR_ELEMTYPE(array_in); get_typlenbyvalalign(element_type,
+    /// ...); deconstruct_array(array_in, element_type, typlen, typbyval,
+    /// typalign, &args_res, &nulls_res, &nargs);` — every `types_res[i]` is set
+    /// to `element_type`. The element `Datum`s are materialized in the canonical
+    /// header-ful by-reference form the per-type output functions consume.
+    /// Installed by `backend-utils-adt-jsonfuncs` (which owns `arrayfuncs` +
+    /// `lsyscache`).
+    pub fn extract_variadic_array<'mcx>(
+        mcx: Mcx<'mcx>,
+        array_image: &Datum<'mcx>,
+    ) -> PgResult<(Oid, alloc::vec::Vec<(Datum<'mcx>, bool)>)>
+);
+
+seam_core::seam!(
+    /// `deconstruct_array_builtin(in_array, TEXTOID, &in_datums, &in_nulls,
+    /// &in_count)` (jsonb.c `jsonb_object` / `jsonb_object_two_arg`): explode the
+    /// on-disk `text[]` varlena image into `ARR_NDIM`, the full `ARR_DIMS` vector
+    /// (for the `[0]` even-element / `[1]` two-column shape checks), and the
+    /// per-element text payloads (`None` == SQL NULL — the C `in_nulls[i]` flag;
+    /// `Some(bytes)` == the raw `text` payload, `VARDATA_ANY` with no header).
+    /// Installed by `backend-utils-adt-jsonfuncs` (which owns `arrayfuncs`).
+    pub fn deconstruct_text_array_with_dims(
+        arr: &[u8],
+    ) -> PgResult<(i32, alloc::vec::Vec<i32>, alloc::vec::Vec<Option<alloc::vec::Vec<u8>>>)>
 );
 
 extern crate alloc;

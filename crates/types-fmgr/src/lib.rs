@@ -13,9 +13,11 @@
 
 pub mod boundary;
 pub mod fmgr;
+pub mod mat_srf;
 pub mod resolution;
 
 pub use boundary::{ExpandedObject, FmgrArg, FmgrOut, RefPayload};
+pub use mat_srf::{MatCell, MatRow, MatSrfGuard, MatSrfSink};
 pub use fmgr::{
     ContextNode, ExternalFnExpr, FmgrBuiltin, FmgrInfo, FmgrInfoExtra, FnExpr,
     FunctionCallInfoBaseData, PGFunction, Pg_finfo_record, TRACK_FUNC_ALL, TRACK_FUNC_OFF,

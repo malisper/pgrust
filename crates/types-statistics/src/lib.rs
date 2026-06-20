@@ -365,6 +365,59 @@ pub struct VacAttrStats<'mcx> {
     pub rowstride: i32,
 }
 
+impl<'mcx> VacAttrStats<'mcx> {
+    /// Build a minimal `VacAttrStats` carrying just the per-column type metadata
+    /// the extended-statistics build kernels read (`attrtypid`, `attrtypmod`,
+    /// `attrcollid`, `attstattarget`, plus the long-lived `anl_context`). In the
+    /// C model the `StatsBuildData.stats[]` matrix simply aliases the live
+    /// `VacAttrStats *` pointers; the owned `StatsBuildData.stats: Vec<...>`
+    /// instead holds these copies, which is sufficient because the build kernels
+    /// (`ndistinct_for_combination` / `dependency_degree` / `build_sorted_items`)
+    /// only read these scalar fields. The heavy `tup_desc` / `rows` /
+    /// per-slot output vectors are owned by the live ANALYZE matrix (used by the
+    /// owner's `make_build_data` value extraction) and are left empty here.
+    pub fn for_ext_build(
+        attstattarget: i32,
+        attrtypid: Oid,
+        attrtypmod: i32,
+        attrcollid: Oid,
+        anl_context: Option<Mcx<'mcx>>,
+    ) -> Self {
+        VacAttrStats {
+            attstattarget,
+            attrtypid,
+            attrtypmod,
+            attrtype: None,
+            attrcollid,
+            anl_context,
+            compute_stats: None,
+            minrows: 0,
+            extra_data: 0,
+            stats_valid: false,
+            stanullfrac: 0.0,
+            stawidth: 0,
+            stadistinct: 0.0,
+            stakind: [0; STATISTIC_NUM_SLOTS],
+            staop: [0; STATISTIC_NUM_SLOTS],
+            stacoll: [0; STATISTIC_NUM_SLOTS],
+            numnumbers: [0; STATISTIC_NUM_SLOTS],
+            stanumbers: Default::default(),
+            numvalues: [0; STATISTIC_NUM_SLOTS],
+            stavalues: Default::default(),
+            statypid: [0; STATISTIC_NUM_SLOTS],
+            statyplen: [0; STATISTIC_NUM_SLOTS],
+            statypbyval: [false; STATISTIC_NUM_SLOTS],
+            statypalign: [0; STATISTIC_NUM_SLOTS],
+            tupattnum: 0,
+            rows: Vec::new(),
+            tup_desc: None,
+            exprvals: Vec::new(),
+            exprnulls: Vec::new(),
+            rowstride: 0,
+        }
+    }
+}
+
 /// `StatsBuildData` (`statistics/extended_stats_internal.h:61`) — a unified
 /// representation of the sampled data the extended statistics is built on.
 ///

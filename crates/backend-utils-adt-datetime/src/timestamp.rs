@@ -491,6 +491,15 @@ pub fn timestamp_out(timestamp: Timestamp) -> DtResult<String> {
 ///
 /// (`utils/adt/timestamp.c`)
 pub fn timestamptz_in(str: &str, typmod: i32) -> DtResult<TimestampTz> {
+    timestamptz_in_safe(str, typmod, None)
+}
+
+/// `timestamptz_in()` core with a soft-error sink (see `timestamp_in_safe`).
+pub fn timestamptz_in_safe(
+    str: &str,
+    typmod: i32,
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> DtResult<TimestampTz> {
     use types_datetime::{DTK_DATE, DTK_EARLY, DTK_EPOCH, DTK_LATE, MAXDATEFIELDS, MAXDATELEN};
 
     let mut fsec: fsec_t = 0;
@@ -524,15 +533,23 @@ pub fn timestamptz_in(str: &str, typmod: i32) -> DtResult<TimestampTz> {
         );
     }
     if dterr != 0 {
-        return Err(datetime_parse_error(dterr, str, "timestamp with time zone", &extra));
+        return ereturn(
+            escontext.as_deref_mut(),
+            0,
+            datetime_parse_error(dterr, str, "timestamp with time zone", &extra),
+        );
     }
 
     let mut result: TimestampTz = match dtype {
         DTK_DATE => {
             let mut r = 0;
             if tm2timestamp(&tm, fsec, Some(tz), &mut r).is_err() {
-                return Err(PgError::error(format!("timestamp out of range: \"{str}\""))
-                    .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE));
+                return ereturn(
+                    escontext.as_deref_mut(),
+                    0,
+                    PgError::error(format!("timestamp out of range: \"{str}\""))
+                        .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+                );
             }
             r
         }

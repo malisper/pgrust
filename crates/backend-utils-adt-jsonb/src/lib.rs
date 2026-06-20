@@ -45,7 +45,7 @@ use types_error::error::{
     ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_PROTOCOL_VIOLATION,
 };
-use types_error::{PgError, PgResult};
+use types_error::{PgError, PgResult, SoftErrorContext};
 use types_json::{JsonTokenType, JsonTypeCategory};
 use types_tuple::heaptuple::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
 use types_tuple::Datum;
@@ -150,9 +150,16 @@ pub mod fmgr_builtins;
 // ===========================================================================
 
 /// C: `jsonb_in(PG_FUNCTION_ARGS)` — parse a NUL-terminated cstring into an
-/// on-disk jsonb varlena.
-pub fn jsonb_in<'mcx>(mcx: Mcx<'mcx>, input: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    jsonb_from_cstring(mcx, input, false)
+/// on-disk jsonb varlena. C forwards `fcinfo->context` (the soft
+/// `ErrorSaveContext`) so a malformed input under `pg_input_is_valid` is
+/// soft-caught: with a live `escontext` a parse failure yields `Ok(None)`,
+/// otherwise it raises `Err`.
+pub fn jsonb_in<'mcx>(
+    mcx: Mcx<'mcx>,
+    input: &[u8],
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    jsonb_from_cstring(mcx, input, false, escontext)
 }
 
 /// C: `jsonb_recv(PG_FUNCTION_ARGS)` — binary recv: a 1-byte version followed by
@@ -168,7 +175,9 @@ pub fn jsonb_recv<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<PgVec<'mcx, u8>>
         // C: str = pq_getmsgtext(buf, len - cursor, &nbytes); the remaining
         // message bytes are the JSON text (encoding-converted by libpq before
         // we see them).
-        jsonb_from_cstring(mcx, &buf[1..], false)
+        // C: jsonb_recv passes escontext = NULL (hard error path).
+        Ok(jsonb_from_cstring(mcx, &buf[1..], false, None)?
+            .expect("jsonb_from_cstring without escontext never soft-fails"))
     } else {
         Err(PgError::error(format!("unsupported jsonb version number {}", version))
             .with_sqlstate(ERRCODE_INTERNAL_ERROR))
@@ -198,7 +207,9 @@ pub fn jsonb_from_text<'mcx>(
     js: &[u8],
     unique_keys: bool,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    jsonb_from_cstring(mcx, js, unique_keys)
+    // C: jsonb_from_text passes escontext = NULL (hard error path).
+    Ok(jsonb_from_cstring(mcx, js, unique_keys, None)?
+        .expect("jsonb_from_cstring without escontext never soft-fails"))
 }
 
 /// C: `jsonb_from_cstring(char *json, int len, bool unique_keys, Node
@@ -208,8 +219,9 @@ fn jsonb_from_cstring<'mcx>(
     mcx: Mcx<'mcx>,
     json: &[u8],
     unique_keys: bool,
-) -> PgResult<PgVec<'mcx, u8>> {
-    jsonb_seam::parse_to_jsonb::call(mcx, json, unique_keys)
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    jsonb_seam::parse_to_jsonb::call(mcx, json, unique_keys, escontext)
 }
 
 // ---------------------------------------------------------------------------
@@ -825,7 +837,7 @@ pub fn jsonb_float8(jb: &[u8]) -> PgResult<Option<f64>> {
 
 /// C: `to_jsonb_is_immutable(Oid typoid)`.
 pub fn to_jsonb_is_immutable(typoid: Oid) -> PgResult<bool> {
-    let (tcategory, outfuncoid) = catalog_fmgr::categorize_type::call(typoid)?;
+    let (tcategory, outfuncoid) = catalog_fmgr::jsonb_categorize_type::call(typoid)?;
 
     match tcategory {
         JsonTypeCategory::JSONTYPE_NULL
@@ -854,7 +866,7 @@ pub fn to_jsonb<'mcx>(mcx: Mcx<'mcx>, val: &Datum<'mcx>, val_type: Oid) -> PgRes
         return Err(PgError::error("could not determine input data type")
             .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
-    let (tcategory, outfuncoid) = catalog_fmgr::categorize_type::call(val_type)?;
+    let (tcategory, outfuncoid) = catalog_fmgr::jsonb_categorize_type::call(val_type)?;
     datum_to_jsonb(mcx, val, tcategory, outfuncoid)
 }
 
@@ -990,7 +1002,13 @@ pub fn datum_to_jsonb_internal<'mcx>(
                 // the text into standalone jsonb bytes which are then spliced
                 // into `result` by the iterator loop — an identical tree.
                 let json = catalog_fmgr::text_datum_bytes::call(mcx, val)?;
-                let parsed = jsonb_seam::parse_to_jsonb::call(mcx, &json, false)?;
+                // Hard-error path: this json text comes from an internal value
+                // conversion (not the input-function boundary), so no soft
+                // ErrorSaveContext is supplied — a parse failure here is a hard
+                // error and the `Option` is always `Some` (mirrors C passing a
+                // NULL escontext into the inner parse).
+                let parsed = jsonb_seam::parse_to_jsonb::call(mcx, &json, false, None)?
+                    .expect("parse_to_jsonb: hard-error path returned None");
                 splice_jsonb_tokens(result, &parsed)?;
             }
             JSONTYPE_JSONB => {
@@ -1384,7 +1402,7 @@ fn add_jsonb<'mcx>(
     let (tcategory, outfuncoid) = if is_null {
         (JsonTypeCategory::JSONTYPE_NULL, 0)
     } else {
-        catalog_fmgr::categorize_type::call(val_type)?
+        catalog_fmgr::jsonb_categorize_type::call(val_type)?
     };
 
     datum_to_jsonb_internal(mcx, val, is_null, result, tcategory, outfuncoid, key_scalar)
@@ -1586,7 +1604,7 @@ pub fn jsonb_agg_transfn_worker<'mcx>(
             }
             let mut s = JsonbAggState::default();
             s.res.res = pushJsonbValue(&mut s.res.parse_state, WJB_BEGIN_ARRAY, None)?;
-            let (cat, out) = catalog_fmgr::categorize_type::call(arg_type)?;
+            let (cat, out) = catalog_fmgr::jsonb_categorize_type::call(arg_type)?;
             s.val_category = Some(cat);
             s.val_output_func = out;
             s
@@ -1733,7 +1751,7 @@ pub fn jsonb_object_agg_transfn_worker<'mcx>(
                 return Err(PgError::error("could not determine input data type")
                     .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
             }
-            let (kcat, kout) = catalog_fmgr::categorize_type::call(key_arg_type)?;
+            let (kcat, kout) = catalog_fmgr::jsonb_categorize_type::call(key_arg_type)?;
             s.key_category = Some(kcat);
             s.key_output_func = kout;
 
@@ -1741,7 +1759,7 @@ pub fn jsonb_object_agg_transfn_worker<'mcx>(
                 return Err(PgError::error("could not determine input data type")
                     .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
             }
-            let (vcat, vout) = catalog_fmgr::categorize_type::call(val_arg_type)?;
+            let (vcat, vout) = catalog_fmgr::jsonb_categorize_type::call(val_arg_type)?;
             s.val_category = Some(vcat);
             s.val_output_func = vout;
             s

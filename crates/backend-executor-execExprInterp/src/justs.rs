@@ -527,10 +527,10 @@ pub fn ExecJustApplyFuncToCase<'mcx>(
                     .as_ref()
                     .expect("ExecJustApplyFuncToCase: func fcinfo_data missing")
                     .fncollation;
-                let fn_expr = finfo
-                    .fn_expr
-                    .as_ref()
-                    .and_then(|e| e.downcast_ref::<types_nodes::primnodes::Expr>());
+                // Pass the call node as the cheap `Rc`-backed erased handle (a
+                // `clone()` of the step's stamped `fn_expr`), NOT a borrow the
+                // dispatch would deep-clone per call.
+                let fn_expr = finfo.fn_expr.clone();
                 (*nargs, cells, oid, collation, fn_expr)
             }
             _ => unreachable!("ExecJustApplyFuncToCase: step[1] is not an EEOP_FUNCEXPR_STRICT*"),

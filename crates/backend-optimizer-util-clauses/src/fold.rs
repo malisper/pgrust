@@ -92,15 +92,26 @@ fn datum_get_bool(d: &types_tuple::backend_access_common_heaptuple::Datum<'_>) -
 // Context + public entry points
 // ---------------------------------------------------------------------------
 
-/// `eval_const_expressions_context` (clauses.c:61). `boundParams` / `root` are
-/// absent in this model (see module docs); `active_fns` is present, threaded
-/// through the SQL-function inliner's recursion guard.
+/// `eval_const_expressions_context` (clauses.c:61). `boundParams` is the bound
+/// external-parameter values (C: `context->boundParams = root->glob->boundParams`),
+/// `None` when the planner has no bound params (the simple-Query path, identical
+/// to C with `boundParams == NULL`). `root` (for `record_plan_*_dependency`) is
+/// still absent (see module docs); `active_fns` is present, threaded through the
+/// SQL-function inliner's recursion guard.
 struct EceContext<'mcx> {
     mcx: Mcx<'mcx>,
     /// Constant test value for the CASE construct currently being examined.
     case_val: Option<Expr>,
     /// Unsafe (estimation-time-only) transformations OK?
     estimate: bool,
+    /// `boundParams` (clauses.c:63) — the bound external-parameter values; the
+    /// `T_Param` arm folds a PARAM_EXTERN `$n` whose slot has a matching type
+    /// and (outside estimate mode) the `PARAM_FLAG_CONST` flag into a `Const`.
+    /// Carried as the shared owned [`ParamListInfo`](types_nodes::params::ParamListInfo)
+    /// (`Rc`, cheap to clone, `'static`); `make_const` copies any by-ref slot
+    /// image into its own backend-lifetime context, so the values need only be
+    /// readable during the fold.
+    bound_params: types_nodes::params::ParamListInfo,
     /// Recursion depth (C: `check_stack_depth()`).
     depth: u32,
     /// `active_fns` (clauses.c:64) — funcids currently being inlined, the
@@ -115,6 +126,30 @@ pub fn eval_const_expressions(mcx: Mcx<'_>, node: Expr) -> PgResult<Expr> {
         mcx,
         case_val: None,
         estimate: false,
+        bound_params: None,
+        depth: 0,
+        active_fns: Vec::new(),
+    };
+    mutate(node, &mut ctx)
+}
+
+/// `Node *eval_const_expressions(PlannerInfo *root, Node *node)`
+/// (clauses.c:2254) with the planner's `root->glob->boundParams` threaded in.
+/// Safe transformations only; a PARAM_EXTERN `$n` whose `boundParams` slot
+/// carries a matching type and the `PARAM_FLAG_CONST` flag folds to a `Const`.
+/// The simple-Query/COPY path uses [`eval_const_expressions`] (None params);
+/// the custom-plan path (`BuildCachedPlan`) reaches here through the planner's
+/// `preprocess_expression`.
+pub fn eval_const_expressions_with_params(
+    mcx: Mcx<'_>,
+    node: Expr,
+    bound_params: types_nodes::params::ParamListInfo,
+) -> PgResult<Expr> {
+    let mut ctx = EceContext {
+        mcx,
+        case_val: None,
+        estimate: false,
+        bound_params,
         depth: 0,
         active_fns: Vec::new(),
     };
@@ -129,6 +164,7 @@ pub fn estimate_expression_value(mcx: Mcx<'_>, node: Expr) -> PgResult<Expr> {
         mcx,
         case_val: None,
         estimate: true,
+        bound_params: None,
         depth: 0,
         active_fns: Vec::new(),
     };
@@ -214,6 +250,67 @@ fn req(opt: Option<Box<Expr>>, what: &str) -> PgResult<Expr> {
         .ok_or_else(|| PgError::error(format!("eval_const_expressions: unexpected NULL {what}")))
 }
 
+/// `T_Param` arm of `eval_const_expressions_mutator` (clauses.c:2452). When a
+/// matching bound external-parameter value is available (and is OK to
+/// substitute — either we are in estimate mode or the slot is flagged
+/// `PARAM_FLAG_CONST`), fold the Param into a `Const`; otherwise copy the Param.
+fn arm_param<'mcx>(node: Expr, ctx: &EceContext<'mcx>) -> PgResult<Expr> {
+    let param = match &node {
+        Expr::Param(p) => p,
+        _ => unreachable!("arm_param: node is not a Param"),
+    };
+
+    // Look to see if we've been given a value for this Param (C:2456-2462).
+    if param.paramkind == types_nodes::primnodes::PARAM_EXTERN {
+        if let Some(param_li) = ctx.bound_params.as_deref() {
+            if param.paramid > 0 && param.paramid <= param_li.num_params {
+                // The dynamic paramFetch hook path (C:2469-2471) is not reached
+                // over the owned model — `param_fetch` is a present-flag only and
+                // the actual hook lives in the caller's subsystem; bound-param
+                // const-folding for cached plans always supplies a fully
+                // materialized `params[]` array (no dynamic fetch). Read the slot
+                // directly (C:2472-2473, the `else` arm).
+                let prm = &param_li.params[(param.paramid - 1) as usize];
+
+                // Insist the fetched type match the Param (C:2480-2481); no error
+                // here, leave that for runtime.
+                if prm.ptype != InvalidOid && prm.ptype == param.paramtype {
+                    // OK to substitute? (C:2484-2485)
+                    if ctx.estimate
+                        || (prm.pflags & types_nodes::params::PARAM_FLAG_CONST) != 0
+                    {
+                        // Return a Const representing the param value. The
+                        // pass-by-ref copy (C's `datumCopy`, C:2503-2506) is done
+                        // inside `make_const`, which copies a `ByRef`/`Composite`
+                        // image into the backend-lifetime const context; for the
+                        // null / by-value case the value word passes through
+                        // unchanged. We therefore hand the slot value straight to
+                        // `make_const` (it owns the copy, exactly like C).
+                        let (typlen, typbyval) =
+                            lsyscache::get_typlenbyval::call(param.paramtype)?;
+                        let mut con = make_const(
+                            ctx.mcx,
+                            param.paramtype,
+                            param.paramtypmod,
+                            param.paramcollid,
+                            typlen as i32,
+                            prm.value.clone(),
+                            prm.isnull,
+                            typbyval,
+                        )?;
+                        // con->location = param->location (C:2510).
+                        con.location = param.location;
+                        return Ok(Expr::Const(con));
+                    }
+                }
+            }
+        }
+    }
+
+    // Not replaceable, so just copy the Param (C:2516). We own the node.
+    Ok(node)
+}
+
 // ---------------------------------------------------------------------------
 // The mutator (clauses.c:2440)
 // ---------------------------------------------------------------------------
@@ -234,9 +331,8 @@ fn mutate(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
 
 fn mutate_inner(node: Expr, ctx: &mut EceContext) -> PgResult<Expr> {
     match node.expr_tag() {
-        // T_Param (clauses.c:2447): with no bound ParamListInfo there is never
-        // a value to substitute; C copies the Param. We own the node, return it.
-        etag::T_Param => Ok(node),
+        // T_Param (clauses.c:2452).
+        etag::T_Param => arm_param(node, ctx),
 
         etag::T_WindowFunc => arm_windowfunc(node, ctx),
         etag::T_FuncExpr => arm_funcexpr(node, ctx),

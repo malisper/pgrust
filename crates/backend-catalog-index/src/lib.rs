@@ -215,6 +215,7 @@ use backend_rewrite_rewritemanip_seams as rewritemanip;
 use backend_executor_execTuples_seams as exec_tuples;
 use backend_executor_execExpr_seams as exec_expr;
 use backend_executor_execUtils_seams as exec_utils;
+use backend_utils_sort_tuplesort_seams as tuplesort_seam;
 
 use types_core::primitive::AttrNumber;
 
@@ -1922,6 +1923,304 @@ fn RELKIND_HAS_STORAGE(relkind: u8) -> bool {
 
 /// `RELPERSISTENCE_TEMP` (`catalog/pg_class.h`).
 const RELPERSISTENCE_TEMP_U8: u8 = b't';
+
+/// `Int8LessOperator` (`catalog/pg_operator.h`) — OID of the `int8 < int8`
+/// btree comparison operator, used as the sort operator for the TID sort.
+const INT8_LESS_OPERATOR: Oid = 412;
+
+/// `INT8OID` (`catalog/pg_type.h`).
+const INT8_OID: Oid = 20;
+
+/// `DEBUG2` (`utils/elog.h`).
+const DEBUG2: i32 = 11;
+
+/// `PROGRESS_CREATEIDX_PHASE_VALIDATE_*` (`commands/progress.h`) — the phase
+/// codes `validate_index` reports.
+const PROGRESS_CREATEIDX_PHASE_VALIDATE_IDXSCAN: i64 = 4;
+const PROGRESS_CREATEIDX_PHASE_VALIDATE_SORT: i64 = 5;
+const PROGRESS_CREATEIDX_PHASE_VALIDATE_TABLESCAN: i64 = 6;
+
+/// `itemptr_encode(itemptr)` (catalog/index.h) — encode an `ItemPointer` as an
+/// int64 that sorts identically to the original TID. The 16 LSBs hold the
+/// offset; the next 32 bits hold the block number. Used by `validate_index` to
+/// sort the index's TIDs as pass-by-value int8 rather than pass-by-ref TID.
+fn itemptr_encode(itemptr: &types_tuple::heaptuple::ItemPointerData) -> i64 {
+    let block = backend_storage_page::ItemPointerGetBlockNumber(itemptr) as u64;
+    let offset = backend_storage_page::ItemPointerGetOffsetNumber(itemptr) as u64;
+    (((block) << 16) | (offset & 0xFFFF)) as i64
+}
+
+/// `index_concurrently_build(heapRelationId, indexRelationId)`
+/// (catalog/index.c): build an index for a concurrent operation. The IndexInfo
+/// is rebuilt from the catalog (its earlier copy was lost in the commit that
+/// made the catalog entry visible), marked `ii_Concurrent = true`, the index is
+/// physically built via [`index_build`] under the table owner's userid +
+/// SECURITY_RESTRICTED_OPERATION, and the pg_index row is finally moved to
+/// `indisready = true` (`INDEX_CREATE_SET_READY`).
+pub fn index_concurrently_build<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_relation_id: Oid,
+    index_relation_id: Oid,
+) -> PgResult<()> {
+    /* This had better make sure that a snapshot is active */
+    debug_assert!(snapmgr::active_snapshot_set::call());
+
+    /* Open and lock the parent heap relation */
+    let heap_rel = table_am::table_open::call(mcx, heap_relation_id, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+
+    /*
+     * Switch to the table owner's userid, so that any index functions are run
+     * as that user. Also lock down security-restricted operations and arrange
+     * to make GUC variable changes local to this command.
+     */
+    let (save_userid, save_sec_context) = matview::get_user_id_and_sec_context::call()?;
+    rt::set_user_id_and_sec_context::call(
+        relcache::rd_rel_relowner::call(&heap_rel)?,
+        save_sec_context | SECURITY_RESTRICTED_OPERATION,
+    )?;
+    let save_nestlevel = guc::new_guc_nest_level::call();
+    guc::restrict_search_path::call()?;
+
+    let index_relation = indexam::index_open::call(mcx, index_relation_id, ROW_EXCLUSIVE_LOCK)?;
+
+    /*
+     * We have to re-build the IndexInfo struct, since it was lost in the commit
+     * of the transaction where this concurrent index was created at the catalog
+     * level.
+     */
+    let mut index_info = BuildIndexInfo(mcx, &index_relation)?;
+    debug_assert!(!index_info.ii_ReadyForInserts);
+    index_info.ii_Concurrent = true;
+    index_info.ii_BrokenHotChain = false;
+
+    /* Now build the index */
+    index_build(mcx, &heap_rel, &index_relation, &mut index_info)?;
+
+    /* Roll back any GUC changes executed by index functions */
+    guc::at_eoxact_guc::call(false, save_nestlevel)?;
+
+    /* Restore userid and security context */
+    rt::set_user_id_and_sec_context::call(save_userid, save_sec_context)?;
+
+    /* Close both the relations, but keep the locks */
+    heap_rel.close(NO_LOCK)?;
+    index_relation.close(NO_LOCK)?;
+
+    /*
+     * Update the pg_index row to mark the index as ready for inserts. Once we
+     * commit this transaction, any new transactions that open the table must
+     * insert new entries into the index for insertions and non-HOT updates.
+     */
+    index_set_state_flags(
+        mcx,
+        index_relation_id,
+        backend_catalog_index_seams::IndexStateFlagsAction::SetReady,
+    )?;
+
+    Ok(())
+}
+
+/// `validate_index(heapId, indexId, snapshot)` (catalog/index.c) — phase 2/3
+/// support code for a concurrent index build. Gather every TID currently in the
+/// index into a sorted tuplesort (via the `ambulkdelete` callback that just
+/// collects + never deletes), then scan the heap under `snapshot` and "merge
+/// join" against the sorted list, inserting any tuple missing from the index.
+///
+/// The TID collector is registered through the generic `bulk_delete_callback`
+/// registry (the owned-model stand-in for the C `(callback, callback_state)`
+/// pair); `index_bulk_delete` invokes it for every index entry. The heap
+/// merge-scan is the heap AM's `table_index_validate_scan` provider.
+pub fn validate_index<'mcx>(
+    mcx: Mcx<'mcx>,
+    heap_id: Oid,
+    index_id: Oid,
+    snapshot: types_tableam::tableam::Snapshot,
+) -> PgResult<()> {
+    use core::cell::RefCell;
+    extern crate alloc;
+    use alloc::boxed::Box;
+    use alloc::rc::Rc;
+
+    {
+        let progress_index = [
+            PROGRESS_CREATEIDX_PHASE,
+            PROGRESS_CREATEIDX_TUPLES_DONE,
+            PROGRESS_CREATEIDX_TUPLES_TOTAL,
+            PROGRESS_SCAN_BLOCKS_DONE,
+            PROGRESS_SCAN_BLOCKS_TOTAL,
+        ];
+        let progress_vals = [PROGRESS_CREATEIDX_PHASE_VALIDATE_IDXSCAN, 0, 0, 0, 0];
+        progress::pgstat_progress_update_multi_param::call(&progress_index, &progress_vals);
+    }
+
+    /* Open and lock the parent heap relation */
+    let heap_relation = table_am::table_open::call(mcx, heap_id, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+
+    /*
+     * Switch to the table owner's userid, so that any index functions are run
+     * as that user. Also lock down security-restricted operations and arrange
+     * to make GUC variable changes local to this command.
+     */
+    let (save_userid, save_sec_context) = matview::get_user_id_and_sec_context::call()?;
+    rt::set_user_id_and_sec_context::call(
+        relcache::rd_rel_relowner::call(&heap_relation)?,
+        save_sec_context | SECURITY_RESTRICTED_OPERATION,
+    )?;
+    let save_nestlevel = guc::new_guc_nest_level::call();
+    guc::restrict_search_path::call()?;
+
+    let index_relation = indexam::index_open::call(mcx, index_id, ROW_EXCLUSIVE_LOCK)?;
+
+    /*
+     * Fetch info needed for index_insert. (Its DefineIndex copy is long gone,
+     * built in a previous transaction.)
+     */
+    let mut index_info = BuildIndexInfo(mcx, &index_relation)?;
+
+    /* mark build is concurrent just for consistency */
+    index_info.ii_Concurrent = true;
+
+    /*
+     * Scan the index and gather up all the TIDs into a tuplesort object.
+     */
+    let ivinfo = types_tableam::genam::IndexVacuumInfo {
+        index: index_relation.alias(),
+        heaprel: heap_relation.alias(),
+        analyze_only: false,
+        report_progress: true,
+        estimated_count: true,
+        message_level: DEBUG2,
+        num_heap_tuples: heap_relation.rd_rel.reltuples as f64,
+        strategy: None,
+    };
+
+    /*
+     * Encode TIDs as int8 values for the sort (pass-by-value int8 sorts faster
+     * than pass-by-ref TID).
+     */
+    let tuplesort = tuplesort_seam::tuplesort_begin_datum::call(
+        mcx,
+        INT8_OID,
+        INT8_LESS_OPERATOR,
+        InvalidOid,
+        false,
+        guc::maintenance_work_mem::call(),
+        types_nodes::nodesort::TUPLESORT_NONE,
+    )?;
+
+    let mut tuplesort = tuplesort;
+
+    // The bulkdelete IndexBulkDeleteCallback (validate_index_callback): for each
+    // index entry, encode its TID and (in C) `tuplesort_putdatum` it straight
+    // into the sort. The owned-model generic callback registry holds `'static`
+    // closures (the C `void *callback_state`), which cannot borrow the
+    // `'mcx`-scoped sort; so the callback collects the encoded int64 TIDs into a
+    // `'static` Vec, and they are fed into the sort immediately after the
+    // bulkdelete scan returns. This is behavior-preserving — the sort's final
+    // contents (and the resulting sorted output) are identical; only the moment
+    // each putdatum happens is deferred to just after the scan.
+    let collected: Rc<RefCell<Vec<i64>>> = Rc::new(RefCell::new(Vec::new()));
+    let handle = {
+        let collected_for_cb = Rc::clone(&collected);
+        backend_commands_vacuum_seams::bulk_delete_callback::register(Box::new(
+            move |tid: types_tuple::heaptuple::ItemPointerData| -> bool {
+                collected_for_cb.borrow_mut().push(itemptr_encode(&tid));
+                false // never actually delete anything
+            },
+        ))
+    };
+
+    /* ambulkdelete updates progress metrics */
+    backend_access_index_indexam::index_bulk_delete(mcx, &ivinfo, None, Some(handle))?;
+
+    // Done collecting: drop the closure and feed the gathered TIDs into the
+    // sort (state.itups += 1 per TID, as in validate_index_callback).
+    backend_commands_vacuum_seams::bulk_delete_callback::unregister(handle);
+    let collected = Rc::try_unwrap(collected)
+        .map_err(|_| PgError::error("validate_index: TID collector still borrowed"))?
+        .into_inner();
+    let itups = collected.len() as i64;
+    for encoded in collected {
+        tuplesort_seam::tuplesort_putdatum::call(
+            &mut tuplesort,
+            types_tuple::backend_access_common_heaptuple::Datum::from_i64(encoded),
+            false,
+        )?;
+    }
+
+    /* Execute the sort */
+    {
+        let progress_index = [
+            PROGRESS_CREATEIDX_PHASE,
+            PROGRESS_SCAN_BLOCKS_DONE,
+            PROGRESS_SCAN_BLOCKS_TOTAL,
+        ];
+        let progress_vals = [PROGRESS_CREATEIDX_PHASE_VALIDATE_SORT, 0, 0];
+        progress::pgstat_progress_update_multi_param::call(&progress_index, &progress_vals);
+    }
+    tuplesort_seam::tuplesort_performsort::call(&mut tuplesort)?;
+
+    /* Now scan the heap and "merge" it with the index */
+    progress::pgstat_progress_update_param::call(
+        PROGRESS_CREATEIDX_PHASE,
+        PROGRESS_CREATEIDX_PHASE_VALIDATE_TABLESCAN,
+    );
+
+    let mut counters = backend_access_table_tableam_seams::ValidateScanCounters::default();
+    // The validate-scan provider pulls each sorted TID through this no-arg
+    // closure (the owned-model stand-in for tuplesort_getdatum on the seam's
+    // far side). Thread the sort through a RefCell so the FnMut() can borrow it.
+    let sort_pull = RefCell::new(tuplesort);
+    {
+        let mut pull = || -> PgResult<Option<i64>> {
+            let mut st = sort_pull.borrow_mut();
+            let (found, val, isnull) =
+                tuplesort_seam::tuplesort_getdatum::call(&mut st, true, false)?;
+            if !found {
+                return Ok(None);
+            }
+            debug_assert!(!isnull);
+            Ok(Some(val.as_i64()))
+        };
+        backend_access_table_tableam_seams::table_index_validate_scan::call(
+            mcx,
+            &heap_relation,
+            &index_relation,
+            &mut index_info,
+            snapshot,
+            &mut counters,
+            &mut pull,
+        )?;
+    }
+    let tuplesort = sort_pull.into_inner();
+
+    /* Done with tuplesort object */
+    let boxed: mcx::PgBox<'mcx, types_nodes::Tuplesortstate<'mcx>> = mcx::alloc_in(mcx, tuplesort)?;
+    tuplesort_seam::tuplesort_end::call(boxed)?;
+
+    /* Make sure to release resources cached in indexInfo (if needed). */
+    {
+        let mut carrier = IndexInfoCarrier::new(&mut index_info);
+        backend_access_index_indexam::index_insert_cleanup(mcx, &index_relation, &mut carrier)?;
+    }
+
+    // elog(DEBUG2, "validate_index found %.0f heap tuples, %.0f index tuples;
+    //              inserted %.0f missing tuples", htups, itups, tups_inserted)
+    // — internal DEBUG2 elog; the counters are otherwise unobserved.
+    let _ = (counters.htups, counters.tups_inserted, itups);
+
+    /* Roll back any GUC changes executed by index functions */
+    guc::at_eoxact_guc::call(false, save_nestlevel)?;
+
+    /* Restore userid and security context */
+    rt::set_user_id_and_sec_context::call(save_userid, save_sec_context)?;
+
+    /* Close rels, but keep locks */
+    index_relation.close(NO_LOCK)?;
+    heap_relation.close(NO_LOCK)?;
+
+    Ok(())
+}
 
 /// `index_concurrently_set_dead(heapId, indexId)` (catalog/index.c): the second
 /// pg_index state transition of DROP/REINDEX INDEX CONCURRENTLY — transfer the
@@ -3701,6 +4000,7 @@ pub fn init_seams() {
     // BuildIndexInfo (brin insert-vacuum, amcheck) and index_build (bootstrap
     // build_indices) — the build / introspection core (keystones #340–#344).
     index_seam::build_index_info::set(BuildIndexInfo);
+    index_seam::index_check_primary_key::set(index_check_primary_key);
     index_seam::index_build::set(index_build);
     index_seam::relation_truncate_indexes::set(RelationTruncateIndexes);
 

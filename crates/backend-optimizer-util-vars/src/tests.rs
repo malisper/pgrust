@@ -102,7 +102,8 @@ fn pull_var_clause_collects_vars() {
         Expr::Var(var_at(1, 0)),
         Expr::Var(var_at(2, 0)),
     ]));
-    let vars = pull_var_clause(&node, 0);
+    let scratch = mcx::MemoryContext::new("pull_var_clause test");
+    let vars = pull_var_clause(scratch.mcx(), &node, 0).expect("ok");
     assert_eq!(vars.len(), 2);
 }
 

@@ -245,17 +245,6 @@ fn fmgr_sql<'mcx>(
     fn_oid: Oid,
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<BareDatum> {
-    // ---- Check call context (functions.c:1588) ----------------------------
-    // We only support non-set functions here. A set-returning SQL function
-    // needs the tuplestore / lazyEval / ReturnSetInfo materialize machinery.
-    if fcinfo.flinfo.as_ref().is_some_and(|f| f.fn_retset) {
-        return Err(PgError::error(
-                "fmgr_sql: set-returning SQL functions are not yet supported \
-                 (needs the tuplestore / lazyEval / ReturnSetInfo materialize path)",
-            )
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
-    }
-
     // ---- init_sql_fcache equivalent (functions.c:536) ---------------------
     // Read the function's pg_proc facts: result type, kind, set-ness, arg types
     // (PgProcSimple), and the body source (prosrc / prosqlbody).
@@ -263,26 +252,47 @@ fn fmgr_sql<'mcx>(
     let rettype = form.prorettype;
     let proargtypes = &form.proargtypes;
 
-    if form.proretset {
-        return Err(PgError::error("fmgr_sql: set-returning SQL functions are not yet supported")
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+    // Set-returning (SETOF/TABLE) SQL function: C `fmgr_sql` runs the body and
+    // delivers the whole result set to the caller's `ReturnSetInfo` in
+    // SFRM_Materialize mode. In the owned model that `ReturnSetInfo` is the
+    // thread-local materialize sink the SRF dispatcher
+    // (`execSRF::dispatch_user_setof`) pushed before this call. A `fn_retset`
+    // function reached WITHOUT an active sink (C `rsinfo == NULL`) is the
+    // "set-valued function called in context that cannot accept a set" error.
+    let set_returning = form.proretset
+        || fcinfo.flinfo.as_ref().is_some_and(|f| f.fn_retset);
+    if set_returning && !types_fmgr::mat_srf::is_active() {
+        return Err(PgError::error(
+            "set-valued function called in context that cannot accept a set",
+        )
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
     }
 
-    // Composite / whole-row results need the JunkFilter row-coercion path.
-    let returns_tuple = rettype == RECORDOID || {
-        // type_is_rowtype: a composite type. get_typlenbyval reports typlen=-1
-        // for a varlena but does not distinguish composites; use the typtype via
-        // the rettype != base classification is out of scope here — a composite
-        // rettype reaches the "whole tuple" branch in C. For the scalar port we
-        // detect it by the body producing more than one column at run time; the
-        // single-column scalar path covers the common case. Treat RECORD as the
-        // only explicit whole-row trigger.
-        false
-    };
-    if returns_tuple {
+    // Composite / whole-row results: `RETURNS [SETOF] <composite>` (a named
+    // rowtype) or `RETURNS TABLE(...)` (RECORD). C's `init_sql_fcache` sets
+    // `fcache->returnsTuple = type_is_rowtype(rettype)`; `postquel_execute`
+    // routes the final SELECT's columns through the JunkFilter into a composite
+    // result tuple (`coerce_fn_result_tuple`).
+    //
+    // For the SETOF (SFRM_Materialize) case the whole-row coercion is the
+    // identity over the result query's columns: each result row IS the composite
+    // value, delivered column-by-column to `rsinfo->setResult` (the materialize
+    // sink). The accumulating receiver (`accum_receive`) already pushes the WHOLE
+    // row (every result column) per row, and the SRF dispatcher
+    // (`materialize_sink_into_rsinfo`, with `returns_tuple == true`) rebuilds the
+    // tuplestore against the caller's `expectedDesc` — so a composite/TABLE SETOF
+    // function flows through the SETOF path below with no extra work.
+    //
+    // The NON-set composite case (`RETURNS <composite>`, a single composite
+    // Datum result, no SETOF) still needs the scalar `coerce_fn_result_tuple`
+    // (heap_form_tuple of the final SELECT's columns -> HeapTupleHeaderGetDatum);
+    // that leg is not yet ported and stays loud.
+    let returns_tuple =
+        rettype == RECORDOID || lsyscache_seams::type_is_rowtype::call(rettype)?;
+    if returns_tuple && !set_returning {
         return Err(PgError::error(
-                "fmgr_sql: composite / whole-row SQL-function results are not yet \
-                 supported (needs the JunkFilter row-coercion path)",
+                "fmgr_sql: composite / whole-row (non-SETOF) SQL-function results are \
+                 not yet supported (needs the coerce_fn_result_tuple path)",
             )
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
     }
@@ -319,6 +329,29 @@ fn fmgr_sql<'mcx>(
         xact_seams::command_counter_increment::call()?;
         snapmgr::push_active_snapshot_transaction::call()?;
         pushed_snapshot = true;
+    }
+
+    // ---- Set-returning (SFRM_Materialize) path ----------------------------
+    // C `fmgr_sql` runs the result query to completion and accumulates every
+    // row into `rsinfo->setResult` (the tuplestore). The owned model runs the
+    // same postquel loop with an ACCUMULATING receiver that appends each row's
+    // column(s) into the active materialize sink, then signals materialize mode.
+    if set_returning {
+        let run_result = run_body_setof(mcx, &querytrees, prosrc.as_str(), params);
+        if pushed_snapshot {
+            let _ = snapmgr::pop_active_snapshot::call();
+        }
+        run_result?;
+        // The whole result set was delivered to the sink; the scalar return is
+        // the NULL word (C: `fcinfo->isnull = true; return (Datum) 0;` in
+        // materialize mode).
+        types_fmgr::mat_srf::with_top(|sink| {
+            if let Some(sink) = sink {
+                sink.materialized = true;
+            }
+        });
+        fcinfo.isnull = true;
+        return Ok(BareDatum::null());
     }
 
     let run_result = run_body(mcx, &querytrees, prosrc.as_str(), params);
@@ -804,6 +837,130 @@ fn run_one_query<'mcx>(
             Ok(None)
         }
     }
+}
+
+// ===========================================================================
+// run_body_setof — the SFRM_Materialize postquel loop accumulating EVERY row of
+// the result query into the active materialize sink (the SETOF SQL-function
+// path). Mirrors `run_body` but the result query drives an accumulating
+// receiver (`accum_receive`) that appends each row's column series to the sink.
+// ===========================================================================
+
+/// `sqlfunction_receive` for the materialize (SETOF) path — append the WHOLE row
+/// (all columns of the result descriptor) to the active materialize sink. Each
+/// column crosses as the `(value | ref_payload, isnull)` split (the same form
+/// `canon_to_capture` produces for the scalar case).
+fn accum_receive<'mcx>(mcx: Mcx<'mcx>, _state: u64, slot: &mut SlotData<'mcx>) -> PgResult<bool> {
+    let natts = slot
+        .base()
+        .tts_tupleDescriptor
+        .as_ref()
+        .map(|d| d.natts.max(0))
+        .unwrap_or(0);
+    let mut row: alloc::vec::Vec<types_fmgr::mat_srf::MatCell> =
+        alloc::vec::Vec::with_capacity(natts as usize);
+    for attnum in 1..=natts {
+        let (value, isnull) =
+            backend_executor_execTuples::slot_deform::slot_getattr(mcx, slot, attnum as i16)?;
+        let cell = canon_to_capture(&value, isnull)?;
+        row.push(types_fmgr::mat_srf::MatCell {
+            value: cell.value,
+            ref_payload: cell.ref_payload,
+            isnull: cell.isnull,
+        });
+    }
+    types_fmgr::mat_srf::with_top(|sink| {
+        if let Some(sink) = sink {
+            sink.rows.push(row);
+        }
+    });
+    Ok(true)
+}
+
+/// Run the body queries to completion, accumulating EVERY row of the last
+/// `canSetTag` query into the active materialize sink. C's `fmgr_sql` SETOF
+/// (SFRM_Materialize) leg: `postquel_start`/`getnext` (run to completion, NOT
+/// lazyEval)/`end` per query, with the result query's receiver appending each
+/// row to `rsinfo->setResult`.
+fn run_body_setof<'mcx>(
+    mcx: Mcx<'mcx>,
+    querytrees: &mcx::PgVec<'mcx, Query<'mcx>>,
+    source_text: &str,
+    params: ParamListInfo,
+) -> PgResult<()> {
+    let mut plans: alloc::vec::Vec<PlannedStmt<'mcx>> = alloc::vec::Vec::new();
+    let mut last_setstag: Option<usize> = None;
+
+    for query in querytrees.iter() {
+        let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, query.clone_in(mcx)?)?;
+        for rq in rewritten.iter() {
+            if rq.commandType == CmdType::CMD_UTILITY {
+                return Err(PgError::error(
+                        "fmgr_sql: utility statements in SQL functions are not yet \
+                         supported (needs the ProcessUtility postquel leg)",
+                    )
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+            }
+            let plan = planner_seams::pg_plan_query::call(
+                mcx,
+                rq,
+                source_text,
+                CURSOR_OPT_PARALLEL_OK,
+            )?;
+            if plan.canSetTag {
+                last_setstag = Some(plans.len());
+            }
+            plans.push(plan);
+        }
+    }
+
+    for (i, plan) in plans.iter().enumerate() {
+        let is_result = Some(i) == last_setstag;
+        run_one_query_setof(mcx, plan, source_text, params.clone(), is_result)?;
+    }
+
+    Ok(())
+}
+
+/// Run one planned query for the SETOF path. When `is_result`, the rows are
+/// accumulated into the materialize sink by `accum_receive`; otherwise output is
+/// discarded (`None_Receiver`).
+fn run_one_query_setof<'mcx>(
+    mcx: Mcx<'mcx>,
+    plan: &PlannedStmt<'mcx>,
+    source_text: &str,
+    params: ParamListInfo,
+    is_result: bool,
+) -> PgResult<()> {
+    let dest = if is_result {
+        let vtable = backend_tcop_dest::ReceiverVtable {
+            rStartup: capture_startup,
+            receiveSlot: accum_receive,
+            rShutdown: capture_shutdown,
+        };
+        // The accumulating receiver reads the active sink via `with_top`; the
+        // state token is unused (kept for the vtable shape).
+        backend_tcop_dest::register_dest_receiver(CommandDest::SqlFunction, vtable, 0)
+    } else {
+        backend_tcop_dest::none_receiver()
+    };
+
+    let mut query_desc = execMain::CreateQueryDesc(
+        mcx.context(),
+        plan,
+        source_text,
+        snapmgr::get_active_snapshot::call()?,
+        None,
+        dest,
+        params,
+        0,
+    )?;
+    execMain::ExecutorStart(&mut query_desc, 0)?;
+    execMain::ExecutorRun(&mut query_desc, ForwardScanDirection, 0)?;
+    execMain::ExecutorFinish(&mut query_desc)?;
+    execMain::ExecutorEnd(&mut query_desc)?;
+    execMain::FreeQueryDesc(query_desc)?;
+    Ok(())
 }
 
 // ===========================================================================

@@ -37,6 +37,9 @@ pub fn init_all() {
     backend_access_gin_gininsert::init_seams();
     backend_access_gin_ginscan::init_seams();
     backend_access_gin_ginutil::init_seams();
+    // gin-ginbulk installs the `ginbuild`/`ginbuildempty` AM build-dispatch
+    // seams that gin-ginutil's `ambuild`/`ambuildempty` adapters call (#341).
+    backend_access_gin_ginbulk::init_seams();
     backend_access_gin_ginvacuum::init_seams();
     backend_access_gin_ginxlog::init_seams();
     backend_access_hashvalidate::init_seams();
@@ -154,6 +157,7 @@ pub fn init_all() {
     backend_catalog_toasting::init_seams();
     backend_commands_amcmds::init_seams();
     backend_commands_analyze::init_seams();
+    backend_statistics_core::init_seams();
     backend_statistics_extended_stats::init_seams();
     backend_statistics_mvdistinct::init_seams();
     backend_statistics_dependencies::init_seams();
@@ -343,6 +347,7 @@ pub fn init_all() {
     backend_parser_parse_utilcmd::init_seams();
     backend_parser_small1::init_seams();
     backend_parser_driver::init_seams();
+    backend_parser_scan::init_seams();
     backend_parser_gram_core::init_seams();
     backend_port_atomics::init_seams();
     backend_port_sysv_sema::init_seams();
@@ -465,6 +470,7 @@ pub fn init_all() {
     backend_utils_adt_array_selfuncs::init_seams();
     backend_utils_adt_geo_selfuncs::init_seams();
     backend_utils_adt_array_typanalyze::init_seams();
+    backend_utils_adt_tsvector_typanalyze::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();
     backend_utils_adt_dbsize::init_seams();
@@ -526,6 +532,7 @@ pub fn init_all() {
     backend_utils_adt_range_selfuncs::init_seams();
     backend_utils_adt_selfuncs::init_seams();
     backend_utils_adt_rangetypes::init_seams();
+    backend_utils_adt_rangetypes_gist::init_seams();
     backend_utils_adt_rangetypes_typanalyze::init_seams();
     backend_utils_adt_regexp::init_seams();
     backend_utils_adt_pseudotypes::init_seams();
@@ -1286,19 +1293,27 @@ mod recurrence_guard {
         // `heap_getattr`s it against the producing slot's descriptor — both
         // installed by backend-executor-execTuples::init_seams.)
         //
-        // DESIGN_DEBT (TD-FORCESTORE-HEAPTUPLE-DATALESS): `exec_force_store_heap_tuple`
-        // (`ExecForceStoreHeapTuple`) stays uninstalled. The seam carries
-        // `tuple: &HeapTupleData`, but the C body's non-heap-slot branch deforms
-        // the tuple (`heap_deform_tuple(tuple, slot->tts_tupleDescriptor,
-        // slot->tts_values, slot->tts_isnull)`) which needs the user-data area —
-        // and the owned `HeapTupleData` / its callers' `xs_hitup`
-        // (`tableam::IndexScanDesc.xs_hitup: HeapTuple`) carrier carry NO data
-        // area in this model (it lives only in `FormedTuple.data`). Installing a
-        // body that synthesizes an empty data area would silently mis-deform
-        // virtual/minimal target slots. Faithful install needs the tree-wide
-        // carrier-widen of `xs_hitup` (and the seam arg) from data-less
-        // `HeapTuple` to data-bearing `FormedTuple` — same class as the curTuple
-        // widen above, but it crosses the tableam relscan carrier (out of lane).
+        // DESIGN_DEBT (TD-FORCESTORE-HEAPTUPLE-DATALESS): the data-less
+        // `exec_force_store_heap_tuple` (`ExecForceStoreHeapTuple` over
+        // `tuple: &HeapTupleData`) stays uninstalled. The C body's non-heap-slot
+        // branch deforms the tuple (`heap_deform_tuple(tuple, ...)`) which needs
+        // the user-data area, and a bare `HeapTupleData` header carries none (it
+        // lives only in `FormedTuple.data`). The data-BEARING twin
+        // `exec_force_store_formed_heap_tuple` (over `FormedTuple`) IS installed
+        // by backend-executor-execTuples::init_seams. The ANALYZE sample path
+        // (commands/analyze.c FormIndexDatum), the index-only-scan `xs_hitup`
+        // store (nodeIndexonlyscan), and the KNN reorder-queue store
+        // (nodeIndexscan) are now routed through the formed twin — their carriers
+        // (`AnlIndexData` sample `FormedTuple`, the carrier-widened
+        // `IndexScanDesc.xs_hitup: Option<FormedTuple>` fed by GiST
+        // `recontup`/SPGiST `reconTups`, and `ReorderTuple.tuple: FormedTuple`)
+        // all keep the user-data area. The lone remaining consumer of the
+        // data-less seam is the MERGE/UPDATE wholerow-junk path
+        // (nodeModifyTable::merge_matched / exec / delete_exec), whose `oldtuple`
+        // comes from `datum_get_wholerow_heap_tuple` (itself uninstalled, so the
+        // path is unreachable). Unblocking it needs the separate `oldtuple`-chain
+        // carrier-widen across delete/update/merge + the wholerow seam — its own
+        // campaign, kept out of this lane.
         ("backend_executor_execTuples", "exec_force_store_heap_tuple"),
         // backend-foreign-foreign owns foreign/foreign.c's READ accessors + the
         // FDW-routine resolution AND now the pg_foreign_* catalog-write/DDL seams
@@ -1659,21 +1674,23 @@ mod recurrence_guard {
         // scan + `get_opcode`/`get_op_opfamily_strategy`), so the relcache owner
         // runs it + caches the three arrays + returns them — fully installed.)
         //
-        // -- backend-utils-cache-relcache-nodexform (#159 planner-arena keystone) --
+        // -- backend-utils-cache-relcache-nodexform --
         // The nodexform owner (sanctioned relcache.c sibling-split) installs its
-        // three live seams (open_index_attrs, relation_build_publication_desc,
-        // publication_desc). The three index node-tree CACHING seams below stay
-        // uninstalled: they cache a built `stringToNode` + eval/canonicalize node
-        // tree into the relcache entry's `rd_indexprs`/`rd_indpred`/dummy-Const
-        // fields, which the TRIMMED owned entry does not carry, AND their only
-        // consumers (`get_index_expressions`/`get_index_predicate` in the
-        // planner-catalog read path) panic on the unmodeled planner-arena node
-        // projection regardless (#159 planner-values keystone); the dummy seam has
-        // no live consumer. Faithful mirror-pg-and-panic until the relcache
-        // node-tree cache fields + the planner-arena projection land. Install +
-        // DELETE these three then.
-        ("backend_utils_cache_relcache_nodexform", "index_expressions"),
-        ("backend_utils_cache_relcache_nodexform", "index_predicate"),
+        // live seams (open_index_attrs, relation_build_publication_desc,
+        // publication_desc, index_expressions, index_predicate). `index_expressions`
+        // and `index_predicate` now decode the raw `pg_index.indexprs`/`indpred`
+        // text (`stringToNode` + `eval_const_expressions` [+ `canonicalize_qual`/
+        // `make_ands_implicit` for the predicate] + `fix_opfuncids`) and RETURN the
+        // transformed `Expr` list in `mcx`; the trimmed owned entry does not retain
+        // the C's `rd_indexprs`/`rd_indpred` memoization, so the tree is re-derived
+        // per call. The runtime `BuildIndexInfo` consumer
+        // (`relation_get_index_{expressions,predicate}`) carries the result into
+        // `IndexInfo.ii_{Expressions,Predicate}`. (The separate planner-catalog read
+        // path `get_index_{expressions,predicate}` still errors on the #159
+        // planner-arena `NodeId` projection — a distinct keystone, untouched here.)
+        // `dummy_index_expressions` stays uninstalled: its only consumer
+        // (`BuildDummyIndexInfo`, the TRUNCATE-of-expression-index path) is not yet
+        // reached. Install + DELETE it when that lands.
         ("backend_utils_cache_relcache_nodexform", "dummy_index_expressions"),
         //
         // (TD-INDEXING-APPEND-ATTRIBUTE-TUPLES RETIRED: `AppendAttributeTuples`

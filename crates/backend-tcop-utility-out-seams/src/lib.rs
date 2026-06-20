@@ -726,8 +726,10 @@ seam!(
 );
 seam!(
     /// `EventTriggerCollectAlterDefPrivs(stmt)` (event_trigger.c) — stash an ALTER
-    /// DEFAULT PRIVILEGES command.
-    pub fn event_trigger_collect_alter_def_privs<'mcx>(stmt: &Node<'mcx>)
+    /// DEFAULT PRIVILEGES command. The active-collection path deep-copies the
+    /// parse tree (palloc can `ereport(ERROR)`, carried on `Err`); a no-op
+    /// (early `Ok`) without an active collection state.
+    pub fn event_trigger_collect_alter_def_privs<'mcx>(stmt: &Node<'mcx>) -> PgResult<()>
 );
 seam!(
     /// `EventTriggerInhibitCommandCollection()` (event_trigger.c) — suppress DDL

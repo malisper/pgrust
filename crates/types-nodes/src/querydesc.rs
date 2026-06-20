@@ -173,10 +173,21 @@ impl QueryDesc {
     /// `'mcx` borrow leaves the bundle.
     pub fn with_result_tupdesc<R>(&self, f: impl FnOnce(Option<&TupleDescData<'_>>) -> R) -> R {
         self.work.with(|w| {
-            let td = w
-                .planstate
-                .as_ref()
-                .and_then(|ps| ps.ps_head().ps_ResultTupleDesc.as_deref());
+            // C `ExecutorStart`/InitPlan sets `queryDesc->tupDesc` to the junk
+            // filter's *cleaned* tuple type when a junk filter is present (e.g.
+            // a top SELECT plan with resjunk columns from FOR UPDATE / ORDER BY),
+            // falling back to the top plan node's result tupdesc otherwise. The
+            // cleaned descriptor is what COPY-(query)-TO builds its attnumlist
+            // from, and it must match the junk-filtered slot the executor
+            // delivers to the dest receiver — otherwise COPY reads the wrong /
+            // out-of-range columns.
+            let td = if let Some(jf) = w.estate.es_junkFilter.as_deref() {
+                jf.jf_cleanTupType.as_deref()
+            } else {
+                w.planstate
+                    .as_ref()
+                    .and_then(|ps| ps.ps_head().ps_ResultTupleDesc.as_deref())
+            };
             f(td)
         })
     }

@@ -49,7 +49,7 @@ use types_error::{
     ERRCODE_DATA_EXCEPTION, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_ARGUMENT_FOR_XQUERY,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_XML_COMMENT,
-    ERRCODE_INVALID_XML_PROCESSING_INSTRUCTION, PgError, PgResult,
+    ERRCODE_INVALID_XML_PROCESSING_INSTRUCTION, PgError, PgResult, SoftErrorContext, ereturn,
 };
 use types_tuple::heaptuple::{
     BOOLOID, BPCHAROID, BYTEAOID, DATEOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID,
@@ -258,21 +258,29 @@ pub fn xmlChar_to_encoding(encoding_name: &str) -> PgResult<i32> {
 
 /// C `xml_in` (xml.c:272) — `xml` type input function. Parses the input to check
 /// well-formedness via libxml.
-pub fn xml_in(s: &str) -> PgResult<Vec<u8>> {
+///
+/// `escontext` is the soft `ErrorSaveContext` off the fmgr call frame
+/// (C: `(Node *) fcinfo->context`). On a malformed-XML parse the error is routed
+/// into the soft context (so `pg_input_is_valid('bad','xml')` returns false) and
+/// `Ok(None)` is returned (C: `if (doc == NULL) PG_RETURN_NULL();`); with no soft
+/// sink the parse error is thrown as a hard `Err`.
+pub fn xml_in(s: &str, escontext: Option<&mut SoftErrorContext>) -> PgResult<Option<Vec<u8>>> {
     if !seam::have_libxml::call() {
         return Err(no_xml_support());
     }
     let vardata = s.as_bytes().to_vec();
-    // Parse to check well-formedness. A soft error is irrelevant here (the C
-    // code passes fcinfo->context but ignores the outcome), so a hard parse is
-    // requested and any well-formedness failure is thrown.
-    xml_parse(
+    // Parse to check well-formedness; on a soft failure `xml_parse` saves the
+    // error into `escontext` and returns false => return NULL.
+    if !xml_parse(
         &vardata,
         seam::xmloption::call(),
         true,
         seam::get_database_encoding::call(),
-    )?;
-    Ok(vardata)
+        escontext,
+    )? {
+        return Ok(None);
+    }
+    Ok(Some(vardata))
 }
 
 /// C `xml_out_internal` (xml.c:311) — render an `xmltype` to a C string,
@@ -353,7 +361,7 @@ pub fn xml_recv(buf: &[u8]) -> PgResult<Vec<u8>> {
 
     // Parse to check well-formedness; xml_parse throws ERROR if not.
     let result = &work[..nbytes];
-    xml_parse(result, seam::xmloption::call(), true, encoding)?;
+    xml_parse(result, seam::xmloption::call(), true, encoding, None)?;
 
     // Now that we know what we're dealing with, convert to server encoding:
     //   newstr = pg_any_to_server(str, nbytes, encoding);
@@ -556,6 +564,7 @@ pub fn xmlparse(
         xmloption_arg,
         preserve_whitespace,
         seam::get_database_encoding::call(),
+        None,
     )?;
     Ok(data.to_vec())
 }
@@ -1105,10 +1114,18 @@ pub fn xml_parse(
     xmloption_arg: XmlOptionType,
     preserve_whitespace: bool,
     encoding: i32,
+    escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<bool> {
-    // A soft error from the provider is escalated to a hard error here, matching
-    // the C call sites that pass escontext == NULL.
-    seam::xml_parse_libxml::call(data, xmloption_arg, preserve_whitespace, encoding)?
+    // The provider returns `Ok(Err(soft))` for a malformed parse and a genuine
+    // hard `Err` only for non-recoverable failures (OOM). A malformed parse is
+    // routed through `ereturn`: with a soft context it is saved and `false` is
+    // returned (C: the soft `ereturn` makes the caller see `doc == NULL`); with
+    // no context it propagates as a hard error, matching the C call sites that
+    // pass escontext == NULL.
+    match seam::xml_parse_libxml::call(data, xmloption_arg, preserve_whitespace, encoding)? {
+        Ok(b) => Ok(b),
+        Err(soft) => ereturn(escontext, false, soft),
+    }
 }
 
 /// C `xml_text2xmlChar` (xml.c:1933, static) — `text_to_cstring(in)` as bytes.

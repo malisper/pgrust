@@ -1438,9 +1438,9 @@ pub fn spggettuple<'mcx>(
             let heaptid = cur.heapPtrs[i];
             let recheck = cur.recheck[i];
             // scan->xs_hitup = so->reconTups[so->iPtr]: hand out the recon tuple
-            // header; its data area lives in the FormedTuple kept in reconTups.
+            // (the full data-bearing FormedTuple kept in reconTups).
             let hitup = if want_itup {
-                cur.reconTups[i].as_ref().map(|f| f.tuple.clone())
+                cur.reconTups[i].clone()
             } else {
                 None
             };

@@ -86,21 +86,23 @@ pub fn fix_indexqual_operand(
             if pos == indexcol {
                 // The stored index expression; strip a binary-compatible
                 // RelabelType wrapper before comparing, exactly as C does.
-                let stored = root.node(item).clone();
-                let indexkey = match &stored {
+                // Borrow the stored index expression and its (relabel-stripped)
+                // indexkey for the read-only comparison (a derived `Expr::clone`
+                // panics on a context-allocated child); no owned copy is needed.
+                let stored: &Expr = root.node(item);
+                let indexkey: &Expr = match stored {
                     Expr::RelabelType(rt) => rt
                         .arg
                         .as_deref()
-                        .expect("fix_indexqual_operand: RelabelType.arg must be set")
-                        .clone(),
-                    other => other.clone(),
+                        .expect("fix_indexqual_operand: RelabelType.arg must be set"),
+                    other => other,
                 };
-                if equal_expr::call(&node, &indexkey) {
+                if equal_expr::call(&node, indexkey) {
                     // makeVar(INDEX_VAR, indexcol + 1,
                     //         exprType(lfirst(indexpr_item)), -1,
                     //         exprCollation(lfirst(indexpr_item)), 0)
-                    let vartype = expr_type(Some(&stored))?;
-                    let varcollid = expr_collation(Some(&stored))?;
+                    let vartype = expr_type(Some(stored))?;
+                    let varcollid = expr_collation(Some(stored))?;
                     let result = make_var(INDEX_VAR, (indexcol + 1) as i16, vartype, -1, varcollid, 0);
                     return Ok(Expr::Var(result));
                 } else {

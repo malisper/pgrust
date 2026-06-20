@@ -168,6 +168,15 @@ pub const REINDEX_REL_FORCE_INDEXES_UNLOGGED: i32 = 0x08;
 /// `REINDEX_REL_FORCE_INDEXES_PERMANENT`.
 pub const REINDEX_REL_FORCE_INDEXES_PERMANENT: i32 = 0x10;
 
+/// `REINDEXOPT_VERBOSE` (`catalog/index.h`) — print progress info.
+pub const REINDEXOPT_VERBOSE: i32 = 0x01;
+/// `REINDEXOPT_REPORT_PROGRESS` — report pgstat progress.
+pub const REINDEXOPT_REPORT_PROGRESS: i32 = 0x02;
+/// `REINDEXOPT_MISSING_OK` — skip missing relations.
+pub const REINDEXOPT_MISSING_OK: i32 = 0x04;
+/// `REINDEXOPT_CONCURRENTLY` — concurrent mode.
+pub const REINDEXOPT_CONCURRENTLY: i32 = 0x08;
+
 /// `ReindexParams` (`catalog/index.h`), trimmed to the fields CLUSTER passes
 /// (`{0}` — no concurrency, default tablespace).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

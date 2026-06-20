@@ -22,6 +22,9 @@ types-scan = { path = "../types-scan" }
 types-amvalidate = { path = "../types-amvalidate" }
 types-tidbitmap = { path = "../types-tidbitmap" }
 backend-access-gin-core-probe-seams = { path = "../backend-access-gin-core-probe-seams" }
+backend-access-gin-ginutil-seams = { path = "../backend-access-gin-ginutil-seams" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+types-fmgr = { path = "../types-fmgr" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }

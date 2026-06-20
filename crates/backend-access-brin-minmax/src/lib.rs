@@ -645,6 +645,45 @@ fn dispatch_serialize<'mcx>(
     }
 }
 
+/// Register the BRIN minmax + inclusion opclass *support* procedures (opcinfo /
+/// add_value / consistent / union) as fmgr builtins (C: their `fmgr_builtins[]`
+/// rows / `pg_proc.dat` internal rows).
+///
+/// These are needed so `index_getprocinfo`'s `fmgr_info` (which BRIN calls via
+/// `support_proc_oid` to learn the column's support-proc OID) resolves — the
+/// `BrinDesc` builder and `add_values_to_range` then dispatch the resolved OID
+/// directly through the `brin_*` opclass seams (`dispatch_opcinfo` /
+/// `dispatch_addvalue` / `dispatch_consistent_*` / `dispatch_union`). The
+/// builtin's `func` is `None`: in this engine these support procedures are
+/// reached only by-OID through those seams, never fmgr-invoked (their fmgr ABI
+/// passes `BrinDesc*`/`BrinValues*` internal pointers as `Datum`, which the
+/// owned model expresses through the typed seams instead). Registering the rows
+/// also satisfies the `fmgr_isbuiltin` completeness guard.
+fn register_opclass_support_builtins() {
+    fn b(foid: Oid, name: &str, nargs: i16, strict: bool) -> types_fmgr::BuiltinFunction {
+        types_fmgr::BuiltinFunction {
+            foid,
+            name: alloc::string::String::from(name),
+            nargs,
+            strict,
+            retset: false,
+            func: None,
+        }
+    }
+    backend_utils_fmgr_core::register_builtins([
+        // minmax (pg_proc.dat oids 3383-3386).
+        b(F_BRIN_MINMAX_OPCINFO, "brin_minmax_opcinfo", 1, true),
+        b(F_BRIN_MINMAX_ADD_VALUE, "brin_minmax_add_value", 4, true),
+        b(F_BRIN_MINMAX_CONSISTENT, "brin_minmax_consistent", 3, true),
+        b(F_BRIN_MINMAX_UNION, "brin_minmax_union", 3, true),
+        // inclusion (pg_proc.dat oids 4105-4108).
+        b(inclusion::F_BRIN_INCLUSION_OPCINFO, "brin_inclusion_opcinfo", 1, true),
+        b(inclusion::F_BRIN_INCLUSION_ADD_VALUE, "brin_inclusion_add_value", 4, true),
+        b(inclusion::F_BRIN_INCLUSION_CONSISTENT, "brin_inclusion_consistent", 3, true),
+        b(inclusion::F_BRIN_INCLUSION_UNION, "brin_inclusion_union", 3, true),
+    ]);
+}
+
 /// Install the BRIN opclass-dispatch seams owned by the built-in opclasses.
 /// Single installer per seam (CLAUDE.md); the built-in opclasses that have not
 /// landed panic loudly on dispatch.
@@ -653,6 +692,10 @@ pub fn init_seams() {
     // by-OID `function_call2_coll(distance_oid, ...)` compaction dispatch
     // resolves them (C: their `fmgr_builtins[]` rows).
     mmm::register_distance_builtins();
+
+    // Register the minmax + inclusion opclass support-procedure builtins so
+    // `index_getprocinfo` resolves them (dispatched by-OID via the seams below).
+    register_opclass_support_builtins();
 
     opclass::brin_opcinfo::set(dispatch_opcinfo);
     opclass::brin_addvalue::set(dispatch_addvalue);

@@ -744,6 +744,33 @@ pub fn datum_get_range_type_p<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<RangeT
     })
 }
 
+/// `DatumGetRangeTypeP(d)` for the value-carrying canonical `Datum` arm: the
+/// on-disk `RangeType` varlena image rides `Datum::ByRef` (header included), so
+/// read it from the element image bytes rather than from a pointer word.
+///
+/// This is the by-reference array-element counterpart of
+/// [`datum_get_range_type_p`]: a `pg_statistic` bounds-histogram entry extracted
+/// by `get_attstatsslot_value_datums` carries the range image by value, whose
+/// bare-word surrogate would be a non-dereferenceable in-buffer offset. The
+/// returned `RangeTypeP` outlives the transient `value`, so the image is copied
+/// into `mcx` (`detoast_attr`: a plain inline varlena is the verbatim-copy
+/// fall-through; a compressed/external image is fetched/decompressed, mirroring
+/// `PG_DETOAST_DATUM`).
+pub fn datum_get_range_type_p_value<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+) -> PgResult<RangeTypeP<'mcx>> {
+    // The element image bytes (the verbatim on-disk varlena, header included).
+    let bytes = value.as_ref_bytes();
+    let copy = detoast::detoast_attr::call(mcx, bytes)?;
+    let ptr = copy.leak().as_ptr() as *const RangeType;
+
+    Ok(RangeTypeP {
+        ptr,
+        _marker: core::marker::PhantomData,
+    })
+}
+
 /// `VARSIZE_EXTERNAL(PTR)` -- `VARHDRSZ_EXTERNAL + VARTAG_SIZE(VARTAG_EXTERNAL(PTR))`.
 /// `VARHDRSZ_EXTERNAL` (offsetof(varattrib_1b_e, va_data)) == 2; the tag byte at
 /// offset 1 selects the payload size (VARTAG_SIZE, varatt.h).

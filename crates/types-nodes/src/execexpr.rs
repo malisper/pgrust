@@ -1084,15 +1084,24 @@ pub enum ExprEvalStepData<'mcx> {
     },
     /// `fieldstore` — for EEOP_FIELDSTORE_DEFORM / FIELDSTORE_FORM.
     FieldStore {
-        /// `FieldStore *fstore` — original node; parked until primnodes carries
-        /// `FieldStore` (opaque address for now).
-        fstore: usize,
+        /// `FieldStore *fstore` — original node. The interpreter only needs
+        /// `fstore->resulttype` (the composite type whose rowtype the DEFORM/FORM
+        /// pair looks up), so the owned model carries that scalar directly rather
+        /// than parking the node as an opaque address.
+        resulttype: Oid,
         /// `ExprEvalRowtypeCache *rowcache` — shared by the DEFORM/FORM pair.
         rowcache: Option<PgBox<'mcx, ExprEvalRowtypeCache>>,
-        /// `Datum *values` — column-value workspace.
-        values: Option<PgVec<'mcx, Datum<'mcx>>>,
-        /// `bool *nulls`.
-        nulls: Option<PgVec<'mcx, bool>>,
+        /// `Datum *values` / `bool *nulls` — the per-column value/null workspace.
+        ///
+        /// In C these are two flat `palloc`'d arrays (`values[ncolumns]` /
+        /// `nulls[ncolumns]`) that DEFORM fills from the deformed input tuple,
+        /// each `newval` sub-expression writes into via `&values[fieldnum-1]` /
+        /// `&nulls[fieldnum-1]` (which is *also* the `innermost_caseval` source
+        /// for that field), and FORM gathers back into `heap_form_tuple`. In the
+        /// owned model each column is an arena [`ResultCellId`] (paired
+        /// value+null), so this is a per-column `Vec` of cell ids — the DEFORM
+        /// writes them, the newval sub-exprs target them, FORM reads them.
+        col_cells: Option<PgVec<'mcx, ResultCellId>>,
         ncolumns: i32,
     },
     /// `sbsref_subscript` — for EEOP_SBSREF_SUBSCRIPTS.
@@ -1144,8 +1153,15 @@ pub enum ExprEvalStepData<'mcx> {
         arg_cell: ResultCellId,
         /// jump here on null
         jumpdone: i32,
-        /// `NullableDatum *iresult` — intermediate hash result.
-        iresult: Option<PgBox<'mcx, NullableDatum>>,
+        /// `NullableDatum *iresult` — the shared intermediate hash-result
+        /// workspace. In C this is a single `NullableDatum` aliased by every
+        /// step's `resvalue` in the chain, so `iresult->value` always holds the
+        /// running hash the NEXT32 steps rotate-and-XOR into. In the owned model
+        /// the running hash flows through the arena result cells, so this carries
+        /// the *cell id* of that shared accumulator (the `iresult_cell` the
+        /// intermediate steps write to). `None` for single-column chains that
+        /// never combine.
+        iresult: Option<ResultCellId>,
     },
     /// `convert_rowtype` — for EEOP_CONVERT_ROWTYPE.
     ConvertRowtype {
@@ -1645,29 +1661,23 @@ impl<'mcx> Clone for ExprState<'mcx> {
     /// the trivial pre-union `ExprState { flags }`). Recompile via
     /// `ExecInitExpr` to obtain a fresh program.
     fn clone(&self) -> Self {
-        ExprState {
-            flags: self.flags,
-            resnull: self.resnull,
-            resvalue: self.resvalue.clone(),
-            resultslot: None,
-            steps: None,
-            result_cells: ResultCellArena::default(),
-            evalfunc: self.evalfunc,
-            expr: None,
-            evalfunc_private: self.evalfunc_private,
-            steps_len: self.steps_len,
-            steps_alloc: self.steps_alloc,
-            parent: None,
-            es_link: None,
-            ext_params: self.ext_params,
-            innermost_caseval: None,
-            innermost_domainval: None,
-            escontext: self.escontext,
-            json_states: JsonExprStateArena::default(),
-            json_coercion_caches: JsonCoercionCacheArena::default(),
-            found_aggs: None,
-            found_window_funcs: None,
-        }
+        // MODE-B GUARD (was a silent field-drop, the b4d2d5566 bug class): a
+        // derived/handle-only clone of a *compiled* `ExprState` would reset
+        // `steps`/`result_cells`/`resultslot`/`expr`/the json + found_* arenas
+        // to `None`/empty, silently losing the linear `ExprEvalStep` program and
+        // yielding a hollow state that the interpreter would reject ("steps not
+        // built"). A compiled `ExprState` is owned by its EState's per-query
+        // context and is NEVER deep-cloned during execution; to obtain a fresh
+        // program, recompile via `ExecInitExpr`/`ExecInitQual` (the C path).
+        // There is no `ExprState` copyObject in PostgreSQL either. Mirror the
+        // Aggref/SubLink/Tuplestorestate guards and stop LOUD rather than hand
+        // back a program-less state.
+        panic!(
+            "ExprState::clone: a compiled ExprState carries a context-allocated \
+             `steps` program (plus result_cells / json arenas / found_* lists) \
+             that a plain `.clone()` would silently drop — there is no copyObject \
+             for ExprState; recompile via ExecInitExpr/ExecInitQual instead"
+        )
     }
 }
 

@@ -16,7 +16,9 @@ types-datum = { path = "../types-datum" }
 types-rangetypes = { path = "../types-rangetypes" }
 types-tuple = { path = "../types-tuple" }
 types-cache = { path = "../types-cache" }
+types-fmgr = { path = "../types-fmgr" }
 types-gist = { path = "../types-gist" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-adt-rangetypes = { path = "../backend-utils-adt-rangetypes" }
 backend-utils-adt-multirangetypes = { path = "../backend-utils-adt-multirangetypes" }
 backend-utils-adt-float = { path = "../backend-utils-adt-float" }

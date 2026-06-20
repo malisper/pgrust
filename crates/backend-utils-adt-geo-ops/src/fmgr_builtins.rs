@@ -193,7 +193,10 @@ fn ok<T>(r: types_error::PgResult<T>) -> T {
 // ---------------------------------------------------------------------------
 
 fn fc_point_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let p = ok(crate::io::point_in(arg_cstring(fcinfo, 0)));
+    // C: `point_in` forwards `fcinfo->context` for soft `pg_input_is_valid`.
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let escontext = fcinfo.escontext_mut();
+    let p = ok(crate::io::point_in(&s, escontext));
     ret_point(fcinfo, p)
 }
 fn fc_point_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
@@ -201,7 +204,9 @@ fn fc_point_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_cstring(fcinfo, crate::io::point_out(&p))
 }
 fn fc_box_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let b = ok(crate::io::box_in(arg_cstring(fcinfo, 0)));
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let escontext = fcinfo.escontext_mut();
+    let b = ok(crate::io::box_in(&s, escontext));
     ret_box(fcinfo, b)
 }
 fn fc_box_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
@@ -209,7 +214,9 @@ fn fc_box_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_cstring(fcinfo, crate::io::box_out(&b))
 }
 fn fc_lseg_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let ls = ok(crate::io::lseg_in(arg_cstring(fcinfo, 0)));
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let escontext = fcinfo.escontext_mut();
+    let ls = ok(crate::io::lseg_in(&s, escontext));
     ret_ref(fcinfo, lseg_bytes(&ls))
 }
 fn fc_lseg_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
@@ -217,7 +224,9 @@ fn fc_lseg_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_cstring(fcinfo, crate::io::lseg_out(&ls))
 }
 fn fc_line_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let l = ok(crate::io::line_in(arg_cstring(fcinfo, 0)));
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let escontext = fcinfo.escontext_mut();
+    let l = ok(crate::io::line_in(&s, escontext));
     ret_ref(fcinfo, line_bytes(&l))
 }
 fn fc_line_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
@@ -225,7 +234,9 @@ fn fc_line_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_cstring(fcinfo, crate::io::line_out(&l))
 }
 fn fc_circle_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let c = ok(crate::io::circle_in(arg_cstring(fcinfo, 0)));
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let escontext = fcinfo.escontext_mut();
+    let c = ok(crate::io::circle_in(&s, escontext));
     ret_circle(fcinfo, c)
 }
 fn fc_circle_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
@@ -1079,7 +1090,9 @@ fn ret_i32(v: i32) -> Datum {
 // --- path I/O (cstring <-> path) ---
 
 fn fc_path_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let p = ok(crate::io::path_in(arg_cstring(fcinfo, 0)));
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let escontext = fcinfo.escontext_mut();
+    let p = ok(crate::io::path_in(&s, escontext));
     ret_path(fcinfo, p)
 }
 fn fc_path_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
@@ -1090,7 +1103,9 @@ fn fc_path_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // --- polygon I/O (cstring <-> polygon) ---
 
 fn fc_poly_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let p = ok(crate::io::poly_in(arg_cstring(fcinfo, 0)));
+    let s = arg_cstring(fcinfo, 0).to_string();
+    let escontext = fcinfo.escontext_mut();
+    let p = ok(crate::io::poly_in(&s, escontext));
     ret_poly(fcinfo, p)
 }
 fn fc_poly_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {

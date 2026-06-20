@@ -416,11 +416,7 @@ fn invoke_transfn<'mcx>(
     // ...)`. Thread that call node so a polymorphic transition function reads its
     // declared arg/result types (`get_fn_expr_*`). The by-OID re-resolution drops
     // it otherwise.
-    let fn_expr = pertrans
-        .transfn
-        .fn_expr
-        .as_ref()
-        .and_then(|e| e.downcast_ref::<types_nodes::primnodes::Expr>());
+    let fn_expr = pertrans.transfn.fn_expr.clone();
     // By-value dispatch: arg 0 may be a `Datum::Internal` (the running
     // aggregate state for an `internal`-transtype aggregate), whose owned
     // `Box<dyn Any>` cannot be cloned out of a borrow. The owned seam moves it

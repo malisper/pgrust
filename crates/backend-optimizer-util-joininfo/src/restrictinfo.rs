@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 
 use backend_nodes_core::makefuncs::{make_andclause, make_orclause};
+use mcx::Mcx;
 use types_error::PgResult;
 use types_nodes::primnodes::{Expr, OpExpr};
 use types_pathnodes::{
@@ -373,12 +374,16 @@ fn make_sub_restrictinfos_expr(
 /// Given a RestrictInfo containing a binary opclause, produce a RestrictInfo
 /// representing the commutation of that clause.
 pub fn commute_restrictinfo(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     rinfo: RinfoId,
     comm_op: types_core::primitive::Oid,
-) -> RinfoId {
+) -> PgResult<RinfoId> {
     let ri = root.rinfo(rinfo).clone();
-    let clause_node = root.node(ri.clause).clone();
+    // Deep-copy the clause OpExpr via `Expr::clone_in` (the derived
+    // `Expr::clone` panics on a context-allocated operand); the copy is moved
+    // into a fresh arena node below.
+    let clause_node = root.node(ri.clause).clone_in(mcx)?;
     let clause: OpExpr = match clause_node {
         Expr::OpExpr(o) => o,
         _ => panic!("commute_restrictinfo: clause is not an OpExpr"),
@@ -386,11 +391,23 @@ pub fn commute_restrictinfo(
     debug_assert!(clause.args.len() == 2);
 
     // flat-copy all the fields of clause ... and adjust those we need to change.
-    let mut newclause = clause.clone();
-    newclause.opno = comm_op;
-    newclause.opfuncid = INVALID_OID;
-    // list_make2(lsecond(args), linitial(args)) — swap the two args.
-    newclause.args = alloc::vec![clause.args[1].clone(), clause.args[0].clone()];
+    // The scalar fields are `Copy`; `args` are deep-copied via `Expr::clone_in`
+    // (swapped order) so we never touch the panicking derived `OpExpr`/`Expr`
+    // clone.
+    let newclause = OpExpr {
+        opno: comm_op,
+        opfuncid: INVALID_OID,
+        opresulttype: clause.opresulttype,
+        opretset: clause.opretset,
+        opcollid: clause.opcollid,
+        inputcollid: clause.inputcollid,
+        // list_make2(lsecond(args), linitial(args)) — swap the two args.
+        args: alloc::vec![
+            clause.args[1].clone_in(mcx)?,
+            clause.args[0].clone_in(mcx)?,
+        ],
+        location: clause.location,
+    };
 
     let new_clause_id = root.alloc_node(Expr::OpExpr(newclause));
 
@@ -417,7 +434,7 @@ pub fn commute_restrictinfo(
     result.left_hasheqoperator = INVALID_OID;
     result.right_hasheqoperator = INVALID_OID;
 
-    root.alloc_rinfo(result)
+    Ok(root.alloc_rinfo(result))
 }
 
 /// `restriction_is_or_clause`: t iff the restrictinfo node contains an OR clause.

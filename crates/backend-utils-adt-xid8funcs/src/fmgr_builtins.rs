@@ -135,16 +135,22 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
 }
 
 /// `pg_snapshot_in(cstring) -> pg_snapshot` (xid8funcs.c:407). The core parses
-/// (hard error context — no soft `ErrorSaveContext` on the frame) and sorts;
-/// the resulting `pg_snapshot` crosses as its header-ful varlena image.
+/// (via `parse_snapshot`) and sorts; the resulting `pg_snapshot` crosses as its
+/// header-ful varlena image. Forward the soft `ErrorSaveContext` installed on
+/// the frame by InputFunctionCallSafe so a recoverable parse failure `ereturn`s
+/// into the sink (returning `Ok(None)`) instead of throwing past `invoke?`.
 fn fc_pg_snapshot_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
-    match crate::pg_snapshot_in(s, None) {
+    // Copy the cstring first: `arg_cstring` borrows `fcinfo` immutably while
+    // `escontext_mut` needs it mutably.
+    let s = arg_cstring(fcinfo, 0).to_owned();
+    match crate::pg_snapshot_in(&s, fcinfo.escontext_mut()) {
         Ok(Some(snap)) => {
             fcinfo.set_ref_result(RefPayload::Varlena(snap.to_varlena_bytes()));
             Datum::from_usize(0)
         }
-        Ok(None) => raise(types_error::PgError::error("pg_snapshot_in returned NULL")),
+        // Soft-error path: escontext recorded the failure; return a NULL
+        // placeholder the caller discards after `soft_error_occurred()`.
+        Ok(None) => Datum::null(),
         Err(e) => raise(e),
     }
 }

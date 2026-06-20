@@ -109,7 +109,7 @@ pub fn set_append_rel_size<'mcx>(
             }
         }
         let childrinfos =
-            appendinfo::adjust_appendrel_attrs_restrictlist::call(root, &kept, core::slice::from_ref(appinfo))?;
+            appendinfo::adjust_appendrel_attrs_restrictlist::call(mcx, root, &kept, core::slice::from_ref(appinfo))?;
         root.rel_mut(childrel).joininfo = childrinfos;
 
         // Translate the parent's reltarget exprs to the child (1-to-1).
@@ -121,7 +121,9 @@ pub fn set_append_rel_size<'mcx>(
             .unwrap_or_default();
         let mut child_exprs: Vec<types_pathnodes::NodeId> = Vec::with_capacity(parent_exprs.len());
         for nid in &parent_exprs {
-            let parent_expr = root.node(*nid).clone();
+            // Deep-copy via `clone_in` — moved into the by-value `adjust_appendrel_attrs`
+            // seam (the derived `Expr::clone` panics on an owned-subtree child).
+            let parent_expr = root.node(*nid).clone_in(mcx)?;
             let translated = backend_optimizer_path_equivclass_ext_seams::adjust_appendrel_attrs::call(
                 root,
                 parent_expr,
@@ -140,6 +142,7 @@ pub fn set_append_rel_size<'mcx>(
         if need_ec {
             backend_optimizer_path_equivclass_seams::add_child_rel_equivalences::call(
                 root,
+                run,
                 childrel, // appinfo carried by relid handle: see seam contract
                 rel,
                 childrel,

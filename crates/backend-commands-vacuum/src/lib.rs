@@ -2645,6 +2645,18 @@ pub fn register_tid_callback_state(ts: TidStore) -> u64 {
 /// membership. Infallible in C; an `Err` from the membership seam (unported
 /// owner) surfaces here as a panic via `.expect`, matching C's infallibility.
 fn vacuum_tid_is_dead_impl(tid: ItemPointerData, callback_state_handle: u64) -> bool {
+    // A generic `IndexBulkDeleteCallback` closure handle (e.g. the
+    // `validate_index` TID collector) takes precedence: its closure decides
+    // (and collects). The VACUUM dead-membership path below is the original
+    // `TidStore`-keyed callback.
+    if backend_commands_vacuum_seams::bulk_delete_callback::is_closure_handle(callback_state_handle)
+    {
+        return backend_commands_vacuum_seams::bulk_delete_callback::invoke(
+            callback_state_handle,
+            tid,
+        )
+        .expect("vacuum_tid_is_dead: unknown bulk-delete closure handle");
+    }
     let ts = tid_callback_registry::lookup(callback_state_handle)
         .expect("vacuum_tid_is_dead: unknown callback-state handle");
     tidstore_seams::tidstore_is_member::call(ts, tid).expect("tidstore_is_member")

@@ -881,11 +881,15 @@ fn compute_index_stats<'mcx>(
             // Reset per-tuple context.
             exec_util_seam::reset_expr_context::call(&mut estate, econtext)?;
 
-            // Store the heap tuple in the slot.
-            slot_seam::exec_force_store_heap_tuple::call(
+            // Store the heap tuple in the slot. The sampled `rows[rowno]` is the
+            // full data-bearing FormedTuple, so route through the formed-tuple
+            // store seam (a partial/expression index's target slot is virtual and
+            // must be deformed from the user-data area).
+            let row_copy = rows[rowno].clone_in(mcx)?;
+            slot_seam::exec_force_store_formed_heap_tuple::call(
                 &mut estate,
                 slot,
-                &rows[rowno].tuple,
+                row_copy,
                 false,
             )?;
 
@@ -1082,21 +1086,49 @@ fn examine_attribute<'mcx>(
     Ok(Some(stats))
 }
 
-/// Run a non-standard `typanalyze` function. The repo array/range typanalyze
-/// leaves install themselves over the array/range type OIDs; a generic
-/// fmgr-by-OID dispatch that hands the live `&mut VacAttrStats` to an arbitrary
-/// typanalyze is not expressible through the by-word fmgr ABI, so an unknown
-/// custom typanalyze bottoms out loudly here (mirror of
-/// `OidFunctionCall1(typanalyze, PointerGetDatum(stats))`).
+// pg_proc OIDs (fmgroids.h) of the built-in `typanalyze` support functions.
+// The C `OidFunctionCall1(typanalyzeOid, PointerGetDatum(stats))` passes a live
+// `VacAttrStats*` (an `internal`-typed arg) through fmgr; that pointer cannot
+// cross the owned by-word Datum lane, so each built-in typanalyze is reached
+// through a typed inward seam (declared by its owner's `*-typanalyze-seams`
+// crate, installed by the owning leaf) that takes the real `&mut VacAttrStats`.
+// This funcoid-keyed dispatch is the owned analog of the fmgr indirection,
+// mirroring how other `internal`-state functions (SRF/agg) are dispatched.
+const F_ARRAY_TYPANALYZE: u32 = 3816;
+const F_TS_TYPANALYZE: u32 = 3688;
+const F_RANGE_TYPANALYZE: u32 = 3916;
+const F_MULTIRANGE_TYPANALYZE: u32 = 4242;
+
+/// Run a non-standard `typanalyze` function (the C
+/// `OidFunctionCall1(typanalyze, PointerGetDatum(stats))`). The live
+/// `VacAttrStats*` is an `internal`-typed fmgr arg that cannot cross the owned
+/// by-word Datum lane, so each built-in typanalyze is dispatched by its pg_proc
+/// OID to the typed inward seam its owning leaf installs (the seam takes the
+/// real `&mut VacAttrStats`). An unknown / user-defined typanalyze (which would
+/// genuinely require a `Datum::Internal` fmgr arm) bottoms out loudly.
 fn run_custom_typanalyze<'mcx>(
     _mcx: Mcx<'mcx>,
     typanalyze: Oid,
-    _stats: &mut VacAttrStats<'mcx>,
+    stats: &mut VacAttrStats<'mcx>,
 ) -> PgResult<bool> {
-    Err(PgError::error(format!(
-        "analyze: custom typanalyze function {} is reached through its own owner (OidFunctionCall1(typanalyze, PointerGetDatum(stats)) cannot cross the by-word fmgr ABI with a live VacAttrStats)",
-        typanalyze
-    )))
+    match typanalyze {
+        F_ARRAY_TYPANALYZE => {
+            backend_utils_adt_array_typanalyze_seams::array_typanalyze::call(stats)
+        }
+        F_TS_TYPANALYZE => {
+            backend_utils_adt_tsvector_typanalyze_seams::ts_typanalyze::call(stats)
+        }
+        F_RANGE_TYPANALYZE => {
+            backend_utils_adt_rangetypes_typanalyze_seams::range_typanalyze::call(stats)
+        }
+        F_MULTIRANGE_TYPANALYZE => {
+            backend_utils_adt_rangetypes_typanalyze_seams::multirange_typanalyze::call(stats)
+        }
+        other => Err(PgError::error(format!(
+            "analyze: typanalyze function {} has no owned dispatch (a user-defined typanalyze would require a Datum::Internal fmgr arm to carry the live VacAttrStats; only the built-in array/tsvector/range/multirange typanalyze functions are reached through their owners)",
+            other
+        ))),
+    }
 }
 
 // ===========================================================================

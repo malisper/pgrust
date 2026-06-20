@@ -37,6 +37,10 @@ pub fn init_seams() {
     // is_jsonb = false (jsonb renders through its own datum_to_jsonb).
     seams::categorize_type::set(|typoid| json_categorize_type(typoid, false));
 
+    // `json_categorize_type(typoid, true, ...)` — the jsonb.c classification
+    // (add_jsonb etc.): a JSONB-typed value splices binary, not text-reparse.
+    seams::jsonb_categorize_type::set(|typoid| json_categorize_type(typoid, true));
+
     // `func_volatile(funcid)` — the PROVOLATILE_* byte.
     seams::func_volatile::set(backend_utils_cache_lsyscache::function::func_volatile);
 
@@ -50,4 +54,21 @@ pub fn init_seams() {
     seams::deconstruct_array::set(json_render::deconstruct_array);
     seams::deconstruct_text_array::set(json_render::deconstruct_text_array);
     seams::walk_composite::set(json_render::walk_composite);
+
+    // The `variadic` branch of `extract_variadic_args` for the VARIADIC-"any"
+    // `jsonb_build_object`/`jsonb_build_array` (jsonb.c): expansion needs
+    // `arrayfuncs` (deconstruct_array) + `lsyscache` (get_typlenbyvalalign),
+    // both owned by `jsonfuncs`; the jsonb crate calls it through
+    // `backend-utils-adt-jsonb-seams`.
+    backend_utils_adt_jsonb_seams::extract_variadic_array::set(
+        json_render::extract_variadic_array,
+    );
+
+    // The `deconstruct_array_builtin(in_array, TEXTOID, ...)` boundary for
+    // `jsonb_object` / `jsonb_object_two_arg` (jsonb.c): the `text[]`-with-dims
+    // explosion needs `arrayfuncs` (owned by `jsonfuncs`); the jsonb crate calls
+    // it through `backend-utils-adt-jsonb-seams`.
+    backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::set(
+        json_render::deconstruct_text_array_with_dims,
+    );
 }

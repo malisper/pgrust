@@ -59,9 +59,10 @@ use mcx::MemoryContext;
 
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
-    PgError, PgResult, ERRCODE_CANNOT_COERCE, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INDETERMINATE_DATATYPE, ERRCODE_INTERNAL_ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR,
+    ErrorLocation, PgError, PgResult, ERRCODE_CANNOT_COERCE, ERRCODE_DATATYPE_MISMATCH,
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_DATATYPE, ERRCODE_INTERNAL_ERROR,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR,
+    ERRCODE_UNDEFINED_OBJECT, ERROR, WARNING,
 };
 use types_sortsupport::COMPARE_EQ;
 
@@ -3559,18 +3560,26 @@ fn plpgsql_pre_column_ref<'mcx>(
         return Ok(None);
     }
 
-    // Lookup keys: the fully-qualified dotted name, then progressively shorter
-    // suffixes down to the last bareword (so `block.var` and `var` both hit).
+    // Lookup keys: progressively shorter trailing suffixes of the dotted name,
+    // longest first. This mirrors C `resolve_column_ref` + `plpgsql_ns_lookup`,
+    // which strips a leading enclosing-block LABEL from a qualified reference:
+    //   * `var`            -> scalar / whole-record bareword.
+    //   * `rec.field`      -> a RECFIELD (the param map keys fields this way), or
+    //                         `block.var` -> the scalar `var` (label stripped).
+    //   * `label.rec.field`-> after stripping the leading block label, the
+    //                         RECFIELD key is `rec.field` (the trailing 2 names).
+    // The param map keys scalars by their bare name and record fields by
+    // `rec.field`, so trying each trailing suffix from longest to shortest hits
+    // the most-specific binding first (matching plpgsql_ns_lookup's preference
+    // for a qualified match before the unqualified fallback).
     let info = {
         let names = &state.names;
         let mut found = None;
-        // Try the full dotted form first, then the trailing single name.
-        let dotted = parts.join(".").to_ascii_lowercase();
-        if let Some(i) = names.get(&dotted) {
-            found = Some(i.clone());
-        } else if let Some(last) = parts.last() {
-            if let Some(i) = names.get(&last.to_ascii_lowercase()) {
+        for start in 0..parts.len() {
+            let key = parts[start..].join(".").to_ascii_lowercase();
+            if let Some(i) = names.get(&key) {
                 found = Some(i.clone());
+                break;
             }
         }
         found
@@ -3677,16 +3686,43 @@ fn transformParamRef<'mcx>(
                 Some(sql_fn_make_param(&pinfo, paramno, pref.location)?)
             }
         }
+        // plpgsql_param_ref (pl_comp.c:1056): a `$n` ParamRef resolves through the
+        // plpgsql namespace under the synthesized name `"$n"`. PL/pgSQL registers
+        // every function argument in the namespace under BOTH its declared name
+        // and `$1`/`$2`/… (pl_comp.c `add_parameter_name`), so a user-written
+        // `$1` in a plpgsql expression resolves to the matching argument datum's
+        // Param exactly like the bareword does — via make_datum_param (paramid =
+        // dno + 1). A name not in the namespace returns NULL (the generic error
+        // below). The owned pre-resolved `names` map carries the `"$n"` keys, so
+        // look the synthesized name up there.
+        ParseRefHookState::PlpgsqlExpr(state) => {
+            let pname = alloc::format!("${}", pref.number);
+            match state.names.get(&pname) {
+                Some(info) => {
+                    // make_datum_param: PARAM_EXTERN with paramid = dno + 1.
+                    let mut paramcollid = info.collation;
+                    if !OidIsValid(paramcollid) && OidIsValid(state.input_collation) {
+                        paramcollid = state.input_collation;
+                    }
+                    let param = types_nodes::primnodes::Param {
+                        paramkind: types_nodes::primnodes::PARAM_EXTERN,
+                        paramid: info.dno + 1,
+                        paramtype: info.typeid,
+                        paramtypmod: info.typmod,
+                        paramcollid,
+                        location: pref.location,
+                    };
+                    // Record the referenced datum number (expr->paramnos).
+                    state.record_paramno(info.dno);
+                    Some(param)
+                }
+                None => None,
+            }
+        }
         // A domain CHECK parse state installs no paramref hook (C
         // `p_paramref_hook == NULL`): a `$n` reference falls to the generic
-        // "there is no parameter $n" error below. A PL/pgSQL expression resolves
-        // variable references through the pre-columnref hook (as barewords), not
-        // through `$n` ParamRefs, so a literal `$n` in a PL/pgSQL expression has
-        // no parameter (C `plpgsql_param_ref` only matches the `$n` form plpgsql
-        // itself synthesizes, never user `$n` text).
-        ParseRefHookState::None
-        | ParseRefHookState::PlpgsqlExpr(_)
-        | ParseRefHookState::DomainCheckValue(_) => None,
+        // "there is no parameter $n" error below.
+        ParseRefHookState::None | ParseRefHookState::DomainCheckValue(_) => None,
     };
 
     // if (result == NULL) ereport(ERROR, "there is no parameter $%d", ...)
@@ -3856,6 +3892,8 @@ fn transformSubLink<'mcx>(
         subLinkType: sub_link_type,
         subLinkId: sub_link_id,
         testexpr: None,
+        // operName defaults to NIL; only the ALL/ANY/ROWCOMPARE arm below sets it.
+        operName: Vec::new(),
         subselect: analyzed_subselect,
         location,
     };
@@ -3935,6 +3973,18 @@ fn transformSubLink<'mcx>(
                 .errposition(parser_errposition(pstate, location))
                 .into_error());
         }
+
+        // C: sublink->operName = operName; — retain the (possibly defaulted)
+        // operator name on the analyzed node so `_outSubLink`/`_readSubLink`
+        // round-trips it in stored `_RETURN` rules (the analyzed carrier models
+        // the `List *` of `String` as the lifetime-free `Vec<String>`).
+        out.operName = oper_name
+            .iter()
+            .filter_map(|n| match &**n {
+                Node::String(s) => Some(String::from(s.sval.as_str())),
+                _ => None,
+            })
+            .collect();
 
         // Identify the combining operator(s) and generate a suitable
         // row-comparison expression.
@@ -5305,22 +5355,63 @@ fn seam_transform_json_expr<'mcx>(
 // Direct-call shims for merged-owner / seam callees not yet re-homed cleanly.
 // ===========================================================================
 
-/// `anytime_typmod_check(istz, typmod)` (utils/adt/date.c) — validate/clamp a
-/// time/timetz typmod. Reached through the date adt seam (unported owner →
-/// panic).
-fn lsyscache_anytime_typmod_check(_istz: bool, _typmod: i32) -> PgResult<i32> {
-    panic!(
-        "anytime_typmod_check (utils/adt/date.c) is not yet ported; \
-         CURRENT_TIME(n)/LOCALTIME(n) typmod validation reaches the unported adt."
-    )
+/// `MAX_TIME_PRECISION` / `MAX_TIMESTAMP_PRECISION` (datetime.h) — both 6.
+const MAX_TIME_PRECISION: i32 = 6;
+const MAX_TIMESTAMP_PRECISION: i32 = 6;
+
+fn typmod_check_errloc(funcname: &'static str) -> ErrorLocation {
+    ErrorLocation::new("src/backend/parser/parse_expr.c", 0, funcname)
 }
 
-/// `anytimestamp_typmod_check(istz, typmod)` (utils/adt/timestamp.c).
-fn lsyscache_anytimestamp_typmod_check(_istz: bool, _typmod: i32) -> PgResult<i32> {
-    panic!(
-        "anytimestamp_typmod_check (utils/adt/timestamp.c) is not yet ported; \
-         CURRENT_TIMESTAMP(n)/LOCALTIMESTAMP(n) typmod validation reaches the unported adt."
-    )
+/// `anytime_typmod_check(istz, typmod)` (utils/adt/date.c) — validate a
+/// time/timetz typmod: negative is an ERROR, over-max clamps to
+/// `MAX_TIME_PRECISION` with a WARNING.  Faithful to date.c.
+fn lsyscache_anytime_typmod_check(istz: bool, mut typmod: i32) -> PgResult<i32> {
+    if typmod < 0 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(alloc::format!(
+                "TIME({typmod}){} precision must not be negative",
+                if istz { " WITH TIME ZONE" } else { "" }
+            ))
+            .into_error());
+    }
+    if typmod > MAX_TIME_PRECISION {
+        ereport(WARNING)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(alloc::format!(
+                "TIME({typmod}){} precision reduced to maximum allowed, {MAX_TIME_PRECISION}",
+                if istz { " WITH TIME ZONE" } else { "" }
+            ))
+            .finish(typmod_check_errloc("anytime_typmod_check"))?;
+        typmod = MAX_TIME_PRECISION;
+    }
+    Ok(typmod)
+}
+
+/// `anytimestamp_typmod_check(istz, typmod)` (utils/adt/timestamp.c) — same
+/// shape over `MAX_TIMESTAMP_PRECISION`.
+fn lsyscache_anytimestamp_typmod_check(istz: bool, mut typmod: i32) -> PgResult<i32> {
+    if typmod < 0 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(alloc::format!(
+                "TIMESTAMP({typmod}){} precision must not be negative",
+                if istz { " WITH TIME ZONE" } else { "" }
+            ))
+            .into_error());
+    }
+    if typmod > MAX_TIMESTAMP_PRECISION {
+        ereport(WARNING)
+            .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
+            .errmsg(alloc::format!(
+                "TIMESTAMP({typmod}){} precision reduced to maximum allowed, {MAX_TIMESTAMP_PRECISION}",
+                if istz { " WITH TIME ZONE" } else { "" }
+            ))
+            .finish(typmod_check_errloc("anytimestamp_typmod_check"))?;
+        typmod = MAX_TIMESTAMP_PRECISION;
+    }
+    Ok(typmod)
 }
 
 /// `format_type_be(typid)` (format_type.c) — through the merged format-type

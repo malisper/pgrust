@@ -3892,4 +3892,7 @@ pub fn init_seams() {
     backend_parser_relation_seams::scan_ns_item_for_column_by_posn::set(
         scan_ns_item_for_column_by_posn,
     );
+    // Cross-crate: parser-relation owns get_rte_attribute_name's body; ruleutils'
+    // expression deparser reaches it through this seam (system-column names).
+    backend_utils_adt_ruleutils_seams::get_rte_attribute_name::set(get_rte_attribute_name);
 }

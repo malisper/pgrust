@@ -867,3 +867,17 @@ seam_core::seam!(
         srcslot: types_nodes::SlotId,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ExecTypeSetColNames(typeInfo, namesList)` (execTuples.c): apply the
+    /// column aliases from a not-yet-blessed RECORD `TupleDesc`'s source RTE
+    /// `eref->colnames` (a `List *` of `String` nodes) over the descriptor's
+    /// non-dropped attributes, in order. `ExecEvalWholeRowVar`'s RECORD branch
+    /// adopts the source range-table entry's column aliases this way. The
+    /// `names` are the already-extracted alias strings (the C walks the
+    /// `String` node list).
+    pub fn exec_type_set_col_names<'mcx>(
+        type_info: &mut types_tuple::heaptuple::TupleDescData<'mcx>,
+        names: &[&str],
+    ) -> types_error::PgResult<()>
+);

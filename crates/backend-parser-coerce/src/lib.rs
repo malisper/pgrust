@@ -355,19 +355,27 @@ pub fn coerce_type<'mcx>(
         );
     }
 
-    if node.is_param() {
+    // if (IsA(node, Param) && pstate != NULL && pstate->p_coerce_param_hook != NULL)
+    //     result = pstate->p_coerce_param_hook(pstate, (Param *) node, ...);
+    //     if (result) return result;
+    //     /* If result is NULL, proceed with normal coercion */
+    //
+    // The owned `p_coerce_param_hook` is reached through the `coerce_param_hook`
+    // seam (installed by `backend-parser-small1`), which dispatches on
+    // `pstate.p_ref_hook_state`. The hook mutates and returns a `Param` (C's
+    // transformed `Node *`), which is the coerced result; a `None` falls through
+    // to the normal coercion path, exactly as a NULL C return does.
+    if let Some(param) = node.as_param() {
         if let Some(pstate) = pstate.as_deref() {
-            if pstate.p_coerce_param_hook.is_some() {
-                // p_coerce_param_hook returns a NodePtr (raw node universe);
-                // the coerce path produces Expr. The hook's transformed-node
-                // bridge is the raw-Node/Expr split keystone — unmodeled here.
-                // No installed parser hook reaches this in the value-typed path
-                // yet; mirror-PG-and-panic on use.
-                panic!(
-                    "coerce_type: p_coerce_param_hook returns a NodePtr (raw-node \
-                     universe); the Param coercion-hook bridge to the Expr tree is \
-                     the unported parser-hook keystone"
-                );
+            let hooked = backend_parser_small1_seams::coerce_param_hook::call(
+                pstate,
+                param,
+                targetTypeId,
+                targetTypeMod,
+                location,
+            )?;
+            if let Some(p) = hooked {
+                return Ok(Some(Expr::Param(p)));
             }
         }
     }

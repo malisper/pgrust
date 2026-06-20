@@ -1037,6 +1037,9 @@ pub fn init_seams() {
     // BlessTupleDesc is fully owned + implemented in this crate's
     // exectype_tupoutput family, so its seam is installed here.
     seams::bless_tuple_desc::set(crate::exectype_tupoutput::BlessTupleDesc);
+    // ExecTypeSetColNames is owned + implemented in exectype_tupoutput; its seam
+    // lets ExecEvalWholeRowVar's RECORD branch adopt the source RTE's aliases.
+    seams::exec_type_set_col_names::set(crate::exectype_tupoutput::ExecTypeSetColNames);
     // Slot-payload op seams over the pool's `SlotData` (bodies in
     // `slot_store_fetch` / `slot_deform`; the adapters resolve the `SlotId`).
     seams::exec_materialize_slot::set(seam_exec_materialize_slot);

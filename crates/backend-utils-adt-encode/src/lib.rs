@@ -185,16 +185,42 @@ fn seam_hex_encode<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>
 /// `(len - 2) / 2 + VARHDRSZ` and calls
 /// `hex_decode_safe(inputText + 2, len - 2, VARDATA(result), escontext)`.
 ///
-/// The `escontext` soft-error sink does not cross the seam boundary; this owner
-/// body decodes with no soft context (hard errors), and the consumer's Datum
-/// boundary maps the returned `Err` back onto the soft-error path when an
-/// `escontext` is set.
-fn seam_hex_decode_safe<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+/// The `&mut SoftErrorContext` sink cannot cross the seam boundary, so `soft`
+/// (C's `escontext != NULL`) is carried as a bool: the owner builds a local
+/// `SoftErrorContext`, lets [`hex_decode_safe`] `ereturn` into it, and on a
+/// captured soft error returns the complete [`PgError`] as the inner `Err` of
+/// the `Ok` arm so the consumer (`byteain`) can re-route it through its own
+/// frame escontext. With `soft = false` the decode raises hard (the outer
+/// `Err`), exactly as C's NULL-escontext path does.
+fn seam_hex_decode_safe<'mcx>(
+    mcx: Mcx<'mcx>,
+    src: &[u8],
+    soft: bool,
+) -> PgResult<Result<PgVec<'mcx, u8>, PgError>> {
     let mut dst = mcx::vec_with_capacity_in(mcx, hex_dec_len(src) as usize)?;
     dst.resize(hex_dec_len(src) as usize, 0);
-    let n = hex_decode_safe(src, dst.as_mut_slice(), None)?;
-    dst.truncate(n as usize);
-    Ok(dst)
+
+    if soft {
+        // C: escontext != NULL — `hex_decode_safe` ereturns into it. Mirror with
+        // a local sink that wants full details so the captured error carries the
+        // message/detail/hint/sqlstate `pg_input_error_info` reports.
+        let mut escontext = SoftErrorContext::new(true);
+        let n = hex_decode_safe(src, dst.as_mut_slice(), Some(&mut escontext))?;
+        if escontext.error_occurred() {
+            // The soft error was captured; surface it as the inner `Err` for the
+            // consumer to route through its own escontext.
+            return Ok(Err(escontext
+                .take_error()
+                .expect("hex_decode_safe set error_occurred with details_wanted")));
+        }
+        dst.truncate(n as usize);
+        Ok(Ok(dst))
+    } else {
+        // C: escontext == NULL — decode hard (a bad digit propagates as `Err`).
+        let n = hex_decode_safe(src, dst.as_mut_slice(), None)?;
+        dst.truncate(n as usize);
+        Ok(Ok(dst))
+    }
 }
 
 /// Install every seam this unit owns (`backend-utils-adt-encode-seams`):

@@ -12,6 +12,7 @@ path = "src/lib.rs"
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-nodes-makefuncs-seams = { path = "../backend-nodes-makefuncs-seams" }
 backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
 backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }

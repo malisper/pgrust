@@ -107,6 +107,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lookup_type_cache(exprType(expr), TYPECACHE_HASH_PROC | TYPECACHE_EQ_OPR)`
+    /// then `OidIsValid(typentry->hash_proc) && OidIsValid(typentry->eq_opr) ?
+    /// Some(eq_opr) : None` (joinpath.c `paraminfo_get_equal_hashops`): resolve a
+    /// type's hash-equality operator for the Memoize cache-key analysis. `None`
+    /// means the type cannot be hashed (Memoize declined). `Err` carries the
+    /// catalog-lookup `ereport(ERROR)` surface.
+    pub fn type_hash_eq_operator(
+        type_id: types_core::primitive::Oid,
+    ) -> types_error::PgResult<Option<types_core::primitive::Oid>>
+);
+
+seam_core::seam!(
     /// `lookup_type_cache(type_id, TYPECACHE_HASH_PROC_FINFO |
     /// TYPECACHE_HASH_EXTENDED_PROC_FINFO)` then read `hash_proc_finfo.fn_oid` /
     /// `hash_extended_proc_finfo.fn_oid` (the `hash_range` / `hash_range_extended`
@@ -211,6 +223,25 @@ seam_core::seam!(
         type_id: types_core::primitive::Oid,
         typmod: i32,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `lookup_rowtype_tupdesc_domain(type_id, typmod, noError)` (typcache.c):
+    /// like `lookup_rowtype_tupdesc`, but if `type_id` is a domain over a
+    /// composite type it looks through to the base composite's rowtype
+    /// descriptor. `noError == true` returns `None` instead of `ereport`ing
+    /// when the type is not composite. The descriptor is cloned out of the
+    /// typcache into `mcx` (the C returns a refcounted pointer; the safe port
+    /// copies). Used by `ExecEvalWholeRowVar` to validate / absorb the Var's
+    /// declared rowtype.
+    pub fn lookup_rowtype_tupdesc_domain<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        type_id: types_core::primitive::Oid,
+        typmod: i32,
+        no_error: bool,
+    ) -> types_error::PgResult<
+        Option<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>,
+    >
 );
 
 /// The base-type I/O info `domain_state_setup` (utils/adt/domains.c) pulls out

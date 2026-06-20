@@ -989,6 +989,14 @@ pub struct SubLink {
     pub subLinkId: i32,
     /// `Node *testexpr`.
     pub testexpr: Option<Box<Expr>>,
+    /// `List *operName` — the (possibly qualified) operator name for an
+    /// `ALL`/`ANY`/`ROWCOMPARE_SUBLINK`, e.g. `("=")`. Unlike most parse-time
+    /// fields it SURVIVES parse-analysis (C `_outSubLink`/`_readSubLink` write/read
+    /// it unconditionally), so stored view `_RETURN` rules embed it. Modeled as the
+    /// lifetime-free `Vec<String>` used by the other analyzed string-list carriers;
+    /// NIL for `EXISTS`/`EXPR`/`ARRAY`/`CTE` sublinks renders as the empty vec
+    /// (`<>`).
+    pub operName: Vec<String>,
     /// `Node *subselect` — the sub-`Query` (after analysis), embedded owned and
     /// walked by deref, exactly mirroring
     /// [`RangeTblEntry::subquery`](crate::parsenodes::RangeTblEntry). Because the
@@ -2412,6 +2420,7 @@ fn clone_sublink<'b>(s: &SubLink, mcx: Mcx<'b>) -> PgResult<SubLink> {
         subLinkType: s.subLinkType,
         subLinkId: s.subLinkId,
         testexpr: clone_opt_box_expr(&s.testexpr, mcx)?,
+        operName: s.operName.clone(),
         subselect,
         location: s.location,
     })
@@ -2440,6 +2449,22 @@ fn clone_subplan_static<'b>(
 /// never mutates it during evaluation).
 #[derive(Debug)]
 pub struct SubPlanExpr(pub Box<SubPlan<'static>>);
+
+impl SubPlanExpr {
+    /// Build a `SubPlanExpr` from a live `SubPlan<'b>` by deep-cloning it into
+    /// `mcx` and erasing the lifetime parameter to the `Expr` tree's notional
+    /// `'static` (the sanctioned node-opaque convention, mirroring
+    /// `Expr::clone_in`'s `SubPlan` arm). Used to wrap a plan-tree `SubPlan` as
+    /// an `Expr::SubPlan` ancestor node for ruleutils' deparse-namespace.
+    pub fn from_subplan<'b>(mcx: Mcx<'b>, sp: &SubPlan<'_>) -> PgResult<Self> {
+        let owned: SubPlan<'b> = sp.clone_in(mcx)?;
+        // SAFETY: fully owned in mcx after clone_in; lifetime-parameter-only
+        // erase to the Expr tree's 'static notional lifetime (cf.
+        // clone_subplan_static / query_into_static).
+        let owned_static: SubPlan<'static> = unsafe { core::mem::transmute(owned) };
+        Ok(SubPlanExpr(Box::new(owned_static)))
+    }
+}
 
 impl Clone for SubPlanExpr {
     fn clone(&self) -> Self {
@@ -2668,6 +2693,7 @@ mod clone_in_tests {
             subLinkType: SubLinkType::Any,
             subLinkId: 0,
             testexpr: Some(Box::new(a_var(4))),
+            operName: alloc::vec![String::from("=")],
             subselect: Some(q_static),
             location: 99,
         };
@@ -2723,6 +2749,7 @@ mod clone_in_tests {
                 subLinkType: SubLinkType::Exists,
                 subLinkId: 0,
                 testexpr: None,
+                operName: alloc::vec::Vec::new(),
                 subselect: Some(q_static),
                 location: 7,
             }),

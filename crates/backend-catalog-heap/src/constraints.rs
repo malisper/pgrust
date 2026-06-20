@@ -436,7 +436,7 @@ fn StoreRelCheck<'mcx>(
      * Find columns of rel that are used in expr. (pull_var_clause is okay
      * because we don't allow subselects in check constraints.)
      */
-    let var_list = backend_optimizer_util_vars::var::pull_var_clause(expr, 0);
+    let var_list = backend_optimizer_util_vars::var::pull_var_clause(mcx, expr, 0)?;
 
     let attnos: Vec<i16> = {
         let mut out: Vec<i16> = Vec::with_capacity(var_list.len());
@@ -970,7 +970,7 @@ pub fn AddRelationNewConstraints<'mcx>(
                  * Generate a name. Approximate column- vs table-constraint by
                  * whether the expression references more than one column.
                  */
-                let vars = backend_optimizer_util_vars::var::pull_var_clause(&expr_node, 0);
+                let vars = backend_optimizer_util_vars::var::pull_var_clause(mcx, &expr_node, 0)?;
                 /* eliminate duplicates */
                 let mut uniq_attnos: Vec<AttrNumber> = Vec::new();
                 for v in vars.iter() {

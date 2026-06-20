@@ -196,6 +196,245 @@ fn qual_as_expr<'a, 'mcx>(
 }
 
 // ===========================================================================
+// transform_MERGE_to_join (prepjointree.c:233)
+// ===========================================================================
+
+/// `transform_MERGE_to_join(Query *parse)` (prepjointree.c:233).
+///
+/// Replace the MERGE query's jointree with a single JOIN between the target
+/// relation and the source relation, manufacturing the join RTE. The join
+/// type is INNER unless there are WHEN NOT MATCHED BY SOURCE/TARGET actions,
+/// which require an outer join so unmatched tuples from the source and/or
+/// target are processed. For outer joins, source-relation Vars in the join
+/// condition, actions, and RETURNING list (and target Vars in the targetlist
+/// for RIGHT/FULL) are marked nullable by the new join via `add_nulling_relids`.
+pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
+    use types_nodes::modifytable::MergeMatchKind;
+    use types_nodes::nodes::{CmdType, Node, NodePtr};
+
+    if parse.commandType != CmdType::CMD_MERGE {
+        return Ok(());
+    }
+
+    // Work out what kind of join is required.
+    let mut have_action = [false; types_nodes::modifytable::NUM_MERGE_MATCH_KINDS];
+    for node in parse.mergeActionList.iter() {
+        if let Some(action) = (**node).as_mergeaction() {
+            if action.commandType != CmdType::CMD_NOTHING {
+                have_action[action.matchKind as usize] = true;
+            }
+        }
+    }
+
+    let by_source = have_action[MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_SOURCE as usize];
+    let by_target = have_action[MergeMatchKind::MERGE_WHEN_NOT_MATCHED_BY_TARGET as usize];
+    let jointype = if by_source && by_target {
+        JoinType::JOIN_FULL
+    } else if by_source {
+        JoinType::JOIN_LEFT
+    } else if by_target {
+        JoinType::JOIN_RIGHT
+    } else {
+        JoinType::JOIN_INNER
+    };
+
+    // Manufacture a join RTE to use.
+    let mut joinrte = types_nodes::parsenodes::RangeTblEntry::new_in(mcx);
+    joinrte.rtekind = RTEKind::RTE_JOIN;
+    joinrte.jointype = jointype;
+    joinrte.joinmergedcols = 0;
+    // joinaliasvars/joinleftcols/joinrightcols start empty (MERGE: no USING).
+    joinrte.join_using_alias = None;
+    joinrte.alias = None;
+    joinrte.eref = Some(mcx::alloc_in(
+        mcx,
+        backend_nodes_core::makefuncs::make_alias(mcx, "*MERGE*", mcx::PgVec::new_in(mcx))?,
+    )?);
+    joinrte.lateral = false;
+    joinrte.inh = false;
+    joinrte.inFromCl = true;
+
+    // Add completed RTE to the range table; remember its 1-based index.
+    parse.rtable.push(joinrte);
+    let joinrti = parse.rtable.len() as i32;
+
+    // Create a JOIN between the target and the source relation. The target is
+    // identified by parse->mergeTargetRelation; quals in parse->jointree->quals
+    // are restrictions on the target (auto-updatable view case).
+    let target_quals = {
+        let jt = parse
+            .jointree
+            .as_deref_mut()
+            .ok_or_else(|| types_error::PgError::error("MERGE Query has no jointree"))?;
+        jt.quals.take()
+    };
+    let mut target_fromlist: mcx::PgVec<'_, NodePtr<'_>> = mcx::PgVec::new_in(mcx);
+    target_fromlist.push(mcx::alloc_in(
+        mcx,
+        Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef {
+            rtindex: parse.mergeTargetRelation,
+        }),
+    )?);
+    let target = backend_nodes_core::makefuncs::make_from_expr(target_fromlist, target_quals);
+
+    // Source rel (expect exactly one -- see transformMergeStmt()).
+    let source: NodePtr<'_> = {
+        let jt = parse.jointree.as_deref_mut().unwrap();
+        if jt.fromlist.len() != 1 {
+            return Err(types_error::PgError::error(
+                "MERGE jointree fromlist does not have exactly one entry",
+            ));
+        }
+        // Move the single source jointree item out (replaced below).
+        jt.fromlist.remove(0)
+    };
+
+    // Index of source rel (a RangeTblRef or a JoinExpr).
+    let sourcerti = if let Some(rtr) = (*source).as_rangetblref() {
+        rtr.rtindex
+    } else if let Some(j) = (*source).as_joinexpr() {
+        j.rtindex
+    } else {
+        return Err(types_error::PgError::error(alloc::format!(
+            "unrecognized source node type: {}",
+            (*source).node_tag().0
+        )));
+    };
+
+    // Join the source and target. quals = parse->mergeJoinCondition.
+    let join_quals: Option<NodePtr<'_>> = match parse.mergeJoinCondition.as_deref() {
+        Some(expr) => Some(mcx::alloc_in(mcx, Node::Expr(expr.clone_in(mcx)?))?),
+        None => None,
+    };
+    let joinexpr = types_nodes::rawnodes::JoinExpr {
+        jointype,
+        isNatural: false,
+        larg: Some(mcx::alloc_in(mcx, Node::FromExpr(target))?),
+        rarg: Some(source),
+        usingClause: mcx::PgVec::new_in(mcx),
+        join_using_alias: None,
+        quals: join_quals,
+        alias: None,
+        rtindex: joinrti,
+    };
+
+    // Make the new join be the sole entry in the query's jointree.
+    {
+        let jt = parse.jointree.as_deref_mut().unwrap();
+        let mut new_fromlist: mcx::PgVec<'_, NodePtr<'_>> = mcx::PgVec::new_in(mcx);
+        new_fromlist.push(mcx::alloc_in(mcx, Node::JoinExpr(joinexpr))?);
+        jt.fromlist = new_fromlist;
+        jt.quals = None;
+    }
+
+    // If the target is a trigger-updatable view, the targetlist may contain a
+    // whole-row Var referring to the expanded view query; mark target entries
+    // nullable by the join for RIGHT/FULL.
+    if !parse.targetList.is_empty()
+        && (jointype == JoinType::JOIN_RIGHT || jointype == JoinType::JOIN_FULL)
+    {
+        let target_relids =
+            backend_rewrite_core::relids::add_member(ExprRelids::default(), parse.mergeTargetRelation);
+        let added = backend_rewrite_core::relids::add_member(ExprRelids::default(), joinrti);
+        for tle in parse.targetList.iter_mut() {
+            let mut node = Node::TargetEntry(tle.clone_in(mcx)?);
+            backend_rewrite_core::add_nulling_relids(&mut node, Some(&target_relids), &added);
+            if let Node::TargetEntry(new_tle) = node {
+                *tle = new_tle;
+            }
+        }
+    }
+
+    // If the source relation is on the outer side of the join, mark any source
+    // relation Vars in the join condition, actions, and RETURNING list as
+    // nullable by the join.
+    if jointype == JoinType::JOIN_LEFT || jointype == JoinType::JOIN_FULL {
+        let source_relids =
+            backend_rewrite_core::relids::add_member(ExprRelids::default(), sourcerti);
+        let added = backend_rewrite_core::relids::add_member(ExprRelids::default(), joinrti);
+
+        // mergeJoinCondition: a modified copy for use above the join (the
+        // original, inside the join, is untouched).
+        if let Some(expr) = parse.mergeJoinCondition.as_deref() {
+            let mut node = Node::Expr(expr.clone_in(mcx)?);
+            backend_rewrite_core::add_nulling_relids(&mut node, Some(&source_relids), &added);
+            if let Node::Expr(e) = node {
+                parse.mergeJoinCondition = Some(mcx::alloc_in(mcx, e)?);
+            }
+        }
+
+        for node in parse.mergeActionList.iter_mut() {
+            if let Some(action) = (**node).as_mergeaction_mut() {
+                if let Some(q) = action.qual.take() {
+                    let mut qnode = (*q).clone_in(mcx)?;
+                    backend_rewrite_core::add_nulling_relids(
+                        &mut qnode,
+                        Some(&source_relids),
+                        &added,
+                    );
+                    action.qual = Some(mcx::alloc_in(mcx, qnode)?);
+                }
+                // add_nulling_relids((Node *) action->targetList, ...): walk
+                // each TargetEntry node in place (descends into tle->expr).
+                for tle_node in action.targetList.iter_mut() {
+                    backend_rewrite_core::add_nulling_relids(
+                        &mut **tle_node,
+                        Some(&source_relids),
+                        &added,
+                    );
+                }
+            }
+        }
+
+        for tle in parse.returningList.iter_mut() {
+            let mut node = Node::TargetEntry(tle.clone_in(mcx)?);
+            backend_rewrite_core::add_nulling_relids(&mut node, Some(&source_relids), &added);
+            if let Node::TargetEntry(new_tle) = node {
+                *tle = new_tle;
+            }
+        }
+    }
+
+    // If there are any WHEN NOT MATCHED BY SOURCE actions, the executor uses the
+    // join condition to distinguish MATCHED vs NOT MATCHED BY SOURCE; add a
+    // "src IS NOT NULL" check so a non-strict join condition rechecks correctly.
+    // Otherwise the join condition is no longer needed.
+    if by_source {
+        let src_rte = &parse.rtable[(sourcerti - 1) as usize];
+        let mut var = backend_nodes_core::makefuncs::make_whole_row_var(
+            src_rte, sourcerti, 0, false,
+        )?;
+        var.varnullingrels =
+            backend_rewrite_core::relids::add_member(ExprRelids::default(), joinrti);
+
+        let ntest = types_nodes::primnodes::Expr::NullTest(types_nodes::primnodes::NullTest {
+            arg: Some(alloc::boxed::Box::new(types_nodes::primnodes::Expr::Var(var))),
+            nulltesttype: types_nodes::primnodes::NullTestType::IS_NOT_NULL,
+            argisrow: false,
+            location: -1,
+        });
+
+        let orig = parse.mergeJoinCondition.as_deref().map(|e| {
+            // clone the (already source-nulled) condition into mcx for the AND.
+            e.clone_in(mcx)
+        });
+        let orig = match orig {
+            Some(r) => Some(r?),
+            None => None,
+        };
+        let combined = backend_nodes_core::makefuncs::make_and_qual(Some(ntest), orig);
+        parse.mergeJoinCondition = match combined {
+            Some(e) => Some(mcx::alloc_in(mcx, e)?),
+            None => None,
+        };
+    } else {
+        parse.mergeJoinCondition = None;
+    }
+
+    Ok(())
+}
+
+// ===========================================================================
 // reduce_outer_joins (prepjointree.c:3101)
 // ===========================================================================
 
@@ -310,8 +549,9 @@ fn remove_nulling_relids_in_append_rel_list<'mcx>(
         // Clone the arena Expr into a Node, mutate, write back. (`Expr` is not
         // `Default`, so we can't `mem::take`; the clone is the owned-tree
         // analogue of the C copy-mutator, which copies each Var/PHV before
-        // editing its nullingrels anyway.)
-        let mut node = Node::mk_expr(mcx, root.node(id).clone())?;
+        // editing its nullingrels anyway.) Deep-copy via `clone_in` — the
+        // derived `Expr::clone` panics on an owned-subtree child.
+        let mut node = Node::mk_expr(mcx, root.node(id).clone_in(mcx)?)?;
         backend_rewrite_core::remove_nulling_relids(&mut node, removable, except, mcx);
         if let Some(e) = node.into_expr() {
             *root.node_mut(id) = e;

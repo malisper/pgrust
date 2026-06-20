@@ -172,17 +172,27 @@ const VARHDRSZ: usize = 4;
 // ---------------------------------------------------------------------------
 
 fn fc_bpcharin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    // C: bpcharin(cstring, oid typelem, int4 atttypmod). Hard error context (no
-    // soft ErrorSaveContext is modeled on the fmgr frame), matching every adt *in.
+    // C: bpcharin(cstring, oid typelem, int4 atttypmod) threads `fcinfo->context`
+    // so a recoverable "value too long" failure `ereturn`s into the soft sink
+    // installed by `InputFunctionCallSafe` (then `PG_RETURN_NULL`). Own-copy the
+    // args to release the immutable arg borrow before the mutable escontext borrow.
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let typelem = fcinfo.arg(1).expect("bpcharin: missing typelem").value.as_oid();
     let atttypmod = arg_i32(fcinfo, 2);
     let m = scratch_mcx();
-    let res = ok(crate::bpcharin(m.mcx(), &s, typelem, atttypmod, None));
-    let out = res
-        .unwrap_or_else(|| raise(types_error::PgError::error("bpcharin returned NULL")))
-        .to_vec();
-    ret_text(fcinfo, out)
+    let escontext = fcinfo.escontext_mut();
+    // Materialize the payload out of the escontext borrow before re-borrowing
+    // `fcinfo` for the result write.
+    let out = ok(crate::bpcharin(m.mcx(), &s, typelem, atttypmod, escontext))
+        .map(|img| img.to_vec());
+    match out {
+        Some(bytes) => ret_text(fcinfo, bytes),
+        None => {
+            // Soft error recorded into the frame's escontext; C `PG_RETURN_NULL`.
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
 }
 
 fn fc_bpcharout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
@@ -216,15 +226,24 @@ fn fc_bpchartypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 fn fc_varcharin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // C: varchar_input threads `fcinfo->context` so a recoverable "value too long"
+    // failure `ereturn`s into the soft sink installed by `InputFunctionCallSafe`
+    // (then `PG_RETURN_NULL`). Own-copy the args before the mutable escontext borrow.
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let typelem = fcinfo.arg(1).expect("varcharin: missing typelem").value.as_oid();
     let atttypmod = arg_i32(fcinfo, 2);
     let m = scratch_mcx();
-    let res = ok(crate::varcharin(m.mcx(), &s, typelem, atttypmod, None));
-    let out = res
-        .unwrap_or_else(|| raise(types_error::PgError::error("varcharin returned NULL")))
-        .to_vec();
-    ret_text(fcinfo, out)
+    let escontext = fcinfo.escontext_mut();
+    let out = ok(crate::varcharin(m.mcx(), &s, typelem, atttypmod, escontext))
+        .map(|img| img.to_vec());
+    match out {
+        Some(bytes) => ret_text(fcinfo, bytes),
+        None => {
+            // Soft error recorded into the frame's escontext; C `PG_RETURN_NULL`.
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
 }
 
 fn fc_varcharout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {

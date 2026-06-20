@@ -139,6 +139,37 @@ impl core::fmt::Debug for Tuplesortstate<'_> {
 }
 
 // ===========================================================================
+// ValidateIndexState (catalog/index.h) — CREATE INDEX CONCURRENTLY validation.
+// ===========================================================================
+
+/// `ValidateIndexState` (`catalog/index.h`):
+///
+/// ```c
+/// typedef struct ValidateIndexState {
+///     Tuplesortstate *tuplesort;  /* for sorting the index TIDs */
+///     /* statistics (for debug messages only): */
+///     double  htups, itups, tups_inserted;
+/// } ValidateIndexState;
+/// ```
+///
+/// The merge state for `validate_index` (catalog/index.c) and the heap AM's
+/// `index_validate_scan` (heapam_handler.c). The `Tuplesortstate *` is carried
+/// by value (the owned-model type-erased carrier); the validation phase feeds
+/// it the sorted index TIDs via `index_bulk_delete`'s callback and then
+/// merge-joins the heap scan against it.
+#[derive(Debug)]
+pub struct ValidateIndexState<'mcx> {
+    /// `Tuplesortstate *tuplesort` — for sorting the index TIDs.
+    pub tuplesort: Tuplesortstate<'mcx>,
+    /// `double htups` — heap tuples scanned (debug only).
+    pub htups: f64,
+    /// `double itups` — index tuples fed into the sort (debug only).
+    pub itups: f64,
+    /// `double tups_inserted` — entries inserted into the index (debug only).
+    pub tups_inserted: f64,
+}
+
+// ===========================================================================
 // Sort plan node (nodes/plannodes.h).
 // ===========================================================================
 

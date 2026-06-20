@@ -90,11 +90,12 @@ fn raise(err: types_error::PgError) -> ! {
 // ---------------------------------------------------------------------------
 
 fn fc_oidin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
-    // C: uint32in_subr(s, NULL, "oid", fcinfo->context). fcinfo->context carries
-    // the soft ErrorSaveContext; at this boundary a hard parse is used (a soft
-    // context is not modeled on the fmgr frame), matching every other adt _in.
-    match crate::oidin(s, None) {
+    let s = arg_cstring(fcinfo, 0).to_string();
+    // C: uint32in_subr(s, NULL, "oid", fcinfo->context). Forward the soft
+    // ErrorSaveContext so a recoverable parse failure `ereturn`s into the sink
+    // (returning a placeholder 0 that the caller discards) instead of throwing.
+    let escontext = fcinfo.escontext_mut();
+    match crate::oidin(&s, escontext) {
         Ok(o) => ret_oid(o),
         Err(e) => raise(e),
     }
@@ -133,15 +134,14 @@ fn fc_oidsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_oidvectorin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let s = arg_cstring(fcinfo, 0).to_string();
     let m = scratch_mcx();
-    // C passes fcinfo->context (the soft ErrorSaveContext) to uint32in_subr; the
-    // soft context is not carried on the fmgr frame here, so a bad OID token
-    // raises a hard error. The soft-error caller (InputFunctionCallSafe in
-    // fmgr-core) catches it and records into the real escontext — so
-    // pg_input_is_valid/pg_input_error_info still observe a soft failure.
-    let image_bytes: Vec<u8> = match crate::oidvectorin(m.mcx(), &s, None) {
+    // C passes fcinfo->context (the soft ErrorSaveContext) to uint32in_subr.
+    // Forward it so a bad OID token `ereturn`s into the soft sink instead of
+    // throwing; on the soft path the body returns `Ok(None)` and the caller
+    // discards this placeholder after `soft_error_occurred()`.
+    let escontext = fcinfo.escontext_mut();
+    let image_bytes: Vec<u8> = match crate::oidvectorin(m.mcx(), &s, escontext) {
         Ok(Some(image)) => image.as_slice().to_vec(),
-        // None only when a soft escontext was supplied (not on this path).
-        Ok(None) => raise(types_error::PgError::error("invalid input syntax for type oid")),
+        Ok(None) => return Datum::null(),
         Err(e) => raise(e),
     };
     ret_varlena(fcinfo, image_bytes)

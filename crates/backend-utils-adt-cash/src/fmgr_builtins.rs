@@ -150,10 +150,12 @@ fn scratch_mcx() -> mcx::MemoryContext {
 
 // ---- I/O ----
 fn fc_cash_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    // C: cash_in(cstring). Hard error context (no soft ErrorSaveContext is
-    // modeled on the fmgr frame), matching every adt *in.
+    // C: cash_in(cstring). Forward `fcinfo->context` (the soft ErrorSaveContext
+    // installed by InputFunctionCallSafe) so a recoverable parse failure
+    // `errsave`s into the soft sink instead of throwing — matching fc_int2in.
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
-    ret_cash(ok(crate::cash_in(&s, None)))
+    let escontext = fcinfo.escontext_mut();
+    ret_cash(ok(crate::cash_in(&s, escontext)))
 }
 fn fc_cash_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     ret_cstring(fcinfo, crate::cash_out(arg_cash(fcinfo, 0)))

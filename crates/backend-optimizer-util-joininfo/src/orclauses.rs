@@ -4,6 +4,7 @@
 use alloc::vec::Vec;
 
 use backend_nodes_core::makefuncs::{make_ands_explicit, make_orclause};
+use mcx::Mcx;
 use types_error::PgResult;
 use types_nodes::primnodes::Expr;
 use types_core::primitive::Index;
@@ -54,7 +55,7 @@ pub fn extract_restriction_or_clauses<'mcx>(run: &PlannerRun<'mcx>, root: &mut P
         for rinfo in joininfo {
             if restriction_is_or_clause(root, rinfo) && join_clause_is_movable_to(root, rinfo, rel) {
                 // Try to extract a qual for this rel only.
-                if let Some(orclause) = extract_or_clause(root, rinfo, rel)? {
+                if let Some(orclause) = extract_or_clause(run.mcx(), root, rinfo, rel)? {
                     // If successful, decide whether we want to use the clause, and
                     // insert it into the rel's restrictinfo list if so.
                     consider_new_or_clause(run, root, rel, orclause, rinfo)?;
@@ -88,6 +89,7 @@ fn is_safe_restriction_clause_for(root: &PlannerInfo, rinfo: RinfoId, rel: RelId
 /// OR-clause. Returns an OR clause (not a RestrictInfo!) pertaining to rel, or
 /// `None` if no OR clause could be extracted.
 fn extract_or_clause(
+    mcx: Mcx<'_>,
     root: &PlannerInfo,
     or_rinfo: RinfoId,
     rel: RelId,
@@ -96,14 +98,17 @@ fn extract_or_clause(
 
     // Scan each arm of the input OR clause.  We descend into or_rinfo->orclause,
     // which has RestrictInfo nodes embedded below the toplevel OR/AND structure.
+    // The arm clauses are moved into the freshly built result OR/AND, so every
+    // owned copy goes through `Expr::clone_in` (the derived `Expr::clone` panics
+    // on a context-allocated child); the read-only structural inspection borrows.
     let orclause_id = root
         .rinfo(or_rinfo)
         .orclause
         .expect("extract_or_clause: or_rinfo has no orclause");
-    let orclause = root.node(orclause_id).clone();
-    debug_assert!(is_orclause(&orclause));
-    let or_args = match &orclause {
-        Expr::BoolExpr(b) => b.args.clone(),
+    let orclause: &Expr = root.node(orclause_id);
+    debug_assert!(is_orclause(orclause));
+    let or_args: &[Expr] = match orclause {
+        Expr::BoolExpr(b) => &b.args,
         _ => unreachable!(),
     };
 
@@ -111,34 +116,34 @@ fn extract_or_clause(
         let mut subclauses: Vec<Expr> = Vec::new();
 
         // OR arguments should be ANDs or sub-RestrictInfos.
-        if is_andclause(&orarg) {
-            let andargs = match &orarg {
-                Expr::BoolExpr(b) => b.args.clone(),
+        if is_andclause(orarg) {
+            let andargs: &[Expr] = match orarg {
+                Expr::BoolExpr(b) => &b.args,
                 _ => unreachable!(),
             };
             for andarg in andargs {
                 let rinfo: RinfoId = match andarg {
-                    Expr::RestrictInfo(r) => r.into(),
+                    Expr::RestrictInfo(r) => (*r).into(),
                     _ => panic!("extract_or_clause: AND arg is not a RestrictInfo"),
                 };
                 if restriction_is_or_clause(root, rinfo) {
                     // Recurse to deal with nested OR.  We *must* recurse to find
                     // and strip all RestrictInfos in the expression.
-                    if let Some(suborclause) = extract_or_clause(root, rinfo, rel)? {
+                    if let Some(suborclause) = extract_or_clause(mcx, root, rinfo, rel)? {
                         subclauses.push(suborclause);
                     }
                 } else if is_safe_restriction_clause_for(root, rinfo, rel) {
-                    subclauses.push(root.node(root.rinfo(rinfo).clause).clone());
+                    subclauses.push(root.node(root.rinfo(rinfo).clause).clone_in(mcx)?);
                 }
             }
         } else {
             let rinfo: RinfoId = match orarg {
-                Expr::RestrictInfo(r) => r.into(),
+                Expr::RestrictInfo(r) => (*r).into(),
                 _ => panic!("extract_or_clause: OR arg is not a RestrictInfo"),
             };
             debug_assert!(!restriction_is_or_clause(root, rinfo));
             if is_safe_restriction_clause_for(root, rinfo, rel) {
-                subclauses.push(root.node(root.rinfo(rinfo).clause).clone());
+                subclauses.push(root.node(root.rinfo(rinfo).clause).clone_in(mcx)?);
             }
         }
 

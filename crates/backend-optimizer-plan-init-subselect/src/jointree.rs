@@ -97,11 +97,70 @@ fn quals_implicit_and(mcx: mcx::Mcx<'_>, quals: Option<&Node>) -> Vec<Expr> {
     // eventual drop frees against an already-freed context (use-after-free /
     // segfault). The planner arena outlives the whole planner run, satisfying
     // the `clone_in` `'static`-erasure invariant.
-    let clause: Option<Expr> = quals.and_then(|n| n.as_expr()).map(|e| {
-        e.clone_in(mcx)
-            .unwrap_or_else(|err| panic!("quals_implicit_and: clone_in: {err:?}"))
-    });
-    make_ands_implicit(clause)
+    // By this planner stage, `f->quals` / `j->quals` is a `Node *` that is held
+    // in one of two equivalent shapes in this owned model:
+    //
+    //   * `Node::Expr(e)` — a single qual expression (the common case, e.g. a
+    //     plain WHERE clause `a = 5` or an AND-`BoolExpr`); or
+    //   * `Node::List([...])` — an already-imploded implicit-AND *list* of
+    //     conjunct `Expr`s. This shape is produced by `concat_quals` in
+    //     `remove_useless_result_rtes` (prepjointree FAMILY 5) when it merges an
+    //     elided single-child FromExpr's quals up into its parent via the C
+    //     `list_concat(child, parent)` — e.g. a view body with a WHERE clause
+    //     over an OUTER join, whose FromExpr is elided and whose quals migrate to
+    //     the parent FromExpr as a `List`.
+    //
+    // In C `f->quals` is just cast to `(List *)` and either iterated directly or
+    // fed through `make_ands_implicit`; both shapes are an implicit-AND list.
+    // Mirror that here: a `Node::List` is *already* the conjunct list, so deep-
+    // copy each element out — but each element is itself a qual `Node` that may
+    // be wrapped as a single AND-`BoolExpr` (e.g. a view body's `WHERE a AND b`
+    // that was analyzed into one `BoolExpr(AND)` and then wrapped as a one-
+    // element list by `concat_quals`). `distribute_qual_to_rels` asserts every
+    // clause it receives is *not* an and-clause, so run each list element back
+    // through `make_ands_implicit` to split any top-level `AND` into its args /
+    // drop a constant-TRUE / keep an atomic clause, and concatenate the results.
+    // A bare single `Node::Expr` runs through `make_ands_implicit` directly.
+    //
+    // The clone MUST land in the long-lived planner arena (`run.mcx()`), NOT a
+    // throwaway `MemoryContext`. `Expr` is lifetime-free: `clone_in` erases the
+    // arena lifetime to `'static`, but the cloned node's `PgBox`/`PgVec`
+    // children still point into the arena it was allocated in and are
+    // deallocated against that arena when the node is dropped. The resulting
+    // `Expr` moves into `JoinTreeItem.quals` and is dropped much later (when
+    // `deconstruct_jointree` drops `item_list`); cloning into a local context
+    // that is freed on return leaves those child pointers dangling, so the
+    // eventual drop frees against an already-freed context (use-after-free /
+    // segfault). The planner arena outlives the whole planner run, satisfying
+    // the `clone_in` `'static`-erasure invariant.
+    match quals {
+        None => Vec::new(),
+        Some(Node::List(items)) => {
+            // Already an implicit-AND conjunct list; flatten each element through
+            // `make_ands_implicit` so no element is left as a top-level AND-clause.
+            let mut out: Vec<Expr> = Vec::with_capacity(items.len());
+            for it in items.iter() {
+                let e = it.as_expr().unwrap_or_else(|| {
+                    panic!(
+                        "quals_implicit_and: jointree quals List element is not an Expr: {:?}",
+                        it.node_tag()
+                    )
+                });
+                let cloned = e
+                    .clone_in(mcx)
+                    .unwrap_or_else(|err| panic!("quals_implicit_and: clone_in: {err:?}"));
+                out.extend(make_ands_implicit(Some(cloned)));
+            }
+            out
+        }
+        Some(n) => {
+            let clause: Option<Expr> = n.as_expr().map(|e| {
+                e.clone_in(mcx)
+                    .unwrap_or_else(|err| panic!("quals_implicit_and: clone_in: {err:?}"))
+            });
+            make_ands_implicit(clause)
+        }
+    }
 }
 
 /// `deconstruct_jointree` (initsplan.c:1084).

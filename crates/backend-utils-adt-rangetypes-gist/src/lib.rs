@@ -87,6 +87,20 @@ use backend_utils_adt_float::get_float4_infinity;
 
 use types_gist::{GistEntryVector, GISTENTRY, GIST_SPLITVEC};
 
+pub mod fmgr_builtins;
+
+/// Wire this crate's outward seams (C: this translation unit's contribution to
+/// the runtime fmgr/opclass tables). Registers the range/multirange GiST
+/// support procedures' `fmgr_builtins[]` rows so `index_getprocinfo` →
+/// `fmgr_info` can resolve them when building a `GISTSTATE` for a
+/// `range_ops` / `multirange_ops` index; the typed by-OID dispatch of the
+/// bodies themselves is installed by `backend-access-gist-proc` (the single
+/// installer of the GiST core dispatch seams), which folds the range/multirange
+/// OIDs into its dispatchers.
+pub fn init_seams() {
+    fmgr_builtins::register_rangetypes_gist_builtins();
+}
+
 // ---------------------------------------------------------------------------
 // Constants (verbatim from the C #defines / #includes).
 // ---------------------------------------------------------------------------
@@ -529,6 +543,69 @@ pub fn range_gist_same(r1: RangeTypeP<'_>, r2: RangeTypeP<'_>) -> PgResult<bool>
         let typcache = range_get_typcache(r1.rangetypid())?;
         range_eq_internal(&typcache, r1, r2)
     }
+}
+
+// ===========================================================================
+// Sort support (rangetypes.c — the range_ops GiST sortsupport comparator).
+//
+// `range_sortsupport` installs `range_fast_cmp` as the SortSupport comparator;
+// the GiST sorted index build (`gist_indexsortbuild`) sorts the leaf keys with
+// it. The comparator lives here (rather than in `rangetypes`) because the GiST
+// sortsupport substrate seam is `Datum`-typed over `types_tuple::Datum` and the
+// install is driven from the GiST `gist_sortsupport` dispatch; the kernel is a
+// thin re-use of the already-ported `range_deserialize` / `range_cmp_bounds`.
+// ===========================================================================
+
+/// `range_fast_cmp(Datum a, Datum b, SortSupport ssup)` (rangetypes.c:1306) —
+/// the SortSupport comparator `range_sortsupport` installs. Both operands are
+/// pass-by-reference `RangeType *` images (`DatumGetRangeTypeP`): empty ranges
+/// sort before all else; otherwise compare lower bounds, breaking ties on the
+/// upper bound. The C `ssup_extra` typcache cache is a per-sort optimization;
+/// the OID is read from the (identical, per the `Assert`) range image each call
+/// and the typcache resolved through the installed seam, which is correct (the
+/// resolution is memoized by the typcache owner). The fallible deserialize /
+/// typcache surface is re-raised through the fmgr `catch_unwind` boundary the
+/// sort engine runs the comparator under.
+pub fn range_fast_cmp(
+    a: types_tuple::backend_access_common_heaptuple::Datum<'_>,
+    b: types_tuple::backend_access_common_heaptuple::Datum<'_>,
+) -> i32 {
+    match range_fast_cmp_inner(a, b) {
+        Ok(c) => c,
+        Err(e) => std::panic::panic_any(e),
+    }
+}
+
+fn range_fast_cmp_inner(
+    a: types_tuple::backend_access_common_heaptuple::Datum<'_>,
+    b: types_tuple::backend_access_common_heaptuple::Datum<'_>,
+) -> PgResult<i32> {
+    let range_a = datum_get_range_type_p_arg(&a);
+    let range_b = datum_get_range_type_p_arg(&b);
+
+    // cache the range info between calls — Assert(RangeTypeGetOid(a) == ...(b)).
+    let typcache = range_get_typcache(range_a.rangetypid())?;
+
+    let (lower1, upper1, empty1) = range_deserialize(&typcache, range_a)?;
+    let (lower2, upper2, empty2) = range_deserialize(&typcache, range_b)?;
+
+    // For b-tree use, empty ranges sort before all else.
+    let cmp = if empty1 && empty2 {
+        0
+    } else if empty1 {
+        -1
+    } else if empty2 {
+        1
+    } else {
+        let c = range_cmp_bounds(&typcache, &lower1, &lower2)?;
+        if c == 0 {
+            range_cmp_bounds(&typcache, &upper1, &upper2)?
+        } else {
+            c
+        }
+    };
+
+    Ok(cmp)
 }
 
 // ===========================================================================
@@ -1318,6 +1395,26 @@ fn entry_range<'mcx>(entryvec: &GistEntryVector<'mcx>, i: usize) -> PgResult<Ran
 fn datum_get_range_type_p<'mcx>(d: types_tuple::backend_access_common_heaptuple::Datum<'mcx>) -> RangeTypeP<'mcx> {
     RangeTypeP {
         ptr: d.as_usize() as *const types_rangetypes::RangeType,
+        _marker: core::marker::PhantomData,
+    }
+}
+
+/// `DatumGetRangeTypeP(arg)` at a fmgr-frame argument boundary — the operand may
+/// arrive either as a pass-by-reference varlena image (`ByRef`, the form the
+/// sort engine hands the SortSupport comparator) or as a pointer word (`ByVal`,
+/// a `RangeType *` address). A by-reference image's bytes live for the call, so
+/// reading the `RangeType` at the image's address is sound; a pointer word is
+/// the address directly.
+fn datum_get_range_type_p_arg<'mcx>(
+    d: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+) -> RangeTypeP<'mcx> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    let ptr = match d {
+        TDatum::ByVal(w) => *w as *const types_rangetypes::RangeType,
+        _ => d.as_ref_bytes().as_ptr() as *const types_rangetypes::RangeType,
+    };
+    RangeTypeP {
+        ptr,
         _marker: core::marker::PhantomData,
     }
 }

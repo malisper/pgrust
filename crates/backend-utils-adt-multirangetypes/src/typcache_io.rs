@@ -11,7 +11,7 @@ use types_cache::typcache::TypeCacheEntry;
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::Oid;
 use types_datum::datum::Datum;
-use types_error::{PgError, PgResult};
+use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 use types_error::error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_UNDEFINED_FUNCTION};
 use types_rangetypes::{MultirangeType, MultirangeTypeP, RANGE_EMPTY, RANGE_EMPTY_LITERAL};
 
@@ -197,6 +197,33 @@ pub fn datum_get_multirange_type_p<'mcx>(
     })
 }
 
+/// `DatumGetMultirangeTypeP(d)` for the value-carrying canonical `Datum` arm: the
+/// on-disk `MultirangeType` varlena image rides `Datum::ByRef` (header included),
+/// so read it from the element image bytes rather than from a pointer word.
+///
+/// This is the by-reference counterpart of [`datum_get_multirange_type_p`],
+/// mirroring `datum_get_range_type_p_value` in the range crate: a planner
+/// `Const`'s `constvalue` for a by-reference multirange carries the varlena image
+/// by value, whose bare-word surrogate would be a non-dereferenceable in-buffer
+/// offset (the source of "Datum: scalar accessor called on a by-reference value"
+/// in `multirangesel`). Detoasts only a compressed/external image, copying into
+/// `mcx`. `Err` carries detoast `ereport(ERROR)`s and OOM.
+pub fn datum_get_multirange_type_p_value<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+) -> PgResult<MultirangeTypeP<'mcx>> {
+    // The element image bytes (the verbatim on-disk varlena, header included).
+    let var_bytes = value.as_ref_bytes();
+    let detoasted = pg_detoast_datum(mcx, var_bytes)?;
+    let ptr = detoasted.as_ptr() as *const MultirangeType;
+    core::mem::forget(detoasted);
+
+    Ok(MultirangeTypeP {
+        ptr,
+        _marker: core::marker::PhantomData,
+    })
+}
+
 /// Seam `multirange_is_empty` — `MultirangeIsEmpty(DatumGetMultirangeTypeP(attval))`
 /// (execIndexing.c's `ExecWithoutOverlapsNotEmpty`): detoast the by-reference
 /// multirange value and report whether it has zero member ranges.
@@ -253,15 +280,17 @@ fn vartag_size(tag: u8) -> usize {
 /// `multirange_in(PG_FUNCTION_ARGS)` (multirangetypes.c:117): parse a text
 /// multirange literal into a serialized multirange.
 ///
-/// The scaffold drops `escontext` (the C `fcinfo->context`); a soft (`escontext`)
-/// error therefore surfaces as a hard `Err`, matching the `escontext == NULL`
-/// behavior of the SQL-callable entry point.
+/// `escontext` is C's `fcinfo->context`: forwarded to `multirange_parse`'s
+/// `ereturn` sites and to each member range's `InputFunctionCallSafe`. A
+/// recoverable parse / element-input error surfaces as `Ok(None)` (C's
+/// `PG_RETURN_NULL`) when `escontext` is `Some`, or a hard `Err` when `None`.
 pub fn multirange_in<'mcx>(
     mcx: Mcx<'mcx>,
     input: &str,
     mltrngtypoid: Oid,
     typmod: i32,
-) -> PgResult<MultirangeTypeP<'mcx>> {
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<MultirangeTypeP<'mcx>>> {
     let input_bytes = input.as_bytes();
 
     let cache = get_multirange_io_data(mltrngtypoid, IOFuncSelector::Input)?;
@@ -290,7 +319,7 @@ pub fn multirange_in<'mcx>(
     if at(input_bytes, ptr) == b'{' {
         ptr += 1;
     } else {
-        return Err(malformed("Missing left brace."));
+        return ereturn(escontext.as_deref_mut(), None, malformed("Missing left brace."));
     }
 
     // consume ranges
@@ -300,7 +329,7 @@ pub fn multirange_in<'mcx>(
         let ch = at(input_bytes, ptr);
 
         if ch == 0 {
-            return Err(malformed("Unexpected end of input."));
+            return ereturn(escontext.as_deref_mut(), None, malformed("Unexpected end of input."));
         }
 
         // skip whitespace
@@ -322,7 +351,11 @@ pub fn multirange_in<'mcx>(
                     ptr += RANGE_EMPTY_LITERAL.len() - 1;
                     parse_state = MultirangeParseState::AfterRange;
                 } else {
-                    return Err(malformed("Expected range start."));
+                    return ereturn(
+                        escontext.as_deref_mut(),
+                        None,
+                        malformed("Expected range start."),
+                    );
                 }
             }
             MultirangeParseState::InRange => {
@@ -333,19 +366,22 @@ pub fn multirange_in<'mcx>(
                     )
                     .map_err(|_| malformed("Invalid UTF-8 in range."))?;
                     ranges_seen += 1;
-                    // InputFunctionCallSafe(&cache->typioproc, range_str, ...)
+                    // C: if (!InputFunctionCallSafe(&cache->typioproc, range_str,
+                    //          cache->typioparam, typmod, escontext, &range_datum))
+                    //        PG_RETURN_NULL();
+                    // Forward escontext so a recoverable member-range parse error
+                    // soft-fails (returns NULL) instead of raising.
                     let range = match rangetypes_seams::range_in::call(
                         mcx,
                         range_str,
                         cache.typioparam,
                         typmod,
+                        escontext.as_deref_mut(),
                     )? {
                         Some(r) => r,
-                        // soft error: C would PG_RETURN_NULL(); the scaffold
-                        // has no NULL channel, so re-raise as a hard error.
-                        None => {
-                            return Err(malformed("Invalid range literal."));
-                        }
+                        // The member range I/O reported a soft error (it saved the
+                        // detail into escontext); propagate NULL.
+                        None => return Ok(None),
                     };
                     // if (!RangeIsEmpty(range)) ranges[range_count++] = range;
                     let flags = rangetypes_seams::range_get_flags::call(range);
@@ -380,7 +416,11 @@ pub fn multirange_in<'mcx>(
                 } else if ch == b'}' {
                     parse_state = MultirangeParseState::Finished;
                 } else {
-                    return Err(malformed("Expected comma or end of multirange."));
+                    return ereturn(
+                        escontext.as_deref_mut(),
+                        None,
+                        malformed("Expected comma or end of multirange."),
+                    );
                 }
             }
             MultirangeParseState::InRangeQuotedEscaped => {
@@ -398,10 +438,15 @@ pub fn multirange_in<'mcx>(
     }
 
     if at(input_bytes, ptr) != 0 {
-        return Err(malformed("Junk after closing right brace."));
+        return ereturn(
+            escontext.as_deref_mut(),
+            None,
+            malformed("Junk after closing right brace."),
+        );
     }
 
-    make_multirange(mcx, mltrngtypoid, rangetyp, &ranges)
+    // C: PG_RETURN_MULTIRANGE_P(make_multirange(...)).
+    Ok(Some(make_multirange(mcx, mltrngtypoid, rangetyp, &ranges)?))
 }
 
 /// `pg_strncasecmp(ptr, RANGE_EMPTY_LITERAL, strlen(RANGE_EMPTY_LITERAL)) == 0`

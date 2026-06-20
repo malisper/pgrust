@@ -403,7 +403,14 @@ seam_core::seam!(
  *     arithmetic in-crate. -------------------------------------------- */
 seam_core::seam!(
     /// `rte->tablesample->tsmhandler` for the baserel's RTE (cost_samplescan).
-    pub fn rte_tablesample_tsmhandler(root: &PlannerInfo, rel: RelId) -> Oid
+    /// `run` is threaded so the owner can `planner_rt_fetch` the RTE's owned
+    /// `tablesample` clause node (the same RTE-projection contract as
+    /// `rte_relid` / `rte_functions_exprcost`).
+    pub fn rte_tablesample_tsmhandler<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rel: RelId,
+    ) -> Oid
 );
 seam_core::seam!(
     /// `cost_qual_eval_node((Node *) rte->functions, root)` for the baserel's
@@ -483,8 +490,14 @@ seam_core::seam!(
     /// `Expr` values on the WindowFunc (no `NodeId`), so the per-func cost is
     /// computed by the owner from the WindowFunc node handle. `&mut root`
     /// because the owner re-interns the WindowFunc's args/aggfilter into the
-    /// arena to run `cost_qual_eval_node`.
-    pub fn windowfunc_cost(root: &mut PlannerInfo, wfunc: NodeId) -> (Cost, Cost)
+    /// arena to run `cost_qual_eval_node`. `run` threads the planner mcx so the
+    /// owner can deep-copy the WindowFunc args (which may carry an `Aggref`, as in
+    /// `SUM(SUM(x)) OVER ...`) via `clone_in` — a plain `.clone()` panics.
+    pub fn windowfunc_cost<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+        wfunc: NodeId,
+    ) -> (Cost, Cost)
 );
 seam_core::seam!(
     /// The WindowClause column counts + startup-tuples estimate — needs the

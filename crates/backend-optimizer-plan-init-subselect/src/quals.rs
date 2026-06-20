@@ -229,7 +229,7 @@ pub fn distribute_qual_to_rels<'mcx>(
         if maybe_equivalence {
             let jdomain = item_list[jti].jdomain;
             let jdomain_relids = bms::relids_copy::call(&root.join_domains[jdomain].jd_relids);
-            let (kept, ri) = eqext_process_equivalence(root, restrictinfo, jdomain_relids);
+            let (kept, ri) = eqext_process_equivalence(root, run, restrictinfo, jdomain_relids);
             if kept {
                 return;
             }
@@ -285,13 +285,16 @@ pub fn distribute_qual_to_rels<'mcx>(
 /// the node; the seam returns `(kept_in_ec, possibly-modified rinfo)`. The
 /// possibly-modified handle is irrelevant to the caller here (the arena entry is
 /// mutated in place), so only the `kept` flag is consumed.
-fn eqext_process_equivalence(
+fn eqext_process_equivalence<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     restrictinfo: RinfoId,
     jdomain: Relids,
 ) -> (bool, RinfoId) {
-    backend_optimizer_path_equivclass_seams::process_equivalence::call(root, restrictinfo, jdomain)
-        .expect("process_equivalence")
+    backend_optimizer_path_equivclass_seams::process_equivalence::call(
+        root, run, restrictinfo, jdomain,
+    )
+    .expect("process_equivalence")
 }
 
 /// Which set-aside outer-join clause list `push_oj_clause_info` appends to.

@@ -126,6 +126,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DefineIndex`'s partitioned-recursion `invalidate_parent` update
+    /// (indexcmds.c:1573): transactionally clear `pg_index.indisvalid` for the
+    /// parent partitioned index when an attached child index is itself invalid.
+    /// Unlike `index_set_state_flags` (a non-transactional CONCURRENTLY
+    /// transition), this is an ordinary `CatalogTupleUpdate`. `Err` carries the
+    /// catalog `ereport(ERROR)` surface (incl. the `cache lookup failed`).
+    pub fn index_mark_invalid(index_relation_id: types_core::primitive::Oid) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ResetReindexState(nestLevel)` — forget any active REINDEX at abort.
     pub fn reset_reindex_state(nest_level: i32)
 );
@@ -147,6 +157,22 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         index: &types_rel::Relation<'mcx>,
     ) -> types_error::PgResult<types_nodes::execnodes::IndexInfo<'mcx>>
+);
+
+seam_core::seam!(
+    /// `index_check_primary_key(heapRel, indexInfo, is_alter_table, stmt)`
+    /// (catalog/index.c): apply the special checks before promoting an index to
+    /// a PRIMARY KEY — no pre-existing primary key (ALTER TABLE / partition-of),
+    /// no NULLS NOT DISTINCT index, and every key column marked NOT NULL (and not
+    /// an expression). Reached from `ATExecAddIndexConstraint` (ADD CONSTRAINT
+    /// ... PRIMARY KEY USING INDEX). The unused C `const IndexStmt *stmt` is
+    /// omitted (its body never reads it). `Err` carries the `ereport(ERROR)`s.
+    pub fn index_check_primary_key<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        heap_rel: &types_rel::Relation<'mcx>,
+        index_info: &types_nodes::execnodes::IndexInfo<'mcx>,
+        is_alter_table: bool,
+    ) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -295,13 +321,8 @@ seam_core::seam!(
     /// reset `pg_index` validity, and fire the post-reindex hook. Reached from
     /// the non-concurrent `ReindexIndex` command driver (indexcmds.c).
     ///
-    /// Owned by this unit (catalog/index.c). Its substrate
-    /// (`SetReindexProcessing`/`ResetReindexProcessing`,
-    /// `RelationSetNewRelfilenumber`, `reindex_index`'s catalog-validity reset,
-    /// `try_index_open`/`try_table_open`) is not yet ported, so the owner does
-    /// not install this from `init_seams()` and a call panics loudly
-    /// (`mirror-pg-and-panic`) until that lands. `Err` carries the
-    /// build/catalog `ereport(ERROR)` surface.
+    /// Owned by this unit (catalog/index.c) and installed from its
+    /// `init_seams()`. `Err` carries the build/catalog `ereport(ERROR)` surface.
     pub fn reindex_index<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         stmt: &types_nodes::ddlnodes::ReindexStmt<'mcx>,

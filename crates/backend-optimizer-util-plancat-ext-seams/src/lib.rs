@@ -182,13 +182,26 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `RelationGetIndexExpressions(indexRelation)` (relcache.c) — the index's
-    /// expression columns as fresh arena node handles, in indkey order.
-    pub fn get_index_expressions(root: &mut PlannerInfo, indexoid: Oid) -> PgResult<Vec<NodeId>>
+    /// expression columns as fresh arena node handles, in indkey order. `mcx` is
+    /// the planner-run arena context the decoded `Expr` trees are interned into
+    /// (the arena that backs `root`'s `node_arena`), so the returned `NodeId`s
+    /// outlive the call (the C `RelationGetIndexExpressions` allocates the result
+    /// in the caller's context, here `root->planner_cxt`).
+    pub fn get_index_expressions<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        indexoid: Oid,
+    ) -> PgResult<Vec<NodeId>>
 );
 seam_core::seam!(
     /// `RelationGetIndexPredicate(indexRelation)` (relcache.c) — the partial
-    /// index predicate as fresh arena node handles (empty if not partial).
-    pub fn get_index_predicate(root: &mut PlannerInfo, indexoid: Oid) -> PgResult<Vec<NodeId>>
+    /// index predicate as fresh arena node handles (empty if not partial). `mcx`
+    /// is the planner-run arena context (see `get_index_expressions`).
+    pub fn get_index_predicate<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        root: &mut PlannerInfo,
+        indexoid: Oid,
+    ) -> PgResult<Vec<NodeId>>
 );
 seam_core::seam!(
     /// `amroutine->amgettreeheight(indexRelation)` (index AM) — the index tree
@@ -578,7 +591,8 @@ seam_core::seam!(
 seam_core::seam!(
     /// `index_open(indexoid, rellockmode)` + the `idxForm`/expr/predicate reads
     /// `infer_arbiter_indexes` needs (with the index left closed at return).
-    pub fn get_infer_index_info(
+    pub fn get_infer_index_info<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         root: &mut PlannerInfo,
         indexoid: Oid,
         rellockmode: i32,

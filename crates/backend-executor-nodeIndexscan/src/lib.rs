@@ -214,13 +214,14 @@ fn IndexNextWithReorder<'mcx>(
             if return_topmost {
                 let tuple = reorderqueue_pop(node, top_idx)?;
                 // Pass 'true', as the tuple in the queue is a palloc'd copy.
-                // ExecForceStoreHeapTuple(rt->htup, slot, true): the C HeapTuple
-                // is the FormedTuple's header (the user-data area rides along in
-                // the FormedTuple, kept alive by `tuple`).
-                execTuples::exec_force_store_heap_tuple::call(
+                // ExecForceStoreHeapTuple(rt->htup, slot, true): the reorder
+                // queue holds the full data-bearing FormedTuple, so route through
+                // the formed-tuple store seam (the user-data area is required to
+                // deform a virtual/minimal target slot).
+                execTuples::exec_force_store_formed_heap_tuple::call(
                     estate,
                     scan_slot,
-                    &tuple.tuple.tuple,
+                    tuple.tuple,
                     true,
                 )?;
                 return Ok(true);
@@ -556,13 +557,29 @@ pub fn ExecIndexScan<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // If we have runtime keys and they've not already been set up, do it now.
-    let (num_runtime_keys, ready, num_orderby) = match pstate {
-        types_nodes::PlanStateNode::IndexScan(n) => {
-            (n.iss_NumRuntimeKeys, n.iss_RuntimeKeysReady, n.iss_NumOrderByKeys)
-        }
+    //
+    //   if (node->iss_NumRuntimeKeys != 0 && !node->iss_RuntimeKeysReady)
+    //       ExecReScan((PlanState *) node);
+    //
+    // A node whose `chgParam` is still set has not yet been rescanned for the
+    // current parameter values: its immediate parent deliberately left it to be
+    // "re-scanned by first ExecProcNode" (e.g. `ExecReScanNestLoop` /
+    // `ExecReScanMemoize` skip rescanning a child whose chgParam is non-NULL).
+    // For a parameterized index scan, recomputing the runtime keys here is that
+    // deferred rescan; without it the scankeys keep the previous parameter's
+    // values and the scan returns the same tuples for every outer row (the
+    // classic Memoize-over-parameterized-IndexScan collapse). Dispatch through
+    // the generic ExecReScan so it recomputes the keys *and* clears chgParam.
+    let (num_runtime_keys, ready, num_orderby, chg_param_set) = match pstate {
+        types_nodes::PlanStateNode::IndexScan(n) => (
+            n.iss_NumRuntimeKeys,
+            n.iss_RuntimeKeysReady,
+            n.iss_NumOrderByKeys,
+            n.ss.ps.chgParam.is_some(),
+        ),
         _ => return Err(elog("ExecIndexScan dispatched to wrong node type")),
     };
-    if num_runtime_keys != 0 && !ready {
+    if (num_runtime_keys != 0 && !ready) || chg_param_set {
         // Generic ExecReScan dispatcher (execAmi): instrument loop end, chgParam
         // propagation, expr-context rescan, then dispatch to ExecReScanIndexScan.
         execAmi::exec_re_scan::call(pstate, estate)?;
@@ -974,9 +991,13 @@ fn exec_index_build_scan_keys_into<'mcx>(
                         const_value_in(mcx, &c.constvalue)?
                     }
                     Some(other) => {
-                        // Need a runtime key.
+                        // Need a runtime key. For an ORDER BY clause the target
+                        // index addresses the iss_OrderByKeys array, not
+                        // iss_ScanKeys (C: scan_key is a raw ScanKey pointer into
+                        // whichever array). Flag the target so eval routes it to
+                        // the order-by array.
                         new_runtime_keys.push(IndexRuntimeKeyInfo {
-                            scan_key: j,
+                            scan_key: encode_orderby_ref(j, isorderby),
                             key_expr: Some(exec_init_expr_in(other, planstate, estate)?),
                             key_toastable: type_is_toastable(op_righttype),
                         });
@@ -1228,11 +1249,15 @@ fn exec_index_build_scan_keys_into<'mcx>(
 /// Generic over the node's scankey + runtime-key vectors.
 fn exec_index_eval_runtime_keys_into<'mcx>(
     scan_keys: &mut PgVec<'mcx, ScanKeyData<'mcx>>,
+    orderby_keys: Option<&mut PgVec<'mcx, ScanKeyData<'mcx>>>,
     runtime_keys: &mut PgVec<'mcx, IndexRuntimeKeyInfo<'mcx>>,
     num_runtime_keys: i32,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    // Re-borrow the order-by array per iteration (the `&mut` is consumed by
+    // target_scankey's lifetime); hold it as an Option of a reborrowable ref.
+    let mut orderby_keys = orderby_keys;
     for j in 0..(num_runtime_keys as usize) {
         let (target, toastable, value, isnull) = {
             let rk = runtime_keys
@@ -1247,8 +1272,9 @@ fn exec_index_eval_runtime_keys_into<'mcx>(
             (rk.scan_key, rk.key_toastable, value, isnull)
         };
 
-        // Resolve the target scankey (possibly a row-header subsidiary key).
-        let scan_key = target_scankey(scan_keys, target)?;
+        // Resolve the target scankey (possibly a row-header subsidiary key, or an
+        // order-by-array key).
+        let scan_key = target_scankey(scan_keys, orderby_keys.as_deref_mut(), target)?;
         if isnull {
             scan_key.sk_argument = value;
             scan_key.sk_flags |= SK_ISNULL;
@@ -1335,7 +1361,7 @@ fn exec_index_eval_array_keys_into<'mcx>(
             ak.num_elems = num_elems as i32;
             ak.next_elem = 1;
         }
-        let scan_key = target_scankey(scan_keys, target)?;
+        let scan_key = target_scankey(scan_keys, None, target)?;
         scan_key.sk_argument = first_val;
         if first_null {
             scan_key.sk_flags |= SK_ISNULL;
@@ -1377,7 +1403,7 @@ fn exec_index_advance_array_keys_into<'mcx>(
             ak.next_elem = next_elem + 1;
             (ak.scan_key, value, isnull)
         };
-        let scan_key = target_scankey(scan_keys, target)?;
+        let scan_key = target_scankey(scan_keys, None, target)?;
         scan_key.sk_argument = value;
         if isnull {
             scan_key.sk_flags |= SK_ISNULL;
@@ -1443,12 +1469,20 @@ fn ExecIndexEvalRuntimeKeys_is<'mcx>(
 ) -> PgResult<()> {
     let IndexScanState {
         iss_ScanKeys,
+        iss_OrderByKeys,
         iss_RuntimeKeys,
         iss_NumRuntimeKeys,
         ..
     } = node;
     let num = *iss_NumRuntimeKeys;
-    exec_index_eval_runtime_keys_into(iss_ScanKeys, iss_RuntimeKeys, num, econtext, estate)
+    exec_index_eval_runtime_keys_into(
+        iss_ScanKeys,
+        Some(iss_OrderByKeys),
+        iss_RuntimeKeys,
+        num,
+        econtext,
+        estate,
+    )
 }
 
 // ===========================================================================
@@ -1898,13 +1932,37 @@ fn encode_subkey_ref(header: usize, sub: usize) -> usize {
     SUBKEY_FLAG | (header << 16) | (sub & 0xffff)
 }
 
+/// Bit flagging that a runtime-key target addresses the order-by scankey array
+/// (`iss_OrderByKeys`) rather than the regular scankey array (`iss_ScanKeys`).
+/// C resolves this with raw `ScanKey` pointers; the index model needs the flag.
+const ORDERBY_FLAG: usize = 1usize << (usize::BITS - 2);
+
+/// Encode a plain runtime-key target index, flagging the order-by array when the
+/// key came from an ORDER BY clause.
+fn encode_orderby_ref(idx: usize, isorderby: bool) -> usize {
+    if isorderby {
+        ORDERBY_FLAG | idx
+    } else {
+        idx
+    }
+}
+
 /// Resolve a runtime/array-key `scan_key` target index into the live scankey,
-/// following the subsidiary-key encoding for row-header keys.
+/// following the subsidiary-key encoding for row-header keys and the order-by
+/// flag for keys that address the order-by scankey array.
 fn target_scankey<'a, 'mcx>(
     scan_keys: &'a mut PgVec<'mcx, ScanKeyData<'mcx>>,
+    orderby_keys: Option<&'a mut PgVec<'mcx, ScanKeyData<'mcx>>>,
     target: usize,
 ) -> PgResult<&'a mut ScanKeyData<'mcx>> {
     const SUBKEY_FLAG: usize = 1usize << (usize::BITS - 1);
+    if target & ORDERBY_FLAG != 0 {
+        let idx = target & !ORDERBY_FLAG;
+        return orderby_keys
+            .ok_or_else(|| elog("order-by runtime key but no order-by scankeys"))?
+            .get_mut(idx)
+            .ok_or_else(|| elog("order-by scankey index out of range"));
+    }
     if target & SUBKEY_FLAG != 0 {
         let header = (target & !SUBKEY_FLAG) >> 16;
         let sub = target & 0xffff;
@@ -2000,12 +2058,20 @@ fn seam_eval_runtime_keys_ios<'mcx>(
 ) -> PgResult<()> {
     let types_nodes::IndexOnlyScanState {
         ioss_ScanKeys,
+        ioss_OrderByKeys,
         ioss_RuntimeKeys,
         ioss_NumRuntimeKeys,
         ..
     } = node;
     let num = *ioss_NumRuntimeKeys;
-    exec_index_eval_runtime_keys_into(ioss_ScanKeys, ioss_RuntimeKeys, num, econtext, estate)
+    exec_index_eval_runtime_keys_into(
+        ioss_ScanKeys,
+        Some(ioss_OrderByKeys),
+        ioss_RuntimeKeys,
+        num,
+        econtext,
+        estate,
+    )
 }
 
 // --- shared scan-key seam adapters (BitmapIndexScanState) ------------------
@@ -2050,7 +2116,8 @@ fn seam_eval_runtime_keys_bis<'mcx>(
         ..
     } = node;
     let num = *biss_NumRuntimeKeys;
-    exec_index_eval_runtime_keys_into(biss_ScanKeys, biss_RuntimeKeys, num, econtext, estate)
+    // bitmap index scans never process ORDER BY, so there are no order-by keys.
+    exec_index_eval_runtime_keys_into(biss_ScanKeys, None, biss_RuntimeKeys, num, econtext, estate)
 }
 
 fn seam_eval_array_keys_bis<'mcx>(

@@ -122,7 +122,7 @@ pub fn make_outerjoininfo(
         semi_rhs_exprs: Vec::new(),
     };
 
-    compute_semijoin_info(root, &mut sjinfo, clause)?;
+    compute_semijoin_info(run.mcx(), root, &mut sjinfo, clause)?;
 
     // If it's a full join, no need to be very smart.
     if jointype == JOIN_FULL {
@@ -382,6 +382,7 @@ pub fn make_outerjoininfo(
 /// via `root.alloc_node` (no parse-tree read is required here, so this takes no
 /// `PlannerRun`).
 pub fn compute_semijoin_info(
+    mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     sjinfo: &mut SpecialJoinInfo,
     clause: &[Expr],
@@ -438,8 +439,11 @@ pub fn compute_semijoin_info(
 
         // Extract data from binary opclause.
         let mut opno = opexpr.opno;
-        let left_expr = opexpr.args[0].clone();
-        let mut right_expr = opexpr.args[1].clone();
+        // Deep-copy the operands via `Expr::clone_in` (right_expr is interned
+        // into the planner arena; a derived `Expr::clone` panics on a
+        // context-allocated child).
+        let left_expr = opexpr.args[0].clone_in(mcx)?;
+        let mut right_expr = opexpr.args[1].clone_in(mcx)?;
         let left_varnos = eqext::pull_varnos::call(root, &left_expr);
         let right_varnos = eqext::pull_varnos::call(root, &right_expr);
         let all_varnos = bms::relids_union::call(&left_varnos, &right_varnos);
@@ -472,7 +476,7 @@ pub fn compute_semijoin_info(
             if !oid_is_valid(opno) {
                 return Ok(());
             }
-            right_expr = left_expr.clone();
+            right_expr = left_expr.clone_in(mcx)?;
         } else {
             // mixed membership of args, punt
             return Ok(());

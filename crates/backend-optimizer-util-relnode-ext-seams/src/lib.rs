@@ -185,8 +185,9 @@ seam_core::seam!(
 seam_core::seam!(
     /// `add_child_join_rel_equivalences(root, nappinfos, appinfos,
     /// parent_joinrel, child_joinrel)` (equivclass.c).
-    pub fn add_child_join_rel_equivalences(
+    pub fn add_child_join_rel_equivalences<'mcx>(
         root: &mut PlannerInfo,
+        run: &PlannerRun<'mcx>,
         appinfos: &[AppendRelInfo],
         parent_joinrel: RelId,
         child_joinrel: RelId,

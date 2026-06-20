@@ -26,6 +26,7 @@ types-fmgr = { path = "../types-fmgr" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 common-hashfn-seams = { path = "../common-hashfn-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+types-tuple = { path = "../types-tuple" }
 
 [dev-dependencies]
 types-tuple = { path = "../types-tuple" }

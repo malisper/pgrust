@@ -40,6 +40,10 @@ backend-utils-misc-guc-tables-seams = { path = "../backend-utils-misc-guc-tables
 # Inward seam crates this unit owns / installs into.
 backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
 backend-commands-view-seams = { path = "../backend-commands-view-seams" }
+# plancat.c's get_relation_constraints reaches expand_generated_columns_in_expr
+# over a planner-arena node list; this owner installs the plancat-ext-seam.
+backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
+types-pathnodes = { path = "../types-pathnodes" }
 backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 
 # Cross-cycle externals consumed through owner -seams crates.

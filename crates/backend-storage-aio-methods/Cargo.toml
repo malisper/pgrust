@@ -54,5 +54,10 @@ backend-storage-lmgr-condition-variable = { path = "../backend-storage-lmgr-cond
 # The genuinely-unported completion-callback / sync-perform / resowner-AIO
 # leaves the engine seams into (owners: bufmgr/md/localbuf, smgr/fd, resowner).
 backend-storage-aio-completion-seams = { path = "../backend-storage-aio-completion-seams" }
+# The buffer manager's explicit multi-block read pipeline AIO handle seams
+# (pgaio_io_acquire / pgaio_register_callbacks / start_read_buffers /
+# wait_read_buffers / wref_check_done), which this engine installs over the
+# real PgAioHandle lifecycle (bufmgr.c AsyncReadBuffers / WaitReadBuffers).
+backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
 
 [dev-dependencies]

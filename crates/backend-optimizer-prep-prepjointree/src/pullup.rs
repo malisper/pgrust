@@ -3171,6 +3171,20 @@ fn offset_var_nodes_in_append_rel_list<'mcx>(
     offset: i32,
     sublevels_up: i32,
 ) -> types_error::PgResult<()> {
+    // C: OffsetVarNodes_walker has an explicit `IsA(node, AppendRelInfo)` case
+    // (rewriteManip.c:444) that, when sublevels_up == 0, adds `offset` to the
+    // integer fields parent_relid and child_relid (then falls through to recurse
+    // into translated_vars). The earlier port dropped the integer fixup, so a
+    // pulled-up subquery's appendrel members kept their subquery-local relids and
+    // collided with the upper query's appendrel relids ("child relation already
+    // exists" on nested UNION ALL). Restore the integer offset.
+    if sublevels_up == 0 {
+        for ai in subroot.append_rel_list.iter_mut() {
+            ai.parent_relid = (ai.parent_relid as i32 + offset) as u32;
+            ai.child_relid = (ai.child_relid as i32 + offset) as u32;
+        }
+    }
+
     let mut ids: Vec<NodeId> = Vec::new();
     for ai in subroot.append_rel_list.iter() {
         for &id in ai.translated_vars.iter() {
@@ -3180,17 +3194,15 @@ fn offset_var_nodes_in_append_rel_list<'mcx>(
         }
     }
     for id in ids {
-        let mut node = Node::mk_expr(mcx, subroot.node(id).clone())?;
+        // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+        // owned-subtree child.
+        let mut node = Node::mk_expr(mcx, subroot.node(id).clone_in(mcx)?)?;
         OffsetVarNodes(&mut node, offset, sublevels_up, mcx);
         if let Some(e) = node.into_expr() {
             *subroot.node_mut(id) = e;
         }
     }
     Ok(())
-    // Also adjust the parent_relid/child_relid integer fields? In C,
-    // OffsetVarNodes over the append_rel_list list adjusts only the Var nodes
-    // within translated_vars (parent_relid/child_relid are plain ints not Vars),
-    // matching this walk.
 }
 
 /// `IncrementVarSublevelsUp((Node *) subroot->append_rel_list, -1, 1)`.
@@ -3209,7 +3221,9 @@ fn increment_var_sublevels_up_in_append_rel_list<'mcx>(
         }
     }
     for id in ids {
-        let mut node = Node::mk_expr(mcx, subroot.node(id).clone())?;
+        // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+        // owned-subtree child.
+        let mut node = Node::mk_expr(mcx, subroot.node(id).clone_in(mcx)?)?;
         IncrementVarSublevelsUp(&mut node, delta, min_sublevels_up, mcx)?;
         if let Some(e) = node.into_expr() {
             *subroot.node_mut(id) = e;

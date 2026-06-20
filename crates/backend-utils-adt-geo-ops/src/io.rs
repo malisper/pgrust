@@ -13,7 +13,7 @@
 //! errors).
 
 use types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
-use types_error::{PgError, PgResult};
+use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 
 use backend_utils_adt_float_seams::{float8in_internal_endptr, float8out_internal};
 
@@ -121,15 +121,29 @@ impl<'a> Cursor<'a> {
 /// `single_decode(num, x, endptr_p, type_name, orig_string)` (geo_ops.c:193):
 /// parse one float8 off the cursor via the `float8in_internal` seam, advancing
 /// the cursor past the consumed token (and any trailing whitespace).
-fn single_decode(cur: &mut Cursor, type_name: &str, orig_string: &str) -> PgResult<f64> {
+fn single_decode(
+    cur: &mut Cursor,
+    type_name: &str,
+    orig_string: &str,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<f64> {
     let tail = cur.tail();
-    let (value, consumed) = float8in_internal_endptr::call(
+    // C: `*x = float8in_internal(num, endptr_p, type_name, orig_string,
+    // escontext)` (geo_ops.c:198) — a recoverable float syntax/range error is
+    // routed into the soft sink rather than thrown. The endptr seam surfaces
+    // such errors as `Err`; under a soft request we `ereturn` them (returning a
+    // 0 sentinel, exactly as C leaves `*x` undefined after a soft error).
+    match float8in_internal_endptr::call(
         tail.to_string(),
         type_name.to_string(),
         orig_string.to_string(),
-    )?;
-    cur.pos += consumed;
-    Ok(value)
+    ) {
+        Ok((value, consumed)) => {
+            cur.pos += consumed;
+            Ok(value)
+        }
+        Err(err) => ereturn(escontext, 0.0, err),
+    }
 }
 
 /// `pair_decode(str, x, y, endptr_p, type_name, orig_string)` (geo_ops.c:211).
@@ -140,6 +154,7 @@ fn pair_decode(
     report_endptr: bool,
     type_name: &str,
     orig_string: &str,
+    mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<(f64, f64)> {
     cur.skip_ws();
     let has_delim = cur.cur() == LDELIM;
@@ -147,27 +162,42 @@ fn pair_decode(
         cur.advance();
     }
 
-    let x = single_decode(cur, type_name, orig_string)?;
-
-    if cur.next() != DELIM {
-        return Err(invalid_input(type_name, orig_string));
+    // C: `if (!single_decode(...)) return false;` — a soft error from the
+    // float parse stops the decode (the saved error is already in escontext).
+    let x = single_decode(cur, type_name, orig_string, escontext.as_deref_mut())?;
+    if soft_occurred(&escontext) {
+        return Ok((0.0, 0.0));
     }
 
-    let y = single_decode(cur, type_name, orig_string)?;
+    if cur.next() != DELIM {
+        return ereturn(escontext, (0.0, 0.0), invalid_input(type_name, orig_string));
+    }
+
+    let y = single_decode(cur, type_name, orig_string, escontext.as_deref_mut())?;
+    if soft_occurred(&escontext) {
+        return Ok((0.0, 0.0));
+    }
 
     if has_delim {
         if cur.next() != RDELIM {
-            return Err(invalid_input(type_name, orig_string));
+            return ereturn(escontext, (0.0, 0.0), invalid_input(type_name, orig_string));
         }
         cur.skip_ws();
     }
 
     // Report stopping point if wanted, else complain if not end of string.
     if !report_endptr && !cur.at_end() {
-        return Err(invalid_input(type_name, orig_string));
+        return ereturn(escontext, (0.0, 0.0), invalid_input(type_name, orig_string));
     }
 
     Ok((x, y))
+}
+
+/// `SOFT_ERROR_OCCURRED(escontext)`: true iff a soft-error sink is installed
+/// and has already recorded a (recoverable) error.
+#[inline]
+fn soft_occurred(escontext: &Option<&mut SoftErrorContext>) -> bool {
+    escontext.as_ref().is_some_and(|c| c.error_occurred())
 }
 
 /// `path_decode(str, opentype, npts, p, isopen, endptr_p, type_name,
@@ -181,6 +211,7 @@ fn path_decode(
     report_endptr: bool,
     type_name: &str,
     orig_string: &str,
+    mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<bool> {
     let mut depth = 0i32;
 
@@ -189,7 +220,7 @@ fn path_decode(
     if isopen {
         // no open delimiter allowed?
         if !opentype {
-            return Err(invalid_input(type_name, orig_string));
+            return ereturn(escontext, false, invalid_input(type_name, orig_string));
         }
         depth += 1;
         cur.advance();
@@ -210,7 +241,11 @@ fn path_decode(
     }
 
     for slot in out.iter_mut().take(npts) {
-        let (x, y) = pair_decode(cur, true, type_name, orig_string)?;
+        // C: `if (!pair_decode(...)) return false;` — propagate a soft stop.
+        let (x, y) = pair_decode(cur, true, type_name, orig_string, escontext.as_deref_mut())?;
+        if soft_occurred(&escontext) {
+            return Ok(false);
+        }
         slot.x = x;
         slot.y = y;
         if cur.cur() == DELIM {
@@ -224,13 +259,13 @@ fn path_decode(
             cur.advance();
             cur.skip_ws();
         } else {
-            return Err(invalid_input(type_name, orig_string));
+            return ereturn(escontext, false, invalid_input(type_name, orig_string));
         }
     }
 
     // Report stopping point if wanted, else complain if not end of string.
     if !report_endptr && !cur.at_end() {
-        return Err(invalid_input(type_name, orig_string));
+        return ereturn(escontext, false, invalid_input(type_name, orig_string));
     }
 
     Ok(isopen)
@@ -303,10 +338,13 @@ fn path_encode(delim: PathDelim, pts: &[Point]) -> String {
 // point I/O (geo_ops.c:1830-1877).
 // ===========================================================================
 
-/// `point_in(str)` (geo_ops.c:1830).
-pub fn point_in(str: &str) -> PgResult<Point> {
+/// `point_in(str)` (geo_ops.c:1830). The decode forwards `fcinfo->context` so a
+/// recoverable syntax error is routed into the soft sink (`pg_input_is_valid`).
+pub fn point_in(str: &str, escontext: Option<&mut SoftErrorContext>) -> PgResult<Point> {
     let mut cur = Cursor::new(str);
-    let (x, y) = pair_decode(&mut cur, false, "point", str)?;
+    // C ignores `pair_decode`'s return (the result won't matter on error), but
+    // the soft sink still records the error and the caller discards the value.
+    let (x, y) = pair_decode(&mut cur, false, "point", str, escontext)?;
     Ok(Point { x, y })
 }
 
@@ -337,10 +375,22 @@ pub fn point_send(pt: &Point) -> Vec<u8> {
 
 /// `box_in(str)` (geo_ops.c:421): parse `(f8,f8),(f8,f8)` (or the old
 /// `(f8,f8,f8,f8)`), reordering corners so `high` >= `low`.
-pub fn box_in(str: &str) -> PgResult<BOX> {
+pub fn box_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgResult<BOX> {
     let mut cur = Cursor::new(str);
     let mut corners = [Point::default(); 2];
-    path_decode(&mut cur, false, 2, &mut corners, false, "box", str)?;
+    path_decode(
+        &mut cur,
+        false,
+        2,
+        &mut corners,
+        false,
+        "box",
+        str,
+        escontext.as_deref_mut(),
+    )?;
+    if soft_occurred(&escontext) {
+        return Ok(BOX::default());
+    }
     let mut b = BOX {
         high: corners[0],
         low: corners[1],
@@ -398,48 +448,81 @@ pub fn box_send(b: &BOX) -> Vec<u8> {
 
 /// `line_decode(s, str, line)` (geo_ops.c:949): decode `A,B,C}` (the leading
 /// '{' has already been consumed by `line_in`).
-fn line_decode(cur: &mut Cursor, str: &str) -> PgResult<LINE> {
-    let a = single_decode(cur, "line", str)?;
-    if cur.next() != DELIM {
-        return Err(invalid_input("line", str));
+fn line_decode(
+    cur: &mut Cursor,
+    str: &str,
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<LINE> {
+    let a = single_decode(cur, "line", str, escontext.as_deref_mut())?;
+    if soft_occurred(&escontext) {
+        return Ok(LINE::default());
     }
-    let b = single_decode(cur, "line", str)?;
     if cur.next() != DELIM {
-        return Err(invalid_input("line", str));
+        return ereturn(escontext, LINE::default(), invalid_input("line", str));
     }
-    let c = single_decode(cur, "line", str)?;
+    let b = single_decode(cur, "line", str, escontext.as_deref_mut())?;
+    if soft_occurred(&escontext) {
+        return Ok(LINE::default());
+    }
+    if cur.next() != DELIM {
+        return ereturn(escontext, LINE::default(), invalid_input("line", str));
+    }
+    let c = single_decode(cur, "line", str, escontext.as_deref_mut())?;
+    if soft_occurred(&escontext) {
+        return Ok(LINE::default());
+    }
     if cur.next() != RDELIM_L {
-        return Err(invalid_input("line", str));
+        return ereturn(escontext, LINE::default(), invalid_input("line", str));
     }
     cur.skip_ws();
     if !cur.at_end() {
-        return Err(invalid_input("line", str));
+        return ereturn(escontext, LINE::default(), invalid_input("line", str));
     }
     Ok(LINE { A: a, B: b, C: c })
 }
 
 /// `line_in(str)` (geo_ops.c:978): parse `{A,B,C}` or two points.
-pub fn line_in(str: &str) -> PgResult<LINE> {
+pub fn line_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgResult<LINE> {
     let mut cur = Cursor::new(str);
     cur.skip_ws();
     if cur.cur() == LDELIM_L {
         cur.advance();
-        let line = line_decode(&mut cur, str)?;
+        let line = line_decode(&mut cur, str, escontext.as_deref_mut())?;
+        if soft_occurred(&escontext) {
+            return Ok(LINE::default());
+        }
         if crate::FPzero(line.A) && crate::FPzero(line.B) {
-            return Err(invalid_input_msg(
-                "invalid line specification: A and B cannot both be zero",
-            ));
+            return ereturn(
+                escontext,
+                LINE::default(),
+                invalid_input_msg("invalid line specification: A and B cannot both be zero"),
+            );
         }
         Ok(line)
     } else {
         let mut pts = [Point::default(); 2];
-        path_decode(&mut cur, true, 2, &mut pts, false, "line", str)?;
-        if point_eq_point(&pts[0], &pts[1]) {
-            return Err(invalid_input_msg(
-                "invalid line specification: must be two distinct points",
-            ));
+        path_decode(
+            &mut cur,
+            true,
+            2,
+            &mut pts,
+            false,
+            "line",
+            str,
+            escontext.as_deref_mut(),
+        )?;
+        if soft_occurred(&escontext) {
+            return Ok(LINE::default());
         }
-        // lseg_sl() / line_construct() can throw overflow/underflow errors.
+        if point_eq_point(&pts[0], &pts[1]) {
+            return ereturn(
+                escontext,
+                LINE::default(),
+                invalid_input_msg("invalid line specification: must be two distinct points"),
+            );
+        }
+        // lseg_sl() / line_construct() can throw overflow/underflow errors
+        // (kept hard, matching C's XXX comment).
         let lseg = LSEG { p: pts };
         crate::line::line_construct(&pts[0], lseg::lseg_sl(&lseg)?)
     }
@@ -496,10 +579,22 @@ pub fn line_send(line: &LINE) -> Vec<u8> {
 // ===========================================================================
 
 /// `lseg_in(str)` (geo_ops.c:2064).
-pub fn lseg_in(str: &str) -> PgResult<LSEG> {
+pub fn lseg_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgResult<LSEG> {
     let mut cur = Cursor::new(str);
     let mut pts = [Point::default(); 2];
-    path_decode(&mut cur, true, 2, &mut pts, false, "lseg", str)?;
+    path_decode(
+        &mut cur,
+        true,
+        2,
+        &mut pts,
+        false,
+        "lseg",
+        str,
+        escontext.as_deref_mut(),
+    )?;
+    if soft_occurred(&escontext) {
+        return Ok(LSEG::default());
+    }
     Ok(LSEG { p: pts })
 }
 
@@ -542,13 +637,19 @@ pub fn lseg_send(ls: &LSEG) -> Vec<u8> {
 const POINT_SIZE: usize = core::mem::size_of::<Point>();
 
 /// `path_in(str)` (geo_ops.c:1401).
-pub fn path_in(str: &str) -> PgResult<Path> {
+pub fn path_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgResult<Path> {
+    let empty = || Path {
+        closed: false,
+        points: Vec::new(),
+    };
     let npts = pair_count(str, b',');
     if npts <= 0 {
-        return Err(invalid_input("path", str));
+        return ereturn(escontext, empty(), invalid_input("path", str));
     }
     let npts = npts as usize;
-    check_points_overflow(npts, types_core::geo::PATH_HEADER_SIZE)?;
+    if let Err(err) = check_points_overflow(npts, types_core::geo::PATH_HEADER_SIZE) {
+        return ereturn(escontext, empty(), err);
+    }
 
     let mut cur = Cursor::new(str);
     cur.skip_ws();
@@ -561,16 +662,28 @@ pub fn path_in(str: &str) -> PgResult<Path> {
     }
 
     let mut points = vec![Point::default(); npts];
-    let isopen = path_decode(&mut cur, true, npts, &mut points, true, "path", str)?;
+    let isopen = path_decode(
+        &mut cur,
+        true,
+        npts,
+        &mut points,
+        true,
+        "path",
+        str,
+        escontext.as_deref_mut(),
+    )?;
+    if soft_occurred(&escontext) {
+        return Ok(empty());
+    }
 
     if depth >= 1 {
         if cur.next() != RDELIM {
-            return Err(invalid_input("path", str));
+            return ereturn(escontext, empty(), invalid_input("path", str));
         }
         cur.skip_ws();
     }
     if !cur.at_end() {
-        return Err(invalid_input("path", str));
+        return ereturn(escontext, empty(), invalid_input("path", str));
     }
 
     Ok(Path {
@@ -633,17 +746,35 @@ pub fn path_send(path: &Path) -> Vec<u8> {
 // ===========================================================================
 
 /// `poly_in(str)` (geo_ops.c:3414).
-pub fn poly_in(str: &str) -> PgResult<Polygon> {
+pub fn poly_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgResult<Polygon> {
+    let empty = || Polygon {
+        boundbox: BOX::default(),
+        points: Vec::new(),
+    };
     let npts = pair_count(str, b',');
     if npts <= 0 {
-        return Err(invalid_input("polygon", str));
+        return ereturn(escontext, empty(), invalid_input("polygon", str));
     }
     let npts = npts as usize;
-    check_points_overflow(npts, types_core::geo::POLYGON_HEADER_SIZE)?;
+    if let Err(err) = check_points_overflow(npts, types_core::geo::POLYGON_HEADER_SIZE) {
+        return ereturn(escontext, empty(), err);
+    }
 
     let mut points = vec![Point::default(); npts];
     let mut cur = Cursor::new(str);
-    path_decode(&mut cur, false, npts, &mut points, false, "polygon", str)?;
+    path_decode(
+        &mut cur,
+        false,
+        npts,
+        &mut points,
+        false,
+        "polygon",
+        str,
+        escontext.as_deref_mut(),
+    )?;
+    if soft_occurred(&escontext) {
+        return Ok(empty());
+    }
 
     let mut poly = Polygon {
         boundbox: BOX::default(),
@@ -701,7 +832,7 @@ pub fn poly_send(poly: &Polygon) -> Vec<u8> {
 // ===========================================================================
 
 /// `circle_in(str)` (geo_ops.c:4610): parse `<(f8,f8),f8>` or `f8,f8,f8`.
-pub fn circle_in(str: &str) -> PgResult<CIRCLE> {
+pub fn circle_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgResult<CIRCLE> {
     let mut cur = Cursor::new(str);
     let mut depth = 0i32;
 
@@ -722,17 +853,23 @@ pub fn circle_in(str: &str) -> PgResult<CIRCLE> {
     }
 
     // pair_decode will consume parens around the pair, if any.
-    let (cx, cy) = pair_decode(&mut cur, true, "circle", str)?;
+    let (cx, cy) = pair_decode(&mut cur, true, "circle", str, escontext.as_deref_mut())?;
+    if soft_occurred(&escontext) {
+        return Ok(CIRCLE::default());
+    }
 
     if cur.cur() == DELIM {
         cur.advance();
     }
 
-    let radius = single_decode(&mut cur, "circle", str)?;
+    let radius = single_decode(&mut cur, "circle", str, escontext.as_deref_mut())?;
+    if soft_occurred(&escontext) {
+        return Ok(CIRCLE::default());
+    }
 
     // We have to accept NaN.
     if radius < 0.0 {
-        return Err(invalid_input("circle", str));
+        return ereturn(escontext, CIRCLE::default(), invalid_input("circle", str));
     }
 
     while depth > 0 {
@@ -741,12 +878,12 @@ pub fn circle_in(str: &str) -> PgResult<CIRCLE> {
             cur.advance();
             cur.skip_ws();
         } else {
-            return Err(invalid_input("circle", str));
+            return ereturn(escontext, CIRCLE::default(), invalid_input("circle", str));
         }
     }
 
     if !cur.at_end() {
-        return Err(invalid_input("circle", str));
+        return ereturn(escontext, CIRCLE::default(), invalid_input("circle", str));
     }
 
     Ok(CIRCLE {

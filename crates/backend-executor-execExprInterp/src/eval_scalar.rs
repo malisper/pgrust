@@ -118,13 +118,13 @@ fn func_step_inputs<'mcx>(
 fn func_step_fn_expr<'a, 'mcx>(
     state: &'a ExprState<'mcx>,
     op: usize,
-) -> Option<&'a types_nodes::primnodes::Expr> {
+) -> Option<types_core::fmgr::FnExprErased> {
+    // Hand the by-OID fmgr dispatch the call node as the cheap `Rc`-backed erased
+    // handle the step's `FmgrInfo` was stamped with (`fmgr_info_set_expr` at
+    // `ExecInitFunc` time), NOT a borrow that the dispatch would have to deep-clone
+    // per call. Re-stamping the re-resolved `FmgrInfo` is then a `Rc::clone`.
     match step_data(state, op) {
-        ExprEvalStepData::Func { finfo, .. } => finfo
-            .as_ref()?
-            .fn_expr
-            .as_ref()?
-            .downcast_ref::<types_nodes::primnodes::Expr>(),
+        ExprEvalStepData::Func { finfo, .. } => finfo.as_ref()?.fn_expr.clone(),
         _ => None,
     }
 }
@@ -484,10 +484,11 @@ fn hashdatum_step_inputs<'mcx>(
             let c = state.result_cells.get(*arg_cell);
             let args = vec![c.value.clone()];
             // DatumGetUInt32(op->d.hashdatum.iresult->value) (NEXT32 only; the
-            // FIRST variants ignore it).
-            let existing = iresult
-                .as_ref()
-                .map(|ir| ir.value.as_u32())
+            // FIRST variants ignore it). `iresult` carries the shared accumulator
+            // cell id (C's aliased `iresult->value`); the prior column's hash
+            // step wrote the running hash there, so read it back from that cell.
+            let existing = (*iresult)
+                .map(|cell| state.result_cells.get(cell).value.as_u32())
                 .unwrap_or(0);
             (finfo.fn_oid, fcinfo.fncollation, args, c.isnull, existing)
         }
@@ -501,13 +502,11 @@ fn hashdatum_step_inputs<'mcx>(
 fn hashdatum_step_fn_expr<'a, 'mcx>(
     state: &'a ExprState<'mcx>,
     op: usize,
-) -> Option<&'a types_nodes::primnodes::Expr> {
+) -> Option<types_core::fmgr::FnExprErased> {
+    // Cheap `Rc` clone of the step's stamped call node, not a borrow the by-OID
+    // dispatch would deep-clone per call (see `func_step_fn_expr`).
     match step_data(state, op) {
-        ExprEvalStepData::HashDatum { finfo, .. } => finfo
-            .as_ref()?
-            .fn_expr
-            .as_ref()?
-            .downcast_ref::<types_nodes::primnodes::Expr>(),
+        ExprEvalStepData::HashDatum { finfo, .. } => finfo.as_ref()?.fn_expr.clone(),
         _ => None,
     }
 }
@@ -1302,10 +1301,13 @@ pub fn ExecEvalConstraintCheck<'mcx>(
     let checkbool = check.value.as_bool();
 
     if !checknull && !checkbool {
+        // format_type_be(resulttype) — render the domain's type name (the C
+        // errmsg uses format_type_be, not the bare OID).
+        let typename =
+            backend_utils_adt_format_type_seams::format_type_be_owned::call(resulttype)?;
         return Err(PgError::error(format!(
             "value for domain {} violates check constraint \"{}\"",
-            // format_type_be(resulttype) — owner (format-type) not a dep here.
-            resulttype, constraintname
+            typename, constraintname
         ))
         .with_sqlstate(ERRCODE_CHECK_VIOLATION));
     }

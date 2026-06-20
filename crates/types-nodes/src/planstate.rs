@@ -12,6 +12,7 @@ use crate::execnodes::{PlanStateData, ScanStateData, T_MaterialState};
 use crate::nodeindexonlyscan::{T_IndexOnlyScanState, T_IndexScanState};
 use crate::nodeappend::{AppendStateData, T_AppendState};
 use crate::nodelimit::T_LimitState;
+use crate::nodelockrows::T_LockRowsState;
 use crate::nodeunique::T_UniqueState;
 use crate::execstate_tags::T_SortState;
 use crate::nodemergeappend::T_MergeAppendState;
@@ -70,6 +71,8 @@ pub enum PlanStateNode<'mcx> {
     BitmapIndexScan(PgBox<'mcx, crate::nodebitmapindexscan::BitmapIndexScanState<'mcx>>),
     /// `T_LimitState`.
     Limit(PgBox<'mcx, crate::nodelimit::LimitStateData<'mcx>>),
+    /// `T_LockRowsState`.
+    LockRows(PgBox<'mcx, crate::nodelockrows::LockRowsStateData<'mcx>>),
     /// `T_UniqueState`.
     Unique(PgBox<'mcx, crate::nodeunique::UniqueStateData<'mcx>>),
     /// `T_SortState`.
@@ -145,6 +148,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::IndexOnlyScan(_) => T_IndexOnlyScanState,
             PlanStateNode::BitmapIndexScan(_) => crate::execstate_tags::T_BitmapIndexScanState,
             PlanStateNode::Limit(_) => T_LimitState,
+            PlanStateNode::LockRows(_) => T_LockRowsState,
             PlanStateNode::Unique(_) => T_UniqueState,
             PlanStateNode::Sort(_) => T_SortState,
             PlanStateNode::IncrementalSort(_) => {
@@ -196,6 +200,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::IndexOnlyScan(m) => &m.ss.ps,
             PlanStateNode::BitmapIndexScan(m) => &m.ss.ps,
             PlanStateNode::Limit(m) => &m.ps,
+            PlanStateNode::LockRows(m) => &m.ps,
             PlanStateNode::Unique(u) => &u.ps,
             PlanStateNode::Sort(s) => &s.ss.ps,
             PlanStateNode::IncrementalSort(s) => &s.ss.ps,
@@ -242,6 +247,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::IndexOnlyScan(m) => &mut m.ss.ps,
             PlanStateNode::BitmapIndexScan(m) => &mut m.ss.ps,
             PlanStateNode::Limit(m) => &mut m.ps,
+            PlanStateNode::LockRows(m) => &mut m.ps,
             PlanStateNode::Unique(u) => &mut u.ps,
             PlanStateNode::Sort(s) => &mut s.ss.ps,
             PlanStateNode::IncrementalSort(s) => &mut s.ss.ps,
@@ -363,6 +369,33 @@ impl<'mcx> PlanStateNode<'mcx> {
         match self {
             _ => None,
         }
+    }
+
+    /// `planstate_walk_members(planstate, ...)` — the per-node member child
+    /// `PlanState`s of the special member-bearing nodes
+    /// (`AppendState.appendplans`, `MergeAppendState.mergeplans`,
+    /// `BitmapAndState`/`BitmapOrState.bitmapplans`), in array order, for shared
+    /// (`&`) read walks such as `ExplainMemberNodes`. Returns the present
+    /// (`Some`) children only — the C arrays are fully populated by the node's
+    /// `ExecInit*`, but the owned vectors carry `Option<PgBox<..>>` slots so a
+    /// not-yet-initialized slot reads as absent. `None` for non-member nodes
+    /// (distinct from `Some(empty)` for a member node with no children).
+    pub fn member_input_states(&self) -> Option<alloc::vec::Vec<&PlanStateNode<'mcx>>> {
+        let members = match self {
+            PlanStateNode::Append(a) => &a.appendplans,
+            PlanStateNode::MergeAppend(m) => &m.mergeplans,
+            PlanStateNode::BitmapAnd(b) => &b.bitmapplans,
+            PlanStateNode::BitmapOr(b) => &b.bitmapplans,
+            _ => return None,
+        };
+        let mut out: alloc::vec::Vec<&PlanStateNode<'mcx>> =
+            alloc::vec::Vec::with_capacity(members.len());
+        for c in members.iter() {
+            if let Some(c) = c.as_deref() {
+                out.push(c);
+            }
+        }
+        Some(out)
     }
 
     /// `castNode(AggState, node)` — the `AggState` an aggregate-owned

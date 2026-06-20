@@ -206,10 +206,13 @@ pub fn range_in<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
     // char *input_str = PG_GETARG_CSTRING(0);
+    // Copy to an owned String so the cstring borrow does not alias the mutable
+    // `escontext_mut()` borrow taken below.
     let input_str = fcinfo
         .ref_arg(0)
         .and_then(|p| p.as_cstring())
-        .expect("range_in arg 0 is a cstring");
+        .expect("range_in arg 0 is a cstring")
+        .to_string();
     let rngtypoid = getarg_datum(fcinfo, 1).as_oid();
     let typmod = getarg_datum(fcinfo, 2).as_i32();
 
@@ -218,10 +221,18 @@ pub fn range_in<'mcx>(
 
     let cache = get_range_io_data(rngtypoid, IOFuncSelector::Input)?;
 
+    // C: Node *escontext = fcinfo->context; — forward the soft-error sink so a
+    // recoverable parse / element-input error soft-fails (PG_RETURN_NULL) when a
+    // caller such as `pg_input_is_valid` supplied an ErrorSaveContext.
+    let escontext = fcinfo.escontext_mut();
+
     // get_range_io_data + element-input parsing + make_range live in the kernel,
     // which returns NULL (soft error) as the SQL NULL the entry surfaces.
-    let range = range_in_kernel(mcx, &cache, input_str, typmod)?;
-    Ok(return_range_p(fcinfo, range))
+    match range_in_kernel(mcx, &cache, &input_str, typmod, escontext)? {
+        Some(range) => Ok(return_range_p(fcinfo, range)),
+        // C: PG_RETURN_NULL() after a soft error.
+        None => Ok(return_null(fcinfo)),
+    }
 }
 
 /// `range_out(PG_FUNCTION_ARGS)` (rangetypes.c:139).

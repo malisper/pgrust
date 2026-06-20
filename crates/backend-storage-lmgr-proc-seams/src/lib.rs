@@ -333,6 +333,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `set_indexsafe_procflags(void)` (commands/indexcmds.c) — set
+    /// `MyProc->statusFlags |= PROC_IN_SAFE_IC` (under `ProcArrayLock`, mirror
+    /// kept in sync) so concurrent index builds / `WaitForOlderSnapshots` may
+    /// ignore this backend during a CONCURRENTLY build of a non-expressional,
+    /// non-partial index. `Err` carries the LWLock `ereport(ERROR)` surface.
+    pub fn set_indexsafe_procflags() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `GetPGProcByNumber(pgprocno)->roleId` — the dummy PGPROC's authenticated
     /// role, read by `BackendPidGetProc`. Plain shared-memory read.
     pub fn proc_role_id(pgprocno: ProcNumber) -> Oid

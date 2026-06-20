@@ -117,10 +117,16 @@ fn ok<T>(r: types_error::PgResult<T>) -> T {
 fn fc_tsqueryin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let m = scratch_mcx();
-    // Hard error context: no soft `ErrorSaveContext` is modeled on the frame.
-    let image = ok(crate::tsquery::tsqueryin(m.mcx(), &s, None))
-        .unwrap_or_else(|| raise(types_error::PgError::error("tsqueryin returned NULL")));
-    ret_varlena_image(fcinfo, image)
+    // Forward the soft ErrorSaveContext installed on the frame by
+    // InputFunctionCallSafe so a recoverable parse failure `ereturn`s into the
+    // sink (returning `Ok(None)`) instead of throwing past `invoke?`.
+    let image = ok(crate::tsquery::tsqueryin(m.mcx(), &s, fcinfo.escontext_mut()));
+    match image {
+        Some(img) => ret_varlena_image(fcinfo, img),
+        // Soft-error path: escontext recorded the failure; return a NULL
+        // placeholder the caller discards after `soft_error_occurred()`.
+        None => Datum::null(),
+    }
 }
 
 fn fc_tsqueryout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {

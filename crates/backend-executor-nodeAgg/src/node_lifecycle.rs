@@ -1446,7 +1446,7 @@ pub fn ExecReScanAgg<'mcx>(
     }
 
     // Forget current agg values: MemSet(ecxt_aggvalues/ecxt_aggnulls, 0).
-    clear_agg_values(node);
+    clear_agg_values(node, estate)?;
 
     // With AGG_HASHED/MIXED, the hash table is allocated in a sub-context of
     // the hashcontext. Resetting a context automatically deletes sub-contexts.
@@ -1512,12 +1512,19 @@ pub fn ExecReScanAgg<'mcx>(
 /// `aggParams` bitmapset, read off the shared plan tree. Owned by the planner
 /// plan-node unit (the `Node::Agg` variant has not landed).
 fn agg_plan_agg_params<'a, 'mcx>(
-    _node: &'a AggStateData<'mcx>,
+    node: &'a AggStateData<'mcx>,
 ) -> PgResult<Option<&'a Bitmapset<'mcx>>> {
-    panic!(
-        "backend-nodes-plannodes: Agg plan-node variant (T_Agg) not yet defined; \
-         ExecReScanAgg cannot read aggnode->aggParams off ss.ps.plan"
-    )
+    // C: `Agg *aggnode = (Agg *) node->ss.ps.plan; ... aggnode->aggParams`.
+    // The plan back-link aliases the shared read-only plan tree (the wrapping
+    // `Node::Agg`); downcast it with `castNode(Agg, ...)` (`as_agg`) and read
+    // `aggParams`. `NULL`/no-plan → `None` (`bms_overlap` treats it as empty).
+    let agg_params = node
+        .ss
+        .ps
+        .plan
+        .and_then(|p| p.as_agg())
+        .and_then(|agg| agg.agg_params.as_deref());
+    Ok(agg_params)
 }
 
 /// `ExecClearTuple(slot)` (execTuples.c).
@@ -1532,33 +1539,43 @@ fn clear_slot<'mcx>(estate: &mut EStateData<'mcx>, slot_id: SlotId) -> PgResult<
 /// EcxtId-addressed context pool. The owned AggState model does not carry the
 /// EcxtId for ps_ExprContext on its facet here, so the clear lands with the
 /// execUtils ExprContext model.
-fn clear_agg_values<'mcx>(_node: &mut AggStateData<'mcx>) {
+fn clear_agg_values<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     // C: `MemSet(econtext->ecxt_aggvalues, 0, sizeof(Datum) * node->numaggs);
     //     MemSet(econtext->ecxt_aggnulls, 0, sizeof(bool) * node->numaggs);`
     // The aggvalues/aggnulls arrays live on the node's per-output-tuple
-    // ExprContext (`ss.ps.ps_ExprContext`), which the owned AggState carries as
-    // an EcxtId into the EState pool — but that EcxtId is NOT on this facet (the
-    // same ExprContext storage-model carrier gap ExecInitAgg/hash_create_memory
-    // hit), and execUtils exposes no "clear ecxt_aggvalues/aggnulls by EcxtId"
-    // seam to marshal the MemSet through. A silent no-op would drop the C clear;
-    // per "loud panic beats a silent stub", panic until the per-tuple ExprContext
-    // reaches this facet (and a clear seam exists).
-    panic!(
-        "backend-executor-nodeAgg::ExecReScanAgg: clearing ecxt_aggvalues/ecxt_aggnulls needs the \
-         node's per-tuple ExprContext (EcxtId) on the AggState facet — same ExprContext carrier \
-         gap as ExecInitAgg; no execUtils clear-agg-values seam yet"
-    );
+    // ExprContext (`ss.ps.ps_ExprContext`), carried by the owned AggState as an
+    // EcxtId into the EState pool (the SAME id `alloc_agg_result_storage`
+    // populated at init). Clear the first `numaggs` slots through the execUtils
+    // `clear_agg_values` seam. If no ExprContext is assigned (numaggs==0, no agg
+    // storage was allocated), there is nothing to clear.
+    if let Some(ecxt_id) = node.ss.ps.ps_ExprContext {
+        backend_executor_execUtils_seams::clear_agg_values::call(estate, ecxt_id, node.numaggs)?;
+    }
+    Ok(())
 }
 
 /// `ExecReScan(outerPlanState(node))` (execAmi.c) — rescan the child plan
 /// subtree. Owned by the execAmi unit; routed through the node-dispatch seam
 /// when it lands. The outer plan state head is lent for the rescan.
 fn exec_rescan_outer<'mcx>(
-    _node: &mut AggStateData<'mcx>,
-    _estate: &mut EStateData<'mcx>,
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    panic!(
-        "backend-executor-execAmi: ExecReScan(outerPlanState) not exposed by this unit's \
-         seam dependencies yet"
-    )
+    // C: `ExecReScan(outerPlan)` where `outerPlan = outerPlanState(node)`
+    // (== `node->ss.ps.lefttree`). Dispatch through the execAmi node-rescan
+    // seam. The owned child PlanState box is lent (taken out, rescanned, and
+    // put back) so the borrow checker can hand `&mut PlanStateNode` plus the
+    // disjoint `&mut EStateData` to the seam — matching nodeSubplan's
+    // take/put pattern. The box is restored even when the rescan errors so the
+    // owned plan-state tree is never left with a hole.
+    if let Some(mut outer) = node.ss.ps.lefttree.take() {
+        let r = backend_executor_execAmi_seams::exec_re_scan::call(&mut outer, estate);
+        node.ss.ps.lefttree = Some(outer);
+        r
+    } else {
+        Ok(())
+    }
 }

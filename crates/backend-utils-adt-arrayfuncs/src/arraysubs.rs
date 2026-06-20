@@ -21,10 +21,12 @@
 //! by their pointer word, and a by-reference result is reconstructed by reading
 //! the element's bytes out of the (already-detoasted, flat) array buffer.
 
-use mcx::Mcx;
+use mcx::{Mcx, PgVec};
 use types_datum::datum::Datum;
 use types_error::PgResult;
 use types_tuple::backend_access_common_heaptuple::Datum as DatumV;
+
+use backend_access_common_detoast_seams as detoast_seam;
 
 use crate::construct::construct_empty_array;
 use crate::element_slice::{array_get_element, array_get_slice, array_set_element, array_set_slice};
@@ -36,16 +38,85 @@ fn container_bytes<'a>(container: &'a DatumV<'a>) -> &'a [u8] {
     container.as_ref_bytes()
 }
 
-/// Bridge a canonical replacement value into the bare-word `Datum` the array
-/// primitives accept: a by-value scalar is its word; a by-reference value is
-/// addressed by its bytes' pointer (mirroring C `DatumGetPointer`). The bytes
-/// live in the caller's arena and outlive the call.
+/// `DatumGetArrayTypeP(arraydatum)` — detoast the container's varlena bytes into
+/// a flat, full-4-byte-header `ArrayType` image in `mcx`. The C array subscript
+/// primitives (`array_get_element`/`array_get_slice`/`array_set_element`/...)
+/// all start with `DatumGetArrayTypeP`, which is `PG_DETOAST_DATUM`: it unpacks a
+/// SHORT (1-byte) varlena header and inlines/decompresses a toasted value so the
+/// fixed-offset header fields (vl_len/ndim/dataoffset/elemtype) read correctly.
+///
+/// A container read straight out of a heap tuple (e.g. `pg_proc.proallargtypes`,
+/// a small `oid[]`) arrives SHORT-header packed; reading its `ArrayType` header
+/// without detoasting mis-reads `ndim`/dims and the subscript silently returns
+/// NULL. `arraytyplen > 0` is a fixed-length (non-varlena) array type, which is
+/// never toasted and must NOT be passed through varlena detoast — it is returned
+/// verbatim.
+fn detoast_container<'mcx>(
+    mcx: Mcx<'mcx>,
+    container: &DatumV<'mcx>,
+    arraytyplen: i32,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let bytes = container_bytes(container);
+    if arraytyplen > 0 {
+        let mut v = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+        v.extend_from_slice(bytes);
+        Ok(v)
+    } else {
+        detoast_seam::detoast_attr::call(mcx, bytes)
+    }
+}
+
+/// Normalize a canonical replacement value into a form whose flat bytes live in
+/// `mcx` and can be addressed by a bare pointer word (mirroring C, where the
+/// replacement value reaching `array_set_element` for a by-reference element is
+/// already a `struct varlena *`/`Pointer` Datum). A `ByVal` scalar is its word
+/// and needs no buffer; a `ByRef`/`Cstring` already holds flat bytes; a
+/// `Composite` is serialized to its `HeapTupleHeader` Datum image (the
+/// self-describing varlena image — same block C would hand to the array
+/// primitive when assigning a composite array element, e.g.
+/// `f4[1].if2[1]` over an array of composite type); an `Expanded` object is
+/// flattened to its varlena image. `Internal` has no flat image (C never stores
+/// an `internal` value into an array element) and stays a hard error.
+fn flatten_replacement<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: &DatumV<'mcx>,
+) -> PgResult<DatumV<'mcx>> {
+    match value {
+        DatumV::ByVal(w) => Ok(DatumV::ByVal(*w)),
+        DatumV::ByRef(b) => {
+            let mut v = mcx::vec_with_capacity_in(mcx, b.len())?;
+            v.extend_from_slice(b);
+            Ok(DatumV::ByRef(v))
+        }
+        DatumV::Cstring(s) => Ok(DatumV::Cstring(s.clone())),
+        DatumV::Composite(_) | DatumV::Expanded(_) => {
+            // `as_varlena_bytes()` materializes a Composite to its datum image
+            // (Cow::Owned); clone_in flattens Expanded. Use clone_in, which
+            // routes Composite→Composite and Expanded→ByRef, then take the flat
+            // image. Simpler: materialize the varlena bytes directly.
+            let bytes = value.as_varlena_bytes();
+            let mut v = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+            v.extend_from_slice(&bytes);
+            Ok(DatumV::ByRef(v))
+        }
+        DatumV::Internal(_) => Err(types_error::PgError::error(
+            "array_set_element: cannot store an internal-typed value into an array element",
+        )),
+    }
+}
+
+/// Bridge a (already flattened, see [`flatten_replacement`]) canonical
+/// replacement value into the bare-word `Datum` the array primitives accept: a
+/// by-value scalar is its word; a by-reference value is addressed by its bytes'
+/// pointer (mirroring C `DatumGetPointer`). The bytes live in the caller's arena
+/// and outlive the call.
 fn value_word(value: &DatumV<'_>) -> Datum {
     match value {
         DatumV::ByVal(w) => Datum::from_usize(*w),
         DatumV::ByRef(b) => Datum::from_usize(b.as_ptr() as usize),
-        DatumV::Cstring(_) | DatumV::Composite(_) | DatumV::Expanded(_) | DatumV::Internal(_) => {
-            panic!("arraysubs::value_word: Cstring/Composite/Expanded/Internal replacement value not yet produced — wave 2")
+        DatumV::Cstring(s) => Datum::from_usize(s.as_ptr() as usize),
+        DatumV::Composite(_) | DatumV::Expanded(_) | DatumV::Internal(_) => {
+            panic!("arraysubs::value_word: replacement value must be flattened via flatten_replacement first")
         }
     }
 }
@@ -92,7 +163,10 @@ pub fn array_subscript_fetch<'mcx>(
     // C: *op->resvalue = array_get_element(*op->resvalue, numupper,
     //        workspace->upperindex, refattrlength, refelemlength, refelembyval,
     //        refelemalign, op->resnull);
-    let array = container_bytes(&container);
+    // C: DatumGetArrayTypeP(*op->resvalue) — detoast a SHORT-header / toasted
+    // container before reading its ArrayType header.
+    let array_buf = detoast_container(mcx, &container, refattrlength as i32)?;
+    let array = array_buf.as_slice();
     let (word, isnull) = array_get_element(
         mcx,
         array,
@@ -126,7 +200,9 @@ pub fn array_subscript_fetch_slice<'mcx>(
     //        workspace->upperindex, workspace->lowerindex, upperprovided,
     //        lowerprovided, refattrlength, refelemlength, refelembyval,
     //        refelemalign);
-    let array = container_bytes(&container);
+    // C: DatumGetArrayTypeP(*op->resvalue) — detoast before reading the header.
+    let array_buf = detoast_container(mcx, &container, refattrlength as i32)?;
+    let array = array_buf.as_slice();
     let result = array_get_slice(
         mcx,
         array,
@@ -176,13 +252,20 @@ pub fn array_subscript_assign<'mcx>(
     // C: *op->resvalue = array_set_element(arraySource, numupper, upperindex,
     //        replacevalue, replacenull, refattrlength, refelemlength,
     //        refelembyval, refelemalign);
-    let array = array_owned.as_ref_bytes();
+    // C: DatumGetArrayTypeP(arraySource) — detoast a SHORT-header / toasted
+    // source array before array_set_element reads its ArrayType header.
+    let array_buf = detoast_container(mcx, &array_owned, refattrlength as i32)?;
+    let array = array_buf.as_slice();
+    // Materialize a by-reference / composite / expanded replacement into flat
+    // arena bytes addressable by a pointer word (C hands `array_set_element` a
+    // `Pointer` Datum for a by-reference element). Kept alive across the call.
+    let replace_flat = flatten_replacement(mcx, &replacevalue)?;
     let result = array_set_element(
         mcx,
         array,
         numupper,
         upperindex,
-        value_word(&replacevalue),
+        value_word(&replace_flat),
         replacenull,
         refattrlength as i32,
         refelemlength as i32,
@@ -220,16 +303,20 @@ pub fn array_subscript_assign_slice<'mcx>(
     } else {
         container
     };
-    let array = array_owned.as_ref_bytes();
+    // C: DatumGetArrayTypeP(arraySource) — detoast before reading the header.
+    let array_buf = detoast_container(mcx, &array_owned, refattrlength as i32)?;
+    let array = array_buf.as_slice();
     // The replacement value for a slice assignment is itself an array (by-ref
     // bytes); a NULL source is a no-op handled inside array_set_slice (it reads
     // an empty slice). Pass an empty buffer when null to avoid touching it.
-    let empty: [u8; 0] = [];
-    let src_array: &[u8] = if replacenull {
-        &empty
+    // C also detoasts the replacement (DatumGetArrayTypeP(srcArrayDatum)).
+    let empty: PgVec<'mcx, u8> = PgVec::new_in(mcx);
+    let src_array_buf: PgVec<'mcx, u8> = if replacenull {
+        empty
     } else {
-        replacevalue.as_ref_bytes()
+        detoast_container(mcx, &replacevalue, refattrlength as i32)?
     };
+    let src_array: &[u8] = src_array_buf.as_slice();
     let result = array_set_slice(
         mcx,
         array,

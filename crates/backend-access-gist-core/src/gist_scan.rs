@@ -567,7 +567,7 @@ fn gistScanPage<'mcx>(
                 heapPtr: itup_heap_ptr(it),
                 recheck,
                 recheckDistances: false,
-                recontup: recontup.map(heaptuple_to_heaptuple),
+                recontup,
                 offnum: i,
             };
             let so = gist(scan);
@@ -592,7 +592,7 @@ fn gistScanPage<'mcx>(
                         heapPtr: itup_heap_ptr(it),
                         recheck,
                         recheckDistances: recheck_distances,
-                        recontup: recontup.map(heaptuple_to_heaptuple),
+                        recontup,
                         offnum: 0,
                     }),
                     distances,
@@ -627,15 +627,6 @@ fn scan_keys<'mcx>(scan: &IndexScanDescData<'mcx>) -> Vec<ScanKeyData<'mcx>> {
 
 fn scan_order_bys<'mcx>(scan: &IndexScanDescData<'mcx>) -> Vec<ScanKeyData<'mcx>> {
     scan.order_by_data.clone()
-}
-
-/// Project a `FormedTuple` to its `HeapTupleData` box for the `recontup` field
-/// (`HeapTuple<'mcx>` = `Option<PgBox<HeapTupleData>>`); used via `.map(...)` on
-/// the `Option<FormedTuple>` from `gistFetchTuple`.
-fn heaptuple_to_heaptuple<'mcx>(
-    t: backend_access_common_heaptuple::FormedTuple<'mcx>,
-) -> PgBox<'mcx, types_tuple::heaptuple::HeapTupleData<'mcx>> {
-    t.tuple
 }
 
 // ===========================================================================

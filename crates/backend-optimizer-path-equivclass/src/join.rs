@@ -17,7 +17,7 @@ use backend_optimizer_util_relnode_seams as bms;
 use backend_utils_cache_lsyscache_seams as cat;
 
 use crate::derives::{ec_add_derived_clause, ec_search_clause_for_ems};
-use crate::merge::{em_expr, process_equivalence};
+use crate::merge::{em_expr_owned, em_expr_ref, process_equivalence};
 use crate::relevance::{
     find_join_domain, is_other_rel, live_ec_ids, new_iterator, oid_is_valid,
     select_equality_operator,
@@ -51,8 +51,8 @@ pub fn create_join_clause<'mcx>(
         parent_rinfo = Some(create_join_clause(root, run, ec, opno, leftp, rightp, parent_ec)?);
     }
 
-    let item1 = em_expr(root, leftem);
-    let item2 = em_expr(root, rightem);
+    let item1 = em_expr_owned(root, run, leftem)?;
+    let item2 = em_expr_owned(root, run, rightem)?;
     let collation = root.ec(ec).ec_collation;
     let min_security = root.ec(ec).ec_min_security;
     let qualscope = bms::relids_union::call(
@@ -257,7 +257,7 @@ pub fn generate_join_implied_equalities_for_ecs<'mcx>(
  * ==================================================================== */
 
 fn em_expr_is_var_shaped(root: &PlannerInfo, em: EmId) -> bool {
-    let e = em_expr(root, em);
+    let e = em_expr_ref(root, em);
     e.as_var().is_some()
         || e.as_relabeltype()
             .and_then(|r| r.arg.as_deref())
@@ -318,7 +318,7 @@ fn generate_join_implied_equalities_normal<'mcx>(
                 if em_expr_is_var_shaped(root, inner_em) {
                     score += 1;
                 }
-                let outer_type = ec_seam::expr_type::call(&em_expr(root, outer_em));
+                let outer_type = ec_seam::expr_type::call(em_expr_ref(root, outer_em));
                 if cat::op_hashjoinable::call(eq_op, outer_type).expect("op_hashjoinable") {
                     score += 1;
                 }
@@ -635,8 +635,11 @@ fn reconsider_outer_join_clause<'mcx>(
         .expect("reconsider_outer_join_clause: clause is not an OpExpr");
     let opno = opexpr.opno;
     let collation = opexpr.inputcollid;
-    let leftop = opexpr.args[0].clone();
-    let rightop = opexpr.args[1].clone();
+    // Deep-copy via `clone_in` — the operands are moved into
+    // `build_implied_join_equality` (the derived `Expr::clone` panics on an
+    // owned-subtree child).
+    let leftop = opexpr.args[0].clone_in(run.mcx())?;
+    let rightop = opexpr.args[1].clone_in(run.mcx())?;
 
     let (left_type, right_type) = cat::op_input_types::call(opno).expect("op_input_types");
     let (outervar, innervar, inner_datatype, inner_relids) = if outer_on_left {
@@ -667,7 +670,7 @@ fn reconsider_outer_join_clause<'mcx>(
         let mut matched = false;
         for &cur_em in &root.ec(cur_ec).ec_members.clone() {
             debug_assert!(!root.em(cur_em).em_is_child);
-            if ec_seam::equal::call(&outervar, &em_expr(root, cur_em)) {
+            if ec_seam::equal::call(&outervar, em_expr_ref(root, cur_em)) {
                 matched = true;
                 break;
             }
@@ -692,7 +695,7 @@ fn reconsider_outer_join_clause<'mcx>(
             }
             let collation = root.ec(cur_ec).ec_collation;
             let min_security = root.ec(cur_ec).ec_min_security;
-            let const_expr = em_expr(root, cur_em);
+            let const_expr = em_expr_owned(root, run, cur_em)?;
             let inner_relids_copy = bms::relids_copy::call(&inner_relids);
             let newrinfo = ec_seam::build_implied_join_equality::call(
                 run,
@@ -706,7 +709,7 @@ fn reconsider_outer_join_clause<'mcx>(
             )?;
             /* holds within the OJ's child JoinDomain */
             let jdomain = find_join_domain(root, &sjinfo.syn_righthand).jd_relids;
-            let (ok, _ri) = process_equivalence(root, newrinfo, jdomain)?;
+            let (ok, _ri) = process_equivalence(root, run, newrinfo, jdomain)?;
             if ok {
                 match_any = true;
             }
@@ -741,8 +744,10 @@ fn reconsider_full_join_clause<'mcx>(
     let opno = opexpr.opno;
     let collation = opexpr.inputcollid;
     let (left_type, right_type) = cat::op_input_types::call(opno).expect("op_input_types");
-    let leftvar = opexpr.args[0].clone();
-    let rightvar = opexpr.args[1].clone();
+    // Deep-copy via `clone_in` — moved into `build_implied_join_equality` (the
+    // derived `Expr::clone` panics on an owned-subtree child).
+    let leftvar = opexpr.args[0].clone_in(run.mcx())?;
+    let rightvar = opexpr.args[1].clone_in(run.mcx())?;
     let left_relids = root.rinfo(rinfo).left_relids.clone();
     let right_relids = root.rinfo(rinfo).right_relids.clone();
     let mergeopfamilies = root.rinfo(rinfo).mergeopfamilies.clone();
@@ -767,7 +772,7 @@ fn reconsider_full_join_clause<'mcx>(
         let members = root.ec(cur_ec).ec_members.clone();
         for (idx, &coal_em) in members.iter().enumerate() {
             debug_assert!(!root.em(coal_em).em_is_child);
-            let emexpr = em_expr(root, coal_em);
+            let emexpr = em_expr_ref(root, coal_em);
             let cexpr = match emexpr.as_coalesceexpr() {
                 Some(c) => c,
                 None => continue,
@@ -775,8 +780,10 @@ fn reconsider_full_join_clause<'mcx>(
             if cexpr.args.len() != 2 {
                 continue;
             }
-            let cfirst = cexpr.args[0].clone();
-            let csecond = cexpr.args[1].clone();
+            // Deep-copy via `clone_in` — moved into `remove_nulling_relids` (the
+            // derived `Expr::clone` panics on an owned-subtree child).
+            let cfirst = cexpr.args[0].clone_in(run.mcx())?;
+            let csecond = cexpr.args[1].clone_in(run.mcx())?;
             /* strip the full join from the COALESCE args' nullingrels */
             let cfirst = ec_seam::remove_nulling_relids::call(
                 cfirst,
@@ -811,13 +818,13 @@ fn reconsider_full_join_clause<'mcx>(
             if oid_is_valid(eq_op) {
                 let collation = root.ec(cur_ec).ec_collation;
                 let min_security = root.ec(cur_ec).ec_min_security;
-                let const_expr = em_expr(root, cur_em);
+                let const_expr = em_expr_owned(root, run, cur_em)?;
                 let lr = bms::relids_copy::call(&left_relids);
                 let newrinfo = ec_seam::build_implied_join_equality::call(
                     run, root, eq_op, collation, leftvar.clone(), const_expr, lr, min_security,
                 )?;
                 let jdomain = find_join_domain(root, &sjinfo.syn_lefthand).jd_relids;
-                let (ok, _ri) = process_equivalence(root, newrinfo, jdomain)?;
+                let (ok, _ri) = process_equivalence(root, run, newrinfo, jdomain)?;
                 if ok {
                     matchleft = true;
                 }
@@ -827,13 +834,13 @@ fn reconsider_full_join_clause<'mcx>(
             if oid_is_valid(eq_op) {
                 let collation = root.ec(cur_ec).ec_collation;
                 let min_security = root.ec(cur_ec).ec_min_security;
-                let const_expr = em_expr(root, cur_em);
+                let const_expr = em_expr_owned(root, run, cur_em)?;
                 let rr = bms::relids_copy::call(&right_relids);
                 let newrinfo = ec_seam::build_implied_join_equality::call(
                     run, root, eq_op, collation, rightvar.clone(), const_expr, rr, min_security,
                 )?;
                 let jdomain = find_join_domain(root, &sjinfo.syn_righthand).jd_relids;
-                let (ok, _ri) = process_equivalence(root, newrinfo, jdomain)?;
+                let (ok, _ri) = process_equivalence(root, run, newrinfo, jdomain)?;
                 if ok {
                     matchright = true;
                 }
@@ -853,9 +860,10 @@ fn reconsider_full_join_clause<'mcx>(
     Ok(false)
 }
 
-/// Resolve a RestrictInfo's clause node to an owned [`Expr`].
-fn em_expr_of_clause(root: &PlannerInfo, rinfo: RinfoId) -> types_nodes::primnodes::Expr {
-    root.node(root.rinfo(rinfo).clause).clone()
+/// Resolve a RestrictInfo's clause node to a borrowed [`Expr`] (read-only; a
+/// derived `.clone()` would panic on an owned-subtree child).
+fn em_expr_of_clause(root: &PlannerInfo, rinfo: RinfoId) -> &types_nodes::primnodes::Expr {
+    root.node(root.rinfo(rinfo).clause)
 }
 
 #[allow(unused_imports)]

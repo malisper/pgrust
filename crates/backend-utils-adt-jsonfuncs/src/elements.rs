@@ -315,7 +315,7 @@ pub fn elements_worker(json: &[u8], funcname: &str, as_text: bool) -> PgResult<V
     let encoding = common_jsonapi_seams::get_database_encoding::call();
     let result = common_jsonapi_seams::pg_parse_json::call(json, encoding, as_text, &mut sem)?;
     if result != JsonParseErrorType::JSON_SUCCESS {
-        common_jsonapi_seams::errsave_error::call(result, json, as_text)?;
+        common_jsonapi_seams::errsave_error::call(result, json, as_text, None)?;
         unreachable!("errsave_error with no escontext raises");
     }
 

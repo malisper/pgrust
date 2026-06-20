@@ -441,23 +441,13 @@ pub fn hash_multirange(rangetyp: &TypeCacheEntry, mr: MultirangeTypeP<'_>) -> Pg
         let (lower, upper) = serialize_core::multirange_get_bounds(rangetyp, mr, i)?;
 
         let lower_hash = if flags & (RANGE_EMPTY | RANGE_LB_NULL | RANGE_LB_INF) == 0 {
-            fmgr_seams::function_call1_coll::call(
-                hash_fn_oid,
-                rangetyp.rng_collation,
-                lower.val,
-            )?
-            .as_u32()
+            elem_hash(hash_fn_oid, rangetyp, lower.val)?.as_u32()
         } else {
             0
         };
 
         let upper_hash = if flags & (RANGE_EMPTY | RANGE_UB_NULL | RANGE_UB_INF) == 0 {
-            fmgr_seams::function_call1_coll::call(
-                hash_fn_oid,
-                rangetyp.rng_collation,
-                upper.val,
-            )?
-            .as_u32()
+            elem_hash(hash_fn_oid, rangetyp, upper.val)?.as_u32()
         } else {
             0
         };
@@ -511,25 +501,13 @@ pub fn hash_multirange_extended(
         let (lower, upper) = serialize_core::multirange_get_bounds(rangetyp, mr, i)?;
 
         let lower_hash = if flags & (RANGE_EMPTY | RANGE_LB_NULL | RANGE_LB_INF) == 0 {
-            fmgr_seams::function_call2_coll::call(
-                hash_fn_oid,
-                rangetyp.rng_collation,
-                lower.val,
-                seed_datum,
-            )?
-            .as_u64()
+            elem_hash_extended(hash_fn_oid, rangetyp, lower.val, seed_datum)?.as_u64()
         } else {
             0
         };
 
         let upper_hash = if flags & (RANGE_EMPTY | RANGE_UB_NULL | RANGE_UB_INF) == 0 {
-            fmgr_seams::function_call2_coll::call(
-                hash_fn_oid,
-                rangetyp.rng_collation,
-                upper.val,
-                seed_datum,
-            )?
-            .as_u64()
+            elem_hash_extended(hash_fn_oid, rangetyp, upper.val, seed_datum)?.as_u64()
         } else {
             0
         };
@@ -545,6 +523,56 @@ pub fn hash_multirange_extended(
     }
 
     Ok(result)
+}
+
+/// `DatumGetUInt32(FunctionCall1Coll(&scache->hash_proc_finfo, ..., bound))`
+/// (multirangetypes.c). The bound element value may be by-reference (e.g. the
+/// `numeric` of a `nummultirange`), so lift it into the canonical `Datum` and call
+/// the element `hash` proc on the by-reference-capable `*_coll_datum` lane,
+/// mirroring `hash_range`; a bare-word `function_call1_coll` would leave the
+/// by-reference referent empty ("by-ref `numeric` arg missing from by-ref lane").
+fn elem_hash(
+    hash_fn_oid: Oid,
+    rangetyp: &TypeCacheEntry,
+    bound: Datum,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'static>> {
+    let scratch = mcx::MemoryContext::new_bump("multirange element hash");
+    let mcx = scratch.mcx();
+    let canon = range_seams::range_elem_word_to_canon::call(mcx, rangetyp, bound)?;
+    let r = fmgr_seams::function_call1_coll_datum::call(
+        mcx,
+        hash_fn_oid,
+        rangetyp.rng_collation,
+        canon,
+    )?;
+    // The hash result is a by-value int4/int8 word; copy it out by value so it
+    // outlives the scratch context.
+    Ok(types_tuple::backend_access_common_heaptuple::Datum::from_usize(r.as_usize()))
+}
+
+/// `DatumGetUInt64(FunctionCall2Coll(&scache->hash_extended_proc_finfo, ...,
+/// bound, seed))` (multirangetypes.c) — the extended (seeded) counterpart of
+/// [`elem_hash`], threading a by-reference bound element onto the `*_coll_datum`
+/// lane.
+fn elem_hash_extended(
+    hash_fn_oid: Oid,
+    rangetyp: &TypeCacheEntry,
+    bound: Datum,
+    seed: Datum,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'static>> {
+    let scratch = mcx::MemoryContext::new_bump("multirange element hash extended");
+    let mcx = scratch.mcx();
+    let canon = range_seams::range_elem_word_to_canon::call(mcx, rangetyp, bound)?;
+    let seed_canon =
+        types_tuple::backend_access_common_heaptuple::Datum::from_usize(seed.as_usize());
+    let r = fmgr_seams::function_call2_coll_datum::call(
+        mcx,
+        hash_fn_oid,
+        rangetyp.rng_collation,
+        canon,
+        seed_canon,
+    )?;
+    Ok(types_tuple::backend_access_common_heaptuple::Datum::from_usize(r.as_usize()))
 }
 
 /// `ereport(ERROR, ERRCODE_UNDEFINED_FUNCTION, "could not identify a hash

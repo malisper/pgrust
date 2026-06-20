@@ -341,8 +341,14 @@ fn install_jsonapi() {
             };
             (PErr::JSON_SUCCESS, t)
         });
-        common_jsonapi_seams::errsave_error::set(|_e, _json| {
-            Err(PgError::error("invalid input syntax for type json"))
+        common_jsonapi_seams::errsave_error::set(|_e, _json, _need_escapes, escontext| {
+            // Mirror json_errsave_error: route into a live soft sink, else raise.
+            if let Some(ec) = escontext {
+                ec.mark_error_occurred();
+                Ok(())
+            } else {
+                Err(PgError::error("invalid input syntax for type json"))
+            }
         });
     });
 }
@@ -370,6 +376,6 @@ fn json_typeof_categories() {
 fn json_in_roundtrips_valid() {
     install_jsonapi();
     let c = ctx();
-    let out = json_in(c.mcx(), b"{}").unwrap().unwrap();
+    let out = json_in(c.mcx(), b"{}", None).unwrap().unwrap();
     assert_eq!(s(&out), "{}");
 }

@@ -940,18 +940,78 @@ pub fn AcquireRewriteLocks<'mcx>(
         }
     }
 
-    // Recurse into sub-link sub-queries.
+    // Recurse into sub-link sub-queries.  But we already did the ones in the
+    // rtable and cteList (so skip those, like the C walker's
+    // QTW_IGNORE_RC_SUBQUERIES).
     if parsetree.hasSubLinks {
-        return Err(elog(
-            "AcquireRewriteLocks: sub-link sub-query descent is blocked on the \
-             '\\''static SubLink.subselect keystone (the lifetime-free Expr embeds \
-             a SubLink's sub-Query at '\\''static, which cannot be reopened with \
-             the engine's per-query Mcx<'\\''mcx>); only the sub-link-free \
-             SELECT/DML rewrite spine is supported (owner: backend-rewrite-rewritehandler)",
-        ));
+        let mut err: Option<types_error::PgError> = None;
+        {
+            let mut walker = |node: &mut Node| {
+                acquireLocksOnSubLinks(mcx, node, for_execute, &mut err)
+            };
+            backend_nodes_core::node_walker::query_tree_mutator(
+                parsetree,
+                &mut walker,
+                backend_nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
+                    | backend_nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
+            );
+        }
+        if let Some(e) = err {
+            return Err(e);
+        }
     }
 
     Ok(())
+}
+
+/// `acquireLocksOnSubLinks(node, context)` (rewriteHandler.c:295) — apply
+/// [`AcquireRewriteLocks`] to each `SubLink`'s sub-select found in an expression
+/// tree. Like the C, it has the form of a walker but modifies the `SubLink` in
+/// place: it takes control at the `SubLink` to lock-acquire on its `subselect`
+/// (and continues into the surrounding expression). It does NOT recurse into
+/// `Query` nodes — the surrounding `AcquireRewriteLocks` already handled the
+/// rtable/cteList subqueries (QTW_IGNORE_RC_SUBQUERIES). The `'static` subselect
+/// is rebound to `'mcx` (the data is mcx-owned) exactly as `fireRIRonSubLink`
+/// does. The C walker's `bool` becomes the early-abort signal carried alongside
+/// the `err` out-param.
+fn acquireLocksOnSubLinks<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &mut Node,
+    for_execute: bool,
+    err: &mut Option<types_error::PgError>,
+) -> bool {
+    if err.is_some() {
+        return true;
+    }
+    if let Some(Expr::SubLink(sub)) = node.as_expr_mut() {
+        // C: AcquireRewriteLocks(sublink->subselect, context->for_execute, false).
+        if let Some(sub_static) = sub.subselect.take() {
+            // 'static -> 'mcx: lifetime-parameter-only erase of mcx-owned data
+            // (the same relabel fireRIRonSubLink / query_box_into_static use).
+            let sub_mcx: PgBox<'mcx, Query<'mcx>> =
+                unsafe { core::mem::transmute(sub_static) };
+            let mut subquery: Query<'mcx> = PgBox::into_inner(sub_mcx);
+            if let Err(e) = AcquireRewriteLocks(mcx, &mut subquery, for_execute, false) {
+                *err = Some(e);
+                return true;
+            }
+            match types_nodes::primnodes::query_box_into_static(subquery, mcx) {
+                Ok(boxed) => sub.subselect = Some(boxed),
+                Err(e) => {
+                    *err = Some(e);
+                    return true;
+                }
+            }
+        }
+        // Fall through to process the SubLink's testexpr (lefthand args).
+    }
+
+    // Do NOT recurse into Query nodes (the QTW behavior).
+    backend_nodes_core::node_walker::expression_tree_walker_mut(
+        node,
+        &mut |n| acquireLocksOnSubLinks(mcx, n, for_execute, err),
+        mcx,
+    )
 }
 
 /// Look through an implicit coercion to a `Var` (the C `strip_implicit_coercions`
@@ -984,7 +1044,7 @@ pub fn rewriteRuleAction<'mcx>(
     AcquireRewriteLocks(mcx, &mut rule_action, true, false)?;
     let mut rule_qual = rule_qual;
     if let Some(q) = rule_qual.as_deref_mut() {
-        acquire_locks_on_sublinks_node(q)?;
+        acquire_locks_on_sublinks_node(mcx, q)?;
     }
 
     let current_varno = rt_index;
@@ -1336,17 +1396,21 @@ fn contain_vars_of_level(node: &Node<'_>, levelsup: i32) -> bool {
     backend_optimizer_util_vars::var::contain_vars_of_level(node, levelsup)
 }
 
-/// `acquireLocksOnSubLinks(node, ...)` over a `Node` — finds `SubLink`s and
-/// `AcquireRewriteLocks` their (`'static`) sub-selects. Blocked on the same
-/// `'static`-SubLink keystone; a no-op when the node has no sub-links.
-fn acquire_locks_on_sublinks_node(node: &mut Node<'_>) -> PgResult<()> {
-    if checkExprHasSubLink(node) {
-        return Err(elog(
-            "acquireLocksOnSubLinks: sub-link descent blocked on the '\\''static \
-             SubLink.subselect keystone (owner: backend-rewrite-rewritehandler)",
-        ));
+/// `acquireLocksOnSubLinks(node, ...)` over a single `Node` (the rule-qual /
+/// inverted-qual entry points) — finds `SubLink`s and `AcquireRewriteLocks`
+/// their (`'static`) sub-selects in place. `for_execute` is `true` at these
+/// call sites (C: `rewriteRuleAction`/`CopyAndAddInvertedQual` pass a context
+/// with `for_execute = true`). A no-op when the node has no sub-links.
+fn acquire_locks_on_sublinks_node<'mcx>(mcx: Mcx<'mcx>, node: &mut Node<'mcx>) -> PgResult<()> {
+    if !checkExprHasSubLink(node) {
+        return Ok(());
     }
-    Ok(())
+    let mut err: Option<types_error::PgError> = None;
+    acquireLocksOnSubLinks(mcx, node, true, &mut err);
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 // ===========================================================================
@@ -1364,7 +1428,7 @@ fn CopyAndAddInvertedQual<'mcx>(
 ) -> PgResult<Query<'mcx>> {
     // Don't scribble on the passed qual.
     let mut new_qual: Node<'mcx> = rule_qual.clone_in(mcx)?;
-    acquire_locks_on_sublinks_node(&mut new_qual)?;
+    acquire_locks_on_sublinks_node(mcx, &mut new_qual)?;
 
     // Fix references to OLD.
     ChangeVarNodes(&mut new_qual, PRS2_OLD_VARNO, rt_index, 0, mcx);
@@ -1513,14 +1577,56 @@ fn ApplyRetrieveRule<'mcx>(
         match parsetree.commandType {
             CmdType::CMD_INSERT => return Ok(parsetree),
             CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE => {
-                // Needs makeWholeRowVar (absent) + a copied result RTE: the
-                // INSTEAD-OF-trigger-on-view UPDATE/DELETE/MERGE source path.
-                return Err(elog(
-                    "ApplyRetrieveRule: UPDATE/DELETE/MERGE on a view result relation \
-                     requires makeWholeRowVar (the resjunk whole-row OLD Var), which is \
-                     not yet ported (owner: backend-nodes-core makefuncs); the plain \
-                     SELECT-from-view spine does not hit this path",
-                ));
+                // For UPDATE/DELETE/MERGE, we need to expand the view so as to
+                // have source data for the operation. But we also need an
+                // unmodified RTE to serve as the target. So, copy the RTE and
+                // add the copy to the rangetable. Note that the copy does not
+                // get added to the jointree. Also note that there's a hack in
+                // fireRIRrules to avoid calling this function again when it
+                // arrives at the copied RTE.
+                let newrte = parsetree.rtable[(rt_index - 1) as usize].clone_in(mcx)?;
+                parsetree.rtable.push(newrte);
+                parsetree.resultRelation = parsetree.rtable.len() as i32;
+                // parsetree->mergeTargetRelation unchanged (use expanded view)
+
+                // For the most part, Vars referencing the view should remain as
+                // they are, meaning that they implicitly represent OLD values.
+                // But in the RETURNING list if any, we want such Vars to
+                // represent NEW values, so change them to reference the new RTE.
+                //
+                // Since ChangeVarNodes scribbles on the tree in-place, copy the
+                // RETURNING list first for safety.
+                let new_result_relation = parsetree.resultRelation;
+                let mut new_returning: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> =
+                    PgVec::new_in(mcx);
+                for tle in parsetree.returningList.iter() {
+                    let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?);
+                    ChangeVarNodes(&mut node, rt_index, new_result_relation, 0);
+                    new_returning.push(node.into_targetentry().unwrap_or_else(|| {
+                        unreachable!("ChangeVarNodes preserves the node kind")
+                    }));
+                }
+                parsetree.returningList = new_returning;
+
+                // To allow the executor to compute the original view row to pass
+                // to the INSTEAD OF trigger, we add a resjunk whole-row Var
+                // referencing the original RTE. This will later get expanded
+                // into a RowExpr computing all the OLD values of the view row.
+                let rte = &parsetree.rtable[(rt_index - 1) as usize];
+                let var = backend_nodes_core::makefuncs::make_whole_row_var(
+                    rte, rt_index, 0, false,
+                )?;
+                let resno = (parsetree.targetList.len() + 1) as i16;
+                let tle = make_target_entry(
+                    mcx,
+                    Expr::Var(var),
+                    resno,
+                    Some("wholerow"),
+                    true,
+                )?;
+                parsetree.targetList.push(tle);
+
+                // Now, continue with expanding the original view RTE.
             }
             other => return Err(elog(format!("unrecognized commandType: {}", other as i32))),
         }
@@ -1996,14 +2102,24 @@ fn rewriteTargetView<'mcx>(
     viewquery.rtable[(base_rt_index - 1) as usize].relkind = base_rel.rd_rel.relkind as i8;
 
     // If the view query contains sublink subqueries, lock relations they refer
-    // to. This is the documented '\''static-SubLink keystone; a no-op otherwise.
+    // to (C: acquireLocksOnSubLinks with for_execute = true,
+    // QTW_IGNORE_RC_SUBQUERIES). A no-op otherwise.
     if viewquery.hasSubLinks {
-        base_rel.close(NoLock)?;
-        return Err(elog(
-            "rewriteTargetView: locking sublink subqueries in a security-/sublink-bearing \
-             view is blocked on the '\\''static SubLink.subselect keystone \
-             (owner: backend-rewrite-rewritehandler rewriteTargetView)",
-        ));
+        let mut err: Option<types_error::PgError> = None;
+        {
+            let mut walker =
+                |node: &mut Node| acquireLocksOnSubLinks(mcx, node, true, &mut err);
+            backend_nodes_core::node_walker::query_tree_mutator(
+                &mut viewquery,
+                &mut walker,
+                backend_nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
+                    | backend_nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
+            );
+        }
+        if let Some(e) = err {
+            base_rel.close(NoLock)?;
+            return Err(e);
+        }
     }
 
     // Create the new target RTE describing the base relation (scribble on the
@@ -2527,11 +2643,64 @@ fn RewriteQuery<'mcx>(
                 parsetree.targetList = new_tlist;
             }
             CmdType::CMD_MERGE => {
-                rt_entry_relation.close(NoLock)?;
-                return Err(elog(
-                    "RewriteQuery: MERGE action target-list rewrite is out of the common \
-                     INSERT/UPDATE/DELETE spine (owner: backend-rewrite-rewritehandler)",
-                ));
+                // `rewriteHandler.c:4097` — Rewrite each MERGE action targetlist
+                // separately. MERGE actions do not permit multi-row INSERTs, so
+                // there is no VALUES RTE to deal with here.
+                debug_assert!(parsetree.r#override == OVERRIDING_NOT_SET);
+                for node in parsetree.mergeActionList.iter_mut() {
+                    let Some(action) = (**node).as_mergeaction_mut() else {
+                        continue;
+                    };
+                    match action.commandType {
+                        // CMD_NOTHING / CMD_DELETE — nothing to do here.
+                        CmdType::CMD_NOTHING | CmdType::CMD_DELETE => {}
+                        CmdType::CMD_UPDATE | CmdType::CMD_INSERT => {
+                            // Downcast the raw-node SET list to `TargetEntry`s
+                            // (the stored form mirrors C's `List *targetList`).
+                            let mut old_tlist: Vec<
+                                types_nodes::primnodes::TargetEntry<'mcx>,
+                            > = Vec::with_capacity(action.targetList.len());
+                            for tle_node in action.targetList.iter() {
+                                let Some(tle) = (**tle_node).as_targetentry() else {
+                                    rt_entry_relation.close(NoLock)?;
+                                    return Err(elog(
+                                        "MergeAction targetList entry is not a TargetEntry",
+                                    ));
+                                };
+                                old_tlist.push(tle.clone_in(mcx)?);
+                            }
+
+                            let mut unused = None;
+                            let new_tlist = rewriteTargetListIU(
+                                mcx,
+                                &old_tlist,
+                                action.commandType,
+                                action.r#override,
+                                &rt_entry_relation,
+                                None,
+                                0,
+                                &mut unused,
+                            )?;
+
+                            // Box the rewritten `TargetEntry`s back into the
+                            // raw-node SET list.
+                            let mut new_tlist_nodes: PgVec<'mcx, NodePtr<'mcx>> =
+                                PgVec::new_in(mcx);
+                            for tle in new_tlist.into_iter() {
+                                new_tlist_nodes
+                                    .push(alloc_in(mcx, Node::TargetEntry(tle))?);
+                            }
+                            action.targetList = new_tlist_nodes;
+                        }
+                        other => {
+                            rt_entry_relation.close(NoLock)?;
+                            return Err(elog(format!(
+                                "unrecognized commandType: {}",
+                                other as i32
+                            )));
+                        }
+                    }
+                }
             }
             CmdType::CMD_DELETE => { /* nothing to do */ }
             other => {

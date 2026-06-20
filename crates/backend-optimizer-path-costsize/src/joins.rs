@@ -35,6 +35,92 @@ fn is_outer_join(jointype: JoinType) -> bool {
     )
 }
 
+/// `ExecSupportsMarkRestore(pathnode)` (execAmi.c) — does a Path support
+/// mark/restore?
+///
+/// This is used during planning (here, `final_cost_mergejoin` deciding whether
+/// to materialize the inner side) and so must accept a Path, not a Plan. The
+/// owned-tree analogue: the Path is identified by its `PathId` arena handle and
+/// resolved through `root.path(..)`. We examine the `pathtype` (the Plan node
+/// type the Path would produce), not the `PathNode` tag, exactly like C.
+pub fn exec_supports_mark_restore(root: &PlannerInfo, path: PathId) -> bool {
+    use types_nodes::nodes;
+    let pathnode = root.path(path);
+    let pathtype = pathnode.base().pathtype;
+
+    if pathtype == nodes::T_IndexScan || pathtype == nodes::T_IndexOnlyScan {
+        // Not all index types support mark/restore.
+        //   return castNode(IndexPath, pathnode)->indexinfo->amcanmarkpos;
+        match pathnode {
+            PathNode::IndexPath(ip) => ip
+                .indexinfo
+                .as_ref()
+                .expect("ExecSupportsMarkRestore: IndexPath->indexinfo must be set")
+                .amcanmarkpos,
+            other => panic!("castNode(IndexPath, pathnode) failed: {other:?}"),
+        }
+    } else if pathtype == nodes::T_Material || pathtype == nodes::T_Sort {
+        true
+    } else if pathtype == nodes::T_CustomScan {
+        match pathnode {
+            PathNode::CustomPath(cp) => {
+                cp.flags & types_pathnodes::CUSTOMPATH_SUPPORT_MARK_RESTORE != 0
+            }
+            other => panic!("castNode(CustomPath, pathnode) failed: {other:?}"),
+        }
+    } else if pathtype == nodes::T_Result {
+        // Result supports mark/restore iff it has a child plan that does.
+        // There is more than one Path type that can produce a Result plan node.
+        match pathnode {
+            PathNode::ProjectionPath(pp) => match pp.subpath {
+                Some(sub) => exec_supports_mark_restore(root, sub),
+                None => false,
+            },
+            // MinMaxAggPath / GroupResultPath produce childless Result nodes.
+            PathNode::MinMaxAggPath(_) | PathNode::GroupResultPath(_) => false,
+            // Simple RTE_RESULT base relation: Assert(IsA(pathnode, Path)) in C;
+            // childless Result.
+            PathNode::Path(_) => false,
+            other => {
+                debug_assert!(
+                    false,
+                    "T_Result pathtype on unexpected Path node \
+                     (C: Assert(IsA(pathnode, Path))): {other:?}"
+                );
+                false
+            }
+        }
+    } else if pathtype == nodes::T_Append {
+        match pathnode {
+            PathNode::AppendPath(ap) => {
+                // If there's exactly one child, there will be no Append in the
+                // final plan, so mark/restore follows the child's ability.
+                if ap.subpaths.len() == 1 {
+                    exec_supports_mark_restore(root, ap.subpaths[0])
+                } else {
+                    false
+                }
+            }
+            other => panic!("castNode(AppendPath, pathnode) failed: {other:?}"),
+        }
+    } else if pathtype == nodes::T_MergeAppend {
+        match pathnode {
+            PathNode::MergeAppendPath(mapath) => {
+                // Like the Append case: single-subpath MergeAppends won't be in
+                // the final plan, so just return the child's ability.
+                if mapath.subpaths.len() == 1 {
+                    exec_supports_mark_restore(root, mapath.subpaths[0])
+                } else {
+                    false
+                }
+            }
+            other => panic!("castNode(MergeAppendPath, pathnode) failed: {other:?}"),
+        }
+    } else {
+        false
+    }
+}
+
 /// `CLAMP_PROBABILITY(p)` (optimizer.h). Used by the C
 /// `get_foreign_key_join_selectivity`.
 fn clamp_probability(p: &mut Selectivity) {
@@ -125,7 +211,7 @@ pub fn initial_cost_nestloop<'mcx>(
         (i.startup_cost, i.total_cost, i.disabled_nodes)
     };
 
-    disabled_nodes = if ENABLE_NESTLOOP { 0 } else { 1 };
+    disabled_nodes = if ENABLE_NESTLOOP() { 0 } else { 1 };
     disabled_nodes += inner_disabled;
     disabled_nodes += outer_disabled;
 
@@ -427,14 +513,14 @@ pub fn initial_cost_mergejoin<'mcx>(
     debug_assert!(outerstartsel <= outerendsel);
     debug_assert!(innerstartsel <= innerendsel);
 
-    disabled_nodes = if ENABLE_MERGEJOIN { 0 } else { 1 };
+    disabled_nodes = if ENABLE_MERGEJOIN() { 0 } else { 1 };
 
     // cost of source data — outer side.
     if !outersortkeys.is_empty() {
         debug_assert!(!ps::pathkeys_contained_in::call(outersortkeys, &outer.pathkeys));
 
         let mut sort_path = make_dummy_sort_path(&outer);
-        if ENABLE_INCREMENTAL_SORT && outer_presorted_keys > 0 {
+        if ENABLE_INCREMENTAL_SORT() && outer_presorted_keys > 0 {
             cost_incremental_sort_owned(
                 &mut sort_path,
                 run,
@@ -645,11 +731,11 @@ pub fn final_cost_mergejoin<'mcx>(
 
     let materialize_inner = if skip_mark_restore {
         false
-    } else if ENABLE_MATERIAL && mat_inner_cost < bare_inner_cost {
+    } else if ENABLE_MATERIAL() && mat_inner_cost < bare_inner_cost {
         true
     } else if innersortkeys_empty && !cz::exec_supports_mark_restore::call(root, inner_id) {
         true
-    } else if ENABLE_MATERIAL
+    } else if ENABLE_MATERIAL()
         && !innersortkeys_empty
         && relation_byte_size(inner_path_rows, inner_pathtarget_width(root, inner_id))
             > work_mem() as f64 * 1024.0
@@ -725,7 +811,7 @@ pub fn initial_cost_hashjoin(
     let numbuckets: i32;
     let numbatches: i32;
 
-    disabled_nodes = if ENABLE_HASHJOIN { 0 } else { 1 };
+    disabled_nodes = if ENABLE_HASHJOIN() { 0 } else { 1 };
     disabled_nodes += inner.disabled_nodes;
     disabled_nodes += outer.disabled_nodes;
 

@@ -1109,25 +1109,20 @@ fn seam_lock_relation_for_extension(
 ) -> PgResult<inward::RelationExtensionLockGuard> {
     let lock_rel_id = LockRelId { relId: rel.rd_id, dbId: rel.rd_locator.dbOid };
     LockRelationForExtension(&lock_rel_id, ExclusiveLock)?;
-    Ok(inward::RelationExtensionLockGuard::new(rel.rd_id))
+    // Carry the full lockRelId (dbId + relId) so release rebuilds the same tag.
+    // For a shared relation dbId is InvalidOid, NOT MyDatabaseId.
+    Ok(inward::RelationExtensionLockGuard::new(rel.rd_locator.dbOid, rel.rd_id))
 }
 
 /// The `unlock_relation_for_extension` inward seam — the release half, reached
 /// only through [`inward::RelationExtensionLockGuard`]. The guard carries the
-/// relation OID; the extension lock's `dbId` is irrelevant for release because
-/// `LockRelease` matches on the full tag, and the guard was built from the same
-/// relation. We rebuild the tag with `dbId = InvalidOid` only when the relation
-/// is shared; to stay faithful we reconstruct from the OID alone is impossible,
-/// so the guard release path delegates to `UnlockRelationForExtension` with the
-/// dbId resolved the same way as acquisition.
-fn seam_unlock_relation_for_extension(relid: Oid) -> PgResult<()> {
-    // The guard only retains the relation OID. The matching unlock tag must use
-    // the same `lockRelId` that acquisition used. `MyDatabaseId` is the dbId for
-    // a non-shared relation; a shared relation used `InvalidOid`. The extension
-    // lock is only taken on real (always non-shared, local) heap/index
-    // relations, so the dbId is `MyDatabaseId` — the same value acquisition
-    // recorded from `rd_locator.dbOid`.
-    let lock_rel_id = LockRelId { relId: relid, dbId: initsmall::my_database_id::call() };
+/// full `lockRelId` (`dbId`, `relId`) acquisition recorded, so the release tag
+/// matches exactly. For a shared relation (e.g. `pg_shdepend`, extended on the
+/// first `changeDependencyOnOwner` catalog write) `dbId` is `InvalidOid`, not
+/// `MyDatabaseId` — mirroring C's single `rd_lockInfo.lockRelId` used by both
+/// `LockRelationForExtension` and `UnlockRelationForExtension`.
+fn seam_unlock_relation_for_extension(dbid: Oid, relid: Oid) -> PgResult<()> {
+    let lock_rel_id = LockRelId { relId: relid, dbId: dbid };
     UnlockRelationForExtension(&lock_rel_id, ExclusiveLock)
 }
 

@@ -729,20 +729,20 @@ mod tests {
     #[test]
     fn point_in_out_roundtrip() {
         setup();
-        let pt = point_in("(1,2)").unwrap();
+        let pt = point_in("(1,2)", None).unwrap();
         assert_eq!(pt, p(1.0, 2.0));
         assert_eq!(point_out(&pt), "(1,2)");
-        assert_eq!(point_in(" 3 , 4 ").unwrap(), p(3.0, 4.0));
-        assert!(point_in("(1,2)x").is_err());
+        assert_eq!(point_in(" 3 , 4 ", None).unwrap(), p(3.0, 4.0));
+        assert!(point_in("(1,2)x", None).is_err());
     }
 
     #[test]
     fn box_in_sorts_corners() {
         setup();
-        let b = box_in("(0,0),(2,3)").unwrap();
+        let b = box_in("(0,0),(2,3)", None).unwrap();
         assert_eq!(b.high, p(2.0, 3.0));
         assert_eq!(b.low, p(0.0, 0.0));
-        let b2 = box_in("(2,3),(0,0)").unwrap();
+        let b2 = box_in("(2,3),(0,0)", None).unwrap();
         assert_eq!(b2.high, p(2.0, 3.0));
         assert_eq!(b2.low, p(0.0, 0.0));
         assert_eq!(box_out(&b), "(2,3),(0,0)");
@@ -751,45 +751,45 @@ mod tests {
     #[test]
     fn line_in_general_form_and_two_points() {
         setup();
-        let l = line_in("{1,2,3}").unwrap();
+        let l = line_in("{1,2,3}", None).unwrap();
         assert_eq!(l, LINE { A: 1.0, B: 2.0, C: 3.0 });
         assert_eq!(line_out(&l), "{1,2,3}");
-        let err = line_in("{0,0,5}").unwrap_err();
+        let err = line_in("{0,0,5}", None).unwrap_err();
         assert_eq!(
             err.message(),
             "invalid line specification: A and B cannot both be zero"
         );
-        let l2 = line_in("[(0,0),(1,0)]").unwrap();
+        let l2 = line_in("[(0,0),(1,0)]", None).unwrap();
         assert_eq!(l2, LINE { A: 0.0, B: -1.0, C: 0.0 });
-        assert!(line_in("[(0,0),(0,0)]").is_err());
+        assert!(line_in("[(0,0),(0,0)]", None).is_err());
     }
 
     #[test]
     fn lseg_path_poly_circle_io() {
         setup();
-        let ls = lseg_in("[(0,0),(1,1)]").unwrap();
+        let ls = lseg_in("[(0,0),(1,1)]", None).unwrap();
         assert_eq!(lseg_out(&ls), "[(0,0),(1,1)]");
 
-        let path = path_in("((0,0),(1,0),(1,1))").unwrap();
+        let path = path_in("((0,0),(1,0),(1,1))", None).unwrap();
         assert!(path.closed);
         assert_eq!(path.points.len(), 3);
         assert_eq!(path_out(&path), "((0,0),(1,0),(1,1))");
 
-        let open = path_in("[(0,0),(1,0)]").unwrap();
+        let open = path_in("[(0,0),(1,0)]", None).unwrap();
         assert!(!open.closed);
         assert_eq!(path_out(&open), "[(0,0),(1,0)]");
 
-        let poly = poly_in("((0,0),(2,0),(2,2),(0,2))").unwrap();
+        let poly = poly_in("((0,0),(2,0),(2,2),(0,2))", None).unwrap();
         assert_eq!(poly.points.len(), 4);
         assert_eq!(poly_out(&poly), "((0,0),(2,0),(2,2),(0,2))");
         assert_eq!(poly.boundbox.low, p(0.0, 0.0));
         assert_eq!(poly.boundbox.high, p(2.0, 2.0));
 
-        let c = circle_in("<(1,2),3>").unwrap();
+        let c = circle_in("<(1,2),3>", None).unwrap();
         assert_eq!(c.center, p(1.0, 2.0));
         assert_eq!(c.radius, 3.0);
         assert_eq!(circle_out(&c), "<(1,2),3>");
-        assert!(circle_in("<(1,2),-1>").is_err());
+        assert!(circle_in("<(1,2),-1>", None).is_err());
     }
 
     #[test]
@@ -816,7 +816,7 @@ mod tests {
     #[test]
     fn box_poly_conversion() {
         setup();
-        let b = box_in("(0,0),(2,2)").unwrap();
+        let b = box_in("(0,0),(2,2)", None).unwrap();
         let poly = box_poly(&b);
         assert_eq!(poly.points.len(), 4);
         assert_eq!(poly.points[0], p(0.0, 0.0));
@@ -826,15 +826,15 @@ mod tests {
     #[test]
     fn lseg_to_lseg_distance() {
         setup();
-        let l1 = lseg_in("[(0,0),(2,0)]").unwrap();
-        let l2 = lseg_in("[(0,1),(2,1)]").unwrap();
+        let l1 = lseg_in("[(0,0),(2,0)]", None).unwrap();
+        let l2 = lseg_in("[(0,1),(2,1)]", None).unwrap();
         assert_eq!(lseg_closept_lseg(None, &l1, &l2).unwrap(), 1.0);
     }
 
     #[test]
     fn box_to_point_distance_and_closest() {
         setup();
-        let b = box_in("(0,0),(2,2)").unwrap();
+        let b = box_in("(0,0),(2,2)", None).unwrap();
         let d = dist_pb(&p(5.0, 5.0), &b).unwrap();
         assert!((d - 4.242_640_687_119_286).abs() < 1e-12);
         assert_eq!(close_pb(&p(5.0, 1.0), &b).unwrap(), Some(p(2.0, 1.0)));
@@ -843,32 +843,32 @@ mod tests {
     #[test]
     fn polygon_overlap_and_contain() {
         setup();
-        let a = poly_in("((0,0),(2,0),(2,2),(0,2))").unwrap();
-        let b = poly_in("((1,1),(3,1),(3,3),(1,3))").unwrap();
+        let a = poly_in("((0,0),(2,0),(2,2),(0,2))", None).unwrap();
+        let b = poly_in("((1,1),(3,1),(3,3),(1,3))", None).unwrap();
         assert!(poly_overlap(&a, &b).unwrap());
 
-        let c = poly_in("((0,0),(1,0),(1,1),(0,1))").unwrap();
-        let d = poly_in("((5,5),(6,5),(6,6),(5,6))").unwrap();
+        let c = poly_in("((0,0),(1,0),(1,1),(0,1))", None).unwrap();
+        let d = poly_in("((5,5),(6,5),(6,6),(5,6))", None).unwrap();
         assert!(!poly_overlap(&c, &d).unwrap());
 
-        let outer = poly_in("((0,0),(10,0),(10,10),(0,10))").unwrap();
-        let inner = poly_in("((2,2),(3,2),(3,3),(2,3))").unwrap();
+        let outer = poly_in("((0,0),(10,0),(10,10),(0,10))", None).unwrap();
+        let inner = poly_in("((2,2),(3,2),(3,3),(2,3))", None).unwrap();
         assert!(poly_contain(&outer, &inner).unwrap());
     }
 
     #[test]
     fn close_lseg_parallel_is_none() {
         setup();
-        let l1 = lseg_in("[(0,0),(2,0)]").unwrap();
-        let l2 = lseg_in("[(0,1),(2,1)]").unwrap();
+        let l1 = lseg_in("[(0,0),(2,0)]", None).unwrap();
+        let l2 = lseg_in("[(0,1),(2,1)]", None).unwrap();
         assert_eq!(close_lseg(&l1, &l2).unwrap(), None);
     }
 
     #[test]
     fn circle_to_polygon_distance() {
         setup();
-        let circle = circle_in("<(10,10),1>").unwrap();
-        let poly = poly_in("((0,0),(2,0),(2,2),(0,2))").unwrap();
+        let circle = circle_in("<(10,10),1>", None).unwrap();
+        let poly = poly_in("((0,0),(2,0),(2,2),(0,2))", None).unwrap();
         let d = dist_cpoly(&circle, &poly).unwrap();
         assert!((d - 10.313_708_498_984_761).abs() < 1e-12);
     }

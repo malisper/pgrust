@@ -25,6 +25,17 @@ use crate::util::{
     BT_LESS_STRATEGY_NUMBER, INVALID_OID, RECORDOID,
 };
 
+/// Deep-copy a slice of `Expr` into `mcx` via `Expr::clone_in` (C copyObject).
+/// The derived `Expr::clone` panics on an owned-subtree child
+/// (`Aggref`/`SubLink`/`SubPlan`), so any moved-into-node copy must go here.
+fn clone_exprs_in(exprs: &[Expr], mcx: Mcx<'_>) -> PgResult<Vec<Expr>> {
+    let mut out = Vec::with_capacity(exprs.len());
+    for e in exprs {
+        out.push(e.clone_in(mcx)?);
+    }
+    Ok(out)
+}
+
 /* ==========================================================================
  * IndexClauseSet — the C-file-private accumulator (indxpath.c:60).
  * ======================================================================== */
@@ -167,7 +178,7 @@ pub fn match_clause_to_indexcol(
     // First check for boolean-index cases.
     let opfamily = index.opfamily[indexcol];
     if IsBooleanOpfamily(opfamily) {
-        if let Some(iclause) = match_boolean_index_clause(root, rinfo, indexcol, index) {
+        if let Some(iclause) = match_boolean_index_clause(mcx, root, rinfo, indexcol, index)? {
             return Ok(Some(iclause));
         }
     }
@@ -176,13 +187,13 @@ pub fn match_clause_to_indexcol(
     let clause_id = root.rinfo(rinfo).clause;
     let clause = root.node(clause_id);
     if clause.is_opexpr() {
-        match_opclause_to_indexcol(root, rinfo, indexcol, index)
+        match_opclause_to_indexcol(mcx, root, rinfo, indexcol, index)
     } else if clause.is_funcexpr() {
         match_funcclause_to_indexcol(root, rinfo, indexcol, index)
     } else if clause.is_scalararrayopexpr() {
         Ok(match_saopclause_to_indexcol(mcx, root, rinfo, indexcol, index)?)
     } else if clause.is_rowcompareexpr() {
-        match_rowcompare_to_indexcol(root, rinfo, indexcol, index)
+        match_rowcompare_to_indexcol(mcx, root, rinfo, indexcol, index)
     } else if restriction_is_or_clause(root, rinfo) {
         match_orclause_to_indexcol(mcx, root, rinfo, indexcol, index)
     } else if index.amsearchnulls && clause.is_nulltest() {
@@ -192,8 +203,8 @@ pub fn match_clause_to_indexcol(
         let matched = if nt.argisrow {
             false
         } else {
-            let arg = nt.arg.as_deref().expect("NullTest without arg").clone();
-            match_index_to_operand(root, &arg, indexcol, index)
+            let arg: &Expr = nt.arg.as_deref().expect("NullTest without arg");
+            match_index_to_operand(root, arg, indexcol, index)
         };
         if matched {
             Ok(Some(make_self_index_clause(rinfo, rinfo, indexcol)))
@@ -228,25 +239,30 @@ pub fn IsBooleanOpfamily(opfamily: Oid) -> bool {
 /// — recognize a restriction clause matchable to a boolean index and rewrite it
 /// to `indexkey = TRUE/FALSE`.
 pub fn match_boolean_index_clause(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     rinfo: RinfoId,
     indexcol: usize,
     index: &IndexOptInfo,
-) -> Option<IndexClause> {
+) -> PgResult<Option<IndexClause>> {
     // Build the candidate derived OpExpr, if any, by inspecting the clause.
+    // The clause / its arg is *moved* into a new derived OpExpr, so any owned
+    // copy must go through `Expr::clone_in` (the derived `Expr::clone` panics on
+    // an `Aggref`/`SubLink`/`SubPlan` payload); the read-only matching only
+    // needs a borrow.
     let op: Option<Expr> = {
         let clause_id = root.rinfo(rinfo).clause;
-        let clause = root.node(clause_id).clone();
+        let clause: &Expr = root.node(clause_id);
 
         // Direct match? -> indexkey = TRUE
-        if match_index_to_operand(root, &clause, indexcol, index) {
-            Some(make_bool_eq_opclause(clause, true))
+        if match_index_to_operand(root, clause, indexcol, index) {
+            Some(make_bool_eq_opclause(clause.clone_in(mcx)?, true))
         }
         // NOT clause? -> indexkey = FALSE
-        else if is_notclause(&clause) {
-            let arg = get_notclausearg(&clause).clone();
-            if match_index_to_operand(root, &arg, indexcol, index) {
-                Some(make_bool_eq_opclause(arg, false))
+        else if is_notclause(clause) {
+            let arg: &Expr = get_notclausearg(clause);
+            if match_index_to_operand(root, arg, indexcol, index) {
+                Some(make_bool_eq_opclause(arg.clone_in(mcx)?, false))
             } else {
                 None
             }
@@ -254,15 +270,15 @@ pub fn match_boolean_index_clause(
         // indexkey IS TRUE / IS FALSE
         else if let Some(btest) = clause.as_booleantest() {
             use types_nodes::primnodes::BoolTestType;
-            let arg = btest.arg.as_deref().expect("BooleanTest without arg").clone();
+            let arg: &Expr = btest.arg.as_deref().expect("BooleanTest without arg");
             if btest.booltesttype == BoolTestType::IS_TRUE
-                && match_index_to_operand(root, &arg, indexcol, index)
+                && match_index_to_operand(root, arg, indexcol, index)
             {
-                Some(make_bool_eq_opclause(arg, true))
+                Some(make_bool_eq_opclause(arg.clone_in(mcx)?, true))
             } else if btest.booltesttype == BoolTestType::IS_FALSE
-                && match_index_to_operand(root, &arg, indexcol, index)
+                && match_index_to_operand(root, arg, indexcol, index)
             {
-                Some(make_bool_eq_opclause(arg, false))
+                Some(make_bool_eq_opclause(arg.clone_in(mcx)?, false))
             } else {
                 None
             }
@@ -272,18 +288,21 @@ pub fn match_boolean_index_clause(
     };
 
     // If we successfully made an operator clause, wrap it in an IndexClause.
-    let op = op?;
+    let op = match op {
+        Some(op) => op,
+        None => return Ok(None),
+    };
     let op_id = root.alloc_node(op);
     let derived = backend_optimizer_util_restrictinfo_seams::make_simple_restrictinfo::call(
         root, op_id,
     );
-    Some(IndexClause {
+    Ok(Some(IndexClause {
         rinfo: Some(rinfo),
         indexquals: vec![derived],
         lossy: false,
         indexcol: indexcol as AttrNumber,
         indexcols: Vec::new(),
-    })
+    }))
 }
 
 /// Build the derived `indexkey = TRUE/FALSE` `OpExpr`:
@@ -309,6 +328,7 @@ fn make_bool_eq_opclause(indexkey: Expr, value: bool) -> Expr {
 /// `match_opclause_to_indexcol(root, rinfo, indexcol, index)` (indxpath.c:2904)
 /// — handle the `OpExpr` case.
 pub fn match_opclause_to_indexcol(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     rinfo: RinfoId,
     indexcol: usize,
@@ -321,15 +341,19 @@ pub fn match_opclause_to_indexcol(
     // Only binary operators need apply. Read the operands / operator / collation.
     let (left_matches, right_matches, expr_op, expr_coll, opfuncid) = {
         let clause_id = root.rinfo(rinfo).clause;
-        let clause = root.node(clause_id).as_opexpr().expect("OpExpr").clone();
+        // Borrow the OpExpr to read its operands (a derived `.clone()` would
+        // panic on an owned-subtree operand); the operands feed read-only
+        // `match_index_to_operand`.
+        let clause = root.node(clause_id).as_opexpr().expect("OpExpr");
         if clause.args.len() != 2 {
             return Ok(None);
         }
-        let leftop = clause.args[0].clone();
-        let rightop = clause.args[1].clone();
-        let left_matches = match_index_to_operand(root, &leftop, indexcol, index);
-        let right_matches = match_index_to_operand(root, &rightop, indexcol, index);
-        (left_matches, right_matches, clause.opno, clause.inputcollid, clause.opfuncid)
+        let leftop: &Expr = &clause.args[0];
+        let rightop: &Expr = &clause.args[1];
+        let (opno, inputcollid, opfuncid) = (clause.opno, clause.inputcollid, clause.opfuncid);
+        let left_matches = match_index_to_operand(root, leftop, indexcol, index);
+        let right_matches = match_index_to_operand(root, rightop, indexcol, index);
+        (left_matches, right_matches, opno, inputcollid, opfuncid)
     };
 
     // Case 1: (indexkey op const).
@@ -337,8 +361,8 @@ pub fn match_opclause_to_indexcol(
         crate::util::relids_is_member(index_relid as i32, &root.rinfo(rinfo).right_relids);
     let rightop_volatile = {
         let clause_id = root.rinfo(rinfo).clause;
-        let rightop = root.node(clause_id).as_opexpr().unwrap().args[1].clone();
-        contain_volatile_functions(Some(&rightop))?
+        let rightop: &Expr = &root.node(clause_id).as_opexpr().unwrap().args[1];
+        contain_volatile_functions(Some(rightop))?
     };
     if left_matches && !right_relids_has_index && !rightop_volatile {
         if index_coll_matches_expr_coll(idxcollation, expr_coll)
@@ -356,15 +380,15 @@ pub fn match_opclause_to_indexcol(
         crate::util::relids_is_member(index_relid as i32, &root.rinfo(rinfo).left_relids);
     let leftop_volatile = {
         let clause_id = root.rinfo(rinfo).clause;
-        let leftop = root.node(clause_id).as_opexpr().unwrap().args[0].clone();
-        contain_volatile_functions(Some(&leftop))?
+        let leftop: &Expr = &root.node(clause_id).as_opexpr().unwrap().args[0];
+        contain_volatile_functions(Some(leftop))?
     };
     if right_matches && !left_relids_has_index && !leftop_volatile {
         if index_coll_matches_expr_coll(idxcollation, expr_coll) {
             let comm_op = lsyscache::get_commutator::call(expr_op)?;
             if comm_op != INVALID_OID && lsyscache::op_in_opfamily::call(comm_op, opfamily)? {
                 // Build a commuted OpExpr + RestrictInfo (pushed into the arena).
-                let commrinfo = commute_restrictinfo(root, rinfo, comm_op);
+                let commrinfo = commute_restrictinfo(mcx, root, rinfo, comm_op)?;
                 return Ok(Some(make_self_index_clause(rinfo, commrinfo, indexcol)));
             }
         }
@@ -408,8 +432,8 @@ pub fn match_funcclause_to_indexcol(
     for indexarg in 0..nargs {
         let matched = {
             let clause_id = root.rinfo(rinfo).clause;
-            let arg = root.node(clause_id).as_funcexpr().unwrap().args[indexarg].clone();
-            match_index_to_operand(root, &arg, indexcol, index)
+            let arg: &Expr = &root.node(clause_id).as_funcexpr().unwrap().args[indexarg];
+            match_index_to_operand(root, arg, indexcol, index)
         };
         if matched {
             return get_index_clause_from_support(
@@ -546,12 +570,22 @@ pub fn match_saopclause_to_indexcol(
 /// `commute_restrictinfo(rinfo, comm_op)` (restrictinfo.c:350) — build a
 /// commuted version of the (binary `OpExpr`) restriction clause `rinfo` using
 /// `comm_op`, push the new `RestrictInfo` into the arena, and return its handle.
-pub fn commute_restrictinfo(root: &mut PlannerInfo, rinfo: RinfoId, comm_op: Oid) -> RinfoId {
+pub fn commute_restrictinfo(
+    mcx: Mcx<'_>,
+    root: &mut PlannerInfo,
+    rinfo: RinfoId,
+    comm_op: Oid,
+) -> PgResult<RinfoId> {
     // Flat-copy all the fields of the source RestrictInfo ...
     let mut result = root.rinfo(rinfo).clone();
 
-    // ... build the commuted OpExpr clause.
-    let orig_op = root.node(result.clause).as_opexpr().expect("OpExpr").clone();
+    // ... build the commuted OpExpr clause. Deep-copy the OpExpr via
+    // `clone_in` (it is moved into a fresh arena node; a derived `.clone()`
+    // panics on an owned-subtree operand).
+    let orig_op = match root.node(result.clause).clone_in(mcx)? {
+        Expr::OpExpr(o) => o,
+        _ => panic!("commute_restrictinfo: clause is not an OpExpr"),
+    };
     let orig_opno = orig_op.opno;
     let mut newclause = orig_op;
     debug_assert_eq!(newclause.args.len(), 2);
@@ -577,7 +611,7 @@ pub fn commute_restrictinfo(root: &mut PlannerInfo, rinfo: RinfoId, comm_op: Oid
     result.left_hasheqoperator = INVALID_OID;
     result.right_hasheqoperator = INVALID_OID;
 
-    root.alloc_rinfo(result)
+    Ok(root.alloc_rinfo(result))
 }
 
 /* ==========================================================================
@@ -588,6 +622,7 @@ pub fn commute_restrictinfo(root: &mut PlannerInfo, rinfo: RinfoId, comm_op: Oid
 /// (indxpath.c:3203) — handle the `RowCompareExpr` case: check the first column
 /// matches the index column, then expand via `expand_indexqual_rowcompare`.
 pub fn match_rowcompare_to_indexcol(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     rinfo: RinfoId,
     indexcol: usize,
@@ -603,15 +638,17 @@ pub fn match_rowcompare_to_indexcol(
     let idxcollation = index.indexcollations[indexcol];
 
     // Look only at the operator (after commutation if indexkey is on the right).
+    // `leftop`/`rightop` must outlive the `&mut root` calls below
+    // (`operand_uses_index_relid` allocs into the arena), so deep-copy them via
+    // `clone_in` (a derived `.clone()` panics on an owned-subtree operand).
     let (leftop, rightop, mut expr_op, expr_coll) = {
         let clause_id = root.rinfo(rinfo).clause;
         let rc = root.node(clause_id).as_rowcompareexpr().expect("RowCompareExpr");
-        (
-            rc.largs.first().cloned().expect("RowCompareExpr largs"),
-            rc.rargs.first().cloned().expect("RowCompareExpr rargs"),
-            *rc.opnos.first().expect("RowCompareExpr opnos"),
-            *rc.inputcollids.first().expect("RowCompareExpr inputcollids"),
-        )
+        let expr_op = *rc.opnos.first().expect("RowCompareExpr opnos");
+        let expr_coll = *rc.inputcollids.first().expect("RowCompareExpr inputcollids");
+        let leftop = rc.largs.first().expect("RowCompareExpr largs").clone_in(mcx)?;
+        let rightop = rc.rargs.first().expect("RowCompareExpr rargs").clone_in(mcx)?;
+        (leftop, rightop, expr_op, expr_coll)
     };
 
     // Collations must match, if relevant.
@@ -622,13 +659,13 @@ pub fn match_rowcompare_to_indexcol(
     // The same syntactic tests as match_opclause_to_indexcol.
     let var_on_left;
     if match_index_to_operand(root, &leftop, indexcol, index)
-        && !operand_uses_index_relid(root, &rightop, index_relid)?
+        && !operand_uses_index_relid(mcx, root, &rightop, index_relid)?
         && !contain_volatile_functions(Some(&rightop))?
     {
         // OK, indexkey is on left.
         var_on_left = true;
     } else if match_index_to_operand(root, &rightop, indexcol, index)
-        && !operand_uses_index_relid(root, &leftop, index_relid)?
+        && !operand_uses_index_relid(mcx, root, &leftop, index_relid)?
         && !contain_volatile_functions(Some(&leftop))?
     {
         // indexkey is on right, so commute the operator.
@@ -650,6 +687,7 @@ pub fn match_rowcompare_to_indexcol(
             || s == BT_GREATER_STRATEGY_NUMBER =>
         {
             Ok(Some(expand_indexqual_rowcompare(
+                mcx,
                 root,
                 rinfo,
                 indexcol,
@@ -666,11 +704,13 @@ pub fn match_rowcompare_to_indexcol(
 /// arena node operand: builds the operand into the arena to reuse the joinpath
 /// `pull_varnos(root, NodeId)` seam, then tests relid membership.
 fn operand_uses_index_relid(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     op: &Expr,
     index_relid: types_core::primitive::Index,
 ) -> PgResult<bool> {
-    let id = root.alloc_node(op.clone());
+    let op = op.clone_in(mcx)?;
+    let id = root.alloc_node(op);
     let varnos = backend_optimizer_path_joinpath_seams::pull_varnos::call(root, id);
     Ok(crate::util::relids_is_member(index_relid as i32, &varnos))
 }
@@ -679,6 +719,7 @@ fn operand_uses_index_relid(
 /// var_on_left)` (indxpath.c:3496) — expand a `RowCompareExpr` indexqual,
 /// possibly building a shortened `RowCompareExpr` or a single `OpExpr`.
 pub fn expand_indexqual_rowcompare(
+    mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     rinfo: RinfoId,
     indexcol: usize,
@@ -686,16 +727,29 @@ pub fn expand_indexqual_rowcompare(
     mut expr_op: Oid,
     var_on_left: bool,
 ) -> PgResult<IndexClause> {
+    // Deep-copy the RowCompareExpr via `clone_in` (its arg Exprs are moved into
+    // freshly built index quals; the derived `.clone()` panics on an
+    // owned-subtree operand).
     let clause: RowCompareExpr = {
         let clause_id = root.rinfo(rinfo).clause;
-        root.node(clause_id).as_rowcompareexpr().expect("RowCompareExpr").clone()
+        match root.node(clause_id).clone_in(mcx)? {
+            Expr::RowCompareExpr(rc) => rc,
+            _ => panic!("expand_indexqual_rowcompare: clause is not a RowCompareExpr"),
+        }
     };
 
-    // var_args / non_var_args.
+    // var_args / non_var_args (already deep copies, taken from the cloned-in
+    // RowCompareExpr by value).
     let (var_args, non_var_args): (Vec<Expr>, Vec<Expr>) = if var_on_left {
-        (clause.largs.clone(), clause.rargs.clone())
+        (
+            clone_exprs_in(&clause.largs, mcx)?,
+            clone_exprs_in(&clause.rargs, mcx)?,
+        )
     } else {
-        (clause.rargs.clone(), clause.largs.clone())
+        (
+            clone_exprs_in(&clause.rargs, mcx)?,
+            clone_exprs_in(&clause.largs, mcx)?,
+        )
     };
 
     let (mut op_strategy, op_lefttype, op_righttype) = lsyscache::get_op_opfamily_properties::call(
@@ -718,8 +772,8 @@ pub fn expand_indexqual_rowcompare(
     // See how many of the remaining columns match in the same way.
     let mut matching_cols = 1usize;
     while matching_cols < var_args.len() {
-        let varop = var_args[matching_cols].clone();
-        let constop = non_var_args[matching_cols].clone();
+        let varop: &Expr = &var_args[matching_cols];
+        let constop: &Expr = &non_var_args[matching_cols];
 
         let mut col_op = clause.opnos[matching_cols];
         if !var_on_left {
@@ -730,13 +784,14 @@ pub fn expand_indexqual_rowcompare(
             }
         }
         if operand_uses_index_relid(
+            mcx,
             root,
-            &constop,
+            constop,
             root.rel(index.rel.expect("IndexOptInfo without rel")).relid,
         )? {
             break; // no good, Var on wrong side
         }
-        if contain_volatile_functions(Some(&constop))? {
+        if contain_volatile_functions(Some(constop))? {
             break; // no good, volatile comparison value
         }
 
@@ -744,7 +799,7 @@ pub fn expand_indexqual_rowcompare(
         let mut i = 0usize;
         let nkeycolumns = index.nkeycolumns as usize;
         while i < nkeycolumns {
-            if match_index_to_operand(root, &varop, i, index)
+            if match_index_to_operand(root, varop, i, index)
                 && lsyscache::get_op_opfamily_strategy::call(col_op, index.opfamily[i])?
                     == op_strategy
                 && index_coll_matches_expr_coll(
@@ -849,8 +904,8 @@ pub fn expand_indexqual_rowcompare(
             opnos: new_ops,
             opfamilies: clause.opfamilies[..matching_cols].to_vec(),
             inputcollids: clause.inputcollids[..matching_cols].to_vec(),
-            largs: var_args[..matching_cols].to_vec(),
-            rargs: non_var_args[..matching_cols].to_vec(),
+            largs: clone_exprs_in(&var_args[..matching_cols], mcx)?,
+            rargs: clone_exprs_in(&non_var_args[..matching_cols], mcx)?,
         };
         let rc_id = root.alloc_node(Expr::RowCompareExpr(rc));
         let ri = backend_optimizer_util_restrictinfo_seams::make_simple_restrictinfo::call(
@@ -864,8 +919,8 @@ pub fn expand_indexqual_rowcompare(
             new_ops[0],
             BOOLOID,
             false,
-            var_args[0].clone(),
-            Some(non_var_args[0].clone()),
+            var_args[0].clone_in(mcx)?,
+            Some(non_var_args[0].clone_in(mcx)?),
             INVALID_OID,
             clause.inputcollids[0],
         );
@@ -937,14 +992,13 @@ pub fn match_orclause_to_indexcol(
     let mut broke = false;
 
     for arg in &or_args {
-        // If it's not a RestrictInfo (i.e. a sub-AND), we can't use it. In this
-        // arena model OR arms are stored as their clause nodes; a sub-RestrictInfo
-        // arm carries an OpExpr, a sub-AND carries a BoolExpr. We accept only
-        // binary OpExpr arms (mirrors "IsA(subRinfo->clause, OpExpr)").
-        let sub = arg.as_opexpr();
-        let sub = match sub {
-            Some(s) => s,
-            None => {
+        // OR arms are RestrictInfo handles (Expr::RestrictInfo). Deref to the
+        // wrapped clause; a usable arm carries a binary OpExpr (mirrors C's
+        // "IsA(arg, RestrictInfo) && IsA(subRinfo->clause, OpExpr)"). A sub-AND
+        // arm (BoolExpr clause) is not usable -> bail.
+        let sub = match crate::bitmap::orarg_clause_owned(mcx, root, arg)? {
+            Some(Expr::OpExpr(s)) => s,
+            _ => {
                 broke = true;
                 break;
             }
@@ -957,8 +1011,11 @@ pub fn match_orclause_to_indexcol(
             break;
         }
 
-        let leftop = sub.args[0].clone();
-        let rightop = sub.args[1].clone();
+        // The operands are moved into the new SAOP node (index_expr / consts);
+        // deep-copy via `clone_in` (a derived `.clone()` panics on an
+        // owned-subtree operand).
+        let leftop = sub.args[0].clone_in(mcx)?;
+        let rightop = sub.args[1].clone_in(mcx)?;
         let sub_inputcollid = sub.inputcollid;
 
         // Determine the index key side / const side. These tests should agree
@@ -966,14 +1023,14 @@ pub fn match_orclause_to_indexcol(
         // pull_varnos over each operand (the arms carry bare clause nodes here,
         // not RestrictInfos with precomputed left/right_relids).
         let const_expr: Expr;
-        let left_uses = operand_uses_index_relid(root, &leftop, index_relid)?;
-        let right_uses = operand_uses_index_relid(root, &rightop, index_relid)?;
+        let left_uses = operand_uses_index_relid(mcx, root, &leftop, index_relid)?;
+        let right_uses = operand_uses_index_relid(mcx, root, &rightop, index_relid)?;
         if match_index_to_operand(root, &leftop, indexcol, index)
             && !right_uses
             && !contain_volatile_functions(Some(&rightop))?
         {
-            index_expr = Some(leftop.clone());
-            const_expr = rightop.clone();
+            index_expr = Some(leftop);
+            const_expr = rightop;
         } else if match_index_to_operand(root, &rightop, indexcol, index)
             && !left_uses
             && !contain_volatile_functions(Some(&leftop))?
@@ -983,8 +1040,8 @@ pub fn match_orclause_to_indexcol(
                 broke = true;
                 break;
             }
-            index_expr = Some(rightop.clone());
-            const_expr = leftop.clone();
+            index_expr = Some(rightop);
+            const_expr = leftop;
         } else {
             broke = true;
             break;

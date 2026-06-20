@@ -64,6 +64,22 @@ backend-executor-nodeTidscan = { path = "../backend-executor-nodeTidscan" }
 backend-executor-nodeTidrangescan = { path = "../backend-executor-nodeTidrangescan" }
 backend-executor-nodeWindowAgg = { path = "../backend-executor-nodeWindowAgg" }
 backend-executor-nodeWorktablescan = { path = "../backend-executor-nodeWorktablescan" }
+# LockRows (nodeLockRows.c): this dispatch routes ExecInit/Proc/End/ReScan and
+# installs the node's 24 seams (the EvalPlanQual/tableam/junk substrate) from
+# lockrows_seams.rs. nodeLockRows depends only on its -seams crate (acyclic).
+backend-executor-nodeLockRows = { path = "../backend-executor-nodeLockRows" }
+backend-executor-nodeLockRows-seams = { path = "../backend-executor-nodeLockRows-seams" }
+# Substrate the LockRows seams reach: table_tuple_lock (tableam), the result
+# slot-ops / range-table-relation helpers (execUtils), the XactIsoLevel GUC.
+backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-executor-execUtils = { path = "../backend-executor-execUtils" }
+backend-access-transam-xact = { path = "../backend-access-transam-xact" }
+types-tableam = { path = "../types-tableam" }
+types-tuple = { path = "../types-tuple" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+types-rel = { path = "../types-rel" }
+types-core = { path = "../types-core" }
 # ExecInitSubPlan (nodeSubplan.c) — the ExecInitNode initPlan walk (#328) routes
 # each Plan.initPlan SubPlan to its ExecInitSubPlan. Acyclic: nodeSubplan depends
 # only on the seam crates, never on this dispatch crate.

@@ -245,7 +245,7 @@ fn extract_lateral_references<'mcx>(
 /// matches `find_lateral_references` except it calls `add_vars_to_attr_needed`
 /// instead of `add_vars_to_targetlist`. It reuses the Vars/PHVs that
 /// `extract_lateral_references` saved in `lateral_vars`.
-pub fn rebuild_lateral_attr_needed(root: &mut PlannerInfo, _run: &PlannerRun<'_>) {
+pub fn rebuild_lateral_attr_needed(root: &mut PlannerInfo, run: &PlannerRun<'_>) {
     // We need do nothing if the query contains no LATERAL RTEs.
     if !root.hasLateralRTEs {
         return;
@@ -266,11 +266,14 @@ pub fn rebuild_lateral_attr_needed(root: &mut PlannerInfo, _run: &PlannerRun<'_>
         if root.rel(rel_id).lateral_vars.is_empty() {
             continue;
         }
+        // Deep-copy each lateral Var/PHV via `Expr::clone_in` (a derived
+        // `Expr::clone` panics on a context-allocated child such as a PHV's
+        // contained expr).
         let vars: Vec<Expr> = root
             .rel(rel_id)
             .lateral_vars
             .iter()
-            .map(|&nid| root.node(nid).clone())
+            .map(|&nid| root.node(nid).clone_in(run.mcx()).expect("clone_in"))
             .collect();
 
         let where_needed = bms::relids_make_singleton::call(rti);
@@ -315,7 +318,9 @@ pub fn create_lateral_join_info(root: &mut PlannerInfo, run: &PlannerRun<'_>) {
         // avoid holding a borrow of root across find_placeholder_info.
         let lv: Vec<types_pathnodes::NodeId> = root.rel(rel_id).lateral_vars.clone();
         for nid in lv {
-            let node = root.node(nid).clone();
+            // Deep-copy via `Expr::clone_in` (a derived `Expr::clone` panics on
+            // a context-allocated child such as a PHV's contained expr).
+            let node = root.node(nid).clone_in(run.mcx()).expect("clone_in");
             match node {
                 Expr::Var(var) => {
                     found_laterals = true;

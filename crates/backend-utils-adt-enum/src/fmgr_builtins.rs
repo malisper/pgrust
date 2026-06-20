@@ -151,16 +151,18 @@ fn ok<T>(r: PgResult<T>) -> T {
 // ---------------------------------------------------------------------------
 
 /// `enum_in(cstring, oid) -> anyenum` (oid 3506). C: `escontext =
-/// fcinfo->context`; at the registry boundary that soft-error sink is absent, so
-/// the hard-error path is taken (`None`), and a soft error surfaces as ERROR.
+/// fcinfo->context`. Forward the soft ErrorSaveContext installed on the frame by
+/// InputFunctionCallSafe so an unrecognized label `ereturn`s into the sink
+/// (returning `Ok(None)`) instead of throwing past `invoke?`.
 fn fc_enum_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let name = arg_cstring(fcinfo, 0).to_string();
     let enumtypoid = arg_oid(fcinfo, 1);
     let xmin = transaction_xmin();
-    match ok(crate::enum_in(&name, enumtypoid, xmin, None)) {
+    match ok(crate::enum_in(&name, enumtypoid, xmin, fcinfo.escontext_mut())) {
         Some(oid) => ret_oid(oid),
-        // Soft-error path returned `(Datum) 0` to the (absent) escontext; with no
-        // sink the core would have raised, so this arm is unreachable in practice.
+        // Soft-error path returned `(Datum) 0` after `ereturn` recorded the
+        // failure into the sink; surface a NULL placeholder the caller discards
+        // after `soft_error_occurred()`.
         None => {
             fcinfo.set_result_null(true);
             Datum::from_usize(0)

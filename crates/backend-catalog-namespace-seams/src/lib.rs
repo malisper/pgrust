@@ -316,6 +316,19 @@ seam_core::seam!(
     ) -> PgResult<Oid>
 );
 seam_core::seam!(
+    /// `RangeVarGetRelidExtended(relation, lockmode, 0,
+    /// RangeVarCallbackForReindexIndex, &state)` (indexcmds.c, bundled here
+    /// like `range_var_get_relid_maintains_table`): resolve+lock a
+    /// `REINDEX INDEX` target, running the reindex-index permission callback
+    /// (verify it's an index, `ACL_MAINTAIN` on its heap, lock heap before
+    /// index to avoid deadlock). Returns the index OID.
+    pub fn range_var_get_relid_for_reindex_index<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &RangeVar,
+        lockmode: LOCKMODE,
+    ) -> PgResult<Oid>
+);
+seam_core::seam!(
     /// `LookupCreationNamespace(nspname)` (namespace.c): OID of the namespace
     /// to create in (`pg_temp` for temp); `Err` on ACL/lookup failure.
     pub fn lookup_creation_namespace(nspname: &str) -> PgResult<Oid>

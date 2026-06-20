@@ -962,6 +962,7 @@ pub fn init_seams() {
     use backend_storage_ipc_procarray_seams as seams;
 
     seams::transaction_id_is_in_progress::set(TransactionIdIsInProgress);
+    seams::get_current_virtual_xids::set(GetCurrentVirtualXIDs);
     seams::proc_number_get_proc_pid::set(ProcNumberGetProcPid);
     seams::proc_status::set(ProcStatus);
     seams::backend_pid_get_proc_role::set(BackendPidGetProcRole);

@@ -24,6 +24,13 @@ types-statistics = { path = "../types-statistics" }
 types-scan = { path = "../types-scan" }
 types-acl = { path = "../types-acl" }
 backend-utils-adt-selfuncs-seams = { path = "../backend-utils-adt-selfuncs-seams" }
+backend-access-brin-insert-vacuum-seams = { path = "../backend-access-brin-insert-vacuum-seams" }
+types-brin = { path = "../types-brin" }
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
+backend-access-gin-ginutil-seams = { path = "../backend-access-gin-ginutil-seams" }
+types-gin = { path = "../types-gin" }
+types-rel = { path = "../types-rel" }
+types-storage = { path = "../types-storage" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }

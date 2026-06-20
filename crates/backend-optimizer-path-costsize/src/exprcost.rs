@@ -70,7 +70,7 @@ pub fn cost_agg<'mcx>(
     } else if aggstrategy == AGG_SORTED || aggstrategy == AGG_MIXED {
         startup_cost = input_startup_cost;
         total_cost = input_total_cost;
-        if aggstrategy == AGG_MIXED && !ENABLE_HASHAGG {
+        if aggstrategy == AGG_MIXED && !ENABLE_HASHAGG() {
             disabled_nodes += 1;
         }
         total_cost += aggcosts.trans_startup;
@@ -83,7 +83,7 @@ pub fn cost_agg<'mcx>(
     } else {
         // AGG_HASHED.
         startup_cost = input_total_cost;
-        if !ENABLE_HASHAGG {
+        if !ENABLE_HASHAGG() {
             disabled_nodes += 1;
         }
         startup_cost += aggcosts.trans_startup;
@@ -239,7 +239,7 @@ pub fn cost_windowagg<'mcx>(
     // Window functions are charged their stated execution cost, plus the cost of
     // evaluating their input expressions + filter, per tuple.
     for &wfn in window_funcs {
-        let (fn_startup, wfunccost) = cz::windowfunc_cost::call(root, wfn);
+        let (fn_startup, wfunccost) = cz::windowfunc_cost::call(run, root, wfn);
         startup_cost += fn_startup;
         total_cost += wfunccost * input_tuples;
     }

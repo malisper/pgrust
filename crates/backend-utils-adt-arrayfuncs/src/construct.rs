@@ -16,7 +16,7 @@ use types_datum::array_build::{ArrayBuildState, ArrayBuildStateArr};
 use types_datum::datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
-    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
+    ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
 use types_nodes::{EStateData, EcxtId};
@@ -850,6 +850,7 @@ fn init_array_result_with_size(
         typbyval: tlbva.typbyval,
         typalign: tlbva.typalign as u8,
         private_cxt: subcontext,
+        byref_storage: Vec::new(),
     })
 }
 
@@ -889,23 +890,27 @@ pub fn accum_array_result<'mcx>(
     // Ensure pass-by-ref stuff is copied (and detoasted if varlena). In the
     // owned model the element bytes are materialized through the detoast seam.
     if !disnull && !astate.typbyval {
-        if astate.typlen == -1 {
-            // dvalue = PointerGetDatum(PG_DETOAST_DATUM_COPY(dvalue));
+        // C: `datumCopy`s the element into the build state's `mcontext` (the
+        // private subcontext when `subcontext` is true) and points `dvalues[]`
+        // at that copy, which lives until `makeArrayResult(release=true)`
+        // deletes the subcontext. We mirror that ownership by keeping the copy
+        // in the state's own `byref_storage` (a stable `Box<[u8]>`) rather than
+        // leaking it into the caller's `Mcx`: the caller's context (often the
+        // short-lived per-tuple eval context) is then never charged, so it can
+        // be reset between tuples without a dangling charge, and the copy is
+        // reclaimed when the state drops. The `dvalues[]` word is the boxed
+        // slice's stable pointer (read by `construct_md_array` at result time).
+        let copy: Box<[u8]> = if astate.typlen == -1 {
+            // PG_DETOAST_DATUM_COPY(dvalue): a fresh, flat varlena copy.
             let bytes = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(dvalue))?;
-            // The detoasted copy is palloc'd in the build context (C's
-            // `rcontext`); it must outlive this frame so the accumulated
-            // `dvalues` pointer word stays valid until `makeArrayResult`. Leak
-            // the buffer into `mcx` (reclaimed by the owning context, not Rust
-            // drop) exactly as `datum_from_buf` does — without the forget the
-            // `PgVec` is dropped here and the dvalue pointer dangles.
-            dvalue = datum_from_buf(bytes);
+            bytes.as_slice().to_vec().into_boxed_slice()
         } else {
-            // dvalue = datumCopy(dvalue, typbyval, typlen); — a fixed-len
-            // by-ref copy. The payload bytes are resolved through the same
-            // byref window owner, then leaked into the build context.
+            // datumCopy(dvalue, false, typlen): a fixed-len by-ref copy.
             let bytes = datum_payload_bytes(mcx, astate.typlen as i32, dvalue)?;
-            dvalue = datum_from_buf(bytes);
-        }
+            bytes.as_slice().to_vec().into_boxed_slice()
+        };
+        dvalue = Datum::from_usize(copy.as_ptr() as usize);
+        astate.byref_storage.push(copy);
     }
 
     astate.dvalues.push(dvalue);
@@ -1559,7 +1564,7 @@ pub fn accum_array_result_any<'mcx>(
     econtext: EcxtId,
     ctx: ArrayBuildCtx,
     astate: ArrayBuildStateAnyHandle<'mcx>,
-    dvalue: Datum,
+    dvalue: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     disnull: bool,
     input_type: Oid,
 ) -> PgResult<ArrayBuildStateAnyHandle<'mcx>> {
@@ -1574,15 +1579,53 @@ pub fn accum_array_result_any<'mcx>(
         }
     };
 
+    // Lower the canonical value to the bare pointer-word the inner accumulator
+    // path reads. For a by-reference value this materializes a transient image
+    // in `mcx`; the accumulator immediately deep-copies it into its own
+    // `byref_storage`, so we hold the transient only across the accumulate call
+    // and let it drop afterward (uncharging `mcx`) — never leaking it into the
+    // caller's (per-tuple) context. (`lower_datum_to_word`'s leak is fine for
+    // its other callers, which want the pointer to outlive the call.)
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    let mut held: Option<PgVec<'mcx, u8>> = None;
+    let dword: Datum = if disnull {
+        Datum::from_usize(0)
+    } else {
+        match &dvalue {
+            TDatum::ByVal(w) => Datum::from_usize(*w),
+            TDatum::ByRef(_) | TDatum::Cstring(_) => {
+                let buf = slice_to_pgvec(mcx, dvalue.as_ref_bytes())?;
+                let ptr = buf.as_ptr() as usize;
+                held = Some(buf);
+                Datum::from_usize(ptr)
+            }
+            TDatum::Composite(_) | TDatum::Expanded(_) => {
+                let buf = slice_to_pgvec(mcx, &dvalue.as_varlena_bytes())?;
+                let ptr = buf.as_ptr() as usize;
+                held = Some(buf);
+                Datum::from_usize(ptr)
+            }
+            TDatum::Internal(_) => {
+                return Err(PgError::error(
+                    "cannot accumulate an internal pseudo-type value into an array",
+                )
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR))
+            }
+        }
+    };
+
     if boxed.scalarstate.is_some() {
         let scalar = boxed.scalarstate.take().unwrap();
-        let scalar = accum_array_result(mcx, Some(scalar), dvalue, disnull, input_type)?;
+        let scalar = accum_array_result(mcx, Some(scalar), dword, disnull, input_type)?;
         boxed.scalarstate = Some(scalar);
     } else {
         let arr = boxed.arraystate.take();
-        let arr = accum_array_result_arr(mcx, arr, dvalue, disnull, input_type)?;
+        let arr = accum_array_result_arr(mcx, arr, dword, disnull, input_type)?;
         boxed.arraystate = Some(arr);
     }
+
+    // Transient lowered image (if any) is reclaimed here, uncharging `mcx`.
+    drop(held);
 
     Ok(Some(boxed))
 }
@@ -1594,26 +1637,56 @@ pub fn make_array_result_any<'mcx>(
     ctx: ArrayBuildCtx,
     astate: ArrayBuildStateAnyHandle<'mcx>,
 ) -> PgResult<Datum> {
-    let mcx = resolve_ctx(estate, econtext, ctx);
-    let astate = astate.expect("makeArrayResultAny: astate must not be NULL");
-
-    let result: PgVec<'mcx, u8> = if let Some(scalar) = astate.scalarstate.as_ref() {
-        // Must use makeMdArrayResult to support the "release" parameter.
-        let ndims = if scalar.nelems > 0 { 1 } else { 0 };
-        let dims = [scalar.nelems];
-        let lbs = [1];
-        make_md_array_result(mcx, scalar, ndims, &dims, &lbs)?
-    } else {
-        let arr = astate.arraystate.as_ref().expect("arraystate or scalarstate");
-        make_array_result_arr(mcx, arr)?
-    };
-
+    let result = make_array_result_any_bytes(estate, econtext, ctx, astate)?;
     // PointerGetDatum(result): the carried Datum is the buffer's pointer word.
     Ok(datum_from_buf(result))
 }
 
+/// `makeArrayResultAny(astate, ctx, true)` body — the array varlena bytes,
+/// shared by the bare-word [`make_array_result_any`] and the unified-value
+/// [`make_array_result_any_v`] seams.
+fn make_array_result_any_bytes<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    econtext: EcxtId,
+    ctx: ArrayBuildCtx,
+    astate: ArrayBuildStateAnyHandle<'mcx>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mcx = resolve_ctx(estate, econtext, ctx);
+    let astate = astate.expect("makeArrayResultAny: astate must not be NULL");
+
+    if let Some(scalar) = astate.scalarstate.as_ref() {
+        // Must use makeMdArrayResult to support the "release" parameter.
+        let ndims = if scalar.nelems > 0 { 1 } else { 0 };
+        let dims = [scalar.nelems];
+        let lbs = [1];
+        make_md_array_result(mcx, scalar, ndims, &dims, &lbs)
+    } else {
+        let arr = astate.arraystate.as_ref().expect("arraystate or scalarstate");
+        make_array_result_arr(mcx, arr)
+    }
+}
+
+/// Seam `make_array_result_any_v` — `makeArrayResultAny` over the unified value
+/// type. An array varlena is always pass-by-reference, so the result is a
+/// [`types_tuple::Datum::ByRef`] carrying the built ArrayType bytes — the
+/// faithful form for `ARRAY(SELECT ...)` results that flow on into a by-ref
+/// fmgr lane (e.g. `array_sort`, array equality), where a bare pointer word
+/// would arrive with no by-ref-lane payload.
+pub fn make_array_result_any_v<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    econtext: EcxtId,
+    ctx: ArrayBuildCtx,
+    astate: ArrayBuildStateAnyHandle<'mcx>,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    let result = make_array_result_any_bytes(estate, econtext, ctx, astate)?;
+    Ok(TDatum::ByRef(result))
+}
+
 /// Seam `pfree_array_datum` — free a previously built array `Datum`.
-pub fn pfree_array_datum(curarray: Datum) {
+pub fn pfree_array_datum(
+    curarray: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+) {
     // pfree(DatumGetPointer(node->curArray)) guarded by != PointerGetDatum(NULL).
     // In the owned model the array buffer lives in its owning MemoryContext and
     // is reclaimed on context reset/delete; an explicit pfree of a non-null
@@ -1630,6 +1703,20 @@ pub fn construct_array_builtin<'mcx>(
     let (elmlen, elmbyval, elmalign) = construct_builtin_meta(elmtype)?;
     let buf = construct_array(mcx, elems, elmtype, elmlen, elmbyval, elmalign)?;
     Ok(datum_from_buf(buf))
+}
+
+/// Seam `construct_array_builtin_v` — `construct_array_builtin` over the unified
+/// value type. The array varlena is pass-by-reference, so its raw bytes are
+/// carried as a [`types_tuple::Datum::ByRef`] (no bare pointer word).
+pub fn construct_array_builtin_v<'mcx>(
+    mcx: Mcx<'mcx>,
+    elems: &[Datum],
+    elmtype: Oid,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    let (elmlen, elmbyval, elmalign) = construct_builtin_meta(elmtype)?;
+    let buf = construct_array(mcx, elems, elmtype, elmlen, elmbyval, elmalign)?;
+    Ok(TDatum::ByRef(buf))
 }
 
 /// Seam `construct_array_expr` — `ExecEvalArrayExpr`'s array fabrication
@@ -2475,6 +2562,18 @@ pub fn deconstruct_text_array<'mcx>(
     mcx: Mcx<'mcx>,
     array: &[u8],
 ) -> PgResult<PgVec<'mcx, PgString<'mcx>>> {
+    // C: deconstruct_array_builtin(DatumGetArrayTypeP(array), TEXTOID, ...).
+    // `DatumGetArrayTypeP` is `PG_DETOAST_DATUM`: it un-packs a short (1-byte)
+    // varlena header and inlines/decompresses a toasted datum so the
+    // fixed-offset `ArrayType` header fields (ndim/dataoffset/elemtype at
+    // offsets 4/8/12) read correctly. On-disk reloptions (`pg_class.reloptions`,
+    // a `text[]`) come back from `fastgetattr` still SHORT-header packed, so the
+    // un-detoasted bytes mis-read `ARR_ELEMTYPE` (e.g. 256 instead of TEXTOID).
+    // Detoast first, matching the C caller's `DatumGetArrayTypeP` (no-op on an
+    // already-plain 4-byte-header array, e.g. when called from
+    // `decode_text_array_to_strings`).
+    let arr = detoast_seam::detoast_attr::call(mcx, array)?;
+
     let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(foundation::TEXTOID)?;
     // Use the value-lane element walk: it materializes each by-reference text
     // element's verbatim varlena bytes as a `Datum::ByRef`. (The bare
@@ -2483,7 +2582,7 @@ pub fn deconstruct_text_array<'mcx>(
     // varlena image segfaults.)
     let pairs = deconstruct_array_values(
         mcx,
-        array,
+        &arr,
         foundation::TEXTOID,
         elmlen,
         elmbyval,
@@ -2604,6 +2703,33 @@ pub fn construct_text_array<'mcx>(mcx: Mcx<'mcx>, elems: &[&str]) -> PgResult<Da
     let astate = astate.expect("non-empty input builds a state");
     let buf = make_array_result(mcx, &astate)?;
     Ok(datum_from_buf(buf))
+}
+
+/// Seam `construct_text_array_bytes` — `accumArrayResult`/`makeArrayResult`
+/// over `TEXTOID`, returning the flat array varlena byte image (the bytes a
+/// `ByRef`/`RefPayload::Varlena` carries) rather than a bare pointer word. An
+/// empty input yields `construct_empty_array(TEXTOID)` (matching C's
+/// `optionListToArray` "pass a null options list as an empty array").
+pub fn construct_text_array_bytes_str<'mcx>(
+    mcx: Mcx<'mcx>,
+    elems: &[&str],
+) -> PgResult<PgVec<'mcx, u8>> {
+    if elems.is_empty() {
+        return construct_empty_array(mcx, foundation::TEXTOID);
+    }
+    let mut astate: Option<ArrayBuildState> = None;
+    for s in elems {
+        let d = cstring_to_text_datum(mcx, s)?;
+        astate = Some(accum_array_result(
+            mcx,
+            astate.take(),
+            d,
+            false,
+            foundation::TEXTOID,
+        )?);
+    }
+    let astate = astate.expect("non-empty input builds a state");
+    make_array_result(mcx, &astate)
 }
 
 /// Seam `text_array_out` — `accumArrayResult`/`makeArrayResult` over `TEXTOID`
@@ -3163,6 +3289,63 @@ pub fn deconstruct_text_array_with_ndim_bytes(
         }
     }
     Ok((ndim, out))
+}
+
+/// Like [`deconstruct_text_array_with_ndim_bytes`] but also returns the full
+/// `ARR_DIMS(arr)` vector (the per-dimension extents), for `jsonb_object`'s
+/// `ARR_DIMS(in_array)[0]` (even-element) / `ARR_DIMS(in_array)[1]` (two-column)
+/// `ndims`-dependent shape checks. The element walk is identical; only the dims
+/// vector is additionally captured (copied to an owned `Vec<i32>`).
+pub fn deconstruct_text_array_with_dims_bytes(
+    arr: &[u8],
+) -> PgResult<(i32, alloc::vec::Vec<i32>, alloc::vec::Vec<ArrayElem>)> {
+    let cx = mcx::MemoryContext::new("jsonb deconstruct_text_array_with_dims");
+    let mcx = cx.mcx();
+
+    // DatumGetArrayTypeP(arr) — detoast the array varlena image.
+    let array = detoast_seam::detoast_attr::call(mcx, arr)?;
+
+    let ndim = foundation::arr_ndim(&array);
+    let dims_v = foundation::arr_dims(mcx, &array)?;
+    let dims_owned: alloc::vec::Vec<i32> = dims_v.iter().copied().collect();
+    let nelems = arrayutils_seam::array_get_n_items::call(ndim, &dims_v)?;
+
+    let mut out: alloc::vec::Vec<ArrayElem> = alloc::vec::Vec::with_capacity(nelems as usize);
+
+    // p = ARR_DATA_PTR(array); bitmap = ARR_NULLBITMAP(array); bitmask = 1.
+    // (TEXT: typlen == -1, typbyval == false, typalign == 'i'.)
+    let mut p = foundation::arr_data_ptr_off(&array);
+    let bitmap = foundation::arr_nullbitmap_off(&array);
+    let mut bitmap_byte = bitmap;
+    let mut bitmask: i32 = 1;
+
+    for _ in 0..nelems {
+        let is_null_here = match bitmap_byte {
+            Some(b) => (array[b] as i32 & bitmask) == 0,
+            None => false,
+        };
+        if is_null_here {
+            out.push(ArrayElem { value: alloc::vec::Vec::new(), is_null: true });
+        } else {
+            let (data_off, data_len) = text_element_payload_span(&array, p)?;
+            let payload = array.get(data_off..data_off + data_len).ok_or_else(|| {
+                PgError::error("malformed array (truncated element data)")
+                    .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+            })?;
+            out.push(ArrayElem { value: payload.to_vec(), is_null: false });
+            p = foundation::att_addlength_pointer(p, -1, &array, p);
+            p = foundation::att_align_nominal(p, TYPALIGN_INT);
+        }
+
+        if let Some(b) = bitmap_byte.as_mut() {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                *b += 1;
+                bitmask = 1;
+            }
+        }
+    }
+    Ok((ndim, dims_owned, out))
 }
 
 /// Seam `deconstruct_char_array` — `deconstruct_array_builtin(weights, CHAROID,

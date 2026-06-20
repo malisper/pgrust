@@ -1145,11 +1145,13 @@ fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubLin
     let sub_link_type = sublink_type_from(read_enum_field()?);
     let sub_link_id = read_int_field()?;
     let testexpr = read_opt_box_expr(mcx)?;
-    // operName — a `List *` of String, NIL post-analysis. Consume the `<>`.
-    let _opername = {
-        let _label = next_token()?;
-        next_token()? // value (the `<>`)
-    };
+    // operName — a `List *` of String (the ALL/ANY/ROWCOMPARE operator name, e.g.
+    // `("=")`). It SURVIVES parse-analysis, so stored `_RETURN` rules embed a
+    // non-NIL list here; reading only one token (assuming `<>`) misaligns the
+    // shared cursor on `("=")` and surfaces as "unexpected right parenthesis".
+    // `read_string_list_field` consumes `<>` (→ empty Vec) or `(...)` (incl. its
+    // closing `)`), mirroring C's `READ_NODE_FIELD(operName)`.
+    let oper_name = read_string_list_field()?;
     // subselect — the embedded Query. The core `node_read` reconstructs the
     // framed `{QUERY ...}` child into an mcx-owned `Node::Query`; box it and
     // re-erase the lifetime parameter to the lifetime-free `Expr` tree's
@@ -1177,6 +1179,7 @@ fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubLin
         subLinkType: sub_link_type,
         subLinkId: sub_link_id,
         testexpr,
+        operName: oper_name,
         subselect,
         location,
     })
@@ -1287,8 +1290,15 @@ fn read_aggref<'mcx>(mcx: Mcx<'mcx>) -> PgResult<pn::Aggref> {
     let aggstar = read_bool_field()?;
     let aggvariadic = read_bool_field()?;
     let aggkind = crate::read_char_field()? as i8;
+    // PG18 `_outAggref` writes aggpresorted/aggno/aggtransno (they are NOT
+    // read_write_ignore — outfuncs.funcs.c:154,157,158). Reading them in struct
+    // order keeps the shared cursor aligned; omitting them left `:aggno -1
+    // :aggtransno -1` unconsumed → "did not find '}'" on stored agg view rules.
+    let aggpresorted = read_bool_field()?;
     let agglevelsup = read_uint_field()?;
     let aggsplit = read_enum_field()?;
+    let aggno = read_int_field()?;
+    let aggtransno = read_int_field()?;
     let location = read_location_field()?;
     Ok(pn::Aggref {
         aggfnoid,
@@ -1305,11 +1315,11 @@ fn read_aggref<'mcx>(mcx: Mcx<'mcx>) -> PgResult<pn::Aggref> {
         aggstar,
         aggvariadic,
         aggkind,
-        aggpresorted: false,
+        aggpresorted,
         agglevelsup,
         aggsplit,
-        aggno: 0,
-        aggtransno: 0,
+        aggno,
+        aggtransno,
         location,
     })
 }
@@ -1589,6 +1599,10 @@ mod tests {
             subLinkType: types_nodes::primnodes::SubLinkType::Any,
             subLinkId: 3,
             testexpr: Some(std::boxed::Box::new(Expr::Var(mk_var()?))),
+            // ANY sublink carries an operName like `("=")`; it must survive the
+            // out/read round-trip (the bug this exercises: the reader formerly
+            // consumed only the `<>` token, misaligning on the real `("=")` list).
+            operName: std::vec![std::string::String::from("=")],
             subselect,
             location: -1,
         });
@@ -1605,6 +1619,8 @@ mod tests {
             Some(Expr::SubLink(s)) => {
                 assert_eq!(s.subLinkId, 3);
                 assert!(s.subselect.is_some(), "subselect lost in round-trip");
+                assert_eq!(s.operName, std::vec![std::string::String::from("=")],
+                    "operName lost/garbled in round-trip");
             }
             _ => panic!("expected SubLink, got {tag:?}"),
         }
@@ -1680,3 +1696,4 @@ mod tests {
         let _ = mk_var()?; // keep helper referenced
     }
 }
+

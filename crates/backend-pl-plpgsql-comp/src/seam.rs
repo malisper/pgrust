@@ -160,22 +160,85 @@ pub fn format_type_be(type_oid: Oid) -> String {
 // work is the gate, not this crate's logic).
 // ---------------------------------------------------------------------------
 
-/// `lookup_type_cache(typoid, flags)` for a composite type's tupdesc identity —
-/// the typcache owner's composite-tupdesc projection is not yet reachable from
-/// the compile path.
-pub fn composite_tupdesc_id(_typoid: Oid) -> ! {
-    panic!(
-        "plpgsql compile: lookup_type_cache(TYPECACHE_TUPDESC) for a named \
-         composite type is not reachable (typcache composite-tupdesc owner unwired)"
+/// `lookup_type_cache(typoid, TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO)`
+/// (chaining to the domain base for a domain-over-composite) for a named
+/// composite type's tupdesc identity — the typcache entry handle and the current
+/// `tupDesc_identifier` recorded in `PLpgSQL_type` so the exec layer can detect
+/// tupdesc changes (including drops). When the type is not composite the
+/// resolved `tupDesc` is `None`, which C turns into
+/// `ERRCODE_WRONG_OBJECT_TYPE` ("type %s is not composite").
+pub fn composite_tupdesc_id(typoid: Oid) -> (Option<types_plpgsql::TypeCacheEntry>, u64) {
+    // The seam clones the composite tupdesc into the supplied context; build a
+    // throwaway one (we only read the scalar identifier + the not-composite flag).
+    let ctx = mcx::MemoryContext::new("plpgsql composite_tupdesc_id");
+    let mcx = ctx.mcx();
+    let view = backend_utils_cache_typcache_seams::lookup_type_cache_expanded_record::call(
+        mcx, typoid,
+    )
+    .expect("lookup_type_cache(TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO) for a named composite type");
+    if view.tup_desc.is_none() {
+        panic!(
+            "type {} is not composite (SQLSTATE 42809)",
+            format_type_be(typoid)
+        );
+    }
+    // typ->tcache is a TypeCacheEntry* handle in C; the exec layer keys it by
+    // type OID for revalidation. typ->tupdesc_id mirrors tupDesc_identifier.
+    (
+        Some(types_plpgsql::TypeCacheEntry(typoid as u64)),
+        view.tup_desc_identifier,
     )
 }
 
-/// `RangeVarGetRelid` / `RelnameGetRelid` for `%TYPE` / `%ROWTYPE` over a table.
-/// Returns the relation OID in C; the namespace owner is not reachable from the
-/// compile path yet, so this mirror-PG-and-panics (the `%ROWTYPE`/`%TYPE`-over-
-/// a-table feature gates on it).
-pub fn relname_get_relid(_relname: &str) -> Oid {
-    panic!("plpgsql compile: RangeVarGetRelid()/RelnameGetRelid() not reachable (namespace owner unwired for compile)")
+/// `RelnameGetRelid(ident)` — resolve an unqualified table name to its relation
+/// OID for `%ROWTYPE` over a table. `missing_ok = true` returns `InvalidOid` (no
+/// raise) when the relation isn't found, matching C's `plpgsql_parse_wordrowtype`
+/// (which then throws its own traditional "relation does not exist" message).
+pub fn relname_get_relid(relname: &str) -> types_error::PgResult<Oid> {
+    qualified_relname_get_relid(&[relname], true)
+}
+
+/// `RangeVarGetRelid(makeRangeVarFromNameList(idents), NoLock, missing_ok)` — the
+/// (possibly-qualified) name resolution used by the `%TYPE` / `%ROWTYPE` paths.
+/// `%TYPE` over a column uses `missing_ok = false` (the relation must exist; C
+/// `plpgsql_parse_cwordtype` calls `RangeVarGetRelid(.., false)`); the
+/// `%ROWTYPE` paths pass `missing_ok = true` and check the OID themselves.
+pub fn qualified_relname_get_relid(
+    idents: &[&str],
+    missing_ok: bool,
+) -> types_error::PgResult<Oid> {
+    // Avoid memory leaks in the long-term function context — C does the lookup
+    // in plpgsql_compile_tmp_cxt. The RangeVar and any transient catalog copies
+    // live in this throwaway context.
+    let ctx = mcx::MemoryContext::new("plpgsql relname_get_relid");
+    let mcx = ctx.mcx();
+    let relvar = backend_catalog_namespace_seams::make_range_var_from_name_list::call(idents)?;
+    // NoLock (== 0): can't lock — we might not have privileges. (LOCKMODE = i32.)
+    const NO_LOCK: i32 = 0;
+    backend_catalog_namespace_seams::range_var_get_relid::call(mcx, &relvar, NO_LOCK, missing_ok)
+}
+
+/// `(SearchSysCacheAttName + build_datatype)` for a `tablename.colname%TYPE`
+/// reference: resolve the column's `(atttypid, atttypmod, attcollation)` and
+/// build the compiler type from it. A missing column raises
+/// `ERRCODE_UNDEFINED_COLUMN`, matching C's `plpgsql_parse_cwordtype`.
+pub fn column_atttype(
+    class_oid: Oid,
+    relname: &str,
+    fldname: &str,
+) -> types_error::PgResult<Box<types_plpgsql::PLpgSQL_type>> {
+    use backend_utils_cache_lsyscache_seams as lsyscache;
+    let attnum = lsyscache::get_attnum::call(class_oid, fldname)?;
+    if attnum == 0 {
+        // InvalidAttrNumber — no such column.
+        return Err(types_error::PgError::error(format!(
+            "column \"{fldname}\" of relation \"{relname}\" does not exist"
+        ))
+        .with_sqlstate(crate::ERRCODE_UNDEFINED_COLUMN));
+    }
+    let (typid, typmod, collid) = lsyscache::get_atttypetypmodcoll::call(class_oid, attnum)?;
+    // build_datatype(typetup, atttypmod, attcollation, NULL) — found-by-OID.
+    Ok(crate::plpgsql_build_datatype_internal(typid, typmod, collid, None))
 }
 
 /// `parse_datatype(string, location)` (pl_gram.y 3844) — the plpgsql-mode raw

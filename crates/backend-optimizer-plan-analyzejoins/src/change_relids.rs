@@ -59,11 +59,14 @@ pub(crate) fn change_relids_in_node<'mcx>(
     id: NodeId,
     ctx: ReplaceRelidContext,
 ) -> types_error::PgResult<()> {
-    // Wrap a clone of the arena Expr as a `Node` so the standalone walker owns a
-    // `&mut Node`, then store the walked result back (mirroring the C in-place
-    // mutation through the `(Node *) rinfo->clause` pointer). The opaque `Node` is
-    // allocated in `mcx`.
-    let mut node = Node::mk_expr(mcx, root.node(id).clone())?;
+    // Move the arena `Expr` out (leaving a cheap leaf placeholder) and wrap it as
+    // a `Node` so the standalone walker owns a `&mut Node`, then store the walked
+    // result back (mirroring the C in-place mutation through the
+    // `(Node *) rinfo->clause` pointer). Taking the value by `mem::replace`
+    // avoids a derived `Expr::clone`, which would panic on a context-allocated
+    // child (Aggref/SubLink/SubPlan). The opaque `Node` is allocated in `mcx`.
+    let taken = core::mem::replace(root.node_mut(id), Expr::Var(Default::default()));
+    let mut node = Node::mk_expr(mcx, taken)?;
     ChangeVarNodes(&mut node, ctx.rt_index, ctx.new_index, 0, mcx);
     // ChangeVarNodes never changes the top-level node kind for an Expr input.
     let walked = node

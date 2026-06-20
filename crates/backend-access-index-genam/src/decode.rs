@@ -106,7 +106,7 @@ use types_catalog::pg_statistic_ext::{
     Anum_pg_statistic_ext_oid, Anum_pg_statistic_ext_stxrelid,
 };
 use types_catalog::pg_trigger::{
-    TriggerRelationId, TriggerRelidNameIndexId, Anum_pg_trigger_oid,
+    TriggerOidIndexId, TriggerRelationId, TriggerRelidNameIndexId, Anum_pg_trigger_oid,
     Anum_pg_trigger_tgargs, Anum_pg_trigger_tgattr, Anum_pg_trigger_tgconstraint,
     Anum_pg_trigger_tgconstrindid, Anum_pg_trigger_tgconstrrelid,
     Anum_pg_trigger_tgdeferrable, Anum_pg_trigger_tgenabled,
@@ -917,6 +917,75 @@ fn relcache_scan_pg_trigger(relid: Oid) -> PgResult<Vec<seam::ScannedPgTrigger>>
 }
 
 // ===========================================================================
+// trigger_by_oid — pg_get_triggerdef_worker's by-OID pg_trigger read
+// ===========================================================================
+
+/// `pg_get_triggerdef_worker`'s by-OID `pg_trigger` read (ruleutils.c 899-1163).
+/// C runs `systable_beginscan(tgrel, TriggerOidIndexId, oid = trigid)`; we
+/// mirror that exactly. `Ok(None)` on a scan miss (C: `!HeapTupleIsValid`). The
+/// decoded row is copied into `mcx`.
+fn trigger_by_oid(mcx: Mcx<'_>, trigid: Oid) -> PgResult<Option<seam::TriggerByOid>> {
+    // ScanKeyInit(&skey[0], Anum_pg_trigger_oid, BTEqualStrategyNumber, F_OIDEQ,
+    //             ObjectIdGetDatum(trigid));
+    let skey = [scan_key_init(
+        Anum_pg_trigger_oid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(trigid),
+    )?];
+
+    // tgrel = table_open(TriggerRelationId, AccessShareLock);
+    // tgscan = systable_beginscan(tgrel, TriggerOidIndexId, true, NULL, 1, skey);
+    let relation = table_open(mcx, TriggerRelationId, AccessShareLock)?;
+    let mut scandesc = systable_beginscan(&relation, TriggerOidIndexId, true, None, &skey)?;
+
+    let result = match systable_getnext(mcx, scandesc.desc_mut())? {
+        None => None,
+        Some(ntp) => {
+            let row = heap_deform_tuple(mcx, &ntp.tuple, &relation.rd_att, &ntp.data)?;
+
+            let tgnargs = col(&row, Anum_pg_trigger_tgnargs, "tgnargs")?.as_i16();
+
+            // tgattr is first var-width field (BKI_FORCE_NOT_NULL int2vector).
+            let tgattr =
+                int2vector_elems(col(&row, Anum_pg_trigger_tgattr, "tgattr")?.as_ref_bytes())?;
+
+            // tgargs: bytea of tgnargs NUL-terminated strings. C errors if NULL.
+            let tgargs = if tgnargs > 0 {
+                let image = bytea_col_opt(&row, Anum_pg_trigger_tgargs).ok_or_else(|| {
+                    PgError::error(alloc::format!("tgargs is null for trigger {trigid}"))
+                })?;
+                split_tgargs(vardata_any(&image)?, tgnargs)
+            } else {
+                Vec::new()
+            };
+
+            Some(seam::TriggerByOid {
+                tgrelid: col(&row, Anum_pg_trigger_tgrelid, "tgrelid")?.as_oid(),
+                tgname: name_col(&row, Anum_pg_trigger_tgname, "tgname")?,
+                tgfoid: col(&row, Anum_pg_trigger_tgfoid, "tgfoid")?.as_oid(),
+                tgtype: col(&row, Anum_pg_trigger_tgtype, "tgtype")?.as_i16(),
+                tgconstrrelid: col(&row, Anum_pg_trigger_tgconstrrelid, "tgconstrrelid")?.as_oid(),
+                tgconstraint: col(&row, Anum_pg_trigger_tgconstraint, "tgconstraint")?.as_oid(),
+                tgdeferrable: col(&row, Anum_pg_trigger_tgdeferrable, "tgdeferrable")?.as_bool(),
+                tginitdeferred: col(&row, Anum_pg_trigger_tginitdeferred, "tginitdeferred")?
+                    .as_bool(),
+                tgnargs,
+                tgattr,
+                tgargs,
+                tgqual: text_col_opt(mcx, &row, Anum_pg_trigger_tgqual)?,
+                tgoldtable: name_col_opt(&row, Anum_pg_trigger_tgoldtable),
+                tgnewtable: name_col_opt(&row, Anum_pg_trigger_tgnewtable),
+            })
+        }
+    };
+
+    scandesc.end()?;
+    table_close(relation, AccessShareLock)?;
+    Ok(result)
+}
+
+// ===========================================================================
 // relcache_scan_pg_policy — RelationBuildRowSecurity
 // ===========================================================================
 
@@ -1435,6 +1504,7 @@ pub fn init_decode_seams() {
     seam::rule_by_oid::set(rule_by_oid);
     seam::relcache_scan_pg_statistic_ext::set(relcache_scan_pg_statistic_ext);
     seam::relcache_scan_pg_trigger::set(relcache_scan_pg_trigger);
+    seam::trigger_by_oid::set(trigger_by_oid);
     seam::relcache_scan_pg_policy::set(relcache_scan_pg_policy);
     seam::relcache_scan_pg_constraint_fkeys::set(relcache_scan_pg_constraint_fkeys);
     seam::scan_pg_constraint_truncate_fks::set(scan_pg_constraint_truncate_fks);

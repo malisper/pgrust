@@ -984,9 +984,9 @@ fn fc_timestamp_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 fn fc_timestamptz_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    let s = arg_cstring(fcinfo, 0).to_string();
     let typmod = arg_i32(fcinfo, 2);
-    match crate::timestamp::timestamptz_in(s, typmod) {
+    match crate::timestamp::timestamptz_in_safe(&s, typmod, fcinfo.escontext_mut()) {
         Ok(t) => ret_i64(t),
         Err(e) => raise(e),
     }

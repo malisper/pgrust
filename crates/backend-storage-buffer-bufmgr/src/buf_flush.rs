@@ -221,6 +221,16 @@ impl BufferManager {
             locator: tag_to_rlocator(&tag),
             backend: types_core::primitive::INVALID_PROC_NUMBER,
         };
+        // `FlushBuffer(buf, reln, ...)` (bufmgr.c:4332): when no `reln`
+        // (SMgrRelation) is supplied — the bgwriter/checkpointer flush path
+        // never has one — C does `reln = smgropen(BufTagGetRelFileLocator(&tag),
+        // INVALID_PROC_NUMBER)` before the smgr write. This port's smgr surface
+        // is keyed by `RelFileLocatorBackend` with no threaded handle, so the
+        // SMgrRelation cache entry must already exist in THIS process's
+        // thread-local smgr cache. A bgwriter/checkpointer flushing a relation it
+        // has not itself opened would otherwise reach the md layer with no entry
+        // ("md operation on an unopened SMgrRelation"). `smgropen` is idempotent.
+        smgr::smgropen(backend.locator, backend.backend)?;
         smgr::smgrwrite(backend, tag.forkNum, tag.blockNum, &page, false)?;
 
         // pgBufferUsage.shared_blks_written++ (bufmgr.c:4397).
@@ -960,6 +970,11 @@ impl BufferManager {
                 locator: currlocator,
                 backend: types_core::primitive::INVALID_PROC_NUMBER,
             };
+            // Same `smgropen` discipline as `flush_buffer`: the writeback may run
+            // in a process (bgwriter/checkpointer) whose thread-local smgr cache
+            // has no entry for this relation. C's `IssuePendingWritebacks` goes
+            // through `smgropen`; mirror that (idempotent).
+            smgr::smgropen(backend.locator, backend.backend)?;
             smgr::smgrwriteback(backend, start.forkNum, start.blockNum, nblocks)?;
 
             i += 1;

@@ -21,8 +21,10 @@
 //! entry behind the seam, so the consumer only needs the attribute
 //! contributions (for the bitmap build) and presence acknowledgements.
 
+use mcx::{Mcx, PgVec};
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
+use types_nodes::primnodes::Expr;
 
 /// One index's attribute contributions for `RelationGetIndexAttrBitmap`,
 /// produced by the owner's `index_open` (relation/indexam) + `pull_varattnos`
@@ -45,18 +47,29 @@ pub struct IndexAttrInfo {
 seam_core::seam!(
     /// `RelationGetIndexExpressions(relation)` (relcache.c): `stringToNode` of
     /// the raw `pg_index.indexprs`, `eval_const_expressions`, `fix_opfuncids`,
-    /// then cache the tree into `rd_indexprs` (node + clauses owners).
-    /// Identified by the index relation's OID. Returns once the tree is cached
-    /// on the entry; can `ereport(ERROR)`, carried on `Err`.
-    pub fn index_expressions(index_relid: Oid) -> PgResult<()>
+    /// returning the decoded expression list allocated in `mcx`. The owned
+    /// relcache entry does not retain the `rd_indexprs` memoization, so the tree
+    /// is re-derived per call (faithful behavior, minus the cache). `None` (==
+    /// `NIL`) when the index has no expression columns. Can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn index_expressions<'mcx>(
+        mcx: Mcx<'mcx>,
+        index_relid: Oid,
+    ) -> PgResult<Option<PgVec<'mcx, Expr>>>
 );
 
 seam_core::seam!(
     /// `RelationGetIndexPredicate(relation)` (relcache.c): `stringToNode` of the
     /// raw `pg_index.indpred`, `eval_const_expressions`, `canonicalize_qual`,
-    /// `make_ands_implicit`, `fix_opfuncids`, then cache into `rd_indpred`
-    /// (node + clauses owners). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn index_predicate(index_relid: Oid) -> PgResult<()>
+    /// `make_ands_implicit`, `fix_opfuncids`, returning the implicit-AND
+    /// predicate list allocated in `mcx`. The owned relcache entry does not
+    /// retain the `rd_indpred` memoization, so the tree is re-derived per call.
+    /// `None` (== `NIL`) when the index is not partial. Can `ereport(ERROR)`,
+    /// carried on `Err`.
+    pub fn index_predicate<'mcx>(
+        mcx: Mcx<'mcx>,
+        index_relid: Oid,
+    ) -> PgResult<Option<PgVec<'mcx, Expr>>>
 );
 
 seam_core::seam!(

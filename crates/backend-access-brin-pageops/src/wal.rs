@@ -14,7 +14,11 @@ pub use types_core::primitive::InvalidBlockNumber;
 // brin_xlog.h opcodes (high nibble of the WAL info byte).
 // ===========================================================================
 
-// `XLOG_BRIN_CREATE_INDEX` (0x00) is emitted by `brin.c`, not these two files.
+/// `XLOG_BRIN_CREATE_INDEX` (0x00) — emitted by `brin.c`'s `brinbuild` /
+/// `brinbuildempty` (the build driver, which lives in
+/// `backend-access-brin-insert-vacuum` and drives the metapage creation through
+/// [`crate::brin_create_metapage`] / [`crate::brin_create_empty_metapage`]).
+pub const XLOG_BRIN_CREATE_INDEX: u8 = 0x00;
 pub const XLOG_BRIN_INSERT: u8 = 0x10;
 pub const XLOG_BRIN_UPDATE: u8 = 0x20;
 pub const XLOG_BRIN_SAMEPAGE_UPDATE: u8 = 0x30;

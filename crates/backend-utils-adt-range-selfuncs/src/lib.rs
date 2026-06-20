@@ -32,8 +32,10 @@ use types_selfuncs::{
     STATISTIC_KIND_BOUNDS_HISTOGRAM, STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM,
 };
 
-use backend_utils_adt_rangetypes_seams::{range_cmp_bounds, range_deserialize, range_subdiff};
-use backend_utils_cache_lsyscache_seams::get_attstatsslot;
+use backend_utils_adt_rangetypes_seams::{
+    datum_get_range_type_p_value, range_cmp_bounds, range_deserialize, range_subdiff,
+};
+use backend_utils_cache_lsyscache_seams::{get_attstatsslot, get_attstatsslot_value_datums};
 
 pub mod multirange;
 pub mod range;
@@ -269,10 +271,6 @@ pub(crate) struct HistData<'mcx> {
     /// Range-length histogram values (`DatumGetFloat8`'d), or empty when the
     /// operator does not need it.
     pub length_hist: alloc::vec::Vec<f64>,
-    /// Keeps the bounds-histogram slot's detoasted arrays alive (their `Datum`s
-    /// back `hist_*`'s deserialized bounds); freed on drop (C:
-    /// `free_attstatsslot`).
-    _bounds_slot: AttStatsSlot<'mcx>,
     /// Keeps the length-histogram slot alive while `length_hist` is used.
     _length_slot: Option<AttStatsSlot<'mcx>>,
 }
@@ -313,19 +311,26 @@ pub(crate) fn calc_hist_prologue<'mcx>(
         Some(t) => t,
         None => return Ok(None),
     };
-    let hslot = match get_attstatsslot::call(
+    /*
+     * C: get_attstatsslot(&hslot, statistic_tuple, STATISTIC_KIND_BOUNDS_HISTOGRAM,
+     *                     InvalidOid, ATTSTATSSLOT_VALUES); the slot's value array
+     * elements are serialized `RangeType`s (a by-reference element type), so read
+     * them as value-carrying canonical `Datum::ByRef` images -- the bare-word
+     * `get_attstatsslot` path would yield non-dereferenceable in-buffer offsets
+     * for each by-reference element.
+     */
+    let hist_values = match get_attstatsslot_value_datums::call(
         mcx,
         stats_tuple,
         STATISTIC_KIND_BOUNDS_HISTOGRAM,
         0,
-        ATTSTATSSLOT_VALUES,
     )? {
         Some(s) => s,
         None => return Ok(None),
     };
 
     /* check that it's a histogram, not just a dummy entry */
-    let nhist = hslot.values.len();
+    let nhist = hist_values.len();
     if nhist < 2 {
         return Ok(None);
     }
@@ -339,10 +344,7 @@ pub(crate) fn calc_hist_prologue<'mcx>(
     let mut hist_upper = alloc::vec::Vec::new();
     hist_upper.try_reserve(nhist).map_err(|_| mcx.oom(nhist))?;
     for i in 0..nhist {
-        let range = backend_utils_adt_rangetypes_seams::datum_get_range_type_p::call(
-            mcx,
-            hslot.values[i],
-        )?;
+        let range = datum_get_range_type_p_value::call(mcx, &hist_values[i])?;
         let (lower, upper, empty) = range_deserialize::call(rng_typcache, range)?;
         /* The histogram should not contain any empty ranges */
         if empty {
@@ -383,7 +385,6 @@ pub(crate) fn calc_hist_prologue<'mcx>(
         hist_lower,
         hist_upper,
         length_hist,
-        _bounds_slot: hslot,
         _length_slot: length_slot,
     }))
 }

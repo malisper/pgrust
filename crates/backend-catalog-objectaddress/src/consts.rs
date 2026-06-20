@@ -186,6 +186,10 @@ pub const Anum_pg_database_datdba: i16 = 3;
 pub const Anum_pg_database_datacl: i16 = 18;
 // pg_default_acl
 pub const Anum_pg_default_acl_oid: i16 = 1;
+pub const Anum_pg_default_acl_defaclrole: i16 = 2;
+pub const Anum_pg_default_acl_defaclnamespace: i16 = 3;
+pub const Anum_pg_default_acl_defaclobjtype: i16 = 4;
+pub const Anum_pg_default_acl_defaclacl: i16 = 5;
 // pg_extension
 pub const Anum_pg_extension_oid: i16 = 1;
 pub const Anum_pg_extension_extname: i16 = 2;
@@ -235,6 +239,8 @@ pub const Anum_pg_authid_oid: i16 = 1;
 pub const Anum_pg_authid_rolname: i16 = 2;
 // pg_auth_members
 pub const Anum_pg_auth_members_oid: i16 = 1;
+pub const Anum_pg_auth_members_roleid: i16 = 2;
+pub const Anum_pg_auth_members_member: i16 = 3;
 pub const Anum_pg_auth_members_grantor: i16 = 4;
 // pg_rewrite
 pub const Anum_pg_rewrite_oid: i16 = 1;

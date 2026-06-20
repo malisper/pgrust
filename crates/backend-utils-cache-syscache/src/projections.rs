@@ -3144,6 +3144,99 @@ fn project_proc_row<'mcx>(
     })
 }
 
+/// `pg_get_functiondef`'s `pg_proc` read (ruleutils.c 2926-3170):
+/// `SearchSysCache1(PROCOID, funcid)` + `GETSTRUCT` for the scalar form, plus
+/// the `SysCacheGetAttr*` reads of the by-reference columns the renderer and
+/// `print_function_*` helpers detoast. `Ok(None)` on a cache miss.
+pub(crate) fn search_pg_functiondef_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<Option<types_catalog::pg_proc::PgFunctiondefInfo>> {
+    use types_catalog::pg_proc::ProcFormFields;
+    // Attribute numbers (1-based, pg_proc.h column order). Spelled inline as the
+    // module already carries i32 consts for the form columns project_proc_row
+    // reads; the remaining columns are named here.
+    const A_PROOWNER: i32 = 4;
+    const A_PROLANG: i32 = 5;
+    const A_PROCOST: i32 = 6;
+    const A_PROROWS: i32 = 7;
+    const A_PROSUPPORT: i32 = 9;
+    const A_PROKIND: i32 = 10;
+    const A_PROSECDEF: i32 = 11;
+    const A_PROLEAKPROOF: i32 = 12;
+    const A_PROISSTRICT: i32 = 13;
+    const A_PROVOLATILE: i32 = 15;
+    const A_PROPARALLEL: i32 = 16;
+    const A_PROARGDEFAULTS: i32 = 24;
+    const A_PROTRFTYPES: i32 = 25;
+    const A_PROSRC: i32 = 26;
+    const A_PROBIN: i32 = 27;
+    const A_PROSQLBODY: i32 = 28;
+    const A_PROCONFIG: i32 = 29;
+
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    // GETSTRUCT(proctup) -> the fixed-width scalar columns.
+    let form = ProcFormFields {
+        oid: getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_oid)?,
+        proname: String::from(
+            getattr_name(mcx, PROCOID, &tup, Anum_pg_proc_proname)?.as_str(),
+        ),
+        pronamespace: getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_pronamespace)?,
+        proowner: getattr_oid(mcx, PROCOID, &tup, A_PROOWNER)?,
+        prolang: getattr_oid(mcx, PROCOID, &tup, A_PROLANG)?,
+        procost: getattr_f32(mcx, PROCOID, &tup, A_PROCOST)?,
+        prorows: getattr_f32(mcx, PROCOID, &tup, A_PROROWS)?,
+        provariadic: getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_provariadic)?,
+        prosupport: getattr_oid(mcx, PROCOID, &tup, A_PROSUPPORT)?,
+        prokind: getattr_char(mcx, PROCOID, &tup, A_PROKIND)?,
+        prosecdef: getattr_bool(mcx, PROCOID, &tup, A_PROSECDEF)?,
+        proleakproof: getattr_bool(mcx, PROCOID, &tup, A_PROLEAKPROOF)?,
+        proisstrict: getattr_bool(mcx, PROCOID, &tup, A_PROISSTRICT)?,
+        proretset: getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?,
+        provolatile: getattr_char(mcx, PROCOID, &tup, A_PROVOLATILE)?,
+        proparallel: getattr_char(mcx, PROCOID, &tup, A_PROPARALLEL)?,
+        pronargs: getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)?,
+        pronargdefaults: getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargdefaults)?,
+        prorettype: getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prorettype)?,
+    };
+
+    // proconfig (text[]) — the SET options, decoded to name=value strings.
+    let proconfig = match getattr_text_array(mcx, PROCOID, &tup, A_PROCONFIG)? {
+        Some(a) => Some(a.values.iter().map(|s| String::from(s.as_str())).collect()),
+        None => None,
+    };
+    // prosqlbody / proargdefaults (pg_node_tree) + probin (text) — nullable text.
+    let prosqlbody = getattr_option_text(mcx, PROCOID, &tup, A_PROSQLBODY)?;
+    let probin = getattr_option_text(mcx, PROCOID, &tup, A_PROBIN)?;
+    let proargdefaults = getattr_option_text(mcx, PROCOID, &tup, A_PROARGDEFAULTS)?;
+    // prosrc (text) — SysCacheGetAttrNotNull (always present).
+    let prosrc = {
+        let value = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, A_PROSRC)?;
+        String::from(varlena_seams::text_to_cstring_v::call(mcx, &value)?.as_str())
+    };
+    // protrftypes (oid[]) — the TRANSFORM types.
+    let protrftypes = match getattr_oid_array(mcx, PROCOID, &tup, A_PROTRFTYPES)? {
+        Some(a) => Some(a.values.iter().copied().collect()),
+        None => None,
+    };
+
+    ReleaseSysCache(tup);
+
+    Ok(Some(types_catalog::pg_proc::PgFunctiondefInfo {
+        form,
+        proconfig,
+        prosqlbody,
+        probin,
+        prosrc,
+        proargdefaults,
+        protrftypes,
+    }))
+}
+
 /// `SearchSysCacheList1(PROCNAMEARGSNSP, CStringGetDatum(funcname))` — the
 /// `pg_proc`-by-name catcache list (`FuncnameGetCandidates`, namespace.c). Each
 /// member tuple is projected to a [`ProcRow`] in catlist order, paired with
@@ -4136,6 +4229,28 @@ pub(crate) fn collation_qualified_name<'mcx>(
         None => return Ok(None),
     };
     Ok(Some((nspname, collname)))
+}
+
+/// `SearchSysCache1(CONSTROID, conoid)` + `GETSTRUCT` of the `Form_pg_constraint`
+/// columns `generateClonedIndexStmt` (parse_utilcmd.c) reads when cloning a
+/// constraint-backed index: `condeferrable`, `condeferred`, `contype`, and the
+/// (nullable) `conexclop` operator `oid[]`. `Ok(None)` on a cache miss.
+pub(crate) fn pg_constraint_clone_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    conoid: Oid,
+) -> PgResult<Option<(bool, bool, i8, Option<PgVec<'mcx, Oid>>)>> {
+    let tuple = SearchSysCache1(mcx, CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(conoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+    let condeferrable = getattr_bool(mcx, CONSTROID, &tup, Anum_pg_constraint_condeferrable as i32)?;
+    let condeferred = getattr_bool(mcx, CONSTROID, &tup, Anum_pg_constraint_condeferred as i32)?;
+    let contype = getattr_char(mcx, CONSTROID, &tup, Anum_pg_constraint_contype as i32)?;
+    // conexclop is `oid[]` (a 1-D Oid array), NULL for non-exclusion constraints.
+    let conexclop =
+        getattr_oid_array(mcx, CONSTROID, &tup, Anum_pg_constraint_conexclop as i32)?.map(|arr| arr.values);
+    ReleaseSysCache(tup);
+    Ok(Some((condeferrable, condeferred, contype, conexclop)))
 }
 
 /// `SearchSysCache1(RELOID, relid)` + `GETSTRUCT` of the full `Form_pg_class`

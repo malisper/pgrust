@@ -614,7 +614,9 @@ fn find_dependent_phvs_in_append_rel_list<'mcx>(
             if id == NodeId::default() {
                 continue;
             }
-            let node = Node::mk_expr(mcx, root.node(id).clone())?;
+            // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+            // owned-subtree child.
+            let node = Node::mk_expr(mcx, root.node(id).clone_in(mcx)?)?;
             if find_dependent_phvs_walker(&node, context) {
                 return Ok(true);
             }
@@ -870,7 +872,9 @@ pub(crate) fn fix_append_rel_relids<'mcx>(
     }
     // Second pass: fix PHVs in the translated_vars arena Exprs.
     for id in to_fix {
-        let mut node = Node::mk_expr(mcx, root.node(id).clone())?;
+        // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+        // owned-subtree child.
+        let mut node = Node::mk_expr(mcx, root.node(id).clone_in(mcx)?)?;
         substitute_phv_relids_in_node(mcx, &mut node, varno, subrelids);
         if let Some(e) = node.into_expr() {
             *root.node_mut(id) = e;
@@ -1174,7 +1178,9 @@ fn remove_nulling_relids_in_append_rel_list<'mcx>(
         }
     }
     for id in ids {
-        let mut node = Node::mk_expr(mcx, root.node(id).clone())?;
+        // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
+        // owned-subtree child.
+        let mut node = Node::mk_expr(mcx, root.node(id).clone_in(mcx)?)?;
         backend_rewrite_core::remove_nulling_relids(&mut node, removable, except, mcx);
         if let Some(e) = node.into_expr() {
             *root.node_mut(id) = e;

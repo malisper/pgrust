@@ -1460,6 +1460,15 @@ pub fn init_seams() {
         grant_exec::execute_grant_stmt(mcx, stmt)
     });
 
+    // ExecAlterDefaultPrivilegesStmt: the ALTER DEFAULT PRIVILEGES executor.
+    // Parses the statement and writes/updates a pg_default_acl row per
+    // (role, schema) combination via SetDefaultACL. (`pstate` is only used by
+    // the C body for error-position reporting on the unrecognized-option path,
+    // which we report without a cursor position.)
+    backend_tcop_utility_out_seams::exec_alter_default_privileges_stmt::set(|mcx, _pstate, stmt| {
+        grant_exec::exec_alter_default_privileges_stmt(mcx, stmt)
+    });
+
     // `aclnewowner(...)` + `PointerGetDatum`: the on-disk relacl/objacl owner
     // rewrite the catalog owner-change paths (ATExecChangeOwner & friends) use
     // when the ACL column is non-null.

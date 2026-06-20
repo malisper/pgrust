@@ -225,8 +225,10 @@ pub fn join_is_removable<'mcx>(
         }
         /* Check the contained expression last (a bit expensive). */
         let phexpr_id = root.phinfo(ph_id).ph_var_phexpr;
-        let phexpr = root.node(phexpr_id).clone();
-        let varnos = backend_optimizer_util_joininfo_ext_seams::pull_varnos_expr::call(root, &phexpr);
+        // Borrow the PHV expr (only inspected by pull_varnos_expr); a derived
+        // `.clone()` would panic on a context-allocated child.
+        let phexpr: &Expr = root.node(phexpr_id);
+        let varnos = backend_optimizer_util_joininfo_ext_seams::pull_varnos_expr::call(root, phexpr);
         if relids::overlap(&varnos, &innerrel_relids) {
             return Ok(false); /* contained expression references innerrel */
         }
@@ -421,20 +423,22 @@ pub fn rel_is_distinct_for<'mcx>(
              * Get the equality operator we need uniqueness according to. The
              * caller's mergejoinability test should have selected only OpExprs.
              */
-            let clause_expr = root.node(r.clause).clone();
-            let op = match &clause_expr {
+            // Borrow the clause (only inspected here); a derived `.clone()`
+            // would panic on a context-allocated child.
+            let clause_expr: &Expr = root.node(r.clause);
+            let op = match clause_expr {
                 Expr::OpExpr(op) => op.opno,
                 other => panic!("rel_is_distinct_for: clause is not an OpExpr: {other:?}"),
             };
 
             /* caller identified the inner side for us */
             let outer_is_left = r.outer_is_left;
-            let var = match &clause_expr {
+            let var: Option<&Expr> = match clause_expr {
                 Expr::OpExpr(op) => {
                     if outer_is_left {
-                        op.args.get(1).cloned() /* get_rightop */
+                        op.args.get(1) /* get_rightop */
                     } else {
-                        op.args.first().cloned() /* get_leftop */
+                        op.args.first() /* get_leftop */
                     }
                 }
                 _ => None,
@@ -444,8 +448,8 @@ pub fn rel_is_distinct_for<'mcx>(
              * We may ignore any RelabelType node above the operand (there won't
              * be more than one after eval_const_expressions).
              */
-            let var = match var {
-                Some(Expr::RelabelType(rt)) => rt.arg.map(|b| *b),
+            let var: Option<&Expr> = match var {
+                Some(Expr::RelabelType(rt)) => rt.arg.as_deref(),
                 other => other,
             };
 

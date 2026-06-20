@@ -44,6 +44,7 @@
 pub mod execProcnode_init;
 pub mod execProcnode_run_end;
 mod cte_seams;
+mod lockrows_seams;
 
 /// Install every seam this unit owns that corresponds to an `execProcnode.c`
 /// function.
@@ -78,4 +79,10 @@ pub fn init_seams() {
     // subplan via `exec_proc_node`, so it installs the owned-model bodies here
     // (the shared per-CTE store lives in `EState.es_cte_shared`).
     cte_seams::init_seams();
+
+    // The LockRows (FOR UPDATE/SHARE) node seams: this dispatch crate owns the
+    // ExecInitLockRows/ExecProcNode call sites and the execTuples/execUtils/
+    // tableam substrate the node reaches, so it installs the node's 24 seams
+    // here (the EvalPlanQual recheck leg loud-errors — see lockrows_seams.rs).
+    lockrows_seams::init_seams();
 }

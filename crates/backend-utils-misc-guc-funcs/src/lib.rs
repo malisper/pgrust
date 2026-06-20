@@ -1027,6 +1027,23 @@ pub fn init_seams() {
     backend_utils_misc_guc_seams::set_pg_variable_session_authorization_reset::set(|| {
         SetPGVariable("session_authorization", None, false)
     });
+    // `GetConfigOptionFlags(name, missing_ok)` (guc.c) — the GUC flag word, for
+    // pg_get_functiondef's proconfig `GUC_LIST_QUOTE` detection. A missing var
+    // under `missing_ok` yields 0 (the C default); the caller passes true.
+    backend_utils_misc_guc_funcs_seams::get_config_option_flags::set(|name, missing_ok| {
+        match find_option_flags(&name) {
+            Some(f) => Ok(f),
+            None => {
+                if missing_ok {
+                    Ok(0)
+                } else {
+                    Err(types_error::PgError::error(format!(
+                        "unrecognized configuration parameter \"{name}\""
+                    )))
+                }
+            }
+        }
+    });
     // `SetPGVariable(name, list_make1(item->arg), true)` — the BEGIN /
     // START TRANSACTION transaction-characteristics options
     // (transaction_isolation / transaction_read_only / transaction_deferrable;

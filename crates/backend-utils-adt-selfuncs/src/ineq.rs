@@ -612,22 +612,64 @@ pub(crate) fn scalarineqsel<'mcx>(
                 if var.varattno == SELF_ITEM_POINTER_ATTRIBUTE_NUMBER {
                     if let Some(relid) = vardata.rel {
                         let rel = root.rel(relid);
-                        // If the relation's empty, include all of it.
+                        // If the relation's empty, we're going to include all of
+                        // it. (Mostly to avoid divide-by-zero below.)
                         if rel.pages == 0 {
                             return Ok(1.0);
                         }
 
-                        // A TID Datum word is an ItemPointer; the block number /
-                        // offset extraction is part of the unported tid.c
-                        // ItemPointer decode over the raw constval word.
-                        let _ = constval;
-                        panic!(
-                            "selfuncs: scalarineqsel CTID density estimate is unported — it \
-                             decodes the constval word as an ItemPointer \
-                             (ItemPointerGetBlockNumberNoCheck / \
-                             ItemPointerGetOffsetNumberNoCheck), which the planner-stats path \
-                             cannot reach yet"
-                        );
+                        // itemptr = (ItemPointer) DatumGetPointer(constval);
+                        // The TID Datum crosses by reference as the verbatim
+                        // 6-byte ItemPointerData image (BlockIdData{bi_hi, bi_lo}
+                        // + uint16 ip_posid), exactly as tid.c's
+                        // return_itempointer writes it.
+                        let image = constval.as_ref_bytes();
+                        let bi_hi = u16::from_ne_bytes([image[0], image[1]]);
+                        let bi_lo = u16::from_ne_bytes([image[2], image[3]]);
+                        let off = u16::from_ne_bytes([image[4], image[5]]);
+                        // ItemPointerGetBlockNumberNoCheck(itemptr)
+                        let mut block = (((bi_hi as u32) << 16) | bi_lo as u32) as f64;
+                        // ItemPointerGetOffsetNumberNoCheck(itemptr)
+                        let offset = off as f64;
+
+                        let pages = rel.pages as f64;
+                        let tuples = rel.tuples;
+
+                        // Determine the average number of tuples per page
+                        // (density). The last page is, on average, half full, so
+                        // give it half weight.
+                        let mut density = tuples / (pages - 0.5);
+
+                        // If target is the last page, use half the density.
+                        if block >= pages - 1.0 {
+                            density *= 0.5;
+                        }
+
+                        // Use the density to estimate how far into the page the
+                        // itemptr is likely to be, and add that fraction of a
+                        // whole block (never more than a whole block).
+                        if density > 0.0 {
+                            block += (offset / density).min(1.0);
+                        }
+
+                        // Convert relative block number to selectivity; again the
+                        // last page has only half weight.
+                        let mut selec = block / (pages - 0.5);
+
+                        // The calculation so far gave us a selectivity for "<=".
+                        // We'll have one fewer tuple for "<" and one additional
+                        // for ">=" (the latter reversed below), so subtract one
+                        // tuple in both cases; identified by iseq == isgt.
+                        if iseq == isgt && tuples >= 1.0 {
+                            selec -= 1.0 / tuples;
+                        }
+
+                        // Reverse the selectivity for the ">", ">=" cases.
+                        if isgt {
+                            selec = 1.0 - selec;
+                        }
+
+                        return Ok(clamp_probability(selec));
                     }
                 }
             }

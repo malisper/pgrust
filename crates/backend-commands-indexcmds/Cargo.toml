@@ -22,6 +22,7 @@ types-tuple = { path = "../types-tuple" }
 types-tableam = { path = "../types-tableam" }
 types-catalog = { path = "../types-catalog" }
 types-scan = { path = "../types-scan" }
+types-hash = { path = "../types-hash" }
 types-storage = { path = "../types-storage" }
 types-acl = { path = "../types-acl" }
 types-pgstat = { path = "../types-pgstat" }
@@ -35,6 +36,8 @@ backend-nodes-core = { path = "../backend-nodes-core" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-index = { path = "../backend-catalog-index" }
 backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
+backend-partitioning-partdesc = { path = "../backend-partitioning-partdesc" }
+backend-access-common-next = { path = "../backend-access-common-next" }
 backend-access-index-amapi = { path = "../backend-access-index-amapi" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
@@ -54,7 +57,16 @@ backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-commands-indexcmds-seams = { path = "../backend-commands-indexcmds-seams" }
 
 # Seams consumed from other units.
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+types-cluster = { path = "../types-cluster" }
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
@@ -69,4 +81,8 @@ backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-catalog-pg-inherits-seams = { path = "../backend-catalog-pg-inherits-seams" }
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
+backend-utils-cache-partcache-seams = { path = "../backend-utils-cache-partcache-seams" }
+backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
+backend-parser-parse-utilcmd-seams = { path = "../backend-parser-parse-utilcmd-seams" }
 backend-utils-activity-small = { path = "../backend-utils-activity-small" }

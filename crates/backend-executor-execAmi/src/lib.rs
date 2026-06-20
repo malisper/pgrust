@@ -346,6 +346,10 @@ pub fn exec_re_scan<'mcx>(
             PlanStateNode::SetOp(m) => nodeSetOp::ExecReScanSetOp(m, estate)?,
             // case T_LimitState: ExecReScanLimit((LimitState *) node);
             PlanStateNode::Limit(m) => nodeLimit::ExecReScanLimit(m, estate)?,
+            // case T_LockRowsState: ExecReScanLockRows((LockRowsState *) node);
+            PlanStateNode::LockRows(m) => {
+                backend_executor_nodeLockRows::ExecReScanLockRows(m, estate)?
+            }
 
             // case T_TidRangeScanState: ExecReScanTidRangeScan((TidRangeScanState *) node);
             PlanStateNode::TidRangeScan(m) => {
@@ -353,7 +357,7 @@ pub fn exec_re_scan<'mcx>(
             }
 
             // The remaining C arms (T_SampleScanState/
-            // T_AggState/T_LockRowsState) operate on node-state variants not yet
+            // T_AggState) operate on node-state variants not yet
             // present in PlanStateNode, so their tags cannot occur. C default:
             //   elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
             other => return Err(unrecognized_node_type(other.tag())),
@@ -606,8 +610,8 @@ pub fn exec_supports_backward_scan(node: Option<&Node<'_>>) -> PgResult<bool> {
         }
 
         // case T_Limit: return ExecSupportsBackwardScan(outerPlan(node));
-        // (T_LockRows has no Node variant yet; T_IncrementalSort/T_SampleScan
-        // return false in C, the wildcard default below covers them.)
+        // (T_LockRows/T_IncrementalSort/T_SampleScan return false in C, the
+        // wildcard default below covers them.)
         ntag::T_Limit => {
             exec_supports_backward_scan(node.plan_head().lefttree.as_deref())
         }

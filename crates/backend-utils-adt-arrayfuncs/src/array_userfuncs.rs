@@ -859,7 +859,16 @@ fn array_sort_internal<'mcx>(
             if !found {
                 break;
             }
-            values.push(value);
+            // C `array_sort_internal` passes `copy=false`, so `value` is only a
+            // borrowed pointer into the tuplesort's own `sortcontext` (freed by
+            // the `tuplesort_end` below); C immediately hands it to
+            // `accumArrayResultAny`, which `datumCopy`s the by-reference element
+            // into the longer-lived result context before the free. The owned
+            // model accumulates into `values` here, so re-home each element into
+            // the caller's `mcx` now — otherwise a by-reference element keeps the
+            // sortcontext allocator and dropping `values` after `tuplesort_end`
+            // deallocates through the already-destroyed context (use-after-free).
+            values.push(value.clone_in(mcx)?);
             nulls.push(isnull);
         }
         tuplesort::tuplesort_end::call(mcx::alloc_in(mcx, tss)?)?;

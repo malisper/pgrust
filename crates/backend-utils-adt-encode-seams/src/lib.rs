@@ -13,7 +13,7 @@
 //! current memory context).
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 
 seam_core::seam!(
     /// `hex_encode(const char *src, size_t len, char *dst)` (encode.c:181) —
@@ -27,10 +27,19 @@ seam_core::seam!(
     /// `hex_decode_safe(const char *src, size_t len, char *dst, Node *escontext)`
     /// (encode.c:217) — decode hex text `src` into raw bytes, skipping ASCII
     /// whitespace between byte pairs. The returned buffer holds the decoded
-    /// bytes, charged to `mcx`. `Err` carries the
-    /// `ERRCODE_INVALID_TEXT_REPRESENTATION` ereport for an invalid hex digit
-    /// or a dangling nibble (C raises it through `escontext`; the Datum
-    /// boundary maps `Err` back onto the soft-error path when `escontext` is
-    /// set).
-    pub fn hex_decode_safe<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>>
+    /// bytes, charged to `mcx`.
+    ///
+    /// `soft` mirrors C's `escontext != NULL`. The recoverable
+    /// `ERRCODE_INVALID_PARAMETER_VALUE` failures (an invalid hex digit or a
+    /// dangling nibble — C's `ereturn(escontext, ...)`) cross as the **inner**
+    /// `Err(PgError)` of the `Ok` arm so the consumer (`byteain`) can route the
+    /// complete error through its own frame escontext via `ereturn`; the inner
+    /// error is only ever produced when `soft` is true (with `soft = false` the
+    /// owner re-raises it hard, surfacing as the outer `Err`). The **outer**
+    /// `Err` is reserved for genuine hard failures (e.g. the charging OOM).
+    pub fn hex_decode_safe<'mcx>(
+        mcx: Mcx<'mcx>,
+        src: &[u8],
+        soft: bool,
+    ) -> PgResult<Result<PgVec<'mcx, u8>, PgError>>
 );

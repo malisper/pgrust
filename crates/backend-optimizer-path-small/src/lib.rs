@@ -1295,14 +1295,18 @@ fn IsCTIDVar(var: &Var, rel_relid: Index) -> bool {
 /// `rel` and nothing on the other side referencing `rel`?
 fn IsBinaryTidClause(root: &mut PlannerInfo, rinfo: RinfoId, rel: RelId) -> bool {
     let rel_relid = root.rel(rel).relid;
-    let clause = root.node(root.rinfo(rinfo).clause).clone();
+    // Borrow the clause directly (C reads `rinfo->clause` as an `OpExpr *`); this
+    // is a pure inspection. A `.clone()` here would panic on owned-subtree Exprs
+    // (an OpExpr operand may be a SubPlan from a correlated subselect, whose
+    // context-allocated children only deep-copy via `clone_in`).
+    let clause = root.node(root.rinfo(rinfo).clause);
 
     // Must be an OpExpr
-    if !is_opclause(&clause) {
+    if !is_opclause(clause) {
         return false;
     }
-    let args = match opexpr_args(&clause) {
-        Some(a) => a.to_vec(),
+    let args = match opexpr_args(clause) {
+        Some(a) => a,
         None => return false,
     };
     // OpExpr must have two arguments
@@ -1340,8 +1344,9 @@ fn IsTidEqualClause(root: &mut PlannerInfo, rinfo: RinfoId, rel: RelId) -> bool 
     if !IsBinaryTidClause(root, rinfo, rel) {
         return false;
     }
-    let clause = root.node(root.rinfo(rinfo).clause).clone();
-    opexpr_opno(&clause) == TID_EQUAL_OPERATOR
+    // Borrow (pure read of the opno); see IsBinaryTidClause for why no `.clone()`.
+    let clause = root.node(root.rinfo(rinfo).clause);
+    opexpr_opno(clause) == TID_EQUAL_OPERATOR
 }
 
 /// `IsTidRangeClause(rinfo, rel)` (tidpath.c): `CTID <,<=,>,>= pseudoconstant`.
@@ -1349,8 +1354,10 @@ fn IsTidRangeClause(root: &mut PlannerInfo, rinfo: RinfoId, rel: RelId) -> bool 
     if !IsBinaryTidClause(root, rinfo, rel) {
         return false;
     }
-    let clause = root.node(root.rinfo(rinfo).clause).clone();
-    let opno = opexpr_opno(&clause);
+    // Pure read of the opno; borrow (no `.clone()`, which panics on owned-subtree
+    // operands like a SubPlan).
+    let clause = root.node(root.rinfo(rinfo).clause);
+    let opno = opexpr_opno(clause);
     opno == TID_LESS_OPERATOR
         || opno == TID_LESS_EQ_OPERATOR
         || opno == TID_GREATER_OPERATOR
@@ -1359,39 +1366,57 @@ fn IsTidRangeClause(root: &mut PlannerInfo, rinfo: RinfoId, rel: RelId) -> bool 
 
 /// `IsTidEqualAnyClause(root, rinfo, rel)` (tidpath.c):
 /// `CTID = ANY (pseudoconstant_array)`.
-fn IsTidEqualAnyClause(root: &mut PlannerInfo, rinfo: RinfoId, rel: RelId) -> bool {
+fn IsTidEqualAnyClause<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    rinfo: RinfoId,
+    rel: RelId,
+) -> bool {
     let rel_relid = root.rel(rel).relid;
-    let clause = root.node(root.rinfo(rinfo).clause).clone();
 
-    // Must be a ScalarArrayOpExpr
-    let Some(node) = clause.as_scalararrayopexpr() else {
-        return false;
-    };
+    // Inspect the clause under a borrow (C reads `rinfo->clause` as a
+    // `ScalarArrayOpExpr *`); a `.clone()` of the whole clause would panic on an
+    // owned-subtree operand. We need an owned copy of only `arg2` (the
+    // pseudoconstant side) to outlive the borrow, since the subsequent
+    // `pull_varnos_expr` takes `&mut PlannerInfo`; deep-copy it through
+    // `clone_in` into the planner arena.
+    let arg2_owned = {
+        let clause = root.node(root.rinfo(rinfo).clause);
 
-    // Operator must be tideq
-    if node.opno != TID_EQUAL_OPERATOR {
-        return false;
-    }
-    if !node.useOr {
-        return false;
-    }
-    debug_assert_eq!(node.args.len(), 2);
-    let arg1 = &node.args[0];
-    let arg2 = &node.args[1];
+        // Must be a ScalarArrayOpExpr
+        let Some(node) = clause.as_scalararrayopexpr() else {
+            return false;
+        };
 
-    // CTID must be first argument
-    if arg1.as_var().is_some_and(|v| IsCTIDVar(v, rel_relid)) {
-        // The other argument must be a pseudoconstant
-        let varnos = seam::pull_varnos_expr::call(root, arg2);
-        if bms::relids_is_member::call(rel_relid as i32, &varnos)
-            || seam::contain_volatile_functions_expr::call(arg2)
-        {
+        // Operator must be tideq
+        if node.opno != TID_EQUAL_OPERATOR {
             return false;
         }
-        return true; // success
-    }
+        if !node.useOr {
+            return false;
+        }
+        debug_assert_eq!(node.args.len(), 2);
+        let arg1 = &node.args[0];
+        let arg2 = &node.args[1];
 
-    false
+        // CTID must be first argument
+        if !arg1.as_var().is_some_and(|v| IsCTIDVar(v, rel_relid)) {
+            return false;
+        }
+        match arg2.clone_in(run.mcx()) {
+            Ok(e) => e,
+            Err(_) => return false,
+        }
+    };
+
+    // The other argument must be a pseudoconstant
+    let varnos = seam::pull_varnos_expr::call(root, &arg2_owned);
+    if bms::relids_is_member::call(rel_relid as i32, &varnos)
+        || seam::contain_volatile_functions_expr::call(&arg2_owned)
+    {
+        return false;
+    }
+    true // success
 }
 
 /// `IsCurrentOfClause(rinfo, rel)` (tidpath.c): a `CurrentOfExpr` referencing
@@ -1406,7 +1431,12 @@ fn IsCurrentOfClause(root: &PlannerInfo, rinfo: RinfoId, rel: RelId) -> bool {
 
 /// `RestrictInfoIsTidQual(root, rinfo, rel)` (tidpath.c): usable as a CTID qual
 /// (base cases only; AND/OR handled by the caller)?
-fn RestrictInfoIsTidQual(root: &mut PlannerInfo, rinfo: RinfoId, rel: RelId) -> bool {
+fn RestrictInfoIsTidQual<'mcx>(
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    rinfo: RinfoId,
+    rel: RelId,
+) -> bool {
     // We may ignore pseudoconstant clauses (they can't contain Vars, so could
     // not match anyway).
     if root.rinfo(rinfo).pseudoconstant {
@@ -1421,15 +1451,16 @@ fn RestrictInfoIsTidQual(root: &mut PlannerInfo, rinfo: RinfoId, rel: RelId) -> 
 
     // Check all base cases.
     IsTidEqualClause(root, rinfo, rel)
-        || IsTidEqualAnyClause(root, rinfo, rel)
+        || IsTidEqualAnyClause(root, run, rinfo, rel)
         || IsCurrentOfClause(root, rinfo, rel)
 }
 
 /// `TidQualFromRestrictInfoList(root, rlist, rel, &isCurrentOf)` (tidpath.c):
 /// extract CTID conditions (implicit OR across the result) from an implicit-AND
 /// list. Returns `(quals, isCurrentOf)`.
-fn TidQualFromRestrictInfoList(
+fn TidQualFromRestrictInfoList<'mcx>(
     root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
     rlist: &[RinfoId],
     rel: RelId,
 ) -> PgResult<(Vec<RinfoId>, bool)> {
@@ -1468,7 +1499,7 @@ fn TidQualFromRestrictInfoList(
                     // transient rinfo to address it by handle.
                     let andrinfos = exprs_as_rinfos(root, &andargs);
                     let (sub, sublist_is_current_of) =
-                        TidQualFromRestrictInfoList(root, &andrinfos, rel)?;
+                        TidQualFromRestrictInfoList(root, run, &andrinfos, rel)?;
                     if sublist_is_current_of {
                         return Err(elog_error("IS CURRENT OF within OR clause"));
                     }
@@ -1478,7 +1509,7 @@ fn TidQualFromRestrictInfoList(
                     // RestrictInfo. In the arena it is a bare expr; wrap it.
                     let ri = expr_as_rinfo(root, orarg.clone());
                     debug_assert!(!seam::restriction_is_or_clause::call(root, ri));
-                    if RestrictInfoIsTidQual(root, ri, rel) {
+                    if RestrictInfoIsTidQual(root, run, ri, rel) {
                         sublist = alloc::vec![ri];
                     } else {
                         sublist = Vec::new();
@@ -1507,7 +1538,7 @@ fn TidQualFromRestrictInfoList(
             }
         } else {
             // Not an OR clause, so handle base cases
-            if RestrictInfoIsTidQual(root, rinfo, rel) {
+            if RestrictInfoIsTidQual(root, run, rinfo, rel) {
                 // We can stop immediately if it's a CurrentOfExpr
                 if IsCurrentOfClause(root, rinfo, rel) {
                     return Ok((alloc::vec![rinfo], true));
@@ -1614,7 +1645,7 @@ pub fn create_tidscan_paths<'mcx>(
     // CurrentOfExpr. In that case, a TID scan is the only correct path.
     let baserestrictinfo: Vec<RinfoId> = root.rel(rel).baserestrictinfo.clone();
     let (tidquals_rinfos, isCurrentOf) =
-        TidQualFromRestrictInfoList(root, &baserestrictinfo, rel)?;
+        TidQualFromRestrictInfoList(root, run, &baserestrictinfo, rel)?;
 
     if !tidquals_rinfos.is_empty() && (enable_tidscan || isCurrentOf) {
         // This path uses no join clauses, but it could still have required

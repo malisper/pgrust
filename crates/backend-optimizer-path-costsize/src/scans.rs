@@ -75,7 +75,7 @@ pub fn cost_seqscan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
 
     let p = root.path_mut(path_id).base_mut();
     p.rows = rows;
-    p.disabled_nodes = if ENABLE_SEQSCAN { 0 } else { 1 };
+    p.disabled_nodes = if ENABLE_SEQSCAN() { 0 } else { 1 };
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + cpu_run_cost + disk_run_cost;
 }
@@ -85,7 +85,12 @@ pub fn cost_seqscan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
  * ========================================================================== */
 
 /// `cost_samplescan` — fills a sample-scan `Path` (by `PathId`).
-pub fn cost_samplescan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
+pub fn cost_samplescan<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    path_id: PathId,
+    rel: RelId,
+) {
     let mut startup_cost: Cost = 0.0;
     let mut run_cost: Cost = 0.0;
 
@@ -105,7 +110,7 @@ pub fn cost_samplescan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
     debug_assert!(rtekind == RTE_RELATION);
 
     // rte->tablesample->tsmhandler is unreachable in the fabled arena → seam.
-    let tsmhandler = cz::rte_tablesample_tsmhandler::call(root, rel);
+    let tsmhandler = cz::rte_tablesample_tsmhandler::call(run, root, rel);
 
     let param_info = path_param_info(root, path_id);
     let rows = match &param_info {
@@ -216,7 +221,7 @@ pub fn cost_index<'mcx>(
     }
     set_index_rows(root, path_id, new_rows);
 
-    set_index_disabled(root, path_id, if ENABLE_INDEXSCAN { 0 } else { 1 });
+    set_index_disabled(root, path_id, if ENABLE_INDEXSCAN() { 0 } else { 1 });
 
     // amcostestimate (index-AM cost callback).
     let am = cz::amcostestimate::call(root, run, path_id, loop_count);
@@ -590,7 +595,7 @@ pub fn cost_bitmap_heap_scan(
 
     let p = root.path_mut(path_id).base_mut();
     p.rows = rows;
-    p.disabled_nodes = if ENABLE_BITMAPSCAN { 0 } else { 1 };
+    p.disabled_nodes = if ENABLE_BITMAPSCAN() { 0 } else { 1 };
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + run_cost;
 }

@@ -87,20 +87,11 @@ seam_core::seam!(
     ) -> bool
 );
 
-seam_core::seam!(
-    /// `GetTsmRoutine(rte->tablesample->tsmhandler)->SampleScanGetSampleSize`
-    /// (tsmapi.h) — returns `(pages, tuples)`.
-    pub fn tsm_get_sample_size(
-        root: &PlannerInfo,
-        rel: RelId,
-        rti: Index,
-    ) -> PgResult<(u32, f64)>
-);
-seam_core::seam!(
-    /// `GetTsmRoutine(rte->tablesample->tsmhandler)->repeatable_across_scans`
-    /// (tsmapi.h).
-    pub fn tsm_repeatable_across_scans(root: &PlannerInfo, rti: Index) -> PgResult<bool>
-);
+// NOTE: TABLESAMPLE `SampleScanGetSampleSize` / `repeatable_across_scans`
+// dispatch is NOT a seam here. The estimation bodies + the GetTsmRoutine
+// registry live in `backend-access-tablesample-core` (the access AM owner),
+// which `set_tablesample_rel_{size,pathlist}` call directly after navigating
+// `rte->tablesample->{tsmhandler,args}` through the rte-seams.
 seam_core::seam!(
     /// TABLESAMPLE sample-function + args parallel safety
     /// (`func_parallel(tsc->tsmhandler) == PROPARALLEL_SAFE` and

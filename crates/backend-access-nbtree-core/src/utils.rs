@@ -102,6 +102,7 @@ use backend_storage_page::{
 };
 
 use backend_storage_buffer_bufmgr_seams as bufmgr;
+use backend_access_nbt_compare_seams as nbtcompare;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
 use backend_access_common_indextuple_seams as indextuple;
@@ -534,15 +535,57 @@ fn pfree_datum_if_byref(_skey: &ScanKeyData, _attbyval: bool) {
 }
 
 /// `array->sksup->decrement(rel, sk_argument, &underflow)` — opclass skip
-/// support decrement. No producer; `sksup` is a `u64` handle.
-fn skip_decrement(_rel: &Relation, _arg: &Datum) -> (Datum<'static>, bool) {
-    panic!("_bt_array_decrement: opclass skip-support decrement not yet ported")
+/// support decrement. Dispatched through the skip-support substrate's
+/// `run_skip_decrement` seam, keyed by the `SkipSupportIncDecId` token the
+/// skip array recorded in `sksup_data.decrement` during
+/// `PrepareSkipSupportFromOpclass` (mirrors the `nbtpreprocesskeys` sibling).
+/// The `rel` argument is dropped (the in-core trivial-type kernels never read
+/// it). The boundary `Datum` is the pass-by-value scalar the skip-support
+/// types operate on.
+fn skip_decrement(
+    _rel: &Relation,
+    decrement: Option<types_sortsupport::SkipSupportIncDecId>,
+    arg: &Datum,
+) -> (Datum<'static>, bool) {
+    let id = decrement
+        .expect("_bt_array_decrement: skip array's decrement callback must be set");
+    let (res, underflow) = nbtcompare::run_skip_decrement::call(id, datum_to_word(arg));
+    (word_to_datum(res), underflow)
 }
 
 /// `array->sksup->increment(rel, sk_argument, &overflow)` — opclass skip
-/// support increment. No producer.
-fn skip_increment(_rel: &Relation, _arg: &Datum) -> (Datum<'static>, bool) {
-    panic!("_bt_array_increment: opclass skip-support increment not yet ported")
+/// support increment. Dispatched through `run_skip_increment` keyed by the
+/// `sksup_data.increment` token.
+fn skip_increment(
+    _rel: &Relation,
+    increment: Option<types_sortsupport::SkipSupportIncDecId>,
+    arg: &Datum,
+) -> (Datum<'static>, bool) {
+    let id = increment
+        .expect("_bt_array_increment: skip array's increment callback must be set");
+    let (res, overflow) = nbtcompare::run_skip_increment::call(id, datum_to_word(arg));
+    (word_to_datum(res), overflow)
+}
+
+/// Convert a canonical by-value `Datum` into the bare-word fmgr-seam `Datum`
+/// the skip-support kernels operate on (the trivial skip-support types are all
+/// pass-by-value). A by-reference argument is not produced for these types.
+#[inline]
+fn datum_to_word(d: &Datum) -> types_datum::Datum {
+    match d {
+        Datum::ByVal(w) => types_datum::Datum::from_usize(*w),
+        _ => panic!(
+            "_bt_array_increment/decrement: by-reference skip-support argument not produced \
+             for a trivial skip-support type"
+        ),
+    }
+}
+
+/// Project a bare-word fmgr-seam `Datum` returned by the skip-support kernels
+/// back into the canonical by-value `Datum`.
+#[inline]
+fn word_to_datum<'mcx>(w: types_datum::Datum) -> Datum<'mcx> {
+    Datum::ByVal(w.as_usize())
 }
 
 /// `_bt_parallel_done(scan)` (nbtree.c). nbtree.c is ported and exposes a
@@ -773,7 +816,7 @@ fn bt_compare_array_skey<'mcx>(
 /// `_bt_binsrch_array_skey()` — Binary search for next matching array key.
 /// Returns an index to the first array element >= caller's tupdatum, and sets
 /// `*set_elem_result` to the comparison of that element against tupdatum.
-fn bt_binsrch_array_skey<'mcx>(
+pub(crate) fn bt_binsrch_array_skey<'mcx>(
     mcx: Mcx<'mcx>,
     orderproc_handle: u64,
     cur_elem_trig: bool,
@@ -1207,7 +1250,8 @@ fn bt_array_decrement<'mcx>(
     }
 
     // Ask opclass support routine for a decremented copy of sk_argument.
-    let (dec_sk_argument, uflow) = skip_decrement(rel, &skey.sk_argument);
+    let decrement = array.sksup_data.as_ref().and_then(|d| d.decrement);
+    let (dec_sk_argument, uflow) = skip_decrement(rel, decrement, &skey.sk_argument);
     if uflow {
         // dec_sk_argument has undefined value (so no pfree).
         if array.null_elem && (skey.sk_flags & SK_BT_NULLS_FIRST) != 0 {
@@ -1296,7 +1340,8 @@ fn bt_array_increment<'mcx>(
     }
 
     // Ask opclass support routine for an incremented copy of sk_argument.
-    let (inc_sk_argument, oflow) = skip_increment(rel, &skey.sk_argument);
+    let increment = array.sksup_data.as_ref().and_then(|d| d.increment);
+    let (inc_sk_argument, oflow) = skip_increment(rel, increment, &skey.sk_argument);
     if oflow {
         if array.null_elem && (skey.sk_flags & SK_BT_NULLS_FIRST) == 0 {
             bt_skiparray_set_isnull(rel, skey, array);

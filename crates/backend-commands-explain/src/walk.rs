@@ -253,15 +253,20 @@ fn explain_pre_scan_node<'es, 'p>(
     }
 
     // return planstate_tree_walker(planstate, ExplainPreScanNode, rels_used).
-    // The owned PlanStateNode threads outer (lefttree) and inner (righttree);
-    // member-node children (Append/BitmapAnd ...) are not yet on the enum (same
-    // limitation as ExplainNode's child recursion) and contribute no scanrelid
-    // for the cases this serves.
+    // The owned PlanStateNode threads outer (lefttree) and inner (righttree),
+    // plus the member-node children (Append/MergeAppend/BitmapAnd/BitmapOr) via
+    // `member_input_states()` — so partition Seq Scans under an Append
+    // contribute their scanrelids (and thus get display names).
     if let Some(outer) = planstate.outer_plan_state() {
         acc = explain_pre_scan_node(mcx, outer, acc)?;
     }
     if let Some(inner) = planstate.ps_head().righttree.as_deref() {
         acc = explain_pre_scan_node(mcx, inner, acc)?;
+    }
+    if let Some(members) = planstate.member_input_states() {
+        for child in members {
+            acc = explain_pre_scan_node(mcx, child, acc)?;
+        }
     }
 
     Ok(acc)
@@ -506,9 +511,10 @@ pub fn ExplainNode<'es, 'p>(
             strategy = Some(st);
             pname = pn.into();
         }
-        // NOTE: the `LockRows` plan node is not modelled in the `Node` enum yet,
-        // so its `ntag::T_LockRows` const is not generated and it cannot reach
-        // this switch; its name case ("LockRows") lands when that variant does.
+        ntag::T_LockRows => {
+            sname = "LockRows";
+            pname = sname.into();
+        }
         ntag::T_Limit => {
             sname = "Limit";
             pname = sname.into();
@@ -690,6 +696,12 @@ pub fn ExplainNode<'es, 'p>(
         es.str.try_push('\n')?;
     }
 
+    // target list (explain.c:1932): `if (es->verbose) show_plan_tlist(...)`.
+    // The VERBOSE-only `Output:` line deparses the node's targetlist.
+    if es.verbose {
+        show_plan_tlist(es, mcx, plan_node, ancestors)?;
+    }
+
     // T_Result: `show_upper_qual(resconstantqual, "One-Time Filter")` runs
     // BEFORE the generic `Filter:` line (explain.c:2234). `show_upper_qual`
     // uses `useprefix = list_length(es->rtable) > 1 || es->verbose`.
@@ -699,7 +711,11 @@ pub fn ExplainNode<'es, 'p>(
             .and_then(|r| r.resconstantqual.as_ref())
             .filter(|q| !q.is_empty())
         {
-            let exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = rcq.iter().cloned().collect();
+            let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+                alloc::vec::Vec::with_capacity(rcq.len());
+            for e in rcq.iter() {
+                exprs.push(e.clone_in(mcx)?);
+            }
             let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
             let node = Node::mk_expr(mcx, anded)?;
 
@@ -724,44 +740,48 @@ pub fn ExplainNode<'es, 'p>(
         }
     }
 
-    // The per-node detail switch (show_plan_tlist / show_*_qual / show_sort_keys
-    // / instrumentation counts). `show_scan_qual(plan->qual, "Filter", ...)`:
-    // deparse the (AND of the) qual conditions and emit them as a `Filter:` line.
-    // The verbose-only tlist (`Output:`) / sort-key / instrumentation parts stay
-    // gated. C: `show_scan_qual` uses `useprefix = IsA(plan, SubqueryScan) ||
-    // es->verbose`.
-    if let Some(qual) = plan.qual.as_ref().filter(|q| !q.is_empty()) {
-        // node = (Node *) make_ands_explicit(qual);
-        let exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> = qual.iter().cloned().collect();
-        let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
-        let node = Node::mk_expr(mcx, anded)?;
-
-        let useprefix = matches!(plan_node.node_tag(), ntag::T_SubqueryScan) || es.verbose;
-
-        // context = set_deparse_context_plan(es->deparse_cxt, planstate->plan,
-        //                                    ancestors);
-        // exprstr = deparse_expression(node, context, useprefix, false);
-        // Folded into one ruleutils seam (the deparse_namespace is owner-private).
-        // The folded seam takes pstmt/plan/expr at one lifetime; clone the
-        // running `'p` plan node into the formatting arena so it matches
-        // `es->pstmt` (the `'es` plan-tree copy stored above).
-        let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
-        let es_pstmt = es
-            .pstmt
-            .as_deref()
-            .expect("EXPLAIN: es->pstmt must be set before deparse");
-        let exprstr = ruleutils_s::deparse_expr_for_plan::call(
-            mcx,
-            es_pstmt,
-            &es.rtable_names,
-            &plan_owned,
-            ancestors,
-            &node,
-            useprefix,
-            false,
-        )?;
-        // ExplainPropertyText("Filter", exprstr, es);
-        fmt::ExplainPropertyText("Filter", exprstr.as_str(), es)?;
+    // The per-node "quals, sort keys, etc" switch (explain.c:1952). C emits the
+    // scan-specific quals (`Index Cond` / `Recheck Cond` / `Order By`) BEFORE the
+    // generic `Filter` line, each in its node's case. The `Filter` itself
+    // (`show_scan_qual(plan->qual, "Filter", ...)`) prints for index/bitmap/seq/
+    // values/cte/etc scans and Gather; the index nodes additionally print their
+    // index condition first. (The verbose-only tlist (`Output:`) /
+    // instrumentation counts stay gated.) `show_scan_qual` uses
+    // `useprefix = IsA(plan, SubqueryScan) || es->verbose`.
+    match plan_node.node_tag() {
+        ntag::T_IndexScan => {
+            // indexqualorig -> "Index Cond"; indexorderbyorig -> "Order By";
+            // plan->qual -> "Filter".
+            let is = plan_node.expect_indexscan();
+            show_scan_qual(es, mcx, plan_node, ancestors, is.indexqualorig.as_ref(), "Index Cond")?;
+            show_scan_qual(es, mcx, plan_node, ancestors, is.indexorderbyorig.as_ref(), "Order By")?;
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+        }
+        ntag::T_IndexOnlyScan => {
+            // indexqual -> "Index Cond"; indexorderby -> "Order By";
+            // plan->qual -> "Filter".
+            let ios = plan_node.expect_indexonlyscan();
+            show_scan_qual(es, mcx, plan_node, ancestors, ios.indexqual.as_ref(), "Index Cond")?;
+            show_scan_qual(es, mcx, plan_node, ancestors, ios.indexorderby.as_ref(), "Order By")?;
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+        }
+        ntag::T_BitmapIndexScan => {
+            // indexqualorig -> "Index Cond" (no Filter — the heap node carries it).
+            let bis = plan_node.expect_bitmapindexscan();
+            show_scan_qual(es, mcx, plan_node, ancestors, bis.indexqualorig.as_ref(), "Index Cond")?;
+        }
+        ntag::T_BitmapHeapScan => {
+            // bitmapqualorig -> "Recheck Cond"; plan->qual -> "Filter".
+            let bhs = plan_node.expect_bitmapheapscan();
+            show_scan_qual(es, mcx, plan_node, ancestors, Some(&bhs.bitmapqualorig), "Recheck Cond")?;
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+        }
+        _ => {
+            // The generic `Filter` leg (SeqScan / SampleScan / ValuesScan /
+            // CteScan / NamedTuplestoreScan / WorkTableScan / SubqueryScan /
+            // Gather / joins / Result / etc).
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+        }
     }
 
     // The sort-/group-key detail (`show_sort_keys` / `show_agg_keys` /
@@ -879,53 +899,70 @@ pub fn ExplainNode<'es, 'p>(
     let has_sub = head.subPlan.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
     let has_outer = planstate.outer_plan_state().is_some();
     let has_inner = head.righttree.is_some();
-    let haschildren = has_init || has_outer || has_inner || has_sub;
+    // Member-node children: Append/MergeAppend appendplans/mergeplans,
+    // BitmapAnd/BitmapOr bitmapplans (explain.c's `haschildren` member legs).
+    let has_members = matches!(
+        plan_node.node_tag(),
+        ntag::T_Append | ntag::T_MergeAppend | ntag::T_BitmapAnd | ntag::T_BitmapOr
+    ) && planstate
+        .member_input_states()
+        .map(|m| !m.is_empty())
+        .unwrap_or(false);
+    let haschildren = has_init || has_outer || has_inner || has_members || has_sub;
 
-    if haschildren {
+    // ancestors = lcons(plan, ancestors): prepend this Plan node (cloned into
+    // the 'es formatting arena, matching es->pstmt) for the children's deparse,
+    // so PARAM_EXEC / OUTER_VAR resolution can reach this node as an ancestor.
+    // The owned model rebuilds the list (the C list_delete_first at block end is
+    // implicit: `child_ancestors` is simply dropped and `ancestors` is reused).
+    let child_ancestors: PgVec<'es, PgBox<'es, Node<'es>>> = if haschildren {
         fmt::ExplainOpenGroup("Plans", Some("Plans"), false, es)?;
-        // ancestors = lcons(plan, ancestors): prepend this Plan node. The
-        // ancestor list is consumed only by deparse (PARAM_EXEC resolution),
-        // which the structural slice never reaches; carry it forward unchanged.
-    }
+        let mut v: PgVec<'es, PgBox<'es, Node<'es>>> = PgVec::new_in(mcx);
+        v.try_reserve(ancestors.len() + 1).map_err(|_| mcx.oom(0))?;
+        v.push(mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?);
+        for a in ancestors.iter() {
+            v.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+        }
+        v
+    } else {
+        PgVec::new_in(mcx)
+    };
 
-    // initPlan-s: SubPlanState detail reaches deparse; gate loudly if present.
+    // initPlan-s.
     if has_init {
-        panic!(
-            "ExplainNode: initPlan-s need ExplainSubPlans (SubPlan deparse, ruleutils \
-             unported) — structural EXPLAIN only"
-        );
+        if let Some(initplans) = head.initPlan.as_ref() {
+            ExplainSubPlans(es, mcx, initplans, &child_ancestors, "InitPlan")?;
+        }
     }
 
     // lefttree (Outer).
     if let Some(outer) = planstate.outer_plan_state() {
-        ExplainNode(es, mcx, outer, ancestors, Some("Outer"), None)?;
+        ExplainNode(es, mcx, outer, &child_ancestors, Some("Outer"), None)?;
     }
     // righttree (Inner).
     if let Some(inner) = head.righttree.as_deref() {
-        ExplainNode(es, mcx, inner, ancestors, Some("Inner"), None)?;
+        ExplainNode(es, mcx, inner, &child_ancestors, Some("Inner"), None)?;
     }
 
-    // Special member-node children (Append/MergeAppend/BitmapAnd/BitmapOr/
-    // SubqueryScan/CustomScan): the trimmed PlanState does not yet thread those
-    // member-node vectors into the enum (append_input_states returns None), so a
-    // member-bearing node reaches no children here. Guard loudly if such a node
-    // appears with children to display.
-    if matches!(
-        plan_node.node_tag(),
-        ntag::T_Append | ntag::T_MergeAppend | ntag::T_BitmapAnd
-    ) {
-        panic!(
-            "ExplainNode: Append/MergeAppend/BitmapAnd member-node recursion needs the \
-             member plan-state vectors (not threaded into PlanStateNode yet)"
-        );
+    // Special member-node children (explain.c:2042-2065): Append/MergeAppend
+    // recurse into appendplans/mergeplans, BitmapAnd/BitmapOr into bitmapplans,
+    // each via ExplainMemberNodes (relationship "Member"). The member plan-state
+    // vectors are threaded onto the owned state structs and exposed through
+    // `member_input_states()`. (SubqueryScan recurses through its subplan, and
+    // CustomScan through custom_ps; those legs land with those nodes.)
+    if let ntag::T_Append | ntag::T_MergeAppend | ntag::T_BitmapAnd | ntag::T_BitmapOr =
+        plan_node.node_tag()
+    {
+        if let Some(members) = planstate.member_input_states() {
+            ExplainMemberNodes(es, mcx, &members, &child_ancestors)?;
+        }
     }
 
     // subPlan-s.
     if has_sub {
-        panic!(
-            "ExplainNode: subPlan-s need ExplainSubPlans (SubPlan deparse, ruleutils \
-             unported) — structural EXPLAIN only"
-        );
+        if let Some(subplans) = head.subPlan.as_ref() {
+            ExplainSubPlans(es, mcx, subplans, &child_ancestors, "SubPlan")?;
+        }
     }
 
     if haschildren {
@@ -943,6 +980,209 @@ pub fn ExplainNode<'es, 'p>(
         true,
         es,
     )?;
+    Ok(())
+}
+
+/// `show_plan_tlist(planstate, ancestors, es)` (explain.c:2438): emit the
+/// VERBOSE-only `Output:` line — the node's target list deparsed, one entry per
+/// `TargetEntry` (resjunk ones included, per the C comment "we now include
+/// resjunk ones"). Several node kinds suppress it (empty tlist, Append,
+/// MergeAppend, RecursiveUnion, and a direct-modify ForeignScan). The deparse
+/// runs against the running plan node via the `deparse_expr_for_plan` seam
+/// (= `set_deparse_context_plan` + `deparse_expression`), with
+/// `useprefix = es->rtable_size > 1` (note: NOT `|| es->verbose`, unlike the
+/// qual/key helpers — show_plan_tlist already only runs under VERBOSE).
+fn show_plan_tlist<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plan_node: &Node<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+) -> PgResult<()> {
+    let plan: &Plan<'p> = plan_node.plan_head();
+
+    // No work if empty tlist (this occurs eg in bitmap indexscans).
+    let Some(tlist) = plan.targetlist.as_ref().filter(|t| !t.is_empty()) else {
+        return Ok(());
+    };
+
+    // The tlist of an Append isn't real helpful, so suppress it; likewise for
+    // MergeAppend and RecursiveUnion.
+    match plan_node.node_tag() {
+        ntag::T_Append | ntag::T_MergeAppend | ntag::T_RecursiveUnion => return Ok(()),
+        _ => {}
+    }
+
+    // Likewise for a ForeignScan that executes a direct INSERT/UPDATE/DELETE:
+    // its tlist contains subplan-output / row-identity junk columns confusing
+    // in this context. `IsA(plan, ForeignScan) && operation != CMD_SELECT`.
+    if let Node::ForeignScan(fs) = plan_node {
+        if fs.operation != CmdType::CMD_SELECT {
+            return Ok(());
+        }
+    }
+
+    // Set up deparsing context + deparse each result column. The
+    // deparse_namespace is owner-private to ruleutils, so
+    // set_deparse_context_plan + deparse_expression are folded into the one
+    // `deparse_expr_for_plan` seam (same as show_scan_qual / show_sort_group_keys).
+    let useprefix = es.rtable_size > 1;
+
+    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let es_pstmt = es
+        .pstmt
+        .as_deref()
+        .expect("EXPLAIN: es->pstmt must be set before deparse");
+
+    let mut result: alloc::vec::Vec<alloc::string::String> =
+        alloc::vec::Vec::with_capacity(tlist.len());
+    for tle in tlist.iter() {
+        let expr = tle
+            .expr
+            .as_deref()
+            .expect("show_plan_tlist: TargetEntry has no expr");
+        // node = (Node *) tle->expr.
+        let expr_node = Node::mk_expr(mcx, expr.clone_in(mcx)?);
+        let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+            mcx,
+            es_pstmt,
+            &es.rtable_names,
+            &plan_owned,
+            ancestors,
+            &expr_node,
+            useprefix,
+            false,
+        )?;
+        result.push(alloc::string::String::from(exprstr.as_str()));
+    }
+
+    // Print results: ExplainPropertyList("Output", result, es).
+    let view: alloc::vec::Vec<&str> = result.iter().map(|s| s.as_str()).collect();
+    fmt::ExplainPropertyList("Output", &view, es)?;
+    Ok(())
+}
+
+/// `show_scan_qual(qual, qlabel, planstate, ancestors, es)` (explain.c:2470):
+/// deparse the AND of `qual`'s conditions and emit them as a `<qlabel>:` line.
+/// A NULL/empty qual prints nothing. C: `useprefix = IsA(plan, SubqueryScan) ||
+/// es->verbose`. The deparse runs against the running plan node (cloned into the
+/// `'es` formatting arena so it matches `es->pstmt`, the `'es` plan-tree copy).
+fn show_scan_qual<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plan_node: &Node<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+    qual: Option<&PgVec<'p, types_nodes::primnodes::Expr>>,
+    qlabel: &str,
+) -> PgResult<()> {
+    let Some(qual) = qual.filter(|q| !q.is_empty()) else {
+        return Ok(());
+    };
+    // node = (Node *) make_ands_explicit(qual);
+    // Deep-clone via clone_in: a qual may carry a SubPlan / Aggref child, on
+    // which a bare derived `Expr::clone()` panics (clone-in convention).
+    let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+        alloc::vec::Vec::with_capacity(qual.len());
+    for e in qual.iter() {
+        exprs.push(e.clone_in(mcx)?);
+    }
+    let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
+    let node = Node::mk_expr(mcx, anded)?;
+
+    let useprefix = matches!(plan_node.node_tag(), ntag::T_SubqueryScan) || es.verbose;
+
+    // context = set_deparse_context_plan(es->deparse_cxt, planstate->plan,
+    //                                    ancestors); exprstr =
+    // deparse_expression(node, context, useprefix, false). Folded into one
+    // ruleutils seam (the deparse_namespace is owner-private).
+    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let es_pstmt = es
+        .pstmt
+        .as_deref()
+        .expect("EXPLAIN: es->pstmt must be set before deparse");
+    let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+        mcx,
+        es_pstmt,
+        &es.rtable_names,
+        &plan_owned,
+        ancestors,
+        &node,
+        useprefix,
+        false,
+    )?;
+    // ExplainPropertyText(qlabel, exprstr, es);
+    fmt::ExplainPropertyText(qlabel, exprstr.as_str(), es)?;
+    Ok(())
+}
+
+/// `ExplainMemberNodes(planstates, nplans, ancestors, es)` (explain.c:4537) —
+/// explain a list of the member-node child plan states of an Append /
+/// MergeAppend / BitmapAnd / BitmapOr node, each as a "Member" child.
+#[allow(non_snake_case)]
+fn ExplainMemberNodes<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    planstates: &[&PlanStateNode<'p>],
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+) -> PgResult<()> {
+    // for (j = 0; j < nplans; j++)
+    //     ExplainNode(planstates[j], ancestors, "Member", NULL, es);
+    for child in planstates {
+        ExplainNode(es, mcx, child, ancestors, Some("Member"), None)?;
+    }
+    Ok(())
+}
+
+/// `ExplainSubPlans(plans, ancestors, relationship, es)` (explain.c:4561) —
+/// explain a list of `SubPlanState`s (a plan node's initPlan or subPlan list).
+/// Each physical subplan (`plan_id`) is printed only once across the whole plan
+/// tree (`es->printed_subplans`). The `SubPlan` node is treated as an ancestor
+/// of the plan node(s) within it, so ruleutils.c can resolve the referents of
+/// subplan parameters (`find_param_referent` / `find_param_generator`).
+#[allow(non_snake_case)]
+fn ExplainSubPlans<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plans: &PgVec<'p, types_nodes::execexpr::SubPlanState<'p>>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+    relationship: &str,
+) -> PgResult<()> {
+    use backend_nodes_core::bitmapset::{bms_add_member, bms_is_member};
+
+    for sps in plans.iter() {
+        let Some(sp) = sps.subplan.as_deref() else {
+            continue;
+        };
+
+        // Print a subplan only once (track plan_id across the plan tree).
+        if bms_is_member(sp.plan_id, es.printed_subplans.as_deref()) {
+            continue;
+        }
+        es.printed_subplans =
+            Some(bms_add_member(mcx, es.printed_subplans.take(), sp.plan_id)?);
+
+        // ancestors = lcons(sp, ancestors): treat the SubPlan node as an
+        // ancestor so ruleutils can find subplan-parameter referents.
+        let sub_node = Node::mk_expr(
+            mcx,
+            types_nodes::primnodes::Expr::SubPlan(
+                types_nodes::primnodes::SubPlanExpr::from_subplan(mcx, sp)?,
+            ),
+        );
+        let mut child_ancestors: PgVec<'es, PgBox<'es, Node<'es>>> = PgVec::new_in(mcx);
+        child_ancestors
+            .try_reserve(ancestors.len() + 1)
+            .map_err(|_| mcx.oom(0))?;
+        child_ancestors.push(mcx::alloc_in(mcx, sub_node)?);
+        for a in ancestors.iter() {
+            child_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+        }
+
+        // ExplainNode(sps->planstate, ancestors, relationship, sp->plan_name, es).
+        let plan_name = sp.plan_name.as_ref().map(|s| s.as_str());
+        if let Some(child_ps) = sps.planstate.as_deref() {
+            ExplainNode(es, mcx, child_ps, &child_ancestors, Some(relationship), plan_name)?;
+        }
+    }
     Ok(())
 }
 

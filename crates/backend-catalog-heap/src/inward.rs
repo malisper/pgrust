@@ -164,6 +164,15 @@ fn system_attribute_by_name_seam(attname: &str) -> PgResult<Option<i32>> {
     Ok(crate::SystemAttributeByName(attname.as_bytes()).map(|att| att.attnum as i32))
 }
 
+/// `SystemAttributeByName(attname)` projected to the `(attnum, atttypid,
+/// atttypmod, attcollation)` a field-reference resolver needs (expandedrecord.c).
+fn system_attribute_by_name_fields(
+    attname: &str,
+) -> Option<(i32, types_core::Oid, i32, types_core::Oid)> {
+    crate::SystemAttributeByName(attname.as_bytes())
+        .map(|att| (att.attnum as i32, att.atttypid, att.atttypmod, att.attcollation))
+}
+
 /// `init_seams()` — install the heap.c inward seams this crate owns. Wired into
 /// the workspace `seams-init` aggregator.
 pub fn init_seams() {
@@ -173,6 +182,7 @@ pub fn init_seams() {
     backend_optimizer_util_plancat_ext_seams::system_attribute_by_name::set(
         system_attribute_by_name_seam,
     );
+    backend_catalog_heap_seams::system_attribute_by_name::set(system_attribute_by_name_fields);
     backend_catalog_heap_seams::heap_create_with_catalog::set(heap_create_with_catalog_seam);
     backend_catalog_heap_seams::heap_create_with_catalog_transient::set(
         heap_create_with_catalog_transient_seam,
