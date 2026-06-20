@@ -850,6 +850,13 @@ pub fn init_seams() {
     backend_storage_buffer_bufmgr_seams::effective_io_concurrency::set(|| {
         vars::effective_io_concurrency.read()
     });
+    // `GetPinLimit()` (bufmgr.c:2505) — the proportional pin budget used to size
+    // a `BAS_BULKREAD` ring / the read_stream pin budget. The body lives on the
+    // `BufferManager` (extend.rs); the seam returns `i32` (the read_stream
+    // builder's `int` budget), so widen the `u32` proportional-pins result.
+    backend_storage_buffer_bufmgr_seams::get_pin_limit::set(|| {
+        BufferManager::global_expect().GetPinLimit() as i32
+    });
     backend_storage_buffer_bufmgr_seams::maintenance_io_concurrency::set(|| {
         vars::maintenance_io_concurrency.read()
     });
