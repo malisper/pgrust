@@ -5981,6 +5981,7 @@ dependencies = [
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xloginsert",
  "backend-access-transam-xlogutils",
+ "backend-catalog-index-seams",
  "backend-catalog-indexing-seams",
  "backend-catalog-storage-seams",
  "backend-common-relpath",

@@ -35,6 +35,7 @@ use types_storage::relfilelocator::RelFileLocatorBackend;
 use mcx::Mcx;
 
 use backend_catalog_storage_seams as storage_seam;
+use backend_catalog_index_seams as index_seam;
 
 // Direct deps (real fns).
 use backend_storage_smgr_smgr as smgr;
@@ -1276,6 +1277,36 @@ pub fn smgr_create_init_fork_and_log(rlocator: RelFileLocator) -> PgResult<()> {
     log_smgrcreate(rlocator, INIT_FORKNUM)
 }
 
+/// `index_build`'s unlogged-index init-fork emit leg (index.c:3089-3095): when
+/// the just-built index is `RELPERSISTENCE_UNLOGGED` and no INIT fork yet
+/// exists, `smgrcreate(RelationGetSmgr(index), INIT_FORKNUM, false)` +
+/// `log_smgrcreate(&index->rd_locator, INIT_FORKNUM)` +
+/// `index->rd_indam->ambuildempty(index)`. (The persistence check is done by
+/// the caller before invoking this seam.) Installed from `init_seams()` into
+/// `backend-catalog-index-seams::build_index_init_fork_if_needed`.
+pub fn build_index_init_fork_if_needed(
+    mcx: Mcx<'_>,
+    index: &types_rel::Relation<'_>,
+) -> PgResult<()> {
+    // RelationGetSmgr(indexRelation) — open (registers the entry) and key it.
+    let srel = smgr::smgropen(index.rd_locator, index.rd_backend)?;
+    let key = srel.smgr_rlocator;
+
+    // if (... && !smgrexists(RelationGetSmgr(indexRelation), INIT_FORKNUM)) {
+    if smgr::smgrexists(key, INIT_FORKNUM)? {
+        return Ok(());
+    }
+
+    // smgrcreate(RelationGetSmgr(indexRelation), INIT_FORKNUM, false);
+    smgr::smgrcreate(key, INIT_FORKNUM, false)?;
+    // log_smgrcreate(&indexRelation->rd_locator, INIT_FORKNUM);
+    log_smgrcreate(index.rd_locator, INIT_FORKNUM)?;
+    // indexRelation->rd_indam->ambuildempty(indexRelation);
+    let amroutine = relcache_seam::relation_rd_indam::call(index.rd_id)
+        .unwrap_or_else(|| panic!("index {} has no rd_indam vtable", index.rd_id));
+    (amroutine.ambuildempty)(mcx, index)
+}
+
 /// The pg_class-update leg of `RelationSetNewRelfilenumber` (relcache.c:3818-3952)
 /// for a non-mapped relation: `table_open(pg_class)`, locked copy of the pg_class
 /// row, set `relfilenode = new_relfilenumber` and (for non-sequence relkinds)
@@ -1342,6 +1373,7 @@ pub fn update_pg_class_relfilenumber(
 /// Install every seam this unit owns.
 pub fn init_seams() {
     storage_seam::smgr_redo::set(smgr_redo);
+    index_seam::build_index_init_fork_if_needed::set(build_index_init_fork_if_needed);
     storage_seam::create_and_copy_relation_data::set(create_and_copy_relation_data);
     storage_seam::rel_file_locator_skipping_wal::set(rel_file_locator_skipping_wal);
     storage_seam::smgr_do_pending_syncs::set(smgr_do_pending_syncs);

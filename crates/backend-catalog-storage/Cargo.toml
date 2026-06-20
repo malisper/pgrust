@@ -48,6 +48,9 @@ backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-s
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
+# index_build's unlogged init-fork emit leg (build_index_init_fork_if_needed)
+# homes here (catalog/storage layer); installed from init_seams().
+backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
 backend-storage-smgr-bulkwrite-seams = { path = "../backend-storage-smgr-bulkwrite-seams" }
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
