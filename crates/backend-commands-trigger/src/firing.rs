@@ -14,12 +14,28 @@
 //!     runs end-to-end; a per-*row* event drives `heap_fetch`, which loud-panics
 //!     until the heap-scan family lands.
 //!
+//! Reachable firing front (trigger.c:2466-2570):
+//!   * [`exec_br_insert_triggers_impl`] (`ExecBRInsertTriggers`) /
+//!     [`exec_ir_insert_triggers_impl`] (`ExecIRInsertTriggers`) — fire the
+//!     BEFORE / INSTEAD-OF FOR EACH ROW INSERT triggers: dispatch via
+//!     `TRIGGER_TYPE_MATCHES`, evaluate the WHEN qual via [`trigger_enabled`]
+//!     (lazily compiling `ResultRelInfo.ri_TrigWhenExprs[i]` from `pg_trigger.tgqual`
+//!     — `stringToNode` → `expand_generated_columns_in_expr` → OLD/NEW→INNER/OUTER
+//!     `ChangeVarNodes` → `ExecPrepareQual`, then `ExecQual` against the NEW slot),
+//!     materialize the NEW slot (`ExecFetchSlotHeapTuple`), build the
+//!     [`TriggerData`], call the trigger via `fmgr`, and apply the returned tuple
+//!     (`ExecForceStoreHeapTuple`) or signal "do nothing".  The returned row
+//!     crosses back over the [BEFORE-trigger return-tuple channel](set_before_trigger_result_tuple_impl).
+//!
 //! Genuine-substrate boundaries (loud, 1:1-named panics — mirror-PG-and-panic):
-//!   * The per-row / per-statement `Exec*Triggers` front needs the per-trigger
-//!     WHEN-qual `ExprState` (`ResultRelInfo.ri_TrigWhenExprs`, trimmed from the
-//!     executor's `ResultRelInfo`) for `TriggerEnabled`, plus `GetTupleForTrigger`
-//!     (`table_tuple_lock` / `heap_fetch` / EvalPlanQual) and the OLD/NEW slot
-//!     materialization.  Those entry points stay loud until that substrate lands.
+//!   * The BEFORE/INSTEAD-OF row trigger's RETURN value: the trigger-language
+//!     executor's return-tuple convention (`plpgsql_exec_trigger` depositing the
+//!     row via `set_before_trigger_result_tuple`) + the fmgr trigger-context bridge
+//!     (`fcinfo->context` carrying the rich `TriggerData` so `CALLED_AS_TRIGGER`
+//!     fires and `take_trigger_data` resolves the NEW/OLD row) are not yet ported.
+//!   * The ROW UPDATE/DELETE front needs `GetTupleForTrigger`
+//!     (`table_tuple_lock` / `heap_fetch` / EvalPlanQual) to fetch the OLD row;
+//!     the BEFORE/AFTER STATEMENT front needs the statement-event save leg.
 //!   * `AfterTriggerExecute`'s by-Oid trigger-descriptor re-resolution
 //!     (`ExecGetTriggerResultRel` / `RelationBuildTriggers`), FDW/cross-partition
 //!     tuple sourcing, transition tables, and the queued-role switch.
@@ -41,7 +57,7 @@ use types_nodes::trigger::{
     TriggerData, T_TriggerData, TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW, AFTER_TRIGGER_2CTID,
     AFTER_TRIGGER_CP_UPDATE, AFTER_TRIGGER_DONE, AFTER_TRIGGER_FDW_FETCH, AFTER_TRIGGER_FDW_REUSE,
     AFTER_TRIGGER_IN_PROGRESS, AFTER_TRIGGER_OFFSET, AFTER_TRIGGER_TUP_BITS,
-    TRIGGER_EVENT_INSERT,
+    TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_INSERT, TRIGGER_EVENT_INSTEAD,
 };
 use types_nodes::EStateData;
 use types_tuple::heaptuple::{HeapTuple, HeapTupleData, ItemPointerData};
@@ -1022,20 +1038,545 @@ fn exec_truncate_fire_after_triggers_impl(
 
 // ---- ROW INSERT (trigger.c:2466-2570) ----
 
+/// `ExecBRInsertTriggers(estate, relinfo, slot)` (trigger.c:2466) — fire the
+/// BEFORE INSERT FOR EACH ROW triggers against `slot`.
+///
+/// Returns `false` ("do nothing" — skip the insert) when a trigger returned a
+/// NULL tuple; otherwise `true`, with `slot` holding the (possibly trigger-
+/// modified) NEW tuple.
 fn exec_br_insert_triggers_impl<'mcx>(
-    _estate: &mut EStateData<'mcx>,
-    _relinfo: types_nodes::RriId,
-    _slot: types_nodes::SlotId,
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    slot: types_nodes::SlotId,
 ) -> PgResult<bool> {
-    front_half("ExecBRInsertTriggers", 2466)
+    exec_br_ir_insert_triggers(estate, relinfo, slot, /* instead */ false)
 }
+/// `ExecIRInsertTriggers(estate, relinfo, slot)` (trigger.c:2570) — fire the
+/// INSTEAD OF INSERT FOR EACH ROW triggers (on a view).
 fn exec_ir_insert_triggers_impl<'mcx>(
-    _estate: &mut EStateData<'mcx>,
-    _relinfo: types_nodes::RriId,
-    _slot: types_nodes::SlotId,
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    slot: types_nodes::SlotId,
 ) -> PgResult<bool> {
-    front_half("ExecIRInsertTriggers", 2570)
+    exec_br_ir_insert_triggers(estate, relinfo, slot, /* instead */ true)
 }
+
+/// Shared body of `ExecBRInsertTriggers` (BEFORE) and `ExecIRInsertTriggers`
+/// (INSTEAD OF) — the two differ only in the `TRIGGER_TYPE_BEFORE` vs
+/// `TRIGGER_TYPE_INSTEAD` timing match and the `TRIGGER_EVENT_BEFORE` vs
+/// `TRIGGER_EVENT_INSTEAD` event bit.  Both fire FOR EACH ROW on INSERT, both
+/// thread the NEW tuple through each trigger and apply a returned tuple.
+fn exec_br_ir_insert_triggers<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    slot: types_nodes::SlotId,
+    instead: bool,
+) -> PgResult<bool> {
+    use types_catalog::pg_trigger::{
+        TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_MATCHES,
+        TRIGGER_TYPE_ROW,
+    };
+
+    let mcx = estate.es_query_cxt;
+    // LocTriggerData.tg_event = TRIGGER_EVENT_INSERT | TRIGGER_EVENT_ROW |
+    //   (TRIGGER_EVENT_BEFORE | TRIGGER_EVENT_INSTEAD);
+    let tg_event = TRIGGER_EVENT_INSERT
+        | TRIGGER_EVENT_ROW
+        | if instead { TRIGGER_EVENT_INSTEAD } else { TRIGGER_EVENT_BEFORE };
+    let timing = if instead { TRIGGER_TYPE_INSTEAD } else { TRIGGER_TYPE_BEFORE };
+
+    // The number of triggers (trigdesc->numtriggers).
+    let numtriggers = {
+        let rri = estate.result_rel(relinfo);
+        match rri.ri_TrigDesc.as_ref() {
+            Some(td) => td.triggers.len(),
+            None => return Ok(true),
+        }
+    };
+
+    // newtuple == NULL until first materialized (ExecFetchSlotHeapTuple(slot)).
+    let mut newtuple: Option<
+        types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    > = None;
+
+    for i in 0..numtriggers {
+        // trigger = &trigdesc->triggers[i]; read the dispatch facts under an
+        // immutable borrow (the firing call below needs &mut estate).
+        let (tgtype, tgenabled, tgoid, has_qual, tgnattr) = {
+            let trig = &estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[i];
+            (
+                trig.tgtype,
+                trig.tgenabled,
+                trig.tgoid,
+                trig.tgqual.is_some(),
+                trig.tgnattr,
+            )
+        };
+
+        // if (!TRIGGER_TYPE_MATCHES(tgtype, ROW, BEFORE|INSTEAD, INSERT)) continue;
+        if !TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_ROW, timing, TRIGGER_TYPE_INSERT) {
+            continue;
+        }
+        // if (!TriggerEnabled(estate, relinfo, trigger, tg_event, NULL, NULL, slot))
+        //   continue;   (oldslot == NULL on INSERT; newslot == slot.)
+        if !trigger_enabled(
+            estate,
+            relinfo,
+            i,
+            tgenabled,
+            tgnattr,
+            has_qual,
+            tg_event,
+            /* oldslot */ None,
+            /* newslot */ Some(slot),
+        )? {
+            continue;
+        }
+
+        // if (!newtuple) newtuple = ExecFetchSlotHeapTuple(slot, true, &should_free);
+        if newtuple.is_none() {
+            let (formed, _should_free) = {
+                let sd = estate.slot_data_mut(slot);
+                backend_executor_execTuples_seams::exec_fetch_slot_heap_tuple::call(mcx, sd, true)?
+            };
+            newtuple = Some(formed);
+        }
+        // oldtuple = newtuple — the tuple handed to this trigger as tg_trigtuple.
+        let oldtuple = newtuple.clone().unwrap();
+
+        // newtuple = ExecCallTriggerFunc(&LocTriggerData, ...);
+        let returned = fire_row_insert_trigger(estate, relinfo, i, tgoid, tg_event, &oldtuple)?;
+
+        match returned {
+            // newtuple == NULL  ->  "do nothing".
+            None => return Ok(false),
+            Some(rt) => {
+                if formed_tuple_same(&rt, &oldtuple) {
+                    // newtuple == oldtuple — row unchanged; keep it cached.
+                    newtuple = Some(rt);
+                } else {
+                    // newtuple != oldtuple — the trigger modified the row.
+                    // ExecForceStoreHeapTuple(newtuple, slot, false);
+                    backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+                        estate,
+                        slot,
+                        rt.clone_in(mcx)?,
+                        false,
+                    )?;
+                    // signal tuple should be re-fetched if used.
+                    newtuple = None;
+                }
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+/// The C `newtuple != oldtuple` pointer-identity test, realized in the owned
+/// model as a data-bytes comparison: a trigger that returns its NEW row
+/// unchanged yields an identical user-data area; a modified row differs.
+fn formed_tuple_same(
+    a: &types_tuple::backend_access_common_heaptuple::FormedTuple<'_>,
+    b: &types_tuple::backend_access_common_heaptuple::FormedTuple<'_>,
+) -> bool {
+    a.data == b.data
+}
+
+/// Fire one BEFORE/INSTEAD-OF row INSERT trigger: build the `TriggerData`,
+/// install the per-call side-channels (the trigger func reads NEW via the slot
+/// accessors), call the function, and decode the returned tuple.
+///
+/// Returns `None` for the C `NULL` ("do nothing") result, else the returned NEW
+/// `FormedTuple`.
+fn fire_row_insert_trigger<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    tgindx: usize,
+    _tgoid: Oid,
+    tg_event: u32,
+    trigtuple: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'static>>> {
+    let mcx = estate.es_query_cxt;
+
+    // tg_trigger = &(trigdesc->triggers[tgindx]) — cloned into the query context.
+    let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
+        let trig = &estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[tgindx];
+        let cloned = trig.clone_in(mcx)?;
+        let boxed: mcx::PgBox<'mcx, Trigger<'mcx>> =
+            mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
+        // SAFETY: allocated in mcx (= es_query_cxt); the side-channel that borrows
+        // it is installed/dropped within this call.
+        unsafe { core::mem::transmute(boxed) }
+    };
+
+    // tg_relation = relinfo->ri_RelationDesc — aliased for the call's duration.
+    let tg_relation: types_rel::Relation<'static> = {
+        let rel = estate
+            .result_rel(relinfo)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecBRInsertTriggers: ResultRelInfo has no relation");
+        let aliased = rel.alias();
+        // SAFETY: query-context lifetime extension; released when the side-channel
+        // guard drops at the end of this call.
+        unsafe {
+            core::mem::transmute::<types_rel::Relation<'_>, types_rel::Relation<'static>>(aliased)
+        }
+    };
+    let slots_relation: types_rel::Relation<'static> = {
+        let rel = estate.result_rel(relinfo).ri_RelationDesc.as_ref().unwrap();
+        let aliased = rel.alias();
+        unsafe {
+            core::mem::transmute::<types_rel::Relation<'_>, types_rel::Relation<'static>>(aliased)
+        }
+    };
+
+    // tg_trigtuple = newtuple (the NEW row): the FormedTuple rides the slot
+    // side-channel (so slot_getattr deforms it) and a HeapTuple view goes on
+    // TriggerData.
+    let formed_static: types_tuple::backend_access_common_heaptuple::FormedTuple<'static> = {
+        let copied = trigtuple.clone_in(mcx)?;
+        // SAFETY: allocated in mcx; installed/dropped within this call.
+        unsafe { core::mem::transmute(copied) }
+    };
+    let tg_trigtuple: HeapTuple<'static> = {
+        let copied: HeapTupleData<'mcx> = formed_static.tuple.clone_in(mcx)?;
+        let boxed: mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
+            mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
+        Some(unsafe { core::mem::transmute(boxed) })
+    };
+
+    let trigdata = TriggerData {
+        type_: T_TriggerData,
+        tg_event,
+        tg_relation: Some(tg_relation),
+        tg_trigtuple,
+        tg_newtuple: None,
+        tg_trigger: Some(trigger_box),
+        // tg_trigslot = the NEW slot; resolves to the SLOT_TRIG payload below.
+        tg_trigslot: Some(types_nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32)),
+        tg_newslot: None,
+        tg_oldtable: None,
+        tg_newtable: None,
+        tg_updatedcols: None,
+    };
+
+    let _slots_guard = CurrentSlotsGuard::install(CurrentTriggerSlots {
+        relation: slots_relation,
+        trigtuple: Some(formed_static),
+        newtuple: None,
+    });
+
+    // result = ExecCallTriggerFunc(&LocTriggerData, ...);
+    // newtuple = (HeapTuple) DatumGetPointer(result);
+    let result = exec_call_trigger_func(trigdata)?;
+    decode_before_trigger_result(mcx, result)
+}
+
+// ---------------------------------------------------------------------------
+// BEFORE-trigger return-tuple channel — the owned analogue of C's
+// `(HeapTuple) DatumGetPointer(result)`.
+//
+// A BEFORE/INSTEAD-OF row trigger function returns the HeapTuple it wants
+// applied (or NULL for "do nothing").  In C this rides the fmgr `Datum` result
+// as a bare HeapTuple pointer.  The idiomatic `Datum` is an opaque `usize` that
+// cannot safely carry an arena pointer across the fmgr boundary, so a PL trigger
+// executor instead deposits the returned row on this per-call thread-local and
+// returns a sentinel `Datum`; the firing path takes it back here.  Set/taken
+// strictly within a single `ExecCallTriggerFunc` invocation, so the `'static`
+// marker is sound (the payload is allocated in the firing query context).
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// The HeapTuple a BEFORE/INSTEAD-OF row trigger function returned, deposited
+    /// by the PL trigger executor (via [`set_before_trigger_result_tuple`]) and
+    /// taken by [`decode_before_trigger_result`].
+    static BEFORE_TRIGGER_RESULT: RefCell<Option<BeforeTriggerResult>> =
+        const { RefCell::new(None) };
+}
+
+/// The two cases of a BEFORE/INSTEAD-OF row trigger return: a row to apply, or
+/// the C `NULL` "do nothing".
+enum BeforeTriggerResult {
+    /// `return NEW`/`return OLD`/`return <row>` — the row to apply.
+    Tuple(types_tuple::backend_access_common_heaptuple::FormedTuple<'static>),
+    /// `return NULL` — skip the operation ("do nothing").
+    DoNothing,
+}
+
+/// `plpgsql_exec_trigger` (and the SQL/C trigger handlers) deposit the row a
+/// BEFORE/INSTEAD-OF trigger returned here, just before returning the sentinel
+/// `Datum` from the fmgr call.  `None` is the C `return NULL` ("do nothing").
+///
+/// # Safety
+/// The deposited `FormedTuple` must outlive the enclosing `ExecCallTriggerFunc`
+/// (the firing path takes it back within the same call); the PL executor
+/// allocates it in the firing query context, satisfying this.
+pub fn set_before_trigger_result_tuple_impl<'mcx>(
+    tuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
+) {
+    let v = match tuple {
+        // SAFETY: the firing path takes this back within the same
+        // ExecCallTriggerFunc call; the depositor allocates in the firing query
+        // context, which outlives that call.
+        Some(t) => BeforeTriggerResult::Tuple(unsafe {
+            core::mem::transmute::<
+                types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+                types_tuple::backend_access_common_heaptuple::FormedTuple<'static>,
+            >(t)
+        }),
+        None => BeforeTriggerResult::DoNothing,
+    };
+    BEFORE_TRIGGER_RESULT.with(|c| *c.borrow_mut() = Some(v));
+}
+
+/// `(HeapTuple) DatumGetPointer(result)` for a BEFORE/INSTEAD-OF row trigger —
+/// take back the row the trigger function deposited on the per-call channel.
+///
+/// `Ok(None)` is the C `NULL` ("do nothing").  An empty channel means the trigger
+/// function did not deposit a result: the trigger-language handler that runs it
+/// (`plpgsql_exec_trigger` for PL/pgSQL) is not yet ported to the return-tuple
+/// convention — a loud, named boundary rather than a fake pointer dereference.
+fn decode_before_trigger_result<'mcx>(
+    mcx: Mcx<'mcx>,
+    _result: Datum,
+) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'static>>> {
+    let taken = BEFORE_TRIGGER_RESULT.with(|c| c.borrow_mut().take());
+    match taken {
+        Some(BeforeTriggerResult::DoNothing) => Ok(None),
+        Some(BeforeTriggerResult::Tuple(t)) => {
+            // Re-anchor into the firing query context (the deposit is already in
+            // es_query_cxt; clone keeps the lifetime story explicit).
+            let copied = t.clone_in(mcx)?;
+            // SAFETY: copied is in mcx (= es_query_cxt), which outlives this call.
+            Ok(Some(unsafe { core::mem::transmute(copied) }))
+        }
+        None => Err(before_trigger_return_unported()),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn before_trigger_return_unported() -> PgError {
+    PgError::error(
+        "ExecBRInsertTriggers: the trigger function returned without depositing a \
+         result row — the trigger-language executor's return-tuple convention \
+         (plpgsql_exec_trigger -> set_before_trigger_result_tuple) is not yet \
+         ported; the BEFORE/INSTEAD-OF row firing front, WHEN-qual gating, and \
+         NEW-slot materialization are in place up to the fmgr call"
+            .to_string(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// TriggerEnabled (trigger.c:3483) — the replication-role / tgenabled /
+// column-specific / WHEN-qual firing-control test.
+// ---------------------------------------------------------------------------
+
+/// `TriggerEnabled(estate, relinfo, trigger, event, modifiedCols, oldslot,
+/// newslot)` (trigger.c:3483).
+///
+/// `trigger` is `relinfo->ri_TrigDesc->triggers[tgindx]`; the matching
+/// `ri_TrigWhenExprs[tgindx]` slot caches the compiled WHEN predicate (lazily
+/// built on first use, surviving in `es_query_cxt`).  `oldslot`/`newslot` carry
+/// the OLD/NEW rows the WHEN clause references as `OLD`/`NEW` (mapped to
+/// `INNER_VAR`/`OUTER_VAR`).  The column-specific (`tgnattr`) check only applies
+/// to UPDATE; on INSERT/DELETE `modified_cols` is `None` and the arm is skipped.
+#[allow(clippy::too_many_arguments)]
+fn trigger_enabled<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    tgindx: usize,
+    tgenabled: i8,
+    tgnattr: i16,
+    has_qual: bool,
+    event: u32,
+    oldslot: Option<types_nodes::SlotId>,
+    newslot: Option<types_nodes::SlotId>,
+) -> PgResult<bool> {
+    // Replication-role-dependent enable state.
+    if !trigger_enabled_no_qual(tgenabled) {
+        return Ok(false);
+    }
+
+    // Column-specific trigger (only possible for UPDATE; tgattr ignored
+    // otherwise).  modifiedCols is not threaded on the INSERT/DELETE paths
+    // (None), so the column check is a no-op there.  When an UPDATE path threads
+    // a modified-columns set, the per-column tgattr check belongs here; on
+    // INSERT (this caller) tgnattr-gated columns never restrict firing.
+    let _ = tgnattr;
+
+    // WHEN clause (tgqual).
+    if has_qual {
+        // predicate = &relinfo->ri_TrigWhenExprs[tgindx]; build it on first use.
+        let needs_build = estate
+            .result_rel(relinfo)
+            .ri_TrigWhenExprs
+            .as_ref()
+            .and_then(|v| v.get(tgindx))
+            .map(|p| p.is_none())
+            .unwrap_or(true);
+        if needs_build {
+            let predicate = build_trigger_when_predicate(estate, relinfo, tgindx)?;
+            if let Some(slot_vec) = estate.result_rel_mut(relinfo).ri_TrigWhenExprs.as_mut() {
+                if let Some(cell) = slot_vec.get_mut(tgindx) {
+                    *cell = predicate;
+                }
+            }
+        }
+
+        // econtext = GetPerTupleExprContext(estate);
+        // econtext->ecxt_innertuple = oldslot; ecxt_outertuple = newslot;
+        let econtext = backend_executor_execUtils_seams::get_per_tuple_expr_context::call(estate)?;
+        {
+            let ecxt = estate.ecxt_mut(econtext);
+            ecxt.ecxt_innertuple = oldslot;
+            ecxt.ecxt_outertuple = newslot;
+        }
+
+        // if (!ExecQual(*predicate, econtext)) return false;
+        // The compiled predicate lives in ri_TrigWhenExprs[tgindx]; take it out to
+        // satisfy exec_qual's &mut ExprState + &mut estate, then put it back.
+        let mut predicate = match estate
+            .result_rel_mut(relinfo)
+            .ri_TrigWhenExprs
+            .as_mut()
+            .and_then(|v| v.get_mut(tgindx))
+            .and_then(|c| c.take())
+        {
+            Some(p) => p,
+            // A NULL predicate after build means the clause folded to constant
+            // TRUE (ExecPrepareQual returned NULL) — ExecQual(NULL) is TRUE.
+            None => return Ok(true),
+        };
+        let pass = backend_executor_execExpr_seams::exec_qual::call(&mut predicate, econtext, estate)?;
+        // Put the compiled predicate back for the next row.
+        if let Some(cell) = estate
+            .result_rel_mut(relinfo)
+            .ri_TrigWhenExprs
+            .as_mut()
+            .and_then(|v| v.get_mut(tgindx))
+        {
+            *cell = Some(predicate);
+        }
+        if !pass {
+            return Ok(false);
+        }
+    }
+    let _ = event;
+
+    Ok(true)
+}
+
+/// Build the compiled WHEN-clause `ExprState` for `triggers[tgindx]`
+/// (trigger.c:3524-3548): `stringToNode(tgqual)` →
+/// `expand_generated_columns_in_expr` (OLD varno 1, NEW varno 2) →
+/// `ChangeVarNodes(OLD→INNER_VAR, NEW→OUTER_VAR)` → `make_ands_implicit` →
+/// `ExecPrepareQual`.  Returns `None` when the clause const-folds to TRUE
+/// (`ExecPrepareQual` returned NULL).
+fn build_trigger_when_predicate<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    tgindx: usize,
+) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> {
+    const PRS2_OLD_VARNO: i32 = 1;
+    const PRS2_NEW_VARNO: i32 = 2;
+    const INNER_VAR: i32 = -1;
+    const OUTER_VAR: i32 = -2;
+
+    let mcx = estate.es_query_cxt;
+
+    // tgqual text + the target relation OID (for expand_generated_columns).
+    let (tgqual, rel_oid) = {
+        let rri = estate.result_rel(relinfo);
+        let trig = &rri.ri_TrigDesc.as_ref().unwrap().triggers[tgindx];
+        let q = trig
+            .tgqual
+            .as_ref()
+            .expect("build_trigger_when_predicate: trigger has no tgqual")
+            .as_str()
+            .to_string();
+        let oid = rri
+            .ri_RelationDesc
+            .as_ref()
+            .expect("build_trigger_when_predicate: ResultRelInfo has no relation")
+            .rd_id;
+        (q, oid)
+    };
+
+    // tgqual = stringToNode(trigger->tgqual);
+    let node = backend_nodes_read_seams::string_to_node::call(mcx, &tgqual)?;
+    let mut expr: types_nodes::primnodes::Expr = node
+        .as_expr()
+        .ok_or_else(|| {
+            PgError::error("trigger WHEN clause tgqual did not parse to an expression node".to_string())
+        })?
+        .clone();
+
+    // tgqual = expand_generated_columns_in_expr(tgqual, rel, PRS2_OLD_VARNO);
+    // tgqual = expand_generated_columns_in_expr(tgqual, rel, PRS2_NEW_VARNO);
+    expr = backend_rewrite_rewritehandler_seams::expand_generated_columns_in_expr::call(
+        mcx,
+        Some(expr),
+        rel_oid,
+        PRS2_OLD_VARNO,
+    )?
+    .expect("expand_generated_columns_in_expr dropped the WHEN expression");
+    expr = backend_rewrite_rewritehandler_seams::expand_generated_columns_in_expr::call(
+        mcx,
+        Some(expr),
+        rel_oid,
+        PRS2_NEW_VARNO,
+    )?
+    .expect("expand_generated_columns_in_expr dropped the WHEN expression");
+
+    // ChangeVarNodes(tgqual, PRS2_OLD_VARNO, INNER_VAR, 0);
+    // ChangeVarNodes(tgqual, PRS2_NEW_VARNO, OUTER_VAR, 0);
+    expr = change_var_nodes_expr(expr, PRS2_OLD_VARNO, INNER_VAR);
+    expr = change_var_nodes_expr(expr, PRS2_NEW_VARNO, OUTER_VAR);
+
+    // tgqual = (Node *) make_ands_implicit((Expr *) tgqual);
+    let quals: Vec<types_nodes::primnodes::Expr> =
+        backend_nodes_core::makefuncs::make_ands_implicit(Some(expr));
+
+    // *predicate = ExecPrepareQual((List *) tgqual, estate);
+    backend_executor_execExpr_seams::exec_prepare_qual::call(
+        if quals.is_empty() { None } else { Some(&quals) },
+        estate,
+    )
+}
+
+/// `ChangeVarNodes(node, rt_index, new_index, 0)` (rewriteManip.c) restricted to
+/// a `sublevels_up == 0` re-stamp of an owned `Expr` tree (the trigger WHEN
+/// clause has no sub-selects with deeper level refs).  Walks the tree with
+/// `expression_tree_mutator`, re-stamping every top-level `Var` whose `varno`
+/// equals `rt_index` (and `varlevelsup == 0`) to `new_index`.
+fn change_var_nodes_expr(
+    expr: types_nodes::primnodes::Expr,
+    rt_index: i32,
+    new_index: i32,
+) -> types_nodes::primnodes::Expr {
+    use types_nodes::primnodes::Expr;
+    fn walk(node: Expr, rt_index: i32, new_index: i32) -> Expr {
+        match node {
+            Expr::Var(mut v) => {
+                if v.varlevelsup == 0 && v.varno == rt_index {
+                    v.varno = new_index;
+                    if v.varnosyn as i32 == rt_index {
+                        v.varnosyn = new_index as types_core::primitive::Index;
+                    }
+                }
+                Expr::Var(v)
+            }
+            other => backend_nodes_core::nodefuncs::expression_tree_mutator(other, &mut |child| {
+                walk(child, rt_index, new_index)
+            }),
+        }
+    }
+    walk(expr, rt_index, new_index)
+}
+
 fn exec_ar_insert_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
     relinfo: types_nodes::RriId,
@@ -1823,6 +2364,10 @@ pub fn init_seams() {
     s::exec_br_insert_triggers::set(exec_br_insert_triggers_impl);
     s::exec_ir_insert_triggers::set(exec_ir_insert_triggers_impl);
     s::exec_ar_insert_triggers::set(exec_ar_insert_triggers_impl);
+    // BEFORE/INSTEAD-OF row trigger return-tuple channel (the owned analogue of
+    // C's `(HeapTuple) DatumGetPointer(result)`); the PL/C trigger handlers
+    // deposit the returned row here.
+    s::set_before_trigger_result_tuple::set(set_before_trigger_result_tuple_impl);
 
     // ROW DELETE firing.
     s::exec_br_delete_triggers::set(exec_br_delete_triggers_impl);

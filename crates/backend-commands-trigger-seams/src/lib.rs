@@ -344,6 +344,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Deposit the row a BEFORE/INSTEAD-OF row trigger function returned, just
+    /// before the trigger-language handler returns its sentinel `Datum` from the
+    /// fmgr call. `None` is the C `return NULL` ("do nothing"). The firing path
+    /// (`ExecBRInsertTriggers`) takes it back within the same `ExecCallTriggerFunc`
+    /// invocation. This is the owned analogue of C handing a `HeapTuple` pointer
+    /// back as the fmgr `Datum` result (an opaque `usize` here cannot carry the
+    /// arena pointer safely).
+    pub fn set_before_trigger_result_tuple<'mcx>(
+        tuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
+    )
+);
+
+seam_core::seam!(
     /// `ExecARInsertTriggers(estate, relinfo, slot, recheckIndexes,
     /// transition_capture)` (trigger.c): queue AFTER ROW INSERT trigger events
     /// (and capture the NEW tuple for transition tables). The transition-capture
