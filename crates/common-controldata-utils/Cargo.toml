@@ -1,0 +1,18 @@
+[package]
+name = "common-controldata-utils"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "common_controldata_utils"
+path = "src/lib.rs"
+
+[dependencies]
+common-controldata-utils-seams = { path = "../common-controldata-utils-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-utils-error = { path = "../backend-utils-error" }
+port-crc32c = { path = "../port-crc32c" }
+types-control = { path = "../types-control" }
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }

@@ -610,6 +610,7 @@ pub fn init_all() {
     backend_utils_time_snapmgr::init_seams();
     common_blkreftable::init_seams();
     common_checksum_helper::init_seams();
+    common_controldata_utils::init_seams();
     common_hashfn::init_seams();
     common_unicode_category::init_seams();
     common_ip::init_seams();

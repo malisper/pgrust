@@ -604,6 +604,7 @@ backend-utils-time-combocid = { path = "../backend-utils-time-combocid" }
 backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
 common-blkreftable = { path = "../common-blkreftable" }
 common-checksum-helper = { path = "../common-checksum-helper" }
+common-controldata-utils = { path = "../common-controldata-utils" }
 common-hashfn = { path = "../common-hashfn" }
 common-ip = { path = "../common-ip" }
 common-unicode-category = { path = "../common-unicode-category" }

@@ -1135,6 +1135,11 @@ pub fn init_seams() {
     common_path_seams::canonicalize_path::set(boot_paths::canonicalize_path_owned);
     common_path_seams::is_absolute_path::set(boot_paths::is_absolute_path_bool);
     port_path_seams::is_absolute_path::set(boot_paths::is_absolute_path_bool);
+    // genfile.c's server-file-read policy gate, bodied in `boot_paths` over the
+    // path predicates it checks.
+    backend_common_path_seams::convert_and_check_filename::set(
+        boot_paths::convert_and_check_filename,
+    );
     backend_common_exec_seams::set_pglocale_pgservice::set(
         startup_paths::set_pglocale_pgservice,
     );

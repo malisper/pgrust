@@ -13,7 +13,7 @@
 
 use std::ffi::{CStr, CString};
 
-use types_error::{PgError, PgResult, FATAL};
+use types_error::{PgError, PgResult, ERROR, FATAL};
 
 /// PostgreSQL's `MAXPGPATH` (`pg_config_manual.h`).
 const MAXPGPATH: usize = 1024;
@@ -704,6 +704,118 @@ pub fn path_is_prefix_of_path_pub(path1: &str, path2: &str) -> PgResult<bool> {
         None => true, // the C '\0' terminator
     };
     Ok(starts_with && boundary)
+}
+
+/// `path_contains_parent_reference(path)` (`port/path.c`): true when `path`
+/// references the parent directory, i.e. contains a `..` path component at the
+/// start or immediately after any path separator. (The leading `skip_drive` is
+/// a no-op on the Unix build.)
+fn path_contains_parent_reference(path: &str) -> bool {
+    let p = path.as_bytes();
+    let path_len = p.len();
+
+    // ".." at the start of the path, followed by '/' or end-of-string.
+    if path_len >= 2
+        && p[0] == b'.'
+        && p[1] == b'.'
+        && (path_len == 2 || p[2] == b'/')
+    {
+        return true;
+    }
+
+    // ".." after each path separator.
+    let mut idx = 0usize;
+    while let Some(off) = first_dir_separator(&p[idx..]) {
+        // Advance past the separator.
+        let after = idx + off + 1;
+        let c0 = p.get(after).copied();
+        let c1 = p.get(after + 1).copied();
+        let c2 = p.get(after + 2).copied();
+        if c0 == Some(b'.')
+            && c1 == Some(b'.')
+            && (c2 == Some(b'/') || c2.is_none())
+        {
+            return true;
+        }
+        idx = after;
+        if idx > path_len {
+            break;
+        }
+    }
+
+    false
+}
+
+/// `path_is_relative_and_below_cwd(path)` (`port/path.c`): true when `path` is
+/// a relative path that does not escape the current working directory — i.e.
+/// not absolute and containing no `..` parent reference. (The Win32
+/// drive-relative branch is compiled out on the Unix build.)
+pub fn path_is_relative_and_below_cwd_pub(path: &str) -> PgResult<bool> {
+    if is_absolute_path(path) {
+        Ok(false)
+    } else if path_contains_parent_reference(path) {
+        Ok(false)
+    } else {
+        // On non-Windows there is no drive-relative case; a relative path with
+        // no parent reference is below the current directory.
+        Ok(true)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// convert_and_check_filename (genfile.c) — the server-file-read access policy
+// over the path helpers above. Homed here next to its sole-dependency path
+// predicates; installed into `backend_common_path_seams` from `init_seams`.
+// ---------------------------------------------------------------------------
+
+/// `convert_and_check_filename(arg)` (`genfile.c`): canonicalize the
+/// caller-supplied filename and enforce the server-file-read policy.
+///
+/// Roles with the privileges of `pg_read_server_files` may name any path.
+/// Otherwise an absolute path must be within `DataDir` or `Log_directory`, and
+/// a relative path must be at or below the data directory; both rejections are
+/// `ERRCODE_INSUFFICIENT_PRIVILEGE`. The canonicalized path is returned in
+/// `mcx` (canonicalization can change its length, hence the owned return).
+pub fn convert_and_check_filename<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    filename: &str,
+) -> PgResult<mcx::PgString<'mcx>> {
+    use backend_utils_misc_guc_tables::vars::Log_directory;
+    use types_catalog::catalog::ROLE_PG_READ_SERVER_FILES;
+    use types_error::ERRCODE_INSUFFICIENT_PRIVILEGE;
+
+    // char *filename = text_to_cstring(arg); canonicalize_path(filename);
+    let filename = canonicalize_path(filename);
+
+    // Members of the 'pg_read_server_files' role are allowed to access any
+    // files on the server as the PG data directory's owner.
+    let user_id = crate::GetUserId();
+    if backend_utils_adt_acl_seams::has_privs_of_role::call(user_id, ROLE_PG_READ_SERVER_FILES)? {
+        return mcx::PgString::from_str_in(&filename, mcx);
+    }
+
+    if is_absolute_path(&filename) {
+        // Absolute paths are allowed if within DataDir or Log_directory, even
+        // though Log_directory might be outside DataDir.
+        let data_dir = backend_utils_init_small::globals::DataDir().unwrap_or_default();
+        let log_directory = Log_directory.read().unwrap_or_default();
+
+        let in_data_dir = path_is_prefix_of_path_pub(&data_dir, &filename)?;
+        let in_log_dir = is_absolute_path(&log_directory)
+            && path_is_prefix_of_path_pub(&log_directory, &filename)?;
+
+        if !in_data_dir && !in_log_dir {
+            return Err(PgError::new(ERROR, "absolute path not allowed")
+                .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE));
+        }
+    } else if !path_is_relative_and_below_cwd_pub(&filename)? {
+        return Err(
+            PgError::new(ERROR, "path must be in or below the data directory")
+                .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE),
+        );
+    }
+
+    mcx::PgString::from_str_in(&filename, mcx)
 }
 
 /// `pstrdup(path); get_parent_directory(buf)` (`path.c`): strip the last path

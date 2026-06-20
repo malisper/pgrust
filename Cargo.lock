@@ -21877,6 +21877,7 @@ dependencies = [
  "backend-commands-tablespace-globals-seams",
  "backend-commands-user-seams",
  "backend-common-exec-seams",
+ "backend-common-path-seams",
  "backend-libpq-pqcomm-seams",
  "backend-libpq-pqsignal-seams",
  "backend-port-path-seams",
@@ -21892,6 +21893,7 @@ dependencies = [
  "backend-storage-lmgr-proc-seams",
  "backend-tcop-postgres-seams",
  "backend-tcop-utility-out-seams",
+ "backend-utils-adt-acl-seams",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-syscache-seams",
@@ -21914,6 +21916,7 @@ dependencies = [
  "libc",
  "mcx",
  "port-path-seams",
+ "types-catalog",
  "types-core",
  "types-datum",
  "types-error",
@@ -22918,6 +22921,19 @@ version = "0.0.0"
 dependencies = [
  "seam-core",
  "types-misc-more2",
+]
+
+[[package]]
+name = "common-controldata-utils"
+version = "0.0.0"
+dependencies = [
+ "backend-storage-file-fd-seams",
+ "backend-utils-error",
+ "common-controldata-utils-seams",
+ "port-crc32c",
+ "types-control",
+ "types-core",
+ "types-error",
 ]
 
 [[package]]
@@ -24227,6 +24243,7 @@ dependencies = [
  "backend-utils-time-snapmgr",
  "common-blkreftable",
  "common-checksum-helper",
+ "common-controldata-utils",
  "common-cryptohash",
  "common-extra-encnames-fgram",
  "common-hashfn",
