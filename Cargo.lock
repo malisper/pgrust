@@ -20085,6 +20085,7 @@ dependencies = [
 name = "backend-utils-adt-pseudotypes"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-libpq-pqformat",
  "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-enum",
@@ -20094,6 +20095,7 @@ dependencies = [
  "backend-utils-fmgr-core",
  "backend-utils-mb-mbutils-seams",
  "mcx",
+ "types-core",
  "types-datum",
  "types-error",
  "types-fmgr",

@@ -17,10 +17,12 @@
 //! expressible at the current fmgr boundary (`cstring` on the by-ref lane, the
 //! 0-width by-value `void`, the `bytea` send result on the by-ref lane).
 //!
-//! The remaining pseudo-type I/O functions are either the `ereport(ERROR)`
-//! dummies (no SQL-callable value), or `recv`/delegating outputs over `Datum`
-//! arms (array / enum / range / multirange) whose arg/result types are not
-//! expressible at the current fmgr boundary.
+//! The delegating `_out`/`_send` for `anyarray`/`anycompatiblearray` (forward to
+//! `array_out`/`array_send`) and `anyenum_out` (forwards to `enum_out`) ARE
+//! expressible and registered here. The remaining pseudo-type I/O functions are
+//! the `ereport(ERROR)` dummies (no SQL-callable value) or the range/multirange
+//! `_out` (which read a typed `RangeType`/multirange pointer off the by-ref lane
+//! via the range/multirange crates' private decode, not yet wired here).
 
 extern crate std;
 
@@ -92,6 +94,32 @@ fn buf_from<'a>(image: &[u8], m: &'a mcx::MemoryContext) -> StringInfo<'a> {
 #[inline]
 fn arg_datum(fcinfo: &FunctionCallInfoBaseData) -> Datum {
     fcinfo.arg(0).map(|a| a.value).unwrap_or_else(Datum::null)
+}
+
+/// `PG_GETARG_OID(i)` → `DatumGetObjectId`: an `anyenum` value is a by-value
+/// enum-label OID word.
+#[inline]
+fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> types_core::Oid {
+    fcinfo.arg(i).expect("pseudotypes fn: missing oid arg").value.as_oid()
+}
+
+/// `PG_GETARG_ANY_ARRAY_P(i)`: the `anyarray` argument **detoasted**
+/// (`DatumGetArrayTypeP` == `pg_detoast_datum`). A stored `anyarray` value
+/// (e.g. pg_statistic `stavalues`) can be inline-compressed or external, so the
+/// raw by-ref image is not a plain `ArrayType`; mirror `arrayfuncs`'
+/// `arg_array_detoast` (detoast is a verbatim copy for an already-plain value).
+fn arg_array_detoast(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
+    let raw = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("pseudotypes fn: anyarray arg missing from by-ref lane");
+    let m = scratch_mcx();
+    let detoasted = match backend_access_common_detoast_seams::detoast_attr::call(m.mcx(), raw) {
+        Ok(d) => d,
+        Err(e) => raise(e),
+    };
+    let out = detoasted.as_slice().to_vec();
+    out
 }
 
 /// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
@@ -277,12 +305,63 @@ fc_out!(fc_anycompatible_out, crate::anycompatible_out);
 fc_in!(fc_anycompatiblenonarray_in, crate::anycompatiblenonarray_in);
 fc_out!(fc_anycompatiblenonarray_out, crate::anycompatiblenonarray_out);
 
-// --- dummy INPUT funcs whose OUTPUT is real (out not registered here) ---
+// --- dummy INPUT funcs whose OUTPUT/SEND is real (delegating I/O) ---
 fc_in!(fc_anyarray_in, crate::anyarray_in);
 fc_recv!(fc_anyarray_recv, crate::anyarray_recv);
 fc_in!(fc_anycompatiblearray_in, crate::anycompatiblearray_in);
 fc_recv!(fc_anycompatiblearray_recv, crate::anycompatiblearray_recv);
 fc_in!(fc_anyenum_in, crate::anyenum_in);
+
+/// An `anyarray` `_out` (delegates to `array_out`): detoast the array arg, call
+/// the core, strip the trailing NUL for the cstring lane (C: `array_out` returns
+/// a NUL-terminated cstring via `PG_RETURN_CSTRING`).
+macro_rules! fc_array_out {
+    ($adapter:ident, $core:path) => {
+        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+            let array = arg_array_detoast(fcinfo, 0);
+            let m = scratch_mcx();
+            let bytes = match $core(m.mcx(), &array) {
+                Ok(v) => v,
+                Err(e) => raise(e),
+            };
+            let raw = bytes.as_slice();
+            let body = raw.strip_suffix(&[0u8]).unwrap_or(raw);
+            ret_cstring(fcinfo, String::from_utf8_lossy(body).into_owned())
+        }
+    };
+}
+
+/// An `anyarray` `_send` (delegates to `array_send`): detoast the array arg,
+/// call the core, return the `bytea` image on the by-ref lane.
+macro_rules! fc_array_send {
+    ($adapter:ident, $core:path) => {
+        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+            let array = arg_array_detoast(fcinfo, 0);
+            let m = scratch_mcx();
+            let bytes = match $core(m.mcx(), &array) {
+                Ok(v) => v.as_slice().to_vec(),
+                Err(e) => raise(e),
+            };
+            ret_varlena(fcinfo, bytes)
+        }
+    };
+}
+
+fc_array_out!(fc_anyarray_out, crate::anyarray_out);
+fc_array_send!(fc_anyarray_send, crate::anyarray_send);
+fc_array_out!(fc_anycompatiblearray_out, crate::anycompatiblearray_out);
+fc_array_send!(fc_anycompatiblearray_send, crate::anycompatiblearray_send);
+
+/// `anyenum_out` (pseudotypes.c:197): `return enum_out(fcinfo)` — the by-value
+/// enum-label OID forwarded to the real `enum.c` output, returned on the cstring
+/// lane.
+fn fc_anyenum_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let oid = arg_oid(fcinfo, 0);
+    match crate::anyenum_out(Datum::from_oid(oid)) {
+        Ok(s) => ret_cstring(fcinfo, s),
+        Err(e) => raise(e),
+    }
+}
 fc_in!(fc_anyrange_in, crate::anyrange_in);
 fc_in!(fc_anycompatiblerange_in, crate::anycompatiblerange_in);
 fc_in!(fc_anymultirange_in, crate::anymultirange_in);
@@ -439,12 +518,18 @@ pub fn register_pseudotypes_builtins() {
         builtin(5087, "anycompatible_out", 1, true, false, fc_anycompatible_out),
         builtin(5092, "anycompatiblenonarray_in", 1, true, false, fc_anycompatiblenonarray_in),
         builtin(5093, "anycompatiblenonarray_out", 1, true, false, fc_anycompatiblenonarray_out),
-        // ---- dummy INPUT (output is real, registered by its real owner) ----
+        // ---- dummy INPUT (input throws; output/send delegate to real I/O) ----
         builtin(2296, "anyarray_in", 1, true, false, fc_anyarray_in),
         builtin(2502, "anyarray_recv", 1, true, false, fc_anyarray_recv),
         builtin(5088, "anycompatiblearray_in", 1, true, false, fc_anycompatiblearray_in),
         builtin(5090, "anycompatiblearray_recv", 1, true, false, fc_anycompatiblearray_recv),
         builtin(3504, "anyenum_in", 1, true, false, fc_anyenum_in),
+        // ---- delegating OUTPUT/SEND (array_out/send, enum_out — real I/O) ----
+        builtin(2297, "anyarray_out", 1, true, false, fc_anyarray_out),
+        builtin(2503, "anyarray_send", 1, true, false, fc_anyarray_send),
+        builtin(5089, "anycompatiblearray_out", 1, true, false, fc_anycompatiblearray_out),
+        builtin(5091, "anycompatiblearray_send", 1, true, false, fc_anycompatiblearray_send),
+        builtin(3505, "anyenum_out", 1, true, false, fc_anyenum_out),
         builtin(3832, "anyrange_in", 3, true, false, fc_anyrange_in),
         builtin(5094, "anycompatiblerange_in", 3, true, false, fc_anycompatiblerange_in),
         builtin(4229, "anymultirange_in", 3, true, false, fc_anymultirange_in),
