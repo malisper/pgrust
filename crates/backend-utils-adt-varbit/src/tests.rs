@@ -9,7 +9,7 @@ static INIT: Once = Once::new();
 /// fragment printed in a bad-digit error message). Install a single-byte mock.
 fn init() {
     INIT.call_once(|| {
-        mb::pg_mblen_range::set(|_s: &[u8]| 1i32);
+        mb::pg_mblen_range::set(|_s: &[u8]| Ok(1i32));
     });
 }
 

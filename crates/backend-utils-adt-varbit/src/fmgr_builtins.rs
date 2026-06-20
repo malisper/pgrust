@@ -27,8 +27,9 @@
 //! by-ref lane, so any self-consistent encoding round-trips).
 
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_stringinfo::StringInfo;
 
 use crate::{VarBit, VarBitRef};
@@ -139,26 +140,12 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("varbit fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
-// fc_ adapters — I/O.
+// fc_ adapters — I/O. (Result-native: `ereport(ERROR)` travels as `Err(PgError)`
+// straight back to the fmgr dispatch `invoke_builtin`, no panic/catch_unwind.)
 // ---------------------------------------------------------------------------
 
-fn fc_bit_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bit_in(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // args: cstring, oid (typioparam, unused), int4 typmod.
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let typmod = arg_int32(fcinfo, 2);
@@ -167,58 +154,58 @@ fn fc_bit_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // InputFunctionCallSafe so a recoverable parse failure `ereturn`s into the
     // sink (returning `Ok(None)`) instead of throwing past `invoke?`.
     let escontext = fcinfo.escontext_mut();
-    let parsed = ok(crate::bit_in(m.mcx(), &s, typmod, escontext));
+    let parsed = crate::bit_in(m.mcx(), &s, typmod, escontext)?;
     match parsed {
-        Some(v) => ret_varbit(fcinfo, &v),
+        Some(v) => Ok(ret_varbit(fcinfo, &v)),
         // Soft-error path: escontext recorded the failure; the caller discards
         // this placeholder after `soft_error_occurred()`.
-        None => Datum::null(),
+        None => Ok(Datum::null()),
     }
 }
 
-fn fc_varbit_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_varbit_in(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let typmod = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
     // Forward the soft ErrorSaveContext (see fc_bit_in).
     let escontext = fcinfo.escontext_mut();
-    let parsed = ok(crate::varbit_in(m.mcx(), &s, typmod, escontext));
+    let parsed = crate::varbit_in(m.mcx(), &s, typmod, escontext)?;
     match parsed {
-        Some(v) => ret_varbit(fcinfo, &v),
-        None => Datum::null(),
+        Some(v) => Ok(ret_varbit(fcinfo, &v)),
+        None => Ok(Datum::null()),
     }
 }
 
-fn fc_bit_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bit_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
     let arg = decode_varbit(&image);
     let m = scratch_mcx();
-    let bytes = ok(crate::bit_out(m.mcx(), arg)).to_vec();
-    ret_cstring(fcinfo, &bytes)
+    let bytes = crate::bit_out(m.mcx(), arg)?.to_vec();
+    Ok(ret_cstring(fcinfo, &bytes))
 }
 
-fn fc_varbit_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_varbit_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
     let arg = decode_varbit(&image);
     let m = scratch_mcx();
-    let bytes = ok(crate::varbit_out(m.mcx(), arg)).to_vec();
-    ret_cstring(fcinfo, &bytes)
+    let bytes = crate::varbit_out(m.mcx(), arg)?.to_vec();
+    Ok(ret_cstring(fcinfo, &bytes))
 }
 
-fn fc_bit_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bit_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
     let arg = decode_varbit(&image);
     let m = scratch_mcx();
-    let bytes = ok(crate::bit_send(m.mcx(), arg)).as_bytes().to_vec();
-    ret_bytea(fcinfo, bytes)
+    let bytes = crate::bit_send(m.mcx(), arg)?.as_bytes().to_vec();
+    Ok(ret_bytea(fcinfo, bytes))
 }
 
-fn fc_varbit_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_varbit_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
     let arg = decode_varbit(&image);
     let m = scratch_mcx();
-    let bytes = ok(crate::varbit_send(m.mcx(), arg)).as_bytes().to_vec();
-    ret_bytea(fcinfo, bytes)
+    let bytes = crate::varbit_send(m.mcx(), arg)?.as_bytes().to_vec();
+    Ok(ret_bytea(fcinfo, bytes))
 }
 
 /// The full `cstring[]` `ArrayType` varlena image of arg `i` off the by-ref
@@ -231,30 +218,30 @@ fn arg_array_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u
         .expect("varbit fn: cstring[] arg missing from by-ref lane")
 }
 
-fn fc_bittypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bittypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_array_bytes(fcinfo, 0).to_vec();
     let m = scratch_mcx();
-    Datum::from_i32(ok(crate::bittypmodin(m.mcx(), &image)))
+    Ok(Datum::from_i32(crate::bittypmodin(m.mcx(), &image)?))
 }
 
-fn fc_varbittypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_varbittypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_array_bytes(fcinfo, 0).to_vec();
     let m = scratch_mcx();
-    Datum::from_i32(ok(crate::varbittypmodin(m.mcx(), &image)))
+    Ok(Datum::from_i32(crate::varbittypmodin(m.mcx(), &image)?))
 }
 
-fn fc_bittypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bittypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let typmod = arg_int32(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(crate::bittypmodout(m.mcx(), typmod)).to_vec();
-    ret_cstring(fcinfo, &bytes)
+    let bytes = crate::bittypmodout(m.mcx(), typmod)?.to_vec();
+    Ok(ret_cstring(fcinfo, &bytes))
 }
 
-fn fc_varbittypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_varbittypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let typmod = arg_int32(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(crate::varbittypmodout(m.mcx(), typmod)).to_vec();
-    ret_cstring(fcinfo, &bytes)
+    let bytes = crate::varbittypmodout(m.mcx(), typmod)?.to_vec();
+    Ok(ret_cstring(fcinfo, &bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -271,101 +258,101 @@ macro_rules! decode_both {
     }};
 }
 
-fn fc_biteq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_biteq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let (a, b) = decode_both!(fcinfo);
-    Datum::from_bool(crate::biteq(decode_varbit(&a), decode_varbit(&b)))
+    Ok(Datum::from_bool(crate::biteq(decode_varbit(&a), decode_varbit(&b))))
 }
 
-fn fc_bitne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitne(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let (a, b) = decode_both!(fcinfo);
-    Datum::from_bool(crate::bitne(decode_varbit(&a), decode_varbit(&b)))
+    Ok(Datum::from_bool(crate::bitne(decode_varbit(&a), decode_varbit(&b))))
 }
 
-fn fc_bitlt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitlt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let (a, b) = decode_both!(fcinfo);
-    Datum::from_bool(crate::bitlt(decode_varbit(&a), decode_varbit(&b)))
+    Ok(Datum::from_bool(crate::bitlt(decode_varbit(&a), decode_varbit(&b))))
 }
 
-fn fc_bitle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitle(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let (a, b) = decode_both!(fcinfo);
-    Datum::from_bool(crate::bitle(decode_varbit(&a), decode_varbit(&b)))
+    Ok(Datum::from_bool(crate::bitle(decode_varbit(&a), decode_varbit(&b))))
 }
 
-fn fc_bitgt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitgt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let (a, b) = decode_both!(fcinfo);
-    Datum::from_bool(crate::bitgt(decode_varbit(&a), decode_varbit(&b)))
+    Ok(Datum::from_bool(crate::bitgt(decode_varbit(&a), decode_varbit(&b))))
 }
 
-fn fc_bitge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitge(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let (a, b) = decode_both!(fcinfo);
-    Datum::from_bool(crate::bitge(decode_varbit(&a), decode_varbit(&b)))
+    Ok(Datum::from_bool(crate::bitge(decode_varbit(&a), decode_varbit(&b))))
 }
 
-fn fc_bitcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitcmp(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let (a, b) = decode_both!(fcinfo);
-    Datum::from_i32(crate::bitcmp(decode_varbit(&a), decode_varbit(&b)))
+    Ok(Datum::from_i32(crate::bitcmp(decode_varbit(&a), decode_varbit(&b))))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — bitwise logical / shift / concat (-> bit/varbit).
 // ---------------------------------------------------------------------------
 
-fn fc_bitand(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitand(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let (a, b) = decode_both!(fcinfo);
     let m = scratch_mcx();
-    let v = ok(crate::bit_and(m.mcx(), decode_varbit(&a), decode_varbit(&b)));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bit_and(m.mcx(), decode_varbit(&a), decode_varbit(&b))?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_bitor(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitor(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let (a, b) = decode_both!(fcinfo);
     let m = scratch_mcx();
-    let v = ok(crate::bit_or(m.mcx(), decode_varbit(&a), decode_varbit(&b)));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bit_or(m.mcx(), decode_varbit(&a), decode_varbit(&b))?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_bitxor(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitxor(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let (a, b) = decode_both!(fcinfo);
     let m = scratch_mcx();
-    let v = ok(crate::bitxor(m.mcx(), decode_varbit(&a), decode_varbit(&b)));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bitxor(m.mcx(), decode_varbit(&a), decode_varbit(&b))?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_bitnot(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitnot(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
     let m = scratch_mcx();
-    let v = ok(crate::bitnot(m.mcx(), decode_varbit(&image)));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bitnot(m.mcx(), decode_varbit(&image))?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_bitshiftleft(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
-    let shft = arg_int32(fcinfo, 1);
-    let m = scratch_mcx();
-    let v = ok(crate::bitshiftleft(m.mcx(), decode_varbit(&image), shft));
-    ret_varbit(fcinfo, &v)
-}
-
-fn fc_bitshiftright(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitshiftleft(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
     let shft = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
-    let v = ok(crate::bitshiftright(m.mcx(), decode_varbit(&image), shft));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bitshiftleft(m.mcx(), decode_varbit(&image), shft)?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_bitcat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitshiftright(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let image = arg_varbit_bytes(fcinfo, 0).to_vec();
+    let shft = arg_int32(fcinfo, 1);
+    let m = scratch_mcx();
+    let v = crate::bitshiftright(m.mcx(), decode_varbit(&image), shft)?;
+    Ok(ret_varbit(fcinfo, &v))
+}
+
+fn fc_bitcat(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let (a, b) = decode_both!(fcinfo);
     let m = scratch_mcx();
-    let v = ok(crate::bitcat(m.mcx(), decode_varbit(&a), decode_varbit(&b)));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bitcat(m.mcx(), decode_varbit(&a), decode_varbit(&b))?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — recv (StringInfo).
 // ---------------------------------------------------------------------------
 
-fn fc_bit_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bit_recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // args: internal (StringInfo), oid (typioparam, unused), int4 typmod.
     let src = arg_varbit_bytes(fcinfo, 0).to_vec();
     let typmod = arg_int32(fcinfo, 2);
@@ -373,146 +360,146 @@ fn fc_bit_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let mut data = mcx::PgVec::new_in(m.mcx());
     data.extend_from_slice(&src);
     let mut buf = StringInfo::from_vec(data);
-    let v = ok(crate::bit_recv(m.mcx(), &mut buf, typmod));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bit_recv(m.mcx(), &mut buf, typmod)?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_varbit_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_varbit_recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let src = arg_varbit_bytes(fcinfo, 0).to_vec();
     let typmod = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
     let mut data = mcx::PgVec::new_in(m.mcx());
     data.extend_from_slice(&src);
     let mut buf = StringInfo::from_vec(data);
-    let v = ok(crate::varbit_recv(m.mcx(), &mut buf, typmod));
-    ret_varbit(fcinfo, &v)
+    let v = crate::varbit_recv(m.mcx(), &mut buf, typmod)?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — length coercion (bit/varbit) — (varbit, int4 len, bool explicit).
 // ---------------------------------------------------------------------------
 
-fn fc_bit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bit(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
     let len = arg_int32(fcinfo, 1);
     let is_explicit = arg_bool(fcinfo, 2);
     let m = scratch_mcx();
-    let v = ok(crate::bit(m.mcx(), decode_varbit(&image), len, is_explicit));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bit(m.mcx(), decode_varbit(&image), len, is_explicit)?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_varbit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_varbit(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
     let len = arg_int32(fcinfo, 1);
     let is_explicit = arg_bool(fcinfo, 2);
     let m = scratch_mcx();
-    let v = ok(crate::varbit(m.mcx(), decode_varbit(&image), len, is_explicit));
-    ret_varbit(fcinfo, &v)
+    let v = crate::varbit(m.mcx(), decode_varbit(&image), len, is_explicit)?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — int4/int8 conversion (by-value <-> varbit).
 // ---------------------------------------------------------------------------
 
-fn fc_bitfromint4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitfromint4(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let a = arg_int32(fcinfo, 0);
     let typmod = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
-    let v = ok(crate::bitfromint4(m.mcx(), a, typmod));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bitfromint4(m.mcx(), a, typmod)?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_bittoint4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bittoint4(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
-    Datum::from_i32(ok(crate::bittoint4(decode_varbit(&image))))
+    Ok(Datum::from_i32(crate::bittoint4(decode_varbit(&image))?))
 }
 
-fn fc_bitfromint8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitfromint8(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let a = arg_int64(fcinfo, 0);
     let typmod = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
-    let v = ok(crate::bitfromint8(m.mcx(), a, typmod));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bitfromint8(m.mcx(), a, typmod)?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_bittoint8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bittoint8(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
-    Datum::from_i64(ok(crate::bittoint8(decode_varbit(&image))))
+    Ok(Datum::from_i64(crate::bittoint8(decode_varbit(&image))?))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — bit get/set, popcount, length, position, substr, overlay.
 // ---------------------------------------------------------------------------
 
-fn fc_bitgetbit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitgetbit(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
     let n = arg_int32(fcinfo, 1);
-    Datum::from_i32(ok(crate::bitgetbit(decode_varbit(&image), n)))
+    Ok(Datum::from_i32(crate::bitgetbit(decode_varbit(&image), n)?))
 }
 
-fn fc_bitsetbit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitsetbit(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
     let n = arg_int32(fcinfo, 1);
     let new_bit = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
-    let v = ok(crate::bitsetbit(m.mcx(), decode_varbit(&image), n, new_bit));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bitsetbit(m.mcx(), decode_varbit(&image), n, new_bit)?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_bit_bit_count(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bit_bit_count(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
-    Datum::from_i64(crate::bit_bit_count(decode_varbit(&image)))
+    Ok(Datum::from_i64(crate::bit_bit_count(decode_varbit(&image))))
 }
 
-fn fc_bitlength(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitlength(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
-    Datum::from_i32(crate::bitlength(decode_varbit(&image)))
+    Ok(Datum::from_i32(crate::bitlength(decode_varbit(&image))))
 }
 
-fn fc_bitoctetlength(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitoctetlength(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
-    Datum::from_i32(crate::bitoctetlength(decode_varbit(&image)))
+    Ok(Datum::from_i32(crate::bitoctetlength(decode_varbit(&image))))
 }
 
-fn fc_bitposition(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitposition(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let (a, b) = decode_both!(fcinfo);
-    Datum::from_i32(crate::bitposition(decode_varbit(&a), decode_varbit(&b)))
+    Ok(Datum::from_i32(crate::bitposition(decode_varbit(&a), decode_varbit(&b))))
 }
 
-fn fc_bitsubstr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitsubstr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
     let s = arg_int32(fcinfo, 1);
     let l = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
-    let v = ok(crate::bitsubstr(m.mcx(), decode_varbit(&image), s, l));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bitsubstr(m.mcx(), decode_varbit(&image), s, l)?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_bitsubstr_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitsubstr_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let image = arg_varbit_bytes(fcinfo, 0).to_vec();
     let s = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
-    let v = ok(crate::bitsubstr_no_len(m.mcx(), decode_varbit(&image), s));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bitsubstr_no_len(m.mcx(), decode_varbit(&image), s)?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_bitoverlay(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitoverlay(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let t1 = arg_varbit_bytes(fcinfo, 0).to_vec();
     let t2 = arg_varbit_bytes(fcinfo, 1).to_vec();
     let sp = arg_int32(fcinfo, 2);
     let sl = arg_int32(fcinfo, 3);
     let m = scratch_mcx();
-    let v = ok(crate::bitoverlay(m.mcx(), decode_varbit(&t1), decode_varbit(&t2), sp, sl));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bitoverlay(m.mcx(), decode_varbit(&t1), decode_varbit(&t2), sp, sl)?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
-fn fc_bitoverlay_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bitoverlay_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let t1 = arg_varbit_bytes(fcinfo, 0).to_vec();
     let t2 = arg_varbit_bytes(fcinfo, 1).to_vec();
     let sp = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
-    let v = ok(crate::bitoverlay_no_len(m.mcx(), decode_varbit(&t1), decode_varbit(&t2), sp));
-    ret_varbit(fcinfo, &v)
+    let v = crate::bitoverlay_no_len(m.mcx(), decode_varbit(&t1), decode_varbit(&t2), sp)?;
+    Ok(ret_varbit(fcinfo, &v))
 }
 
 // ---------------------------------------------------------------------------
@@ -525,16 +512,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the expressible `varbit.c` fmgr builtins (C: their `fmgr_builtins[]`
@@ -549,7 +539,7 @@ fn builtin(
 /// typmodin seam delivers as a full array varlena image on the by-ref Varlena
 /// lane (`arg_array_bytes`).
 pub fn register_varbit_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // I/O
         builtin(1564, "bit_in", 3, true, false, fc_bit_in),
         builtin(1565, "bit_out", 1, true, false, fc_bit_out),
@@ -628,12 +618,11 @@ mod tests {
         fc
     }
 
-    /// Call a registered builtin by OID with the given fcinfo.
+    /// Call a registered builtin by OID with the given fcinfo (via the
+    /// Result-native overlay; unwrap the hard `Err` in tests).
     fn call(oid: u32, fc: &mut FunctionCallInfoBaseData) -> Datum {
-        let f = backend_utils_fmgr_core::fmgr_isbuiltin(oid)
-            .and_then(|b| b.func)
-            .expect("builtin not registered");
-        f(fc)
+        let f = backend_utils_fmgr_core::native_builtin(oid).expect("builtin not registered");
+        f(fc).expect("builtin returned Err")
     }
 
     /// Run `bit_in`/`varbit_in` (OID) over `text`, returning the varbit image.
