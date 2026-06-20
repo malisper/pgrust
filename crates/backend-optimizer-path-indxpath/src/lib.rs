@@ -124,8 +124,10 @@ pub fn init_seams() {
          root: &mut PlannerInfo,
          rel: RelId|
          -> PgResult<()> {
-            let ctx = mcx::MemoryContext::new("indxpath");
-            drivers::create_index_paths(ctx.mcx(), root, run, rel)
+            // The opaque `Node` is invariant in `'mcx`, so the transient nodes the
+            // driver builds must share the planner arena's lifetime — use the
+            // planner run's own `mcx` (not a fresh, shorter-lived scratch).
+            drivers::create_index_paths(run.mcx(), root, run, rel)
         },
     );
     ix::check_index_predicates::set(
@@ -133,8 +135,7 @@ pub fn init_seams() {
          root: &mut PlannerInfo,
          rel: RelId|
          -> PgResult<()> {
-            let ctx = mcx::MemoryContext::new("indxpath");
-            predicates::check_index_predicates(ctx.mcx(), root, run, rel)
+            predicates::check_index_predicates(run.mcx(), root, run, rel)
         },
     );
     ix::relation_has_unique_index_for::set(

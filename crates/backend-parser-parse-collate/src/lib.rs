@@ -170,7 +170,7 @@ impl<'p, 'mcx> AssignCollationsContext<'p, 'mcx> {
 /// `assign_list_collations`; each `WALK(Node *)` to `assign_expr_collations`
 /// (the two branches of `assign_query_collations_walker`).
 pub fn assign_query_collations<'mcx>(
-    pstate: Option<&ParseState<'_>>,
+    pstate: Option<&ParseState<'mcx>>,
     query: &mut types_nodes::copy_query::Query<'mcx>,
 ) -> PgResult<()> {
     // targetList / returningList are `Vec<TargetEntry>` (typed); each member's
@@ -237,7 +237,7 @@ pub fn assign_query_collations<'mcx>(
 /// component expression trees (arbiter where, the SET targetlist, the
 /// `WHERE`), each processed independently by `assign_query_collations_walker`.
 fn assign_onconflict_collations<'mcx>(
-    pstate: Option<&ParseState<'_>>,
+    pstate: Option<&ParseState<'mcx>>,
     oce: &mut types_nodes::rawnodes::OnConflictExpr<'mcx>,
 ) -> PgResult<()> {
     for e in oce.arbiterElems.iter_mut() {
@@ -261,7 +261,7 @@ fn assign_onconflict_collations<'mcx>(
 /// `FromExpr` sub-walk (the query's jointree): each fromlist member and the
 /// quals, processed independently.
 fn assign_fromexpr_collations<'mcx>(
-    pstate: Option<&ParseState<'_>>,
+    pstate: Option<&ParseState<'mcx>>,
     from: &mut types_nodes::rawnodes::FromExpr<'mcx>,
 ) -> PgResult<()> {
     for e in from.fromlist.iter_mut() {
@@ -278,9 +278,9 @@ fn assign_fromexpr_collations<'mcx>(
 /// special-cases `SetOperationStmt` (already processed) and a whole `List`
 /// (→ assign_list_collations); a bare expression goes to
 /// `assign_expr_collations`.
-fn assign_query_collations_walker_node(
-    pstate: Option<&ParseState<'_>>,
-    node: &mut Node,
+fn assign_query_collations_walker_node<'mcx>(
+    pstate: Option<&ParseState<'mcx>>,
+    node: &mut Node<'mcx>,
 ) -> PgResult<()> {
     // We don't want to recurse into a set-operations tree; it's already been
     // fully processed in transformSetOperationStmt.
@@ -293,8 +293,8 @@ fn assign_query_collations_walker_node(
 /// The `WALK(Node *)` branch handed an embedded `Expr` (the typed `expr` of a
 /// targetlist `TargetEntry`): process it independently via
 /// `assign_expr_collations`.
-fn assign_query_collations_walker_expr(
-    pstate: Option<&ParseState<'_>>,
+fn assign_query_collations_walker_expr<'mcx>(
+    pstate: Option<&ParseState<'mcx>>,
     expr: &mut Expr,
 ) -> PgResult<()> {
     let mut context = AssignCollationsContext::fresh(pstate);
@@ -330,7 +330,10 @@ pub fn assign_expr_collations(pstate: Option<&ParseState<'_>>, expr: &mut Expr) 
 /// the expression walk; the non-expression `Node` arms (jointree members,
 /// MergeAction, …) recurse via the in-place `Node` walker exactly as C's
 /// `assign_collations_walker` does for those tags.
-fn assign_expr_collations_node(pstate: Option<&ParseState<'_>>, node: &mut Node) -> PgResult<()> {
+fn assign_expr_collations_node<'mcx>(
+    pstate: Option<&ParseState<'mcx>>,
+    node: &mut Node<'mcx>,
+) -> PgResult<()> {
     let mut context = AssignCollationsContext::fresh(pstate);
     assign_collations_walker(node, &mut context)
 }
@@ -381,9 +384,9 @@ pub fn select_common_collation(
 /// `T_TargetEntry`, `T_RangeTblRef`/`T_JoinExpr`/`T_FromExpr`/…, `T_Query`,
 /// `T_List`) applies; an embedded `Node::Expr` delegates to
 /// [`assign_collations_walker_expr`] (the expression switch).
-fn assign_collations_walker(
-    node: &mut Node,
-    context: &mut AssignCollationsContext<'_, '_>,
+fn assign_collations_walker<'mcx>(
+    node: &mut Node<'mcx>,
+    context: &mut AssignCollationsContext<'_, 'mcx>,
 ) -> PgResult<()> {
     // Prepare for recursion: each level has its own local context.
     let mut loccontext = AssignCollationsContext::fresh(context.pstate);
@@ -788,23 +791,30 @@ fn assign_collations_walker_expr(
 /// `(void) expression_tree_walker(node, assign_collations_walker, &loccontext)`
 /// over a generic `Node` — recurse into children, mutating each and merging its
 /// state into `loccontext`.
-fn recurse_children(
-    node: &mut Node,
-    loccontext: &mut AssignCollationsContext<'_, '_>,
+fn recurse_children<'mcx>(
+    node: &mut Node<'mcx>,
+    loccontext: &mut AssignCollationsContext<'_, 'mcx>,
 ) -> PgResult<()> {
     let mut err: Option<types_error::PgError> = None;
-    let scratch = mcx::MemoryContext::new("assign_collations scratch");
-    let scratch_mcx = scratch.mcx();
+    // The in-place walker wraps each `Expr` child as a transient opaque `Node`
+    // tied to the walked tree's context (`'mcx`); recover that context from the
+    // pstate (the tree being collated lives in the query mcx). Every real caller
+    // passes `Some(pstate)`.
+    let mcx: mcx::Mcx<'mcx> = *loccontext
+        .pstate
+        .expect("recurse_children: assign_collations requires a pstate (for the query mcx)")
+        .p_rtable
+        .allocator();
     expression_tree_walker_mut(
         node,
-        &mut |child: &mut Node| match assign_collations_walker(child, loccontext) {
+        &mut |child: &mut Node<'mcx>| match assign_collations_walker(child, loccontext) {
             Ok(()) => false,
             Err(e) => {
                 err = Some(e);
                 true
             }
         },
-        scratch_mcx,
+        mcx,
     );
     match err {
         Some(e) => Err(e),
@@ -816,17 +826,20 @@ fn recurse_children(
 /// over an embedded `Expr` — recurse into the expression's children (wrapped as
 /// `Node::Expr` by the in-place `Node` walker), mutating each and merging into
 /// `loccontext`.
-fn recurse_expr_children(
+fn recurse_expr_children<'mcx>(
     expr: &mut Expr,
-    loccontext: &mut AssignCollationsContext<'_, '_>,
+    loccontext: &mut AssignCollationsContext<'_, 'mcx>,
 ) -> PgResult<()> {
-    // Wrap the Expr into a Node so the Node-level in-place walker enumerates its
-    // children (it descends `Node::Expr` via the canonical Expr-level child set,
-    // wrapping each child back as `Node::Expr`). The wrapper is written back so
-    // any in-place mutation of `expr`'s own collation fields (none happen here;
-    // children mutate themselves) is preserved.
+    // Wrap the Expr into an opaque `Node` (allocated in the query mcx, recovered
+    // from the pstate) so the Node-level in-place walker enumerates its children.
+    // The wrapper is written back so any in-place mutation is preserved.
+    let mcx: mcx::Mcx<'mcx> = *loccontext
+        .pstate
+        .expect("recurse_expr_children: assign_collations requires a pstate (for the query mcx)")
+        .p_rtable
+        .allocator();
     let placeholder = Expr::Var(types_nodes::primnodes::Var::default());
-    let mut wrapped = Node::Expr(core::mem::replace(expr, placeholder));
+    let mut wrapped = Node::mk_expr(mcx, core::mem::replace(expr, placeholder))?;
     let res = recurse_children(&mut wrapped, loccontext);
     if let Some(e) = wrapped.into_expr() {
         *expr = e;

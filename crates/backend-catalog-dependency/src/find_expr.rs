@@ -755,10 +755,10 @@ fn run_query_subwalk(
 
 /// find_expr_references_walker subroutine: handle a Var reference to an
 /// RTE_FUNCTION RTE.
-fn process_function_rte_ref(
-    rte: &RangeTblEntry<'_>,
+fn process_function_rte_ref<'mcx>(
+    rte: &RangeTblEntry<'mcx>,
     attnum: AttrNumber,
-    context: &mut FindExprReferencesContext<'_>,
+    context: &mut FindExprReferencesContext<'mcx>,
 ) -> PgResult<()> {
     let mut atts_done: i32 = 0;
 
