@@ -1037,7 +1037,7 @@ fn subquery_planner_carried<'mcx>(
                 };
 
                 let processed =
-                    preprocess_expression(mcx, &mut root, run, outer_query_ref, qual_expr, EXPRKIND_QUAL)?;
+                    preprocess_expression(mcx, &mut *root, run, outer_query_ref, qual_expr, EXPRKIND_QUAL)?;
 
                 let wco_node = run.resolve_mut(root.parse).withCheckOptions[i].as_mut();
                 let wco = wco_node.as_withcheckoption_mut().expect(
