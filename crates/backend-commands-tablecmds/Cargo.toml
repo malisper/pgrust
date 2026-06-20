@@ -31,6 +31,9 @@ types-cluster = { path = "../types-cluster" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-utils-time-snapmgr-pc-seams = { path = "../backend-utils-time-snapmgr-pc-seams" }
+backend-access-transam-multixact-seams = { path = "../backend-access-transam-multixact-seams" }
+backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
 # ProcessUtility dispatch arms (installs TRUNCATE + DROP-relations forwarding seams).
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }

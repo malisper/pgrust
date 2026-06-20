@@ -1768,7 +1768,9 @@ mod recurrence_guard {
         // init_seams() (for the pg_shdepend REASSIGN/DROP OWNED by-OID path); the
         // direct AT_ChangeOwner phase calls the body in-process.
         // (rename_relation_internal retired — ported + installed in rename.rs.)
-        ("backend_commands_tablecmds", "reset_rel_rewrite"),
+        // (reset_rel_rewrite retired — ported (at_column::ResetRelRewrite) +
+        // installed in tablecmds' init_seams() for finish_heap_swap's pg_class
+        // relrewrite clear.)
         // DESIGN_DEBT (TD-INDEXCREATE-BOOTSTRAP-LEGS): catalog/index.c's
         // `index_create` reaches three legs ONLY in bootstrap mode (or via the
         // deferrable-constraint path of `index_constraint_create`) whose owners

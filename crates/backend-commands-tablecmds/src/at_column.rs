@@ -793,6 +793,26 @@ pub fn ATExecForceNoForceRowSecurity<'mcx>(
     Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
 }
 
+/// `ResetRelRewrite(myrelid)` (tablecmds.c:4363) — clear `pg_class.relrewrite`
+/// (set to `InvalidOid`) on `myrelid` after a heap rewrite/swap. Installed as the
+/// `reset_rel_rewrite` seam (consumed by cluster's `finish_heap_swap` for the
+/// swapped relation and its toast table).
+pub fn ResetRelRewrite(myrelid: types_core::Oid) -> PgResult<()> {
+    // pg_class = table_open(RelationRelationId, RowExclusiveLock);
+    // reltup = SearchSysCacheCopy1(RELOID, myrelid);
+    // ((Form_pg_class) GETSTRUCT(reltup))->relrewrite = InvalidOid;
+    // CatalogTupleUpdate(pg_class, &reltup->t_self, reltup);
+    let valid =
+        indexing_seam::set_pg_class_relrewrite::call(myrelid, types_core::InvalidOid)?;
+    if !valid {
+        return backend_utils_error::ereport(ERROR)
+            .errmsg(format!("cache lookup failed for relation {myrelid}"))
+            .finish(here("ResetRelRewrite"))
+            .map(|()| unreachable!());
+    }
+    Ok(())
+}
+
 /// `HEAP_RELOPT_NAMESPACES` (access/reloptions.h) — `{ "toast", NULL }`.
 const HEAP_RELOPT_NAMESPACES: &[&str] = &["toast"];
 

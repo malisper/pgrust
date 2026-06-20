@@ -94,6 +94,7 @@ const ANUM_PG_CLASS_RELFORCEROWSECURITY: i16 = 25;
 const ANUM_PG_CLASS_RELISPOPULATED: i16 = 26;
 const ANUM_PG_CLASS_RELREPLIDENT: i16 = 27;
 const ANUM_PG_CLASS_RELISPARTITION: i16 = 28;
+const ANUM_PG_CLASS_RELREWRITE: i16 = 29;
 const ANUM_PG_INDEX_INDEXRELID: i16 = 1;
 const ANUM_PG_INDEX_INDISVALID: i16 = 11;
 const ANUM_PG_INDEX_INDISREPLIDENT: i16 = 15;
@@ -1338,6 +1339,37 @@ fn set_pg_class_relreplident(relid: Oid, ri_type: i8) -> PgResult<bool> {
         );
         modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
     }
+    pg_class.close(RowExclusiveLock)?;
+    Ok(true)
+}
+
+/// `ResetRelRewrite`'s pg_class write (tablecmds.c:4363): `pg_class =
+/// table_open(RelationRelationId, RowExclusiveLock)` → `tuple =
+/// SearchSysCacheCopy1(RELOID, relid)` → `((Form_pg_class)
+/// GETSTRUCT(tuple))->relrewrite = InvalidOid` → `CatalogTupleUpdate` →
+/// `heap_freetuple` → `table_close`. Returns `false` when the syscache lookup
+/// failed (`!HeapTupleIsValid`), so the caller raises `cache lookup failed for
+/// relation %u`. Installed as the `reset_rel_rewrite` tablecmds seam (the pg_class
+/// write the tablecmds body delegates to the indexing pg_class-write owner, like
+/// the setters above).
+fn set_pg_class_relrewrite(relid: Oid, relrewrite: Oid) -> PgResult<bool> {
+    let ctx = MemoryContext::new("set_pg_class_relrewrite");
+    let mcx = ctx.mcx();
+    let pg_class = table_open(mcx, cat::catalog::RELATION_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_class, ANUM_PG_CLASS_OID, relid)? else {
+        pg_class.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+    let (mut values, mut nulls) = deform(mcx, &pg_class, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        ANUM_PG_CLASS_RELREWRITE,
+        Datum::from_oid(relrewrite),
+    );
+    modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
     pg_class.close(RowExclusiveLock)?;
     Ok(true)
 }
@@ -2921,6 +2953,7 @@ pub fn install() {
     s::set_pg_class_row_security::set(set_pg_class_row_security);
     s::set_pg_class_relhastriggers::set(set_pg_class_relhastriggers);
     s::set_pg_class_relreplident::set(set_pg_class_relreplident);
+    s::set_pg_class_relrewrite::set(set_pg_class_relrewrite);
     s::set_index_isreplident::set(set_index_isreplident);
 
     // matview.c's SetMatViewPopulatedState pg_class write (cross-crate install:

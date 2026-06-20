@@ -909,6 +909,32 @@ pub fn event_trigger_alter_table_relid(_object_id: Oid) {
     );
 }
 
+/// `EventTriggerTableRewrite(parsetree, tableOid, reason)` (event_trigger.c:1003)
+/// — fire any `table_rewrite` event triggers before a table's heap is rewritten.
+/// No-op when no event-trigger collection state is set up (the standalone /
+/// no-relevant-trigger case: the C `!currentEventTriggerState` early return,
+/// which is *necessary* per the C comment, since `EventTriggerCommonSetup` might
+/// otherwise find triggers created mid-command). The active firing path
+/// (`EventTriggerCommonSetup`/`EventTriggerInvoke` + the
+/// `pg_event_trigger_table_rewrite_oid` state) is part of the event-trigger
+/// firing sub-campaign and stops loudly until it lands.
+pub fn event_trigger_table_rewrite(
+    _parsetree: Option<&Node>,
+    _table_oid: Oid,
+    _reason: i32,
+) -> PgResult<()> {
+    // if (!IsUnderPostmaster || !event_triggers) return;
+    // if (!currentEventTriggerState) return;
+    if !collecting() {
+        return Ok(());
+    }
+    panic!(
+        "EventTriggerTableRewrite: firing table_rewrite event triggers \
+         (EventTriggerCommonSetup + EventTriggerInvoke) is part of the \
+         event-trigger firing sub-campaign and is not modelled here"
+    );
+}
+
 /// `EventTriggerAlterTableEnd()` (event_trigger.c:1840) — finish collecting the
 /// ALTER TABLE command and, if it gathered any subcommands, append it to the
 /// command list. No-op without an active collection state (standalone).
@@ -1615,6 +1641,9 @@ pub fn init_seams() {
     );
     backend_commands_event_trigger_seams::event_trigger_collect_simple_command_reindex::set(
         event_trigger_collect_simple_command_reindex,
+    );
+    backend_commands_event_trigger_seams::event_trigger_table_rewrite::set(
+        event_trigger_table_rewrite,
     );
     backend_commands_event_trigger_seams::event_trigger_collect_create_opclass::set(
         event_trigger_collect_create_opclass,

@@ -95,6 +95,7 @@ pub fn init_seams() {
     seam::set_relation_has_subclass::set(smallfns::set_relation_has_subclass);
     seam::check_relation_tablespace_move::set(smallfns::check_relation_tablespace_move);
     seam::set_relation_tablespace::set(smallfns::set_relation_tablespace);
+    seam::reset_rel_rewrite::set(at_column::ResetRelRewrite);
 
     // F1 (RENAME / namespace / owner).
     seam::range_var_callback_owns_relation::set(f1_rename::range_var_callback_owns_relation);

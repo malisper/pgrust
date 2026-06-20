@@ -2348,6 +2348,414 @@ pub fn validate_partition_constraint_scan<'mcx>(
     result
 }
 
+/// `ATRewriteTable(tab, OIDNewHeap)` (tablecmds.c) — scan or rewrite one table.
+///
+/// A rewrite is requested by passing a valid `oid_new_heap` (caller already
+/// holds `AccessExclusiveLock` on it, having just `make_new_heap`'d it); for the
+/// scan-only verify path `oid_new_heap == InvalidOid`. This is the executor-owned
+/// leg: it builds an `EState`, compiles the queued cast/USING/default expressions
+/// (`tab->newvals`) and CHECK quals (`tab->constraints`) into `ExprState`s, then
+/// scans the old heap. For each row, when rewriting, it copies the old columns
+/// into a new slot, evaluates the replacement/generated expressions, re-checks
+/// the not-null / CHECK / partition constraints, and inserts the new tuple into
+/// the new heap via `table_tuple_insert`. The tablecmds caller does the
+/// surrounding `make_new_heap` / `finish_heap_swap`.
+#[allow(clippy::too_many_arguments)]
+pub fn at_rewrite_table_scan<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    relid: Oid,
+    oid_new_heap: Oid,
+    old_desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+    rewrite: i32,
+    newvals: &[(i16, types_nodes::primnodes::Expr, bool)],
+    check_constraints: &[(&str, types_nodes::primnodes::Expr)],
+    verify_new_notnull: bool,
+    partition_constraint: &[types_nodes::primnodes::Expr],
+    validate_default: bool,
+) -> PgResult<()> {
+    use backend_executor_execTuples::exec_init_slots::{
+        ExecDropSingleTupleTableSlot, MakeSingleTupleTableSlot,
+    };
+    use backend_executor_execTuples::slot_store_fetch::{
+        ExecClearTuple, ExecStoreAllNullTuple, ExecStoreVirtualTuple,
+    };
+
+    const NoLock: i32 = 0;
+
+    // oldrel = table_open(tab->relid, NoLock); newTupDesc = RelationGetDescr(oldrel)
+    // (includes all mods); oldTupDesc = tab->oldDesc.
+    let oldrel = backend_access_common_relation::relation_open(mcx, relid, NoLock)?;
+    let rel_alias = oldrel.alias();
+    let old_relid = oldrel.rd_id;
+    let new_tup_desc = oldrel.rd_att.clone_in(mcx)?;
+    let old_tup_desc = old_desc.clone_in(mcx)?;
+
+    let rewriting = types_core::primitive::OidIsValid(oid_new_heap);
+
+    // newrel = OidIsValid(OIDNewHeap) ? table_open(OIDNewHeap, NoLock) : NULL.
+    let newrel = if rewriting {
+        Some(backend_access_common_relation::relation_open(mcx, oid_new_heap, NoLock)?)
+    } else {
+        None
+    };
+
+    // BulkInsertState + insert options + command id (only when rewriting).
+    let (mycid, mut bistate, ti_options) = if rewriting {
+        let cid = xact_seams::get_current_command_id::call(true)?;
+        let bistate = backend_access_heap_heapam_seams::get_bulk_insert_state::call()?;
+        // TABLE_INSERT_SKIP_FSM == (1 << 1) (tableam.h).
+        (cid, Some(bistate), 1 << 1)
+    } else {
+        (0, None, 0)
+    };
+
+    // estate = CreateExecutorState(); reuse the active snapshot for the scan
+    // (the managed active snapshot is at least as new as the ALTER's own catalog
+    // mutations — same idiom as validate_partition_constraint_scan / the NOT NULL
+    // verify scan, avoiding a private RegisterSnapshot/UnregisterSnapshot pair).
+    let mut estate = execUtils::create_executor_state_in(mcx)?;
+    estate.es_snapshot = backend_utils_time_snapmgr_seams::get_active_snapshot::call()?;
+    estate.es_direction = ScanDirection::ForwardScanDirection;
+
+    let mut needscan = false;
+
+    // Build CHECK constraint ExprStates (con->qualstate =
+    // ExecPrepareExpr(expand_generated_columns_in_expr(con->qual, oldrel, 1))).
+    let mut check_states: alloc::vec::Vec<(alloc::string::String, mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>)> =
+        alloc::vec::Vec::with_capacity(check_constraints.len());
+    for (name, qual) in check_constraints.iter() {
+        needscan = true;
+        let expanded = backend_rewrite_rewritehandler::expand_generated_columns_in_expr(
+            mcx,
+            Some(qual.clone_in(mcx)?),
+            &rel_alias,
+            1,
+        )?;
+        let expanded_expr =
+            expanded.expect("expand_generated_columns_in_expr returned NULL for a non-NULL Expr");
+        let state = execExpr::exec_prepare_expr(&expanded_expr, &mut estate)?;
+        check_states.push(((*name).to_string(), state));
+    }
+
+    // Build partition-check ExprState (partqualstate = ExecPrepareExpr(tab->partition_constraint)).
+    let mut partqualstate: Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>> = None;
+    if !partition_constraint.is_empty() {
+        needscan = true;
+        // tab->partition_constraint is the single ANDed Expr; ExecPrepareExpr it.
+        // (Callers store it already AND-collapsed; an implicit-AND list is
+        // AND-folded element-wise by ExecPrepareCheck, but ATRewriteTable uses
+        // ExecPrepareExpr on the single stored Expr — mirror that for the first
+        // element, AND-ing the rest defensively if more than one was passed.)
+        let expr = if partition_constraint.len() == 1 {
+            partition_constraint[0].clone_in(mcx)?
+        } else {
+            let mut planned: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+                alloc::vec::Vec::with_capacity(partition_constraint.len());
+            for e in partition_constraint {
+                planned.push(e.clone_in(mcx)?);
+            }
+            backend_nodes_core::makefuncs::make_ands_explicit(planned)
+        };
+        partqualstate = Some(execExpr::exec_prepare_expr(&expr, &mut estate)?);
+    }
+
+    // Build newvals ExprStates (ex->exprstate = ExecInitExpr(ex->expr, NULL)).
+    // attnum and is_generated travel alongside.
+    let mut newval_states: alloc::vec::Vec<(i16, bool, mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>)> =
+        alloc::vec::Vec::with_capacity(newvals.len());
+    for (attnum, expr, is_generated) in newvals.iter() {
+        let state = execExpr::exec_init_expr_no_parent(&expr.clone_in(mcx)?, &mut estate)?;
+        newval_states.push((*attnum, *is_generated, state));
+    }
+
+    // Collect *valid* (non-virtual) NOT NULL attnums to recheck when rewriting
+    // or when verify_new_notnull is set. Virtual generated NOT NULL columns are
+    // not supported on this frontier (mirrors at_verify_not_null).
+    let mut notnull_attrs: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
+    let mut has_virtual_notnull = false;
+    if rewriting || verify_new_notnull {
+        for i in 0..new_tup_desc.natts {
+            let att = new_tup_desc.attr(i as usize);
+            // attr->attnullability == ATTNULLABLE_VALID && !attisdropped. The
+            // owned descriptor exposes attnotnull (set for a valid NOT NULL).
+            if att.attnotnull && !att.attisdropped {
+                if att.attgenerated == types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL {
+                    has_virtual_notnull = true;
+                } else {
+                    notnull_attrs.push(att.attnum as i32);
+                }
+            }
+        }
+        if !notnull_attrs.is_empty() {
+            needscan = true;
+        }
+    }
+    if has_virtual_notnull {
+        panic!(
+            "backend-executor-execMain: ATRewriteTable NOT NULL recheck over a virtual generated \
+             column (ExecRelGenVirtualNotNull) is unported on this frontier"
+        );
+    }
+
+    // Precompute the list of dropped attributes (set to NULL in the new tuple).
+    let mut dropped_attrs: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+    for i in 0..new_tup_desc.natts {
+        if new_tup_desc.attr(i as usize).attisdropped {
+            dropped_attrs.push(i as usize);
+        }
+    }
+
+    // The scan body is wrapped so cleanup (table_endscan + drop slots) always
+    // runs, including on the Err path.
+    let body: PgResult<()> = (|| {
+        if !(rewriting || needscan) {
+            // Nothing to scan (no rewrite, no constraints, no NOT NULL recheck).
+            return Ok(());
+        }
+
+        // Create the tuple slots and register them in the EState pool (the
+        // ExprContext->ecxt_scantuple references a pool SlotId). When rewriting,
+        // two slots are needed (old over oldTupDesc, new over newTupDesc);
+        // otherwise one slot over newTupDesc suffices.
+        let old_callbacks = backend_access_table_tableam::table_slot_callbacks(&rel_alias);
+        let (oldslot_id, newslot_id): (types_nodes::SlotId, Option<types_nodes::SlotId>) =
+            if rewriting {
+                let newrel_alias = newrel
+                    .as_ref()
+                    .expect("at_rewrite_table_scan: newrel is NULL while rewriting")
+                    .alias();
+                let new_callbacks =
+                    backend_access_table_tableam::table_slot_callbacks(&newrel_alias);
+                let oslot = MakeSingleTupleTableSlot(
+                    mcx,
+                    Some(mcx::alloc_in(mcx, old_tup_desc.clone_in(mcx)?)?),
+                    old_callbacks,
+                )?;
+                let mut nslot = MakeSingleTupleTableSlot(
+                    mcx,
+                    Some(mcx::alloc_in(mcx, new_tup_desc.clone_in(mcx)?)?),
+                    new_callbacks,
+                )?;
+                // Set all columns in the new slot to NULL initially (columns
+                // added by the rewrite with a NULL default get no newval expr).
+                ExecStoreAllNullTuple(mcx, &mut nslot)?;
+                let oid = estate.push_slot_data(oslot)?;
+                let nid = estate.push_slot_data(nslot)?;
+                (oid, Some(nid))
+            } else {
+                let oslot = MakeSingleTupleTableSlot(
+                    mcx,
+                    Some(mcx::alloc_in(mcx, new_tup_desc.clone_in(mcx)?)?),
+                    old_callbacks,
+                )?;
+                let oid = estate.push_slot_data(oslot)?;
+                (oid, None)
+            };
+
+        let econtext = execUtils::MakePerTupleExprContext(&mut estate)?;
+
+        let snapshot = estate
+            .es_snapshot
+            .clone()
+            .expect("at_rewrite_table_scan: no active snapshot");
+
+        let mut scan =
+            backend_access_table_tableam_seams::table_beginscan::call(mcx, &rel_alias, snapshot)?;
+
+        // while (table_scan_getnextslot(scan, ForwardScanDirection, oldslot))
+        loop {
+            let got = backend_access_table_tableam_seams::table_scan_getnextslot_direction::call(
+                mcx,
+                &mut scan,
+                estate.es_direction,
+                estate.slot_data_mut(oldslot_id),
+            )?;
+            if !got {
+                break;
+            }
+
+            let insertslot: types_nodes::SlotId = if rewrite > 0 {
+                let newslot_id = newslot_id.expect("rewrite>0 but no new slot");
+
+                // slot_getallattrs(oldslot); ExecClearTuple(newslot).
+                backend_executor_execTuples::slot_deform::slot_getallattrs(
+                    mcx,
+                    estate.slot_data_mut(oldslot_id),
+                )?;
+                ExecClearTuple(estate.slot_data_mut(newslot_id))?;
+
+                // Copy attributes old -> new (memcpy of tts_values/tts_isnull up
+                // to oldslot->tts_nvalid); set dropped attrs to NULL; set
+                // tts_tableOid = RelationGetRelid(oldrel).
+                {
+                    let (oldslot, newslot) =
+                        estate.slot_data_pair_mut(oldslot_id, newslot_id);
+                    let nvalid = oldslot.base().tts_nvalid as usize;
+                    let (ovals, oisn) = {
+                        let ob = oldslot.base();
+                        (&ob.tts_values, &ob.tts_isnull)
+                    };
+                    let nb = newslot.base_mut();
+                    for i in 0..nvalid {
+                        nb.tts_values[i] = ovals[i].clone_in(mcx)?;
+                        nb.tts_isnull[i] = oisn[i];
+                    }
+                    for &d in dropped_attrs.iter() {
+                        nb.tts_isnull[d] = true;
+                    }
+                    nb.tts_tableOid = old_relid;
+                }
+
+                // First, evaluate expressions whose inputs come from the old
+                // tuple (ex->is_generated == false). econtext->ecxt_scantuple = oldslot.
+                estate.ecxt_mut(econtext).ecxt_scantuple = Some(oldslot_id);
+                for (attnum, is_generated, state) in newval_states.iter_mut() {
+                    if *is_generated {
+                        continue;
+                    }
+                    let (val, isnull) =
+                        execExpr::exec_eval_expr_switch_context(state, econtext, &mut estate)?;
+                    let nb = estate.slot_data_mut(newslot_id).base_mut();
+                    nb.tts_values[(*attnum - 1) as usize] = val;
+                    nb.tts_isnull[(*attnum - 1) as usize] = isnull;
+                }
+
+                // ExecStoreVirtualTuple(newslot).
+                ExecStoreVirtualTuple(estate.slot_data_mut(newslot_id))?;
+
+                // Then, evaluate generated expressions (inputs from the new
+                // tuple). econtext->ecxt_scantuple = newslot.
+                estate.ecxt_mut(econtext).ecxt_scantuple = Some(newslot_id);
+                for (attnum, is_generated, state) in newval_states.iter_mut() {
+                    if !*is_generated {
+                        continue;
+                    }
+                    let (val, isnull) =
+                        execExpr::exec_eval_expr_switch_context(state, econtext, &mut estate)?;
+                    let nb = estate.slot_data_mut(newslot_id).base_mut();
+                    nb.tts_values[(*attnum - 1) as usize] = val;
+                    nb.tts_isnull[(*attnum - 1) as usize] = isnull;
+                }
+
+                newslot_id
+            } else {
+                // No rewrite: verify constraints over the old slot directly.
+                oldslot_id
+            };
+
+            // Now check any constraints on the possibly-changed tuple.
+            estate.ecxt_mut(econtext).ecxt_scantuple = Some(insertslot);
+
+            // NOT NULL recheck.
+            for &attn in notnull_attrs.iter() {
+                let (_v, isnull) = backend_executor_execTuples::slot_deform::slot_getattr(
+                    mcx,
+                    estate.slot_data_mut(insertslot),
+                    attn as i16,
+                )?;
+                if isnull {
+                    let att = new_tup_desc.attr((attn - 1) as usize);
+                    let attname =
+                        alloc::string::String::from_utf8_lossy(att.attname.name_str())
+                            .into_owned();
+                    let relname = rel_alias.name().to_string();
+                    backend_access_table_tableam::table_endscan(scan)?;
+                    return Err(ereport(ERROR)
+                        .errcode(types_error::ERRCODE_NOT_NULL_VIOLATION)
+                        .errmsg(alloc::format!(
+                            "column \"{attname}\" of relation \"{relname}\" contains null values"
+                        ))
+                        .into_error());
+                }
+            }
+
+            // CHECK constraints (ExecCheck: NULL counts as success).
+            for (name, state) in check_states.iter_mut() {
+                let ok = execExpr::exec_check(Some(state), econtext, &mut estate)?;
+                if !ok {
+                    let relname = rel_alias.name().to_string();
+                    backend_access_table_tableam::table_endscan(scan)?;
+                    return Err(ereport(ERROR)
+                        .errcode(types_error::ERRCODE_CHECK_VIOLATION)
+                        .errmsg(alloc::format!(
+                            "check constraint \"{name}\" of relation \"{relname}\" is violated by some row"
+                        ))
+                        .into_error());
+                }
+            }
+
+            // Partition constraint (ExecCheck).
+            if let Some(state) = partqualstate.as_mut() {
+                let ok = execExpr::exec_check(Some(state), econtext, &mut estate)?;
+                if !ok {
+                    let relname = rel_alias.name().to_string();
+                    backend_access_table_tableam::table_endscan(scan)?;
+                    let msg = if validate_default {
+                        alloc::format!(
+                            "updated partition constraint for default partition \"{relname}\" would be violated by some row"
+                        )
+                    } else {
+                        alloc::format!(
+                            "partition constraint of relation \"{relname}\" is violated by some row"
+                        )
+                    };
+                    return Err(ereport(ERROR)
+                        .errcode(types_error::ERRCODE_CHECK_VIOLATION)
+                        .errmsg(msg)
+                        .into_error());
+                }
+            }
+
+            // Write the tuple out to the new relation.
+            if let Some(nr) = newrel.as_ref() {
+                let nr_alias = nr.alias();
+                backend_access_table_tableam::table_tuple_insert(
+                    mcx,
+                    &nr_alias,
+                    estate.slot_data_mut(insertslot),
+                    mycid,
+                    ti_options,
+                    bistate.as_mut(),
+                )?;
+            }
+
+            // ResetExprContext(econtext) — reset the per-tuple memory.
+            execUtils::ResetPerTupleExprContext(&mut estate);
+
+            backend_tcop_postgres_seams::check_for_interrupts::call()?;
+        }
+
+        backend_access_table_tableam::table_endscan(scan)?;
+
+        // ExecDropSingleTupleTableSlot(oldslot); if (newslot) drop it too. The
+        // pool-owned slots are reclaimed with the EState; explicit clear to
+        // mirror C's ExecDropSingleTupleTableSlot (releases any pin). Take them
+        // out of the pool by value.
+        ExecClearTuple(estate.slot_data_mut(oldslot_id))?;
+        if let Some(nid) = newslot_id {
+            ExecClearTuple(estate.slot_data_mut(nid))?;
+        }
+        Ok(())
+    })();
+
+    // FreeExecutorState(estate).
+    execUtils::free_executor_state_in(estate)?;
+
+    // table_close(oldrel, NoLock); if (newrel) { FreeBulkInsertState; finish; close }.
+    oldrel.close(NoLock)?;
+    if let Some(nr) = newrel {
+        if let Some(mut b) = bistate.take() {
+            backend_access_heap_heapam_seams::free_bulk_insert_state::call(&mut b)?;
+        }
+        let nr_alias = nr.alias();
+        backend_access_table_tableam::table_finish_bulk_insert(&nr_alias, ti_options)?;
+        nr.close(NoLock)?;
+    }
+
+    let _ = ExecDropSingleTupleTableSlot; // keep the import meaningful if scan skipped
+    body
+}
+
 /// `ExecConstraints(resultRelInfo, slot, estate)` (execMain.c): check the
 /// relation's NOT NULL and CHECK constraints against `slot`. The partition
 /// constraint is *not* checked here.
@@ -2699,6 +3107,7 @@ pub fn init_seams() {
     seams::exec_partition_check::set(ExecPartitionCheck);
     seams::exec_partition_check_emit_error::set(ExecPartitionCheckEmitError);
     seams::validate_partition_constraint_scan::set(validate_partition_constraint_scan);
+    seams::at_rewrite_table_scan::set(at_rewrite_table_scan);
     seams::exec_check_permissions_select::set(exec_check_permissions_select);
     seams::exec_check_one_rel_perms_view::set(exec_check_one_rel_perms_view);
     seams::exec_build_slot_value_description::set(ExecBuildSlotValueDescription);

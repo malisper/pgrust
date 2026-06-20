@@ -590,6 +590,11 @@ pub fn init_seams() {
     heapam_seam::heap_multi_insert::set(|mcx, rel, tuples, cid, options, bistate| {
         insert::heap_multi_insert(mcx, rel, tuples, cid, options, bistate)
     });
+    heapam_seam::get_bulk_insert_state::set(|| crate::GetBulkInsertState());
+    heapam_seam::free_bulk_insert_state::set(|bistate| {
+        crate::FreeBulkInsertState(bistate);
+        Ok(())
+    });
 
     // F4 LOCK — the lock-wait primitives F0 declared as owned by this family.
     heapam_seam::heap_acquire_tuplock::set(|relation, tid, mode, wait_policy, have_tuple_lock| {

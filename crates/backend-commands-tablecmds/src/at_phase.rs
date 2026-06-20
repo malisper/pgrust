@@ -36,7 +36,7 @@
 use mcx::{Mcx, PgVec};
 
 use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::primitive::{InvalidOid, Oid};
+use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
 use types_acl::ACLCHECK_NOT_OWNER;
 use types_nodes::ddlnodes::{AlterTableCmd, AlterTableStmt, AlterTableType};
@@ -1767,37 +1767,170 @@ fn ATRewriteTables<'mcx>(
             rel.close(NoLock)?;
         }
 
-        // tab->rewrite > 0 (heap rewrite) and tab->constraints (CHECK
-        // revalidation) require the full ATRewriteTable rewrite/eval path, which
-        // is not yet ported. The NOT-NULL-only verify path (verify_new_notnull,
-        // no rewrite, no CHECK) is.
-        if wqueue[ti].rewrite > 0 {
-            unported("ATRewriteTable (phase-3 heap rewrite)");
-        }
-        if !wqueue[ti].constraints.is_empty() {
-            unported("ATRewriteTable (phase-3 CHECK constraint revalidation)");
-        }
-        if wqueue[ti].verify_new_notnull {
+        // We only need to rewrite the table if at least one column needs to be
+        // recomputed, or we are changing its persistence or access method
+        // (tablecmds.c:5883). `tab->rewrite > 0 && relkind != RELKIND_SEQUENCE`.
+        if wqueue[ti].rewrite > 0 && wqueue[ti].relkind != RELKIND_SEQUENCE {
+            // Build a temporary relation and copy data.
             let relid = wqueue[ti].relid;
-            crate::at_constraint::at_verify_not_null(mcx, relid)?;
-        }
-        // Also: ATTACH PARTITION constraint validation. `tab->partition_constraint`
-        // holds the single ANDed constraint Expr (queued by
-        // QueuePartitionConstraintValidation when it could not prove the bound
-        // from existing constraints). Scan the table and verify every row, via the
-        // execMain `validate_partition_constraint_scan` seam (the ATTACH leg of C's
-        // ATRewriteTable).
-        if let Some(part_constraint) = wqueue[ti].partition_constraint.as_ref() {
-            let relid = wqueue[ti].relid;
-            let expr = part_constraint
-                .as_expr()
-                .cloned()
-                .expect("partition_constraint is not an Expr");
-            backend_executor_execMain_seams::validate_partition_constraint_scan::call(
+            let old_heap = relation_open(mcx, relid, NoLock)?;
+
+            // We don't support rewriting of system catalogs.
+            if IsSystemRelation(&old_heap) {
+                let name = old_heap.name().to_string();
+                old_heap.close(NoLock)?;
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg(format!("cannot rewrite system relation \"{name}\""))
+                    .finish(here("ATRewriteTables"));
+            }
+            // RelationIsUsedAsCatalogTable(rel): rd_options->user_catalog_table
+            // (only meaningful for RELATION / MATVIEW).
+            let used_as_catalog = matches!(
+                old_heap.rd_rel.relkind,
+                RELKIND_RELATION | RELKIND_MATVIEW
+            ) && old_heap
+                .rd_options
+                .as_ref()
+                .is_some_and(|o| o.user_catalog_table);
+            if used_as_catalog {
+                let name = old_heap.name().to_string();
+                old_heap.close(NoLock)?;
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg(format!(
+                        "cannot rewrite table \"{name}\" used as a catalog table"
+                    ))
+                    .finish(here("ATRewriteTables"));
+            }
+            // Don't allow rewrite on temp tables of other backends.
+            if crate::smallfns::relation_is_other_temp(&old_heap)? {
+                old_heap.close(NoLock)?;
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg("cannot rewrite temporary tables of other sessions".to_string())
+                    .finish(here("ATRewriteTables"));
+            }
+
+            // Select destination tablespace / access method / persistence (same
+            // as original unless the user requested a change).
+            let new_table_space = if OidIsValid(wqueue[ti].newTableSpace) {
+                wqueue[ti].newTableSpace
+            } else {
+                old_heap.rd_rel.reltablespace
+            };
+            let new_access_method = if wqueue[ti].chgAccessMethod {
+                wqueue[ti].newAccessMethod
+            } else {
+                old_heap.rd_rel.relam
+            };
+            let persistence = if wqueue[ti].chgPersistence {
+                wqueue[ti].newrelpersistence
+            } else {
+                old_heap.rd_rel.relpersistence
+            };
+
+            old_heap.close(NoLock)?;
+
+            // Fire the table_rewrite Event Trigger now, before rewriting (only
+            // once, and only when parsetree is non-NULL — not from
+            // AlterTableInternal). A no-op without active event-trigger state.
+            if _parsetree.is_some() {
+                backend_commands_event_trigger_seams::event_trigger_table_rewrite::call(
+                    None,
+                    relid,
+                    wqueue[ti].rewrite,
+                )?;
+            }
+
+            // Create the transient table that will receive the modified data.
+            let oid_new_heap = backend_commands_cluster_seams::make_new_heap::call(
                 mcx,
                 relid,
-                &[expr],
+                new_table_space,
+                new_access_method,
+                persistence,
+                _lockmode,
             )?;
+
+            // Copy the heap data into the new table with the desired
+            // modifications, testing the current data against new constraints.
+            run_at_rewrite_table_scan(mcx, &wqueue[ti], oid_new_heap)?;
+
+            // Swap the physical files, rebuild indexes, discard the old heap.
+            // We use RecentXmin for the new relfrozenxid (all tuples rewritten).
+            let frozen_xid = backend_utils_time_snapmgr_pc_seams::recent_xmin::call();
+            let cutoff_multi =
+                backend_access_transam_multixact_seams::read_next_multixact_id::call()?;
+            backend_commands_cluster_seams::finish_heap_swap::call(
+                mcx,
+                relid,
+                oid_new_heap,
+                false,
+                false,
+                true,
+                !OidIsValid(wqueue[ti].newTableSpace),
+                frozen_xid,
+                cutoff_multi,
+                persistence,
+            )?;
+
+            // InvokeObjectPostAlterHook(RelationRelationId, tab->relid, 0).
+            backend_catalog_objectaccess_seams::invoke_object_post_alter_hook::call(
+                RelationRelationId,
+                relid,
+                0,
+            )?;
+        } else if wqueue[ti].rewrite > 0 && wqueue[ti].relkind == RELKIND_SEQUENCE {
+            // SequenceChangePersistence on rewrite of a sequence (persistence
+            // change). The owner is unported on this frontier.
+            if wqueue[ti].chgPersistence {
+                unported("ATRewriteTables: SequenceChangePersistence (rewrite of a sequence)");
+            }
+        } else {
+            // If required, test the current data against new constraints, but
+            // don't rebuild data. C: if (tab->constraints != NIL ||
+            // tab->verify_new_notnull || tab->partition_constraint != NULL)
+            // ATRewriteTable(tab, InvalidOid).
+            if !wqueue[ti].constraints.is_empty()
+                || wqueue[ti].verify_new_notnull
+                || wqueue[ti].partition_constraint.is_some()
+            {
+                run_at_rewrite_table_scan(mcx, &wqueue[ti], InvalidOid)?;
+            }
+
+            // SET TABLESPACE with no reason to reconstruct tuples → block copy.
+            if OidIsValid(wqueue[ti].newTableSpace) {
+                unported("ATRewriteTables: ATExecSetTableSpace (block-by-block copy)");
+            }
+        }
+
+        // Also change persistence of owned sequences. The getOwnedSequences /
+        // SequenceChangePersistence pair is unported on this frontier; it is only
+        // reached by SET LOGGED/UNLOGGED, which itself sets chgPersistence.
+        if wqueue[ti].chgPersistence {
+            unported("ATRewriteTables: owned-sequence persistence change");
+        }
+    }
+
+    // Foreign-key constraints are checked in a final pass (after all rewrites).
+    for ti in 0..wqueue.len() {
+        if !backend_catalog_heap::RELKIND_HAS_STORAGE(wqueue[ti].relkind) {
+            continue;
+        }
+        for ci in 0..wqueue[ti].constraints.len() {
+            if wqueue[ti].constraints[ci].contype
+                == types_nodes::ddlnodes::ConstrType::CONSTR_FOREIGN as i32
+            {
+                unported("ATRewriteTables: validateForeignKeyConstraint final pass");
+            }
+        }
+    }
+
+    // Finally, run any afterStmts that were queued up.
+    for ti in 0..wqueue.len() {
+        if !wqueue[ti].afterStmts.is_empty() {
+            unported("ATRewriteTables: afterStmts (ProcessUtilityForAlterTable)");
         }
     }
 
@@ -1808,6 +1941,90 @@ fn ATRewriteTables<'mcx>(
 
     let _ = mcx;
     Ok(())
+}
+
+/// Project a phase-3 work-queue entry into the executor-owned
+/// [`backend_executor_execMain_seams::at_rewrite_table_scan`] seam (the scan +
+/// expression-eval + constraint-recheck + insert body of C's `ATRewriteTable`).
+/// `oid_new_heap` is the transient heap (`InvalidOid` for the scan-only verify
+/// path). The newvals carry `(attnum, planned-expr, is_generated)`; the CHECK
+/// constraints carry `(name, cooked-qual-expr)`; the partition constraint and
+/// `validate_default` flag round out the recheck inputs.
+fn run_at_rewrite_table_scan<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &AlteredTableInfo<'mcx>,
+    oid_new_heap: Oid,
+) -> PgResult<()> {
+    // tab->newvals: each NewColumnValue carries an `Expr` (the planned
+    // cast/USING/default), its attnum, and is_generated.
+    let mut newvals: Vec<(i16, types_nodes::primnodes::Expr, bool)> =
+        Vec::with_capacity(tab.newvals.len());
+    for nv in tab.newvals.iter() {
+        let node = nv
+            .expr
+            .as_ref()
+            .expect("NewColumnValue.expr is NULL in phase-3 rewrite");
+        let expr = node
+            .as_expr()
+            .cloned()
+            .expect("NewColumnValue.expr is not an Expr");
+        newvals.push((nv.attnum, expr, nv.is_generated));
+    }
+
+    // tab->constraints: only CONSTR_CHECK entries are evaluated by the scan (the
+    // CONSTR_FOREIGN entries are validated in the separate FK pass). Their qual
+    // is the cooked CHECK Expr.
+    const CONSTR_CHECK: i32 = 5; // ConstrType::CONSTR_CHECK
+    let mut check_names: Vec<String> = Vec::new();
+    let mut check_exprs: Vec<types_nodes::primnodes::Expr> = Vec::new();
+    for con in tab.constraints.iter() {
+        if con.contype != CONSTR_CHECK {
+            continue;
+        }
+        let node = con
+            .qual
+            .as_ref()
+            .expect("CONSTR_CHECK NewConstraint.qual is NULL");
+        let expr = node
+            .as_expr()
+            .cloned()
+            .expect("CONSTR_CHECK NewConstraint.qual is not an Expr");
+        let name = con
+            .name
+            .as_ref()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        check_names.push(name);
+        check_exprs.push(expr);
+    }
+    let check_constraints: Vec<(&str, types_nodes::primnodes::Expr)> = check_names
+        .iter()
+        .zip(check_exprs.iter())
+        .map(|(n, e)| (n.as_str(), e.clone()))
+        .collect();
+
+    // tab->partition_constraint: the single ANDed Expr, if any.
+    let partition_constraint: Vec<types_nodes::primnodes::Expr> =
+        match tab.partition_constraint.as_ref() {
+            Some(node) => vec![node
+                .as_expr()
+                .cloned()
+                .expect("partition_constraint is not an Expr")],
+            None => Vec::new(),
+        };
+
+    backend_executor_execMain_seams::at_rewrite_table_scan::call(
+        mcx,
+        tab.relid,
+        oid_new_heap,
+        &tab.oldDesc,
+        tab.rewrite,
+        &newvals,
+        &check_constraints,
+        tab.verify_new_notnull,
+        &partition_constraint,
+        tab.validate_default,
+    )
 }
 
 // ===========================================================================

@@ -261,6 +261,37 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ATRewriteTable(tab, OIDNewHeap)` (tablecmds.c) — the phase-3
+    /// scan-and-rewrite of one table's heap, owned by execMain (it builds an
+    /// `EState` + `ExprState`s + scan loop, evaluating the queued cast/USING/
+    /// default expressions and re-checking constraints). The tablecmds caller
+    /// has already done `make_new_heap` (passing the transient heap's OID in
+    /// `oid_new_heap`; `InvalidOid` for the scan-only verify path) and will do
+    /// `finish_heap_swap` afterward.
+    ///
+    /// `old_desc` is `tab->oldDesc` (the pre-modification descriptor); `rewrite`
+    /// is `tab->rewrite`. `newvals` carries each queued `NewColumnValue` as
+    /// `(attnum, planned-expr, is_generated)`; `check_constraints` carries each
+    /// `CONSTR_CHECK` `NewConstraint` as `(name, cooked-qual-expr)`.
+    /// `verify_new_notnull` / `partition_constraint` / `validate_default` mirror
+    /// the `AlteredTableInfo` fields. A constraint violation or NOT NULL
+    /// violation raises the matching `ereport(ERROR)`, carried on `Err`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn at_rewrite_table_scan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: types_core::primitive::Oid,
+        oid_new_heap: types_core::primitive::Oid,
+        old_desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+        rewrite: i32,
+        newvals: &[(i16, types_nodes::primnodes::Expr, bool)],
+        check_constraints: &[(&str, types_nodes::primnodes::Expr)],
+        verify_new_notnull: bool,
+        partition_constraint: &[types_nodes::primnodes::Expr],
+        validate_default: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecLookupResultRelByOid(node, resultoid, missing_ok, update_cache)`
     /// (execMain.c): find the `ResultRelInfo` already known to the
     /// `ModifyTableState` for the relation `resultoid`, returning its EState

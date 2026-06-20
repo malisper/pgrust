@@ -28,6 +28,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `EventTriggerTableRewrite(parsetree, tableOid, reason)` (event_trigger.c)
+    /// — fire any `table_rewrite` event triggers before `ATRewriteTables`
+    /// rewrites a table's heap. A no-op without an active event-trigger
+    /// collection state (`currentEventTriggerState == NULL`, the standalone /
+    /// no-relevant-trigger case); the active firing path
+    /// (`EventTriggerCommonSetup` + `EventTriggerInvoke`) is part of the
+    /// event-trigger firing sub-campaign and stops loudly until it lands.
+    pub fn event_trigger_table_rewrite<'mcx>(
+        parsetree: Option<&types_nodes::nodes::Node<'mcx>>,
+        table_oid: Oid,
+        reason: i32,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `AlterEventTriggerOwner_oid(trigOid, newOwnerId)` (event_trigger.c):
     /// change an event trigger's owner during REASSIGN OWNED. Can
     /// `ereport(ERROR)`, carried on `Err`.

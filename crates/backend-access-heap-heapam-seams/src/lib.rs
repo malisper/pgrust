@@ -132,6 +132,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetBulkInsertState()` (heapam.c) — prepare a `BulkInsertState` (a
+    /// `BAS_BULKWRITE` ring buffer) for a bulk insert (e.g. `ATRewriteTable`,
+    /// `copy_heap_data`). **Installed by `backend-access-heap-heapam`.**
+    pub fn get_bulk_insert_state() -> PgResult<types_tableam::tableam::BulkInsertStateData>
+);
+
+seam_core::seam!(
+    /// `FreeBulkInsertState(bistate)` (heapam.c) — release the held buffer and
+    /// the ring strategy of a `BulkInsertState` made by `get_bulk_insert_state`.
+    /// **Installed by `backend-access-heap-heapam`.**
+    pub fn free_bulk_insert_state(
+        bistate: &mut types_tableam::tableam::BulkInsertStateData,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `HeapTupleGetUpdateXid(htup)` (heapam.c) — resolve a multixact xmax to
     /// the single update XID it carries (`MultiXactIdGetUpdateXid`), or
     /// `InvalidTransactionId` if the multixact has no updater. Only the header's

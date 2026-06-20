@@ -12,6 +12,7 @@ path = "src/lib.rs"
 backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
+backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 seam-core = { path = "../seam-core" }
 types-error = { path = "../types-error" }

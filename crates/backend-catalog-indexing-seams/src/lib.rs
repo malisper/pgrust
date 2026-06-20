@@ -126,6 +126,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ResetRelRewrite`'s pg_class write (tablecmds.c:4363): open pg_class
+    /// RowExclusiveLock, `SearchSysCacheCopy1(RELOID, relid)`, poke
+    /// `relrewrite = relrewrite` on the `GETSTRUCT` copy and `CatalogTupleUpdate`.
+    /// The boolean result is `HeapTupleIsValid(tuple)`; the caller raises the
+    /// `cache lookup failed for relation %u` `elog(ERROR)` when it is `false`.
+    pub fn set_pg_class_relrewrite(relid: Oid, relrewrite: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `relation_mark_replica_identity`'s per-index pg_index leg
     /// (tablecmds.c:18435-18481): open pg_index RowExclusiveLock,
     /// `SearchSysCacheCopy1(INDEXRELID, index_oid)`, and — only if

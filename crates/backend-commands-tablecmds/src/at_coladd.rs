@@ -375,6 +375,7 @@ pub fn ATExecAddColumn<'mcx>(
     // attribute = TupleDescAttr(tupdesc, 0); attribute->attnum = newattnum;
     tupdesc.attr_mut(0).attnum = newattnum;
     let attribute_typid = tupdesc.attr(0).atttypid;
+    let attribute_typmod = tupdesc.attr(0).atttypmod;
     let attribute_collation = tupdesc.attr(0).attcollation;
     let attribute_generated = tupdesc.attr(0).attgenerated;
     let attribute_name = {
@@ -448,27 +449,14 @@ pub fn ATExecAddColumn<'mcx>(
 
     // Tell Phase 3 to fill in the default expression, if there is one. We can
     // skip this entirely for relations without storage.
+    let _ = has_raw_default;
     if RELKIND_HAS_STORAGE(relkind) {
-        // defval = build_column_default(rel, attribute->attnum) (or a NextValueExpr
-        // for an identity column).
-        //
-        // The full phase-3 behavior — evaluate the default and either store it as
-        // an out-of-heap "missing value" (ExecPrepareExpr/ExecEvalExpr ->
-        // StoreAttrMissingVal) or force a table rewrite (AT_REWRITE_DEFAULT_VAL)
-        // to materialize it into existing rows — bottoms out on the still-unported
-        // executor expr-eval, by-ref missing-value storage, and the phase-3 rewrite
-        // engine (ATRewriteTable). The catalog default (pg_attrdef, stored above
-        // via AddRelationNewConstraints) already makes NEW rows pick up the
-        // default. We deliberately do NOT request the table rewrite
-        // (`AT_REWRITE_DEFAULT_VAL`) yet, because the phase-3 rewrite engine is
-        // unported and requesting it would hard-fail the whole ADD COLUMN; the
-        // back-fill of pre-existing rows (they read NULL until then) is deferred
-        // to when ATRewriteTables / the missing-value path land. `has_raw_default`
-        // and `AT_REWRITE_DEFAULT_VAL` are retained for that follow-on.
-        let _ = (has_raw_default, AT_REWRITE_DEFAULT_VAL);
+        let mut has_missing = false;
+
+        // For an identity column we can't use build_column_default() (sequence
+        // ownership isn't set yet). The NextValueExpr build + identity-sequence
+        // ownership wiring is not yet ported.
         if col_def.identity != 0 {
-            // Identity columns require the NextValueExpr build + sequence
-            // ownership wiring, which is not yet ported.
             panic!(
                 "ALTER TABLE ADD COLUMN ... GENERATED ... AS IDENTITY: the NextValueExpr \
                  phase-3 fill + identity-sequence ownership path is not yet ported \
@@ -476,9 +464,74 @@ pub fn ATExecAddColumn<'mcx>(
             );
         }
 
+        // defval = build_column_default(rel, attribute->attnum).
+        //
+        // The owned `rel` carrier still holds the pre-ADD tuple descriptor; the
+        // catalog row for the new column was inserted in this command (and made
+        // visible by the CommandCounterIncrement above), so re-open the relation
+        // to pick up the freshly-added attribute before resolving its default.
+        let fresh_rel = relation_open(mcx, myrelid, NoLock)?;
+        let mut defval = backend_rewrite_rewritehandler_seams::build_column_default::call(
+            mcx,
+            fresh_rel.alias(),
+            newattnum as i32,
+        )?;
+        drop(fresh_rel);
+
+        // has_domain_constraints = DomainHasConstraints(attribute->atttypid).
+        let has_domain_constraints =
+            backend_utils_cache_typcache_seams::domain_has_constraints::call(attribute_typid)?;
+        if defval.is_none() && has_domain_constraints {
+            // Build a CoerceToDomain(NULL) so the table is rewritten and the
+            // domain constraints are checked against each existing row. The
+            // makeNullConst + coerce_to_target_type build is not yet ported.
+            let _ = attribute_typmod;
+            panic!(
+                "ALTER TABLE ADD COLUMN of a constrained-domain type with no default: the \
+                 CoerceToDomain(NULL) build (makeNullConst + coerce_to_target_type) is not \
+                 yet ported (faithful seam-and-panic)"
+            );
+        }
+
+        if let Some(dv) = defval.take() {
+            // Prepare defval for execution, either here or in Phase 3:
+            // defval = expression_planner(defval).
+            let planned =
+                backend_optimizer_plan_planner::expression_planner(mcx, dv.clone_in(mcx)?)?;
+
+            // Add the new default to the newvals list.
+            let node = mcx::alloc_in(mcx, Node::mk_expr(mcx, planned.clone_in(mcx)?)?)?;
+            wqueue[ti].newvals.push(crate::at_phase::NewColumnValue {
+                attnum: newattnum,
+                expr: Some(node),
+                is_generated: col_def.generated != 0,
+            });
+
+            // C attempts to skip a complete table rewrite by storing the DEFAULT
+            // outside the heap (a "missing value", StoreAttrMissingVal) when the
+            // relation is a plain table, the column is non-generated, the default
+            // is non-volatile, and the type has no domain constraints. That
+            // optimization rides the by-ref `Datum` missing-value carrier
+            // (`store_attr_missing_val`), which bottoms out on the writable ATTNUM
+            // syscache copy + `pg_attribute` CatalogTupleUpdate carrier (still
+            // unported — see `backend-catalog-heap-seams::store_attr_missing_val`).
+            // Until that lands we take the always-correct path: materialize the
+            // default into existing rows via the phase-3 table rewrite. (This is
+            // observably correct; it differs from upstream only in that a rewrite
+            // happens where the missing-value fast path would have avoided one,
+            // and `atthasmissing` stays false.) The volatile case (e.g.
+            // `DEFAULT random()`) takes the rewrite path in upstream too.
+            let _ = (has_domain_constraints, &planned);
+            if col_def.generated != ATTRIBUTE_GENERATED_VIRTUAL {
+                wqueue[ti].rewrite |= AT_REWRITE_DEFAULT_VAL;
+            }
+        }
+
         // If the new column is NOT NULL, and there is no missing value, tell
         // Phase 3 to check for NULLs.
-        wqueue[ti].verify_new_notnull |= col_def.is_not_null;
+        if !has_missing {
+            wqueue[ti].verify_new_notnull |= col_def.is_not_null;
+        }
     }
 
     // Add needed dependency entries for the new column.
