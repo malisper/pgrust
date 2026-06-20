@@ -9,21 +9,21 @@
 //! query string.
 //!
 //! This crate is `#![no_std]`; the value-core families are `no_std`/`alloc`.
-//! The fmgr registration layer needs `std` for the `panic_any` ereport path, so
-//! it pulls in `extern crate std` (see `lib.rs`) and uses `alloc::` for
-//! `String`/`Vec`.
+//! The fmgr adapters return `PgResult<Datum>` (the Result-native fmgr shape),
+//! threading any `ereport(ERROR)` back through the dispatch `?` path; they use
+//! `alloc::` for `String`/`Vec`.
 //!
 //! NOT registered here: nothing else in this unit is SQL-callable
 //! (`tsquery_util.c` / `tsquery_cleanup.c` are internal toolkits with no
 //! `pg_proc` row).
 
-use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 const VARHDRSZ: usize = 4;
 
@@ -62,40 +62,28 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("ts_rewrite fmgr scratch")
 }
 
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `tsquery_rewrite(tsquery query, tsquery target, tsquery substitute)` (oid 3684).
-fn fc_tsquery_rewrite(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_rewrite(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let query = arg_tsquery(fcinfo, 0);
     let ex = arg_tsquery(fcinfo, 1);
     let subst = arg_tsquery(fcinfo, 2);
-    let image = ok(crate::rewrite::tsquery_rewrite(m.mcx(), query, ex, subst));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::rewrite::tsquery_rewrite(m.mcx(), query, ex, subst)?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
 /// `tsquery_rewrite_query(tsquery query, text spi_query)` (oid 3685). The `text`
 /// arg is the SPI query string whose two `tsquery` columns drive each rewrite.
-fn fc_tsquery_rewrite_query(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tsquery_rewrite_query(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let query = arg_tsquery(fcinfo, 0);
     let buf = arg_text_str(fcinfo, 1);
-    let image = ok(crate::rewrite::tsquery_rewrite_query(m.mcx(), query, buf));
-    ret_varlena_image(fcinfo, image)
+    let image = crate::rewrite::tsquery_rewrite_query(m.mcx(), query, buf)?;
+    Ok(ret_varlena_image(fcinfo, image))
 }
 
 // ---------------------------------------------------------------------------
@@ -106,23 +94,26 @@ fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the `ts_rewrite` builtins (C: their `fmgr_builtins[]` rows). Called
 /// from this crate's `init_seams()`. OIDs/nargs from `pg_proc.dat`; both rows
 /// are `proisstrict => 't'` and not retset.
 pub fn register_ts_small_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(3684, "tsquery_rewrite", 3, fc_tsquery_rewrite),
         builtin(3685, "tsquery_rewrite_query", 2, fc_tsquery_rewrite_query),
     ]);
