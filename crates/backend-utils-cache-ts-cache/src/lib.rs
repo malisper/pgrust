@@ -618,6 +618,100 @@ pub fn lookup_ts_dictionary_cache(dictId: Oid) -> PgResult<TSDictionaryCacheEntr
     Ok(entry)
 }
 
+/// The catalog facts a `lexize` dispatcher needs for a dictionary OID: which
+/// template (and thus which `*_init` / `*_lexize` method pair) it uses, its
+/// lexize method OID (for `get_func_name`-keyed dispatch), and the
+/// `deserialize_deflist`-decoded init options.
+pub struct TSDictTemplateInfo<'mcx> {
+    /// `pg_ts_dict.dicttemplate`.
+    pub template_oid: Oid,
+    /// `pg_ts_template.tmpllexize` — the lexize method's `pg_proc` OID. Builtin
+    /// templates have fixed OIDs; the snowball template's is assigned at initdb,
+    /// so callers key on `get_func_name(lexize_oid)` rather than the raw OID.
+    pub lexize_oid: Oid,
+    /// `deserialize_deflist(pg_ts_dict.dictinitoption)` — the `(defname, arg)`
+    /// option list the template's `*_init` method consumes.
+    pub options: PgVec<'mcx, types_cache::deflist::DefElemString<'mcx>>,
+}
+
+/// Read the template OID + lexize-method OID + decoded init options for a
+/// dictionary OID, without going through (or populating) the dictionary cache.
+///
+/// This is the catalog-read half of C's `lookup_ts_dictionary_cache` (the
+/// `pg_ts_dict` -> `pg_ts_template` join), exposed so the owned-model `lexize`
+/// dispatcher can rebuild the dictionary object from its options and run the
+/// ported `*_lexize` body (the C `dict_data` `void *` round-trip is not
+/// reachable by OID in the owned model).
+pub fn lookup_ts_dict_template_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    dictId: Oid,
+) -> PgResult<TSDictTemplateInfo<'mcx>> {
+    let tpdict = syscache::SearchSysCache1(
+        mcx,
+        syscache::TSDICTOID,
+        SysCacheKey::Value(ScalarWord::from_oid(dictId)),
+    )?;
+    let Some(tpdict) = tpdict else {
+        return elog_error(format!("cache lookup failed for text search dictionary {dictId}"));
+    };
+
+    let template_oid = getattr_oid(mcx, syscache::TSDICTOID, &tpdict, Anum_pg_ts_dict_dicttemplate)?;
+    if !OidIsValid(template_oid) {
+        return elog_error(format!("text search dictionary {dictId} has no template"));
+    }
+
+    // Decode the init options (deserialize_deflist of dictinitoption).
+    let (opt, isnull) = syscache::SysCacheGetAttr(
+        mcx,
+        syscache::TSDICTOID,
+        &tpdict,
+        Anum_pg_ts_dict_dictinitoption,
+    )?;
+    let options = if isnull {
+        PgVec::new_in(mcx)
+    } else {
+        let bytes = match &opt {
+            Datum::ByRef(b) => &b[..],
+            Datum::ByVal(_)
+            | Datum::Cstring(_)
+            | Datum::Composite(_)
+            | Datum::Expanded(_)
+            | Datum::Internal(_) => {
+                return elog_error("dictinitoption is not by-reference".into())
+            }
+        };
+        tsearchcmds_seams::deserialize_deflist::call(mcx, bytes)?
+    };
+
+    // Retrieve the dictionary's template to read tmpllexize.
+    let tptmpl = syscache::SearchSysCache1(
+        mcx,
+        syscache::TSTEMPLATEOID,
+        SysCacheKey::Value(ScalarWord::from_oid(template_oid)),
+    )?;
+    let Some(tptmpl) = tptmpl else {
+        return elog_error(format!(
+            "cache lookup failed for text search template {template_oid}"
+        ));
+    };
+    let lexize_oid =
+        getattr_oid(mcx, syscache::TSTEMPLATEOID, &tptmpl, Anum_pg_ts_template_tmpllexize)?;
+    if !OidIsValid(lexize_oid) {
+        return elog_error(format!(
+            "text search template {template_oid} has no lexize method"
+        ));
+    }
+
+    syscache::ReleaseSysCache(tptmpl);
+    syscache::ReleaseSysCache(tpdict);
+
+    Ok(TSDictTemplateInfo {
+        template_oid,
+        lexize_oid,
+        options,
+    })
+}
+
 /* ---------------------------------------------------------------------------
  * lookup_ts_config_cache
  * ------------------------------------------------------------------------- */
