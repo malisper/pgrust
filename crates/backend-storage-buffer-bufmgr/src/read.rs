@@ -1210,8 +1210,13 @@ impl BufferManager {
             operation.io_wref = io_wref;
 
             // Build the scatter-read run: the head plus as many consecutive
-            // neighbours as we can start IO on without blocking.
-            let mut io_buffers: Vec<i32> = vec![head];
+            // neighbours as we can start IO on without blocking. The AIO layer
+            // (`buffer_stage_common` / `pgaio_perform_io_syscall` /
+            // `buffer_readv_complete`) keys the run on `Buffer` values (1-based
+            // for shared, negative for local), matching C's
+            // `ReadBuffersOperation.buffers[]`; `operation.buffers` stores
+            // 0-based buf_ids, so convert each entry through `buf_id_to_buffer`.
+            let mut io_buffers: Vec<i32> = vec![head_buffer];
             let mut io_buffers_len = 1i32;
             let mut idx = nblocks_done + 1;
             while idx < total {
@@ -1226,7 +1231,7 @@ impl BufferManager {
                     ))?,
                     self.BufferGetBlockNumber(b)? - 1
                 );
-                io_buffers.push(operation.buffers[idx as usize]);
+                io_buffers.push(b);
                 io_buffers_len += 1;
                 idx += 1;
             }
