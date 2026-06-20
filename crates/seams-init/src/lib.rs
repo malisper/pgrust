@@ -549,6 +549,11 @@ pub fn init_all() {
     backend_utils_adt_ts_small::init_seams();
     backend_utils_adt_tsvector_core::init_seams();
     backend_utils_adt_tsquery_core::init_seams();
+    // `to_tsany.c`: installs the parsetext config/lexize dispatch (config_lenmap
+    // / config_dict_ids / dict_lexize into parse-seams, subdict_lexize into
+    // dict-seams) + the `to_ts*` fmgr builtins. Must run after the dict /
+    // snowball / parse / tsvector-core / tsquery-core init above.
+    backend_tsearch_to_tsany::init_seams();
     backend_utils_adt_tsrank::init_seams();
     backend_utils_adt_varchar::init_seams();
     backend_utils_adt_varlena::init_seams();

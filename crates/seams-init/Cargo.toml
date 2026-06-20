@@ -535,6 +535,7 @@ backend-utils-adt-skipsupport = { path = "../backend-utils-adt-skipsupport" }
 backend-utils-adt-ts-small = { path = "../backend-utils-adt-ts-small" }
 backend-utils-adt-tsvector-core = { path = "../backend-utils-adt-tsvector-core" }
 backend-utils-adt-tsquery-core = { path = "../backend-utils-adt-tsquery-core" }
+backend-tsearch-to-tsany = { path = "../backend-tsearch-to-tsany" }
 backend-utils-adt-tsrank = { path = "../backend-utils-adt-tsrank" }
 backend-utils-adt-varchar = { path = "../backend-utils-adt-varchar" }
 backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }

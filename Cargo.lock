@@ -16342,6 +16342,7 @@ dependencies = [
  "backend-utils-adt-formatting-seams",
  "backend-utils-error",
  "backend-utils-mb-mbutils-seams",
+ "libc",
  "mcx",
  "types-core",
  "types-error",
@@ -18419,6 +18420,7 @@ dependencies = [
  "backend-utils-error",
  "backend-utils-mb-mbutils",
  "libc",
+ "mcx",
  "types-error",
 ]
 
@@ -18456,6 +18458,32 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+ "types-tsearch",
+]
+
+[[package]]
+name = "backend-tsearch-to-tsany"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-define-seams",
+ "backend-snowball-dict-snowball",
+ "backend-tsearch-dict",
+ "backend-tsearch-dict-seams",
+ "backend-tsearch-ispell-regis",
+ "backend-tsearch-parse",
+ "backend-tsearch-parse-seams",
+ "backend-utils-adt-tsquery-core",
+ "backend-utils-adt-tsvector-core",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-ts-cache",
+ "backend-utils-error",
+ "backend-utils-fmgr-core",
+ "mcx",
+ "types-cache",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
  "types-tsearch",
 ]
 
@@ -24514,6 +24542,7 @@ dependencies = [
  "backend-tsearch-ispell-regis",
  "backend-tsearch-parse",
  "backend-tsearch-spell",
+ "backend-tsearch-to-tsany",
  "backend-tsearch-ts-locale",
  "backend-tsearch-ts-utils",
  "backend-utils-activity-pgstat",
