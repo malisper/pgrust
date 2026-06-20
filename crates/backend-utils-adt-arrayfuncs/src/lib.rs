@@ -121,8 +121,10 @@ pub fn init_seams() {
     seams::init_array_result_any::set(construct::init_array_result_any);
     seams::accum_array_result_any::set(construct::accum_array_result_any);
     seams::make_array_result_any::set(construct::make_array_result_any);
+    seams::make_array_result_any_v::set(construct::make_array_result_any_v);
     seams::pfree_array_datum::set(construct::pfree_array_datum);
     seams::construct_array_builtin::set(construct::construct_array_builtin);
+    seams::construct_array_builtin_v::set(construct::construct_array_builtin_v);
     seams::construct_array_expr::set(construct::construct_array_expr);
     seams::array_map_deconstruct::set(construct::array_map_deconstruct);
     seams::array_map_build::set(construct::array_map_build);

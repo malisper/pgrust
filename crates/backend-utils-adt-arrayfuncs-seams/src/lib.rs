@@ -78,7 +78,7 @@ seam_core::seam!(
         econtext: EcxtId,
         ctx: ArrayBuildCtx,
         astate: ArrayBuildStateAnyHandle<'mcx>,
-        dvalue: Datum,
+        dvalue: DatumV<'mcx>,
         disnull: bool,
         input_type: Oid,
     ) -> PgResult<ArrayBuildStateAnyHandle<'mcx>>
@@ -98,11 +98,31 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `makeArrayResultAny(astate, ctx, true)` (arrayfuncs.c) over the unified
+    /// value type — the migration-target form of [`make_array_result_any`]. An
+    /// array varlena is always pass-by-reference, so the result is a
+    /// [`DatumV::ByRef`] over the built ArrayType bytes; this lets an
+    /// `ARRAY(SELECT ...)` result ride the by-ref fmgr lane of a downstream
+    /// array function (`array_sort`, array equality) instead of arriving as a
+    /// bare pointer word with no by-ref-lane payload. Fallible on OOM.
+    pub fn make_array_result_any_v<'mcx>(
+        estate: &mut EStateData<'mcx>,
+        econtext: EcxtId,
+        ctx: ArrayBuildCtx,
+        astate: ArrayBuildStateAnyHandle<'mcx>,
+    ) -> PgResult<DatumV<'mcx>>
+);
+
+seam_core::seam!(
     /// `pfree(DatumGetPointer(node->curArray))` (utils/palloc.h): free a
     /// previously built array `Datum` held in the node's `curArray`. A null
-    /// `Datum` is a no-op (the C guards with `!= PointerGetDatum(NULL)`).
+    /// `Datum` is a no-op (the C guards with `!= PointerGetDatum(NULL)`). In the
+    /// owned model the array bytes live in their owning `MemoryContext` and are
+    /// reclaimed on context reset/delete, so this is a no-op; the value is taken
+    /// by shared reference (the canonical by-reference `Datum::ByRef` an array
+    /// result now carries — a bare pointer word would have nothing to free).
     /// Infallible.
-    pub fn pfree_array_datum(curarray: Datum)
+    pub fn pfree_array_datum<'mcx>(curarray: &DatumV<'mcx>)
 );
 
 seam_core::seam!(
@@ -117,6 +137,22 @@ seam_core::seam!(
         elems: &[Datum],
         elmtype: Oid,
     ) -> PgResult<Datum>
+);
+
+seam_core::seam!(
+    /// `construct_array_builtin(elems, nelems, elmtype)` (arrayfuncs.c) over the
+    /// unified value type — the migration-target form of
+    /// [`construct_array_builtin`]. An array varlena is always pass-by-reference,
+    /// so the result is a [`DatumV::ByRef`] holding the freshly built ArrayType
+    /// bytes allocated in `mcx`, rather than a bare pointer word that would panic
+    /// the scalar accessor when later formed into a by-ref attribute (e.g. the
+    /// `param_types`/`result_types` columns of the `pg_prepared_statements` SRF).
+    /// Can `ereport(ERROR)` (unsupported element type).
+    pub fn construct_array_builtin_v<'mcx>(
+        mcx: Mcx<'mcx>,
+        elems: &[Datum],
+        elmtype: Oid,
+    ) -> PgResult<DatumV<'mcx>>
 );
 
 seam_core::seam!(

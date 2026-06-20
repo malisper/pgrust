@@ -16,7 +16,7 @@ use types_datum::array_build::{ArrayBuildState, ArrayBuildStateArr};
 use types_datum::datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
-    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
+    ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
 use types_nodes::{EStateData, EcxtId};
@@ -1553,17 +1553,60 @@ fn init_array_result_any_inner(
     }
 }
 
+/// Lower a canonical (rich) [`types_tuple::Datum`] to the bare-word `Datum`
+/// the by-value/by-reference accumulator path expects (a machine word that,
+/// for a pass-by-ref element, is a live pointer into `mcx`-owned bytes).
+///
+/// A by-value scalar keeps its word verbatim. A by-reference value
+/// ([`ByRef`]/[`Cstring`]/composite/expanded) is materialized into `mcx` and
+/// the resulting pointer word is returned — this is the faithful idiomatic
+/// stand-in for C, where the SubPlan-produced element already IS a real
+/// pointer Datum. Without it, a by-ref element produced as a canonical
+/// `Datum::ByRef` (e.g. `ARRAY(SELECT '1 4'::int2vector ...)`, text/numeric
+/// subquery arrays) would hit the bare-word scalar accessor and panic.
+fn lower_datum_to_word<'mcx>(
+    mcx: Mcx<'mcx>,
+    dvalue: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    disnull: bool,
+) -> PgResult<Datum> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    if disnull {
+        // The pointer is never dereferenced for a NULL element; carry (Datum) 0.
+        return Ok(Datum::from_usize(0));
+    }
+    match dvalue {
+        TDatum::ByVal(w) => Ok(Datum::from_usize(*w)),
+        TDatum::ByRef(_) | TDatum::Cstring(_) => {
+            byref_image_to_datum(mcx, dvalue.as_ref_bytes())
+        }
+        TDatum::Composite(_) | TDatum::Expanded(_) => {
+            // A composite/expanded value materializes to its flat varlena image
+            // (HeapTupleHeader datum / EOH_flatten_into), exactly as the by-ref
+            // copy path in accumArrayResult treats a varlena element.
+            byref_image_to_datum(mcx, &dvalue.as_varlena_bytes())
+        }
+        TDatum::Internal(_) => Err(PgError::error(
+            "cannot accumulate an internal pseudo-type value into an array",
+        )
+        .with_sqlstate(ERRCODE_INTERNAL_ERROR)),
+    }
+}
+
 /// Seam `accum_array_result_any` — `accumArrayResultAny` (arrayfuncs.c).
 pub fn accum_array_result_any<'mcx>(
     estate: &mut EStateData<'mcx>,
     econtext: EcxtId,
     ctx: ArrayBuildCtx,
     astate: ArrayBuildStateAnyHandle<'mcx>,
-    dvalue: Datum,
+    dvalue: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     disnull: bool,
     input_type: Oid,
 ) -> PgResult<ArrayBuildStateAnyHandle<'mcx>> {
     let mcx = resolve_ctx(estate, econtext, ctx);
+
+    // Lower the canonical value to the bare-word the inner accumulator path
+    // reads (materializing any by-reference image into `mcx`).
+    let dvalue = lower_datum_to_word(mcx, &dvalue, disnull)?;
 
     // astate == NULL => initArrayResultAny(input_type, rcontext, true)
     let mut boxed = match astate {
@@ -1594,26 +1637,56 @@ pub fn make_array_result_any<'mcx>(
     ctx: ArrayBuildCtx,
     astate: ArrayBuildStateAnyHandle<'mcx>,
 ) -> PgResult<Datum> {
-    let mcx = resolve_ctx(estate, econtext, ctx);
-    let astate = astate.expect("makeArrayResultAny: astate must not be NULL");
-
-    let result: PgVec<'mcx, u8> = if let Some(scalar) = astate.scalarstate.as_ref() {
-        // Must use makeMdArrayResult to support the "release" parameter.
-        let ndims = if scalar.nelems > 0 { 1 } else { 0 };
-        let dims = [scalar.nelems];
-        let lbs = [1];
-        make_md_array_result(mcx, scalar, ndims, &dims, &lbs)?
-    } else {
-        let arr = astate.arraystate.as_ref().expect("arraystate or scalarstate");
-        make_array_result_arr(mcx, arr)?
-    };
-
+    let result = make_array_result_any_bytes(estate, econtext, ctx, astate)?;
     // PointerGetDatum(result): the carried Datum is the buffer's pointer word.
     Ok(datum_from_buf(result))
 }
 
+/// `makeArrayResultAny(astate, ctx, true)` body — the array varlena bytes,
+/// shared by the bare-word [`make_array_result_any`] and the unified-value
+/// [`make_array_result_any_v`] seams.
+fn make_array_result_any_bytes<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    econtext: EcxtId,
+    ctx: ArrayBuildCtx,
+    astate: ArrayBuildStateAnyHandle<'mcx>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mcx = resolve_ctx(estate, econtext, ctx);
+    let astate = astate.expect("makeArrayResultAny: astate must not be NULL");
+
+    if let Some(scalar) = astate.scalarstate.as_ref() {
+        // Must use makeMdArrayResult to support the "release" parameter.
+        let ndims = if scalar.nelems > 0 { 1 } else { 0 };
+        let dims = [scalar.nelems];
+        let lbs = [1];
+        make_md_array_result(mcx, scalar, ndims, &dims, &lbs)
+    } else {
+        let arr = astate.arraystate.as_ref().expect("arraystate or scalarstate");
+        make_array_result_arr(mcx, arr)
+    }
+}
+
+/// Seam `make_array_result_any_v` — `makeArrayResultAny` over the unified value
+/// type. An array varlena is always pass-by-reference, so the result is a
+/// [`types_tuple::Datum::ByRef`] carrying the built ArrayType bytes — the
+/// faithful form for `ARRAY(SELECT ...)` results that flow on into a by-ref
+/// fmgr lane (e.g. `array_sort`, array equality), where a bare pointer word
+/// would arrive with no by-ref-lane payload.
+pub fn make_array_result_any_v<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    econtext: EcxtId,
+    ctx: ArrayBuildCtx,
+    astate: ArrayBuildStateAnyHandle<'mcx>,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    let result = make_array_result_any_bytes(estate, econtext, ctx, astate)?;
+    Ok(TDatum::ByRef(result))
+}
+
 /// Seam `pfree_array_datum` — free a previously built array `Datum`.
-pub fn pfree_array_datum(curarray: Datum) {
+pub fn pfree_array_datum(
+    curarray: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+) {
     // pfree(DatumGetPointer(node->curArray)) guarded by != PointerGetDatum(NULL).
     // In the owned model the array buffer lives in its owning MemoryContext and
     // is reclaimed on context reset/delete; an explicit pfree of a non-null
@@ -1630,6 +1703,20 @@ pub fn construct_array_builtin<'mcx>(
     let (elmlen, elmbyval, elmalign) = construct_builtin_meta(elmtype)?;
     let buf = construct_array(mcx, elems, elmtype, elmlen, elmbyval, elmalign)?;
     Ok(datum_from_buf(buf))
+}
+
+/// Seam `construct_array_builtin_v` — `construct_array_builtin` over the unified
+/// value type. The array varlena is pass-by-reference, so its raw bytes are
+/// carried as a [`types_tuple::Datum::ByRef`] (no bare pointer word).
+pub fn construct_array_builtin_v<'mcx>(
+    mcx: Mcx<'mcx>,
+    elems: &[Datum],
+    elmtype: Oid,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    let (elmlen, elmbyval, elmalign) = construct_builtin_meta(elmtype)?;
+    let buf = construct_array(mcx, elems, elmtype, elmlen, elmbyval, elmalign)?;
+    Ok(TDatum::ByRef(buf))
 }
 
 /// Seam `construct_array_expr` — `ExecEvalArrayExpr`'s array fabrication

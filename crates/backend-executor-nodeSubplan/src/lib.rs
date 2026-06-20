@@ -358,7 +358,7 @@ fn ExecScanSubPlan<'mcx>(
                 econtext,
                 arrayfuncs::ArrayBuildCtx::PerTuple,
                 astate,
-                word(&attr.value),
+                attr.value,
                 attr.isnull,
                 firstColType,
             )?;
@@ -414,15 +414,16 @@ fn ExecScanSubPlan<'mcx>(
     if subLinkType == SubLinkType::Array {
         // We return the result in the caller's context.
         //   result = makeArrayResultAny(astate, oldcontext, true);
-        // `oldcontext` is the entry-time per-tuple eval context. The arrayfuncs
-        // owner is un-migrated, so the array varlena comes back as a bare word;
-        // carry it into the canonical value's by-value arm (the C `Datum`).
-        result = from_word(arrayfuncs::make_array_result_any::call(
+        // `oldcontext` is the entry-time per-tuple eval context. An array is
+        // pass-by-reference, so the unified `_v` seam hands back a
+        // `Datum::ByRef` carrying the array bytes — the form that rides the
+        // by-ref fmgr lane of any downstream array function.
+        result = arrayfuncs::make_array_result_any_v::call(
             estate,
             econtext,
             arrayfuncs::ArrayBuildCtx::PerTuple,
             astate,
-        )?);
+        )?;
     } else if !found {
         // deal with empty subplan result.  result/isNull were previously
         // initialized correctly for all sublink types except EXPR and
@@ -1068,7 +1069,7 @@ pub fn ExecSetParamPlan<'mcx>(
                 econtext,
                 arrayfuncs::ArrayBuildCtx::PerQuery,
                 astate,
-                word(&attr.value),
+                attr.value,
                 attr.isnull,
                 firstColType,
             )?;
@@ -1107,17 +1108,19 @@ pub fn ExecSetParamPlan<'mcx>(
         //   node->curArray = makeArrayResultAny(astate,
         //                                       econtext->ecxt_per_query_memory,
         //                                       true);
-        // pfree(DatumGetPointer(node->curArray)). The array seam still takes the
-        // bare-word `Datum`; project it off the canonical by-value arm.
-        arrayfuncs::pfree_array_datum::call(word(&node.curArray));
-        // The un-migrated arrayfuncs owner returns the array varlena as a bare
-        // word; carry it into the canonical value once and reuse it.
-        let arr = from_word(arrayfuncs::make_array_result_any::call(
+        // pfree(DatumGetPointer(node->curArray)) — a no-op in the owned model
+        // (the array bytes live in their owning context). The previous curArray
+        // is simply dropped/overwritten below.
+        arrayfuncs::pfree_array_datum::call(&node.curArray);
+        // An array is pass-by-reference; the unified `_v` seam returns a
+        // `Datum::ByRef` carrying the array bytes so it rides the by-ref fmgr
+        // lane of any downstream array function.
+        let arr = arrayfuncs::make_array_result_any_v::call(
             estate,
             econtext,
             arrayfuncs::ArrayBuildCtx::PerQuery,
             astate,
-        )?);
+        )?;
         // node->curArray holds the freshly built array value for cross-call reuse.
         node.curArray = arr.clone();
         set_exec_param_clear_execplan(estate, paramid, arr, false)?;

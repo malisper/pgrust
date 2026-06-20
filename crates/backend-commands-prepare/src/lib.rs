@@ -911,16 +911,14 @@ pub fn pg_prepared_statement<'mcx>(
             let mut nulls = [false; 8];
 
             // values[0] = CStringGetTextDatum(prep_stmt->stmt_name);
-            // `cstring_to_text` is varlena-owned and still hands back the
-            // bare-word `text` pointer (shim contract not yet advanced); carry
-            // it as the canonical enum's by-value pointer word at this edge.
-            values[0] = Datum::from_usize(
-                varlena_seam::cstring_to_text::call(mcx, &prep_stmt.stmt_name)?.as_usize(),
-            );
+            // `text` is pass-by-reference; carry it as the canonical enum's
+            // by-reference value (the unified `cstring_to_text_v` returns a
+            // `Datum::ByRef` over the freshly built varlena), so the SRF tuple
+            // form path reads the by-ref image rather than a bare pointer word.
+            values[0] = varlena_seam::cstring_to_text_v::call(mcx, &prep_stmt.stmt_name)?;
             // values[1] = CStringGetTextDatum(prep_stmt->plansource->query_string);
             let qs = plancache_seam::plansource_query_string::call(mcx, prep_stmt.plansource)?;
-            values[1] =
-                Datum::from_usize(varlena_seam::cstring_to_text::call(mcx, qs.as_str())?.as_usize());
+            values[1] = varlena_seam::cstring_to_text_v::call(mcx, qs.as_str())?;
             // values[2] = TimestampTzGetDatum(prep_stmt->prepare_time);
             values[2] = Datum::from_i64(prep_stmt.prepare_time);
             // values[3] = build_regtype_array(param_types, num_params);
@@ -986,8 +984,11 @@ fn build_regtype_array<'mcx>(mcx: Mcx<'mcx>, param_types: &[Oid]) -> PgResult<Da
 
     // result = construct_array_builtin(tmp_ary, num_params, REGTYPEOID);
     // return PointerGetDatum(result);
-    let arr = arrayfuncs_seam::construct_array_builtin::call(mcx, tmp_ary.as_slice(), REGTYPEOID)?;
-    Ok(Datum::from_usize(arr.as_usize()))
+    // The array varlena is pass-by-reference; the `_v` form returns a
+    // `Datum::ByRef` over the built bytes so the `param_types`/`result_types`
+    // columns form correctly (a bare pointer word would panic the scalar
+    // accessor when the SRF tuple is formed).
+    arrayfuncs_seam::construct_array_builtin_v::call(mcx, tmp_ary.as_slice(), REGTYPEOID)
 }
 
 // ===========================================================================
