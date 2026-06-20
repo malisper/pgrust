@@ -126,6 +126,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `DefineIndex`'s partitioned-recursion `invalidate_parent` update
+    /// (indexcmds.c:1573): transactionally clear `pg_index.indisvalid` for the
+    /// parent partitioned index when an attached child index is itself invalid.
+    /// Unlike `index_set_state_flags` (a non-transactional CONCURRENTLY
+    /// transition), this is an ordinary `CatalogTupleUpdate`. `Err` carries the
+    /// catalog `ereport(ERROR)` surface (incl. the `cache lookup failed`).
+    pub fn index_mark_invalid(index_relation_id: types_core::primitive::Oid) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ResetReindexState(nestLevel)` — forget any active REINDEX at abort.
     pub fn reset_reindex_state(nest_level: i32)
 );

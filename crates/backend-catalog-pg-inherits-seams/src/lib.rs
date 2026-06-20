@@ -56,3 +56,11 @@ seam_core::seam!(
         childname: Option<&str>,
     ) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `has_superclass(relationId)` (pg_inherits.c): whether the relation has a
+    /// `pg_inherits` row (i.e. inherits from / is a partition of some parent).
+    /// `IndexSetParentIndex` (indexcmds.c) and `DefineIndex`'s partitioned-table
+    /// recursion use it. `Err` carries the catalog-scan `ereport(ERROR)`s.
+    pub fn has_superclass(relation_id: Oid) -> PgResult<bool>
+);

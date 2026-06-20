@@ -92,6 +92,9 @@ const ANUM_PG_CLASS_RELHASSUBCLASS: i16 = 23;
 const ANUM_PG_CLASS_RELROWSECURITY: i16 = 24;
 const ANUM_PG_CLASS_RELFORCEROWSECURITY: i16 = 25;
 const ANUM_PG_CLASS_RELISPOPULATED: i16 = 26;
+const ANUM_PG_CLASS_RELISPARTITION: i16 = 28;
+const ANUM_PG_INDEX_INDEXRELID: i16 = 1;
+const ANUM_PG_INDEX_INDISVALID: i16 = 11;
 
 // pg_sequence (CATALOG(pg_sequence,2224)): 8 fixed columns.
 const ANUM_PG_SEQUENCE_SEQRELID: i16 = 1;
@@ -557,6 +560,65 @@ fn catalog_tuple_update_pg_index<'mcx>(
     set_col(&mut values, &mut nulls, &mut replaces, 14, Datum::from_bool(form.indislive));
     set_col(&mut values, &mut nulls, &mut replaces, 15, Datum::from_bool(form.indisreplident));
     modify_and_update_tid(mcx, &r, &oldtup, &values, &nulls, &replaces, tid)
+}
+
+/// `update_relispartition(relationId, newval)` (commands/indexcmds.c:4574) —
+/// subroutine of `IndexSetParentIndex`: open pg_class RowExclusiveLock,
+/// `SearchSysCacheLockedCopy1(RELOID, relationId)`, set `relispartition` to
+/// `newval`, `CatalogTupleUpdate`. The C asserts `cur != newval`; we set
+/// unconditionally (the only callers always flip the value). Returns
+/// `HeapTupleIsValid(tuple)`.
+fn update_relispartition_catalog(relation_id: Oid, newval: bool) -> PgResult<bool> {
+    let ctx = MemoryContext::new("update_relispartition_catalog");
+    let mcx = ctx.mcx();
+    let pg_class = table_open(mcx, cat::catalog::RELATION_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_class, ANUM_PG_CLASS_OID, relation_id)? else {
+        pg_class.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+    let (values, nulls) = deform(mcx, &pg_class, &oldtup)?;
+    let mut values = values;
+    let mut nulls = nulls;
+    let mut replaces = vec![false; values.len()];
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        ANUM_PG_CLASS_RELISPARTITION,
+        Datum::from_bool(newval),
+    );
+    modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
+    pg_class.close(RowExclusiveLock)?;
+    Ok(true)
+}
+
+/// `DefineIndex`'s partitioned-recursion `invalidate_parent` update
+/// (indexcmds.c:1573): open pg_index RowExclusiveLock,
+/// `SearchSysCache1(INDEXRELID)`, `heap_copytuple`, set `indisvalid = false`,
+/// `CatalogTupleUpdate`. Returns `HeapTupleIsValid(tup)`.
+fn index_mark_invalid_catalog(index_relation_id: Oid) -> PgResult<bool> {
+    let ctx = MemoryContext::new("index_mark_invalid_catalog");
+    let mcx = ctx.mcx();
+    let pg_index = table_open(mcx, types_core::catalog::INDEX_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_index, ANUM_PG_INDEX_INDEXRELID, index_relation_id)?
+    else {
+        pg_index.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+    let (values, nulls) = deform(mcx, &pg_index, &oldtup)?;
+    let mut values = values;
+    let mut nulls = nulls;
+    let mut replaces = vec![false; values.len()];
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        ANUM_PG_INDEX_INDISVALID,
+        Datum::from_bool(false),
+    );
+    modify_and_update(mcx, &pg_index, &oldtup, &values, &nulls, &replaces)?;
+    pg_index.close(RowExclusiveLock)?;
+    Ok(true)
 }
 
 /// `set_col(values, nulls, replaces, anum, datum)` — write a 1-based column.
@@ -2773,4 +2835,26 @@ pub fn install() {
             Ok(())
         },
     );
+
+    // update_relispartition catalog body (indexcmds.c): the pg_class
+    // `relispartition` write of IndexSetParentIndex.
+    backend_commands_tablecmds_seams::update_relispartition_catalog::set(|relid, newval| {
+        if !update_relispartition_catalog(relid, newval)? {
+            return Err(PgError::error(format!(
+                "cache lookup failed for relation {relid}"
+            )));
+        }
+        Ok(())
+    });
+
+    // index_mark_invalid catalog body (indexcmds.c): the pg_index `indisvalid`
+    // clear of DefineIndex's partitioned-recursion invalidate_parent path.
+    backend_catalog_index_seams::index_mark_invalid::set(|relid| {
+        if !index_mark_invalid_catalog(relid)? {
+            return Err(PgError::error(format!(
+                "cache lookup failed for index {relid}"
+            )));
+        }
+        Ok(())
+    });
 }

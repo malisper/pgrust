@@ -813,6 +813,8 @@ pub fn init_seams() {
     backend_catalog_pg_inherits_seams::store_single_inheritance::set(StoreSingleInheritance);
     // index_drop (catalog/index.c) partition-index parent-link cleanup.
     backend_catalog_pg_inherits_seams::delete_inherits_tuple::set(DeleteInheritsTuple);
+    // IndexSetParentIndex (indexcmds.c) + DefineIndex partitioned recursion.
+    backend_catalog_pg_inherits_seams::has_superclass::set(has_superclass);
 }
 
 #[cfg(test)]

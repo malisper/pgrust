@@ -759,6 +759,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The catalog-write body of `update_relispartition` (indexcmds.c:4574),
+    /// the subroutine of `IndexSetParentIndex`: `SearchSysCacheLockedCopy1(RELOID)`
+    /// + set `pg_class.relispartition` + `CatalogTupleUpdate`. Separated for the
+    /// same reason as [`set_relation_has_subclass_catalog`]. `Err` carries the
+    /// catalog `ereport(ERROR)`s.
+    pub fn update_relispartition_catalog(relation_id: Oid, newval: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// The catalog-write body of `SetRelationTableSpace` (tablecmds.c):
     /// `SearchSysCacheLockedCopy1(RELOID)` + `CatalogTupleUpdate` +
     /// `UnlockTuple` + (for storageless relkinds) `changeDependencyOnTablespace`.
