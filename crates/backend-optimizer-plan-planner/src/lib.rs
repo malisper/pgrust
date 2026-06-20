@@ -764,16 +764,10 @@ fn subquery_planner_carried<'mcx>(
         }
     }
 
-    // transform_MERGE_to_join(parse) (C:722). No ported owner.
+    // transform_MERGE_to_join(parse) (C:722). For non-MERGE this is a no-op.
     {
-        let parse = run.resolve(root.parse);
-        if parse.commandType == CmdType::CMD_MERGE {
-            panic!(
-                "subquery_planner: transform_MERGE_to_join (parsenodes/analyze) \
-                 has no ported owner"
-            );
-        }
-        // For non-MERGE, transform_MERGE_to_join is a no-op, so nothing to do.
+        let parse = run.resolve_mut(root.parse);
+        backend_optimizer_prep_prepjointree::transform_MERGE_to_join(mcx, parse)?;
     }
 
     // replace_empty_jointree(parse) (C:728). If the Query's jointree is empty,
@@ -1116,12 +1110,68 @@ fn subquery_planner_carried<'mcx>(
             // exclRelTlist contains only Vars, so no preprocessing needed.
         }
 
-        // mergeActionList (C:965-978). MERGE-only; a SELECT has none.
-        if !run.resolve(root.parse).mergeActionList.is_empty() {
-            panic!(
-                "subquery_planner: mergeActionList expression preprocessing \
-                 (planner.c:965-978) is not wired over the owned Query model"
-            );
+        // mergeActionList (C:965-978). MERGE-only; a SELECT has none. For each
+        // MergeAction, preprocess its targetList (EXPRKIND_TARGET, per
+        // TargetEntry expr) and its qual (EXPRKIND_QUAL). In the owned parse
+        // tree the action lives as a `Node::MergeAction` whose `targetList` is a
+        // `Vec<Node::TargetEntry>` and whose `qual` is an `Option<Node::Expr>`.
+        {
+            let n_actions = run.resolve(root.parse).mergeActionList.len();
+            for ai in 0..n_actions {
+                // action->targetList: preprocess each TargetEntry expr.
+                let n_tle = {
+                    let action = run.resolve(root.parse).mergeActionList[ai]
+                        .as_mergeaction()
+                        .expect("mergeActionList entry is a MergeAction");
+                    action.targetList.len()
+                };
+                for ti in 0..n_tle {
+                    // Take the TargetEntry expr out of the action's node.
+                    let e = {
+                        let action = run.resolve_mut(root.parse).mergeActionList[ai]
+                            .as_mergeaction_mut()
+                            .unwrap();
+                        action.targetList[ti]
+                            .as_targetentry_mut()
+                            .and_then(|tle| tle.expr.take())
+                            .map(mcx::PgBox::into_inner)
+                    };
+                    let processed = preprocess_expression(
+                        mcx, &mut root, run, outer_query_ref, e, EXPRKIND_TARGET,
+                    )?;
+                    let processed = match processed {
+                        Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+                        None => None,
+                    };
+                    let action = run.resolve_mut(root.parse).mergeActionList[ai]
+                        .as_mergeaction_mut()
+                        .unwrap();
+                    if let Some(tle) = action.targetList[ti].as_targetentry_mut() {
+                        tle.expr = processed;
+                    }
+                }
+
+                // action->qual: preprocess the WHEN condition (EXPRKIND_QUAL).
+                let q = {
+                    let action = run.resolve_mut(root.parse).mergeActionList[ai]
+                        .as_mergeaction_mut()
+                        .unwrap();
+                    action
+                        .qual
+                        .take()
+                        .map(mcx::PgBox::into_inner)
+                        .and_then(|node| node.into_expr())
+                };
+                let processed =
+                    preprocess_expression(mcx, &mut root, run, outer_query_ref, q, EXPRKIND_QUAL)?;
+                let action = run.resolve_mut(root.parse).mergeActionList[ai]
+                    .as_mergeaction_mut()
+                    .unwrap();
+                action.qual = match processed {
+                    Some(pe) => Some(mcx::alloc_in(mcx, Node::Expr(pe))?),
+                    None => None,
+                };
+            }
         }
 
         // parse->mergeJoinCondition = preprocess_expression(..., EXPRKIND_QUAL)

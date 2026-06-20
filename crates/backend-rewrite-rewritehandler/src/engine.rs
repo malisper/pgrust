@@ -2526,11 +2526,64 @@ fn RewriteQuery<'mcx>(
                 parsetree.targetList = new_tlist;
             }
             CmdType::CMD_MERGE => {
-                rt_entry_relation.close(NoLock)?;
-                return Err(elog(
-                    "RewriteQuery: MERGE action target-list rewrite is out of the common \
-                     INSERT/UPDATE/DELETE spine (owner: backend-rewrite-rewritehandler)",
-                ));
+                // `rewriteHandler.c:4097` — Rewrite each MERGE action targetlist
+                // separately. MERGE actions do not permit multi-row INSERTs, so
+                // there is no VALUES RTE to deal with here.
+                debug_assert!(parsetree.r#override == OVERRIDING_NOT_SET);
+                for node in parsetree.mergeActionList.iter_mut() {
+                    let Some(action) = (**node).as_mergeaction_mut() else {
+                        continue;
+                    };
+                    match action.commandType {
+                        // CMD_NOTHING / CMD_DELETE — nothing to do here.
+                        CmdType::CMD_NOTHING | CmdType::CMD_DELETE => {}
+                        CmdType::CMD_UPDATE | CmdType::CMD_INSERT => {
+                            // Downcast the raw-node SET list to `TargetEntry`s
+                            // (the stored form mirrors C's `List *targetList`).
+                            let mut old_tlist: Vec<
+                                types_nodes::primnodes::TargetEntry<'mcx>,
+                            > = Vec::with_capacity(action.targetList.len());
+                            for tle_node in action.targetList.iter() {
+                                let Some(tle) = (**tle_node).as_targetentry() else {
+                                    rt_entry_relation.close(NoLock)?;
+                                    return Err(elog(
+                                        "MergeAction targetList entry is not a TargetEntry",
+                                    ));
+                                };
+                                old_tlist.push(tle.clone_in(mcx)?);
+                            }
+
+                            let mut unused = None;
+                            let new_tlist = rewriteTargetListIU(
+                                mcx,
+                                &old_tlist,
+                                action.commandType,
+                                action.r#override,
+                                &rt_entry_relation,
+                                None,
+                                0,
+                                &mut unused,
+                            )?;
+
+                            // Box the rewritten `TargetEntry`s back into the
+                            // raw-node SET list.
+                            let mut new_tlist_nodes: PgVec<'mcx, NodePtr<'mcx>> =
+                                PgVec::new_in(mcx);
+                            for tle in new_tlist.into_iter() {
+                                new_tlist_nodes
+                                    .push(alloc_in(mcx, Node::TargetEntry(tle))?);
+                            }
+                            action.targetList = new_tlist_nodes;
+                        }
+                        other => {
+                            rt_entry_relation.close(NoLock)?;
+                            return Err(elog(format!(
+                                "unrecognized commandType: {}",
+                                other as i32
+                            )));
+                        }
+                    }
+                }
             }
             CmdType::CMD_DELETE => { /* nothing to do */ }
             other => {
