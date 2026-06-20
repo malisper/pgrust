@@ -42,6 +42,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `planner(parse, query_string, cursorOptions, boundParams)` (planner.c:286)
+    /// with the bound external-parameter values threaded in. Identical to
+    /// [`pg_plan_query`] but `bound_params` (`None` is the C NULL) is recorded on
+    /// `glob->boundParams` so the const-folder substitutes a PARAM_EXTERN `$n`
+    /// for its bound `Const` (the custom-plan path; `BuildCachedPlan` →
+    /// `pg_plan_queries` → `pg_plan_query`). The simple-Query/COPY path passes
+    /// `None` and is identical to [`pg_plan_query`].
+    pub fn pg_plan_query_params<'mcx>(
+        mcx: Mcx<'mcx>,
+        querytree: &Query<'mcx>,
+        query_string: &str,
+        cursor_options: i32,
+        bound_params: types_nodes::params::ParamListInfo,
+    ) -> PgResult<PlannedStmt<'mcx>>
+);
+
+seam_core::seam!(
     /// `plan_cluster_use_sort(tableOid, indexOid)` (planner.c): whether a
     /// seqscan+sort beats an indexscan for the cluster copy.
     pub fn plan_cluster_use_sort(table_oid: Oid, index_oid: Oid) -> PgResult<bool>

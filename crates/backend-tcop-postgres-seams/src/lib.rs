@@ -170,19 +170,20 @@ seam_core::seam!(
     /// `PlannedStmt` in C (the trimmed owned `PlannedStmt` model cannot express
     /// that wrapper yet — the value body mirrors PG and panics precisely on a
     /// utility statement, which the SELECT/F0 spine never reaches).
-    /// `bound_params` is the C `ParamListInfo`: `None` is NULL (the
-    /// generic-plan / simple-Query path); a `Some` (custom-plan parameter
-    /// substitution) is not yet threaded through the value planning stack and
-    /// panics precisely rather than being silently dropped. plancache's
-    /// `BuildCachedPlan` (plancache.c:1074) is the F0 consumer; this is the
-    /// VALUE counterpart of the handle-based
+    /// `bound_params` is the C `ParamListInfo` (the shared owned `Rc` value):
+    /// `None` is NULL (the generic-plan / simple-Query path); a `Some`
+    /// (custom-plan parameter substitution) is threaded into the planner so
+    /// `standard_planner` records it on `glob->boundParams` and the
+    /// const-folder substitutes a PARAM_EXTERN `$n` for its bound `Const`.
+    /// plancache's `BuildCachedPlan` (plancache.c:1074) is the F0 consumer; this
+    /// is the VALUE counterpart of the handle-based
     /// `backend_optimizer_plan_planner_pc_seams::plan_queries`.
     pub fn pg_plan_queries_value<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         querytrees: &[types_nodes::copy_query::Query<'mcx>],
         query_string: &str,
         cursor_options: i32,
-        bound_params: Option<&types_nodes::params::ParamListInfoData<'mcx>>,
+        bound_params: types_nodes::params::ParamListInfo,
     ) -> types_error::PgResult<mcx::PgVec<'mcx, types_nodes::nodeindexscan::PlannedStmt<'mcx>>>
 );
 

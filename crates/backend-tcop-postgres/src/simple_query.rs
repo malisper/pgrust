@@ -258,6 +258,7 @@ pub fn pg_plan_query<'mcx>(
     querytree: &Query<'mcx>,
     query_string: &str,
     cursor_options: i32,
+    bound_params: types_nodes::params::ParamListInfo,
 ) -> PgResult<Option<PlannedStmt<'mcx>>> {
     // Utility commands have no plans.
     if querytree.commandType == CmdType::CMD_UTILITY {
@@ -269,8 +270,16 @@ pub fn pg_plan_query<'mcx>(
     // snapshot before reaching here when analyze_requires_snapshot is true.)
 
     // call the optimizer (planner_hook == NULL -> standard_planner), owned and
-    // installed by the planner crate.
-    let plan = planner_seams::pg_plan_query::call(mcx, querytree, query_string, cursor_options)?;
+    // installed by the planner crate. `boundParams` flows into the planner so a
+    // PARAM_EXTERN `$n` const-folds against the bound value (the custom-plan
+    // path); `None` is the generic-plan / simple-Query / COPY path.
+    let plan = planner_seams::pg_plan_query_params::call(
+        mcx,
+        querytree,
+        query_string,
+        cursor_options,
+        bound_params,
+    )?;
 
     Ok(Some(plan))
 }
@@ -291,6 +300,7 @@ pub fn pg_plan_queries<'mcx>(
     querytrees: PgVec<'mcx, Query<'mcx>>,
     query_string: &str,
     cursor_options: i32,
+    bound_params: types_nodes::params::ParamListInfo,
 ) -> PgResult<PgVec<'mcx, PlannedStmt<'mcx>>> {
     let mut stmt_list: PgVec<'mcx, PlannedStmt<'mcx>> = PgVec::new_in(mcx);
 
@@ -301,7 +311,9 @@ pub fn pg_plan_queries<'mcx>(
             // queryId, everything else null/zero (postgres.c pg_plan_queries).
             stmt_list.push(PlannedStmt::for_utility(mcx, query)?);
         } else {
-            let stmt = pg_plan_query(mcx, query, query_string, cursor_options)?
+            // C passes the same `boundParams` to every query in the list
+            // (postgres.c pg_plan_queries).
+            let stmt = pg_plan_query(mcx, query, query_string, cursor_options, bound_params.clone())?
                 .expect("pg_plan_query returned None for a non-utility query");
             stmt_list.push(stmt);
         }
@@ -447,8 +459,10 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
         let querytree_list =
             pg_analyze_and_rewrite_fixedparams(mcx, parsetree, query_string, &[])?;
 
+        // The simple-Query path has no bound external params (NULL boundParams
+        // in C's exec_simple_query → pg_plan_queries).
         let plantree_list =
-            pg_plan_queries(mcx, querytree_list, query_string, CURSOR_OPT_PARALLEL_OK)?;
+            pg_plan_queries(mcx, querytree_list, query_string, CURSOR_OPT_PARALLEL_OK, None)?;
 
         // Done with the snapshot used for parsing/planning. (We deliberately do
         // NOT reuse it for execution; see the C comment / postgr.es link.)

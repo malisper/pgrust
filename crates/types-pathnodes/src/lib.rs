@@ -621,6 +621,16 @@ pub struct PlannerGlobal {
     /// dependency cycle, so the owner downcasts the boxed value, exactly as
     /// `EState::es_partition_directory` does for the executor.
     pub partition_directory: types_nodes::Opaque,
+    /// `ParamListInfo boundParams` (pathnodes.h) — the bound external-parameter
+    /// values made available to the planner for this run (set by
+    /// `standard_planner` from its `boundParams` argument). `None` is the C
+    /// `NULL` (no bound params — the generic-plan / simple-Query path). The
+    /// custom-plan path (`BuildCachedPlan` with a non-NULL `boundParams`) carries
+    /// the bound values here so `eval_const_expressions_mutator`'s `T_Param` arm
+    /// (clauses.c:2452, read via `root->glob->boundParams`) can fold a
+    /// PARAM_EXTERN `$n` into a `Const`. The owned `ParamListInfo` is a shared
+    /// `Rc` value (cheap to clone), not an opaque handle.
+    pub bound_params: types_nodes::params::ParamListInfo,
 }
 
 /* ==========================================================================

@@ -1186,7 +1186,7 @@ fn BuildCachedPlan(
             qlist.as_slice(),
             qstr.as_str(),
             cursor_options,
-            bound_params.as_deref(),
+            bound_params.clone(),
         )?;
         // Own the planned stmts in the now-stable plan context.
         clone_plan_list_into(&plan_p.context, planned.as_slice())?

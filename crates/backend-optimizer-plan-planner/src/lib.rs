@@ -200,7 +200,21 @@ fn pg_plan_query_impl<'mcx>(
     query_string: &str,
     cursor_options: i32,
 ) -> PgResult<PlannedStmt<'mcx>> {
-    standard_planner(mcx, querytree, query_string, cursor_options)
+    standard_planner(mcx, querytree, query_string, cursor_options, None)
+}
+
+/// `planner(parse, query_string, cursorOptions, boundParams)` (planner.c:286)
+/// with the bound external-parameter values threaded in. Installed as the
+/// `pg_plan_query_params` seam (the tcop value path consumes it for cached /
+/// custom plans).
+fn pg_plan_query_params_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    querytree: &Query<'mcx>,
+    query_string: &str,
+    cursor_options: i32,
+    bound_params: types_nodes::params::ParamListInfo,
+) -> PgResult<PlannedStmt<'mcx>> {
+    standard_planner(mcx, querytree, query_string, cursor_options, bound_params)
 }
 
 /// `standard_planner(parse, query_string, cursorOptions, boundParams)`
@@ -210,10 +224,15 @@ fn standard_planner<'mcx>(
     parse: &Query<'mcx>,
     _query_string: &str,
     cursor_options: i32,
+    bound_params: types_nodes::params::ParamListInfo,
 ) -> PgResult<PlannedStmt<'mcx>> {
     // glob = makeNode(PlannerGlobal); + field init (C:322-345). All other
     // fields are the C zero-defaults via Default.
     let mut glob = PlannerGlobal::default();
+
+    // glob->boundParams = boundParams (planner.c:347) — the const-folder reads
+    // this through `root->glob->boundParams` to substitute PARAM_EXTERN values.
+    glob.bound_params = bound_params;
 
     // Assess parallel-mode feasibility (C:368-384).
     //
@@ -1780,9 +1799,22 @@ pub fn preprocess_expression<'mcx>(
         };
     }
 
-    // eval_const_expressions (C:1300-1301).
+    // eval_const_expressions (C:1300-1301). C: `eval_const_expressions(root,
+    // expr)` reads `root->glob->boundParams` for the PARAM_EXTERN const-fold;
+    // the custom-plan path (BuildCachedPlan with bound params) supplies them,
+    // the simple-Query / generic-plan path leaves glob->boundParams NULL. The
+    // owned `ParamListInfo` is a shared `Rc` value; clone it (cheap) out of glob
+    // so the borrow handed to the fold is independent of the `&mut root` borrow.
     if kind != EXPRKIND_RTFUNC {
-        expr = backend_optimizer_util_clauses::eval_const_expressions(mcx, expr)?;
+        let bound_params = root
+            .glob
+            .as_ref()
+            .and_then(|g| g.bound_params.clone());
+        expr = backend_optimizer_util_clauses::fold::eval_const_expressions_with_params(
+            mcx,
+            expr,
+            bound_params,
+        )?;
     }
 
     // canonicalize_qual (C:1306-1308).
@@ -7713,6 +7745,7 @@ pub fn init_seams() {
     backend_catalog_index_seams::plan_create_index_workers::set(plan_create_index_workers);
 
     backend_optimizer_plan_planner_seams::pg_plan_query::set(pg_plan_query_impl);
+    backend_optimizer_plan_planner_seams::pg_plan_query_params::set(pg_plan_query_params_impl);
     backend_optimizer_plan_planner_seams::plan_cluster_use_sort::set(plan_cluster_use_sort_impl);
     backend_optimizer_plan_planner_seams::select_rowmark_type::set(|rte, strength| {
         select_rowmark_type(rte, strength)
