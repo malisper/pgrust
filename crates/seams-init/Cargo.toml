@@ -161,6 +161,7 @@ backend-catalog-pg-shdepend = { path = "../backend-catalog-pg-shdepend" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-commands-amcmds = { path = "../backend-commands-amcmds" }
 backend-commands-analyze = { path = "../backend-commands-analyze" }
+backend-statistics-core = { path = "../backend-statistics-core" }
 backend-statistics-extended-stats = { path = "../backend-statistics-extended-stats" }
 backend-statistics-mvdistinct = { path = "../backend-statistics-mvdistinct" }
 backend-statistics-dependencies = { path = "../backend-statistics-dependencies" }

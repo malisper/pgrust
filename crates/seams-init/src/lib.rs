@@ -157,6 +157,7 @@ pub fn init_all() {
     backend_catalog_toasting::init_seams();
     backend_commands_amcmds::init_seams();
     backend_commands_analyze::init_seams();
+    backend_statistics_core::init_seams();
     backend_statistics_extended_stats::init_seams();
     backend_statistics_mvdistinct::init_seams();
     backend_statistics_dependencies::init_seams();

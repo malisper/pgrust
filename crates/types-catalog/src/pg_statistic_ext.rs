@@ -23,6 +23,9 @@ pub const StatisticExtNameIndexId: Oid = 3997;
 pub const StatisticExtRelidIndexId: Oid = 3379;
 /// `StatisticExtDataRelationId` — `pg_statistic_ext_data` (OID 3429).
 pub const StatisticExtDataRelationId: Oid = 3429;
+/// `StatisticExtDataStxoidInhIndexId` — `pg_statistic_ext_data_stxoid_inh_index`
+/// (OID 3433).
+pub const StatisticExtDataStxoidInhIndexId: Oid = 3433;
 
 /* ==========================================================================
  * Attribute numbers (genbki, field order of FormData_pg_statistic_ext).
@@ -40,6 +43,21 @@ pub const Anum_pg_statistic_ext_stxexprs: i16 = 9;
 
 /// `Natts_pg_statistic_ext` — number of columns.
 pub const Natts_pg_statistic_ext: usize = 9;
+
+/* ==========================================================================
+ * pg_statistic_ext_data attribute numbers
+ * (genbki, field order of FormData_pg_statistic_ext_data).
+ * ======================================================================== */
+
+pub const Anum_pg_statistic_ext_data_stxoid: i16 = 1;
+pub const Anum_pg_statistic_ext_data_stxdinherit: i16 = 2;
+pub const Anum_pg_statistic_ext_data_stxdndistinct: i16 = 3;
+pub const Anum_pg_statistic_ext_data_stxddependencies: i16 = 4;
+pub const Anum_pg_statistic_ext_data_stxdmcv: i16 = 5;
+pub const Anum_pg_statistic_ext_data_stxdexpr: i16 = 6;
+
+/// `Natts_pg_statistic_ext_data` — number of columns.
+pub const Natts_pg_statistic_ext_data: usize = 6;
 
 /* ==========================================================================
  * Statistics kind chars (pg_statistic_ext.h EXPOSE_TO_CLIENT_CODE).

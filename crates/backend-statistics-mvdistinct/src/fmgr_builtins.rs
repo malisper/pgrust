@@ -33,6 +33,17 @@ fn arg_bytea_body<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8
     }
 }
 
+/// The full detoasted `bytea` arg image (varlena header included). `pg_ndistinct_out`
+/// passes the whole `bytea *` to `statext_ndistinct_deserialize`, which reads the
+/// varlena header via `VARSIZE_ANY_EXHDR` — so the header must be present.
+#[inline]
+fn arg_bytea_full<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("pg_ndistinct fn: by-ref bytea arg missing from by-ref lane")
+}
+
 /// Set a `cstring` (`_out`) result on the by-ref lane (the core returns the
 /// NUL-terminated payload; drop the trailing NUL for the `String` carrier).
 #[inline]
@@ -77,7 +88,8 @@ fn fc_pg_ndistinct_recv(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 fn fc_pg_ndistinct_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let data = arg_bytea_body(fcinfo, 0).to_vec();
+    // C: statext_ndistinct_deserialize(PG_GETARG_BYTEA_PP(0)) — full varlena.
+    let data = arg_bytea_full(fcinfo, 0).to_vec();
     match crate::pg_ndistinct_out(&data) {
         Ok(s) => ret_cstring(fcinfo, s),
         Err(e) => raise(e),

@@ -16299,6 +16299,24 @@ name = "backend-snowball-runtime"
 version = "0.0.0"
 
 [[package]]
+name = "backend-statistics-core"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-detoast-seams",
+ "backend-parser-parse-oper",
+ "backend-statistics-core-seams",
+ "backend-statistics-mvdistinct",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-sort-sortsupport-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-sortsupport",
+ "types-statistics",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-statistics-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -16334,16 +16352,24 @@ dependencies = [
  "backend-access-common-scankey",
  "backend-access-index-genam-seams",
  "backend-access-table-table",
+ "backend-catalog-indexing",
  "backend-commands-analyze-rt-seams",
+ "backend-commands-statscmds",
+ "backend-statistics-dependencies",
+ "backend-statistics-mcv",
+ "backend-statistics-mvdistinct",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-error",
  "backend-utils-misc-guc-tables",
  "mcx",
  "seam-core",
  "types-catalog",
  "types-core",
+ "types-datum",
  "types-error",
  "types-rel",
  "types-scan",
+ "types-sortsupport",
  "types-statistics",
  "types-storage",
  "types-tuple",
@@ -24261,6 +24287,7 @@ dependencies = [
  "backend-rewrite-rewritehandler",
  "backend-rmgrdesc-next",
  "backend-snowball-dict-snowball",
+ "backend-statistics-core",
  "backend-statistics-dependencies",
  "backend-statistics-extended-stats",
  "backend-statistics-mvdistinct",
