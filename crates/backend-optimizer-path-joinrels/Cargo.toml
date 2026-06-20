@@ -21,6 +21,7 @@ backend-optimizer-path-joinpath = { path = "../backend-optimizer-path-joinpath" 
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
 backend-optimizer-util-relnode-ext-seams = { path = "../backend-optimizer-util-relnode-ext-seams" }
+backend-optimizer-path-equivclass-ext-seams = { path = "../backend-optimizer-path-equivclass-ext-seams" }
 backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 backend-optimizer-util-appendinfo-seams = { path = "../backend-optimizer-util-appendinfo-seams" }
 backend-partitioning-partbounds-seams = { path = "../backend-partitioning-partbounds-seams" }

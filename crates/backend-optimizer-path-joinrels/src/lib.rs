@@ -715,7 +715,9 @@ pub fn make_join_rel<'mcx>(
     // Add outer join relid(s) to form the canonical relids. Any added outer joins
     // besides sjinfo itself are appended to pushed_down_joins.
     let mut pushed_down_joins: Vec<SpecialJoinInfo> = Vec::new();
-    let joinrelids = add_outer_joins_to_relids(root, joinrelids, match_index, &mut pushed_down_joins)?;
+    let match_sjinfo = match_index.map(|i| &root.join_info_list[i]);
+    let joinrelids =
+        add_outer_joins_to_relids(root, joinrelids, match_sjinfo, &mut pushed_down_joins)?;
 
     // Swap rels if needed to match the join info.
     if reversed {
@@ -759,18 +761,18 @@ pub fn make_join_rel<'mcx>(
 /// outer joins that will be calculated at this join.
 ///
 /// `input_relids` is modified in-place and returned (the C convention).
-/// `match_index` indexes `root.join_info_list` (the join being performed), or
-/// `None` for a plain inner join. SpecialJoinInfos for added pushed-down outer
-/// joins are appended to `pushed_down_joins`.
+/// `sjinfo` is the SpecialJoinInfo for the join being performed, or `None` for
+/// a plain inner join (the C `sjinfo == NULL` case). SpecialJoinInfos for added
+/// pushed-down outer joins are appended to `pushed_down_joins`.
 fn add_outer_joins_to_relids(
     root: &PlannerInfo,
     input_relids: Relids,
-    match_index: Option<usize>,
+    sjinfo: Option<&SpecialJoinInfo>,
     pushed_down_joins: &mut Vec<SpecialJoinInfo>,
 ) -> PgResult<Relids> {
     // Nothing to do if this isn't an outer join with an assigned relid.
-    let sjinfo = match match_index {
-        Some(i) => &root.join_info_list[i],
+    let sjinfo = match sjinfo {
+        Some(sj) => sj,
         None => return Ok(input_relids),
     };
     if sjinfo.ojrelid == 0 {
@@ -1636,6 +1638,20 @@ pub fn init_seams() {
     // `get_parameterized_joinrel_size`) through the costsize self-seam crate. The
     // seam keys the two rels by `RelId`; resolve each to `rel->relids` and fill a
     // fresh dummy `SpecialJoinInfo`.
+    // `add_outer_joins_to_relids(root, input_relids, sjinfo)` (joinrels.c, owned
+    // here) is read by equivclass.c `generate_join_implied_equalities` through the
+    // equivclass-ext-seams crate. The equivclass call passes `pushed_down_joins ==
+    // NULL`, so we feed a throwaway Vec and discard it. The seam returns a bare
+    // `Relids`; the only fallible step is `pushed_down_joins.push` (OOM), which is
+    // surfaced via `.expect` to mirror the seam's infallible signature.
+    backend_optimizer_path_equivclass_ext_seams::add_outer_joins_to_relids::set(
+        |root: &PlannerInfo, input_relids, sjinfo: Option<SpecialJoinInfo>| {
+            let mut pushed_down_joins: Vec<SpecialJoinInfo> = Vec::new();
+            add_outer_joins_to_relids(root, input_relids, sjinfo.as_ref(), &mut pushed_down_joins)
+                .expect("add_outer_joins_to_relids")
+        },
+    );
+
     backend_optimizer_path_costsize_seams::init_dummy_sjinfo::set(
         |root: &PlannerInfo, outer_rel, inner_rel| {
             let left_relids = root.rel(outer_rel).relids.clone();
