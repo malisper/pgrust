@@ -895,6 +895,7 @@ pub fn AcquireRewriteLocks<'mcx>(
                                 let curinputrte =
                                     &parsetree.rtable[(curinputvarno - 1) as usize];
                                 let dropped = backend_parser_relation::get_rte_attribute_is_dropped(
+                                    mcx,
                                     curinputrte,
                                     var.varattno,
                                 )?;

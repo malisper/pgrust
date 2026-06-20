@@ -3199,8 +3199,9 @@ pub fn get_rte_attribute_name<'mcx>(
 
 /// `get_rte_attribute_is_dropped` — check whether an attribute ref is to a
 /// dropped column.
-pub fn get_rte_attribute_is_dropped(
-    rte: &RangeTblEntry<'_>,
+pub fn get_rte_attribute_is_dropped<'mcx>(
+    mcx: Mcx<'mcx>,
+    rte: &RangeTblEntry<'mcx>,
     attnum: AttrNumber,
 ) -> PgResult<bool> {
     let result;
@@ -3248,11 +3249,74 @@ pub fn get_rte_attribute_is_dropped(
                 && is_null_const(rte.joinaliasvars[(attnum - 1) as usize].as_ref());
         }
         RTE_FUNCTION => {
-            // RTE_FUNCTION composite arm needs get_expr_result_tupdesc — unported.
-            panic!(
-                "get_rte_attribute_is_dropped RTE_FUNCTION composite arm needs \
-                 get_expr_result_tupdesc (funcapi), unported here (parse_relation.c:3487)"
-            );
+            // Function RTE.
+            //
+            // Dropped attributes are only possible with functions that return
+            // named composite types.  In such a case we have to look up the
+            // result type to see if it currently has this column dropped.  So
+            // first, loop over the funcs until we find the one that covers the
+            // requested column.
+            let attnum_i32 = attnum as i32;
+            let mut atts_done: i32 = 0;
+            for func_node in rte.functions.iter() {
+                // C: RangeTblFunction *rtfunc = (RangeTblFunction *) lfirst(lc);
+                let rtfunc = match &**func_node {
+                    types_nodes::nodes::Node::RangeTblFunction(r) => r,
+                    other => {
+                        return Err(ereport(ERROR)
+                            .errmsg_internal(format!(
+                                "unexpected node type in RTE_FUNCTION functions list: {:?}",
+                                other.node_tag()
+                            ))
+                            .into_error());
+                    }
+                };
+
+                if attnum_i32 > atts_done && attnum_i32 <= atts_done + rtfunc.funccolcount {
+                    // If it has a coldeflist, it returns RECORD; can't have any
+                    // dropped columns.
+                    if !rtfunc.funccolnames.is_empty() {
+                        return Ok(false);
+                    }
+
+                    // C: tupdesc = get_expr_result_tupdesc(rtfunc->funcexpr, true);
+                    let funcexpr_node: Option<&Node<'mcx>> =
+                        rtfunc.funcexpr.as_deref();
+                    let tupdesc = backend_utils_fmgr_funcapi::result_type::get_expr_result_tupdesc(
+                        mcx,
+                        funcexpr_node,
+                        true,
+                    )?;
+
+                    match tupdesc {
+                        Some(td) => {
+                            // Composite data type, e.g. a table's row type.
+                            // C: Assert(attnum - atts_done <= tupdesc->natts);
+                            let idx = (attnum_i32 - atts_done - 1) as usize;
+                            debug_assert!(attnum_i32 - atts_done <= td.natts);
+                            return Ok(td.attrs[idx].attisdropped);
+                        }
+                        // Otherwise, it can't have any dropped columns.
+                        None => return Ok(false),
+                    }
+                }
+                atts_done += rtfunc.funccolcount;
+            }
+
+            // If we get here, must be looking for the ordinality column.
+            if rte.funcordinality && attnum_i32 == atts_done + 1 {
+                return Ok(false);
+            }
+
+            // this probably can't happen ...
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_COLUMN)
+                .errmsg(format!(
+                    "column {} of relation \"{}\" does not exist",
+                    attnum,
+                    rte_eref_aliasname(rte)
+                ))
+                .into_error());
         }
         RTE_RESULT => {
             return Err(ereport(ERROR)
