@@ -83,8 +83,84 @@ const FUNC_MAX_ARGS: usize = 100;
 /// `catalog/pg_type_d.h` type OIDs used by `get_const_expr`.
 const BOOLOID: u32 = 16;
 const INT4OID: u32 = 23;
+const TEXTOID: u32 = 25;
 const UNKNOWNOID: u32 = 705;
 const NUMERICOID: u32 = 1700;
+
+/// `utils/fmgroids.h` builtin-function OIDs referenced by `get_func_sql_syntax`.
+/// These are stable, generated constants (Gen_fmgrtab.pl) — values taken from
+/// `src/include/utils/fmgroids.h` for PG 18.
+#[allow(non_upper_case_globals, dead_code)]
+mod fmgroids {
+    pub const F_TIMEZONE_INTERVAL_TIMESTAMPTZ: u32 = 1026;
+    pub const F_TIMEZONE_TEXT_TIMESTAMPTZ: u32 = 1159;
+    pub const F_TIMEZONE_TEXT_TIMETZ: u32 = 2037;
+    pub const F_TIMEZONE_INTERVAL_TIMETZ: u32 = 2038;
+    pub const F_TIMEZONE_TEXT_TIMESTAMP: u32 = 2069;
+    pub const F_TIMEZONE_INTERVAL_TIMESTAMP: u32 = 2070;
+    pub const F_TIMEZONE_TIMESTAMPTZ: u32 = 6334;
+    pub const F_TIMEZONE_TIMESTAMP: u32 = 6335;
+    pub const F_TIMEZONE_TIMETZ: u32 = 6336;
+
+    pub const F_OVERLAPS_TIMETZ_TIMETZ_TIMETZ_TIMETZ: u32 = 1271;
+    pub const F_OVERLAPS_TIMESTAMPTZ_TIMESTAMPTZ_TIMESTAMPTZ_TIMESTAMPTZ: u32 = 1304;
+    pub const F_OVERLAPS_TIMESTAMPTZ_INTERVAL_TIMESTAMPTZ_INTERVAL: u32 = 1305;
+    pub const F_OVERLAPS_TIMESTAMPTZ_TIMESTAMPTZ_TIMESTAMPTZ_INTERVAL: u32 = 1306;
+    pub const F_OVERLAPS_TIMESTAMPTZ_INTERVAL_TIMESTAMPTZ_TIMESTAMPTZ: u32 = 1307;
+    pub const F_OVERLAPS_TIME_TIME_TIME_TIME: u32 = 1308;
+    pub const F_OVERLAPS_TIME_INTERVAL_TIME_INTERVAL: u32 = 1309;
+    pub const F_OVERLAPS_TIME_TIME_TIME_INTERVAL: u32 = 1310;
+    pub const F_OVERLAPS_TIME_INTERVAL_TIME_TIME: u32 = 1311;
+    pub const F_OVERLAPS_TIMESTAMP_TIMESTAMP_TIMESTAMP_TIMESTAMP: u32 = 2041;
+    pub const F_OVERLAPS_TIMESTAMP_INTERVAL_TIMESTAMP_INTERVAL: u32 = 2042;
+    pub const F_OVERLAPS_TIMESTAMP_TIMESTAMP_TIMESTAMP_INTERVAL: u32 = 2043;
+    pub const F_OVERLAPS_TIMESTAMP_INTERVAL_TIMESTAMP_TIMESTAMP: u32 = 2044;
+
+    pub const F_EXTRACT_TEXT_DATE: u32 = 6199;
+    pub const F_EXTRACT_TEXT_TIME: u32 = 6200;
+    pub const F_EXTRACT_TEXT_TIMETZ: u32 = 6201;
+    pub const F_EXTRACT_TEXT_TIMESTAMP: u32 = 6202;
+    pub const F_EXTRACT_TEXT_TIMESTAMPTZ: u32 = 6203;
+    pub const F_EXTRACT_TEXT_INTERVAL: u32 = 6204;
+
+    pub const F_IS_NORMALIZED: u32 = 4351;
+    pub const F_PG_COLLATION_FOR: u32 = 3162;
+    pub const F_NORMALIZE: u32 = 4350;
+
+    pub const F_OVERLAY_BYTEA_BYTEA_INT4_INT4: u32 = 749;
+    pub const F_OVERLAY_BYTEA_BYTEA_INT4: u32 = 752;
+    pub const F_OVERLAY_TEXT_TEXT_INT4_INT4: u32 = 1404;
+    pub const F_OVERLAY_TEXT_TEXT_INT4: u32 = 1405;
+    pub const F_OVERLAY_BIT_BIT_INT4_INT4: u32 = 3030;
+    pub const F_OVERLAY_BIT_BIT_INT4: u32 = 3031;
+
+    pub const F_POSITION_TEXT_TEXT: u32 = 849;
+    pub const F_POSITION_BIT_BIT: u32 = 1698;
+    pub const F_POSITION_BYTEA_BYTEA: u32 = 2014;
+
+    pub const F_SUBSTRING_TEXT_INT4_INT4: u32 = 936;
+    pub const F_SUBSTRING_TEXT_INT4: u32 = 937;
+    pub const F_SUBSTRING_BIT_INT4_INT4: u32 = 1680;
+    pub const F_SUBSTRING_BIT_INT4: u32 = 1699;
+    pub const F_SUBSTRING_BYTEA_INT4_INT4: u32 = 2012;
+    pub const F_SUBSTRING_BYTEA_INT4: u32 = 2013;
+    pub const F_SUBSTRING_TEXT_TEXT_TEXT: u32 = 2074;
+
+    pub const F_BTRIM_TEXT_TEXT: u32 = 884;
+    pub const F_BTRIM_TEXT: u32 = 885;
+    pub const F_BTRIM_BYTEA_BYTEA: u32 = 2015;
+
+    pub const F_LTRIM_TEXT_TEXT: u32 = 875;
+    pub const F_LTRIM_TEXT: u32 = 881;
+    pub const F_LTRIM_BYTEA_BYTEA: u32 = 6195;
+
+    pub const F_RTRIM_TEXT_TEXT: u32 = 876;
+    pub const F_RTRIM_TEXT: u32 = 882;
+    pub const F_RTRIM_BYTEA_BYTEA: u32 = 6196;
+
+    pub const F_SYSTEM_USER: u32 = 6311;
+    pub const F_XMLEXISTS: u32 = 2614;
+}
 
 /// `access/attnum.h` `InvalidAttrNumber`.
 const InvalidAttrNumber: i16 = 0;
@@ -1157,11 +1233,11 @@ fn get_func_expr_inner(
         return Ok(());
     }
 
-    // SQL-syntax special forms (get_func_sql_syntax).
-    if funcformat == CoercionForm::COERCE_SQL_SYNTAX {
-        return Err(deferred(
-            "get_func_sql_syntax (COERCE_SQL_SYNTAX special forms: fmgr/Datum text value layer + fmgroids F_* table)",
-        ));
+    // If the function was called using one of the SQL spec's random special
+    // syntaxes, try to reproduce that.  If we don't recognize the function,
+    // fall through.
+    if funcformat == CoercionForm::COERCE_SQL_SYNTAX && get_func_sql_syntax(f, enclosing, context)? {
+        return Ok(());
     }
 
     // Normal function: display as proname(args).
@@ -1207,6 +1283,266 @@ fn get_func_expr_inner(
     }
     ch_(context, b')')?;
     Ok(())
+}
+
+/* -------------------------------------------------------------------------- *
+ * get_func_sql_syntax — C 11143-11399.
+ * -------------------------------------------------------------------------- */
+
+/// `TextDatumGetCString(con->constvalue)` for a TEXTOID, non-null `Const`.
+///
+/// The C code reads the text value straight out of the Const datum; we obtain
+/// the same string via the type-output function (textout) at the fmgr seam, the
+/// same path `get_const_expr` uses. Mirrors the C `Assert(IsA(con, Const) &&
+/// con->consttype == TEXTOID && !con->constisnull)`.
+fn text_const_cstring<'mcx>(
+    mcx: Mcx<'mcx>,
+    con: &Const,
+) -> PgResult<PgString<'mcx>> {
+    debug_assert!(con.consttype == TEXTOID && !con.constisnull);
+    let (typoutput, _typ_is_varlena) =
+        backend_utils_cache_lsyscache_seams::get_type_output_info::call(con.consttype)?;
+    let datum = con.constvalue.clone_in(mcx)?;
+    backend_utils_fmgr_fmgr_seams::oid_output_function_call_datum::call(mcx, typoutput, datum)
+}
+
+/// `static bool get_func_sql_syntax(FuncExpr *expr, deparse_context *context)`
+/// — C 11149-11399.
+///
+/// Parse back a SQL-syntax function call. Returns `true` if we successfully
+/// deparsed, `false` if we did not recognize the function.
+fn get_func_sql_syntax(
+    expr: &FuncExpr,
+    enclosing: Option<&Expr>,
+    context: &mut DeparseContext<'_>,
+) -> PgResult<bool> {
+    use fmgroids::*;
+    let mcx = context.buf.allocator();
+    let funcoid = expr.funcid;
+    let args = &expr.args;
+
+    match funcoid {
+        F_TIMEZONE_INTERVAL_TIMESTAMP
+        | F_TIMEZONE_INTERVAL_TIMESTAMPTZ
+        | F_TIMEZONE_INTERVAL_TIMETZ
+        | F_TIMEZONE_TEXT_TIMESTAMP
+        | F_TIMEZONE_TEXT_TIMESTAMPTZ
+        | F_TIMEZONE_TEXT_TIMETZ => {
+            // AT TIME ZONE ... note reversed argument order
+            ch_(context, b'(')?;
+            get_rule_expr_paren_e(expr_arg(args, 1)?, context, false, enclosing)?;
+            str_(context, " AT TIME ZONE ")?;
+            get_rule_expr_paren_e(expr_arg(args, 0)?, context, false, enclosing)?;
+            ch_(context, b')')?;
+            Ok(true)
+        }
+
+        F_TIMEZONE_TIMESTAMP | F_TIMEZONE_TIMESTAMPTZ | F_TIMEZONE_TIMETZ => {
+            // AT LOCAL
+            ch_(context, b'(')?;
+            get_rule_expr_paren_e(expr_arg(args, 0)?, context, false, enclosing)?;
+            str_(context, " AT LOCAL)")?;
+            Ok(true)
+        }
+
+        F_OVERLAPS_TIMESTAMPTZ_INTERVAL_TIMESTAMPTZ_INTERVAL
+        | F_OVERLAPS_TIMESTAMPTZ_INTERVAL_TIMESTAMPTZ_TIMESTAMPTZ
+        | F_OVERLAPS_TIMESTAMPTZ_TIMESTAMPTZ_TIMESTAMPTZ_INTERVAL
+        | F_OVERLAPS_TIMESTAMPTZ_TIMESTAMPTZ_TIMESTAMPTZ_TIMESTAMPTZ
+        | F_OVERLAPS_TIMESTAMP_INTERVAL_TIMESTAMP_INTERVAL
+        | F_OVERLAPS_TIMESTAMP_INTERVAL_TIMESTAMP_TIMESTAMP
+        | F_OVERLAPS_TIMESTAMP_TIMESTAMP_TIMESTAMP_INTERVAL
+        | F_OVERLAPS_TIMESTAMP_TIMESTAMP_TIMESTAMP_TIMESTAMP
+        | F_OVERLAPS_TIMETZ_TIMETZ_TIMETZ_TIMETZ
+        | F_OVERLAPS_TIME_INTERVAL_TIME_INTERVAL
+        | F_OVERLAPS_TIME_INTERVAL_TIME_TIME
+        | F_OVERLAPS_TIME_TIME_TIME_INTERVAL
+        | F_OVERLAPS_TIME_TIME_TIME_TIME => {
+            // (x1, x2) OVERLAPS (y1, y2)
+            str_(context, "((")?;
+            get_rule_expr_e(expr_arg(args, 0)?, context, false)?;
+            str_(context, ", ")?;
+            get_rule_expr_e(expr_arg(args, 1)?, context, false)?;
+            str_(context, ") OVERLAPS (")?;
+            get_rule_expr_e(expr_arg(args, 2)?, context, false)?;
+            str_(context, ", ")?;
+            get_rule_expr_e(expr_arg(args, 3)?, context, false)?;
+            str_(context, "))")?;
+            Ok(true)
+        }
+
+        F_EXTRACT_TEXT_DATE
+        | F_EXTRACT_TEXT_TIME
+        | F_EXTRACT_TEXT_TIMETZ
+        | F_EXTRACT_TEXT_TIMESTAMP
+        | F_EXTRACT_TEXT_TIMESTAMPTZ
+        | F_EXTRACT_TEXT_INTERVAL => {
+            // EXTRACT (x FROM y)
+            str_(context, "EXTRACT(")?;
+            let con = expr_as_const(expr_arg(args, 0)?)?;
+            let field = text_const_cstring(mcx, con)?;
+            str_(context, field.as_str())?;
+            str_(context, " FROM ")?;
+            get_rule_expr_e(expr_arg(args, 1)?, context, false)?;
+            ch_(context, b')')?;
+            Ok(true)
+        }
+
+        F_IS_NORMALIZED => {
+            // IS xxx NORMALIZED
+            ch_(context, b'(')?;
+            get_rule_expr_paren_e(expr_arg(args, 0)?, context, false, enclosing)?;
+            str_(context, " IS")?;
+            if args.len() == 2 {
+                let con = expr_as_const(expr_arg(args, 1)?)?;
+                let form = text_const_cstring(mcx, con)?;
+                ch_(context, b' ')?;
+                str_(context, form.as_str())?;
+            }
+            str_(context, " NORMALIZED)")?;
+            Ok(true)
+        }
+
+        F_PG_COLLATION_FOR => {
+            // COLLATION FOR
+            str_(context, "COLLATION FOR (")?;
+            get_rule_expr_e(expr_arg(args, 0)?, context, false)?;
+            ch_(context, b')')?;
+            Ok(true)
+        }
+
+        F_NORMALIZE => {
+            // NORMALIZE()
+            str_(context, "NORMALIZE(")?;
+            get_rule_expr_e(expr_arg(args, 0)?, context, false)?;
+            if args.len() == 2 {
+                let con = expr_as_const(expr_arg(args, 1)?)?;
+                let form = text_const_cstring(mcx, con)?;
+                str_(context, ", ")?;
+                str_(context, form.as_str())?;
+            }
+            ch_(context, b')')?;
+            Ok(true)
+        }
+
+        F_OVERLAY_BIT_BIT_INT4
+        | F_OVERLAY_BIT_BIT_INT4_INT4
+        | F_OVERLAY_BYTEA_BYTEA_INT4
+        | F_OVERLAY_BYTEA_BYTEA_INT4_INT4
+        | F_OVERLAY_TEXT_TEXT_INT4
+        | F_OVERLAY_TEXT_TEXT_INT4_INT4 => {
+            // OVERLAY()
+            str_(context, "OVERLAY(")?;
+            get_rule_expr_e(expr_arg(args, 0)?, context, false)?;
+            str_(context, " PLACING ")?;
+            get_rule_expr_e(expr_arg(args, 1)?, context, false)?;
+            str_(context, " FROM ")?;
+            get_rule_expr_e(expr_arg(args, 2)?, context, false)?;
+            if args.len() == 4 {
+                str_(context, " FOR ")?;
+                get_rule_expr_e(expr_arg(args, 3)?, context, false)?;
+            }
+            ch_(context, b')')?;
+            Ok(true)
+        }
+
+        F_POSITION_BIT_BIT | F_POSITION_BYTEA_BYTEA | F_POSITION_TEXT_TEXT => {
+            // POSITION() ... extra parens since args are b_expr not a_expr
+            str_(context, "POSITION((")?;
+            get_rule_expr_e(expr_arg(args, 1)?, context, false)?;
+            str_(context, ") IN (")?;
+            get_rule_expr_e(expr_arg(args, 0)?, context, false)?;
+            str_(context, "))")?;
+            Ok(true)
+        }
+
+        F_SUBSTRING_BIT_INT4
+        | F_SUBSTRING_BIT_INT4_INT4
+        | F_SUBSTRING_BYTEA_INT4
+        | F_SUBSTRING_BYTEA_INT4_INT4
+        | F_SUBSTRING_TEXT_INT4
+        | F_SUBSTRING_TEXT_INT4_INT4 => {
+            // SUBSTRING FROM/FOR (i.e., integer-position variants)
+            str_(context, "SUBSTRING(")?;
+            get_rule_expr_e(expr_arg(args, 0)?, context, false)?;
+            str_(context, " FROM ")?;
+            get_rule_expr_e(expr_arg(args, 1)?, context, false)?;
+            if args.len() == 3 {
+                str_(context, " FOR ")?;
+                get_rule_expr_e(expr_arg(args, 2)?, context, false)?;
+            }
+            ch_(context, b')')?;
+            Ok(true)
+        }
+
+        F_SUBSTRING_TEXT_TEXT_TEXT => {
+            // SUBSTRING SIMILAR/ESCAPE
+            str_(context, "SUBSTRING(")?;
+            get_rule_expr_e(expr_arg(args, 0)?, context, false)?;
+            str_(context, " SIMILAR ")?;
+            get_rule_expr_e(expr_arg(args, 1)?, context, false)?;
+            str_(context, " ESCAPE ")?;
+            get_rule_expr_e(expr_arg(args, 2)?, context, false)?;
+            ch_(context, b')')?;
+            Ok(true)
+        }
+
+        F_BTRIM_BYTEA_BYTEA | F_BTRIM_TEXT | F_BTRIM_TEXT_TEXT => {
+            // TRIM()
+            str_(context, "TRIM(BOTH")?;
+            if args.len() == 2 {
+                ch_(context, b' ')?;
+                get_rule_expr_e(expr_arg(args, 1)?, context, false)?;
+            }
+            str_(context, " FROM ")?;
+            get_rule_expr_e(expr_arg(args, 0)?, context, false)?;
+            ch_(context, b')')?;
+            Ok(true)
+        }
+
+        F_LTRIM_BYTEA_BYTEA | F_LTRIM_TEXT | F_LTRIM_TEXT_TEXT => {
+            // TRIM()
+            str_(context, "TRIM(LEADING")?;
+            if args.len() == 2 {
+                ch_(context, b' ')?;
+                get_rule_expr_e(expr_arg(args, 1)?, context, false)?;
+            }
+            str_(context, " FROM ")?;
+            get_rule_expr_e(expr_arg(args, 0)?, context, false)?;
+            ch_(context, b')')?;
+            Ok(true)
+        }
+
+        F_RTRIM_BYTEA_BYTEA | F_RTRIM_TEXT | F_RTRIM_TEXT_TEXT => {
+            // TRIM()
+            str_(context, "TRIM(TRAILING")?;
+            if args.len() == 2 {
+                ch_(context, b' ')?;
+                get_rule_expr_e(expr_arg(args, 1)?, context, false)?;
+            }
+            str_(context, " FROM ")?;
+            get_rule_expr_e(expr_arg(args, 0)?, context, false)?;
+            ch_(context, b')')?;
+            Ok(true)
+        }
+
+        F_SYSTEM_USER => {
+            str_(context, "SYSTEM_USER")?;
+            Ok(true)
+        }
+
+        F_XMLEXISTS => {
+            // XMLEXISTS ... extra parens because args are c_expr
+            str_(context, "XMLEXISTS((")?;
+            get_rule_expr_e(expr_arg(args, 0)?, context, false)?;
+            str_(context, ") PASSING (")?;
+            get_rule_expr_e(expr_arg(args, 1)?, context, false)?;
+            str_(context, "))")?;
+            Ok(true)
+        }
+
+        _ => Ok(false),
+    }
 }
 
 /* -------------------------------------------------------------------------- *
