@@ -830,9 +830,9 @@ fn UpdateIndexRelation<'mcx>(
             // nodeToString of the List of Exprs.
             let mut cells = mcx::vec_with_capacity_in(mcx, exprs.len())?;
             for e in exprs.iter() {
-                cells.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?))?);
+                cells.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
             }
-            let list = Node::mk_list(mcx, cells);
+            let list = Node::mk_list(mcx, cells)?;
             let s = nodes_seam::node_to_string_with_locations::call(mcx, &list)?;
             Some(s.as_str().into())
         }
@@ -855,7 +855,7 @@ fn UpdateIndexRelation<'mcx>(
                 clauses.push(e.clone_in(mcx)?);
             }
             let anded = backend_nodes_core::makefuncs::make_ands_explicit(clauses);
-            let node = Node::mk_expr(mcx, anded);
+            let node = Node::mk_expr(mcx, anded)?;
             let s = nodes_seam::node_to_string_with_locations::call(mcx, &node)?;
             Some(s.as_str().into())
         }
@@ -1604,9 +1604,9 @@ fn exprs_to_list_node<'mcx>(
     use types_nodes::nodes::Node;
     let mut cells = mcx::vec_with_capacity_in(mcx, exprs.len())?;
     for e in exprs.iter() {
-        cells.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?))?);
+        cells.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
     }
-    Ok(Node::mk_list(mcx, cells))
+    Ok(Node::mk_list(mcx, cells)?)
 }
 
 /* ===========================================================================

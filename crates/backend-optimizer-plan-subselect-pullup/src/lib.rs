@@ -171,7 +171,7 @@ fn convert_VALUES_to_ANY<'mcx>(
         // Prepare an evaluation of the right side of the operator with
         // substitution of the given value.
         // value = convert_testexpr(root, rightop, list_make1(value));
-        let rightop_node = Node::mk_expr(mcx, rightop.clone());
+        let rightop_node = Node::mk_expr(mcx, rightop.clone())?;
         let subst = match value0.as_expr() {
             Some(e) => alloc::vec![e.clone()],
             None => return Ok(None),
@@ -233,7 +233,7 @@ fn convert_testexpr<'mcx>(
     subst_nodes: &[Expr],
 ) -> PgResult<Node<'mcx>> {
     match testexpr.as_expr() {
-        Some(e) => Ok(Node::mk_expr(mcx, convert_testexpr_mutator(e.clone(), subst_nodes))),
+        Some(e) => Ok(Node::mk_expr(mcx, convert_testexpr_mutator(e.clone(), subst_nodes))?),
         // The C always passes an expression tree here; an ANY SubLink's testexpr
         // is an OpExpr / BoolExpr, i.e. a `Node::Expr`. Anything else is a
         // malformed parse tree.
@@ -311,7 +311,7 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
         .subselect
         .as_deref()
         .expect("convert_ANY_sublink_to_join: SubLink has no subselect");
-    let subselect_node = Node::mk_query(mcx, subselect.clone_in(mcx)?);
+    let subselect_node = Node::mk_query(mcx, subselect.clone_in(mcx)?)?;
 
     // If the sub-select contains any Vars of the parent query, we treat it as
     // LATERAL.  (Vars from higher levels don't matter here.)
@@ -340,7 +340,7 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
         .testexpr
         .as_deref()
         .expect("convert_ANY_sublink_to_join: ANY SubLink has no testexpr");
-    let testexpr_node = Node::mk_expr(mcx, testexpr_expr.clone());
+    let testexpr_node = Node::mk_expr(mcx, testexpr_expr.clone())?;
     let upper_varnos =
         backend_optimizer_util_vars::var::pull_varnos(Some(root), &testexpr_node);
     if relids_is_empty(&upper_varnos) {
@@ -409,7 +409,7 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
         jointype: JoinType::JOIN_SEMI,
         isNatural: false,
         larg: None, // caller must fill this in
-        rarg: Some(alloc_in(mcx, Node::mk_range_tbl_ref(mcx, rtr))?),
+        rarg: Some(alloc_in(mcx, Node::mk_range_tbl_ref(mcx, rtr)?)?),
         usingClause: PgVec::new_in(mcx),
         join_using_alias: None,
         quals: Some(alloc_in(mcx, quals)?),
@@ -473,7 +473,7 @@ pub fn convert_EXISTS_sublink_to_join<'mcx>(
     //
     // Re-wrap the (mutated) subselect Query as a Node for the level walkers.
     {
-        let subselect_as_node = Node::mk_query(mcx, subselect);
+        let subselect_as_node = Node::mk_query(mcx, subselect)?;
         if backend_optimizer_util_vars::var::contain_vars_of_level(&subselect_as_node, 1) {
             return Ok(None);
         }
@@ -511,7 +511,7 @@ pub fn convert_EXISTS_sublink_to_join<'mcx>(
     let rtoffset = parse.rtable.len() as i32;
     {
         // OffsetVarNodes((Node *) subselect, rtoffset, 0)
-        let mut subselect_node2 = Node::mk_query(mcx, subselect);
+        let mut subselect_node2 = Node::mk_query(mcx, subselect)?;
         backend_rewrite_core::offset::OffsetVarNodes(&mut subselect_node2, rtoffset, 0);
         // IncrementVarSublevelsUp((Node *) subselect, -1, 1)
         backend_rewrite_core::increment::IncrementVarSublevelsUp(&mut subselect_node2, -1, 1)?;
@@ -574,7 +574,7 @@ pub fn convert_EXISTS_sublink_to_join<'mcx>(
         let first = fromexpr.fromlist.remove(0);
         PgBox::into_inner(first)
     } else {
-        Node::mk_from_expr(mcx, PgBox::into_inner(sub_jointree))
+        Node::mk_from_expr(mcx, PgBox::into_inner(sub_jointree))?
     };
 
     let result = JoinExpr {
@@ -725,7 +725,7 @@ pub fn replace_empty_jointree<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> 
     // And jam a reference into the jointree.
     let rtr = RangeTblRef { rtindex: rti };
     let jt = parse.jointree.as_mut().unwrap();
-    jt.fromlist.push(alloc_in(mcx, Node::mk_range_tbl_ref(mcx, rtr))?);
+    jt.fromlist.push(alloc_in(mcx, Node::mk_range_tbl_ref(mcx, rtr)?)?);
     Ok(())
 }
 
