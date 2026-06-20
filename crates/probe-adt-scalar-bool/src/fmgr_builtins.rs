@@ -19,7 +19,7 @@
 use mcx::MemoryContext;
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
@@ -96,37 +96,29 @@ fn scratch_mcx() -> MemoryContext {
     MemoryContext::new("bool fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
-// fc_ adapters.
+// fc_ adapters (Result-native: `ereport(ERROR)` travels as `Err(PgError)`
+// straight back to the fmgr dispatch `invoke_builtin`, no panic/catch_unwind).
 // ---------------------------------------------------------------------------
 
-fn fc_boolin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_boolin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: boolin(in_str, fcinfo->context). Forward the soft ErrorSaveContext
     // installed on the frame by InputFunctionCallSafe so a bad spelling
     // `ereturn`s into the sink (returning the `false` placeholder) instead of
     // throwing past `invoke?`. Copy the cstring first because `arg_cstring`
     // borrows `fcinfo` immutably while `escontext_mut` needs it mutably.
     let s = arg_cstring(fcinfo, 0).to_owned();
-    match crate::boolin(&s, fcinfo.escontext_mut()) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+    Ok(ret_bool(crate::boolin(&s, fcinfo.escontext_mut())?))
 }
 
-fn fc_boolout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_boolout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let b = arg_bool(fcinfo, 0);
     // C: boolout palloc's a 2-byte cstring ("t"/"f"). The owned core returns the
     // static spelling; ret_cstring copies it onto the by-ref lane.
-    ret_cstring(fcinfo, crate::boolout(b).into())
+    Ok(ret_cstring(fcinfo, crate::boolout(b).into()))
 }
 
-fn fc_boolrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_boolrecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: boolrecv reads one byte off the StringInfo and returns `ext != 0`. The
     // wire payload arrives on the by-ref lane (header already stripped); copy it
     // into a scratch StringInfo so pq_getmsgbyte can consume it, mirroring
@@ -135,77 +127,71 @@ fn fc_boolrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let src = arg_varlena(fcinfo, 0);
     let mut data = mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(src.len()).is_err() {
-        raise(types_error::PgError::error("out of memory"));
+        return Err(types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(src);
     let mut buf = StringInfo::from_vec(data);
-    match crate::boolrecv(&mut buf) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+    Ok(ret_bool(crate::boolrecv(&mut buf)?))
 }
 
-fn fc_boolsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_boolsend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let arg1 = arg_bool(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = match crate::boolsend(m.mcx(), arg1) {
-        Ok(bytea) => bytea.as_bytes().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_varlena(fcinfo, bytes)
+    let bytes = crate::boolsend(m.mcx(), arg1)?.as_bytes().to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
 }
 
-fn fc_booltext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_booltext(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: booltext returns the SQL-spec spelling "true"/"false" wrapped in a
     // `text` varlena (`cstring_to_text`). The boundary owns the VARHDRSZ framing,
     // so the result payload is exactly those bytes (byte-identical to
     // cstring_to_text's payload, minus the header) — same pattern as char_text.
     let arg1 = arg_bool(fcinfo, 0);
     let s = if arg1 { "true" } else { "false" };
-    ret_varlena(fcinfo, s.as_bytes().to_vec())
+    Ok(ret_varlena(fcinfo, s.as_bytes().to_vec()))
 }
 
-fn fc_booleq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::booleq(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1)))
+fn fc_booleq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::booleq(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1))))
 }
-fn fc_boolne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::boolne(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1)))
+fn fc_boolne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::boolne(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1))))
 }
-fn fc_boollt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::boollt(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1)))
+fn fc_boollt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::boollt(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1))))
 }
-fn fc_boolgt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::boolgt(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1)))
+fn fc_boolgt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::boolgt(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1))))
 }
-fn fc_boolle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::boolle(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1)))
+fn fc_boolle(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::boolle(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1))))
 }
-fn fc_boolge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::boolge(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1)))
+fn fc_boolge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::boolge(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1))))
 }
 
-fn fc_booland_statefunc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::booland_statefunc(
+fn fc_booland_statefunc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::booland_statefunc(
         arg_bool(fcinfo, 0),
         arg_bool(fcinfo, 1),
-    ))
+    )))
 }
-fn fc_boolor_statefunc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::boolor_statefunc(
+fn fc_boolor_statefunc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::boolor_statefunc(
         arg_bool(fcinfo, 0),
         arg_bool(fcinfo, 1),
-    ))
+    )))
 }
 
-fn fc_hashbool(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashbool(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: hashbool returns int4; the core already returns the result `Datum`
     // (UInt32GetDatum(hash_bytes_uint32(...))).
-    crate::hashbool(arg_bool(fcinfo, 0))
+    Ok(crate::hashbool(arg_bool(fcinfo, 0)))
 }
-fn fc_hashboolextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashboolextended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: hashboolextended returns int8; the core already returns the result
     // `Datum` (UInt64GetDatum(hash_bytes_uint32_extended(..., seed))).
-    crate::hashboolextended(arg_bool(fcinfo, 0), arg_i64(fcinfo, 1))
+    Ok(crate::hashboolextended(arg_bool(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
 
 // ---------------------------------------------------------------------------
@@ -216,23 +202,28 @@ fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.into(),
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.into(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `bool.c` builtin expressible at the fmgr boundary (C: their
-/// `fmgr_builtins[]` rows). Called from this crate's `init_seams()`. OIDs/nargs
-/// from `pg_proc.dat`; all are `proisstrict => 't'` and not retset.
+/// `fmgr_builtins[]` rows) as **Result-native** (the panic→Result migration;
+/// see `docs/proposals/panic-to-result-migration.md`). Called from this crate's
+/// `init_seams()`. OIDs/nargs from `pg_proc.dat`; all are `proisstrict => 't'`
+/// and not retset.
 pub fn register_probe_adt_scalar_bool_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- I/O + cast ----
         builtin(1242, "boolin", 1, fc_boolin),
         builtin(1243, "boolout", 1, fc_boolout),

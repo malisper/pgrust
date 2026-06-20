@@ -21,7 +21,7 @@
 use types_core::{Oid, NAMEDATALEN};
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_stringinfo::StringInfo;
 use types_tuple::heaptuple::NameData;
 
@@ -104,51 +104,39 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("name fmgr scratch")
 }
 
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-macro_rules! ok_or_raise {
-    ($e:expr) => {
-        match $e {
-            Ok(v) => v,
-            Err(e) => raise(e),
-        }
-    };
-}
-
 // ---------------------------------------------------------------------------
-// I/O
+// I/O (Result-native: `ereport(ERROR)` travels as `Err(PgError)` straight back
+// to the fmgr dispatch `invoke_builtin`, no panic/catch_unwind).
 // ---------------------------------------------------------------------------
 
-fn fc_namein(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let nd = ok_or_raise!(namein(arg_cstring(fcinfo, 0)));
-    ret_name(fcinfo, &nd)
+fn fc_namein(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let nd = namein(arg_cstring(fcinfo, 0))?;
+    Ok(ret_name(fcinfo, &nd))
 }
-fn fc_nameout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_nameout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let nd = arg_name(fcinfo, 0);
     let m = scratch_mcx();
-    let s = ok_or_raise!(nameout(m.mcx(), &nd)).as_str().to_string();
-    ret_cstring(fcinfo, s)
+    let s = nameout(m.mcx(), &nd)?.as_str().to_string();
+    Ok(ret_cstring(fcinfo, s))
 }
-fn fc_namerecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_namerecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // Build a StringInfo over the wire bytes, charged to a scratch ctx.
     let m = scratch_mcx();
     let src = arg_varlena(fcinfo, 0);
     let mut data = mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(src.len()).is_err() {
-        raise(types_error::PgError::error("out of memory"));
+        return Err(types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(src);
     let mut buf = StringInfo::from_vec(data);
-    let nd = ok_or_raise!(namerecv(m.mcx(), &mut buf));
-    ret_name(fcinfo, &nd)
+    let nd = namerecv(m.mcx(), &mut buf)?;
+    Ok(ret_name(fcinfo, &nd))
 }
-fn fc_namesend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_namesend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let nd = arg_name(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok_or_raise!(namesend(m.mcx(), &nd)).as_bytes().to_vec();
-    ret_varlena(fcinfo, bytes)
+    let bytes = namesend(m.mcx(), &nd)?.as_bytes().to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -157,11 +145,11 @@ fn fc_namesend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 macro_rules! namecmp_op {
     ($fc:ident, $core:ident) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let a = arg_name(fcinfo, 0);
             let b = arg_name(fcinfo, 1);
             let collid = get_collation(fcinfo);
-            ret_bool(ok_or_raise!($core(&a, &b, collid)))
+            Ok(ret_bool($core(&a, &b, collid)?))
         }
     };
 }
@@ -173,18 +161,18 @@ namecmp_op!(fc_namele, namele);
 namecmp_op!(fc_namegt, namegt);
 namecmp_op!(fc_namege, namege);
 
-fn fc_btnamecmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_btnamecmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_name(fcinfo, 0);
     let b = arg_name(fcinfo, 1);
     let collid = get_collation(fcinfo);
-    ret_i32(ok_or_raise!(btnamecmp(&a, &b, collid)))
+    Ok(ret_i32(btnamecmp(&a, &b, collid)?))
 }
 
-fn fc_nameconcatoid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_nameconcatoid(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let nam = arg_name(fcinfo, 0);
     let oid = arg_oid(fcinfo, 1);
-    let nd = ok_or_raise!(nameconcatoid(&nam, oid));
-    ret_name(fcinfo, &nd)
+    let nd = nameconcatoid(&nam, oid)?;
+    Ok(ret_name(fcinfo, &nd))
 }
 
 // ---------------------------------------------------------------------------
@@ -193,28 +181,28 @@ fn fc_nameconcatoid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `current_user()` (name.c:275). `getpgusername`/`current_user` share this
 /// `prosrc => 'current_user'` body.
-fn fc_current_user(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_current_user(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let nd = ok_or_raise!(current_user(m.mcx()));
-    ret_name(fcinfo, &nd)
+    let nd = current_user(m.mcx())?;
+    Ok(ret_name(fcinfo, &nd))
 }
 
 /// `session_user()` (name.c:281).
-fn fc_session_user(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_session_user(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let nd = ok_or_raise!(session_user(m.mcx()));
-    ret_name(fcinfo, &nd)
+    let nd = session_user(m.mcx())?;
+    Ok(ret_name(fcinfo, &nd))
 }
 
 /// `current_schema()` (name.c:291). Returns SQL NULL (`PG_RETURN_NULL()`) when
 /// the active search path is empty / its head namespace was recently deleted.
-fn fc_current_schema(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_current_schema(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    match ok_or_raise!(current_schema(m.mcx())) {
-        Some(nd) => ret_name(fcinfo, &nd),
+    match current_schema(m.mcx())? {
+        Some(nd) => Ok(ret_name(fcinfo, &nd)),
         None => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
     }
 }
@@ -227,16 +215,19 @@ fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Like [`builtin`] but with explicit `strict`/`retset` — the no-argument SQL
@@ -247,23 +238,28 @@ fn builtin_full(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every registerable `name.c` builtin (C: their `fmgr_builtins[]`
-/// rows). Called from this crate's `init_seams()`. OIDs/nargs from
-/// `pg_proc.dat`; all are `proisstrict => 't'` and not retset.
+/// rows) as **Result-native** (the panic→Result migration; see
+/// `docs/proposals/panic-to-result-migration.md`). Called from this crate's
+/// `init_seams()`. OIDs/nargs from `pg_proc.dat`; all are `proisstrict => 't'`
+/// and not retset.
 pub fn register_name_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- I/O ----
         builtin(34, "namein", 1, fc_namein),
         builtin(35, "nameout", 1, fc_nameout),

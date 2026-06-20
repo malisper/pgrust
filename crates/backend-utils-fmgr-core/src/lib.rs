@@ -151,7 +151,7 @@ pub fn register_builtins_native(
 }
 
 /// Look up the Result-native callable for `foid`, if this Oid has been migrated.
-fn native_builtin(foid: Oid) -> Option<PgFnNative> {
+pub fn native_builtin(foid: Oid) -> Option<PgFnNative> {
     NATIVE.with(|r| r.borrow().get(&foid).copied())
 }
 
