@@ -1609,6 +1609,15 @@ pub struct ProcCompileFacts {
     /// `None` (InvalidOid) for the non-polymorphic case or when the integration
     /// layer could not resolve it (the validator path substitutes instead).
     pub resolved_rettype: Oid,
+    /// For a non-validator compile of a function with polymorphic argument
+    /// types, the actual argument types resolved from the call expression by the
+    /// integration layer (`resolve_polymorphic_argtypes` over `fcinfo->flinfo->
+    /// fn_expr`). When non-empty this list (length == declared `argtypes`) is
+    /// used in place of the declared types so that each `any*` pseudo-type is
+    /// the concrete type the call passes. Empty for the validator path (which
+    /// substitutes the int4 family per `plpgsql_resolve_polymorphic_argtypes`'s
+    /// `forValidator` branch) or when no polymorphic argument is present.
+    pub resolved_argtypes: Vec<Oid>,
 }
 
 /// `plpgsql_compile_inline` — make an execution tree for an anonymous code
@@ -1783,6 +1792,73 @@ pub fn plpgsql_compile_from_source(facts: &ProcCompileFacts) -> PLpgSQL_function
     take_curr_compile()
 }
 
+/// `plpgsql_resolve_polymorphic_argtypes` (pl_comp.c) — given the declared
+/// argument types of the function being compiled, substitute each polymorphic
+/// pseudo-type (`anyelement`/`anyarray`/`anyenum`/`anyrange`/`anymultirange` and
+/// the `anycompatible*` family) with the concrete type the call actually passes.
+///
+/// In the normal (non-validator) call path this is the actual-type resolution
+/// from `fcinfo->flinfo->fn_expr` via `resolve_polymorphic_argtypes`
+/// (funcapi.c); the integration layer performs that resolution against the call
+/// expression and hands the result in `facts.resolved_argtypes`, so here we copy
+/// those concrete types in (and ereport if they could not be determined).
+///
+/// In the validator path there is no call expression, so — exactly as the C
+/// `forValidator` branch — we arbitrarily assume we are dealing with the integer
+/// family. Note `ANYENUMOID` maps to `INT4OID` (the C comment marks this as
+/// "XXX dubious", but it is what CREATE FUNCTION validation does), which is what
+/// lets a `CREATE FUNCTION f(x anyenum) ... LANGUAGE plpgsql` validate.
+fn plpgsql_resolve_polymorphic_argtypes(facts: &ProcCompileFacts, argtypes: &mut [Oid]) {
+    if !facts.for_validator {
+        // Normal case: the integration layer resolved the actual argument types
+        // from the call expression (the C `resolve_polymorphic_argtypes(numargs,
+        // argtypes, argmodes, call_expr)` call). If any declared type is
+        // polymorphic, `resolved_argtypes` must be populated with the concretes.
+        let needs_resolution = argtypes.iter().any(|&t| is_polymorphic_type(t));
+        if needs_resolution {
+            if facts.resolved_argtypes.len() != argtypes.len() {
+                panic!(
+                    "could not determine actual argument type for polymorphic function \"{}\" (SQLSTATE 0A000)",
+                    plpgsql_error_funcname().unwrap_or_default()
+                );
+            }
+            for (i, dst) in argtypes.iter_mut().enumerate() {
+                if is_polymorphic_type(*dst) {
+                    let concrete = facts.resolved_argtypes[i];
+                    if !oid_is_valid(concrete) {
+                        panic!(
+                            "could not determine actual argument type for polymorphic function \"{}\" (SQLSTATE 0A000)",
+                            plpgsql_error_funcname().unwrap_or_default()
+                        );
+                    }
+                    *dst = concrete;
+                }
+            }
+        }
+    } else {
+        // Special validation mode --- arbitrarily assume we are dealing with the
+        // integer family (mirrors pl_comp.c's `forValidator` switch).
+        for t in argtypes.iter_mut() {
+            match *t {
+                ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID | ANYCOMPATIBLEOID
+                | ANYCOMPATIBLENONARRAYOID => {
+                    *t = INT4OID;
+                }
+                ANYARRAYOID | ANYCOMPATIBLEARRAYOID => {
+                    *t = INT4ARRAYOID;
+                }
+                ANYRANGEOID | ANYCOMPATIBLERANGEOID => {
+                    *t = INT4RANGEOID;
+                }
+                ANYMULTIRANGEOID | ANYCOMPATIBLEMULTIRANGEOID => {
+                    *t = INT4MULTIRANGEOID;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// The non-trigger (`PLPGSQL_NOT_TRIGGER`) arm of `plpgsql_compile_callback`:
 /// build the argument variables, handle OUT params, resolve the return type.
 fn compile_scalar_function_setup(
@@ -1793,7 +1869,12 @@ fn compile_scalar_function_setup(
 ) {
     plpgsql_start_datums();
 
-    let argtypes = facts.argtypes.clone();
+    // Resolve any polymorphic argument types to the concrete call types (or the
+    // int4 family in validation mode) before building the argument variables.
+    // (the C `plpgsql_resolve_polymorphic_argtypes(numargs, argtypes, argmodes,
+    // fcinfo->flinfo->fn_expr, forValidator, ...)` call in do_compile)
+    let mut argtypes = facts.argtypes.clone();
+    plpgsql_resolve_polymorphic_argtypes(facts, &mut argtypes);
     let argnames = facts.argnames.clone();
     let argmodes = facts.argmodes.clone();
     let numargs = argtypes.len() as i32;

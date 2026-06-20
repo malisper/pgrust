@@ -216,22 +216,72 @@ pub fn compile_for_call(
     // function (used by exec for collation-aware simple-expr eval).
     let fn_input_collation = fcinfo.fncollation;
 
+    // Resolve a polymorphic return type and polymorphic argument types from the
+    // call expression carried on `fcinfo->flinfo->fn_expr`
+    // (`get_fn_expr_rettype` / `resolve_polymorphic_argtypes` over the
+    // `FuncExpr`/`OpExpr`). When the field-bearing call node is present these
+    // yield the concrete types the call passes; otherwise they degrade to
+    // `InvalidOid` and the compile body errors (C: "could not determine actual
+    // type for polymorphic function") exactly as in PG when no call expr exists.
+    let resolved_rettype = resolved_rettype_from_call(fcinfo);
+    let resolved_argtypes = resolved_argtypes_from_call(fcinfo);
+
     match compile_proc_from_row(
         funcoid,
         is_dml_trigger,
         is_event_trigger,
         fn_input_collation,
         /* for_validator = */ false,
-        // The non-polymorphic common case: the compile body uses prorettype.
-        // A polymorphic return needs get_fn_expr_rettype off the call
-        // expression (FmgrInfo.fn_expr); the owned tag-only fn_expr does not
-        // carry the resolved type, so leave InvalidOid (substituted as in C's
-        // resolve_polymorphic_argtypes when the call expr is unavailable).
-        types_core::InvalidOid,
+        resolved_rettype,
+        resolved_argtypes,
     ) {
         Ok(func) => func,
         Err(e) => propagate(e),
     }
+}
+
+/// `get_fn_expr_rettype(fcinfo->flinfo)` — read the actual result type of the
+/// call expression carried on `fcinfo->flinfo->fn_expr`. `InvalidOid` when no
+/// field-bearing call node is present (the compile body then errors for a
+/// polymorphic return, as C does when `fn_expr` is unavailable).
+fn resolved_rettype_from_call(fcinfo: &FunctionCallInfoBaseData) -> Oid {
+    match fcinfo.flinfo.as_deref() {
+        Some(flinfo) => backend_utils_fmgr_core::get_fn_expr_rettype(Some(flinfo)),
+        None => types_core::InvalidOid,
+    }
+}
+
+/// `get_fn_expr_argtype(fcinfo->flinfo, argnum)` per input argument — the
+/// per-argument leg of `plpgsql_resolve_polymorphic_argtypes`'s non-validator
+/// branch. Returns the concrete type of each call argument read off
+/// `fcinfo->flinfo->fn_expr` (the `FuncExpr`/`OpExpr` argument list); an empty
+/// vec when no field-bearing call node is present, in which case the compile
+/// body keeps the declared types (and errors if any is polymorphic).
+///
+/// The full `resolve_polymorphic_argtypes` two-pass deduction (deriving e.g.
+/// `anyarray` from a sibling `anyelement`) is not reproduced here: the compile
+/// body only needs each *input* argument's concrete type, and
+/// `get_fn_expr_argtype` reads the declared/coerced type the parser already
+/// pinned onto every actual argument of the call expression, which is the
+/// concrete type for each polymorphic input. OUT-only polymorphic positions do
+/// not appear as PL/pgSQL argument variables.
+fn resolved_argtypes_from_call(fcinfo: &FunctionCallInfoBaseData) -> Vec<Oid> {
+    let flinfo = match fcinfo.flinfo.as_deref() {
+        Some(f) => f,
+        None => return Vec::new(),
+    };
+    // No field-bearing call node => nothing to resolve from.
+    let has_call_node = matches!(
+        flinfo.fn_expr.as_deref(),
+        Some(types_fmgr::fmgr::FnExpr::External(ext)) if ext.node.is_some()
+    );
+    if !has_call_node {
+        return Vec::new();
+    }
+    let nargs = flinfo.fn_nargs as usize;
+    (0..nargs)
+        .map(|i| backend_utils_fmgr_core::get_fn_expr_argtype(Some(flinfo), i as i32))
+        .collect()
 }
 
 /// Shared body of the call-handler / validator compile: project the `pg_proc`
@@ -245,6 +295,7 @@ fn compile_proc_from_row(
     fn_input_collation: Oid,
     for_validator: bool,
     resolved_rettype: Oid,
+    resolved_argtypes: Vec<Oid>,
 ) -> PgResult<types_plpgsql::PLpgSQL_function> {
     use backend_pl_plpgsql_comp::ProcCompileFacts;
     use types_plpgsql::PLpgSQL_trigtype;
@@ -284,6 +335,7 @@ fn compile_proc_from_row(
         fn_is_trigger,
         for_validator,
         resolved_rettype,
+        resolved_argtypes,
     };
 
     // The compile body `ereport`s on a faulty function; that propagates as a
@@ -464,6 +516,9 @@ fn validate_test_compile(
         /* fn_input_collation = */ types_core::InvalidOid,
         /* for_validator = */ true,
         /* resolved_rettype = */ types_core::InvalidOid,
+        // Validator has no call expression; the compile body's forValidator
+        // branch substitutes the int4 family for any polymorphic argument.
+        /* resolved_argtypes = */ Vec::new(),
     )?;
     Ok(())
 }

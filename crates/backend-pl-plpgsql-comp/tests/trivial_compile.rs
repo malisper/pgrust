@@ -33,6 +33,7 @@ fn trivial_block_reaches_catalog_boundary() {
         fn_is_trigger: PLpgSQL_trigtype::PLPGSQL_NOT_TRIGGER,
         for_validator: false,
         resolved_rettype: 0,
+        resolved_argtypes: Vec::new(),
     };
 
     let res = catch_unwind(AssertUnwindSafe(|| {
