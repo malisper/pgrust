@@ -39,7 +39,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use backend_utils_adt_jsonb_util::VARHDRSZ;
 use backend_utils_fmgr_core as fmgr_core;
@@ -228,27 +228,12 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("jsonb fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // I/O adapters (jsonb.c).
 // ---------------------------------------------------------------------------
 
 /// `jsonb_in(cstring) -> jsonb` (oid 3806).
-fn fc_jsonb_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: `jsonb_in` forwards `fcinfo->context` (the soft `ErrorSaveContext`) to
     // `json_errsave_error`. Copy the cstring to an owned buffer first so the
     // immutable `fcinfo` borrow is released before taking the `&mut` escontext
@@ -257,45 +242,45 @@ fn fc_jsonb_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = scratch_mcx();
     let escontext = fcinfo.escontext_mut();
     // Copy out of the scratch arena before it drops (the result borrows `m`).
-    let image = ok(crate::jsonb_in(m.mcx(), &s, escontext)).map(|img| img.as_slice().to_vec());
-    match image {
+    let image = crate::jsonb_in(m.mcx(), &s, escontext)?.map(|img| img.as_slice().to_vec());
+    Ok(match image {
         Some(b) => ret_jsonb(fcinfo, b),
         // Soft parse failure (`ereturn(escontext, (Datum) 0, ...)`): SQL NULL.
         None => {
             fcinfo.set_result_null(true);
             Datum::from_usize(0)
         }
-    }
+    })
 }
 
 /// `jsonb_recv(internal) -> jsonb` (oid 3805): a 1-byte version then JSON text.
 /// The `internal` (StringInfo) arg is delivered as its message-buffer bytes on
 /// the by-ref lane.
-fn fc_jsonb_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let buf = arg_jsonb_image(fcinfo, 0);
     let m = scratch_mcx();
-    let image = ok(crate::jsonb_recv(m.mcx(), buf));
-    ret_jsonb(fcinfo, image.as_slice().to_vec())
+    let image = crate::jsonb_recv(m.mcx(), buf)?;
+    Ok(ret_jsonb(fcinfo, image.as_slice().to_vec()))
 }
 
 /// `jsonb_out(jsonb) -> cstring` (oid 3804).
-fn fc_jsonb_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let image = arg_jsonb_image(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(crate::jsonb_out(m.mcx(), image));
+    let bytes = crate::jsonb_out(m.mcx(), image)?;
     // `jsonb_out` returns a NUL-terminated cstring byte buffer; decode to a
     // String for the cstring lane (strip a trailing NUL if present).
     let raw = bytes.as_slice();
     let body = raw.strip_suffix(&[0u8]).unwrap_or(raw);
-    ret_cstring(fcinfo, String::from_utf8_lossy(body).into_owned())
+    Ok(ret_cstring(fcinfo, String::from_utf8_lossy(body).into_owned()))
 }
 
 /// `jsonb_send(jsonb) -> bytea` (oid 3803). The core returns the wire bytes
 /// (version byte + text); we wrap them into a `bytea` varlena image.
-fn fc_jsonb_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let image = arg_jsonb_image(fcinfo, 0);
     let m = scratch_mcx();
-    let wire = ok(crate::jsonb_send(m.mcx(), image));
+    let wire = crate::jsonb_send(m.mcx(), image)?;
     // C `pq_endtypsend` wraps the StringInfo payload into a `bytea` varlena:
     // a 4-byte length header (`VARHDRSZ + len`, `<< 2` native-order) + payload.
     let total = VARHDRSZ + wire.len();
@@ -303,7 +288,7 @@ fn fc_jsonb_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let header = (total as u32) << 2;
     out.extend_from_slice(&header.to_ne_bytes());
     out.extend_from_slice(&wire);
-    ret_varlena(fcinfo, out)
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // ---------------------------------------------------------------------------
@@ -313,12 +298,12 @@ fn fc_jsonb_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `to_jsonb(anyelement) -> jsonb` (oid 3787). `val_type =
 /// get_fn_expr_argtype(flinfo, 0)` resolves the polymorphic input type, then
 /// the value is classified + rendered into a `jsonb` image by the core.
-fn fc_to_jsonb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_jsonb(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val_type = fn_expr_argtype(fcinfo, 0);
     let m = scratch_mcx();
-    let val = ok(arg_value(m.mcx(), fcinfo, 0));
-    let image = ok(crate::to_jsonb(m.mcx(), &val, val_type));
-    ret_jsonb(fcinfo, image.as_slice().to_vec())
+    let val = arg_value(m.mcx(), fcinfo, 0)?;
+    let image = crate::to_jsonb(m.mcx(), &val, val_type)?;
+    Ok(ret_jsonb(fcinfo, image.as_slice().to_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -329,10 +314,10 @@ fn fc_to_jsonb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `fn(&[u8], &[u8]) -> PgResult<bool>` container core (`&jb->root` args).
 macro_rules! fc_jb_cmp_bool {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let a = arg_jsonb_root(fcinfo, 0);
             let b = arg_jsonb_root(fcinfo, 1);
-            ret_bool(ok($core(a, b)))
+            Ok(ret_bool($core(a, b)?))
         }
     };
 }
@@ -345,10 +330,10 @@ fc_jb_cmp_bool!(fc_jsonb_gt, backend_utils_adt_jsonb_op::jsonb_gt);
 fc_jb_cmp_bool!(fc_jsonb_ge, backend_utils_adt_jsonb_op::jsonb_ge);
 
 /// `jsonb_cmp(jsonb, jsonb) -> int4` (oid 4044): -1/0/1.
-fn fc_jsonb_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_jsonb_root(fcinfo, 0);
     let b = arg_jsonb_root(fcinfo, 1);
-    ret_i32(ok(backend_utils_adt_jsonb_op::jsonb_cmp(a, b)))
+    Ok(ret_i32(backend_utils_adt_jsonb_op::jsonb_cmp(a, b)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -356,40 +341,40 @@ fn fc_jsonb_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 /// `jsonb_contains(jsonb, jsonb) -> bool` (oid 4046).
-fn fc_jsonb_contains(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_contains(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_jsonb_root(fcinfo, 0);
     let tmpl = arg_jsonb_root(fcinfo, 1);
-    ret_bool(ok(backend_utils_adt_jsonb_op::jsonb_contains(val, tmpl)))
+    Ok(ret_bool(backend_utils_adt_jsonb_op::jsonb_contains(val, tmpl)?))
 }
 
 /// `jsonb_contained(jsonb, jsonb) -> bool` (oid 4050): arg 0 = tmpl, arg 1 = val.
-fn fc_jsonb_contained(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_contained(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let tmpl = arg_jsonb_root(fcinfo, 0);
     let val = arg_jsonb_root(fcinfo, 1);
-    ret_bool(ok(backend_utils_adt_jsonb_op::jsonb_contained(tmpl, val)))
+    Ok(ret_bool(backend_utils_adt_jsonb_op::jsonb_contained(tmpl, val)?))
 }
 
 /// `jsonb_exists(jsonb, text) -> bool` (oid 4047).
-fn fc_jsonb_exists(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_exists(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_root(fcinfo, 0);
     let key = arg_text_payload(fcinfo, 1);
-    ret_bool(ok(backend_utils_adt_jsonb_op::jsonb_exists(jb, key)))
+    Ok(ret_bool(backend_utils_adt_jsonb_op::jsonb_exists(jb, key)?))
 }
 
 /// `jsonb_exists_any(jsonb, _text) -> bool` (oid 4048). The `text[]` arg arrives
 /// as its detoasted array varlena bytes; the core flattens it through the
 /// `deconstruct_text_array` seam.
-fn fc_jsonb_exists_any(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_exists_any(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_root(fcinfo, 0);
     let keys = arg_varlena_image(fcinfo, 1);
-    ret_bool(ok(backend_utils_adt_jsonb_op::jsonb_exists_any(jb, keys)))
+    Ok(ret_bool(backend_utils_adt_jsonb_op::jsonb_exists_any(jb, keys)?))
 }
 
 /// `jsonb_exists_all(jsonb, _text) -> bool` (oid 4049).
-fn fc_jsonb_exists_all(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_exists_all(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_root(fcinfo, 0);
     let keys = arg_varlena_image(fcinfo, 1);
-    ret_bool(ok(backend_utils_adt_jsonb_op::jsonb_exists_all(jb, keys)))
+    Ok(ret_bool(backend_utils_adt_jsonb_op::jsonb_exists_all(jb, keys)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -397,16 +382,16 @@ fn fc_jsonb_exists_all(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 /// `jsonb_hash(jsonb) -> int4` (oid 4045).
-fn fc_jsonb_hash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_hash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_root(fcinfo, 0);
-    ret_i32(ok(backend_utils_adt_jsonb_op::jsonb_hash(jb)))
+    Ok(ret_i32(backend_utils_adt_jsonb_op::jsonb_hash(jb)?))
 }
 
 /// `jsonb_hash_extended(jsonb, int8) -> int8` (oid 3416).
-fn fc_jsonb_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_root(fcinfo, 0);
     let seed = arg_int64(fcinfo, 1) as u64;
-    ret_i64(ok(backend_utils_adt_jsonb_op::jsonb_hash_extended(jb, seed)) as i64)
+    Ok(ret_i64(backend_utils_adt_jsonb_op::jsonb_hash_extended(jb, seed)? as i64))
 }
 
 // ---------------------------------------------------------------------------
@@ -417,61 +402,61 @@ fn fc_jsonb_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 /// `jsonb_bool(jsonb) -> bool` (oid 3556).
-fn fc_jsonb_bool(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_bool(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
-    let v = ok(crate::jsonb_bool(jb));
-    ret_opt(fcinfo, v, ret_bool)
+    let v = crate::jsonb_bool(jb)?;
+    Ok(ret_opt(fcinfo, v, ret_bool))
 }
 
 /// `jsonb_int2(jsonb) -> int2` (oid 3450).
-fn fc_jsonb_int2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_int2(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
-    let v = ok(crate::jsonb_int2(jb));
-    ret_opt(fcinfo, v, ret_i16)
+    let v = crate::jsonb_int2(jb)?;
+    Ok(ret_opt(fcinfo, v, ret_i16))
 }
 
 /// `jsonb_int4(jsonb) -> int4` (oid 3451).
-fn fc_jsonb_int4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_int4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
-    let v = ok(crate::jsonb_int4(jb));
-    ret_opt(fcinfo, v, ret_i32)
+    let v = crate::jsonb_int4(jb)?;
+    Ok(ret_opt(fcinfo, v, ret_i32))
 }
 
 /// `jsonb_int8(jsonb) -> int8` (oid 3452).
-fn fc_jsonb_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_int8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
-    let v = ok(crate::jsonb_int8(jb));
-    ret_opt(fcinfo, v, ret_i64)
+    let v = crate::jsonb_int8(jb)?;
+    Ok(ret_opt(fcinfo, v, ret_i64))
 }
 
 /// `jsonb_float4(jsonb) -> float4` (oid 3453).
-fn fc_jsonb_float4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_float4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
-    let v = ok(crate::jsonb_float4(jb));
-    ret_opt(fcinfo, v, ret_f32)
+    let v = crate::jsonb_float4(jb)?;
+    Ok(ret_opt(fcinfo, v, ret_f32))
 }
 
 /// `jsonb_float8(jsonb) -> float8` (oid 2580).
-fn fc_jsonb_float8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_float8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0);
-    let v = ok(crate::jsonb_float8(jb));
-    ret_opt(fcinfo, v, ret_f64)
+    let v = crate::jsonb_float8(jb)?;
+    Ok(ret_opt(fcinfo, v, ret_f64))
 }
 
 /// `jsonb_numeric(jsonb) -> numeric` (oid 3449). The numeric result is a
 /// by-reference varlena image built in a scratch context and copied onto the
 /// by-ref lane.
-fn fc_jsonb_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let bytes: Option<Vec<u8>> = ok(crate::jsonb_numeric(m.mcx(), arg_jsonb_image(fcinfo, 0)))
+    let bytes: Option<Vec<u8>> = crate::jsonb_numeric(m.mcx(), arg_jsonb_image(fcinfo, 0))?
         .map(|image| image.as_slice().to_vec());
-    match bytes {
+    Ok(match bytes {
         Some(b) => ret_varlena(fcinfo, b),
         None => {
             fcinfo.set_result_null(true);
             Datum::from_usize(0)
         }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -506,22 +491,21 @@ fn extract_variadic_args<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     variadic_start: usize,
-) -> Option<VariadicArgs<'mcx>> {
+) -> types_error::PgResult<Option<VariadicArgs<'mcx>>> {
     let variadic = fmgr_core::get_fn_expr_variadic(fcinfo.flinfo.as_deref());
 
     if variadic {
         // Assert(PG_NARGS() == variadic_start + 1);
         // if (PG_ARGISNULL(variadic_start)) return -1;
         if fcinfo.arg(variadic_start).map(|d| d.isnull).unwrap_or(true) {
-            return None;
+            return Ok(None);
         }
         // array_in = PG_GETARG_ARRAYTYPE_P(variadic_start); element_type =
         // ARR_ELEMTYPE(array_in); deconstruct_array(...) — all element types
         // are element_type.
-        let array_image = ok(arg_value(mcx, fcinfo, variadic_start));
-        let (element_type, elems): (types_core::Oid, alloc::vec::Vec<(ValDatum<'mcx>, bool)>) = ok(
-            backend_utils_adt_jsonb_seams::extract_variadic_array::call(mcx, &array_image),
-        );
+        let array_image = arg_value(mcx, fcinfo, variadic_start)?;
+        let (element_type, elems): (types_core::Oid, alloc::vec::Vec<(ValDatum<'mcx>, bool)>) =
+            backend_utils_adt_jsonb_seams::extract_variadic_array::call(mcx, &array_image)?;
         let n = elems.len();
         let mut args = alloc::vec::Vec::with_capacity(n);
         let mut nulls = alloc::vec::Vec::with_capacity(n);
@@ -531,7 +515,7 @@ fn extract_variadic_args<'mcx>(
             nulls.push(isnull);
             types.push(element_type);
         }
-        Some(VariadicArgs { args, types, nulls })
+        Ok(Some(VariadicArgs { args, types, nulls }))
     } else {
         // nargs = PG_NARGS() - variadic_start;
         let nargs = fcinfo.nargs().saturating_sub(variadic_start);
@@ -554,7 +538,7 @@ fn extract_variadic_args<'mcx>(
                 } else if let Some(s) = fcinfo.ref_arg(idx).and_then(|p| p.as_cstring()) {
                     typ = TEXTOID;
                     // args_res[i] = CStringGetTextDatum(PG_GETARG_POINTER(i));
-                    ok(backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, s))
+                    backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, s)?
                 } else {
                     ValDatum::null()
                 }
@@ -562,13 +546,13 @@ fn extract_variadic_args<'mcx>(
                 ValDatum::null()
             } else {
                 // No conversion needed, just take the datum as given.
-                ok(arg_value(mcx, fcinfo, idx))
+                arg_value(mcx, fcinfo, idx)?
             };
 
             // if (!OidIsValid(types_res[i]) || (convert_unknown && types_res[i]
             // == UNKNOWNOID)) ereport(ERROR, ...).
             if typ == 0 || typ == UNKNOWNOID {
-                raise(
+                return Err(
                     types_error::PgError::error(alloc::format!(
                         "could not determine data type for argument {}",
                         i + 1
@@ -582,60 +566,60 @@ fn extract_variadic_args<'mcx>(
             types.push(typ);
         }
 
-        Some(VariadicArgs { args, types, nulls })
+        Ok(Some(VariadicArgs { args, types, nulls }))
     }
 }
 
 /// `jsonb_build_object(PG_FUNCTION_ARGS)` (jsonb.c) — oid 3273.
-fn fc_jsonb_build_object(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_build_object(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let mcx = m.mcx();
-    let extracted = extract_variadic_args(mcx, fcinfo, 0);
+    let extracted = extract_variadic_args(mcx, fcinfo, 0)?;
     let image: Option<Vec<u8>> = match &extracted {
         None => None,
-        Some(v) => ok(crate::jsonb_build_object(mcx, Some((&v.args, &v.types, &v.nulls))))
+        Some(v) => crate::jsonb_build_object(mcx, Some((&v.args, &v.types, &v.nulls)))?
             .map(|b| b.as_slice().to_vec()),
     };
-    match image {
+    Ok(match image {
         Some(buf) => ret_jsonb(fcinfo, buf),
         None => {
             fcinfo.set_result_null(true);
             Datum::from_usize(0)
         }
-    }
+    })
 }
 
 /// `jsonb_build_object_noargs(PG_FUNCTION_ARGS)` (jsonb.c) — oid 3274.
-fn fc_jsonb_build_object_noargs(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_build_object_noargs(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let image = ok(crate::jsonb_build_object_noargs(m.mcx())).as_slice().to_vec();
-    ret_jsonb(fcinfo, image)
+    let image = crate::jsonb_build_object_noargs(m.mcx())?.as_slice().to_vec();
+    Ok(ret_jsonb(fcinfo, image))
 }
 
 /// `jsonb_build_array(PG_FUNCTION_ARGS)` (jsonb.c) — oid 3271.
-fn fc_jsonb_build_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_build_array(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let mcx = m.mcx();
-    let extracted = extract_variadic_args(mcx, fcinfo, 0);
+    let extracted = extract_variadic_args(mcx, fcinfo, 0)?;
     let image: Option<Vec<u8>> = match &extracted {
         None => None,
-        Some(v) => ok(crate::jsonb_build_array(mcx, Some((&v.args, &v.types, &v.nulls))))
+        Some(v) => crate::jsonb_build_array(mcx, Some((&v.args, &v.types, &v.nulls)))?
             .map(|b| b.as_slice().to_vec()),
     };
-    match image {
+    Ok(match image {
         Some(buf) => ret_jsonb(fcinfo, buf),
         None => {
             fcinfo.set_result_null(true);
             Datum::from_usize(0)
         }
-    }
+    })
 }
 
 /// `jsonb_build_array_noargs(PG_FUNCTION_ARGS)` (jsonb.c) — oid 3272.
-fn fc_jsonb_build_array_noargs(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_build_array_noargs(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let image = ok(crate::jsonb_build_array_noargs(m.mcx())).as_slice().to_vec();
-    ret_jsonb(fcinfo, image)
+    let image = crate::jsonb_build_array_noargs(m.mcx())?.as_slice().to_vec();
+    Ok(ret_jsonb(fcinfo, image))
 }
 
 // ---------------------------------------------------------------------------
@@ -652,34 +636,34 @@ fn fc_jsonb_build_array_noargs(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `jsonb_object(text[]) -> jsonb` (oid 3263). The single `text[]` arg arrives
 /// as its detoasted array varlena image on the by-ref lane.
-fn fc_jsonb_object(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_object(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let arr = arg_varlena_image(fcinfo, 0);
     let (ndims, dims, in_datums) =
-        ok(backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::call(arr));
+        backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::call(arr)?;
     let m = scratch_mcx();
-    let image = ok(crate::jsonb_object(m.mcx(), ndims, &dims, &in_datums)).as_slice().to_vec();
-    ret_jsonb(fcinfo, image)
+    let image = crate::jsonb_object(m.mcx(), ndims, &dims, &in_datums)?.as_slice().to_vec();
+    Ok(ret_jsonb(fcinfo, image))
 }
 
 /// `jsonb_object(text[], text[]) -> jsonb` (oid 3264): keys array + values array.
-fn fc_jsonb_object_two_arg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_object_two_arg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let key_arr = arg_varlena_image(fcinfo, 0);
     let (nkdims, _kdims, key_datums) =
-        ok(backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::call(key_arr));
+        backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::call(key_arr)?;
     let val_arr = arg_varlena_image(fcinfo, 1);
     let (nvdims, _vdims, val_datums) =
-        ok(backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::call(val_arr));
+        backend_utils_adt_jsonb_seams::deconstruct_text_array_with_dims::call(val_arr)?;
     let m = scratch_mcx();
-    let image = ok(crate::jsonb_object_two_arg(
+    let image = crate::jsonb_object_two_arg(
         m.mcx(),
         nkdims,
         nvdims,
         &key_datums,
         &val_datums,
-    ))
+    )?
     .as_slice()
     .to_vec();
-    ret_jsonb(fcinfo, image)
+    Ok(ret_jsonb(fcinfo, image))
 }
 
 // ---------------------------------------------------------------------------
@@ -692,24 +676,29 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every expressible scalar `jsonb` builtin (C: their
-/// `fmgr_builtins[]` rows). Called from this crate's `init_seams()`.
-/// OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat`
-/// (all of these are `proisstrict => 't'` default and none `proretset`).
+/// `fmgr_builtins[]` rows) as **Result-native** (the panic→Result migration; see
+/// `docs/proposals/panic-to-result-migration.md`). Called from this crate's
+/// `init_seams()`. OIDs/nargs/strict/retset transcribed exactly from
+/// `pg_proc.dat` (all of these are `proisstrict => 't'` default and none
+/// `proretset`).
 pub fn register_jsonb_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // I/O.
         builtin(3806, "jsonb_in", 1, true, false, fc_jsonb_in),
         builtin(3805, "jsonb_recv", 1, true, false, fc_jsonb_recv),
@@ -820,8 +809,9 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(image.to_vec()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(3804).expect("jsonb_out registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let native =
+            backend_utils_fmgr_core::native_builtin(3804).expect("jsonb_out registered native");
+        native(&mut fcinfo).expect("jsonb_out succeeded");
         match fcinfo.take_ref_result().expect("jsonb_out produced a result") {
             RefPayload::Cstring(s) => s,
             other => panic!("jsonb_out: unexpected result lane {other:?}"),
@@ -839,8 +829,9 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
-        let d = (entry.func.unwrap())(&mut fcinfo);
+        let native =
+            backend_utils_fmgr_core::native_builtin(oid).expect("builtin registered native");
+        let d = native(&mut fcinfo).expect("builtin succeeded");
         d.as_bool()
     }
 
@@ -855,8 +846,9 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
-        let d = (entry.func.unwrap())(&mut fcinfo);
+        let native =
+            backend_utils_fmgr_core::native_builtin(oid).expect("builtin registered native");
+        let d = native(&mut fcinfo).expect("builtin succeeded");
         d.as_i32()
     }
 
@@ -878,8 +870,9 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(img.clone()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(3803).expect("jsonb_send registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let native =
+            backend_utils_fmgr_core::native_builtin(3803).expect("jsonb_send registered native");
+        native(&mut fcinfo).expect("jsonb_send succeeded");
         let bytea = match fcinfo.take_ref_result().expect("jsonb_send produced a result") {
             RefPayload::Varlena(b) => b,
             other => panic!("jsonb_send: unexpected result lane {other:?}"),
