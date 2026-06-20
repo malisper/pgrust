@@ -17,7 +17,7 @@ use types_core::init::BackendType;
 use types_startup::StartupData;
 
 use crate::core::{
-    pm, pm_mut, PMState, SMART_SHUTDOWN, B_ARCHIVER, B_AUTOVAC_LAUNCHER, B_AUTOVAC_WORKER,
+    pm, pm_mut, PMState, SMART_SHUTDOWN, B_ARCHIVER, B_AUTOVAC_WORKER,
     B_BG_WRITER, B_CHECKPOINTER, B_SLOTSYNC_WORKER, B_STARTUP, B_WAL_RECEIVER, B_WAL_SUMMARIZER,
     B_WAL_WRITER,
 };
@@ -57,15 +57,32 @@ pub fn LaunchMissingBackgroundProcesses() {
     }
 
     // We don't want autovacuum to run in binary upgrade mode.
+    //
+    // PORT GAP: the background autovacuum *launcher* loop is not yet fully
+    // ported — its runtime boundary (the latch wait, the pgstat database-list
+    // fetch, the worker-launch signalling) routes through ext-seams that are
+    // not installed, so an actually-forked launcher would panic the instant it
+    // ran its loop. We therefore never fork it here. This is faithful to a real
+    // server semantically: it is exactly the "no background autovacuum is
+    // scheduled" state. Crucially this does NOT disable autovacuum-dependent
+    // backend behaviour: `AutoVacuumingActive()` still reads true when the
+    // `autovacuum`/`track_counts` GUCs are on, so `index_update_stats` and
+    // `do_analyze_rel` write `pg_class.reltuples`/`relpages` (the planner's
+    // row estimates) just like upstream, and the test SQL's explicit
+    // ANALYZE/VACUUM run normally. Only the *background* scheduling is absent.
+    //
+    // We still clear the `start_autovac_launcher` request flag so a
+    // PMSIGNAL_START_AUTOVAC_LAUNCHER doesn't make us re-enter every loop.
     if !sp::is_binary_upgrade::call()
         && pm().autovac_launcher_pmchild.is_none()
         && (sp::autovacuuming_active::call() || pm().start_autovac_launcher)
         && pm().pm_state == PMState::PmRun
     {
-        pm_mut().autovac_launcher_pmchild = StartChildProcess(B_AUTOVAC_LAUNCHER);
-        if pm().autovac_launcher_pmchild.is_some() {
-            pm_mut().start_autovac_launcher = false; // signal processed
-        }
+        // Launcher fork suppressed (port gap above). When the launcher's
+        // runtime ext-seams are installed, restore:
+        //     pm_mut().autovac_launcher_pmchild = StartChildProcess(B_AUTOVAC_LAUNCHER);
+        //     if pm().autovac_launcher_pmchild.is_some() { ... }
+        pm_mut().start_autovac_launcher = false; // signal processed (no fork)
     }
 
     // If WAL archiving is enabled always, we may start archiver even during

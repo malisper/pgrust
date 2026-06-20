@@ -98,6 +98,13 @@ seam!(pub fn timestamp_tz_plus_milliseconds(tz: TimestampTz, ms: i64) -> Timesta
 seam!(pub fn read_next_transaction_id() -> TransactionId);
 seam!(pub fn read_next_multixact_id() -> MultiXactId);
 seam!(pub fn multixact_member_freeze_threshold() -> i32);
+// `bool pgstat_track_counts` (pgstat.c) — the single process-global GUC that
+// gates `AutoVacuumingActive()`. In C this is a plain extern global read
+// directly; here its one true backing store lives in the pgstat owner crate
+// (its GUC accessor is what the engine writes on boot/SET), so the autovacuum
+// crate reads the live value through this seam rather than a private shadow
+// cell (which the GUC engine never updates).
+seam!(pub fn pgstat_track_counts() -> bool);
 seam!(pub fn pgstat_report_autovac(dbid: Oid));
 seam!(pub fn pgstat_report_activity_running(activity: alloc::string::String));
 seam!(pub fn my_database_id() -> Oid);

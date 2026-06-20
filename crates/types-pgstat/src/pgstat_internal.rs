@@ -100,21 +100,33 @@ pub struct PgStatShared_HashEntry {
 // ============================================================================
 
 /// `PgStatShared_Database` (`utils/pgstat_internal.h`).
+///
+/// `#[repr(C)]` so the leading `header` is guaranteed first (see
+/// [`PgStatShared_Backend`]): the pgstat core hands out the shared body as a
+/// `*mut PgStatShared_Common` (offset 0) and locks `header.lock`, while the
+/// per-kind code recovers `.stats` via `offset_of!`. Without `repr(C)` Rust may
+/// reorder the fields, so the two views disagree, corrupting the embedded
+/// LWLock state (→ `PANIC: queueing for lock while waiting on another one`).
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct PgStatShared_Database {
     pub header: PgStatShared_Common,
     pub stats: PgStat_StatDBEntry,
 }
 
-/// `PgStatShared_Relation` (`utils/pgstat_internal.h`).
+/// `PgStatShared_Relation` (`utils/pgstat_internal.h`). `#[repr(C)]` required —
+/// see [`PgStatShared_Database`].
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct PgStatShared_Relation {
     pub header: PgStatShared_Common,
     pub stats: PgStat_StatTabEntry,
 }
 
-/// `PgStatShared_Function` (`utils/pgstat_internal.h`).
+/// `PgStatShared_Function` (`utils/pgstat_internal.h`). `#[repr(C)]` required —
+/// see [`PgStatShared_Database`].
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct PgStatShared_Function {
     pub header: PgStatShared_Common,
     pub stats: PgStat_StatFuncEntry,

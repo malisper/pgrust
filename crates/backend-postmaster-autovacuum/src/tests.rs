@@ -12,6 +12,7 @@ use types_reloptions::AutoVacOpts;
 /// Seed the GUC globals to PostgreSQL's defaults and clear the worker/wrap
 /// state so the threshold math runs deterministically.
 fn seed_default_gucs() {
+    install_track_counts_seam();
     core::set_autovacuum_start_daemon(true);
     core::set_pgstat_track_counts(true);
     core::set_autovacuum_vac_thresh(50);
@@ -225,8 +226,18 @@ fn snprintf_append_bounds_total_like_c() {
     assert_eq!(s.len(), MAX_AUTOVAC_ACTIV_LEN - 1);
 }
 
+/// Install the `pgstat_track_counts` ext-seam so `AutoVacuumingActive()` reads
+/// the test-controllable local cell (production installs it against pgstat's
+/// live GUC value from `seams-init`). Idempotent — `set` overwrites.
+fn install_track_counts_seam() {
+    if !backend_postmaster_autovacuum_ext_seams::pgstat_track_counts::is_installed() {
+        backend_postmaster_autovacuum_ext_seams::pgstat_track_counts::set(core::pgstat_track_counts);
+    }
+}
+
 #[test]
 fn autovacuuming_active_requires_both_gucs() {
+    install_track_counts_seam();
     core::set_autovacuum_start_daemon(false);
     core::set_pgstat_track_counts(false);
     assert!(!AutoVacuumingActive());

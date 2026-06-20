@@ -22,9 +22,21 @@
 use core::cell::Cell;
 
 thread_local! {
-    /// `bool pgstat_track_counts` (pgstat.c). Boot default `false`; the GUC
-    /// engine overrides it from the `track_counts` `boot_val` (`true`).
-    static TRACK_COUNTS: Cell<bool> = const { Cell::new(false) };
+    /// `bool pgstat_track_counts` (pgstat.c). Seeded with the C `track_counts`
+    /// `boot_val` (`true`) — NOT the C source-level initializer `false`.
+    ///
+    /// This seeding is load-bearing (same discipline as guc-tables `backing`):
+    /// `InitializeGUCOptions` applies each `boot_val` via `registry::apply_value`,
+    /// which only writes the owner backing store once the accessor is
+    /// `installed()`. This crate's `init_seams()` installs the accessor AFTER
+    /// `InitializeGUCOptions` runs, so the boot-time `apply_value` write is
+    /// skipped and the cell keeps whatever it was seeded with for the process
+    /// lifetime (runtime `SET track_counts` still writes through the accessor).
+    /// With the old `false` seed, `pgstat_track_counts` read false even though
+    /// `SHOW track_counts` was `on`, which pinned `AutoVacuumingActive()` false
+    /// and made `index_update_stats` skip the `pg_class.reltuples` write — so the
+    /// planner saw the `-1` reltuples sentinel and mis-estimated row counts.
+    static TRACK_COUNTS: Cell<bool> = const { Cell::new(true) };
 
     /// `int pgstat_fetch_consistency` (pgstat.c). Boot default
     /// `PGSTAT_FETCH_CONSISTENCY_CACHE` (`1`); the GUC engine overrides it from

@@ -661,6 +661,13 @@ pub fn init_seams() {
         pgstat_report_checksum_failures_in_db,
     );
 
+    // `bool pgstat_track_counts` (pgstat.c) — the live `track_counts` GUC value
+    // `AutoVacuumingActive()` gates on. The single true backing is the GUC slot
+    // here; the autovacuum crate reads it through this seam (it never updates a
+    // private shadow cell). Without this, `AutoVacuumingActive()` was pinned
+    // false even with `autovacuum=on`, so `index_update_stats` skipped the
+    // `pg_class.reltuples` write and the planner saw the `-1` sentinel.
+    backend_postmaster_autovacuum_ext_seams::pgstat_track_counts::set(pgstat_track_counts);
     backend_postmaster_autovacuum_ext_seams::pgstat_report_autovac::set(|dbid| {
         pgstat_report_autovac(dbid).expect("pgstat_report_autovac failed");
     });

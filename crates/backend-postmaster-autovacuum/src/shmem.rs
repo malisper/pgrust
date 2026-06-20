@@ -24,7 +24,12 @@ fn errloc(lineno: i32, funcname: &'static str) -> ErrorLocation {
 /// `bool AutoVacuumingActive(void)` (`autovacuum.c` lines 3287-3293) — whether
 /// autovacuum is enabled (the GUC and `track_counts` are on).
 pub fn AutoVacuumingActive() -> bool {
-    if !core::autovacuum_start_daemon() || !core::pgstat_track_counts() {
+    // `autovacuum_start_daemon` is this crate's own GUC variable (its accessor
+    // is installed, so the engine writes the live value). `pgstat_track_counts`
+    // is a pgstat-owned process-global; read its live value through the seam
+    // rather than a stale private shadow (the GUC engine never updates a shadow
+    // cell here, so it would otherwise pin `AutoVacuumingActive()` false).
+    if !core::autovacuum_start_daemon() || !seam::pgstat_track_counts::call() {
         return false;
     }
     true
@@ -36,7 +41,7 @@ pub fn AutoVacuumingActive() -> bool {
 pub fn autovac_init() -> PgResult<()> {
     if !core::autovacuum_start_daemon() {
         // return
-    } else if !core::pgstat_track_counts() {
+    } else if !seam::pgstat_track_counts::call() {
         ereport(WARNING)
             .errmsg("autovacuum not started because of misconfiguration")
             .errhint("Enable the \"track_counts\" option.")
