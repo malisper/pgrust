@@ -236,7 +236,7 @@ pub fn reduce_outer_joins<'mcx>(
                 fromlist: mcx::PgVec::new_in(mcx),
                 quals: None,
             },
-        ));
+        ))?;
         reduce_outer_joins_pass2(mcx, &mut jt_node, &state1, &mut state2, parse, None, &empty_mbms(mcx))?;
         // Put the (possibly mutated) FromExpr back.
         if let Some(f) = jt_node.into_fromexpr() {

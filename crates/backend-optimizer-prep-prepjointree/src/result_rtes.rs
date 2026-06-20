@@ -57,7 +57,7 @@ type Relids<'mcx> = Option<PgBox<'mcx, Bitmapset<'mcx>>>;
 /// slot (the slot is always overwritten before being read again).
 #[inline]
 fn dummy_node<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Node<'mcx>> {
-    Ok(Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: 0 }))
+    Ok(Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: 0 })?)
 }
 
 /// Convert an `'mcx`-arena [`Bitmapset`] relid set to the lifetime-free
@@ -116,7 +116,7 @@ pub fn remove_useless_result_rtes<'mcx>(
         .jointree
         .take()
         .expect("remove_useless_result_rtes: top jointree must be a FromExpr");
-    let jt_node = Node::mk_from_expr(mcx, PgBox::into_inner(jt));
+    let jt_node = Node::mk_from_expr(mcx, PgBox::into_inner(jt))?;
     let new_top = remove_useless_results_recurse(
         mcx,
         root,
@@ -286,7 +286,7 @@ fn remove_useless_results_recurse_fromexpr<'mcx>(
         return Ok(child);
     }
 
-    Ok(Node::mk_from_expr(mcx, f))
+    Ok(Node::mk_from_expr(mcx, f)?)
 }
 
 /// The `IsA(jtnode, JoinExpr)` arm of [`remove_useless_results_recurse`].
@@ -365,7 +365,7 @@ fn remove_useless_results_recurse_joinexpr<'mcx>(
     j.rarg = Some(mcx::alloc_in(mcx, new_rarg)?);
 
     // Apply join-type-specific optimization rules.
-    let mut jtnode: Node<'mcx> = Node::mk_join_expr(mcx, j);
+    let mut jtnode: Node<'mcx> = Node::mk_join_expr(mcx, j)?;
     match jointype {
         JoinType::JOIN_INNER => {
             // An inner join is equivalent to a FromExpr; if either side reduced
@@ -468,7 +468,7 @@ fn inner_collapse<'mcx>(
         let mut fromlist = mcx::PgVec::new_in(mcx);
         fromlist.try_reserve(1).map_err(|_| mcx.oom(1))?;
         fromlist.push(mcx::alloc_in(mcx, side)?);
-        Ok(Node::mk_from_expr(mcx, types_nodes::rawnodes::FromExpr { fromlist, quals }))
+        Ok(Node::mk_from_expr(mcx, types_nodes::rawnodes::FromExpr { fromlist, quals })?)
     } else {
         // Merge any quals up to parent, return the surviving side.
         if let Some(pq) = parent_quals {
@@ -1201,7 +1201,7 @@ fn concat_quals<'mcx>(
     if out.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(mcx::alloc_in(mcx, Node::mk_list(mcx, out))?))
+        Ok(Some(mcx::alloc_in(mcx, Node::mk_list(mcx, out)?)?))
     }
 }
 

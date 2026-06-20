@@ -483,7 +483,7 @@ fn pull_up_subqueries_recurse<'mcx>(
                         mcx,
                         root,
                         parse,
-                        Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: varno }),
+                        Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: varno })?,
                         varno,
                         lowest_outer_join,
                         containing_appendrel,
@@ -504,7 +504,7 @@ fn pull_up_subqueries_recurse<'mcx>(
                         mcx,
                         root,
                         parse,
-                        Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: varno }),
+                        Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: varno })?,
                         varno,
                     )?;
                     jt_store(parse, path, new);
@@ -521,7 +521,7 @@ fn pull_up_subqueries_recurse<'mcx>(
                         mcx,
                         root,
                         parse,
-                        Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: varno }),
+                        Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: varno })?,
                         varno,
                     )?;
                     jt_store(parse, path, new);
@@ -533,7 +533,7 @@ fn pull_up_subqueries_recurse<'mcx>(
                     mcx,
                     root,
                     parse,
-                    Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: varno }),
+                    Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: varno })?,
                     varno,
                     containing_appendrel,
                 )?;
@@ -622,7 +622,7 @@ impl<'mcx> LowestOuterJoin<'mcx> {
     /// jointree structure (RangeTblRef/JoinExpr/FromExpr indexes), so clone the
     /// arms recursively.
     fn snapshot(mcx: Mcx<'mcx>, j: &types_nodes::rawnodes::JoinExpr<'mcx>) -> PgResult<Self> {
-        let node = clone_jointree_shape(mcx, &Node::mk_join_expr(mcx, clone_joinexpr_shape(mcx, j)?))?;
+        let node = clone_jointree_shape(mcx, &Node::mk_join_expr(mcx, clone_joinexpr_shape(mcx, j)?)?)?;
         Ok(LowestOuterJoin { node })
     }
 }
@@ -660,8 +660,8 @@ fn clone_jointree_shape<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Node<'
     match n.node_tag() {
         ntag::T_RangeTblRef => Ok(Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef {
             rtindex: n.expect_rangetblref().rtindex,
-        })),
-        ntag::T_JoinExpr => Ok(Node::mk_join_expr(mcx, clone_joinexpr_shape(mcx, n.expect_joinexpr())?)),
+        })?),
+        ntag::T_JoinExpr => Ok(Node::mk_join_expr(mcx, clone_joinexpr_shape(mcx, n.expect_joinexpr())?)?),
         ntag::T_FromExpr => {
             let f = n.expect_fromexpr();
             let mut fromlist: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
@@ -671,7 +671,7 @@ fn clone_jointree_shape<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Node<'
             Ok(Node::mk_from_expr(mcx, FromExpr {
                 fromlist,
                 quals: None,
-            }))
+            })?)
         }
         _ => Err(types_error::PgError::error("unrecognized node type")),
     }
@@ -681,7 +681,7 @@ fn clone_jointree_shape<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Node<'
 /// slot (the slot is always overwritten before being read again).
 #[inline]
 fn dummy_node<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Node<'mcx>> {
-    Ok(Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: 0 }))
+    Ok(Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef { rtindex: 0 })?)
 }
 
 // ===========================================================================
@@ -767,10 +767,10 @@ fn pull_up_simple_subquery<'mcx>(
         // We need an immutable subquery view (subroot->parse) for the seam's
         // `query` arg, but the seam only consults the query's range table for
         // RTE_JOIN aliasvars — pass a clone of the subquery as the query arg.
-        let query_node = Node::mk_query(mcx, subquery.clone_in(mcx)?);
+        let query_node = Node::mk_query(mcx, subquery.clone_in(mcx)?)?;
         for i in 0..n {
             if let Some(expr) = subquery.targetList[i].expr.take() {
-                let node = Node::mk_expr(mcx, PgBox::into_inner(expr));
+                let node = Node::mk_expr(mcx, PgBox::into_inner(expr))?;
                 let flat = rewritemanip::flatten_join_alias_vars::call(mcx, &query_node, node)?;
                 if let Some(e) = flat.into_expr() {
                     subquery.targetList[i].expr = Some(alloc_in(mcx, e)?);
@@ -786,7 +786,7 @@ fn pull_up_simple_subquery<'mcx>(
     // Adjust level-0 varnos in subquery so we can append its rangetable to the
     // upper query's. We have to fix the subquery's append_rel_list too.
     let rtoffset = parse.rtable.len() as i32;
-    offset_var_nodes_in_query(mcx, &mut subquery, rtoffset, 0);
+    offset_var_nodes_in_query(mcx, &mut subquery, rtoffset, 0)?;
     offset_var_nodes_in_append_rel_list(&mut subroot, rtoffset, 0);
 
     // Upper-level vars in subquery are now one level closer to their parent.
@@ -815,7 +815,7 @@ fn pull_up_simple_subquery<'mcx>(
         let sub_jt = Node::mk_from_expr(mcx, clone_fromexpr_shape(
             mcx,
             subquery.jointree.as_deref().expect("subquery has no jointree"),
-        )?);
+        )?)?;
         let r = result_rtes::get_relids_in_jointree(mcx, &sub_jt, true, true)?;
         let ni = result_rtes::get_nullingrels(mcx, parse)?;
         (r, Some(ni))
@@ -905,7 +905,7 @@ fn pull_up_simple_subquery<'mcx>(
             // No: combine_range_tables only moves rtable/rteperminfos. The
             // jointree is still present.
             subquery.jointree.as_deref().expect("subquery has no jointree"),
-        )?);
+        )?)?;
         let subrelids = result_rtes::get_relids_in_jointree(mcx, &sub_jt, true, false)?;
         let sub_expr = pathlike_bms_to_expr_relids(subrelids.as_deref());
         if last_ph_id(root) != 0 {
@@ -947,7 +947,7 @@ fn pull_up_simple_subquery<'mcx>(
         let only = core::mem::replace(&mut *jt.fromlist[0], dummy_node(mcx)?);
         return Ok(only);
     }
-    Ok(Node::mk_from_expr(mcx, PgBox::into_inner(jt)))
+    Ok(Node::mk_from_expr(mcx, PgBox::into_inner(jt))?)
 }
 
 /// Convert an `'mcx` Bitmapset (the lifetime-free `types_pathnodes::Relids` form
@@ -977,7 +977,7 @@ fn rte_shallow_clone<'mcx>(
     mcx: Mcx<'mcx>,
     rte: &RangeTblEntry<'mcx>,
 ) -> PgResult<RangeTblEntry<'mcx>> {
-    let node = Node::mk_range_tbl_entry(mcx, rte.clone_in(mcx)?);
+    let node = Node::mk_range_tbl_entry(mcx, rte.clone_in(mcx)?)?;
     Ok(node.into_rangetblentry().unwrap_or_else(|| unreachable!()))
 }
 
@@ -1163,7 +1163,7 @@ fn pull_up_union_leaf_queries<'mcx>(
                 types_nodes::rawnodes::RangeTblRef {
                     rtindex: child_rt_index,
                 },
-            ));
+            )?);
             pull_up_subqueries_recurse(
                 mcx,
                 root,
@@ -1425,7 +1425,7 @@ pub fn flatten_simple_union_all<'mcx>(
     // Query of a setops tree should have had an empty FromClause initially.
     let rtr_node = Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef {
         rtindex: leftmost_rti,
-    });
+    })?;
     {
         let jt = parse
             .jointree
@@ -1563,7 +1563,7 @@ fn eval_const_expressions_in_rtfunc<'mcx>(
             if node.is_expr() {
                 let e = node.into_expr().expect("is_expr implies into_expr");
                 let folded = backend_optimizer_util_clauses::fold::eval_const_expressions(mcx, e)?;
-                rtf.funcexpr = Some(alloc_in(mcx, Node::mk_expr(mcx, folded))?);
+                rtf.funcexpr = Some(alloc_in(mcx, Node::mk_expr(mcx, folded)?)?);
             } else {
                 rtf.funcexpr = Some(alloc_in(mcx, node)?);
             }
@@ -1911,7 +1911,7 @@ fn pull_up_constant_function<'mcx>(
     // `functypclass = get_expr_result_type(rtf->funcexpr, &funcrettype, &tupdesc);`
     let resolved = backend_utils_fmgr_funcapi::result_type::get_expr_result_type(
         mcx,
-        Some(&Node::mk_expr(mcx, funcexpr.clone_in(mcx)?)),
+        Some(&Node::mk_expr(mcx, funcexpr.clone_in(mcx)?)?),
     )?;
     if resolved.class != Some(types_nodes::funcapi::TypeFuncClass::Scalar) {
         return Ok(jtnode); // must be a one-column composite type
@@ -2136,7 +2136,7 @@ fn is_simple_subquery<'mcx>(
         let sub_jt = Node::mk_from_expr(mcx, clone_fromexpr_shape(
             mcx,
             subquery.jointree.as_deref().expect("subquery has no jointree"),
-        )?);
+        )?)?;
         if jointree_contains_lateral_outer_refs(
             mcx,
             root,
@@ -2181,10 +2181,10 @@ fn targetlist_as_node<'mcx>(
     items.try_reserve(tlist.len()).map_err(|_| mcx.oom(tlist.len()))?;
     for te in tlist.iter() {
         if let Some(expr) = te.expr.as_deref() {
-            items.push(alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?))?);
+            items.push(alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?)?)?);
         }
     }
-    Ok(Node::mk_list(mcx, items))
+    Ok(Node::mk_list(mcx, items)?)
 }
 
 /// `contain_volatile_functions` over a `Node` that may be a `List`.
@@ -2416,7 +2416,7 @@ fn perform_pullup_replace_vars<'mcx>(
     // aliasing the jointree we are walking.
     {
         let jt = parse.jointree.take().expect("perform_pullup_replace_vars: no jointree");
-        let mut node = Node::mk_from_expr(mcx, PgBox::into_inner(jt));
+        let mut node = Node::mk_from_expr(mcx, PgBox::into_inner(jt))?;
         replace_vars_in_jointree(mcx, root, parse, &mut node, rvcontext, outer_has_sublinks)?;
         let jt = if let Some(f) = node.into_fromexpr() {
             alloc_in(mcx, f)?
@@ -2478,7 +2478,7 @@ fn pullup_replace_vars_targetlist<'mcx>(
     let n = tlist.len();
     for i in 0..n {
         if let Some(expr) = tlist[i].expr.take() {
-            let node = Node::mk_expr(mcx, PgBox::into_inner(expr));
+            let node = Node::mk_expr(mcx, PgBox::into_inner(expr))?;
             let newnode = pullup_replace_vars(mcx, root, node, rvcontext, outer_has_sublinks)?;
             if let Some(e) = newnode.into_expr() {
                 tlist[i].expr = Some(alloc_in(mcx, e)?);
@@ -2543,7 +2543,7 @@ fn pullup_replace_vars_opt_expr<'mcx>(
             let newnode = pullup_replace_vars(
                 mcx,
                 root,
-                Node::mk_expr(mcx, PgBox::into_inner(n)),
+                Node::mk_expr(mcx, PgBox::into_inner(n))?,
                 rvcontext,
                 outer_has_sublinks,
             )?;
@@ -2572,7 +2572,7 @@ fn pullup_replace_vars_merge_action<'mcx>(
                 a.qual = pullup_replace_vars_opt(mcx, root, q, rvcontext, outer_has_sublinks)?;
             }
             pullup_replace_vars_nodelist(mcx, root, &mut a.targetList, rvcontext, outer_has_sublinks)?;
-            Ok(Node::mk_merge_action(mcx, a))
+            Ok(Node::mk_merge_action(mcx, a)?)
         }
         None => Err(types_error::PgError::error(
             "pullup_replace_vars: mergeActionList element is not a MergeAction",
@@ -2597,7 +2597,7 @@ fn replace_vars_in_translated_vars<'mcx>(
         }
         let expr = root.node(id).clone_in(mcx)?;
         let newnode =
-            pullup_replace_vars(mcx, root, Node::mk_expr(mcx, expr), rvcontext, outer_has_sublinks)?;
+            pullup_replace_vars(mcx, root, Node::mk_expr(mcx, expr)?, rvcontext, outer_has_sublinks)?;
         if let Some(e) = newnode.into_expr() {
             *root.node_mut(id) = e;
         } else {
@@ -2791,7 +2791,7 @@ fn pullup_replace_vars_subquery<'mcx>(
 ) -> PgResult<()> {
     let varno = rvcontext.varno;
     let q = core::mem::replace(query, Query::new(mcx));
-    let mut node = Node::mk_query(mcx, q);
+    let mut node = Node::mk_query(mcx, q)?;
     let mut none_outer: Option<bool> = None;
     {
         let mut cb = |var: &Var, _ctx: &mut ReplaceRteVariablesContext| -> PgResult<Expr> {
@@ -2844,7 +2844,7 @@ fn pullup_replace_vars_callback<'mcx>(
         && rcon.rv_cache[varattno as usize].is_some()
     {
         let cached = rcon.rv_cache[varattno as usize].as_ref().unwrap();
-        newnode = Node::mk_expr(mcx, cached.clone_in(mcx)?);
+        newnode = Node::mk_expr(mcx, cached.clone_in(mcx)?)?;
     } else {
         // Generate the replacement expression (whole-row expansion +
         // non-default varreturningtype handled by ReplaceVarFromTargetList).
@@ -2857,7 +2857,7 @@ fn pullup_replace_vars_callback<'mcx>(
             0,
             mcx,
         )?;
-        newnode = Node::mk_expr(mcx, replacement);
+        newnode = Node::mk_expr(mcx, replacement)?;
 
         if need_phv {
             let wrap = compute_wrap(mcx, root, rcon, var, &newnode)?;
@@ -2868,7 +2868,7 @@ fn pullup_replace_vars_callback<'mcx>(
                     inner,
                     pathrelids_make_singleton(rcon.varno),
                 );
-                newnode = Node::mk_place_holder_var(mcx, phv);
+                newnode = Node::mk_place_holder_var(mcx, phv)?;
                 // Cache it if possible.
                 if varattno >= types_core::primitive::InvalidAttrNumber && varattno <= tlist_len {
                     if let Some(e) = newnode.as_expr() {
@@ -3132,15 +3132,16 @@ fn offset_var_nodes_in_query<'mcx>(
     subquery: &mut Query<'mcx>,
     offset: i32,
     sublevels_up: i32,
-) {
+) -> types_error::PgResult<()> {
     let node = core::mem::replace(subquery, Query::new(mcx));
-    let mut qnode = Node::mk_query(mcx, node);
+    let mut qnode = Node::mk_query(mcx, node)?;
     OffsetVarNodes(&mut qnode, offset, sublevels_up);
     if let Some(q) = qnode.into_query() {
         *subquery = q;
     } else {
         unreachable!();
     }
+    Ok(())
 }
 
 /// `IncrementVarSublevelsUp((Node *) subquery, -1, 1)` over the whole Query.
@@ -3151,7 +3152,7 @@ fn increment_var_sublevels_up_in_query<'mcx>(
     min_sublevels_up: i32,
 ) -> types_error::PgResult<()> {
     let node = core::mem::replace(subquery, Query::new(mcx));
-    let mut qnode = Node::mk_query(mcx, node);
+    let mut qnode = Node::mk_query(mcx, node)?;
     let res = IncrementVarSublevelsUp(&mut qnode, delta, min_sublevels_up);
     if let Some(q) = qnode.into_query() {
         *subquery = q;
