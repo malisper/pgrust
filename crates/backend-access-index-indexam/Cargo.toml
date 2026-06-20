@@ -26,6 +26,7 @@ backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
 backend-access-common-reloptions-seams = { path = "../backend-access-common-reloptions-seams" }
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
+backend-commands-analyze-rt-seams = { path = "../backend-commands-analyze-rt-seams" }
 types-vacuum = { path = "../types-vacuum" }
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
 backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }

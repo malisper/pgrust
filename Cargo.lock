@@ -2061,6 +2061,7 @@ dependencies = [
  "backend-access-index-indexam-seams",
  "backend-access-table-tableam",
  "backend-catalog-index-seams",
+ "backend-commands-analyze-rt-seams",
  "backend-commands-vacuum-seams",
  "backend-storage-lmgr-predicate-seams",
  "backend-utils-activity-pgstat-seams",

@@ -99,6 +99,15 @@ pub fn init_seams() {
         vac::index_bulk_delete::set(seam_vac_index_bulk_delete);
         vac::index_vacuum_cleanup::set(seam_vac_index_vacuum_cleanup);
     }
+
+    // ANALYZE-only index cleanup (`do_analyze_rel`'s `index_vacuum_cleanup`
+    // call with `ivinfo.analyze_only == true`). The analyze owner declares the
+    // seam (`backend-commands-analyze-rt-seams`) but cannot install it — its
+    // body is indexam's `index_vacuum_cleanup`, which lives here. indexam owns
+    // and installs it, mirroring the AM-vacuum dispatch above.
+    backend_commands_analyze_rt_seams::index_vacuum_cleanup_analyze::set(
+        seam_analyze_index_vacuum_cleanup,
+    );
 }
 
 /// Build the Relation-shaped `genam::IndexVacuumInfo<'mcx>` the AM dispatch
@@ -155,6 +164,47 @@ fn seam_vac_index_vacuum_cleanup(
     let mcx = cx.mcx();
     let info = build_genam_ivinfo(mcx, &ivinfo)?;
     index_vacuum_cleanup(mcx, &info, istat)
+}
+
+/// `index_vacuum_cleanup_analyze` seam body (analyze owner's decl). Mirrors the
+/// `do_analyze_rel` call site (analyze.c:714-726): for one index of the
+/// just-analyzed relation, build the ANALYZE-only `IndexVacuumInfo` and let the
+/// AM do post-analyze cleanup via `amvacuumcleanup` (a no-op for every core AM
+/// except GIN). The C passes `stats = NULL` (no prior bulk-delete result) and
+/// `pfree`s any returned stats; the owned model drops the `Option` return.
+///
+/// The `index` / `heaprel` relations are already open and locked by analyze's
+/// `vac_open_indexes` (RowExclusiveLock held for the duration of ANALYZE), so
+/// re-opening by OID with `NoLock` just fetches the live relcache entries — the
+/// same posture `build_genam_ivinfo` uses for the vacuum path. The fixed
+/// `ivinfo` fields (`analyze_only = true`, `estimated_count = true`, and the
+/// `message_level` / `num_heap_tuples` carried across the seam) match the C
+/// call site verbatim; `vac_strategy` is the vacuum substrate's access strategy
+/// (not consulted by the AM cleanup bodies through this struct, so `None`).
+fn seam_analyze_index_vacuum_cleanup<'mcx>(
+    index: &Relation<'mcx>,
+    heaprel: &Relation<'mcx>,
+    message_level: i32,
+    num_heap_tuples: f64,
+) -> PgResult<()> {
+    let cx = mcx::MemoryContext::new("index_vacuum_cleanup_analyze");
+    let mcx = cx.mcx();
+    let index_rel = index_open(mcx, index.rd_id, NoLock)?;
+    let heap_rel =
+        backend_access_common_relation_seams::relation_open::call(mcx, heaprel.rd_id, NoLock)?;
+    let info = IndexVacuumInfo {
+        index: index_rel,
+        heaprel: heap_rel,
+        analyze_only: true,
+        report_progress: false,
+        estimated_count: true,
+        message_level,
+        num_heap_tuples,
+        strategy: None,
+    };
+    // C: stats = index_vacuum_cleanup(&ivinfo, NULL); if (stats) pfree(stats);
+    let _stats = index_vacuum_cleanup(mcx, &info, None)?;
+    Ok(())
 }
 
 // ===========================================================================
