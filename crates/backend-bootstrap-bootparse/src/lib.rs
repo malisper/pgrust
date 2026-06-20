@@ -686,7 +686,7 @@ fn boot_declare_index_stmt(mcx: Mcx<'static>, p: &mut Parser, unique: bool) -> P
 
     /* stmt->relation = makeRangeVar(NULL, tablename, -1); */
     let range_var = make_range_var(mcx, &tablename)?;
-    let relation_node = mcx::alloc_in(mcx, types_nodes::nodes::Node::mk_range_var(mcx, range_var))?;
+    let relation_node = mcx::alloc_in(mcx, types_nodes::nodes::Node::mk_range_var(mcx, range_var)?)?;
 
     let stmt = types_nodes::ddlnodes::IndexStmt {
         idxname: Some(PgString::from_str_in(&idxname, mcx)?),
@@ -826,7 +826,7 @@ fn boot_index_param<'mcx>(
     };
     opclass.push(mcx::alloc_in(
         mcx,
-        types_nodes::nodes::Node::mk_string(mcx, string_node),
+        types_nodes::nodes::Node::mk_string(mcx, string_node)?,
     )?);
 
     let elem = types_nodes::ddlnodes::IndexElem {
@@ -840,7 +840,7 @@ fn boot_index_param<'mcx>(
         nulls_ordering: types_nodes::rawnodes::SortByNulls::SORTBY_NULLS_DEFAULT,
     };
 
-    mcx::alloc_in(mcx, types_nodes::nodes::Node::mk_index_elem(mcx, elem))
+    mcx::alloc_in(mcx, types_nodes::nodes::Node::mk_index_elem(mcx, elem)?)
 }
 
 /* =========================================================================

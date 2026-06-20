@@ -1509,43 +1509,43 @@ fn into_pgvec_opt<'mcx, T>(mcx: Mcx<'mcx>, v: Vec<T>) -> PgResult<Option<PgVec<'
 /// Dispatch the read_plan_family LABELs this module owns.
 pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<Node<'mcx>>> {
     let r: PgResult<Node<'mcx>> = match label {
-        b"SEQSCAN" => read_seqscan(mcx).map(|p| Node::mk_seq_scan(mcx, p)),
-        b"MATERIAL" => read_material(mcx).map(|p| Node::mk_material(mcx, p)),
-        b"PROJECTSET" => read_projectset(mcx).map(|p| Node::mk_project_set(mcx, p)),
-        b"RESULT" => read_result(mcx).map(|p| Node::mk_result(mcx, p)),
-        b"APPEND" => read_append(mcx).map(|p| Node::mk_append(mcx, p)),
-        b"BITMAPAND" => read_bitmapand(mcx).map(|p| Node::mk_bitmap_and(mcx, p)),
-        b"GATHER" => read_gather(mcx).map(|p| Node::mk_gather(mcx, p)),
-        b"GATHERMERGE" => read_gathermerge(mcx).map(|p| Node::mk_gather_merge(mcx, p)),
-        b"MERGEAPPEND" => read_mergeappend(mcx).map(|p| Node::mk_merge_append(mcx, p)),
-        b"RECURSIVEUNION" => read_recursiveunion(mcx).map(|p| Node::mk_recursive_union(mcx, p)),
-        b"GROUP" => read_group(mcx).map(|p| Node::mk_group(mcx, p)),
-        b"SETOP" => read_setop(mcx).map(|p| Node::mk_set_op(mcx, p)),
-        b"UNIQUE" => read_unique(mcx).map(|p| Node::mk_unique(mcx, p)),
-        b"SORT" => read_sort(mcx).map(|p| Node::mk_sort(mcx, p)),
-        b"INCREMENTALSORT" => read_incrementalsort(mcx).map(|p| Node::mk_incremental_sort(mcx, p)),
-        b"LIMIT" => read_limit(mcx).map(|p| Node::mk_limit(mcx, p)),
-        b"AGG" => read_agg(mcx).map(|p| Node::mk_agg(mcx, p)),
-        b"NESTLOOP" => read_nestloop(mcx).map(|p| Node::mk_nest_loop(mcx, p)),
-        b"MERGEJOIN" => read_mergejoin(mcx).map(|p| Node::mk_merge_join(mcx, p)),
-        b"HASHJOIN" => read_hashjoin(mcx).map(|p| Node::mk_hash_join(mcx, p)),
-        b"HASH" => read_hash(mcx).map(|p| Node::mk_hash(mcx, p)),
-        b"MEMOIZE" => read_memoize(mcx).map(|p| Node::mk_memoize(mcx, p)),
-        b"INDEXSCAN" => read_indexscan(mcx).map(|p| Node::mk_index_scan(mcx, p)),
-        b"INDEXONLYSCAN" => read_indexonlyscan(mcx).map(|p| Node::mk_index_only_scan(mcx, p)),
-        b"BITMAPINDEXSCAN" => read_bitmapindexscan(mcx).map(|p| Node::mk_bitmap_index_scan(mcx, p)),
-        b"TIDSCAN" => read_tidscan(mcx).map(|p| Node::mk_tid_scan(mcx, p)),
-        b"TIDRANGESCAN" => read_tidrangescan(mcx).map(|p| Node::mk_tid_range_scan(mcx, p)),
-        b"SUBQUERYSCAN" => read_subqueryscan(mcx).map(|p| Node::mk_subquery_scan(mcx, p)),
-        b"WORKTABLESCAN" => read_worktablescan(mcx).map(|p| Node::mk_work_table_scan(mcx, p)),
-        b"CTESCAN" => read_ctescan(mcx).map(|p| Node::mk_cte_scan(mcx, p)),
-        b"NAMEDTUPLESTORESCAN" => read_namedtuplestorescan(mcx).map(|p| Node::mk_named_tuplestore_scan(mcx, p)),
-        b"VALUESSCAN" => read_valuesscan(mcx).map(|p| Node::mk_values_scan(mcx, p)),
-        b"FOREIGNSCAN" => read_foreignscan(mcx).map(|p| Node::mk_foreign_scan(mcx, p)),
-        b"FUNCTIONSCAN" => read_functionscan(mcx).map(|p| Node::mk_function_scan(mcx, p)),
-        b"SAMPLESCAN" => read_samplescan(mcx).map(|p| Node::mk_sample_scan(mcx, p)),
-        b"WINDOWAGG" => read_windowagg(mcx).map(|p| Node::mk_window_agg(mcx, p)),
-        b"TABLEFUNCSCAN" => read_tablefuncscan(mcx).map(|p| Node::mk_table_func_scan(mcx, p)),
+        b"SEQSCAN" => read_seqscan(mcx).and_then(|p| Node::mk_seq_scan(mcx, p)),
+        b"MATERIAL" => read_material(mcx).and_then(|p| Node::mk_material(mcx, p)),
+        b"PROJECTSET" => read_projectset(mcx).and_then(|p| Node::mk_project_set(mcx, p)),
+        b"RESULT" => read_result(mcx).and_then(|p| Node::mk_result(mcx, p)),
+        b"APPEND" => read_append(mcx).and_then(|p| Node::mk_append(mcx, p)),
+        b"BITMAPAND" => read_bitmapand(mcx).and_then(|p| Node::mk_bitmap_and(mcx, p)),
+        b"GATHER" => read_gather(mcx).and_then(|p| Node::mk_gather(mcx, p)),
+        b"GATHERMERGE" => read_gathermerge(mcx).and_then(|p| Node::mk_gather_merge(mcx, p)),
+        b"MERGEAPPEND" => read_mergeappend(mcx).and_then(|p| Node::mk_merge_append(mcx, p)),
+        b"RECURSIVEUNION" => read_recursiveunion(mcx).and_then(|p| Node::mk_recursive_union(mcx, p)),
+        b"GROUP" => read_group(mcx).and_then(|p| Node::mk_group(mcx, p)),
+        b"SETOP" => read_setop(mcx).and_then(|p| Node::mk_set_op(mcx, p)),
+        b"UNIQUE" => read_unique(mcx).and_then(|p| Node::mk_unique(mcx, p)),
+        b"SORT" => read_sort(mcx).and_then(|p| Node::mk_sort(mcx, p)),
+        b"INCREMENTALSORT" => read_incrementalsort(mcx).and_then(|p| Node::mk_incremental_sort(mcx, p)),
+        b"LIMIT" => read_limit(mcx).and_then(|p| Node::mk_limit(mcx, p)),
+        b"AGG" => read_agg(mcx).and_then(|p| Node::mk_agg(mcx, p)),
+        b"NESTLOOP" => read_nestloop(mcx).and_then(|p| Node::mk_nest_loop(mcx, p)),
+        b"MERGEJOIN" => read_mergejoin(mcx).and_then(|p| Node::mk_merge_join(mcx, p)),
+        b"HASHJOIN" => read_hashjoin(mcx).and_then(|p| Node::mk_hash_join(mcx, p)),
+        b"HASH" => read_hash(mcx).and_then(|p| Node::mk_hash(mcx, p)),
+        b"MEMOIZE" => read_memoize(mcx).and_then(|p| Node::mk_memoize(mcx, p)),
+        b"INDEXSCAN" => read_indexscan(mcx).and_then(|p| Node::mk_index_scan(mcx, p)),
+        b"INDEXONLYSCAN" => read_indexonlyscan(mcx).and_then(|p| Node::mk_index_only_scan(mcx, p)),
+        b"BITMAPINDEXSCAN" => read_bitmapindexscan(mcx).and_then(|p| Node::mk_bitmap_index_scan(mcx, p)),
+        b"TIDSCAN" => read_tidscan(mcx).and_then(|p| Node::mk_tid_scan(mcx, p)),
+        b"TIDRANGESCAN" => read_tidrangescan(mcx).and_then(|p| Node::mk_tid_range_scan(mcx, p)),
+        b"SUBQUERYSCAN" => read_subqueryscan(mcx).and_then(|p| Node::mk_subquery_scan(mcx, p)),
+        b"WORKTABLESCAN" => read_worktablescan(mcx).and_then(|p| Node::mk_work_table_scan(mcx, p)),
+        b"CTESCAN" => read_ctescan(mcx).and_then(|p| Node::mk_cte_scan(mcx, p)),
+        b"NAMEDTUPLESTORESCAN" => read_namedtuplestorescan(mcx).and_then(|p| Node::mk_named_tuplestore_scan(mcx, p)),
+        b"VALUESSCAN" => read_valuesscan(mcx).and_then(|p| Node::mk_values_scan(mcx, p)),
+        b"FOREIGNSCAN" => read_foreignscan(mcx).and_then(|p| Node::mk_foreign_scan(mcx, p)),
+        b"FUNCTIONSCAN" => read_functionscan(mcx).and_then(|p| Node::mk_function_scan(mcx, p)),
+        b"SAMPLESCAN" => read_samplescan(mcx).and_then(|p| Node::mk_sample_scan(mcx, p)),
+        b"WINDOWAGG" => read_windowagg(mcx).and_then(|p| Node::mk_window_agg(mcx, p)),
+        b"TABLEFUNCSCAN" => read_tablefuncscan(mcx).and_then(|p| Node::mk_table_func_scan(mcx, p)),
         _ => return None,
     };
     Some(r)
@@ -1584,7 +1584,7 @@ mod tests {
             scan: types_nodes::nodeindexscan::Scan::default(),
         };
         s.scan.scanrelid = 3;
-        let text = assert_framed_round_trip(&Node::mk_seq_scan(mcx, s));
+        let text = assert_framed_round_trip(&Node::mk_seq_scan(mcx, s)?);
         assert!(text.starts_with("{SEQSCAN :scan.plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":scan.plan.targetlist <>"), "{text}");
         assert!(text.ends_with(":scan.scanrelid 3}"), "{text}");
@@ -1610,7 +1610,7 @@ mod tests {
         pco.push(0u32);
         w.partCollations = Some(pco);
         w.topWindow = true;
-        let text = assert_framed_round_trip(&Node::mk_window_agg(mcx, w));
+        let text = assert_framed_round_trip(&Node::mk_window_agg(mcx, w)?);
         assert!(text.starts_with("{WINDOWAGG :plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":winname w "), "{text}");
         assert!(text.ends_with(":topWindow true}"), "{text}");
@@ -1638,7 +1638,7 @@ mod tests {
             tablefunc: alloc_in(mcx, tf).unwrap(),
         };
         s.scan.scanrelid = 4;
-        let text = assert_framed_round_trip(&Node::mk_table_func_scan(mcx, s));
+        let text = assert_framed_round_trip(&Node::mk_table_func_scan(mcx, s)?);
         assert!(text.starts_with("{TABLEFUNCSCAN :scan.plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":tablefunc {TABLEFUNC :functype 0"), "{text}");
         assert!(text.contains(":colnames (\"c1\")"), "{text}");
@@ -1679,7 +1679,7 @@ mod tests {
         };
         s.scan.plan.initPlan = Some(init);
         s.scan.scanrelid = 1;
-        let text = assert_framed_round_trip(&Node::mk_seq_scan(mcx, s));
+        let text = assert_framed_round_trip(&Node::mk_seq_scan(mcx, s)?);
         assert!(text.contains("initPlan ({SUBPLAN :subLinkType"), "{text}");
         assert!(text.contains(":plan_id 7"), "{text}");
 
@@ -1724,7 +1724,7 @@ mod tests {
             funcordinality: true,
         };
         fs.scan.scanrelid = 5;
-        let text = assert_framed_round_trip(&Node::mk_function_scan(mcx, fs));
+        let text = assert_framed_round_trip(&Node::mk_function_scan(mcx, fs)?);
         assert!(text.starts_with("{FUNCTIONSCAN :scan.plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":functions ({RANGETBLFUNCTION"), "{text}");
         assert!(text.ends_with(":funcordinality true}"), "{text}");
@@ -1742,7 +1742,7 @@ mod tests {
             plan: types_nodes::nodeindexscan::Plan::default(),
         };
         m.plan.lefttree = Some(mcx::alloc_in(mcx, child).unwrap());
-        let text = assert_framed_round_trip(&Node::mk_material(mcx, m));
+        let text = assert_framed_round_trip(&Node::mk_material(mcx, m)?);
         assert!(text.starts_with("{MATERIAL :plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":plan.lefttree {SEQSCAN"), "{text}");
     }
@@ -1776,12 +1776,12 @@ mod tests {
         let s = types_nodes::nodesort::Sort {
             plan: types_nodes::nodeindexscan::Plan::default(),
             numCols: 2,
-            sortColIdx: mk_i16(&[1, 2]),
-            sortOperators: mk_u32(&[97, 521]),
-            collations: mk_u32(&[0, 100]),
-            nullsFirst: mk_bool(&[false, true]),
+            sortColIdx: mk_i16(&[1, 2])?,
+            sortOperators: mk_u32(&[97, 521])?,
+            collations: mk_u32(&[0, 100])?,
+            nullsFirst: mk_bool(&[false, true])?,
         };
-        let text = assert_framed_round_trip(&Node::mk_sort(mcx, s));
+        let text = assert_framed_round_trip(&Node::mk_sort(mcx, s)?);
         assert!(text.contains(":numCols 2"), "{text}");
         assert!(text.contains(":sortColIdx ( 1 2)"), "{text}");
         assert!(text.contains(":sortOperators ( 97 521)"), "{text}");
@@ -1795,7 +1795,7 @@ mod tests {
         // NIL nestParams → `<>`.
         let mut nl = types_nodes::nodenestloop::NestLoop::default();
         nl.join.jointype = JoinType::JOIN_INNER;
-        let text = assert_framed_round_trip(&Node::mk_nest_loop(mcx, nl));
+        let text = assert_framed_round_trip(&Node::mk_nest_loop(mcx, nl)?);
         assert!(text.starts_with("{NESTLOOP :join.plan.disabled_nodes 0"), "{text}");
         assert!(text.ends_with(":nestParams <>}"), "{text}");
     }
@@ -1827,7 +1827,7 @@ mod tests {
                 paramval: v2,
             },
         ];
-        let text = assert_framed_round_trip(&Node::mk_nest_loop(mcx, nl));
+        let text = assert_framed_round_trip(&Node::mk_nest_loop(mcx, nl)?);
         assert!(
             text.contains(":nestParams ({NESTLOOPPARAM :paramno 0 :paramval {VAR :varno 1"),
             "{text}"
