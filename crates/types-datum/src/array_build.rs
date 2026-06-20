@@ -7,6 +7,7 @@
 //! fills the scalar / array sub-states; this module declares them
 //! field-for-field against `utils/array.h`.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use types_core::Oid;
 
@@ -44,6 +45,21 @@ pub struct ArrayBuildState {
     pub typalign: u8,
     /// `bool private_cxt` — whether a private memory context is used.
     pub private_cxt: bool,
+    /// Owned backing storage for pass-by-reference element copies.
+    ///
+    /// In C, `accumArrayResult` `datumCopy`s a pass-by-ref element into the
+    /// build state's `mcontext` (the private subcontext when `subcontext` is
+    /// true), and the `dvalues[]` `Datum` word points into that copy; the whole
+    /// subcontext is reclaimed by `makeArrayResult(release=true)` /
+    /// `MemoryContextDelete`, modeled here by dropping the state. The owned
+    /// model keeps each such copy in a stable heap `Box<[u8]>` owned by the
+    /// state (so its address is fixed and it outlives the accumulation), and the
+    /// corresponding `dvalues[]` word is that boxed slice's pointer. Storing the
+    /// copies here — rather than leaking them into the caller's (per-tuple)
+    /// `Mcx` — is what makes the private-subcontext semantics faithful: the
+    /// caller's context is never charged, so it can be reset between tuples
+    /// without a dangling charge, and the copies die with the state.
+    pub byref_storage: Vec<Box<[u8]>>,
 }
 
 /// `ArrayBuildStateArr` (utils/array.h:205) — working state for

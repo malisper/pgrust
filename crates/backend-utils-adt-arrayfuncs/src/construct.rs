@@ -850,6 +850,7 @@ fn init_array_result_with_size(
         typbyval: tlbva.typbyval,
         typalign: tlbva.typalign as u8,
         private_cxt: subcontext,
+        byref_storage: Vec::new(),
     })
 }
 
@@ -889,23 +890,27 @@ pub fn accum_array_result<'mcx>(
     // Ensure pass-by-ref stuff is copied (and detoasted if varlena). In the
     // owned model the element bytes are materialized through the detoast seam.
     if !disnull && !astate.typbyval {
-        if astate.typlen == -1 {
-            // dvalue = PointerGetDatum(PG_DETOAST_DATUM_COPY(dvalue));
+        // C: `datumCopy`s the element into the build state's `mcontext` (the
+        // private subcontext when `subcontext` is true) and points `dvalues[]`
+        // at that copy, which lives until `makeArrayResult(release=true)`
+        // deletes the subcontext. We mirror that ownership by keeping the copy
+        // in the state's own `byref_storage` (a stable `Box<[u8]>`) rather than
+        // leaking it into the caller's `Mcx`: the caller's context (often the
+        // short-lived per-tuple eval context) is then never charged, so it can
+        // be reset between tuples without a dangling charge, and the copy is
+        // reclaimed when the state drops. The `dvalues[]` word is the boxed
+        // slice's stable pointer (read by `construct_md_array` at result time).
+        let copy: Box<[u8]> = if astate.typlen == -1 {
+            // PG_DETOAST_DATUM_COPY(dvalue): a fresh, flat varlena copy.
             let bytes = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(dvalue))?;
-            // The detoasted copy is palloc'd in the build context (C's
-            // `rcontext`); it must outlive this frame so the accumulated
-            // `dvalues` pointer word stays valid until `makeArrayResult`. Leak
-            // the buffer into `mcx` (reclaimed by the owning context, not Rust
-            // drop) exactly as `datum_from_buf` does — without the forget the
-            // `PgVec` is dropped here and the dvalue pointer dangles.
-            dvalue = datum_from_buf(bytes);
+            bytes.as_slice().to_vec().into_boxed_slice()
         } else {
-            // dvalue = datumCopy(dvalue, typbyval, typlen); — a fixed-len
-            // by-ref copy. The payload bytes are resolved through the same
-            // byref window owner, then leaked into the build context.
+            // datumCopy(dvalue, false, typlen): a fixed-len by-ref copy.
             let bytes = datum_payload_bytes(mcx, astate.typlen as i32, dvalue)?;
-            dvalue = datum_from_buf(bytes);
-        }
+            bytes.as_slice().to_vec().into_boxed_slice()
+        };
+        dvalue = Datum::from_usize(copy.as_ptr() as usize);
+        astate.byref_storage.push(copy);
     }
 
     astate.dvalues.push(dvalue);
@@ -1553,45 +1558,6 @@ fn init_array_result_any_inner(
     }
 }
 
-/// Lower a canonical (rich) [`types_tuple::Datum`] to the bare-word `Datum`
-/// the by-value/by-reference accumulator path expects (a machine word that,
-/// for a pass-by-ref element, is a live pointer into `mcx`-owned bytes).
-///
-/// A by-value scalar keeps its word verbatim. A by-reference value
-/// ([`ByRef`]/[`Cstring`]/composite/expanded) is materialized into `mcx` and
-/// the resulting pointer word is returned — this is the faithful idiomatic
-/// stand-in for C, where the SubPlan-produced element already IS a real
-/// pointer Datum. Without it, a by-ref element produced as a canonical
-/// `Datum::ByRef` (e.g. `ARRAY(SELECT '1 4'::int2vector ...)`, text/numeric
-/// subquery arrays) would hit the bare-word scalar accessor and panic.
-fn lower_datum_to_word<'mcx>(
-    mcx: Mcx<'mcx>,
-    dvalue: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
-    disnull: bool,
-) -> PgResult<Datum> {
-    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
-    if disnull {
-        // The pointer is never dereferenced for a NULL element; carry (Datum) 0.
-        return Ok(Datum::from_usize(0));
-    }
-    match dvalue {
-        TDatum::ByVal(w) => Ok(Datum::from_usize(*w)),
-        TDatum::ByRef(_) | TDatum::Cstring(_) => {
-            byref_image_to_datum(mcx, dvalue.as_ref_bytes())
-        }
-        TDatum::Composite(_) | TDatum::Expanded(_) => {
-            // A composite/expanded value materializes to its flat varlena image
-            // (HeapTupleHeader datum / EOH_flatten_into), exactly as the by-ref
-            // copy path in accumArrayResult treats a varlena element.
-            byref_image_to_datum(mcx, &dvalue.as_varlena_bytes())
-        }
-        TDatum::Internal(_) => Err(PgError::error(
-            "cannot accumulate an internal pseudo-type value into an array",
-        )
-        .with_sqlstate(ERRCODE_INTERNAL_ERROR)),
-    }
-}
-
 /// Seam `accum_array_result_any` — `accumArrayResultAny` (arrayfuncs.c).
 pub fn accum_array_result_any<'mcx>(
     estate: &mut EStateData<'mcx>,
@@ -1604,10 +1570,6 @@ pub fn accum_array_result_any<'mcx>(
 ) -> PgResult<ArrayBuildStateAnyHandle<'mcx>> {
     let mcx = resolve_ctx(estate, econtext, ctx);
 
-    // Lower the canonical value to the bare-word the inner accumulator path
-    // reads (materializing any by-reference image into `mcx`).
-    let dvalue = lower_datum_to_word(mcx, &dvalue, disnull)?;
-
     // astate == NULL => initArrayResultAny(input_type, rcontext, true)
     let mut boxed = match astate {
         Some(b) => b,
@@ -1617,15 +1579,53 @@ pub fn accum_array_result_any<'mcx>(
         }
     };
 
+    // Lower the canonical value to the bare pointer-word the inner accumulator
+    // path reads. For a by-reference value this materializes a transient image
+    // in `mcx`; the accumulator immediately deep-copies it into its own
+    // `byref_storage`, so we hold the transient only across the accumulate call
+    // and let it drop afterward (uncharging `mcx`) — never leaking it into the
+    // caller's (per-tuple) context. (`lower_datum_to_word`'s leak is fine for
+    // its other callers, which want the pointer to outlive the call.)
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+    let mut held: Option<PgVec<'mcx, u8>> = None;
+    let dword: Datum = if disnull {
+        Datum::from_usize(0)
+    } else {
+        match &dvalue {
+            TDatum::ByVal(w) => Datum::from_usize(*w),
+            TDatum::ByRef(_) | TDatum::Cstring(_) => {
+                let buf = slice_to_pgvec(mcx, dvalue.as_ref_bytes())?;
+                let ptr = buf.as_ptr() as usize;
+                held = Some(buf);
+                Datum::from_usize(ptr)
+            }
+            TDatum::Composite(_) | TDatum::Expanded(_) => {
+                let buf = slice_to_pgvec(mcx, &dvalue.as_varlena_bytes())?;
+                let ptr = buf.as_ptr() as usize;
+                held = Some(buf);
+                Datum::from_usize(ptr)
+            }
+            TDatum::Internal(_) => {
+                return Err(PgError::error(
+                    "cannot accumulate an internal pseudo-type value into an array",
+                )
+                .with_sqlstate(ERRCODE_INTERNAL_ERROR))
+            }
+        }
+    };
+
     if boxed.scalarstate.is_some() {
         let scalar = boxed.scalarstate.take().unwrap();
-        let scalar = accum_array_result(mcx, Some(scalar), dvalue, disnull, input_type)?;
+        let scalar = accum_array_result(mcx, Some(scalar), dword, disnull, input_type)?;
         boxed.scalarstate = Some(scalar);
     } else {
         let arr = boxed.arraystate.take();
-        let arr = accum_array_result_arr(mcx, arr, dvalue, disnull, input_type)?;
+        let arr = accum_array_result_arr(mcx, arr, dword, disnull, input_type)?;
         boxed.arraystate = Some(arr);
     }
+
+    // Transient lowered image (if any) is reclaimed here, uncharging `mcx`.
+    drop(held);
 
     Ok(Some(boxed))
 }

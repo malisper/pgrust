@@ -429,6 +429,13 @@ fn ExecScanSubPlan<'mcx>(
         // the unified `_v` seam hands back a `Datum::ByRef` carrying the array
         // bytes — the form that rides the by-ref fmgr lane of any downstream
         // array function.
+        //
+        // Companion fix (this commit): the *element* copies the per-tuple
+        // accumulator makes for a pass-by-ref element type (e.g. text[]) must
+        // likewise not be charged to the caller's per-tuple context, else its
+        // reset asserts a still-charged leak. accumArrayResult now keeps those
+        // copies in the build state's own `byref_storage` (arrayfuncs), mirroring
+        // C's private-subcontext datumCopy.
         result = arrayfuncs::make_array_result_any_v::call(
             estate,
             econtext,
