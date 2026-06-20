@@ -197,9 +197,11 @@ pub fn group_similar_or_args(
             inputcollid: INVALID_OID,
         };
 
-        // The arena stores OR arms as their clause nodes. A usable arm is a
-        // binary OpExpr (mirrors "IsA(arg, RestrictInfo) && IsA(clause, OpExpr)").
-        if let Some(clause) = arg.as_opexpr() {
+        // OR arms are RestrictInfo handles (Expr::RestrictInfo); deref to the
+        // wrapped clause. A usable arm is a binary OpExpr (mirrors
+        // "IsA(arg, RestrictInfo) && IsA(argrinfo->clause, OpExpr)").
+        if let Some(clause) = orarg_clause(root, arg).as_opexpr() {
+            let clause = clause.clone();
             let mut opno = clause.opno;
             if clause.args.len() == 2 {
                 // Ignore a RelabelType above each operand.
@@ -303,15 +305,16 @@ pub fn group_similar_or_args(
                 // One clause in group: add it "as is".
                 result.push(orargs[matches[group_start].argindex as usize].clone());
             } else {
-                // Two or more clauses: create a nested OR.
+                // Two or more clauses: create a nested OR. `rargs` holds the arm
+                // RestrictInfo handles (as C keeps the RestrictInfo* nodes);
+                // `args` holds each arm's underlying clause (C's
+                // `IsA(arg, RestrictInfo) ? argrinfo->clause : arg`).
                 let mut args: Vec<Expr> = Vec::new();
                 let mut rargs: Vec<Expr> = Vec::new();
                 for j in group_start..i {
                     let arg = orargs[matches[j].argindex as usize].clone();
-                    rargs.push(arg.clone());
-                    // If arg carries a RestrictInfo clause we'd unwrap it; in
-                    // this arena OR arms are bare clause nodes, so args == rargs.
-                    args.push(arg);
+                    args.push(orarg_clause(root, &arg).clone());
+                    rargs.push(arg);
                 }
                 let or_args_node = make_orclause(args);
                 let or_rargs_node = make_orclause(rargs);
@@ -344,9 +347,9 @@ pub fn group_similar_or_args(
                     &incompatible_relids,
                     &outer_relids,
                 );
-                // The result arm is the sub-rinfo's own (OR) clause node.
-                let sub_clause = root.rinfo(subrinfo).clause;
-                result.push(root.node(sub_clause).clone());
+                // The result arm is the sub-rinfo itself (C lappends the
+                // RestrictInfo*), embedded as a RestrictInfo handle.
+                result.push(Expr::RestrictInfo(subrinfo.as_expr_ref()));
             }
             group_start = i;
         }
@@ -501,14 +504,16 @@ pub fn generate_bitmap_or_paths<'mcx>(
 
         for orarg in &grouped_args {
             let indlist: Vec<PathId>;
-            if is_andclause(orarg) {
+            // OR arguments are ANDs or sub-RestrictInfos; look through the arm's
+            // RestrictInfo handle to its underlying clause to classify it.
+            if is_andclause(orarg_clause(root, orarg)) {
+                // C reads ((BoolExpr *) orarg)->args, whose elements are
+                // themselves RestrictInfo* arms.
                 let andargs_nodes: Vec<Expr> =
-                    orarg.as_boolexpr().unwrap().args.clone();
-                // Wrap each AND arg in a RestrictInfo for matching.
+                    orarg_clause(root, orarg).as_boolexpr().unwrap().args.clone();
                 let mut andargs: Vec<RinfoId> = Vec::new();
                 for a in &andargs_nodes {
-                    let aid = root.alloc_node(a.clone());
-                    andargs.push(restrictinfo::make_simple_restrictinfo::call(root, aid));
+                    andargs.push(orarg_to_rinfo(root, a));
                 }
                 let mut il = build_paths_for_OR(mcx, root, run, rel, &andargs, &all_clauses)?;
                 // Recurse in case there are sub-ORs.
@@ -518,8 +523,7 @@ pub fn generate_bitmap_or_paths<'mcx>(
                 indlist = il;
             } else if orarg_is_or_clause(root, orarg) {
                 // A grouped sub-OR RestrictInfo: build bitmap paths for the group.
-                let arg_id = root.alloc_node(orarg.clone());
-                let ri = restrictinfo::make_simple_restrictinfo::call(root, arg_id);
+                let ri = orarg_to_rinfo(root, orarg);
                 let il = make_bitmap_paths_for_or_group(
                     mcx,
                     root,
@@ -537,8 +541,9 @@ pub fn generate_bitmap_or_paths<'mcx>(
                     continue;
                 }
             } else {
-                let arg_id = root.alloc_node(orarg.clone());
-                let ri = restrictinfo::make_simple_restrictinfo::call(root, arg_id);
+                // A simple arm: use the existing arm RestrictInfo directly
+                // (C does `orargs = list_make1(castNode(RestrictInfo, orarg))`).
+                let ri = orarg_to_rinfo(root, orarg);
                 let orargs = [ri];
                 indlist = build_paths_for_OR(mcx, root, run, rel, &orargs, &all_clauses)?;
             }
@@ -565,10 +570,45 @@ pub fn generate_bitmap_or_paths<'mcx>(
     Ok(result)
 }
 
-/// Is this grouped OR arm itself an OR clause (a sub-OR `BoolExpr`)?
-fn orarg_is_or_clause(_root: &PlannerInfo, orarg: &Expr) -> bool {
+/// An OR-clause argument is a `RestrictInfo*` in C (cast into the `BoolExpr`
+/// arg list by `make_sub_restrictinfos`); in this arena it is embedded as
+/// [`Expr::RestrictInfo`] carrying the arm's [`RinfoId`]. If `orarg` is such a
+/// handle, return that existing `RinfoId`; otherwise wrap the bare clause node
+/// in a fresh simple `RestrictInfo` (mirrors `IsA(arg, RestrictInfo) ?
+/// castNode(...) : ...`).
+fn orarg_to_rinfo(root: &mut PlannerInfo, orarg: &Expr) -> RinfoId {
+    if let Expr::RestrictInfo(r) = orarg {
+        RinfoId::from(*r)
+    } else {
+        let aid = root.alloc_node(orarg.clone());
+        restrictinfo::make_simple_restrictinfo::call(root, aid)
+    }
+}
+
+/// The underlying clause node of an OR-clause argument: if `orarg` is an
+/// [`Expr::RestrictInfo`] handle, dereference it to the wrapped
+/// `RestrictInfo.clause`; otherwise the arg is itself the clause (C's
+/// `IsA(arg, RestrictInfo) ? argrinfo->clause : arg`).
+fn orarg_clause<'a>(root: &'a PlannerInfo, orarg: &'a Expr) -> &'a Expr {
+    if let Expr::RestrictInfo(r) = orarg {
+        root.node(root.rinfo(RinfoId::from(*r)).clause)
+    } else {
+        orarg
+    }
+}
+
+/// Owned-clone variant of [`orarg_clause`] for callers that need to release the
+/// `&PlannerInfo` borrow before taking `&mut PlannerInfo`. Returns the arm's
+/// underlying clause node (deref'ing an [`Expr::RestrictInfo`] handle).
+pub fn orarg_clause_owned(root: &PlannerInfo, orarg: &Expr) -> Option<Expr> {
+    Some(orarg_clause(root, orarg).clone())
+}
+
+/// Is this grouped OR arm itself an OR clause (a sub-OR `BoolExpr`)? Looks
+/// through the arm's `RestrictInfo` handle to its underlying clause.
+fn orarg_is_or_clause(root: &PlannerInfo, orarg: &Expr) -> bool {
     use types_nodes::primnodes::BoolExprType;
-    matches!(orarg.as_boolexpr(), Some(b) if b.boolop == BoolExprType::OR_EXPR)
+    matches!(orarg_clause(root, orarg).as_boolexpr(), Some(b) if b.boolop == BoolExprType::OR_EXPR)
 }
 
 /// Structural equality of two `Expr` lists (for the "grouping changed the args"

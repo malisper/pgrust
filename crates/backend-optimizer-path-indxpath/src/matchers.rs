@@ -937,12 +937,11 @@ pub fn match_orclause_to_indexcol(
     let mut broke = false;
 
     for arg in &or_args {
-        // If it's not a RestrictInfo (i.e. a sub-AND), we can't use it. In this
-        // arena model OR arms are stored as their clause nodes; a sub-RestrictInfo
-        // arm carries an OpExpr, a sub-AND carries a BoolExpr. We accept only
-        // binary OpExpr arms (mirrors "IsA(subRinfo->clause, OpExpr)").
-        let sub = arg.as_opexpr();
-        let sub = match sub {
+        // OR arms are RestrictInfo handles (Expr::RestrictInfo). Deref to the
+        // wrapped clause; a usable arm carries a binary OpExpr (mirrors C's
+        // "IsA(arg, RestrictInfo) && IsA(subRinfo->clause, OpExpr)"). A sub-AND
+        // arm (BoolExpr clause) is not usable -> bail.
+        let sub = match crate::bitmap::orarg_clause_owned(root, arg).and_then(|e| e.as_opexpr().cloned()) {
             Some(s) => s,
             None => {
                 broke = true;
