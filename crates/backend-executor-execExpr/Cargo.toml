@@ -13,7 +13,8 @@ seam-core = { path = "../seam-core" }
 mcx = { path = "../mcx" }
 # ExecPrepareExpr/Qual/Check reach expression_planner over the deps-less VALUE
 # seam (declared in the planner-pc-seams crate, installed from the planner unit's
-# init_seams) — declared once further down with the fuller note.
+# init_seams), avoiding a direct executor->optimizer dependency.
+backend-optimizer-plan-planner-pc-seams = { path = "../backend-optimizer-plan-planner-pc-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-datum = { path = "../types-datum" }
