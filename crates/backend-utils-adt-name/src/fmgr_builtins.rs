@@ -26,7 +26,7 @@ use types_stringinfo::StringInfo;
 use types_tuple::heaptuple::NameData;
 
 use crate::{btnamecmp, nameconcatoid, namein, nameout, namerecv, namesend};
-use crate::{current_schema, current_user, session_user};
+use crate::{current_schema, current_schemas, current_user, session_user};
 use crate::{nameeq, namege, namegt, namele, namelt, namene};
 
 // ---------------------------------------------------------------------------
@@ -207,6 +207,19 @@ fn fc_current_schema(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgRe
     }
 }
 
+/// `current_schemas(include_implicit bool)` (name.c:307). Returns the active
+/// search path as a `name[]` array (a flat varlena image on the by-ref lane).
+fn fc_current_schemas(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let include_implicit = fcinfo
+        .arg(0)
+        .expect("current_schemas: missing bool arg")
+        .value
+        .as_bool();
+    let m = scratch_mcx();
+    let image = current_schemas(m.mcx(), include_implicit)?;
+    Ok(ret_varlena(fcinfo, image.to_vec()))
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -282,5 +295,6 @@ pub fn register_name_builtins() {
         builtin_full(745, "current_user", 0, true, false, fc_current_user),
         builtin_full(746, "session_user", 0, true, false, fc_session_user),
         builtin_full(1402, "current_schema", 0, true, false, fc_current_schema),
+        builtin(1403, "current_schemas", 1, fc_current_schemas),
     ]);
 }
