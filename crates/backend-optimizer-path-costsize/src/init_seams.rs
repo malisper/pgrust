@@ -157,6 +157,12 @@ pub fn init_seams() {
     // walker (costsize.c:4796). This unit owns it.
     cz::cost_qual_eval_walker::set(crate::qualcost::cost_qual_eval_walker);
 
+    // `ExecSupportsMarkRestore(path)` (execAmi.c) — read by
+    // `final_cost_mergejoin` to decide whether to materialize the inner side.
+    // The arena `PathNode` form is owned here (resolved through `root.path`);
+    // the seam crosses the Path as its `PathId` handle.
+    cz::exec_supports_mark_restore::set(crate::joins::exec_supports_mark_restore);
+
     /* ---- pathnode-seams: cost_qual_eval + expression_returns_set_rows -- */
     ps::cost_qual_eval::set(cost_qual_eval_seam);
     ps::expression_returns_set_rows::set(expression_returns_set_rows_seam);

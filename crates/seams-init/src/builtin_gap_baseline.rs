@@ -603,7 +603,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (6107, "pg_stat_get_backend_subxact", BuiltinGapKind::NotRegistered),
     (6118, "pg_stat_get_subscription", BuiltinGapKind::NotRegistered),
     (6119, "pg_get_publication_tables", BuiltinGapKind::NotRegistered),
-    (6121, "pg_relation_is_publishable", BuiltinGapKind::NotRegistered),
     (6154, "multirange_gist_consistent", BuiltinGapKind::NotRegistered),
     (6156, "multirange_gist_compress", BuiltinGapKind::NotRegistered),
     (6159, "pg_get_catalog_foreign_keys", BuiltinGapKind::NotRegistered),

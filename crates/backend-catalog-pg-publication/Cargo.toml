@@ -28,6 +28,7 @@ backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-cache = { path = "../types-cache" }
@@ -35,6 +36,7 @@ types-catalog = { path = "../types-catalog" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
 types-error = { path = "../types-error" }
+types-fmgr = { path = "../types-fmgr" }
 types-nodes = { path = "../types-nodes" }
 types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }
