@@ -207,7 +207,9 @@ fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
 /// to the running buffer. Mirrors `bytea_string_agg_transfn` in `varlena.c`,
 /// which is structurally identical to `string_agg_transfn` but reads `bytea`
 /// args; the transition state is the same `internal` `StringInfo`.
-fn fc_bytea_string_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytea_string_agg_transfn(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     // state = PG_ARGISNULL(0) ? NULL : (StringInfo) PG_GETARG_POINTER(0);
     let mut state = take_string_state(fcinfo);
 
@@ -245,25 +247,27 @@ fn fc_bytea_string_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 
     // if (state) PG_RETURN_POINTER(state); else PG_RETURN_NULL();
-    match state {
+    Ok(match state {
         Some(s) => ret_internal(fcinfo, s),
         None => ret_null(fcinfo),
-    }
+    })
 }
 
 /// `bytea_string_agg_finalfn`(3544): the accumulated bytes with the first
 /// delimiter stripped off the front (C: `PG_RETURN_BYTEA_P` over
 /// `&state->data[state->cursor]`, length `state->len - state->cursor`).
-fn fc_bytea_string_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytea_string_agg_finalfn(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     // state = PG_ARGISNULL(0) ? NULL : (StringInfo) PG_GETARG_POINTER(0);
-    match take_string_state(fcinfo) {
+    Ok(match take_string_state(fcinfo) {
         None => ret_null(fcinfo),
         Some(state) => {
             let cursor = state.cursor.min(state.data.len());
             let payload = state.data[cursor..].to_vec();
             ret_bytea(fcinfo, payload)
         }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
