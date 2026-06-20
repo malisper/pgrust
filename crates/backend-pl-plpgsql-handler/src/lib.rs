@@ -250,7 +250,7 @@ fn ref_payload_image(p: Option<&types_fmgr::boundary::RefPayload>) -> Option<std
     }
 }
 
-pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // nonatomic = fcinfo->context is a CallContext with atomic == false.
     let nonatomic = seam::called_nonatomic(fcinfo);
 
@@ -258,93 +258,112 @@ pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let opts = if nonatomic { SPI_OPT_NONATOMIC } else { 0 };
     let _ = SPI_connect_ext(opts);
 
-    // Find or compile the function. `plpgsql_compile(fcinfo, false)` (comp)
-    // takes the live arena-lifetimed `types_nodes` fcinfo; the fmgr `PGFunction`
-    // boundary carries the non-lifetimed `types_fmgr` fcinfo, so the
-    // fcinfo-model bridge is the fmgr-dispatch substrate (loud here).
-    let func = seam::compile_for_call(fcinfo);
+    // Run the dispatch in a closure so the SPI_finish below runs on BOTH the
+    // Ok and the Err path (C's PG_FINALLY: the SPI bracket must close, and the
+    // use-count decrement / cur_estate restore happen, even when the PL body
+    // raised). The body returns the marshaled `Datum` (a by-reference result is
+    // deposited on `fcinfo`'s ref-result side-channel inside).
+    let body = (|| -> PgResult<Datum> {
+        // Find or compile the function. `plpgsql_compile(fcinfo, false)` (comp)
+        // takes the live arena-lifetimed `types_nodes` fcinfo; the fmgr
+        // `PGFunction` boundary carries the non-lifetimed `types_fmgr` fcinfo, so
+        // the fcinfo-model bridge is the fmgr-dispatch substrate.
+        let func = seam::compile_for_call(fcinfo);
 
-    // The use-count++ / cur_estate save+restore + procedure resowner
-    // create/release bookkeeping is the funccache + resowner substrate. The
-    // scalar dispatch is the body below.
-    // A pass-by-reference argument (`text`/`varchar`/`numeric`/…) crosses the
-    // fmgr boundary as an owned image in the parallel `ref_args` side-channel
-    // (C's "`args[i].value` is a pointer to `payload`"). Carry the verbatim
-    // header-ful varlena / cstring bytes alongside the bare-word `value` so the
-    // arg-store leg can keep the image in the local variable; a by-value
-    // argument has no `ref_args` entry (`byref == None`).
-    let args: Vec<FunctionCallArg> = fcinfo
-        .args
-        .iter()
-        .enumerate()
-        .map(|(i, a)| FunctionCallArg {
-            value: a.value,
-            isnull: a.isnull,
-            byref: ref_payload_image(fcinfo.ref_arg(i)),
-        })
-        .collect();
+        // A pass-by-reference argument (`text`/`varchar`/`numeric`/…) crosses the
+        // fmgr boundary as an owned image in the parallel `ref_args` side-channel
+        // (C's "`args[i].value` is a pointer to `payload`"). Carry the verbatim
+        // header-ful varlena / cstring bytes alongside the bare-word `value` so
+        // the arg-store leg can keep the image in the local variable; a by-value
+        // argument has no `ref_args` entry (`byref == None`).
+        let args: Vec<FunctionCallArg> = fcinfo
+            .args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| FunctionCallArg {
+                value: a.value,
+                isnull: a.isnull,
+                byref: ref_payload_image(fcinfo.ref_arg(i)),
+            })
+            .collect();
 
-    let procedure_resowner = if nonatomic && func.requires_procedure_resowner {
-        Some(seam::create_procedure_resowner())
-    } else {
-        None
-    };
+        let procedure_resowner = if nonatomic && func.requires_procedure_resowner {
+            Some(seam::create_procedure_resowner())
+        } else {
+            None
+        };
 
-    let result: FunctionResult = if seam::called_as_trigger(fcinfo) {
-        // PointerGetDatum(plpgsql_exec_trigger(func, trigdata))
-        let trigdata = seam::take_trigger_data(fcinfo);
-        let d = backend_pl_plpgsql_exec::plpgsql_exec_trigger(&func, trigdata);
-        FunctionResult {
-            value: d,
-            isnull: false,
-            byref: None,
-            rettype: 0,
+        // The PL executor is now Result-native end to end: a SQL error in the
+        // body arrives as `Err(PgError)` (via `?`) instead of a `panic_any`, and
+        // is propagated straight to the fmgr boundary below.
+        let result: FunctionResult = if seam::called_as_trigger(fcinfo) {
+            // PointerGetDatum(plpgsql_exec_trigger(func, trigdata))
+            let trigdata = seam::take_trigger_data(fcinfo);
+            let d = backend_pl_plpgsql_exec::plpgsql_exec_trigger(&func, trigdata)?;
+            FunctionResult {
+                value: d,
+                isnull: false,
+                byref: None,
+                rettype: 0,
+            }
+        } else if seam::called_as_event_trigger(fcinfo) {
+            let trigdata = seam::take_event_trigger_data(fcinfo);
+            backend_pl_plpgsql_exec::plpgsql_exec_event_trigger(&func, trigdata);
+            // no return value in this case
+            FunctionResult {
+                value: Datum::null(),
+                isnull: false,
+                byref: None,
+                rettype: 0,
+            }
+        } else {
+            backend_pl_plpgsql_exec::plpgsql_exec_function(
+                &func,
+                &args,
+                None,
+                None,
+                procedure_resowner,
+                !nonatomic,
+            )?
+        };
+
+        fcinfo.isnull = result.isnull;
+
+        // A pass-by-reference result (text/varchar/numeric/SQLERRM/…) crosses the
+        // fmgr boundary through `ref_result`: set the owned varlena image
+        // (already header-ful, `datumCopy`'d out of the exec/SPI context, so it
+        // outlives the SPI bracket we close just below) and return the dummy
+        // word. fmgr-core's result marshaling (`take_ref_result` → `FmgrOut::Ref`)
+        // reconstructs the value. A by-value result returns its scalar word
+        // directly (`byref == None`).
+        let ret = match result.byref {
+            Some(image) if !result.isnull => {
+                fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Varlena(image));
+                Datum::from_usize(0)
+            }
+            _ => result.value,
+        };
+        Ok(ret)
+    })();
+
+    // PG_FINALLY: disconnect from SPI manager on both paths. On the error path,
+    // close SPI and then propagate the original body error (a SPI_finish failure
+    // there is secondary and would mask the real error, so the body error wins).
+    let finish = SPI_finish();
+    match &body {
+        Ok(_) => match finish {
+            Ok(SPI_OK_FINISH) => {}
+            Ok(rc) => seam::elog_spi_finish_failed(rc),
+            Err(e) => return Err(e.clone()),
+        },
+        Err(_) => {
+            // The body already failed; SPI is being torn down by the surrounding
+            // subtransaction abort, so a non-FINISH code / error here is expected
+            // and must not mask the body error.
         }
-    } else if seam::called_as_event_trigger(fcinfo) {
-        let trigdata = seam::take_event_trigger_data(fcinfo);
-        backend_pl_plpgsql_exec::plpgsql_exec_event_trigger(&func, trigdata);
-        // no return value in this case
-        FunctionResult {
-            value: Datum::null(),
-            isnull: false,
-            byref: None,
-            rettype: 0,
-        }
-    } else {
-        backend_pl_plpgsql_exec::plpgsql_exec_function(
-            &func,
-            &args,
-            None,
-            None,
-            procedure_resowner,
-            !nonatomic,
-        )
-    };
-
-    fcinfo.isnull = result.isnull;
-
-    // A pass-by-reference result (text/varchar/numeric/SQLERRM/…) crosses the
-    // fmgr boundary through `ref_result`: set the owned varlena image (already
-    // header-ful, `datumCopy`'d out of the exec/SPI context, so it outlives the
-    // SPI bracket we close just below) and return the dummy word. fmgr-core's
-    // result marshaling (`take_ref_result` → `FmgrOut::Ref`) reconstructs the
-    // value. A by-value result returns its scalar word directly (`byref == None`).
-    let ret = match result.byref {
-        Some(image) if !result.isnull => {
-            fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Varlena(image));
-            Datum::from_usize(0)
-        }
-        _ => result.value,
-    };
-
-    // Disconnect from SPI manager.
-    match SPI_finish() {
-        Ok(SPI_OK_FINISH) => {}
-        Ok(rc) => seam::elog_spi_finish_failed(rc),
-        Err(e) => seam::propagate(e),
     }
 
-    ret
+    body
 }
 
 // ---------------------------------------------------------------------------
@@ -383,7 +402,10 @@ pub fn plpgsql_inline_handler(codeblock: InlineCodeBlock) -> PgResult<()> {
     let simple_eval_estate = None;
     let simple_eval_resowner = None;
 
-    // Run the function (fake fcinfo with no args).
+    // Run the function (fake fcinfo with no args). The PL executor is
+    // Result-native; a body SQL error arrives as `Err` and propagates with `?`
+    // (the DO-block PG_CATCH resource flush is the SPI/executor substrate, still
+    // owned by the surrounding bracket).
     let _result = backend_pl_plpgsql_exec::plpgsql_exec_function(
         &func,
         &[],
@@ -391,7 +413,7 @@ pub fn plpgsql_inline_handler(codeblock: InlineCodeBlock) -> PgResult<()> {
         simple_eval_resowner,
         None,
         codeblock.atomic,
-    );
+    )?;
 
     // Function should now have no remaining use-counts; free subsidiary storage.
     backend_pl_plpgsql_funcs::plpgsql_free_function_memory(&mut func)?;
@@ -441,8 +463,23 @@ pub fn plpgsql_validator(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datu
 // fmgr PGFunction wrappers + builtin registration.
 // ---------------------------------------------------------------------------
 
-/// The `PGFunction` ABI wrapper for `plpgsql_call_handler`.
+/// The legacy `PGFunction` ABI wrapper for `plpgsql_call_handler` (the
+/// `lookup()` `$libdir/plpgsql` module-resolver path, which hands back a bare
+/// `PGFunction`). Re-raises the `Err` the one sanctioned way at the fmgr
+/// boundary (`seam::propagate` = `panic_any`); the migrated builtin-registry
+/// path uses [`plpgsql_call_handler_native`] and never panics.
 fn plpgsql_call_handler_pg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    match plpgsql_call_handler(fcinfo) {
+        Ok(d) => d,
+        Err(e) => seam::propagate(e),
+    }
+}
+
+/// Result-native form of [`plpgsql_call_handler_pg`] for the migrated builtin
+/// registry: a SQL error in the PL body travels back as `Err(PgError)` straight
+/// to `invoke_builtin` (no `panic_any`/`catch_unwind`), now that the whole PL
+/// executor is Result-threaded.
+fn plpgsql_call_handler_native(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     plpgsql_call_handler(fcinfo)
 }
 
@@ -516,19 +553,22 @@ fn lookup(function: &str) -> Option<types_fmgr::LoadedExternalFunc> {
 /// (`fmgr_lookup_by_name`). The placeholder `foid = 0` is overwritten by the
 /// catalog OID when the row is created.
 fn register_handler_builtins() {
-    // `plpgsql_call_handler` stays on the legacy panic bridge: its core raises
-    // errors through `seam::propagate` (a `panic_any` deep inside the SPI/PL
-    // executor body), so it is NOT yet a clean `-> PgResult<Datum>` scalar body.
-    // Migrating it requires threading `?` through the whole PL executor call
-    // tree — deferred to Phase 4.
-    backend_utils_fmgr_core::register_builtins([BuiltinFunction {
-        foid: 0,
-        name: "plpgsql_call_handler".to_string(),
-        nargs: 0,
-        strict: false,
-        retset: false,
-        func: Some(plpgsql_call_handler_pg),
-    }]);
+    // `plpgsql_call_handler` is now Result-native: the whole PL executor call
+    // tree is `PgResult`-threaded, so a SQL error in the body arrives as
+    // `Err(PgError)` and dispatches with `?` (no `catch_unwind`). The legacy
+    // `*_pg` wrapper is retained only for the `lookup()` `$libdir/plpgsql`
+    // module-resolver path (which needs a bare `PGFunction`).
+    backend_utils_fmgr_core::register_builtins_native([(
+        BuiltinFunction {
+            foid: 0,
+            name: "plpgsql_call_handler".to_string(),
+            nargs: 0,
+            strict: false,
+            retset: false,
+            func: None,
+        },
+        plpgsql_call_handler_native as types_fmgr::PgFnNative,
+    )]);
     // `plpgsql_inline_handler` / `plpgsql_validator` are Result-native: their
     // cores already return `PgResult`, so they register the native callable and
     // dispatch with `?` (no `catch_unwind`).

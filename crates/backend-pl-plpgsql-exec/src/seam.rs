@@ -19,6 +19,7 @@
 
 use types_core::Oid;
 use types_datum::Datum;
+use types_error::PgResult;
 use types_plpgsql::{
     int32, ExprContext, PLpgSQL_datum, PLpgSQL_datum_type, PLpgSQL_execstate, PLpgSQL_expr,
     PLpgSQL_var,
@@ -74,8 +75,12 @@ pub fn assign_simple_var_free_old(_oldvalue: Datum, _oldisnull: bool, _typlen: i
 
 /// `exec_assign_expr(estate, target, expr)` (pl_exec.c 5003): evaluate `expr`
 /// and assign into `target`.
-pub fn exec_assign_expr(estate: &mut PLpgSQL_execstate, target_dno: int32, expr: &PLpgSQL_expr) {
-    super::exec_assign_expr_impl(estate, target_dno, expr);
+pub fn exec_assign_expr(
+    estate: &mut PLpgSQL_execstate,
+    target_dno: int32,
+    expr: &PLpgSQL_expr,
+) -> PgResult<()> {
+    super::exec_assign_expr_impl(estate, target_dno, expr)
 }
 
 /// `exec_assign_value(estate, target, value, isNull, valtype, valtypmod)`
@@ -88,8 +93,8 @@ pub fn exec_assign_value(
     isnull: bool,
     valtype: Oid,
     valtypmod: int32,
-) {
-    super::exec_assign_value_impl(estate, target_dno, value, isnull, valtype, valtypmod);
+) -> PgResult<()> {
+    super::exec_assign_value_impl(estate, target_dno, value, isnull, valtype, valtypmod)
 }
 
 /// `exec_eval_expr(estate, expr, &isNull, &rettype, &rettypmod)` (pl_exec.c
@@ -98,30 +103,33 @@ pub fn exec_assign_value(
 pub fn exec_eval_expr(
     estate: &mut PLpgSQL_execstate,
     expr: &PLpgSQL_expr,
-) -> (Datum, bool, Oid, int32) {
+) -> PgResult<(Datum, bool, Oid, int32)> {
     super::exec_eval_expr_impl(estate, expr)
 }
 
 /// `exec_eval_boolean(estate, expr, &isNull)` (pl_exec.c 5642): evaluate a
 /// boolean condition expression. Returns `(value, isnull)`.
-pub fn exec_eval_boolean(estate: &mut PLpgSQL_execstate, expr: &PLpgSQL_expr) -> (bool, bool) {
+pub fn exec_eval_boolean(
+    estate: &mut PLpgSQL_execstate,
+    expr: &PLpgSQL_expr,
+) -> PgResult<(bool, bool)> {
     // exec_eval_expr + exec_cast_value(value, valtype -> BOOLOID).
     const BOOLOID: Oid = 16;
-    let (value, isnull, rettype, rettypmod) = super::exec_eval_expr_impl(estate, expr);
+    let (value, isnull, rettype, rettypmod) = super::exec_eval_expr_impl(estate, expr)?;
     if isnull {
-        return (false, true);
+        return Ok((false, true));
     }
     if rettype == BOOLOID {
         // No coercion needed: DatumGetBool reads the low byte.
-        return (value.as_bool(), false);
+        return Ok((value.as_bool(), false));
     }
     // A non-boolean condition needs a cast to bool (exec_cast_value). This is the
     // value-substrate cast path; route through the cast seam (loud until the
     // cast-expr substrate lands — a comparison/boolean condition, the common
     // case, returns BOOLOID above and never reaches here).
     let (cast_value, cast_isnull) =
-        exec_cast_value(estate, value, isnull, rettype, rettypmod, BOOLOID, -1);
-    (cast_value.as_bool(), cast_isnull)
+        exec_cast_value(estate, value, isnull, rettype, rettypmod, BOOLOID, -1)?;
+    Ok((cast_value.as_bool(), cast_isnull))
 }
 
 /// `exec_eval_datum(estate, datum, &typeid, &typetypmod, &value, &isnull)`
@@ -130,7 +138,7 @@ pub fn exec_eval_boolean(estate: &mut PLpgSQL_execstate, expr: &PLpgSQL_expr) ->
 pub fn exec_eval_datum(
     estate: &mut PLpgSQL_execstate,
     datum: &PLpgSQL_datum,
-) -> (Oid, int32, Datum, bool) {
+) -> PgResult<(Oid, int32, Datum, bool)> {
     super::exec_eval_datum_impl(estate, datum)
 }
 
@@ -145,7 +153,7 @@ pub fn exec_cast_value(
     valtypmod: int32,
     reqtype: Oid,
     reqtypmod: int32,
-) -> (Datum, bool) {
+) -> PgResult<(Datum, bool)> {
     super::exec_cast_value_impl(estate, value, isnull, valtype, valtypmod, reqtype, reqtypmod)
 }
 
@@ -157,14 +165,17 @@ pub fn exec_run_select(
     expr: &PLpgSQL_expr,
     maxtuples: i64,
     set_portal: bool,
-) -> int32 {
+) -> PgResult<int32> {
     super::exec_run_select_impl(estate, expr, maxtuples, set_portal)
 }
 
 /// `plpgsql_fulfill_promise(estate, var)` (pl_exec.c): compute and assign a
 /// DTYPE_PROMISE variable's promised value on first read.
-pub fn plpgsql_fulfill_promise(estate: &mut PLpgSQL_execstate, var: &mut PLpgSQL_var) {
-    super::trigger::plpgsql_fulfill_promise_impl(estate, var);
+pub fn plpgsql_fulfill_promise(
+    estate: &mut PLpgSQL_execstate,
+    var: &mut PLpgSQL_var,
+) -> PgResult<()> {
+    super::trigger::plpgsql_fulfill_promise_impl(estate, var)
 }
 
 /// The varlena R/W-expanded / flat-array commandeering leg of the
@@ -185,8 +196,8 @@ pub fn exec_move_row_from_datum(
     estate: &mut PLpgSQL_execstate,
     target_dno: int32,
     value: Datum,
-) {
-    super::trigger::exec_move_row_from_datum_impl(estate, target_dno, value);
+) -> PgResult<()> {
+    super::trigger::exec_move_row_from_datum_impl(estate, target_dno, value)
 }
 
 /// `exec_move_row_from_datum` carrying the source composite value's by-reference
@@ -197,19 +208,17 @@ pub fn exec_move_row_from_datum_byref(
     target_dno: int32,
     value: Datum,
     byref: Option<std::vec::Vec<u8>>,
-) {
-    super::trigger::exec_move_row_from_datum_byref_impl(estate, target_dno, value, byref);
+) -> PgResult<()> {
+    super::trigger::exec_move_row_from_datum_byref_impl(estate, target_dno, value, byref)
 }
 
 /// `ereport(ERROR, ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT)`
 /// (pl_exec.c) — the toplevel block fell through without RETURN.
-pub fn ereport_no_return_statement() -> ! {
-    std::panic::panic_any(
-        types_error::PgError::error(
-            "control reached end of function without RETURN".to_string(),
-        )
-        .with_sqlstate(types_error::ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT),
-    );
+pub fn ereport_no_return_statement() -> types_error::PgError {
+    types_error::PgError::error(
+        "control reached end of function without RETURN".to_string(),
+    )
+    .with_sqlstate(types_error::ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT)
 }
 
 /// The set-returning-function result handoff of `plpgsql_exec_function`
@@ -305,8 +314,8 @@ pub fn coerce_function_result_tuple(_estate: &mut PLpgSQL_execstate) {
 
 /// `exec_move_row(estate, var, NULL, NULL)` (pl_exec.c): clear a REC/ROW to
 /// the NULL row.
-pub fn exec_move_row_null(estate: &mut PLpgSQL_execstate, target_dno: int32) {
-    super::trigger::exec_move_row_null_impl(estate, target_dno);
+pub fn exec_move_row_null(estate: &mut PLpgSQL_execstate, target_dno: int32) -> PgResult<()> {
+    super::trigger::exec_move_row_null_impl(estate, target_dno)
 }
 
 /// The CASE temp-var datatype rebuild (`exec_stmt_case`): when the test-expr's
@@ -346,50 +355,40 @@ pub fn type_is_rowtype(_typeid: Oid) -> bool {
 
 /// `ereport(ERROR, ERRCODE_CASE_NOT_FOUND)` — CASE with no matching WHEN and no
 /// ELSE (`exec_stmt_case`).
-pub fn ereport_case_not_found() -> ! {
-    std::panic::panic_any(
-        types_error::PgError::error("case not found".to_string())
-            .with_detail("CASE statement is missing ELSE part.".to_string())
-            .with_sqlstate(types_error::ERRCODE_CASE_NOT_FOUND),
-    );
+pub fn ereport_case_not_found() -> types_error::PgError {
+    types_error::PgError::error("case not found".to_string())
+        .with_detail("CASE statement is missing ELSE part.".to_string())
+        .with_sqlstate(types_error::ERRCODE_CASE_NOT_FOUND)
 }
 
 /// `ereport(ERROR, ERRCODE_NULL_VALUE_NOT_ALLOWED)` — a FOR(i) loop bound /
 /// step evaluated to NULL (`exec_stmt_fori`).
-pub fn ereport_for_bound_null(which: &str) -> ! {
-    std::panic::panic_any(
-        types_error::PgError::error(format!("{which} of FOR loop cannot be null"))
-            .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
-    );
+pub fn ereport_for_bound_null(which: &str) -> types_error::PgError {
+    types_error::PgError::error(format!("{which} of FOR loop cannot be null"))
+        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
 }
 
 /// `ereport(ERROR, ERRCODE_INVALID_PARAMETER_VALUE)` — FOR(i) BY step <= 0.
-pub fn ereport_for_step_nonpositive() -> ! {
-    std::panic::panic_any(
-        types_error::PgError::error(
-            "BY value of FOR loop must be greater than zero".to_string(),
-        )
-        .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
-    );
+pub fn ereport_for_step_nonpositive() -> types_error::PgError {
+    types_error::PgError::error(
+        "BY value of FOR loop must be greater than zero".to_string(),
+    )
+    .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
 }
 
 /// `ereport(ERROR, ERRCODE_NULL_VALUE_NOT_ALLOWED)` — FOREACH over a NULL array
 /// (`exec_stmt_foreach_a`).
-pub fn ereport_foreach_null() -> ! {
-    std::panic::panic_any(
-        types_error::PgError::error("FOREACH expression must not be null".to_string())
-            .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED),
-    );
+pub fn ereport_foreach_null() -> types_error::PgError {
+    types_error::PgError::error("FOREACH expression must not be null".to_string())
+        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
 }
 
 /// `ereport(ERROR, ERRCODE_DATATYPE_MISMATCH)` — RETURN of a non-composite from
 /// a function returning a tuple (`exec_stmt_return`).
-pub fn ereport_return_noncomposite() -> ! {
-    std::panic::panic_any(
-        types_error::PgError::error(
-            "cannot return non-composite value from function returning composite type"
-                .to_string(),
-        )
-        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH),
-    );
+pub fn ereport_return_noncomposite() -> types_error::PgError {
+    types_error::PgError::error(
+        "cannot return non-composite value from function returning composite type"
+            .to_string(),
+    )
+    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
 }
