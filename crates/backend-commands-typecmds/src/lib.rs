@@ -4752,6 +4752,10 @@ pub fn init_seams() {
     // the `CreateDomainStmt` and run the ported `DefineDomain` body.
     backend_tcop_utility_out_seams::define_domain::set(define_domain_seam);
 
+    // ProcessUtilitySlow `T_AlterDomainStmt` dispatch target (utility.c) — the
+    // subtype switch over the ported `AlterDomain*` bodies.
+    backend_tcop_utility_out_seams::alter_domain::set(alter_domain_seam);
+
     // ProcessUtilitySlow `T_DefineStmt` dispatch target (utility.c) — the `kind`
     // switch; the OBJECT_TYPE (base type) leg runs the ported `DefineType` body.
     backend_tcop_utility_out_seams::define_stmt::set(define_stmt_seam);
@@ -5135,4 +5139,90 @@ fn define_domain_seam<'mcx>(
         coll_clause.as_deref(),
         &constraints,
     )
+}
+
+/// Outward-seam adapter for the `T_AlterDomainStmt` subtype switch
+/// (utility.c:1340-1387 / `ProcessUtilitySlow`): decode the `AlterDomainStmt`'s
+/// qualified `typeName` (a `List*` of `String` nodes) and dispatch on
+/// `stmt->subtype` (`'T'`/`'N'`/`'O'`/`'C'`/`'X'`/`'V'`) to the ported
+/// `AlterDomain*` bodies. The `secondaryObject` returned by ADD CONSTRAINT is
+/// not carried at this leaf (matching the seam contract).
+fn alter_domain_seam<'mcx>(mcx: Mcx<'mcx>, stmt: &RichNode<'mcx>) -> PgResult<ObjectAddress> {
+    let ads = match stmt.as_alterdomainstmt() {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error(
+                "alter_domain_seam: statement is not an AlterDomainStmt",
+            ))
+        }
+    };
+
+    // typeName: List of String nodes -> Vec<String>.
+    let mut names: Vec<String> = Vec::with_capacity(ads.typeName.len());
+    for n in ads.typeName.iter() {
+        match n.as_string() {
+            Some(s) => names.push(s.sval.as_str().to_string()),
+            None => {
+                return Err(PgError::error(
+                    "ALTER DOMAIN: type name element is not a String",
+                ))
+            }
+        }
+    }
+
+    match ads.subtype as u8 as char {
+        'T' => {
+            // ALTER DOMAIN SET/DROP DEFAULT.
+            AlterDomainDefault(mcx, &names, ads.def.as_deref())
+        }
+        'N' => {
+            // ALTER DOMAIN DROP NOT NULL.
+            AlterDomainNotNull(mcx, &names, false)
+        }
+        'O' => {
+            // ALTER DOMAIN SET NOT NULL.
+            AlterDomainNotNull(mcx, &names, true)
+        }
+        'C' => {
+            // ALTER DOMAIN ADD CONSTRAINT.
+            let def = match ads.def.as_deref() {
+                Some(d) => d,
+                None => {
+                    return Err(PgError::error(
+                        "ALTER DOMAIN ADD CONSTRAINT: missing constraint definition",
+                    ))
+                }
+            };
+            let (addr, _secondary) = AlterDomainAddConstraint(mcx, &names, def, false)?;
+            Ok(addr)
+        }
+        'X' => {
+            // ALTER DOMAIN DROP CONSTRAINT.
+            let constr_name = match ads.name.as_ref() {
+                Some(s) => s.as_str(),
+                None => {
+                    return Err(PgError::error(
+                        "ALTER DOMAIN DROP CONSTRAINT: missing constraint name",
+                    ))
+                }
+            };
+            AlterDomainDropConstraint(mcx, &names, constr_name, ads.behavior, ads.missing_ok)
+        }
+        'V' => {
+            // ALTER DOMAIN VALIDATE CONSTRAINT.
+            let constr_name = match ads.name.as_ref() {
+                Some(s) => s.as_str(),
+                None => {
+                    return Err(PgError::error(
+                        "ALTER DOMAIN VALIDATE CONSTRAINT: missing constraint name",
+                    ))
+                }
+            };
+            AlterDomainValidateConstraint(mcx, &names, constr_name)
+        }
+        other => Err(PgError::error(format!(
+            "unrecognized alter domain type: {}",
+            other as i32
+        ))),
+    }
 }
