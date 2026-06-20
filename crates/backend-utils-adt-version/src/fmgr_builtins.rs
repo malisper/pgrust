@@ -15,29 +15,21 @@
 //! key, so strict defaults to `false`; not `proretset`, so retset is `false`).
 
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
-
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `version()` (version.c `pgsql_version`) — `PG_RETURN_TEXT_P(cstring_to_text(
 /// PG_VERSION_STR))`. No arguments; the `text` result rides the by-reference
 /// lane as a `text` varlena (header + payload).
-fn fc_version(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_version(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // The varlena `text` result is allocated through a scratch `Mcx` (C: the
     // caller's current memory context); its flat varlena bytes are then handed
     // to the by-reference result lane (which owns them as a `Vec<u8>`).
     let m = mcx::MemoryContext::new("version fmgr scratch");
-    let bytes = match crate::pgsql_version_v(m.mcx()) {
-        Ok(d) => d.as_ref_bytes().to_vec(),
-        Err(e) => raise(e),
-    };
+    let bytes = crate::pgsql_version_v(m.mcx())?.as_ref_bytes().to_vec();
     fcinfo.set_ref_result(RefPayload::Varlena(bytes));
-    Datum::from_usize(0)
+    Ok(Datum::from_usize(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -50,16 +42,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register `version.c`'s SQL-callable builtin (C: its `fmgr_builtins[]` row).
@@ -67,7 +62,7 @@ fn builtin(
 /// transcribed exactly from `pg_proc.dat` (OID 89, 0 args, not strict, not
 /// retset).
 pub fn register_version_builtins() {
-    backend_utils_fmgr_core::register_builtins([builtin(
+    backend_utils_fmgr_core::register_builtins_native([builtin(
         89, "pgsql_version", 0, true, false, fc_version,
     )]);
 }
