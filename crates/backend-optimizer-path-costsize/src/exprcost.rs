@@ -239,7 +239,7 @@ pub fn cost_windowagg<'mcx>(
     // Window functions are charged their stated execution cost, plus the cost of
     // evaluating their input expressions + filter, per tuple.
     for &wfn in window_funcs {
-        let (fn_startup, wfunccost) = cz::windowfunc_cost::call(root, wfn);
+        let (fn_startup, wfunccost) = cz::windowfunc_cost::call(run, root, wfn);
         startup_cost += fn_startup;
         total_cost += wfunccost * input_tuples;
     }

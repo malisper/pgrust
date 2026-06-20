@@ -650,9 +650,16 @@ pub const PVC_INCLUDE_PLACEHOLDERS: i32 = 0x0010;
 pub const PVC_RECURSE_PLACEHOLDERS: i32 = 0x0020;
 
 /// `pull_var_clause_context` (var.c:58-62).
-struct PullVarClauseContext {
+struct PullVarClauseContext<'mcx> {
     varlist: Vec<Expr>,
     flags: i32,
+    /// Memory context for deep-copying collected nodes (`Aggref`/`WindowFunc`/
+    /// `GroupingFunc` carry context-allocated children that a plain `.clone()`
+    /// would panic on; deep-copy via `clone_in`). C `lappend`s the bare pointer;
+    /// the owned model needs a copy.
+    mcx: mcx::Mcx<'mcx>,
+    /// First clone error encountered, propagated out by `pull_var_clause`.
+    err: Option<types_error::PgError>,
 }
 
 /// `pull_var_clause(node, flags)` (var.c:652). Recursively pull all Var nodes
@@ -660,7 +667,7 @@ struct PullVarClauseContext {
 /// per the `PVC_*` flag bits; `GroupingFunc` is treated like `Aggref`;
 /// `CurrentOfExpr` is ignored. Upper-level vars/aggrefs/PHVs should not be seen.
 /// Returns a list of the (cloned) nodes found. Does not examine subqueries.
-pub fn pull_var_clause(node: &Node, flags: i32) -> Vec<Expr> {
+pub fn pull_var_clause<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node, flags: i32) -> PgResult<Vec<Expr>> {
     // Assert that caller has not specified inconsistent flags.
     debug_assert_ne!(
         flags & (PVC_INCLUDE_AGGREGATES | PVC_RECURSE_AGGREGATES),
@@ -678,13 +685,21 @@ pub fn pull_var_clause(node: &Node, flags: i32) -> Vec<Expr> {
     let mut context = PullVarClauseContext {
         varlist: Vec::new(),
         flags,
+        mcx,
+        err: None,
     };
     pull_var_clause_walker(node, &mut context);
-    context.varlist
+    if let Some(e) = context.err {
+        return Err(e);
+    }
+    Ok(context.varlist)
 }
 
 /// `pull_var_clause_walker` (var.c:672).
 fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bool {
+    if context.err.is_some() {
+        return true;
+    }
     if let Some(expr) = node.as_expr() {
         match expr {
             Expr::Var(var) => {
@@ -699,7 +714,13 @@ fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bo
                     panic!("Upper-level Aggref found where not expected");
                 }
                 if context.flags & PVC_INCLUDE_AGGREGATES != 0 {
-                    context.varlist.push(node_expr_clone(node));
+                    match node_expr_clone(node, context.mcx) {
+                        Ok(c) => context.varlist.push(c),
+                        Err(e) => {
+                            context.err = Some(e);
+                            return true;
+                        }
+                    }
                     return false; // do NOT descend into the contained expression
                 } else if context.flags & PVC_RECURSE_AGGREGATES != 0 {
                     // fall through to recurse into the aggregate's arguments
@@ -712,7 +733,13 @@ fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bo
                     panic!("Upper-level GROUPING found where not expected");
                 }
                 if context.flags & PVC_INCLUDE_AGGREGATES != 0 {
-                    context.varlist.push(node_expr_clone(node));
+                    match node_expr_clone(node, context.mcx) {
+                        Ok(c) => context.varlist.push(c),
+                        Err(e) => {
+                            context.err = Some(e);
+                            return true;
+                        }
+                    }
                     return false;
                 } else if context.flags & PVC_RECURSE_AGGREGATES != 0 {
                     // fall through to recurse into the GroupingFunc's arguments
@@ -723,7 +750,13 @@ fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bo
             Expr::WindowFunc(_) => {
                 // WindowFuncs have no levelsup field to check ...
                 if context.flags & PVC_INCLUDE_WINDOWFUNCS != 0 {
-                    context.varlist.push(node_expr_clone(node));
+                    match node_expr_clone(node, context.mcx) {
+                        Ok(c) => context.varlist.push(c),
+                        Err(e) => {
+                            context.err = Some(e);
+                            return true;
+                        }
+                    }
                     return false;
                 } else if context.flags & PVC_RECURSE_WINDOWFUNCS != 0 {
                     // fall through to recurse into the windowfunc's arguments
@@ -750,11 +783,13 @@ fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bo
     expression_tree_walker(node, &mut |n: &Node| pull_var_clause_walker(n, context))
 }
 
-/// Clone the `Expr` payload of a `Node::Expr(..)` arm. Only called on arms known
-/// to be `Node::Expr`.
-fn node_expr_clone(node: &Node) -> Expr {
+/// Deep-copy the `Expr` payload of a `Node::Expr(..)` arm into `mcx`. Only called
+/// on arms known to be `Node::Expr`. Uses `Expr::clone_in` (not a plain
+/// `.clone()`) because `Aggref`/`WindowFunc`/`GroupingFunc` carry
+/// context-allocated children whose derived `.clone()` panics.
+fn node_expr_clone<'mcx>(node: &Node, mcx: mcx::Mcx<'mcx>) -> PgResult<Expr> {
     match node.as_expr() {
-        Some(e) => e.clone(),
+        Some(e) => e.clone_in(mcx),
         None => unreachable!("node_expr_clone on non-Expr node"),
     }
 }
@@ -1022,9 +1057,11 @@ fn seam_eqext_pull_var_clause(node: &Expr, flags: i32) -> Vec<Expr> {
     // `Expr::clone` panics on an `Aggref` (context-allocated `TargetEntry`
     // args); `node_expr_wrapper` deep-copies into a scratch context via the
     // non-panicking `clone_in`, observationally identical to C's borrowed ptr.
+    // The equivclass-ext caller only pulls Vars (self-contained clones), so the
+    // collected nodes do not retain `scratch`-allocated children.
     let scratch = mcx::MemoryContext::new("pull_var_clause wrapper");
     let wrapped = node_expr_wrapper(node, scratch.mcx());
-    pull_var_clause(&wrapped, flags)
+    pull_var_clause(scratch.mcx(), &wrapped, flags).unwrap_or_default()
 }
 
 /// `pull_var_clause((Node *) exprs, flags)` (var.c) over a `List` — run the walk
@@ -1035,7 +1072,7 @@ fn seam_eqext_pull_var_clause_list(nodes: Vec<Expr>, flags: i32) -> Vec<Expr> {
     for node in nodes.iter() {
         let scratch = mcx::MemoryContext::new("pull_var_clause_list wrapper");
         let wrapped = node_expr_wrapper(node, scratch.mcx());
-        out.extend(pull_var_clause(&wrapped, flags));
+        out.extend(pull_var_clause(scratch.mcx(), &wrapped, flags).unwrap_or_default());
     }
     out
 }

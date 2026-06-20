@@ -273,7 +273,7 @@ pub fn preprocess_targetlist<'mcx>(
         for tle in parse.returningList.iter() {
             if let Some(expr) = tle.expr.as_deref() {
                 let node = types_nodes::nodes::Node::mk_expr(mcx, expr.clone_in(mcx)?);
-                for v in backend_optimizer_util_vars::pull_var_clause(&node, flags) {
+                for v in backend_optimizer_util_vars::pull_var_clause(mcx, &node, flags)? {
                     vars.push(v);
                 }
             }

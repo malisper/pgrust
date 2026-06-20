@@ -47,6 +47,8 @@ use backend_executor_execProcnode_seams as execProcnode;
 use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
 use backend_tcop_postgres_seams as tcop_postgres;
+use backend_nodes_nodeFuncs_seams as nodeFuncs;
+use backend_utils_adt_datum_seams as datum_seams;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
 use backend_utils_init_small_seams as globals;
@@ -2157,16 +2159,20 @@ fn calculate_frame_offsets<'mcx>(
                 "frame starting offset must not be null",
             ));
         }
-        // copy value into query-lifespan context (by-value: just the word)
-        if value.is_byval() {
-            winstate.startOffsetValue = value.clone_in_word();
-        } else {
-            panic!(
-                "backend-executor-nodeWindowAgg::calculate_frame_offsets: \
-                 datumCopy of a pass-by-reference frame starting offset into the \
-                 query-lifespan context has no owner; no seam yet"
-            );
-        }
+        // copy value into query-lifespan context:
+        //   get_typlenbyval(exprType(startOffset->expr), &len, &byval);
+        //   winstate->startOffsetValue = datumCopy(value, byval, len);
+        let (len, byval) = {
+            let so = winstate.startOffset.as_deref().unwrap();
+            let oexpr = so
+                .expr
+                .as_deref()
+                .expect("calculate_frame_offsets: startOffset->expr not set");
+            let typid = nodeFuncs::expr_type_info::call(oexpr)?.typid;
+            lsyscache::get_typlenbyval::call(typid)?
+        };
+        winstate.startOffsetValue =
+            datum_seams::datum_copy_v::call(estate.es_query_cxt, &value, byval, len as i32)?;
         if (frameOptions & (FRAMEOPTION_ROWS | FRAMEOPTION_GROUPS)) != 0 {
             // value is known to be int8
             let offset = winstate.startOffsetValue.as_i64();
@@ -2189,15 +2195,17 @@ fn calculate_frame_offsets<'mcx>(
                 "frame ending offset must not be null",
             ));
         }
-        if value.is_byval() {
-            winstate.endOffsetValue = value.clone_in_word();
-        } else {
-            panic!(
-                "backend-executor-nodeWindowAgg::calculate_frame_offsets: \
-                 datumCopy of a pass-by-reference frame ending offset into the \
-                 query-lifespan context has no owner; no seam yet"
-            );
-        }
+        let (len, byval) = {
+            let eo = winstate.endOffset.as_deref().unwrap();
+            let oexpr = eo
+                .expr
+                .as_deref()
+                .expect("calculate_frame_offsets: endOffset->expr not set");
+            let typid = nodeFuncs::expr_type_info::call(oexpr)?.typid;
+            lsyscache::get_typlenbyval::call(typid)?
+        };
+        winstate.endOffsetValue =
+            datum_seams::datum_copy_v::call(estate.es_query_cxt, &value, byval, len as i32)?;
         if (frameOptions & (FRAMEOPTION_ROWS | FRAMEOPTION_GROUPS)) != 0 {
             let offset = winstate.endOffsetValue.as_i64();
             if offset < 0 {
@@ -3910,7 +3918,17 @@ fn init_expr_opt<'mcx>(
 ) -> PgResult<Option<PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>> {
     match expr {
         None => Ok(None),
-        Some(e) => Ok(Some(execExpr::exec_init_expr::call(&**e, parent, estate)?)),
+        Some(e) => {
+            let mut state = execExpr::exec_init_expr::call(&**e, parent, estate)?;
+            // C's ExecInitExpr sets `state->expr = node`; `calculate_frame_offsets`
+            // reads `exprType((Node *) winstate->startOffset->expr)` to size the
+            // datumCopy of the frame offset. Ensure the back-reference is present
+            // (the deep-copy mirrors C's borrowed pointer into the plan tree).
+            if state.expr.is_none() {
+                state.expr = Some(mcx::alloc_in(estate.es_query_cxt, e.clone_in(estate.es_query_cxt)?)?);
+            }
+            Ok(Some(state))
+        }
     }
 }
 

@@ -1206,36 +1206,21 @@ fn locate_windowfunc_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> i32 {
 }
 
 /// Wrap an `&Expr` as an owned `Node` for a seam call. The seam takes `&Node`;
-/// the rewriteManip walkers only read the tree, so a clone-free wrapper is
-/// preferred, but `Node::Expr` owns its payload — so we clone the Expr (cheap
-/// for the common scalar/Var/funcexpr argument lists). Aggref cannot be cloned,
-/// but window-func argument lists never contain top-level Aggrefs requiring a
-/// clone at this position (the contain/locate walkers descend, not clone).
+/// the rewriteManip walkers only read the tree, so a borrowed view would be
+/// preferred, but `Node::Expr` owns its payload — so we deep-copy the Expr into
+/// `mcx`. A window-func argument may itself be an aggregate (e.g.
+/// `sum(sum(salary)) OVER (...)`), whose `Aggref` carries context-allocated
+/// `TargetEntry` args that a derived `.clone()` panics on, so deep-copy via the
+/// non-panicking `Expr::clone_in`.
 fn wrap_expr_ref<'mcx>(mcx: Mcx<'mcx>, e: &Expr) -> Node<'mcx> {
-    // The contain/locate seams take a borrowed Node and never retain it. We
-    // build a borrowed view by re-creating a Node referencing a cloned Expr;
-    // for Aggref (non-Clone) we cannot, so fall back to a structural clone via
-    // the node arena would be required. In practice window arg lists are
-    // already analyzed Exprs; clone where possible.
-    match e {
-        Expr::Aggref(_) => {
-            // Aggref args can contain nested aggs but not window funcs at this
-            // top level; represent as an empty marker the walkers treat as "no
-            // window func". We mirror C by descending, but since we cannot clone
-            // an Aggref, wrap it through a no-op container is unsound. Instead,
-            // panic loudly — this position is not reachable for window args in
-            // practice (window funcs cannot appear inside aggregate args, which
-            // transformAggregateCall already rejected).
-            panic!("transformWindowFuncCall: unexpected Aggref at top of window-func argument list")
-        }
-        other => Node::mk_expr(mcx, clone_expr_static(other)),
-    }
-}
-
-/// Clone an `Expr` (non-Aggref) to a `'static` Node payload. The window-func
-/// argument exprs are owned analyzed expressions with no borrowed data.
-fn clone_expr_static(e: &Expr) -> Expr {
-    e.clone()
+    // The contain/locate seams take a borrowed Node and never retain it; the
+    // deep copy is observationally identical to C's borrowed pointer. clone_in
+    // is infallible except under OOM, where the surrounding parse-analyze would
+    // already be aborting; `.expect` mirrors the previous fail-loud contract.
+    let copy = e
+        .clone_in(mcx)
+        .expect("wrap_expr_ref: clone_in (OOM during window-func arg copy)");
+    Node::mk_expr(mcx, copy)
 }
 
 /// `equal(list1, list2)` for two `PgVec<NodePtr>`: element-wise `_equalList`.

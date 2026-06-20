@@ -2354,6 +2354,7 @@ fn grouping_planner<'mcx>(
                 .map(|eid| root.node(eid))
                 .collect();
             let lists = backend_optimizer_util_clauses::find_window_functions_in_exprs(
+                mcx,
                 &tlist_refs,
                 max_win_ref,
             )?;
@@ -2521,7 +2522,7 @@ fn grouping_planner<'mcx>(
     // (C:1697-1705); otherwise sort_input_target.
     let _ = has_window;
     let (mut grouping_target, grouping_target_parallel_safe) = if !active_windows.is_empty() {
-        let gt = make_window_input_target(root, &final_target, &active_windows)?;
+        let gt = make_window_input_target(mcx, root, &final_target, &active_windows)?;
         let safe = is_target_exprs_parallel_safe(root, &gt.exprs);
         (gt, safe)
     } else {
@@ -3170,7 +3171,10 @@ fn make_group_input_target<'mcx>(
         // recurses into the agg's args rather than pushing the agg itself.
         let scratch = mcx::MemoryContext::new("make_group_input_target pull_var_clause");
         let node = backend_nodes_core::node_walker::node_expr_wrapper(root.node(nid), scratch.mcx());
-        let vars = pull_var_clause(&node, flags);
+        // Deep-copy collected nodes into the planner mcx (re-interned via
+        // `alloc_node` below); a plain `.clone()` panics on a context-allocated
+        // child (Aggref TargetEntry args).
+        let vars = pull_var_clause(mcx, &node, flags)?;
         for v in vars {
             non_group_var_ids.push(root.alloc_node(v));
         }
@@ -3541,6 +3545,7 @@ fn name_active_windows(
 /// columns (window PARTITION/ORDER BY + GROUP BY items) are kept as-is; the rest
 /// are flattened into their component Vars/Aggrefs.
 fn make_window_input_target<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     final_target: &PathTarget,
     active_windows: &[types_pathnodes::NodeId],
@@ -3596,7 +3601,10 @@ fn make_window_input_target<'mcx>(
     for &nid in &flattenable_cols {
         let scratch = mcx::MemoryContext::new("make_window_input_target pull_var_clause");
         let node = backend_nodes_core::node_walker::node_expr_wrapper(root.node(nid), scratch.mcx());
-        let vars = pull_var_clause(&node, flags);
+        // Deep-copy collected nodes into the planner mcx (re-interned via
+        // `alloc_node` below); a plain `.clone()` panics on a context-allocated
+        // child (Aggref TargetEntry args, e.g. `SUM(SUM(x)) OVER ...`).
+        let vars = pull_var_clause(mcx, &node, flags)?;
         for v in vars {
             flattenable_var_ids.push(root.alloc_node(v));
         }
@@ -3857,14 +3865,33 @@ fn create_one_window_path<'mcx>(
 /// cost contribution: `add_function_cost(winfnoid)` startup + per-row, plus
 /// `cost_qual_eval_node(wfunc->args)` + `cost_qual_eval_node(wfunc->aggfilter)`
 /// per-row contributions.
-fn windowfunc_cost_impl(
+fn windowfunc_cost_impl<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     wfunc: types_pathnodes::NodeId,
 ) -> (types_core::primitive::Cost, types_core::primitive::Cost) {
     let Some(w) = root.node(wfunc).as_windowfunc() else {
         panic!("windowfunc_cost: node is not a WindowFunc");
     };
-    let (winfnoid, args, aggfilter) = (w.winfnoid, w.args.clone(), w.aggfilter.clone());
+    // Deep-copy the args/aggfilter into the planner mcx (re-interned via
+    // `alloc_node` below). A plain `.clone()` panics on a context-allocated
+    // child: the WindowFunc args may carry an `Aggref` (e.g. the inner agg of
+    // `SUM(SUM(x)) OVER ...`).
+    let winfnoid = w.winfnoid;
+    let mut args: Vec<Expr> = Vec::with_capacity(w.args.len());
+    for a in w.args.iter() {
+        match a.clone_in(run.mcx()) {
+            Ok(c) => args.push(c),
+            Err(_) => return (0.0, 0.0),
+        }
+    }
+    let aggfilter: Option<Expr> = match &w.aggfilter {
+        Some(f) => match f.clone_in(run.mcx()) {
+            Ok(c) => Some(c),
+            Err(_) => return (0.0, 0.0),
+        },
+        None => None,
+    };
 
     // add_function_cost(root, winfnoid, (Node *) wfunc): startup + per_tuple.
     let (mut startup, mut per_tuple) =
@@ -3882,7 +3909,7 @@ fn windowfunc_cost_impl(
     }
     // cost_qual_eval_node(&argcosts, (Node *) wfunc->aggfilter, root).
     if let Some(f) = aggfilter {
-        let id = root.alloc_node(*f);
+        let id = root.alloc_node(f);
         let qc = backend_optimizer_path_costsize::cost_qual_eval_node(root, id);
         startup += qc.startup;
         per_tuple += qc.per_tuple;
@@ -6320,7 +6347,7 @@ fn make_sort_input_target<'mcx>(
         // Deep-copy via `clone_in` (C copyObject); a derived `Expr::clone`
         // panics on a context-allocated child (Aggref/SubLink/SubPlan).
         let node = Node::mk_expr(run.mcx(), root.node(col).clone_in(run.mcx())?);
-        for v in backend_optimizer_util_vars::pull_var_clause(&node, pvc_flags) {
+        for v in backend_optimizer_util_vars::pull_var_clause(run.mcx(), &node, pvc_flags)? {
             postponable_vars.push(root.alloc_node(v));
         }
     }

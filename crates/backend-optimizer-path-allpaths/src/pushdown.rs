@@ -474,9 +474,10 @@ pub(crate) fn qual_is_pushdown_safe(
     // `Expr::clone` panics on an owned-subtree child).
     let clause_node = Node::mk_expr(mcx, clause.clone_in(mcx)?);
     let vars = backend_optimizer_util_vars::var::pull_var_clause(
+        mcx,
         &clause_node,
         backend_optimizer_util_vars::var::PVC_INCLUDE_PLACEHOLDERS,
-    );
+    )?;
 
     for v in vars.iter() {
         // Punt on PlaceHolderVars (anything that isn't a plain Var) (point, XXX).
