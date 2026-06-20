@@ -26,13 +26,13 @@
 
 extern crate std;
 
-use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
@@ -80,13 +80,13 @@ fn arg_image(fcinfo: &FunctionCallInfoBaseData) -> Vec<u8> {
         .to_vec()
 }
 #[inline]
-fn buf_from<'a>(image: &[u8], m: &'a mcx::MemoryContext) -> StringInfo<'a> {
+fn buf_from<'a>(image: &[u8], m: &'a mcx::MemoryContext) -> PgResult<StringInfo<'a>> {
     let mut data = mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(image.len()).is_err() {
-        raise(types_error::PgError::error("out of memory"));
+        return Err(types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(image);
-    StringInfo::from_vec(data)
+    Ok(StringInfo::from_vec(data))
 }
 
 /// `PG_GETARG_DATUM(0)`: the by-value word for an `_out`/`_send` dummy (unread
@@ -108,24 +108,14 @@ fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> types_core::Oid {
 /// (e.g. pg_statistic `stavalues`) can be inline-compressed or external, so the
 /// raw by-ref image is not a plain `ArrayType`; mirror `arrayfuncs`'
 /// `arg_array_detoast` (detoast is a verbatim copy for an already-plain value).
-fn arg_array_detoast(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
+fn arg_array_detoast(fcinfo: &FunctionCallInfoBaseData, i: usize) -> PgResult<Vec<u8>> {
     let raw = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("pseudotypes fn: anyarray arg missing from by-ref lane");
     let m = scratch_mcx();
-    let detoasted = match backend_access_common_detoast_seams::detoast_attr::call(m.mcx(), raw) {
-        Ok(d) => d,
-        Err(e) => raise(e),
-    };
-    let out = detoasted.as_slice().to_vec();
-    out
-}
-
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
+    let detoasted = backend_access_common_detoast_seams::detoast_attr::call(m.mcx(), raw)?;
+    Ok(detoasted.as_slice().to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -133,89 +123,65 @@ fn raise(err: types_error::PgError) -> ! {
 // ---------------------------------------------------------------------------
 
 /// `cstring_in` (pseudotypes.c:101): `PG_RETURN_CSTRING(pstrdup(str))`.
-fn fc_cstring_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cstring_in(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let s = arg_cstring(fcinfo, 0);
-    let owned = match crate::cstring_in(m.mcx(), s) {
-        Ok(out) => out.as_str().to_string(),
-        Err(e) => raise(e),
-    };
-    ret_cstring(fcinfo, owned)
+    let owned = crate::cstring_in(m.mcx(), s)?.as_str().to_string();
+    Ok(ret_cstring(fcinfo, owned))
 }
 
 /// `cstring_out` (pseudotypes.c:110): `PG_RETURN_CSTRING(pstrdup(str))`.
-fn fc_cstring_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cstring_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let s = arg_cstring(fcinfo, 0);
-    let owned = match crate::cstring_out(m.mcx(), s) {
-        Ok(out) => out.as_str().to_string(),
-        Err(e) => raise(e),
-    };
-    ret_cstring(fcinfo, owned)
+    let owned = crate::cstring_out(m.mcx(), s)?.as_str().to_string();
+    Ok(ret_cstring(fcinfo, owned))
 }
 
 /// `cstring_send` (pseudotypes.c:130): `PG_RETURN_BYTEA_P(pq_endtypsend(&buf))`.
-fn fc_cstring_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cstring_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let s = arg_cstring(fcinfo, 0);
-    let bytes = match crate::cstring_send(m.mcx(), s) {
-        Ok(bytea) => bytea.as_bytes().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_varlena(fcinfo, bytes)
+    let bytes = crate::cstring_send(m.mcx(), s)?.as_bytes().to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
 }
 
 /// `void_in` (pseudotypes.c:263): `PG_RETURN_VOID()`. Accepts any cstring and
 /// returns the 0-width by-value `void` word.
-fn fc_void_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_void_in(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let _s = arg_cstring(fcinfo, 0);
-    match crate::void_in(_s) {
-        Ok(d) => d,
-        Err(e) => raise(e),
-    }
+    crate::void_in(_s)
 }
 
 /// `void_out` (pseudotypes.c:269): `PG_RETURN_CSTRING(pstrdup(""))`. The `void`
 /// argument is a 0-width by-value word that carries no payload.
-fn fc_void_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_void_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let owned = match crate::void_out(m.mcx()) {
-        Ok(out) => out.as_str().to_string(),
-        Err(e) => raise(e),
-    };
-    ret_cstring(fcinfo, owned)
+    let owned = crate::void_out(m.mcx())?.as_str().to_string();
+    Ok(ret_cstring(fcinfo, owned))
 }
 
 /// `void_send` (pseudotypes.c:285): send an empty string,
 /// `PG_RETURN_BYTEA_P(pq_endtypsend(&buf))`.
-fn fc_void_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_void_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let bytes = match crate::void_send(m.mcx()) {
-        Ok(bytea) => bytea.as_bytes().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_varlena(fcinfo, bytes)
+    let bytes = crate::void_send(m.mcx())?.as_bytes().to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
 }
 
 /// `shell_in` (pseudotypes.c:303): `errmsg("cannot accept a value of a shell
 /// type")` — always raises.
-fn fc_shell_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_shell_in(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0);
-    match crate::shell_in(s) {
-        Ok(d) => d,
-        Err(e) => raise(e),
-    }
+    crate::shell_in(s)
 }
 
 /// `shell_out` (pseudotypes.c:313): `errmsg("cannot display a value of a shell
 /// type")` — always raises. Its `opaque` argument is an unread by-value word.
-fn fc_shell_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_shell_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let value = fcinfo.arg(0).map(|a| a.value).unwrap_or_else(Datum::null);
-    let owned = match crate::shell_out(value) {
-        Ok(out) => out.as_str().to_string(),
-        Err(e) => raise(e),
-    };
-    ret_cstring(fcinfo, owned)
+    let owned = crate::shell_out(value)?.as_str().to_string();
+    Ok(ret_cstring(fcinfo, owned))
 }
 
 // ---------------------------------------------------------------------------
@@ -238,11 +204,8 @@ fn arg_cstring_opt<'a>(fcinfo: &'a FunctionCallInfoBaseData) -> &'a str {
 /// A throwing-or-Datum core: `_in`/`_recv` cores return `PgResult<Datum>`.
 macro_rules! fc_in {
     ($adapter:ident, $core:path) => {
-        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-            match $core(arg_cstring_opt(fcinfo)) {
-                Ok(d) => d,
-                Err(e) => raise(e),
-            }
+        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+            $core(arg_cstring_opt(fcinfo))
         }
     };
 }
@@ -251,12 +214,10 @@ macro_rules! fc_in {
 /// returns `PgResult<PgString>`), and on success writes the cstring result.
 macro_rules! fc_out {
     ($adapter:ident, $core:path) => {
-        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
             let value = arg_datum(fcinfo);
-            match $core(value) {
-                Ok(out) => ret_cstring(fcinfo, out.as_str().to_string()),
-                Err(e) => raise(e),
-            }
+            let out = $core(value)?;
+            Ok(ret_cstring(fcinfo, out.as_str().to_string()))
         }
     };
 }
@@ -265,14 +226,11 @@ macro_rules! fc_out {
 /// throwing core (`PgResult<Datum>`).
 macro_rules! fc_recv {
     ($adapter:ident, $core:path) => {
-        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
             let m = scratch_mcx();
             let image = arg_image(fcinfo);
-            let mut buf = buf_from(&image, &m);
-            match $core(&mut buf) {
-                Ok(d) => d,
-                Err(e) => raise(e),
-            }
+            let mut buf = buf_from(&image, &m)?;
+            $core(&mut buf)
         }
     };
 }
@@ -317,16 +275,13 @@ fc_in!(fc_anyenum_in, crate::anyenum_in);
 /// a NUL-terminated cstring via `PG_RETURN_CSTRING`).
 macro_rules! fc_array_out {
     ($adapter:ident, $core:path) => {
-        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-            let array = arg_array_detoast(fcinfo, 0);
+        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+            let array = arg_array_detoast(fcinfo, 0)?;
             let m = scratch_mcx();
-            let bytes = match $core(m.mcx(), &array) {
-                Ok(v) => v,
-                Err(e) => raise(e),
-            };
+            let bytes = $core(m.mcx(), &array)?;
             let raw = bytes.as_slice();
             let body = raw.strip_suffix(&[0u8]).unwrap_or(raw);
-            ret_cstring(fcinfo, String::from_utf8_lossy(body).into_owned())
+            Ok(ret_cstring(fcinfo, String::from_utf8_lossy(body).into_owned()))
         }
     };
 }
@@ -335,14 +290,11 @@ macro_rules! fc_array_out {
 /// call the core, return the `bytea` image on the by-ref lane.
 macro_rules! fc_array_send {
     ($adapter:ident, $core:path) => {
-        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-            let array = arg_array_detoast(fcinfo, 0);
+        fn $adapter(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+            let array = arg_array_detoast(fcinfo, 0)?;
             let m = scratch_mcx();
-            let bytes = match $core(m.mcx(), &array) {
-                Ok(v) => v.as_slice().to_vec(),
-                Err(e) => raise(e),
-            };
-            ret_varlena(fcinfo, bytes)
+            let bytes = $core(m.mcx(), &array)?.as_slice().to_vec();
+            Ok(ret_varlena(fcinfo, bytes))
         }
     };
 }
@@ -355,12 +307,10 @@ fc_array_send!(fc_anycompatiblearray_send, crate::anycompatiblearray_send);
 /// `anyenum_out` (pseudotypes.c:197): `return enum_out(fcinfo)` — the by-value
 /// enum-label OID forwarded to the real `enum.c` output, returned on the cstring
 /// lane.
-fn fc_anyenum_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_anyenum_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let oid = arg_oid(fcinfo, 0);
-    match crate::anyenum_out(Datum::from_oid(oid)) {
-        Ok(s) => ret_cstring(fcinfo, s),
-        Err(e) => raise(e),
-    }
+    let s = crate::anyenum_out(Datum::from_oid(oid))?;
+    Ok(ret_cstring(fcinfo, s))
 }
 fc_in!(fc_anyrange_in, crate::anyrange_in);
 fc_in!(fc_anycompatiblerange_in, crate::anycompatiblerange_in);
@@ -386,12 +336,9 @@ fn arg_text_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8
 
 /// `pg_node_tree_out` (pseudotypes.c:338): `return textout(fcinfo)` — emit the
 /// node-tree `text` payload as a `cstring` on the by-ref lane.
-fn fc_pg_node_tree_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_node_tree_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let out = match crate::pg_node_tree_out(m.mcx(), arg_text_bytes(fcinfo, 0)) {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    };
+    let out = crate::pg_node_tree_out(m.mcx(), arg_text_bytes(fcinfo, 0))?;
     // `text_to_cstring` returns a NUL-terminated cstring (`pstrdup`); the by-ref
     // cstring lane carries the logical string, so drop one trailing NUL.
     let bytes = out.as_slice();
@@ -399,18 +346,15 @@ fn fc_pg_node_tree_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         Some(0) => &bytes[..bytes.len() - 1],
         _ => bytes,
     };
-    ret_cstring(fcinfo, String::from_utf8_lossy(body).into_owned())
+    Ok(ret_cstring(fcinfo, String::from_utf8_lossy(body).into_owned()))
 }
 
 /// `pg_node_tree_send` (pseudotypes.c:344): `return textsend(fcinfo)` — emit the
 /// node-tree `text` payload as a header-ful `bytea` on the by-ref lane.
-fn fc_pg_node_tree_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_node_tree_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let bytea = match crate::pg_node_tree_send(m.mcx(), arg_text_bytes(fcinfo, 0)) {
-        Ok(b) => b,
-        Err(e) => raise(e),
-    };
-    ret_varlena(fcinfo, bytea.as_bytes().to_vec())
+    let bytea = crate::pg_node_tree_send(m.mcx(), arg_text_bytes(fcinfo, 0))?;
+    Ok(ret_varlena(fcinfo, bytea.as_bytes().to_vec()))
 }
 
 // --- pg_ddl_command: all four throw ---
@@ -419,36 +363,28 @@ fc_out!(fc_pg_ddl_command_out, crate::pg_ddl_command_out);
 fc_recv!(fc_pg_ddl_command_recv, crate::pg_ddl_command_recv);
 /// `pg_ddl_command_send` (pseudotypes.c:359): reads the by-value word, forwards
 /// to the throwing core (`PgResult<Bytea>`).
-fn fc_pg_ddl_command_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_ddl_command_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let value = arg_datum(fcinfo);
-    match crate::pg_ddl_command_send(value) {
-        Ok(bytea) => ret_varlena(fcinfo, bytea.as_bytes().to_vec()),
-        Err(e) => raise(e),
-    }
+    let bytea = crate::pg_ddl_command_send(value)?;
+    Ok(ret_varlena(fcinfo, bytea.as_bytes().to_vec()))
 }
 
 // --- working recv funcs (return a real value, not throwers) ---
 /// `void_recv` (pseudotypes.c:275): `PG_RETURN_VOID()`.
-fn fc_void_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_void_recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let image = arg_image(fcinfo);
-    let mut buf = buf_from(&image, &m);
-    match crate::void_recv(&mut buf) {
-        Ok(d) => d,
-        Err(e) => raise(e),
-    }
+    let mut buf = buf_from(&image, &m)?;
+    crate::void_recv(&mut buf)
 }
 /// `cstring_recv` (pseudotypes.c:119): read the remaining message text, return a
 /// `cstring` on the by-ref lane.
-fn fc_cstring_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cstring_recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let image = arg_image(fcinfo);
-    let mut buf = buf_from(&image, &m);
-    let s = match crate::cstring_recv(m.mcx(), &mut buf) {
-        Ok(bytes) => String::from_utf8_lossy(bytes.as_slice()).into_owned(),
-        Err(e) => raise(e),
-    };
-    ret_cstring(fcinfo, s)
+    let mut buf = buf_from(&image, &m)?;
+    let s = String::from_utf8_lossy(crate::cstring_recv(m.mcx(), &mut buf)?.as_slice()).into_owned();
+    Ok(ret_cstring(fcinfo, s))
 }
 
 // ---------------------------------------------------------------------------
@@ -461,23 +397,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the `cstring` pseudo-type's working I/O builtins (C: their
 /// `fmgr_builtins[]` rows). Called from this crate's `init_seams()`. OIDs /
 /// nargs from `pg_proc.dat`; all default `proisstrict => 't'`, none retset.
 pub fn register_pseudotypes_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(2292, "cstring_in", 1, true, false, fc_cstring_in),
         builtin(2293, "cstring_out", 1, true, false, fc_cstring_out),
         builtin(2501, "cstring_send", 1, true, false, fc_cstring_send),
