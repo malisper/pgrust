@@ -67,4 +67,7 @@ backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }
 backend-utils-misc-stack-depth = { path = "../backend-utils-misc-stack-depth" }
 backend-utils-fmgr-support-seams = { path = "../backend-utils-fmgr-support-seams" }
+backend-utils-adt-ts-small = { path = "../backend-utils-adt-ts-small" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 types-locale = { path = "../types-locale" }
+types-tsearch = { path = "../types-tsearch" }

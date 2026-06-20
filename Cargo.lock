@@ -20848,6 +20848,7 @@ name = "backend-utils-adt-selfuncs"
 version = "0.0.0"
 dependencies = [
  "backend-access-brin-insert-vacuum-seams",
+ "backend-access-common-detoast-seams",
  "backend-access-gin-ginutil-seams",
  "backend-access-index-indexam-seams",
  "backend-catalog-aclchk-seams",
@@ -20878,6 +20879,7 @@ dependencies = [
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-regexp-seams",
  "backend-utils-adt-selfuncs-seams",
+ "backend-utils-adt-ts-small",
  "backend-utils-adt-varlena-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
@@ -20903,6 +20905,7 @@ dependencies = [
  "types-selfuncs",
  "types-statistics",
  "types-storage",
+ "types-tsearch",
  "types-tuple",
 ]
 

@@ -49,6 +49,9 @@ const F_RANGESEL: Oid = 3169;
 const F_MULTIRANGESEL: Oid = 4243;
 const F_NETWORKSEL: Oid = 3560;
 const F_NETWORKJOINSEL: Oid = 3561;
+/// `tsmatchsel` (ts_selfuncs.c) — `oprrest` of `tsvector @@ tsquery` /
+/// `tsquery @@ tsvector` (pg_proc.dat OID 3686).
+const F_TSMATCHSEL: Oid = 3686;
 const F_ARRAYCONTSEL: Oid = 3817;
 const F_AREASEL: Oid = 139;
 const F_AREAJOINSEL: Oid = 140;
@@ -106,6 +109,12 @@ pub fn call_oprrest<'mcx>(
         F_NETWORKSEL => backend_utils_adt_network_selfuncs::networksel(
             mcx, run, root, operatorid, args, var_relid,
         ),
+        // tsmatchsel (ts_selfuncs.c) — restriction selectivity of `@@`
+        // (tsvector @@ tsquery). Ignores the input collation (C's `#ifdef
+        // NOT_USED` operator + no collation use), so `inputcollid` is unused.
+        F_TSMATCHSEL => {
+            crate::tsmatchsel::tsmatchsel(mcx, run, root, operatorid, args, var_relid)
+        }
         F_ARRAYCONTSEL => backend_utils_adt_array_selfuncs::arraycontsel(
             mcx, run, root, operatorid, args, var_relid,
         ),

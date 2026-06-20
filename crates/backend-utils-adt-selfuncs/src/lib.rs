@@ -55,6 +55,7 @@ pub mod misc;
 pub mod node_sel;
 pub mod patternsel;
 pub mod scalar;
+pub mod tsmatchsel;
 
 /// `DEFAULT_INEQ_SEL` (selfuncs.h), re-exported from [`types_selfuncs`] for the
 /// entry-point dispatch.
