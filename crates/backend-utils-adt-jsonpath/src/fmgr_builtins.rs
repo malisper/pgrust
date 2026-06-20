@@ -93,17 +93,26 @@ fn ok<T>(r: types_error::PgResult<T>) -> T {
 /// `jsonpath_in(cstring) -> jsonpath` (oid 4001): parse text into the flattened
 /// on-disk `jsonpath` image; cross back on the by-ref lane header-stripped.
 ///
-/// The ERROR-context fmgr dispatch passes no `escontext`; a swallowed soft error
-/// (the `None` return) would only arise on the `errsave` path that does not run
-/// here (hard errors raise above), so `None` yields empty content bytes for
-/// completeness.
+/// The fmgr frame carries the caller's `escontext` (C: `fcinfo->context` set by
+/// `InputFunctionCallSafe` for `pg_input_is_valid` / `pg_input_error_info`).
+/// Thread it to `jsonpath_in` so a parse error is reported softly (`errsave`)
+/// rather than thrown; on a recorded soft error `jsonpath_in` returns `None`
+/// (C's `(Datum) 0`) and we mark the result NULL — the safe-call caller reads
+/// the captured error off the escontext, not this value.
 fn fc_jsonpath_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let s = arg_cstring(fcinfo, 0);
+    // Copy the cstring out so the immutable arg borrow is released before we
+    // take a mutable borrow of fcinfo.escontext.
+    let s = arg_cstring(fcinfo, 0).to_owned();
     let m = scratch_mcx();
-    let bytes = ok(crate::jsonpath_in(m.mcx(), s.as_bytes(), None))
-        .map(|image| image.as_slice().to_vec())
-        .unwrap_or_default();
-    ret_varlena(fcinfo, bytes)
+    let result = ok(crate::jsonpath_in(m.mcx(), s.as_bytes(), fcinfo.escontext.as_mut()));
+    match result {
+        Some(image) => ret_varlena(fcinfo, image.as_slice().to_vec()),
+        None => {
+            // Soft error was recorded in escontext; return a NULL result.
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+    }
 }
 
 /// `jsonpath_out(jsonpath) -> cstring` (oid 4003): render the on-disk image to
