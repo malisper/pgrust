@@ -8,20 +8,29 @@
 //! `SystemAttributeByName` lookups, and the PRIMARY-KEY-implied not-null
 //! additions — crosses the outward seam.
 
+use alloc::string::ToString;
+
 use mcx::{Mcx, PgString, PgVec};
 
 use backend_nodes_equalfuncs::equal_node;
 use backend_utils_error::ereport;
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
-    ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERROR,
+    ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+    ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT,
+    ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 
 use types_nodes::ddlnodes::{IndexElem, IndexStmt, CONSTR_EXCLUSION, CONSTR_PRIMARY};
 use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsestmt::ParseState;
 use types_nodes::rawnodes::{SORTBY_DEFAULT, SORTBY_NULLS_DEFAULT};
+use types_core::primitive::{InvalidOid, OidIsValid};
+use types_core::catalog::BTREE_AM_OID;
 use types_core::Oid;
+
+use types_storage::lock::{AccessShareLock, NoLock};
+use backend_access_common_relation::relation_open;
 
 use backend_optimizer_util_plancat_ext_seams as plancat_ext;
 use backend_parser_parse_utilcmd_outward_seams as sx;
@@ -310,52 +319,288 @@ fn make_index_elem<'mcx>(mcx: Mcx<'mcx>, key: &str) -> PgResult<NodePtr<'mcx>> {
 pub fn transform_index_constraint_catalog<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'mcx>,
-    constraint: NodePtr<'mcx>,
+    mut constraint: NodePtr<'mcx>,
     mut index: NodePtr<'mcx>,
     _relation: NodePtr<'mcx>,
-    _rel_oid: Oid,
+    rel_oid: Oid,
     isalter: bool,
     mut columns: PgVec<'mcx, NodePtr<'mcx>>,
     inh_relations: PgVec<'mcx, NodePtr<'mcx>>,
 ) -> PgResult<(NodePtr<'mcx>, PgVec<'mcx, NodePtr<'mcx>>)> {
-    let con = match constraint.node_tag() {
-        ntag::T_Constraint => constraint.expect_constraint(),
-        _ => unreachable!("transformIndexConstraintCatalog: not a Constraint: {}", constraint.node_tag()),
-    };
-    let contype = con.contype;
+    // PRIMARY-KEY-implied not-null constraints accumulate here and are returned
+    // to the caller (which appends them to cxt->nnconstraints).
+    let mut extra_nn: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+
     let is_primary = match index.as_indexstmt() {
         Some(i) => i.primary,
         None => unreachable!("transformIndexConstraintCatalog: index is not an IndexStmt"),
     };
 
-    // PRIMARY-KEY-implied not-null constraints accumulate here and are returned
-    // to the caller (which appends them to cxt->nnconstraints).
-    let mut extra_nn: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+    // ALTER TABLE ADD CONSTRAINT ... USING INDEX: look up the existing index and
+    // verify it, copying its key/INCLUDE columns into constraint->keys /
+    // ->including. This block mutates the source Constraint, so it runs before
+    // the immutable `con` borrow below is taken.
+    {
+        let (indexname, location, contype) = {
+            let con = constraint.expect_constraint();
+            (
+                con.indexname.as_ref().map(|s| s.as_str().to_string()),
+                con.location,
+                con.contype,
+            )
+        };
 
-    // ALTER TABLE ADD CONSTRAINT USING INDEX: look up the existing index and
-    // verify it. Requires relcache/syscache by-OID reads not available here.
-    if con.indexname.is_some() {
-        if !isalter {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                .errmsg("cannot use an existing index in CREATE TABLE")
-                .errposition(parser_errposition(pstate, con.location))
-                .into_error());
+        if let Some(index_name) = indexname {
+            // Grammar should only allow PRIMARY and UNIQUE constraints, and no
+            // explicit column list (constraint->keys == NIL).
+            debug_assert!(contype == CONSTR_PRIMARY || contype == types_nodes::ddlnodes::CONSTR_UNIQUE);
+
+            // Must be ALTER, not CREATE, but grammar doesn't enforce that.
+            if !isalter {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg("cannot use an existing index in CREATE TABLE")
+                    .errposition(parser_errposition(pstate, location))
+                    .into_error());
+            }
+
+            // Open the heap relation (already locked by the ALTER) to read its
+            // namespace and TupleDesc.
+            let heap_rel = relation_open(mcx, rel_oid, NoLock)?;
+            let heap_namespace = heap_rel.rd_rel.relnamespace;
+
+            // Look for the index in the same schema as the table.
+            let index_oid = backend_utils_cache_lsyscache::relation::get_relname_relid(&index_name, heap_namespace)?;
+            if !OidIsValid(index_oid) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_UNDEFINED_OBJECT)
+                    .errmsg(alloc::format!("index \"{index_name}\" does not exist"))
+                    .errposition(parser_errposition(pstate, location))
+                    .into_error());
+            }
+
+            // Open the index (this throws if it is not an index).
+            let index_rel = relation_open(mcx, index_oid, AccessShareLock)?;
+            let index_form = match &index_rel.rd_index {
+                Some(f) => f,
+                None => {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                        .errmsg(alloc::format!("\"{index_name}\" is not an index"))
+                        .errposition(parser_errposition(pstate, location))
+                        .into_error());
+                }
+            };
+
+            // Check that it does not have an associated constraint already.
+            if OidIsValid(backend_catalog_pg_depend_seams::get_index_constraint::call(index_oid)?) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .errmsg(alloc::format!(
+                        "index \"{index_name}\" is already associated with a constraint"
+                    ))
+                    .errposition(parser_errposition(pstate, location))
+                    .into_error());
+            }
+
+            // Perform validity checks on the index.
+            if index_form.indrelid != rel_oid {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .errmsg(alloc::format!(
+                        "index \"{}\" does not belong to table \"{}\"",
+                        index_name,
+                        heap_rel.name()
+                    ))
+                    .errposition(parser_errposition(pstate, location))
+                    .into_error());
+            }
+
+            if !index_form.indisvalid {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .errmsg(alloc::format!("index \"{index_name}\" is not valid"))
+                    .errposition(parser_errposition(pstate, location))
+                    .into_error());
+            }
+
+            // Today we forbid non-unique indexes.
+            if !index_form.indisunique {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                    .errmsg(alloc::format!("\"{index_name}\" is not a unique index"))
+                    .errdetail(
+                        "Cannot create a primary key or unique constraint using such an index."
+                            .to_string(),
+                    )
+                    .errposition(parser_errposition(pstate, location))
+                    .into_error());
+            }
+
+            // BuildIndexInfo gives the expression / predicate detection and the
+            // per-column heap attribute numbers (ii_IndexAttrNumbers == indkey).
+            let index_info =
+                backend_catalog_index_seams::build_index_info::call(mcx, &index_rel)?;
+
+            if index_info.ii_Expressions.as_ref().is_some_and(|e| !e.is_empty()) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                    .errmsg(alloc::format!("index \"{index_name}\" contains expressions"))
+                    .errdetail(
+                        "Cannot create a primary key or unique constraint using such an index."
+                            .to_string(),
+                    )
+                    .errposition(parser_errposition(pstate, location))
+                    .into_error());
+            }
+
+            if index_info.ii_Predicate.as_ref().is_some_and(|p| !p.is_empty()) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                    .errmsg(alloc::format!("\"{index_name}\" is a partial index"))
+                    .errdetail(
+                        "Cannot create a primary key or unique constraint using such an index."
+                            .to_string(),
+                    )
+                    .errposition(parser_errposition(pstate, location))
+                    .into_error());
+            }
+
+            // It's probably unsafe to change a deferred index to non-deferred.
+            // (A non-constraint index couldn't be deferred anyway, so this case
+            // should never occur; no need to sweat, but let's check it.)
+            let con_deferrable = constraint.expect_constraint().deferrable;
+            if !index_form.indimmediate && !con_deferrable {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                    .errmsg(alloc::format!("\"{index_name}\" is a deferrable index"))
+                    .errdetail(
+                        "Cannot create a non-deferrable constraint using a deferrable index."
+                            .to_string(),
+                    )
+                    .errposition(parser_errposition(pstate, location))
+                    .into_error());
+            }
+
+            // Insist on it being a btree. We must have an index that exactly
+            // matches what you'd get from plain ADD CONSTRAINT syntax, else dump
+            // and reload will produce a different index (breaking pg_upgrade in
+            // particular). get_index_am_oid(DEFAULT_INDEX_TYPE, false) is BTREE_AM_OID.
+            if index_rel.rd_rel.relam != BTREE_AM_OID {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                    .errmsg(alloc::format!("index \"{index_name}\" is not a btree"))
+                    .errposition(parser_errposition(pstate, location))
+                    .into_error());
+            }
+
+            let indnatts = index_form.indnatts as usize;
+            let indnkeyatts = index_form.indnkeyatts as usize;
+
+            // Accumulate the new constraint->keys / ->including String nodes plus
+            // any PRIMARY-KEY-implied not-null constraints.
+            let mut new_keys: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+            let mut new_including: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+
+            for i in 0..indnatts {
+                let attnum = index_info.ii_IndexAttrNumbers[i];
+
+                // We shouldn't see attnum == 0 here (expression indexes already
+                // rejected). Resolve the heap attribute: typid / collation from
+                // the TupleDesc (attnum > 0) or SystemAttributeDefinition (< 0).
+                let (atttypid, attcollation) = if attnum > 0 {
+                    debug_assert!((attnum as usize) <= heap_rel.rd_att.natts as usize);
+                    let att = heap_rel.rd_att.attr((attnum - 1) as usize);
+                    (att.atttypid, att.attcollation)
+                } else {
+                    let (typid, _typmod, coll) =
+                        plancat_ext::system_attribute_definition::call(attnum as i32)?;
+                    (typid, coll)
+                };
+                let attname = backend_utils_cache_lsyscache::attribute::get_attname(mcx, rel_oid, attnum, false)?
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default();
+
+                if i < indnkeyatts {
+                    // Insist on default opclass, collation, and sort options.
+                    // C: `attoptions != (Datum) 0`. `get_attoptions` returns
+                    // `Ok(None)` when the pg_attribute.attoptions attr is SQL NULL
+                    // (no per-column options), `Ok(Some(_))` when set.
+                    let has_attoptions =
+                        backend_utils_cache_lsyscache::attribute::get_attoptions(mcx, index_oid, (i + 1) as i16)?
+                            .is_some();
+                    let defopclass = backend_utils_cache_lsyscache_seams::get_default_opclass::call(
+                        atttypid,
+                        index_rel.rd_rel.relam,
+                    )?;
+                    let indclass_i = backend_utils_cache_lsyscache::relation::get_index_column_opclass(index_oid, (i + 1) as i32)?;
+                    let indcoll_i = index_rel.rd_indcollation.get(i).copied().unwrap_or(InvalidOid);
+                    let indoption_i = index_rel.rd_indoption.get(i).copied().unwrap_or(0);
+
+                    if indclass_i != defopclass
+                        || attcollation != indcoll_i
+                        || has_attoptions
+                        || indoption_i != 0
+                    {
+                        return Err(ereport(ERROR)
+                            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                            .errmsg(alloc::format!(
+                                "index \"{}\" column number {} does not have default sorting behavior",
+                                index_name,
+                                i + 1
+                            ))
+                            .errdetail(
+                                "Cannot create a primary key or unique constraint using such an index."
+                                    .to_string(),
+                            )
+                            .errposition(parser_errposition(pstate, location))
+                            .into_error());
+                    }
+
+                    // If a PK, ensure the columns get not null constraints.
+                    if contype == CONSTR_PRIMARY {
+                        let nn = make_not_null_constraint(mcx, &attname)?;
+                        extra_nn.push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn))?);
+                    }
+
+                    new_keys.push(mcx::alloc_in(
+                        mcx,
+                        Node::mk_string(mcx, types_nodes::value::StringNode {
+                            sval: PgString::from_str_in(&attname, mcx)?,
+                        }),
+                    )?);
+                } else {
+                    new_including.push(mcx::alloc_in(
+                        mcx,
+                        Node::mk_string(mcx, types_nodes::value::StringNode {
+                            sval: PgString::from_str_in(&attname, mcx)?,
+                        }),
+                    )?);
+                }
+            }
+
+            // Close the index relation but keep the lock (NoLock close releases
+            // only the relcache reference; the AccessShareLock is kept).
+            index_rel.close(NoLock)?;
+            heap_rel.close(NoLock)?;
+
+            // Scribble the resolved keys / including onto the source constraint,
+            // and set index->indexOid.
+            if let Some(c) = constraint.as_constraint_mut() {
+                c.keys = new_keys;
+                c.including = new_including;
+            }
+            if let Some(i) = index.as_indexstmt_mut() {
+                i.indexOid = index_oid;
+            }
         }
-        // ALTER TABLE ... ADD CONSTRAINT ... USING INDEX: C opens the named
-        // index via get_relname_relid + index_open, validates it (unique,
-        // non-expression, non-partial, btree, default opclass/collation/sort
-        // options) and copies its key columns into constraint->keys /
-        // ->including. That whole leg needs relcache/syscache by-OID reads
-        // (index_open, RelationGetIndexExpressions/Predicate, GetDefaultOpClass,
-        // SysCacheGetAttrNotNull on pg_index) which are not reachable from the
-        // parse-analysis crate. Stop loudly and recoverably rather than crash.
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("ADD CONSTRAINT ... USING INDEX is not yet supported")
-            .errposition(parser_errposition(pstate, con.location))
-            .into_error());
     }
+
+    let con = match constraint.node_tag() {
+        ntag::T_Constraint => constraint.expect_constraint(),
+        _ => unreachable!("transformIndexConstraintCatalog: not a Constraint: {}", constraint.node_tag()),
+    };
+    let contype = con.contype;
 
     // EXCLUDE: break the (IndexElem, opname) pairs apart.
     if contype == CONSTR_EXCLUSION {

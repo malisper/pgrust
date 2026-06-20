@@ -13946,8 +13946,10 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-relation",
  "backend-access-table-table",
+ "backend-catalog-index-seams",
  "backend-catalog-namespace",
  "backend-catalog-pg-depend",
+ "backend-catalog-pg-depend-seams",
  "backend-commands-indexcmds",
  "backend-nodes-core",
  "backend-nodes-equalfuncs",
@@ -13967,6 +13969,7 @@ dependencies = [
  "backend-utils-adt-format-type",
  "backend-utils-adt-ruleutils",
  "backend-utils-cache-lsyscache",
+ "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-typcache",
  "backend-utils-error",
  "mcx",

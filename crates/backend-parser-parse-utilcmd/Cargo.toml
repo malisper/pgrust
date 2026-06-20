@@ -33,6 +33,14 @@ backend-parser-parse-utilcmd-outward-seams = { path = "../backend-parser-parse-u
 # (decls-only seam crate: leaf, cycle-free).
 backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
 
+# ALTER TABLE ADD CONSTRAINT ... USING INDEX validation leg
+# (transformIndexConstraint): BuildIndexInfo (expression/predicate/unique probe),
+# get_index_constraint (already-a-constraint check), GetDefaultOpClass (default
+# sorting behavior check). Decls-only seam crates: leaves, cycle-free.
+backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
+backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+
 # Merged sibling owner called directly (cycle-free): node equality for the
 # index-redundancy dedup (equal()).
 backend-nodes-equalfuncs = { path = "../backend-nodes-equalfuncs" }

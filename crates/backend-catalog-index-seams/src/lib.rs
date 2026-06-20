@@ -150,6 +150,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `index_check_primary_key(heapRel, indexInfo, is_alter_table, stmt)`
+    /// (catalog/index.c): apply the special checks before promoting an index to
+    /// a PRIMARY KEY — no pre-existing primary key (ALTER TABLE / partition-of),
+    /// no NULLS NOT DISTINCT index, and every key column marked NOT NULL (and not
+    /// an expression). Reached from `ATExecAddIndexConstraint` (ADD CONSTRAINT
+    /// ... PRIMARY KEY USING INDEX). The unused C `const IndexStmt *stmt` is
+    /// omitted (its body never reads it). `Err` carries the `ereport(ERROR)`s.
+    pub fn index_check_primary_key<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        heap_rel: &types_rel::Relation<'mcx>,
+        index_info: &types_nodes::execnodes::IndexInfo<'mcx>,
+        is_alter_table: bool,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `FormIndexDatum(indexInfo, slot, estate, values, isnull)`
     /// (catalog/index.c): compute the index tuple's column values from the
     /// slot's row, evaluating index expressions in the estate's per-tuple

@@ -4000,6 +4000,7 @@ pub fn init_seams() {
     // BuildIndexInfo (brin insert-vacuum, amcheck) and index_build (bootstrap
     // build_indices) — the build / introspection core (keystones #340–#344).
     index_seam::build_index_info::set(BuildIndexInfo);
+    index_seam::index_check_primary_key::set(index_check_primary_key);
     index_seam::index_build::set(index_build);
     index_seam::relation_truncate_indexes::set(RelationTruncateIndexes);
 
