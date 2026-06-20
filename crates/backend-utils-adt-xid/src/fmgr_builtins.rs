@@ -22,8 +22,9 @@
 
 use types_core::{CommandId, FullTransactionId, TransactionId};
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
@@ -124,27 +125,21 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("xid fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 /// Build a [`StringInfo`] over the inbound wire bytes for a `*recv` body.
-fn recv_buf<'mcx>(mcx: mcx::Mcx<'mcx>, src: &[u8]) -> StringInfo<'mcx> {
+fn recv_buf<'mcx>(mcx: mcx::Mcx<'mcx>, src: &[u8]) -> PgResult<StringInfo<'mcx>> {
     let mut data = mcx::PgVec::new_in(mcx);
     if data.try_reserve(src.len()).is_err() {
-        raise(types_error::PgError::error("out of memory"));
+        return Err(types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(src);
-    StringInfo::from_vec(data)
+    Ok(StringInfo::from_vec(data))
 }
 
 // ---------------------------------------------------------------------------
 // xid fc_ adapters.
 // ---------------------------------------------------------------------------
 
-fn fc_xidin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_xidin(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // C: uint32in_subr(s, NULL, "xid", fcinfo->context). Forward the soft
     // ErrorSaveContext installed on the frame by InputFunctionCallSafe so a
     // recoverable parse failure `ereturn`s into the sink (returning a 0
@@ -152,183 +147,167 @@ fn fc_xidin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // because `arg_cstring` borrows `fcinfo` immutably while `escontext_mut`
     // needs it mutably.
     let s = arg_cstring(fcinfo, 0).to_owned();
-    match crate::xidin(&s, fcinfo.escontext_mut()) {
-        Ok(v) => ret_xid(v),
-        Err(e) => raise(e),
-    }
+    let v = crate::xidin(&s, fcinfo.escontext_mut())?;
+    Ok(ret_xid(v))
 }
 
-fn fc_xidout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_xidout(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let s = crate::xidout(arg_xid(fcinfo, 0));
-    ret_cstring(fcinfo, s)
+    Ok(ret_cstring(fcinfo, s))
 }
 
-fn fc_xidrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_xidrecv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mut buf = recv_buf(m.mcx(), arg_varlena(fcinfo, 0));
-    match crate::xidrecv(&mut buf) {
-        Ok(v) => ret_xid(v),
-        Err(e) => raise(e),
-    }
+    let mut buf = recv_buf(m.mcx(), arg_varlena(fcinfo, 0))?;
+    let v = crate::xidrecv(&mut buf)?;
+    Ok(ret_xid(v))
 }
 
-fn fc_xidsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_xidsend(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let arg1 = arg_xid(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = match crate::xidsend(m.mcx(), arg1) {
-        Ok(bytea) => bytea.as_bytes().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_varlena(fcinfo, bytes)
+    let bytes = crate::xidsend(m.mcx(), arg1)?.as_bytes().to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
 }
 
-fn fc_xideq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::xideq(arg_xid(fcinfo, 0), arg_xid(fcinfo, 1)))
+fn fc_xideq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::xideq(arg_xid(fcinfo, 0), arg_xid(fcinfo, 1))))
 }
-fn fc_xidneq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::xidneq(arg_xid(fcinfo, 0), arg_xid(fcinfo, 1)))
-}
-
-fn fc_hashxid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(crate::hashxid(arg_xid(fcinfo, 0)))
-}
-fn fc_hashxidextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(crate::hashxidextended(arg_xid(fcinfo, 0), arg_i64(fcinfo, 1) as u64))
+fn fc_xidneq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::xidneq(arg_xid(fcinfo, 0), arg_xid(fcinfo, 1))))
 }
 
-fn fc_xid_age(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::xid_age(arg_xid(fcinfo, 0)) {
-        Ok(v) => ret_i32(v),
-        Err(e) => raise(e),
-    }
+fn fc_hashxid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(crate::hashxid(arg_xid(fcinfo, 0))))
 }
-fn fc_mxid_age(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::mxid_age(arg_xid(fcinfo, 0)) {
-        Ok(v) => ret_i32(v),
-        Err(e) => raise(e),
-    }
+fn fc_hashxidextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u64(crate::hashxidextended(
+        arg_xid(fcinfo, 0),
+        arg_i64(fcinfo, 1) as u64,
+    )))
+}
+
+fn fc_xid_age(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let v = crate::xid_age(arg_xid(fcinfo, 0))?;
+    Ok(ret_i32(v))
+}
+fn fc_mxid_age(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let v = crate::mxid_age(arg_xid(fcinfo, 0))?;
+    Ok(ret_i32(v))
 }
 
 // ---------------------------------------------------------------------------
 // xid8 fc_ adapters.
 // ---------------------------------------------------------------------------
 
-fn fc_xid8in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_xid8in(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // Forward the soft ErrorSaveContext (see fc_xidin).
     let s = arg_cstring(fcinfo, 0).to_owned();
-    match crate::xid8in(&s, fcinfo.escontext_mut()) {
-        Ok(v) => ret_fxid(v),
-        Err(e) => raise(e),
-    }
+    let v = crate::xid8in(&s, fcinfo.escontext_mut())?;
+    Ok(ret_fxid(v))
 }
 
-fn fc_xid8out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_xid8out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let s = crate::xid8out(arg_fxid(fcinfo, 0));
-    ret_cstring(fcinfo, s)
+    Ok(ret_cstring(fcinfo, s))
 }
 
-fn fc_xid8recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_xid8recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mut buf = recv_buf(m.mcx(), arg_varlena(fcinfo, 0));
-    match crate::xid8recv(&mut buf) {
-        Ok(v) => ret_fxid(v),
-        Err(e) => raise(e),
-    }
+    let mut buf = recv_buf(m.mcx(), arg_varlena(fcinfo, 0))?;
+    let v = crate::xid8recv(&mut buf)?;
+    Ok(ret_fxid(v))
 }
 
-fn fc_xid8send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_xid8send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let arg1 = arg_fxid(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = match crate::xid8send(m.mcx(), arg1) {
-        Ok(bytea) => bytea.as_bytes().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_varlena(fcinfo, bytes)
+    let bytes = crate::xid8send(m.mcx(), arg1)?.as_bytes().to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
 }
 
-fn fc_xid8toxid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_xid(crate::xid8toxid(arg_fxid(fcinfo, 0)))
+fn fc_xid8toxid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_xid(crate::xid8toxid(arg_fxid(fcinfo, 0))))
 }
 
-fn fc_xid8eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::xid8eq(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1)))
+fn fc_xid8eq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::xid8eq(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1))))
 }
-fn fc_xid8ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::xid8ne(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1)))
+fn fc_xid8ne(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::xid8ne(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1))))
 }
-fn fc_xid8lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::xid8lt(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1)))
+fn fc_xid8lt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::xid8lt(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1))))
 }
-fn fc_xid8gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::xid8gt(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1)))
+fn fc_xid8gt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::xid8gt(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1))))
 }
-fn fc_xid8le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::xid8le(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1)))
+fn fc_xid8le(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::xid8le(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1))))
 }
-fn fc_xid8ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::xid8ge(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1)))
+fn fc_xid8ge(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::xid8ge(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1))))
 }
-fn fc_xid8cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::xid8cmp(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1)))
+fn fc_xid8cmp(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_i32(crate::xid8cmp(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1))))
 }
-fn fc_xid8_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_fxid(crate::xid8_larger(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1)))
+fn fc_xid8_larger(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_fxid(crate::xid8_larger(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1))))
 }
-fn fc_xid8_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_fxid(crate::xid8_smaller(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1)))
+fn fc_xid8_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_fxid(crate::xid8_smaller(arg_fxid(fcinfo, 0), arg_fxid(fcinfo, 1))))
 }
-fn fc_hashxid8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(crate::hashxid8(arg_fxid(fcinfo, 0)))
+fn fc_hashxid8(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(crate::hashxid8(arg_fxid(fcinfo, 0))))
 }
-fn fc_hashxid8extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(crate::hashxid8extended(arg_fxid(fcinfo, 0), arg_i64(fcinfo, 1) as u64))
+fn fc_hashxid8extended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u64(crate::hashxid8extended(
+        arg_fxid(fcinfo, 0),
+        arg_i64(fcinfo, 1) as u64,
+    )))
 }
 
 // ---------------------------------------------------------------------------
 // cid fc_ adapters.
 // ---------------------------------------------------------------------------
 
-fn fc_cidin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cidin(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // Forward the soft ErrorSaveContext (see fc_xidin).
     let s = arg_cstring(fcinfo, 0).to_owned();
-    match crate::cidin(&s, fcinfo.escontext_mut()) {
-        Ok(v) => ret_cid(v),
-        Err(e) => raise(e),
-    }
+    let v = crate::cidin(&s, fcinfo.escontext_mut())?;
+    Ok(ret_cid(v))
 }
 
-fn fc_cidout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cidout(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let s = crate::cidout(arg_cid(fcinfo, 0));
-    ret_cstring(fcinfo, s)
+    Ok(ret_cstring(fcinfo, s))
 }
 
-fn fc_cidrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cidrecv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mut buf = recv_buf(m.mcx(), arg_varlena(fcinfo, 0));
-    match crate::cidrecv(&mut buf) {
-        Ok(v) => ret_cid(v),
-        Err(e) => raise(e),
-    }
+    let mut buf = recv_buf(m.mcx(), arg_varlena(fcinfo, 0))?;
+    let v = crate::cidrecv(&mut buf)?;
+    Ok(ret_cid(v))
 }
 
-fn fc_cidsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cidsend(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let arg1 = arg_cid(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = match crate::cidsend(m.mcx(), arg1) {
-        Ok(bytea) => bytea.as_bytes().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_varlena(fcinfo, bytes)
+    let bytes = crate::cidsend(m.mcx(), arg1)?.as_bytes().to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
 }
 
-fn fc_cideq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::cideq(arg_cid(fcinfo, 0), arg_cid(fcinfo, 1)))
+fn fc_cideq(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_bool(crate::cideq(arg_cid(fcinfo, 0), arg_cid(fcinfo, 1))))
 }
-fn fc_hashcid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(crate::hashcid(arg_cid(fcinfo, 0)))
+fn fc_hashcid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(crate::hashcid(arg_cid(fcinfo, 0))))
 }
-fn fc_hashcidextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(crate::hashcidextended(arg_cid(fcinfo, 0), arg_i64(fcinfo, 1) as u64))
+fn fc_hashcidextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u64(crate::hashcidextended(
+        arg_cid(fcinfo, 0),
+        arg_i64(fcinfo, 1) as u64,
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -341,22 +320,25 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the `xid` / `xid8` fmgr builtins (C: their `fmgr_builtins[]` rows).
 /// OIDs / nargs / strict / retset transcribed from `pg_proc.dat`.
 pub fn register_xid_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- xid I/O ----
         builtin(50, "xidin", 1, true, false, fc_xidin),
         builtin(51, "xidout", 1, true, false, fc_xidout),
@@ -400,7 +382,7 @@ pub fn register_xid_builtins() {
 /// Register the `cid` fmgr builtins (C: their `fmgr_builtins[]` rows). Same
 /// contract as [`register_xid_builtins`].
 pub fn register_cid_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(52, "cidin", 1, true, false, fc_cidin),
         builtin(53, "cidout", 1, true, false, fc_cidout),
         builtin(2442, "cidrecv", 1, true, false, fc_cidrecv),
