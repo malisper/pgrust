@@ -704,6 +704,904 @@ fn subquery_planner<'mcx>(
     )
 }
 
+// ===========================================================================
+// preprocess_query_expressions cold-clause helpers.
+//
+// FRAME-BLOAT: `preprocess_query_expressions` (a nested fn in
+// `subquery_planner_carried`) holds a large union of branch-local temporaries
+// (owned `Expr`s, cloned `Query` nodes, per-clause `PgBox`es) across ~15
+// sequential per-clause blocks. In an unoptimized (dev) build the compiler
+// reserves stack for every local in the function at once, so a trivial query
+// (e.g. `SELECT 1`, which only runs the `targetList` block) still pays for the
+// whole union — the dominant per-statement stack cost. Each cold clause block
+// is hoisted here behind its own `#[inline(never)]` boundary so its locals get
+// a separate frame allocated only when that clause is actually present.
+// Behavior-preserving: statements are moved verbatim, `?` early-exits now
+// return from the helper and propagate unchanged. Mirrors C, where these are
+// sequential statements but the equivalent expression walks live in callees.
+// ===========================================================================
+
+/// withCheckOptions preprocessing (planner.c:907-916). INSERT/UPDATE on an
+/// updatable view with WITH CHECK OPTION only.
+#[inline(never)]
+fn pqe_with_check_options<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    outer_query_ref: Option<&Node<'mcx>>,
+) -> PgResult<()> {
+    let n_wco = run.resolve(root.parse).withCheckOptions.len();
+    for i in 0..n_wco {
+        // wco->qual = preprocess_expression(root, wco->qual, EXPRKIND_QUAL).
+        // Take the qual NodePtr out of the WCO node, convert to an owned
+        // Expr, preprocess, and write the result back.
+        let qual_expr: Option<Expr> = {
+            let wco_node = run.resolve_mut(root.parse).withCheckOptions[i].as_mut();
+            let wco = wco_node.as_withcheckoption_mut().expect(
+                "subquery_planner: withCheckOptions element is not a WithCheckOption node",
+            );
+            match wco.qual.take() {
+                None => None,
+                Some(q) => match mcx::PgBox::into_inner(q).into_expr() {
+                    Some(e) => Some(e),
+                    None => {
+                        return Err(PgError::error(
+                            "subquery_planner: WithCheckOption qual is not an \
+                             expression node",
+                        ));
+                    }
+                },
+            }
+        };
+
+        let processed =
+            preprocess_expression(mcx, &mut *root, run, outer_query_ref, qual_expr, EXPRKIND_QUAL)?;
+
+        let wco_node = run.resolve_mut(root.parse).withCheckOptions[i].as_mut();
+        let wco = wco_node.as_withcheckoption_mut().expect(
+            "subquery_planner: withCheckOptions element is not a WithCheckOption node",
+        );
+        wco.qual = match processed {
+            Some(pe) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?),
+            None => None,
+        };
+    }
+
+    // newWithCheckOptions = keep only the WCOs whose qual survived.
+    let mut kept: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
+        mcx::PgVec::new_in(mcx);
+    for wco_ptr in run.resolve_mut(root.parse).withCheckOptions.drain(..) {
+        let keep = wco_ptr
+            .as_withcheckoption()
+            .map(|w| w.qual.is_some())
+            .unwrap_or(false);
+        if keep {
+            kept.push(wco_ptr);
+        }
+    }
+    run.resolve_mut(root.parse).withCheckOptions = kept;
+    Ok(())
+}
+
+/// returningList preprocessing (planner.c:918-920). INSERT/UPDATE/DELETE
+/// ... RETURNING only.
+#[inline(never)]
+fn pqe_returning_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    outer_query_ref: Option<&Node<'mcx>>,
+) -> PgResult<()> {
+    let n = run.resolve(root.parse).returningList.len();
+    for i in 0..n {
+        let e = run.resolve_mut(root.parse).returningList[i].expr.take();
+        let e = match e {
+            Some(b) => Some(mcx::PgBox::into_inner(b)),
+            None => None,
+        };
+        let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_TARGET)?;
+        run.resolve_mut(root.parse).returningList[i].expr = match processed {
+            Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+            None => None,
+        };
+    }
+    Ok(())
+}
+
+/// windowClause start/end offset preprocessing (planner.c:927-936). Windowed
+/// queries with frame offsets only.
+#[inline(never)]
+fn pqe_window_clause<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    outer_query_ref: Option<&Node<'mcx>>,
+) -> PgResult<()> {
+    let n_wc = run.resolve(root.parse).windowClause.len();
+    for i in 0..n_wc {
+        // wc->startOffset = preprocess_expression(startOffset, EXPRKIND_LIMIT).
+        let start = extract_windowclause_offset(run, &root, i, true);
+        let processed =
+            preprocess_expression(mcx, &mut *root, run, outer_query_ref, start, EXPRKIND_LIMIT)?;
+        set_windowclause_offset(mcx, run, &root, i, true, processed)?;
+
+        // wc->endOffset = preprocess_expression(endOffset, EXPRKIND_LIMIT).
+        let end = extract_windowclause_offset(run, &root, i, false);
+        let processed =
+            preprocess_expression(mcx, &mut *root, run, outer_query_ref, end, EXPRKIND_LIMIT)?;
+        set_windowclause_offset(mcx, run, &root, i, false, processed)?;
+    }
+    Ok(())
+}
+
+/// limitOffset / limitCount preprocessing (planner.c:938-941). LIMIT/OFFSET
+/// queries only.
+#[inline(never)]
+fn pqe_limit<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    outer_query_ref: Option<&Node<'mcx>>,
+) -> PgResult<()> {
+    {
+        let lo = run.resolve_mut(root.parse).limitOffset.take();
+        let lo = lo.map(mcx::PgBox::into_inner);
+        let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, lo, EXPRKIND_LIMIT)?;
+        run.resolve_mut(root.parse).limitOffset = match processed {
+            Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+            None => None,
+        };
+    }
+    {
+        let lc = run.resolve_mut(root.parse).limitCount.take();
+        let lc = lc.map(mcx::PgBox::into_inner);
+        let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, lc, EXPRKIND_LIMIT)?;
+        run.resolve_mut(root.parse).limitCount = match processed {
+            Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+            None => None,
+        };
+    }
+    Ok(())
+}
+
+/// onConflict expression lists preprocessing (planner.c:943-963). INSERT ...
+/// ON CONFLICT only.
+#[inline(never)]
+fn pqe_on_conflict<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    outer_query_ref: Option<&Node<'mcx>>,
+) -> PgResult<()> {
+    // arbiterElems: each element is an InferenceElem Expr wrapped in a
+    // Node::Expr (EXPRKIND_ARBITER_ELEM).
+    let n = run
+        .resolve(root.parse)
+        .onConflict
+        .as_deref()
+        .map(|oc| oc.arbiterElems.len())
+        .unwrap_or(0);
+    for i in 0..n {
+        let e = take_onconflict_list_expr(run, &root, OcList::ArbiterElems, i);
+        let processed = preprocess_expression(
+            mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_ARBITER_ELEM,
+        )?;
+        set_onconflict_list_expr(mcx, run, &root, OcList::ArbiterElems, i, processed)?;
+    }
+
+    // arbiterWhere (EXPRKIND_QUAL).
+    {
+        let w = take_onconflict_scalar(run, &root, OcScalar::ArbiterWhere);
+        let processed =
+            preprocess_expression(mcx, &mut *root, run, outer_query_ref, w, EXPRKIND_QUAL)?;
+        set_onconflict_scalar(mcx, run, &root, OcScalar::ArbiterWhere, processed)?;
+    }
+
+    // onConflictSet: each element is a TargetEntry; preprocess its expr
+    // (EXPRKIND_TARGET).
+    let n = run
+        .resolve(root.parse)
+        .onConflict
+        .as_deref()
+        .map(|oc| oc.onConflictSet.len())
+        .unwrap_or(0);
+    for i in 0..n {
+        let e = take_onconflict_list_expr(run, &root, OcList::OnConflictSet, i);
+        let processed = preprocess_expression(
+            mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_TARGET,
+        )?;
+        set_onconflict_list_expr(mcx, run, &root, OcList::OnConflictSet, i, processed)?;
+    }
+
+    // onConflictWhere (EXPRKIND_QUAL).
+    {
+        let w = take_onconflict_scalar(run, &root, OcScalar::OnConflictWhere);
+        let processed =
+            preprocess_expression(mcx, &mut *root, run, outer_query_ref, w, EXPRKIND_QUAL)?;
+        set_onconflict_scalar(mcx, run, &root, OcScalar::OnConflictWhere, processed)?;
+    }
+    // exclRelTlist contains only Vars, so no preprocessing needed.
+    Ok(())
+}
+
+/// mergeActionList preprocessing (planner.c:965-978). MERGE only.
+#[inline(never)]
+fn pqe_merge_action_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    outer_query_ref: Option<&Node<'mcx>>,
+) -> PgResult<()> {
+    let n_actions = run.resolve(root.parse).mergeActionList.len();
+    for ai in 0..n_actions {
+        // action->targetList: preprocess each TargetEntry expr.
+        let n_tle = {
+            let action = run.resolve(root.parse).mergeActionList[ai]
+                .as_mergeaction()
+                .expect("mergeActionList entry is a MergeAction");
+            action.targetList.len()
+        };
+        for ti in 0..n_tle {
+            // Take the TargetEntry expr out of the action's node.
+            let e = {
+                let action = run.resolve_mut(root.parse).mergeActionList[ai]
+                    .as_mergeaction_mut()
+                    .unwrap();
+                action.targetList[ti]
+                    .as_targetentry_mut()
+                    .and_then(|tle| tle.expr.take())
+                    .map(mcx::PgBox::into_inner)
+            };
+            let processed = preprocess_expression(
+                mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_TARGET,
+            )?;
+            let processed = match processed {
+                Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+                None => None,
+            };
+            let action = run.resolve_mut(root.parse).mergeActionList[ai]
+                .as_mergeaction_mut()
+                .unwrap();
+            if let Some(tle) = action.targetList[ti].as_targetentry_mut() {
+                tle.expr = processed;
+            }
+        }
+
+        // action->qual: preprocess the WHEN condition (EXPRKIND_QUAL).
+        let q = {
+            let action = run.resolve_mut(root.parse).mergeActionList[ai]
+                .as_mergeaction_mut()
+                .unwrap();
+            action
+                .qual
+                .take()
+                .map(mcx::PgBox::into_inner)
+                .and_then(|node| node.into_expr())
+        };
+        let processed =
+            preprocess_expression(mcx, &mut *root, run, outer_query_ref, q, EXPRKIND_QUAL)?;
+        let action = run.resolve_mut(root.parse).mergeActionList[ai]
+            .as_mergeaction_mut()
+            .unwrap();
+        action.qual = match processed {
+            Some(pe) => Some(mcx::alloc_in(mcx, Node::Expr(pe))?),
+            None => None,
+        };
+    }
+    Ok(())
+}
+
+/// mergeJoinCondition preprocessing (planner.c:980-981). MERGE only.
+#[inline(never)]
+fn pqe_merge_join_condition<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    outer_query_ref: Option<&Node<'mcx>>,
+) -> PgResult<()> {
+    let c = run.resolve_mut(root.parse).mergeJoinCondition.take();
+    let c = c.map(mcx::PgBox::into_inner);
+    let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, c, EXPRKIND_QUAL)?;
+    run.resolve_mut(root.parse).mergeJoinCondition = match processed {
+        Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
+        None => None,
+    };
+    Ok(())
+}
+
+/// append_rel_list translated_vars preprocessing (planner.c:983-985).
+/// Inheritance / UNION ALL flattening only.
+#[inline(never)]
+fn pqe_append_rel_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    outer_query_ref: Option<&Node<'mcx>>,
+) -> PgResult<()> {
+    // Snapshot (appinfo index, var slot index, NodeId) for every
+    // translated_var; a default-NodeId (0) slot is a dropped column
+    // (C NULL) and is skipped.
+    let mut work: Vec<(usize, usize, types_pathnodes::NodeId)> = Vec::new();
+    for (ai, appinfo) in root.append_rel_list.iter().enumerate() {
+        for (vi, id) in appinfo.translated_vars.iter().enumerate() {
+            if *id == types_pathnodes::NodeId::default() {
+                continue;
+            }
+            work.push((ai, vi, *id));
+        }
+    }
+    for (_ai, _vi, id) in work {
+        let live = root.node(id).clone_in(mcx)?;
+        let processed = preprocess_expression(
+            mcx,
+            &mut *root,
+            run,
+            outer_query_ref,
+            Some(live),
+            EXPRKIND_APPINFO,
+        )?;
+        match processed {
+            Some(e) => *root.node_mut(id) = e,
+            // EXPRKIND_APPINFO (not a QUAL) never reduces an expression
+            // to NULL; preprocess_expression only returns None for a
+            // None input or a canonicalize_qual collapse, neither of
+            // which applies here. Keep the original node if it ever did.
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+/// Per-RTE expression preprocessing (planner.c:987-1054): tablesample /
+/// subquery join-alias flattening / function / tablefunc / values / groupexprs,
+/// plus per-element securityQuals. A plain RTE_RELATION SELECT has none of these.
+#[inline(never)]
+fn pqe_per_rte<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    outer_query_ref: Option<&Node<'mcx>>,
+) -> PgResult<()> {
+    use types_nodes::nodes::Node;
+    use types_nodes::parsenodes::RTEKind;
+    let n = run.resolve(root.parse).rtable.len();
+    for i in 0..n {
+        let rtekind = run.resolve(root.parse).rtable[i].rtekind;
+        let lateral = run.resolve(root.parse).rtable[i].lateral;
+
+        match rtekind {
+            RTEKind::RTE_RELATION => {
+                // planner.c:993-998: rte->tablesample =
+                //   preprocess_expression(root, (Node *) rte->tablesample,
+                //                         EXPRKIND_TABLESAMPLE).
+                // C casts the whole TableSampleClause* to a Node and folds it.
+                // In the owned model the clause is a `Node::TableSampleClause`
+                // node pointed at by `rte->tablesample`; the only expression
+                // subtrees it carries are its `args` list and its optional
+                // `repeatable` Expr. EXPRKIND_TABLESAMPLE runs
+                // eval_const_expressions (+ SS_process_sublinks /
+                // SS_replace_correlation_vars), all per-expression and
+                // recursive, so preprocessing each `args` element and the
+                // `repeatable` Expr individually is equivalent to folding the
+                // whole clause node once.
+                if run.resolve(root.parse).rtable[i].tablesample.is_some() {
+                    // Pull the args + repeatable Exprs out of the clause node.
+                    let (args, repeatable): (Vec<Expr>, Option<Expr>) = {
+                        let parse = run.resolve(root.parse);
+                        let ts_node = parse.rtable[i]
+                            .tablesample
+                            .as_deref()
+                            .expect("tablesample is_some");
+                        match ts_node {
+                            Node::TableSampleClause(tsc) => {
+                                let args: Vec<Expr> = match &tsc.args {
+                                    Some(list) => list.iter().cloned().collect(),
+                                    None => Vec::new(),
+                                };
+                                let repeatable =
+                                    tsc.repeatable.as_deref().cloned();
+                                (args, repeatable)
+                            }
+                            _ => {
+                                return Err(types_error::PgError::error(
+                                    "subquery_planner: RTE_RELATION tablesample \
+                                     is not a TableSampleClause node",
+                                ))
+                            }
+                        }
+                    };
+
+                    // Preprocess each args element.
+                    let mut new_args: mcx::PgVec<'mcx, Expr> =
+                        mcx::vec_with_capacity_in(mcx, args.len())?;
+                    for e in args.into_iter() {
+                        let pe = preprocess_expression(
+                            mcx,
+                            &mut *root,
+                            run,
+                            outer_query_ref,
+                            Some(e),
+                            EXPRKIND_TABLESAMPLE,
+                        )?;
+                        let pe = pe.ok_or_else(|| {
+                            types_error::PgError::error(
+                                "subquery_planner: TABLESAMPLE arg folded to NULL",
+                            )
+                        })?;
+                        new_args.push(pe);
+                    }
+
+                    // Preprocess the optional repeatable Expr.
+                    let new_repeatable: Option<alloc::boxed::Box<Expr>> =
+                        match repeatable {
+                            Some(e) => {
+                                let pe = preprocess_expression(
+                                    mcx,
+                                    &mut *root,
+                                    run,
+                                    outer_query_ref,
+                                    Some(e),
+                                    EXPRKIND_TABLESAMPLE,
+                                )?;
+                                let pe = pe.ok_or_else(|| {
+                                    types_error::PgError::error(
+                                        "subquery_planner: TABLESAMPLE repeatable \
+                                         folded to NULL",
+                                    )
+                                })?;
+                                Some(alloc::boxed::Box::new(pe))
+                            }
+                            None => None,
+                        };
+
+                    // Write the preprocessed expressions back into the clause
+                    // node in place.
+                    if let Node::TableSampleClause(tsc) = &mut **run
+                        .resolve_mut(root.parse)
+                        .rtable[i]
+                        .tablesample
+                        .as_mut()
+                        .expect("tablesample is_some")
+                    {
+                        tsc.args = Some(new_args);
+                        tsc.repeatable = new_repeatable;
+                    }
+                }
+            }
+            RTEKind::RTE_SUBQUERY => {
+                if lateral && root.hasJoinRTEs {
+                    panic!(
+                        "subquery_planner: LATERAL subquery join-alias flattening \
+                         (planner.c:1009-1012) is not wired over the owned RTE model"
+                    );
+                }
+            }
+            RTEKind::RTE_VALUES => {
+                // Preprocess the values lists fully (planner.c:1029-1034):
+                // const-fold each row's each column expression. EXPRKIND_VALUES
+                // skips flatten_join_alias_vars/canonicalize. LATERAL VALUES
+                // (CREATE RULE only) panics in preprocess_expression if any
+                // join RTEs are present, matching the C gate.
+                let kind = if lateral {
+                    EXPRKIND_VALUES_LATERAL
+                } else {
+                    EXPRKIND_VALUES
+                };
+                let nrows = run.resolve(root.parse).rtable[i].values_lists.len();
+                for r in 0..nrows {
+                    // Take the row's column expressions out, process, put back.
+                    let row_exprs: mcx::PgVec<'mcx, Expr> = {
+                        let parse = run.resolve(root.parse);
+                        let row_node = &parse.rtable[i].values_lists[r];
+                        let row_node = &**row_node;
+                        let cols = match row_node.node_tag() {
+                            ntag::T_List => row_node.expect_list(),
+                            _ => {
+                                return Err(types_error::PgError::error(
+                                    "subquery_planner: VALUES row is not a List",
+                                ))
+                            }
+                        };
+                        let mut v = mcx::vec_with_capacity_in(mcx, cols.len())?;
+                        for c in cols.iter() {
+                            match c.as_expr() {
+                                // Deep-copy through `clone_in` (copyObject shape),
+                                // not a plain `.clone()`: a VALUES column may be a
+                                // `SubLink` (e.g. `(select 2)`) whose embedded owned
+                                // `Query` is context-allocated and panics under the
+                                // derived `Clone` (mirrors Aggref/SubPlan).
+                                Some(e) => v.push(e.clone_in(mcx)?),
+                                None => {
+                                    return Err(types_error::PgError::error(
+                                        "subquery_planner: VALUES column is not an Expr",
+                                    ))
+                                }
+                            }
+                        }
+                        v
+                    };
+                    let mut new_cols: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
+                        mcx::vec_with_capacity_in(mcx, row_exprs.len())?;
+                    for e in row_exprs.into_iter() {
+                        let pe = preprocess_expression(mcx, &mut *root, run, outer_query_ref, Some(e), kind)?;
+                        let pe = pe.ok_or_else(|| {
+                            types_error::PgError::error(
+                                "subquery_planner: VALUES column folded to NULL",
+                            )
+                        })?;
+                        new_cols.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?);
+                    }
+                    let new_row = mcx::alloc_in(mcx, Node::mk_list(mcx, new_cols))?;
+                    run.resolve_mut(root.parse).rtable[i].values_lists[r] = new_row;
+                }
+            }
+            RTEKind::RTE_GROUP => {
+                // Preprocess the groupexprs list fully (planner.c:1035-1038):
+                // rte->groupexprs = preprocess_expression(root, groupexprs,
+                // EXPRKIND_GROUPEXPR). The list is a flat PgVec<NodePtr> of
+                // Node::Expr; const-fold each element. EXPRKIND_GROUPEXPR runs
+                // eval_const_expressions but not canonicalize/saop.
+                let ng = run.resolve(root.parse).rtable[i].groupexprs.len();
+                for g in 0..ng {
+                    let e: Expr = {
+                        let parse = run.resolve(root.parse);
+                        match parse.rtable[i].groupexprs[g].as_expr() {
+                            Some(e) => e.clone(),
+                            None => {
+                                return Err(types_error::PgError::error(
+                                    "subquery_planner: RTE_GROUP groupexpr is not an Expr",
+                                ))
+                            }
+                        }
+                    };
+                    let pe = preprocess_expression(
+                        mcx,
+                        &mut *root,
+                        run,
+                        outer_query_ref,
+                        Some(e),
+                        EXPRKIND_GROUPEXPR,
+                    )?;
+                    let pe = pe.ok_or_else(|| {
+                        types_error::PgError::error(
+                            "subquery_planner: RTE_GROUP groupexpr folded to NULL",
+                        )
+                    })?;
+                    run.resolve_mut(root.parse).rtable[i].groupexprs[g] =
+                        mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?;
+                }
+            }
+            RTEKind::RTE_FUNCTION => {
+                // Preprocess the function expression(s) fully (planner.c:
+                // 1015-1021): rte->functions = preprocess_expression(root,
+                // (Node *) rte->functions, EXPRKIND_RTFUNC[_LATERAL]). C folds
+                // the whole `functions` list as one node; here the typed list
+                // is a flat PgVec<NodePtr> of RangeTblFunction nodes, so
+                // preprocess each RangeTblFunction's funcexpr (the only
+                // expression subtree it carries).
+                let kind = if lateral {
+                    EXPRKIND_RTFUNC_LATERAL
+                } else {
+                    EXPRKIND_RTFUNC
+                };
+                let nfuncs = run.resolve(root.parse).rtable[i].functions.len();
+                for f in 0..nfuncs {
+                    // Take the RangeTblFunction's funcexpr Expr out, preprocess,
+                    // put it back. A funcexpr that is not a Node::Expr (or is
+                    // absent) is left untouched.
+                    let fe: Option<Expr> = {
+                        let parse = run.resolve(root.parse);
+                        let fn_node = &*parse.rtable[i].functions[f];
+                        match fn_node.node_tag() {
+                            ntag::T_RangeTblFunction => fn_node
+                                .expect_rangetblfunction()
+                                .funcexpr
+                                .as_deref()
+                                .and_then(|n| n.as_expr())
+                                .cloned(),
+                            _ => {
+                                return Err(types_error::PgError::error(
+                                    "subquery_planner: RTE_FUNCTION functions entry is not a RangeTblFunction",
+                                ))
+                            }
+                        }
+                    };
+                    if let Some(e) = fe {
+                        let pe = preprocess_expression(
+                            mcx,
+                            &mut *root,
+                            run,
+                            outer_query_ref,
+                            Some(e),
+                            kind,
+                        )?;
+                        let pe = pe.ok_or_else(|| {
+                            types_error::PgError::error(
+                                "subquery_planner: RTE_FUNCTION funcexpr folded to NULL",
+                            )
+                        })?;
+                        if let Some(rtf) =
+                            (*run.resolve_mut(root.parse).rtable[i].functions[f]).as_rangetblfunction_mut()
+                        {
+                            rtf.funcexpr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?);
+                        }
+                    }
+                }
+            }
+            RTEKind::RTE_TABLEFUNC => {
+                // planner.c:1022-1027 preprocesses rte->tablefunc; the owned
+                // TableFunc node universe (XMLTABLE / JSON_TABLE) is not
+                // reachable as a walkable Expr here, so this leg loud-panics
+                // until the tablefunc node model lands. No generate_series /
+                // unnest path reaches this arm.
+                panic!(
+                    "subquery_planner: per-RTE expression preprocessing \
+                     (planner.c:1022-1027) for RTE_TABLEFUNC is not wired over \
+                     the owned RTE model"
+                );
+            }
+            _ => {}
+        }
+
+        if !run.resolve(root.parse).rtable[i].securityQuals.is_empty() {
+            panic!(
+                "subquery_planner: securityQuals expression preprocessing \
+                 (planner.c:1050-1054) is not wired over the owned RTE model"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// flatten_group_exprs over targetList/havingQual (planner.c:1088-1095).
+/// GROUP-RTE queries only.
+#[inline(never)]
+fn pqe_flatten_group_exprs<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+) -> PgResult<()> {
+    use types_nodes::nodes::Node;
+    // flatten_group_exprs reads query->rtable (the RTE_GROUP groupexprs)
+    // and query->hasSubLinks; clone the parse Query into the run arena as
+    // the immutable context so we can mutate targetList/havingQual on the
+    // live Query in place. The clone already carries the preprocessed
+    // groupexprs.
+    let ctx_query = run.resolve(root.parse).clone_in(mcx)?;
+
+    // targetList: apply to each TargetEntry's expr (walking the list is
+    // equivalent to the C flatten over the whole List node).
+    let ntargets = run.resolve(root.parse).targetList.len();
+    for t in 0..ntargets {
+        let expr_opt: Option<Expr> = {
+            let parse = run.resolve(root.parse);
+            match parse.targetList[t].expr.as_deref() {
+                Some(e) => Some(e.clone_in(mcx)?),
+                None => None,
+            }
+        };
+        if let Some(e) = expr_opt {
+            let node = Node::mk_expr(mcx, e);
+            let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
+                mcx, &mut *root, &ctx_query, node,
+            )?;
+            if let Some(ne) = flattened.into_expr() {
+                run.resolve_mut(root.parse).targetList[t].expr =
+                    Some(mcx::alloc_in(mcx, ne)?);
+            }
+        }
+    }
+
+    // havingQual.
+    let having_opt: Option<Expr> = match run.resolve(root.parse).havingQual.as_deref() {
+        Some(e) => Some(e.clone_in(mcx)?),
+        None => None,
+    };
+    if let Some(e) = having_opt {
+        let node = Node::mk_expr(mcx, e);
+        let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
+            mcx, &mut *root, &ctx_query, node,
+        )?;
+        if let Some(ne) = flattened.into_expr() {
+            run.resolve_mut(root.parse).havingQual = Some(mcx::alloc_in(mcx, ne)?);
+        }
+    }
+    Ok(())
+}
+
+/// expand_grouping_sets (planner.c:1107-1110). GROUPING SETS only.
+#[inline(never)]
+fn pqe_expand_grouping_sets<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+) -> PgResult<()> {
+    let grouping_sets_nodes: alloc::vec::Vec<Node<'mcx>> = {
+        let parse = run.resolve(root.parse);
+        let mut v: alloc::vec::Vec<Node<'mcx>> =
+            alloc::vec::Vec::with_capacity(parse.groupingSets.len());
+        for gs in parse.groupingSets.iter() {
+            v.push(gs.as_ref().clone_in(mcx)?);
+        }
+        v
+    };
+    let group_distinct = run.resolve(root.parse).groupDistinct;
+    let expanded = backend_parser_parse_agg_seams::expand_grouping_sets::call(
+        mcx,
+        &grouping_sets_nodes,
+        group_distinct,
+        -1,
+    )?;
+
+    let mut new_gsets: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
+        mcx::PgVec::new_in(mcx);
+    if let Some(sets) = expanded {
+        for set in sets.iter() {
+            let mut intlist: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
+            intlist.extend(set.iter().copied());
+            new_gsets.push(mcx::alloc_in(mcx, Node::mk_int_list(mcx, intlist))?);
+        }
+    }
+    run.resolve_mut(root.parse).groupingSets = new_gsets;
+    Ok(())
+}
+
+/// newHaving HAVING→WHERE transfer loop (planner.c:1154-1199). Runs only when
+/// there is a havingQual.
+#[inline(never)]
+fn pqe_having_transfer<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    outer_query_ref: Option<&Node<'mcx>>,
+) -> PgResult<()> {
+    use backend_nodes_core::makefuncs::{make_ands_explicit, make_ands_implicit};
+
+    // havingQual is the implicitly-ANDed list of HAVING clauses.
+    let having_expr: Option<Expr> = run
+        .resolve_mut(root.parse)
+        .havingQual
+        .take()
+        .map(mcx::PgBox::into_inner);
+    let having_clauses: alloc::vec::Vec<Expr> = make_ands_implicit(having_expr);
+
+    // Snapshot the grouping flags the loop branches on. groupClause and
+    // groupingSets are NIL/non-NIL tests; for grouping sets we also need
+    // whether the first grouping set is empty (linitial(groupingSets) != NIL).
+    let (has_group_clause, has_grouping_sets, first_gset_nonempty) = {
+        let parse = run.resolve(root.parse);
+        let has_group_clause = !parse.groupClause.is_empty();
+        let has_grouping_sets = !parse.groupingSets.is_empty();
+        // linitial(groupingSets) is a GroupingSet node; its emptiness is
+        // whether that GroupingSet's content list is empty.
+        let first_gset_nonempty = match parse.groupingSets.first() {
+            Some(gs) => match gs.as_ref().node_tag() {
+                ntag::T_GroupingSet => !gs.as_ref().expect_groupingset().content.is_empty(),
+                // A non-GroupingSet first element is unexpected; treat as
+                // non-empty (the conservative branch keeps a WHERE copy).
+                _ => true,
+            },
+            None => false,
+        };
+        (has_group_clause, has_grouping_sets, first_gset_nonempty)
+    };
+    let group_rtindex = root.group_rtindex;
+
+    let mut new_having: alloc::vec::Vec<Expr> = alloc::vec::Vec::new();
+    // Accumulate clauses moved/copied into WHERE; appended to the
+    // jointree's existing quals after the loop (C list_concat).
+    let mut moved_to_where: alloc::vec::Vec<Expr> = alloc::vec::Vec::new();
+
+    for havingclause in having_clauses {
+        // contain_agg_clause / contain_volatile_functions / contain_subplans
+        // / (grouping-sets GROUP-Var membership) => keep in HAVING (C:1158-1166).
+        let keep_in_having = backend_optimizer_util_clauses::grounded::contain_agg_clause(
+            Some(&havingclause),
+        )? || backend_optimizer_util_clauses::grounded::contain_volatile_functions(
+            Some(&havingclause),
+        )? || backend_optimizer_util_clauses::grounded::contain_subplans(
+            Some(&havingclause),
+        )? || (has_group_clause
+            && has_grouping_sets
+            && {
+                // bms_is_member(root->group_rtindex, pull_varnos(root, havingclause))
+                let node = Node::mk_expr(mcx, havingclause.clone_in(mcx)?);
+                let varnos =
+                    backend_optimizer_util_vars::var::pull_varnos(Some(&root), &node);
+                bms_is_member_relids(group_rtindex, &varnos)
+            });
+
+        if keep_in_having {
+            // keep it in HAVING (C:1166).
+            new_having.push(havingclause);
+        } else if has_group_clause && (!has_grouping_sets || first_gset_nonempty) {
+            // There is GROUP BY, but no empty grouping set (C:1168-1180):
+            // preprocess fully and move it to WHERE.
+            let whereclause = preprocess_expression(
+                mcx,
+                &mut *root,
+                run,
+                outer_query_ref,
+                Some(havingclause),
+                EXPRKIND_QUAL,
+            )?;
+            // make_ands_implicit so the moved clause matches the
+            // implicitly-ANDed list form of jointree->quals (the C
+            // list_concat splices a List* directly; preprocess_expression
+            // here returns an already make_ands_implicit'd single Expr).
+            for c in make_ands_implicit(whereclause) {
+                moved_to_where.push(c);
+            }
+        } else {
+            // There is an empty grouping set, perhaps implicitly (C:1182-1197):
+            // preprocess a *copy* into WHERE and also keep the original in
+            // HAVING.
+            let copy = havingclause.clone_in(mcx)?;
+            let whereclause = preprocess_expression(
+                mcx,
+                &mut *root,
+                run,
+                outer_query_ref,
+                Some(copy),
+                EXPRKIND_QUAL,
+            )?;
+            for c in make_ands_implicit(whereclause) {
+                moved_to_where.push(c);
+            }
+            new_having.push(havingclause);
+        }
+    }
+
+    // parse->havingQual = (Node *) newHaving (C:1199). Empty list => NULL.
+    run.resolve_mut(root.parse).havingQual = if new_having.is_empty() {
+        None
+    } else {
+        Some(mcx::alloc_in(mcx, make_ands_explicit(new_having))?)
+    };
+
+    // list_concat the moved clauses onto jointree->quals (C:1173-1180,
+    // 1190-1197). The jointree quals live as a single `Node::Expr`; splice
+    // by re-imploding the existing-plus-moved implicit-AND list.
+    if !moved_to_where.is_empty() {
+        let jt = run.resolve_mut(root.parse).jointree.take();
+        if let Some(jt) = jt {
+            let mut f = mcx::PgBox::into_inner(jt);
+            let existing: Option<Expr> = match f.quals.take() {
+                None => None,
+                Some(n) => match mcx::PgBox::into_inner(n) {
+                    other if other.is_expr() => Some(other.into_expr().unwrap()),
+                    other => {
+                        return Err(PgError::error(alloc::format!(
+                            "subquery_planner: jointree quals is a non-Expr \
+                             node during HAVING transfer: {:?}",
+                            other.node_tag()
+                        )));
+                    }
+                },
+            };
+            let mut combined = make_ands_implicit(existing);
+            combined.append(&mut moved_to_where);
+            f.quals = Some(mcx::alloc_in(
+                mcx,
+                Node::mk_expr(mcx, make_ands_explicit(combined)),
+            )?);
+            run.resolve_mut(root.parse).jointree = Some(mcx::alloc_in(mcx, f)?);
+        } else {
+            // No jointree (replace_empty_jointree should have created one);
+            // build a bare FromExpr to hold the moved quals.
+            let f = types_nodes::rawnodes::FromExpr {
+                fromlist: mcx::PgVec::new_in(mcx),
+                quals: Some(mcx::alloc_in(
+                    mcx,
+                    Node::mk_expr(mcx, make_ands_explicit(moved_to_where)),
+                )?),
+            };
+            run.resolve_mut(root.parse).jointree = Some(mcx::alloc_in(mcx, f)?);
+        }
+    }
+    Ok(())
+}
+
 /// As [`subquery_planner`], but with the recursive-term carrier
 /// (`(wt_param_id, non_recursive_rows)`) seeded onto the root before its access
 /// paths (including the self-reference WorkTableScan) are built.
@@ -1011,75 +1909,14 @@ fn subquery_planner_carried<'mcx>(
         // child against an already-released context -> SIGSEGV in
         // `Mcx::deallocate`; observed on updatable_views' WITH CHECK OPTION
         // views.)
-        {
-            let n_wco = run.resolve(root.parse).withCheckOptions.len();
-            for i in 0..n_wco {
-                // wco->qual = preprocess_expression(root, wco->qual, EXPRKIND_QUAL).
-                // Take the qual NodePtr out of the WCO node, convert to an owned
-                // Expr, preprocess, and write the result back.
-                let qual_expr: Option<Expr> = {
-                    let wco_node = run.resolve_mut(root.parse).withCheckOptions[i].as_mut();
-                    let wco = wco_node.as_withcheckoption_mut().expect(
-                        "subquery_planner: withCheckOptions element is not a WithCheckOption node",
-                    );
-                    match wco.qual.take() {
-                        None => None,
-                        Some(q) => match mcx::PgBox::into_inner(q).into_expr() {
-                            Some(e) => Some(e),
-                            None => {
-                                return Err(PgError::error(
-                                    "subquery_planner: WithCheckOption qual is not an \
-                                     expression node",
-                                ));
-                            }
-                        },
-                    }
-                };
-
-                let processed =
-                    preprocess_expression(mcx, &mut *root, run, outer_query_ref, qual_expr, EXPRKIND_QUAL)?;
-
-                let wco_node = run.resolve_mut(root.parse).withCheckOptions[i].as_mut();
-                let wco = wco_node.as_withcheckoption_mut().expect(
-                    "subquery_planner: withCheckOptions element is not a WithCheckOption node",
-                );
-                wco.qual = match processed {
-                    Some(pe) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?),
-                    None => None,
-                };
-            }
-
-            // newWithCheckOptions = keep only the WCOs whose qual survived.
-            let mut kept: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
-                mcx::PgVec::new_in(mcx);
-            for wco_ptr in run.resolve_mut(root.parse).withCheckOptions.drain(..) {
-                let keep = wco_ptr
-                    .as_withcheckoption()
-                    .map(|w| w.qual.is_some())
-                    .unwrap_or(false);
-                if keep {
-                    kept.push(wco_ptr);
-                }
-            }
-            run.resolve_mut(root.parse).withCheckOptions = kept;
+        if !run.resolve(root.parse).withCheckOptions.is_empty() {
+            pqe_with_check_options(mcx, run, &mut *root, outer_query_ref)?;
         }
 
         // parse->returningList = preprocess_expression(..., EXPRKIND_TARGET)
         // (C:918-920). Same per-TargetEntry handling as targetList.
-        {
-            let n = run.resolve(root.parse).returningList.len();
-            for i in 0..n {
-                let e = run.resolve_mut(root.parse).returningList[i].expr.take();
-                let e = match e {
-                    Some(b) => Some(mcx::PgBox::into_inner(b)),
-                    None => None,
-                };
-                let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_TARGET)?;
-                run.resolve_mut(root.parse).returningList[i].expr = match processed {
-                    Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
-                    None => None,
-                };
-            }
+        if !run.resolve(root.parse).returningList.is_empty() {
+            pqe_returning_list(mcx, run, &mut *root, outer_query_ref)?;
         }
 
         // preprocess_qual_conditions(root, (Node *) parse->jointree) (C:922).
@@ -1099,95 +1936,22 @@ fn subquery_planner_carried<'mcx>(
         // windowClause start/end offsets (C:927-936). For each WindowClause,
         // preprocess wc->startOffset and wc->endOffset (EXPRKIND_LIMIT). The
         // partition/order clauses are sort/group expressions handled elsewhere.
-        {
-            let n_wc = run.resolve(root.parse).windowClause.len();
-            for i in 0..n_wc {
-                // wc->startOffset = preprocess_expression(startOffset, EXPRKIND_LIMIT).
-                let start = extract_windowclause_offset(run, &root, i, true);
-                let processed =
-                    preprocess_expression(mcx, &mut *root, run, outer_query_ref, start, EXPRKIND_LIMIT)?;
-                set_windowclause_offset(mcx, run, &root, i, true, processed)?;
-
-                // wc->endOffset = preprocess_expression(endOffset, EXPRKIND_LIMIT).
-                let end = extract_windowclause_offset(run, &root, i, false);
-                let processed =
-                    preprocess_expression(mcx, &mut *root, run, outer_query_ref, end, EXPRKIND_LIMIT)?;
-                set_windowclause_offset(mcx, run, &root, i, false, processed)?;
-            }
+        if !run.resolve(root.parse).windowClause.is_empty() {
+            pqe_window_clause(mcx, run, &mut *root, outer_query_ref)?;
         }
 
         // parse->limitOffset / parse->limitCount = preprocess_expression(...,
         // EXPRKIND_LIMIT) (C:938-941).
+        if run.resolve(root.parse).limitOffset.is_some()
+            || run.resolve(root.parse).limitCount.is_some()
         {
-            let lo = run.resolve_mut(root.parse).limitOffset.take();
-            let lo = lo.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, lo, EXPRKIND_LIMIT)?;
-            run.resolve_mut(root.parse).limitOffset = match processed {
-                Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
-                None => None,
-            };
-        }
-        {
-            let lc = run.resolve_mut(root.parse).limitCount.take();
-            let lc = lc.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, lc, EXPRKIND_LIMIT)?;
-            run.resolve_mut(root.parse).limitCount = match processed {
-                Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
-                None => None,
-            };
+            pqe_limit(mcx, run, &mut *root, outer_query_ref)?;
         }
 
         // onConflict expression lists (C:943-963). onConflict is only present
         // for INSERT ... ON CONFLICT.
         if run.resolve(root.parse).onConflict.is_some() {
-            // arbiterElems: each element is an InferenceElem Expr wrapped in a
-            // Node::Expr (EXPRKIND_ARBITER_ELEM).
-            let n = run
-                .resolve(root.parse)
-                .onConflict
-                .as_deref()
-                .map(|oc| oc.arbiterElems.len())
-                .unwrap_or(0);
-            for i in 0..n {
-                let e = take_onconflict_list_expr(run, &root, OcList::ArbiterElems, i);
-                let processed = preprocess_expression(
-                    mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_ARBITER_ELEM,
-                )?;
-                set_onconflict_list_expr(mcx, run, &root, OcList::ArbiterElems, i, processed)?;
-            }
-
-            // arbiterWhere (EXPRKIND_QUAL).
-            {
-                let w = take_onconflict_scalar(run, &root, OcScalar::ArbiterWhere);
-                let processed =
-                    preprocess_expression(mcx, &mut *root, run, outer_query_ref, w, EXPRKIND_QUAL)?;
-                set_onconflict_scalar(mcx, run, &root, OcScalar::ArbiterWhere, processed)?;
-            }
-
-            // onConflictSet: each element is a TargetEntry; preprocess its expr
-            // (EXPRKIND_TARGET).
-            let n = run
-                .resolve(root.parse)
-                .onConflict
-                .as_deref()
-                .map(|oc| oc.onConflictSet.len())
-                .unwrap_or(0);
-            for i in 0..n {
-                let e = take_onconflict_list_expr(run, &root, OcList::OnConflictSet, i);
-                let processed = preprocess_expression(
-                    mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_TARGET,
-                )?;
-                set_onconflict_list_expr(mcx, run, &root, OcList::OnConflictSet, i, processed)?;
-            }
-
-            // onConflictWhere (EXPRKIND_QUAL).
-            {
-                let w = take_onconflict_scalar(run, &root, OcScalar::OnConflictWhere);
-                let processed =
-                    preprocess_expression(mcx, &mut *root, run, outer_query_ref, w, EXPRKIND_QUAL)?;
-                set_onconflict_scalar(mcx, run, &root, OcScalar::OnConflictWhere, processed)?;
-            }
-            // exclRelTlist contains only Vars, so no preprocessing needed.
+            pqe_on_conflict(mcx, run, &mut *root, outer_query_ref)?;
         }
 
         // mergeActionList (C:965-978). MERGE-only; a SELECT has none. For each
@@ -1195,75 +1959,14 @@ fn subquery_planner_carried<'mcx>(
         // TargetEntry expr) and its qual (EXPRKIND_QUAL). In the owned parse
         // tree the action lives as a `Node::MergeAction` whose `targetList` is a
         // `Vec<Node::TargetEntry>` and whose `qual` is an `Option<Node::Expr>`.
-        {
-            let n_actions = run.resolve(root.parse).mergeActionList.len();
-            for ai in 0..n_actions {
-                // action->targetList: preprocess each TargetEntry expr.
-                let n_tle = {
-                    let action = run.resolve(root.parse).mergeActionList[ai]
-                        .as_mergeaction()
-                        .expect("mergeActionList entry is a MergeAction");
-                    action.targetList.len()
-                };
-                for ti in 0..n_tle {
-                    // Take the TargetEntry expr out of the action's node.
-                    let e = {
-                        let action = run.resolve_mut(root.parse).mergeActionList[ai]
-                            .as_mergeaction_mut()
-                            .unwrap();
-                        action.targetList[ti]
-                            .as_targetentry_mut()
-                            .and_then(|tle| tle.expr.take())
-                            .map(mcx::PgBox::into_inner)
-                    };
-                    let processed = preprocess_expression(
-                        mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_TARGET,
-                    )?;
-                    let processed = match processed {
-                        Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
-                        None => None,
-                    };
-                    let action = run.resolve_mut(root.parse).mergeActionList[ai]
-                        .as_mergeaction_mut()
-                        .unwrap();
-                    if let Some(tle) = action.targetList[ti].as_targetentry_mut() {
-                        tle.expr = processed;
-                    }
-                }
-
-                // action->qual: preprocess the WHEN condition (EXPRKIND_QUAL).
-                let q = {
-                    let action = run.resolve_mut(root.parse).mergeActionList[ai]
-                        .as_mergeaction_mut()
-                        .unwrap();
-                    action
-                        .qual
-                        .take()
-                        .map(mcx::PgBox::into_inner)
-                        .and_then(|node| node.into_expr())
-                };
-                let processed =
-                    preprocess_expression(mcx, &mut *root, run, outer_query_ref, q, EXPRKIND_QUAL)?;
-                let action = run.resolve_mut(root.parse).mergeActionList[ai]
-                    .as_mergeaction_mut()
-                    .unwrap();
-                action.qual = match processed {
-                    Some(pe) => Some(mcx::alloc_in(mcx, Node::Expr(pe))?),
-                    None => None,
-                };
-            }
+        if !run.resolve(root.parse).mergeActionList.is_empty() {
+            pqe_merge_action_list(mcx, run, &mut *root, outer_query_ref)?;
         }
 
         // parse->mergeJoinCondition = preprocess_expression(..., EXPRKIND_QUAL)
         // (C:980-981).
-        {
-            let c = run.resolve_mut(root.parse).mergeJoinCondition.take();
-            let c = c.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, c, EXPRKIND_QUAL)?;
-            run.resolve_mut(root.parse).mergeJoinCondition = match processed {
-                Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
-                None => None,
-            };
+        if run.resolve(root.parse).mergeJoinCondition.is_some() {
+            pqe_merge_join_condition(mcx, run, &mut *root, outer_query_ref)?;
         }
 
         // root->append_rel_list = preprocess_expression(..., EXPRKIND_APPINFO)
@@ -1275,38 +1978,8 @@ fn subquery_planner_carried<'mcx>(
         // place: take it out of the node arena (resolving the borrow against
         // `&mut *root`, as the processed_tlist aggref block does), run
         // `preprocess_expression` with EXPRKIND_APPINFO, and write it back.
-        {
-            // Snapshot (appinfo index, var slot index, NodeId) for every
-            // translated_var; a default-NodeId (0) slot is a dropped column
-            // (C NULL) and is skipped.
-            let mut work: Vec<(usize, usize, types_pathnodes::NodeId)> = Vec::new();
-            for (ai, appinfo) in root.append_rel_list.iter().enumerate() {
-                for (vi, id) in appinfo.translated_vars.iter().enumerate() {
-                    if *id == types_pathnodes::NodeId::default() {
-                        continue;
-                    }
-                    work.push((ai, vi, *id));
-                }
-            }
-            for (_ai, _vi, id) in work {
-                let live = root.node(id).clone_in(mcx)?;
-                let processed = preprocess_expression(
-                    mcx,
-                    &mut *root,
-                    run,
-                    outer_query_ref,
-                    Some(live),
-                    EXPRKIND_APPINFO,
-                )?;
-                match processed {
-                    Some(e) => *root.node_mut(id) = e,
-                    // EXPRKIND_APPINFO (not a QUAL) never reduces an expression
-                    // to NULL; preprocess_expression only returns None for a
-                    // None input or a canonicalize_qual collapse, neither of
-                    // which applies here. Keep the original node if it ever did.
-                    None => {}
-                }
-            }
+        if !root.append_rel_list.is_empty() {
+            pqe_append_rel_list(mcx, run, &mut *root, outer_query_ref)?;
         }
 
         // Preprocess expressions within RTEs (C:987-1054): tablesample / subquery
@@ -1314,296 +1987,7 @@ fn subquery_planner_carried<'mcx>(
         // per-element securityQuals. A plain RTE_RELATION SELECT has none of these
         // (no TABLESAMPLE, no function/values/group RTEs, no securityQuals); scan
         // and panic precisely if any present.
-        {
-            use types_nodes::nodes::Node;
-            use types_nodes::parsenodes::RTEKind;
-            let n = run.resolve(root.parse).rtable.len();
-            for i in 0..n {
-                let rtekind = run.resolve(root.parse).rtable[i].rtekind;
-                let lateral = run.resolve(root.parse).rtable[i].lateral;
-
-                match rtekind {
-                    RTEKind::RTE_RELATION => {
-                        // planner.c:993-998: rte->tablesample =
-                        //   preprocess_expression(root, (Node *) rte->tablesample,
-                        //                         EXPRKIND_TABLESAMPLE).
-                        // C casts the whole TableSampleClause* to a Node and folds it.
-                        // In the owned model the clause is a `Node::TableSampleClause`
-                        // node pointed at by `rte->tablesample`; the only expression
-                        // subtrees it carries are its `args` list and its optional
-                        // `repeatable` Expr. EXPRKIND_TABLESAMPLE runs
-                        // eval_const_expressions (+ SS_process_sublinks /
-                        // SS_replace_correlation_vars), all per-expression and
-                        // recursive, so preprocessing each `args` element and the
-                        // `repeatable` Expr individually is equivalent to folding the
-                        // whole clause node once.
-                        if run.resolve(root.parse).rtable[i].tablesample.is_some() {
-                            // Pull the args + repeatable Exprs out of the clause node.
-                            let (args, repeatable): (Vec<Expr>, Option<Expr>) = {
-                                let parse = run.resolve(root.parse);
-                                let ts_node = parse.rtable[i]
-                                    .tablesample
-                                    .as_deref()
-                                    .expect("tablesample is_some");
-                                match ts_node {
-                                    Node::TableSampleClause(tsc) => {
-                                        let args: Vec<Expr> = match &tsc.args {
-                                            Some(list) => list.iter().cloned().collect(),
-                                            None => Vec::new(),
-                                        };
-                                        let repeatable =
-                                            tsc.repeatable.as_deref().cloned();
-                                        (args, repeatable)
-                                    }
-                                    _ => {
-                                        return Err(types_error::PgError::error(
-                                            "subquery_planner: RTE_RELATION tablesample \
-                                             is not a TableSampleClause node",
-                                        ))
-                                    }
-                                }
-                            };
-
-                            // Preprocess each args element.
-                            let mut new_args: mcx::PgVec<'mcx, Expr> =
-                                mcx::vec_with_capacity_in(mcx, args.len())?;
-                            for e in args.into_iter() {
-                                let pe = preprocess_expression(
-                                    mcx,
-                                    &mut *root,
-                                    run,
-                                    outer_query_ref,
-                                    Some(e),
-                                    EXPRKIND_TABLESAMPLE,
-                                )?;
-                                let pe = pe.ok_or_else(|| {
-                                    types_error::PgError::error(
-                                        "subquery_planner: TABLESAMPLE arg folded to NULL",
-                                    )
-                                })?;
-                                new_args.push(pe);
-                            }
-
-                            // Preprocess the optional repeatable Expr.
-                            let new_repeatable: Option<alloc::boxed::Box<Expr>> =
-                                match repeatable {
-                                    Some(e) => {
-                                        let pe = preprocess_expression(
-                                            mcx,
-                                            &mut *root,
-                                            run,
-                                            outer_query_ref,
-                                            Some(e),
-                                            EXPRKIND_TABLESAMPLE,
-                                        )?;
-                                        let pe = pe.ok_or_else(|| {
-                                            types_error::PgError::error(
-                                                "subquery_planner: TABLESAMPLE repeatable \
-                                                 folded to NULL",
-                                            )
-                                        })?;
-                                        Some(alloc::boxed::Box::new(pe))
-                                    }
-                                    None => None,
-                                };
-
-                            // Write the preprocessed expressions back into the clause
-                            // node in place.
-                            if let Node::TableSampleClause(tsc) = &mut **run
-                                .resolve_mut(root.parse)
-                                .rtable[i]
-                                .tablesample
-                                .as_mut()
-                                .expect("tablesample is_some")
-                            {
-                                tsc.args = Some(new_args);
-                                tsc.repeatable = new_repeatable;
-                            }
-                        }
-                    }
-                    RTEKind::RTE_SUBQUERY => {
-                        if lateral && root.hasJoinRTEs {
-                            panic!(
-                                "subquery_planner: LATERAL subquery join-alias flattening \
-                                 (planner.c:1009-1012) is not wired over the owned RTE model"
-                            );
-                        }
-                    }
-                    RTEKind::RTE_VALUES => {
-                        // Preprocess the values lists fully (planner.c:1029-1034):
-                        // const-fold each row's each column expression. EXPRKIND_VALUES
-                        // skips flatten_join_alias_vars/canonicalize. LATERAL VALUES
-                        // (CREATE RULE only) panics in preprocess_expression if any
-                        // join RTEs are present, matching the C gate.
-                        let kind = if lateral {
-                            EXPRKIND_VALUES_LATERAL
-                        } else {
-                            EXPRKIND_VALUES
-                        };
-                        let nrows = run.resolve(root.parse).rtable[i].values_lists.len();
-                        for r in 0..nrows {
-                            // Take the row's column expressions out, process, put back.
-                            let row_exprs: mcx::PgVec<'mcx, Expr> = {
-                                let parse = run.resolve(root.parse);
-                                let row_node = &parse.rtable[i].values_lists[r];
-                                let row_node = &**row_node;
-                                let cols = match row_node.node_tag() {
-                                    ntag::T_List => row_node.expect_list(),
-                                    _ => {
-                                        return Err(types_error::PgError::error(
-                                            "subquery_planner: VALUES row is not a List",
-                                        ))
-                                    }
-                                };
-                                let mut v = mcx::vec_with_capacity_in(mcx, cols.len())?;
-                                for c in cols.iter() {
-                                    match c.as_expr() {
-                                        // Deep-copy through `clone_in` (copyObject shape),
-                                        // not a plain `.clone()`: a VALUES column may be a
-                                        // `SubLink` (e.g. `(select 2)`) whose embedded owned
-                                        // `Query` is context-allocated and panics under the
-                                        // derived `Clone` (mirrors Aggref/SubPlan).
-                                        Some(e) => v.push(e.clone_in(mcx)?),
-                                        None => {
-                                            return Err(types_error::PgError::error(
-                                                "subquery_planner: VALUES column is not an Expr",
-                                            ))
-                                        }
-                                    }
-                                }
-                                v
-                            };
-                            let mut new_cols: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
-                                mcx::vec_with_capacity_in(mcx, row_exprs.len())?;
-                            for e in row_exprs.into_iter() {
-                                let pe = preprocess_expression(mcx, &mut *root, run, outer_query_ref, Some(e), kind)?;
-                                let pe = pe.ok_or_else(|| {
-                                    types_error::PgError::error(
-                                        "subquery_planner: VALUES column folded to NULL",
-                                    )
-                                })?;
-                                new_cols.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?);
-                            }
-                            let new_row = mcx::alloc_in(mcx, Node::mk_list(mcx, new_cols))?;
-                            run.resolve_mut(root.parse).rtable[i].values_lists[r] = new_row;
-                        }
-                    }
-                    RTEKind::RTE_GROUP => {
-                        // Preprocess the groupexprs list fully (planner.c:1035-1038):
-                        // rte->groupexprs = preprocess_expression(root, groupexprs,
-                        // EXPRKIND_GROUPEXPR). The list is a flat PgVec<NodePtr> of
-                        // Node::Expr; const-fold each element. EXPRKIND_GROUPEXPR runs
-                        // eval_const_expressions but not canonicalize/saop.
-                        let ng = run.resolve(root.parse).rtable[i].groupexprs.len();
-                        for g in 0..ng {
-                            let e: Expr = {
-                                let parse = run.resolve(root.parse);
-                                match parse.rtable[i].groupexprs[g].as_expr() {
-                                    Some(e) => e.clone(),
-                                    None => {
-                                        return Err(types_error::PgError::error(
-                                            "subquery_planner: RTE_GROUP groupexpr is not an Expr",
-                                        ))
-                                    }
-                                }
-                            };
-                            let pe = preprocess_expression(
-                                mcx,
-                                &mut *root,
-                                run,
-                                outer_query_ref,
-                                Some(e),
-                                EXPRKIND_GROUPEXPR,
-                            )?;
-                            let pe = pe.ok_or_else(|| {
-                                types_error::PgError::error(
-                                    "subquery_planner: RTE_GROUP groupexpr folded to NULL",
-                                )
-                            })?;
-                            run.resolve_mut(root.parse).rtable[i].groupexprs[g] =
-                                mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?;
-                        }
-                    }
-                    RTEKind::RTE_FUNCTION => {
-                        // Preprocess the function expression(s) fully (planner.c:
-                        // 1015-1021): rte->functions = preprocess_expression(root,
-                        // (Node *) rte->functions, EXPRKIND_RTFUNC[_LATERAL]). C folds
-                        // the whole `functions` list as one node; here the typed list
-                        // is a flat PgVec<NodePtr> of RangeTblFunction nodes, so
-                        // preprocess each RangeTblFunction's funcexpr (the only
-                        // expression subtree it carries).
-                        let kind = if lateral {
-                            EXPRKIND_RTFUNC_LATERAL
-                        } else {
-                            EXPRKIND_RTFUNC
-                        };
-                        let nfuncs = run.resolve(root.parse).rtable[i].functions.len();
-                        for f in 0..nfuncs {
-                            // Take the RangeTblFunction's funcexpr Expr out, preprocess,
-                            // put it back. A funcexpr that is not a Node::Expr (or is
-                            // absent) is left untouched.
-                            let fe: Option<Expr> = {
-                                let parse = run.resolve(root.parse);
-                                let fn_node = &*parse.rtable[i].functions[f];
-                                match fn_node.node_tag() {
-                                    ntag::T_RangeTblFunction => fn_node
-                                        .expect_rangetblfunction()
-                                        .funcexpr
-                                        .as_deref()
-                                        .and_then(|n| n.as_expr())
-                                        .cloned(),
-                                    _ => {
-                                        return Err(types_error::PgError::error(
-                                            "subquery_planner: RTE_FUNCTION functions entry is not a RangeTblFunction",
-                                        ))
-                                    }
-                                }
-                            };
-                            if let Some(e) = fe {
-                                let pe = preprocess_expression(
-                                    mcx,
-                                    &mut *root,
-                                    run,
-                                    outer_query_ref,
-                                    Some(e),
-                                    kind,
-                                )?;
-                                let pe = pe.ok_or_else(|| {
-                                    types_error::PgError::error(
-                                        "subquery_planner: RTE_FUNCTION funcexpr folded to NULL",
-                                    )
-                                })?;
-                                if let Some(rtf) =
-                                    (*run.resolve_mut(root.parse).rtable[i].functions[f]).as_rangetblfunction_mut()
-                                {
-                                    rtf.funcexpr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?);
-                                }
-                            }
-                        }
-                    }
-                    RTEKind::RTE_TABLEFUNC => {
-                        // planner.c:1022-1027 preprocesses rte->tablefunc; the owned
-                        // TableFunc node universe (XMLTABLE / JSON_TABLE) is not
-                        // reachable as a walkable Expr here, so this leg loud-panics
-                        // until the tablefunc node model lands. No generate_series /
-                        // unnest path reaches this arm.
-                        panic!(
-                            "subquery_planner: per-RTE expression preprocessing \
-                             (planner.c:1022-1027) for RTE_TABLEFUNC is not wired over \
-                             the owned RTE model"
-                        );
-                    }
-                    _ => {}
-                }
-
-                if !run.resolve(root.parse).rtable[i].securityQuals.is_empty() {
-                    panic!(
-                        "subquery_planner: securityQuals expression preprocessing \
-                         (planner.c:1050-1054) is not wired over the owned RTE model"
-                    );
-                }
-            }
-        }
+        pqe_per_rte(mcx, run, &mut *root, outer_query_ref)?;
 
         // Drop joinaliasvars lists once flattening is done (C:1067-1078). The
         // lists no longer match what expressions in the rest of the tree look
@@ -1623,51 +2007,7 @@ fn subquery_planner_carried<'mcx>(
         // a non-grouped SELECT has hasGroupRTE == false. Performed after the
         // grouping expressions were preprocessed above.
         if run.resolve(root.parse).hasGroupRTE {
-            use types_nodes::nodes::Node;
-            // flatten_group_exprs reads query->rtable (the RTE_GROUP groupexprs)
-            // and query->hasSubLinks; clone the parse Query into the run arena as
-            // the immutable context so we can mutate targetList/havingQual on the
-            // live Query in place. The clone already carries the preprocessed
-            // groupexprs.
-            let ctx_query = run.resolve(root.parse).clone_in(mcx)?;
-
-            // targetList: apply to each TargetEntry's expr (walking the list is
-            // equivalent to the C flatten over the whole List node).
-            let ntargets = run.resolve(root.parse).targetList.len();
-            for t in 0..ntargets {
-                let expr_opt: Option<Expr> = {
-                    let parse = run.resolve(root.parse);
-                    match parse.targetList[t].expr.as_deref() {
-                        Some(e) => Some(e.clone_in(mcx)?),
-                        None => None,
-                    }
-                };
-                if let Some(e) = expr_opt {
-                    let node = Node::mk_expr(mcx, e);
-                    let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
-                        mcx, &mut *root, &ctx_query, node,
-                    )?;
-                    if let Some(ne) = flattened.into_expr() {
-                        run.resolve_mut(root.parse).targetList[t].expr =
-                            Some(mcx::alloc_in(mcx, ne)?);
-                    }
-                }
-            }
-
-            // havingQual.
-            let having_opt: Option<Expr> = match run.resolve(root.parse).havingQual.as_deref() {
-                Some(e) => Some(e.clone_in(mcx)?),
-                None => None,
-            };
-            if let Some(e) = having_opt {
-                let node = Node::mk_expr(mcx, e);
-                let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
-                    mcx, &mut *root, &ctx_query, node,
-                )?;
-                if let Some(ne) = flattened.into_expr() {
-                    run.resolve_mut(root.parse).havingQual = Some(mcx::alloc_in(mcx, ne)?);
-                }
-            }
+            pqe_flatten_group_exprs(mcx, run, &mut *root)?;
         }
 
         // hasTargetSRFs re-check (C:1098-1099). Constant-folding can remove all
@@ -1696,33 +2036,7 @@ fn subquery_planner_carried<'mcx>(
         // a `Node::IntList` so the field keeps its `PgVec<NodePtr>` shape with
         // `T_IntList` element tags, matching C's stored representation.
         if !run.resolve(root.parse).groupingSets.is_empty() {
-            let grouping_sets_nodes: alloc::vec::Vec<Node<'mcx>> = {
-                let parse = run.resolve(root.parse);
-                let mut v: alloc::vec::Vec<Node<'mcx>> =
-                    alloc::vec::Vec::with_capacity(parse.groupingSets.len());
-                for gs in parse.groupingSets.iter() {
-                    v.push(gs.as_ref().clone_in(mcx)?);
-                }
-                v
-            };
-            let group_distinct = run.resolve(root.parse).groupDistinct;
-            let expanded = backend_parser_parse_agg_seams::expand_grouping_sets::call(
-                mcx,
-                &grouping_sets_nodes,
-                group_distinct,
-                -1,
-            )?;
-
-            let mut new_gsets: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
-                mcx::PgVec::new_in(mcx);
-            if let Some(sets) = expanded {
-                for set in sets.iter() {
-                    let mut intlist: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
-                    intlist.extend(set.iter().copied());
-                    new_gsets.push(mcx::alloc_in(mcx, Node::mk_int_list(mcx, intlist))?);
-                }
-            }
-            run.resolve_mut(root.parse).groupingSets = new_gsets;
+            pqe_expand_grouping_sets(mcx, run, &mut *root)?;
         }
 
         // newHaving HAVING→WHERE transfer loop (C:1154-1199). Runs only when there
@@ -1734,150 +2048,7 @@ fn subquery_planner_carried<'mcx>(
         // `make_ands_explicit` reassembles the residual list back into a single
         // `Expr` (empty list => NULL/None, matching C's NIL).
         if run.resolve(root.parse).havingQual.is_some() {
-            use backend_nodes_core::makefuncs::{make_ands_explicit, make_ands_implicit};
-
-            // havingQual is the implicitly-ANDed list of HAVING clauses.
-            let having_expr: Option<Expr> = run
-                .resolve_mut(root.parse)
-                .havingQual
-                .take()
-                .map(mcx::PgBox::into_inner);
-            let having_clauses: alloc::vec::Vec<Expr> = make_ands_implicit(having_expr);
-
-            // Snapshot the grouping flags the loop branches on. groupClause and
-            // groupingSets are NIL/non-NIL tests; for grouping sets we also need
-            // whether the first grouping set is empty (linitial(groupingSets) != NIL).
-            let (has_group_clause, has_grouping_sets, first_gset_nonempty) = {
-                let parse = run.resolve(root.parse);
-                let has_group_clause = !parse.groupClause.is_empty();
-                let has_grouping_sets = !parse.groupingSets.is_empty();
-                // linitial(groupingSets) is a GroupingSet node; its emptiness is
-                // whether that GroupingSet's content list is empty.
-                let first_gset_nonempty = match parse.groupingSets.first() {
-                    Some(gs) => match gs.as_ref().node_tag() {
-                        ntag::T_GroupingSet => !gs.as_ref().expect_groupingset().content.is_empty(),
-                        // A non-GroupingSet first element is unexpected; treat as
-                        // non-empty (the conservative branch keeps a WHERE copy).
-                        _ => true,
-                    },
-                    None => false,
-                };
-                (has_group_clause, has_grouping_sets, first_gset_nonempty)
-            };
-            let group_rtindex = root.group_rtindex;
-
-            let mut new_having: alloc::vec::Vec<Expr> = alloc::vec::Vec::new();
-            // Accumulate clauses moved/copied into WHERE; appended to the
-            // jointree's existing quals after the loop (C list_concat).
-            let mut moved_to_where: alloc::vec::Vec<Expr> = alloc::vec::Vec::new();
-
-            for havingclause in having_clauses {
-                // contain_agg_clause / contain_volatile_functions / contain_subplans
-                // / (grouping-sets GROUP-Var membership) => keep in HAVING (C:1158-1166).
-                let keep_in_having = backend_optimizer_util_clauses::grounded::contain_agg_clause(
-                    Some(&havingclause),
-                )? || backend_optimizer_util_clauses::grounded::contain_volatile_functions(
-                    Some(&havingclause),
-                )? || backend_optimizer_util_clauses::grounded::contain_subplans(
-                    Some(&havingclause),
-                )? || (has_group_clause
-                    && has_grouping_sets
-                    && {
-                        // bms_is_member(root->group_rtindex, pull_varnos(root, havingclause))
-                        let node = Node::mk_expr(mcx, havingclause.clone_in(mcx)?);
-                        let varnos =
-                            backend_optimizer_util_vars::var::pull_varnos(Some(&root), &node);
-                        bms_is_member_relids(group_rtindex, &varnos)
-                    });
-
-                if keep_in_having {
-                    // keep it in HAVING (C:1166).
-                    new_having.push(havingclause);
-                } else if has_group_clause && (!has_grouping_sets || first_gset_nonempty) {
-                    // There is GROUP BY, but no empty grouping set (C:1168-1180):
-                    // preprocess fully and move it to WHERE.
-                    let whereclause = preprocess_expression(
-                        mcx,
-                        &mut *root,
-                        run,
-                        outer_query_ref,
-                        Some(havingclause),
-                        EXPRKIND_QUAL,
-                    )?;
-                    // make_ands_implicit so the moved clause matches the
-                    // implicitly-ANDed list form of jointree->quals (the C
-                    // list_concat splices a List* directly; preprocess_expression
-                    // here returns an already make_ands_implicit'd single Expr).
-                    for c in make_ands_implicit(whereclause) {
-                        moved_to_where.push(c);
-                    }
-                } else {
-                    // There is an empty grouping set, perhaps implicitly (C:1182-1197):
-                    // preprocess a *copy* into WHERE and also keep the original in
-                    // HAVING.
-                    let copy = havingclause.clone_in(mcx)?;
-                    let whereclause = preprocess_expression(
-                        mcx,
-                        &mut *root,
-                        run,
-                        outer_query_ref,
-                        Some(copy),
-                        EXPRKIND_QUAL,
-                    )?;
-                    for c in make_ands_implicit(whereclause) {
-                        moved_to_where.push(c);
-                    }
-                    new_having.push(havingclause);
-                }
-            }
-
-            // parse->havingQual = (Node *) newHaving (C:1199). Empty list => NULL.
-            run.resolve_mut(root.parse).havingQual = if new_having.is_empty() {
-                None
-            } else {
-                Some(mcx::alloc_in(mcx, make_ands_explicit(new_having))?)
-            };
-
-            // list_concat the moved clauses onto jointree->quals (C:1173-1180,
-            // 1190-1197). The jointree quals live as a single `Node::Expr`; splice
-            // by re-imploding the existing-plus-moved implicit-AND list.
-            if !moved_to_where.is_empty() {
-                let jt = run.resolve_mut(root.parse).jointree.take();
-                if let Some(jt) = jt {
-                    let mut f = mcx::PgBox::into_inner(jt);
-                    let existing: Option<Expr> = match f.quals.take() {
-                        None => None,
-                        Some(n) => match mcx::PgBox::into_inner(n) {
-                            other if other.is_expr() => Some(other.into_expr().unwrap()),
-                            other => {
-                                return Err(PgError::error(alloc::format!(
-                                    "subquery_planner: jointree quals is a non-Expr \
-                                     node during HAVING transfer: {:?}",
-                                    other.node_tag()
-                                )));
-                            }
-                        },
-                    };
-                    let mut combined = make_ands_implicit(existing);
-                    combined.append(&mut moved_to_where);
-                    f.quals = Some(mcx::alloc_in(
-                        mcx,
-                        Node::mk_expr(mcx, make_ands_explicit(combined)),
-                    )?);
-                    run.resolve_mut(root.parse).jointree = Some(mcx::alloc_in(mcx, f)?);
-                } else {
-                    // No jointree (replace_empty_jointree should have created one);
-                    // build a bare FromExpr to hold the moved quals.
-                    let f = types_nodes::rawnodes::FromExpr {
-                        fromlist: mcx::PgVec::new_in(mcx),
-                        quals: Some(mcx::alloc_in(
-                            mcx,
-                            Node::mk_expr(mcx, make_ands_explicit(moved_to_where)),
-                        )?),
-                    };
-                    run.resolve_mut(root.parse).jointree = Some(mcx::alloc_in(mcx, f)?);
-                }
-            }
+            pqe_having_transfer(mcx, run, &mut *root, outer_query_ref)?;
         }
         Ok(())
     }
