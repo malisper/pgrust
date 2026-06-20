@@ -18,10 +18,11 @@
 //! `PG_RETURN_NULL()`).
 
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::Oid;
 use types_datum::Datum;
+use types_error::PgResult;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -80,27 +81,20 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("format_type fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `format_type(oid, int4)` (OID 1081) — not strict.
-fn fc_format_type(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_format_type(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let type_oid = arg_oid_opt(fcinfo, 0);
     let typemod = arg_int32_opt(fcinfo, 1);
     let m = scratch_mcx();
-    let result: Option<String> = match crate::format_type(m.mcx(), type_oid, typemod) {
-        Ok(Some(name)) => Some(String::from(name.as_str())),
-        Ok(None) => None,
-        Err(e) => raise(e),
+    let result: Option<String> = match crate::format_type(m.mcx(), type_oid, typemod)? {
+        Some(name) => Some(String::from(name.as_str())),
+        None => None,
     };
-    ret_text_opt(fcinfo, result)
+    Ok(ret_text_opt(fcinfo, result))
 }
 
 // ---------------------------------------------------------------------------
@@ -113,16 +107,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the `format_type.c` fmgr builtin this crate owns (C: its
@@ -130,7 +127,7 @@ fn builtin(
 /// / strict / retset transcribed exactly from `pg_proc.dat`: `format_type` is
 /// `proisstrict => 'f'` (not strict), 2 args (`oid int4`), no `proretset`.
 pub fn register_format_type_builtins() {
-    backend_utils_fmgr_core::register_builtins([builtin(
+    backend_utils_fmgr_core::register_builtins_native([builtin(
         1081,
         "format_type",
         2,
