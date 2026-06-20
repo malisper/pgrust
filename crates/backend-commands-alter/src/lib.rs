@@ -1444,6 +1444,24 @@ fn exec_alter_object_depends_stmt_slow_arm<'mcx>(
     ExecAlterObjectDependsStmt(mcx, &pn, None)
 }
 
+/// `case T_AlterOwnerStmt:` in the standard (non-event-trigger) ProcessUtility
+/// fast leg (utility.c) — ALTER … OWNER TO. Same body as the slow arm but
+/// discards the returned `ObjectAddress` (the fast leg has no event-trigger
+/// command to record).
+fn exec_alter_owner_stmt_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    parsetree: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<()> {
+    let Some(stmt) = parsetree.as_alterownerstmt() else {
+        return Err(PgError::error(
+            "exec_alter_owner_stmt: parse tree is not an AlterOwnerStmt",
+        ));
+    };
+    let pn = alter_owner_stmt_to_parsenodes(stmt)?;
+    ExecAlterOwnerStmt(mcx, &pn)?;
+    Ok(())
+}
+
 /// `case T_AlterOwnerStmt:` in `ProcessUtilitySlow` (utility.c) — ALTER … OWNER
 /// TO.
 fn exec_alter_owner_stmt_slow_arm<'mcx>(
@@ -1490,6 +1508,7 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::exec_alter_object_depends_stmt_slow::set(
         exec_alter_object_depends_stmt_slow_arm,
     );
+    backend_tcop_utility_out_seams::exec_alter_owner_stmt::set(exec_alter_owner_stmt_arm);
     backend_tcop_utility_out_seams::exec_alter_owner_stmt_slow::set(
         exec_alter_owner_stmt_slow_arm,
     );
