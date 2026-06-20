@@ -465,6 +465,26 @@ fn plpgsql_validator_pg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 }
 
+/// Result-native form of [`plpgsql_inline_handler_pg`] for the migrated builtin
+/// registry: the `Err` travels back as `Err(PgError)` straight to
+/// `invoke_builtin` (no `panic_any`/`catch_unwind`). The legacy `*_pg` wrapper is
+/// retained for the `lookup()` `PGFunction` module-resolver path.
+fn plpgsql_inline_handler_native(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    let codeblock = seam::getarg_inline_codeblock(fcinfo);
+    plpgsql_inline_handler(codeblock)?;
+    Ok(Datum::null())
+}
+
+/// Result-native form of [`plpgsql_validator_pg`] for the migrated builtin
+/// registry.
+fn plpgsql_validator_native(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    plpgsql_validator(fcinfo)
+}
+
 /// The simple (suffix-free, directory-free) name of the plpgsql loadable module
 /// — `$libdir/plpgsql` reduces to this for the in-process loader registry.
 const LIBRARY: &str = "plpgsql";
@@ -496,31 +516,45 @@ fn lookup(function: &str) -> Option<types_fmgr::LoadedExternalFunc> {
 /// (`fmgr_lookup_by_name`). The placeholder `foid = 0` is overwritten by the
 /// catalog OID when the row is created.
 fn register_handler_builtins() {
-    backend_utils_fmgr_core::register_builtins([
-        BuiltinFunction {
-            foid: 0,
-            name: "plpgsql_call_handler".to_string(),
-            nargs: 0,
-            strict: false,
-            retset: false,
-            func: Some(plpgsql_call_handler_pg),
-        },
-        BuiltinFunction {
-            foid: 0,
-            name: "plpgsql_inline_handler".to_string(),
-            nargs: 1,
-            strict: false,
-            retset: false,
-            func: Some(plpgsql_inline_handler_pg),
-        },
-        BuiltinFunction {
-            foid: 0,
-            name: "plpgsql_validator".to_string(),
-            nargs: 1,
-            strict: false,
-            retset: false,
-            func: Some(plpgsql_validator_pg),
-        },
+    // `plpgsql_call_handler` stays on the legacy panic bridge: its core raises
+    // errors through `seam::propagate` (a `panic_any` deep inside the SPI/PL
+    // executor body), so it is NOT yet a clean `-> PgResult<Datum>` scalar body.
+    // Migrating it requires threading `?` through the whole PL executor call
+    // tree — deferred to Phase 4.
+    backend_utils_fmgr_core::register_builtins([BuiltinFunction {
+        foid: 0,
+        name: "plpgsql_call_handler".to_string(),
+        nargs: 0,
+        strict: false,
+        retset: false,
+        func: Some(plpgsql_call_handler_pg),
+    }]);
+    // `plpgsql_inline_handler` / `plpgsql_validator` are Result-native: their
+    // cores already return `PgResult`, so they register the native callable and
+    // dispatch with `?` (no `catch_unwind`).
+    backend_utils_fmgr_core::register_builtins_native([
+        (
+            BuiltinFunction {
+                foid: 0,
+                name: "plpgsql_inline_handler".to_string(),
+                nargs: 1,
+                strict: false,
+                retset: false,
+                func: None,
+            },
+            plpgsql_inline_handler_native as types_fmgr::PgFnNative,
+        ),
+        (
+            BuiltinFunction {
+                foid: 0,
+                name: "plpgsql_validator".to_string(),
+                nargs: 1,
+                strict: false,
+                retset: false,
+                func: None,
+            },
+            plpgsql_validator_native as types_fmgr::PgFnNative,
+        ),
     ]);
 }
 
