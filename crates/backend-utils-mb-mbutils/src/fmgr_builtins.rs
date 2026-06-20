@@ -17,8 +17,9 @@
 //! (`Ok(None)`); at the SQL boundary that means the result is the input image.
 
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::NAMEDATALEN;
 use types_tuple::heaptuple::NameData;
@@ -125,108 +126,93 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("mbutils fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-macro_rules! ok_or_raise {
-    ($e:expr) => {
-        match $e {
-            Ok(v) => v,
-            Err(e) => raise(e),
-        }
-    };
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `pg_client_encoding()` → `name`. No args.
-fn fc_pg_client_encoding(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let nd = ok_or_raise!(pg_client_encoding());
-    ret_name(fcinfo, &nd)
+fn fc_pg_client_encoding(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let nd = pg_client_encoding()?;
+    Ok(ret_name(fcinfo, &nd))
 }
 
 /// `getdatabaseencoding()` → `name`. No args.
-fn fc_getdatabaseencoding(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let nd = ok_or_raise!(getdatabaseencoding());
-    ret_name(fcinfo, &nd)
+fn fc_getdatabaseencoding(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let nd = getdatabaseencoding()?;
+    Ok(ret_name(fcinfo, &nd))
 }
 
 /// `pg_char_to_encoding(name)` → `int4`.
-fn fc_pg_char_to_encoding(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_char_to_encoding(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let nd = arg_name(fcinfo, 0);
-    ret_i32(PG_char_to_encoding(&nd))
+    Ok(ret_i32(PG_char_to_encoding(&nd)))
 }
 
 /// `pg_encoding_to_char(int4)` → `name`.
-fn fc_pg_encoding_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_encoding_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let encoding = fcinfo
         .arg(0)
         .expect("pg_encoding_to_char: missing arg")
         .value
         .as_i32();
-    let nd = ok_or_raise!(PG_encoding_to_char(encoding));
-    ret_name(fcinfo, &nd)
+    let nd = PG_encoding_to_char(encoding)?;
+    Ok(ret_name(fcinfo, &nd))
 }
 
 /// `length(bytea, name)` (`length_in_encoding`) → `int4`.
-fn fc_length(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_length(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let string = arg_varlena(fcinfo, 0).to_vec();
     let enc = arg_name(fcinfo, 1);
-    ret_i32(ok_or_raise!(length_in_encoding(&string, name_str(&enc))))
+    Ok(ret_i32(length_in_encoding(&string, name_str(&enc))?))
 }
 
 /// `convert_from(bytea, name)` (`pg_convert_from`) → `text`.
-fn fc_convert_from(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_convert_from(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let string = arg_varlena(fcinfo, 0).to_vec();
     let src = arg_name(fcinfo, 1);
     let m = scratch_mcx();
-    let converted = ok_or_raise!(pg_convert_from(m.mcx(), &string, name_str(&src)))
+    let converted = pg_convert_from(m.mcx(), &string, name_str(&src))?
         .map(|v| v.as_slice().to_vec());
     // A performed conversion uses the converted bytes; when no conversion was
     // required (`None`) C returns the source pointer unchanged.
-    ret_varlena(fcinfo, converted.unwrap_or(string))
+    Ok(ret_varlena(fcinfo, converted.unwrap_or(string)))
 }
 
 /// `convert_to(text, name)` (`pg_convert_to`) → `bytea`.
-fn fc_convert_to(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_convert_to(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let string = arg_varlena(fcinfo, 0).to_vec();
     let dest = arg_name(fcinfo, 1);
     let m = scratch_mcx();
-    let converted = ok_or_raise!(pg_convert_to(m.mcx(), &string, name_str(&dest)))
+    let converted = pg_convert_to(m.mcx(), &string, name_str(&dest))?
         .map(|v| v.as_slice().to_vec());
-    ret_varlena(fcinfo, converted.unwrap_or(string))
+    Ok(ret_varlena(fcinfo, converted.unwrap_or(string)))
 }
 
 /// `convert(bytea, name, name)` (`pg_convert`) → `bytea`.
-fn fc_convert(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_convert(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let string = arg_varlena(fcinfo, 0).to_vec();
     let src = arg_name(fcinfo, 1);
     let dest = arg_name(fcinfo, 2);
     let m = scratch_mcx();
-    let converted = ok_or_raise!(pg_convert(m.mcx(), &string, name_str(&src), name_str(&dest)))
+    let converted = pg_convert(m.mcx(), &string, name_str(&src), name_str(&dest))?
         .map(|v| v.as_slice().to_vec());
-    ret_varlena(fcinfo, converted.unwrap_or(string))
+    Ok(ret_varlena(fcinfo, converted.unwrap_or(string)))
 }
 
 /// `pg_encoding_max_length(int4)` (`pg_encoding_max_length_sql`) → `int4`,
 /// returning SQL NULL for an invalid encoding.
-fn fc_pg_encoding_max_length(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_encoding_max_length(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let encoding = fcinfo
         .arg(0)
         .expect("pg_encoding_max_length: missing arg")
         .value
         .as_i32();
     match pg_encoding_max_length_sql(encoding) {
-        Some(v) => ret_i32(v),
+        Some(v) => Ok(ret_i32(v)),
         None => {
             // C: PG_RETURN_NULL().
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
     }
 }
@@ -241,16 +227,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    func: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        func,
+    )
 }
 
 /// Register every SQL-callable `mbutils.c` encoding builtin (C: their
@@ -258,7 +247,7 @@ fn builtin(
 /// OIDs/nargs/strict/retset transcribed from `pg_proc.dat` (none override
 /// `proisstrict` so all are strict; none is a `proretset`).
 pub fn register_mbutils_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(810, "pg_client_encoding", 0, true, false, fc_pg_client_encoding),
         builtin(1039, "getdatabaseencoding", 0, true, false, fc_getdatabaseencoding),
         builtin(1264, "PG_char_to_encoding", 1, true, false, fc_pg_char_to_encoding),
