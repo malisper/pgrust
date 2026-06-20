@@ -762,6 +762,39 @@ fn finalize_node_specific<'mcx>(
 
 /// `finalize_primnode(node, context)` (subselect.c): add IDs of all PARAM_EXEC
 /// params appearing (or appearing-after-setrefs) in the expression tree.
+/// Param accounting for one `SubPlan` node, mirroring the `IsA(node, SubPlan)`
+/// branch of C `finalize_primnode`. Shared by the `Expr::SubPlan` case and the
+/// `Expr::AlternativeSubPlan` case (C reaches the latter's children by invoking
+/// the walker on each contained SubPlan node).
+fn finalize_subplan_node<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    subplan: &types_nodes::primnodes::SubPlan<'mcx>,
+    context: &mut FinalizeCtx<'mcx>,
+) -> PgResult<()> {
+    // Recurse into the testexpr, but not into the Plan.
+    if let Some(te) = subplan.testexpr.as_deref() {
+        finalize_primnode(mcx, root, run, Some(te), context)?;
+    }
+    // Remove output paramIds referenced in the testexpr.
+    for id in subplan.paramIds.iter() {
+        context.paramids = bms::bms_del_member(context.paramids.take(), *id);
+    }
+    // Also examine args list.
+    for arg in subplan.args.iter() {
+        finalize_primnode(mcx, root, run, Some(arg), context)?;
+    }
+    // Add params needed by the subplan, excluding those we pass down.
+    let child = planner_subplan_get_plan(run, root, subplan.plan_id);
+    let mut subparamids = bms::bms_copy(mcx, child.plan_head().extParam.as_deref())?;
+    for id in subplan.parParam.iter() {
+        subparamids = bms::bms_del_member(subparamids, *id);
+    }
+    context.paramids = bms::bms_join(context.paramids.take(), subparamids);
+    Ok(())
+}
+
 fn finalize_primnode<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
@@ -790,26 +823,17 @@ fn finalize_primnode<'mcx>(
             // Fall through to examine the agg's arguments.
         }
         Expr::SubPlan(splan) => {
-            let subplan = &splan.0;
-            // Recurse into the testexpr, but not into the Plan.
-            if let Some(te) = subplan.testexpr.as_deref() {
-                finalize_primnode(mcx, root, run, Some(te), context)?;
+            finalize_subplan_node(mcx, root, run, &splan.0, context)?;
+            return Ok(false);
+        }
+        Expr::AlternativeSubPlan(asplan) => {
+            // C: expression_tree_walker descends into AlternativeSubPlan->subplans
+            // by invoking the walker (finalize_primnode) on each whole SubPlan
+            // node, so each is param-accounted via the SubPlan branch. Mirror that
+            // by running the per-SubPlan accounting over every alternative.
+            for sp in asplan.0.subplans.iter() {
+                finalize_subplan_node(mcx, root, run, sp, context)?;
             }
-            // Remove output paramIds referenced in the testexpr.
-            for id in subplan.paramIds.iter() {
-                context.paramids = bms::bms_del_member(context.paramids.take(), *id);
-            }
-            // Also examine args list.
-            for arg in subplan.args.iter() {
-                finalize_primnode(mcx, root, run, Some(arg), context)?;
-            }
-            // Add params needed by the subplan, excluding those we pass down.
-            let child = planner_subplan_get_plan(run, root, subplan.plan_id);
-            let mut subparamids = bms::bms_copy(mcx, child.plan_head().extParam.as_deref())?;
-            for id in subplan.parParam.iter() {
-                subparamids = bms::bms_del_member(subparamids, *id);
-            }
-            context.paramids = bms::bms_join(context.paramids.take(), subparamids);
             return Ok(false);
         }
         _ => {}
