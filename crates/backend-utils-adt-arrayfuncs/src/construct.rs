@@ -2705,6 +2705,33 @@ pub fn construct_text_array<'mcx>(mcx: Mcx<'mcx>, elems: &[&str]) -> PgResult<Da
     Ok(datum_from_buf(buf))
 }
 
+/// Seam `construct_text_array_bytes` — `accumArrayResult`/`makeArrayResult`
+/// over `TEXTOID`, returning the flat array varlena byte image (the bytes a
+/// `ByRef`/`RefPayload::Varlena` carries) rather than a bare pointer word. An
+/// empty input yields `construct_empty_array(TEXTOID)` (matching C's
+/// `optionListToArray` "pass a null options list as an empty array").
+pub fn construct_text_array_bytes_str<'mcx>(
+    mcx: Mcx<'mcx>,
+    elems: &[&str],
+) -> PgResult<PgVec<'mcx, u8>> {
+    if elems.is_empty() {
+        return construct_empty_array(mcx, foundation::TEXTOID);
+    }
+    let mut astate: Option<ArrayBuildState> = None;
+    for s in elems {
+        let d = cstring_to_text_datum(mcx, s)?;
+        astate = Some(accum_array_result(
+            mcx,
+            astate.take(),
+            d,
+            false,
+            foundation::TEXTOID,
+        )?);
+    }
+    let astate = astate.expect("non-empty input builds a state");
+    make_array_result(mcx, &astate)
+}
+
 /// Seam `text_array_out` — `accumArrayResult`/`makeArrayResult` over `TEXTOID`
 /// then `array_out` (the `getTypeOutputInfo(ANYARRAYOID)` +
 /// `OidOutputFunctionCall(typoutput, makeArrayResult(...))` pair).

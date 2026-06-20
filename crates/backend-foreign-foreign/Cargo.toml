@@ -14,6 +14,8 @@ mcx = { path = "../mcx" }
 backend-optimizer-util-plancat-ext-seams = { path = "../backend-optimizer-util-plancat-ext-seams" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
 types-cache = { path = "../types-cache" }
 types-nodes = { path = "../types-nodes" }
 types-tuple = { path = "../types-tuple" }
@@ -31,6 +33,9 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }

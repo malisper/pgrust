@@ -588,6 +588,24 @@ pub fn postgresql_fdw_validator<'mcx>(
     // Oid catalog = PG_GETARG_OID(1);
     let catalog = fmgr::pg_getarg_oid::call(fcinfo, 1);
 
+    // PG_RETURN_BOOL(...).
+    Ok(Datum::from_bool(postgresql_fdw_validator_core(
+        mcx,
+        &options_list,
+        catalog,
+    )?))
+}
+
+/// The validation body of `postgresql_fdw_validator`, over the already-decoded
+/// option list (the `untransformRelOptions` output `(defname, arg)` pairs) and
+/// catalog OID. Raises an ERROR if any option is invalid; returns `true`
+/// otherwise. Shared by the fmgr `fcinfo` entry point and the `fmgr_builtins`
+/// fc-adapter (which decodes the `text[]` arg off the by-reference lane).
+pub fn postgresql_fdw_validator_core<'mcx>(
+    mcx: Mcx<'mcx>,
+    options_list: &[(String, Option<String>)],
+    catalog: Oid,
+) -> PgResult<bool> {
     for (defname, _arg) in options_list.iter() {
         if !is_conninfo_option(defname, catalog) {
             /*
@@ -632,8 +650,7 @@ pub fn postgresql_fdw_validator<'mcx>(
         }
     }
 
-    // PG_RETURN_BOOL(true);
-    Ok(Datum::from_bool(true))
+    Ok(true)
 }
 
 /* ===========================================================================
@@ -1097,25 +1114,43 @@ fn usermapping_options<'mcx>(
 /* ---- FDW options validator (transformGenericOptions tail) ---- */
 
 /// `OidFunctionCall2(fdwvalidator, optionsArray, ObjectIdGetDatum(catalogId))`
-/// — run the FDW options validator on the merged option list. The C builds a
+/// — run the FDW options validator on the merged option list. C builds a
 /// `text[]` `Datum` from the option list (`optionListToArray`, packing
-/// `"name=value"` text varlenas; an empty list → `construct_empty_array(
-/// TEXTOID)`), lowers it to a `Datum` word, and `OidFunctionCall2`s the
-/// validator. Building that `text[]` `Datum` and lowering it to the validator's
-/// argument word both require the pointer-Datum bridge
-/// (`types_datum::Datum` is a bare word with no by-reference array lane), which
-/// is unported; so is the runtime fmgr dispatch of an arbitrary validator OID.
-/// This body therefore seam-and-panics into that unported bridge, matching the
-/// FDW-provider / `DatumGetHeapTupleHeader` precedents (see DESIGN_DEBT.md).
-/// The DDL seam itself is installed (so it leaves CONTRACT_RECONCILE_PENDING);
-/// only the genuinely-unported validator dispatch panics when reached.
-fn validate_options(_fdwvalidator: Oid, _options: &[DefElem<'_>], _catalog_id: Oid) -> PgResult<()> {
-    panic!(
-        "validate_options: the FDW options validator dispatch \
-         (optionListToArray text[] Datum build + OidFunctionCall2(fdwvalidator)) \
-         requires the pointer-Datum array bridge + runtime fmgr validator \
-         dispatch, both unported — seam-and-panic until that bridge lands"
-    );
+/// `"name=value"` text varlenas; an empty list → an empty array so the
+/// validator need not be non-strict), then `OidFunctionCall2`s the validator.
+///
+/// The owned tree lowers the array onto the fmgr by-reference lane via the
+/// canonical `ByRef` `Datum`: `construct_text_array_bytes` packs the
+/// `"name=value"` elements into the flat array varlena image (the same bytes
+/// a `RefPayload::Varlena` carries), and `function_call2_coll_datum` resolves
+/// the validator by OID and dispatches with the array as arg0 (by-reference)
+/// and `ObjectIdGetDatum(catalogId)` as arg1 (by-value). The validator
+/// (`postgresql_fdw_validator` and any builtin/SQL validator) reads arg0 back
+/// with `untransformRelOptions(PG_GETARG_DATUM(0))`, exactly as C does. A
+/// validator `ereport(ERROR)` is carried back on `Err`.
+fn validate_options(fdwvalidator: Oid, options: &[DefElem<'_>], catalog_id: Oid) -> PgResult<()> {
+    let ctx = MemoryContext::new("validate_options");
+    let mcx = ctx.mcx();
+
+    // optionListToArray(options): each option packed as "name=value" text.
+    // `value = defGetString(def)` (the existing options_to_pairs helper).
+    let pairs = options_to_pairs(Some(options))?.unwrap_or_default();
+    let elems: Vec<String> = pairs
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect();
+    let elem_refs: Vec<&str> = elems.iter().map(|s| s.as_str()).collect();
+    // An empty list → construct_empty_array(TEXTOID), matching C's "pass a null
+    // options list as an empty array" so the validator need not be non-strict.
+    let array_image =
+        backend_utils_adt_arrayfuncs_seams::construct_text_array_bytes::call(mcx, &elem_refs)?;
+
+    // OidFunctionCall2(fdwvalidator, PointerGetDatum(array), ObjectIdGetDatum(catalogId)).
+    // arg0 crosses on the by-reference lane (ByRef text[] image); arg1 by value.
+    let arg0 = Datum::ByRef(array_image);
+    let arg1 = Datum::ByVal(catalog_id as usize);
+    fmgr::function_call2_coll_datum::call(mcx, fdwvalidator, InvalidOid, arg0, arg1)?;
+    Ok(())
 }
 
 /* ---- catalog inserts (open rel + GetNewOidWithIndex + indexing insert) ---- */
@@ -1450,7 +1485,14 @@ pub fn init_seams() {
     inward::validate_options::set(validate_options);
     inward::import_classify_raw_stmt::set(import_classify_raw_stmt);
     inward::import_set_schemaname::set(import_set_schemaname);
+
+    // Register the foreign.c fmgr builtins (postgresql_fdw_validator) so the
+    // OidFunctionCall2(fdwvalidator, ...) dispatch from validate_options
+    // resolves the validator by OID.
+    fmgr_builtins::register_foreign_builtins();
 }
+
+mod fmgr_builtins;
 
 /// `RelationGetRelid(node->ss.ss_currentRelation)`.
 fn scan_relation_relid(node: &ForeignScanState<'_>) -> Oid {

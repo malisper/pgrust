@@ -135,6 +135,7 @@ pub fn init_seams() {
     seams::decode_text_array_to_strings::set(construct::decode_text_array_to_strings);
     seams::deconstruct_tid_array::set(construct::deconstruct_tid_array);
     seams::construct_text_array::set(construct::construct_text_array);
+    seams::construct_text_array_bytes::set(construct::construct_text_array_bytes_str);
     seams::text_array_out::set(construct::text_array_out);
     seams::build_text_array_nullable::set(construct::build_text_array_nullable);
     seams::build_name_array::set(construct::build_name_array);

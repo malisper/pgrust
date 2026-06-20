@@ -90,6 +90,21 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     Datum::from_usize(0)
 }
 
+/// Write a `name` result (C: `PG_RETURN_NAME(Name)`): the fixed
+/// `NAMEDATALEN`-byte buffer image on the by-ref lane (the `name` value the
+/// boundary passes by pointer), NUL-filled past the copied bytes. `name` is a
+/// fixed-length-by-ref type, not a varlena — no header.
+#[inline]
+fn ret_name(fcinfo: &mut FunctionCallInfoBaseData, name: &[u8]) -> Datum {
+    const NAMEDATALEN: usize = types_core::fmgr::NAMEDATALEN as usize;
+    let mut buf = alloc::vec![0u8; NAMEDATALEN];
+    // namestrcpy truncates at NAMEDATALEN-1 and always NUL-terminates.
+    let n = name.len().min(NAMEDATALEN - 1);
+    buf[..n].copy_from_slice(&name[..n]);
+    fcinfo.set_ref_result(RefPayload::Varlena(buf));
+    Datum::from_usize(0)
+}
+
 /// A scratch context for workers that allocate their result through `Mcx`. The
 /// resulting bytes are copied onto the by-ref lane before it is dropped (C: the
 /// palloc'd result lives in the caller's context; here it crosses by value).
@@ -198,6 +213,25 @@ fn fc_pg_get_indexdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
         None => ret_null(fcinfo),
     }
+}
+
+/// `pg_get_userbyid(oid) -> name` (oid 1642, ruleutils.c:2794). Look up the
+/// `pg_authid` row for `roleid` via `SearchSysCache1(AUTHOID, ...)` and return
+/// `rolname`; on cache miss fall back to `unknown (OID=n)`. The result is a
+/// `name` (the fixed `NAMEDATALEN` buffer image).
+fn fc_pg_get_userbyid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let roleid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    // SearchSysCache1(AUTHOID, ObjectIdGetDatum(roleid)) projected to rolname.
+    let rolname = ok(backend_utils_cache_syscache_seams::authid_rolname::call(
+        m.mcx(),
+        roleid,
+    ));
+    let name: Vec<u8> = match rolname {
+        Some(s) => s.as_str().as_bytes().to_vec(),
+        None => alloc::format!("unknown (OID={roleid})").into_bytes(),
+    };
+    ret_name(fcinfo, &name)
 }
 
 /// `pg_get_constraintdef(oid) -> text` (oid 1387). prettyFlags =
@@ -517,6 +551,8 @@ pub fn register_ruleutils_builtins() {
         builtin(2507, "pg_get_indexdef_ext", 3, true, false, fc_pg_get_indexdef_ext),
         builtin(1387, "pg_get_constraintdef", 1, true, false, fc_pg_get_constraintdef),
         builtin(2508, "pg_get_constraintdef_ext", 2, true, false, fc_pg_get_constraintdef_ext),
+        // pg_get_userbyid(oid) -> name (roleid -> rolname, unknown-OID fallback).
+        builtin(1642, "pg_get_userbyid", 1, true, false, fc_pg_get_userbyid),
         // Slice 3: extended-statistics deparse (resolvable; workers seam-and-panic
         // at the unported Form_pg_statistic_ext deform — empty-input psql `\d`
         // describe only needs resolution, see statisticsdef.rs).

@@ -225,6 +225,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `accumArrayResult`/`makeArrayResult` over `TEXTOID` (arrayfuncs.c):
+    /// build a `text[]` array from the given element strings and return the
+    /// flat array varlena byte image (the same bytes a `ByRef` `Datum` /
+    /// `RefPayload::Varlena` carries). Unlike [`construct_text_array`], which
+    /// yields a bare in-`mcx` pointer word, this returns the bytes so the caller
+    /// can lower them onto the fmgr by-reference lane (e.g. the
+    /// `optionListToArray` text[] an FDW validator receives). An empty input
+    /// yields the C `construct_empty_array(TEXTOID)` image. Allocated in `mcx`.
+    pub fn construct_text_array_bytes<'mcx>(
+        mcx: Mcx<'mcx>,
+        elems: &[&str],
+    ) -> PgResult<PgVec<'mcx, u8>>
+);
+
+seam_core::seam!(
     /// `accumArrayResult`/`makeArrayResult` over `TEXTOID` followed by
     /// `array_out` (arrayfuncs.c): build a `text[]` array from the given element
     /// strings and render its external text form — the `getTypeOutputInfo(
