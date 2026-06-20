@@ -3153,22 +3153,23 @@ thread_local! {
 /// &prm->isnull)`.
 pub fn eval_exec_param_into_list<'mcx>(
     param_li: &mut types_nodes::params::ParamListInfoData<'static>,
-    exprstate: &ExprState<'mcx>,
+    exprstate: &mut ExprState<'mcx>,
     param_index: i32,
     ptype: types_core::Oid,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // ExprState is consumed by-&mut by the evaluator (it threads result cells);
-    // clone the borrowed compiled program into a local the evaluator can drive,
-    // matching the C `ExecEvalExprSwitchContext(n, ...)` which mutates the
-    // ExprState's scratch in place.
-    let mut state = exprstate.clone();
-
     // prm->value = ExecEvalExprSwitchContext(n, GetPerTupleExprContext(estate),
     //                                        &prm->isnull);
+    //
+    // C evaluates the compiled `ExprState` in place — the interpreter threads
+    // its scratch result cells through the *same* state built by
+    // `ExecPrepareExprList`. The state must NOT be cloned: `ExprState::clone`
+    // deliberately drops the compiled `steps` program (it only carries the
+    // lightweight handle fields), so a cloned state has no instructions and
+    // `CheckExprStillValid`/`ExecInterpExpr` would panic ("steps not built").
     let econtext =
         backend_executor_execUtils_seams::get_per_tuple_expr_context::call(estate)?;
-    let (value, isnull) = exec_eval_expr_switch_context(&mut state, econtext, estate)?;
+    let (value, isnull) = exec_eval_expr_switch_context(exprstate, econtext, estate)?;
 
     // Deep-copy the computed value out of the per-tuple context into the param
     // list's backend-lifetime storage (`Datum<'static>`). For a by-value datum

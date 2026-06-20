@@ -471,11 +471,12 @@ fn EvaluateParams<'mcx>(
     //     prm->ptype = param_types[i]; prm->pflags = PARAM_FLAG_CONST;
     //     prm->value = ExecEvalExprSwitchContext(n, GetPerTupleExprContext(estate),
     //                                            &prm->isnull); i++; }
+    let mut exprstates = exprstates;
     let mut i: i32 = 0;
     while i < num_params {
         execexpr_seam::eval_exec_param_into_list::call(
             param_data,
-            &exprstates[i as usize],
+            &mut exprstates[i as usize],
             i,
             param_types[i as usize],
             estate,
