@@ -341,7 +341,7 @@ fn get_opfamily_name_str(opfamily: Oid) -> PgResult<String> {
 
 /// `get_am_name(amid)` rendered as an owned `String`, like
 /// [`get_opfamily_name_str`].
-fn get_am_name_str(amid: Oid) -> PgResult<String> {
+pub(crate) fn get_am_name_str(amid: Oid) -> PgResult<String> {
     let tmp = MemoryContext::new("indexcmds:get_am_name");
     let name = lsyscache::get_am_name::call(tmp.mcx(), amid)?
         .map(|s| s.as_str().to_string())

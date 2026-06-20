@@ -99,6 +99,17 @@ use backend_utils_time_snapmgr_seams as snapmgr_seam;
 use backend_access_transam_xact_seams as xact_seam;
 use backend_utils_cache_inval_seams as inval_seam;
 use backend_utils_cache_relcache_seams as relcache_seam;
+use backend_utils_cache_partcache_seams as partcache_seam;
+use backend_utils_adt_format_type_seams as formattype_seam;
+use backend_catalog_pg_inherits_seams as inherits_seam;
+use backend_catalog_pg_depend_seams as depend_seam;
+use backend_access_index_indexam_seams as indexam_seam;
+use backend_parser_parse_utilcmd_seams as utilcmd_seam;
+
+use crate::opclass::get_am_name_str;
+use types_amapi::COMPARE_EQ;
+use types_hash::hash::HTEqualStrategyNumber;
+use types_scan::scankey::BTEqualStrategyNumber;
 
 use types_acl::acl::{ACL_CREATE, ACLCHECK_OK};
 use types_nodes::parsenodes::{OBJECT_SCHEMA, OBJECT_TABLESPACE};
@@ -106,7 +117,7 @@ use types_catalog::catalog::{GLOBALTABLESPACE_OID, TABLESPACE_RELATION_ID};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::catalog::{NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
 use types_tuple::access::{
-    ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW,
+    ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
@@ -149,6 +160,7 @@ const INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS: u16 = 1 << 5;
 const PROGRESS_CREATEIDX_COMMAND: i32 = 0;
 const PROGRESS_CREATEIDX_INDEX_OID: i32 = 6;
 const PROGRESS_CREATEIDX_ACCESS_METHOD_OID: i32 = 8;
+const PROGRESS_CREATEIDX_PARTITIONS_TOTAL: i32 = 13;
 const PROGRESS_CREATEIDX_PARTITIONS_DONE: i32 = 14;
 const PROGRESS_CREATEIDX_COMMAND_CREATE: i64 = 1;
 const PROGRESS_CREATEIDX_COMMAND_CREATE_CONCURRENTLY: i64 = 2;
@@ -234,7 +246,7 @@ pub fn DefineIndex<'mcx>(
     mut index_relation_id: Oid,
     parent_index_id: Oid,
     parent_constraint_id: Oid,
-    _total_parts: i32,
+    mut total_parts: i32,
     is_alter_table: bool,
     check_rights: bool,
     check_not_in_use: bool,
@@ -581,8 +593,22 @@ pub fn DefineIndex<'mcx>(
     }
 
     // Partitioned + (unique | exclusion): partition-key subset check.
+    //
+    // If this table is partitioned and we're creating a unique index, primary
+    // key, or exclusion constraint, make sure that the partition key is a
+    // subset of the index's columns.  Otherwise it would be possible to violate
+    // uniqueness by putting values that ought to be unique in different
+    // partitions.
     if partitioned && (stmt.unique || exclusion) {
-        return Err(define_index_partition_keycheck_unsupported());
+        define_index_partition_keycheck(
+            mcx,
+            &rel,
+            stmt,
+            exclusion,
+            &index_info,
+            &collation_ids,
+            &opclass_ids,
+        )?;
     }
 
     // Disallow indexes on system columns + virtual generated columns.
@@ -674,7 +700,7 @@ pub fn DefineIndex<'mcx>(
     }
 
     // If partitioned, recursion declined but partitions exist -> mark invalid.
-    if partitioned && relation_inh_declined(stmt) && relation_has_partitions(&rel) {
+    if partitioned && relation_inh_declined(stmt) && relation_has_partitions(mcx, &rel)? {
         flags |= INDEX_CREATE_INVALID;
     }
 
@@ -718,7 +744,6 @@ pub fn DefineIndex<'mcx>(
 
     let (created_index_relation_id, created_constraint_id) = index_seam::index_create::call(&rel, args)?;
     index_relation_id = created_index_relation_id;
-    let _ = created_constraint_id;
 
     let address = ObjectAddress {
         classId: RELATION_RELATION_ID,
@@ -747,12 +772,212 @@ pub fn DefineIndex<'mcx>(
         CreateComments(mcx, index_relation_id, RELATION_RELATION_ID, 0, Some(comment.as_str()))?;
     }
 
-    // Partitioned-table recursion: build/attach child indexes. DEFERRED.
+    // Partitioned-table recursion: build/attach child indexes (indexcmds.c
+    // DefineIndex partitioned branch, lines ~1292-1600).
     if partitioned {
-        if relation_should_recurse(stmt) && relation_has_partitions(&rel) {
-            return Err(define_index_partition_recursion());
+        let partdesc = backend_partitioning_partdesc::RelationGetPartitionDesc(mcx, &rel, true)?;
+
+        // Unless caller specified to skip this step (via ONLY), process each
+        // partition to make sure they all contain a corresponding index. If we're
+        // called internally (no stmt->relation), recurse always.
+        if (stmt.relation.is_none() || relation_should_recurse(stmt)) && partdesc.nparts > 0 {
+            // Make a local copy of partdesc->oids[], just for safety.
+            let part_oids: Vec<Oid> = partdesc.oids.iter().copied().collect();
+            let mut invalidate_parent = false;
+
+            // Report the total number of partitions at the start of the command;
+            // don't update it when being called recursively.
+            if !OidIsValid(parent_index_id) {
+                if total_parts < 0 {
+                    let children = inherits_seam::find_all_inheritors::call(
+                        mcx,
+                        table_id,
+                        types_storage::lock::NoLock,
+                    )?;
+                    total_parts = children.len() as i32 - 1;
+                }
+                pgstat_progress_update_param(
+                    PROGRESS_CREATEIDX_PARTITIONS_TOTAL,
+                    total_parts as i64,
+                );
+            }
+
+            // We'll need an IndexInfo describing the parent index, built the same
+            // way (BuildIndexInfo) so it will match those for child indexes.
+            let parent_index = indexam_seam::index_open::call(mcx, index_relation_id, lockmode)?;
+            let parent_index_info = backend_catalog_index::BuildIndexInfo(mcx, &parent_index)?;
+            let parent_index_collations: Vec<Oid> = parent_index.rd_indcollation.to_vec();
+            let parent_index_opfamilies: Vec<Oid> = parent_index.rd_opfamily.to_vec();
+
+            // For each partition, scan all existing indexes; if one matches our
+            // index definition and is not already attached to some other parent
+            // index, attach it. If none matches, build a new index by recursing.
+            for &child_relid in part_oids.iter() {
+                let childrel = table_seam::table_open::call(mcx, child_relid, lockmode)?;
+
+                let (child_save_userid, child_save_sec_context) = GetUserIdAndSecContext();
+                SetUserIdAndSecContext(
+                    childrel.rd_rel.relowner,
+                    child_save_sec_context | SECURITY_RESTRICTED_OPERATION,
+                );
+                let child_save_nestlevel = NewGUCNestLevel();
+                restrict_search_path::call()?;
+
+                // Don't try to create indexes on foreign tables.
+                if childrel.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
+                    if stmt.unique || stmt.primary {
+                        return Err(ereport(ERROR)
+                            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                            .errmsg(format!(
+                                "cannot create unique index on partitioned table \"{}\"",
+                                rel.rd_rel.relname.as_str()
+                            ))
+                            .errdetail(format!(
+                                "Table \"{}\" contains partitions that are foreign tables.",
+                                rel.rd_rel.relname.as_str()
+                            ))
+                            .into_error());
+                    }
+                    at_eoxact_guc(false, child_save_nestlevel);
+                    SetUserIdAndSecContext(child_save_userid, child_save_sec_context);
+                    owner_table_close(childrel, lockmode)?;
+                    continue;
+                }
+
+                let childidxs =
+                    relcache_seam::relation_get_index_list::call(mcx, childrel.alias())?;
+                let attmap = backend_access_common_next::build_attrmap_by_name(
+                    mcx,
+                    &childrel.rd_att,
+                    &rel.rd_att,
+                    false,
+                )?;
+
+                let mut found = false;
+                for &cldidxid in childidxs.iter() {
+                    // this index is already partition of another one
+                    if inherits_seam::has_superclass::call(cldidxid)? {
+                        continue;
+                    }
+
+                    let cldidx = indexam_seam::index_open::call(mcx, cldidxid, lockmode)?;
+                    let cld_idx_info = backend_catalog_index::BuildIndexInfo(mcx, &cldidx)?;
+                    if backend_catalog_index::CompareIndexInfo(
+                        mcx,
+                        &cld_idx_info,
+                        &parent_index_info,
+                        &cldidx.rd_indcollation,
+                        &parent_index_collations,
+                        &cldidx.rd_opfamily,
+                        &parent_index_opfamilies,
+                        &attmap.attnums,
+                    )? {
+                        let mut cld_constr_oid = InvalidOid;
+
+                        // If this index is being created in the parent because of
+                        // a constraint, the child needs a constraint also; if none,
+                        // this index is no good, so keep looking.
+                        if OidIsValid(created_constraint_id) {
+                            cld_constr_oid =
+                                backend_catalog_pg_constraint::get_relation_idx_constraint_oid(
+                                    child_relid,
+                                    cldidxid,
+                                )?;
+                            if !OidIsValid(cld_constr_oid) {
+                                cldidx.close(lockmode)?;
+                                continue;
+                            }
+                        }
+
+                        // Attach index to parent and we're done.
+                        IndexSetParentIndex(mcx, &cldidx, index_relation_id)?;
+                        if OidIsValid(created_constraint_id) {
+                            backend_catalog_pg_constraint::ConstraintSetParentConstraint(
+                                mcx,
+                                cld_constr_oid,
+                                created_constraint_id,
+                                child_relid,
+                            )?;
+                        }
+
+                        if !cldidx
+                            .rd_index
+                            .as_ref()
+                            .map(|i| i.indisvalid)
+                            .unwrap_or(false)
+                        {
+                            invalidate_parent = true;
+                        }
+
+                        found = true;
+
+                        pgstat_progress_incr_param(PROGRESS_CREATEIDX_PARTITIONS_DONE, 1);
+
+                        // keep lock till commit
+                        cldidx.close(types_storage::lock::NoLock)?;
+                        break;
+                    }
+
+                    cldidx.close(lockmode)?;
+                }
+
+                at_eoxact_guc(false, child_save_nestlevel);
+                SetUserIdAndSecContext(child_save_userid, child_save_sec_context);
+                owner_table_close(childrel, types_storage::lock::NoLock)?;
+
+                // If no matching index was found, create our own.
+                if !found {
+                    // Build an IndexStmt describing the desired child index as in
+                    // ATTACH PARTITION (search-path-independent via the cloner).
+                    let (child_stmt, _child_constr_oid) =
+                        utilcmd_seam::generateClonedIndexStmt::call(
+                            mcx,
+                            None,
+                            parent_index.alias(),
+                            &attmap,
+                        )?;
+
+                    // Recurse as the starting user ID. Callee will use that for
+                    // permission checks, then switch again.
+                    SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
+                    let child_addr = DefineIndex(
+                        mcx,
+                        child_relid,
+                        &child_stmt,
+                        InvalidOid,        // no predefined OID
+                        index_relation_id, // this is our child
+                        created_constraint_id,
+                        -1,
+                        is_alter_table,
+                        check_rights,
+                        check_not_in_use,
+                        skip_build,
+                        quiet,
+                    )?;
+                    SetUserIdAndSecContext(child_save_userid, child_save_sec_context);
+
+                    // The index just created could have been switched to invalid
+                    // when recursing across multiple partition levels.
+                    if !lsyscache::get_index_isvalid::call(child_addr.objectId)? {
+                        invalidate_parent = true;
+                    }
+                }
+            }
+
+            parent_index.close(lockmode)?;
+
+            // The pg_index row we inserted was marked indisvalid=true. But if we
+            // attached an existing index that is invalid, update our row to
+            // invalid too.
+            if invalidate_parent {
+                index_seam::index_mark_invalid::call(index_relation_id)?;
+                // CCI here to make this update visible, in case this recurses
+                // across multiple partition levels.
+                xact_seam::command_counter_increment::call()?;
+            }
         }
-        // No partitions / ONLY: indexes on partitioned tables aren't built.
+
+        // Indexes on partitioned tables are not themselves built, so we're done.
         at_eoxact_guc(false, root_save_nestlevel);
         SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
         owner_table_close(rel, types_storage::lock::NoLock)?;
@@ -1310,23 +1535,284 @@ fn reindex_concurrently_deferred() -> backend_utils_error::PgError {
 }
 
 // ---------------------------------------------------------------------------
-// Deferred DefineIndex tails (precise panics)
+// DefineIndex partitioned-table legs (key-subset check + parent-index linking)
 // ---------------------------------------------------------------------------
 
-fn define_index_partition_recursion() -> backend_utils_error::PgError {
-    panic!(
-        "backend-commands-indexcmds: DefineIndex partitioned-table recursion is deferred — \
-         generateClonedIndexStmt / IndexSetParentIndex / BuildIndexInfo+CompareIndexInfo \
-         child-index matching is unported"
-    );
+/// `elog(ERROR, msg)` shorthand returning the error value.
+fn elog_error(msg: impl Into<String>) -> backend_utils_error::PgError {
+    ereport(ERROR).errmsg_internal(msg).into_error()
 }
 
-fn define_index_partition_keycheck_unsupported() -> backend_utils_error::PgError {
-    panic!(
-        "backend-commands-indexcmds: DefineIndex partition-key subset check (UNIQUE / PRIMARY \
-         KEY / EXCLUDE on a partitioned table) is deferred — it needs RelationGetPartitionKey \
-         + partition-opfamily matching, which is unported"
+/// indexcmds.c DefineIndex partitioned + (unique | exclusion) branch
+/// (lines ~963-1098): verify that all columns in the partition key appear in
+/// the unique/PK/exclusion index definition, with the same notion of equality.
+#[allow(clippy::too_many_arguments)]
+fn define_index_partition_keycheck<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    stmt: &IndexStmt<'mcx>,
+    exclusion: bool,
+    index_info: &types_nodes::execnodes::IndexInfo<'mcx>,
+    collation_ids: &[Oid],
+    opclass_ids: &[Oid],
+) -> PgResult<()> {
+    use types_nodes::partition::PartitionStrategy;
+
+    let key = partcache_seam::relation_get_partition_key::call(mcx, rel.alias())?
+        .ok_or_else(|| elog_error("DefineIndex: partitioned table has no partition key"))?;
+
+    let constraint_type = if stmt.primary {
+        "PRIMARY KEY"
+    } else if stmt.unique {
+        "UNIQUE"
+    } else if !stmt.excludeOpNames.is_empty() {
+        "EXCLUDE"
+    } else {
+        return Err(elog_error("unknown constraint type"));
+    };
+
+    // Verify that all the columns in the partition key appear in the unique key
+    // definition, with the same notion of equality.
+    for i in 0..key.partnatts as usize {
+        let mut found = false;
+
+        // Identify the equality operator associated with this partkey column.
+        // For list and range partitioning, partkeys use btree operator classes;
+        // hash partitioning uses hash operator classes. (Keep this in sync with
+        // ComputePartitionAttrs!)
+        let eq_strategy: i16 = if key.strategy == PartitionStrategy::Hash {
+            HTEqualStrategyNumber as i16
+        } else {
+            BTEqualStrategyNumber as i16
+        };
+
+        let ptkey_eqop = lsyscache::get_opfamily_member::call(
+            key.partopfamily[i],
+            key.partopcintype[i],
+            key.partopcintype[i],
+            eq_strategy,
+        )?;
+        if !OidIsValid(ptkey_eqop) {
+            return Err(elog_error(format!(
+                "missing operator {}({},{}) in partition opfamily {}",
+                eq_strategy, key.partopcintype[i], key.partopcintype[i], key.partopfamily[i]
+            )));
+        }
+
+        // It may be possible to support UNIQUE constraints when partition keys
+        // are expressions, but is it worth it? Give up for now.
+        if key.partattrs[i] == 0 {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!(
+                    "unsupported {constraint_type} constraint with partition key definition"
+                ))
+                .errdetail(format!(
+                    "{constraint_type} constraints cannot be used when partition keys include expressions."
+                ))
+                .into_error());
+        }
+
+        // Search the index column(s) for a match.
+        for j in 0..index_info.ii_NumIndexKeyAttrs as usize {
+            if key.partattrs[i] == index_info.ii_IndexAttrNumbers[j] {
+                // Matched the column, now what about the collation and equality op?
+                if key.partcollation[i] != collation_ids[j] {
+                    continue;
+                }
+
+                if let Some((idx_opfamily, idx_opcintype)) =
+                    lsyscache::get_opclass_opfamily_and_input_type::call(opclass_ids[j])?
+                {
+                    let mut idx_eqop = InvalidOid;
+
+                    if stmt.unique && !stmt.iswithoutoverlaps {
+                        idx_eqop = lsyscache::get_opfamily_member_for_cmptype::call(
+                            idx_opfamily,
+                            idx_opcintype,
+                            idx_opcintype,
+                            COMPARE_EQ as i32,
+                        )?;
+                    } else if exclusion {
+                        idx_eqop = index_info
+                            .ii_ExclusionOps
+                            .as_ref()
+                            .map(|ops| ops[j])
+                            .unwrap_or(InvalidOid);
+                    }
+
+                    if !OidIsValid(idx_eqop) {
+                        let opfam_name = lsyscache::get_opfamily_name::call(mcx, idx_opfamily, false)?
+                            .map(|s| s.as_str().to_string())
+                            .unwrap_or_default();
+                        let am_name =
+                            get_am_name_str(lsyscache::get_opfamily_method::call(idx_opfamily)?)?;
+                        return Err(ereport(ERROR)
+                            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                            .errmsg(format!(
+                                "could not identify an equality operator for type {}",
+                                formattype_seam::format_type_be_owned::call(idx_opcintype)?
+                            ))
+                            .errdetail(format!(
+                                "There is no suitable operator in operator family \"{}\" for access method \"{}\".",
+                                opfam_name, am_name
+                            ))
+                            .into_error());
+                    }
+
+                    if ptkey_eqop == idx_eqop {
+                        found = true;
+                        break;
+                    } else if exclusion {
+                        // We found a match, but it's not an equality operator.
+                        // Fail now and explain that the operator is wrong.
+                        let att = rel.rd_att.attr((key.partattrs[i] - 1) as usize);
+                        let excl_op = index_info
+                            .ii_ExclusionOps
+                            .as_ref()
+                            .map(|ops| ops[j])
+                            .unwrap_or(InvalidOid);
+                        let opname = lsyscache::get_opname::call(mcx, excl_op)?
+                            .map(|s| s.as_str().to_string())
+                            .unwrap_or_default();
+                        return Err(ereport(ERROR)
+                            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                            .errmsg(format!(
+                                "cannot match partition key to index on column \"{}\" using non-equal operator \"{}\"",
+                                String::from_utf8_lossy(att.attname.name_str()),
+                                opname
+                            ))
+                            .into_error());
+                    }
+                }
+            }
+        }
+
+        if !found {
+            let att = rel.rd_att.attr((key.partattrs[i] - 1) as usize);
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("unique constraint on partitioned table must include all partitioning columns")
+                .errdetail(format!(
+                    "{constraint_type} constraint on table \"{}\" lacks column \"{}\" which is part of the partition key.",
+                    rel.rd_rel.relname.as_str(),
+                    String::from_utf8_lossy(att.attname.name_str())
+                ))
+                .into_error());
+        }
+    }
+
+    Ok(())
+}
+
+/// `IndexSetParentIndex(partitionIdx, parentOid)` (indexcmds.c:4443).
+///
+/// Set or clear the parent-index link of `partition_idx`: detect an existing
+/// `pg_inherits` row, then insert (`StoreSingleInheritance`), delete
+/// (`DeleteInheritsTuple`), or leave it as-is; set the parent's
+/// `relhassubclass` when a parent is added; update the partition's
+/// `relispartition`; and add/remove the `DEPENDENCY_PARTITION_{PRI,SEC}` pg_depend
+/// rows. A no-op (already in the right state) skips the dependency churn and the
+/// `CommandCounterIncrement`.
+pub fn IndexSetParentIndex<'mcx>(
+    mcx: Mcx<'mcx>,
+    partition_idx: &Relation<'mcx>,
+    parent_oid: Oid,
+) -> PgResult<()> {
+    use types_catalog::catalog_dependency::{DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC};
+
+    let part_relid = partition_idx.rd_id;
+
+    // Make sure this is an index (Assert in C).
+    debug_assert!(
+        partition_idx.rd_rel.relkind == RELKIND_INDEX
+            || partition_idx.rd_rel.relkind == RELKIND_PARTITIONED_INDEX
     );
+
+    // Scan pg_inherits for a row linking our index to some parent (inhseqno = 1).
+    // `has_superclass` reports whether such a row exists; the partition-index
+    // tree only ever has a single (seqno = 1) parent link, so that suffices to
+    // distinguish the insert / delete / already-linked cases.
+    let has_parent_row = inherits_seam::has_superclass::call(part_relid)?;
+
+    let fix_dependencies: bool;
+    if !has_parent_row {
+        if !OidIsValid(parent_oid) {
+            // No pg_inherits row, and no parent wanted: nothing to do.
+            fix_dependencies = false;
+        } else {
+            inherits_seam::store_single_inheritance::call(part_relid, parent_oid, 1)?;
+            fix_dependencies = true;
+        }
+    } else if !OidIsValid(parent_oid) {
+        // There exists a pg_inherits row, which we want to clear; do so.
+        inherits_seam::delete_inherits_tuple::call(part_relid, InvalidOid, false, None)?;
+        fix_dependencies = true;
+    } else {
+        // A pg_inherits row exists and a parent is wanted. If it names the same
+        // parent we're good (already in the right state); a different parent
+        // would be a corrupt catalog, which our callers never produce.
+        fix_dependencies = false;
+    }
+
+    // Set relhassubclass if an index partition has been added to the parent.
+    if OidIsValid(parent_oid) {
+        lmgr_seam::lock_relation_oid::call(parent_oid, ShareUpdateExclusiveLock_v())?.keep();
+        tablecmds_seam::set_relation_has_subclass::call(mcx, parent_oid, true)?;
+    }
+
+    // Set relispartition correctly on the partition.
+    tablecmds_seam::update_relispartition_catalog::call(part_relid, OidIsValid(parent_oid))?;
+
+    if fix_dependencies {
+        // Insert/delete pg_depend rows.
+        if OidIsValid(parent_oid) {
+            let part_idx = ObjectAddress {
+                classId: RELATION_RELATION_ID,
+                objectId: part_relid,
+                objectSubId: 0,
+            };
+            let parent_idx = ObjectAddress {
+                classId: RELATION_RELATION_ID,
+                objectId: parent_oid,
+                objectSubId: 0,
+            };
+            let partition_tbl = ObjectAddress {
+                classId: RELATION_RELATION_ID,
+                objectId: partition_idx
+                    .rd_index
+                    .as_ref()
+                    .map(|i| i.indrelid)
+                    .unwrap_or(InvalidOid),
+                objectSubId: 0,
+            };
+            depend_seam::recordDependencyOn::call(mcx, &part_idx, &parent_idx, DEPENDENCY_PARTITION_PRI)?;
+            depend_seam::recordDependencyOn::call(
+                mcx,
+                &part_idx,
+                &partition_tbl,
+                DEPENDENCY_PARTITION_SEC,
+            )?;
+        } else {
+            depend_seam::deleteDependencyRecordsForClass::call(
+                RELATION_RELATION_ID,
+                part_relid,
+                RELATION_RELATION_ID,
+                DEPENDENCY_PARTITION_PRI.0,
+            )?;
+            depend_seam::deleteDependencyRecordsForClass::call(
+                RELATION_RELATION_ID,
+                part_relid,
+                RELATION_RELATION_ID,
+                DEPENDENCY_PARTITION_SEC.0,
+            )?;
+        }
+
+        // Make our updates visible.
+        xact_seam::command_counter_increment::call()?;
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1431,19 +1917,13 @@ fn here(funcname: &'static str) -> types_error::pg_error::ErrorLocation {
     types_error::pg_error::ErrorLocation::new("../src/backend/commands/indexcmds.c", 0, funcname)
 }
 
-/// `RelationGetPartitionDesc(rel, true)->nparts != 0`. The partition-descriptor
-/// machinery is unported; reaching this for a non-partitioned table is a no-op
-/// (returns false). For a partitioned table with the recursion paths above it
-/// is gated by the partition-recursion deferral panic, so a precise panic here
-/// keeps the "partitions exist?" probe honest.
-fn relation_has_partitions(rel: &Relation<'_>) -> bool {
+/// `RelationGetPartitionDesc(rel, true)->nparts != 0` (indexcmds.c:1232-1234).
+fn relation_has_partitions<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<bool> {
     if rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE {
-        return false;
+        return Ok(false);
     }
-    panic!(
-        "backend-commands-indexcmds: RelationGetPartitionDesc (partition-descriptor probe) is \
-         unported; CREATE INDEX on a partitioned table is deferred"
-    );
+    let pd = backend_partitioning_partdesc::RelationGetPartitionDesc(mcx, rel, true)?;
+    Ok(pd.nparts != 0)
 }
 
 /// Install this unit's outward seams.
