@@ -10,13 +10,15 @@
 //! resolves them. OIDs / nargs / strict / retset are transcribed exactly from
 //! `pg_proc.dat`.
 //!
-//! `numeric_random` (oid 6341) is NOT registered here: its arguments and result
-//! are on-disk `Numeric` Datums, which are not expressible at the current
-//! by-value fmgr boundary (the systemic fmgr/Datum `Numeric` deferral the crate
-//! docs describe).
+//! `numeric_random` (oid 6341, SQL name `random`) takes two on-disk `numeric`
+//! Datums and returns one; like the rest of the `numeric.c` family these cross
+//! the fmgr boundary as header-ful varlena images on the by-ref
+//! `RefPayload::Varlena` lane (the established `numeric` convention), so it IS
+//! registered here.
 
 use types_datum::Datum;
 use types_error::PgResult;
+use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
@@ -51,6 +53,25 @@ fn arg_i64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i64 {
         .expect("pseudorandom fn: missing arg")
         .value
         .as_i64()
+}
+
+/// `PG_GETARG_NUMERIC(i)`: the full header-ful `numeric` varlena image on the
+/// by-ref lane (the `numeric` core reads from `VARHDRSZ`; it crosses verbatim).
+#[inline]
+fn arg_numeric(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("pseudorandom fn: by-ref `numeric` arg missing from by-ref lane")
+        .to_vec()
+}
+
+/// `PG_RETURN_NUMERIC(image)`: set the header-ful `numeric` result on the by-ref
+/// lane and return the dummy by-value word.
+#[inline]
+fn ret_numeric(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Datum::from_usize(0)
 }
 
 #[inline]
@@ -107,6 +128,17 @@ fn fc_int8random(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     Ok(ret_i64(crate::int8random(rmin, rmax)?))
 }
 
+/// `numeric_random(PG_FUNCTION_ARGS)` — `random(numeric min, numeric max)`,
+/// returns a `numeric`. The bounds and result cross as header-ful varlena
+/// images on the by-ref lane.
+fn fc_numeric_random(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let rmin = arg_numeric(fcinfo, 0);
+    let rmax = arg_numeric(fcinfo, 1);
+    let m = mcx::MemoryContext::new("numeric_random fmgr scratch");
+    let image = crate::numeric_random(m.mcx(), &rmin, &rmax)?;
+    Ok(ret_numeric(fcinfo, image.to_vec()))
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -144,5 +176,6 @@ pub fn register_pseudorandomfuncs_builtins() {
         builtin(6212, "drandom_normal", 2, true, false, fc_drandom_normal),
         builtin(6339, "int4random", 2, true, false, fc_int4random),
         builtin(6340, "int8random", 2, true, false, fc_int8random),
+        builtin(6341, "numeric_random", 2, true, false, fc_numeric_random),
     ]);
 }
