@@ -12794,6 +12794,7 @@ dependencies = [
  "types-pathnodes",
  "types-plancache",
  "types-rel",
+ "types-statistics",
  "types-storage",
  "types-tuple",
 ]

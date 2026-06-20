@@ -1290,6 +1290,8 @@ pub fn init_seams() {
     s::statext_namespace::set(projections::statext_namespace);
     s::statext_search_tuple::set(projections::statext_search_tuple);
     s::statext_data_search_tuple::set(projections::statext_data_search_tuple);
+    s::statext_keys_exprs_text::set(projections::statext_keys_exprs_text);
+    s::statext_data_built_kinds::set(projections::statext_data_built_kinds);
     s::search_seqrelid::set(projections::search_seqrelid);
     s::pg_type_default::set(projections::pg_type_default);
     s::search_pg_proc_fastpath::set(projections::search_pg_proc_fastpath);

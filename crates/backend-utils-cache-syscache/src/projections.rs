@@ -5010,6 +5010,13 @@ const Anum_pg_statistic_ext_oid_b2: i32 = 1;
 const Anum_pg_statistic_ext_stxrelid_b2: i32 = 2;
 const Anum_pg_statistic_ext_stxname_b2: i32 = 3;
 const Anum_pg_statistic_ext_stxnamespace_b2: i32 = 4;
+const Anum_pg_statistic_ext_stxkeys_b2: i32 = 6;
+const Anum_pg_statistic_ext_stxexprs_b2: i32 = 9;
+const Anum_pg_statistic_ext_data_stxdinherit_b2: i32 = 2;
+const Anum_pg_statistic_ext_data_stxdndistinct_b2: i32 = 3;
+const Anum_pg_statistic_ext_data_stxddependencies_b2: i32 = 4;
+const Anum_pg_statistic_ext_data_stxdmcv_b2: i32 = 5;
+const Anum_pg_statistic_ext_data_stxdexpr_b2: i32 = 6;
 const Anum_pg_ts_parser_oid_b2: i32 = 1;
 const Anum_pg_ts_parser_prsname_b2: i32 = 2;
 const Anum_pg_ts_parser_prsnamespace_b2: i32 = 3;
@@ -6899,4 +6906,88 @@ pub(crate) fn statext_data_search_tuple<'mcx>(
     let copy = tup.clone_in(mcx)?;
     ReleaseSysCache(tup);
     Ok(Some(copy))
+}
+
+/// `SearchSysCache1(STATEXTOID, statOid)` projected to the covered-column attnums
+/// (`staForm->stxkeys`, the int2vector members) and the raw `stxexprs`
+/// `pg_node_tree` text (NULL ⇒ `None`) — the catalog half of
+/// `get_relation_statistics` (plancat.c:1522-1556). `Ok(None)` on a cache miss
+/// (the caller raises `cache lookup failed for statistics object %u`).
+pub(crate) fn statext_keys_exprs_text<'mcx>(
+    mcx: Mcx<'mcx>,
+    stat_oid: Oid,
+) -> PgResult<Option<(Vec<i32>, Option<PgString<'mcx>>)>> {
+    let tuple = SearchSysCache1(mcx, STATEXTOID, SysCacheKey::Value(KeyDatum::from_oid(stat_oid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    // for (i = 0; i < staForm->stxkeys.dim1; i++)
+    //     keys = bms_add_member(keys, staForm->stxkeys.values[i]);
+    // stxkeys is an int2vector, BKI_FORCE_NOT_NULL.
+    let stxkeys_datum = SysCacheGetAttrNotNull(mcx, STATEXTOID, &tup, Anum_pg_statistic_ext_stxkeys_b2)?;
+    let keys: Vec<i32> = match &stxkeys_datum {
+        Datum::ByRef(b) => arrayfuncs_seams::int2vector_to_i16s_bytes::call(mcx, &b[..])?
+            .into_iter()
+            .map(|k| k as i32)
+            .collect(),
+        _ => {
+            ReleaseSysCache(tup);
+            return Err(PgError::error(
+                "statext_keys_exprs_text: stxkeys attribute is by-value",
+            ));
+        }
+    };
+
+    // datum = SysCacheGetAttr(STATEXTOID, htup, Anum_pg_statistic_ext_stxexprs,
+    //                         &isnull);
+    // if (!isnull) exprsString = TextDatumGetCString(datum);
+    let (stxexprs_val, stxexprs_isnull) =
+        SysCacheGetAttr(mcx, STATEXTOID, &tup, Anum_pg_statistic_ext_stxexprs_b2)?;
+    let exprs_text = if stxexprs_isnull {
+        None
+    } else {
+        Some(varlena_seams::text_to_cstring_v::call(mcx, &stxexprs_val)?)
+    };
+
+    ReleaseSysCache(tup);
+    Ok(Some((keys, exprs_text)))
+}
+
+/// `SearchSysCache2(STATEXTDATASTXOID, statOid, inh)` projected to the
+/// `stxdinherit` flag and the four `statext_is_kind_built` results (the non-null
+/// status of `stxdndistinct`/`stxddependencies`/`stxdmcv`/`stxdexpr`, in
+/// `STATS_EXT_*` order: NDISTINCT, DEPENDENCIES, MCV, EXPRESSIONS) — the catalog
+/// half of `get_relation_statistics_worker` (plancat.c:1428-1490). `Ok(None)`
+/// when no data row exists for `(statOid, inh)` (the C early return).
+pub(crate) fn statext_data_built_kinds(
+    stat_oid: Oid,
+    inh: bool,
+) -> PgResult<Option<(bool, [bool; 4])>> {
+    let scratch = MemoryContext::new("syscache statext data kinds");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache2(
+        mcx,
+        STATEXTDATASTXOID,
+        SysCacheKey::Value(KeyDatum::from_oid(stat_oid)),
+        SysCacheKey::Value(KeyDatum::from_bool(inh)),
+    )?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    // dataForm->stxdinherit (BKI_FORCE_NOT_NULL).
+    let stxdinherit = getattr_bool(mcx, STATEXTDATASTXOID, &tup, Anum_pg_statistic_ext_data_stxdinherit_b2)?;
+
+    // statext_is_kind_built(dtup, kind) == !heap_attisnull(dtup, attnum):
+    // the nullability of each kind's data column.
+    let built = [
+        !SysCacheGetAttr(mcx, STATEXTDATASTXOID, &tup, Anum_pg_statistic_ext_data_stxdndistinct_b2)?.1,
+        !SysCacheGetAttr(mcx, STATEXTDATASTXOID, &tup, Anum_pg_statistic_ext_data_stxddependencies_b2)?.1,
+        !SysCacheGetAttr(mcx, STATEXTDATASTXOID, &tup, Anum_pg_statistic_ext_data_stxdmcv_b2)?.1,
+        !SysCacheGetAttr(mcx, STATEXTDATASTXOID, &tup, Anum_pg_statistic_ext_data_stxdexpr_b2)?.1,
+    ];
+
+    ReleaseSysCache(tup);
+    Ok(Some((stxdinherit, built)))
 }

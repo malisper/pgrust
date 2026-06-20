@@ -324,10 +324,14 @@ seam_core::seam!(
     /// attnums (`stxkeys`) and the const-folded, opfuncid-fixed expression list
     /// (`stxexprs`) as fresh arena node handles. Mirrors the
     /// `SearchSysCache1(STATEXTOID)` + `eval_const_expressions` + `fix_opfuncids`
-    /// body of `get_relation_statistics`. `Err` carries the cache-lookup elog.
+    /// + `ChangeVarNodes(.., 1, varno, 0)` body of `get_relation_statistics`.
+    /// `varno` is `rel->relid`; when it is not 1, the decoded Vars (which the
+    /// catalog stores with varno == 1) are re-stamped to it. `Err` carries the
+    /// cache-lookup elog.
     pub fn get_stat_ext_keys_exprs(
         root: &mut PlannerInfo,
         stat_oid: Oid,
+        varno: i32,
     ) -> PgResult<(Vec<i32>, Vec<NodeId>)>
 );
 seam_core::seam!(

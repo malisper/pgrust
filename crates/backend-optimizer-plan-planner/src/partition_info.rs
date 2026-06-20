@@ -26,11 +26,124 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_optimizer_util_plancat_ext_seams as plancat_ext;
 
-/// Install the two partitioning ext-seams owned by this crate.
+/// Install the partitioning + extended-statistics ext-seams owned by this crate.
 pub(crate) fn init_seams() {
     plancat_ext::set_relation_partition_info::set(set_relation_partition_info);
     plancat_ext::set_baserel_partition_constraint::set(set_baserel_partition_constraint);
     plancat_ext::process_check_constraint::set(process_check_constraint);
+    plancat_ext::get_stat_ext_keys_exprs::set(get_stat_ext_keys_exprs);
+    plancat_ext::get_stat_ext_data_kinds::set(get_stat_ext_data_kinds);
+}
+
+/// `get_relation_statistics`'s per-stat-object key/expression preprocessing
+/// (plancat.c:1522-1580) for one `pg_statistic_ext` row (`statOid`):
+///
+/// ```text
+/// htup = SearchSysCache1(STATEXTOID, statOid);   -- elog if missing
+/// for (i = 0; i < staForm->stxkeys.dim1; i++)
+///     keys = bms_add_member(keys, staForm->stxkeys.values[i]);
+/// datum = SysCacheGetAttr(.., Anum_pg_statistic_ext_stxexprs, &isnull);
+/// if (!isnull) {
+///     exprs = (List *) stringToNode(TextDatumGetCString(datum));
+///     exprs = (List *) eval_const_expressions(NULL, (Node *) exprs);
+///     fix_opfuncids((Node *) exprs);
+///     if (varno != 1) ChangeVarNodes((Node *) exprs, 1, varno, 0);
+/// }
+/// ```
+///
+/// Returns the covered-column attnums and the decoded/const-folded expression
+/// list interned into the planner (`root`) arena as `NodeId` handles, with Vars
+/// re-stamped to the parent relation's varno. The catalog read (stxkeys +
+/// raw stxexprs text) is the syscache projection; the node-vocabulary transforms
+/// (which plancat cannot reach without a `planner -> plancat` cycle) run here.
+fn get_stat_ext_keys_exprs(
+    root: &mut PlannerInfo,
+    stat_oid: Oid,
+    varno: i32,
+) -> PgResult<(Vec<i32>, Vec<NodeId>)> {
+    // htup = SearchSysCache1(STATEXTOID, statOid);
+    // if (!HeapTupleIsValid(htup)) elog(ERROR, "cache lookup failed ...");
+    let scratch = mcx::MemoryContext::new("get_stat_ext_keys_exprs");
+    let mcx = scratch.mcx();
+    let (keys, exprs_text) =
+        backend_utils_cache_syscache_seams::statext_keys_exprs_text::call(mcx, stat_oid)?
+            .ok_or_else(|| {
+                PgError::error(alloc::format!(
+                    "cache lookup failed for statistics object {stat_oid}"
+                ))
+            })?;
+
+    // No stxexprs ⇒ NIL expression list (the common column-only stat object).
+    let Some(exprs_text) = exprs_text else {
+        return Ok((keys, Vec::new()));
+    };
+
+    // exprs = (List *) stringToNode(exprsString);
+    let node = backend_nodes_read_seams::string_to_node::call(mcx, exprs_text.as_str())?;
+    let elems = mcx::PgBox::into_inner(node).into_list().ok_or_else(|| {
+        PgError::error("get_stat_ext_keys_exprs: stxexprs stringToNode did not yield a List")
+    })?;
+
+    // exprs = (List *) eval_const_expressions(NULL, (Node *) exprs);  (root-less:
+    // stat expressions, like CHECK constraints, contain no subqueries, so the
+    // Param/sublink leg of eval_const_expressions never runs.)
+    // fix_opfuncids((Node *) exprs);  — per element, as fix_opfuncids walks the tree.
+    let mut ids: Vec<NodeId> = Vec::with_capacity(elems.len());
+    for el in elems.into_iter() {
+        let expr = mcx::PgBox::into_inner(el).into_expr().ok_or_else(|| {
+            PgError::error("get_stat_ext_keys_exprs: stxexprs element is not an Expr")
+        })?;
+        let mut folded =
+            backend_optimizer_plan_init_subselect_ext_seams::eval_const_expressions_expr::call(
+                mcx, expr,
+            )?;
+        backend_nodes_core::nodefuncs::fix_opfuncids(&mut folded)?;
+        ids.push(root.alloc_node(folded));
+    }
+
+    // if (varno != 1) ChangeVarNodes((Node *) exprs, 1, varno, 0);  — restamp the
+    // Vars, which the catalog stores with varno == 1, to the parent relation.
+    if varno != 1 {
+        plancat_ext::change_var_nodes::call(root, &ids, 1, varno);
+    }
+
+    Ok((keys, ids))
+}
+
+/// `get_relation_statistics_worker`'s data-row read (plancat.c:1428-1490) for one
+/// `(statOid, inh)` pair: returns the `stxdinherit` flag and which statistics
+/// kinds are built (in the fixed `STATS_EXT_*` order NDISTINCT, DEPENDENCIES,
+/// MCV, EXPRESSIONS) via `statext_is_kind_built` (the non-null status of each
+/// kind's `pg_statistic_ext_data` column), or `None` when no data row exists.
+fn get_stat_ext_data_kinds(
+    stat_oid: Oid,
+    inh: bool,
+) -> PgResult<Option<plancat_ext::StatExtDataKinds>> {
+    let Some((stxdinherit, built)) =
+        backend_utils_cache_syscache_seams::statext_data_built_kinds::call(stat_oid, inh)?
+    else {
+        return Ok(None);
+    };
+
+    // Fixed order: NDISTINCT, DEPENDENCIES, MCV, EXPRESSIONS — the StatisticExtInfo
+    // `char kind` per built statistic, matching the C worker's four if-blocks.
+    let kind_chars = [
+        types_statistics::STATS_EXT_NDISTINCT,
+        types_statistics::STATS_EXT_DEPENDENCIES,
+        types_statistics::STATS_EXT_MCV,
+        types_statistics::STATS_EXT_EXPRESSIONS,
+    ];
+    let mut kinds: Vec<i8> = Vec::new();
+    for (i, &is_built) in built.iter().enumerate() {
+        if is_built {
+            kinds.push(kind_chars[i]);
+        }
+    }
+
+    Ok(Some(plancat_ext::StatExtDataKinds {
+        stxdinherit,
+        kinds,
+    }))
 }
 
 /// `get_relation_constraints`'s per-check-constraint body (plancat.c:1305) over a

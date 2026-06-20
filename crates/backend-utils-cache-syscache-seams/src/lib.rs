@@ -2278,6 +2278,33 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(STATEXTOID, statOid)` projected to the covered-column
+    /// attnums (`staForm->stxkeys`, the int2vector members) and the raw
+    /// `stxexprs` `pg_node_tree` text (NULL ⇒ `None`), as
+    /// `get_relation_statistics` (plancat.c) reads them. `Ok(None)` on a cache
+    /// miss (the caller raises `cache lookup failed for statistics object %u`).
+    /// The node decode + `eval_const_expressions`/`fix_opfuncids`/`ChangeVarNodes`
+    /// run in the planner-side seam owner; this is the pure catalog read.
+    pub fn statext_keys_exprs_text<'mcx>(
+        mcx: Mcx<'mcx>,
+        stat_oid: Oid,
+    ) -> PgResult<Option<(Vec<i32>, Option<PgString<'mcx>>)>>
+);
+
+seam_core::seam!(
+    /// `SearchSysCache2(STATEXTDATASTXOID, statOid, inh)` projected to the
+    /// `stxdinherit` flag and the four `statext_is_kind_built` results — the
+    /// non-null status of `stxdndistinct`/`stxddependencies`/`stxdmcv`/`stxdexpr`
+    /// (in `STATS_EXT_*` order: NDISTINCT, DEPENDENCIES, MCV, EXPRESSIONS) — as
+    /// `get_relation_statistics_worker` (plancat.c) reads them. `Ok(None)` when no
+    /// data row exists for `(statOid, inh)` (the C early return).
+    pub fn statext_data_built_kinds(
+        stat_oid: Oid,
+        inh: bool,
+    ) -> PgResult<Option<(bool, [bool; 4])>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache1(PARAMETERACLOID, paramaclid)` +
     /// `SysCacheGetAttrNotNull(Anum_pg_parameter_acl_parname)` +
     /// `TextDatumGetCString` (the parameter-ACL description arm): the GUC

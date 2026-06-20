@@ -1306,7 +1306,7 @@ fn get_relation_statistics(
         // Build the covered-column keys + const-folded expressions (the
         // SearchSysCache1(STATEXTOID) + eval_const_expressions + fix_opfuncids +
         // ChangeVarNodes body).
-        let (key_attnums, exprs) = ext::get_stat_ext_keys_exprs::call(root, stat_oid)?;
+        let (key_attnums, exprs) = ext::get_stat_ext_keys_exprs::call(root, stat_oid, varno as i32)?;
         let mut keys: Relids = None;
         for &k in key_attnums.iter() {
             keys = bms::relids_add_member::call(keys.take(), k);
@@ -1317,7 +1317,6 @@ fn get_relation_statistics(
         get_relation_statistics_worker(root, &mut stainfos, rel, stat_oid, false, &keys, &exprs)?;
     }
 
-    let _ = varno;
     Ok(stainfos)
 }
 

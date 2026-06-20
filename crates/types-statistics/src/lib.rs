@@ -107,6 +107,9 @@ pub const STATS_EXT_NDISTINCT: i8 = b'd' as i8;
 /// `STATS_EXT_MCV` (`catalog/pg_statistic_ext.h`): the 'm' kind char.
 pub const STATS_EXT_MCV: i8 = b'm' as i8;
 
+/// `STATS_EXT_EXPRESSIONS` (`catalog/pg_statistic_ext.h`): the 'e' kind char.
+pub const STATS_EXT_EXPRESSIONS: i8 = b'e' as i8;
+
 /* ---------------------------------------------------------------------------
  * Multivariate MCV lists (`statistics/statistics.h`).
  * ------------------------------------------------------------------------- */
