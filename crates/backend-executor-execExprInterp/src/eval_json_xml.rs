@@ -534,6 +534,29 @@ pub fn ExecEvalJsonIsPredicate<'mcx>(
     Ok(())
 }
 
+/// Return the `jsonpath` image in the form the `executeJsonPath` cores expect
+/// (`jsonpath_header` reads `[4..8]`, `jsonpath_data` reads `[8..]`).
+///
+/// The `jsonpath` by-ref lane (and a `jsonpath` `Const`'s `ByRef` value) carries
+/// the full `jsonpath` varlena image behind ONE extra leading `VARHDRSZ` word —
+/// the canonical-`ByRef` → ABI bridge frames a pass-by-reference value that way,
+/// so the on-the-wire bytes are `[outer VARHDRSZ][inner VARHDRSZ][version word]
+/// [flattened nodes]`. Strip the single leading `VARHDRSZ` to recover the real
+/// full `jsonpath` varlena the cores slice into — identical to the jsonpath
+/// fmgr boundary's `arg_jsonpath_image` (jsonpath_exec `fmgr_builtins.rs`).
+///
+/// Verified against the `jsonpath` for `$.a`: `[136, 0,0,0,  120,0,0,0,
+/// 1,0,0,128, …]` = `[outer len 34<<2][inner len][version|LAX]`; after stripping
+/// the outer length word the cores read `version|LAX` at `[4..8]`.
+fn normalize_jsonpath_image(image: &[u8]) -> Vec<u8> {
+    const VARHDRSZ: usize = 4;
+    if image.len() >= VARHDRSZ {
+        image[VARHDRSZ..].to_vec()
+    } else {
+        image.to_vec()
+    }
+}
+
 /// `JB_ROOT_*` header word of a jsonb varlena image: the `u32` immediately after
 /// the 4-byte varlena length header (`&jb->root.header`, native byte order).
 fn jsonb_root_header(image: &[u8]) -> u32 {
@@ -634,7 +657,13 @@ pub fn ExecEvalJsonExprPath<'mcx>(
     let item = read_cell(state, formatted_expr_cell).0;
     let path = read_cell(state, pathspec_cell).0;
     let item_bytes = item.as_ref_bytes().to_vec();
-    let path_bytes = path.as_ref_bytes().to_vec();
+    // `executeJsonPath`/`jspInit` consume the FULL `jsonpath` varlena image
+    // (`jsonpath_header` reads `[4..8]`, `jsonpath_data` reads `[8..]`), i.e.
+    // `[VARHDRSZ length word][version word][nodes]`. A `jsonpath` `Const`
+    // const-folded from `jsonpath_in` carries only the logical payload
+    // (`[version word][nodes]`, no leading `VARHDRSZ`); frame it back to the
+    // full varlena the cores expect when the leading length word is absent.
+    let path_bytes = normalize_jsonpath_image(path.as_ref_bytes());
 
     // Build the PASSING-variable list from jsestate->args.
     let vars = build_path_vars(state, jsestate_id)?;
