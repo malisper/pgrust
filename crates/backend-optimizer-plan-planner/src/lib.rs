@@ -991,16 +991,77 @@ fn subquery_planner_carried<'mcx>(
             }
         }
 
-        // withCheckOptions (C:907-916): each WithCheckOption's qual is an
-        // EXPRKIND_QUAL expression; the WCOs whose qual reduces to NULL are
-        // dropped. WCOs are only produced by the rewriter for RLS/updatable
-        // views; a plain table SELECT has none. Panic precisely if present.
-        if !run.resolve(root.parse).withCheckOptions.is_empty() {
-            panic!(
-                "subquery_planner: withCheckOptions expression preprocessing \
-                 (planner.c:907-916) is not wired over the owned Query model \
-                 (the qual lives as a NodePtr on the WithCheckOption node)"
-            );
+        // withCheckOptions (C:907-916):
+        //
+        //   newWithCheckOptions = NIL;
+        //   foreach(l, parse->withCheckOptions) {
+        //       WithCheckOption *wco = lfirst_node(WithCheckOption, l);
+        //       wco->qual = preprocess_expression(root, wco->qual, EXPRKIND_QUAL);
+        //       if (wco->qual != NULL)
+        //           newWithCheckOptions = lappend(newWithCheckOptions, wco);
+        //   }
+        //   parse->withCheckOptions = newWithCheckOptions;
+        //
+        // Each `withCheckOptions` element is a `NodePtr` to a `WithCheckOption`
+        // node whose `qual` is itself a `NodePtr` to the (Expr-typed) check
+        // qual. Preprocess each in place, then drop WCOs whose qual reduced to
+        // NULL. (Previously a loud panic — exercising it left a SubLink-bearing
+        // WCO qual half-cloned into the planner arena, so the panic's unwind of
+        // a partly-built PlannerInfo double-freed the SubLink's `Box<Query, Mcx>`
+        // child against an already-released context -> SIGSEGV in
+        // `Mcx::deallocate`; observed on updatable_views' WITH CHECK OPTION
+        // views.)
+        {
+            let n_wco = run.resolve(root.parse).withCheckOptions.len();
+            for i in 0..n_wco {
+                // wco->qual = preprocess_expression(root, wco->qual, EXPRKIND_QUAL).
+                // Take the qual NodePtr out of the WCO node, convert to an owned
+                // Expr, preprocess, and write the result back.
+                let qual_expr: Option<Expr> = {
+                    let wco_node = run.resolve_mut(root.parse).withCheckOptions[i].as_mut();
+                    let wco = wco_node.as_withcheckoption_mut().expect(
+                        "subquery_planner: withCheckOptions element is not a WithCheckOption node",
+                    );
+                    match wco.qual.take() {
+                        None => None,
+                        Some(q) => match mcx::PgBox::into_inner(q).into_expr() {
+                            Some(e) => Some(e),
+                            None => {
+                                return Err(PgError::error(
+                                    "subquery_planner: WithCheckOption qual is not an \
+                                     expression node",
+                                ));
+                            }
+                        },
+                    }
+                };
+
+                let processed =
+                    preprocess_expression(mcx, &mut root, run, outer_query_ref, qual_expr, EXPRKIND_QUAL)?;
+
+                let wco_node = run.resolve_mut(root.parse).withCheckOptions[i].as_mut();
+                let wco = wco_node.as_withcheckoption_mut().expect(
+                    "subquery_planner: withCheckOptions element is not a WithCheckOption node",
+                );
+                wco.qual = match processed {
+                    Some(pe) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?),
+                    None => None,
+                };
+            }
+
+            // newWithCheckOptions = keep only the WCOs whose qual survived.
+            let mut kept: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
+                mcx::PgVec::new_in(mcx);
+            for wco_ptr in run.resolve_mut(root.parse).withCheckOptions.drain(..) {
+                let keep = wco_ptr
+                    .as_withcheckoption()
+                    .map(|w| w.qual.is_some())
+                    .unwrap_or(false);
+                if keep {
+                    kept.push(wco_ptr);
+                }
+            }
+            run.resolve_mut(root.parse).withCheckOptions = kept;
         }
 
         // parse->returningList = preprocess_expression(..., EXPRKIND_TARGET)
