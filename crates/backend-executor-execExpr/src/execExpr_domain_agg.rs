@@ -709,6 +709,19 @@ pub fn exec_build_agg_trans<'mcx>(
                 .first()
                 .copied()
                 .unwrap_or(STATE_RESULT_CELL);
+            // MULTI: thread ALL numTransInputs input cells so the interpreter can
+            // stage them onto the per-trans sortslot by-reference-faithfully (each
+            // cell carries the input Datum on its ByRef arm for a typbyval=false
+            // attribute). C recurses each input straight into
+            // &pertrans->transfn_fcinfo->args[i + 1]; SINGLE keeps the input_cell
+            // path and leaves this empty.
+            let mut input_cells: PgVec<'mcx, ResultCellId> =
+                mcx::vec_with_capacity_in(mcx, trans_input_cells.len())?;
+            if opcode == ExprEvalOp::EEOP_AGG_PRESORTED_DISTINCT_MULTI {
+                for &c in trans_input_cells.iter() {
+                    input_cells.push(c);
+                }
+            }
             let scratch = ExprEvalStep {
                 opcode,
                 resvalue: STATE_RESULT_CELL,
@@ -717,6 +730,7 @@ pub fn exec_build_agg_trans<'mcx>(
                     pertrans: transno,
                     aggcontext: 0,
                     input_cell,
+                    input_cells,
                     jumpdistinct: -1, // adjust later
                 },
             };

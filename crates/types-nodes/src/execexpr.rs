@@ -1323,6 +1323,17 @@ pub enum ExprEvalStepData<'mcx> {
         /// `args[1]` before the distinct comparison reads it). The MULTI variant
         /// reads the per-trans `sortslot` instead and ignores this.
         input_cell: ResultCellId,
+        /// The result cells the MULTI-column DISTINCT input sub-expressions were
+        /// evaluated into — one per `numTransInputs` column (C recurses each
+        /// straight into `&pertrans->transfn_fcinfo->args[i + 1]`; this owned
+        /// model uses separate arena cells). The interpreter reads these
+        /// by-reference-faithfully (each cell carries the input Datum on its
+        /// `ByRef` arm for a `typbyval = false` attribute) and stages them onto
+        /// the per-trans `sortslot` virtual tuple before the comparison — so a
+        /// by-ref DISTINCT key (text/bytea/numeric/array) crosses the
+        /// comparison-tuple formation as its referent bytes, not a collapsed
+        /// by-value word. Empty for the SINGLE variant (which uses `input_cell`).
+        input_cells: PgVec<'mcx, ResultCellId>,
         jumpdistinct: i32,
     },
     /// `agg_trans` — for EEOP_AGG_PLAIN_TRANS_[INIT_][STRICT_]{BYVAL,BYREF}

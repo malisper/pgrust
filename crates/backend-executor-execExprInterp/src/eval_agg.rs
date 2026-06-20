@@ -83,6 +83,11 @@ fn transfn_arg_value(pertrans: &AggStatePerTransData<'_>, n: usize) -> Datum {
 }
 
 /// `pertrans->transfn_fcinfo->args[n].isnull` — read a transfn argument's null.
+/// Paired with [`transfn_arg_value`]; exercised by the unit test. The presorted
+/// multi-column DISTINCT path now reads its inputs by-reference-faithfully from
+/// the compiled `input_cells` rather than the bare-word fcinfo args, so the
+/// non-test build no longer calls this accessor directly.
+#[cfg_attr(not(test), allow(dead_code))]
 fn transfn_arg_isnull(pertrans: &AggStatePerTransData<'_>, n: usize) -> bool {
     let fcinfo = pertrans
         .transfn_fcinfo
@@ -376,6 +381,14 @@ pub fn ExecEvalPreOrderedDistinctSingle<'mcx>(
 pub fn ExecEvalPreOrderedDistinctMulti<'mcx>(
     aggstate: &mut AggState<'mcx>,
     pertrans: usize,
+    // The per-column input Datums/nulls the interpreter read out of the
+    // compiled `input_cells` (one per `numTransInputs`). Each carries its input
+    // by-reference-faithfully (a `typbyval = false` DISTINCT column on its
+    // `ByRef` arm), the owned-model replacement for C recursing each input into
+    // `&pertrans->transfn_fcinfo->args[i + 1]` and then copying
+    // `args[i + 1].value` into `sortslot->tts_values[i]`.
+    input_values: &[DatumV<'mcx>],
+    input_nulls: &[bool],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // ExprContext *tmpcontext = aggstate->tmpcontext;
@@ -400,17 +413,30 @@ pub fn ExecEvalPreOrderedDistinctMulti<'mcx>(
     //     pertrans->sortslot->tts_values[i] = pertrans->transfn_fcinfo->args[i + 1].value;
     //     pertrans->sortslot->tts_isnull[i] = pertrans->transfn_fcinfo->args[i + 1].isnull;
     // }
-    let mut values: Vec<Datum> = Vec::with_capacity(num_trans_inputs as usize);
+    //
+    // The owned model takes the per-column inputs straight from the interpreter's
+    // compiled `input_cells` (the by-reference-faithful `DatumV` the input
+    // sub-expressions were evaluated into) rather than the bare-word
+    // transfn_fcinfo->args[]: a by-ref DISTINCT column (text/bytea/numeric/array)
+    // must keep its `ByRef` arm so the comparison-tuple formation
+    // (heap_compute_data_size) reads its referent varlena bytes, not a collapsed
+    // by-value word (#296 by-ref Datum class).
+    assert_eq!(
+        input_values.len(),
+        num_trans_inputs as usize,
+        "ExecEvalPreOrderedDistinctMulti: input_values count {} != numTransInputs {}",
+        input_values.len(),
+        num_trans_inputs,
+    );
+    assert_eq!(input_values.len(), input_nulls.len());
+    let mut values_v: Vec<DatumV> = Vec::with_capacity(num_trans_inputs as usize);
     let mut isnull: Vec<bool> = Vec::with_capacity(num_trans_inputs as usize);
-    {
-        let pt = &aggstate
-            .pertrans
-            .as_ref()
-            .expect("ExecEvalPreOrderedDistinctMulti: pertrans")[pertrans];
-        for i in 0..num_trans_inputs as usize {
-            values.push(transfn_arg_value(pt, i + 1));
-            isnull.push(transfn_arg_isnull(pt, i + 1));
-        }
+    for i in 0..num_trans_inputs as usize {
+        // Carry each column on its native arm (ByVal AND ByRef AND null): a null
+        // column's payload is unused by store_virtual_values (tts_isnull[i]
+        // gates it), matching C which leaves tts_values[i] indeterminate there.
+        values_v.push(input_values[i].clone_in(estate.es_query_cxt)?);
+        isnull.push(input_nulls[i]);
     }
 
     // ExecClearTuple(pertrans->sortslot);
@@ -423,9 +449,6 @@ pub fn ExecEvalPreOrderedDistinctMulti<'mcx>(
     // the first numTransInputs columns; nvalid is numInputs (== numTransInputs
     // for the multi-DISTINCT case, since there are no ORDER BY-only columns).
     debug_assert_eq!(num_inputs, num_trans_inputs);
-    // The transfn-arg cells are bare scalar words; project each onto the
-    // canonical store_virtual_values ABI edge (a C `tts_values[i]` word).
-    let values_v: Vec<DatumV> = values.iter().map(|d| DatumV::from_usize(d.as_usize())).collect();
     store_virtual_values::call(estate, sortslot, &values_v, &isnull)?;
 
     // save_outer = tmpcontext->ecxt_outertuple;
@@ -444,17 +467,24 @@ pub fn ExecEvalPreOrderedDistinctMulti<'mcx>(
 
     // if (!pertrans->haslast || !ExecQual(pertrans->equalfnMulti, tmpcontext))
     let equal = if haslast {
-        let pt = aggstate
+        // The compiled multi-column DISTINCT comparator ExprState is parked in
+        // `pertrans->equalfn_multi`; ExecQual evaluates it over the tmpcontext
+        // (whose ecxt_outertuple = sortslot / ecxt_innertuple = uniqslot were
+        // just set). Borrow it `&mut` (the seam reads/advances the ExprState) —
+        // disjoint from `&mut estate`, so the two mutable borrows coexist (the
+        // exact split the nodeAgg `equalfn_multi_qual` non-presorted drain uses).
+        let equalfn_multi = aggstate
             .pertrans
-            .as_ref()
+            .as_mut()
             .expect("ExecEvalPreOrderedDistinctMulti: pertrans")[pertrans]
             .equalfn_multi
-            .as_deref()
+            .as_mut()
             .expect("ExecEvalPreOrderedDistinctMulti: equalfnMulti");
-        // SAFETY of borrow: equalfn_multi lives in pertrans; exec_qual needs an
-        // &ExprState plus &mut estate. Detach the ExprState borrow by reading it
-        // through a raw shared reference held only for the call.
-        exec_qual_on_pertrans_equalfn_multi(pt, tmpcontext_id, estate)?
+        backend_executor_execExpr_seams::exec_qual::call(
+            equalfn_multi,
+            tmpcontext_id,
+            estate,
+        )?
     } else {
         false
     };
@@ -501,23 +531,6 @@ fn aggstate_tmpcontext<'mcx>(
     aggstate
         .tmpcontext
         .expect("eval_agg: aggstate->tmpcontext EcxtId not assigned by ExecInitAgg")
-}
-
-/// `ExecQual(pertrans->equalfnMulti, tmpcontext)` over the multi-column
-/// DISTINCT comparator ExprState. The comparator is the execExpr unit's
-/// compiled qual; running it is the `exec_qual` seam. The comparator ExprState
-/// is parked inside `pertrans` (a nodeAgg box), so threading it as the
-/// `&ExprState` the seam needs alongside `&mut estate` is nodeAgg's wiring.
-fn exec_qual_on_pertrans_equalfn_multi<'mcx>(
-    _equalfn_multi: &ExprState<'mcx>,
-    _econtext: types_nodes::execnodes::EcxtId,
-    _estate: &mut EStateData<'mcx>,
-) -> PgResult<bool> {
-    panic!(
-        "backend-executor-execExprInterp::eval_agg: ExecQual of pertrans->equalfnMulti reads a \
-         comparator ExprState parked inside the nodeAgg pertrans box; threading it as the \
-         exec_qual seam's &ExprState alongside &mut estate is nodeAgg's wiring, not yet exposed"
-    );
 }
 
 /// `ExecEvalAggOrderedTransDatum(ExprState *state, ExprEvalStep *op,

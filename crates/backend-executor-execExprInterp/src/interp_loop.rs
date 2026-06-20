@@ -1236,15 +1236,12 @@ pub fn ExecInterpExpr<'mcx>(
                 //    if (ExecEvalPreOrderedDistinct{Single,Multi}(aggstate, pertrans))
                 //        EEO_NEXT();
                 //    else EEO_JUMP(op->d.agg_presorted_distinctcheck.jumpdistinct);
-                let (pertrans, input_cell, jumpdistinct) = {
+                let jumpdistinct = {
                     let steps = state.steps.as_ref().unwrap();
                     match &steps[op].d {
-                        ExprEvalStepData::AggPresortedDistinctCheck {
-                            pertrans,
-                            input_cell,
-                            jumpdistinct,
-                            ..
-                        } => (*pertrans, *input_cell, *jumpdistinct),
+                        ExprEvalStepData::AggPresortedDistinctCheck { jumpdistinct, .. } => {
+                            *jumpdistinct
+                        }
                         other => unreachable!(
                             "EEOP_AGG_PRESORTED_DISTINCT_*: payload mismatch: {other:?}"
                         ),
@@ -1252,10 +1249,26 @@ pub fn ExecInterpExpr<'mcx>(
                 };
                 let is_single = opcode == EEOP_AGG_PRESORTED_DISTINCT_SINGLE;
                 let distinct = if is_single {
+                    let (pertrans, input_cell) = {
+                        let steps = state.steps.as_ref().unwrap();
+                        match &steps[op].d {
+                            ExprEvalStepData::AggPresortedDistinctCheck {
+                                pertrans,
+                                input_cell,
+                                ..
+                            } => (*pertrans, *input_cell),
+                            other => unreachable!(
+                                "EEOP_AGG_PRESORTED_DISTINCT_*: payload mismatch: {other:?}"
+                            ),
+                        }
+                    };
                     // The SINGLE comparator reads pertrans->transfn_fcinfo->args[1];
                     // the owned model evaluated the input into `input_cell`, so copy
                     // it into the per-trans frame before the comparison (C recurses
-                    // the input straight into that fcinfo arg).
+                    // the input straight into that fcinfo arg). `read_cell` returns
+                    // the input by-reference-faithfully (its ByRef arm for a
+                    // typbyval=false key), staged on the by-ref-capable
+                    // distinct_value slot.
                     let (value, isnull) = read_cell(state, input_cell);
                     let aggstate = agg_parent_mut(state);
                     backend_executor_nodeAgg::transition::set_transfn_arg(
@@ -1263,8 +1276,42 @@ pub fn ExecInterpExpr<'mcx>(
                     );
                     eval_agg::ExecEvalPreOrderedDistinctSingle(aggstate, pertrans, estate)?
                 } else {
+                    // MULTI: read each numTransInputs input cell by-reference-
+                    // faithfully (a by-ref DISTINCT column carries its referent on
+                    // the ByRef arm) and hand the values to the comparator, which
+                    // stages them onto the per-trans sortslot virtual tuple. This
+                    // bypasses the bare-word transfn_fcinfo->args[] entirely, so the
+                    // comparison-tuple formation reads varlena bytes for a by-ref
+                    // column instead of a collapsed by-value word.
+                    let (pertrans, input_values, input_nulls) = {
+                        let steps = state.steps.as_ref().unwrap();
+                        let (pertrans, input_cells) = match &steps[op].d {
+                            ExprEvalStepData::AggPresortedDistinctCheck {
+                                pertrans,
+                                input_cells,
+                                ..
+                            } => (*pertrans, input_cells),
+                            other => unreachable!(
+                                "EEOP_AGG_PRESORTED_DISTINCT_*: payload mismatch: {other:?}"
+                            ),
+                        };
+                        let mut values: Vec<Datum> = Vec::with_capacity(input_cells.len());
+                        let mut nulls: Vec<bool> = Vec::with_capacity(input_cells.len());
+                        for &c in input_cells.iter() {
+                            let (v, n) = read_cell(state, c);
+                            values.push(v);
+                            nulls.push(n);
+                        }
+                        (pertrans, values, nulls)
+                    };
                     let aggstate = agg_parent_mut(state);
-                    eval_agg::ExecEvalPreOrderedDistinctMulti(aggstate, pertrans, estate)?
+                    eval_agg::ExecEvalPreOrderedDistinctMulti(
+                        aggstate,
+                        pertrans,
+                        &input_values,
+                        &input_nulls,
+                        estate,
+                    )?
                 };
                 if distinct {
                     op += 1; // EEO_NEXT()
