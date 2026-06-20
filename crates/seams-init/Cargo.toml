@@ -631,6 +631,7 @@ port-crc32c = { path = "../port-crc32c" }
 port-pg-strong-random = { path = "../port-pg-strong-random" }
 port-pgsleep = { path = "../port-pgsleep" }
 port-noblock = { path = "../port-noblock" }
+port-pg-numa = { path = "../port-pg-numa" }
 port-pqsignal = { path = "../port-pqsignal" }
 probe-adt-scalar-bool = { path = "../probe-adt-scalar-bool" }
 backend-utils-adt-jsonpath-exec = { path = "../backend-utils-adt-jsonpath-exec" }

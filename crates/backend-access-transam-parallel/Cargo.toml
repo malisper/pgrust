@@ -18,6 +18,13 @@ types-parallel = { path = "../types-parallel" }
 types-storage = { path = "../types-storage" }
 mcx = { path = "../mcx" }
 backend-utils-error = { path = "../backend-utils-error" }
+# GetCurrentSubTransactionId(): the parallel rt-seam delegates to the xact-owned
+# accessor seam (installed by backend-access-transam-xact in production).
+backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
+# HoldInterrupts/ResumeInterrupts/INTERRUPTS_CAN_BE_PROCESSED: the parallel
+# rt-seams delegate to the init-small-owned accessor seams (installed in
+# production by backend-utils-init-small).
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-storage-ipc-dsm-core = { path = "../backend-storage-ipc-dsm-core" }
 backend-storage-ipc-shm-toc = { path = "../backend-storage-ipc-shm-toc" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }

@@ -599,6 +599,19 @@ pub fn HoldInterrupts() {
     SetInterruptHoldoffCount(InterruptHoldoffCount() + 1);
 }
 
+/// `INTERRUPTS_CAN_BE_PROCESSED()` (miscadmin.h) — whether `ProcessInterrupts()`
+/// is guaranteed to clear `InterruptPending`:
+///
+/// ```c
+/// #define INTERRUPTS_CAN_BE_PROCESSED() \
+///     (InterruptHoldoffCount == 0 && CritSectionCount == 0 && \
+///      QueryCancelHoldoffCount == 0)
+/// ```
+#[inline]
+pub fn InterruptsCanBeProcessed() -> bool {
+    InterruptHoldoffCount() == 0 && CritSectionCount() == 0 && QueryCancelHoldoffCount() == 0
+}
+
 /// `RESUME_INTERRUPTS()` (miscadmin.h) — `InterruptHoldoffCount--` with
 /// underflow assertion.
 #[inline]

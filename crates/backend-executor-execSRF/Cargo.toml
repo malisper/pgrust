@@ -125,6 +125,11 @@ backend-catalog-pg-inherits-seams = { path = "../backend-catalog-pg-inherits-sea
 backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 types-storage = { path = "../types-storage" }
+# pg_get_shmem_allocations_numa() (OID 4100): the materialize-mode NUMA
+# shmem-allocations SRF core (over the executor frame) + the huge_pages_status
+# GUC the body reads as a global.
+backend-storage-ipc-shmem = { path = "../backend-storage-ipc-shmem" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 # pg_prepared_xact() (OID 1065): the locked snapshot-and-project core over the
 # live TwoPhaseState (pg_prepared_xact_rows / with_twophase_state).
 backend-access-transam-twophase = { path = "../backend-access-transam-twophase" }

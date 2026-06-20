@@ -3182,6 +3182,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-parallel-seams",
+ "backend-access-transam-xact-seams",
  "backend-executor-execParallel-support-seams",
  "backend-executor-instrument",
  "backend-postmaster-bgworker-seams",
@@ -3195,6 +3196,7 @@ dependencies = [
  "backend-storage-lmgr-s-lock",
  "backend-tcop-postgres-seams",
  "backend-utils-error",
+ "backend-utils-init-small-seams",
  "backend-utils-mmgr-freepage",
  "backend-utils-mmgr-mcxt-seams",
  "mcx",
@@ -9691,6 +9693,7 @@ dependencies = [
  "backend-executor-execTuples-seams",
  "backend-foreign-foreign",
  "backend-nodes-core",
+ "backend-storage-ipc-shmem",
  "backend-tcop-postgres-seams",
  "backend-utils-adt-acl",
  "backend-utils-adt-array-more-seams",
@@ -9715,6 +9718,7 @@ dependencies = [
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-fmgr-funcapi",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-guc-tables",
  "backend-utils-misc-more",
  "backend-utils-sort-storage-seams",
  "mcx",
@@ -23999,6 +24003,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-pg-numa"
+version = "0.0.0"
+dependencies = [
+ "port-pg-numa-seams",
+]
+
+[[package]]
 name = "port-pg-numa-seams"
 version = "0.0.0"
 dependencies = [
@@ -24730,6 +24741,7 @@ dependencies = [
  "port-crc32c",
  "port-dynloader",
  "port-noblock",
+ "port-pg-numa",
  "port-pg-strong-random",
  "port-pgsleep",
  "port-pqsignal",

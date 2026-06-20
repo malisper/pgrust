@@ -103,6 +103,9 @@ pub fn init_seams() {
     backend_utils_init_small_seams::query_cancel_pending::set(globals::QueryCancelPending);
     backend_utils_init_small_seams::set_interrupt_holdoff_count::set(globals::SetInterruptHoldoffCount);
     backend_utils_init_small_seams::interrupt_holdoff_count::set(globals::InterruptHoldoffCount);
+    backend_utils_init_small_seams::interrupts_can_be_processed::set(
+        globals::InterruptsCanBeProcessed,
+    );
     backend_utils_init_small_seams::hold_interrupts::set(globals::HoldInterrupts);
     backend_utils_init_small_seams::resume_interrupts::set(globals::ResumeInterrupts);
     backend_utils_init_small_seams::set_my_backend_type::set(globals::SetMyBackendType);

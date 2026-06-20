@@ -86,6 +86,7 @@ mod pg_lock_status;
 mod pg_prepared_xact;
 mod pg_snapshot_xip;
 mod aclexplode;
+mod shmem_numa_srf;
 mod system_srf;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
 
@@ -229,6 +230,7 @@ pub fn init_seams() {
     // executor-frame SRF table like the `json_to_record` family (cores in
     // `backend-utils-misc-more` / `backend-utils-adt-misc2`).
     control_srf::register_control_srfs();
+    shmem_numa_srf::register_shmem_numa_srf();
 }
 
 // ===========================================================================

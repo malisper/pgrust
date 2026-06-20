@@ -178,6 +178,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `INTERRUPTS_CAN_BE_PROCESSED()` (miscadmin.h) — `InterruptHoldoffCount ==
+    /// 0 && CritSectionCount == 0 && QueryCancelHoldoffCount == 0`. Read by
+    /// `InitializeParallelDSM` to decide whether it is safe to launch workers.
+    pub fn interrupts_can_be_processed() -> bool
+);
+
+seam_core::seam!(
     /// `HOLD_INTERRUPTS()` (miscadmin.h): `InterruptHoldoffCount++`.
     pub fn hold_interrupts()
 );

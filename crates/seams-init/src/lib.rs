@@ -642,6 +642,7 @@ pub fn init_all() {
     port_pg_strong_random::init_seams();
     port_pgsleep::init_seams();
     port_noblock::init_seams();
+    port_pg_numa::init_seams();
     port_pqsignal::init_seams();
     probe_adt_scalar_bool::init_seams();
     backend_utils_adt_jsonpath_exec::init_seams();

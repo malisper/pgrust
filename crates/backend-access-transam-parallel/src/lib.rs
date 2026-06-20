@@ -2209,6 +2209,70 @@ pub fn init_seams() {
     install_dsm_helper_seams();
     install_fps_driver_seams();
     install_execparallel_support_pcxt_seams();
+    install_mmgr_context_seams();
+}
+
+/// Install the `MemoryContextSwitchTo(TopTransactionContext)` / restore pair
+/// that `CreateParallelContext` (parallel.c:172-203) brackets its `palloc0` of
+/// the `ParallelContext` with, so it survives a short-lived caller context.
+///
+/// In this tree's `mcx` model there is **no ambient `CurrentMemoryContext`** to
+/// flip (docs/mctx-design.md): every allocation threads an owned `Mcx` and the
+/// `ParallelContext` itself is held in the parallel subsystem's thread-local
+/// registry (`with_globals` / `push_head`), not in the switched-to arena. So,
+/// exactly like the `switch_to_top_memory_context` seam
+/// (`backend-utils-mmgr-portalmem`'s `top_context.rs`, the
+/// `MemoryContextSwitchTo(TopMemoryContext)` analog), the C switch has no
+/// observable effect to reproduce: the switch returns a nominal saved handle
+/// and the restore is a no-op. Both are infallible here.
+fn install_mmgr_context_seams() {
+    // C: oldcontext = MemoryContextSwitchTo(TopTransactionContext). No ambient
+    // current context exists in this model, so there is nothing to flip and no
+    // real old context to capture; return a nominal saved handle.
+    rt::switch_to_top_transaction_context::set(|| Ok(0));
+    // C: MemoryContextSwitchTo(oldcontext). The saved handle is nominal (no
+    // ambient context was changed), so restoring it is a no-op.
+    rt::memory_context_switch_back::set(|_saved| Ok(()));
+
+    // C: pcxt->subid = GetCurrentSubTransactionId() (parallel.c:191). Delegate
+    // to the xact-owned accessor seam (the real `GetCurrentSubTransactionId`,
+    // installed in production by `backend-access-transam-xact`).
+    rt::get_current_subtransaction_id::set(|| {
+        Ok(backend_access_transam_xact_seams::get_current_sub_transaction_id::call())
+    });
+
+    // C: pcxt->error_context_stack = error_context_stack (parallel.c:193) — saves
+    // the live `ErrorContextCallback *` chain head into the context so the worker
+    // can re-raise errors under the leader's callback chain. That `error_context_stack`
+    // global is RETIRED in this tree (backend-utils-error: context attaches on
+    // propagation, not via a saved chain pointer — docs/query-lifecycle-raii.md),
+    // so the faithful saved value is the NULL handle (`0`), exactly as the
+    // parallel subsystem's own test path encodes it (`error_context_stack: 0`).
+    rt::error_context_stack::set(|| Ok(0));
+
+    // Interrupt-management macros (miscadmin.h), owned by globals.c and installed
+    // in production by `backend-utils-init-small`. Delegate to those accessor
+    // seams.
+    //
+    // C: INTERRUPTS_CAN_BE_PROCESSED() — read by `InitializeParallelDSM` to
+    // decide whether it is safe to launch workers (else it pretends none).
+    rt::interrupts_can_be_processed::set(|| {
+        backend_utils_init_small_seams::interrupts_can_be_processed::call()
+    });
+    // C: HOLD_INTERRUPTS() / RESUME_INTERRUPTS() — bracket `ProcessParallelMessages`
+    // and `LaunchParallelWorkers`.
+    rt::hold_interrupts::set(|| {
+        backend_utils_init_small_seams::hold_interrupts::call();
+        Ok(())
+    });
+    rt::resume_interrupts::set(|| {
+        backend_utils_init_small_seams::resume_interrupts::call();
+        Ok(())
+    });
+    // NOTE: `rt::check_for_interrupts` is already installed in production by
+    // `backend-utils-init-miscinit` (lib.rs:1067, delegating to the tcop-owned
+    // accessor seam); do not install it here (seam slots panic on a second
+    // `set`).
 }
 
 /// Install the orthogonal `ParallelContext`/`shm_toc` estimator accessors that
