@@ -585,6 +585,7 @@ pub fn define_relation_partbound<'mcx>(
         &key,
         &parent_partdesc,
         bound,
+        Some(&pstate),
     )?;
 
     // If the default partition exists, its constraint tightens; check its rows.

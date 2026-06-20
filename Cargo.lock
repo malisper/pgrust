@@ -14391,6 +14391,7 @@ dependencies = [
  "backend-nodes-core",
  "backend-nodes-core-seams",
  "backend-nodes-read-seams",
+ "backend-parser-small1-seams",
  "backend-partitioning-partbounds-seams",
  "backend-partitioning-partdesc-seams",
  "backend-utils-adt-scalar-seams",

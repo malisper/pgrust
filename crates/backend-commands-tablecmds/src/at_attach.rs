@@ -302,12 +302,15 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     let key = backend_utils_cache_partcache_seams::relation_get_partition_key::call(mcx, rel.alias())?
         .ok_or_else(|| elog("ATTACH PARTITION: parent has no partition key"))?;
     let attachrel_name = attachrel.name().to_string();
+    // C passes the real ParseState only on the DefineRelation path; ATTACH
+    // PARTITION calls check_new_partition_bound with pstate = NULL.
     backend_partitioning_partbounds_seams::check_new_partition_bound::call(
         mcx,
         &attachrel_name,
         &key,
         &parent_partdesc,
         bound,
+        None,
     )?;
 
     // OK to create inheritance. Rest of the checks performed there.

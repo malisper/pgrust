@@ -171,6 +171,7 @@ seam_core::seam!(
         key: &PartitionKeyData<'_>,
         partdesc: &PartitionDescData<'_>,
         spec: &PartitionBoundSpec<'_>,
+        pstate: Option<&types_nodes::parsestmt::ParseState<'_>>,
     ) -> PgResult<()>
 );
 

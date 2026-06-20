@@ -1123,10 +1123,23 @@ pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
     key: &PartitionKeyData<'k>,
     partdesc: &PartitionDescData<'d>,
     spec: &PartitionBoundSpec<'s>,
+    pstate: Option<&types_nodes::parsestmt::ParseState<'_>>,
 ) -> PgResult<()> {
+    // Attach `parser_errposition(pstate, location)` as the cursor position,
+    // matching the C ereport's trailing `parser_errposition(...)` (no-op when
+    // pstate is NULL or location < 0).
+    let errpos = |location: i32| -> i32 {
+        match pstate {
+            Some(ps) if location >= 0 => {
+                backend_parser_small1_seams::parser_errposition::call(ps, location).unwrap_or(0)
+            }
+            _ => 0,
+        }
+    };
     let boundinfo = partdesc.boundinfo.as_deref();
     let mut with: i32 = -1;
     let mut overlap = false;
+    let mut overlap_location: i32 = -1;
 
     if spec.is_default {
         // The default partition never conflicts with any other partition's
@@ -1139,7 +1152,8 @@ pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
                 let other = get_rel_name(mcx, partdesc.oids[bi.default_index as usize])?;
                 return Err(invalid_object_def(format!(
                     "partition \"{relname}\" conflicts with existing default partition \"{other}\""
-                )));
+                ))
+                .with_cursor_position(errpos(spec.location)));
             }
         }
     }
@@ -1206,6 +1220,7 @@ pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
                 loop {
                     if bi.indexes[remainder as usize] != -1 {
                         overlap = true;
+                        overlap_location = spec.location;
                         with = bi.indexes[remainder as usize];
                         break;
                     }
@@ -1230,6 +1245,7 @@ pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
 
                 for cell in spec.listdatums.iter() {
                     let val = const_from_node(cell)?;
+                    overlap_location = val.location;
                     if !val.constisnull {
                         let (offset, is_equal) =
                             partition_list_bsearch(key, bi, val.constvalue.clone())?;
@@ -1268,12 +1284,15 @@ pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
                         mcx,
                         &spec.upperdatums,
                     )?;
+                // C: parser_errposition(pstate, datum->location) where
+                // datum = list_nth(spec->lowerdatums, cmpval - 1).
+                let datum_loc = range_datum_location(&spec.lowerdatums, cmpval - 1);
                 return Err(invalid_object_def_detail(
                             format!("empty range bound specified for partition \"{relname}\""),
                             format!(
                         "Specified lower bound {lower_str} is greater than or equal to upper bound {upper_str}."
                     ),
-                        ));
+                        ).with_cursor_position(errpos(datum_loc)));
             }
 
             if partdesc.nparts > 0 {
@@ -1303,15 +1322,24 @@ pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
                             partition_rbound_cmp(key, datums, kind, is_lower, &upper)?;
                         if cmpval < 0 {
                             // The new partition overlaps the existing partition
-                            // between offset + 1 and offset + 2.
+                            // between offset + 1 and offset + 2.  C points to the
+                            // problematic key in the upper datums list.
                             overlap = true;
+                            overlap_location =
+                                range_datum_location(&spec.upperdatums, cmpval.abs() - 1);
                             with = bi.indexes[(offset + 2) as usize];
                         }
                     }
                 } else {
                     // The new partition overlaps the existing partition between
-                    // offset and offset + 1.
+                    // offset and offset + 1.  C points to the problematic key in
+                    // the lower datums list; on equality, the first one.
                     overlap = true;
+                    overlap_location = if _bs_cmpval == 0 {
+                        range_datum_location(&spec.lowerdatums, 0)
+                    } else {
+                        range_datum_location(&spec.lowerdatums, _bs_cmpval.abs() - 1)
+                    };
                     with = bi.indexes[(offset + 1) as usize];
                 }
             }
@@ -1323,10 +1351,29 @@ pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
         let other = get_rel_name(mcx, partdesc.oids[with as usize])?;
         return Err(invalid_object_def(format!(
             "partition \"{relname}\" would overlap partition \"{other}\""
-        )));
+        ))
+        .with_cursor_position(errpos(overlap_location)));
     }
 
     Ok(())
+}
+
+/// `((PartitionRangeDatum *) list_nth(datums, idx))->location`, or -1 when the
+/// index is out of range or the node is not a `PartitionRangeDatum`.
+fn range_datum_location(
+    datums: &PgVec<'_, types_nodes::nodes::NodePtr<'_>>,
+    idx: i32,
+) -> i32 {
+    if idx < 0 {
+        return -1;
+    }
+    match datums.get(idx as usize) {
+        Some(node) => (**node)
+            .as_partitionrangedatum()
+            .map(|d| d.location)
+            .unwrap_or(-1),
+        None => -1,
+    }
 }
 
 /* ===========================================================================
