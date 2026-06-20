@@ -269,10 +269,18 @@ pub fn newcolor<'mcx>(_mcx: Mcx<'mcx>, cm: &mut ColorMap) -> RegResult<color> {
         debug_assert!(cm.cd[f].arcs.is_none());
         cm.free = cm.cd[f].sub;
         co = f as color;
+    } else if cm.max < cm.cd.len() - 1 {
+        // C: else if (cm->max < cm->ncds - 1) — a slot already exists past
+        // `max` (left behind when freecolor shrank `max` without truncating the
+        // backing array). Reuse it without growing. With a Vec the role of
+        // `ncds` (allocated rows) is played by `cm.cd.len()`.
+        cm.max += 1;
+        co = cm.max as color;
     } else {
-        // C: else if (cm->max < cm->ncds - 1) reuse a slot; else grow. With a
-        // Vec there is no preallocated ncds tail to fill, so we always append,
-        // but must still enforce the MAX_COLOR cap first.
+        // C: else — must allocate more. Enforce the MAX_COLOR cap first, then
+        // append a fresh slot. `cm.max` is the highest valid color index and
+        // `cm.cd.len() == cm.max + 1` on this branch, so the push keeps
+        // `co == cm.max` consistent.
         if cm.max == MAX_COLOR as usize {
             return Err(RegError(REG_ECOLORS)); // too many colors
         }
