@@ -98,6 +98,10 @@ types-statistics = { path = "../types-statistics" }
 backend-catalog-pg-constraint = { path = "../backend-catalog-pg-constraint" }
 backend-access-common-next = { path = "../backend-access-common-next" }
 backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
+# ALTER TABLE ENABLE/DISABLE RULE → EnableDisableRule (rewriteDefine.c:691);
+# direct call, same as backend-commands-alter's RenameRewriteRule. No cycle:
+# rewriteDefine does not depend on tablecmds.
+backend-rewrite-rewriteDefine = { path = "../backend-rewrite-rewriteDefine" }
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 # ATExecAddIndex: DefineIndex (indexcmds.c) inward seam (decls only; owner installs).

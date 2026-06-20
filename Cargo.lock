@@ -8147,6 +8147,7 @@ dependencies = [
  "backend-parser-small1",
  "backend-partitioning-partbounds-seams",
  "backend-partitioning-partdesc",
+ "backend-rewrite-rewriteDefine",
  "backend-rewrite-rewritehandler-seams",
  "backend-rewrite-rewritemanip-seams",
  "backend-storage-lmgr-lmgr",

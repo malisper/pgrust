@@ -62,6 +62,7 @@ use backend_access_common_tupdesc::CreateTupleDescCopyConstr;
 use backend_access_transam_xact::CommandCounterIncrement;
 use backend_catalog_aclchk_seams as aclchk_seam;
 use backend_catalog_catalog::IsSystemRelation;
+use backend_catalog_objectaccess_seams as objaccess_seam;
 use backend_catalog_objectaddress_seams as objaddr_seam;
 use backend_catalog_pg_class_seams as pgclass_seam;
 use backend_catalog_pg_inherits_seams as inherits_seam;
@@ -1056,10 +1057,15 @@ pub(crate) fn ATPrepCmd<'mcx>(
             ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_PARTITIONED_TABLE)?;
             pass = AT_PASS_MISC;
         }
-        AT_EnableRule | AT_EnableAlwaysRule | AT_EnableReplicaRule | AT_DisableRule | AT_AddOf
-        | AT_DropOf => {
+        AT_EnableRule | AT_EnableAlwaysRule | AT_EnableReplicaRule | AT_DisableRule => {
+            // tablecmds.c:5245 — ATSimplePermissions, never recurses, no
+            // command-specific prep needed.
             ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_PARTITIONED_TABLE)?;
-            unported("ENABLE/DISABLE RULE / OF / NOT OF variants");
+            pass = AT_PASS_MISC;
+        }
+        AT_AddOf | AT_DropOf => {
+            ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_PARTITIONED_TABLE)?;
+            unported("OF / NOT OF variants");
         }
         AT_GenericOptions => {
             ATSimplePermissions(cmd.subtype, rel, ATT_FOREIGN_TABLE)?;
@@ -1591,7 +1597,29 @@ fn ATExecCmd<'mcx>(
             unported("ENABLE/DISABLE TRIGGER (EnableDisableTrigger)")
         }
         AT_EnableRule | AT_EnableAlwaysRule | AT_EnableReplicaRule | AT_DisableRule => {
-            unported("ENABLE/DISABLE RULE (EnableDisableRule)")
+            // ATExecEnableDisableRule(rel, cmd->name, fires_when, lockmode)
+            // (tablecmds.c:5607-5623). The fires_when char depends on the
+            // subcommand variant.
+            let fires_when = match cmd.subtype {
+                AT_EnableRule => types_catalog::pg_rewrite::RULE_FIRES_ON_ORIGIN,
+                AT_EnableAlwaysRule => types_catalog::pg_rewrite::RULE_FIRES_ALWAYS,
+                AT_EnableReplicaRule => types_catalog::pg_rewrite::RULE_FIRES_ON_REPLICA,
+                AT_DisableRule => types_catalog::pg_rewrite::RULE_DISABLED,
+                _ => unreachable!(),
+            };
+            let rulename = cmd
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("ENABLE/DISABLE RULE requires a rule name");
+            // EnableDisableRule(rel, rulename, fires_when);
+            backend_rewrite_rewriteDefine::EnableDisableRule(mcx, rel, rulename, fires_when)?;
+            // InvokeObjectPostAlterHook(RelationRelationId, RelationGetRelid(rel), 0);
+            objaccess_seam::invoke_object_post_alter_hook::call(
+                RelationRelationId,
+                rel.rd_id,
+                0,
+            )?;
         }
         AT_EnableRowSecurity => {
             // ATExecSetRowSecurity(rel, true)
