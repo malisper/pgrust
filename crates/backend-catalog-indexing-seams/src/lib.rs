@@ -573,6 +573,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CatalogTupleUpdate(rel, &tup->t_self, tup)` for `renametrig_internal`
+    /// (commands/trigger.c): the owner reads the existing `pg_trigger` tuple
+    /// addressed by `tid`, overwrites the `TriggerFieldUpdate` columns (just
+    /// `tgname`, which the rename path scribbles via `namestrcpy`), re-forms,
+    /// and stores it. `Err` carries the heap/index mutation `ereport(ERROR)`s.
+    pub fn catalog_tuple_update_pg_trigger(
+        rel: &RelationData<'_>,
+        tid: ItemPointerData,
+        fields: &types_catalog::pg_trigger::TriggerFieldUpdate,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `CastCreate`'s tuple build + insert: `GetNewOidWithIndex(rel,
     /// CastOidIndexId, Anum_pg_cast_oid)` + `heap_form_tuple(RelationGetDescr(
     /// rel), values, nulls)` + `CatalogTupleInsert(rel, tup)` (catalog/

@@ -31,6 +31,7 @@ types-tuple = { path = "../types-tuple" }
 types-trigger = { path = "../types-trigger" }
 types-ri-triggers = { path = "../types-ri-triggers" }
 types-nodes = { path = "../types-nodes" }
+types-parsenodes = { path = "../types-parsenodes" }
 types-tableam = { path = "../types-tableam" }
 backend-commands-trigger-seams = { path = "../backend-commands-trigger-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
@@ -59,6 +60,8 @@ backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-s
 backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
+backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
+backend-partitioning-partdesc = { path = "../backend-partitioning-partdesc" }
 backend-catalog-pg-class-seams = { path = "../backend-catalog-pg-class-seams" }
 backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }

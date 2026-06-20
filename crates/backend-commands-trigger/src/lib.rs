@@ -32,6 +32,7 @@ pub mod firing;
 pub mod fmgr_builtins;
 pub mod queue;
 pub mod remove;
+pub mod rename;
 pub mod ri_accessors;
 
 /// Install every implementation in `backend-commands-trigger-seams` (and the
@@ -73,6 +74,7 @@ pub fn init_seams() {
     ri_accessors::init_seams();
     create::init_seams();
     remove::init_seams();
+    rename::init_seams();
     fmgr_builtins::register_trigger_builtins();
 
     // trigger.c owns the `SessionReplicationRole` GUC global (read by

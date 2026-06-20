@@ -1651,17 +1651,14 @@ mod recurrence_guard {
         // SnapshotSelf liveness test (tg_relation_tuple_satisfies_snapshot_self)
         // are now INSTALLED + DELETED from this allowlist.
         //
-        // What remains uninstalled below:
-        //   * renametrig — the unported catalog-write DDL leg
-        //     (CreateTrigger family: renametrig partition recursion,
-        //     RangeVarGetRelidExtended callbacks). `RemoveTriggerById` is now
-        //     ported + installed (backend-commands-trigger remove.rs), so its
-        //     entry is deleted.
+        // `renametrig` (the ALTER TRIGGER ... RENAME TO catalog-write DDL leg,
+        // including renametrig_internal / renametrig_partition recursion and the
+        // RangeVarCallbackForRenameTrigger lock-acquire callback) is now ported +
+        // installed (backend-commands-trigger rename.rs), so its entry is DELETED.
+        // `RemoveTriggerById` is likewise ported + installed (remove.rs).
         // (tg_trigtuple / tg_newtuple are now INSTALLED off the current-trigger
         // side-channel — read by plpgsql_exec_trigger to populate NEW/OLD records
         // — so their entries are DELETED.)
-        // Install + DELETE each as that substrate / DDL family lands.
-        ("backend_commands_trigger", "renametrig"),
         //
         // (TD-RELCACHE-INDEX-NODETREE RETIRED for the relcache owner's four
         // `BuildIndexInfo`/`BuildDummyIndexInfo` accessors: all of

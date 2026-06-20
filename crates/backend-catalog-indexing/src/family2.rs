@@ -1715,6 +1715,25 @@ fn catalog_tuple_update_pg_constraint(
     modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
 }
 
+/// `CatalogTupleUpdate` for `renametrig_internal` (commands/trigger.c): re-read
+/// the `pg_trigger` tuple at `tid`, overwrite `tgname`, re-form, store.
+fn catalog_tuple_update_pg_trigger(
+    rel: &RelationData<'_>,
+    tid: ItemPointerData,
+    fields: &cat::pg_trigger::TriggerFieldUpdate,
+) -> PgResult<()> {
+    use cat::pg_trigger as pt;
+    let ctx = MemoryContext::new("catalog_tuple_update_pg_trigger");
+    let mcx = ctx.mcx();
+    let r = reopen(mcx, rel)?;
+    let oldtup = fetch_by_tid(mcx, &r, tid)?
+        .ok_or_else(|| PgError::error("could not re-read pg_trigger tuple for update"))?;
+    let (mut values, mut nulls) = deform(mcx, &r, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+    set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_trigger_tgname, name_datum(mcx, &fields.tgname)?);
+    modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
+}
+
 /* ======================================================================== *
  * pg_type (TypeShellMake / TypeCreate / RenameTypeInternal).
  * ======================================================================== */
@@ -2936,6 +2955,9 @@ pub fn install() {
     // pg_constraint.
     s::catalog_tuple_insert_pg_constraint::set(catalog_tuple_insert_pg_constraint);
     s::catalog_tuple_update_pg_constraint::set(catalog_tuple_update_pg_constraint);
+
+    // pg_trigger.
+    s::catalog_tuple_update_pg_trigger::set(catalog_tuple_update_pg_trigger);
 
     // pg_type.
     s::catalog_tuple_insert_pg_type::set(catalog_tuple_insert_pg_type);
