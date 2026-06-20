@@ -761,7 +761,7 @@ pub(crate) fn get_partcheck<'mcx>(
         match st.partcheck.get(&relid) {
             Some((valid, exprs)) => {
                 for e in exprs {
-                    out.push(types_nodes::nodes::Node::mk_expr(mcx, e.clone()));
+                    out.push(types_nodes::nodes::Node::mk_expr(mcx, e.clone())?);
                 }
                 Ok((*valid, out))
             }

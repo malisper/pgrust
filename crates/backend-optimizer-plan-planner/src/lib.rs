@@ -421,7 +421,7 @@ fn standard_planner<'mcx>(
         // glob->subplans is empty, so this loop never runs.
         let node = core::mem::replace(
             run.resolve_subplan_mut(*pid),
-            Node::mk_result(mcx, types_nodes::noderesult::Result::default()),
+            Node::mk_result(mcx, types_nodes::noderesult::Result::default())?,
         );
         subplans.push(Some(mcx::alloc_in(mcx, node)?));
     }
@@ -919,7 +919,7 @@ fn subquery_planner_carried<'mcx>(
         // arena as the immutable context node, exactly as the hasGroupRTE block
         // below does for flatten_group_exprs. Cheap and only built when needed.
         let outer_query: Option<Node<'mcx>> = if root.hasJoinRTEs {
-            Some(Node::mk_query(mcx, run.resolve(root.parse).clone_in(mcx)?))
+            Some(Node::mk_query(mcx, run.resolve(root.parse).clone_in(mcx)?)?)
         } else {
             None
         };
@@ -1223,9 +1223,9 @@ fn subquery_planner_carried<'mcx>(
                                         "subquery_planner: VALUES column folded to NULL",
                                     )
                                 })?;
-                                new_cols.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?);
+                                new_cols.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe)?)?);
                             }
-                            let new_row = mcx::alloc_in(mcx, Node::mk_list(mcx, new_cols))?;
+                            let new_row = mcx::alloc_in(mcx, Node::mk_list(mcx, new_cols)?)?;
                             run.resolve_mut(root.parse).rtable[i].values_lists[r] = new_row;
                         }
                     }
@@ -1262,7 +1262,7 @@ fn subquery_planner_carried<'mcx>(
                                 )
                             })?;
                             run.resolve_mut(root.parse).rtable[i].groupexprs[g] =
-                                mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?;
+                                mcx::alloc_in(mcx, Node::mk_expr(mcx, pe)?)?;
                         }
                     }
                     RTEKind::RTE_FUNCTION => {
@@ -1317,7 +1317,7 @@ fn subquery_planner_carried<'mcx>(
                                 if let Some(rtf) =
                                     (*run.resolve_mut(root.parse).rtable[i].functions[f]).as_rangetblfunction_mut()
                                 {
-                                    rtf.funcexpr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe))?);
+                                    rtf.funcexpr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe)?)?);
                                 }
                             }
                         }
@@ -1384,7 +1384,7 @@ fn subquery_planner_carried<'mcx>(
                     }
                 };
                 if let Some(e) = expr_opt {
-                    let node = Node::mk_expr(mcx, e);
+                    let node = Node::mk_expr(mcx, e)?;
                     let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
                         mcx, &mut root, &ctx_query, node,
                     )?;
@@ -1401,7 +1401,7 @@ fn subquery_planner_carried<'mcx>(
                 None => None,
             };
             if let Some(e) = having_opt {
-                let node = Node::mk_expr(mcx, e);
+                let node = Node::mk_expr(mcx, e)?;
                 let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
                     mcx, &mut root, &ctx_query, node,
                 )?;
@@ -1460,7 +1460,7 @@ fn subquery_planner_carried<'mcx>(
                 for set in sets.iter() {
                     let mut intlist: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
                     intlist.extend(set.iter().copied());
-                    new_gsets.push(mcx::alloc_in(mcx, Node::mk_int_list(mcx, intlist))?);
+                    new_gsets.push(mcx::alloc_in(mcx, Node::mk_int_list(mcx, intlist)?)?);
                 }
             }
             run.resolve_mut(root.parse).groupingSets = new_gsets;
@@ -1525,7 +1525,7 @@ fn subquery_planner_carried<'mcx>(
                     && has_grouping_sets
                     && {
                         // bms_is_member(root->group_rtindex, pull_varnos(root, havingclause))
-                        let node = Node::mk_expr(mcx, havingclause.clone_in(mcx)?);
+                        let node = Node::mk_expr(mcx, havingclause.clone_in(mcx)?)?;
                         let varnos =
                             backend_optimizer_util_vars::var::pull_varnos(Some(&root), &node);
                         bms_is_member_relids(group_rtindex, &varnos)
@@ -1603,7 +1603,7 @@ fn subquery_planner_carried<'mcx>(
                     combined.append(&mut moved_to_where);
                     f.quals = Some(mcx::alloc_in(
                         mcx,
-                        Node::mk_expr(mcx, make_ands_explicit(combined)),
+                        Node::mk_expr(mcx, make_ands_explicit(combined))?,
                     )?);
                     run.resolve_mut(root.parse).jointree = Some(mcx::alloc_in(mcx, f)?);
                 } else {
@@ -1613,7 +1613,7 @@ fn subquery_planner_carried<'mcx>(
                         fromlist: mcx::PgVec::new_in(mcx),
                         quals: Some(mcx::alloc_in(
                             mcx,
-                            Node::mk_expr(mcx, make_ands_explicit(moved_to_where)),
+                            Node::mk_expr(mcx, make_ands_explicit(moved_to_where))?,
                         )?),
                     };
                     run.resolve_mut(root.parse).jointree = Some(mcx::alloc_in(mcx, f)?);
@@ -1768,7 +1768,7 @@ pub fn preprocess_expression<'mcx>(
         let flat = backend_rewrite_rewritemanip_seams::flatten_join_alias_vars::call(
             mcx,
             query_node,
-            Node::mk_expr(mcx, expr),
+            Node::mk_expr(mcx, expr)?,
         )?;
         expr = match flat.into_expr() {
             Some(e) => e,
@@ -1858,7 +1858,7 @@ fn preprocess_qual_conditions_query<'mcx>(
 ) -> PgResult<()> {
     let jt = run.resolve_mut(root.parse).jointree.take();
     if let Some(jt) = jt {
-        let mut node = Node::mk_from_expr(mcx, mcx::PgBox::into_inner(jt));
+        let mut node = Node::mk_from_expr(mcx, mcx::PgBox::into_inner(jt))?;
         preprocess_qual_conditions(mcx, root, run, outer_query, &mut node)?;
         let f = node
             .into_fromexpr()
@@ -1945,7 +1945,7 @@ fn preprocess_jointree_quals<'mcx>(
     };
     let processed = preprocess_expression(mcx, root, run, outer_query, expr, EXPRKIND_QUAL)?;
     *quals = match processed {
-        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
+        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
         None => None,
     };
     Ok(())
@@ -6121,7 +6121,7 @@ fn make_sort_input_target<'mcx>(
     // pulled Var/Aggref/WindowFunc/PHV into the arena to obtain its handle.
     let mut postponable_vars: Vec<types_pathnodes::NodeId> = Vec::new();
     for &col in &postponable_cols {
-        let node = Node::mk_expr(run.mcx(), root.node(col).clone());
+        let node = Node::mk_expr(run.mcx(), root.node(col).clone())?;
         for v in backend_optimizer_util_vars::pull_var_clause(&node, pvc_flags) {
             postponable_vars.push(root.alloc_node(v));
         }
@@ -6856,7 +6856,7 @@ fn preprocess_rowmarks<'mcx>(
     // rels = get_relids_in_jointree((Node *) parse->jointree, false, false).
     let mut rels: Option<mcx::PgBox<'mcx, types_nodes::bitmapset::Bitmapset<'mcx>>> = {
         let jointree_node: Option<Node<'mcx>> = match run.resolve(root.parse).jointree.as_deref() {
-            Some(f) => Some(Node::mk_from_expr(mcx, f.clone_in(mcx)?)),
+            Some(f) => Some(Node::mk_from_expr(mcx, f.clone_in(mcx)?)?),
             None => None,
         };
         match jointree_node {
@@ -7393,7 +7393,7 @@ fn set_windowclause_offset<'mcx>(
     processed: Option<Expr>,
 ) -> PgResult<()> {
     let wrapped = match processed {
-        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
+        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
         None => None,
     };
     let wc_node = &mut *run.resolve_mut(root.parse).windowClause[i];
@@ -7478,7 +7478,7 @@ fn set_onconflict_list_expr<'mcx>(
             let e = processed.ok_or_else(|| {
                 PgError::error("preprocess_expression reduced an arbiterElem to NULL")
             })?;
-            *oc.arbiterElems[i] = Node::mk_expr(mcx, e);
+            *oc.arbiterElems[i] = Node::mk_expr(mcx, e)?;
         }
         OcList::OnConflictSet => {
             let el = &mut oc.onConflictSet[i];
@@ -7538,7 +7538,7 @@ fn set_onconflict_scalar<'mcx>(
         None => return Ok(()),
     };
     let wrapped = match processed {
-        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
+        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
         None => None,
     };
     match which {

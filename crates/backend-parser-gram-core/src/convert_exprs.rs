@@ -18,13 +18,13 @@ fn conv_a_const<'mcx>(mcx: Mcx<'mcx>, p: *mut cs::A_Const) -> PgResult<Node<'mcx
         let node = match inner_tag {
             tags::T_Integer => Node::mk_integer(mcx, tn_val::Integer {
                 ival: unsafe { c.val.ival.ival },
-            }),
+            })?,
             tags::T_Float => Node::mk_float(mcx, tn_val::Float {
                 fval: cstr(mcx, unsafe { c.val.fval.fval })?,
-            }),
+            })?,
             tags::T_Boolean => Node::mk_boolean(mcx, tn_val::Boolean {
                 boolval: unsafe { c.val.boolval.boolval },
-            }),
+            })?,
             tags::T_String => Node::mk_string(mcx, tn_val::StringNode {
                 sval: cstr(mcx, unsafe { c.val.sval.sval })?,
             })?,
