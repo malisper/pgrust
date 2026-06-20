@@ -17,11 +17,37 @@ use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_rel::Relation;
-use types_tableam::amapi::IndexUniqueCheck;
+use types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck};
 use types_tableam::index_info_carrier::IndexInfoCarrier;
 use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_tuple::heaptuple::ItemPointerData;
+
+seam_core::seam!(
+    /// `brinbuild(heap, index, indexInfo)` (brin.c): the `ambuild` callback —
+    /// create the BRIN metapage + revmap, then `table_index_build_scan` the heap
+    /// accumulating each block-range's summary (via the opclass `add_value`
+    /// support fn) into a `BrinMemTuple`, flushing completed ranges via
+    /// `brin_doinsert`/`brinbuildCallback`'s page-range boundary logic, and
+    /// backfilling trailing empty ranges. Returns the heap/index tuple counts.
+    /// `Err` carries its `ereport(ERROR)` surface.
+    pub fn brinbuild<'mcx, 'a>(
+        mcx: Mcx<'mcx>,
+        heap_relation: &Relation<'mcx>,
+        index_relation: &Relation<'mcx>,
+        index_info: &mut IndexInfoCarrier<'a, 'mcx>,
+    ) -> PgResult<IndexBuildResult>
+);
+
+seam_core::seam!(
+    /// `brinbuildempty(index)` (brin.c): the `ambuildempty` callback — create an
+    /// empty BRIN index (a metapage only) in the index's INIT fork. `Err`
+    /// carries its `ereport(ERROR)` surface.
+    pub fn brinbuildempty<'mcx>(
+        mcx: Mcx<'mcx>,
+        index_relation: &Relation<'mcx>,
+    ) -> PgResult<()>
+);
 
 seam_core::seam!(
     /// `brininsert(idxRel, values, nulls, heaptid, heapRel, checkUnique,
@@ -101,4 +127,17 @@ seam_core::seam!(
         indexoid: Oid,
         heap_blk64: i64,
     ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `index_open(indexoid, NoLock); brinGetStats(index, &stats);
+    /// index_close(index, NoLock)` (brin.c:1648 via selfuncs.c brincostestimate):
+    /// open the BRIN index (a lock is already held by plancat.c, so `NoLock`),
+    /// read its statistical data (`pagesPerRange` / `revmapNumPages`) from the
+    /// metapage, and close it. Used by `brincostestimate` (selfuncs.c) for the
+    /// non-hypothetical-index branch. `Err` carries its `ereport(ERROR)` surface.
+    pub fn brin_get_stats<'mcx>(
+        mcx: Mcx<'mcx>,
+        indexoid: types_core::primitive::Oid,
+    ) -> PgResult<types_brin::BrinStatsData>
 );

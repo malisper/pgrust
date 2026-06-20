@@ -552,4 +552,72 @@ fn extend_buffered_rel_lock_first(irel: &Relation<'_>) -> PgResult<Buffer> {
     backend_storage_buffer_bufmgr_seams::extend_buffered_rel::call(irel, ForkNumber::MAIN_FORKNUM)
 }
 
+/// `BRIN_CURRENT_VERSION` (brin_page.h): the on-disk BRIN metapage version.
+pub const BRIN_CURRENT_VERSION: u16 = 1;
+
+/// `SizeOfBrinCreateIdx` (brin_xlog.h): `offsetof(xl_brin_createidx, version) +
+/// sizeof(uint16)` — i.e. `{ BlockNumber pagesPerRange; uint16 version; }`
+/// laid out native-endian (matching `parse_createidx` in the redo crate).
+fn encode_xl_brin_createidx(pages_per_range: BlockNumber, version: u16) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::with_capacity(6);
+    out.extend_from_slice(&pages_per_range.to_ne_bytes());
+    out.extend_from_slice(&version.to_ne_bytes());
+    out
+}
+
+/// `brinbuild`'s metapage-creation leg (brin.c:1019): extend the index's MAIN
+/// fork to obtain block 0, initialize it as the BRIN metapage with the given
+/// `pages_per_range`, dirty it, and (when the index is WAL-logged) emit an
+/// `XLOG_BRIN_CREATE_INDEX` record registering the metapage with
+/// `REGBUF_WILL_INIT | REGBUF_STANDARD`. The buffer is unlocked and released on
+/// return (the build then re-initializes the revmap via `brinRevmapInitialize`).
+///
+/// No critical section: per brin.c, "Critical section not required, because on
+/// error the creation of the whole relation will be rolled back."
+pub fn brin_create_metapage(index: &Relation<'_>, pages_per_range: BlockNumber) -> PgResult<()> {
+    let meta = extend_buffered_rel_lock_first(index)?;
+    // Assert(BufferGetBlockNumber(meta) == BRIN_METAPAGE_BLKNO);
+    debug_assert_eq!(buffer_get_block_number::call(meta), BRIN_METAPAGE_BLKNO);
+
+    page_modify(meta, |page: &mut [u8]| {
+        crate::brin_page::brin_metapage_init(page, pages_per_range, BRIN_CURRENT_VERSION)
+    })?;
+    mark_buffer_dirty::call(meta);
+
+    if relation_needs_wal(index) {
+        let xlrec = encode_xl_brin_createidx(pages_per_range, BRIN_CURRENT_VERSION);
+        xlog_begin_insert()?;
+        xlog_register_data(&xlrec)?;
+        xlog_register_buffer(0, meta, REGBUF_WILL_INIT | REGBUF_STANDARD)?;
+        let recptr = xlog_insert_record(RM_BRIN_ID, crate::wal::XLOG_BRIN_CREATE_INDEX)?;
+        page_modify(meta, |page: &mut [u8]| page_set_lsn(page, recptr))?;
+    }
+
+    unlock_release_buffer::call(meta);
+    Ok(())
+}
+
+/// `brinbuildempty` (brin.c:1140): create an empty BRIN index, consisting of a
+/// metapage only, in the index's INIT fork (for unlogged indexes). Extends the
+/// INIT fork to block 0, initializes the metapage, dirties it, and unconditionally
+/// `log_newpage_buffer`s it (the init-fork image must always be WAL-logged).
+pub fn brin_create_empty_metapage(index: &Relation<'_>, pages_per_range: BlockNumber) -> PgResult<()> {
+    let metabuf = backend_storage_buffer_bufmgr_seams::extend_buffered_rel::call(
+        index,
+        ForkNumber::INIT_FORKNUM,
+    )?;
+
+    // START_CRIT_SECTION();
+    page_modify(metabuf, |page: &mut [u8]| {
+        crate::brin_page::brin_metapage_init(page, pages_per_range, BRIN_CURRENT_VERSION)
+    })?;
+    mark_buffer_dirty::call(metabuf);
+    log_newpage_buffer(metabuf, true)?;
+    // END_CRIT_SECTION();
+
+    unlock_release_buffer::call(metabuf);
+    Ok(())
+}
+
+use crate::wal::log_newpage_buffer;
 use types_rel::Relation;

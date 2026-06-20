@@ -361,3 +361,17 @@ pub struct BrinMemTuple<'mcx> {
 /// by-reference output in `mcx`.
 pub type BrinSerializeFn =
     for<'mcx> fn(Mcx<'mcx>, &Datum<'_>, &mut [Datum<'mcx>]) -> PgResult<()>;
+
+// ---------------------------------------------------------------------------
+// BrinStatsData (brin.h) — index statistics read from the metapage.
+// ---------------------------------------------------------------------------
+
+/// `BrinStatsData` (`brin.h`): the BRIN index statistics `brinGetStats` reads
+/// from the metapage, used by `brincostestimate` (selfuncs.c).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BrinStatsData {
+    /// `pagesPerRange`.
+    pub pages_per_range: BlockNumber,
+    /// `revmapNumPages`.
+    pub revmap_num_pages: BlockNumber,
+}

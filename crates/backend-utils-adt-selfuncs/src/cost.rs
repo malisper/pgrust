@@ -25,7 +25,7 @@ use types_nodes::primnodes::Expr;
 use types_pathnodes::{
     IndexOptInfo, NodeId, PathId, PathNode, PlannerInfo, RinfoId, JOIN_INNER,
 };
-use types_pathnodes::planner_run::PlannerRun;
+use types_pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use types_selfuncs::{VariableStatData, ATTSTATSSLOT_NUMBERS};
 use types_statistics::STATISTIC_KIND_CORRELATION;
 use types_scan::scankey::{BTEqualStrategyNumber, BTLessStrategyNumber};
@@ -36,6 +36,7 @@ use backend_optimizer_path_small_seams as sel;
 use backend_optimizer_path_small_seams::ClauseListEntry;
 use backend_optimizer_util_predtest_seams as predtest;
 use backend_utils_cache_lsyscache_seams as lsc;
+use backend_access_brin_insert_vacuum_seams as brin_iv;
 
 use crate::examine::examine_indexcol_variable;
 use crate::scalar::get_variable_numdistinct;
@@ -796,6 +797,177 @@ pub(crate) fn spgcostestimate<'mcx, 'run>(
     })
 }
 
+/// `brincostestimate(root, path, loop_count, ...)` (selfuncs.c) — the BRIN
+/// index AM's cost estimator. Estimates the number of block-ranges the scan
+/// touches from the index correlation and qual selectivity, then prices the
+/// revmap (sequential) + regular-page (random) reads plus a per-range bitmap
+/// charge. 1:1 with the C body. Returns the five output cost components.
+pub(crate) fn brincostestimate<'mcx, 'run>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'run>,
+    root: &mut PlannerInfo,
+    path_id: PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    /// `BRIN_DEFAULT_PAGES_PER_RANGE` (brin.h).
+    const BRIN_DEFAULT_PAGES_PER_RANGE: f64 = 128.0;
+    /// `REVMAP_PAGE_MAXITEMS` (brin_page.h) for `BLCKSZ == 8192`:
+    /// `(8192 - MAXALIGN(SizeOfPageHeaderData) - MAXALIGN(SizeOfBrinSpecial)) /
+    /// sizeof(ItemPointerData)` == `(8192 - 24 - 4) / 6` == `1360`. Only the
+    /// hypothetical-index branch reads it.
+    const REVMAP_PAGE_MAXITEMS: f64 = 1360.0;
+
+    let (index, indexclauses): (IndexOptInfo, Vec<types_pathnodes::IndexClause>) = {
+        let path = expect_index_path(root, path_id);
+        let index = (**path
+            .indexinfo
+            .as_ref()
+            .expect("brincostestimate: indexinfo must be set"))
+        .clone();
+        (index, path.indexclauses.clone())
+    };
+
+    let index_quals: Vec<RinfoId> = {
+        let path = expect_index_path(root, path_id);
+        get_quals_from_indexclauses(path)
+    };
+
+    let num_pages = index.pages as f64;
+    let baserel = index.rel.expect("brincostestimate: index.rel must be set");
+    let baserel_relid = root.rel(baserel).relid as i32;
+    let baserel_pages = root.rel(baserel).pages as f64;
+
+    // RTE must be a plain relation (Assert(rte->rtekind == RTE_RELATION)).
+    {
+        let rte = planner_rt_fetch(run, root, root.rel(baserel).relid);
+        debug_assert_eq!(
+            rte.rtekind,
+            types_nodes::parsenodes::RTEKind::RTE_RELATION
+        );
+    }
+
+    // Fetch estimated page cost for the tablespace containing the index.
+    let spc = cz::get_tablespace_page_costs::call(index.reltablespace);
+    let spc_seq_page_cost = spc.spc_seq_page_cost;
+    let spc_random_page_cost = spc.spc_random_page_cost;
+
+    // Obtain some data from the index itself, if possible. Otherwise invent some
+    // plausible internal statistics based on the relation page count.
+    let (index_ranges, stats_pages_per_range, stats_revmap_num_pages) = if !index.hypothetical {
+        // A lock should have already been obtained on the index in plancat.c.
+        let stats = brin_iv::brin_get_stats::call(mcx, index.indexoid)?;
+        let index_ranges =
+            (baserel_pages / stats.pages_per_range as f64).ceil().max(1.0);
+        (index_ranges, stats.pages_per_range as f64, stats.revmap_num_pages as f64)
+    } else {
+        // Assume default number of pages per range.
+        let index_ranges =
+            (baserel_pages / BRIN_DEFAULT_PAGES_PER_RANGE).ceil().max(1.0);
+        let revmap_num_pages = (index_ranges / REVMAP_PAGE_MAXITEMS) + 1.0;
+        (index_ranges, BRIN_DEFAULT_PAGES_PER_RANGE, revmap_num_pages)
+    };
+
+    // Compute index correlation. Because we can use all index quals equally when
+    // scanning, use the largest absolute correlation among columns used by the
+    // query. Start at the worst case (0); if no stats are found, keep it 0.
+    let mut index_correlation = 0.0f64;
+    for iclause in &indexclauses {
+        let attnum = index.indexkeys[iclause.indexcol as usize];
+
+        // Look up stats for this index column (simple var -> table stats,
+        // expression column -> index stats). `examine_indexcol_variable` handles
+        // both legs (the `indexkeys[col] != 0` vs `== 0` split), exactly as the C
+        // `attnum != 0` branch does.
+        let _ = attnum;
+        let mut vardata = VariableStatData::zeroed(NodeId::default());
+        examine_indexcol_variable(mcx, run, root, &index, iclause.indexcol as usize, &mut vardata)?;
+
+        if let Some(stats_tuple) = vardata.stats_tuple {
+            if let Some(sslot) = lsc::get_attstatsslot::call(
+                mcx,
+                stats_tuple,
+                STATISTIC_KIND_CORRELATION as i32,
+                InvalidOid,
+                ATTSTATSSLOT_NUMBERS,
+            )? {
+                let var_correlation = if sslot.numbers.is_empty() {
+                    0.0f64
+                } else {
+                    (sslot.numbers[0] as f64).abs()
+                };
+                if var_correlation > index_correlation {
+                    index_correlation = var_correlation;
+                }
+            }
+        }
+
+        crate::examine::release_variable_stats(vardata);
+    }
+
+    // Estimate the fraction of main-table tuples matched by the index quals.
+    let qual_selectivity = {
+        let entries: Vec<ClauseListEntry> =
+            index_quals.iter().map(|&r| ClauseListEntry::Rinfo(r)).collect();
+        sel::clauselist_selectivity_mixed::call(
+            run,
+            root,
+            &entries,
+            baserel_relid,
+            JOIN_INNER,
+            None,
+        )?
+    };
+
+    // The minimum possible ranges we could match if all rows were in perfect
+    // order in the table's heap.
+    let minimal_ranges = (index_ranges * qual_selectivity).ceil();
+
+    // Estimate the number of ranges we'll touch using the correlation. Careful
+    // not to divide by zero (we use the absolute value of the correlation).
+    let estimated_ranges = if index_correlation < 1.0e-10 {
+        index_ranges
+    } else {
+        (minimal_ranges / index_correlation).min(index_ranges)
+    };
+
+    // We expect to visit this portion of the table.
+    let selec = crate::clamp_probability(estimated_ranges / index_ranges);
+    let index_selectivity = selec;
+
+    // Compute the index qual costs, much as in genericcostestimate, to add to the
+    // index costs. We can disregard indexorderbys (BRIN doesn't support those).
+    let qual_arg_cost = {
+        let refs: Vec<ClauseRef> =
+            index_quals.iter().map(|&r| ClauseRef::Rinfo(r)).collect();
+        index_other_operands_eval_cost(root, &refs)
+    };
+
+    let cpu_operator_cost = cz::cpu_operator_cost::call();
+
+    // Startup cost: read the whole revmap sequentially, including the index quals.
+    let mut index_startup_cost = spc_seq_page_cost * stats_revmap_num_pages * loop_count;
+    index_startup_cost += qual_arg_cost;
+
+    // Total cost: reading a BRIN index involves back-and-forth over regular pages
+    // (revmap can point to them out of sequential order), so price the regular
+    // pages as random reads.
+    let mut index_total_cost = index_startup_cost
+        + spc_random_page_cost * (num_pages - stats_revmap_num_pages) * loop_count;
+
+    // Charge a small amount per range tuple we expect to match, reflecting the
+    // bitmap-manipulation cost (the BRIN scan sets a bit for each page in a
+    // matching range, so multiply by the pages-per-range).
+    index_total_cost += 0.1 * cpu_operator_cost * estimated_ranges * stats_pages_per_range;
+
+    Ok(AmCostEstimate {
+        index_startup_cost,
+        index_total_cost,
+        index_selectivity,
+        index_correlation,
+        index_pages: num_pages,
+    })
+}
+
 /// `&mut`-borrow the `IndexPath` for a `PathId`, panicking if it is not one.
 fn expect_index_path(root: &PlannerInfo, path_id: PathId) -> &types_pathnodes::IndexPath {
     match root.path(path_id) {
@@ -842,6 +1014,9 @@ pub fn seam_amcostestimate<'mcx>(
         // SPGIST_AM_OID (pg_am.h) — the SP-GiST access method.
         4000 => spgcostestimate(mcx, run, root, path_id, loop_count)
             .expect("spgcostestimate"),
+        // BRIN_AM_OID (pg_am.h) — the BRIN access method.
+        3580 => brincostestimate(mcx, run, root, path_id, loop_count)
+            .expect("brincostestimate"),
         other => panic!(
             "amcostestimate: no cost estimator ported for index AM oid {}",
             other

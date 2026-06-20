@@ -70,7 +70,8 @@ pub use brin_pageops::{
     brin_page_cleanup, brin_start_evacuating_page,
 };
 pub use brin_revmap::{
-    brinGetTupleForHeapBlock, brinLockRevmapPageForUpdate, brinRevmapDesummarizeRange,
-    brinRevmapExtend, brinRevmapInitialize, brinRevmapTerminate, brinSetHeapBlockItemptr,
-    read_found_tuple_bytes, FoundTuple,
+    brin_create_empty_metapage, brin_create_metapage, brinGetTupleForHeapBlock,
+    brinLockRevmapPageForUpdate, brinRevmapDesummarizeRange, brinRevmapExtend, brinRevmapInitialize,
+    brinRevmapTerminate, brinSetHeapBlockItemptr, read_found_tuple_bytes, BRIN_CURRENT_VERSION,
+    FoundTuple,
 };

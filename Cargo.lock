@@ -133,6 +133,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-brin",
  "types-core",
  "types-error",
  "types-rel",
@@ -153,12 +154,14 @@ dependencies = [
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-typcache-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-fmgr-fmgr-seams",
  "mcx",
  "types-brin",
  "types-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
  "types-rel",
  "types-scan",
  "types-storage",
@@ -20593,6 +20596,7 @@ dependencies = [
 name = "backend-utils-adt-selfuncs"
 version = "0.0.0"
 dependencies = [
+ "backend-access-brin-insert-vacuum-seams",
  "backend-catalog-aclchk-seams",
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
@@ -20633,6 +20637,7 @@ dependencies = [
  "backend-utils-misc-stack-depth",
  "mcx",
  "types-acl",
+ "types-brin",
  "types-core",
  "types-datum",
  "types-error",
