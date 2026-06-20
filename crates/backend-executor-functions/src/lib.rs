@@ -744,7 +744,16 @@ fn run_body<'mcx>(
     let mut last_setstag: Option<usize> = None;
 
     for query in querytrees.iter() {
-        let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, query.clone_in(mcx)?)?;
+        // C functions.c:931 (prepare_next_query, pre-analyzed prosqlbody branch):
+        // AcquireRewriteLocks(parsetree, true, false) before pg_rewrite_query.
+        // A prosqlbody (BEGIN ATOMIC) function stores pre-analyzed Query trees that
+        // never passed through parse analysis, so no relation locks were taken;
+        // without this the executor's ExecOpenScanRelation re-opens each scanned
+        // relation with NoLock and the lock-held-by-me assertion fires. (Re-locking
+        // an already-held AccessShareLock on the prosrc path is a no-op.)
+        let locked =
+            rewrite_seams::acquire_rewrite_locks::call(mcx, query.clone_in(mcx)?, true, false)?;
+        let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, locked)?;
         for rq in rewritten.iter() {
             if rq.commandType == CmdType::CMD_UTILITY {
                 return Err(PgError::error(
@@ -907,7 +916,16 @@ fn run_body_setof<'mcx>(
     let mut last_setstag: Option<usize> = None;
 
     for query in querytrees.iter() {
-        let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, query.clone_in(mcx)?)?;
+        // C functions.c:931 (prepare_next_query, pre-analyzed prosqlbody branch):
+        // AcquireRewriteLocks(parsetree, true, false) before pg_rewrite_query.
+        // A prosqlbody (BEGIN ATOMIC) function stores pre-analyzed Query trees that
+        // never passed through parse analysis, so no relation locks were taken;
+        // without this the executor's ExecOpenScanRelation re-opens each scanned
+        // relation with NoLock and the lock-held-by-me assertion fires. (Re-locking
+        // an already-held AccessShareLock on the prosrc path is a no-op.)
+        let locked =
+            rewrite_seams::acquire_rewrite_locks::call(mcx, query.clone_in(mcx)?, true, false)?;
+        let rewritten = rewrite_seams::query_rewrite_canonical::call(mcx, locked)?;
         for rq in rewritten.iter() {
             if rq.commandType == CmdType::CMD_UTILITY {
                 return Err(PgError::error(
