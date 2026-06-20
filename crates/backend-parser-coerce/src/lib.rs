@@ -1455,13 +1455,21 @@ pub fn select_common_type<'mcx>(
                 match context {
                     None => return Ok(InvalidOid),
                     Some(ctx) => {
-                        let _ = pstate;
-                        return Err(types_error::PgError::error(format!(
+                        // C: parser_errposition(pstate, exprLocation(nexpr))
+                        let mut e = types_error::PgError::error(format!(
                             "{ctx} types {} and {} cannot be matched",
                             format_type_be(ptype)?,
                             format_type_be(ntype)?
                         ))
-                        .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
+                        .with_sqlstate(ERRCODE_DATATYPE_MISMATCH);
+                        if let Some(ps) = pstate {
+                            use backend_nodes_core::nodefuncs::expr_location;
+                            let pos = parser_errposition::call(ps, expr_location(Some(nexpr))?)?;
+                            if pos > 0 {
+                                e = e.with_cursor_position(pos);
+                            }
+                        }
+                        return Err(e);
                     }
                 }
             } else if !pispreferred
