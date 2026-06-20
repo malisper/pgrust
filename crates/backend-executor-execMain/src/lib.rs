@@ -1178,6 +1178,84 @@ pub fn exec_supports_backward_scan(plan: &PlannedStmt<'_>) -> PgResult<bool> {
 // ExecUpdateLockMode (execMain.c).
 // ===========================================================================
 
+/// Install the outward seams the `GetTupleForTrigger` firing front
+/// (`backend-commands-trigger`) calls to fetch + lock the OLD on-disk tuple.
+/// The trigger manager is below the executor's execUtils/tableam machinery in
+/// the crate DAG, so the bodies live here (execMain owns `ExecUpdateLockMode`,
+/// depends on execUtils for `ExecGetTriggerOldSlot`, and on the tableam crate).
+fn install_get_tuple_for_trigger_seams() {
+    // ExecGetTriggerOldSlot(estate, relinfo) — the relInfo's reusable OLD slot.
+    backend_commands_trigger_seams::exec_get_trigger_old_slot::set(|estate, relinfo| {
+        execUtils::ExecGetTriggerOldSlot(estate, relinfo)
+    });
+
+    // ExecUpdateLockMode(estate, relinfo).
+    backend_commands_trigger_seams::exec_update_lock_mode::set(|estate, relinfo| {
+        ExecUpdateLockMode(estate, relinfo)
+    });
+
+    // table_tuple_lock(rel, tid, es_snapshot, oldslot, es_output_cid, mode,
+    //                  LockWaitBlock, lockflags, &tmfd).
+    backend_commands_trigger_seams::get_tuple_for_trigger_lock::set(
+        |estate, relinfo, tid, oldslot, mode, find_last_version, tmfd| {
+            let mcx = estate.es_query_cxt;
+            let rel = estate
+                .result_rel(relinfo)
+                .ri_RelationDesc
+                .as_ref()
+                .expect("GetTupleForTrigger: result relation has no relation")
+                .alias();
+            let snapshot = estate
+                .es_snapshot
+                .as_deref()
+                .cloned()
+                .expect("GetTupleForTrigger: no active es_snapshot");
+            let cid = estate.es_output_cid;
+            let flags: u8 = if find_last_version {
+                types_tableam::tableam::TUPLE_LOCK_FLAG_FIND_LAST_VERSION
+            } else {
+                0
+            };
+            let inslot = estate.slot_data_mut(oldslot);
+            backend_access_table_tableam::table_tuple_lock(
+                mcx,
+                &rel,
+                tid,
+                &Some(snapshot),
+                inslot,
+                cid,
+                mode,
+                types_tableam::tableam::LockWaitPolicy::LockWaitBlock,
+                flags,
+                tmfd,
+            )
+        },
+    );
+
+    // table_tuple_fetch_row_version(rel, tid, SnapshotAny, oldslot).
+    backend_commands_trigger_seams::get_tuple_for_trigger_fetch::set(
+        |estate, relinfo, tid, oldslot| {
+            let mcx = estate.es_query_cxt;
+            let rel = estate
+                .result_rel(relinfo)
+                .ri_RelationDesc
+                .as_ref()
+                .expect("GetTupleForTrigger: result relation has no relation")
+                .alias();
+            let snapshot_any =
+                Some(types_snapshot::SnapshotData::sentinel(types_snapshot::SnapshotType::SNAPSHOT_ANY));
+            let inslot = estate.slot_data_mut(oldslot);
+            backend_access_table_tableam::table_tuple_fetch_row_version(
+                mcx,
+                &rel,
+                tid,
+                &snapshot_any,
+                inslot,
+            )
+        },
+    );
+}
+
 /// `ExecUpdateLockMode(estate, relinfo)` (execMain.c): the row-lock mode to
 /// acquire on a conflicting tuple before updating. If no key column has been
 /// modified a weaker lock is sufficient (better concurrency).
@@ -2574,6 +2652,8 @@ pub fn init_seams() {
     // ExecSupportsBackwardScan (body in execAmi) + ExecUpdateLockMode.
     seams::exec_supports_backward_scan::set(exec_supports_backward_scan);
     seams::exec_update_lock_mode::set(ExecUpdateLockMode);
+
+    install_get_tuple_for_trigger_seams();
 
     // ExecGetReturningSlot / ExecGetChildToRootMap bodies live in execUtils;
     // execMain owns these seam decls (consumed by nodeModifyTable) and delegates.

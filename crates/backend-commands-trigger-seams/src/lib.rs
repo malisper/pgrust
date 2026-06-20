@@ -130,6 +130,64 @@ seam_core::seam!(
         slot: TupleTableSlotRef,
     ) -> PgResult<bool>
 );
+// ---------------------------------------------------------------------------
+// Outward seams the BEFORE-ROW UPDATE/DELETE firing front calls to fetch and
+// lock the OLD on-disk tuple (`GetTupleForTrigger`).  The trigger manager
+// (`commands/trigger.c`) is BELOW the executor's tableam/slot machinery in the
+// crate DAG, so these cross back up to the owning executor unit
+// (`nodeModifyTable`), which installs them from its `init_seams()`.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `ExecGetTriggerOldSlot(estate, relinfo)` (execUtils.c): the relInfo's
+    /// reusable slot for a trigger's OLD tuple (lazily created against the
+    /// relation's tuple descriptor). Returns its `SlotId`.
+    pub fn exec_get_trigger_old_slot<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+    ) -> PgResult<types_nodes::SlotId>
+);
+
+seam_core::seam!(
+    /// `ExecUpdateLockMode(estate, relinfo)` (execMain.c): the row-lock mode
+    /// (`LockTupleExclusive` / `LockTupleNoKeyExclusive`) for a BEFORE-ROW
+    /// UPDATE, chosen by whether any key column is updated.
+    pub fn exec_update_lock_mode<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+    ) -> PgResult<types_tableam::tableam::LockTupleMode>
+);
+
+seam_core::seam!(
+    /// `table_tuple_lock(rel, tid, estate->es_snapshot, oldslot,
+    /// estate->es_output_cid, mode, LockWaitBlock, lockflags, &tmfd)`
+    /// (tableam.h) for `GetTupleForTrigger`: lock the OLD on-disk tuple into
+    /// `oldslot`, returning the lock outcome. `find_last_version` corresponds
+    /// to `TUPLE_LOCK_FLAG_FIND_LAST_VERSION` (set unless the isolation level
+    /// uses a transaction snapshot).
+    pub fn get_tuple_for_trigger_lock<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+        tupleid: &types_tuple::heaptuple::ItemPointerData,
+        oldslot: types_nodes::SlotId,
+        mode: types_tableam::tableam::LockTupleMode,
+        find_last_version: bool,
+        tmfd: &mut types_tableam::tableam::TM_FailureData,
+    ) -> PgResult<types_tableam::tableam::TM_Result>
+);
+
+seam_core::seam!(
+    /// `table_tuple_fetch_row_version(rel, tid, SnapshotAny, oldslot)`
+    /// (tableam.h) for the no-EPQ leg of `GetTupleForTrigger`: fetch the row
+    /// version identified by `tid` into `oldslot`. Returns `false` if absent.
+    pub fn get_tuple_for_trigger_fetch<'mcx>(
+        estate: &mut types_nodes::EStateData<'mcx>,
+        relinfo: types_nodes::RriId,
+        tupleid: &types_tuple::heaptuple::ItemPointerData,
+        oldslot: types_nodes::SlotId,
+    ) -> PgResult<bool>
+);
+
 seam_core::seam!(
     /// `trigdata->tg_trigger`.
     pub fn tg_trigger(trigdata: TriggerDataRef) -> TriggerRef
