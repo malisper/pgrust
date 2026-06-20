@@ -2562,6 +2562,18 @@ pub fn deconstruct_text_array<'mcx>(
     mcx: Mcx<'mcx>,
     array: &[u8],
 ) -> PgResult<PgVec<'mcx, PgString<'mcx>>> {
+    // C: deconstruct_array_builtin(DatumGetArrayTypeP(array), TEXTOID, ...).
+    // `DatumGetArrayTypeP` is `PG_DETOAST_DATUM`: it un-packs a short (1-byte)
+    // varlena header and inlines/decompresses a toasted datum so the
+    // fixed-offset `ArrayType` header fields (ndim/dataoffset/elemtype at
+    // offsets 4/8/12) read correctly. On-disk reloptions (`pg_class.reloptions`,
+    // a `text[]`) come back from `fastgetattr` still SHORT-header packed, so the
+    // un-detoasted bytes mis-read `ARR_ELEMTYPE` (e.g. 256 instead of TEXTOID).
+    // Detoast first, matching the C caller's `DatumGetArrayTypeP` (no-op on an
+    // already-plain 4-byte-header array, e.g. when called from
+    // `decode_text_array_to_strings`).
+    let arr = detoast_seam::detoast_attr::call(mcx, array)?;
+
     let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(foundation::TEXTOID)?;
     // Use the value-lane element walk: it materializes each by-reference text
     // element's verbatim varlena bytes as a `Datum::ByRef`. (The bare
@@ -2570,7 +2582,7 @@ pub fn deconstruct_text_array<'mcx>(
     // varlena image segfaults.)
     let pairs = deconstruct_array_values(
         mcx,
-        array,
+        &arr,
         foundation::TEXTOID,
         elmlen,
         elmbyval,
