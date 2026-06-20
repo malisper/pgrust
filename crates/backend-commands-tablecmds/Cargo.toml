@@ -59,6 +59,7 @@ backend-catalog-pg-type-seams = { path = "../backend-catalog-pg-type-seams" }
 backend-catalog-pg-inherits-seams = { path = "../backend-catalog-pg-inherits-seams" }
 backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
 backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+backend-catalog-index = { path = "../backend-catalog-index" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }

@@ -16,11 +16,16 @@
 //!     must run;
 //!   * `FindTriggerIncompatibleWithInheritance`.
 //!
+//!   * `AttachPartitionEnsureIndexes` — for each partitioned index on the
+//!     parent, attach a matching existing index on the partition-to-be (via
+//!     `CompareIndexInfo`) or build one with `generateClonedIndexStmt` +
+//!     `DefineIndex`.
+//!
 //! GAPS (precise errors, not silent skips):
-//!   * `AttachPartitionEnsureIndexes` / `CloneRowTriggersToPartition` /
-//!     `CloneForeignKeyConstraints` are unported — when the parent carries
-//!     indexes, row triggers, or foreign keys, a `FEATURE_NOT_SUPPORTED` error
-//!     is raised; when absent these are genuine no-ops and attach proceeds.
+//!   * `CloneRowTriggersToPartition` / `CloneForeignKeyConstraints` are
+//!     unported — when the parent carries row triggers or foreign keys, a
+//!     `FEATURE_NOT_SUPPORTED` error is raised; when absent these are genuine
+//!     no-ops and attach proceeds.
 //!   * The default-partition recursion of the qual generators
 //!     (`get_qual_for_{range,list}` `is_default`) is unported in partbounds;
 //!     attaching under a parent that already has a DEFAULT partition surfaces a
@@ -51,7 +56,8 @@ use types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock,
 };
 use types_tuple::access::{
-    RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELPERSISTENCE_TEMP,
+    RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
+    RELPERSISTENCE_TEMP,
 };
 use types_tuple::heaptuple::ATTNULLABLE_VALID;
 
@@ -429,25 +435,216 @@ fn node_to_expr(n: Node<'_>) -> PgResult<Expr> {
 // Cloners (unported — no-op when absent, precise error when present)
 // ===========================================================================
 
-/// `AttachPartitionEnsureIndexes` (tablecmds.c:20566). Unported; raises a
-/// precise error when the parent carries partitioned indexes (the only case
-/// requiring index cloning), no-op otherwise.
+/// `AttachPartitionEnsureIndexes(wqueue, rel, attachrel)` (tablecmds.c:20573).
+///
+/// Enforce the indexing rule for partitioned tables during ATTACH PARTITION:
+/// every partition must have an index attached to each partitioned index on the
+/// partitioned table. For each partitioned index on `rel`, find a matching valid
+/// unattached index on `attachrel` (via `CompareIndexInfo`) and attach it; if
+/// none matches, build one with `generateClonedIndexStmt` + `DefineIndex`.
 fn AttachPartitionEnsureIndexes<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    _attachrel: &Relation<'mcx>,
+    attachrel: &Relation<'mcx>,
 ) -> PgResult<()> {
-    let idxlist = backend_utils_cache_relcache::derived::RelationGetIndexList(rel.rd_id)?;
-    if !idxlist.is_empty() {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(
-                "ATTACH PARTITION onto a partitioned table with indexes is not yet supported \
-                 (AttachPartitionEnsureIndexes / DefineIndex clone path unported)"
-                    .to_string(),
-            )
-            .into_error());
+    use backend_access_transam_xact::CommandCounterIncrement;
+    use types_core::primitive::InvalidOid;
+
+    let idxes = backend_utils_cache_relcache::derived::RelationGetIndexList(rel.rd_id)?;
+    let attach_rel_idxs =
+        backend_utils_cache_relcache::derived::RelationGetIndexList(attachrel.rd_id)?;
+
+    // Build arrays of all existing indexes on the partition-to-be and their
+    // IndexInfos.
+    let mut attachrel_idx_rels: Vec<Relation<'mcx>> = Vec::with_capacity(attach_rel_idxs.len());
+    let mut attach_infos = Vec::with_capacity(attach_rel_idxs.len());
+    for &cld_idx_id in attach_rel_idxs.iter() {
+        let cld = backend_access_index_indexam_seams::index_open::call(
+            mcx,
+            cld_idx_id,
+            AccessShareLock,
+        )?;
+        let info = backend_catalog_index::BuildIndexInfo(mcx, &cld)?;
+        attachrel_idx_rels.push(cld);
+        attach_infos.push(info);
     }
+
+    // If we're attaching a foreign table, we must fail if any of the indexes is
+    // a constraint index; otherwise, there's nothing to do here. Do this before
+    // starting work, to avoid wasting the effort of building a few non-unique
+    // indexes before coming across a unique one.
+    if attachrel.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
+        for &idx in idxes.iter() {
+            let idx_rel =
+                backend_access_index_indexam_seams::index_open::call(mcx, idx, AccessShareLock)?;
+            let is_unique_or_pk = idx_rel
+                .rd_index
+                .as_ref()
+                .map(|i| i.indisunique || i.indisprimary)
+                .unwrap_or(false);
+            if is_unique_or_pk {
+                // close everything we have open before erroring
+                idx_rel.close(AccessShareLock)?;
+                for cld in attachrel_idx_rels {
+                    cld.close(AccessShareLock)?;
+                }
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                    .errmsg(format!(
+                        "cannot attach foreign table \"{}\" as partition of partitioned table \"{}\"",
+                        attachrel.name(),
+                        rel.name()
+                    ))
+                    .errdetail(format!(
+                        "Partitioned table \"{}\" contains unique indexes.",
+                        rel.name()
+                    ))
+                    .into_error());
+            }
+            idx_rel.close(AccessShareLock)?;
+        }
+
+        // out: clean up and return
+        for cld in attachrel_idx_rels {
+            cld.close(AccessShareLock)?;
+        }
+        return Ok(());
+    }
+
+    // For each index on the partitioned table, find a matching one in the
+    // partition-to-be; if one is not found, create one.
+    for &idx in idxes.iter() {
+        let idx_rel =
+            backend_access_index_indexam_seams::index_open::call(mcx, idx, AccessShareLock)?;
+
+        // Ignore indexes in the partitioned table other than partitioned
+        // indexes.
+        if idx_rel.rd_rel.relkind != RELKIND_PARTITIONED_INDEX {
+            idx_rel.close(AccessShareLock)?;
+            continue;
+        }
+
+        // construct an indexinfo to compare existing indexes against
+        let info = backend_catalog_index::BuildIndexInfo(mcx, &idx_rel)?;
+        let attmap = backend_access_common_next::attmap::build_attrmap_by_name(
+            mcx,
+            &attachrel.rd_att,
+            &rel.rd_att,
+            false,
+        )?;
+        let constraint_oid = backend_catalog_pg_constraint::get_relation_idx_constraint_oid(
+            rel.rd_id, idx,
+        )?;
+
+        // Scan the list of existing indexes in the partition-to-be, and mark the
+        // first matching, valid, unattached one we find, if any, as partition of
+        // the parent index. If we find one, we're done.
+        let mut found = false;
+        for i in 0..attachrel_idx_rels.len() {
+            let cld_idx_id = attachrel_idx_rels[i].rd_id;
+
+            // does this index have a parent? if so, can't use it
+            if attachrel_idx_rels[i].rd_rel.relispartition {
+                continue;
+            }
+
+            // If this index is invalid, can't use it
+            if !attachrel_idx_rels[i]
+                .rd_index
+                .as_ref()
+                .map(|ind| ind.indisvalid)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            if backend_catalog_index::CompareIndexInfo(
+                mcx,
+                &attach_infos[i],
+                &info,
+                &attachrel_idx_rels[i].rd_indcollation,
+                &idx_rel.rd_indcollation,
+                &attachrel_idx_rels[i].rd_opfamily,
+                &idx_rel.rd_opfamily,
+                &attmap.attnums,
+            )? {
+                let mut cld_constr_oid = InvalidOid;
+
+                // If this index is being created in the parent because of a
+                // constraint, then the child needs to have a constraint also, so
+                // look for one. If there is no such constraint, this index is no
+                // good, so keep looking.
+                if OidIsValid(constraint_oid) {
+                    cld_constr_oid =
+                        backend_catalog_pg_constraint::get_relation_idx_constraint_oid(
+                            attachrel.rd_id,
+                            cld_idx_id,
+                        )?;
+                    // no dice
+                    if !OidIsValid(cld_constr_oid) {
+                        continue;
+                    }
+
+                    // Ensure they're both the same type of constraint
+                    if backend_utils_cache_lsyscache::collation_constraint_language_cast::get_constraint_type(constraint_oid)?
+                        != backend_utils_cache_lsyscache::collation_constraint_language_cast::get_constraint_type(cld_constr_oid)?
+                    {
+                        continue;
+                    }
+                }
+
+                // bingo.
+                backend_commands_indexcmds::IndexSetParentIndex(
+                    mcx,
+                    &attachrel_idx_rels[i],
+                    idx,
+                )?;
+                if OidIsValid(constraint_oid) {
+                    backend_catalog_pg_constraint::ConstraintSetParentConstraint(
+                        mcx,
+                        cld_constr_oid,
+                        constraint_oid,
+                        attachrel.rd_id,
+                    )?;
+                }
+                found = true;
+
+                CommandCounterIncrement()?;
+                break;
+            }
+        }
+
+        // If no suitable index was found in the partition-to-be, create one now.
+        // Note that if this is a PK, not-null constraints must already exist.
+        if !found {
+            let (stmt, con_oid) =
+                backend_parser_parse_utilcmd_seams::generateClonedIndexStmt::call(
+                    mcx, None, &idx_rel, &attmap,
+                )?;
+            let args = backend_commands_indexcmds_seams::DefineIndexArgs {
+                table_id: attachrel.rd_id,
+                stmt,
+                index_relation_id: InvalidOid,
+                parent_index_id: idx_rel.rd_id,
+                parent_constraint_id: con_oid,
+                total_parts: -1,
+                is_alter_table: true,
+                check_rights: false,
+                check_not_in_use: false,
+                skip_build: false,
+                quiet: false,
+            };
+            backend_commands_indexcmds_seams::define_index_full::call(mcx, args)?;
+        }
+
+        idx_rel.close(AccessShareLock)?;
+    }
+
+    // out: Clean up.
+    for cld in attachrel_idx_rels {
+        cld.close(AccessShareLock)?;
+    }
+
     Ok(())
 }
 
