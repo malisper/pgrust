@@ -26,7 +26,7 @@
 use types_core::{TimestampTz, XLogRecPtr};
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -119,131 +119,117 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("xlogfuncs fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `pg_is_wal_replay_paused()` (xlogfuncs.c:572).
-fn fc_pg_is_wal_replay_paused(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_is_wal_replay_paused() {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+fn fc_pg_is_wal_replay_paused(
+    _fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::pg_is_wal_replay_paused()?))
 }
 
 /// `pg_get_wal_replay_pause_state()` (xlogfuncs.c:593) — a `text` result.
-fn fc_pg_get_wal_replay_pause_state(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_wal_replay_pause_state(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     // Copy the varlena image out of the scratch arena onto the by-ref lane
     // (C: PG_RETURN_TEXT_P over a palloc'd varlena) before the arena is dropped.
-    let bytes: Vec<u8> = match crate::pg_get_wal_replay_pause_state(m.mcx()) {
-        Ok(text) => text.as_slice().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_text(fcinfo, bytes)
+    let bytes: Vec<u8> = crate::pg_get_wal_replay_pause_state(m.mcx())?
+        .as_slice()
+        .to_vec();
+    Ok(ret_text(fcinfo, bytes))
 }
 
 /// `pg_wal_replay_pause()` (xlogfuncs.c:518) — `void` result
 /// (C: `PG_RETURN_VOID()` = Datum 0).
-fn fc_pg_wal_replay_pause(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_wal_replay_pause() {
-        Ok(()) => Datum::from_usize(0),
-        Err(e) => raise(e),
-    }
+fn fc_pg_wal_replay_pause(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    crate::pg_wal_replay_pause()?;
+    Ok(Datum::from_usize(0))
 }
 
 /// `pg_wal_replay_resume()` (xlogfuncs.c:548) — `void` result
 /// (C: `PG_RETURN_VOID()` = Datum 0).
-fn fc_pg_wal_replay_resume(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_wal_replay_resume() {
-        Ok(()) => Datum::from_usize(0),
-        Err(e) => raise(e),
-    }
+fn fc_pg_wal_replay_resume(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    crate::pg_wal_replay_resume()?;
+    Ok(Datum::from_usize(0))
 }
 
 /// `pg_is_in_recovery()` (xlogfuncs.c:643) — infallible `bool`.
-fn fc_pg_is_in_recovery(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::pg_is_in_recovery())
+fn fc_pg_is_in_recovery(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::pg_is_in_recovery()))
 }
 
 /// `pg_promote(wait bool, wait_seconds int4)` (xlogfuncs.c:670).
-fn fc_pg_promote(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_promote(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let wait = arg_bool(fcinfo, 0);
     let wait_seconds = arg_int32(fcinfo, 1);
-    match crate::pg_promote(wait, wait_seconds) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+    Ok(ret_bool(crate::pg_promote(wait, wait_seconds)?))
 }
 
 /// `pg_current_wal_lsn()` (xlogfuncs.c) — `pg_lsn` result.
-fn fc_pg_current_wal_lsn(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_current_wal_lsn() {
-        Ok(l) => ret_lsn(l),
-        Err(e) => raise(e),
-    }
+fn fc_pg_current_wal_lsn(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_lsn(crate::pg_current_wal_lsn()?))
 }
 
 /// `pg_current_wal_insert_lsn()` (xlogfuncs.c) — `pg_lsn` result.
-fn fc_pg_current_wal_insert_lsn(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_current_wal_insert_lsn() {
-        Ok(l) => ret_lsn(l),
-        Err(e) => raise(e),
-    }
+fn fc_pg_current_wal_insert_lsn(
+    _fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    Ok(ret_lsn(crate::pg_current_wal_insert_lsn()?))
 }
 
 /// `pg_current_wal_flush_lsn()` (xlogfuncs.c) — `pg_lsn` result.
-fn fc_pg_current_wal_flush_lsn(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_current_wal_flush_lsn() {
-        Ok(l) => ret_lsn(l),
-        Err(e) => raise(e),
-    }
+fn fc_pg_current_wal_flush_lsn(
+    _fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    Ok(ret_lsn(crate::pg_current_wal_flush_lsn()?))
 }
 
 /// `pg_switch_wal()` (xlogfuncs.c) — `pg_lsn` result.
-fn fc_pg_switch_wal(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_switch_wal() {
-        Ok(l) => ret_lsn(l),
-        Err(e) => raise(e),
-    }
+fn fc_pg_switch_wal(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_lsn(crate::pg_switch_wal()?))
 }
 
 /// `pg_create_restore_point(text)` (xlogfuncs.c) — `pg_lsn` result.
-fn fc_pg_create_restore_point(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_create_restore_point(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let name = arg_text(fcinfo, 0);
-    match crate::pg_create_restore_point(name) {
-        Ok(l) => ret_lsn(l),
-        Err(e) => raise(e),
-    }
+    Ok(ret_lsn(crate::pg_create_restore_point(name)?))
 }
 
 /// `pg_last_wal_receive_lsn()` (xlogfuncs.c) — NULL-able `pg_lsn` result.
-fn fc_pg_last_wal_receive_lsn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_lsn_opt(fcinfo, crate::pg_last_wal_receive_lsn())
+fn fc_pg_last_wal_receive_lsn(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    Ok(ret_lsn_opt(fcinfo, crate::pg_last_wal_receive_lsn()))
 }
 
 /// `pg_last_wal_replay_lsn()` (xlogfuncs.c) — NULL-able `pg_lsn` result.
-fn fc_pg_last_wal_replay_lsn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_lsn_opt(fcinfo, crate::pg_last_wal_replay_lsn())
+fn fc_pg_last_wal_replay_lsn(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    Ok(ret_lsn_opt(fcinfo, crate::pg_last_wal_replay_lsn()))
 }
 
 /// `pg_last_xact_replay_timestamp()` (xlogfuncs.c) — NULL-able `timestamptz`.
-fn fc_pg_last_xact_replay_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_timestamptz_opt(fcinfo, crate::pg_last_xact_replay_timestamp())
+fn fc_pg_last_xact_replay_timestamp(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    Ok(ret_timestamptz_opt(
+        fcinfo,
+        crate::pg_last_xact_replay_timestamp(),
+    ))
 }
 
 /// `pg_log_standby_snapshot()` (xlogfuncs.c) — `pg_lsn` result.
-fn fc_pg_log_standby_snapshot(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_log_standby_snapshot() {
-        Ok(l) => ret_lsn(l),
-        Err(e) => raise(e),
-    }
+fn fc_pg_log_standby_snapshot(
+    _fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    Ok(ret_lsn(crate::pg_log_standby_snapshot()?))
 }
 
 // ---------------------------------------------------------------------------
@@ -256,16 +242,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the six expressible `xlogfuncs.c` recovery-control fmgr builtins
@@ -276,7 +265,7 @@ fn builtin(
 /// and inherit `proisstrict BKI_DEFAULT(t)` (none overrides it, so `strict =
 /// true`), and none is `proretset` (so `retset = false`).
 pub fn register_xlogfuncs_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // pg_wal_replay_pause() -> void
         builtin(3071, "pg_wal_replay_pause", 0, true, false, fc_pg_wal_replay_pause),
         // pg_wal_replay_resume() -> void
