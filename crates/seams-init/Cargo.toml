@@ -166,6 +166,7 @@ backend-statistics-extended-stats = { path = "../backend-statistics-extended-sta
 backend-statistics-mvdistinct = { path = "../backend-statistics-mvdistinct" }
 backend-statistics-dependencies = { path = "../backend-statistics-dependencies" }
 backend-commands-cluster = { path = "../backend-commands-cluster" }
+backend-commands-discard = { path = "../backend-commands-discard" }
 backend-commands-prepare = { path = "../backend-commands-prepare" }
 backend-commands-tablecmds = { path = "../backend-commands-tablecmds" }
 backend-commands-user = { path = "../backend-commands-user" }

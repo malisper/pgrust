@@ -29,7 +29,12 @@ use backend_utils_mmgr_portalmem::PortalHashTableDeleteAll;
 
 use backend_access_transam_xact_seams::prevent_in_transaction_block;
 use types_error::PgResult;
-use types_parsenodes::{DiscardMode, DiscardStmt};
+// The canonical CALL/DISCARD parse node lives in `types_nodes::ddlnodes` (the
+// node-opaque payload the dispatcher downcasts to). `types_parsenodes::DiscardMode`
+// is a re-export of this same enum, so the two `DiscardStmt` shapes are
+// field-identical; we consume the canonical node form directly so the
+// ProcessUtility dispatch can hand us the downcast payload with no conversion.
+use types_nodes::ddlnodes::{DiscardMode, DiscardStmt};
 
 /// `DISCARD { ALL | SEQUENCES | TEMP | PLANS }`.
 ///
@@ -70,10 +75,21 @@ fn DiscardAll(is_top_level: bool) -> PgResult<()> {
     Ok(())
 }
 
+/// Install the outward `ProcessUtility` DISCARD dispatch seam.
+///
 /// No inward seams: nothing calls into discard across a dependency cycle (its
-/// only caller is `ProcessUtility`, unported, which will depend on this crate
-/// directly). Present for the workflow's `init_all()` uniformity.
-pub fn init_seams() {}
+/// only caller is `ProcessUtility`, unported, which reaches it through
+/// `backend-tcop-utility-out-seams::discard_command`). The dispatcher hands us a
+/// `&Node` whose payload is the `DiscardStmt` parse node; we downcast to the
+/// canonical `ddlnodes::DiscardStmt` and run the command driver.
+pub fn init_seams() {
+    backend_tcop_utility_out_seams::discard_command::set(|stmt, is_top_level| {
+        let ds = stmt
+            .as_discardstmt()
+            .expect("discard_command: parse tree is not a DiscardStmt");
+        DiscardCommand(ds, is_top_level)
+    });
+}
 
 #[cfg(test)]
 mod tests;

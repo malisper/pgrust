@@ -12,6 +12,10 @@ crate-type = ["rlib"]
 [dependencies]
 types-error = { path = "../types-error" }
 types-parsenodes = { path = "../types-parsenodes" }
+types-nodes = { path = "../types-nodes" }
+
+# Outward seam this crate installs: the ProcessUtility DISCARD dispatch slot.
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
 # Ported owners called directly (no cycle: nothing depends on discard).
 backend-utils-mmgr-portalmem = { path = "../backend-utils-mmgr-portalmem" }

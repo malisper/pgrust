@@ -6917,10 +6917,12 @@ dependencies = [
  "backend-commands-prepare",
  "backend-commands-sequence-seams",
  "backend-storage-lmgr-lock-seams",
+ "backend-tcop-utility-out-seams",
  "backend-utils-cache-plancache",
  "backend-utils-misc-guc-seams",
  "backend-utils-mmgr-portalmem",
  "types-error",
+ "types-nodes",
  "types-parsenodes",
 ]
 
@@ -24201,6 +24203,7 @@ dependencies = [
  "backend-commands-createas",
  "backend-commands-dbcommands",
  "backend-commands-define",
+ "backend-commands-discard",
  "backend-commands-dropcmds",
  "backend-commands-event-trigger",
  "backend-commands-explain",

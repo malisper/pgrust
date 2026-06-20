@@ -162,6 +162,7 @@ pub fn init_all() {
     backend_statistics_mvdistinct::init_seams();
     backend_statistics_dependencies::init_seams();
     backend_commands_cluster::init_seams();
+    backend_commands_discard::init_seams();
     backend_commands_prepare::init_seams();
     backend_commands_tablecmds::init_seams();
     backend_commands_user::init_seams();
