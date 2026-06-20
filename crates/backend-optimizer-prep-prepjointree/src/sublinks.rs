@@ -291,21 +291,54 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
             let rtindex = j.rtindex;
             match j.jointype {
                 JoinType::JOIN_INNER => {
-                    // jtlink starts as the JoinExpr itself; spliced joins stack
-                    // above it.
-                    let mut jtlink: Option<NodePtr<'mcx>> =
-                        Some(alloc_in(mcx, Node::mk_join_expr(mcx, j))?);
+                    // C:
+                    //   jtlink = (Node *) j;
+                    //   j->quals = pull_up_sublinks_qual_recurse(root, j->quals,
+                    //                  &jtlink, bms_union(leftrelids, rightrelids),
+                    //                  NULL, NULL);
+                    //   jtnode = jtlink;
+                    //
+                    // `jtlink` is a slot that initially aliases `j`. A pulled-up
+                    // sublink stacks a new join ABOVE `j` by doing
+                    // `new->larg = *jtlink; *jtlink = new`, so after the walk
+                    // `jtlink` is either still `j` (no splice) or a stack of new
+                    // JoinExprs whose `larg` chain bottoms out at `j`. The
+                    // critical point: the folded quals (`newquals`) are assigned
+                    // to `j` ITSELF (the *original* inner join), NOT to the
+                    // bottom of `j`'s own `larg` subtree — which in a nested
+                    // (3+-way) join is another JoinExpr that already carries its
+                    // own ON-quals. Attaching there scrambles ON-quals across
+                    // join levels (the create_index `\d` regression).
+                    //
+                    // To assign to `j` faithfully without searching for it, we
+                    // keep `j` owned and thread the splices through a separate
+                    // `stack` slot that holds only the joins stacked ABOVE `j`
+                    // (its `larg` chain bottoms out at a `None` placeholder for
+                    // `j`). After the walk we set `j.quals = newquals`, then
+                    // re-link the bottom of the stack to `j`.
                     let avail = relids_union(&leftrelids, &rightrelids);
-                    let quals = take_joinexpr_quals(&mut jtlink);
+                    let quals = j.quals.take();
+                    let mut stack: Option<NodePtr<'mcx>> = None;
                     let newquals = pull_up_sublinks_qual_recurse(
-                        mcx, root, parse, quals, &mut jtlink, &avail, None, &None,
+                        mcx, root, parse, quals, &mut stack, &avail, None, &None,
                     )?;
-                    attach_quals_to_joinexpr_base(&mut jtlink, newquals);
+                    j.quals = newquals;
+                    let j_node = alloc_in(mcx, Node::mk_join_expr(mcx, j))?;
+                    let result = match stack {
+                        // No splice: `jtlink` is still `j`.
+                        None => Some(j_node),
+                        // Splices occurred: the bottom of the spliced `larg`
+                        // chain is the `None` placeholder; re-link it to `j`.
+                        Some(mut top) => {
+                            link_stack_bottom_to(&mut top, j_node);
+                            Some(top)
+                        }
+                    };
                     *relids = relids_join(leftrelids, rightrelids);
                     if rtindex != 0 {
                         *relids = relids_add_member(relids.take(), rtindex);
                     }
-                    Ok(jtlink)
+                    Ok(result)
                 }
                 JoinType::JOIN_LEFT => {
                     let quals = j.quals.take();
@@ -360,54 +393,28 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
     }
 }
 
-/// Take the `quals` out of the JoinExpr currently at the base of a jtlink stack
-/// (used for the JOIN_INNER case, where the qual is on `j` itself which is now
-/// boxed in `*jtlink`). The base is `*jtlink` itself (no joins have been spliced
-/// at this point).
-fn take_joinexpr_quals<'mcx>(jtlink: &mut Option<NodePtr<'mcx>>) -> Option<NodePtr<'mcx>> {
-    if let Some(n) = jtlink.as_deref_mut() {
-        if let Some(j) = n.as_joinexpr_mut() {
-            return j.quals.take();
+/// Re-link the bottom of a stack of spliced JoinExprs to `bottom`.
+///
+/// When sublinks are pulled up in the JOIN_INNER case, the new JoinExprs are
+/// stacked onto a fresh `stack` slot (initially `None`). Each splice sets the
+/// new join's `larg` to the previous slot contents, so the `larg` chain bottoms
+/// out at a `None` placeholder standing in for the original inner join `j`. This
+/// walks down the `larg` chain to that bottom-most `None` slot and stores `j`
+/// there, completing the C `jtnode = jtlink` with `j` at the base. (Mirrors C,
+/// where `j` is aliased through `jtlink` from the start and its `larg` subtree is
+/// never disturbed — so this never descends into `j`'s own left child.)
+fn link_stack_bottom_to<'mcx>(top: &mut Node<'mcx>, bottom: NodePtr<'mcx>) {
+    let mut cur = top;
+    loop {
+        // `cur` is always one of the freshly-spliced JoinExprs.
+        let j = cur
+            .as_joinexpr_mut()
+            .expect("spliced stack node must be a JoinExpr");
+        if j.larg.is_none() {
+            j.larg = Some(bottom);
+            return;
         }
-    }
-    None
-}
-
-/// Re-attach the folded quals onto the JoinExpr at the *base* of the jtlink
-/// stack. After `pull_up_sublinks_qual_recurse`, `*jtlink` may be a stack of new
-/// JoinExprs whose `larg` chain bottoms out at the original inner JoinExpr; walk
-/// to that base and store the quals there (C: `j->quals = ...` where `j` is the
-/// original, still aliased through `jtlink`).
-fn attach_quals_to_joinexpr_base<'mcx>(
-    jtlink: &mut Option<NodePtr<'mcx>>,
-    newquals: Option<NodePtr<'mcx>>,
-) {
-    // `*jtlink` is either the original inner JoinExpr (no splice) or a stack of
-    // spliced JoinExprs whose `larg` chain bottoms out at it; descend `larg` to
-    // the bottom-most JoinExpr and store the quals there.
-    if let Some(j) =
-        find_bottom_joinexpr(jtlink.as_deref_mut()).and_then(|n| n.as_joinexpr_mut())
-    {
-        j.quals = newquals;
-    }
-}
-
-/// Descend the `larg` chain to the bottom-most node that is a `JoinExpr` (the
-/// original inner join that all spliced joins were stacked above).
-fn find_bottom_joinexpr<'a, 'mcx>(
-    start: Option<&'a mut Node<'mcx>>,
-) -> Option<&'a mut Node<'mcx>> {
-    let node = start?;
-    let descend = node
-        .as_joinexpr()
-        .is_some_and(|j| j.larg.as_deref().is_some_and(|n| n.is_joinexpr()));
-    if descend {
-        if let Some(j) = node.as_joinexpr_mut() {
-            return find_bottom_joinexpr(j.larg.as_deref_mut());
-        }
-        None
-    } else {
-        Some(node)
+        cur = j.larg.as_deref_mut().unwrap();
     }
 }
 
