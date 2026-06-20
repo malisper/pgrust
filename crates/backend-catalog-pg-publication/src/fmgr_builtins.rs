@@ -11,7 +11,7 @@
 //! exactly from `pg_proc.dat`.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::Oid;
 
@@ -30,25 +30,20 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("pg_publication fmgr scratch")
 }
 
-/// Raise a core's `ereport(ERROR)` through the one dispatch point every builtin
-/// crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 /// `pg_relation_is_publishable(PG_FUNCTION_ARGS)` (pg_publication.c). The core
 /// returns `Option<bool>`: `None` is the C `PG_RETURN_NULL()` (the relation
 /// vanished from the catalog mid-call), which maps onto `fcinfo->isnull`.
-fn fc_pg_relation_is_publishable(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_relation_is_publishable(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let relid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    match crate::pg_relation_is_publishable(m.mcx(), relid) {
-        Ok(Some(b)) => Datum::from_bool(b),
-        Ok(None) => {
+    match crate::pg_relation_is_publishable(m.mcx(), relid)? {
+        Some(b) => Ok(Datum::from_bool(b)),
+        None => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
-        Err(e) => raise(e),
     }
 }
 
@@ -58,16 +53,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `pg_publication.c` SQL-callable builtin (C: their
@@ -75,7 +73,7 @@ fn builtin(
 /// OID/nargs/strict from `pg_proc.dat` (`proisstrict` default `t`, not
 /// `proretset`).
 pub fn register_pg_publication_builtins() {
-    backend_utils_fmgr_core::register_builtins([builtin(
+    backend_utils_fmgr_core::register_builtins_native([builtin(
         6121,
         "pg_relation_is_publishable",
         1,
