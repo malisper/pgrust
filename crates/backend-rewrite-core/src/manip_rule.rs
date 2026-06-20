@@ -142,8 +142,11 @@ pub fn AddQual<'mcx>(
     // Existing quals are carried as Node::Expr; pull out the Expr (or None).
     let existing: Option<Expr> = match jointree.quals.take() {
         None => None,
-        Some(n) => match n.as_expr() {
-            Some(e) => Some(e.clone()),
+        // `n` is owned (we just took it), so move the Expr out with into_expr
+        // rather than `.clone()` — the latter panics when the existing qual
+        // carries a SubLink (e.g. an EXISTS qual).
+        Some(n) => match PgBox::into_inner(n).into_expr() {
+            Some(e) => Some(e),
             None => return Err(PgError::error("AddQual: existing quals are not an expression")),
         },
     };

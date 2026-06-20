@@ -97,12 +97,16 @@ fn replace_rte_variables_mutator<'mcx>(
             if is_match {
                 // Found a matching variable, make the substitution.
                 let newexpr = callback(&var_clone, context)?;
+                // Wrap the replacement into a node once (the C walker inspects
+                // `newnode` in-place); inspect via reference, then store it.
+                // A plain `.clone()` here would panic on a SubLink replacement
+                // (C just re-uses the same pointer, never copies).
+                let newnode = Node::mk_expr(mcx, newexpr)?;
                 // Detect if we are adding a sublink to query.
                 if !context.inserted_sublink {
-                    context.inserted_sublink =
-                        checkExprHasSubLink(&Node::mk_expr(mcx, newexpr.clone())?);
+                    context.inserted_sublink = checkExprHasSubLink(&newnode);
                 }
-                *node = Node::mk_expr(mcx, newexpr)?;
+                *node = newnode;
                 return Ok(false);
             }
             Ok(false)
@@ -552,7 +556,10 @@ pub fn ReplaceVarFromTargetList<'mcx>(
                     mcx,
                 )?
             } else if let Some(e) = field_node.as_expr() {
-                e.clone()
+                // C shares the field pointer in-place; the owned model needs a
+                // copy. Route through clone_in (not `.clone()`) so a
+                // SubLink-bearing field does not hit the panicking derived Clone.
+                e.clone_in(mcx)?
             } else {
                 continue;
             };
@@ -579,11 +586,15 @@ pub fn ReplaceVarFromTargetList<'mcx>(
         None => no_match(var, nomatch_option, nomatch_varno, mcx),
         Some(tle) if tle.resjunk => no_match(var, nomatch_option, nomatch_varno, mcx),
         Some(tle) => {
-            // Make a copy of the tlist item to return.
-            let mut newnode: Expr = tle.expr.as_deref().expect("tle->expr set").clone();
+            // Make a copy of the tlist item to return (C: copyObject).
+            // Must route through clone_in(mcx) — a plain `.clone()` panics when
+            // tle->expr carries a SubLink (its derived Clone is a guard;
+            // copyObject is the sanctioned deep-copy path).
+            let mut newnode: Expr =
+                tle.expr.as_deref().expect("tle->expr set").clone_in(mcx)?;
 
             // Check for a PARAM_MULTIEXPR Param and throw error if so.
-            if contains_multiexpr_param(&Node::mk_expr(mcx, newnode.clone())?) {
+            if contains_multiexpr_param(&Node::mk_expr(mcx, newnode.clone_in(mcx)?)?) {
                 return Err(feature_not_supported(
                     "NEW variables in ON UPDATE rules cannot reference columns that are part of a multiple assignment in the subject UPDATE command",
                 ));
