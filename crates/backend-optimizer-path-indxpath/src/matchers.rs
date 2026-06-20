@@ -973,13 +973,21 @@ pub fn match_orclause_to_indexcol(
     let index_relid = root.rel(index.rel.expect("IndexOptInfo without rel")).relid;
 
     // The OR clause's arms (each is a RestrictInfo node, or a sub-AND).
+    // Deep-copy each arm via `clone_in` (a derived `.clone()` panics on an
+    // owned-subtree operand such as a SubPlan inside an `OpExpr` arm).
     let orclause_id = root.rinfo(rinfo).orclause.expect("RestrictInfo without orclause");
-    let or_args: Vec<Expr> = root
-        .node(orclause_id)
-        .as_boolexpr()
-        .expect("orclause must be a BoolExpr")
-        .args
-        .clone();
+    let or_args: Vec<Expr> = {
+        let args = &root
+            .node(orclause_id)
+            .as_boolexpr()
+            .expect("orclause must be a BoolExpr")
+            .args;
+        let mut out = Vec::with_capacity(args.len());
+        for a in args {
+            out.push(a.clone_in(mcx)?);
+        }
+        out
+    };
 
     let mut consts: Vec<Expr> = Vec::new();
     let mut index_expr: Option<Expr> = None;

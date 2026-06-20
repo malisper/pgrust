@@ -358,7 +358,7 @@ const F_NEQJOINSEL: Oid = 106;
 
 /// `strip_array_coercion(node)` (selfuncs.c:1790) — peel binary-compatible
 /// `ArrayCoerceExpr` / `RelabelType` wrappers off an array-valued expression.
-fn strip_array_coercion(node: &Expr) -> &Expr {
+pub(crate) fn strip_array_coercion(node: &Expr) -> &Expr {
     let mut node = node;
     loop {
         if let Some(acoerce) = node.as_arraycoerceexpr() {

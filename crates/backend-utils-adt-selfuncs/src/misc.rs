@@ -756,33 +756,83 @@ pub fn generic_restriction_selectivity<'mcx>(
 /// `estimate_array_length(root, arrayexpr)` (selfuncs.c) — estimate the number
 /// of elements in an array-valued expression.
 ///
-/// The `strip_array_coercion` peel and the `Const` / `ArrayExpr` fast paths
-/// require resolving the arena node and decoding an array varlena
-/// (`DatumGetArrayTypeP` / `ArrayGetNItems`), which crosses into the unported
-/// arrayfuncs varlena envelope; the statistics fallback uses the
-/// keystone-blocked `examine_variable`. The default guess of `10` (matching
-/// `scalararraysel`) is the live tail. Kept structurally as a precise panic for
-/// the non-default paths.
+/// Ports the `strip_array_coercion` peel plus the `Const`-array and
+/// `ArrayExpr` fast paths. The statistics fallback (DECHIST element stats via
+/// `examine_variable`) is keystone-blocked here — this seam is consumed by
+/// costsize with only a shared `&PlannerInfo` and no `&PlannerRun`/`&mut
+/// PlannerInfo`, which `examine_variable` requires — so when neither fast path
+/// yields a count we return the default guess of `10` (matching what C returns
+/// when the stats lookup finds nothing, and matching `scalararraysel`).
 pub fn estimate_array_length<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     arrayexpr: NodeId,
 ) -> PgResult<f64> {
-    // C `estimate_array_length` peels `strip_array_coercion`, then:
-    //   * a `Const` array -> `ArrayGetNItems(DatumGetArrayTypeP(...))`;
-    //   * an `ArrayExpr` -> `list_length(arrayexpr->elements)`;
-    //   * otherwise examines the variable's stats (DECHIST / element stats).
-    // The Const path needs the array-varlena decode (`DatumGetArrayTypeP` /
-    // `ArrayGetNItems`, the unported arrayfuncs varlena envelope), and the
-    // stats path needs `examine_variable`, whose seam carries `&PlannerRun` +
-    // `&mut PlannerInfo` that this `estimate_array_length` seam (consumed by
-    // costsize with a shared `&PlannerInfo` and no run) does not have. The
-    // `ArrayExpr` element-count fast path is the live tail; everything else
-    // falls back to the default guess of 10 (matching `scalararraysel`), which
-    // is what C returns when no recognized form yields a count.
     let _ = mcx;
-    if let Some(ae) = root.node(arrayexpr).as_arrayexpr() {
-        return Ok(ae.elements.len() as f64);
+
+    // Look through any binary-compatible relabeling of arrayexpr.
+    let node = crate::node_sel::strip_array_coercion(root.node(arrayexpr));
+
+    if let Some(c) = node.as_const() {
+        // A Const array: ArrayGetNItems(DatumGetArrayTypeP(constvalue)).
+        if c.constisnull {
+            return Ok(0.0);
+        }
+        // The array's verbatim varlena image: a 4-byte varlena header
+        // (vl_len_), then the `ArrayType` fixed fields ndim/dataoffset/elemtype
+        // (3 × 4 bytes), then `ndim` 4-byte dimension lengths. ArrayGetNItems is
+        // the product of those dimension lengths (0 when ndim <= 0). (An array
+        // Const is always a long-header, fully detoasted varlena.)
+        let bytes = c.constvalue.as_varlena_bytes();
+        return Ok(array_get_n_items(&bytes));
     }
+
+    if let Some(ae) = node.as_arrayexpr() {
+        if !ae.multidims {
+            return Ok(ae.elements.len() as f64);
+        }
+        // A multidim ArrayExpr's `elements` are sub-arrays, not scalar
+        // elements; C does not take this fast path for it, so fall through to
+        // the default guess.
+    }
+
+    // Else use a default guess --- this should match scalararraysel.
     Ok(10.0)
+}
+
+/// `ArrayGetNItems(ndim, dims)` (arrayutils.c) over a flat array varlena image
+/// that begins with a 4-byte varlena length header followed by the `ArrayType`
+/// fixed fields. Returns the product of the `ndim` dimension lengths, or `0`
+/// when `ndim <= 0`. Returns the default guess of `10` if the image is too
+/// short to decode (defensive; an in-memory array Const is well-formed).
+fn array_get_n_items(image: &[u8]) -> f64 {
+    // Offsets within a long-header (4-byte vl_len_) array varlena:
+    //   0: vl_len_ (4)   4: ndim (4)   8: dataoffset (4)   12: elemtype (4)
+    //   16: dims[0..ndim] (4 each)
+    const NDIM_OFF: usize = 4;
+    const DIMS_OFF: usize = 16;
+    if image.len() < DIMS_OFF {
+        return 10.0;
+    }
+    let ndim = i32::from_ne_bytes([
+        image[NDIM_OFF],
+        image[NDIM_OFF + 1],
+        image[NDIM_OFF + 2],
+        image[NDIM_OFF + 3],
+    ]);
+    if ndim <= 0 {
+        return 0.0;
+    }
+    let ndim = ndim as usize;
+    if image.len() < DIMS_OFF + ndim * 4 {
+        return 10.0;
+    }
+    // ArrayGetNItems: product of the per-dimension lengths.
+    let mut ret: i32 = 1;
+    for d in 0..ndim {
+        let off = DIMS_OFF + d * 4;
+        let dim = i32::from_ne_bytes([image[off], image[off + 1], image[off + 2], image[off + 3]]);
+        ret = ret.wrapping_mul(dim);
+    }
+    ret as f64
 }
