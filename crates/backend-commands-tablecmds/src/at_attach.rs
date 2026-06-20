@@ -406,10 +406,8 @@ fn eval_const_expressions_list<'mcx>(
 
 /// Unwrap a `Node::Expr` into its `Expr`.
 fn node_to_expr(n: Node<'_>) -> PgResult<Expr> {
-    match n {
-        Node::Expr(e) => Ok(e),
-        _ => Err(elog("partition constraint node is not an Expr")),
-    }
+    n.into_expr()
+        .ok_or_else(|| elog("partition constraint node is not an Expr"))
 }
 
 // ===========================================================================
@@ -864,10 +862,9 @@ fn ConstraintImpliedByRelConstraint<'mcx>(
             };
             // cexpr = stringToNode(ccbin);
             let cnode = backend_nodes_read_seams::string_to_node::call(mcx, ccbin.as_str())?;
-            let cexpr = match mcx::PgBox::into_inner(cnode) {
-                Node::Expr(e) => e,
-                _ => return Err(elog("CHECK constraint ccbin did not parse to an Expr")),
-            };
+            let cexpr = mcx::PgBox::into_inner(cnode)
+                .into_expr()
+                .ok_or_else(|| elog("CHECK constraint ccbin did not parse to an Expr"))?;
             // eval_const_expressions + canonicalize_qual.
             let cexpr = backend_optimizer_util_clauses::eval_const_expressions(mcx, cexpr)?;
             let cexpr =
@@ -882,10 +879,10 @@ fn ConstraintImpliedByRelConstraint<'mcx>(
     // Convert the test constraint Node list to Exprs.
     let mut test_exprs: Vec<Expr> = Vec::with_capacity(test_constraint.len());
     for n in test_constraint.iter() {
-        match n {
-            Node::Expr(e) => test_exprs.push(e.clone_in(mcx)?),
-            _ => return Err(elog("test partition constraint node is not an Expr")),
-        }
+        let e = n
+            .as_expr()
+            .ok_or_else(|| elog("test partition constraint node is not an Expr"))?;
+        test_exprs.push(e.clone_in(mcx)?);
     }
 
     // predicate_implied_by(testConstraint, existConstraint, weak=true).
