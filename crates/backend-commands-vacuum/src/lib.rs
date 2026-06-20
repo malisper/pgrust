@@ -745,6 +745,34 @@ fn in_vacuum_set(v: bool) {
     IN_VACUUM.with(|c| c.set(v));
 }
 
+/// RAII guard modeling vacuum.c's `PG_FINALLY()` cleanup for the
+/// `in_vacuum`/cost-accounting block (vacuum.c:601-686).
+///
+/// C clears `in_vacuum`, `VacuumCostActive`, `VacuumFailsafeActive`, and
+/// `VacuumCostBalance` inside `PG_FINALLY()`, which runs whether the protected
+/// section returns normally *or* `longjmp`s out via `ereport(ERROR)`.  In this
+/// port an `ereport(ERROR)` is a returned `PgResult::Err`, but other failures
+/// inside the protected section — a seam-miss `panic!`, a `todo!`, a slice
+/// index, a failed downcast — unwind as a Rust panic.  A plain
+/// closure-then-cleanup model lets such an unwind blow *past* the cleanup,
+/// leaving `in_vacuum` stuck `true`; every subsequent VACUUM/ANALYZE in that
+/// backend then wrongly trips the "cannot be executed from VACUUM or ANALYZE"
+/// recursion guard once `catch_unwind` recovers the transaction.
+///
+/// Running the cleanup in `Drop` restores C's `PG_FINALLY` contract: it fires
+/// on normal return, on `?`-early-return, and on unwind alike.
+struct InVacuumGuard;
+
+impl Drop for InVacuumGuard {
+    fn drop(&mut self) {
+        /* PG_FINALLY: matches vacuum.c:677-685. */
+        in_vacuum_set(false);
+        let _ = rt::set_vacuum_cost_active::call(false);
+        let _ = rt::set_vacuum_failsafe_active::call(false);
+        let _ = rt::set_vacuum_cost_balance::call(0);
+    }
+}
+
 /// `vacuum(relations, params, bstrategy, vac_context, isTopLevel)`
 /// (vacuum.c:500) — internal entry point for autovacuum and VACUUM/ANALYZE.
 ///
@@ -850,9 +878,14 @@ pub fn vacuum<'mcx>(
     }
 
     /* Turn vacuum cost accounting on or off, and set/clear in_vacuum.  The
-     * PG_TRY()/PG_FINALLY() block is modeled with a closure whose result we
-     * capture, then always run the FINALLY cleanup. */
+     * PG_TRY()/PG_FINALLY() block (vacuum.c:601-686) is modeled with an RAII
+     * `InVacuumGuard`: its `Drop` runs the FINALLY cleanup on *every* exit path
+     * — normal return, `?`-early-return, and Rust unwind (panic) — exactly like
+     * C's `PG_FINALLY` running on both fall-through and `longjmp`.  Modeling it
+     * as a closure-then-cleanup would let a panic inside the protected section
+     * skip the cleanup and leave `in_vacuum` stuck `true`. */
     in_vacuum_set(true);
+    let _in_vacuum_guard = InVacuumGuard;
     let try_result: PgResult<()> = (|| {
         rt::set_vacuum_failsafe_active::call(false)?;
         rt::vacuum_update_costs::call()?;
@@ -931,11 +964,11 @@ pub fn vacuum<'mcx>(
         Ok(())
     })();
 
-    /* PG_FINALLY: */
-    in_vacuum_set(false);
-    let _ = rt::set_vacuum_cost_active::call(false);
-    let _ = rt::set_vacuum_failsafe_active::call(false);
-    let _ = rt::set_vacuum_cost_balance::call(0);
+    /* PG_FINALLY: run the cleanup here, at the same point C's PG_FINALLY runs
+     * (immediately after the protected loop, before finish-up), by dropping the
+     * guard.  On a panic the guard would instead drop while unwinding out of
+     * `vacuum()`; either way the cleanup runs exactly once. */
+    drop(_in_vacuum_guard);
 
     /* PG_END_TRY: re-raise any error from the protected section */
     try_result?;
