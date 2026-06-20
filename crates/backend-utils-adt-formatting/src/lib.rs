@@ -101,7 +101,7 @@ pub(crate) fn install_test_seams() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         backend_utils_adt_pg_locale_seams::cache_locale_time::set(|| Ok(()));
-        backend_utils_mb_mbutils_seams::pg_mblen_range::set(|_s| 1);
+        backend_utils_mb_mbutils_seams::pg_mblen_range::set(|_s| Ok(1));
         backend_utils_adt_isoweek_seams::date2isoyearday::set(|_, _, _| 1);
         backend_utils_adt_isoweek_seams::date2isoweek::set(|_, _, _| 1);
         backend_utils_adt_isoweek_seams::date2isoyear::set(|y, _, _| y);
