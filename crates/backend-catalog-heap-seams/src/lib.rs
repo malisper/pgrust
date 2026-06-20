@@ -203,24 +203,15 @@ seam_core::seam!(
 // `backend-catalog-heap` calls directly, so the former
 // `merge_with_existing_constraint` mirror-and-panic seam is gone.
 
-seam_core::seam!(
-    /// `RemoveAttributeById`'s pg_attribute mutation (heap.c): `relation_open(
-    /// relid, AccessExclusiveLock)` + `table_open(AttributeRelationId,
-    /// RowExclusiveLock)` + `SearchSysCacheCopy2(ATTNUM)` + the GETSTRUCT field
-    /// mutations (`attisdropped = true`, `atttypid = 0`, `attnotnull = false`,
-    /// `attgenerated = 0`, rename to `........pg.dropped.N........`,
-    /// `atthasmissing = false`) + nulling `attmissingval` / `attstattarget` /
-    /// `attacl` / `attoptions` / `attfdwoptions` via `heap_modify_tuple` +
-    /// `CatalogTupleUpdate` + `table_close`. Holds the AccessExclusiveLock on
-    /// the owning relation until end of transaction (NoLock close). Blocked on
-    /// the writable full-row `ATTNUM` syscache copy + `pg_attribute`
-    /// `CatalogTupleUpdate` carrier. The `RemoveStatistics` half is real in the
-    /// caller. `Err` carries the heap-mutation `ereport(ERROR)`s.
-    pub fn remove_attribute_by_id_update(
-        relid: Oid,
-        attnum: types_core::AttrNumber,
-    ) -> PgResult<()>
-);
+// `RemoveAttributeById`'s pg_attribute mutation is now REAL in-crate
+// (`backend-catalog-heap` constraints.rs: keyed `systable_beginscan` on the
+// `AttributeRelidNumIndexId` over `attrelid = relid`, match `attnum`, then
+// `heap_modify_tuple` setting `attisdropped = true` / `atttypid = 0` /
+// `attnotnull = false` / `attgenerated = 0` / rename to
+// `........pg.dropped.N........` / `atthasmissing = false` + nulling
+// `attmissingval` / `attstattarget` / `attacl` / `attoptions` /
+// `attfdwoptions`, then `CatalogTupleUpdate`), so the former
+// `remove_attribute_by_id_update` mirror-and-panic seam is gone.
 
 // `RelationClearMissing`'s pg_attribute mutation is now REAL in-crate
 // (`backend-catalog-heap` constraints.rs: systable scan on pg_attribute by

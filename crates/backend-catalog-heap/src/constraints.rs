@@ -1420,24 +1420,189 @@ pub fn AddRelationNotNullConstraints<'mcx>(
  * ================================================================ */
 
 /// `RemoveAttributeById` (heap.c) — mark the attribute dropped, reset its
-/// nullable fields, rename it, drop its statistics. Needs a writable full-row
-/// `ATTNUM` syscache copy + a `pg_attribute` `CatalogTupleUpdate` carrier
-/// (`heap_modify_tuple` setting `attisdropped`/`atttypid=0`/`attnotnull`/
-/// `attgenerated=0`/`attname`/`atthasmissing=false` + nulling
-/// `attmissingval`/`attstattarget`/`attacl`/`attoptions`/`attfdwoptions`)
-/// the typed catalog-write model does not yet expose; driven through a
-/// mirror-and-panic seam. The `RemoveStatistics` half IS real (it lives in
-/// this crate), and runs after the seam succeeds.
+/// nullable fields, rename it, drop its statistics.
+///
+/// The C grabs `relation_open(relid, AccessExclusiveLock)` (held until end of
+/// transaction), `table_open(AttributeRelationId, RowExclusiveLock)`, finds the
+/// `(relid, attnum)` pg_attribute row, then `heap_modify_tuple` setting
+/// `attisdropped = true`, `atttypid = 0`, `attnotnull = false`,
+/// `attgenerated = '\0'`, renaming `attname` to `........pg.dropped.N........`,
+/// `atthasmissing = false`, and nulling `attmissingval` / `attstattarget` /
+/// `attacl` / `attoptions` / `attfdwoptions`, then `CatalogTupleUpdate`.
+///
+/// We do the pg_attribute mutation in-crate (the same `systable_beginscan` on
+/// `AttributeRelidNumIndexId` + `heap_modify_tuple` + `CatalogTupleUpdate` idiom
+/// as `RelationClearMissing` above; `SearchSysCacheCopy2(ATTNUM)` is the keyed
+/// single-row case of that scan). The `RemoveStatistics` half is real in-crate
+/// and runs after.
 pub fn RemoveAttributeById<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber) -> PgResult<()> {
-    // C: relation_open(relid, AccessExclusiveLock) + table_open(AttributeRelationId,
-    //    RowExclusiveLock) + SearchSysCacheCopy2(ATTNUM) + GETSTRUCT field
-    //    mutations + heap_modify_tuple + CatalogTupleUpdate + table_close.
-    backend_catalog_heap_seams::remove_attribute_by_id_update::call(relid, attnum)?;
+    use backend_access_common_scankey::ScanKeyInit;
+    use types_core::fmgr::F_OIDEQ;
+    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use types_tuple::backend_access_common_heaptuple::Datum;
+
+    // pg_attribute catalog OID + its (attrelid, attnum) index, and the columns
+    // touched (catalog/pg_attribute.h).
+    const AttributeRelationId: Oid = 1249;
+    const AttributeRelidNumIndexId: Oid = 2659;
+    const Anum_pg_attribute_attrelid: AttrNumber = 1;
+    const Anum_pg_attribute_attname: AttrNumber = 2;
+    const Anum_pg_attribute_atttypid: AttrNumber = 3;
+    const Anum_pg_attribute_attnum: AttrNumber = 5;
+    const Anum_pg_attribute_attnotnull: AttrNumber = 12;
+    const Anum_pg_attribute_atthasmissing: AttrNumber = 14;
+    const Anum_pg_attribute_attgenerated: AttrNumber = 16;
+    const Anum_pg_attribute_attisdropped: AttrNumber = 17;
+    const Anum_pg_attribute_attstattarget: AttrNumber = 21;
+    const Anum_pg_attribute_attacl: AttrNumber = 22;
+    const Anum_pg_attribute_attoptions: AttrNumber = 23;
+    const Anum_pg_attribute_attfdwoptions: AttrNumber = 24;
+    const Anum_pg_attribute_attmissingval: AttrNumber = 25;
+    const NAMEDATALEN: usize = 64;
+
+    // C: rel = relation_open(relid, AccessExclusiveLock); held until end of
+    //    transaction (closed NoLock at the end so the lock is retained).
+    let rel =
+        backend_access_table_table::table_open(mcx, relid, types_storage::lock::AccessExclusiveLock)?;
+
+    // attr_rel = table_open(AttributeRelationId, RowExclusiveLock);
+    let attr_rel = backend_access_table_table::table_open(
+        mcx,
+        AttributeRelationId,
+        types_storage::lock::RowExclusiveLock,
+    )?;
+
+    // SearchSysCacheCopy2(ATTNUM, relid, attnum) — keyed single-row case: scan
+    // the (attrelid, attnum) index over attrelid = relid, then match attnum.
+    let mut key = [ScanKeyData::empty()];
+    ScanKeyInit(
+        &mut key[0],
+        Anum_pg_attribute_attrelid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(relid),
+    )?;
+
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &attr_rel,
+        AttributeRelidNumIndexId,
+        true,
+        None,
+        &key[..1],
+    )?;
+
+    let natts = attr_rel.rd_att.natts as usize;
+    let mut found = false;
+    loop {
+        let Some(tuple) =
+            backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?
+        else {
+            break;
+        };
+
+        let (attnum_val, _) = backend_access_common_heaptuple::heap_getattr(
+            mcx,
+            &tuple,
+            Anum_pg_attribute_attnum as i32,
+            &attr_rel.rd_att,
+        )?;
+        if attnum_val.as_i16() != attnum {
+            continue;
+        }
+
+        // newtuple = heap_modify_tuple(tuple, RelationGetDescr(attr_rel),
+        //     valuesAtt, nullsAtt, replacesAtt).
+        let mut repl_val = alloc::vec![Datum::null(); natts];
+        let mut repl_null = alloc::vec![false; natts];
+        let mut repl_repl = alloc::vec![false; natts];
+
+        let set = |val: &mut Vec<Datum<'mcx>>,
+                   repl: &mut Vec<bool>,
+                   anum: AttrNumber,
+                   d: Datum<'mcx>| {
+            val[(anum - 1) as usize] = d;
+            repl[(anum - 1) as usize] = true;
+        };
+
+        // attStruct->attisdropped = true;
+        set(&mut repl_val, &mut repl_repl, Anum_pg_attribute_attisdropped, Datum::from_bool(true));
+        // attStruct->atttypid = InvalidOid;
+        set(&mut repl_val, &mut repl_repl, Anum_pg_attribute_atttypid, Datum::from_oid(InvalidOid));
+        // attStruct->attnotnull = false;
+        set(&mut repl_val, &mut repl_repl, Anum_pg_attribute_attnotnull, Datum::from_bool(false));
+        // attStruct->attgenerated = '\0';
+        set(&mut repl_val, &mut repl_repl, Anum_pg_attribute_attgenerated, Datum::from_char(0));
+
+        // snprintf newattname = "........pg.dropped.%d........", attnum;
+        // namestrcpy(&attStruct->attname, newattname).
+        let newattname = alloc::format!("........pg.dropped.{}........", attnum);
+        let mut image: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, NAMEDATALEN)?;
+        let src = newattname.as_bytes();
+        let take = core::cmp::min(src.len(), NAMEDATALEN - 1);
+        for &b in &src[..take] {
+            image.push(b);
+        }
+        while image.len() < NAMEDATALEN {
+            image.push(0);
+        }
+        set(&mut repl_val, &mut repl_repl, Anum_pg_attribute_attname, Datum::ByRef(image));
+
+        // attStruct->atthasmissing = false;
+        set(&mut repl_val, &mut repl_repl, Anum_pg_attribute_atthasmissing, Datum::from_bool(false));
+
+        // nullsAtt/replacesAtt: attmissingval, attstattarget, attacl,
+        // attoptions, attfdwoptions := NULL.
+        for anum in [
+            Anum_pg_attribute_attmissingval,
+            Anum_pg_attribute_attstattarget,
+            Anum_pg_attribute_attacl,
+            Anum_pg_attribute_attoptions,
+            Anum_pg_attribute_attfdwoptions,
+        ] {
+            repl_null[(anum - 1) as usize] = true;
+            repl_repl[(anum - 1) as usize] = true;
+        }
+
+        let mut newtuple = backend_access_common_heaptuple::heap_modify_tuple(
+            mcx,
+            &tuple,
+            &attr_rel.rd_att,
+            &repl_val,
+            &repl_null,
+            &repl_repl,
+        )?;
+
+        // CatalogTupleUpdate(attr_rel, &tuple->t_self, tuple);
+        backend_catalog_indexing::keystone::CatalogTupleUpdate(
+            mcx,
+            &attr_rel,
+            tuple.tuple.t_self,
+            &mut newtuple,
+        )?;
+        found = true;
+        break;
+    }
+
+    scan.end()?;
+
+    if !found {
+        // elog(ERROR, "cache lookup failed for attribute %d of relation %u")
+        return Err(ereport(ERROR)
+            .errmsg_internal(format!(
+                "cache lookup failed for attribute {} of relation {}",
+                attnum, relid
+            ))
+            .into_error());
+    }
+
+    // table_close(attr_rel, RowExclusiveLock);
+    attr_rel.close(types_storage::lock::RowExclusiveLock)?;
 
     crate::statistics::RemoveStatistics(mcx, relid, attnum)?;
 
-    // relation_close(rel, NoLock) — the relation_open/lock is held by the
-    // seam owner (it owns the AccessExclusiveLock acquisition mirroring the C).
+    // relation_close(rel, NoLock) — keep the AccessExclusiveLock until end of
+    // transaction.
+    rel.close(types_storage::lock::NoLock)?;
     Ok(())
 }
 
