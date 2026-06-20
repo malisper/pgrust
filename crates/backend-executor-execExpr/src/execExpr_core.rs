@@ -872,19 +872,15 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         // ----- T_NullTest -----
         etag::T_NullTest => {
             let ntest = node.expect_nulltest();
-            if ntest.argisrow {
-                // Row null-test needs a rowcache and the composite-deform path
-                // (ExecEvalRowNull[NotNull]); the rowcache lives in the step,
-                // but the runtime tupdesc lookup is the typcache owner's. The
-                // scalar path below is fully ported; the row path routes loudly.
-                panic!(
-                    "execExpr-core: row NullTest (argisrow) needs the composite-type rowcache \
-                     deform path (typcache owner); scalar NullTest is ported"
-                );
-            }
-            let opcode = match ntest.nulltesttype {
-                NullTestType::IS_NULL => ExprEvalOp::EEOP_NULLTEST_ISNULL,
-                NullTestType::IS_NOT_NULL => ExprEvalOp::EEOP_NULLTEST_ISNOTNULL,
+            // C: pick the scalar vs row opcode by nulltesttype × argisrow. The
+            // row path (EEOP_NULLTEST_ROWIS[NOT]NULL) drives ExecEvalRowNull[NotNull],
+            // which decodes the composite Datum and per-field heap_attisnull tests
+            // it via the typcache rowtype lookup (now ported).
+            let opcode = match (ntest.nulltesttype, ntest.argisrow) {
+                (NullTestType::IS_NULL, false) => ExprEvalOp::EEOP_NULLTEST_ISNULL,
+                (NullTestType::IS_NULL, true) => ExprEvalOp::EEOP_NULLTEST_ROWISNULL,
+                (NullTestType::IS_NOT_NULL, false) => ExprEvalOp::EEOP_NULLTEST_ISNOTNULL,
+                (NullTestType::IS_NOT_NULL, true) => ExprEvalOp::EEOP_NULLTEST_ROWISNOTNULL,
             };
             // first evaluate argument into result variable
             let arg = ntest.arg.as_deref().expect("NullTest.arg present");

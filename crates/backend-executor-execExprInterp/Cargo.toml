@@ -21,6 +21,15 @@ backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" 
 # lookup_rowtype_tupdesc for the EEOP_FIELDSELECT rowtype descriptor (the typcache
 # TupleDesc model); a leaf seam-declaration crate, so no dependency cycle.
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+# toast_build_flattened_tuple for EEOP_WHOLEROW (build a composite Datum whose
+# external/by-ref fields are detoasted). A leaf access unit (types-* deps only),
+# so the edge is acyclic.
+backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
+# convert_tuples_by_name + execute_attr_map_tuple for EEOP_CONVERT_ROWTYPE; a
+# leaf seam-declaration crate, so no dependency cycle.
+backend-access-common-next-seams = { path = "../backend-access-common-next-seams" }
+# format_type_be for the WHOLEROW type-mismatch ereport details; leaf seam crate.
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 # nextval_internal seam: ExecEvalNextValueExpr advances the sequence behind a
 # column's implicit NextValueExpr default (SERIAL / GENERATED AS IDENTITY).
 backend-commands-sequence-seams = { path = "../backend-commands-sequence-seams" }

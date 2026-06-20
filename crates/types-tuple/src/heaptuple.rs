@@ -816,6 +816,31 @@ pub fn HeapTupleHeaderGetTypeId(tup: &HeapTupleHeaderData) -> Oid {
     }
 }
 
+/// `HeapTupleHeaderSetTypeId(tup, typeid)` (`htup_details.h`) —
+/// `tup->t_choice.t_datum.datum_typeid = typeid`. Relabels a composite Datum's
+/// header with a new rowtype OID (e.g. `ExecEvalWholeRowVar` stamps the blessed
+/// output tupdesc's type). Panics if the header carries heap fields instead (C
+/// would clobber the other union arm).
+pub fn HeapTupleHeaderSetTypeId(tup: &mut HeapTupleHeaderData, typeid: Oid) {
+    match &mut tup.t_choice {
+        HeapTupleHeaderChoice::TDatum(d) => d.datum_typeid = typeid,
+        HeapTupleHeaderChoice::THeap(_) => {
+            panic!("HeapTupleHeaderSetTypeId: header is not a composite Datum")
+        }
+    }
+}
+
+/// `HeapTupleHeaderSetTypMod(tup, typmod)` (`htup_details.h`) —
+/// `tup->t_choice.t_datum.datum_typmod = typmod`.
+pub fn HeapTupleHeaderSetTypMod(tup: &mut HeapTupleHeaderData, typmod: i32) {
+    match &mut tup.t_choice {
+        HeapTupleHeaderChoice::TDatum(d) => d.datum_typmod = typmod,
+        HeapTupleHeaderChoice::THeap(_) => {
+            panic!("HeapTupleHeaderSetTypMod: header is not a composite Datum")
+        }
+    }
+}
+
 /// `HeapTupleHeaderGetTypMod(tup)` (`htup_details.h`) —
 /// `tup->t_choice.t_datum.datum_typmod`.
 pub fn HeapTupleHeaderGetTypMod(tup: &HeapTupleHeaderData) -> i32 {

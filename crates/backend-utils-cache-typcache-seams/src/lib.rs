@@ -225,6 +225,25 @@ seam_core::seam!(
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>
 );
 
+seam_core::seam!(
+    /// `lookup_rowtype_tupdesc_domain(type_id, typmod, noError)` (typcache.c):
+    /// like `lookup_rowtype_tupdesc`, but if `type_id` is a domain over a
+    /// composite type it looks through to the base composite's rowtype
+    /// descriptor. `noError == true` returns `None` instead of `ereport`ing
+    /// when the type is not composite. The descriptor is cloned out of the
+    /// typcache into `mcx` (the C returns a refcounted pointer; the safe port
+    /// copies). Used by `ExecEvalWholeRowVar` to validate / absorb the Var's
+    /// declared rowtype.
+    pub fn lookup_rowtype_tupdesc_domain<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        type_id: types_core::primitive::Oid,
+        typmod: i32,
+        no_error: bool,
+    ) -> types_error::PgResult<
+        Option<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>,
+    >
+);
+
 /// The base-type I/O info `domain_state_setup` (utils/adt/domains.c) pulls out
 /// of the typcache for a domain type: the result of
 /// `lookup_type_cache(domainType, TYPECACHE_DOMAIN_BASE_INFO)` (which also

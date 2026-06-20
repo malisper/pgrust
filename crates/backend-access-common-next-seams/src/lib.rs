@@ -75,3 +75,20 @@ seam_core::seam!(
         in_cols: Option<&types_nodes::Bitmapset<'_>>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::Bitmapset<'mcx>>>>
 );
+
+seam_core::seam!(
+    /// `execute_attr_map_tuple(tuple, map)` (tupconvert.c): rearrange a tuple's
+    /// columns according to a [`TupleConversionMap`], returning the formed
+    /// output tuple. In the owned heaptuple model the source tuple's user-data
+    /// area travels alongside the header, so the caller supplies the source
+    /// tuple plus its `data` bytes (`t_data + t_hoff`). `ExecEvalConvertRowtype`
+    /// uses this when the in/out rowtypes are not physically compatible.
+    pub fn execute_attr_map_tuple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+        data: &[u8],
+        map: &types_tuple::tupconvert::TupleConversionMap<'_>,
+    ) -> types_error::PgResult<
+        types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    >
+);

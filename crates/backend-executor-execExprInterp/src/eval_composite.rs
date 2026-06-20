@@ -18,25 +18,23 @@
 //! shortcuts, the slot selection and `wholerow.first`/`slow` flag handling,
 //! reading every payload field — is ported here.
 //!
-//! The cross-crate owners these steps then call are NOT wired as dependencies
-//! of this crate (the only seam deps are execExpr / execTuples / nodeSubplan /
-//! fmgr), and the boundary they sit behind is the *composite-`Datum` bridge*:
-//! a composite value is a pass-by-reference (varlena) `Datum`, and the trimmed
-//! [`Datum`] model (`SIZEOF_DATUM` scalar word only) cannot round-trip a
-//! pointer payload to a `HeapTupleHeader` (`DatumGetHeapTupleHeader`) nor mint
-//! one back (`HeapTupleGetDatum` / `PointerGetDatum`). That payload model is
-//! owned by `execTuples` / `backend-access-common-heaptuple` (the same blocker
-//! the `ExecJust*` by-reference fast paths document). The heap-tuple
-//! form/deform/getattr (`heap_form_tuple`, `heap_deform_tuple`, `heap_getattr`,
-//! `heap_attisnull`), the rowtype cache (`get_cached_rowtype`, sibling dispatch
-//! family), the tuple-conversion map (`convert_tuples_by_name` /
-//! `execute_attr_map_tuple` / `heap_copy_tuple_as_datum`), the TOAST flattener
-//! (`toast_build_flattened_tuple`), the expanded-record helpers, the junk
-//! filter (`ExecFilterJunk`) and the fmgr comparison call frame
-//! (`FunctionCallInvoke` over `fcinfo->args[]`) all live behind that boundary.
-//! Per mirror-PG-and-panic, once the modeled control flow reaches that boundary
-//! it aborts with a loud panic naming the unported owner rather than silently
-//! stubbing a result.
+//! The *composite-`Datum` bridge* — a composite value is a pass-by-reference
+//! (varlena) `Datum` carried by [`Datum::Composite`] (a `FormedTuple` image) or
+//! as a flat `Datum::ByRef` HeapTupleHeader image — is now ported. The heap-tuple
+//! form/deform/getattr (`heap_form_tuple`, `heap_deform_tuple`, `heap_getattr`),
+//! the rowtype cache (`lookup_rowtype_tupdesc` / `lookup_rowtype_tupdesc_domain`),
+//! the tuple-conversion map (`convert_tuples_by_name` / `execute_attr_map_tuple`
+//! / `heap_copy_tuple_as_datum`), the TOAST flattener
+//! (`toast_build_flattened_tuple`) and `BlessTupleDesc` are all wired here, so
+//! `ExecEvalRow`, `ExecEvalFieldSelect`, `ExecEvalWholeRowVar` and
+//! `ExecEvalConvertRowtype` run end-to-end.
+//!
+//! Two legs remain parked, each on a *different* boundary (not the composite
+//! bridge): `ExecEvalFieldStoreDeForm`/`Form` need the `FieldStore` node carrier
+//! + per-column `ResultCellId` model (the execExpr.c *compiler* step for
+//! `EEOP_FIELDSTORE_*` `panic!`s before runtime is reached — a nodes/keystone
+//! gap), and `ExecEvalRowNullInt` needs the per-field `heap_attisnull` row-null
+//! test. Those still abort loudly naming the unported owner.
 
 // The bare-word newtype: the scalar form the composite eval helpers operate on.
 // The canonical unified value type (Datum-unification keystone) — what the
@@ -46,10 +44,18 @@ use backend_utils_fmgr_fmgr_seams::function_call_invoke;
 use types_tuple::backend_access_common_heaptuple::Datum;
 use types_error::PgResult;
 use types_nodes::execexpr::{
-    ExprEvalStepData, ExprState, MinMaxOp, ResultCell, ResultCellId, STATE_RESULT_CELL,
+    ExprEvalStepData, ExprState, MinMaxOp, ResultCell, ResultCellId, EEO_FLAG_NEW_IS_NULL,
+    EEO_FLAG_OLD_IS_NULL, STATE_RESULT_CELL,
 };
 use types_nodes::execnodes::EcxtId;
-use types_nodes::EStateData;
+use types_nodes::primnodes::VarReturningType;
+use types_nodes::{EStateData, SlotId};
+
+/// `INNER_VAR` / `OUTER_VAR` (primnodes.h) — the special `varno` sentinels for a
+/// Var referencing the inner/outer side of a join. Any other `varno` selects the
+/// scan slot (INDEX_VAR is handled by this default case too).
+const INNER_VAR: i32 = -1;
+const OUTER_VAR: i32 = -2;
 
 /// The composite-`Datum` bridge (`DatumGetHeapTupleHeader` / `HeapTupleGetDatum`
 /// / `PointerGetDatum`) and the heap-tuple / tupconvert / TOAST / expanded-record
@@ -137,11 +143,13 @@ pub fn ExecEvalRowNullInt<'mcx>(
     op: usize,
     _econtext: EcxtId,
     checkisnull: bool,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+
     // Datum value = *op->resvalue;
     // bool  isnull = *op->resnull;
-    let (_value, isnull) = load_result(state, op);
+    let (value, isnull) = load_result(state, op);
 
     // *op->resnull = false;
     // /* NULL row variables are treated just as NULL scalar columns */
@@ -160,28 +168,66 @@ pub fn ExecEvalRowNullInt<'mcx>(
     }
 
     // tuple = DatumGetHeapTupleHeader(value);
-    // tupType = HeapTupleHeaderGetTypeId(tuple);
-    // tupTypmod = HeapTupleHeaderGetTypMod(tuple);
-    // tupDesc = get_cached_rowtype(tupType, tupTypmod,
-    //                              &op->d.nulltest_row.rowcache, NULL);
-    // tmptup.t_len = HeapTupleHeaderGetDatumLength(tuple);
-    // tmptup.t_data = tuple;
+    // tupType = HeapTupleHeaderGetTypeId(tuple); tupTypmod = HeapTupleHeaderGetTypMod(tuple);
+    // tupDesc = get_cached_rowtype(tupType, tupTypmod, &op->d.nulltest_row.rowcache, NULL);
+    //
+    // Decode the composite Datum (Composite or a flat by-ref HeapTupleHeader
+    // image) into a FormedTuple, then look up its rowtype descriptor (the
+    // internally-cached typcache lookup stands in for the C void* rowcache).
+    let tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx> = match &value {
+        Datum::Composite(t) => t.clone_in(mcx)?,
+        Datum::ByRef(image) => {
+            types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
+                mcx,
+                image.as_slice(),
+            )?
+        }
+        other => unreachable!(
+            "ExecEvalRowNullInt: composite input Datum is neither Composite nor ByRef: {other:?}"
+        ),
+    };
+    let header = tuple
+        .tuple
+        .t_data
+        .as_ref()
+        .expect("ExecEvalRowNullInt: composite Datum has no header");
+    let tup_type = types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
+    let tup_typmod = types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
+    let tup_desc = backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(
+        mcx, tup_type, tup_typmod,
+    )?;
+
     // for (att = 1; att <= tupDesc->natts; att++) {
     //     if (TupleDescCompactAttr(tupDesc, att - 1)->attisdropped) continue;
     //     if (heap_attisnull(&tmptup, att, tupDesc)) {
     //         if (!checkisnull) { *op->resvalue = BoolGetDatum(false); return; }
     //     } else {
-    //         if (checkisnull) { *op->resvalue = BoolGetDatum(false); return; }
+    //         if (checkisnull)  { *op->resvalue = BoolGetDatum(false); return; }
     //     }
     // }
     // *op->resvalue = BoolGetDatum(true);
-    //
-    // DatumGetHeapTupleHeader(value) + heap_attisnull cross the composite-Datum
-    // bridge / heap-tuple payload boundary.
-    composite_datum_owner_unported(
-        "ExecEvalRowNullInt: decoding the row Datum (DatumGetHeapTupleHeader) and \
-         per-field heap_attisnull tests",
-    )
+    for att in 1..=tup_desc.natts {
+        if tup_desc.compact_attrs[(att - 1) as usize].attisdropped {
+            continue;
+        }
+        let attisnull = backend_access_common_heaptuple::heap_attisnull(
+            &tuple.tuple,
+            att,
+            Some(&tup_desc),
+        );
+        if attisnull {
+            if !checkisnull {
+                store_result(state, op, Datum::from_bool(false), false);
+                return Ok(());
+            }
+        } else if checkisnull {
+            store_result(state, op, Datum::from_bool(false), false);
+            return Ok(());
+        }
+    }
+
+    store_result(state, op, Datum::from_bool(true), false);
+    Ok(())
 }
 
 /// `ExecEvalRow(ExprState *state, ExprEvalStep *op)` — build a composite Datum
@@ -606,42 +652,79 @@ pub fn ExecEvalConvertRowtype<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     _econtext: EcxtId,
-    _estate: &mut EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
     let steps = state.steps.as_ref().expect("eval_composite: steps not ready");
-    match &steps[op].d {
-        ExprEvalStepData::ConvertRowtype { .. } => {}
+    let (inputtype, outputtype) = match &steps[op].d {
+        ExprEvalStepData::ConvertRowtype {
+            inputtype,
+            outputtype,
+            ..
+        } => (*inputtype, *outputtype),
         other => unreachable!("ExecEvalConvertRowtype: step.d is not ConvertRowtype: {other:?}"),
-    }
+    };
 
     // /* NULL in -> NULL out */
     // if (*op->resnull) return;
-    let (_tup_datum, isnull) = load_result(state, op);
+    let (tup_datum, isnull) = load_result(state, op);
     if isnull {
         return Ok(());
     }
 
-    // tupDatum = *op->resvalue;
-    // tuple = DatumGetHeapTupleHeader(tupDatum);
-    // indesc  = get_cached_rowtype(op->d.convert_rowtype.inputtype,  -1, incache,  &changed);
-    // IncrTupleDescRefCount(indesc);
-    // outdesc = get_cached_rowtype(op->d.convert_rowtype.outputtype, -1, outcache, &changed);
-    // IncrTupleDescRefCount(outdesc);
-    // Assert(... typeid matches indesc or RECORDOID);
-    // if (changed) { old = MemoryContextSwitchTo(per_query); map = convert_tuples_by_name(indesc, outdesc); MemoryContextSwitchTo(old); }
-    // tmptup.t_len = HeapTupleHeaderGetDatumLength(tuple); tmptup.t_data = tuple;
-    // if (map != NULL) { result = execute_attr_map_tuple(&tmptup, map); *op->resvalue = HeapTupleGetDatum(result); }
-    // else *op->resvalue = heap_copy_tuple_as_datum(&tmptup, outdesc);
-    // DecrTupleDescRefCount(indesc); DecrTupleDescRefCount(outdesc);
+    // tupDatum = *op->resvalue; tuple = DatumGetHeapTupleHeader(tupDatum);
     //
-    // DatumGetHeapTupleHeader + execute_attr_map_tuple / heap_copy_tuple_as_datum
-    // cross the composite-Datum / heap-tuple / tupconvert boundary.
-    composite_datum_owner_unported(
-        "ExecEvalConvertRowtype: decoding the input record Datum \
-         (DatumGetHeapTupleHeader), building the conversion map \
-         (convert_tuples_by_name) and rearranging/relabeling the tuple \
-         (execute_attr_map_tuple / heap_copy_tuple_as_datum)",
-    )
+    // A composite value reaches this step as `Datum::Composite` (minted by
+    // ExecEvalRow / ExecEvalWholeRowVar / record_in) or as a flat by-ref
+    // HeapTupleHeader image (a composite column deformed out of a heap tuple);
+    // decode either into a FormedTuple.
+    let in_tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx> = match &tup_datum {
+        Datum::Composite(t) => t.clone_in(mcx)?,
+        Datum::ByRef(image) => {
+            types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
+                mcx,
+                image.as_slice(),
+            )?
+        }
+        other => unreachable!(
+            "ExecEvalConvertRowtype: composite input Datum is neither Composite nor ByRef: {other:?}"
+        ),
+    };
+
+    // indesc  = get_cached_rowtype(op->d.convert_rowtype.inputtype,  -1, incache,  &changed);
+    // outdesc = get_cached_rowtype(op->d.convert_rowtype.outputtype, -1, outcache, &changed);
+    //
+    // The owned rowcache (ExprEvalRowtypeCache) cannot round-trip the C void*
+    // cache pointer; the faithful substitute is the typcache lookup itself, which
+    // is internally cached (lookup_rowtype_tupdesc → lookup_type_cache). Since the
+    // descriptors are recomputed each call we always (re)build the conversion map,
+    // matching C's `changed` path.
+    let indesc =
+        backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(mcx, inputtype, -1)?;
+    let outdesc =
+        backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(mcx, outputtype, -1)?;
+
+    // map = convert_tuples_by_name(indesc, outdesc);
+    let map = backend_access_common_next_seams::convert_tuples_by_name::call(mcx, &indesc, &outdesc)?;
+
+    // tmptup.t_len = HeapTupleHeaderGetDatumLength(tuple); tmptup.t_data = tuple;
+    let result = if let Some(map) = map.as_ref() {
+        // result = execute_attr_map_tuple(&tmptup, map);
+        backend_access_common_next_seams::execute_attr_map_tuple::call(
+            mcx,
+            &in_tuple.tuple,
+            in_tuple.data.as_slice(),
+            map,
+        )?
+    } else {
+        // physically compatible: just relabel with the destination rowtype.
+        // *op->resvalue = heap_copy_tuple_as_datum(&tmptup, outdesc);
+        backend_access_common_heaptuple::heap_copy_tuple_as_datum(mcx, &in_tuple, &outdesc)?
+    };
+
+    // *op->resvalue = HeapTupleGetDatum(result); *op->resnull stays false.
+    store_result(state, op, Datum::Composite(result), false);
+    Ok(())
 }
 
 /// `ExecEvalWholeRowVar(ExprState *state, ExprEvalStep *op,
@@ -655,32 +738,309 @@ pub fn ExecEvalConvertRowtype<'mcx>(
 pub fn ExecEvalWholeRowVar<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
-    _econtext: EcxtId,
-    _estate: &mut EStateData<'mcx>,
+    econtext: EcxtId,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+
     // Var *variable = op->d.wholerow.var;
     // Assert(variable->varattno == InvalidAttrNumber);
+    //
+    // Read the (immutable) bits of the Var + the step's `first`/`slow`/junk
+    // fields up front; the step is re-borrowed mutably below to update `first` /
+    // `slow` / `tupdesc`.
     let steps = state.steps.as_ref().expect("eval_composite: steps not ready");
-    match &steps[op].d {
-        ExprEvalStepData::WholeRow { .. } => {}
-        other => unreachable!("ExecEvalWholeRowVar: step.d is not WholeRow: {other:?}"),
+    let (varno, varreturningtype, vartype, var_typmod, first, slow, junk_filter) =
+        match &steps[op].d {
+            ExprEvalStepData::WholeRow {
+                var,
+                first,
+                slow,
+                junk_filter,
+                ..
+            } => {
+                let var = var
+                    .as_ref()
+                    .expect("ExecEvalWholeRowVar: op->d.wholerow.var not threaded");
+                debug_assert_eq!(
+                    var.varattno, 0,
+                    "ExecEvalWholeRowVar: whole-row Var must have varattno == InvalidAttrNumber"
+                );
+                (
+                    var.varno,
+                    var.varreturningtype,
+                    var.vartype,
+                    var.vartypmod,
+                    *first,
+                    *slow,
+                    *junk_filter,
+                )
+            }
+            other => unreachable!("ExecEvalWholeRowVar: step.d is not WholeRow: {other:?}"),
+        };
+    let _ = var_typmod;
+
+    // Get the input slot we want (switch on variable->varno).
+    let ecxt = &estate.es_exprcontexts[econtext.0 as usize]
+        .as_ref()
+        .expect("ExecEvalWholeRowVar: econtext freed");
+    let slot_id: SlotId = match varno {
+        // case INNER_VAR: slot = econtext->ecxt_innertuple;
+        INNER_VAR => ecxt
+            .ecxt_innertuple
+            .expect("ExecEvalWholeRowVar: ecxt_innertuple is NULL"),
+        // case OUTER_VAR: slot = econtext->ecxt_outertuple;
+        OUTER_VAR => ecxt
+            .ecxt_outertuple
+            .expect("ExecEvalWholeRowVar: ecxt_outertuple is NULL"),
+        // default: get the tuple from the relation being scanned. By default the
+        // "scan" tuple slot, but a wholerow Var in RETURNING may refer to
+        // OLD/NEW; if that row doesn't exist, return NULL.
+        _ => match varreturningtype {
+            VarReturningType::VAR_RETURNING_DEFAULT => ecxt
+                .ecxt_scantuple
+                .expect("ExecEvalWholeRowVar: ecxt_scantuple is NULL"),
+            VarReturningType::VAR_RETURNING_OLD => {
+                if state.flags & EEO_FLAG_OLD_IS_NULL != 0 {
+                    store_result(state, op, Datum::null(), true);
+                    return Ok(());
+                }
+                ecxt.ecxt_oldtuple
+                    .expect("ExecEvalWholeRowVar: ecxt_oldtuple is NULL")
+            }
+            VarReturningType::VAR_RETURNING_NEW => {
+                if state.flags & EEO_FLAG_NEW_IS_NULL != 0 {
+                    store_result(state, op, Datum::null(), true);
+                    return Ok(());
+                }
+                ecxt.ecxt_newtuple
+                    .expect("ExecEvalWholeRowVar: ecxt_newtuple is NULL")
+            }
+        },
+    };
+
+    // Apply the junkfilter if any.
+    //
+    // The junk filter is parked as an opaque address (the execJunk owner is not
+    // wired here); a non-zero value means a junk filter is present and the slot
+    // selection above would need rerouting through ExecFilterJunk. None of the
+    // wholerow paths the executor reaches today install one.
+    if junk_filter != 0 {
+        return Err(types_error::PgError::error(
+            "ExecEvalWholeRowVar: a junk filter is attached to this whole-row Var, \
+             but execJunk's ExecFilterJunk is not wired into this crate yet",
+        ));
     }
 
-    // The Var-driven slot selection (switch on variable->varno /
-    // variable->varreturningtype, with the OLD/NEW NULL shortcuts), the junk
-    // filter (ExecFilterJunk), the wholerow.first TupleDesc build/bless
-    // (lookup_rowtype_tupdesc_domain, CreateTupleDescCopy, BlessTupleDesc,
-    // ExecTypeSetColNames), slot_getallattrs, the wholerow.slow dropped-attr
-    // check, and the final toast_build_flattened_tuple + HeapTupleHeaderSetTypeId/
-    // TypMod + PointerGetDatum all read the slot's value arrays
-    // (execTuples-owned) and the heap-tuple / composite-Datum bridge. The
-    // wholerow.var node itself is parked as an opaque address until primnodes
-    // threads the real Var through this step. None of those owners are wired as
-    // dependencies of this crate.
-    composite_datum_owner_unported(
-        "ExecEvalWholeRowVar: slot selection / junk filter / first-time \
-         BlessTupleDesc build / slot_getallattrs / toast_build_flattened_tuple + \
-         PointerGetDatum — needs the execTuples slot payload model, the heap-tuple \
-         / composite-Datum bridge, and the parked wholerow.var node",
-    )
+    // If first time through, obtain the output tuple descriptor and check
+    // compatibility, then bless it and cache it on the step.
+    if first {
+        // optimistically assume we don't need the slow path
+        let mut new_slow = false;
+
+        let output_tupdesc;
+        if vartype != types_tuple::heaptuple::RECORDOID {
+            // Named composite: check the slot's actual rowtype is compatible.
+            //
+            // var_tupdesc = lookup_rowtype_tupdesc_domain(variable->vartype, -1, false);
+            let var_tupdesc =
+                backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc_domain::call(
+                    mcx, vartype, -1, false,
+                )?
+                .expect("ExecEvalWholeRowVar: named composite vartype is not composite");
+
+            // slot_tupdesc = slot->tts_tupleDescriptor;
+            let slot_tupdesc =
+                backend_executor_execTuples_seams::exec_slot_descriptor::call(mcx, estate, slot_id)?
+                    .expect("ExecEvalWholeRowVar: slot has no tuple descriptor");
+
+            // if (var_tupdesc->natts != slot_tupdesc->natts) ereport(...);
+            if var_tupdesc.natts != slot_tupdesc.natts {
+                return Err(types_error::PgError::error(
+                    "table row type and query-specified row type do not match",
+                )
+                .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+                .with_detail(format!(
+                    "Table row contains {} attributes, but query expects {}.",
+                    slot_tupdesc.natts, var_tupdesc.natts
+                )));
+            }
+
+            // for each attribute, check datatypes; tolerate dropped columns.
+            for i in 0..var_tupdesc.natts as usize {
+                let vattr = var_tupdesc.attr(i);
+                let sattr = slot_tupdesc.attr(i);
+
+                if vattr.atttypid == sattr.atttypid {
+                    continue; // no worries
+                }
+                if !vattr.attisdropped {
+                    let sname =
+                        backend_utils_adt_format_type_seams::format_type_be_owned::call(
+                            sattr.atttypid,
+                        )?;
+                    let vname =
+                        backend_utils_adt_format_type_seams::format_type_be_owned::call(
+                            vattr.atttypid,
+                        )?;
+                    return Err(types_error::PgError::error(
+                        "table row type and query-specified row type do not match",
+                    )
+                    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+                    .with_detail(format!(
+                        "Table has type {} at ordinal position {}, but query expects {}.",
+                        sname,
+                        i + 1,
+                        vname
+                    )));
+                }
+
+                if vattr.attlen != sattr.attlen || vattr.attalign != sattr.attalign {
+                    new_slow = true; // need to check for nulls
+                }
+            }
+
+            // Use the variable's declared rowtype as the output descriptor (it
+            // carries the attisdropped markings). C copies into the per-query
+            // context; clone_in(mcx) here.
+            output_tupdesc = var_tupdesc.clone_in(mcx)?;
+        } else {
+            // RECORD case: use the input slot's rowtype as the output descriptor,
+            // reset to RECORD, and adopt the source RTE's column aliases.
+            let slot_tupdesc =
+                backend_executor_execTuples_seams::exec_slot_descriptor::call(mcx, estate, slot_id)?
+                    .expect("ExecEvalWholeRowVar: slot has no tuple descriptor");
+            let mut out = slot_tupdesc.clone_in(mcx)?;
+
+            // We're supposed to return RECORD, so reset to that.
+            out.tdtypeid = types_tuple::heaptuple::RECORDOID;
+            out.tdtypmod = -1;
+
+            // Try to find the source RTE and adopt its column aliases (a String
+            // node list, C `rte->eref->colnames`). If we can't locate the RTE or
+            // its eref, the slot's existing names are kept.
+            if varno >= 1 && (varno as usize) <= estate.es_range_table_size {
+                let colnames: Option<Vec<String>> = estate
+                    .es_range_table
+                    .get((varno - 1) as usize)
+                    .and_then(|rte| rte.eref.as_ref())
+                    .map(|eref| {
+                        eref.colnames
+                            .iter()
+                            .map(|n| match &**n {
+                                types_nodes::nodes::Node::String(s) => s.sval.as_str().to_string(),
+                                // Dropped columns are represented by an empty
+                                // String node; any non-String is unexpected but
+                                // treated as an empty (skipped) name.
+                                _ => String::new(),
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                if let Some(names) = colnames {
+                    let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+                    backend_executor_execTuples_seams::exec_type_set_col_names::call(
+                        &mut out, &refs,
+                    )?;
+                }
+            }
+            output_tupdesc = out;
+        }
+
+        // Bless the tupdesc if needed, and save it on the step.
+        let output_tupdesc = mcx::alloc_in(mcx, output_tupdesc)?;
+        let blessed =
+            backend_executor_execTuples_seams::bless_tuple_desc::call(mcx, Some(output_tupdesc))?;
+
+        let steps = state
+            .steps
+            .as_mut()
+            .expect("eval_composite: steps not ready");
+        match &mut steps[op].d {
+            ExprEvalStepData::WholeRow {
+                first: first_mut,
+                slow: slow_mut,
+                tupdesc,
+                ..
+            } => {
+                *tupdesc = blessed;
+                *slow_mut = new_slow;
+                *first_mut = false;
+            }
+            _ => unreachable!("ExecEvalWholeRowVar: step.d is not WholeRow on writeback"),
+        }
+    }
+
+    // Make sure all columns of the slot are accessible in the slot's
+    // Datum/isnull arrays (and read its descriptor for the slow check / build).
+    let cols = backend_executor_execTuples_seams::slot_getallattrs_by_id::call(estate, slot_id)?;
+    let slot_tupdesc =
+        backend_executor_execTuples_seams::exec_slot_descriptor::call(mcx, estate, slot_id)?
+            .expect("ExecEvalWholeRowVar: slot has no tuple descriptor");
+
+    // Re-read the (now-populated) blessed output tupdesc.
+    let steps = state.steps.as_ref().expect("eval_composite: steps not ready");
+    let out_tupdesc = match &steps[op].d {
+        ExprEvalStepData::WholeRow { tupdesc, slow, .. } => {
+            let td = tupdesc
+                .as_ref()
+                .expect("ExecEvalWholeRowVar: blessed tupdesc not built")
+                .clone_in(mcx)?;
+            (td, *slow)
+        }
+        _ => unreachable!("ExecEvalWholeRowVar: step.d is not WholeRow"),
+    };
+    let (var_tupdesc, slow) = out_tupdesc;
+
+    if slow {
+        // Check that any dropped attributes are non-null.
+        debug_assert_eq!(var_tupdesc.natts, slot_tupdesc.natts);
+        for i in 0..var_tupdesc.natts as usize {
+            let vattr = &var_tupdesc.compact_attrs[i];
+            let sattr = &slot_tupdesc.compact_attrs[i];
+            if !vattr.attisdropped {
+                continue; // already checked non-dropped cols
+            }
+            if cols[i].1 {
+                continue; // null is always okay
+            }
+            if vattr.attlen != sattr.attlen || vattr.attalignby != sattr.attalignby {
+                return Err(types_error::PgError::error(
+                    "table row type and query-specified row type do not match",
+                )
+                .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+                .with_detail(format!(
+                    "Physical storage mismatch on dropped attribute at ordinal position {}.",
+                    i + 1
+                )));
+            }
+        }
+    }
+
+    // Build a composite datum, making sure any toasted fields get detoasted.
+    // (Critical: we must not change the slot's state here, which is why we built
+    // the values/nulls workspace from the deformed copy above.)
+    //
+    // tuple = toast_build_flattened_tuple(slot->tts_tupleDescriptor,
+    //                                     slot->tts_values, slot->tts_isnull);
+    let values: Vec<Datum<'mcx>> = cols.iter().map(|c| c.0.clone()).collect();
+    let nulls: Vec<bool> = cols.iter().map(|c| c.1).collect();
+    let mut tuple =
+        backend_access_heap_heaptoast::toast_build_flattened_tuple(mcx, &slot_tupdesc, &values, &nulls)?;
+
+    // Label the datum with the composite type info identified before.
+    // HeapTupleHeaderSetTypeId(dtuple, op->d.wholerow.tupdesc->tdtypeid);
+    // HeapTupleHeaderSetTypMod(dtuple, op->d.wholerow.tupdesc->tdtypmod);
+    {
+        let header = tuple
+            .tuple
+            .t_data
+            .as_mut()
+            .expect("ExecEvalWholeRowVar: built tuple has no header");
+        types_tuple::heaptuple::HeapTupleHeaderSetTypeId(header, var_tupdesc.tdtypeid);
+        types_tuple::heaptuple::HeapTupleHeaderSetTypMod(header, var_tupdesc.tdtypmod);
+    }
+
+    // *op->resvalue = PointerGetDatum(dtuple); *op->resnull = false;
+    store_result(state, op, Datum::Composite(tuple), false);
+    Ok(())
 }

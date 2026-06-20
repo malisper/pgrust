@@ -9104,6 +9104,8 @@ name = "backend-executor-execExprInterp"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-common-next-seams",
+ "backend-access-heap-heaptoast",
  "backend-commands-sequence-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execExprInterp-seams",
@@ -9115,6 +9117,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-datetime",
  "backend-utils-adt-datum-seams",
+ "backend-utils-adt-format-type-seams",
  "backend-utils-adt-json",
  "backend-utils-adt-jsonb",
  "backend-utils-adt-jsonb-util",

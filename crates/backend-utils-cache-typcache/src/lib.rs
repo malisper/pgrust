@@ -3328,6 +3328,9 @@ pub fn init_seams() {
     backend_utils_cache_typcache_seams::at_eosubxact_type_cache::set(at_eosubxact_type_cache);
     // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
     backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc_copy::set(lookup_rowtype_tupdesc_copy);
+    backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc_domain::set(
+        lookup_rowtype_tupdesc_domain,
+    );
     // Element-type support-function lookups (own typcache logic: lookup + finfo
     // OID read). The array/range ADTs call these across the dep cycle.
     backend_utils_cache_typcache_seams::lookup_element_eq_opr::set(lookup_element_eq_opr);
