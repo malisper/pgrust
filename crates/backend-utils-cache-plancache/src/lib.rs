@@ -1934,16 +1934,39 @@ fn cte_query<'a>(cte: &'a Node<'_>) -> Option<&'a Query<'a>> {
 /// recurse — equivalent to C's in-walker recursion (order is irrelevant for
 /// lock acquisition).
 fn scan_query_sublinks(parsetree: &Query<'_>, acquire: bool) -> PgResult<()> {
-    // Collect raw pointers to the SubLink subselects so the immutable borrow of
-    // `parsetree` taken by the walker ends before we recurse. Lifetime-erased to
-    // `*const ()` because the HRTB walker node lifetime differs from `subs`.
-    let mut subs: Vec<*const ()> = Vec::new();
+    // C's `ScanQueryWalker` recurses `ScanQueryForLocks` into each
+    // `SubLink.subselect` (a `Query` after analysis) FROM INSIDE the walker — it
+    // never carries a child pointer out past the walk. We must do the same here
+    // for two reasons:
+    //
+    //   1. Type: the analyzed tree's SubLinks are the lifetime-free `Expr::SubLink`
+    //      form (`subselect: PgBox<Query>`), reached through `Node::as_expr()` ->
+    //      `Expr::as_sublink()`. The opaque-`Node` `as_sublink()` accessor returns
+    //      the RAW-grammar `SubLink` struct (`subselect: Option<NodePtr>`), whose
+    //      field layout differs — reading the analyzed payload through it is a
+    //      tag-keyed type confusion (both forms carry `T_SubLink`; the
+    //      tag<->adapter bijection the downcast assumes is broken for Expr-routed
+    //      nodes), producing a garbage `subselect` pointer and a SIGSEGV/SIGBUS in
+    //      the subsequent `as_query()` deref.
+    //
+    //   2. Lifetime: the `&Node` the walker hands the callback is a TRANSIENT
+    //      `node_expr_wrapper` whose deep-cloned `SubLink`+`subselect` live in the
+    //      walk's private scratch `MemoryContext`, freed when the walk returns.
+    //      Stashing a `&Query` into it for use after the walk is a use-after-free.
+    //      Recursing in-walker keeps the borrow live exactly as long as it is read.
+    let mut err: Option<types_error::PgError> = None;
     {
         let mut walker = |node: &Node<'_>| -> bool {
-            if let Some(sl) = node.as_sublink() {
-                // castNode(Query, sub->subselect).
-                if let Some(q) = sl.subselect.as_deref().and_then(|n| n.as_query()) {
-                    subs.push(q as *const Query<'_> as *const ());
+            if let Some(q) = node
+                .as_expr()
+                .and_then(|e| e.as_sublink())
+                .and_then(|sl| sl.subselect.as_deref())
+            {
+                // castNode(Query, sub->subselect): recurse now, while the wrapper
+                // (and its scratch-cloned subselect) is still borrowed.
+                if let Err(e) = ScanQueryForLocks(q, acquire) {
+                    err = Some(e);
+                    return true; // abort the walk
                 }
             }
             // expression_tree_walker recursion is handled by query_tree_walker
@@ -1957,13 +1980,10 @@ fn scan_query_sublinks(parsetree: &Query<'_>, acquire: bool) -> PgResult<()> {
                 | backend_nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
         );
     }
-    for sub in subs {
-        // SAFETY: `sub` points into `parsetree`'s owned tree, alive for this
-        // call; no mutation happens between collection and use.
-        let q: &Query<'_> = unsafe { &*(sub as *const Query<'_>) };
-        ScanQueryForLocks(q, acquire)?;
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /* ==========================================================================
