@@ -91,7 +91,7 @@ pub fn transformPLAssignStmt<'mcx>(
     cref_fields.try_reserve(1).map_err(|_| mcx.oom(1))?;
     cref_fields.push(mcx::alloc_in(
         mcx,
-        Node::mk_string(mcx, StringNode { sval: mcx::PgString::from_str_in(name, mcx)? }),
+        Node::mk_string(mcx, StringNode { sval: mcx::PgString::from_str_in(name, mcx)? })?,
     )?);
 
     // The indirection list we work with: the raw list, or (when peeling names)
@@ -137,7 +137,7 @@ pub fn transformPLAssignStmt<'mcx>(
             fields: cref_fields,
             location: stmt.location,
         },
-    );
+    )?;
 
     /*
      * Transform the target reference.  Typically we will get back a Param
@@ -261,10 +261,10 @@ pub fn transformPLAssignStmt<'mcx>(
             .expr
             .take()
             .ok_or_else(|| elog_error("transformPLAssignStmt: NULL source expr for indirection"))?;
-        let rhs_node = Node::mk_expr(mcx, mcx::PgBox::into_inner(rhs_expr));
+        let rhs_node = Node::mk_expr(mcx, mcx::PgBox::into_inner(rhs_expr))?;
 
         // C passes `target` (a Node *) as the basenode; re-wrap our Expr value.
-        let target_node = Node::mk_expr(mcx, target);
+        let target_node = Node::mk_expr(mcx, target)?;
 
         let assigned = backend_parser_parse_target::transformAssignmentIndirection(
             mcx,
@@ -463,7 +463,7 @@ pub fn transformPLAssignStmt<'mcx>(
     qry.windowClause = {
         let mut v = mcx::vec_with_capacity_in(mcx, window_clause.len())?;
         for wc in window_clause {
-            v.push(mcx::alloc_in(mcx, Node::mk_window_clause(mcx, wc))?);
+            v.push(mcx::alloc_in(mcx, Node::mk_window_clause(mcx, wc)?)?);
         }
         v
     };

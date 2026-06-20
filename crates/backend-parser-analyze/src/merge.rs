@@ -344,7 +344,7 @@ pub fn transformMergeStmt<'mcx>(
             "WHEN",
         )?;
         action.qual = match qual {
-            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?),
+            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
             None => None,
         };
 
@@ -456,7 +456,7 @@ pub fn transformMergeStmt<'mcx>(
                     )?;
                     action
                         .targetList
-                        .push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle))?);
+                        .push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle)?)?);
 
                     // perminfo->insertedCols =
                     //   bms_add_member(perminfo->insertedCols,
@@ -490,7 +490,7 @@ pub fn transformMergeStmt<'mcx>(
                 for tle in target_list.into_iter() {
                     action
                         .targetList
-                        .push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle))?);
+                        .push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle)?)?);
                 }
             }
             CmdType::CMD_DELETE => {}
@@ -501,7 +501,7 @@ pub fn transformMergeStmt<'mcx>(
             _ => return Err(elog_error("unknown action in MERGE WHEN clause")),
         }
 
-        merge_action_list.push(mcx::alloc_in(mcx, Node::mk_merge_action(mcx, action))?);
+        merge_action_list.push(mcx::alloc_in(mcx, Node::mk_merge_action(mcx, action)?)?);
     }
 
     qry.mergeActionList = merge_action_list;

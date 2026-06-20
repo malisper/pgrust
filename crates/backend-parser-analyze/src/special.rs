@@ -117,11 +117,11 @@ pub fn transformDeclareCursorStmt<'mcx>(
      * Query so the executor reads the analyzed query.
      */
     let mut new_stmt = stmt.clone_in(mcx)?;
-    new_stmt.query = Some(mcx::alloc_in(mcx, Node::mk_query(mcx, query))?);
+    new_stmt.query = Some(mcx::alloc_in(mcx, Node::mk_query(mcx, query)?)?);
 
     let mut result = Query::new(mcx);
     result.commandType = CmdType::CMD_UTILITY;
-    result.utilityStmt = Some(mcx::alloc_in(mcx, Node::mk_declare_cursor_stmt(mcx, new_stmt))?);
+    result.utilityStmt = Some(mcx::alloc_in(mcx, Node::mk_declare_cursor_stmt(mcx, new_stmt)?)?);
     Ok(result)
 }
 
@@ -262,11 +262,11 @@ pub fn transformCallStmt<'mcx>(
      * in place; the owned model rebuilds it).
      */
     let mut new_stmt = stmt.clone_in(mcx)?;
-    new_stmt.funcexpr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, Expr::FuncExpr(fexpr)))?);
+    new_stmt.funcexpr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, Expr::FuncExpr(fexpr))?)?);
     new_stmt.outargs = {
         let mut v = mcx::vec_with_capacity_in(mcx, outargs.len())?;
         for o in outargs {
-            v.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, o))?);
+            v.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, o)?)?);
         }
         v
     };
@@ -274,6 +274,6 @@ pub fn transformCallStmt<'mcx>(
     /* represent the command as a utility Query */
     let mut result = Query::new(mcx);
     result.commandType = CmdType::CMD_UTILITY;
-    result.utilityStmt = Some(mcx::alloc_in(mcx, Node::mk_call_stmt(mcx, new_stmt))?);
+    result.utilityStmt = Some(mcx::alloc_in(mcx, Node::mk_call_stmt(mcx, new_stmt)?)?);
     Ok(result)
 }

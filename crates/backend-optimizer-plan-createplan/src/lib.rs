@@ -1261,7 +1261,7 @@ fn create_seqscan_plan<'mcx>(
 
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_seq_scan(mcx, scan_plan))
+    Ok(Node::mk_seq_scan(mcx, scan_plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -1710,7 +1710,7 @@ fn create_indexscan_plan<'mcx>(
             dir,
         );
         copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
-        Node::mk_index_only_scan(mcx, scan_plan)
+        Node::mk_index_only_scan(mcx, scan_plan)?
     } else {
         let indexorderbyorig_field =
             build_node_list_to_expr_field(mcx, root, &indexorderbys_orig)?;
@@ -1728,7 +1728,7 @@ fn create_indexscan_plan<'mcx>(
             dir,
         );
         copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
-        Node::mk_index_scan(mcx, scan_plan)
+        Node::mk_index_scan(mcx, scan_plan)?
     };
 
     Ok(plan)
@@ -1863,7 +1863,7 @@ fn create_bitmap_scan_plan<'mcx>(
 
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_bitmap_heap_scan(mcx, scan_plan))
+    Ok(Node::mk_bitmap_heap_scan(mcx, scan_plan)?)
 }
 
 /// The byproducts `create_bitmap_subplan` returns alongside the Plan tree:
@@ -1929,7 +1929,7 @@ fn create_bitmap_subplan<'mcx>(
             node.plan.parallel_safe = parallel_safe;
 
             Ok(BitmapSubplan {
-                plan: Node::mk_bitmap_and(mcx, node),
+                plan: Node::mk_bitmap_and(mcx, node)?,
                 qual: subquals,
                 indexqual: subindexquals,
                 index_ecs: subindexecs,
@@ -1993,7 +1993,7 @@ fn create_bitmap_subplan<'mcx>(
                 node.plan.plan_width = 0; // meaningless
                 node.plan.parallel_aware = false;
                 node.plan.parallel_safe = parallel_safe;
-                Node::mk_bitmap_or(mcx, node)
+                Node::mk_bitmap_or(mcx, node)?
             };
 
             // If there were constant-TRUE subquals, the OR reduces to TRUE.
@@ -2108,7 +2108,7 @@ fn create_bitmap_subplan<'mcx>(
             }
 
             Ok(BitmapSubplan {
-                plan: Node::mk_bitmap_index_scan(mcx, bnode),
+                plan: Node::mk_bitmap_index_scan(mcx, bnode)?,
                 qual: subquals,
                 indexqual: subindexquals,
                 index_ecs: subindexecs,
@@ -2280,7 +2280,7 @@ fn create_valuesscan_plan<'mcx>(
 
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_values_scan(mcx, scan_plan))
+    Ok(Node::mk_values_scan(mcx, scan_plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -2323,7 +2323,7 @@ fn create_resultscan_plan<'mcx>(
 
     copy_generic_path_info(&mut scan_plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_result(mcx, scan_plan))
+    Ok(Node::mk_result(mcx, scan_plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -2611,7 +2611,7 @@ fn create_samplescan_plan<'mcx>(
 
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_sample_scan(mcx, scan_plan))
+    Ok(Node::mk_sample_scan(mcx, scan_plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -2737,7 +2737,7 @@ fn create_tidscan_plan<'mcx>(
 
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_tid_scan(mcx, scan_plan))
+    Ok(Node::mk_tid_scan(mcx, scan_plan)?)
 }
 
 /// `is_redundant_derived_clause(rinfo, tidquals)` over a bare-expr tidqual list.
@@ -2864,7 +2864,7 @@ fn create_tidrangescan_plan<'mcx>(
 
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_tid_range_scan(mcx, scan_plan))
+    Ok(Node::mk_tid_range_scan(mcx, scan_plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -2943,7 +2943,7 @@ fn create_functionscan_plan<'mcx>(
 
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_function_scan(mcx, scan_plan))
+    Ok(Node::mk_function_scan(mcx, scan_plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -2988,7 +2988,7 @@ fn create_namedtuplestorescan_plan<'mcx>(
 
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_named_tuplestore_scan(mcx, scan_plan))
+    Ok(Node::mk_named_tuplestore_scan(mcx, scan_plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -3044,7 +3044,7 @@ fn create_ctescan_plan<'mcx>(
 
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_cte_scan(mcx, scan_plan))
+    Ok(Node::mk_cte_scan(mcx, scan_plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -3097,7 +3097,7 @@ fn create_worktablescan_plan<'mcx>(
 
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_work_table_scan(mcx, scan_plan))
+    Ok(Node::mk_work_table_scan(mcx, scan_plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -3210,7 +3210,7 @@ fn create_subqueryscan_plan<'mcx>(
 
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_subquery_scan(mcx, scan_plan))
+    Ok(Node::mk_subquery_scan(mcx, scan_plan)?)
 }
 
 // ===========================================================================
@@ -3345,7 +3345,7 @@ fn materialize_finished_plan<'mcx>(
         plan.parallel_safe = sub_parallel_safe;
     }
 
-    Ok(Node::mk_material(mcx, matnode))
+    Ok(Node::mk_material(mcx, matnode)?)
 }
 
 /// `make_project_set(tlist, subplan)` — build a `ProjectSet` plan node.
@@ -3449,7 +3449,7 @@ fn create_group_result_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_result(mcx, plan))
+    Ok(Node::mk_result(mcx, plan)?)
 }
 
 /// Convert a list of bare clause expression arena handles into an owned `Expr`
@@ -3501,7 +3501,7 @@ fn create_project_set_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_project_set(mcx, plan))
+    Ok(Node::mk_project_set(mcx, plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -3532,7 +3532,7 @@ fn create_material_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_material(mcx, plan))
+    Ok(Node::mk_material(mcx, plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -3662,7 +3662,7 @@ fn create_memoize_plan<'mcx>(
     // copy_generic_path_info(&plan->plan, (Path *) best_path);
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_memoize(mcx, plan))
+    Ok(Node::mk_memoize(mcx, plan)?)
 }
 
 // ===========================================================================
@@ -3686,7 +3686,7 @@ fn inject_projection_plan<'mcx>(
     let mut node = make_result(mcx, tlist, None, Some(subplan))?;
     copy_plan_costsize(&mut node.plan, &child_plan);
     node.plan.parallel_safe = parallel_safe;
-    Ok(Node::mk_result(mcx, node))
+    Ok(Node::mk_result(mcx, node)?)
 }
 
 /// `make_sort(lefttree, numCols, sortColIdx, sortOperators, collations,
@@ -4039,7 +4039,7 @@ fn create_sort_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_sort(mcx, plan))
+    Ok(Node::mk_sort(mcx, plan)?)
 }
 
 // ===========================================================================
@@ -4140,7 +4140,7 @@ fn create_limit_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_limit(mcx, plan))
+    Ok(Node::mk_limit(mcx, plan)?)
 }
 
 // ===========================================================================
@@ -4218,7 +4218,7 @@ fn create_modifytable_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_modify_table(mcx, plan))
+    Ok(Node::mk_modify_table(mcx, plan)?)
 }
 
 /// `make_modifytable(...)` (createplan.c:7169) — build a `ModifyTable` plan node
@@ -4736,7 +4736,7 @@ fn create_agg_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_agg(mcx, plan))
+    Ok(Node::mk_agg(mcx, plan)?)
 }
 
 /// `create_agg_dispatch_plan` — the `T_Agg` createplan arm. C discriminates on
@@ -4858,7 +4858,7 @@ fn create_groupingsets_plan<'mcx>(
                 let placeholder = dummy_plan_with_tlist(mcx, &subplan)?;
                 let sort =
                     make_sort_from_groupcols(mcx, group_clause, &new_grp_col_idx, placeholder)?;
-                Some(Node::mk_sort(mcx, sort))
+                Some(Node::mk_sort(mcx, sort)?)
             } else {
                 None
             };
@@ -4968,7 +4968,7 @@ fn create_groupingsets_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_agg(mcx, plan))
+    Ok(Node::mk_agg(mcx, plan)?)
 }
 
 /// Convert a `&[Vec<i32>]` (the C `rollup->gsets`, a `List` of integer lists)
@@ -4999,7 +4999,7 @@ fn gsets_to_field<'mcx>(
 /// every node to own its child.
 fn dummy_plan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Node<'mcx>> {
     let _ = mcx;
-    Ok(Node::mk_result(mcx, ResultNode::default()))
+    Ok(Node::mk_result(mcx, ResultNode::default())?)
 }
 
 /// As [`dummy_plan`], but the placeholder carries a clone of `src`'s
@@ -5008,7 +5008,7 @@ fn dummy_plan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Node<'mcx>> {
 fn dummy_plan_with_tlist<'mcx>(mcx: Mcx<'mcx>, src: &Node<'mcx>) -> PgResult<Node<'mcx>> {
     let mut node = ResultNode::default();
     node.plan.targetlist = clone_plan_tlist(mcx, src)?;
-    Ok(Node::mk_result(mcx, node))
+    Ok(Node::mk_result(mcx, node)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -5092,7 +5092,7 @@ fn create_projection_plan<'mcx>(
         let tlist = tlist_to_plan_field(mcx, tlist)?;
         let mut plan = make_result(mcx, tlist, None, Some(subplan))?;
         copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
-        Ok(Node::mk_result(mcx, plan))
+        Ok(Node::mk_result(mcx, plan)?)
     }
 }
 
@@ -5560,7 +5560,7 @@ fn create_nestloop_plan<'mcx>(
 
     copy_generic_path_info(&mut join_plan.join.plan, root.path(best_path).base());
 
-    Ok(Node::mk_nest_loop(mcx, join_plan))
+    Ok(Node::mk_nest_loop(mcx, join_plan)?)
 }
 
 /// `create_hashjoin_plan(root, (HashPath *) best_path)` (createplan.c:4847).
@@ -5724,14 +5724,14 @@ fn create_hashjoin_plan<'mcx>(
         outer_hashkeys_opt,
         // lefttree = outer_plan, righttree = the Hash node (over inner_plan).
         outer_plan,
-        Node::mk_hash(mcx, hash_plan),
+        Node::mk_hash(mcx, hash_plan)?,
         jointype_path_to_node(jointype),
         inner_unique,
     )?;
 
     copy_generic_path_info(&mut join_plan.join.plan, root.path(best_path).base());
 
-    Ok(Node::mk_hash_join(mcx, join_plan))
+    Ok(Node::mk_hash_join(mcx, join_plan)?)
 }
 
 /// `label_sort_with_costsize(root, plan, limit_tuples)` (createplan.c:5553) —
@@ -5960,12 +5960,12 @@ fn create_mergejoin_plan<'mcx>(
                 outer_presorted_keys,
             )?;
             label_incrementalsort_with_costsize(root, run, &mut sort_plan, &outersortkeys, -1.0)?;
-            Node::mk_incremental_sort(mcx, sort_plan)
+            Node::mk_incremental_sort(mcx, sort_plan)?
         } else {
             let mut sort_plan =
                 make_sort_from_pathkeys(mcx, root, outer_plan, &outersortkeys, &outer_sort_relids)?;
             label_sort_with_costsize(root, &mut sort_plan, -1.0);
-            Node::mk_sort(mcx, sort_plan)
+            Node::mk_sort(mcx, sort_plan)?
         };
         outer_plan = sort_node;
         outersortkeys.clone()
@@ -5981,7 +5981,7 @@ fn create_mergejoin_plan<'mcx>(
         let mut sort_plan =
             make_sort_from_pathkeys(mcx, root, inner_plan, &innersortkeys, &inner_sort_relids)?;
         label_sort_with_costsize(root, &mut sort_plan, -1.0);
-        inner_plan = Node::mk_sort(mcx, sort_plan);
+        inner_plan = Node::mk_sort(mcx, sort_plan)?;
         innersortkeys.clone()
     } else {
         root.path(innerjoinpath).base().pathkeys.clone()
@@ -6004,7 +6004,7 @@ fn create_mergejoin_plan<'mcx>(
         };
         apply_cost_snapshot(&mut matplan.plan, &inner_cost);
         matplan.plan.total_cost += pathnode::cpu_operator_cost::call() * matplan.plan.plan_rows;
-        inner_plan = Node::mk_material(mcx, matplan);
+        inner_plan = Node::mk_material(mcx, matplan)?;
     }
 
     // Compute the opfamily/collation/strategy/nullsfirst arrays needed by the
@@ -6142,7 +6142,7 @@ fn create_mergejoin_plan<'mcx>(
     // Costs of sort and material steps are included in path cost already.
     copy_generic_path_info(&mut join_plan.join.plan, root.path(best_path).base());
 
-    Ok(Node::mk_merge_join(mcx, join_plan))
+    Ok(Node::mk_merge_join(mcx, join_plan)?)
 }
 
 // ===========================================================================
@@ -6279,7 +6279,7 @@ fn create_append_plan<'mcx>(
         let tlist = tlist_to_plan_field(mcx, tlist)?;
         let mut plan = make_result(mcx, tlist, Some(resconstantqual), None)?;
         copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
-        return Ok(Node::mk_result(mcx, plan));
+        return Ok(Node::mk_result(mcx, plan)?);
     }
 
     // Otherwise build an Append plan. We don't split the Append's creation into
@@ -6292,7 +6292,7 @@ fn create_append_plan<'mcx>(
     append.plan.qual = None;
     append.plan.lefttree = None;
     append.plan.righttree = None;
-    let mut append_node: Node<'mcx> = Node::mk_append(mcx, append);
+    let mut append_node: Node<'mcx> = Node::mk_append(mcx, append)?;
 
     // For ordered Appends, compute the parent sort-key info (adjusting the
     // Append's tlist in place) so children can cross-check against it.
@@ -6350,7 +6350,7 @@ fn create_append_plan<'mcx>(
                     nulls_first,
                 )?;
                 label_sort_with_costsize(root, &mut sort, limit_tuples);
-                subplan = Node::mk_sort(mcx, sort);
+                subplan = Node::mk_sort(mcx, sort)?;
             }
         }
 
@@ -6437,7 +6437,7 @@ fn create_merge_append_plan<'mcx>(
     // copy_generic_path_info(plan, path) happens up front in C; the targetlist
     // assignment above mirrors the field order. Copy cost/size now.
     copy_generic_path_info(&mut node.plan, root.path(best_path).base());
-    let mut ma_node: Node<'mcx> = Node::mk_merge_append(mcx, node);
+    let mut ma_node: Node<'mcx> = Node::mk_merge_append(mcx, node)?;
 
     // Compute parent sort-key info, adjusting the MergeAppend tlist in place.
     let rel_relids = root.rel(rel_id).relids.clone();
@@ -6487,7 +6487,7 @@ fn create_merge_append_plan<'mcx>(
                 nulls_first,
             )?;
             label_sort_with_costsize(root, &mut sort, limit_tuples);
-            subplan = Node::mk_sort(mcx, sort);
+            subplan = Node::mk_sort(mcx, sort)?;
         }
 
         subplans.push(subplan);
@@ -6621,7 +6621,7 @@ fn create_gating_plan<'mcx>(
     apply_cost_snapshot(&mut gplan.plan, &cost);
     gplan.plan.parallel_safe = path_parallel_safe;
 
-    Ok(Node::mk_result(mcx, gplan))
+    Ok(Node::mk_result(mcx, gplan)?)
 }
 
 // ===========================================================================
@@ -6713,7 +6713,7 @@ fn create_group_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_group(mcx, plan))
+    Ok(Node::mk_group(mcx, plan)?)
 }
 
 /// `make_windowagg(tlist, wc, partNumCols, partColIdx, partOperators,
@@ -6900,7 +6900,7 @@ fn create_windowagg_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_window_agg(mcx, plan))
+    Ok(Node::mk_window_agg(mcx, plan)?)
 }
 
 /// `make_unique_from_sortclauses(lefttree, distinctList)` (createplan.c:6835) —
@@ -7171,7 +7171,7 @@ fn create_unique_plan<'mcx>(
             0, // transitionSpace
             subplan,
         )?;
-        Node::mk_agg(mcx, agg)
+        Node::mk_agg(mcx, agg)?
     } else {
         // Create an ORDER BY list to sort the input compatibly, deriving the
         // SortGroupClause for each IN-clause operator.
@@ -7225,8 +7225,8 @@ fn create_unique_plan<'mcx>(
 
         let mut sort = make_sort_from_sortclauses(mcx, &sort_list, subplan)?;
         label_sort_with_costsize(root, &mut sort, -1.0);
-        let unique = make_unique_from_sortclauses(mcx, Node::mk_sort(mcx, sort), &sort_list)?;
-        Node::mk_unique(mcx, unique)
+        let unique = make_unique_from_sortclauses(mcx, Node::mk_sort(mcx, sort)?, &sort_list)?;
+        Node::mk_unique(mcx, unique)?
     };
 
     // Copy cost data from Path to Plan.
@@ -7274,7 +7274,7 @@ fn create_upper_unique_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_unique(mcx, plan))
+    Ok(Node::mk_unique(mcx, plan)?)
 }
 
 /// `make_setop(cmd, strategy, tlist, lefttree, righttree, groupList, numGroups)`
@@ -7376,7 +7376,7 @@ fn create_setop_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_set_op(mcx, plan))
+    Ok(Node::mk_set_op(mcx, plan)?)
 }
 
 /// `make_recursive_union(tlist, lefttree, righttree, wtParam, distinctList,
@@ -7467,7 +7467,7 @@ fn create_recursiveunion_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_recursive_union(mcx, plan))
+    Ok(Node::mk_recursive_union(mcx, plan)?)
 }
 
 /// `make_gather(qptlist, qpqual, nworkers, rescan_param, single_copy, subplan)`
@@ -7526,7 +7526,7 @@ fn create_gather_plan<'mcx>(
         g.parallel_mode_needed = true;
     }
 
-    Ok(Node::mk_gather(mcx, gather_plan))
+    Ok(Node::mk_gather(mcx, gather_plan)?)
 }
 
 /// `create_gather_merge_plan(root, (GatherMergePath *) best_path)`
@@ -7577,7 +7577,7 @@ fn create_gather_merge_plan<'mcx>(
         g.parallel_mode_needed = true;
     }
 
-    Ok(Node::mk_gather_merge(mcx, node))
+    Ok(Node::mk_gather_merge(mcx, node)?)
 }
 
 /// `make_incrementalsort(lefttree, numCols, nPresortedCols, sortColIdx,
@@ -7668,7 +7668,7 @@ fn create_incrementalsort_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.sort.plan, root.path(best_path).base());
 
-    Ok(Node::mk_incremental_sort(mcx, plan))
+    Ok(Node::mk_incremental_sort(mcx, plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -7789,7 +7789,7 @@ fn oid_vec_opt<'mcx>(mcx: Mcx<'mcx>, v: Vec<Oid>) -> PgResult<Option<PgVec<'mcx,
 /// Wrap an owned `Expr` into the `Node<'mcx>` carrier the HashJoin hashkey /
 /// hashclause lists hold (`PgVec<Node>`).
 fn expr_to_node<'mcx>(mcx: Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
-    Ok(Node::mk_expr(mcx, e))
+    Ok(Node::mk_expr(mcx, e)?)
 }
 
 /// Move an owned `Vec<Expr>` into a `PgVec<Node>` (the HashJoin `hashclauses`
@@ -7803,7 +7803,7 @@ fn exprs_to_node_list<'mcx>(
     }
     let mut out = vec_with_capacity_in(mcx, v.len())?;
     for e in v {
-        out.push(Node::mk_expr(mcx, e));
+        out.push(Node::mk_expr(mcx, e)?);
     }
     Ok(Some(out))
 }

@@ -226,7 +226,7 @@ pub fn transformSelectStmt<'mcx>(
     qry.windowClause = {
         let mut v = mcx::vec_with_capacity_in(mcx, window_clause.len())?;
         for wc in window_clause {
-            v.push(mcx::alloc_in(mcx, Node::mk_window_clause(mcx, wc))?);
+            v.push(mcx::alloc_in(mcx, Node::mk_window_clause(mcx, wc)?)?);
         }
         v
     };
@@ -477,9 +477,9 @@ pub fn transformValuesClause<'mcx>(
             mcx::vec_with_capacity_in(mcx, sublist_length.max(0) as usize)?;
         for i in 0..(sublist_length.max(0) as usize) {
             let e = colexprs[i][r].clone();
-            row.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e))?);
+            row.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?);
         }
-        exprs_lists.push(mcx::alloc_in(mcx, Node::mk_list(mcx, row))?);
+        exprs_lists.push(mcx::alloc_in(mcx, Node::mk_list(mcx, row)?)?);
     }
 
     /*
@@ -494,7 +494,7 @@ pub fn transformValuesClause<'mcx>(
                 v.push(mcx::alloc_in(mcx, e.clone_in(mcx)?)?);
             }
             v
-        });
+        })?;
         if backend_optimizer_util_vars::var::contain_vars_of_level(&probe, 0) {
             lateral = true;
         }

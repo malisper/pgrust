@@ -317,17 +317,17 @@ pub fn interpret_sql_body<'mcx>(
         let mut transformed = mcx::PgVec::new_in(mcx);
         for stmt in stmts {
             let q = transform_one_body_stmt(mcx, &pinfo, qstr, stmt.as_ref())?;
-            transformed.push(mcx::alloc_in(mcx, Node::mk_query(mcx, q))?);
+            transformed.push(mcx::alloc_in(mcx, Node::mk_query(mcx, q)?)?);
         }
         // *sql_body_out = (Node *) list_make1(transformed_stmts);
-        let inner = Node::mk_list(mcx, transformed);
+        let inner = Node::mk_list(mcx, transformed)?;
         let mut outer_vec = mcx::PgVec::new_in(mcx);
         outer_vec.push(mcx::alloc_in(mcx, inner)?);
-        Node::mk_list(mcx, outer_vec)
+        Node::mk_list(mcx, outer_vec)?
     } else {
         // q = transformStmt(pstate, sql_body_in); *sql_body_out = (Node *) q;
         let q = transform_one_body_stmt(mcx, &pinfo, qstr, sql_body_in)?;
-        Node::mk_query(mcx, q)
+        Node::mk_query(mcx, q)?
     };
 
     // *prosrc_str_p = ""; *probin = NULL; nodeToString(*sql_body_out).
@@ -408,7 +408,7 @@ pub fn parse_sub_analyze<'mcx>(
 
     backend_parser_small1::free_parsestate(pstate)?;
 
-    mcx::alloc_in(mcx, Node::mk_query(mcx, query))
+    mcx::alloc_in(mcx, Node::mk_query(mcx, query)?)
 }
 
 /// Merge SELECT/INSERT/UPDATE permission marks recorded on a cloned parent
@@ -524,13 +524,13 @@ fn transformOptionalSelectInto<'mcx>(
             };
 
             let ctas = types_nodes::ddlnodes::CreateTableAsStmt {
-                query: Some(mcx::alloc_in(mcx, Node::mk_select_stmt(mcx, select_copy))?),
+                query: Some(mcx::alloc_in(mcx, Node::mk_select_stmt(mcx, select_copy)?)?),
                 into,
                 objtype: types_nodes::parsenodes::OBJECT_TABLE,
                 is_select_into: true,
                 if_not_exists: false,
             };
-            let ctas_node = Node::mk_create_table_as_stmt(mcx, ctas);
+            let ctas_node = Node::mk_create_table_as_stmt(mcx, ctas)?;
             return transformStmt(mcx, pstate, &ctas_node);
         }
     }
@@ -578,11 +578,11 @@ fn transformExplainStmt<'mcx>(
     // represent the command as a utility Query wrapping a fresh ExplainStmt that
     // carries the transformed inner Query (mirrors C's `stmt->query = <Query>`).
     let mut new_stmt = stmt.clone_in(mcx)?;
-    new_stmt.query = Some(mcx::alloc_in(mcx, Node::mk_query(mcx, transformed))?);
+    new_stmt.query = Some(mcx::alloc_in(mcx, Node::mk_query(mcx, transformed)?)?);
 
     let mut result = Query::new(mcx);
     result.commandType = CmdType::CMD_UTILITY;
-    result.utilityStmt = Some(mcx::alloc_in(mcx, Node::mk_explain_stmt(mcx, new_stmt))?);
+    result.utilityStmt = Some(mcx::alloc_in(mcx, Node::mk_explain_stmt(mcx, new_stmt)?)?);
     Ok(result)
 }
 
@@ -673,16 +673,16 @@ fn transformCreateTableAsStmt<'mcx>(
             .as_deref_mut()
             .and_then(Node::as_intoclause_mut)
             .expect("transformCreateTableAsStmt: stmt->into is not an IntoClause");
-        into.viewQuery = Some(mcx::alloc_in(mcx, Node::mk_query(mcx, view_query))?);
+        into.viewQuery = Some(mcx::alloc_in(mcx, Node::mk_query(mcx, view_query)?)?);
     }
 
     /* stmt->query = (Node *) query */
-    new_stmt.query = Some(mcx::alloc_in(mcx, Node::mk_query(mcx, query))?);
+    new_stmt.query = Some(mcx::alloc_in(mcx, Node::mk_query(mcx, query)?)?);
 
     /* represent the command as a utility Query */
     let mut result = Query::new(mcx);
     result.commandType = CmdType::CMD_UTILITY;
-    result.utilityStmt = Some(mcx::alloc_in(mcx, Node::mk_create_table_as_stmt(mcx, new_stmt))?);
+    result.utilityStmt = Some(mcx::alloc_in(mcx, Node::mk_create_table_as_stmt(mcx, new_stmt)?)?);
     Ok(result)
 }
 
@@ -909,7 +909,7 @@ pub(crate) fn sgc_vec_to_nodes<'mcx>(
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
     let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
     for sgc in v {
-        out.push(mcx::alloc_in(mcx, Node::mk_sort_group_clause(mcx, sgc))?);
+        out.push(mcx::alloc_in(mcx, Node::mk_sort_group_clause(mcx, sgc)?)?);
     }
     Ok(out)
 }
@@ -933,7 +933,7 @@ pub(crate) fn opt_expr_to_node<'mcx>(
     e: Option<types_nodes::primnodes::Expr>,
 ) -> PgResult<Option<NodePtr<'mcx>>> {
     match e {
-        Some(expr) => Ok(Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr))?)),
+        Some(expr) => Ok(Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr)?)?)),
         None => Ok(None),
     }
 }
@@ -959,7 +959,7 @@ pub(crate) fn cte_vec_to_nodes<'mcx>(
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
     let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
     for cte in v {
-        out.push(mcx::alloc_in(mcx, Node::mk_common_table_expr(mcx, cte))?);
+        out.push(mcx::alloc_in(mcx, Node::mk_common_table_expr(mcx, cte)?)?);
     }
     Ok(out)
 }

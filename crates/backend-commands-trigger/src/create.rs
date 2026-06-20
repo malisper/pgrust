@@ -626,7 +626,7 @@ fn transform_trigger_when<'mcx>(
         backend_parser_parse_collate::assign_expr_collations(Some(&pstate), e)?;
     }
     let when_node = match when_expr {
-        Some(e) => Node::mk_expr(mcx, e),
+        Some(e) => Node::mk_expr(mcx, e)?,
         None => {
             return Ok(WhenTransform {
                 qual: None,
