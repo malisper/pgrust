@@ -730,6 +730,21 @@ seam_core::seam!(
     ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
 
+seam_core::seam!(
+    /// `pg_get_indexdef_columns(indexrelid, pretty)` (ruleutils.c): render the
+    /// comma-joined index key column list — plain column names for simple keys
+    /// and the deparsed expression text for expression keys. Used by genam's
+    /// `BuildIndexValueDescription` to print the `(key columns)` head of a
+    /// unique-violation detail. Installed by the ruleutils owner (`pretty` is
+    /// always `false` for this caller). Allocates in `mcx`; fallible on the
+    /// node-tree decode / deparse path.
+    pub fn pg_get_indexdef_columns<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        indexrelid: types_core::primitive::Oid,
+        pretty: bool,
+    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+);
+
 /// One deformed `pg_attrdef` row, as produced by [`scan_pg_attrdef`]: the
 /// `adnum` plus the `adbin` default-expression node-tree text already run
 /// through `TextDatumGetCString` (`None` is the C `isnull`). The owner does

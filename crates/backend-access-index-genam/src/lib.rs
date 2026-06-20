@@ -1027,29 +1027,17 @@ fn build_index_value_description<'mcx>(
 
     // appendStringInfo(&buf, "(%s)=(", pg_get_indexdef_columns(indexrelid, true)).
     //
-    // pg_get_indexdef_columns is unported (it lives in ruleutils.c). For a plain
-    // (non-expression) index it is exactly the comma-joined key column names;
-    // render them from the base table's pg_attribute via get_attname. An
-    // expression key column (attnum == InvalidAttrNumber) has no plain column
-    // name — render a placeholder where ruleutils would expand the deparsed
-    // expression (we cannot deparse here without ruleutils).
+    // pg_get_indexdef_columns lives in ruleutils.c (above this crate); it is
+    // reached through the genam-seams `pg_get_indexdef_columns` seam, which the
+    // ruleutils owner installs. It renders the comma-joined key column list —
+    // plain names for simple keys and the deparsed expression text for
+    // expression keys (attnum == InvalidAttrNumber).
+    let indexrelid = index_relation.rd_id; // RelationGetRelid(indexRelation)
+    let cols = seam::pg_get_indexdef_columns::call(mcx, indexrelid, true)?;
     buf.try_push('(')?;
-    for keyno in 0..indnkeyatts {
-        if keyno > 0 {
-            buf.try_push_str(", ")?;
-        }
-        let attnum = indkey.get(keyno).copied().unwrap_or(InvalidAttrNumber);
-        if attnum != InvalidAttrNumber {
-            let name = lsyscache_seams::get_attname::call(mcx, indrelid, attnum, false)?;
-            match name {
-                Some(s) => buf.try_push_str(s.as_str())?,
-                None => buf.try_push_str("?column?")?,
-            }
-        } else {
-            // Expression column: pg_get_indexdef_columns would emit the deparsed
-            // expression text; ruleutils deparse is unported.
-            buf.try_push_str("?expr?")?;
-        }
+    match &cols {
+        Some(s) => buf.try_push_str(s.as_str())?,
+        None => buf.try_push_str("?")?,
     }
     buf.try_push_str(")=(")?;
 

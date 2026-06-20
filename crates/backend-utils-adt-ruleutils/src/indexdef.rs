@@ -28,8 +28,11 @@ const RELKIND_PARTITIONED_INDEX: u8 = b'I';
 /// `INDOPTION_DESC` / `INDOPTION_NULLS_FIRST` (`catalog/pg_index.h`).
 const INDOPTION_DESC: i16 = 0x0001;
 const INDOPTION_NULLS_FIRST: i16 = 0x0002;
-/// `PRETTYFLAG_SCHEMA` (`utils/ruleutils.h`).
-const PRETTYFLAG_SCHEMA: i32 = 2;
+/// `PRETTYFLAG_SCHEMA` (`utils/ruleutils.h` line 90: `0x0004`). NB: this is a
+/// distinct bit from `PRETTYFLAG_INDENT` (`0x0002`); the plain `pg_get_indexdef`
+/// path passes only `PRETTYFLAG_INDENT`, so the SCHEMA bit is clear and the
+/// table name is force-qualified via `generate_qualified_relation_name`.
+const PRETTYFLAG_SCHEMA: i32 = 0x0004;
 
 /// `pg_get_indexdef_worker(indexrelid, colno, excludeOps, attrsOnly, keysOnly,
 /// showTblSpc, inherits, prettyFlags, missing_ok)` (ruleutils.c 1269-1576).

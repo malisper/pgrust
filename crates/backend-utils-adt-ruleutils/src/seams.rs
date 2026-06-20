@@ -78,6 +78,30 @@ pub fn init_seams() {
         crate::deparse_expr_for_plan,
     );
 
+    // pg_get_indexdef_columns(indexrelid, pretty) (ruleutils.c): the comma-
+    // joined index key column list (plain names + deparsed expression text),
+    // used by genam's BuildIndexValueDescription to print the "(key columns)"
+    // head of a unique-violation detail. C body =
+    //   pg_get_indexdef_worker(indexrelid, 0, NULL, true /*attrsOnly*/,
+    //                          true /*keysOnly*/, false, false,
+    //                          GET_PRETTY_FLAGS(pretty), false).
+    backend_access_index_genam_seams::pg_get_indexdef_columns::set(
+        |mcx, indexrelid, pretty| {
+            crate::indexdef::pg_get_indexdef_worker(
+                mcx,
+                indexrelid,
+                0,
+                None,
+                true,
+                true,
+                false,
+                false,
+                crate::get_pretty_flags(pretty),
+                false,
+            )
+        },
+    );
+
     // The catalog half of `generate_relation_name` (the CTE-conflict scan is
     // done in-crate by the deparser). Reads relname/relnamespace + visibility,
     // qualifies, and quotes — all owners (lsyscache/namespace) are installed.
