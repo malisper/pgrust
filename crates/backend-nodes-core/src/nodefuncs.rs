@@ -190,6 +190,10 @@ pub fn expr_type(expr: Option<&Expr>) -> PgResult<Oid> {
         etag::T_ReturningExpr => {
             expr_type(expr.as_returningexpr().unwrap().retexpr.as_deref())?
         }
+        etag::T_PlaceHolderVar => {
+            // C: exprType((Node *) ((const PlaceHolderVar *) expr)->phexpr)
+            expr_type(expr.as_placeholdervar().unwrap().phexpr.as_deref())?
+        }
         // `Expr` is #[non_exhaustive]; an unmodeled future variant is the C
         // default: elog(ERROR, "unrecognized node type").
         _ => return Err(unrecognized_node_type_error(expr_variant_name(expr))?),
@@ -350,6 +354,10 @@ pub fn expr_typmod(expr: Option<&Expr>) -> PgResult<i32> {
         etag::T_SetToDefault => expr.as_settodefault().unwrap().typeMod,
         etag::T_ReturningExpr => {
             expr_typmod(expr.as_returningexpr().unwrap().retexpr.as_deref())?
+        }
+        etag::T_PlaceHolderVar => {
+            // C: exprTypmod((Node *) ((const PlaceHolderVar *) expr)->phexpr)
+            expr_typmod(expr.as_placeholdervar().unwrap().phexpr.as_deref())?
         }
         _ => -1,
     };
@@ -745,6 +753,10 @@ pub fn expr_collation(expr: Option<&Expr>) -> PgResult<Oid> {
         etag::T_ReturningExpr => {
             expr_collation(expr.as_returningexpr().unwrap().retexpr.as_deref())?
         }
+        etag::T_PlaceHolderVar => {
+            // C: exprCollation((Node *) ((const PlaceHolderVar *) expr)->phexpr)
+            expr_collation(expr.as_placeholdervar().unwrap().phexpr.as_deref())?
+        }
         // #[non_exhaustive]: C default elog(ERROR, "unrecognized node type").
         _ => return Err(unrecognized_node_type_error(expr_variant_name(expr))?),
     };
@@ -956,6 +968,14 @@ pub fn expr_location(expr: Option<&Expr>) -> PgResult<i32> {
         }
         etag::T_InferenceElem => {
             expr_location(expr.as_inferenceelem().unwrap().expr.as_deref())?
+        }
+        etag::T_GroupingFunc => {
+            // C: loc = ((const GroupingFunc *) expr)->location; (token location)
+            expr.as_groupingfunc().unwrap().location
+        }
+        etag::T_PlaceHolderVar => {
+            // C: exprLocation((Node *) ((const PlaceHolderVar *) expr)->phexpr)
+            expr_location(expr.as_placeholdervar().unwrap().phexpr.as_deref())?
         }
         // All other modeled variants carry only trimmed-away `location`
         // fields — unknown.

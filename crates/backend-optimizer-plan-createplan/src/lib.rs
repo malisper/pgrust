@@ -3922,7 +3922,11 @@ fn prepare_sort_from_pathkeys<'mcx>(
                         .ok_or_else(|| PgError::error("could not find pathkey item to sort"))?;
                 pk_datatype = root.em(em_id).em_datatype;
                 // em_expr to be copied into a resjunk targetentry.
-                let resjunk_expr = root.node(root.em(em_id).em_expr).clone();
+                // C: makeTargetEntry(copyObject(em->em_expr), ...) (createplan.c:6434).
+                // A derived `.clone()` panics on owned-subtree Exprs (Aggref/SubLink,
+                // whose `args` TargetEntry list holds context-allocated children);
+                // copyObject == `clone_in(mcx)` — the deep copy used 8 lines above.
+                let resjunk_expr = root.node(root.em(em_id).em_expr).clone_in(mcx)?;
 
                 // Do we need to insert a Result node? If we can't modify the
                 // tlist in place and the input plan can't project, stack a

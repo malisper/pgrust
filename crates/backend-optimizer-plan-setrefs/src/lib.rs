@@ -123,6 +123,20 @@ fn is_regclass_const(con: &Const) -> bool {
 // in-repo word-bit pattern (init-subselect/quals.rs `expr_relids_is_member`).
 // ===========================================================================
 
+/// `bms_make_singleton(x)` over the lifetime-free `Relids`
+/// (`Option<Box<Bitmapset>>`): a one-member relid set. Bit `x` lives in word
+/// `x/64`, bit `x%64`. Used by the grouping-sets nullingrels strip in
+/// `set_upper_references` (C: `bms_make_singleton(root->group_rtindex)`).
+fn bms_make_singleton_relids(x: i32) -> types_pathnodes::Relids {
+    debug_assert!(x > 0);
+    let bit = x as usize;
+    let wordnum = bit / 64;
+    let bitnum = bit % 64;
+    let mut words = alloc::vec![0u64; wordnum + 1];
+    words[wordnum] = 1u64 << bitnum;
+    Some(alloc::boxed::Box::new(types_pathnodes::Bitmapset { words }))
+}
+
 fn expr_relids_equal(
     a: &types_nodes::primnodes::ExprRelids,
     b: &types_nodes::primnodes::ExprRelids,
@@ -1544,12 +1558,42 @@ fn set_upper_references<'mcx>(
         build_tlist_index(sub_tlist, mcx)?
     };
 
-    // Grouping-sets nullingrels strip (Agg with group_rtindex > 0 + groupingSets).
+    // If it's a grouping node with grouping sets, any Vars and PHVs appearing in
+    // the targetlist and quals should have nullingrels that include the effects
+    // of the grouping step (input Vars/PHVs' nullingrels plus the RT index of the
+    // grouping step). To perform exact nullingrels matches in fix_upper_expr, we
+    // first remove the RT index of the grouping step. (setrefs.c:2480.) The C
+    //   plan->targetlist = remove_nulling_relids(plan->targetlist,
+    //                          bms_make_singleton(root->group_rtindex), NULL);
+    //   plan->qual       = remove_nulling_relids(plan->qual, <same>, NULL);
+    // is applied per-element here: the Node-level List mutator recurses into each
+    // element's expr, so stripping each TLE/qual `Expr` is identical.
     if is_agg && root.group_rtindex > 0 && agg_grouping_sets {
-        return Err(PgError::error(
-            "set_upper_references: grouping-sets nullingrels strip \
-             (remove_nulling_relids, rewriteManip-owned) is not ported",
-        ));
+        let removable = bms_make_singleton_relids(root.group_rtindex);
+        let except: types_pathnodes::Relids = None; // C NULL
+        if let Some(tlist) = plan.targetlist.as_mut() {
+            for tle in tlist.iter_mut() {
+                if let Some(expr) = tle.expr.take() {
+                    // Move the owned Expr into the seam (by value) so no `.clone()`
+                    // is needed; `PgBox::into_inner` extracts it from the box.
+                    let stripped = backend_nodes_nodeFuncs_seams::remove_nulling_relids::call(
+                        mcx::PgBox::into_inner(expr),
+                        &removable,
+                        &except,
+                    );
+                    tle.expr = Some(mcx::alloc_in(mcx, stripped)?);
+                }
+            }
+        }
+        if let Some(qual) = plan.qual.as_mut() {
+            for e in qual.iter_mut() {
+                let owned = core::mem::replace(e, Expr::Const(error_placeholder_const()));
+                let stripped = backend_nodes_nodeFuncs_seams::remove_nulling_relids::call(
+                    owned, &removable, &except,
+                );
+                *e = stripped;
+            }
+        }
     }
 
     let num_exec = num_exec_tlist(plan);

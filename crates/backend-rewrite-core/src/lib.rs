@@ -221,7 +221,10 @@ pub fn init_seams() {
                 .as_ref()
                 .map(|b| types_nodes::primnodes::ExprRelids { words: b.words.clone() })
                 .unwrap_or_default();
-            let mut node = types_nodes::nodes::Node::Expr(expr.clone());
+            // `expr` is moved in (the seam takes it by value), so wrapping it in a
+            // `Node` is a move — no `.clone()` (which would panic on an owned-
+            // subtree Expr such as `Aggref`). C mutates the node tree in place.
+            let mut node = types_nodes::nodes::Node::Expr(expr);
             nulling::remove_nulling_relids(&mut node, &removable_er, &except_er);
             match node.into_expr() {
                 Some(e) => e,

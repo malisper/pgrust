@@ -87,7 +87,7 @@ struct GroupVarInfo {
 fn add_unique_group_var(
     root: &mut PlannerInfo,
     mut varinfos: alloc::vec::Vec<GroupVarInfo>,
-    var: &Expr,
+    var: Expr,
     vardata: &VariableStatData,
 ) -> alloc::vec::Vec<GroupVarInfo> {
     let (ndistinct, isdefault) = get_variable_numdistinct(root, vardata);
@@ -265,7 +265,7 @@ pub(crate) fn estimate_num_groups<'mcx>(
         // complicated.
         let vardata = examine_variable(mcx, run, root, groupexpr_id, 0)?;
         if vardata.stats_tuple.is_some() || vardata.isunique {
-            varinfos = add_unique_group_var(root, varinfos, &groupexpr, &vardata);
+            varinfos = add_unique_group_var(root, varinfos, groupexpr.clone_in(mcx)?, &vardata);
             release_variable_stats(vardata);
             continue;
         }
@@ -291,9 +291,9 @@ pub(crate) fn estimate_num_groups<'mcx>(
 
         // Else add variables to varinfos list.
         for var in varshere.into_iter() {
-            let var_id = root.alloc_node(var.clone());
+            let var_id = root.alloc_node(var.clone_in(mcx)?);
             let vardata = examine_variable(mcx, run, root, var_id, 0)?;
-            varinfos = add_unique_group_var(root, varinfos, &var, &vardata);
+            varinfos = add_unique_group_var(root, varinfos, var, &vardata);
             release_variable_stats(vardata);
         }
     }

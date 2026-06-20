@@ -1267,7 +1267,7 @@ pub fn make_pathkeys_for_sortclauses_extended(
                 None,
                 &bms_make_singleton(root.group_rtindex),
             );
-            sortkey = nf::remove_nulling_relids::call(&sortkey, &singleton, &None);
+            sortkey = nf::remove_nulling_relids::call(sortkey, &singleton, &None);
         }
 
         let pathkey = make_pathkey_from_sortop(

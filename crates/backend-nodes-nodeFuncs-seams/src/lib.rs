@@ -194,9 +194,12 @@ seam_core::seam!(
     /// `remove_nulling_relids(node, removable_relids, except_relids)`
     /// (nodeFuncs.c) — strip the given nulling relids from any `Var`/PHV
     /// `varnullingrels`/`phnullingrels` in `node`, returning the rewritten
-    /// expression value. `except_relids` of `None` is the C `NULL`.
+    /// expression value. `except_relids` of `None` is the C `NULL`. The `node`
+    /// is taken BY VALUE: C mutates the passed tree in place, so the owner
+    /// moves it into the mutator (a borrow would force a `.clone()` that panics
+    /// on owned-subtree Exprs like `Aggref`).
     pub fn remove_nulling_relids(
-        node: &Expr,
+        node: Expr,
         removable_relids: &types_pathnodes::Relids,
         except_relids: &types_pathnodes::Relids,
     ) -> Expr

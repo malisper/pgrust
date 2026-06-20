@@ -356,17 +356,17 @@ fn alloc_fmt(args: &core::fmt::Arguments) -> String {
 
 /// Transform a GROUPING expression.
 ///
-/// `p_node` is the raw `GROUPING(...)` node (`Node::Expr(Expr::GroupingFunc)`);
-/// its `args` are the raw (untransformed) argument expressions.
+/// `p_node` is the raw `GROUPING(...)` node (`Node::GroupingFunc`, the
+/// `rawexprnodes::GroupingFunc` the grammar emits); its `args` are the raw
+/// (untransformed) argument expressions as `NodePtr` children.
 pub fn transformGroupingFunc<'mcx>(
     pstate: &mut ParseState<'mcx>,
     p_node: Node<'mcx>,
 ) -> PgResult<Expr> {
-    // NOTE: left on the enum — the generated `into_groupingfunc` accessor is
-    // shadowed by the Node-direct *raw* `rawexprnodes::GroupingFunc` variant, so
-    // it does not reach the analyzed `primnodes::GroupingFunc` payload here.
-    let p: GroupingFunc = match p_node.into_expr() {
-        Some(Expr::GroupingFunc(g)) => g,
+    // C: GroupingFunc *p = (GroupingFunc *) gf; the grammar produces the *raw*
+    // `Node::GroupingFunc` (rawexprnodes), whose `args` are raw `NodePtr`s.
+    let p: types_nodes::rawexprnodes::GroupingFunc<'mcx> = match p_node {
+        Node::GroupingFunc(g) => g,
         _ => {
             return Err(PgError::error(
                 "transformGroupingFunc: input is not a GroupingFunc node",
@@ -394,7 +394,9 @@ pub fn transformGroupingFunc<'mcx>(
     result_list.reserve(p.args.len());
     let expr_kind = pstate.p_expr_kind;
     for arg in p.args.into_iter() {
-        let arg_node = Node::mk_expr(pstate_mcx(pstate), arg);
+        // Each raw arg is a `NodePtr` (PgBox<Node>); move out the inner raw Node
+        // and feed it to transformExpr (C: transformExpr(pstate, lfirst(...))).
+        let arg_node = mcx::PgBox::into_inner(arg);
         let current_result = backend_parser_parse_expr_seams::transformExpr::call(
             pstate,
             Some(arg_node),

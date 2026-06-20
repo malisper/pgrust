@@ -317,6 +317,13 @@ pub fn transformExprRecurse<'mcx>(
         ntag::T_FuncCall => transformFuncCall(pstate, expr.into_funccall().unwrap())?,
         ntag::T_MultiAssignRef => transformMultiAssignRef(pstate, expr.into_multiassignref().unwrap())?,
 
+        // T_GroupingFunc → transformGroupingFunc(pstate, (GroupingFunc *) expr)
+        // (parse_expr.c). The grammar emits GROUPING(...) as the *raw*
+        // `Node::GroupingFunc` (rawexprnodes); route it to the parse_agg seam,
+        // which transforms the raw arg list and returns the analyzed
+        // `Expr::GroupingFunc`.
+        ntag::T_GroupingFunc => seam_transform_grouping_func(pstate, expr)?,
+
         // T_SubLink → transformSubLink(pstate, (SubLink *) expr).
         ntag::T_SubLink => transformSubLink(pstate, expr.into_sublink().unwrap())?,
 

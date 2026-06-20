@@ -245,7 +245,7 @@ fn examine_expression_stats<'mcx, 'run>(
     let outer_join_rels = root.outer_join_rels.clone();
     if rel_seams::relids_overlap::call(varnos, &outer_join_rels) {
         let none: Relids = None;
-        node = nf::remove_nulling_relids::call(&node, &outer_join_rels, &none);
+        node = nf::remove_nulling_relids::call(node, &outer_join_rels, &none);
     }
 
     // Snapshot the per-rel index + stat lists (immutable reads) so we can match

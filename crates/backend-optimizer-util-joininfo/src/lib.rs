@@ -188,6 +188,32 @@ pub fn init_seams() {
         find_placeholder_info(root, &phv).expect("find_placeholder_info failed")
     });
 
+    // placeholder.c / costsize.c — `find_placeholder_info_width` (costsize-seams,
+    // consumed by `set_pathtarget_cost_width` in costsize.c). C:
+    //   phinfo = find_placeholder_info(root, phv);
+    //   tuple_width += phinfo->ph_width;
+    //   cost_qual_eval_node(&cost, (Node *) phv->phexpr, root);
+    // Returns `(ph_width, cost.startup, cost.per_tuple)`. Homed here because this
+    // unit ports `find_placeholder_info`. Mirrors `add_placeholders_to_joinrel`.
+    costsize_seam::find_placeholder_info_width::set(|root, node| {
+        let phv = match root.node(node) {
+            Expr::PlaceHolderVar(phv) => phv.clone(),
+            _ => panic!("find_placeholder_info_width: node is not a PlaceHolderVar"),
+        };
+        let phid = find_placeholder_info(root, &phv)
+            .expect("find_placeholder_info_width: find_placeholder_info failed");
+        let ph_width = root.phinfo(phid).ph_width;
+        let phexpr = phv
+            .phexpr
+            .as_ref()
+            .expect("find_placeholder_info_width: PHV has no phexpr")
+            .as_ref()
+            .clone();
+        let (cost_startup, cost_per_tuple) =
+            crate::ext_seam::cost_qual_eval_node_expr::call(root, &phexpr);
+        (ph_width, cost_startup, cost_per_tuple)
+    });
+
     // joinpath.c paraminfo_get_equal_hashops (expr_hash_eq_operator) is installed
     // by its real owner var.c (backend-optimizer-util-vars init_seams); see
     // seam_expr_hash_eq_operator there. Installing it here too double-installs the

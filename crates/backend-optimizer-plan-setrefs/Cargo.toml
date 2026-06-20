@@ -26,3 +26,6 @@ backend-optimizer-plan-setrefs-seams = { path = "../backend-optimizer-plan-setre
 # GetSysCacheHashValue1(PROCOID, funcid) for record_plan_function_dependency's
 # VALUE form (the extract_query_dependencies path).
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+# remove_nulling_relids (rewriteManip.c) for the grouping-sets nullingrels strip
+# in set_upper_references; owner-installed by backend-rewrite-core.
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
