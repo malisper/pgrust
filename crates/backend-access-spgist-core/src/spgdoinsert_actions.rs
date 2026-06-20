@@ -291,7 +291,12 @@ fn doPickSplit<'mcx>(
     if total_leaf_sizes <= current_free_space {
         // All on the current page.
         new_leaf_buffer = InvalidBuffer;
-        n_to_insert = max_to_include;
+        // `n_to_insert` mirrors C's `nToInsert`, which at this point still holds
+        // the *collected* leaf count (`in.nTuples - 1`), NOT `maxToInclude`; the
+        // `+1` below re-adds the incoming tuple. Seeding it from `max_to_include`
+        // (== n_tuples when include_new) double-counts and indexes one past the
+        // end of `mapTuplesToNodes` (spgdoinsert.c keeps nToInsert == collected).
+        n_to_insert = n_to_insert_collected;
         if include_new {
             n_to_insert += 1;
             inserted_new = true;
@@ -337,7 +342,9 @@ fn doPickSplit<'mcx>(
 
         let ok = assign(&leaf_sizes_work, &mut node_page_select);
         if ok {
-            n_to_insert = max_to_include;
+            // As in the single-page branch: `n_to_insert` carries C's collected
+            // leaf count (`in.nTuples - 1`), and `+1` re-adds the incoming tuple.
+            n_to_insert = n_to_insert_collected;
             if include_new {
                 n_to_insert += 1;
                 inserted_new = true;
@@ -647,7 +654,7 @@ fn doPickSplit<'mcx>(
         bufmgr::unlock_release_buffer::call(save_current.buffer);
     }
 
-    let _ = (n_to_insert_collected, parent);
+    let _ = parent;
     Ok(inserted_new)
 }
 
@@ -1376,14 +1383,19 @@ pub fn spgdoinsert<'mcx>(
                             "cannot add a node to an allTheSame inner tuple".into(),
                         ));
                     }
-                    spgChooseOutResult::MatchNode(_) => {
+                    spgChooseOutResult::MatchNode(m) => {
+                        // C only overwrites `nodeN` (to a random child); it must
+                        // preserve the opclass-supplied `restDatum` and `levelAdd`
+                        // (spgdoinsert.c:2214). Zeroing `restDatum` to a by-value
+                        // null here corrupts a by-reference key (e.g. an empty
+                        // range), later panicking in SpGistGetLeafTupleSize.
                         let r =
                             pg_prng::global_prng(|p| p.u64_range(0, (n_nodes - 1) as u64)) as i32;
                         out.result = spgChooseOutResult::MatchNode(
                             types_spgist::spgChooseOutMatchNode {
                                 nodeN: r,
-                                levelAdd: 0,
-                                restDatum: Datum::null(),
+                                levelAdd: m.levelAdd,
+                                restDatum: m.restDatum.clone(),
                             },
                         );
                     }
