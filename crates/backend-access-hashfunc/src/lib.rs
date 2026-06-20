@@ -29,7 +29,7 @@ use common_hashfn::{
 use types_core::Oid;
 use types_datum::Datum;
 use types_error::{PgResult, ERRCODE_INDETERMINATE_COLLATION, ERROR};
-use types_fmgr::FunctionCallInfoBaseData;
+use types_fmgr::{FunctionCallInfoBaseData, PgFnNative};
 
 use backend_utils_adt_oid_seams::check_valid_oidvector;
 use backend_utils_adt_pg_locale_seams::{collation_is_deterministic, pg_strxfrm};
@@ -387,116 +387,96 @@ fn ret_u64(v: u64) -> Datum {
     Datum::from_u64(v)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`): a structured
-/// message panic carrying the SQLSTATE and text, which the dispatcher rebuilds
-/// into the `PgResult` error C's `ereport` longjmp delivers.
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
+fn fc_hashchar(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(hashchar(arg_word(fcinfo, 0) as i8)))
 }
-
-fn fc_hashchar(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashchar(arg_word(fcinfo, 0) as i8))
+fn fc_hashcharextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u64(hashcharextended(arg_word(fcinfo, 0) as i8, arg_word(fcinfo, 1) as u64)))
 }
-fn fc_hashcharextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(hashcharextended(arg_word(fcinfo, 0) as i8, arg_word(fcinfo, 1) as u64))
+fn fc_hashint2(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(hashint2(arg_word(fcinfo, 0) as i16)))
 }
-fn fc_hashint2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashint2(arg_word(fcinfo, 0) as i16))
+fn fc_hashint2extended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u64(hashint2extended(arg_word(fcinfo, 0) as i16, arg_word(fcinfo, 1) as u64)))
 }
-fn fc_hashint2extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(hashint2extended(arg_word(fcinfo, 0) as i16, arg_word(fcinfo, 1) as u64))
+fn fc_hashint4(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(hashint4(arg_word(fcinfo, 0) as i32)))
 }
-fn fc_hashint4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashint4(arg_word(fcinfo, 0) as i32))
+fn fc_hashint4extended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u64(hashint4extended(arg_word(fcinfo, 0) as i32, arg_word(fcinfo, 1) as u64)))
 }
-fn fc_hashint4extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(hashint4extended(arg_word(fcinfo, 0) as i32, arg_word(fcinfo, 1) as u64))
+fn fc_hashint8(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(hashint8(arg_word(fcinfo, 0) as i64)))
 }
-fn fc_hashint8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashint8(arg_word(fcinfo, 0) as i64))
+fn fc_hashint8extended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u64(hashint8extended(arg_word(fcinfo, 0) as i64, arg_word(fcinfo, 1) as u64)))
 }
-fn fc_hashint8extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(hashint8extended(arg_word(fcinfo, 0) as i64, arg_word(fcinfo, 1) as u64))
+fn fc_hashoid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(hashoid(arg_word(fcinfo, 0) as u32)))
 }
-fn fc_hashoid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashoid(arg_word(fcinfo, 0) as u32))
+fn fc_hashoidextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u64(hashoidextended(arg_word(fcinfo, 0) as u32, arg_word(fcinfo, 1) as u64)))
 }
-fn fc_hashoidextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(hashoidextended(arg_word(fcinfo, 0) as u32, arg_word(fcinfo, 1) as u64))
+fn fc_hashenum(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(hashenum(arg_word(fcinfo, 0) as u32)))
 }
-fn fc_hashenum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashenum(arg_word(fcinfo, 0) as u32))
+fn fc_hashenumextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u64(hashenumextended(arg_word(fcinfo, 0) as u32, arg_word(fcinfo, 1) as u64)))
 }
-fn fc_hashenumextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(hashenumextended(arg_word(fcinfo, 0) as u32, arg_word(fcinfo, 1) as u64))
+fn fc_hashfloat4(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(hashfloat4(f32::from_bits(arg_word(fcinfo, 0) as u32))))
 }
-fn fc_hashfloat4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashfloat4(f32::from_bits(arg_word(fcinfo, 0) as u32)))
-}
-fn fc_hashfloat4extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(hashfloat4extended(
+fn fc_hashfloat4extended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u64(hashfloat4extended(
         f32::from_bits(arg_word(fcinfo, 0) as u32),
         arg_word(fcinfo, 1) as u64,
-    ))
+    )))
 }
-fn fc_hashfloat8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashfloat8(f64::from_bits(arg_word(fcinfo, 0) as u64)))
+fn fc_hashfloat8(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(hashfloat8(f64::from_bits(arg_word(fcinfo, 0) as u64))))
 }
-fn fc_hashfloat8extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(hashfloat8extended(
+fn fc_hashfloat8extended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u64(hashfloat8extended(
         f64::from_bits(arg_word(fcinfo, 0) as u64),
         arg_word(fcinfo, 1) as u64,
-    ))
+    )))
 }
-fn fc_hashoidvector(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match hashoidvector(arg_bytes(fcinfo, 0)) {
-        Ok(v) => ret_u32(v),
-        Err(e) => raise(e),
-    }
+fn fc_hashoidvector(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(hashoidvector(arg_bytes(fcinfo, 0))?))
 }
-fn fc_hashoidvectorextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashoidvectorextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let seed = arg_word(fcinfo, 1) as u64;
-    match hashoidvectorextended(arg_bytes(fcinfo, 0), seed) {
-        Ok(v) => ret_u64(v),
-        Err(e) => raise(e),
-    }
+    Ok(ret_u64(hashoidvectorextended(arg_bytes(fcinfo, 0), seed)?))
 }
-fn fc_hashname(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashname(arg_bytes(fcinfo, 0)))
+fn fc_hashname(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(hashname(arg_bytes(fcinfo, 0))))
 }
-fn fc_hashnameextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashnameextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let seed = arg_word(fcinfo, 1) as u64;
-    ret_u64(hashnameextended(arg_bytes(fcinfo, 0), seed))
+    Ok(ret_u64(hashnameextended(arg_bytes(fcinfo, 0), seed)))
 }
-fn fc_hashtext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashtext(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let collid = fcinfo.fncollation;
-    match hashtext(arg_varlena_payload(fcinfo, 0), collid) {
-        Ok(v) => ret_u32(v),
-        Err(e) => raise(e),
-    }
+    Ok(ret_u32(hashtext(arg_varlena_payload(fcinfo, 0), collid)?))
 }
-fn fc_hashtextextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashtextextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let collid = fcinfo.fncollation;
     let seed = arg_word(fcinfo, 1) as u64;
-    match hashtextextended(arg_varlena_payload(fcinfo, 0), collid, seed) {
-        Ok(v) => ret_u64(v),
-        Err(e) => raise(e),
-    }
+    Ok(ret_u64(hashtextextended(arg_varlena_payload(fcinfo, 0), collid, seed)?))
 }
-fn fc_hashvarlena(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashvarlena(arg_varlena_payload(fcinfo, 0)))
+fn fc_hashvarlena(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(hashvarlena(arg_varlena_payload(fcinfo, 0))))
 }
-fn fc_hashvarlenaextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashvarlenaextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let seed = arg_word(fcinfo, 1) as u64;
-    ret_u64(hashvarlenaextended(arg_varlena_payload(fcinfo, 0), seed))
+    Ok(ret_u64(hashvarlenaextended(arg_varlena_payload(fcinfo, 0), seed)))
 }
-fn fc_hashbytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(hashbytea(arg_varlena_payload(fcinfo, 0)))
+fn fc_hashbytea(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    Ok(ret_u32(hashbytea(arg_varlena_payload(fcinfo, 0))))
 }
-fn fc_hashbyteaextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashbyteaextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let seed = arg_word(fcinfo, 1) as u64;
-    ret_u64(hashbyteaextended(arg_varlena_payload(fcinfo, 0), seed))
+    Ok(ret_u64(hashbyteaextended(arg_varlena_payload(fcinfo, 0), seed)))
 }
 
 // pg_proc OIDs (pg_proc.dat).
@@ -534,23 +514,26 @@ fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> types_fmgr::BuiltinFunction {
-    types_fmgr::BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    func: PgFnNative,
+) -> (types_fmgr::BuiltinFunction, PgFnNative) {
+    (
+        types_fmgr::BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        func,
+    )
 }
 
 /// Register the hashfunc.c support procs as fmgr builtins (C: their
 /// `fmgr_builtins[]` rows), so the hash AM's `function_call1_coll(hash_proc, …)`
 /// dispatch resolves them by OID. Called from this crate's `init_seams()`.
 pub fn register_hash_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(F_HASHCHAR, "hashchar", 1, fc_hashchar),
         builtin(F_HASHCHAREXTENDED, "hashcharextended", 2, fc_hashcharextended),
         builtin(F_HASHINT2, "hashint2", 1, fc_hashint2),
