@@ -32,7 +32,7 @@
 //! (every row is `proisstrict => 't'` and not `proretset`).
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// The shared fmgr-frame entry point for every GIN `anyarray_ops` support proc.
 /// In the owned model the GIN access method invokes these procs through the
@@ -41,31 +41,36 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 /// path; it exists so the `fmgr_builtins[]` row carries a non-`None` callable
 /// (matching C's table). It raises a clear error if a future fmgr-frame call
 /// site is added, pointing at the dispatch seam to use instead.
-fn fc_gin_support_via_dispatch(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_gin_support_via_dispatch(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let foid = fcinfo
         .flinfo
         .as_ref()
         .map(|fi| fi.fn_oid)
         .unwrap_or(0);
-    std::panic::panic_any(types_error::PgError::error(format!(
+    Err(types_error::PgError::error(format!(
         "GIN anyarray_ops support function (OID {foid}) must be invoked through \
          the typed opclass dispatch (gin_extract_value / gin_extract_query / \
          gin_consistent_call_{{bool,tri}} seams), not the fmgr frame; the owned \
          GIN access method dispatches these by FmgrInfo.fn_oid"
-    )));
+    )))
 }
 
-fn builtin(foid: u32, name: &str, nargs: i16) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        // Every ginarrayproc.c support proc is proisstrict => 't' and not
-        // proretset in pg_proc.dat.
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(fc_gin_support_via_dispatch),
-    }
+fn builtin(foid: u32, name: &str, nargs: i16) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            // Every ginarrayproc.c support proc is proisstrict => 't' and not
+            // proretset in pg_proc.dat.
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        fc_gin_support_via_dispatch,
+    )
 }
 
 /// Register the `fmgr_builtins[]` rows for the GIN `anyarray_ops` opclass support
@@ -76,7 +81,7 @@ fn builtin(foid: u32, name: &str, nargs: i16) -> BuiltinFunction {
 /// "ginarrayextract" is not in internal lookup table`). OIDs / nargs from
 /// `pg_proc.dat`.
 pub fn register_gin_array_proc_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- anyarray_ops ----
         builtin(2743, "ginarrayextract", 3),
         // OID 3076: pg_proc.dat `proname => 'ginarrayextract'` but
