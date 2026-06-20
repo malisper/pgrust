@@ -20433,8 +20433,10 @@ name = "backend-utils-adt-ruleutils"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-relation-seams",
+ "backend-access-index-amapi-seams",
  "backend-access-index-genam-seams",
  "backend-catalog-namespace-seams",
+ "backend-commands-tablespace-seams",
  "backend-commands-typecmds-seams",
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
@@ -20443,6 +20445,7 @@ dependencies = [
  "backend-parser-parse-func-seams",
  "backend-partitioning-partbounds-seams",
  "backend-rewrite-core",
+ "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-ruleutils-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -20456,6 +20459,8 @@ dependencies = [
  "common-keywords",
  "mcx",
  "seam-core",
+ "types-cache",
+ "types-catalog",
  "types-core",
  "types-datum",
  "types-error",

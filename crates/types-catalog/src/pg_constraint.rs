@@ -265,3 +265,37 @@ pub struct ConstraintFormCopy {
     /// `ConstraintSetParentConstraint` / `AdjustNotNullInheritance`).
     pub tid: types_tuple::heaptuple::ItemPointerData,
 }
+
+/// The deformed `pg_constraint` row `pg_get_constraintdef_worker`
+/// (ruleutils.c 2193-2612) reads: the fixed-width scalar form plus the
+/// by-reference array / `pg_node_tree` columns the switch arms detoast with
+/// `SysCacheGetAttr*`. Each optional array/text is `None` when the column is
+/// SQL NULL (matching the C `SysCacheGetAttr(..., &isnull)` reads; the
+/// `*NotNull` reads never produce `None` and the caller treats absence as the
+/// C `elog` would).
+#[derive(Clone, Debug)]
+pub struct PgConstraintDefInfo {
+    /// `(Form_pg_constraint) GETSTRUCT(tup)` — the fixed-width scalar columns.
+    pub form: FormData_pg_constraint,
+    /// `conkey` (1-D smallint, FK/PK/UNIQUE referencing columns), `None` when
+    /// SQL NULL.
+    pub conkey: Option<ConKeyArray>,
+    /// `confkey` (1-D smallint, FK referenced columns), `None` when SQL NULL.
+    pub confkey: Option<ConKeyArray>,
+    /// `confdelsetcols` (1-D smallint, FK ON DELETE SET columns), `None` when
+    /// SQL NULL.
+    pub confdelsetcols: Option<ConKeyArray>,
+    /// `conexclop` (1-D oid, EXCLUDE operators), `None` when SQL NULL.
+    pub conexclop: Option<OidArray>,
+    /// `conbin` (`pg_node_tree` CHECK expression), `None` when SQL NULL.
+    pub conbin: Option<alloc::string::String>,
+    /// `indnatts` of the `conindid` index (PRIMARY/UNIQUE INCLUDE rendering),
+    /// `None` when the constraint has no backing index.
+    pub indnatts: Option<i16>,
+    /// `indkey` of the `conindid` index (PRIMARY/UNIQUE INCLUDE column
+    /// numbers), `None` when the constraint has no backing index.
+    pub indkey: Option<alloc::vec::Vec<i16>>,
+    /// `indnullsnotdistinct` of the `conindid` index (UNIQUE NULLS NOT
+    /// DISTINCT rendering), `None` when there is no backing index.
+    pub indnullsnotdistinct: Option<bool>,
+}

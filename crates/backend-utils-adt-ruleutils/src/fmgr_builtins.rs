@@ -161,7 +161,13 @@ fn fc_pg_get_indexdef(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         m.mcx(),
         indexrelid,
         0,
+        None,
+        false,
+        false,
+        false,
+        false,
         crate::PRETTYFLAG_INDENT,
+        true,
     ));
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
@@ -180,7 +186,13 @@ fn fc_pg_get_indexdef_ext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         m.mcx(),
         indexrelid,
         colno,
+        None,
+        colno != 0,
+        false,
+        false,
+        false,
         crate::get_pretty_flags(pretty),
+        true,
     ));
     match res {
         Some(s) => ret_text(fcinfo, s.as_str().as_bytes().to_vec()),
@@ -564,18 +576,24 @@ mod tests {
         assert!(!fcinfo.isnull);
     }
 
-    /// The Slice-2 `pg_get_indexdef` builtin is registered and dispatchable, and
-    /// its worker faithfully seam-panics at the unported `pg_index` syscache
-    /// read (mirror-PG-and-panic) rather than fabricating a definition.
+    /// The index/constraint definition builtins are registered and dispatchable
+    /// by OID with the correct arity. (Exercising the worker bodies needs the
+    /// real syscache/lsyscache/amapi owners installed, which only happens at
+    /// backend init, so the end-to-end deparse is verified by the regress suite
+    /// — see the module docs.)
     #[test]
-    #[should_panic(expected = "pg_get_indexdef_worker")]
-    fn pg_get_indexdef_is_seam_bounded() {
+    fn indexdef_constraintdef_builtins_registered() {
         register_ruleutils_builtins();
-        let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
-        fcinfo.args = vec![NullableDatum::value(Datum::from_u32(16384))];
-        fcinfo.ref_args = vec![None];
-        let entry =
-            backend_utils_fmgr_core::fmgr_isbuiltin(1643).expect("pg_get_indexdef registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let idx = backend_utils_fmgr_core::fmgr_isbuiltin(1643).expect("pg_get_indexdef registered");
+        assert_eq!(idx.nargs, 1);
+        let idx_ext =
+            backend_utils_fmgr_core::fmgr_isbuiltin(2507).expect("pg_get_indexdef_ext registered");
+        assert_eq!(idx_ext.nargs, 3);
+        let con = backend_utils_fmgr_core::fmgr_isbuiltin(1387)
+            .expect("pg_get_constraintdef registered");
+        assert_eq!(con.nargs, 1);
+        let con_ext = backend_utils_fmgr_core::fmgr_isbuiltin(2508)
+            .expect("pg_get_constraintdef_ext registered");
+        assert_eq!(con_ext.nargs, 2);
     }
 }

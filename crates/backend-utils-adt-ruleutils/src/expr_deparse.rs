@@ -256,6 +256,32 @@ fn expr_typmod(expr: &Expr) -> PgResult<i32> {
     Ok(backend_nodes_nodeFuncs_seams::expr_type_info::call(expr)?.typmod)
 }
 
+/// `exprType((const Node *) node)` over a generic `Node` (the index key node in
+/// `pg_get_indexdef_worker`). Non-`Expr` nodes have no type — C's `exprType`
+/// would `elog` on an unrecognized node, but index expression keys are always
+/// `Expr`-derived, so an `InvalidOid` is the faithful fall-through.
+pub(crate) fn expr_type_of_node(node: &Node<'_>) -> PgResult<Oid> {
+    match node.as_expr() {
+        Some(e) => expr_type(e),
+        None => Ok(Oid::default()),
+    }
+}
+
+/// `exprCollation((const Node *) node)` over a generic `Node`.
+pub(crate) fn expr_collation_of_node(node: &Node<'_>) -> PgResult<Oid> {
+    match node.as_expr() {
+        Some(e) => Ok(backend_nodes_nodeFuncs_seams::expr_type_info::call(e)?.collation),
+        None => Ok(Oid::default()),
+    }
+}
+
+/// `looks_like_function(node)` (ruleutils.c 10706) re-exported for the index
+/// deparser (an expressional index column is parenthesized unless it is a bare
+/// function call).
+pub(crate) fn looks_like_function_pub(node: &Node<'_>) -> bool {
+    looks_like_function(node)
+}
+
 /// `format_type_with_typemod(type_oid, typemod)` (format_type.c) — the type's
 /// printable name (flags = 0). The deparser's standard `arg::typename` decorator.
 fn format_type_with_typemod<'mcx>(

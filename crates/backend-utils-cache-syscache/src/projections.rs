@@ -1684,6 +1684,7 @@ use types_catalog::pg_constraint::{
     Anum_pg_constraint_coninhcount, Anum_pg_constraint_connoinherit, Anum_pg_constraint_conperiod,
     Anum_pg_constraint_conkey, Anum_pg_constraint_confkey, Anum_pg_constraint_conpfeqop,
     Anum_pg_constraint_conppeqop, Anum_pg_constraint_conffeqop, Anum_pg_constraint_confdelsetcols,
+    Anum_pg_constraint_conexclop, Anum_pg_constraint_conbin, PgConstraintDefInfo,
 };
 use types_tuple::heaptuple::{INT2OID, OIDOID};
 use backend_access_common_detoast_seams as detoast_seams;
@@ -2095,6 +2096,127 @@ pub(crate) fn search_constraint_form_by_oid(
         form,
         conkey: None,
         tid,
+    }))
+}
+
+/// Read an optional 1-D `int2[]` array column (`SysCacheGetAttr` + `isnull`):
+/// `None` when SQL NULL, else the deformed [`ConKeyArray`].
+fn getattr_option_conkey(
+    mcx: Mcx<'_>,
+    cache_id: i32,
+    tup: &FormedTuple<'_>,
+    attnum: i32,
+) -> PgResult<Option<ConKeyArray>> {
+    let (value, isnull) = SysCacheGetAttr(mcx, cache_id, tup, attnum)?;
+    if isnull {
+        return Ok(None);
+    }
+    match &value {
+        Datum::ByRef(b) => Ok(Some(read_conkey_array(mcx, b)?)),
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(PgError::error("pg_constraint smallint[] column is by-value")),
+    }
+}
+
+/// Read an optional 1-D `oid[]` array column (`SysCacheGetAttr` + `isnull`):
+/// `None` when SQL NULL, else the deformed [`OidArray`].
+fn getattr_option_oidarray(
+    mcx: Mcx<'_>,
+    cache_id: i32,
+    tup: &FormedTuple<'_>,
+    attnum: i32,
+) -> PgResult<Option<OidArray>> {
+    let (value, isnull) = SysCacheGetAttr(mcx, cache_id, tup, attnum)?;
+    if isnull {
+        return Ok(None);
+    }
+    match &value {
+        Datum::ByRef(b) => Ok(Some(read_oid_array(mcx, b)?)),
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => Err(PgError::error("pg_constraint oid[] column is by-value")),
+    }
+}
+
+/// `pg_get_constraintdef_worker`'s `pg_constraint` read (ruleutils.c
+/// 2193-2612): `SearchSysCache1(CONSTROID, conoid)` (the C uses an MVCC
+/// `systable_beginscan` over `ConstraintOidIndexId`, but the syscache read is
+/// equivalent for a by-OID lookup), `GETSTRUCT(Form_pg_constraint)` for the
+/// scalar columns, then `SysCacheGetAttr*` of every by-reference column the
+/// switch arms detoast: `conkey` / `confkey` / `confdelsetcols` (smallint[]),
+/// `conexclop` (oid[]), `conbin` (`pg_node_tree`). For PRIMARY/UNIQUE the C
+/// also opens `SearchSysCache1(INDEXRELID, conForm->conindid)` to read the
+/// backing index's `indnatts` / `indkey` / `indnullsnotdistinct`; we fold that
+/// second fetch here so the worker (which has no syscache access) gets all the
+/// catalog reads in one projection. `Ok(None)` on a constraint cache miss; the
+/// caller decides `missing_ok` vs the `could not find tuple for constraint %u`
+/// `elog`.
+pub(crate) fn search_pg_constraintdef_info<'mcx>(
+    mcx: Mcx<'mcx>,
+    conoid: Oid,
+) -> PgResult<Option<PgConstraintDefInfo>> {
+    let tuple = SearchSysCache1(mcx, CONSTROID, SysCacheKey::Value(KeyDatum::from_oid(conoid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    let form = deform_constraint_form(mcx, &tup)?;
+    let conkey = getattr_option_conkey(mcx, CONSTROID, &tup, Anum_pg_constraint_conkey as i32)?;
+    let confkey = getattr_option_conkey(mcx, CONSTROID, &tup, Anum_pg_constraint_confkey as i32)?;
+    let confdelsetcols =
+        getattr_option_conkey(mcx, CONSTROID, &tup, Anum_pg_constraint_confdelsetcols as i32)?;
+    let conexclop =
+        getattr_option_oidarray(mcx, CONSTROID, &tup, Anum_pg_constraint_conexclop as i32)?;
+    let conbin = getattr_option_text(mcx, CONSTROID, &tup, Anum_pg_constraint_conbin as i32)?;
+    ReleaseSysCache(tup);
+
+    // PRIMARY/UNIQUE: read the backing index's indnatts/indkey/indnullsnotdistinct
+    // (ruleutils.c 2399-2449). The C errors "cache lookup failed for index %u"
+    // if conindid is valid but missing; here a miss yields None and the caller
+    // raises that error.
+    let (indnatts, indkey, indnullsnotdistinct) = if OidIsValid(form.conindid) {
+        let itup = SearchSysCache1(
+            mcx,
+            INDEXRELID,
+            SysCacheKey::Value(KeyDatum::from_oid(form.conindid)),
+        )?;
+        match itup {
+            Some(it) => {
+                let n = getattr_i16(mcx, INDEXRELID, &it, Anum_pg_index_indnatts)?;
+                let nnd = getattr_bool(mcx, INDEXRELID, &it, Anum_pg_index_indnullsnotdistinct)?;
+                // indkey int2vector -> i16 values.
+                let indkey_datum =
+                    SysCacheGetAttrNotNull(mcx, INDEXRELID, &it, Anum_pg_index_indkey)?;
+                let indkey_bytes = match &indkey_datum {
+                    Datum::ByRef(b) => b.to_vec(),
+                    _ => return Err(PgError::error("indkey attribute is by-value")),
+                };
+                let ikv = arrayfuncs_seams::int2vector_to_i16s_bytes::call(mcx, &indkey_bytes)?;
+                let indkey: Vec<i16> = ikv.iter().copied().collect();
+                ReleaseSysCache(it);
+                (Some(n), Some(indkey), Some(nnd))
+            }
+            None => (None, None, None),
+        }
+    } else {
+        (None, None, None)
+    };
+
+    Ok(Some(PgConstraintDefInfo {
+        form,
+        conkey,
+        confkey,
+        confdelsetcols,
+        conexclop,
+        conbin,
+        indnatts,
+        indkey,
+        indnullsnotdistinct,
     }))
 }
 

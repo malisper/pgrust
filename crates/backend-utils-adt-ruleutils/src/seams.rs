@@ -56,6 +56,15 @@ pub fn init_seams() {
         crate::expr_deparse::get_range_partbound_string,
     );
 
+    // generate_collation_name / generate_opclass_name (ruleutils.c 13543 /
+    // 12898): the schema-qualified, quoted name of a collation / opclass OID.
+    // The expression deparser and the catalog def-builders reach these through
+    // their ruleutils-owned seams; the owners are now ported in this crate.
+    backend_utils_adt_ruleutils_seams::generate_collation_name::set(
+        crate::generate_collation_name,
+    );
+    backend_utils_adt_ruleutils_seams::generate_opclass_name::set(crate::generate_opclass_name);
+
     backend_utils_adt_ruleutils_seams::quote_identifier::set(crate::quote_identifier);
     backend_utils_adt_ruleutils_seams::quote_qualified_identifier::set(
         crate::quote_qualified_identifier,

@@ -257,7 +257,14 @@ fn ruleutils_relation_real_colnames<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
 ) -> PgResult<PgVec<'mcx, Option<mcx::PgString<'mcx>>>> {
-    crate::core_entry_store::with_relation(relid, |rd| {
+    // C: rel = relation_open(rte->relid, AccessShareLock); ... relation_close.
+    // The deparser can be invoked on a relation that is not already pinned in
+    // the current statement (e.g. standalone `pg_get_indexdef` /
+    // `pg_get_constraintdef` over a partial-index predicate or CHECK Var), so
+    // open-and-pin here rather than assuming a live entry. The RAII guard
+    // unpins on drop, mirroring `relation_close`.
+    let rel = crate::core_entry_store::RelationRef::open(relid)?;
+    rel.with(|rd| {
         let mut out = PgVec::new_in(mcx);
         out.try_reserve(rd.rd_att.attrs.len())
             .map_err(|_| mcx.oom(0))?;
@@ -269,7 +276,7 @@ fn ruleutils_relation_real_colnames<'mcx>(
             }
         }
         Ok(out)
-    })?
+    })
 }
 
 /// `rel->rd_isnailed` (rel.h) — read off the live owned relcache entry.

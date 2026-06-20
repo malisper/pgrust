@@ -2534,6 +2534,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pg_get_constraintdef_worker`'s `pg_constraint` read (ruleutils.c
+    /// 2193-2612): `SearchSysCache1(CONSTROID, conoid)` + `GETSTRUCT` for the
+    /// scalar form, plus `SysCacheGetAttr*` of every by-reference column the
+    /// deparse switch arms detoast (`conkey` / `confkey` / `confdelsetcols`
+    /// smallint[], `conexclop` oid[], `conbin` `pg_node_tree`), and — when
+    /// `conindid` is valid — the backing index's `indnatts` / `indkey` /
+    /// `indnullsnotdistinct` (the C `SearchSysCache1(INDEXRELID, conindid)`).
+    /// `Ok(None)` on a constraint cache miss so the caller chooses `missing_ok`
+    /// vs the `could not find tuple for constraint %u` `elog`; the installer
+    /// owns the `ReleaseSysCache`.
+    pub fn search_pg_constraintdef_info<'mcx>(
+        mcx: Mcx<'mcx>,
+        conoid: Oid,
+    ) -> PgResult<Option<types_catalog::pg_constraint::PgConstraintDefInfo>>
+);
+
+seam_core::seam!(
     /// `SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid))` +
     /// `GETSTRUCT(Form_pg_class)->relchecks` (RemoveConstraintById): the
     /// relation's check-constraint count. `Ok(None)` on a cache miss; the

@@ -387,6 +387,184 @@ fn add_cast_to<'mcx>(mcx: Mcx<'mcx>, buf: &mut alloc::vec::Vec<u8>, typid: Oid) 
     Ok(())
 }
 
+/* -------------------------------------------------------------------------- *
+ * Catalog name generators / option flatteners used by the index & constraint
+ * definition deparsers (ruleutils.c 12861-13668).
+ * -------------------------------------------------------------------------- */
+
+/// `generate_collation_name(collid)` (ruleutils.c 13543-13567) — the
+/// schema-qualified, quoted name of a collation. Installed as the ruleutils
+/// `generate_collation_name` inward seam (the expression deparser reaches it
+/// through that seam; the index deparser calls it directly).
+pub fn generate_collation_name<'mcx>(mcx: Mcx<'mcx>, collid: Oid) -> PgResult<PgString<'mcx>> {
+    // tp = SearchSysCache1(COLLOID, collid); elog(ERROR) on miss.
+    let nm = backend_utils_cache_syscache_seams::collation_namespace_and_name::call(mcx, collid)?
+        .ok_or_else(|| elog_error(format!("cache lookup failed for collation {collid}")))?;
+
+    // nspname = CollationIsVisible(collid) ? NULL : get_namespace_name_or_temp(collnamespace).
+    let nspname: Option<PgString<'mcx>> =
+        if backend_catalog_namespace_seams::collation_is_visible::call(mcx, collid)? {
+            None
+        } else {
+            backend_utils_cache_lsyscache_seams::get_namespace_name_or_temp::call(mcx, nm.namespace)?
+        };
+
+    // result = quote_qualified_identifier(nspname, collname);
+    quote_qualified_identifier(mcx, nspname.as_deref(), nm.name.as_str())
+}
+
+/// `get_opclass_name(opclass, actual_datatype, buf)` (ruleutils.c 12861-12890) —
+/// append ` <opclass-name>` to `buf`, but only when the opclass is not the
+/// default for `actual_datatype` (or `actual_datatype` is `InvalidOid`). The
+/// name is schema-qualified iff the opclass is not visible in the search path.
+pub(crate) fn get_opclass_name<'mcx>(
+    mcx: Mcx<'mcx>,
+    buf: &mut alloc::string::String,
+    opclass: Oid,
+    actual_datatype: Oid,
+) -> PgResult<()> {
+    // opcrec = SearchSysCache1(CLAOID, opclass); elog(ERROR) on miss.
+    let (opcnamespace, opcmethod, opcname) =
+        backend_utils_cache_syscache_seams::opclass_namespace_method_name::call(mcx, opclass)?
+            .ok_or_else(|| elog_error(format!("cache lookup failed for opclass {opclass}")))?;
+
+    // if (!OidIsValid(actual_datatype) ||
+    //     GetDefaultOpClass(actual_datatype, opcrec->opcmethod) != opclass)
+    let is_default = oid_is_valid(actual_datatype)
+        && backend_utils_cache_lsyscache_seams::get_default_opclass::call(
+            actual_datatype,
+            opcmethod,
+        )? == opclass;
+    if !is_default {
+        if backend_catalog_namespace_seams::opclass_is_visible::call(mcx, opclass)? {
+            // appendStringInfo(buf, " %s", quote_identifier(opcname));
+            let q = quote_identifier(mcx, opcname.as_str())?;
+            buf.push(' ');
+            buf.push_str(q.as_str());
+        } else {
+            // nspname = get_namespace_name_or_temp(opcrec->opcnamespace);
+            // appendStringInfo(buf, " %s.%s", quote_identifier(nspname),
+            //                  quote_identifier(opcname));
+            let nspname =
+                backend_utils_cache_lsyscache_seams::get_namespace_name_or_temp::call(
+                    mcx,
+                    opcnamespace,
+                )?;
+            let qnsp = quote_identifier(mcx, nspname.as_deref().unwrap_or(""))?;
+            let qopc = quote_identifier(mcx, opcname.as_str())?;
+            buf.push(' ');
+            buf.push_str(qnsp.as_str());
+            buf.push('.');
+            buf.push_str(qopc.as_str());
+        }
+    }
+    Ok(())
+}
+
+/// `generate_opclass_name(opclass)` (ruleutils.c 12898-12907) — the
+/// schema-qualified opclass name (no leading space). Installed as the ruleutils
+/// `generate_opclass_name` inward seam.
+pub fn generate_opclass_name<'mcx>(mcx: Mcx<'mcx>, opclass: Oid) -> PgResult<PgString<'mcx>> {
+    let mut buf = alloc::string::String::new();
+    // get_opclass_name(opclass, InvalidOid, &buf);
+    get_opclass_name(mcx, &mut buf, opclass, Oid::default())?;
+    // return &buf.data[1];  /* get_opclass_name() prepends space */
+    PgString::from_str_in(buf.strip_prefix(' ').unwrap_or(&buf), mcx)
+}
+
+/// `get_reloptions(buf, reloptions)` (ruleutils.c 13587-13637) — render a
+/// `text[]` of `name=value` reloptions into `buf`.
+fn get_reloptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    buf: &mut alloc::string::String,
+    reloptions: &[u8],
+) -> PgResult<()> {
+    use alloc::string::String;
+
+    // deconstruct_array_builtin(DatumGetArrayTypeP(reloptions), TEXTOID, ...).
+    let options =
+        backend_utils_adt_arrayfuncs_seams::deconstruct_text_array::call(mcx, reloptions)?;
+
+    for (i, option) in options.iter().enumerate() {
+        let option = option.as_str();
+        // name=value split on the first '='; missing '=' -> empty value.
+        let (name, value) = match option.find('=') {
+            Some(pos) => (&option[..pos], &option[pos + 1..]),
+            None => (option, ""),
+        };
+
+        if i > 0 {
+            buf.push_str(", ");
+        }
+        // appendStringInfo(buf, "%s=", quote_identifier(name));
+        let qname = quote_identifier(mcx, name)?;
+        buf.push_str(qname.as_str());
+        buf.push('=');
+
+        // if (quote_identifier(value) == value) append value else simple_quote_literal(value).
+        // quote_identifier returns its argument verbatim iff no quoting is needed.
+        let qval = quote_identifier(mcx, value)?;
+        if qval.as_str() == value {
+            buf.push_str(value);
+        } else {
+            simple_quote_literal_into(buf, value);
+        }
+    }
+    let _ = String::new;
+    Ok(())
+}
+
+/// `simple_quote_literal(buf, val)` (ruleutils.c 11963) rendered into an owned
+/// `String` (the catalog-def builders accumulate into a plain `String`, not a
+/// `DeparseContext` buffer). Doubles embedded single quotes / backslashes and
+/// emits the `E''` prefix when a backslash is present.
+fn simple_quote_literal_into(buf: &mut alloc::string::String, val: &str) {
+    // Mirror simple_quote_literal: leading ' (with E if needed), escape ' and \\.
+    let needs_e = val.contains('\\');
+    if needs_e {
+        buf.push('E');
+    }
+    buf.push('\'');
+    for ch in val.chars() {
+        if ch == '\'' || ch == '\\' {
+            buf.push(ch);
+        }
+        buf.push(ch);
+    }
+    buf.push('\'');
+}
+
+/// `oid_is_valid` re-exported for the catalog-def modules.
+pub(crate) fn oid_is_valid_pub(oid: Oid) -> bool {
+    oid_is_valid(oid)
+}
+
+/// `get_reloptions(buf, reloptions)` re-exported for the index deparser (opclass
+/// options rendering).
+pub(crate) fn get_reloptions_pub<'mcx>(
+    mcx: Mcx<'mcx>,
+    buf: &mut alloc::string::String,
+    reloptions: &[u8],
+) -> PgResult<()> {
+    get_reloptions(mcx, buf, reloptions)
+}
+
+/// `flatten_reloptions(relid)` (ruleutils.c 13642-13669) — the relation's
+/// reloptions as a `name=value, …` string, or `None` when unset.
+pub(crate) fn flatten_reloptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Option<PgString<'mcx>>> {
+    // reloptions = SysCacheGetAttr(RELOID, tuple, Anum_pg_class_reloptions, &isnull);
+    let token = backend_utils_cache_syscache_seams::fetch_class_reloptions::call(mcx, relid)?;
+    if token.is_null {
+        return Ok(None);
+    }
+    let mut buf = alloc::string::String::new();
+    get_reloptions(mcx, &mut buf, &token.bytes)?;
+    Ok(Some(PgString::from_str_in(&buf, mcx)?))
+}
+
 mod seams;
 pub use seams::init_seams;
 

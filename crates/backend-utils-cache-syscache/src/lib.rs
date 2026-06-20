@@ -1106,6 +1106,9 @@ pub fn init_seams() {
     backend_utils_cache_syscache_seams::search_constraint_form_by_oid::set(
         projections::search_constraint_form_by_oid,
     );
+    backend_utils_cache_syscache_seams::search_pg_constraintdef_info::set(
+        projections::search_pg_constraintdef_info,
+    );
     backend_utils_cache_syscache_seams::fetch_relchecks::set(projections::fetch_relchecks);
     backend_utils_cache_syscache_seams::search_syscache_copy_pg_class_tuple::set(
         projections::search_syscache_copy_pg_class_tuple,
