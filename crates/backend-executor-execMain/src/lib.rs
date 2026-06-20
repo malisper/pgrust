@@ -1948,6 +1948,107 @@ pub fn ExecPartitionCheckEmitError<'mcx>(
     Err(err.into_error())
 }
 
+/// The ATTACH-PARTITION leg of `ATRewriteTable` (tablecmds.c): scan the table
+/// being attached and verify every live row satisfies the partition constraint
+/// `partConstraint` (an implicit-AND list of `Expr` clauses, already mapped to
+/// the table's attribute numbers). On the first violating row, `ereport(ERROR,
+/// ERRCODE_CHECK_VIOLATION, "partition constraint of relation \"%s\" is
+/// violated by some row")`.
+///
+/// This builds a throwaway `EState`, compiles the constraint via
+/// `ExecPrepareCheck`, and runs a `table_beginscan` / `table_scan_getnextslot`
+/// loop calling `ExecCheck` per row — the executor-native form of the C
+/// `ATRewriteTable` partition-constraint scan. Installed as the
+/// `validate_partition_constraint_scan` seam (consumed by tablecmds Phase 3).
+pub fn validate_partition_constraint_scan<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    relid: types_core::primitive::Oid,
+    part_constraint: &[types_nodes::primnodes::Expr],
+) -> PgResult<()> {
+    // NoLock == 0 (lmgr.h LOCKMODE); types-storage is not a dep of this crate.
+    const NoLock: i32 = 0;
+
+    // Nothing to validate.
+    if part_constraint.is_empty() {
+        return Ok(());
+    }
+
+    // oldrel = table_open(tab->relid, NoLock); (the ALTER already holds a lock).
+    let oldrel = backend_access_common_relation::relation_open(mcx, relid, NoLock)?;
+    let rel_alias = oldrel.alias();
+
+    // estate = CreateExecutorState(); estate->es_snapshot = GetActiveSnapshot();
+    let mut estate = execUtils::create_executor_state_in(mcx)?;
+    estate.es_snapshot = backend_utils_time_snapmgr_seams::get_active_snapshot::call()?;
+    estate.es_direction = ScanDirection::ForwardScanDirection;
+
+    // partqualstate = ExecPrepareCheck(partConstraint, estate).
+    let mut owned: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+        alloc::vec::Vec::with_capacity(part_constraint.len());
+    for e in part_constraint {
+        owned.push(e.clone_in(mcx)?);
+    }
+    let mut partqualstate = execExpr::exec_prepare_check(&owned, &mut estate)?;
+
+    // scan slot in the EState pool + per-tuple ExprContext.
+    let tupdesc = Some(mcx::alloc_in(mcx, rel_alias.rd_att.clone_in(mcx)?)?);
+    let callbacks = backend_access_table_tableam::table_slot_callbacks(&rel_alias);
+    let slot_id =
+        backend_executor_execTuples_seams::exec_init_extra_tuple_slot::call(&mut estate, tupdesc, callbacks)?;
+    let econtext = execUtils::MakePerTupleExprContext(&mut estate)?;
+
+    let snapshot = estate
+        .es_snapshot
+        .clone()
+        .expect("validate_partition_constraint_scan: no active snapshot");
+
+    let result: PgResult<()> = (|| {
+        let mut scan =
+            backend_access_table_tableam_seams::table_beginscan::call(mcx, &rel_alias, snapshot)?;
+
+        loop {
+            backend_tcop_postgres_seams::check_for_interrupts::call()?;
+
+            let got = backend_access_table_tableam_seams::table_scan_getnextslot_direction::call(
+                mcx,
+                &mut scan,
+                estate.es_direction,
+                estate.slot_data_mut(slot_id),
+            )?;
+            if !got {
+                break;
+            }
+
+            // econtext->ecxt_scantuple = slot; if (!ExecCheck(partqualstate,
+            // econtext)) ereport(ERROR, ...).
+            estate.ecxt_mut(econtext).ecxt_scantuple = Some(slot_id);
+            let ok = match partqualstate.as_mut() {
+                Some(state) => execExpr::exec_check(Some(state), econtext, &mut estate)?,
+                None => execExpr::exec_check(None, econtext, &mut estate)?,
+            };
+            if !ok {
+                backend_access_table_tableam::table_endscan(scan)?;
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_CHECK_VIOLATION)
+                    .errmsg(alloc::format!(
+                        "partition constraint of relation \"{}\" is violated by some row",
+                        rel_alias.name()
+                    ))
+                    .into_error());
+            }
+
+            // ResetExprContext(econtext) is implicit per-iteration in the owned
+            // model (the per-tuple context is reset by the next slot fill).
+        }
+
+        backend_access_table_tableam::table_endscan(scan)?;
+        Ok(())
+    })();
+
+    oldrel.close(NoLock)?;
+    result
+}
+
 /// `ExecConstraints(resultRelInfo, slot, estate)` (execMain.c): check the
 /// relation's NOT NULL and CHECK constraints against `slot`. The partition
 /// constraint is *not* checked here.
@@ -2298,6 +2399,7 @@ pub fn init_seams() {
     seams::exec_constraints::set(ExecConstraints);
     seams::exec_partition_check::set(ExecPartitionCheck);
     seams::exec_partition_check_emit_error::set(ExecPartitionCheckEmitError);
+    seams::validate_partition_constraint_scan::set(validate_partition_constraint_scan);
     seams::exec_check_permissions_select::set(exec_check_permissions_select);
     seams::exec_check_one_rel_perms_view::set(exec_check_one_rel_perms_view);
     seams::exec_build_slot_value_description::set(ExecBuildSlotValueDescription);

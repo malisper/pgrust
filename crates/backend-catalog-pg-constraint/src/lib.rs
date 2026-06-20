@@ -2838,6 +2838,206 @@ const OIDOID: Oid = 26;
 const ANYRANGEOID: Oid = 3831;
 const ANYMULTIRANGEOID: Oid = 4537;
 
+/* ===========================================================================
+ * MergeConstraintsIntoExisting (tablecmds.c:17638)
+ * ========================================================================= */
+
+/// `((Form_pg_constraint) GETSTRUCT(tup))->connoinherit` — read the
+/// `connoinherit` flag off a constraint tuple. Used by
+/// `MergeAttributesIntoExisting` (tablecmds) to decide whether a parent's
+/// not-null constraint is inherited.
+pub fn constraint_connoinherit(mcx: Mcx<'_>, tup: &FormedTuple<'_>) -> PgResult<bool> {
+    // Read the whole row to deform connoinherit; the pg_constraint descriptor
+    // comes from the relcache. We deform via a fresh pg_constraint open.
+    let pg_constraint = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+    let cols = heap_deform_tuple(mcx, &tup.tuple, &pg_constraint.rd_att, &tup.data)?;
+    let mut values: PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(mcx, cols.len())?;
+    for (value, _null) in cols.iter() {
+        values.push(value.clone());
+    }
+    let form = form_pg_constraint(&values);
+    pg_constraint.close(AccessShareLock)?;
+    Ok(form.connoinherit)
+}
+
+/// `MergeConstraintsIntoExisting(child_rel, parent_rel)` (tablecmds.c:17638) —
+/// match the parent's inheritable CHECK / NOT NULL constraints to the child and
+/// bump each matched child constraint's `coninhcount` (and clear `conislocal`
+/// for a partitioned parent). Lives here because the `Form_pg_constraint` deform
+/// + `pg_constraint` scan/write substrate is owned by this crate.
+///
+/// NOT NULL constraints are matched by attribute number and fully ported. CHECK
+/// constraints are matched by name; the C compares their *definitions* via
+/// `constraints_equivalent` (reverse-compile to source through `pg_get_expr`),
+/// which needs the ruleutils deparser (unported). When both parent and child
+/// carry a same-named CHECK constraint, this raises a precise error noting that
+/// gap rather than risk an unverified merge; a parent with no CHECK constraints
+/// (the ATTACH / partition common case) never reaches it.
+pub fn merge_constraints_into_existing<'mcx>(
+    mcx: Mcx<'mcx>,
+    child_rel: &RelationData<'mcx>,
+    parent_rel: &RelationData<'mcx>,
+) -> PgResult<()> {
+    let parent_relid = parent_rel.rd_id;
+
+    let constraintrel = table::table_open(mcx, CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+
+    // attmap = build_attrmap_by_name(parent_desc, child_desc, true);
+    let attmap = backend_access_common_next::attmap::build_attrmap_by_name(
+        mcx,
+        &parent_rel.rd_att,
+        &child_rel.rd_att,
+        true,
+    )?;
+
+    let parent_partitioned = parent_rel.rd_rel.relkind
+        == types_tuple::access::RELKIND_PARTITIONED_TABLE;
+
+    // Collect the parent's inheritable CHECK / NOT NULL constraints first (the C
+    // nests two scans on the same relation; we materialize the outer scan to
+    // avoid an overlapping systable scan).
+    struct ParentCon {
+        contype: i8,
+        conname: [u8; NAMEDATALEN],
+        connoinherit: bool,
+        attno: AttrNumber, /* for NOT NULL */
+    }
+    let mut parent_cons: Vec<ParentCon> = Vec::new();
+    {
+        let key = [oid_key(Anum_pg_constraint_conrelid, parent_relid)?];
+        systable_scan_foreach(&constraintrel, ConstraintRelidTypidNameIndexId, &key, |row| {
+            let ct = row.form.contype;
+            if ct != CONSTRAINT_CHECK && ct != CONSTRAINT_NOTNULL {
+                return Ok(true);
+            }
+            if row.form.connoinherit {
+                return Ok(true);
+            }
+            let attno = if ct == CONSTRAINT_NOTNULL {
+                extractNotNullColumn(&row.htup)?
+            } else {
+                InvalidAttrNumber
+            };
+            parent_cons.push(ParentCon {
+                contype: ct,
+                conname: row.form.conname,
+                connoinherit: row.form.connoinherit,
+                attno,
+            });
+            Ok(true)
+        })?;
+    }
+
+    for parent_con in parent_cons.iter() {
+        let mut found = false;
+
+        // For a CHECK constraint matched by name, the C verifies equivalence via
+        // the deparser — unported.
+        if parent_con.contype == CONSTRAINT_CHECK {
+            constraintrel.close(RowExclusiveLock)?;
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(
+                    "ATTACH/INHERIT merging an inherited CHECK constraint is not yet \
+                     supported (constraints_equivalent needs the ruleutils pg_get_expr \
+                     deparser, unported)"
+                        .to_string(),
+                )
+                .into_error());
+        }
+
+        // NOT NULL: match the child constraint by attribute number.
+        let child_key = [oid_key(Anum_pg_constraint_conrelid, child_rel.rd_id)?];
+        let mut matched: Option<(ItemPointerData, FormData_pg_constraint, FormedTuple<'mcx>)> = None;
+        systable_scan_foreach(&constraintrel, ConstraintRelidTypidNameIndexId, &child_key, |row| {
+            if row.form.contype != parent_con.contype {
+                return Ok(true);
+            }
+            // NOT NULL matched by attribute number.
+            let child_attno = extractNotNullColumn(&row.htup)?;
+            // parent_attno != attmap->attnums[child_attno - 1] ⇒ skip.
+            let mapped = attmap
+                .attnums
+                .get((child_attno - 1) as usize)
+                .copied()
+                .unwrap_or(InvalidAttrNumber);
+            if parent_con.attno != mapped {
+                return Ok(true);
+            }
+            matched = Some((row.tid, row.form.clone(), row.htup.clone_in(mcx)?));
+            Ok(false)
+        })?;
+
+        if let Some((tid, mut child_form, _htup)) = matched {
+            // If the child constraint is NO INHERIT, cannot merge.
+            if child_form.connoinherit {
+                constraintrel.close(RowExclusiveLock)?;
+                return Err(ereport(ERROR)
+                    .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errmsg(format!(
+                        "constraint \"{}\" conflicts with non-inherited constraint on child table \"{}\"",
+                        name_str(&child_form.conname),
+                        child_rel_name(child_rel)
+                    ))
+                    .into_error());
+            }
+
+            // Bump the child constraint's inheritance count.
+            let mut newcount = child_form.coninhcount;
+            if pg_add_s16_overflow(child_form.coninhcount, 1, &mut newcount) {
+                constraintrel.close(RowExclusiveLock)?;
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+                    .errmsg("too many inheritance parents".to_string())
+                    .into_error());
+            }
+            child_form.coninhcount = newcount;
+
+            // For a partitioned parent, the inherited constraint is never local.
+            if parent_partitioned {
+                child_form.conislocal = false;
+            }
+
+            let fields = ConstraintFieldUpdate {
+                conname: child_form.conname,
+                connamespace: child_form.connamespace,
+                conislocal: child_form.conislocal,
+                coninhcount: child_form.coninhcount,
+                conparentid: child_form.conparentid,
+                convalidated: child_form.convalidated,
+                connoinherit: child_form.connoinherit,
+                conenforced: child_form.conenforced,
+            };
+            indexing_seams::catalog_tuple_update_pg_constraint::call(&constraintrel, tid, &fields)?;
+            found = true;
+        }
+
+        if !found {
+            // NOT NULL: the child is missing the constraint.
+            constraintrel.close(RowExclusiveLock)?;
+            let colname = lsyscache_seams::get_attname::call(mcx, parent_relid, parent_con.attno, false)?
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default();
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                .errmsg(format!(
+                    "column \"{}\" in child table \"{}\" must be marked NOT NULL",
+                    colname,
+                    child_rel_name(child_rel)
+                ))
+                .into_error());
+        }
+    }
+
+    constraintrel.close(RowExclusiveLock)?;
+    Ok(())
+}
+
+/// `RelationGetRelationName(child_rel)` as an owned `String`.
+fn child_rel_name(rel: &RelationData<'_>) -> String {
+    rel.name().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

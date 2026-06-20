@@ -9,6 +9,12 @@ name = "backend_commands_tablecmds"
 path = "src/lib.rs"
 
 [dependencies]
+backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
+backend-catalog-partition = { path = "../backend-catalog-partition" }
+backend-optimizer-util-predtest-seams = { path = "../backend-optimizer-util-predtest-seams" }
+backend-optimizer-prep-prepqual-seams = { path = "../backend-optimizer-prep-prepqual-seams" }
+backend-utils-cache-inval = { path = "../backend-utils-cache-inval" }
+backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }

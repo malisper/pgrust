@@ -9,6 +9,9 @@
 
 extern crate alloc;
 
+use mcx::Mcx;
+use types_error::PgResult;
+use types_nodes::primnodes::Expr;
 use types_pathnodes::{NodeId, PlannerInfo};
 
 seam_core::seam!(
@@ -24,4 +27,19 @@ seam_core::seam!(
         restriction_clauses: &[NodeId],
         weak: bool
     ) -> bool
+);
+
+seam_core::seam!(
+    /// `predicate_implied_by(predicate, clause, weak)` (predtest.c) over bare
+    /// owned `Expr` lists with a NULL planner root — the form
+    /// `ConstraintImpliedByRelConstraint` (tablecmds.c) calls. Both lists are
+    /// implicit-AND conjunctions of immutable clauses with `varno = 1`. Returns
+    /// whether `clause` proves `predicate`; the catalog lookups in the prover can
+    /// `ereport(ERROR)`, carried on `Err`.
+    pub fn predicate_implied_by_exprs<'mcx>(
+        mcx: Mcx<'mcx>,
+        predicate: &[Expr],
+        clause: &[Expr],
+        weak: bool
+    ) -> PgResult<bool>
 );

@@ -246,6 +246,21 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The ATTACH-PARTITION leg of `ATRewriteTable` (tablecmds.c): scan the
+    /// relation `relid` and verify every live row satisfies the implicit-AND
+    /// `part_constraint` (already mapped to `relid`'s attribute numbers). The
+    /// first violating row raises `ereport(ERROR, ERRCODE_CHECK_VIOLATION)`,
+    /// carried on `Err`; an empty constraint or empty table is a no-op. Owned by
+    /// execMain (it builds a throwaway `EState` + `ExecPrepareCheck` + scan loop
+    /// + `ExecCheck`).
+    pub fn validate_partition_constraint_scan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: types_core::primitive::Oid,
+        part_constraint: &[types_nodes::primnodes::Expr],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ExecLookupResultRelByOid(node, resultoid, missing_ok, update_cache)`
     /// (execMain.c): find the `ResultRelInfo` already known to the
     /// `ModifyTableState` for the relation `resultoid`, returning its EState

@@ -1024,7 +1024,9 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_PARTITIONED_TABLE | ATT_PARTITIONED_INDEX,
             )?;
-            unported("ATTACH PARTITION");
+            // C: `cmd->recurse = false;` (never auto-recurses) and the catch-all
+            // tail sets `pass = AT_PASS_MISC`. Execution happens in phase 2.
+            pass = AT_PASS_MISC;
         }
         AT_DetachPartition => {
             ATSimplePermissions(cmd.subtype, rel, ATT_PARTITIONED_TABLE)?;
@@ -1519,7 +1521,40 @@ fn ATExecCmd<'mcx>(
             _address = crate::at_column::ATExecForceNoForceRowSecurity(rel, false)?;
         }
         AT_GenericOptions => unported("OPTIONS (ATExecGenericOptions)"),
-        AT_AttachPartition => unported("ATTACH PARTITION (ATExecAttachPartition)"),
+        AT_AttachPartition => {
+            // cmd = ATParseTransformCmd(wqueue, tab, rel, cmd, false, ...): transform
+            // the FOR VALUES bound (raw A_Const → PartitionRangeDatum/Const) before
+            // execution, exactly as C's ATExecCmd does for this subcommand.
+            let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");
+            let res = (|| {
+                let transformed = crate::at_coladd::ATParseTransformCmd(
+                    mcx,
+                    wqueue,
+                    ti,
+                    &owned_rel,
+                    cmd.clone_in(mcx)?,
+                    false,
+                    lockmode,
+                    cur_pass,
+                    context,
+                )?
+                .expect("ATParseTransformCmd returned None for ATTACH PARTITION");
+                let pc = transformed
+                    .def
+                    .as_deref()
+                    .and_then(|d| d.as_partitioncmd())
+                    .expect("AT_AttachPartition: transformed cmd.def is not a PartitionCmd");
+                // C: rd_rel->relkind == RELKIND_PARTITIONED_TABLE ⇒ ATExecAttachPartition;
+                // RELKIND_PARTITIONED_INDEX ⇒ ATExecAttachPartitionIdx (unported).
+                if owned_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+                    crate::at_attach::ATExecAttachPartition(mcx, wqueue, &owned_rel, pc)
+                } else {
+                    unported("ATTACH PARTITION on a partitioned index (ATExecAttachPartitionIdx)");
+                }
+            })();
+            wqueue[ti].rel = Some(owned_rel);
+            _address = res?;
+        }
         AT_DetachPartition => unported("DETACH PARTITION (ATExecDetachPartition)"),
         AT_DetachPartitionFinalize => {
             unported("DETACH PARTITION FINALIZE (ATExecDetachPartitionFinalize)")
@@ -1568,9 +1603,23 @@ fn ATRewriteTables<'mcx>(
             let relid = wqueue[ti].relid;
             crate::at_constraint::at_verify_not_null(mcx, relid)?;
         }
-        // Also: ATTACH PARTITION constraint validation lives here.
-        if wqueue[ti].partition_constraint.is_some() {
-            unported("ATRewriteTable (ATTACH PARTITION constraint validation)");
+        // Also: ATTACH PARTITION constraint validation. `tab->partition_constraint`
+        // holds the single ANDed constraint Expr (queued by
+        // QueuePartitionConstraintValidation when it could not prove the bound
+        // from existing constraints). Scan the table and verify every row, via the
+        // execMain `validate_partition_constraint_scan` seam (the ATTACH leg of C's
+        // ATRewriteTable).
+        if let Some(part_constraint) = wqueue[ti].partition_constraint.as_ref() {
+            let relid = wqueue[ti].relid;
+            let expr = part_constraint
+                .as_expr()
+                .cloned()
+                .expect("partition_constraint is not an Expr");
+            backend_executor_execMain_seams::validate_partition_constraint_scan::call(
+                mcx,
+                relid,
+                &[expr],
+            )?;
         }
     }
 

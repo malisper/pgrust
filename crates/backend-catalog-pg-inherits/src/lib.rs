@@ -488,6 +488,50 @@ pub fn has_superclass(relationId: Oid) -> PgResult<bool> {
     Ok(result)
 }
 
+/// The pg_inherits dup-parent check + max-`inhseqno` scan at the head of
+/// `CreateInheritance` (tablecmds.c:17390-17415): scan pg_inherits by
+/// `child_relid`, reject a row whose `inhparent == parent_relid` (the child
+/// would inherit from the parent more than once), and return the highest
+/// `inhseqno` seen (0 if none). The caller adds 1 for the new row's seqno.
+/// `parent_name` is used only for the duplicate-parent error message.
+pub fn next_inheritance_seqno_checked<'mcx>(
+    mcx: Mcx<'mcx>,
+    child_relid: Oid,
+    parent_relid: Oid,
+    parent_name: &str,
+) -> PgResult<i32> {
+    // Note: RowExclusiveLock because the caller will write pg_inherits next.
+    let catalog = open_inherits(mcx, RowExclusiveLock)?;
+    let key = oid_key(Anum_pg_inherits_inhrelid, child_relid)?;
+
+    // inhseqno sequences start at 1.
+    let mut inhseqno = 0i32;
+    let mut dup_parent = false;
+    systable_scan_foreach(&catalog, InheritsRelidSeqnoIndexId, key, |row| {
+        if row.form.inhparent == parent_relid {
+            dup_parent = true;
+            return Ok(false);
+        }
+        if row.form.inhseqno > inhseqno {
+            inhseqno = row.form.inhseqno;
+        }
+        Ok(true)
+    })?;
+
+    catalog.close(RowExclusiveLock)?;
+
+    if dup_parent {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_DUPLICATE_TABLE)
+            .errmsg(format!(
+                "relation \"{parent_name}\" would be inherited from more than once"
+            ))
+            .into_error());
+    }
+
+    Ok(inhseqno)
+}
+
 /*
  * Given two type OIDs, determine whether the first is a complex type (class
  * type) that inherits from the second.

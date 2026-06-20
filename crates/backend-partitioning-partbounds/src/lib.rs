@@ -22,6 +22,8 @@
 //! out on the unported `transformPartitionBound` / catalog node-construction
 //! machinery); only the routing-search leg lands.
 
+mod qual;
+
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::Oid;
@@ -1343,6 +1345,23 @@ pub fn init_seams() {
     seams::partition_range_datum_bsearch::set(partition_range_datum_bsearch);
     seams::partition_rbound_datum_cmp::set(partition_rbound_datum_cmp);
     seams::check_new_partition_bound::set(check_new_partition_bound);
+    seams::qual_from_partbound::set(qual::qual_from_partbound_seam);
+    seams::get_qual_from_partbound::set(get_qual_from_partbound_seam);
+}
+
+/// Adapter installing `get_qual_from_partbound` (partbounds.c:249): build the
+/// implicit-AND qual `Node` list from a directly-supplied bound spec.
+fn get_qual_from_partbound_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    key: &PartitionKeyData<'_>,
+    spec: &PartitionBoundSpec<'_>,
+) -> PgResult<PgVec<'mcx, Node<'mcx>>> {
+    let exprs = qual::get_qual_from_partbound(mcx, key, spec)?;
+    let mut out: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+    for e in exprs {
+        out.push(Node::Expr(e));
+    }
+    Ok(out)
 }
 
 /* ===========================================================================

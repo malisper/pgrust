@@ -37,6 +37,9 @@ pub use predtest::{predicate_implied_by, predicate_refuted_by};
 /// needs no consumer-owned seam.
 pub fn init_seams() {
     backend_optimizer_util_predtest_seams::predicate_implied_by::set(predicate_implied_by);
+    backend_optimizer_util_predtest_seams::predicate_implied_by_exprs::set(
+        predtest::predicate_implied_by_exprs,
+    );
 }
 
 #[cfg(test)]

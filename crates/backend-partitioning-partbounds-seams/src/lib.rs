@@ -118,6 +118,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `get_qual_from_partbound(parent, spec)` (partbounds.c:249): build the
+    /// implicit-AND partition-constraint qual list for a partition with the given
+    /// bound `spec` under `parent`, dispatching by the parent's partition
+    /// strategy (HASH/LIST/RANGE). Unlike [`qual_from_partbound`], the bound is
+    /// supplied directly (not decoded from `relpartbound`) — this is the entry
+    /// point `ATExecAttachPartition` uses on the to-be-attached bound. `key` is
+    /// the parent's `RelationGetPartitionKey`. Returns the qual list as `Node`s
+    /// allocated in `mcx`; the construction can `ereport(ERROR)`, carried on
+    /// `Err`.
+    pub fn get_qual_from_partbound<'mcx>(
+        mcx: Mcx<'mcx>,
+        key: &PartitionKeyData<'_>,
+        spec: &PartitionBoundSpec<'_>,
+    ) -> PgResult<PgVec<'mcx, Node<'mcx>>>
+);
+
+seam_core::seam!(
     /// `partition_bounds_create(boundspecs, nparts, key, &mapping)`
     /// (partbounds.c): build a [`PartitionBoundInfoData`] from a list of
     /// partition bound-spec parse nodes, dispatching by `key->strategy` to

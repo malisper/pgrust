@@ -340,6 +340,18 @@ fn resolve_nodes(root: &PlannerInfo, ids: &[NodeId]) -> Vec<Expr> {
     ids.iter().map(|&id| root.node(id).clone()).collect()
 }
 
+/// `predicate_implied_by(predicate, clause, weak)` over bare owned `Expr`
+/// lists with a NULL planner root — the `ConstraintImpliedByRelConstraint`
+/// (tablecmds.c) form. Install body for the `predicate_implied_by_exprs` seam.
+pub fn predicate_implied_by_exprs<'mcx>(
+    mcx: Mcx<'mcx>,
+    predicate: &[Expr],
+    clause: &[Expr],
+    weak: bool,
+) -> PgResult<bool> {
+    predicate_implied_by_impl(mcx, predicate, clause, weak)
+}
+
 /// `predicate_implied_by` over already-resolved owned `Expr` lists, fallible
 /// and `Mcx`-threaded (the catalog lookups allocate).
 pub(crate) fn predicate_implied_by_impl<'mcx>(

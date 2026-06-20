@@ -5200,6 +5200,7 @@ name = "backend-catalog-pg-constraint"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-common-next",
  "backend-access-common-scankey",
  "backend-access-index-genam-seams",
  "backend-access-table-table",
@@ -8001,6 +8002,7 @@ dependencies = [
  "backend-catalog-objectaccess-seams",
  "backend-catalog-objectaddress",
  "backend-catalog-objectaddress-seams",
+ "backend-catalog-partition",
  "backend-catalog-partition-seams",
  "backend-catalog-pg-attrdef",
  "backend-catalog-pg-class-seams",
@@ -8022,11 +8024,15 @@ dependencies = [
  "backend-commands-tablespace-seams",
  "backend-commands-trigger",
  "backend-commands-view-seams",
+ "backend-executor-execMain-seams",
  "backend-executor-execTuples",
  "backend-nodes-core",
  "backend-nodes-equalfuncs-seams",
+ "backend-nodes-read-seams",
  "backend-optimizer-plan-planner",
+ "backend-optimizer-prep-prepqual-seams",
  "backend-optimizer-util-clauses",
+ "backend-optimizer-util-predtest-seams",
  "backend-optimizer-util-vars",
  "backend-parser-coerce",
  "backend-parser-coerce-seams",
@@ -8047,6 +8053,7 @@ dependencies = [
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-format-type",
  "backend-utils-adt-format-type-seams",
+ "backend-utils-cache-inval",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-lsyscache",
  "backend-utils-cache-lsyscache-seams",
@@ -9237,6 +9244,9 @@ name = "backend-executor-execMain"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-next",
+ "backend-access-common-relation",
+ "backend-access-table-tableam",
+ "backend-access-table-tableam-seams",
  "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-catalog",
@@ -9258,6 +9268,7 @@ dependencies = [
  "backend-nodes-core-seams",
  "backend-rewrite-rewritehandler",
  "backend-tcop-dest-seams",
+ "backend-tcop-postgres-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-partcache",
  "backend-utils-cache-relcache-seams",
@@ -13275,6 +13286,7 @@ dependencies = [
 name = "backend-optimizer-util-predtest-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -14092,15 +14104,23 @@ dependencies = [
 name = "backend-partitioning-partbounds"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-relation-seams",
+ "backend-nodes-core",
  "backend-nodes-core-seams",
+ "backend-nodes-read-seams",
  "backend-partitioning-partbounds-seams",
  "backend-utils-adt-scalar-seams",
  "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-partcache-seams",
+ "backend-utils-cache-syscache-seams",
+ "backend-utils-error",
  "backend-utils-fmgr-fmgr-seams",
  "mcx",
  "types-core",
  "types-error",
  "types-nodes",
+ "types-rel",
+ "types-storage",
  "types-tuple",
 ]
 
