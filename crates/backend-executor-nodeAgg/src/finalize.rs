@@ -177,6 +177,23 @@ pub fn finalize_aggregate<'mcx>(
             // *resultIsNull = fcinfo->isnull;
             // *resultVal = MakeExpandedObjectReadOnly(result, fcinfo->isnull,
             //                                         peragg->resulttypeLen);
+            //
+            // C: `InitFunctionCallInfoData(*fcinfo, ..., (void *) aggstate, NULL)`
+            // — set `fcinfo->context = (Node *) aggstate` so a finalfn that calls
+            // `AggCheckCallContext` (every ordered-set / hypothetical-set finalfn
+            // does) recovers the AggState. Deposit the live-AggState back-pointer
+            // on the fmgr thread-local channel for the duration of THIS finalfn
+            // dispatch (RAII-scoped); fmgr-core reads it onto the callee frame.
+            // `curperagg` is set so an `AggGetAggref`-calling finalfn sees the
+            // right Aggref (the peragg array is borrowed out during finalize, so
+            // the read uses the still-live `pertrans` arm via curperagg→transno).
+            let agg_link = types_nodes::aggstate_carrier::AggStateContextLink::from_ref(
+                aggstate as &(dyn types_nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
+            );
+            let (data, vtable) = agg_link.to_raw();
+            let _agg_ctx_guard = types_fmgr::fmgr::AggCallContextGuard::install(
+                types_fmgr::fmgr::RawAggContextLink { data, vtable },
+            );
             let (result, isnull, surviving_arg0) = invoke_finalfn(
                 peragg.finalfn_oid,
                 agg_collation,

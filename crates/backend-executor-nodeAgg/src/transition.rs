@@ -6,6 +6,7 @@ use mcx::{alloc_in, Mcx};
 use types_error::PgResult;
 use crate::aggstate::{AggStateData, AggStatePerGroupData, AggStatePerTransData};
 use types_nodes::EStateData;
+use types_nodes::fmgr::FunctionCallInfoBaseData;
 
 use crate::node_lifecycle::select_current_set;
 
@@ -441,6 +442,16 @@ fn invoke_transfn<'mcx>(
     // declared arg/result types (`get_fn_expr_*`). The by-OID re-resolution drops
     // it otherwise.
     let fn_expr = pertrans.transfn.fn_expr.clone();
+    // K2 (the live-AggState fcinfo->context across the by-OID re-dispatch): C
+    // sets `fcinfo->context = (Node *) aggstate`. The rich frame
+    // `pertrans->transfn_fcinfo` carries that as the K1 `AggStateContextLink`;
+    // the by-OID `function_call_invoke` seam builds a fresh callee frame inside
+    // fmgr-core and can't be handed the link directly, so deposit it on the
+    // thread-local channel (RAII-scoped to this one dispatch) — fmgr-core's
+    // `init_fcinfo` takes it back onto the callee frame, where a transfn that
+    // calls `AggCheckCallContext`/`AggGetAggref`/`AggStateIsShared` recovers the
+    // AggState. Plain count/min/max/sum/avg transfns ignore it.
+    let _agg_ctx_guard = agg_call_context_guard(pertrans.transfn_fcinfo.as_deref());
     // By-value dispatch: arg 0 may be a `Datum::Internal` (the running
     // aggregate state for an `internal`-transtype aggregate), whose owned
     // `Box<dyn Any>` cannot be cloned out of a borrow. The owned seam moves it
@@ -453,6 +464,25 @@ fn invoke_transfn<'mcx>(
         args_null,
         fn_expr,
     )
+}
+
+/// Deposit the aggregate-call back-pointer (C `fcinfo->context = (Node *)
+/// aggstate`) on the fmgr thread-local channel for the about-to-be-issued
+/// transfn/finalfn dispatch, returning the RAII guard that clears it after the
+/// call. Reads the `AggStateContextLink` off the rich `*_fcinfo` frame the
+/// executor built at `ExecInitAgg` time (`new_agg_fcinfo`); `None` (no frame /
+/// non-Agg context) deposits nothing, exactly as a plain call.
+pub(crate) fn agg_call_context_guard(
+    fcinfo: Option<&FunctionCallInfoBaseData<'_>>,
+) -> Option<types_fmgr::fmgr::AggCallContextGuard> {
+    let link = match fcinfo.and_then(|fc| fc.context.as_ref()) {
+        Some(types_nodes::fmgr::FmgrCallContext::Agg(link)) => *link,
+        _ => return None,
+    };
+    let (data, vtable) = link.to_raw();
+    Some(types_fmgr::fmgr::AggCallContextGuard::install(
+        types_fmgr::fmgr::RawAggContextLink { data, vtable },
+    ))
 }
 
 /// `ExecAggInitGroup(aggstate, pertrans, pergroup, aggcontext)`

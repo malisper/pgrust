@@ -150,6 +150,17 @@ pub struct FunctionCallInfoBaseData {
     /// `fmNodePtr context` — extra info about context (the C node-tag a
     /// context-demuxing callee switches on). `None` is C's NULL.
     pub context: Option<ContextNode>,
+    /// The aggregate `fcinfo->context = (Node *) aggstate` back-pointer, when
+    /// this frame is an aggregate transition/final function call. C carries the
+    /// live `AggState` through the SAME `fcinfo->context` `fmNodePtr` as the
+    /// trigger node above; in the owned model the tag-only [`ContextNode`] can't
+    /// carry the dereferenceable `AggState`, so the aggregate back-pointer image
+    /// rides this dedicated channel. `None` is "not an aggregate support call".
+    /// Populated by `init_fcinfo` from the [`take_agg_context_link`] thread-local
+    /// the executor deposits via [`AggCallContextGuard`]; the
+    /// `nodeAgg-aggapi-seams` bodies reconstruct the `AggStateContextLink` from
+    /// it. See [`RawAggContextLink`].
+    pub agg_context: Option<RawAggContextLink>,
     /// Soft-error channel. In C the soft-error sink reaches the called function
     /// as `fcinfo->context` when it `IsA(ErrorSaveContext)` (an input function
     /// does `escontext = (Node *) fcinfo->context`). The tag-only `context`
@@ -212,6 +223,102 @@ thread_local! {
         const { core::cell::Cell::new(None) };
 }
 
+/// An opaque, lifetime-free image of the aggregate-call back-pointer C carries
+/// as `fcinfo->context = (Node *) aggstate` for an aggregate transition/final
+/// function (and which its support functions — `AggCheckCallContext` /
+/// `AggGetAggref` / `AggStateIsShared` / `AggRegisterCallback` — recover via
+/// `(AggState *) fcinfo->context`).
+///
+/// In the owned model the live `AggState` back-pointer is the `types_nodes`
+/// `AggStateContextLink` (a `NonNull<dyn AggStateLive<'static>>` wide pointer).
+/// `types-fmgr` sits BELOW `types-nodes` and cannot name that type, so this
+/// crate carries it as its raw wide-pointer image: the data pointer + the
+/// vtable pointer (two `usize`s). The executor (`backend-executor-nodeAgg`)
+/// deposits it via [`AggCallContextGuard`] before dispatching the
+/// transfn/finalfn through the by-OID `function_call_invoke` seam, and the
+/// `nodeAgg-aggapi-seams` bodies — installed from `backend-executor-nodeAgg`,
+/// where `AggStateContextLink` IS nameable — reconstruct the link from these
+/// raw words (the same lifetime-erasure-into-raw-address discipline
+/// `AggStateContextLink::from_ref`/`get` already use internally).
+///
+/// This is the aggregate analogue of the trigger [`ContextNode`] tag channel:
+/// the dispatcher cannot reach into the callee frame fmgr-core builds, so it
+/// deposits the back-pointer on a thread-local that `init_fcinfo`-style frame
+/// construction reads back onto the callee frame's `agg_context`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RawAggContextLink {
+    /// The data pointer half of the erased `dyn AggStateLive` wide pointer.
+    pub data: *const (),
+    /// The vtable pointer half of the erased `dyn AggStateLive` wide pointer.
+    pub vtable: *const (),
+}
+
+// SAFETY: `RawAggContextLink` is a raw, lifetime-erased back-pointer to a live
+// `AggState` that is single-backend-thread-confined (it only ever crosses the
+// thread-local channel within one backend's fmgr dispatch, exactly as the
+// trigger tag does); it is never shared across threads. The `Send`/`Sync` marks
+// mirror the established raw-back-pointer carriers (`PlanStateLink` /
+// `AggStateContextLink`), which are likewise lifetime-/thread-confined.
+#[allow(unsafe_code)]
+unsafe impl Send for RawAggContextLink {}
+#[allow(unsafe_code)]
+unsafe impl Sync for RawAggContextLink {}
+
+thread_local! {
+    /// The aggregate back-pointer C would have set on `fcinfo->context =
+    /// (Node *) aggstate` for the aggregate transfn/finalfn currently being
+    /// *issued* on this backend thread, or `None` (a non-aggregate call).
+    ///
+    /// Mirrors [`CURRENT_CALL_CONTEXT_TAG`] but carries the rich aggregate
+    /// back-pointer image rather than a bare node tag, because the aggregate
+    /// support functions need to dereference the live `AggState` (not just
+    /// switch on its tag). Deposited by [`AggCallContextGuard`] (RAII-scoped to
+    /// the call) and read back by `init_fcinfo` onto
+    /// [`FunctionCallInfoBaseData::agg_context`].
+    static CURRENT_AGG_CONTEXT_LINK: core::cell::Cell<Option<RawAggContextLink>> =
+        const { core::cell::Cell::new(None) };
+}
+
+/// RAII guard depositing the aggregate back-pointer for the transfn/finalfn
+/// call about to be issued, restoring the prior value on drop (so a nested fmgr
+/// call the support function itself issues observes `None`, exactly as C's
+/// per-frame `fcinfo->context`). The aggregate analogue of
+/// [`CallContextTagGuard`].
+#[must_use]
+pub struct AggCallContextGuard {
+    prev: Option<RawAggContextLink>,
+}
+
+impl AggCallContextGuard {
+    /// Install `link` as the current aggregate-call back-pointer (C:
+    /// `fcinfo->context = (Node *) aggstate`).
+    pub fn install(link: RawAggContextLink) -> Self {
+        let prev = CURRENT_AGG_CONTEXT_LINK.with(|c| c.replace(Some(link)));
+        AggCallContextGuard { prev }
+    }
+}
+
+impl Drop for AggCallContextGuard {
+    fn drop(&mut self) {
+        CURRENT_AGG_CONTEXT_LINK.with(|c| c.set(self.prev));
+    }
+}
+
+/// Take (consuming, leaving `None`) the aggregate back-pointer deposited for the
+/// fmgr call currently being issued. fmgr-core calls this when it builds a
+/// callee's call frame so the back-pointer rides onto exactly that one frame and
+/// is cleared for any nested calls (same per-frame discipline as
+/// [`take_call_context_tag`]).
+pub fn take_agg_context_link() -> Option<RawAggContextLink> {
+    CURRENT_AGG_CONTEXT_LINK.with(|c| c.replace(None))
+}
+
+/// Read (without consuming) the aggregate back-pointer deposited for the fmgr
+/// call currently being issued.
+pub fn current_agg_context_link() -> Option<RawAggContextLink> {
+    CURRENT_AGG_CONTEXT_LINK.with(|c| c.get())
+}
+
 /// RAII guard depositing `tag` as the context node-tag for the fmgr call about
 /// to be issued, restoring the prior value on drop (so nested fmgr calls — a
 /// trigger function that itself issues calls — see the correct context: the
@@ -268,6 +375,7 @@ impl FunctionCallInfoBaseData {
         Self {
             flinfo,
             context,
+            agg_context: None,
             escontext: None,
             resultinfo,
             fncollation,
@@ -278,6 +386,20 @@ impl FunctionCallInfoBaseData {
             ref_result: None,
             internal_args: Vec::new(),
         }
+    }
+
+    /// The aggregate back-pointer image on this call frame (C's
+    /// `(AggState *) fcinfo->context`), `None` when not an aggregate support
+    /// call. The `nodeAgg-aggapi-seams` bodies reconstruct the live
+    /// `AggStateContextLink` from this.
+    pub fn agg_context_link(&self) -> Option<RawAggContextLink> {
+        self.agg_context
+    }
+
+    /// Set the aggregate back-pointer image on this call frame (used by
+    /// `init_fcinfo` when it reads the executor-deposited thread-local back).
+    pub fn set_agg_context_link(&mut self, link: RawAggContextLink) {
+        self.agg_context = Some(link);
     }
 
     /// Install the soft-error sink (C: pointing `fcinfo->context` at an
@@ -425,6 +547,7 @@ impl Clone for FunctionCallInfoBaseData {
         Self {
             flinfo: self.flinfo.clone(),
             context: self.context,
+            agg_context: self.agg_context,
             escontext: self.escontext.clone(),
             resultinfo: self.resultinfo,
             fncollation: self.fncollation,

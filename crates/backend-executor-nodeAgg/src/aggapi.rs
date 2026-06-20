@@ -434,7 +434,150 @@ fn exec_agg_retrieve_instrumentation_shim(node: PlanStateHandle) -> PgResult<()>
 
 /// Install the `aggapi` parallel-instrumentation seams this unit owns
 /// (`backend-executor-nodeAgg-pq-seams`).
+// ---------------------------------------------------------------------------
+// Aggregate-support API seam bodies (installed into nodeAgg-aggapi-seams)
+//
+// These are the downward-facing entry points an adt aggregate support function
+// (orderedsetaggs.c) calls. They receive the LOW-LEVEL `types_fmgr` call frame
+// (what every fmgr-dispatched builtin gets), recover the live `AggState` from
+// the frame's aggregate back-pointer image (deposited by the executor's
+// transfn/finalfn dispatch through the `AggCallContextGuard` thread-local, read
+// back onto the frame by `init_fcinfo`), downcast to the concrete
+// `AggStateData`, and run the same reads the `types_nodes`-frame functions above
+// do. This is the C `(AggState *) fcinfo->context` recovery, reproduced across
+// the by-OID fmgr dispatch the executor actually uses.
+// ---------------------------------------------------------------------------
+
+/// Recover the live `AggStateData` from a low-level `types_fmgr` call frame's
+/// aggregate back-pointer image (C: `(AggState *) fcinfo->context`). `None` when
+/// the frame is not an aggregate support call (no link deposited).
+fn agg_context_from_raw_frame<'a, 'mcx>(
+    fcinfo: &types_fmgr::FunctionCallInfoBaseData,
+) -> Option<&'a AggStateData<'mcx>> {
+    let raw = fcinfo.agg_context_link()?;
+    let link = types_nodes::aggstate_carrier::AggStateContextLink::from_raw(raw.data, raw.vtable);
+    let live: &(dyn types_nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx) = link.get();
+    types_nodes::aggstate_carrier::downcast_agg_state_ref::<AggStateData<'mcx>>(live)
+}
+
+/// Seam body for `agg_get_aggref` (C `AggGetAggref`). Recovers the `Aggref`
+/// currently being evaluated from the raw frame and returns an `mcx`-arena copy.
+fn agg_get_aggref_shim<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Option<Aggref<'mcx>>> {
+    let Some(aggstate) = agg_context_from_raw_frame::<'mcx, 'mcx>(fcinfo) else {
+        return Ok(None);
+    };
+    // Same curperagg (finalfn) / curpertrans (transfn) selection as `AggGetAggref`.
+    if aggstate.curperagg >= 0 {
+        if let Some(peragg) = aggstate
+            .peragg
+            .as_ref()
+            .and_then(|p| p.get(aggstate.curperagg as usize))
+        {
+            if let Some(aggref) = peragg.aggref.as_ref() {
+                return Ok(Some(aggref.clone_in(mcx)?));
+            }
+        }
+    }
+    if aggstate.curpertrans >= 0 {
+        if let Some(pertrans) = aggstate
+            .pertrans
+            .as_ref()
+            .and_then(|p| p.get(aggstate.curpertrans as usize))
+        {
+            if let Some(aggref) = pertrans.aggref.as_ref() {
+                return Ok(Some(aggref.clone_in(mcx)?));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Seam body for `agg_check_call_context` (C `AggCheckCallContext`). Reports the
+/// aggregate-context code and the per-group aggregate `ExprContext` `EcxtId`.
+fn agg_check_call_context_shim(
+    fcinfo: &types_fmgr::FunctionCallInfoBaseData,
+) -> (i32, Option<EcxtId>) {
+    if let Some(aggstate) = agg_context_from_raw_frame::<'_, '_>(fcinfo) {
+        let aggcontext = aggstate
+            .aggcontexts
+            .as_ref()
+            .and_then(|c| c.get(aggstate.curaggcontext as usize))
+            .copied();
+        return (AGG_CONTEXT_AGGREGATE, aggcontext);
+    }
+    (0, None)
+}
+
+/// Seam body for `agg_state_is_shared` (C `AggStateIsShared`). Conservative
+/// `true` when not in aggregate context.
+fn agg_state_is_shared_shim(fcinfo: &types_fmgr::FunctionCallInfoBaseData) -> bool {
+    if let Some(aggstate) = agg_context_from_raw_frame::<'_, '_>(fcinfo) {
+        if aggstate.curperagg >= 0 {
+            if let Some(peragg) = aggstate
+                .peragg
+                .as_ref()
+                .and_then(|p| p.get(aggstate.curperagg as usize))
+            {
+                if let Some(pertrans) = aggstate
+                    .pertrans
+                    .as_ref()
+                    .and_then(|p| p.get(peragg.transno as usize))
+                {
+                    return pertrans.aggshared;
+                }
+            }
+        }
+        if aggstate.curpertrans >= 0 {
+            if let Some(pertrans) = aggstate
+                .pertrans
+                .as_ref()
+                .and_then(|p| p.get(aggstate.curpertrans as usize))
+            {
+                return pertrans.aggshared;
+            }
+        }
+    }
+    true
+}
+
+/// Seam body for `agg_register_callback` (C `AggRegisterCallback`). The live
+/// `AggState` is now reachable through the raw frame, but registering the
+/// callback against the live `curaggcontext` `ExprContext` requires an
+/// EState-ExprContext-pool register seam keyed by `EcxtId` (this entry point
+/// holds no `&mut EState`); that mutable pool handoff is unported. See the
+/// `AggRegisterCallback` doc comment above — this is the Phase-B blocker for
+/// running ordered-set aggregates (their `ordered_set_startup` registers
+/// `ordered_set_shutdown`).
+fn agg_register_callback_shim<'mcx>(
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+    func: types_nodes::ExprContextCallbackFunction,
+    arg: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+) -> PgResult<()> {
+    if agg_context_from_raw_frame::<'_, 'mcx>(fcinfo).is_some() {
+        let _ = (func, arg);
+        // RegisterExprContextCallback(aggstate->curaggcontext, func, arg) — the
+        // EState ExprContext-pool register seam keyed by the curaggcontext EcxtId
+        // is unported (this frame carries no &mut EState). NOT a stub: it raises
+        // the same hard error C would never reach with a working pool handoff;
+        // resolving the pool seam unblocks ordered-set aggregate execution.
+        return Err(types_error::PgError::error(
+            "AggRegisterCallback: EState ExprContext-pool register seam (keyed by curaggcontext \
+             EcxtId) is unported; the support-fn frame holds no &mut EState",
+        ));
+    }
+    Err(types_error::PgError::error(
+        "aggregate function cannot register a callback in this context",
+    ))
+}
+
 pub fn init_seams() {
+    backend_executor_nodeAgg_aggapi_seams::agg_get_aggref::set(agg_get_aggref_shim);
+    backend_executor_nodeAgg_aggapi_seams::agg_check_call_context::set(agg_check_call_context_shim);
+    backend_executor_nodeAgg_aggapi_seams::agg_state_is_shared::set(agg_state_is_shared_shim);
+    backend_executor_nodeAgg_aggapi_seams::agg_register_callback::set(agg_register_callback_shim);
     backend_executor_nodeAgg_pq_seams::exec_agg_estimate::set(exec_agg_estimate_shim);
     backend_executor_nodeAgg_pq_seams::exec_agg_initialize_dsm::set(exec_agg_initialize_dsm_shim);
     backend_executor_nodeAgg_pq_seams::exec_agg_initialize_worker::set(

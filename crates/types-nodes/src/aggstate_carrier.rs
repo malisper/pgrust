@@ -181,6 +181,40 @@ impl AggStateContextLink {
         AggStateContextLink(unsafe { core::ptr::NonNull::new_unchecked(p) })
     }
 
+    /// Decompose the link into its raw wide-pointer image (data pointer + vtable
+    /// pointer) so it can ride the lifetime-free `types_fmgr` aggregate-context
+    /// thread-local channel (which sits below this crate and cannot name
+    /// `AggStateContextLink`). Reconstructed by [`Self::from_raw`]. The two words
+    /// are the same image `from_ref` already erases into the `NonNull`.
+    #[allow(unsafe_code)]
+    #[inline]
+    pub fn to_raw(self) -> (*const (), *const ()) {
+        let p: *mut dyn AggStateLive<'static> = self.0.as_ptr();
+        // SAFETY: a `*mut dyn Trait` is a wide pointer laid out as exactly two
+        // machine words (data ptr, vtable ptr); reinterpret it as a `[*const ();
+        // 2]` to read those words. This is the inverse of `from_raw` and never
+        // dereferences.
+        let words: [*const (); 2] = unsafe { core::mem::transmute(p) };
+        (words[0], words[1])
+    }
+
+    /// Rebuild the link from the raw wide-pointer image produced by
+    /// [`Self::to_raw`]. The `data`/`vtable` words must come from a `to_raw` of a
+    /// link whose `AggState` is still live (the executor guarantees this: the
+    /// call frame carrying the image lives strictly within the AggState's
+    /// transition/final dispatch).
+    #[allow(unsafe_code)]
+    #[inline]
+    pub fn from_raw(data: *const (), vtable: *const ()) -> Self {
+        let words: [*const (); 2] = [data, vtable];
+        // SAFETY: `words` is the exact two-word image of a `*mut dyn
+        // AggStateLive<'static>` produced by `to_raw`; reconstituting the wide
+        // pointer from its two halves restores the original fat pointer. The data
+        // half is non-null (it came from a live `&` in `from_ref`).
+        let p: *mut dyn AggStateLive<'static> = unsafe { core::mem::transmute(words) };
+        AggStateContextLink(unsafe { core::ptr::NonNull::new_unchecked(p) })
+    }
+
     /// Momentary shared read of the live `AggState` through the back-link -- the
     /// single audited deref (mirrors [`crate::planstate::PlanStateLink::get`]).
     /// Re-derives the `&` per access at the caller-chosen lifetime; never stores

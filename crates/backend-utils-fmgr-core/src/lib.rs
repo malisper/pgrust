@@ -358,6 +358,16 @@ fn init_fcinfo(
         .map(|tag| types_fmgr::fmgr::ContextNode { tag });
     let mut fcinfo =
         FunctionCallInfoBaseData::new(flinfo.map(Box::new), nargs, collation, context, None);
+    // C: `fcinfo->context = (Node *) aggstate` for an aggregate transition/final
+    // function — the executor deposits the live-AggState back-pointer on a
+    // thread-local before dispatching the support function by OID (it cannot
+    // reach into this seam-built callee frame), exactly as the trigger tag above.
+    // Take it onto THIS one frame (per-frame `fcinfo->context` discipline) so the
+    // aggregate support functions (AggGetAggref / AggCheckCallContext / …) recover
+    // the AggState, and any nested call the support function issues sees `None`.
+    if let Some(link) = types_fmgr::fmgr::take_agg_context_link() {
+        fcinfo.set_agg_context_link(link);
+    }
     fcinfo.args = args;
     fcinfo
 }
