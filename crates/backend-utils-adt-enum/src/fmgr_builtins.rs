@@ -27,9 +27,8 @@
 
 use mcx::MemoryContext;
 use types_datum::Datum;
-use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_core::primitive::Oid;
 use types_core::TransactionId;
 
@@ -131,21 +130,6 @@ fn scratch_mcx() -> MemoryContext {
     MemoryContext::new("enum fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters — I/O.
 // ---------------------------------------------------------------------------
@@ -154,31 +138,31 @@ fn ok<T>(r: PgResult<T>) -> T {
 /// fcinfo->context`. Forward the soft ErrorSaveContext installed on the frame by
 /// InputFunctionCallSafe so an unrecognized label `ereturn`s into the sink
 /// (returning `Ok(None)`) instead of throwing past `invoke?`.
-fn fc_enum_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_enum_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let name = arg_cstring(fcinfo, 0).to_string();
     let enumtypoid = arg_oid(fcinfo, 1);
     let xmin = transaction_xmin();
-    match ok(crate::enum_in(&name, enumtypoid, xmin, fcinfo.escontext_mut())) {
-        Some(oid) => ret_oid(oid),
+    match crate::enum_in(&name, enumtypoid, xmin, fcinfo.escontext_mut())? {
+        Some(oid) => Ok(ret_oid(oid)),
         // Soft-error path returned `(Datum) 0` after `ereturn` recorded the
         // failure into the sink; surface a NULL placeholder the caller discards
         // after `soft_error_occurred()`.
         None => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
     }
 }
 
 /// `enum_out(anyenum) -> cstring` (oid 3507).
-fn fc_enum_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_enum_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_oid(fcinfo, 0);
-    let s = ok(crate::enum_out(val));
-    ret_cstring(fcinfo, s)
+    let s = crate::enum_out(val)?;
+    Ok(ret_cstring(fcinfo, s))
 }
 
 /// `enum_recv(internal, oid) -> anyenum` (oid 3532).
-fn fc_enum_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_enum_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let src = arg_recv_bytes(fcinfo, 0).to_vec();
     let enumtypoid = arg_oid(fcinfo, 1);
     let xmin = transaction_xmin();
@@ -186,16 +170,16 @@ fn fc_enum_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let mut data = mcx::PgVec::new_in(m.mcx());
     data.extend_from_slice(&src);
     let mut buf = types_stringinfo::StringInfo::from_vec(data);
-    let oid = ok(crate::enum_recv(&mut buf, enumtypoid, xmin));
-    ret_oid(oid)
+    let oid = crate::enum_recv(&mut buf, enumtypoid, xmin)?;
+    Ok(ret_oid(oid))
 }
 
 /// `enum_send(anyenum) -> bytea` (oid 3533).
-fn fc_enum_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_enum_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(crate::enum_send(m.mcx(), val));
-    ret_send(fcinfo, bytes.as_slice().to_vec())
+    let bytes = crate::enum_send(m.mcx(), val)?;
+    Ok(ret_send(fcinfo, bytes.as_slice().to_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -204,10 +188,10 @@ fn fc_enum_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 macro_rules! fc_cmp_bool {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let a = arg_oid(fcinfo, 0);
             let b = arg_oid(fcinfo, 1);
-            ret_bool(ok($core(a, b)))
+            Ok(ret_bool($core(a, b)?))
         }
     };
 }
@@ -217,34 +201,34 @@ fc_cmp_bool!(fc_enum_gt, crate::enum_gt);
 fc_cmp_bool!(fc_enum_ge, crate::enum_ge);
 
 /// `enum_eq(anyenum, anyenum) -> bool` (oid 3508) — OID equality, no catalog.
-fn fc_enum_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::enum_eq(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+fn fc_enum_eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::enum_eq(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1))))
 }
 
 /// `enum_ne(anyenum, anyenum) -> bool` (oid 3509) — OID inequality, no catalog.
-fn fc_enum_ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::enum_ne(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+fn fc_enum_ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::enum_ne(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1))))
 }
 
 /// `enum_cmp(anyenum, anyenum) -> int4` (oid 3514).
-fn fc_enum_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_enum_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_oid(fcinfo, 0);
     let b = arg_oid(fcinfo, 1);
-    ret_i32(ok(crate::enum_cmp(a, b)))
+    Ok(ret_i32(crate::enum_cmp(a, b)?))
 }
 
 /// `enum_smaller(anyenum, anyenum) -> anyenum` (oid 3524).
-fn fc_enum_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_enum_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_oid(fcinfo, 0);
     let b = arg_oid(fcinfo, 1);
-    ret_oid(ok(crate::enum_smaller(a, b)))
+    Ok(ret_oid(crate::enum_smaller(a, b)?))
 }
 
 /// `enum_larger(anyenum, anyenum) -> anyenum` (oid 3525).
-fn fc_enum_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_enum_larger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_oid(fcinfo, 0);
     let b = arg_oid(fcinfo, 1);
-    ret_oid(ok(crate::enum_larger(a, b)))
+    Ok(ret_oid(crate::enum_larger(a, b)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -253,24 +237,24 @@ fn fc_enum_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `enum_first(anyenum) -> anyenum` (oid 3528, NOT strict — the arg may be NULL;
 /// the type is taken from the call expression, not the value).
-fn fc_enum_first(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_enum_first(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let enumtypoid = fn_expr_argtype0(fcinfo);
     let xmin = transaction_xmin();
     let m = scratch_mcx();
-    ret_oid(ok(crate::enum_first(m.mcx(), enumtypoid, xmin)))
+    Ok(ret_oid(crate::enum_first(m.mcx(), enumtypoid, xmin)?))
 }
 
 /// `enum_last(anyenum) -> anyenum` (oid 3529, NOT strict).
-fn fc_enum_last(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_enum_last(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let enumtypoid = fn_expr_argtype0(fcinfo);
     let xmin = transaction_xmin();
     let m = scratch_mcx();
-    ret_oid(ok(crate::enum_last(m.mcx(), enumtypoid, xmin)))
+    Ok(ret_oid(crate::enum_last(m.mcx(), enumtypoid, xmin)?))
 }
 
 /// `enum_range(anyenum, anyenum) -> anyarray` (oid 3530, NOT strict): every
 /// member from `lower` to `upper` inclusive; a NULL bound is open-ended.
-fn fc_enum_range_bounds(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_enum_range_bounds(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let lower = fcinfo
         .arg(0)
         .filter(|d| !d.isnull)
@@ -282,17 +266,17 @@ fn fc_enum_range_bounds(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let enumtypoid = fn_expr_argtype0(fcinfo);
     let xmin = transaction_xmin();
     let m = scratch_mcx();
-    let image = ok(crate::enum_range_bounds(m.mcx(), lower, upper, enumtypoid, xmin));
-    ret_varlena(fcinfo, image.as_slice().to_vec())
+    let image = crate::enum_range_bounds(m.mcx(), lower, upper, enumtypoid, xmin)?;
+    Ok(ret_varlena(fcinfo, image.as_slice().to_vec()))
 }
 
 /// `enum_range(anyenum) -> anyarray` (oid 3531, NOT strict): every member.
-fn fc_enum_range_all(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_enum_range_all(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let enumtypoid = fn_expr_argtype0(fcinfo);
     let xmin = transaction_xmin();
     let m = scratch_mcx();
-    let image = ok(crate::enum_range_all(m.mcx(), enumtypoid, xmin));
-    ret_varlena(fcinfo, image.as_slice().to_vec())
+    let image = crate::enum_range_all(m.mcx(), enumtypoid, xmin)?;
+    Ok(ret_varlena(fcinfo, image.as_slice().to_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -305,16 +289,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `enum.c` builtin into the fmgr-core builtin table (C:
@@ -322,7 +309,7 @@ fn builtin(
 /// crate's `init_seams()`. OIDs/nargs/strict/retset transcribed from
 /// `fmgrtab.c`.
 pub fn register_enum_builtins() {
-    fmgr_core::register_builtins([
+    fmgr_core::register_builtins_native([
         // ---- basic + binary I/O ----
         builtin(3506, "enum_in", 2, true, false, fc_enum_in),
         builtin(3507, "enum_out", 1, true, false, fc_enum_out),

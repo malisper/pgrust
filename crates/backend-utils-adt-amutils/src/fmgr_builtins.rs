@@ -28,7 +28,7 @@ use alloc::string::{String, ToString};
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::Oid;
 
@@ -106,52 +106,37 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("amutils fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `pg_indexam_has_property(amoid oid, prop text)` (OID 636).
-fn fc_pg_indexam_has_property(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_indexam_has_property(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let amoid = arg_oid(fcinfo, 0);
     let prop = arg_text(fcinfo, 1).to_string();
     let m = scratch_mcx();
-    let res = ok(crate::pg_indexam_has_property(m.mcx(), amoid, &prop));
-    ret_bool_opt(fcinfo, res)
+    let res = crate::pg_indexam_has_property(m.mcx(), amoid, &prop)?;
+    Ok(ret_bool_opt(fcinfo, res))
 }
 
 /// `pg_index_has_property(index regclass, prop text)` (OID 637).
-fn fc_pg_index_has_property(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_index_has_property(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let indexoid = arg_oid(fcinfo, 0);
     let prop = arg_text(fcinfo, 1).to_string();
     let m = scratch_mcx();
-    let res = ok(crate::pg_index_has_property(m.mcx(), indexoid, &prop));
-    ret_bool_opt(fcinfo, res)
+    let res = crate::pg_index_has_property(m.mcx(), indexoid, &prop)?;
+    Ok(ret_bool_opt(fcinfo, res))
 }
 
 /// `pg_index_column_has_property(index regclass, column int4, prop text)`
 /// (OID 638).
-fn fc_pg_index_column_has_property(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_index_column_has_property(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let indexoid = arg_oid(fcinfo, 0);
     let attno = arg_int32(fcinfo, 1);
     let prop = arg_text(fcinfo, 2).to_string();
     let m = scratch_mcx();
-    let res = ok(crate::pg_index_column_has_property(m.mcx(), indexoid, attno, &prop));
-    ret_bool_opt(fcinfo, res)
+    let res = crate::pg_index_column_has_property(m.mcx(), indexoid, attno, &prop)?;
+    Ok(ret_bool_opt(fcinfo, res))
 }
 
 /// `pg_indexam_progress_phasename(amoid oid, phasenum int8)` (OID 676).
@@ -160,15 +145,15 @@ fn fc_pg_index_column_has_property(fcinfo: &mut FunctionCallInfoBaseData) -> Dat
 /// the `int8` datum to its low 32 bits before widening back to `int64` for the
 /// `ambuildphasename(int64)` callback; the value core takes the full `int64`
 /// word and reproduces that truncation internally.
-fn fc_pg_indexam_progress_phasename(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_indexam_progress_phasename(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let amoid = arg_oid(fcinfo, 0);
     let phasenum = fcinfo
         .arg(1)
         .expect("amutils fn: missing arg")
         .value
         .as_i64();
-    let res = ok(crate::pg_indexam_progress_phasename(amoid, phasenum));
-    ret_text_opt(fcinfo, res)
+    let res = crate::pg_indexam_progress_phasename(amoid, phasenum)?;
+    Ok(ret_text_opt(fcinfo, res))
 }
 
 // ---------------------------------------------------------------------------
@@ -181,16 +166,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every SQL-callable `amutils.c` builtin (C: their `fmgr_builtins[]`
@@ -198,7 +186,7 @@ fn builtin(
 /// retset transcribed exactly from `pg_proc.dat` (all proisstrict, none
 /// retset).
 pub fn register_amutils_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(636, "pg_indexam_has_property", 2, true, false, fc_pg_indexam_has_property),
         builtin(637, "pg_index_has_property", 2, true, false, fc_pg_index_has_property),
         builtin(

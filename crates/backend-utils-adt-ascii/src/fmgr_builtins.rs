@@ -22,7 +22,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -85,55 +85,44 @@ fn ret(fcinfo: &mut FunctionCallInfoBaseData, payload: RefPayload) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `to_ascii(text)` (OID 1845, `to_ascii_default`): transliterate using the
 /// current database encoding.
-fn fc_to_ascii_default(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_ascii_default(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let payload = {
         let data = arg_text(fcinfo, 0);
-        match crate::to_ascii_default(data) {
-            Ok(out) => into_payload(out),
-            Err(e) => raise(e),
-        }
+        into_payload(crate::to_ascii_default(data)?)
     };
-    ret(fcinfo, payload)
+    Ok(ret(fcinfo, payload))
 }
 
 /// `to_ascii(text, int4)` (OID 1846, `to_ascii_enc`): transliterate using the
 /// given encoding code.
-fn fc_to_ascii_enc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_ascii_enc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let enc = arg_i32(fcinfo, 1);
     let payload = {
         let data = arg_text(fcinfo, 0);
-        match crate::to_ascii_enc(data, enc) {
-            Ok(out) => into_payload(out),
-            Err(e) => raise(e),
-        }
+        into_payload(crate::to_ascii_enc(data, enc)?)
     };
-    ret(fcinfo, payload)
+    Ok(ret(fcinfo, payload))
 }
 
 /// `to_ascii(text, name)` (OID 1847, `to_ascii_encname`): transliterate using
 /// the named encoding.
-fn fc_to_ascii_encname(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_ascii_encname(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let payload = {
         let data = arg_text(fcinfo, 0);
         let encname = arg_name(fcinfo, 1);
-        match crate::to_ascii_encname(data, encname) {
-            Ok(out) => into_payload(out),
-            Err(e) => raise(e),
-        }
+        into_payload(crate::to_ascii_encname(data, encname)?)
     };
-    ret(fcinfo, payload)
+    Ok(ret(fcinfo, payload))
 }
 
 // ---------------------------------------------------------------------------
@@ -146,16 +135,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every SQL-callable `ascii.c` `to_ascii` builtin (C: their
@@ -163,7 +155,7 @@ fn builtin(
 /// nargs / strict / retset transcribed exactly from `pg_proc.dat` (all named
 /// `to_ascii`, all strict by default, none retset).
 pub fn register_ascii_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(1845, "to_ascii_default", 1, true, false, fc_to_ascii_default),
         builtin(1846, "to_ascii_enc", 2, true, false, fc_to_ascii_enc),
         builtin(1847, "to_ascii_encname", 2, true, false, fc_to_ascii_encname),

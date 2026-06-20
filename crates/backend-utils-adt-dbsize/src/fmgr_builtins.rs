@@ -28,7 +28,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::Oid;
 
@@ -146,129 +146,114 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("dbsize fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: backend_utils_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
 /// `pg_database_size_oid(oid)` (OID 2324).
-fn fc_pg_database_size_oid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_database_size_oid(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let db_oid = arg_oid(fcinfo, 0);
-    let size = ok(crate::pg_database_size_oid(db_oid));
-    ret_int64_opt(fcinfo, size)
+    let size = crate::pg_database_size_oid(db_oid)?;
+    Ok(ret_int64_opt(fcinfo, size))
 }
 
 /// `pg_database_size_name(name)` (OID 2168).
-fn fc_pg_database_size_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_database_size_name(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let db_name = arg_name(fcinfo, 0).to_string();
-    let size = ok(crate::pg_database_size_name(&db_name));
-    ret_int64_opt(fcinfo, size)
+    let size = crate::pg_database_size_name(&db_name)?;
+    Ok(ret_int64_opt(fcinfo, size))
 }
 
 /// `pg_tablespace_size_oid(oid)` (OID 2322).
-fn fc_pg_tablespace_size_oid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_tablespace_size_oid(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let tblspc_oid = arg_oid(fcinfo, 0);
-    let size = ok(crate::pg_tablespace_size_oid(tblspc_oid));
-    ret_int64_opt(fcinfo, size)
+    let size = crate::pg_tablespace_size_oid(tblspc_oid)?;
+    Ok(ret_int64_opt(fcinfo, size))
 }
 
 /// `pg_tablespace_size_name(name)` (OID 2323).
-fn fc_pg_tablespace_size_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_tablespace_size_name(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let tblspc_name = arg_name(fcinfo, 0).to_string();
-    let size = ok(crate::pg_tablespace_size_name(&tblspc_name));
-    ret_int64_opt(fcinfo, size)
+    let size = crate::pg_tablespace_size_name(&tblspc_name)?;
+    Ok(ret_int64_opt(fcinfo, size))
 }
 
 /// `pg_size_pretty(int8)` (OID 2288).
-fn fc_pg_size_pretty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_size_pretty(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let size = arg_int64(fcinfo, 0);
     let text = crate::pg_size_pretty(size);
-    ret_text(fcinfo, text)
+    Ok(ret_text(fcinfo, text))
 }
 
 /// `pg_size_pretty_numeric(numeric)` (OID 3166).
-fn fc_pg_size_pretty_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_size_pretty_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let size = arg_numeric(fcinfo, 0);
-    let text = ok(crate::pg_size_pretty_numeric(m.mcx(), size));
-    ret_text(fcinfo, text)
+    let text = crate::pg_size_pretty_numeric(m.mcx(), size)?;
+    Ok(ret_text(fcinfo, text))
 }
 
 /// `pg_size_bytes(text)` (OID 3334).
-fn fc_pg_size_bytes(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_size_bytes(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let arg = arg_text_bytes(fcinfo, 0);
-    let bytes = ok(crate::pg_size_bytes(m.mcx(), arg));
-    Datum::from_i64(bytes)
+    let bytes = crate::pg_size_bytes(m.mcx(), arg)?;
+    Ok(Datum::from_i64(bytes))
 }
 
 /// `pg_relation_size(regclass, text)` (OID 2332).
-fn fc_pg_relation_size(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_relation_size(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let rel_oid = arg_oid(fcinfo, 0);
     // C: text_to_cstring(PG_GETARG_TEXT_PP(1)). The fork name arrives as the
     // detoasted text payload bytes on the by-ref lane.
     let fork_bytes = arg_text_bytes(fcinfo, 1);
     let fork_name = core::str::from_utf8(fork_bytes)
         .expect("dbsize fn: fork-name text arg not valid UTF-8");
-    let size = ok(crate::pg_relation_size(rel_oid, fork_name));
-    ret_int64_opt(fcinfo, size)
+    let size = crate::pg_relation_size(rel_oid, fork_name)?;
+    Ok(ret_int64_opt(fcinfo, size))
 }
 
 /// `pg_total_relation_size(regclass)` (OID 2286).
-fn fc_pg_total_relation_size(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_total_relation_size(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let rel_oid = arg_oid(fcinfo, 0);
-    let size = ok(crate::pg_total_relation_size(rel_oid));
-    ret_int64_opt(fcinfo, size)
+    let size = crate::pg_total_relation_size(rel_oid)?;
+    Ok(ret_int64_opt(fcinfo, size))
 }
 
 /// `pg_table_size(regclass)` (OID 2997).
-fn fc_pg_table_size(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_table_size(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let rel_oid = arg_oid(fcinfo, 0);
-    let size = ok(crate::pg_table_size(rel_oid));
-    ret_int64_opt(fcinfo, size)
+    let size = crate::pg_table_size(rel_oid)?;
+    Ok(ret_int64_opt(fcinfo, size))
 }
 
 /// `pg_indexes_size(regclass)` (OID 2998).
-fn fc_pg_indexes_size(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_indexes_size(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let rel_oid = arg_oid(fcinfo, 0);
-    let size = ok(crate::pg_indexes_size(rel_oid));
-    ret_int64_opt(fcinfo, size)
+    let size = crate::pg_indexes_size(rel_oid)?;
+    Ok(ret_int64_opt(fcinfo, size))
 }
 
 /// `pg_relation_filenode(regclass)` (OID 2999) → `oid` (or NULL).
-fn fc_pg_relation_filenode(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_relation_filenode(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let relid = arg_oid(fcinfo, 0);
-    let filenode = ok(crate::pg_relation_filenode(relid));
-    ret_oid_opt(fcinfo, filenode)
+    let filenode = crate::pg_relation_filenode(relid)?;
+    Ok(ret_oid_opt(fcinfo, filenode))
 }
 
 /// `pg_filenode_relation(oid, oid)` (OID 3454) → `regclass` (an `oid`, or NULL).
-fn fc_pg_filenode_relation(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_filenode_relation(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let reltablespace = arg_oid(fcinfo, 0);
     let relfilenumber = arg_oid(fcinfo, 1);
-    let relid = ok(crate::pg_filenode_relation(reltablespace, relfilenumber));
-    ret_oid_opt(fcinfo, relid)
+    let relid = crate::pg_filenode_relation(reltablespace, relfilenumber)?;
+    Ok(ret_oid_opt(fcinfo, relid))
 }
 
 /// `pg_relation_filepath(regclass)` (OID 3034) → `text` (or NULL).
-fn fc_pg_relation_filepath(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_relation_filepath(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let relid = arg_oid(fcinfo, 0);
-    let path = ok(crate::pg_relation_filepath(relid));
-    ret_text_opt(fcinfo, path)
+    let path = crate::pg_relation_filepath(relid)?;
+    Ok(ret_text_opt(fcinfo, path))
 }
 
 // ---------------------------------------------------------------------------
@@ -281,16 +266,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the `dbsize.c` fmgr builtins this crate owns (C: their
@@ -298,7 +286,7 @@ fn builtin(
 /// OIDs / nargs / strict / retset transcribed exactly from `pg_proc.dat`
 /// (all `proisstrict` defaults to `'t'`; none set `proretset`).
 pub fn register_dbsize_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // pg_database_size(oid) -> int8
         builtin(2324, "pg_database_size_oid", 1, true, false, fc_pg_database_size_oid),
         // pg_database_size(name) -> int8

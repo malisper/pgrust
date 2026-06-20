@@ -13,7 +13,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers.
@@ -123,20 +123,6 @@ fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     fcinfo.set_ref_result(RefPayload::Varlena(varlena_image(s.as_bytes())));
     Datum::from_usize(0)
 }
-
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-/// Unwrap a `PgResult<T>`, raising the error through `raise` on `Err`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
 /// A scratch context for cores that allocate their result through `Mcx`. The
 /// resulting bytes are copied onto the by-ref lane before it is dropped (C: the
 /// palloc'd result lives in the caller's context; here it crosses by value).
@@ -149,147 +135,147 @@ fn scratch_mcx() -> mcx::MemoryContext {
 // ---------------------------------------------------------------------------
 
 // ---- I/O ----
-fn fc_cash_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cash_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: cash_in(cstring). Forward `fcinfo->context` (the soft ErrorSaveContext
     // installed by InputFunctionCallSafe) so a recoverable parse failure
     // `errsave`s into the soft sink instead of throwing — matching fc_int2in.
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let escontext = fcinfo.escontext_mut();
-    ret_cash(ok(crate::cash_in(&s, escontext)))
+    Ok(ret_cash(crate::cash_in(&s, escontext)?))
 }
-fn fc_cash_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cstring(fcinfo, crate::cash_out(arg_cash(fcinfo, 0)))
+fn fc_cash_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cstring(fcinfo, crate::cash_out(arg_cash(fcinfo, 0))))
 }
-fn fc_cash_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cash_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let buf = arg_varlena(fcinfo, 0);
-    ret_cash(ok(crate::cash_recv(buf)))
+    Ok(ret_cash(crate::cash_recv(buf)?))
 }
-fn fc_cash_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cash_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let v = arg_cash(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(crate::cash_send(m.mcx(), v));
-    ret_bytea(fcinfo, bytes.as_slice().to_vec())
+    let bytes = crate::cash_send(m.mcx(), v)?;
+    Ok(ret_bytea(fcinfo, bytes.as_slice().to_vec()))
 }
 
 // ---- comparisons ----
-fn fc_cash_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::cash_eq(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1)))
+fn fc_cash_eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::cash_eq(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))))
 }
-fn fc_cash_ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::cash_ne(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1)))
+fn fc_cash_ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::cash_ne(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))))
 }
-fn fc_cash_lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::cash_lt(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1)))
+fn fc_cash_lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::cash_lt(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))))
 }
-fn fc_cash_le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::cash_le(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1)))
+fn fc_cash_le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::cash_le(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))))
 }
-fn fc_cash_gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::cash_gt(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1)))
+fn fc_cash_gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::cash_gt(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))))
 }
-fn fc_cash_ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::cash_ge(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1)))
+fn fc_cash_ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::cash_ge(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))))
 }
-fn fc_cash_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::cash_cmp(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1)))
+fn fc_cash_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::cash_cmp(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))))
 }
 
 // ---- arithmetic ----
-fn fc_cash_pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::cash_pl(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))))
+fn fc_cash_pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cash_pl(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))?))
 }
-fn fc_cash_mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::cash_mi(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))))
+fn fc_cash_mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cash_mi(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))?))
 }
-fn fc_cash_div_cash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(ok(crate::cash_div_cash(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))))
+fn fc_cash_div_cash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::cash_div_cash(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))?))
 }
 
 // ---- mul/div against float8 ----
-fn fc_cash_mul_flt8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::cash_mul_flt8(arg_cash(fcinfo, 0), arg_f64(fcinfo, 1))))
+fn fc_cash_mul_flt8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cash_mul_flt8(arg_cash(fcinfo, 0), arg_f64(fcinfo, 1))?))
 }
-fn fc_flt8_mul_cash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::flt8_mul_cash(arg_f64(fcinfo, 0), arg_cash(fcinfo, 1))))
+fn fc_flt8_mul_cash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::flt8_mul_cash(arg_f64(fcinfo, 0), arg_cash(fcinfo, 1))?))
 }
-fn fc_cash_div_flt8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::cash_div_flt8(arg_cash(fcinfo, 0), arg_f64(fcinfo, 1))))
+fn fc_cash_div_flt8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cash_div_flt8(arg_cash(fcinfo, 0), arg_f64(fcinfo, 1))?))
 }
 
 // ---- mul/div against float4 ----
-fn fc_cash_mul_flt4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::cash_mul_flt4(arg_cash(fcinfo, 0), arg_f32(fcinfo, 1))))
+fn fc_cash_mul_flt4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cash_mul_flt4(arg_cash(fcinfo, 0), arg_f32(fcinfo, 1))?))
 }
-fn fc_flt4_mul_cash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::flt4_mul_cash(arg_f32(fcinfo, 0), arg_cash(fcinfo, 1))))
+fn fc_flt4_mul_cash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::flt4_mul_cash(arg_f32(fcinfo, 0), arg_cash(fcinfo, 1))?))
 }
-fn fc_cash_div_flt4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::cash_div_flt4(arg_cash(fcinfo, 0), arg_f32(fcinfo, 1))))
+fn fc_cash_div_flt4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cash_div_flt4(arg_cash(fcinfo, 0), arg_f32(fcinfo, 1))?))
 }
 
 // ---- mul/div against int8 ----
-fn fc_cash_mul_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::cash_mul_int8(arg_cash(fcinfo, 0), arg_i64(fcinfo, 1))))
+fn fc_cash_mul_int8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cash_mul_int8(arg_cash(fcinfo, 0), arg_i64(fcinfo, 1))?))
 }
-fn fc_int8_mul_cash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::int8_mul_cash(arg_i64(fcinfo, 0), arg_cash(fcinfo, 1))))
+fn fc_int8_mul_cash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::int8_mul_cash(arg_i64(fcinfo, 0), arg_cash(fcinfo, 1))?))
 }
-fn fc_cash_div_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::cash_div_int8(arg_cash(fcinfo, 0), arg_i64(fcinfo, 1))))
+fn fc_cash_div_int8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cash_div_int8(arg_cash(fcinfo, 0), arg_i64(fcinfo, 1))?))
 }
 
 // ---- mul/div against int4 ----
-fn fc_cash_mul_int4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::cash_mul_int4(arg_cash(fcinfo, 0), arg_i32(fcinfo, 1))))
+fn fc_cash_mul_int4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cash_mul_int4(arg_cash(fcinfo, 0), arg_i32(fcinfo, 1))?))
 }
-fn fc_int4_mul_cash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::int4_mul_cash(arg_i32(fcinfo, 0), arg_cash(fcinfo, 1))))
+fn fc_int4_mul_cash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::int4_mul_cash(arg_i32(fcinfo, 0), arg_cash(fcinfo, 1))?))
 }
-fn fc_cash_div_int4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::cash_div_int4(arg_cash(fcinfo, 0), arg_i32(fcinfo, 1))))
+fn fc_cash_div_int4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cash_div_int4(arg_cash(fcinfo, 0), arg_i32(fcinfo, 1))?))
 }
 
 // ---- mul/div against int2 ----
-fn fc_cash_mul_int2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::cash_mul_int2(arg_cash(fcinfo, 0), arg_i16(fcinfo, 1))))
+fn fc_cash_mul_int2(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cash_mul_int2(arg_cash(fcinfo, 0), arg_i16(fcinfo, 1))?))
 }
-fn fc_int2_mul_cash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::int2_mul_cash(arg_i16(fcinfo, 0), arg_cash(fcinfo, 1))))
+fn fc_int2_mul_cash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::int2_mul_cash(arg_i16(fcinfo, 0), arg_cash(fcinfo, 1))?))
 }
-fn fc_cash_div_int2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::cash_div_int2(arg_cash(fcinfo, 0), arg_i16(fcinfo, 1))))
+fn fc_cash_div_int2(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cash_div_int2(arg_cash(fcinfo, 0), arg_i16(fcinfo, 1))?))
 }
 
 // ---- larger/smaller ----
-fn fc_cashlarger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(crate::cashlarger(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1)))
+fn fc_cashlarger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cashlarger(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))))
 }
-fn fc_cashsmaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(crate::cashsmaller(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1)))
+fn fc_cashsmaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::cashsmaller(arg_cash(fcinfo, 0), arg_cash(fcinfo, 1))))
 }
 
 // ---- words ----
-fn fc_cash_words(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_text(fcinfo, crate::cash_words(arg_cash(fcinfo, 0)))
+fn fc_cash_words(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_text(fcinfo, crate::cash_words(arg_cash(fcinfo, 0))))
 }
 
 // ---- casts ----
-fn fc_cash_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cash_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let money = arg_cash(fcinfo, 0);
     let m = scratch_mcx();
-    let image = ok(crate::cash_numeric(m.mcx(), money));
-    ret_varlena(fcinfo, image.as_slice().to_vec())
+    let image = crate::cash_numeric(m.mcx(), money)?;
+    Ok(ret_varlena(fcinfo, image.as_slice().to_vec()))
 }
-fn fc_numeric_cash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_cash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_varlena(fcinfo, 0);
     let m = scratch_mcx();
-    ret_cash(ok(crate::numeric_cash(m.mcx(), num)))
+    Ok(ret_cash(crate::numeric_cash(m.mcx(), num)?))
 }
-fn fc_int4_cash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::int4_cash(arg_i32(fcinfo, 0))))
+fn fc_int4_cash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::int4_cash(arg_i32(fcinfo, 0))?))
 }
-fn fc_int8_cash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_cash(ok(crate::int8_cash(arg_i64(fcinfo, 0))))
+fn fc_int8_cash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_cash(crate::int8_cash(arg_i64(fcinfo, 0))?))
 }
 
 // ---------------------------------------------------------------------------
@@ -302,16 +288,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `cash.c` builtin into the fmgr-core builtin table (C:
@@ -319,7 +308,7 @@ fn builtin(
 /// crate's `init_seams()`. OIDs/nargs/strict/retset transcribed from
 /// `pg_proc.dat` (all rows: `proisstrict => 't'`, none `proretset`).
 pub fn register_cash_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- I/O ----
         builtin(886, "cash_in", 1, true, false, fc_cash_in),
         builtin(887, "cash_out", 1, true, false, fc_cash_out),

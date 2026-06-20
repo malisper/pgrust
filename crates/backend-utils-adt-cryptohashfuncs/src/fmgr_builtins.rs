@@ -15,7 +15,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
 const VARHDRSZ: usize = 4;
@@ -59,47 +59,33 @@ fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
-fn fc_md5_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let out = ok(crate::md5_text(arg_bytes(fcinfo, 0)));
-    ret_varlena(fcinfo, out)
+fn fc_md5_text(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let out = crate::md5_text(arg_bytes(fcinfo, 0))?;
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_md5_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let out = ok(crate::md5_bytea(arg_bytes(fcinfo, 0)));
-    ret_varlena(fcinfo, out)
+fn fc_md5_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let out = crate::md5_bytea(arg_bytes(fcinfo, 0))?;
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_sha224_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_sha224_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let out = crate::sha224_bytea(arg_bytes(fcinfo, 0));
-    ret_varlena(fcinfo, out)
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_sha256_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_sha256_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let out = crate::sha256_bytea(arg_bytes(fcinfo, 0));
-    ret_varlena(fcinfo, out)
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_sha384_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_sha384_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let out = crate::sha384_bytea(arg_bytes(fcinfo, 0));
-    ret_varlena(fcinfo, out)
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_sha512_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_sha512_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let out = crate::sha512_bytea(arg_bytes(fcinfo, 0));
-    ret_varlena(fcinfo, out)
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // ---------------------------------------------------------------------------
@@ -112,23 +98,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every SQL-callable `cryptohashfuncs.c` builtin. OIDs / nargs /
 /// strict / retset transcribed exactly from `pg_proc.dat` (all `nargs => 1`,
 /// all strict, none retset).
 pub fn register_cryptohashfuncs_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // md5(text) / md5(bytea) — the builtin `name` is the `prosrc` C symbol
         // (canonical fmgr_builtins[] keys on prosrc, not the SQL proname).
         builtin(2311, "md5_text", 1, true, false, fc_md5_text),
