@@ -17,11 +17,12 @@ use mcx::Mcx;
 use types_core::Oid;
 use backend_utils_error::ereport;
 use types_error::{
-    PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERROR,
+    PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERROR,
 };
 use types_explain::{ExplainFormat, ExplainSerializeOption, ExplainState};
 use types_nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
 use types_nodes::ddlnodes::DefElem;
+use types_nodes::parsenodes::{OBJECT_MATVIEW, OBJECT_TABLE};
 use types_nodes::nodes::{ntag, CmdType, Node};
 use types_nodes::parsestmt::{DestReceiverHandle, ParseState};
 use types_nodes::portalcmds::ParamListInfo;
@@ -34,6 +35,8 @@ use backend_commands_define_seams::DefElemArg;
 use backend_commands_explain_format as fmt;
 use backend_commands_explain_seams as seams;
 use backend_commands_explain_state as state;
+use backend_rewrite_rewritehandler_seams as rewrite;
+use backend_commands_createas_seams;
 
 // TEXTOID / XMLOID / JSONOID (pg_type.h).
 const TEXTOID: Oid = 25;
@@ -274,7 +277,8 @@ fn ExplainOneQuery<'mcx>(
     cursor_options: i32,
     into: Option<&IntoClause<'mcx>>,
     es: &mut ExplainState<'mcx>,
-    pstate: &ParseState<'mcx>,
+    source_text: &str,
+    query_env: Option<&QueryEnvironment<'mcx>>,
     params: ParamListInfo,
 ) -> PgResult<()> {
     // planner will not cope with utility statements
@@ -287,8 +291,8 @@ fn ExplainOneQuery<'mcx>(
             utility,
             into,
             es,
-            pstate.p_sourcetext.as_ref().map(|s| s.as_str()).unwrap_or(""),
-            pstate.p_queryEnv.as_deref(),
+            source_text,
+            query_env,
             params,
         );
     }
@@ -300,10 +304,153 @@ fn ExplainOneQuery<'mcx>(
         cursor_options,
         into,
         es,
-        pstate.p_sourcetext.as_ref().map(|s| s.as_str()).unwrap_or(""),
+        source_text,
         params,
-        pstate.p_queryEnv.as_deref(),
+        query_env,
     )
+}
+
+/// `ExplainOneUtility(utilityStmt, into, es, pstate, params)` (explain.c:439) —
+/// explain a utility statement (the `EXPLAIN <utility>` legs). CTAS and DECLARE
+/// CURSOR re-rewrite their contained `Query` and route back through
+/// `ExplainOneQuery`; EXECUTE delegates to the prepared-statement cache's
+/// `ExplainExecuteQuery` (installed by `backend-commands-prepare`); NOTIFY and
+/// everything else emit a no-plan placeholder.
+pub fn ExplainOneUtility<'mcx>(
+    mcx: Mcx<'mcx>,
+    utility_stmt: &Node<'mcx>,
+    into: Option<&IntoClause<'mcx>>,
+    es: &mut ExplainState<'mcx>,
+    source_text: &str,
+    query_env: Option<&QueryEnvironment<'mcx>>,
+    params: ParamListInfo,
+) -> PgResult<()> {
+    // if (utilityStmt == NULL) return; — the seam is only reached with a node.
+    match utility_stmt.node_tag() {
+        ntag::T_CreateTableAsStmt => {
+            // We have to rewrite the contained SELECT and then pass it back to
+            // ExplainOneQuery.  Copy to be safe in the EXPLAIN EXECUTE case.
+            let ctas = utility_stmt.expect_createtableasstmt();
+
+            // Check if the relation exists or not.  This is done at this stage
+            // to avoid query planning or execution.
+            if backend_commands_createas_seams::create_table_as_rel_exists::call(mcx, ctas)? {
+                match ctas.objtype {
+                    OBJECT_TABLE => {
+                        fmt::ExplainDummyGroup("CREATE TABLE AS", None, es)?;
+                    }
+                    OBJECT_MATVIEW => {
+                        fmt::ExplainDummyGroup("CREATE MATERIALIZED VIEW", None, es)?;
+                    }
+                    other => {
+                        return Err(PgError::error(alloc::format!(
+                            "unexpected object type: {}",
+                            other as i32
+                        )));
+                    }
+                }
+                return Ok(());
+            }
+
+            // ctas_query = castNode(Query, copyObject(ctas->query));
+            let ctas_query = ctas
+                .query
+                .as_deref()
+                .and_then(|n| n.as_query())
+                .expect("ExplainOneUtility: CreateTableAsStmt->query is not a Query");
+            let ctas_query = ctas_query.clone_in(mcx)?;
+
+            // IsQueryIdEnabled() jumble + post_parse_analyze_hook: query-id
+            // jumbling is off by default and no hook is installed in this build,
+            // so the C path is a no-op here (same as ExplainQuery).
+
+            // rewritten = QueryRewrite(ctas_query); Assert(length == 1);
+            let rewritten = rewrite::query_rewrite_canonical::call(mcx, ctas_query)?;
+            assert_eq!(rewritten.len(), 1, "QueryRewrite(CTAS query) produced != 1 query");
+
+            // ctas->into — the CTAS target IntoClause. The downstream EXPLAIN
+            // consumers carry the trimmed `parsestmt::IntoClause` (skipData +
+            // the opaque createas-owned `IntoClause` node payload); build it
+            // from the full `ddlnodes::IntoClause` the statement holds.
+            let into_node = ctas
+                .into
+                .as_deref()
+                .expect("ExplainOneUtility: CreateTableAsStmt->into is NULL");
+            let skip_data = into_node
+                .as_intoclause()
+                .expect("ExplainOneUtility: CreateTableAsStmt->into is not an IntoClause")
+                .skipData;
+            let ctas_into = IntoClause {
+                skipData: skip_data,
+                node: mcx::alloc_in(mcx, into_node.clone_in(mcx)?)?,
+            };
+
+            ExplainOneQuery(
+                mcx,
+                &rewritten[0],
+                CURSOR_OPT_PARALLEL_OK,
+                Some(&ctas_into),
+                es,
+                source_text,
+                query_env,
+                params,
+            )
+        }
+        ntag::T_DeclareCursorStmt => {
+            // Likewise for DECLARE CURSOR. EXPLAIN ANALYZE DECLARE CURSOR runs
+            // the query (no cursor is created, however).
+            let dcs = utility_stmt.expect_declarecursorstmt();
+
+            let dcs_query = dcs
+                .query
+                .as_deref()
+                .and_then(|n| n.as_query())
+                .expect("ExplainOneUtility: DeclareCursorStmt->query is not a Query");
+            let dcs_query = dcs_query.clone_in(mcx)?;
+
+            let rewritten = rewrite::query_rewrite_canonical::call(mcx, dcs_query)?;
+            assert_eq!(rewritten.len(), 1, "QueryRewrite(DECLARE CURSOR query) produced != 1 query");
+
+            ExplainOneQuery(
+                mcx,
+                &rewritten[0],
+                dcs.options,
+                None,
+                es,
+                source_text,
+                query_env,
+                params,
+            )
+        }
+        ntag::T_ExecuteStmt => {
+            let execstmt = utility_stmt.expect_executestmt();
+            seams::explain_execute_query::call(
+                execstmt,
+                into,
+                es,
+                source_text,
+                query_env,
+                params,
+            )
+        }
+        ntag::T_NotifyStmt => {
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                es.str.try_push_str("NOTIFY\n")?;
+            } else {
+                fmt::ExplainDummyGroup("Notify", None, es)?;
+            }
+            Ok(())
+        }
+        _ => {
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                es.str
+                    .try_push_str("Utility statements have no plan structure\n")?;
+            } else {
+                fmt::ExplainDummyGroup("Utility Statement", None, es)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// `ExplainQuery(pstate, stmt, params, dest)` (explain.c:163) — the SQL-`EXPLAIN`
@@ -356,7 +503,16 @@ pub fn ExplainQuery<'mcx>(
     } else {
         let n = rewritten.len();
         for (i, q) in rewritten.iter().enumerate() {
-            ExplainOneQuery(mcx, q, CURSOR_OPT_PARALLEL_OK, None, &mut es, pstate, params.clone())?;
+            ExplainOneQuery(
+                mcx,
+                q,
+                CURSOR_OPT_PARALLEL_OK,
+                None,
+                &mut es,
+                pstate.p_sourcetext.as_ref().map(|s| s.as_str()).unwrap_or(""),
+                pstate.p_queryEnv.as_deref(),
+                params.clone(),
+            )?;
             // Separate plans with an appropriate separator.
             if i + 1 < n {
                 seams::explain_separate_plans::call(&mut es)?;

@@ -493,22 +493,19 @@ fn explain_print_plan<'es>(
 // ===========================================================================
 
 /// `explain_one_utility` seam — `ExplainOneUtility(utilityStmt, into, es,
-/// pstate, params)`. The utility-statement EXPLAIN legs (CTAS / DECLARE CURSOR /
-/// EXECUTE / CALL) deparse / re-plan through unported owners; reaching one is a
-/// loud boundary.
+/// pstate, params)`. Delegates to the driver implementation (CTAS / DECLARE
+/// CURSOR re-rewrite + re-plan; EXECUTE → the prepared-statement cache's
+/// `ExplainExecuteQuery`; NOTIFY / other → no-plan placeholder).
 fn explain_one_utility<'mcx>(
-    _utility_stmt: &Node<'mcx>,
-    _into: Option<&IntoClause<'mcx>>,
+    utility_stmt: &Node<'mcx>,
+    into: Option<&IntoClause<'mcx>>,
     es: &mut ExplainState<'mcx>,
-    _source_text: &str,
-    _query_env: Option<&QueryEnvironment<'mcx>>,
-    _params: ParamListInfo,
+    source_text: &str,
+    query_env: Option<&QueryEnvironment<'mcx>>,
+    params: ParamListInfo,
 ) -> PgResult<()> {
-    let _ = es;
-    panic!(
-        "explain_one_utility: ExplainOneUtility (CTAS / DECLARE CURSOR / EXECUTE / \
-         CALL legs) needs the utility-statement re-plan/deparse owners (unported)"
-    );
+    let mcx = es.str.allocator();
+    driver::ExplainOneUtility(mcx, utility_stmt, into, es, source_text, query_env, params)
 }
 
 /// `explain_separate_plans(es)` seam — `ExplainSeparatePlans(es)` (delegates to

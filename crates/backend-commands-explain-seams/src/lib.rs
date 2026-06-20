@@ -12,6 +12,7 @@
 use types_core::instrument::{instr_time, BufferUsage};
 use types_error::PgResult;
 use types_explain::ExplainState;
+use types_nodes::ddlnodes::ExecuteStmt;
 use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::Node;
 use types_nodes::params::ParamListInfo;
@@ -108,4 +109,20 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ExplainSeparatePlans(es)` (explain.c).
     pub fn explain_separate_plans<'mcx>(es: &mut ExplainState<'mcx>) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `ExplainExecuteQuery((ExecuteStmt *) utilityStmt, into, es, pstate,
+    /// params)` (prepare.c) — the `EXPLAIN EXECUTE` leg of `ExplainOneUtility`.
+    /// Owned/installed by `backend-commands-prepare` (the prepared-statement
+    /// cache lives there); `backend-commands-explain`'s `ExplainOneUtility`
+    /// calls it. `source_text` is `pstate->p_sourcetext`. Can `ereport(ERROR)`.
+    pub fn explain_execute_query<'mcx>(
+        execstmt: &ExecuteStmt<'mcx>,
+        into: Option<&IntoClause<'mcx>>,
+        es: &mut ExplainState<'mcx>,
+        source_text: &str,
+        query_env: Option<&QueryEnvironment<'mcx>>,
+        params: ParamListInfo,
+    ) -> PgResult<()>
 );

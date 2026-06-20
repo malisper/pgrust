@@ -81,6 +81,7 @@ use types_nodes::parsestmt::{
 // `Node` enum carries (raw `NodePtr` argtypes / params / query), which the
 // ProcessUtility dispatch hands us as `&Node`.
 use types_nodes::ddlnodes::{DeallocateStmt, ExecuteStmt, PrepareStmt};
+use types_nodes::queryenvironment::QueryEnvironment;
 
 use backend_access_common_tupdesc_seams as tupdesc_seam;
 use backend_access_transam_xact_seams as xact_seam;
@@ -824,7 +825,8 @@ pub fn ExplainExecuteQuery<'mcx>(
     execstmt: ExecuteStmt<'mcx>,
     into: Option<&IntoClause<'mcx>>,
     es: &mut ExplainState<'mcx>,
-    pstate: &ParseState<'mcx>,
+    source_text: &str,
+    query_env: Option<&QueryEnvironment<'mcx>>,
     params: ParamListInfo,
 ) -> PgResult<()> {
     // ParamListInfo paramLI = NULL; EState *estate = NULL;
@@ -860,16 +862,23 @@ pub fn ExplainExecuteQuery<'mcx>(
     // EvaluateParams only consults p_sourcetext, and C copies pstate's into the
     // throwaway pstate_params, so we pass `pstate` straight through.
     if plancache_seam::plansource_num_params::call(entry.plansource)? != 0 {
+        // pstate_params = make_parsestate(NULL);
+        // pstate_params->p_sourcetext = pstate->p_sourcetext;
+        // EvaluateParams only consults p_sourcetext (transformExpr error
+        // positions), so a throwaway pstate carrying just the source text
+        // matches C's `pstate_params`.
+        let mut pstate_params = ParseState::new(mcx)?;
+        pstate_params.p_sourcetext = Some(mcx::PgString::from_str_in(source_text, mcx)?);
         let mut es_state = execexpr_seam::create_executor_state::call(mcx)?;
         es_state.es_param_list_info = params;
-        param_li = EvaluateParams(mcx, pstate, &entry, &execstmt.params, &mut es_state)?;
+        param_li =
+            EvaluateParams(mcx, &pstate_params, &entry, &execstmt.params, &mut es_state)?;
         estate = Some(es_state);
     }
 
     // cplan = GetCachedPlan(entry->plansource, paramLI, CurrentResourceOwner,
     //                       pstate->p_queryEnv);
     let owner = resowner_seam::current_resource_owner::call()?;
-    let query_env = pstate.p_queryEnv.as_deref();
     let cplan: CachedPlanHandle =
         plancache_seam::get_cached_plan::call(entry.plansource, param_li.clone(), owner, query_env)?;
 
@@ -901,11 +910,6 @@ pub fn ExplainExecuteQuery<'mcx>(
     //     else ExplainOneUtility(pstmt->utilityStmt, into, es, pstate, paramLI);
     //     if (lnext(plan_list, p) != NULL) ExplainSeparatePlans(es); }
     let n = plan_list.len();
-    let p_sourcetext: &str = pstate
-        .p_sourcetext
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("");
     for idx in 0..n {
         let pstmt = &plan_list[idx];
         if pstmt.commandType != CmdType::CMD_UTILITY {
@@ -931,7 +935,7 @@ pub fn ExplainExecuteQuery<'mcx>(
                 utility_stmt,
                 into,
                 &mut *es,
-                p_sourcetext,
+                source_text,
                 query_env,
                 param_li.clone(),
             )?;
@@ -1201,6 +1205,24 @@ fn deallocate_query_arm<'mcx>(stmt: &DispatchNode<'mcx>) -> PgResult<()> {
     DeallocateQuery(s)
 }
 
+/// `explain_execute_query` seam arm: the `EXPLAIN EXECUTE` leg of
+/// `ExplainOneUtility`. The explain crate hands a borrowed `ExecuteStmt`;
+/// `ExplainExecuteQuery` takes it by value (matching C's
+/// `(ExecuteStmt *) utilityStmt` which the body treats as read-only and never
+/// frees), so clone it into the arena.
+fn explain_execute_query_arm<'mcx>(
+    execstmt: &ExecuteStmt<'mcx>,
+    into: Option<&IntoClause<'mcx>>,
+    es: &mut ExplainState<'mcx>,
+    source_text: &str,
+    query_env: Option<&QueryEnvironment<'mcx>>,
+    params: ParamListInfo,
+) -> PgResult<()> {
+    let mcx = es.str.allocator();
+    let execstmt_owned = execstmt.clone_in(mcx)?;
+    ExplainExecuteQuery(mcx, execstmt_owned, into, es, source_text, query_env, params)
+}
+
 /// Install this crate's inward seams. Wired into `seams-init`.
 ///
 /// PREPARE, DEALLOCATE, and EXECUTE install fully: the portal-driving tail now
@@ -1217,4 +1239,7 @@ pub fn init_seams() {
     // `CREATE TABLE ... AS EXECUTE` leg, owned by `createas.c`'s `ExecuteQuery`
     // (prepare.c) — createas-seams declares it; prepare installs it.
     createas_seam::execute_query::set(execute_query_ctas_arm);
+    // `EXPLAIN EXECUTE` leg of explain.c's `ExplainOneUtility` — explain-seams
+    // declares it; prepare (owner of the prepared-statement cache) installs it.
+    explain_seam::explain_execute_query::set(explain_execute_query_arm);
 }

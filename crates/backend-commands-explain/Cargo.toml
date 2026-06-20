@@ -33,6 +33,9 @@ backend-utils-adt-ruleutils = { path = "../backend-utils-adt-ruleutils" }
 # Inward seam crate this unit installs.
 backend-commands-explain-seams = { path = "../backend-commands-explain-seams" }
 
+# ExplainOneUtility CTAS leg: CreateTableAsRelExists (createas-seams).
+backend-commands-createas-seams = { path = "../backend-commands-createas-seams" }
+
 # ExplainResultDesc: tcop-utility out-seam this unit installs + the tupdesc
 # constructor + the format-option string accessor.
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
