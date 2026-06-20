@@ -637,6 +637,51 @@ fn update_relispartition_catalog(relation_id: Oid, newval: bool) -> PgResult<boo
     Ok(true)
 }
 
+/// `pg_partitioned_table.partdefid` column (`pg_partitioned_table.h`):
+/// partrelid=1, partstrat=2, partnatts=3, partdefid=4.
+const ANUM_PG_PARTITIONED_TABLE_PARTRELID: i16 = 1;
+const ANUM_PG_PARTITIONED_TABLE_PARTDEFID: i16 = 4;
+
+/// `update_default_partition_oid(parentId, defaultPartId)`
+/// (catalog/partition.c:340): set `pg_partitioned_table.partdefid` of the
+/// partitioned table `parentId` to `defaultPartId`. Mirrors C exactly:
+/// `table_open(PartitionedRelationId, RowExclusiveLock)` →
+/// `SearchSysCacheCopy1(PARTRELID, parentId)` → in-place `partdefid` write →
+/// `CatalogTupleUpdate` → `heap_freetuple` → `table_close`. On a cache miss the
+/// C `elog(ERROR, "cache lookup failed for partition key of relation %u")`.
+fn update_default_partition_oid_catalog(parent_id: Oid, default_part_id: Oid) -> PgResult<()> {
+    let ctx = MemoryContext::new("update_default_partition_oid_catalog");
+    let mcx = ctx.mcx();
+    let pg_partitioned_table =
+        table_open(mcx, cat::catalog::PARTITIONED_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(
+        mcx,
+        &pg_partitioned_table,
+        ANUM_PG_PARTITIONED_TABLE_PARTRELID,
+        parent_id,
+    )?
+    else {
+        pg_partitioned_table.close(RowExclusiveLock)?;
+        return Err(PgError::error(format!(
+            "cache lookup failed for partition key of relation {parent_id}"
+        )));
+    };
+    let (values, nulls) = deform(mcx, &pg_partitioned_table, &oldtup)?;
+    let mut values = values;
+    let mut nulls = nulls;
+    let mut replaces = vec![false; values.len()];
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        ANUM_PG_PARTITIONED_TABLE_PARTDEFID,
+        Datum::from_oid(default_part_id),
+    );
+    modify_and_update(mcx, &pg_partitioned_table, &oldtup, &values, &nulls, &replaces)?;
+    pg_partitioned_table.close(RowExclusiveLock)?;
+    Ok(())
+}
+
 /// `DefineIndex`'s partitioned-recursion `invalidate_parent` update
 /// (indexcmds.c:1573): open pg_index RowExclusiveLock,
 /// `SearchSysCache1(INDEXRELID)`, `heap_copytuple`, set `indisvalid = false`,
@@ -2874,6 +2919,14 @@ pub fn install() {
     // the seam is declared on backend-commands-functioncmds-seams but the body
     // needs this crate's CatalogTupleDelete + heap scan substrate).
     backend_commands_functioncmds_seams::remove_function_tuple::set(remove_function_tuple);
+
+    // catalog/partition.c update_default_partition_oid pg_partitioned_table
+    // single-field write (cross-crate install: the seam is declared on
+    // backend-utils-cache-syscache-seams but the catalog-write substrate
+    // (table_open + CatalogTupleUpdate) lives in this crate).
+    backend_utils_cache_syscache_seams::update_default_partition_oid::set(
+        update_default_partition_oid_catalog,
+    );
 
     // pg_depend / pg_shdepend.
     s::catalog_tuple_update_pg_depend::set(catalog_tuple_update_pg_depend);

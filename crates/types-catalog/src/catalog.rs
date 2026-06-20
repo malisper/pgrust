@@ -13,6 +13,9 @@ pub const CONSTRAINT_RELATION_ID: Oid = 2606;
 pub const EXTENSION_RELATION_ID: Oid = 3079;
 /// `DatabaseRelationId` — `pg_database` (`pg_database_d.h`).
 pub const DATABASE_RELATION_ID: Oid = 1262;
+/// `PartitionedRelationId` — `pg_partitioned_table`
+/// (`pg_partitioned_table_d.h`).
+pub const PARTITIONED_RELATION_ID: Oid = 3350;
 /// `AuthIdRelationId` — `pg_authid` (`pg_authid_d.h`).
 pub const AUTH_ID_RELATION_ID: Oid = 1260;
 /// `DbRoleSettingRelationId` — `pg_db_role_setting` (`pg_db_role_setting_d.h`).

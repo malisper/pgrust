@@ -79,6 +79,7 @@ backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-activity-pgstat-function = { path = "../backend-utils-activity-pgstat-function" }
 backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 # Heavyweight tuple-tag lock for get_catalog_object_by_oid_extended's locktuple
