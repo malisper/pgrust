@@ -167,7 +167,6 @@ impl<'mcx> History<'mcx> {
     /// `pglz_hist_add`: enter the current input position into the hash table.
     fn add(&mut self, input: &[u8], pos: usize) {
         let hindex = hist_idx(input, pos, self.mask);
-        let head = self.start[hindex] as usize;
         let entry_index = self.next;
 
         // If we are about to reuse an entry that is still in some list, unlink
@@ -183,6 +182,14 @@ impl<'mcx> History<'mcx> {
                 self.entries[old.next].prev = old.prev;
             }
         }
+
+        // C reads `*__myhsp` (the current list head for `hindex`) only AFTER the
+        // recycle/unlink block above. When the entry being recycled was the head
+        // of this same bucket, the unlink moves the bucket head, so reading the
+        // head before unlinking would splice the recycled entry onto itself
+        // (next == prev == entry_index → a self-referential cycle that makes
+        // `find_match` loop forever). Read it here, post-unlink, like C.
+        let head = self.start[hindex] as usize;
 
         self.entries[entry_index] = HistEntry {
             next: head,
@@ -735,5 +742,74 @@ mod tests {
         }
         let compressed = compress(&input, Some(PGLZ_strategy_always())).unwrap();
         assert_eq!(decompress(&compressed, input.len(), true).unwrap(), input);
+    }
+}
+
+#[cfg(test)]
+mod spin_repro {
+    use super::*;
+    use mcx::MemoryContext;
+    use std::vec::Vec;
+
+    // Deterministic LCG mimicking `string_agg(random()::text,'')` — a long,
+    // poorly-compressible run of digits/dots. This is the arrays.sql input that
+    // hung the backend at 100% CPU before the `add` head-read ordering fix:
+    // recycling an entry that was the head of its own bucket spliced it onto
+    // itself (next == prev == self), so `find_match` looped forever.
+    fn gen(n: usize) -> Vec<u8> {
+        let mut s: u64 = 0x12345678;
+        let mut out = Vec::with_capacity(n);
+        let digits = b"0123456789.";
+        while out.len() < n {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            out.push(digits[((s >> 33) as usize) % digits.len()]);
+        }
+        out
+    }
+
+    // Build the history exactly as `pglz_compress` does and assert no bucket
+    // ever forms a cycle (a self-loop bounds the walk at > table size).
+    #[test]
+    fn history_never_cycles_on_large_input() {
+        let input = gen(370_000);
+        let ctx = MemoryContext::new("cyc");
+        let mut history = History::new(ctx.mcx(), PGLZ_MAX_HISTORY_LISTS).unwrap();
+        for pos in 0..input.len() {
+            let hidx = hist_idx(&input, pos, history.mask);
+            let mut e = history.start[hidx] as usize;
+            let mut count = 0usize;
+            while e != INVALID_ENTRY {
+                count += 1;
+                assert!(
+                    count <= PGLZ_HISTORY_SIZE,
+                    "bucket {hidx} cycles at pos {pos} (walked {count} > table size)"
+                );
+                e = history.entries[e].next;
+            }
+            history.add(&input, pos);
+        }
+    }
+
+    // End-to-end: the full compressor must terminate and round-trip on the
+    // large, poorly-compressible input that used to hang.
+    #[test]
+    fn large_randomish_text_terminates_and_roundtrips() {
+        let input = gen(370_000);
+        let ctx = MemoryContext::new("spin");
+        let compressed: Option<Vec<u8>> = match pglz_compress(ctx.mcx(), &input, None).unwrap() {
+            Ok(out) => Some(out.iter().copied().collect()),
+            // Random text often won't meet the compression rate; that's fine —
+            // the point is that compression *terminates*.
+            Err(_) => None,
+        };
+        if let Some(bytes) = compressed {
+            let back: Vec<u8> = super::pglz_decompress(ctx.mcx(), &bytes, input.len(), true)
+                .unwrap()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect();
+            assert_eq!(back, input);
+        }
     }
 }
