@@ -873,10 +873,29 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
             // (re-)initialize tts_tableOid before constraints.
             estate.slot_mut(singleslot).tts_tableOid = result_oid;
 
-            // ExecComputeStoredGenerated / ExecConstraints: if the relation has
-            // constraints, check them. (No generated-stored columns on the
-            // common path; ExecComputeStoredGenerated is gated by the descriptor
-            // flag inside the executor.)
+            // Compute stored generated columns (copyfrom.c L1347-1350): if the
+            // relation has a constraint descriptor with has_generated_stored,
+            // evaluate the per-column generation expressions and write them back
+            // into the slot before checking constraints.
+            {
+                let has_gen_stored = relation_alias(estate, rri)
+                    .rd_att
+                    .constr
+                    .as_ref()
+                    .map(|c| c.has_generated_stored)
+                    .unwrap_or(false);
+                if has_gen_stored {
+                    backend_executor_nodeModifyTable_seams::exec_compute_stored_generated::call(
+                        mcx,
+                        estate,
+                        rri,
+                        singleslot,
+                        types_nodes::nodes::CmdType::CMD_INSERT,
+                    )?;
+                }
+            }
+
+            // ExecConstraints: if the relation has constraints, check them.
             if relation_alias(estate, rri).rd_att.constr.is_some() {
                 backend_executor_execMain_seams::exec_constraints::call(estate, rri, singleslot)?;
             }
