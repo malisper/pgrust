@@ -3560,18 +3560,26 @@ fn plpgsql_pre_column_ref<'mcx>(
         return Ok(None);
     }
 
-    // Lookup keys: the fully-qualified dotted name, then progressively shorter
-    // suffixes down to the last bareword (so `block.var` and `var` both hit).
+    // Lookup keys: progressively shorter trailing suffixes of the dotted name,
+    // longest first. This mirrors C `resolve_column_ref` + `plpgsql_ns_lookup`,
+    // which strips a leading enclosing-block LABEL from a qualified reference:
+    //   * `var`            -> scalar / whole-record bareword.
+    //   * `rec.field`      -> a RECFIELD (the param map keys fields this way), or
+    //                         `block.var` -> the scalar `var` (label stripped).
+    //   * `label.rec.field`-> after stripping the leading block label, the
+    //                         RECFIELD key is `rec.field` (the trailing 2 names).
+    // The param map keys scalars by their bare name and record fields by
+    // `rec.field`, so trying each trailing suffix from longest to shortest hits
+    // the most-specific binding first (matching plpgsql_ns_lookup's preference
+    // for a qualified match before the unqualified fallback).
     let info = {
         let names = &state.names;
         let mut found = None;
-        // Try the full dotted form first, then the trailing single name.
-        let dotted = parts.join(".").to_ascii_lowercase();
-        if let Some(i) = names.get(&dotted) {
-            found = Some(i.clone());
-        } else if let Some(last) = parts.last() {
-            if let Some(i) = names.get(&last.to_ascii_lowercase()) {
+        for start in 0..parts.len() {
+            let key = parts[start..].join(".").to_ascii_lowercase();
+            if let Some(i) = names.get(&key) {
                 found = Some(i.clone());
+                break;
             }
         }
         found

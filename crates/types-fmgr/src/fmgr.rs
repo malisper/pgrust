@@ -228,6 +228,19 @@ pub fn current_call_context_tag() -> Option<u32> {
     CURRENT_CALL_CONTEXT_TAG.with(|c| c.get())
 }
 
+/// Take (consuming, leaving `None`) the context node-tag deposited for the fmgr
+/// call currently being issued. fmgr-core calls this when it builds a callee's
+/// call frame: C's `fcinfo->context` is a per-frame field, so the tag must ride
+/// onto exactly that one frame and be cleared, so any *nested* fmgr call the
+/// callee itself issues — e.g. a trigger function whose body runs SPI queries
+/// invoking ordinary functions — observes `None`, exactly as a freshly-zeroed C
+/// `fcinfo->context`. The dispatcher's RAII [`CallContextTagGuard`] still
+/// restores the prior value on drop, so a sibling trigger fired afterwards sees
+/// the tag again.
+pub fn take_call_context_tag() -> Option<u32> {
+    CURRENT_CALL_CONTEXT_TAG.with(|c| c.replace(None))
+}
+
 impl FunctionCallInfoBaseData {
     pub fn new(
         flinfo: Option<Box<FmgrInfo>>,

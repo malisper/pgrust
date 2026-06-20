@@ -289,7 +289,16 @@ fn init_fcinfo(
     // the callee's CALLED_AS_TRIGGER(fcinfo) demux fires. The issuing dispatcher
     // cannot reach this frame (it is built inside the seam), so it deposits the
     // node-tag on a thread-local that we read back here. `None` is a plain call.
-    let context = types_fmgr::fmgr::current_call_context_tag()
+    //
+    // We *take* (consume) the tag rather than peek it: C's `fcinfo->context` is
+    // a per-frame field, so the tag must ride onto exactly this one callee frame
+    // and not leak into the calls the callee itself issues. Without consuming, a
+    // trigger function whose body runs SPI queries that invoke ordinary
+    // functions would wrongly stamp T_TriggerData onto those nested frames
+    // (making e.g. a plain 2-arg helper compile as a trigger function). The
+    // dispatcher's RAII guard still restores the prior tag on drop, so a sibling
+    // trigger fired afterwards re-observes it.
+    let context = types_fmgr::fmgr::take_call_context_tag()
         .map(|tag| types_fmgr::fmgr::ContextNode { tag });
     let mut fcinfo =
         FunctionCallInfoBaseData::new(flinfo.map(Box::new), nargs, collation, context, None);
@@ -3066,10 +3075,19 @@ fn function_call_invoke_seam(
 ) -> PgResult<(Datum, bool)> {
     let ctx = MemoryContext::new("function_call_invoke");
     let mcx = ctx.mcx();
+    // C: `fcinfo->context = (Node *) &LocTriggerData` is set on THIS call's frame.
+    // The issuing dispatcher deposited the tag on a thread-local; snapshot and
+    // clear it now so the `fmgr_info` resolution below (which may itself issue
+    // nested fmgr calls — catalog lookups) does not consume/observe it. We
+    // re-install it just before `init_fcinfo` so it rides onto exactly the callee
+    // frame, matching C's per-frame `fcinfo->context`.
+    let deposited_ctx = types_fmgr::fmgr::take_call_context_tag();
     let resolved = fmgr_info(mcx, fn_oid)?;
     // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658) — thread
     // the caller's fn_expr before the FmgrInfo is moved into fcinfo.
     let fn_expr = resolved.finfo.fn_expr.clone();
+    // Re-deposit the snapshot tag so `init_fcinfo` consumes it onto this frame.
+    let _ctx_reinstall = deposited_ctx.map(types_fmgr::fmgr::CallContextTagGuard::install);
     let mut fcinfo = init_fcinfo(Some(resolved.finfo), collation, args.to_vec());
     // C: fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo);
     fcinfo.isnull = false;
