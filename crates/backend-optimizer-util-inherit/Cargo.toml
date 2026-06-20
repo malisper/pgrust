@@ -55,6 +55,8 @@ backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-s
 # PartitionDirectoryLookup (partdesc) + prune_append_rel_partitions (partprune).
 backend-partitioning-core-seams = { path = "../backend-partitioning-core-seams" }
 backend-partitioning-partprune-seams = { path = "../backend-partitioning-partprune-seams" }
+# relids_del_members — bms_del_member over a planner Relids.
+backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 
 # The seams this unit owns + installs (declared in consumer ext-seam crates).
 backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }

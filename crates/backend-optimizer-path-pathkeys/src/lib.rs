@@ -63,7 +63,7 @@ use types_core::primitive::{Index, Oid};
 use types_pathnodes::{
     optimizer_plan::CostSelector, CompareType, EcId, GroupByOrdering, IndexOptInfo, NodeId, PathId,
     PathKey, PlannerInfo, RelId, RelOptInfo, Relids, RestrictInfo, RinfoId, ScanDirection,
-    BackwardScanDirection, RELOPT_BASEREL,
+    BackwardScanDirection, RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL,
 };
 
 use backend_optimizer_util_pathnode_seams::PathKeysComparison;
@@ -890,7 +890,12 @@ pub fn build_partition_pathkeys(
             .part_scheme
             .as_ref()
             .expect("build_partition_pathkeys: part_scheme is NULL");
-        debug_assert!(rel.reloptkind == RELOPT_BASEREL); // IS_SIMPLE_REL
+        // IS_SIMPLE_REL(partrel): a base rel or an "other member" (partition)
+        // rel — a sub-partitioned partition reaches here as an OTHER_MEMBER_REL.
+        debug_assert!(
+            rel.reloptkind == RELOPT_BASEREL
+                || rel.reloptkind == RELOPT_OTHER_MEMBER_REL
+        );
         (part_scheme.partnatts, bms::relids_copy::call(&rel.relids))
     };
 

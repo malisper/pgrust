@@ -151,8 +151,35 @@ pub fn expand_inherited_rtentry<'mcx>(
         );
 
         // getRTEPermissionInfo(parse->rteperminfos, rte)->updatedCols, used as
-        // the root partrel's parent_updatedCols.
-        expand_partitioned_rtentry(run, root, rti as Index, &oldrelation, oldrc, lockmode)?;
+        // the root partrel's parent_updatedCols.  For a SELECT this is empty
+        // (NULL); for UPDATE/DELETE/MERGE it carries the updated columns of the
+        // root partitioned target, translated to the parent's numbering at each
+        // recursion level.
+        // getRTEPermissionInfo(...)->updatedCols, converted from the parsenodes
+        // `Bitmapset` (attno-offset by FirstLowInvalidHeapAttributeNumber) into a
+        // planner `Relids` (same numbering), which both `has_partition_attrs` and
+        // the recursive `translate_col_privs` speak.
+        let parent_updated_cols: Relids = {
+            let rte = planner_rt_fetch(run, root, rti as Index);
+            let perm_idx = backend_parser_relation_seams::get_rte_permission_info::call(
+                &run.resolve(root.parse).rteperminfos,
+                rte,
+            )?;
+            updated_bitmapset_to_relids(
+                run.resolve(root.parse).rteperminfos[perm_idx]
+                    .updatedCols
+                    .as_deref(),
+            )
+        };
+        expand_partitioned_rtentry(
+            run,
+            root,
+            rti as Index,
+            &oldrelation,
+            &parent_updated_cols,
+            oldrc,
+            lockmode,
+        )?;
     } else {
         // Ordinary table — traditional inheritance.  (Partitioned tables can't
         // have inheritance children, so the two cases are mutually exclusive.)
@@ -319,36 +346,198 @@ fn expand_partitioned_rtentry<'mcx>(
     run: &mut PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     parent_rt_index: Index,
-    _parentrel: &Relation<'mcx>,
-    _top_parentrc: Option<PlanRowMarkId>,
-    _lockmode: i32,
+    parentrel: &Relation<'mcx>,
+    parent_updated_cols: &Relids,
+    top_parentrc: Option<PlanRowMarkId>,
+    lockmode: i32,
 ) -> PgResult<()> {
     // check_stack_depth(); Assert(parentrte->inh);
     debug_assert!(planner_rt_fetch(run, root, parent_rt_index).inh);
 
-    // partdesc = PartitionDirectoryLookup(root->glob->partition_directory,
-    // parentrel); root->partColsUpdated |= has_partition_attrs(...);
-    // relinfo->live_parts = prune_append_rel_partitions(relinfo);
-    //
-    // The PartitionDirectory lives on PlannerGlobal::partition_directory (not yet
-    // modeled) and prune_append_rel_partitions is owned by partprune.c, which is
-    // keystone-blocked on the PartitionPruneStep carrier (see the
-    // partprune-blocked memory note). Mirror PG and panic precisely at the first
-    // unported substrate — partition pruning.
+    let mcx = run.mcx();
+
     let parent_rel = root.simple_rel_array[parent_rt_index as usize]
         .expect("expand_partitioned_rtentry: parent rel slot empty");
-    // relinfo->live_parts = prune_append_rel_partitions(relinfo);
+
+    // partdesc = PartitionDirectoryLookup(root->glob->partition_directory,
+    // parentrel).  The PartitionDirectory was created and the descriptor pinned
+    // by set_relation_partition_info (build_simple_rel) for this parent rel, so
+    // looking it up here reuses that per-query-stable descriptor (no fresh
+    // build, no extra relation pin).  We need partdesc->oids and partdesc->nparts
+    // to materialise the live partitions.
+    let partdesc = {
+        let glob = root
+            .glob
+            .as_mut()
+            .expect("expand_partitioned_rtentry: root->glob is NULL");
+        backend_partitioning_core_seams::partition_directory_lookup::call(
+            mcx,
+            &mut glob.partition_directory,
+            parentrel.alias(),
+        )?
+    };
+    // A partitioned table should always have a partition descriptor.
+    let nparts = partdesc.nparts;
+
+    // Note down whether any partition key cols are being updated.  Though it's
+    // the root partitioned table's updatedCols we are interested in,
+    // parent_updatedCols (provided by the caller) contains the root partrel's
+    // updatedCols translated to match the attribute ordering of parentrel.
+    if !root.partColsUpdated {
+        let mut used_in_expr = false;
+        let uses_part_attr = backend_catalog_partition::has_partition_attrs(
+            mcx,
+            parentrel,
+            parent_updated_cols.as_deref(),
+            Some(&mut used_in_expr),
+        )?;
+        root.partColsUpdated = uses_part_attr;
+    }
+
+    // Nothing further to do here if there are no partitions.
+    if nparts == 0 {
+        return Ok(());
+    }
+
+    // Perform partition pruning using restriction clauses assigned to the parent
+    // relation.  live_parts will contain PartitionDesc indexes of partitions
+    // that survive pruning.  Below, we will initialize child objects for the
+    // surviving partitions.
     let live_parts = partprune::prune_append_rel_partitions::call(run, root, parent_rel)?;
     root.rel_mut(parent_rel).live_parts = live_parts;
 
-    // The remainder of expand_partitioned_rtentry (building a child RTE +
-    // AppendRelInfo + RelOptInfo for each surviving partition, and recursing into
-    // sub-partitioned children) is the follow-on lane's work; the partition
-    // pruning step itself now lands here.
-    unreachable!(
-        "expand_partitioned_rtentry: child-partition expansion unported \
-         (prune_append_rel_partitions now lands; see partprune-core)"
-    )
+    // Expand simple_rel_array and friends to hold child objects.
+    let num_live_parts = {
+        let lp = &root.rel(parent_rel).live_parts;
+        bms::relids_num_members::call(lp)
+    };
+    if num_live_parts > 0 {
+        expand_planner_arrays(root, num_live_parts);
+    }
+
+    // We also store partition RelOptInfo pointers in the parent relation.
+    // palloc0(nparts): slots for pruned partitions stay NULL.
+    debug_assert!(root.rel(parent_rel).part_rels.is_empty());
+    {
+        let mut part_rels: Vec<Option<RelId>> = Vec::with_capacity(nparts as usize);
+        part_rels.resize(nparts as usize, None);
+        root.rel_mut(parent_rel).part_rels = part_rels;
+    }
+
+    // Create a child RTE for each live partition.  Unlike traditional
+    // inheritance, we don't build a child RTE for the partitioned table itself,
+    // because it's not going to be scanned.
+    let mut i: i32 = -1;
+    loop {
+        i = {
+            let lp = &root.rel(parent_rel).live_parts;
+            bms::relids_next_member::call(lp, i)
+        };
+        if i < 0 {
+            break;
+        }
+
+        let child_oid = partdesc.oids[i as usize];
+
+        // Open rel, acquiring required locks.  If a partition was recently
+        // detached and then dropped, opening it fails; behave as though the
+        // partition had been pruned.
+        let childrel = match tbl::try_table_open::call(mcx, child_oid, lockmode)? {
+            None => {
+                let lp = root.rel_mut(parent_rel).live_parts.take();
+                root.rel_mut(parent_rel).live_parts = relids_del_member(lp, i);
+                continue;
+            }
+            Some(c) => c,
+        };
+
+        // Temporary partitions belonging to other sessions should have been
+        // disallowed at definition; double-check for paranoia's sake.
+        if relation_is_other_temp(&childrel)? {
+            childrel.close(NO_LOCK)?;
+            return Err(PgError::error(
+                "temporary relation from another session found as partition",
+            ));
+        }
+
+        let child_relkind = childrel.rd_rel.relkind;
+
+        // Create RTE and AppendRelInfo, plus PlanRowMark if needed.
+        let child_rt_index = expand_single_inheritance_child(
+            run,
+            root,
+            parent_rt_index,
+            parentrel,
+            top_parentrc,
+            &childrel,
+        )?;
+
+        // Create the otherrel RelOptInfo too.
+        let childrelinfo = build_simple_rel(run, root, child_rt_index as i32, Some(parent_rel))?;
+        root.rel_mut(parent_rel).part_rels[i as usize] = Some(childrelinfo);
+        let child_relids = bms::relids_copy::call(&root.rel(childrelinfo).relids);
+        let merged = {
+            let all = root.rel_mut(parent_rel).all_partrels.take();
+            bms::relids_add_members::call(all, &child_relids)
+        };
+        root.rel_mut(parent_rel).all_partrels = merged;
+
+        // If this child is itself partitioned, recurse.
+        if child_relkind == RELKIND_PARTITIONED_TABLE {
+            // child_updatedCols = translate_col_privs(parent_updatedCols,
+            //                                         appinfo->translated_vars);
+            let translated_vars = root.append_rel_array[child_rt_index as usize]
+                .as_ref()
+                .expect("expand_partitioned_rtentry: append_rel_array slot empty")
+                .translated_vars
+                .clone();
+            let child_updated_cols =
+                translate_col_privs(root, parent_updated_cols, &translated_vars);
+
+            expand_partitioned_rtentry(
+                run,
+                root,
+                child_rt_index,
+                &childrel,
+                &child_updated_cols,
+                top_parentrc,
+                lockmode,
+            )?;
+        }
+
+        // Close child relation, but keep locks.
+        childrel.close(NO_LOCK)?;
+    }
+
+    Ok(())
+}
+
+/// `bms_del_member(a, x)` over a planner `Relids`, via the
+/// `relids_del_members` set-difference seam with a locally-built singleton
+/// (mirrors the pattern used in optimizer-path-small / appendinfo).
+fn relids_del_member(a: Relids, x: i32) -> Relids {
+    let single = bms::relids_make_singleton::call(x);
+    backend_optimizer_util_pathnode_seams::relids_del_members::call(a, &single)
+}
+
+/// Convert the parsenodes `Bitmapset` carried by `RTEPermissionInfo.updatedCols`
+/// (member numbers offset by `FirstLowInvalidHeapAttributeNumber`) into a
+/// planner `Relids` (same numbering, distinct `Bitmapset` type), by walking its
+/// set bits.  `None`/empty maps to `None`.
+fn updated_bitmapset_to_relids(bms: Option<&types_nodes::Bitmapset<'_>>) -> Relids {
+    let mut out: Relids = None;
+    if let Some(b) = bms {
+        for (wi, &word) in b.words.iter().enumerate() {
+            let mut w = word;
+            while w != 0 {
+                let bit = w.trailing_zeros() as i32;
+                let member = (wi as i32) * 64 + bit;
+                out = bms::relids_add_member::call(out.take(), member);
+                w &= w - 1;
+            }
+        }
+    }
+    out
 }
 
 /// `expand_single_inheritance_child(...)` (inherit.c:460) — build a child

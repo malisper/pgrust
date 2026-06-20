@@ -586,6 +586,19 @@ fn standard_planner<'mcx>(
         }
     };
 
+    // if (glob->partition_directory != NULL)
+    //     DestroyPartitionDirectory(glob->partition_directory); (planner.c:611)
+    //
+    // The PartitionDirectory pins one relcache entry per partitioned table it
+    // looked up (RelationIncrementReferenceCount) for the plan's lifetime; tear
+    // it down now so those pins are released (else the resource owner warns
+    // "resource was not closed: relation with OID ..." at transaction end).
+    if let Some(glob) = root.glob.as_mut() {
+        if let Some(dir) = glob.partition_directory.0.take() {
+            backend_partitioning_core_seams::destroy_partition_directory::call(dir);
+        }
+    }
+
     let result = PlannedStmt {
         commandType: command_type,
         // result->queryId = parse->queryId; (planner.c:578)
@@ -5972,11 +5985,15 @@ fn apply_scanjoin_target_to_paths<'mcx>(
         ) && r.part_scheme.is_some()
             && r.nparts > 0
     };
+
+    // If the rel is partitioned, drop its existing paths and generate new ones,
+    // computing the scan/join target below the partitioning Append rather than
+    // above it (cheaper or equal cost, and stable across platforms). Some care
+    // is needed: zap the main pathlist now so generate_useful_gather_paths can
+    // still see the old PARTIAL paths in the next stanza, then zap the partial
+    // pathlist afterwards.
     if rel_is_partitioned {
-        panic!(
-            "apply_scanjoin_target_to_paths: partitioned-rel recursion + \
-             add_paths_to_append_rel (planner.c:7770) is not ported"
-        );
+        root.rel_mut(rel).pathlist = Vec::new();
     }
 
     // If the scan/join target is not parallel-safe, partial paths cannot
@@ -5987,6 +6004,11 @@ fn apply_scanjoin_target_to_paths<'mcx>(
         backend_optimizer_path_allpaths::generate_useful_gather_paths(root, run, rel, false)?;
         root.rel_mut(rel).partial_pathlist = Vec::new();
         root.rel_mut(rel).consider_parallel = false;
+    }
+
+    // Finish dropping old paths for a partitioned rel, per comment above.
+    if rel_is_partitioned {
+        root.rel_mut(rel).partial_pathlist = Vec::new();
     }
 
     // Apply the SRF-free scan/join target to each existing path (C:7727-7747).
@@ -6049,6 +6071,93 @@ fn apply_scanjoin_target_to_paths<'mcx>(
     // pathtarget.
     let last_target = scanjoin_targets[scanjoin_targets.len() - 1].clone();
     root.rel_mut(rel).reltarget = Some(Box::new(last_target));
+
+    // If the relation is partitioned, recursively apply the scan/join target to
+    // all partitions and generate brand-new Append paths in which the scan/join
+    // target is computed below the Append rather than above it. Since Append is
+    // not projection-capable, this can save a separate Result node, and is
+    // important for partitionwise aggregate (C:7972-8038).
+    if rel_is_partitioned {
+        let mut live_children: Vec<RelId> = Vec::new();
+
+        // Adjust each partition. Enumerate the live-part indexes by walking the
+        // live_parts Bitmapset words (bms_next_member over rel->live_parts).
+        let live_indexes: Vec<usize> = root
+            .rel(rel)
+            .live_parts
+            .as_ref()
+            .map(|b| {
+                let mut out = Vec::new();
+                for (wi, &word) in b.words.iter().enumerate() {
+                    let mut w = word;
+                    while w != 0 {
+                        let bit = w.trailing_zeros() as usize;
+                        out.push(wi * 64 + bit);
+                        w &= w - 1;
+                    }
+                }
+                out
+            })
+            .unwrap_or_default();
+        for i in live_indexes {
+            let child_rel = root.rel(rel).part_rels[i]
+                .expect("apply_scanjoin_target_to_paths: live part_rels slot is NULL");
+
+            // Dummy children can be ignored.
+            if backend_optimizer_path_joinrels::is_dummy_rel(root, child_rel) {
+                continue;
+            }
+
+            // Translate scan/join targets for this child.
+            let child_relids = root.rel(child_rel).relids.clone();
+            let appinfos =
+                backend_optimizer_util_appendinfo::find_appinfos_by_relids(root, &child_relids)?;
+
+            let mut child_scanjoin_targets: Vec<PathTarget> =
+                Vec::with_capacity(scanjoin_targets.len());
+            for target in scanjoin_targets.iter() {
+                // target = copy_pathtarget(target);
+                let mut t = backend_optimizer_util_vars::tlist::copy_pathtarget(target);
+                // target->exprs = adjust_appendrel_attrs(root, target->exprs, appinfos);
+                let mut new_exprs: Vec<types_pathnodes::NodeId> =
+                    Vec::with_capacity(t.exprs.len());
+                for &expr_id in t.exprs.iter() {
+                    let expr = root.node(expr_id).clone();
+                    let adjusted = backend_optimizer_util_appendinfo::adjust_appendrel_attrs(
+                        root, expr, &appinfos,
+                    )?;
+                    new_exprs.push(root.alloc_node(adjusted));
+                }
+                t.exprs = new_exprs;
+                child_scanjoin_targets.push(t);
+            }
+
+            // Recursion does the real work.
+            apply_scanjoin_target_to_paths(
+                run,
+                root,
+                child_rel,
+                &child_scanjoin_targets,
+                scanjoin_targets_contain_srfs,
+                scanjoin_target_parallel_safe,
+                tlist_same_exprs,
+            )?;
+
+            // Save non-dummy children for Append paths.
+            if !backend_optimizer_path_joinrels::is_dummy_rel(root, child_rel) {
+                live_children.push(child_rel);
+            }
+        }
+
+        // Build new paths for this relation by appending child paths.
+        backend_optimizer_path_allpaths::add_paths_to_append_rel(
+            run.mcx(),
+            root,
+            run,
+            rel,
+            &live_children,
+        )?;
+    }
 
     // We may have added paths (replacing existing ones with projection paths),
     // so recompute the rel's cheapest-path info (C:8043). Without this, the

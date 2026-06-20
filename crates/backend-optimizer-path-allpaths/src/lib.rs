@@ -948,6 +948,13 @@ pub fn init_seams() {
     // when it picks the final path off the upper rel; install our real body.
     seams::get_cheapest_fractional_path::set(append::get_cheapest_fractional_path);
 
+    // allpaths' generate_orderedappend_paths consults
+    // `partitions_are_ordered` (partbounds.c) to decide whether a partitioned
+    // rel admits a plain Append. Every input it reads (boundinfo strategy /
+    // default_index / interleaved_parts, live_parts) is pure planner data on
+    // the RelOptInfo, so install the real body here.
+    seams::partitions_are_ordered::set(append::partitions_are_ordered_impl);
+
     // setrefs.c's add_rtes_to_flat_rtable tests whether a subquery RTE's planned
     // subroot has a dummy final rel. The subroot lives in
     // `root.simple_rel_array[idx].subroot`; fetch its UPPERREL_FINAL rel and run

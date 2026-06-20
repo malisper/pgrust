@@ -72,6 +72,10 @@ backend-optimizer-util-paramassign-seams = { path = "../backend-optimizer-util-p
 backend-optimizer-util-pathnode-seams = { path = "../backend-optimizer-util-pathnode-seams" }
 # get_cheapest_fractional_path (allpaths seam).
 backend-optimizer-path-allpaths = { path = "../backend-optimizer-path-allpaths" }
+# apply_scanjoin_target_to_paths partitioned branch: adjust_appendrel_attrs +
+# find_appinfos_by_relids (target translation per child) and is_dummy_rel.
+backend-optimizer-util-appendinfo = { path = "../backend-optimizer-util-appendinfo" }
+backend-optimizer-path-joinrels = { path = "../backend-optimizer-path-joinrels" }
 # make_pathkeys_for_sortclauses.
 backend-optimizer-path-pathkeys = { path = "../backend-optimizer-path-pathkeys" }
 # eval_const_expressions / estimate_expression_value / contain_* / is_parallel_safe / convert_saop.

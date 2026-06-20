@@ -12333,6 +12333,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-partition",
  "types-pathnodes",
 ]
 
@@ -12737,6 +12738,7 @@ dependencies = [
  "backend-optimizer-path-allpaths",
  "backend-optimizer-path-costsize",
  "backend-optimizer-path-costsize-seams",
+ "backend-optimizer-path-joinrels",
  "backend-optimizer-path-pathkeys",
  "backend-optimizer-plan-createplan",
  "backend-optimizer-plan-createplan-seams",
@@ -12755,6 +12757,7 @@ dependencies = [
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-prep-preptlist",
  "backend-optimizer-prep-prepunion-seams",
+ "backend-optimizer-util-appendinfo",
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-paramassign-seams",
  "backend-optimizer-util-pathnode",
@@ -13217,6 +13220,7 @@ dependencies = [
  "backend-optimizer-util-clauses",
  "backend-optimizer-util-joininfo",
  "backend-optimizer-util-joininfo-ext-seams",
+ "backend-optimizer-util-pathnode-seams",
  "backend-optimizer-util-plancat",
  "backend-optimizer-util-relnode",
  "backend-optimizer-util-relnode-ext-seams",

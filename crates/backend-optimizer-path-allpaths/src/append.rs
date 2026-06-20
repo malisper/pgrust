@@ -854,6 +854,81 @@ fn partitions_are_ordered(root: &PlannerInfo, rel: RelId) -> bool {
     crate::seams::partitions_are_ordered::call(root, rel)
 }
 
+/// `partitions_are_ordered(boundinfo, live_parts)` (partbounds.c:3036) — can a
+/// partitioned table's partitions be scanned in a guaranteed sort order?  RANGE
+/// partitioning always can, unless a live DEFAULT partition exists (it may hold
+/// out-of-order rows).  LIST partitioning can unless the live set overlaps the
+/// interleaved partitions.  HASH never can.
+///
+/// Reads the three scalar fields the planner carries on
+/// `RelOptInfo::boundinfo` (`strategy`, `default_index`, `interleaved_parts`)
+/// plus `RelOptInfo::live_parts`.  Installed as the `partitions_are_ordered`
+/// seam (the C function lives in partbounds.c, but every input it touches is
+/// pure planner data, so allpaths owns the install).
+pub(crate) fn partitions_are_ordered_impl(root: &PlannerInfo, rel: RelId) -> bool {
+    use types_partition::{
+        PARTITION_STRATEGY_HASH, PARTITION_STRATEGY_LIST, PARTITION_STRATEGY_RANGE,
+    };
+
+    let relinfo = root.rel(rel);
+    // Assert(boundinfo != NULL);
+    let boundinfo = match relinfo.boundinfo.as_ref() {
+        Some(bi) => bi,
+        None => return false,
+    };
+    let live_parts = &relinfo.live_parts;
+
+    match boundinfo.strategy {
+        s if s == PARTITION_STRATEGY_RANGE => {
+            // RANGE partitioning guarantees the partitions can be scanned in
+            // PartitionDesc order to give sequential, non-overlapping ranges.
+            // But a live DEFAULT partition breaks that ordering.
+            let has_default = boundinfo.default_index != -1;
+            if !has_default
+                || !bms_is_member(boundinfo.default_index, live_parts)
+            {
+                return true;
+            }
+        }
+        s if s == PARTITION_STRATEGY_LIST => {
+            // LIST partitions are ordered unless any live partition overlaps the
+            // partitioned table's interleaved partitions.
+            if !bms_overlap(live_parts, &boundinfo.interleaved_parts) {
+                return true;
+            }
+        }
+        s if s == PARTITION_STRATEGY_HASH => {}
+        _ => {}
+    }
+
+    false
+}
+
+/// `bms_is_member(x, a)` over a planner `Relids` (lifetime-free
+/// `types_pathnodes::Bitmapset`).
+fn bms_is_member(x: i32, a: &types_pathnodes::Relids) -> bool {
+    if x < 0 {
+        return false;
+    }
+    if let Some(b) = a {
+        let wi = (x / 64) as usize;
+        let bit = (x % 64) as u32;
+        return b.words.get(wi).map(|w| (w >> bit) & 1 == 1).unwrap_or(false);
+    }
+    false
+}
+
+/// `bms_overlap(a, b)` over two planner `Relids`.
+fn bms_overlap(a: &types_pathnodes::Relids, b: &types_pathnodes::Relids) -> bool {
+    match (a, b) {
+        (Some(ab), Some(bb)) => {
+            let n = ab.words.len().min(bb.words.len());
+            (0..n).any(|i| ab.words[i] & bb.words[i] != 0)
+        }
+        _ => false,
+    }
+}
+
 /// `get_cheapest_fractional_path(childrel, tuple_fraction)` (pathkeys.c).
 ///
 /// Find the cheapest path (by `compare_fractional_path_costs`) for retrieving

@@ -13,6 +13,8 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }
+# PARTITION_STRATEGY_* constants for partitions_are_ordered.
+types-partition = { path = "../types-partition" }
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 

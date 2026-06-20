@@ -90,21 +90,42 @@ fn set_relation_partition_info(
 
     // rel->boundinfo = partdesc->boundinfo;
     //
-    // The consumer-layer `PartitionBoundInfoData` is opaque (the bound algebra
-    // lives with partbounds); mirror C's pointer copy by carrying presence: a
-    // partitioned table with a partdesc always has boundinfo.
-    let has_boundinfo = partdesc.boundinfo.is_some();
+    // The full bound algebra (datums/kinds/indexes) lives with partbounds and
+    // is not modeled at the consumer layer; carry the three scalar fields the
+    // planner actually reads off `rel->boundinfo` (strategy, default_index,
+    // interleaved_parts — used by `partitions_are_ordered`). A partitioned
+    // table with a partdesc always has boundinfo.
+    let boundinfo_carrier = partdesc.boundinfo.as_ref().map(|bi| {
+        // interleaved_parts is the C `Bitmapset *` of interleaved LIST-partition
+        // indexes; translate to the planner `Relids` representation (same member
+        // numbering, distinct Bitmapset type) by walking its set bits.
+        let interleaved: types_pathnodes::Relids = bi.interleaved_parts.as_ref().and_then(|b| {
+            // Both representations are a flat `bitmapword[]` with identical
+            // member numbering; copy the words directly (trim trailing zeros so
+            // the empty set normalizes to None, matching C's NULL Bitmapset).
+            let mut words = b.words.to_vec();
+            while words.last() == Some(&0) {
+                words.pop();
+            }
+            if words.is_empty() {
+                None
+            } else {
+                Some(alloc::boxed::Box::new(types_pathnodes::Bitmapset { words }))
+            }
+        });
+        Box::new(PartitionBoundInfoData {
+            strategy: bi.strategy as i8,
+            default_index: bi.default_index,
+            interleaved_parts: interleaved,
+        })
+    });
     // rel->nparts = partdesc->nparts;
     let nparts = partdesc.nparts;
 
     {
         let r = root.rel_mut(rel);
         r.part_scheme = part_scheme;
-        r.boundinfo = if has_boundinfo {
-            Some(Box::new(PartitionBoundInfoData {}))
-        } else {
-            None
-        };
+        r.boundinfo = boundinfo_carrier;
         r.nparts = nparts;
     }
 

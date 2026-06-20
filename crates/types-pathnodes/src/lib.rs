@@ -294,12 +294,23 @@ impl PartialEq for PartitionSchemeData {
 pub type PartitionScheme = Option<Box<PartitionSchemeData>>;
 
 /// `struct PartitionBoundInfoData` (partition/partbounds.h) — the specific
-/// partition bounds of a partitioned relation. Opaque here: the bound algebra
-/// lives with the partbounds unit, so this carries no fields at the consumer
-/// layer (the analogue of the C `PartitionBoundInfoData *`, reached only by
-/// presence in `RelOptInfo::boundinfo`).
+/// partition bounds of a partitioned relation. The full bound algebra (datums,
+/// kinds, indexes) lives with the partbounds unit and is not modeled at the
+/// consumer layer. The planner reads only three scalar fields off the
+/// descriptor — `strategy`, `default_index`, and `interleaved_parts` — in
+/// `partitions_are_ordered` (allpaths.c / partbounds.c), so those are carried
+/// here. `interleaved_parts` is the planner `Relids` representation of the C
+/// `Bitmapset *` (LIST-partition indexes that interleave). The rest stays with
+/// partbounds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PartitionBoundInfoData {}
+pub struct PartitionBoundInfoData {
+    /// `char strategy` — hash, list or range (`PARTITION_STRATEGY_*` as i8).
+    pub strategy: i8,
+    /// `int default_index` — default partition index; -1 if none.
+    pub default_index: i32,
+    /// `Bitmapset *interleaved_parts` — interleaved LIST partition indexes.
+    pub interleaved_parts: Relids,
+}
 
 /// `struct FdwRoutine` (foreign/fdwapi.h) — the FDW callback hook table for a
 /// foreign table/join. This is the *same* C struct the executor/relcache model;
