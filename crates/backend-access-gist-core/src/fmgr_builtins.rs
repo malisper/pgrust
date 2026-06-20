@@ -17,7 +17,8 @@
 use alloc::string::ToString;
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_error::PgResult;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::gistutil;
 
@@ -47,9 +48,9 @@ fn ret_u16(v: u16) -> Datum {
 // ---------------------------------------------------------------------------
 
 /// `gist_translate_cmptype_common(cmptype int4) -> int2` (gistutil.c:1064).
-fn fc_gist_translate_cmptype_common(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_gist_translate_cmptype_common(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let cmptype = arg_i32(fcinfo, 0);
-    ret_u16(gistutil::gist_translate_cmptype_common(cmptype))
+    Ok(ret_u16(gistutil::gist_translate_cmptype_common(cmptype)))
 }
 
 // ---------------------------------------------------------------------------
@@ -61,12 +62,15 @@ fn fc_gist_translate_cmptype_common(fcinfo: &mut FunctionCallInfoBaseData) -> Da
 /// from `pg_proc.dat`; `gist_translate_cmptype_common` is not strict and not
 /// retset (neither `proisstrict` nor `proretset` is set in `pg_proc.dat`).
 pub fn register_backend_access_gist_core_builtins() {
-    backend_utils_fmgr_core::register_builtins([BuiltinFunction {
-        foid: 6347,
-        name: "gist_translate_cmptype_common".to_string(),
-        nargs: 1,
-        strict: true,
-        retset: false,
-        func: Some(fc_gist_translate_cmptype_common),
-    }]);
+    backend_utils_fmgr_core::register_builtins_native([(
+        BuiltinFunction {
+            foid: 6347,
+            name: "gist_translate_cmptype_common".to_string(),
+            nargs: 1,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        fc_gist_translate_cmptype_common as PgFnNative,
+    )]);
 }
