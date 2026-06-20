@@ -623,8 +623,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (6357, "generate_series_numeric_support", BuiltinGapKind::NotRegistered),
     (6362, "pg_restore_relation_stats", BuiltinGapKind::NotRegistered),
     (6363, "pg_restore_attribute_stats", BuiltinGapKind::NotRegistered),
-    (6364, "crc32_bytea", BuiltinGapKind::NotRegistered),
-    (6365, "crc32c_bytea", BuiltinGapKind::NotRegistered),
     (6366, "pg_stat_get_checkpointer_slru_written", BuiltinGapKind::NotRegistered),
     (6377, "pg_stat_get_checkpointer_num_performed", BuiltinGapKind::NotRegistered),
     (6378, "array_append_support", BuiltinGapKind::NotRegistered),
