@@ -8096,6 +8096,7 @@ dependencies = [
  "backend-access-common-toast-compression",
  "backend-access-common-tupdesc",
  "backend-access-index-amapi-seams",
+ "backend-access-index-indexam-seams",
  "backend-access-table-table",
  "backend-access-table-table-seams",
  "backend-access-table-tableam",

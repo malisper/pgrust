@@ -37,6 +37,7 @@ backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigg
 # ProcessUtility dispatch arms (installs TRUNCATE + DROP-relations forwarding seams).
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }
+backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-access-table-table-seams = { path = "../backend-access-table-table-seams" }
 backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }

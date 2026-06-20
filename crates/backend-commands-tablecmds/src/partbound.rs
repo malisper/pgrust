@@ -608,16 +608,18 @@ pub fn define_relation_partbound<'mcx>(
 ///
 /// For a parent with no indexes, no row triggers and no foreign keys (the common
 /// `CREATE TABLE child PARTITION OF parent` case where the parent is a bare
-/// partitioned table) this is a no-op. When the parent DOES carry such objects
-/// the cloners `generateClonedIndexStmt` / `CloneRowTriggersToPartition` /
-/// `CloneForeignKeyConstraints` are needed — those are unported, so this raises a
-/// precise error rather than silently skipping the clone.
+/// partitioned table) this is a no-op. The index-clone leg is ported here (it
+/// reuses the CREATE TABLE LIKE `generateClonedIndexStmt` cloner + `DefineIndex`);
+/// the row-trigger and foreign-key cloners (`CloneRowTriggersToPartition` /
+/// `CloneForeignKeyConstraints`) are still unported, so those raise a precise
+/// error rather than silently skipping the clone.
 pub fn define_relation_clone_partition_objects<'mcx>(
     mcx: Mcx<'mcx>,
-    _relation_id: Oid,
+    relation_id: Oid,
     inherit_oids: &[Oid],
 ) -> PgResult<()> {
-    use types_storage::lock::NoLock;
+    use types_core::primitive::InvalidOid;
+    use types_storage::lock::{AccessShareLock, NoLock};
 
     let parent_oid = inherit_oids[0];
     let parent = backend_access_common_relation::relation_open(mcx, parent_oid, NoLock)?;
@@ -632,17 +634,79 @@ pub fn define_relation_clone_partition_objects<'mcx>(
     let has_triggers =
         backend_utils_cache_syscache_seams::rel_relhastriggers::call(parent_oid)?.unwrap_or(false);
 
+    // Clone each parent index onto the new partition.
+    //
+    // C (tablecmds.c, DefineRelation post-partbound block):
+    //
+    //     idxlist = RelationGetIndexList(parent);
+    //     foreach(cell, idxlist)
+    //     {
+    //         Relation idxRel = index_open(lfirst_oid(cell), AccessShareLock);
+    //         AttrMap *attmap;
+    //         IndexStmt *idxstmt;
+    //         Oid       constraintOid;
+    //
+    //         attmap = build_attrmap_by_name(RelationGetDescr(rel),
+    //                                        RelationGetDescr(parent), false);
+    //         idxstmt = generateClonedIndexStmt(NULL, idxRel, attmap,
+    //                                           &constraintOid);
+    //         DefineIndex(RelationGetRelid(rel), idxstmt, InvalidOid,
+    //                     RelationGetRelid(idxRel), constraintOid,
+    //                     -1, false, false, false, false, true);
+    //         index_close(idxRel, AccessShareLock);
+    //     }
+    //
+    // The new partition `rel` is locked AccessExclusiveLock by the in-flight
+    // DefineRelation; re-open it by OID under NoLock to obtain its TupleDesc.
+    if !idxlist.is_empty() {
+        let rel = backend_access_common_relation::relation_open(mcx, relation_id, NoLock)?;
+
+        for &idx in idxlist.iter() {
+            let idx_rel =
+                backend_access_index_indexam_seams::index_open::call(mcx, idx, AccessShareLock)?;
+
+            // attmap = build_attrmap_by_name(RelationGetDescr(rel),
+            //                                RelationGetDescr(parent), false);
+            let attmap = backend_access_common_next::attmap::build_attrmap_by_name(
+                mcx,
+                &rel.rd_att,
+                &parent.rd_att,
+                false,
+            )?;
+
+            // idxstmt = generateClonedIndexStmt(NULL, idxRel, attmap, &constraintOid);
+            let (idxstmt, constraint_oid) =
+                backend_parser_parse_utilcmd_seams::generateClonedIndexStmt::call(
+                    mcx, None, &idx_rel, &attmap,
+                )?;
+
+            // DefineIndex(RelationGetRelid(rel), idxstmt, InvalidOid,
+            //             RelationGetRelid(idxRel), constraintOid,
+            //             -1, false, false, false, false, true);
+            let args = backend_commands_indexcmds_seams::DefineIndexArgs {
+                table_id: relation_id,
+                stmt: idxstmt,
+                index_relation_id: InvalidOid,
+                parent_index_id: idx_rel.rd_id, // this is our parent index
+                parent_constraint_id: constraint_oid,
+                total_parts: -1,
+                is_alter_table: false,
+                check_rights: false,
+                check_not_in_use: false,
+                skip_build: false,
+                quiet: true,
+            };
+            backend_commands_indexcmds_seams::define_index_full::call(mcx, args)?;
+
+            // index_close(idxRel, AccessShareLock);
+            idx_rel.close(AccessShareLock)?;
+        }
+
+        rel.close(NoLock)?;
+    }
+
     parent.close(NoLock)?;
 
-    if !idxlist.is_empty() {
-        return ereport(ERROR)
-            .errmsg_internal(
-                "cloning parent indexes onto a new partition is not yet supported \
-                 (generateClonedIndexStmt/DefineIndex clone path unported)",
-            )
-            .finish(here("define_relation_clone_partition_objects"))
-            .map(|()| unreachable!());
-    }
     if has_triggers {
         return ereport(ERROR)
             .errmsg_internal(
