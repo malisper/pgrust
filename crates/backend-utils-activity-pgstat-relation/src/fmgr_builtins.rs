@@ -17,9 +17,9 @@
 
 use types_core::{Oid, TimestampTz};
 use types_datum::Datum;
-use types_error::PgError;
+use types_error::PgResult;
 use types_fmgr::resolution::BuiltinFunction;
-use types_fmgr::FunctionCallInfoBaseData;
+use types_fmgr::{FunctionCallInfoBaseData, PgFnNative};
 use types_pgstat::activity_pgstat::PgStat_StatTabEntry;
 
 /// `PG_GETARG_OID(0)` → `DatumGetObjectId`: the relation OID argument.
@@ -32,37 +32,34 @@ fn arg_relid(fcinfo: &FunctionCallInfoBaseData) -> Oid {
         .as_oid()
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 /// Fetch `relid`'s table-stats entry (C: `pgstat_fetch_stat_tabentry(relid)`).
 /// `None` ⇒ no stats for this relation (the `tabentry == NULL` branch).
 #[inline]
-fn tabentry(relid: Oid) -> Option<PgStat_StatTabEntry> {
-    match crate::pgstat_fetch_stat_tabentry(relid) {
-        Ok(e) => e,
-        Err(e) => raise(e),
-    }
+fn tabentry(relid: Oid) -> PgResult<Option<PgStat_StatTabEntry>> {
+    crate::pgstat_fetch_stat_tabentry(relid)
 }
 
 /// `PG_STAT_GET_RELENTRY_INT64(stat)`: `int8`, `(int64) tabentry->stat`, or `0`.
 #[inline]
-fn relentry_int64(fcinfo: &FunctionCallInfoBaseData, f: fn(&PgStat_StatTabEntry) -> i64) -> Datum {
+fn relentry_int64(
+    fcinfo: &FunctionCallInfoBaseData,
+    f: fn(&PgStat_StatTabEntry) -> i64,
+) -> PgResult<Datum> {
     let relid = arg_relid(fcinfo);
-    let result = tabentry(relid).map(|t| f(&t)).unwrap_or(0);
-    Datum::from_i64(result)
+    let result = tabentry(relid)?.map(|t| f(&t)).unwrap_or(0);
+    Ok(Datum::from_i64(result))
 }
 
 /// `PG_STAT_GET_RELENTRY_FLOAT8(stat)`: `float8`, `(double) tabentry->stat`, or
 /// `0`.
 #[inline]
-fn relentry_float8(fcinfo: &FunctionCallInfoBaseData, f: fn(&PgStat_StatTabEntry) -> i64) -> Datum {
+fn relentry_float8(
+    fcinfo: &FunctionCallInfoBaseData,
+    f: fn(&PgStat_StatTabEntry) -> i64,
+) -> PgResult<Datum> {
     let relid = arg_relid(fcinfo);
-    let result = tabentry(relid).map(|t| f(&t)).unwrap_or(0) as f64;
-    Datum::from_f64(result)
+    let result = tabentry(relid)?.map(|t| f(&t)).unwrap_or(0) as f64;
+    Ok(Datum::from_f64(result))
 }
 
 /// `PG_STAT_GET_RELENTRY_TIMESTAMPTZ(stat)`: `timestamptz`. `NULL` when no entry
@@ -71,14 +68,14 @@ fn relentry_float8(fcinfo: &FunctionCallInfoBaseData, f: fn(&PgStat_StatTabEntry
 fn relentry_timestamptz(
     fcinfo: &mut FunctionCallInfoBaseData,
     f: fn(&PgStat_StatTabEntry) -> TimestampTz,
-) -> Datum {
+) -> PgResult<Datum> {
     let relid = arg_relid(fcinfo);
-    let result = tabentry(relid).map(|t| f(&t)).unwrap_or(0);
+    let result = tabentry(relid)?.map(|t| f(&t)).unwrap_or(0);
     if result == 0 {
         fcinfo.set_result_null(true);
-        Datum::from_i64(0)
+        Ok(Datum::from_i64(0))
     } else {
-        Datum::from_i64(result)
+        Ok(Datum::from_i64(result))
     }
 }
 
@@ -86,58 +83,58 @@ fn relentry_timestamptz(
 // INT64 accessors.
 // ---------------------------------------------------------------------------
 
-fn fc_numscans(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numscans(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.numscans)
 }
-fn fc_tuples_returned(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tuples_returned(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.tuples_returned)
 }
-fn fc_tuples_fetched(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tuples_fetched(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.tuples_fetched)
 }
-fn fc_tuples_inserted(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tuples_inserted(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.tuples_inserted)
 }
-fn fc_tuples_updated(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tuples_updated(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.tuples_updated)
 }
-fn fc_tuples_deleted(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tuples_deleted(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.tuples_deleted)
 }
-fn fc_tuples_hot_updated(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tuples_hot_updated(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.tuples_hot_updated)
 }
-fn fc_tuples_newpage_updated(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_tuples_newpage_updated(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.tuples_newpage_updated)
 }
-fn fc_live_tuples(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_live_tuples(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.live_tuples)
 }
-fn fc_dead_tuples(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_dead_tuples(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.dead_tuples)
 }
-fn fc_mod_since_analyze(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_mod_since_analyze(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.mod_since_analyze)
 }
-fn fc_ins_since_vacuum(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ins_since_vacuum(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.ins_since_vacuum)
 }
-fn fc_blocks_fetched(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_blocks_fetched(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.blocks_fetched)
 }
-fn fc_blocks_hit(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_blocks_hit(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.blocks_hit)
 }
-fn fc_vacuum_count(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_vacuum_count(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.vacuum_count)
 }
-fn fc_autovacuum_count(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_autovacuum_count(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.autovacuum_count)
 }
-fn fc_analyze_count(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_analyze_count(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.analyze_count)
 }
-fn fc_autoanalyze_count(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_autoanalyze_count(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_int64(fc, |t| t.autoanalyze_count)
 }
 
@@ -145,16 +142,16 @@ fn fc_autoanalyze_count(fc: &mut FunctionCallInfoBaseData) -> Datum {
 // FLOAT8 accessors (times stored in milliseconds).
 // ---------------------------------------------------------------------------
 
-fn fc_total_vacuum_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_total_vacuum_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_float8(fc, |t| t.total_vacuum_time)
 }
-fn fc_total_autovacuum_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_total_autovacuum_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_float8(fc, |t| t.total_autovacuum_time)
 }
-fn fc_total_analyze_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_total_analyze_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_float8(fc, |t| t.total_analyze_time)
 }
-fn fc_total_autoanalyze_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_total_autoanalyze_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_float8(fc, |t| t.total_autoanalyze_time)
 }
 
@@ -162,19 +159,19 @@ fn fc_total_autoanalyze_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
 // TIMESTAMPTZ accessors (NULL when 0).
 // ---------------------------------------------------------------------------
 
-fn fc_lastscan(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lastscan(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_timestamptz(fc, |t| t.lastscan)
 }
-fn fc_last_vacuum_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_last_vacuum_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_timestamptz(fc, |t| t.last_vacuum_time)
 }
-fn fc_last_autovacuum_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_last_autovacuum_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_timestamptz(fc, |t| t.last_autovacuum_time)
 }
-fn fc_last_analyze_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_last_analyze_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_timestamptz(fc, |t| t.last_analyze_time)
 }
-fn fc_last_autoanalyze_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_last_autoanalyze_time(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     relentry_timestamptz(fc, |t| t.last_autoanalyze_time)
 }
 
@@ -182,25 +179,24 @@ fn fc_last_autoanalyze_time(fc: &mut FunctionCallInfoBaseData) -> Datum {
 // Registration.
 // ---------------------------------------------------------------------------
 
-fn builtin(
-    foid: u32,
-    name: &str,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs: 1,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+fn builtin(foid: u32, name: &str, native: PgFnNative) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs: 1,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every per-relation `pg_stat_get_*` builtin (C: their
 /// `fmgr_builtins[]` rows). Called from this crate's `init_seams()`.
 pub fn register_pgstat_relation_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // INT64
         builtin(1928, "pg_stat_get_numscans", fc_numscans),
         builtin(1929, "pg_stat_get_tuples_returned", fc_tuples_returned),
