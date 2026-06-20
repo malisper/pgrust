@@ -26,6 +26,12 @@ backend-pl-plpgsql-funcs = { path = "../backend-pl-plpgsql-funcs" }
 backend-pl-plpgsql-gram = { path = "../backend-pl-plpgsql-gram" }
 backend-pl-plpgsql-scanner = { path = "../backend-pl-plpgsql-scanner" }
 
+# Namespace name resolution (catalog/namespace.c) — RangeVarGetRelid for
+# %TYPE/%ROWTYPE over a table (plpgsql_parse_{c,}word{type,rowtype}).
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+# typcache composite-tupdesc projection (utils/cache/typcache.c) — build_datatype
+# records a named composite type's tupDesc_identifier for change detection.
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 # Catalog / syscache reads (utils/cache/{syscache,lsyscache}.c).
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }

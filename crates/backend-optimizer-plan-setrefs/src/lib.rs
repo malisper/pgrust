@@ -28,7 +28,8 @@ use mcx::{Mcx, PgBox, PgVec};
 use types_error::{PgError, PgResult};
 
 use backend_nodes_core::nodefuncs::{
-    expr_collation, expr_type, expr_typmod, expression_tree_mutator, set_opfuncid, set_sa_opfuncid,
+    expr_collation, expr_type, expr_typmod, expression_tree_mutator, resolved_opfuncid,
+    set_opfuncid, set_sa_opfuncid,
 };
 use backend_nodes_core::makefuncs::{
     flat_copy_target_entry, make_null_const, make_var, make_var_from_target_entry,
@@ -3421,21 +3422,22 @@ fn fix_expr_common_value(ctx: &mut ExtractDepsCtx, node: &Expr) -> PgResult<()> 
         Expr::Aggref(a) => record_plan_function_dependency_value(ctx, a.aggfnoid)?,
         Expr::WindowFunc(w) => record_plan_function_dependency_value(ctx, w.winfnoid)?,
         Expr::FuncExpr(f) => record_plan_function_dependency_value(ctx, f.funcid)?,
-        // OpExpr / DistinctExpr / NullIfExpr share the OpExpr struct.
+        // OpExpr / DistinctExpr / NullIfExpr share the OpExpr struct. C scribbles
+        // opfuncid in place via set_opfuncid; this is the read-only VALUE walk, so
+        // resolve the OID without cloning the node (its args may carry an Aggref,
+        // which is not deep-cloneable).
         Expr::OpExpr(op) | Expr::DistinctExpr(op) | Expr::NullIfExpr(op) => {
-            let mut tmp = op.clone();
-            set_opfuncid(&mut tmp)?;
-            record_plan_function_dependency_value(ctx, tmp.opfuncid)?;
+            let opfuncid = resolved_opfuncid(op.opno, op.opfuncid)?;
+            record_plan_function_dependency_value(ctx, opfuncid)?;
         }
         Expr::ScalarArrayOpExpr(saop) => {
-            let mut tmp = saop.clone();
-            set_sa_opfuncid(&mut tmp)?;
-            record_plan_function_dependency_value(ctx, tmp.opfuncid)?;
-            if tmp.hashfuncid != 0 {
-                record_plan_function_dependency_value(ctx, tmp.hashfuncid)?;
+            let opfuncid = resolved_opfuncid(saop.opno, saop.opfuncid)?;
+            record_plan_function_dependency_value(ctx, opfuncid)?;
+            if saop.hashfuncid != 0 {
+                record_plan_function_dependency_value(ctx, saop.hashfuncid)?;
             }
-            if tmp.negfuncid != 0 {
-                record_plan_function_dependency_value(ctx, tmp.negfuncid)?;
+            if saop.negfuncid != 0 {
+                record_plan_function_dependency_value(ctx, saop.negfuncid)?;
             }
         }
         Expr::Const(con) => {

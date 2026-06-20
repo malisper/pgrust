@@ -27,8 +27,9 @@
 
 use types_error::PgResult;
 use types_plpgsql::{
-    Oid, PLcword, PLpgSQL_condition, PLpgSQL_datum_type, PLpgSQL_expr, PLpgSQL_resolve_option,
-    PLpgSQL_type, PLpgSQL_var, PLpgSQL_variable, PLwdatum, PLword, RawParseMode,
+    IdentifierLookup, Oid, PLcword, PLpgSQL_condition, PLpgSQL_datum_type, PLpgSQL_expr,
+    PLpgSQL_resolve_option, PLpgSQL_type, PLpgSQL_var, PLpgSQL_variable, PLwdatum, PLword,
+    RawParseMode,
 };
 
 /// Result of resolving a single identifier (`plpgsql_parse_word`).
@@ -97,6 +98,15 @@ seam_core::seam!(
 seam_core::seam!(
     /// `plpgsql_DumpExecTree = value` (`#option dump`).
     pub fn set_dump_exec_tree(value: bool)
+);
+
+seam_core::seam!(
+    /// `plpgsql_IdentifierLookup = mode` — the grammar toggles this global as it
+    /// enters/leaves DECLARE sections and SQL-expression scans. The
+    /// authoritative copy lives in the compiler unit (consulted by
+    /// `plpgsql_parse_word`/`dblword`/`tripword`), so the grammar writes it
+    /// through this seam rather than the (vestigial) scanner-instance mirror.
+    pub fn set_identifier_lookup(mode: IdentifierLookup)
 );
 
 seam_core::seam!(

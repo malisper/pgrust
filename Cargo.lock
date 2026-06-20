@@ -14214,6 +14214,7 @@ dependencies = [
 name = "backend-pl-plpgsql-comp"
 version = "0.0.0"
 dependencies = [
+ "backend-catalog-namespace-seams",
  "backend-parser-driver-seams",
  "backend-parser-parse-type",
  "backend-pl-plpgsql-comp-seams",
@@ -14225,6 +14226,7 @@ dependencies = [
  "backend-utils-cache-funccache-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
  "backend-utils-misc-guc-tables",
  "mcx",
  "types-core",
@@ -19795,6 +19797,7 @@ dependencies = [
  "backend-access-table-tableam",
  "backend-catalog-aclchk-seams",
  "backend-catalog-binary-upgrade-seams",
+ "backend-catalog-heap-seams",
  "backend-catalog-namespace-seams",
  "backend-catalog-objectaddress-seams",
  "backend-catalog-partition-seams",

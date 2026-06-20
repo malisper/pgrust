@@ -1077,6 +1077,20 @@ pub fn set_opfuncid(opexpr: &mut OpExpr) -> PgResult<()> {
     Ok(())
 }
 
+/// The `opfuncid` `set_opfuncid` would compute, *without* scribbling on (or
+/// cloning) the node. C's `set_opfuncid` writes the field in place; a
+/// read-only walker that can't (or won't) mutate the node — e.g. the
+/// dependency-extraction VALUE walk, whose `OpExpr.args` may carry an `Aggref`
+/// that isn't deep-cloneable — resolves the same OID this way. Reads only the
+/// scalar `opno`/`opfuncid`, never the argument subtree.
+pub fn resolved_opfuncid(opno: Oid, opfuncid: Oid) -> PgResult<Oid> {
+    if opfuncid == InvalidOid {
+        lsyscache::get_opcode::call(opno)
+    } else {
+        Ok(opfuncid)
+    }
+}
+
 /// `set_sa_opfuncid(opexpr)` (nodeFuncs.c) — as `set_opfuncid`, for
 /// ScalarArrayOpExpr.
 pub fn set_sa_opfuncid(opexpr: &mut ScalarArrayOpExpr) -> PgResult<()> {

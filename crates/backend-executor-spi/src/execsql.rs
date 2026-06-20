@@ -36,6 +36,7 @@ use crate::result_code::*;
 use backend_executor_execMain as execmain;
 use backend_utils_cache_plancache as plancache;
 use backend_utils_cache_plancache_seams as plancache_seams;
+use backend_access_transam_xact_seams as xact_seams;
 use backend_utils_time_snapmgr_seams as snapmgr;
 
 type SourceHandle = u64;
@@ -106,7 +107,13 @@ pub fn spi_execsql(
 
     // _SPI_execute_plan: GetCachedPlan + push the transaction snapshot + run.
     let pushed = snapmgr::push_active_snapshot_transaction::call().is_ok();
-    let out = run_execsql(mcx, source, &param_li, into, tcount);
+    // Advance the command counter before each command and update the snapshot
+    // when not read-only and the snapshot is under our control (spi.c:2665) — so
+    // a later statement in the same function/trigger sees the writes of an
+    // earlier one (and a fired AFTER trigger sees the triggering statement's
+    // effects). Skipped for a read-only function (it makes no writes to see).
+    let advance_cid = pushed && !_read_only;
+    let out = run_execsql(mcx, source, &param_li, into, tcount, advance_cid);
     if pushed {
         let _ = snapmgr::pop_active_snapshot::call();
     }
@@ -176,15 +183,23 @@ fn build_param_list(
     let ctx: &'static MemoryContext = allocator_api2::boxed::Box::leak(
         allocator_api2::boxed::Box::new(MemoryContext::new("PL/pgSQL Param List")),
     );
-    let _pmcx: Mcx<'static> = ctx.mcx();
+    let pmcx: Mcx<'static> = ctx.mcx();
 
     let mut params: Vec<ParamExternData<'static>> = Vec::with_capacity(num_params);
     let referenced: std::collections::BTreeSet<i32> = dnos.iter().copied().collect();
     for dno in 0..(num_params as i32) {
         if referenced.contains(&dno) {
             let v = resolve(dno)?;
+            // A pass-by-reference value (varchar/text/name/numeric/...) carries
+            // its header-ful byte image in `byref`; rebuild it as a live
+            // `Datum::ByRef` rooted in the param-list context. The bare `value`
+            // word is only meaningful for by-value types (byref == None).
+            let value = match &v.byref {
+                Some(bytes) if !v.isnull => RichDatum::from_byref_bytes_in(pmcx, bytes)?,
+                _ => RichDatum::from_usize(v.value),
+            };
             params.push(ParamExternData {
-                value: RichDatum::from_usize(v.value),
+                value,
                 isnull: v.isnull,
                 pflags: PARAM_FLAG_CONST,
                 ptype: v.typeid,
@@ -220,6 +235,7 @@ fn run_execsql<'mcx>(
     param_li: &ParamListInfo,
     into: bool,
     tcount: i64,
+    advance_cid: bool,
 ) -> PgResult<ExecsqlResult> {
     let cplan = plancache::GetCachedPlan(source, param_li.clone(), ResourceOwner::NULL, None)?;
     let stmt_list = plancache_seams::cached_plan_stmt_list::call(mcx, CachedPlanHandle(cplan))?;
@@ -230,6 +246,13 @@ fn run_execsql<'mcx>(
     let mut first_row: Vec<ExecsqlColumn> = Vec::new();
 
     for stmt in stmt_list.iter() {
+        // spi.c:2665 — advance the command counter before each command and update
+        // the active snapshot's command id, so writes of an earlier command (or
+        // the statement that queued a now-firing AFTER trigger) are visible.
+        if advance_cid {
+            xact_seams::command_counter_increment::call()?;
+            snapmgr::update_active_snapshot_command_id::call()?;
+        }
         let (c, n, tt, row) = run_one_execsql_stmt(stmt, param_li, into, tcount)?;
         code = c;
         processed = n;

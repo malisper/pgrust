@@ -42,7 +42,7 @@ use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
 use types_tuple::backend_access_common_heaptuple::{FormedTuple, Datum};
-use types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData, BITMAPLEN, RECORDOID};
+use types_tuple::heaptuple::{TupleDescData, BITMAPLEN, RECORDOID};
 
 use backend_access_common_heaptuple as heaptuple;
 
@@ -280,9 +280,11 @@ fn datum_copy<'mcx>(
     value.clone_in(mcx)
 }
 
-/// `SystemAttributeByName(attname)` (catalog/heap.c). Owner not yet ported.
-fn system_attribute_by_name(_fieldname: &str) -> Option<FormData_pg_attribute> {
-    panic!("expandedrecord: SystemAttributeByName: unported owner (catalog/heap.c)")
+/// `SystemAttributeByName(attname)` (catalog/heap.c) — the system column named
+/// `fieldname` projected to `(attnum, atttypid, atttypmod, attcollation)`, or
+/// `None` if not a system attribute. Routed to the heap.c owner via its seam.
+fn system_attribute_by_name(fieldname: &str) -> Option<(i32, Oid, i32, Oid)> {
+    backend_catalog_heap_seams::system_attribute_by_name::call(fieldname)
 }
 
 /// `ereport(ERROR, errcode(ERRCODE_WRONG_OBJECT_TYPE), errmsg("type %s is not
@@ -958,12 +960,12 @@ pub fn expanded_record_lookup_field<'mcx>(
     }
 
     // How about system attributes?
-    if let Some(sysattr) = system_attribute_by_name(fieldname) {
+    if let Some((attnum, atttypid, atttypmod, attcollation)) = system_attribute_by_name(fieldname) {
         return Ok(Some(ExpandedRecordFieldInfo {
-            fnumber: sysattr.attnum as i32,
-            ftypeid: sysattr.atttypid,
-            ftypmod: sysattr.atttypmod,
-            fcollation: sysattr.attcollation,
+            fnumber: attnum,
+            ftypeid: atttypid,
+            ftypmod: atttypmod,
+            fcollation: attcollation,
         }));
     }
 

@@ -27,6 +27,7 @@ use core::cell::RefCell;
 
 use types_core::Oid;
 use types_datum::Datum;
+pub use types_error::ERRCODE_UNDEFINED_COLUMN;
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_FUNCTION_DEFINITION,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE,
@@ -400,16 +401,29 @@ pub fn plpgsql_parse_cwordtype(idents: &[String]) -> PgResult<Box<PLpgSQL_type>>
             }
         }
     }
-    // %TYPE over a relation column requires RangeVarGetRelid + pg_attribute,
-    // which is not reachable from the compile path yet (the namespace/
-    // syscache-attname owner is unwired) — mirror-PG-and-panic.
-    let _relid = seam::relname_get_relid(&idents[0]);
-    panic!("plpgsql compile: %TYPE over a relation column not reachable (pg_attribute owner unwired)")
+    // First word (or all-but-last words) could also be a table name; the last
+    // ident is the column.  (C: makeRangeVar over a 2-name list uses the first
+    // as the relname and the second as the field; for >2 names it strips the
+    // last and resolves the rest as a qualified rel name.)
+    let (rvnames, fldname): (&[String], &str) = if idents.len() == 2 {
+        (&idents[0..1], idents[1].as_str())
+    } else {
+        // list_length(idents) > 2
+        (&idents[..idents.len() - 1], idents[idents.len() - 1].as_str())
+    };
+    let rvname_refs: Vec<&str> = rvnames.iter().map(String::as_str).collect();
+    // C: RangeVarGetRelid(relvar, NoLock, false) — the relation must exist.
+    let class_oid = seam::qualified_relname_get_relid(&rvname_refs, false)?;
+    // relvar->relname is the last component of the rel-name portion (C reads
+    // relvar->relname for the diagnostic).
+    let relname = rvname_refs.last().copied().unwrap_or("");
+    seam::column_atttype(class_oid, relname, fldname)
 }
 
 /// `plpgsql_parse_wordrowtype` — the scanner found `word%ROWTYPE`.
 pub fn plpgsql_parse_wordrowtype(ident: &str) -> PgResult<Box<PLpgSQL_type>> {
-    let class_oid = seam::relname_get_relid(ident);
+    // C: RelnameGetRelid(ident); a missing relation is "relation does not exist".
+    let class_oid = seam::relname_get_relid(ident)?;
     if !oid_is_valid(class_oid) {
         return Err(PgError::error(format!("relation \"{ident}\" does not exist"))
             .with_sqlstate(ERRCODE_UNDEFINED_TABLE));
@@ -426,9 +440,12 @@ pub fn plpgsql_parse_wordrowtype(ident: &str) -> PgResult<Box<PLpgSQL_type>> {
 
 /// `plpgsql_parse_cwordrowtype` — `compositeword%ROWTYPE` (qualified table).
 pub fn plpgsql_parse_cwordrowtype(idents: &[String]) -> PgResult<Box<PLpgSQL_type>> {
-    // Qualified table name -> RangeVarGetRelid -> get_rel_type_id.
+    // Qualified table name -> makeRangeVarFromNameList -> RangeVarGetRelid
+    // (NoLock, missing_ok=false) -> get_rel_type_id.
+    let idents_refs: Vec<&str> = idents.iter().map(String::as_str).collect();
+    let class_oid = seam::qualified_relname_get_relid(&idents_refs, false)?;
+    // relvar->relname is the last component (the diagnostic's relation name).
     let relname = idents.last().map(String::as_str).unwrap_or("");
-    let class_oid = seam::relname_get_relid(relname);
     let typ_oid = seam::get_rel_type_id(class_oid);
     if !oid_is_valid(typ_oid) {
         return Err(
@@ -698,11 +715,14 @@ fn build_datatype(
         false
     };
 
-    // Named composite type (or domain over one) records its current tupdesc id.
+    // If it's a named composite type (or domain over one), find the typcache
+    // entry and record the current tupdesc ID, so we can detect changes
+    // (including drops). (C build_datatype: lookup_type_cache(typoid,
+    // TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO), chaining to the domain
+    // base for a domain; raise "type is not composite" when tupDesc is NULL.)
     let (tcache, tupdesc_id) =
         if ttype == PLpgSQL_type_type::PLPGSQL_TTYPE_REC && form.oid != RECORDOID {
-            // Requires the typcache composite-tupdesc projection — not reachable.
-            seam::composite_tupdesc_id(form.oid);
+            seam::composite_tupdesc_id(form.oid)
         } else {
             (None, 0)
         };
@@ -2000,6 +2020,7 @@ pub fn init_seams() {
     comp_seams::plpgsql_parse_tripword::set(|w1, w2, w3| Ok(plpgsql_parse_tripword(w1, w2, w3)));
 
     comp_seams::set_dump_exec_tree::set(set_dump_exec_tree);
+    comp_seams::set_identifier_lookup::set(set_plpgsql_identifier_lookup);
     comp_seams::curr_compile_set_print_strict_params::set(|v| {
         set_curr_compile_field(|f| f.print_strict_params = v)
     });
