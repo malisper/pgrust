@@ -539,13 +539,23 @@ pub fn ResOwnerReleaseRelation(relation: Oid) -> PgResult<()> {
 /// The further `RelationClearRelation` call the C makes is guarded by
 /// `#ifdef RELCACHE_FORCE_RELEASE`, a debug-only define compiled out of normal
 /// builds, so it is intentionally absent here.
-pub(crate) fn RelationCloseCleanup(relation: Oid) -> PgResult<()> {
-    let do_clear = with_rel(relation, |rd| {
-        rd.rd_refcnt == 0 && (!rd.rd_isvalid || rd.rd_droppedSubid != 0)
-    });
-    if do_clear {
-        return crate::invalidate::RelationClearRelation(relation);
-    }
+///
+/// An earlier port reintroduced that clear under a hand-written
+/// `rd_refcnt == 0 && (!rd_isvalid || rd_droppedSubid != 0)` condition. That is
+/// NOT what the normal C build does: even the `#ifdef RELCACHE_FORCE_RELEASE`
+/// path additionally requires `rd_createSubid == InvalidSubTransactionId &&
+/// rd_firstRelfilelocatorSubid == InvalidSubTransactionId` (relcache.c:2248). So
+/// releasing the last ref on a relation created in (and invalidated by) the
+/// *current, aborting* transaction reached `RelationClearRelation`, whose
+/// `Assert(rd_createSubid == InvalidSubTransactionId)` then fired *inside*
+/// `AbortTransaction` — an abort-in-abort escalation the error-recovery loop
+/// could never settle, killing the backend (generated_virtual). Stale/dropped
+/// entries are reclaimed by `RelationFlushRelation` / `AtEOXact_RelationCache`,
+/// not on the resowner close path.
+pub(crate) fn RelationCloseCleanup(_relation: Oid) -> PgResult<()> {
+    // Normal build: only the partition-descriptor child-context cleanup, which
+    // is a no-op over the fields this family owns (rd_pdcxt/rd_pddcxt are not
+    // modeled). The RELCACHE_FORCE_RELEASE clear stays compiled out.
     Ok(())
 }
 
