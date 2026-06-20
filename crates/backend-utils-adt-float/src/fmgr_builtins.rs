@@ -15,7 +15,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -115,21 +115,6 @@ fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult<T>`, raising the error through `raise` on `Err`.
-#[inline]
-fn unwrap_or_raise<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 /// Set a `float8[]` transition-state result on the by-ref lane. The aggregate
 /// transition/combine cores return a COMPLETE `ArrayType` varlena image (built by
 /// `construct_array`, 4-byte header + ARR_* body), so the `RefPayload::Varlena`
@@ -158,472 +143,472 @@ fn ret_opt_f64(fcinfo: &mut FunctionCallInfoBaseData, v: Option<f64>) -> Datum {
 // ---------------------------------------------------------------------------
 
 // ---- I/O ----
-fn fc_float4in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float4in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: `float4in` forwards `fcinfo->context` for soft `pg_input_is_valid`.
     let s = arg_cstring(fcinfo, 0).to_string();
     let escontext = fcinfo.escontext_mut();
-    ret_f32(unwrap_or_raise(crate::float4in(&s, escontext)))
+    Ok(ret_f32(crate::float4in(&s, escontext)?))
 }
-fn fc_float4out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float4out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let v = arg_f32(fcinfo, 0);
-    ret_cstring(fcinfo, crate::float4out(v))
+    Ok(ret_cstring(fcinfo, crate::float4out(v)))
 }
-fn fc_float8in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float8in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: `float8in` forwards `fcinfo->context` for soft `pg_input_is_valid`.
     let s = arg_cstring(fcinfo, 0).to_string();
     let escontext = fcinfo.escontext_mut();
-    ret_f64(unwrap_or_raise(crate::float8in(&s, escontext)))
+    Ok(ret_f64(crate::float8in(&s, escontext)?))
 }
-fn fc_float8out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float8out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let v = arg_f64(fcinfo, 0);
-    ret_cstring(fcinfo, crate::float8out(v))
+    Ok(ret_cstring(fcinfo, crate::float8out(v)))
 }
-fn fc_float4send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float4send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let v = arg_f32(fcinfo, 0);
-    ret_varlena(fcinfo, crate::float4send(v))
+    Ok(ret_varlena(fcinfo, crate::float4send(v)))
 }
-fn fc_float8send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float8send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let v = arg_f64(fcinfo, 0);
-    ret_varlena(fcinfo, crate::float8send(v))
+    Ok(ret_varlena(fcinfo, crate::float8send(v)))
 }
-fn fc_float4recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float4recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let buf = arg_varlena(fcinfo, 0);
-    ret_f32(unwrap_or_raise(crate::float4recv(buf)))
+    Ok(ret_f32(crate::float4recv(buf)?))
 }
-fn fc_float8recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float8recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let buf = arg_varlena(fcinfo, 0);
-    ret_f64(unwrap_or_raise(crate::float8recv(buf)))
+    Ok(ret_f64(crate::float8recv(buf)?))
 }
 
 // ---- same-type arithmetic (float4) ----
-fn fc_float4pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(unwrap_or_raise(crate::float4_pl(
+fn fc_float4pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::float4_pl(
         arg_f32(fcinfo, 0),
         arg_f32(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_float4mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(unwrap_or_raise(crate::float4_mi(
+fn fc_float4mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::float4_mi(
         arg_f32(fcinfo, 0),
         arg_f32(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_float4mul(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(unwrap_or_raise(crate::float4_mul(
+fn fc_float4mul(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::float4_mul(
         arg_f32(fcinfo, 0),
         arg_f32(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_float4div(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(unwrap_or_raise(crate::float4_div(
+fn fc_float4div(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::float4_div(
         arg_f32(fcinfo, 0),
         arg_f32(fcinfo, 1),
-    )))
+    )?))
 }
 
 // ---- same-type arithmetic (float8) ----
-fn fc_float8pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::float8_pl(
+fn fc_float8pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float8_pl(
         arg_f64(fcinfo, 0),
         arg_f64(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_float8mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::float8_mi(
+fn fc_float8mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float8_mi(
         arg_f64(fcinfo, 0),
         arg_f64(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_float8mul(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::float8_mul(
+fn fc_float8mul(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float8_mul(
         arg_f64(fcinfo, 0),
         arg_f64(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_float8div(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::float8_div(
+fn fc_float8div(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float8_div(
         arg_f64(fcinfo, 0),
         arg_f64(fcinfo, 1),
-    )))
+    )?))
 }
 
 // ---- same-type comparisons (float4) ----
-fn fc_float4eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float4_eq(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float4eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float4_eq(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
-fn fc_float4ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float4_ne(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float4ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float4_ne(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
-fn fc_float4lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float4_lt(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float4lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float4_lt(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
-fn fc_float4le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float4_le(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float4le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float4_le(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
-fn fc_float4gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float4_gt(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float4gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float4_gt(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
-fn fc_float4ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float4_ge(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float4ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float4_ge(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
 
 // ---- same-type comparisons (float8) ----
-fn fc_float8eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float8_eq(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float8eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float8_eq(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_float8ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float8_ne(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float8ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float8_ne(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_float8lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float8_lt(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float8lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float8_lt(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_float8le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float8_le(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float8le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float8_le(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_float8gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float8_gt(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float8gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float8_gt(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_float8ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float8_ge(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float8ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float8_ge(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
 
 // ---- unary float4 ----
-fn fc_float4um(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(crate::float4um(arg_f32(fcinfo, 0)))
+fn fc_float4um(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::float4um(arg_f32(fcinfo, 0))))
 }
-fn fc_float4up(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(crate::float4up(arg_f32(fcinfo, 0)))
+fn fc_float4up(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::float4up(arg_f32(fcinfo, 0))))
 }
-fn fc_float4abs(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(crate::float4abs(arg_f32(fcinfo, 0)))
+fn fc_float4abs(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::float4abs(arg_f32(fcinfo, 0))))
 }
-fn fc_float4larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(crate::float4larger(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float4larger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::float4larger(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
-fn fc_float4smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(crate::float4smaller(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float4smaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::float4smaller(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
 
 // ---- unary float8 ----
-fn fc_float8um(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::float8um(arg_f64(fcinfo, 0)))
+fn fc_float8um(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float8um(arg_f64(fcinfo, 0))))
 }
-fn fc_float8up(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::float8up(arg_f64(fcinfo, 0)))
+fn fc_float8up(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float8up(arg_f64(fcinfo, 0))))
 }
-fn fc_float8abs(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::float8abs(arg_f64(fcinfo, 0)))
+fn fc_float8abs(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float8abs(arg_f64(fcinfo, 0))))
 }
-fn fc_float8larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::float8larger(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float8larger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float8larger(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_float8smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::float8smaller(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float8smaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float8smaller(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
 
 // ---- math (float8) ----
-fn fc_dround(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::dround(arg_f64(fcinfo, 0)))
+fn fc_dround(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dround(arg_f64(fcinfo, 0))))
 }
-fn fc_dtrunc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::dtrunc(arg_f64(fcinfo, 0)))
+fn fc_dtrunc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dtrunc(arg_f64(fcinfo, 0))))
 }
-fn fc_dceil(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::dceil(arg_f64(fcinfo, 0)))
+fn fc_dceil(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dceil(arg_f64(fcinfo, 0))))
 }
-fn fc_dfloor(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::dfloor(arg_f64(fcinfo, 0)))
+fn fc_dfloor(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dfloor(arg_f64(fcinfo, 0))))
 }
-fn fc_dsign(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::dsign(arg_f64(fcinfo, 0)))
+fn fc_dsign(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dsign(arg_f64(fcinfo, 0))))
 }
-fn fc_dsqrt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dsqrt(arg_f64(fcinfo, 0))))
+fn fc_dsqrt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dsqrt(arg_f64(fcinfo, 0))?))
 }
-fn fc_dcbrt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dcbrt(arg_f64(fcinfo, 0))))
+fn fc_dcbrt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dcbrt(arg_f64(fcinfo, 0))?))
 }
-fn fc_dpow(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dpow(
+fn fc_dpow(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dpow(
         arg_f64(fcinfo, 0),
         arg_f64(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_dexp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dexp(arg_f64(fcinfo, 0))))
+fn fc_dexp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dexp(arg_f64(fcinfo, 0))?))
 }
-fn fc_dlog1(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dlog1(arg_f64(fcinfo, 0))))
+fn fc_dlog1(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dlog1(arg_f64(fcinfo, 0))?))
 }
-fn fc_dlog10(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dlog10(arg_f64(fcinfo, 0))))
+fn fc_dlog10(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dlog10(arg_f64(fcinfo, 0))?))
 }
 
 // ---- trig (radians) ----
-fn fc_dasin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dasin(arg_f64(fcinfo, 0))))
+fn fc_dasin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dasin(arg_f64(fcinfo, 0))?))
 }
-fn fc_dacos(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dacos(arg_f64(fcinfo, 0))))
+fn fc_dacos(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dacos(arg_f64(fcinfo, 0))?))
 }
-fn fc_datan(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::datan(arg_f64(fcinfo, 0))))
+fn fc_datan(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::datan(arg_f64(fcinfo, 0))?))
 }
-fn fc_datan2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::datan2(
+fn fc_datan2(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::datan2(
         arg_f64(fcinfo, 0),
         arg_f64(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_dsin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dsin(arg_f64(fcinfo, 0))))
+fn fc_dsin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dsin(arg_f64(fcinfo, 0))?))
 }
-fn fc_dcos(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dcos(arg_f64(fcinfo, 0))))
+fn fc_dcos(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dcos(arg_f64(fcinfo, 0))?))
 }
-fn fc_dtan(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dtan(arg_f64(fcinfo, 0))))
+fn fc_dtan(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dtan(arg_f64(fcinfo, 0))?))
 }
-fn fc_dcot(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dcot(arg_f64(fcinfo, 0))))
+fn fc_dcot(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dcot(arg_f64(fcinfo, 0))?))
 }
-fn fc_degrees(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::degrees(arg_f64(fcinfo, 0))))
+fn fc_degrees(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::degrees(arg_f64(fcinfo, 0))?))
 }
-fn fc_radians(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::radians(arg_f64(fcinfo, 0))))
+fn fc_radians(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::radians(arg_f64(fcinfo, 0))?))
 }
-fn fc_dpi(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::dpi())
+fn fc_dpi(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dpi()))
 }
 
 // ---- trig (degrees) ----
-fn fc_dasind(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dasind(arg_f64(fcinfo, 0))))
+fn fc_dasind(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dasind(arg_f64(fcinfo, 0))?))
 }
-fn fc_dacosd(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dacosd(arg_f64(fcinfo, 0))))
+fn fc_dacosd(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dacosd(arg_f64(fcinfo, 0))?))
 }
-fn fc_datand(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::datand(arg_f64(fcinfo, 0))))
+fn fc_datand(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::datand(arg_f64(fcinfo, 0))?))
 }
-fn fc_datan2d(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::datan2d(
+fn fc_datan2d(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::datan2d(
         arg_f64(fcinfo, 0),
         arg_f64(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_dsind(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dsind(arg_f64(fcinfo, 0))))
+fn fc_dsind(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dsind(arg_f64(fcinfo, 0))?))
 }
-fn fc_dcosd(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dcosd(arg_f64(fcinfo, 0))))
+fn fc_dcosd(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dcosd(arg_f64(fcinfo, 0))?))
 }
-fn fc_dtand(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dtand(arg_f64(fcinfo, 0))))
+fn fc_dtand(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dtand(arg_f64(fcinfo, 0))?))
 }
-fn fc_dcotd(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dcotd(arg_f64(fcinfo, 0))))
+fn fc_dcotd(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dcotd(arg_f64(fcinfo, 0))?))
 }
 
 // ---- hyperbolic ----
-fn fc_dsinh(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::dsinh(arg_f64(fcinfo, 0)))
+fn fc_dsinh(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dsinh(arg_f64(fcinfo, 0))))
 }
-fn fc_dcosh(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dcosh(arg_f64(fcinfo, 0))))
+fn fc_dcosh(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dcosh(arg_f64(fcinfo, 0))?))
 }
-fn fc_dtanh(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dtanh(arg_f64(fcinfo, 0))))
+fn fc_dtanh(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dtanh(arg_f64(fcinfo, 0))?))
 }
-fn fc_dasinh(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::dasinh(arg_f64(fcinfo, 0)))
+fn fc_dasinh(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dasinh(arg_f64(fcinfo, 0))))
 }
-fn fc_dacosh(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dacosh(arg_f64(fcinfo, 0))))
+fn fc_dacosh(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dacosh(arg_f64(fcinfo, 0))?))
 }
-fn fc_datanh(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::datanh(arg_f64(fcinfo, 0))))
+fn fc_datanh(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::datanh(arg_f64(fcinfo, 0))?))
 }
 
 // ---- erf / gamma ----
-fn fc_derf(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::derf(arg_f64(fcinfo, 0))))
+fn fc_derf(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::derf(arg_f64(fcinfo, 0))?))
 }
-fn fc_derfc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::derfc(arg_f64(fcinfo, 0))))
+fn fc_derfc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::derfc(arg_f64(fcinfo, 0))?))
 }
-fn fc_dgamma(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dgamma(arg_f64(fcinfo, 0))))
+fn fc_dgamma(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dgamma(arg_f64(fcinfo, 0))?))
 }
-fn fc_dlgamma(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::dlgamma(arg_f64(fcinfo, 0))))
+fn fc_dlgamma(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::dlgamma(arg_f64(fcinfo, 0))?))
 }
 
 // ---- conversions ----
-fn fc_i2tod(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::i2tod(arg_i16(fcinfo, 0)))
+fn fc_i2tod(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::i2tod(arg_i16(fcinfo, 0))))
 }
-fn fc_i2tof(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(crate::i2tof(arg_i16(fcinfo, 0)))
+fn fc_i2tof(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::i2tof(arg_i16(fcinfo, 0))))
 }
-fn fc_dtoi2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i16(unwrap_or_raise(crate::dtoi2(arg_f64(fcinfo, 0))))
+fn fc_dtoi2(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i16(crate::dtoi2(arg_f64(fcinfo, 0))?))
 }
-fn fc_ftoi2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i16(unwrap_or_raise(crate::ftoi2(arg_f32(fcinfo, 0))))
+fn fc_ftoi2(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i16(crate::ftoi2(arg_f32(fcinfo, 0))?))
 }
-fn fc_i4tod(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::i4tod(arg_i32(fcinfo, 0)))
+fn fc_i4tod(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::i4tod(arg_i32(fcinfo, 0))))
 }
-fn fc_i4tof(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(crate::i4tof(arg_i32(fcinfo, 0)))
+fn fc_i4tof(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::i4tof(arg_i32(fcinfo, 0))))
 }
-fn fc_dtoi4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(unwrap_or_raise(crate::dtoi4(arg_f64(fcinfo, 0))))
+fn fc_dtoi4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::dtoi4(arg_f64(fcinfo, 0))?))
 }
-fn fc_ftoi4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(unwrap_or_raise(crate::ftoi4(arg_f32(fcinfo, 0))))
+fn fc_ftoi4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::ftoi4(arg_f32(fcinfo, 0))?))
 }
-fn fc_ftod(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::ftod(arg_f32(fcinfo, 0)))
+fn fc_ftod(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::ftod(arg_f32(fcinfo, 0))))
 }
-fn fc_dtof(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(unwrap_or_raise(crate::dtof(arg_f64(fcinfo, 0))))
+fn fc_dtof(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::dtof(arg_f64(fcinfo, 0))?))
 }
 
 // ---- float48 (float4 op float8) arithmetic ----
-fn fc_float48mul(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::float48mul(
+fn fc_float48mul(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float48mul(
         arg_f32(fcinfo, 0),
         arg_f64(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_float48div(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::float48div(
+fn fc_float48div(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float48div(
         arg_f32(fcinfo, 0),
         arg_f64(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_float48pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::float48pl(
+fn fc_float48pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float48pl(
         arg_f32(fcinfo, 0),
         arg_f64(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_float48mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::float48mi(
+fn fc_float48mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float48mi(
         arg_f32(fcinfo, 0),
         arg_f64(fcinfo, 1),
-    )))
+    )?))
 }
 
 // ---- float84 (float8 op float4) arithmetic ----
-fn fc_float84mul(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::float84mul(
+fn fc_float84mul(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float84mul(
         arg_f64(fcinfo, 0),
         arg_f32(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_float84div(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::float84div(
+fn fc_float84div(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float84div(
         arg_f64(fcinfo, 0),
         arg_f32(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_float84pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::float84pl(
+fn fc_float84pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float84pl(
         arg_f64(fcinfo, 0),
         arg_f32(fcinfo, 1),
-    )))
+    )?))
 }
-fn fc_float84mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(unwrap_or_raise(crate::float84mi(
+fn fc_float84mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::float84mi(
         arg_f64(fcinfo, 0),
         arg_f32(fcinfo, 1),
-    )))
+    )?))
 }
 
 // ---- float48 comparisons ----
-fn fc_float48eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float48eq(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float48eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float48eq(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_float48ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float48ne(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float48ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float48ne(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_float48lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float48lt(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float48lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float48lt(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_float48le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float48le(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float48le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float48le(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_float48gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float48gt(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float48gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float48gt(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_float48ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float48ge(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_float48ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float48ge(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
 
 // ---- float84 comparisons ----
-fn fc_float84eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float84eq(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float84eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float84eq(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
-fn fc_float84ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float84ne(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float84ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float84ne(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
-fn fc_float84lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float84lt(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float84lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float84lt(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
-fn fc_float84le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float84le(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float84le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float84le(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
-fn fc_float84gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float84gt(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float84gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float84gt(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
-fn fc_float84ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::float84ge(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_float84ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::float84ge(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
 
 // ---- btree comparators ----
-fn fc_btfloat4cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btfloat4cmp(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_btfloat4cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btfloat4cmp(arg_f32(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
-fn fc_btfloat8cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btfloat8cmp(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_btfloat8cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btfloat8cmp(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_btfloat48cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btfloat48cmp(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1)))
+fn fc_btfloat48cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btfloat48cmp(arg_f32(fcinfo, 0), arg_f64(fcinfo, 1))))
 }
-fn fc_btfloat84cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btfloat84cmp(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1)))
+fn fc_btfloat84cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btfloat84cmp(arg_f64(fcinfo, 0), arg_f32(fcinfo, 1))))
 }
 
 // ---- in_range / width_bucket ----
-fn fc_in_range_float8_float8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(unwrap_or_raise(crate::in_range_float8_float8(
+fn fc_in_range_float8_float8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::in_range_float8_float8(
         arg_f64(fcinfo, 0),
         arg_f64(fcinfo, 1),
         arg_f64(fcinfo, 2),
         arg_bool(fcinfo, 3),
         arg_bool(fcinfo, 4),
-    )))
+    )?))
 }
-fn fc_in_range_float4_float8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(unwrap_or_raise(crate::in_range_float4_float8(
+fn fc_in_range_float4_float8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::in_range_float4_float8(
         arg_f32(fcinfo, 0),
         arg_f32(fcinfo, 1),
         arg_f64(fcinfo, 2),
         arg_bool(fcinfo, 3),
         arg_bool(fcinfo, 4),
-    )))
+    )?))
 }
-fn fc_width_bucket_float8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(unwrap_or_raise(crate::width_bucket_float8(
+fn fc_width_bucket_float8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::width_bucket_float8(
         arg_f64(fcinfo, 0),
         arg_f64(fcinfo, 1),
         arg_f64(fcinfo, 2),
         arg_i32(fcinfo, 3),
-    )))
+    )?))
 }
 
 // ---- aggregate transition / combine / final functions (float.c) ----
@@ -634,50 +619,50 @@ fn fc_width_bucket_float8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // each call, written back raw via `ret_array_raw`. All are `proisstrict => 't'`,
 // so the fmgr dispatcher already shortcuts a NULL input before reaching here.
 
-fn fc_float8_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float8_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = mcx::MemoryContext::new("float8_accum");
     let transarray = arg_varlena(fcinfo, 0);
     let newval = arg_f64(fcinfo, 1);
-    let out = unwrap_or_raise(crate::float8_accum(m.mcx(), transarray, newval));
-    ret_array_raw(fcinfo, out.as_slice().to_vec())
+    let out = crate::float8_accum(m.mcx(), transarray, newval)?;
+    Ok(ret_array_raw(fcinfo, out.as_slice().to_vec()))
 }
-fn fc_float4_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float4_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = mcx::MemoryContext::new("float4_accum");
     let transarray = arg_varlena(fcinfo, 0);
     let newval = arg_f32(fcinfo, 1);
-    let out = unwrap_or_raise(crate::float4_accum(m.mcx(), transarray, newval));
-    ret_array_raw(fcinfo, out.as_slice().to_vec())
+    let out = crate::float4_accum(m.mcx(), transarray, newval)?;
+    Ok(ret_array_raw(fcinfo, out.as_slice().to_vec()))
 }
-fn fc_float8_combine(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float8_combine(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = mcx::MemoryContext::new("float8_combine");
     let a = arg_varlena(fcinfo, 0);
     let b = arg_varlena(fcinfo, 1);
-    let out = unwrap_or_raise(crate::float8_combine(m.mcx(), a, b));
-    ret_array_raw(fcinfo, out.as_slice().to_vec())
+    let out = crate::float8_combine(m.mcx(), a, b)?;
+    Ok(ret_array_raw(fcinfo, out.as_slice().to_vec()))
 }
-fn fc_float8_regr_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float8_regr_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = mcx::MemoryContext::new("float8_regr_accum");
     let transarray = arg_varlena(fcinfo, 0);
     let newval_y = arg_f64(fcinfo, 1);
     let newval_x = arg_f64(fcinfo, 2);
     let out =
-        unwrap_or_raise(crate::float8_regr_accum(m.mcx(), transarray, newval_y, newval_x));
-    ret_array_raw(fcinfo, out.as_slice().to_vec())
+        crate::float8_regr_accum(m.mcx(), transarray, newval_y, newval_x)?;
+    Ok(ret_array_raw(fcinfo, out.as_slice().to_vec()))
 }
-fn fc_float8_regr_combine(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float8_regr_combine(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = mcx::MemoryContext::new("float8_regr_combine");
     let a = arg_varlena(fcinfo, 0);
     let b = arg_varlena(fcinfo, 1);
-    let out = unwrap_or_raise(crate::float8_regr_combine(m.mcx(), a, b));
-    ret_array_raw(fcinfo, out.as_slice().to_vec())
+    let out = crate::float8_regr_combine(m.mcx(), a, b)?;
+    Ok(ret_array_raw(fcinfo, out.as_slice().to_vec()))
 }
 
 macro_rules! fc_final {
     ($fc:ident, $core:ident) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let transarray = arg_varlena(fcinfo, 0);
-            let v = unwrap_or_raise(crate::$core(transarray));
-            ret_opt_f64(fcinfo, v)
+            let v = crate::$core(transarray)?;
+            Ok(ret_opt_f64(fcinfo, v))
         }
     };
 }
@@ -708,16 +693,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every `float.c` builtin whose types cross the current fmgr
@@ -725,7 +713,7 @@ fn builtin(
 /// `init_seams()`. OIDs/nargs/strict/retset transcribed from `pg_proc.dat`
 /// (all rows: `proisstrict => 't'`, none `proretset`).
 pub fn register_float_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- I/O ----
         builtin(200, "float4in", 1, true, false, fc_float4in),
         builtin(201, "float4out", 1, true, false, fc_float4out),
