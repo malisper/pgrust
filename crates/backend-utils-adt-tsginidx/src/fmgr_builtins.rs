@@ -21,7 +21,8 @@
 //! the GIN opclass support-proc family instead.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_error::PgResult;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -52,10 +53,10 @@ fn ret_i32(v: i32) -> Datum {
 /// `gin_cmp_tslexeme(text, text) -> int4` (tsginidx.c:23). C reads
 /// `VARDATA_ANY` / `VARSIZE_ANY_EXHDR` of both `text` args and returns the
 /// `tsCompareString` result; here the two args already arrive header-stripped.
-fn fc_gin_cmp_tslexeme(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_gin_cmp_tslexeme(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let a = arg_text(fcinfo, 0);
     let b = arg_text(fcinfo, 1);
-    ret_i32(crate::gin_cmp_tslexeme(a, b))
+    Ok(ret_i32(crate::gin_cmp_tslexeme(a, b)))
 }
 
 // ---------------------------------------------------------------------------
@@ -68,16 +69,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the scalar `tsginidx.c` builtins (C: their `fmgr_builtins[]` rows).
@@ -85,7 +89,7 @@ fn builtin(
 /// transcribed exactly from `pg_proc.dat` (`gin_cmp_tslexeme`:
 /// `proisstrict => 't'`, 2 args, not retset).
 pub fn register_tsginidx_builtins() {
-    backend_utils_fmgr_core::register_builtins([builtin(
+    backend_utils_fmgr_core::register_builtins_native([builtin(
         3724,
         "gin_cmp_tslexeme",
         2,
