@@ -559,10 +559,21 @@ fn finalize_windowaggregate<'mcx>(
         // `Datum::Internal` box) through the fcinfo side channel, so an
         // internal-state aggregate's finalfn (e.g. numeric_avg) gets its state.
         // That state cannot be cloned, so for the internal case MOVE it out
-        // (C passes the same pointer; the finalfn reads it without freeing). The
-        // owned seam consumes the box; the per-frame result cache means finalize
-        // runs once per distinct frame, and the state is rebuilt on the next
-        // frame head (restart) — faithful for whole-partition and growing frames.
+        // (C passes the same pointer; the finalfn reads it without freeing).
+        //
+        // C's finalize_windowaggregate reads `peraggstate->transValue` with
+        // `PG_GETARG_POINTER(0)`, which does NOT consume the state: the same
+        // running state must survive this call so the NEXT row's forward/inverse
+        // transition (advance_windowaggregate / advance_windowaggregate_base) can
+        // keep accumulating it. A moving frame (`ROWS n PRECEDING`) calls the
+        // inverse transfn on the live state; an unbounded-preceding frame keeps
+        // adding to it. Moving it out and dropping it here would make the next
+        // row see a NULL state — "numeric_accum_inv called with NULL state" for a
+        // moving frame, or non-accumulation (per-row values) for an unbounded one.
+        // So use the FINAL form of the owned seam, which returns `args[0]` back
+        // after the finalfn glue restores it (set_ref_arg(0)), and put the
+        // surviving state back into `peraggstate->transValue` below — mirroring
+        // nodeAgg's finalize_aggregate restore (commit 599387c18).
         let trans_is_null = peragg_ref(winstate, peraggno).transValueIsNull;
         let mut anynull = trans_is_null;
         let arg0 = {
@@ -591,15 +602,37 @@ fn finalize_windowaggregate<'mcx>(
         if fn_strict && anynull {
             // Don't call a strict function with NULL inputs.
             //   *result = (Datum) 0; *isnull = true;
+            // We moved arg0 (the running state) out above but are not calling the
+            // finalfn; restore it so the state survives for the next row's
+            // transition (the by-value/null cases carry no referent and a restore
+            // of the null placeholder is harmless).
+            let mut args = args;
+            let surviving_arg0 = args.swap_remove(0);
+            let pa = peragg_mut(winstate, peraggno);
+            pa.transValue = surviving_arg0;
+            pa.transValueIsNull = trans_is_null;
             Ok((Datum::null(), true))
         } else {
             //   winstate->curaggcontext = peraggstate->aggcontext;
             //   res = FunctionCallInvoke(fcinfo);
             //   *isnull = fcinfo->isnull;
             //   *result = MakeExpandedObjectReadOnly(res, fcinfo->isnull, resulttypeLen);
-            let (res, isnull) = fmgr::function_call_invoke_datum_owned::call(
+            //
+            // FINAL form: returns the live transition state (args[0]) back so it
+            // survives this non-destructive read (C: PG_GETARG_POINTER(0)).
+            let (res, isnull, surviving_arg0) = fmgr::function_call_finalfn_owned::call(
                 mcx, fn_oid, collation, args, args_null, fn_expr,
             )?;
+            // Restore the running state into peraggstate->transValue so the next
+            // row's forward/inverse transition keeps accumulating it. For a
+            // by-value or plain by-ref transtype the seam returns None and the
+            // transValue handle we cloned above is still live, so leave it; for an
+            // `internal` transtype the box came back here and must go back.
+            if let Some(state) = surviving_arg0 {
+                let pa = peragg_mut(winstate, peraggno);
+                pa.transValue = state;
+                pa.transValueIsNull = trans_is_null;
+            }
             // MakeExpandedObjectReadOnly is a pass-through for both by-value and
             // plain by-reference result types.
             Ok((res, isnull))
