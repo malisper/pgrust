@@ -287,11 +287,32 @@ pub(crate) fn transformUpdateTargetList<'mcx>(
                 .map(|r| r.rd_rel.relname.as_str())
                 .unwrap_or("")
                 .to_string();
-            return Err(elog_error(alloc::format!(
-                "column \"{}\" of relation \"{}\" does not exist",
-                colname,
-                relname
-            )));
+            // C: errhint when indirection != NIL && name == target nsitem aliasname
+            // (parse_target columns cannot be qualified with the relation name).
+            let target_alias = pstate
+                .p_target_nsitem
+                .as_deref()
+                .and_then(|nsi| nsi.p_names.as_deref())
+                .and_then(|alias| alias.aliasname.as_deref())
+                .unwrap_or("");
+            let mut e = backend_utils_error::ereport(types_error::ERROR)
+                .errcode(types_error::ERRCODE_UNDEFINED_COLUMN)
+                .errmsg_internal(alloc::format!(
+                    "column \"{}\" of relation \"{}\" does not exist",
+                    colname,
+                    relname
+                ));
+            if !orig_target.indirection.is_empty() && colname == target_alias {
+                e = e.errhint(
+                    "SET target columns cannot be qualified with the relation name.".to_string(),
+                );
+            }
+            return Err(e
+                .errposition(backend_parser_small1::parser_errposition(
+                    pstate,
+                    orig_target.location,
+                ))
+                .into_error());
         }
 
         backend_parser_parse_target::updateTargetListEntry(

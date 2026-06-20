@@ -517,7 +517,13 @@ pub fn transformInsertRow<'mcx>(
     // there are target columns. Fewer is allowed only if no explicit column
     // list was given (the remaining columns are implicitly defaulted).
     if exprlist.len() > icolumns.len() {
-        return Err(elog_error("INSERT has more expressions than target columns"));
+        // C: parser_errposition(pstate, exprLocation(list_nth(exprlist, list_length(icolumns))))
+        let loc = backend_nodes_core::nodefuncs::expr_location(Some(&exprlist[icolumns.len()]))?;
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg_internal("INSERT has more expressions than target columns".to_string())
+            .errposition(backend_parser_small1::parser_errposition(pstate, loc))
+            .into_error());
     }
     if !stmtcols.is_empty() && exprlist.len() < icolumns.len() {
         return Err(elog_error("INSERT has more target columns than expressions"));
