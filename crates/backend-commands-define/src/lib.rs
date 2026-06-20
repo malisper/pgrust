@@ -356,6 +356,26 @@ pub fn init_seams() {
         Ok(out)
     });
     fc::def_get_as_clause::set(|defel| def_get_as_clause(&defel));
+
+    // vacuum.c (ExecVacuum) reads VACUUM/ANALYZE option DefElems
+    // (`defGetInt32` / `defGetString`) through its own outward seam crate; the
+    // real owner is define.c. The seams pass the `(defname, DefElemArg)`
+    // projection (same marshalling as `def_get_string`/`def_get_boolean`).
+    use backend_commands_vacuum_seams as vac;
+    vac::def_get_int32::set(seam_def_get_int32);
+    vac::def_get_string_text::set(|defname, arg| arg_get_string(&defname, arg.as_ref()));
+}
+
+/// Install seam: `defGetInt32` over the [`DefElemArg`] projection (vacuum.c's
+/// `BUFFER_USAGE_LIMIT`/etc. option parse). Mirrors [`defGetInt32`]: only a
+/// `T_Integer` value node is accepted; anything else is the "requires an integer
+/// value" syntax error. An absent argument is the same error.
+fn seam_def_get_int32(defname: String, arg: Option<DefElemArg>) -> PgResult<i32> {
+    match arg {
+        // case T_Integer: return (int32) intVal(def->arg);
+        Some(DefElemArg::Integer(value)) => Ok(value as i32),
+        _ => Err(syntax_error(format!("{defname} requires an integer value"))),
+    }
 }
 
 /// The AS clause of a CREATE FUNCTION option list: `(List *) def->arg`

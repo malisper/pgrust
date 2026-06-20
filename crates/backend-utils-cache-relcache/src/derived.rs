@@ -1217,17 +1217,25 @@ pub(crate) struct ForeignKeyCacheInfo {
 }
 
 /// `RelationGetIndexExpressions(relation)`'s node-tree transform: `stringToNode`
-/// of `pg_index.indexprs`, `eval_const_expressions`, `fix_opfuncids`, then cache
-/// into `rd_indexprs` (node owner).
+/// of `pg_index.indexprs`, `eval_const_expressions`, `fix_opfuncids`. The owner
+/// seam returns the decoded list; this presence-only shell (the C's `rd_indexprs`
+/// memoization, which the owned entry does not retain) discards it and just
+/// acknowledges. Callers that need the tree (the runtime `BuildIndexInfo` path)
+/// invoke the typed `relation_get_index_expressions` seam directly.
 fn index_expressions_seam(relid: Oid) -> PgResult<()> {
-    nodexform_seam::index_expressions::call(relid)
+    let scratch = MemoryContext::new("RelationGetIndexExpressions seam");
+    nodexform_seam::index_expressions::call(scratch.mcx(), relid)?;
+    Ok(())
 }
 
 /// `RelationGetIndexPredicate(relation)`'s node-tree transform: `stringToNode`
 /// of `pg_index.indpred`, `eval_const_expressions`, `canonicalize_qual`,
-/// `make_ands_implicit`, `fix_opfuncids`, then cache into `rd_indpred`.
+/// `make_ands_implicit`, `fix_opfuncids`. Presence-only shell (see
+/// [`index_expressions_seam`]).
 fn index_predicate_seam(relid: Oid) -> PgResult<()> {
-    nodexform_seam::index_predicate::call(relid)
+    let scratch = MemoryContext::new("RelationGetIndexPredicate seam");
+    nodexform_seam::index_predicate::call(scratch.mcx(), relid)?;
+    Ok(())
 }
 
 /// `RelationGetDummyIndexExpressions(relation)`'s dummy-Const build: read the

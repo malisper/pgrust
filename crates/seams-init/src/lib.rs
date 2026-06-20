@@ -1660,21 +1660,23 @@ mod recurrence_guard {
         // scan + `get_opcode`/`get_op_opfamily_strategy`), so the relcache owner
         // runs it + caches the three arrays + returns them — fully installed.)
         //
-        // -- backend-utils-cache-relcache-nodexform (#159 planner-arena keystone) --
+        // -- backend-utils-cache-relcache-nodexform --
         // The nodexform owner (sanctioned relcache.c sibling-split) installs its
-        // three live seams (open_index_attrs, relation_build_publication_desc,
-        // publication_desc). The three index node-tree CACHING seams below stay
-        // uninstalled: they cache a built `stringToNode` + eval/canonicalize node
-        // tree into the relcache entry's `rd_indexprs`/`rd_indpred`/dummy-Const
-        // fields, which the TRIMMED owned entry does not carry, AND their only
-        // consumers (`get_index_expressions`/`get_index_predicate` in the
-        // planner-catalog read path) panic on the unmodeled planner-arena node
-        // projection regardless (#159 planner-values keystone); the dummy seam has
-        // no live consumer. Faithful mirror-pg-and-panic until the relcache
-        // node-tree cache fields + the planner-arena projection land. Install +
-        // DELETE these three then.
-        ("backend_utils_cache_relcache_nodexform", "index_expressions"),
-        ("backend_utils_cache_relcache_nodexform", "index_predicate"),
+        // live seams (open_index_attrs, relation_build_publication_desc,
+        // publication_desc, index_expressions, index_predicate). `index_expressions`
+        // and `index_predicate` now decode the raw `pg_index.indexprs`/`indpred`
+        // text (`stringToNode` + `eval_const_expressions` [+ `canonicalize_qual`/
+        // `make_ands_implicit` for the predicate] + `fix_opfuncids`) and RETURN the
+        // transformed `Expr` list in `mcx`; the trimmed owned entry does not retain
+        // the C's `rd_indexprs`/`rd_indpred` memoization, so the tree is re-derived
+        // per call. The runtime `BuildIndexInfo` consumer
+        // (`relation_get_index_{expressions,predicate}`) carries the result into
+        // `IndexInfo.ii_{Expressions,Predicate}`. (The separate planner-catalog read
+        // path `get_index_{expressions,predicate}` still errors on the #159
+        // planner-arena `NodeId` projection — a distinct keystone, untouched here.)
+        // `dummy_index_expressions` stays uninstalled: its only consumer
+        // (`BuildDummyIndexInfo`, the TRUNCATE-of-expression-index path) is not yet
+        // reached. Install + DELETE it when that lands.
         ("backend_utils_cache_relcache_nodexform", "dummy_index_expressions"),
         //
         // (TD-INDEXING-APPEND-ATTRIBUTE-TUPLES RETIRED: `AppendAttributeTuples`

@@ -26,10 +26,11 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 
-use mcx::{Mcx, MemoryContext};
+use mcx::{Mcx, MemoryContext, PgVec};
 use types_catalog::pg_publication::{PublicationDesc, PublishGencolsType};
 use types_core::primitive::Oid;
 use types_error::{PgResult, ERROR};
+use types_nodes::primnodes::Expr;
 use types_rel::Relation;
 
 use backend_utils_error::ereport;
@@ -40,6 +41,8 @@ use backend_catalog_partition_seams as partition_seam;
 use backend_catalog_pg_publication_seams as pubcat_seam;
 use backend_commands_publicationcmds_seams as pubcmds_seam;
 use backend_nodes_read_seams as read_seam;
+use backend_optimizer_plan_init_subselect_ext_seams as clauses_seam;
+use backend_optimizer_prep_prepqual_seams as prepqual_seam;
 use backend_optimizer_util_var_seams as var_seam;
 use backend_utils_cache_lsyscache_seams as lsyscache_seam;
 use backend_utils_cache_relcache_nodexform_seams as inward;
@@ -352,16 +355,119 @@ fn publication_desc(relid: Oid) -> PgResult<()> {
     Ok(())
 }
 
-/// Install this unit's seams. The three node-tree caching seams
-/// (`index_expressions` / `index_predicate` / `dummy_index_expressions`) are NOT
-/// installed here: they cache a built node tree into the relcache entry's
-/// `rd_indexprs` / `rd_indpred` / dummy-Const fields, which the trimmed owned
-/// entry does not carry, and their only consumers (`get_index_expressions` /
-/// `get_index_predicate` in the planner-catalog read path) panic on the
-/// unmodeled planner-arena node projection regardless — that is the #159
-/// planner-values keystone, not this lane.
+/// Decode a stored `pg_node_tree` text (`pg_index.indexprs` / `indpred`) into a
+/// `Vec<Expr>`. The C stores both as a `List*` (`indexprs` is the expression
+/// list, `indpred` the implicit-AND predicate list); `stringToNode` yields a
+/// `Node::List` of `Expr` (defensively, a bare `Expr` is treated as a 1-element
+/// list). Each element is owned out of the decoded tree.
+fn decode_node_text_to_exprs<'mcx>(mcx: Mcx<'mcx>, text: &str) -> PgResult<alloc::vec::Vec<Expr>> {
+    let node = read_seam::string_to_node::call(mcx, text)?;
+    let node = mcx::PgBox::into_inner(node);
+    let mut out = alloc::vec::Vec::new();
+    match node.into_list() {
+        Some(elems) => {
+            for elem in elems {
+                let inner = mcx::PgBox::into_inner(elem);
+                if let Some(e) = inner.into_expr() {
+                    out.push(e);
+                }
+            }
+        }
+        None => {
+            // A bare expression node (not wrapped in a List).
+            if let Some(e) = node_into_expr_fallback(text, mcx)? {
+                out.push(e);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Re-decode and unwrap a bare `Expr` from a `pg_node_tree` text (used only on
+/// the defensive non-`List` path of [`decode_node_text_to_exprs`], where the
+/// first decode was consumed by the `into_list` test).
+fn node_into_expr_fallback<'mcx>(text: &str, mcx: Mcx<'mcx>) -> PgResult<Option<Expr>> {
+    let node = read_seam::string_to_node::call(mcx, text)?;
+    Ok(mcx::PgBox::into_inner(node).into_expr())
+}
+
+/// `RelationGetIndexExpressions(relation)` (relcache.c:5097): decode the raw
+/// `pg_index.indexprs` text, run each expression through
+/// `eval_const_expressions` (NOT `canonicalize_qual` — these are not quals),
+/// then `fix_opfuncids`. Returns the expression list in `mcx`, or `None` when
+/// the index has no expression columns. The C memoizes into `rd_indexprs`; the
+/// owned entry does not carry that field, so the tree is re-derived per call.
+fn index_expressions<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relid: Oid,
+) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+    // heap_attisnull(rd_indextuple, Anum_pg_index_indexprs): the raw indexprs
+    // text is read by OID through the syscache owner (the C `rd_indextuple`
+    // analogue). NULL == no expression columns == NIL.
+    let Some(text) = syscache_seam::pg_index_exprs_text::call(index_relid)? else {
+        return Ok(None);
+    };
+
+    let raw = decode_node_text_to_exprs(mcx, &text)?;
+    let mut result: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    for e in raw {
+        // eval_const_expressions(NULL, expr) — const-fold, no canonicalize.
+        let mut e = clauses_seam::eval_const_expressions_expr::call(mcx, e)?;
+        // fix_opfuncids((Node *) result).
+        backend_nodes_core::nodefuncs::fix_opfuncids(&mut e)?;
+        result.push(e);
+    }
+    Ok(Some(result))
+}
+
+/// `RelationGetIndexPredicate(relation)` (relcache.c:5210): decode the raw
+/// `pg_index.indpred` implicit-AND text, run it through `eval_const_expressions`,
+/// `canonicalize_qual(.., false)`, `make_ands_implicit`, then `fix_opfuncids`.
+/// Returns the implicit-AND predicate list in `mcx`, or `None` when the index is
+/// not partial. The C memoizes into `rd_indpred`; the owned entry re-derives.
+fn index_predicate<'mcx>(
+    mcx: Mcx<'mcx>,
+    index_relid: Oid,
+) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+    // heap_attisnull(rd_indextuple, Anum_pg_index_indpred): NULL == not partial
+    // == NIL.
+    let Some(text) = syscache_seam::pg_index_pred_text::call(index_relid)? else {
+        return Ok(None);
+    };
+
+    // The stored predicate is an implicit-AND `List*`; rebuild the single
+    // boolean clause (`make_ands_explicit`) so the qual transforms (which work
+    // over one `Expr`) match the C's `(Expr *) result` cast over the list.
+    let clauses = decode_node_text_to_exprs(mcx, &text)?;
+    let pred_expr = backend_nodes_core::makefuncs::make_ands_explicit(clauses);
+
+    // result = eval_const_expressions(NULL, (Node *) result);
+    let folded = clauses_seam::eval_const_expressions_expr::call(mcx, pred_expr)?;
+    // result = canonicalize_qual((Expr *) result, false);
+    let canon = prepqual_seam::canonicalize_qual::call(mcx, Some(folded), false)?;
+    // result = make_ands_implicit((Expr *) result);
+    let implicit = backend_nodes_core::makefuncs::make_ands_implicit(canon);
+
+    let mut result: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    for mut e in implicit {
+        // fix_opfuncids((Node *) result).
+        backend_nodes_core::nodefuncs::fix_opfuncids(&mut e)?;
+        result.push(e);
+    }
+    Ok(Some(result))
+}
+
+/// Install this unit's seams. `index_expressions` / `index_predicate` decode the
+/// raw `pg_index.indexprs` / `indpred` node trees and return the transformed
+/// expression lists; the owned relcache entry does not retain the C's
+/// `rd_indexprs` / `rd_indpred` memoization, so each call re-derives the tree
+/// (faithful behavior, minus the cache). `dummy_index_expressions` remains
+/// unwired (its only consumer, `BuildDummyIndexInfo`, is on the TRUNCATE path
+/// not yet reached).
 pub fn init_seams() {
     inward::open_index_attrs::set(open_index_attrs);
     inward::relation_build_publication_desc::set(relation_build_publication_desc);
     inward::publication_desc::set(publication_desc);
+    inward::index_expressions::set(index_expressions);
+    inward::index_predicate::set(index_predicate);
 }

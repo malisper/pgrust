@@ -6831,6 +6831,7 @@ dependencies = [
  "backend-catalog-namespace",
  "backend-commands-define-seams",
  "backend-commands-functioncmds-seams",
+ "backend-commands-vacuum-seams",
  "backend-nodes-makefuncs-seams",
  "backend-parser-parse-type-seams",
  "backend-parser-small1-seams",
@@ -21437,6 +21438,8 @@ dependencies = [
  "backend-commands-publicationcmds-seams",
  "backend-nodes-core",
  "backend-nodes-read-seams",
+ "backend-optimizer-plan-init-subselect-ext-seams",
+ "backend-optimizer-prep-prepqual-seams",
  "backend-optimizer-util-var-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-nodexform-seams",
@@ -21463,6 +21466,7 @@ dependencies = [
  "types-catalog",
  "types-core",
  "types-error",
+ "types-nodes",
  "types-rel",
 ]
 
@@ -22269,6 +22273,7 @@ dependencies = [
  "backend-catalog-pg-proc-seams",
  "backend-commands-matview-deps-seams",
  "backend-commands-tablespace-globals-seams",
+ "backend-commands-vacuum-seams",
  "backend-libpq-pqcomm-seams",
  "backend-parser-scansup-seams",
  "backend-utils-adt-scalar-seams",

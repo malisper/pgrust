@@ -30,6 +30,8 @@ backend-access-common-relation-seams = { path = "../backend-access-common-relati
 backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-nodes-read-seams = { path = "../backend-nodes-read-seams" }
 backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
+backend-optimizer-prep-prepqual-seams = { path = "../backend-optimizer-prep-prepqual-seams" }
+backend-optimizer-plan-init-subselect-ext-seams = { path = "../backend-optimizer-plan-init-subselect-ext-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-catalog-pg-publication-seams = { path = "../backend-catalog-pg-publication-seams" }
