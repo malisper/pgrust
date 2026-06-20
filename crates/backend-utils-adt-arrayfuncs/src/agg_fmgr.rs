@@ -36,8 +36,9 @@ use mcx::MemoryContext;
 use types_core::{Oid, OidIsValid};
 use types_datum::array_build::ArrayBuildState;
 use types_datum::datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::construct;
 
@@ -56,27 +57,12 @@ struct ArrayAggInternal {
 impl ArrayAggInternal {
     /// `initArrayResult(element_type, aggcontext, false)` in a newly-leaked
     /// per-aggregate context.
-    fn new(element_type: Oid) -> Box<ArrayAggInternal> {
+    fn new(element_type: Oid) -> PgResult<Box<ArrayAggInternal>> {
         let ctx: &'static MemoryContext =
             Box::leak(Box::new(MemoryContext::new("array_agg state")));
         // initArrayResult(element_type, rcontext, subcontext = false).
-        let state = construct::init_array_result(element_type, false)
-            .unwrap_or_else(|e| raise(e));
-        Box::new(ArrayAggInternal { ctx, state })
-    }
-}
-
-/// Re-raise a builtin's `ereport(ERROR)` through the one dispatch point
-/// (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err)
-}
-
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
+        let state = construct::init_array_result(element_type, false)?;
+        Ok(Box::new(ArrayAggInternal { ctx, state }))
     }
 }
 
@@ -139,14 +125,12 @@ fn ret_array(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
 
 /// `array_agg_transfn`(2333): accumulate one `anynonarray` element into the
 /// running `ArrayBuildState`.
-fn fc_array_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_array_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // arg1_typeid = get_fn_expr_argtype(fcinfo->flinfo, 1);
     let arg1_typeid = fn_expr_argtype(fcinfo, 1);
     if !OidIsValid(arg1_typeid) {
-        raise(
-            types_error::PgError::error("could not determine input data type")
-                .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
-        );
+        return Err(types_error::PgError::error("could not determine input data type")
+            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
     }
 
     // AggCheckCallContext: the leaked context inside ArrayAggInternal models the
@@ -154,8 +138,10 @@ fn fc_array_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
     // state = PG_ARGISNULL(0) ? initArrayResult(arg1_typeid, aggcontext, false)
     //                         : (ArrayBuildState *) PG_GETARG_POINTER(0);
-    let mut carrier =
-        take_array_state(fcinfo).unwrap_or_else(|| ArrayAggInternal::new(arg1_typeid));
+    let mut carrier = match take_array_state(fcinfo) {
+        Some(c) => c,
+        None => ArrayAggInternal::new(arg1_typeid)?,
+    };
 
     // elem = PG_ARGISNULL(1) ? (Datum) 0 : PG_GETARG_DATUM(1);
     let disnull = arg_isnull(fcinfo, 1);
@@ -163,22 +149,22 @@ fn fc_array_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let elem: Datum = if disnull {
         Datum::from_usize(0)
     } else {
-        elem_datum(fcinfo, &carrier.state, ctx_mcx)
+        elem_datum(fcinfo, &carrier.state, ctx_mcx)?
     };
 
     // state = accumArrayResult(state, elem, PG_ARGISNULL(1), arg1_typeid,
     //                          aggcontext);
-    let new_state = ok(construct::accum_array_result(
+    let new_state = construct::accum_array_result(
         ctx_mcx,
         Some(core::mem::take(&mut carrier.state)),
         elem,
         disnull,
         arg1_typeid,
-    ));
+    )?;
     carrier.state = new_state;
 
     // PG_RETURN_POINTER(state).
-    ret_internal(fcinfo, carrier)
+    Ok(ret_internal(fcinfo, carrier))
 }
 
 /// `PG_GETARG_DATUM(1)` for the element argument. A by-value element (the
@@ -191,13 +177,13 @@ fn elem_datum<'mcx>(
     fcinfo: &FunctionCallInfoBaseData,
     state: &types_datum::array_build::ArrayBuildState,
     ctx_mcx: mcx::Mcx<'mcx>,
-) -> Datum {
+) -> PgResult<Datum> {
     // For a by-value element, the boundary populates the by-value word.
     if state.typbyval {
-        return fcinfo
+        return Ok(fcinfo
             .arg(1)
             .map(|d| d.value)
-            .unwrap_or_else(|| Datum::from_usize(0));
+            .unwrap_or_else(|| Datum::from_usize(0)));
     }
     // For a by-ref element, C's `PG_GETARG_DATUM(1)` yields a real pointer into
     // the argument image. The bare by-value word here is NOT that pointer (it is
@@ -208,7 +194,7 @@ fn elem_datum<'mcx>(
         // Varlena (`typlen == -1`) and fixed-length by-ref (`typlen > 0`) images
         // ride the `Varlena` lane verbatim — copy them as-is.
         Some(types_fmgr::boundary::RefPayload::Varlena(b)) => {
-            ok(construct::byref_image_to_datum(ctx_mcx, b.as_slice()))
+            construct::byref_image_to_datum(ctx_mcx, b.as_slice())
         }
         // `cstring` (`typlen == -2`) elements: `accumArrayResult`'s by-ref copy
         // reads a NUL-terminated image, so append the terminator the `Cstring`
@@ -216,10 +202,10 @@ fn elem_datum<'mcx>(
         Some(types_fmgr::boundary::RefPayload::Cstring(s)) => {
             let mut img = s.clone().into_bytes();
             img.push(0);
-            ok(construct::byref_image_to_datum(ctx_mcx, &img))
+            construct::byref_image_to_datum(ctx_mcx, &img)
         }
         // No by-ref payload seeded: same diagnostic the other by-ref accessors use.
-        _ => raise(types_error::PgError::error(
+        _ => Err(types_error::PgError::error(
             "array_agg_transfn: arg 1 has no by-reference payload on the call frame \
              (the dispatcher did not seed ref_args[1] for a by-ref element)",
         )),
@@ -227,11 +213,11 @@ fn elem_datum<'mcx>(
 }
 
 /// `array_agg_finalfn`(2334): make a 1-D array of the accumulated elements.
-fn fc_array_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_array_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // state = PG_ARGISNULL(0) ? NULL : (ArrayBuildState *) PG_GETARG_POINTER(0);
     match take_array_state(fcinfo) {
         // if (state == NULL) PG_RETURN_NULL();  (no input values)
-        None => ret_null(fcinfo),
+        None => Ok(ret_null(fcinfo)),
         Some(carrier) => {
             // dims[0] = state->nelems; lbs[0] = 1;
             // result = makeMdArrayResult(state, 1, dims, lbs,
@@ -241,11 +227,10 @@ fn fc_array_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
             let ndims = if astate.nelems > 0 { 1 } else { 0 };
             let dims = [astate.nelems];
             let lbs = [1];
-            let image =
-                ok(construct::make_md_array_result(m.mcx(), astate, ndims, &dims, &lbs))
-                    .as_slice()
-                    .to_vec();
-            ret_array(fcinfo, image)
+            let image = construct::make_md_array_result(m.mcx(), astate, ndims, &dims, &lbs)?
+                .as_slice()
+                .to_vec();
+            Ok(ret_array(fcinfo, image))
         }
     }
 }
@@ -258,25 +243,29 @@ fn fc_array_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ===========================================================================
 
 pub fn register_array_agg_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(2333, "array_agg_transfn", 2, fc_array_agg_transfn),
         builtin(2334, "array_agg_finalfn", 2, fc_array_agg_finalfn),
     ]);
 }
 
-/// A non-strict (`proisstrict => 'f'`) builtin row.
+/// A non-strict (`proisstrict => 'f'`) native builtin row (`func: None`; the
+/// dispatch goes through the `NATIVE` overlay and threads `Err` with `?`).
 fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: false,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: false,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }

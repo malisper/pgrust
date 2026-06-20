@@ -24,8 +24,9 @@
 use mcx::MemoryContext;
 use types_core::Oid;
 use types_datum::datum::Datum as BoundaryDatum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_tuple::Datum as ValDatum;
 
 use crate::{
@@ -33,19 +34,6 @@ use crate::{
     jsonb_object_agg_strict_transfn, jsonb_object_agg_transfn,
     jsonb_object_agg_unique_strict_transfn, jsonb_object_agg_unique_transfn, JsonbAggState,
 };
-
-/// Re-raise a builtin's `ereport(ERROR)` through the one dispatch point.
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err)
-}
-
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
 
 /// `PG_ARGISNULL(i)`.
 #[inline]
@@ -103,66 +91,69 @@ fn arg_value<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
-) -> ValDatum<'mcx> {
-    match fcinfo.ref_arg(i) {
-        Some(RefPayload::Varlena(b)) => ValDatum::ByRef(ok(mcx::slice_in(mcx, b))),
+) -> PgResult<ValDatum<'mcx>> {
+    Ok(match fcinfo.ref_arg(i) {
+        Some(RefPayload::Varlena(b)) => ValDatum::ByRef(mcx::slice_in(mcx, b)?),
         Some(RefPayload::Cstring(s)) => ValDatum::Cstring(s.clone()),
         Some(RefPayload::Composite(image)) => {
-            ValDatum::Composite(ok(types_tuple::FormedTuple::from_datum_image(mcx, image)))
+            ValDatum::Composite(types_tuple::FormedTuple::from_datum_image(mcx, image)?)
         }
-        Some(RefPayload::Expanded(eo)) => ValDatum::ByRef(ok(mcx::slice_in(
+        Some(RefPayload::Expanded(eo)) => ValDatum::ByRef(mcx::slice_in(
             mcx,
             &types_datum::flatten_expanded(eo.as_ref()),
-        ))),
+        )?),
         Some(RefPayload::Internal(_)) => {
             panic!("jsonb_agg fn: unexpected `internal` argument on the by-ref lane")
         }
         None => ValDatum::ByVal(fcinfo.arg(i).map(|d| d.value.as_usize()).unwrap_or(0)),
-    }
+    })
 }
 
 // ===========================================================================
 // jsonb_agg(3267) / jsonb_agg_strict(6284): transfn + shared finalfn.
 // ===========================================================================
 
-fn jsonb_agg_transfn_impl(fcinfo: &mut FunctionCallInfoBaseData, strict: bool) -> BoundaryDatum {
+fn jsonb_agg_transfn_impl(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    strict: bool,
+) -> PgResult<BoundaryDatum> {
     let arg_type = fn_expr_argtype(fcinfo, 1);
     let val_is_null = arg_isnull(fcinfo, 1);
     let prev_state = take_state(fcinfo).map(|b| *b);
 
     let m = MemoryContext::new("jsonb_agg transfn scratch");
     let mcx = m.mcx();
-    let val = arg_value(mcx, fcinfo, 1);
+    let val = arg_value(mcx, fcinfo, 1)?;
 
-    let new_state = ok(if strict {
+    let new_state = if strict {
         jsonb_agg_strict_transfn(mcx, prev_state, arg_type, &val, val_is_null)
     } else {
         jsonb_agg_transfn(mcx, prev_state, arg_type, &val, val_is_null)
-    });
+    }?;
 
-    ret_internal(fcinfo, Box::new(new_state))
+    Ok(ret_internal(fcinfo, Box::new(new_state)))
 }
 
-fn fc_jsonb_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> BoundaryDatum {
+fn fc_jsonb_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<BoundaryDatum> {
     jsonb_agg_transfn_impl(fcinfo, false)
 }
 
-fn fc_jsonb_agg_strict_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> BoundaryDatum {
+fn fc_jsonb_agg_strict_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<BoundaryDatum> {
     jsonb_agg_transfn_impl(fcinfo, true)
 }
 
 /// `jsonb_agg_finalfn`(shared): close the array; NULL for the no-rows case.
-fn fc_jsonb_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> BoundaryDatum {
+fn fc_jsonb_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<BoundaryDatum> {
     match take_state(fcinfo) {
-        None => ret_null(fcinfo),
+        None => Ok(ret_null(fcinfo)),
         Some(state) => {
             let m = MemoryContext::new("jsonb_agg finalfn");
             let out: Option<Vec<u8>> =
-                ok(jsonb_agg_finalfn(m.mcx(), Some(&state))).map(|b| b.as_slice().to_vec());
-            match out {
+                jsonb_agg_finalfn(m.mcx(), Some(&state))?.map(|b| b.as_slice().to_vec());
+            Ok(match out {
                 None => ret_null(fcinfo),
                 Some(image) => ret_jsonb(fcinfo, image),
-            }
+            })
         }
     }
 }
@@ -182,7 +173,7 @@ enum ObjAggKind {
 fn jsonb_object_agg_transfn_impl(
     fcinfo: &mut FunctionCallInfoBaseData,
     kind: ObjAggKind,
-) -> BoundaryDatum {
+) -> PgResult<BoundaryDatum> {
     let key_arg_type = fn_expr_argtype(fcinfo, 1);
     let val_arg_type = fn_expr_argtype(fcinfo, 2);
     let key_is_null = arg_isnull(fcinfo, 1);
@@ -191,10 +182,10 @@ fn jsonb_object_agg_transfn_impl(
 
     let m = MemoryContext::new("jsonb_object_agg transfn scratch");
     let mcx = m.mcx();
-    let key = arg_value(mcx, fcinfo, 1);
-    let val = arg_value(mcx, fcinfo, 2);
+    let key = arg_value(mcx, fcinfo, 1)?;
+    let val = arg_value(mcx, fcinfo, 2)?;
 
-    let new_state = ok(match kind {
+    let new_state = match kind {
         ObjAggKind::Plain => jsonb_object_agg_transfn(
             mcx, prev_state, key_arg_type, val_arg_type, &key, key_is_null, &val, val_is_null,
         ),
@@ -207,41 +198,45 @@ fn jsonb_object_agg_transfn_impl(
         ObjAggKind::UniqueStrict => jsonb_object_agg_unique_strict_transfn(
             mcx, prev_state, key_arg_type, val_arg_type, &key, key_is_null, &val, val_is_null,
         ),
-    });
+    }?;
 
-    ret_internal(fcinfo, Box::new(new_state))
+    Ok(ret_internal(fcinfo, Box::new(new_state)))
 }
 
-fn fc_jsonb_object_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> BoundaryDatum {
+fn fc_jsonb_object_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<BoundaryDatum> {
     jsonb_object_agg_transfn_impl(fcinfo, ObjAggKind::Plain)
 }
 
-fn fc_jsonb_object_agg_strict_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> BoundaryDatum {
+fn fc_jsonb_object_agg_strict_transfn(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<BoundaryDatum> {
     jsonb_object_agg_transfn_impl(fcinfo, ObjAggKind::Strict)
 }
 
-fn fc_jsonb_object_agg_unique_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> BoundaryDatum {
+fn fc_jsonb_object_agg_unique_transfn(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<BoundaryDatum> {
     jsonb_object_agg_transfn_impl(fcinfo, ObjAggKind::Unique)
 }
 
 fn fc_jsonb_object_agg_unique_strict_transfn(
     fcinfo: &mut FunctionCallInfoBaseData,
-) -> BoundaryDatum {
+) -> PgResult<BoundaryDatum> {
     jsonb_object_agg_transfn_impl(fcinfo, ObjAggKind::UniqueStrict)
 }
 
 /// `jsonb_object_agg_finalfn`(shared): close the object; NULL for no-rows.
-fn fc_jsonb_object_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> BoundaryDatum {
+fn fc_jsonb_object_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<BoundaryDatum> {
     match take_state(fcinfo) {
-        None => ret_null(fcinfo),
+        None => Ok(ret_null(fcinfo)),
         Some(state) => {
             let m = MemoryContext::new("jsonb_object_agg finalfn");
             let out: Option<Vec<u8>> =
-                ok(jsonb_object_agg_finalfn(m.mcx(), Some(&state))).map(|b| b.as_slice().to_vec());
-            match out {
+                jsonb_object_agg_finalfn(m.mcx(), Some(&state))?.map(|b| b.as_slice().to_vec());
+            Ok(match out {
                 None => ret_null(fcinfo),
                 Some(image) => ret_jsonb(fcinfo, image),
-            }
+            })
         }
     }
 }
@@ -252,7 +247,7 @@ fn fc_jsonb_object_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> Boundar
 // ===========================================================================
 
 pub fn register_jsonb_agg_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(3265, "jsonb_agg_transfn", 2, fc_jsonb_agg_transfn),
         builtin(3266, "jsonb_agg_finalfn", 1, fc_jsonb_agg_finalfn),
         builtin(6283, "jsonb_agg_strict_transfn", 2, fc_jsonb_agg_strict_transfn),
@@ -279,19 +274,23 @@ pub fn register_jsonb_agg_builtins() {
     ]);
 }
 
-/// A non-strict (`proisstrict => 'f'`) builtin row.
+/// A non-strict (`proisstrict => 'f'`) native builtin row (`func: None`; the
+/// dispatch goes through the `NATIVE` overlay and threads `Err` with `?`).
 fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> BoundaryDatum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: false,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: false,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
