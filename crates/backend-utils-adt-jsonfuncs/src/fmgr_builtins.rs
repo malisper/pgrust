@@ -35,7 +35,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use backend_utils_adt_arrayfuncs::construct::deconstruct_text_array_with_ndim_bytes;
 
@@ -90,14 +90,14 @@ fn arg_bool(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
 fn arg_text_array(
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
-) -> (i32, Vec<Option<Vec<u8>>>) {
+) -> types_error::PgResult<(i32, Vec<Option<Vec<u8>>>)> {
     let bytes = arg_varlena_image(fcinfo, i);
-    let (ndim, elems) = ok(deconstruct_text_array_with_ndim_bytes(bytes));
+    let (ndim, elems) = deconstruct_text_array_with_ndim_bytes(bytes)?;
     let path = elems
         .into_iter()
         .map(|e| if e.is_null { None } else { Some(e.value) })
         .collect();
-    (ndim, path)
+    Ok((ndim, path))
 }
 
 /// Set a `jsonb` (by-reference) result on the by-ref lane and return the dummy
@@ -171,21 +171,6 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("jsonfuncs fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 #[inline]
 fn opt_bytes(v: Option<mcx::PgVec<'_, u8>>) -> Option<Vec<u8>> {
     v.map(|b| b.as_slice().to_vec())
@@ -196,57 +181,57 @@ fn opt_bytes(v: Option<mcx::PgVec<'_, u8>>) -> Option<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 /// `jsonb_object_field(jsonb, text) -> jsonb` (oid 3478): `jb -> key`.
-fn fc_jsonb_object_field(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_object_field(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
     let key = arg_text_payload(fcinfo, 1).to_vec();
     let m = scratch_mcx();
-    let r = opt_bytes(ok(crate::getfield::jsonb_object_field(m.mcx(), &jb, &key)));
-    ret_opt_varlena(fcinfo, r)
+    let r = opt_bytes(crate::getfield::jsonb_object_field(m.mcx(), &jb, &key)?);
+    Ok(ret_opt_varlena(fcinfo, r))
 }
 
 /// `jsonb_object_field_text(jsonb, text) -> text` (oid 3214): `jb ->> key`.
-fn fc_jsonb_object_field_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_object_field_text(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
     let key = arg_text_payload(fcinfo, 1).to_vec();
     let m = scratch_mcx();
-    let r = opt_bytes(ok(crate::getfield::jsonb_object_field_text(m.mcx(), &jb, &key)));
-    ret_opt_text(fcinfo, r)
+    let r = opt_bytes(crate::getfield::jsonb_object_field_text(m.mcx(), &jb, &key)?);
+    Ok(ret_opt_text(fcinfo, r))
 }
 
 /// `jsonb_array_element(jsonb, int4) -> jsonb` (oid 3215): `jb -> n`.
-fn fc_jsonb_array_element(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_array_element(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
     let n = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
-    let r = opt_bytes(ok(crate::getfield::jsonb_array_element(m.mcx(), &jb, n)));
-    ret_opt_varlena(fcinfo, r)
+    let r = opt_bytes(crate::getfield::jsonb_array_element(m.mcx(), &jb, n)?);
+    Ok(ret_opt_varlena(fcinfo, r))
 }
 
 /// `jsonb_array_element_text(jsonb, int4) -> text` (oid 3216): `jb ->> n`.
-fn fc_jsonb_array_element_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_array_element_text(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
     let n = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
-    let r = opt_bytes(ok(crate::getfield::jsonb_array_element_text(m.mcx(), &jb, n)));
-    ret_opt_text(fcinfo, r)
+    let r = opt_bytes(crate::getfield::jsonb_array_element_text(m.mcx(), &jb, n)?);
+    Ok(ret_opt_text(fcinfo, r))
 }
 
 /// `jsonb_extract_path(jsonb, variadic text[]) -> jsonb` (oid 3217): `jb #> path`.
-fn fc_jsonb_extract_path(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_extract_path(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
-    let (_ndim, path) = arg_text_array(fcinfo, 1);
+    let (_ndim, path) = arg_text_array(fcinfo, 1)?;
     let m = scratch_mcx();
-    let r = opt_bytes(ok(crate::getfield::jsonb_extract_path(m.mcx(), &jb, &path)));
-    ret_opt_varlena(fcinfo, r)
+    let r = opt_bytes(crate::getfield::jsonb_extract_path(m.mcx(), &jb, &path)?);
+    Ok(ret_opt_varlena(fcinfo, r))
 }
 
 /// `jsonb_extract_path_text(jsonb, variadic text[]) -> text` (oid 3940): `jb #>> path`.
-fn fc_jsonb_extract_path_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_extract_path_text(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
-    let (_ndim, path) = arg_text_array(fcinfo, 1);
+    let (_ndim, path) = arg_text_array(fcinfo, 1)?;
     let m = scratch_mcx();
-    let r = opt_bytes(ok(crate::getfield::jsonb_extract_path_text(m.mcx(), &jb, &path)));
-    ret_opt_text(fcinfo, r)
+    let r = opt_bytes(crate::getfield::jsonb_extract_path_text(m.mcx(), &jb, &path)?);
+    Ok(ret_opt_text(fcinfo, r))
 }
 
 // ---------------------------------------------------------------------------
@@ -254,57 +239,57 @@ fn fc_jsonb_extract_path_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 /// `json_object_field(json, text) -> json` (oid 3947).
-fn fc_json_object_field(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_object_field(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let json = arg_text_payload(fcinfo, 0).to_vec();
     let fname = arg_text_payload(fcinfo, 1).to_vec();
     let m = scratch_mcx();
-    let r = opt_bytes(ok(crate::getfield::json_object_field(m.mcx(), &json, &fname)));
-    ret_opt_text(fcinfo, r)
+    let r = opt_bytes(crate::getfield::json_object_field(m.mcx(), &json, &fname)?);
+    Ok(ret_opt_text(fcinfo, r))
 }
 
 /// `json_object_field_text(json, text) -> text` (oid 3948).
-fn fc_json_object_field_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_object_field_text(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let json = arg_text_payload(fcinfo, 0).to_vec();
     let fname = arg_text_payload(fcinfo, 1).to_vec();
     let m = scratch_mcx();
-    let r = opt_bytes(ok(crate::getfield::json_object_field_text(m.mcx(), &json, &fname)));
-    ret_opt_text(fcinfo, r)
+    let r = opt_bytes(crate::getfield::json_object_field_text(m.mcx(), &json, &fname)?);
+    Ok(ret_opt_text(fcinfo, r))
 }
 
 /// `json_array_element(json, int4) -> json` (oid 3949).
-fn fc_json_array_element(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_array_element(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let json = arg_text_payload(fcinfo, 0).to_vec();
     let n = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
-    let r = opt_bytes(ok(crate::getfield::json_array_element(m.mcx(), &json, n)));
-    ret_opt_text(fcinfo, r)
+    let r = opt_bytes(crate::getfield::json_array_element(m.mcx(), &json, n)?);
+    Ok(ret_opt_text(fcinfo, r))
 }
 
 /// `json_array_element_text(json, int4) -> text` (oid 3950).
-fn fc_json_array_element_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_array_element_text(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let json = arg_text_payload(fcinfo, 0).to_vec();
     let n = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
-    let r = opt_bytes(ok(crate::getfield::json_array_element_text(m.mcx(), &json, n)));
-    ret_opt_text(fcinfo, r)
+    let r = opt_bytes(crate::getfield::json_array_element_text(m.mcx(), &json, n)?);
+    Ok(ret_opt_text(fcinfo, r))
 }
 
 /// `json_extract_path(json, variadic text[]) -> json` (oid 3951).
-fn fc_json_extract_path(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_extract_path(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let json = arg_text_payload(fcinfo, 0).to_vec();
-    let (_ndim, path) = arg_text_array(fcinfo, 1);
+    let (_ndim, path) = arg_text_array(fcinfo, 1)?;
     let m = scratch_mcx();
-    let r = opt_bytes(ok(crate::getfield::json_extract_path(m.mcx(), &json, &path)));
-    ret_opt_text(fcinfo, r)
+    let r = opt_bytes(crate::getfield::json_extract_path(m.mcx(), &json, &path)?);
+    Ok(ret_opt_text(fcinfo, r))
 }
 
 /// `json_extract_path_text(json, variadic text[]) -> text` (oid 3953).
-fn fc_json_extract_path_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_extract_path_text(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let json = arg_text_payload(fcinfo, 0).to_vec();
-    let (_ndim, path) = arg_text_array(fcinfo, 1);
+    let (_ndim, path) = arg_text_array(fcinfo, 1)?;
     let m = scratch_mcx();
-    let r = opt_bytes(ok(crate::getfield::json_extract_path_text(m.mcx(), &json, &path)));
-    ret_opt_text(fcinfo, r)
+    let r = opt_bytes(crate::getfield::json_extract_path_text(m.mcx(), &json, &path)?);
+    Ok(ret_opt_text(fcinfo, r))
 }
 
 // ---------------------------------------------------------------------------
@@ -312,59 +297,59 @@ fn fc_json_extract_path_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 /// `jsonb_concat(jsonb, jsonb) -> jsonb` (oid 3301): the `||` operator.
-fn fc_jsonb_concat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_concat(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb1 = arg_jsonb_image(fcinfo, 0).to_vec();
     let jb2 = arg_jsonb_image(fcinfo, 1).to_vec();
     let m = scratch_mcx();
-    let r = ok(crate::setops::jsonb_concat(m.mcx(), &jb1, &jb2));
-    ret_varlena(fcinfo, r.as_slice().to_vec())
+    let r = crate::setops::jsonb_concat(m.mcx(), &jb1, &jb2)?;
+    Ok(ret_varlena(fcinfo, r.as_slice().to_vec()))
 }
 
 /// `jsonb_delete(jsonb, text) -> jsonb` (oid 3302): `jb - key`.
-fn fc_jsonb_delete(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_delete(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
     let key = arg_text_payload(fcinfo, 1).to_vec();
     let m = scratch_mcx();
-    let r = ok(crate::setops::jsonb_delete(m.mcx(), &jb, &key));
-    ret_varlena(fcinfo, r.as_slice().to_vec())
+    let r = crate::setops::jsonb_delete(m.mcx(), &jb, &key)?;
+    Ok(ret_varlena(fcinfo, r.as_slice().to_vec()))
 }
 
 /// `jsonb_delete_idx(jsonb, int4) -> jsonb` (oid 3303): `jb - n`.
-fn fc_jsonb_delete_idx(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_delete_idx(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
     let idx = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
-    let r = ok(crate::setops::jsonb_delete_idx(m.mcx(), &jb, idx));
-    ret_varlena(fcinfo, r.as_slice().to_vec())
+    let r = crate::setops::jsonb_delete_idx(m.mcx(), &jb, idx)?;
+    Ok(ret_varlena(fcinfo, r.as_slice().to_vec()))
 }
 
 /// `jsonb_delete_array(jsonb, text[]) -> jsonb` (oid 3343): `jb - keys[]`.
-fn fc_jsonb_delete_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_delete_array(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
-    let (ndim, keys) = arg_text_array(fcinfo, 1);
+    let (ndim, keys) = arg_text_array(fcinfo, 1)?;
     let m = scratch_mcx();
-    let r = ok(crate::setops::jsonb_delete_array(m.mcx(), &jb, &keys, ndim));
-    ret_varlena(fcinfo, r.as_slice().to_vec())
+    let r = crate::setops::jsonb_delete_array(m.mcx(), &jb, &keys, ndim)?;
+    Ok(ret_varlena(fcinfo, r.as_slice().to_vec()))
 }
 
 /// `jsonb_delete_path(jsonb, text[]) -> jsonb` (oid 3304): the `#-` operator.
-fn fc_jsonb_delete_path(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_delete_path(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
-    let (ndim, path) = arg_text_array(fcinfo, 1);
+    let (ndim, path) = arg_text_array(fcinfo, 1)?;
     let m = scratch_mcx();
-    let r = ok(crate::setops::jsonb_delete_path(m.mcx(), &jb, &path, ndim));
-    ret_varlena(fcinfo, r.as_slice().to_vec())
+    let r = crate::setops::jsonb_delete_path(m.mcx(), &jb, &path, ndim)?;
+    Ok(ret_varlena(fcinfo, r.as_slice().to_vec()))
 }
 
 /// `jsonb_set(jsonb, text[], jsonb, bool) -> jsonb` (oid 3305).
-fn fc_jsonb_set(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_set(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
-    let (ndim, path) = arg_text_array(fcinfo, 1);
+    let (ndim, path) = arg_text_array(fcinfo, 1)?;
     let newjb = arg_jsonb_image(fcinfo, 2).to_vec();
     let create = arg_bool(fcinfo, 3);
     let m = scratch_mcx();
-    let r = ok(crate::setops::jsonb_set(m.mcx(), &jb, &path, ndim, &newjb, create));
-    ret_varlena(fcinfo, r.as_slice().to_vec())
+    let r = crate::setops::jsonb_set(m.mcx(), &jb, &path, ndim, &newjb, create)?;
+    Ok(ret_varlena(fcinfo, r.as_slice().to_vec()))
 }
 
 /// `jsonb_set_lax(jsonb, text[], jsonb, boolean, text) -> jsonb` (oid 5054).
@@ -375,7 +360,7 @@ fn fc_jsonb_set(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// dispatch. `json_null` is the on-disk `jsonb` image for the literal `null`
 /// (C's `DirectFunctionCall1(jsonb_in, "null")`), built here as the serialized
 /// `jbvNull` scalar.
-fn fc_jsonb_set_lax(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_set_lax(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // PG_ARGISNULL(i): a by-ref arg is NULL when its lane payload is absent and
     // the nullable-datum flag is set; a by-value arg (bool) reads `isnull`.
     let isnull = |i: usize| fcinfo.arg(i).map(|d| d.isnull).unwrap_or(true);
@@ -388,7 +373,7 @@ fn fc_jsonb_set_lax(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         None
     } else {
         let bytes = arg_varlena_image(fcinfo, 1);
-        let (ndim, elems) = ok(deconstruct_text_array_with_ndim_bytes(bytes));
+        let (ndim, elems) = deconstruct_text_array_with_ndim_bytes(bytes)?;
         let p: Vec<Option<Vec<u8>>> = elems
             .into_iter()
             .map(|e| if e.is_null { None } else { Some(e.value) })
@@ -411,14 +396,14 @@ fn fc_jsonb_set_lax(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
     let m = scratch_mcx();
     // json_null = JsonbValueToJsonb(jbvNull) — the on-disk image for `null`.
-    let json_null = ok(backend_utils_adt_jsonb_util::JsonbValueToJsonb(
+    let json_null = backend_utils_adt_jsonb_util::JsonbValueToJsonb(
         m.mcx(),
         &backend_utils_adt_jsonb_util::JsonbValue::null(),
-    ))
+    )?
     .as_slice()
     .to_vec();
 
-    let r = ok(crate::setops::jsonb_set_lax(
+    let r = crate::setops::jsonb_set_lax(
         m.mcx(),
         arg0,
         path_ref,
@@ -426,27 +411,27 @@ fn fc_jsonb_set_lax(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         create,
         handle_null.as_deref(),
         &json_null,
-    ));
-    ret_opt_varlena(fcinfo, r.map(|v| v.as_slice().to_vec()))
+    )?;
+    Ok(ret_opt_varlena(fcinfo, r.map(|v| v.as_slice().to_vec())))
 }
 
 /// `jsonb_insert(jsonb, text[], jsonb, bool) -> jsonb` (oid 3579).
-fn fc_jsonb_insert(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_insert(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
-    let (ndim, path) = arg_text_array(fcinfo, 1);
+    let (ndim, path) = arg_text_array(fcinfo, 1)?;
     let newjb = arg_jsonb_image(fcinfo, 2).to_vec();
     let after = arg_bool(fcinfo, 3);
     let m = scratch_mcx();
-    let r = ok(crate::setops::jsonb_insert(m.mcx(), &jb, &path, ndim, &newjb, after));
-    ret_varlena(fcinfo, r.as_slice().to_vec())
+    let r = crate::setops::jsonb_insert(m.mcx(), &jb, &path, ndim, &newjb, after)?;
+    Ok(ret_varlena(fcinfo, r.as_slice().to_vec()))
 }
 
 /// `jsonb_pretty(jsonb) -> text` (oid 3306).
-fn fc_jsonb_pretty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_pretty(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
     let m = scratch_mcx();
-    let r = ok(crate::setops::jsonb_pretty(m.mcx(), &jb));
-    ret_text(fcinfo, r.as_slice().to_vec())
+    let r = crate::setops::jsonb_pretty(m.mcx(), &jb)?;
+    Ok(ret_text(fcinfo, r.as_slice().to_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -454,21 +439,21 @@ fn fc_jsonb_pretty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 /// `jsonb_strip_nulls(jsonb, bool) -> jsonb` (oid 3262).
-fn fc_jsonb_strip_nulls(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_strip_nulls(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
     let strip_in_arrays = arg_bool(fcinfo, 1);
     let m = scratch_mcx();
-    let r = ok(crate::strip::jsonb_strip_nulls(m.mcx(), &jb, strip_in_arrays));
-    ret_varlena(fcinfo, r.as_slice().to_vec())
+    let r = crate::strip::jsonb_strip_nulls(m.mcx(), &jb, strip_in_arrays)?;
+    Ok(ret_varlena(fcinfo, r.as_slice().to_vec()))
 }
 
 /// `json_strip_nulls(json, bool) -> json` (oid 3261).
-fn fc_json_strip_nulls(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_strip_nulls(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let json = arg_text_payload(fcinfo, 0).to_vec();
     let strip_in_arrays = arg_bool(fcinfo, 1);
     let m = scratch_mcx();
-    let r = ok(crate::strip::json_strip_nulls(m.mcx(), &json, strip_in_arrays));
-    ret_text(fcinfo, r.as_slice().to_vec())
+    let r = crate::strip::json_strip_nulls(m.mcx(), &json, strip_in_arrays)?;
+    Ok(ret_text(fcinfo, r.as_slice().to_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -476,22 +461,22 @@ fn fc_json_strip_nulls(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 /// `jsonb_typeof(jsonb) -> text` (oid 3210).
-fn fc_jsonb_typeof(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_typeof(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
-    let typ = ok(backend_utils_adt_jsonb::jsonb_typeof(&jb));
-    ret_text(fcinfo, typ.as_bytes().to_vec())
+    let typ = backend_utils_adt_jsonb::jsonb_typeof(&jb)?;
+    Ok(ret_text(fcinfo, typ.as_bytes().to_vec()))
 }
 
 /// `jsonb_array_length(jsonb) -> int4` (oid 3207).
-fn fc_jsonb_array_length(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonb_array_length(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
-    ret_i32(ok(crate::length::jsonb_array_length(&jb)))
+    Ok(ret_i32(crate::length::jsonb_array_length(&jb)?))
 }
 
 /// `json_array_length(json) -> int4` (oid 3956).
-fn fc_json_array_length(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_json_array_length(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let json = arg_text_payload(fcinfo, 0).to_vec();
-    ret_i32(ok(crate::length::json_array_length(&json)))
+    Ok(ret_i32(crate::length::json_array_length(&json)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -504,23 +489,28 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: alloc::string::String::from(name),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: alloc::string::String::from(name),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
-/// Register the expressible scalar/operator `jsonfuncs.c` builtins. Called from
-/// this crate's `init_seams()`. OIDs/nargs/strict/retset transcribed from
-/// `pg_proc.dat` (all `proisstrict => 't'` default; none `proretset`).
+/// Register the expressible scalar/operator `jsonfuncs.c` builtins as
+/// **Result-native** (the panic→Result migration; see
+/// `docs/proposals/panic-to-result-migration.md`). Called from this crate's
+/// `init_seams()`. OIDs/nargs/strict/retset transcribed from `pg_proc.dat`
+/// (all `proisstrict => 't'` default; none `proretset`).
 pub fn register_jsonfuncs_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // jsonb getters.
         builtin(3478, "jsonb_object_field", 2, true, false, fc_jsonb_object_field),
         builtin(3214, "jsonb_object_field_text", 2, true, false, fc_jsonb_object_field_text),
