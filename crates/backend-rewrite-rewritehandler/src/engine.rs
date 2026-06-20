@@ -1577,14 +1577,56 @@ fn ApplyRetrieveRule<'mcx>(
         match parsetree.commandType {
             CmdType::CMD_INSERT => return Ok(parsetree),
             CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE => {
-                // Needs makeWholeRowVar (absent) + a copied result RTE: the
-                // INSTEAD-OF-trigger-on-view UPDATE/DELETE/MERGE source path.
-                return Err(elog(
-                    "ApplyRetrieveRule: UPDATE/DELETE/MERGE on a view result relation \
-                     requires makeWholeRowVar (the resjunk whole-row OLD Var), which is \
-                     not yet ported (owner: backend-nodes-core makefuncs); the plain \
-                     SELECT-from-view spine does not hit this path",
-                ));
+                // For UPDATE/DELETE/MERGE, we need to expand the view so as to
+                // have source data for the operation. But we also need an
+                // unmodified RTE to serve as the target. So, copy the RTE and
+                // add the copy to the rangetable. Note that the copy does not
+                // get added to the jointree. Also note that there's a hack in
+                // fireRIRrules to avoid calling this function again when it
+                // arrives at the copied RTE.
+                let newrte = parsetree.rtable[(rt_index - 1) as usize].clone_in(mcx)?;
+                parsetree.rtable.push(newrte);
+                parsetree.resultRelation = parsetree.rtable.len() as i32;
+                // parsetree->mergeTargetRelation unchanged (use expanded view)
+
+                // For the most part, Vars referencing the view should remain as
+                // they are, meaning that they implicitly represent OLD values.
+                // But in the RETURNING list if any, we want such Vars to
+                // represent NEW values, so change them to reference the new RTE.
+                //
+                // Since ChangeVarNodes scribbles on the tree in-place, copy the
+                // RETURNING list first for safety.
+                let new_result_relation = parsetree.resultRelation;
+                let mut new_returning: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> =
+                    PgVec::new_in(mcx);
+                for tle in parsetree.returningList.iter() {
+                    let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?);
+                    ChangeVarNodes(&mut node, rt_index, new_result_relation, 0);
+                    new_returning.push(node.into_targetentry().unwrap_or_else(|| {
+                        unreachable!("ChangeVarNodes preserves the node kind")
+                    }));
+                }
+                parsetree.returningList = new_returning;
+
+                // To allow the executor to compute the original view row to pass
+                // to the INSTEAD OF trigger, we add a resjunk whole-row Var
+                // referencing the original RTE. This will later get expanded
+                // into a RowExpr computing all the OLD values of the view row.
+                let rte = &parsetree.rtable[(rt_index - 1) as usize];
+                let var = backend_nodes_core::makefuncs::make_whole_row_var(
+                    rte, rt_index, 0, false,
+                )?;
+                let resno = (parsetree.targetList.len() + 1) as i16;
+                let tle = make_target_entry(
+                    mcx,
+                    Expr::Var(var),
+                    resno,
+                    Some("wholerow"),
+                    true,
+                )?;
+                parsetree.targetList.push(tle);
+
+                // Now, continue with expanding the original view RTE.
             }
             other => return Err(elog(format!("unrecognized commandType: {}", other as i32))),
         }

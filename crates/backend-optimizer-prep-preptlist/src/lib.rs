@@ -222,13 +222,29 @@ pub fn preprocess_targetlist<'mcx>(
         }
         if rc.allMarkTypes & (1 << ROW_MARK_COPY) != 0 {
             // Need the whole row as a junk var (makeWholeRowVar) (C:255-267).
-            // Reached only for a ROW_MARK_COPY mark (a non-relation / view RTE);
-            // makeWholeRowVar is not yet ported. Regular-table FOR UPDATE never
-            // takes this leg (its allMarkTypes excludes ROW_MARK_COPY).
-            panic!(
-                "preprocess_targetlist: ROW_MARK_COPY whole-row junk Var needs makeWholeRowVar \
-                 (makefuncs.c) — not ported (only reached for non-relation/view rowmarks)"
-            );
+            // Reached for a ROW_MARK_COPY mark (a non-relation / view RTE):
+            // makeWholeRowVar(rt_fetch(rc->rti, range_table), rc->rti, 0, false).
+            let rte = parse.rtable.get((rc.rti - 1) as usize).ok_or_else(|| {
+                types_error::PgError::error(alloc::format!(
+                    "preprocess_targetlist: ROW_MARK_COPY rti {} out of range",
+                    rc.rti
+                ))
+            })?;
+            let var =
+                backend_nodes_core::makefuncs::make_whole_row_var(rte, rc.rti as i32, 0, false)?;
+            let resname = alloc::format!("wholerow{}", rc.rowmarkId);
+            let expr_id = root.alloc_node(types_nodes::primnodes::Expr::Var(var));
+            let resno = (tlist.len() + 1) as AttrNumber;
+            let te = TargetEntryNode {
+                expr: expr_id,
+                resno,
+                resname: Some(resname),
+                ressortgroupref: 0,
+                resorigtbl: InvalidOid,
+                resorigcol: 0,
+                resjunk: true,
+            };
+            tlist.push(root.alloc_targetentry(te));
         }
 
         // If parent of an inheritance tree, always fetch the tableoid too
