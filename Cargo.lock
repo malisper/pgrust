@@ -2110,6 +2110,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-datum",
+ "types-error",
  "types-fmgr",
  "types-sortsupport",
 ]
