@@ -8111,18 +8111,171 @@ pub fn expression_planner_with_deps<'mcx>(
 
 /// `plan_cluster_use_sort(tableOid, indexOid)` (planner.c:6859). Decides whether
 /// a seqscan+sort beats an indexscan for CLUSTER's table copy.
-fn plan_cluster_use_sort_impl(_table_oid: Oid, _index_oid: Oid) -> PgResult<bool> {
-    // The body builds dummy PlannerInfo/RelOptInfo, calls cost_index / cost_sort /
-    // build_index_paths and compares costs, short-circuiting on
-    // `if (!enable_indexscan) return true`. The `enable_indexscan` GUC is not
-    // threaded into this crate, and cost_index (costsize.c) / cost_sort
-    // (costsize.c) / build_index_paths (indxpath.c) are not reachable over the
-    // value model. Mirror PG and panic precisely.
-    panic!(
-        "plan_cluster_use_sort (planner.c:6859): needs the enable_indexscan GUC + \
-         cost_index/cost_sort (costsize.c) + build_index_paths (indxpath.c) over a \
-         dummy PlannerInfo/RelOptInfo, none reachable over the value model yet"
+fn plan_cluster_use_sort_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    table_oid: Oid,
+    index_oid: Oid,
+) -> PgResult<bool> {
+    use types_pathnodes::{ForwardScanDirection, JoinDomain};
+
+    /* We can short-circuit the cost comparison if indexscans are disabled */
+    if !backend_optimizer_path_costsize::ENABLE_INDEXSCAN() {
+        return Ok(true); /* use sort */
+    }
+
+    /* Set up mostly-dummy planner state. */
+    // query = makeNode(Query); query->commandType = CMD_SELECT;
+    let mut query = Query::new(mcx);
+    query.commandType = types_nodes::nodes::CmdType::CMD_SELECT;
+
+    /* Build a minimal RTE for the rel */
+    // rte = makeNode(RangeTblEntry); ...
+    let mut rte = types_nodes::parsenodes::RangeTblEntry::new_in(mcx);
+    rte.rtekind = types_nodes::parsenodes::RTEKind::RTE_RELATION;
+    rte.relid = table_oid;
+    rte.relkind = types_tuple::access::RELKIND_RELATION as i8; /* Don't be too picky. */
+    rte.rellockmode = types_storage::lock::AccessShareLock;
+    rte.lateral = false;
+    rte.inh = false;
+    rte.inFromCl = true;
+
+    // query->rtable = list_make1(rte); addRTEPermissionInfo(&query->rteperminfos, rte);
+    backend_parser_relation::addRTEPermissionInfo(&mut query.rteperminfos, &mut rte)?;
+    query.rtable.push(rte);
+
+    // glob = makeNode(PlannerGlobal);
+    let glob = PlannerGlobal::default();
+
+    // The dummy planner run owns the interned Query/RTE arenas.
+    let mut run = PlannerRun::new(mcx);
+    let query_id = run.intern(query);
+
+    // root = makeNode(PlannerInfo); + field init.
+    let mut root = PlannerInfo::default();
+    root.parse = query_id;
+    root.glob = Some(Box::new(glob));
+    root.query_level = 1;
+    root.planner_cxt = None; /* C: CurrentMemoryContext — the value model uses `mcx`. */
+    root.wt_param_id = -1;
+    // root->join_domains = list_make1(makeNode(JoinDomain));
+    root.join_domains = alloc::vec![JoinDomain::default()];
+
+    /* Set up RTE/RelOptInfo arrays */
+    backend_optimizer_util_relnode::setup_simple_rel_arrays(&mut run, &mut root, mcx)?;
+
+    /* Build RelOptInfo (get_relation_info fills indexlist/tuples/pages) */
+    let rel_id = backend_optimizer_util_relnode::build_simple_rel(&run, &mut root, 1, None)?;
+
+    /* Locate IndexOptInfo for the target index */
+    // foreach(lc, rel->indexlist) { if indexInfo->indexoid == indexOid break; }
+    let index_info = {
+        let rel = root.rel(rel_id);
+        rel.indexlist
+            .iter()
+            .find(|ix| ix.indexoid == index_oid)
+            .cloned()
+    };
+
+    /*
+     * It's possible that get_relation_info did not generate an IndexOptInfo
+     * for the desired index; this could happen if it's not yet reached its
+     * indcheckxmin usability horizon, or if it's a system index and we're
+     * ignoring system indexes.  In such cases we should tell CLUSTER to not
+     * trust the index contents but use seqscan-and-sort.
+     */
+    let index_info = match index_info {
+        Some(ix) => ix,
+        None => return Ok(true), /* not in the list? -> use sort */
+    };
+
+    /*
+     * Rather than doing all the pushups that would be needed to use
+     * set_baserel_size_estimates, just do a quick hack for rows and width.
+     */
+    // rel->rows = rel->tuples; rel->reltarget->width = get_relation_data_width(tableOid, NULL);
+    let data_width = backend_optimizer_util_plancat::get_relation_data_width(table_oid, &[])?;
+    let (rel_tuples, rel_pages) = {
+        let rel = root.rel_mut(rel_id);
+        rel.rows = rel.tuples;
+        if let Some(rt) = rel.reltarget.as_mut() {
+            rt.width = data_width;
+        }
+        (rel.tuples, rel.pages)
+    };
+
+    // root->total_table_pages = rel->pages;
+    root.total_table_pages = rel_pages as f64;
+
+    /*
+     * Determine eval cost of the index expressions, if any.  We need to
+     * charge twice that amount for each tuple comparison that happens during
+     * the sort, since tuplesort.c will have to re-evaluate the index
+     * expressions each time.  (XXX that's pretty inefficient...)
+     */
+    // cost_qual_eval(&indexExprCost, indexInfo->indexprs, root);
+    let index_expr_cost =
+        backend_optimizer_path_costsize::cost_qual_eval(&root, &index_info.indexprs);
+    // comparisonCost = 2.0 * (indexExprCost.startup + indexExprCost.per_tuple);
+    let comparison_cost = 2.0 * (index_expr_cost.startup + index_expr_cost.per_tuple);
+
+    /* Estimate the cost of seq scan + sort */
+    // seqScanPath = create_seqscan_path(root, rel, NULL, 0);
+    let seq_scan_path =
+        backend_optimizer_util_pathnode::create::create_seqscan_path(&mut root, &run, rel_id, &None, 0)?;
+    // Read seqscan's cost/disabled_nodes before cost_sort (avoid overlapping borrows).
+    let (seq_disabled, seq_total) = {
+        let base = root.path(seq_scan_path).base();
+        (base.disabled_nodes, base.total_cost)
+    };
+
+    // cost_sort(&seqScanAndSortPath, root, NIL, seqScanPath->disabled_nodes,
+    //           seqScanPath->total_cost, rel->tuples, rel->reltarget->width,
+    //           comparisonCost, maintenance_work_mem, -1.0);
+    //
+    // C `cost_sort`s into a stack-allocated `Path seqScanAndSortPath`. The
+    // value-model `cost_sort` writes into a PathId in the arena, so allocate a
+    // throwaway path node to receive the result. We reuse `create_seqscan_path`
+    // to mint a fresh base path over the same rel; `cost_sort` overwrites the
+    // rows/disabled_nodes/startup_cost/total_cost fields it cares about.
+    let sort_path =
+        backend_optimizer_util_pathnode::create::create_seqscan_path(&mut root, &run, rel_id, &None, 0)?;
+    let maintenance_work_mem =
+        backend_utils_init_small::globals::maintenance_work_mem();
+    backend_optimizer_path_costsize::cost_sort(
+        &mut root,
+        sort_path,
+        &[],
+        seq_disabled,
+        seq_total,
+        rel_tuples,
+        data_width,
+        comparison_cost,
+        maintenance_work_mem,
+        -1.0,
     );
+    let seq_scan_and_sort_total = root.path(sort_path).base().total_cost;
+
+    /* Estimate the cost of index scan */
+    // indexScanPath = create_index_path(root, indexInfo, NIL, NIL, NIL, NIL,
+    //                                   ForwardScanDirection, false, NULL, 1.0, false);
+    let index_scan_path = backend_optimizer_util_pathnode::create::create_index_path(
+        &mut root,
+        &run,
+        Box::new(index_info),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        ForwardScanDirection,
+        false,
+        &None,
+        1.0,
+        false,
+    )?;
+    let index_scan_total = root.path(index_scan_path).base().total_cost;
+
+    // return (seqScanAndSortPath.total_cost < indexScanPath->path.total_cost);
+    Ok(seq_scan_and_sort_total < index_scan_total)
 }
 
 // ===========================================================================

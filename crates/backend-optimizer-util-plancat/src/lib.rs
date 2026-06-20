@@ -938,9 +938,19 @@ fn get_rel_data_width_impl(
 pub fn get_relation_data_width(relid: Oid, attr_widths: &[i32]) -> PgResult<i32> {
     let relcx = mcx::MemoryContext::new("get_relation_data_width relcache");
     let relation = backend_access_table_table::table_open(relcx.mcx(), relid, NoLock)?;
+    // C: `get_rel_data_width(relation, attr_widths)` passes the caller's pointer
+    // straight through; a NULL `attr_widths` means "no cache buffer". The owned
+    // model represents the C NULL as an EMPTY slice, so map empty -> None (rather
+    // than wrapping an empty Vec in Some, which would index out of bounds). A
+    // non-empty caller buffer is threaded through and updated in place.
     let mut widths = attr_widths.to_vec();
     let min_attr = (FirstLowInvalidHeapAttributeNumber + 1) as AttrNumber;
-    let result = get_rel_data_width_impl(&relation, Some(&mut widths), min_attr)?;
+    let cache: Option<&mut [i32]> = if widths.is_empty() {
+        None
+    } else {
+        Some(&mut widths)
+    };
+    let result = get_rel_data_width_impl(&relation, cache, min_attr)?;
     // relation_close(relation, NoLock): close the RAII handle directly. A by-OID
     // close here plus the handle's Drop would double-decrement the pin.
     relation.close(NoLock)?;

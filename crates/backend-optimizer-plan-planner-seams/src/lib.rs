@@ -60,8 +60,14 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `plan_cluster_use_sort(tableOid, indexOid)` (planner.c): whether a
-    /// seqscan+sort beats an indexscan for the cluster copy.
-    pub fn plan_cluster_use_sort(table_oid: Oid, index_oid: Oid) -> PgResult<bool>
+    /// seqscan+sort beats an indexscan for the cluster copy. C runs in
+    /// `CurrentMemoryContext`; the value-model port threads the caller's `mcx`
+    /// in (it owns the throwaway dummy `PlannerRun`/`PlannerInfo`).
+    pub fn plan_cluster_use_sort<'mcx>(
+        mcx: Mcx<'mcx>,
+        table_oid: Oid,
+        index_oid: Oid,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(
