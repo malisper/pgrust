@@ -125,6 +125,7 @@ pub fn init_all() {
     backend_catalog_partition::init_seams();
     backend_partitioning_partbounds::init_seams();
     backend_partitioning_partdesc::init_seams();
+    backend_partitioning_core::init_seams();
     backend_catalog_indexing::init_seams();
     backend_catalog_heap::init_seams();
     backend_catalog_index::init_seams();

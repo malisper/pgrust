@@ -128,6 +128,7 @@ backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
 backend-catalog-partition = { path = "../backend-catalog-partition" }
 backend-partitioning-partbounds = { path = "../backend-partitioning-partbounds" }
 backend-partitioning-partdesc = { path = "../backend-partitioning-partdesc" }
+backend-partitioning-core = { path = "../backend-partitioning-core" }
 backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-catalog-heap = { path = "../backend-catalog-heap" }
 backend-catalog-index = { path = "../backend-catalog-index" }

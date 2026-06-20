@@ -337,11 +337,17 @@ fn expand_partitioned_rtentry<'mcx>(
     // unported substrate — partition pruning.
     let parent_rel = root.simple_rel_array[parent_rt_index as usize]
         .expect("expand_partitioned_rtentry: parent rel slot empty");
-    let _ = partprune::prune_append_rel_partitions::call(root, parent_rel)?;
+    // relinfo->live_parts = prune_append_rel_partitions(relinfo);
+    let live_parts = partprune::prune_append_rel_partitions::call(run, root, parent_rel)?;
+    root.rel_mut(parent_rel).live_parts = live_parts;
 
+    // The remainder of expand_partitioned_rtentry (building a child RTE +
+    // AppendRelInfo + RelOptInfo for each surviving partition, and recursing into
+    // sub-partitioned children) is the follow-on lane's work; the partition
+    // pruning step itself now lands here.
     unreachable!(
-        "expand_partitioned_rtentry: prune_append_rel_partitions panics until \
-         partprune.c lands (and PlannerGlobal::partition_directory is modeled)"
+        "expand_partitioned_rtentry: child-partition expansion unported \
+         (prune_append_rel_partitions now lands; see partprune-core)"
     )
 }
 

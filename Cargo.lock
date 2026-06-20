@@ -14262,6 +14262,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-partitioning-core"
+version = "0.0.0"
+dependencies = [
+ "backend-access-table-table-seams",
+ "backend-nodes-copyfuncs-seams",
+ "backend-nodes-core",
+ "backend-nodes-makefuncs-seams",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-prep-prepqual-seams",
+ "backend-partitioning-partbounds-seams",
+ "backend-partitioning-partdesc",
+ "backend-partitioning-partprune-seams",
+ "backend-utils-cache-lsyscache-seams",
+ "backend-utils-cache-partcache",
+ "backend-utils-cache-partcache-seams",
+ "backend-utils-fmgr-fmgr-seams",
+ "mcx",
+ "types-core",
+ "types-error",
+ "types-hash",
+ "types-nodes",
+ "types-partition",
+ "types-pathnodes",
+ "types-rel",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-partitioning-core-seams"
 version = "0.0.0"
 dependencies = [
@@ -24470,6 +24500,7 @@ dependencies = [
  "backend-parser-relation",
  "backend-parser-scan-fgram",
  "backend-parser-small1",
+ "backend-partitioning-core",
  "backend-partitioning-partbounds",
  "backend-partitioning-partdesc",
  "backend-pl-plpgsql-comp",

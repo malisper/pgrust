@@ -23,6 +23,7 @@ seam_core::seam!(
     /// `PartitionPruneStep` carrier (see the partprune-blocked memory note), so
     /// this currently panics when reached.
     pub fn prune_append_rel_partitions<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut types_pathnodes::PlannerInfo,
         rel: types_pathnodes::RelId,
     ) -> PgResult<types_pathnodes::Relids>
