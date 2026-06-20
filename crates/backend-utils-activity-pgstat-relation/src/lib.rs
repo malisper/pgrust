@@ -45,6 +45,8 @@
 
 extern crate alloc;
 
+pub mod fmgr_builtins;
+
 use alloc::boxed::Box;
 
 use backend_access_transam_twophase_rmgr::TWOPHASE_RM_PGSTAT_ID;
@@ -1277,6 +1279,9 @@ fn relation_kind_info() -> PgStat_KindInfo {
 /// Must run before `backend_utils_activity_pgstat::init_seams()` seals the
 /// per-kind table.
 pub fn init_seams() {
+    // Register the per-relation pg_stat_get_* SQL accessors (pgstatfuncs.c).
+    fmgr_builtins::register_pgstat_relation_builtins();
+
     registry::register(
         KindInfoBuilder::new(PGSTAT_KIND_RELATION, relation_kind_info())
             .flush_pending_cb(pgstat_relation_flush_cb)

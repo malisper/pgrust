@@ -25,6 +25,8 @@
 
 extern crate alloc;
 
+pub mod fmgr_builtins;
+
 use core::cell::Cell;
 
 use backend_utils_activity_pgstat::entry_ref::PgStat_EntryRef;
@@ -326,6 +328,9 @@ fn function_kind_info() -> PgStat_KindInfo {
 /// Must run before `backend_utils_activity_pgstat::init_seams()` seals the
 /// per-kind table.
 pub fn init_seams() {
+    // Register the per-function pg_stat_get_function_* SQL accessors (pgstatfuncs.c).
+    fmgr_builtins::register_pgstat_function_builtins();
+
     registry::register(
         KindInfoBuilder::new(PGSTAT_KIND_FUNCTION, function_kind_info())
             .flush_pending_cb(pgstat_function_flush_cb)

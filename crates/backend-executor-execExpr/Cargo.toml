@@ -73,6 +73,9 @@ backend-optimizer-util-inherit-predtest-seams = { path = "../backend-optimizer-u
 # installed from this executor owner's init_seams() (evaluate_expr runs the expr
 # through the executor: CreateExecutorState → ExecInitExpr → ExecEvalExpr).
 backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
+# expression_planner() VALUE seam (declared in the planner-pc unit, installed
+# from the planner's init_seams) used by ExecPrepareExpr/Qual/Check.
+backend-optimizer-plan-planner-pc-seams = { path = "../backend-optimizer-plan-planner-pc-seams" }
 # ExecPrepareExpr/ExecPrepareQual/ExecPrepareCheck run their standalone expr
 # through expression_planner() (eval_const_expressions + fix_opfuncids) before
 # the parentless ExecInitExpr compile. The planner owns expression_planner; this

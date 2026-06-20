@@ -21,3 +21,7 @@ backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" 
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-catalog-pg-proc-seams = { path = "../backend-catalog-pg-proc-seams" }
 portability-instr-time = { path = "../portability-instr-time" }
+# fmgr builtin registry for the pgstatfuncs.c per-function SQL accessors.
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+types-fmgr = { path = "../types-fmgr" }
+types-datum = { path = "../types-datum" }

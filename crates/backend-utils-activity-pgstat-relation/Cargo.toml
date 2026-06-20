@@ -37,3 +37,7 @@ backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-sea
 backend-access-transam-twophase-seams = { path = "../backend-access-transam-twophase-seams" }
 backend-access-transam-twophase-rmgr = { path = "../backend-access-transam-twophase-rmgr" }
 backend-catalog-catalog-seams = { path = "../backend-catalog-catalog-seams" }
+# fmgr builtin registry for the pgstatfuncs.c per-relation SQL accessors.
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+types-fmgr = { path = "../types-fmgr" }
+types-datum = { path = "../types-datum" }
