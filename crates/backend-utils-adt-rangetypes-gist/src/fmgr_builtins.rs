@@ -38,7 +38,8 @@
 //! (every row is `proisstrict => 't'` — the default — and not retset).
 
 use types_datum::datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_error::PgResult;
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// The shared fmgr-frame entry point for every range/multirange GiST opclass
 /// support proc. In the owned model the GiST access method invokes these procs
@@ -48,31 +49,34 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 /// carries a non-`None` callable (matching C's table, where `fn_addr` is the
 /// real C function). It raises a clear error if a future fmgr-frame call site is
 /// added, pointing at the dispatch seam to use instead.
-fn fc_gist_support_via_dispatch(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_gist_support_via_dispatch(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let foid = fcinfo
         .flinfo
         .as_ref()
         .map(|fi| fi.fn_oid)
         .unwrap_or(0);
-    std::panic::panic_any(types_error::PgError::error(format!(
+    Err(types_error::PgError::error(format!(
         "range/multirange GiST support function (OID {foid}) must be invoked \
          through the typed opclass dispatch (backend-access-gist-dispatch-seams), \
          not the fmgr frame; the owned GiST access method dispatches these by \
          FmgrInfo.fn_oid"
-    )));
+    )))
 }
 
-fn builtin(foid: u32, name: &str, nargs: i16) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        // Every rangetypes_gist.c support proc is proisstrict => 't' (the
-        // default) and not proretset in pg_proc.dat.
-        strict: true,
-        retset: false,
-        func: Some(fc_gist_support_via_dispatch),
-    }
+fn builtin(foid: u32, name: &str, nargs: i16) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            // Every rangetypes_gist.c support proc is proisstrict => 't' (the
+            // default) and not proretset in pg_proc.dat.
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        fc_gist_support_via_dispatch,
+    )
 }
 
 /// Register the `fmgr_builtins[]` rows for every range/multirange GiST opclass
@@ -89,7 +93,7 @@ fn builtin(foid: u32, name: &str, nargs: i16) -> BuiltinFunction {
 /// (6156, which collapses a multirange to its union range) and a `consistent`
 /// (6154).
 pub fn register_rangetypes_gist_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- range_ops opclass ----
         builtin(3875, "range_gist_consistent", 5),
         builtin(3876, "range_gist_union", 2),
