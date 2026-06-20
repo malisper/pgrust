@@ -33,7 +33,7 @@ use types_cache::typcache::TypeCacheEntry;
 use types_core::primitive::Oid;
 use types_datum::Datum;
 use types_error::PgResult;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, RefPayload};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative, RefPayload};
 use types_rangetypes::{MultirangeTypeP, RangeTypeP};
 
 // ---------------------------------------------------------------------------
@@ -90,32 +90,19 @@ fn scratch_mcx() -> MemoryContext {
     MemoryContext::new("multirangetypes fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through `invoke_pgfunction`'s `catch_unwind`.
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-#[inline]
-fn ok<T>(r: PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 /// `PG_GETARG_MULTIRANGE_P(i)`: materialize arg `i`'s by-ref `Varlena` image into
 /// `mcx` and detoast to a `MultirangeTypeP` (the cores' input form).
 fn getarg_multirange<'mcx>(
     fcinfo: &FunctionCallInfoBaseData,
     mcx: Mcx<'mcx>,
     i: usize,
-) -> MultirangeTypeP<'mcx> {
+) -> PgResult<MultirangeTypeP<'mcx>> {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("multirange fn: by-ref `multirange` arg missing from by-ref lane");
-    let word = ok(mr_bytes_to_arg_word(mcx, image));
-    ok(crate::typcache_io::datum_get_multirange_type_p(mcx, word))
+    let word = mr_bytes_to_arg_word(mcx, image)?;
+    crate::typcache_io::datum_get_multirange_type_p(mcx, word)
 }
 
 /// `PG_GETARG_DATUM(i)` for an `anyelement` arg: the bound-comparison kernels
@@ -128,11 +115,11 @@ fn getarg_elem_word<'mcx>(
     fcinfo: &FunctionCallInfoBaseData,
     mcx: Mcx<'mcx>,
     i: usize,
-) -> Datum {
-    match fcinfo.ref_arg(i).and_then(|p| p.as_varlena()) {
-        Some(image) => ok(mr_bytes_to_arg_word(mcx, image)),
+) -> PgResult<Datum> {
+    Ok(match fcinfo.ref_arg(i).and_then(|p| p.as_varlena()) {
+        Some(image) => mr_bytes_to_arg_word(mcx, image)?,
         None => fcinfo.arg(i).map(|nd| nd.value).unwrap_or_else(Datum::null),
-    }
+    })
 }
 
 /// `PG_GETARG_CSTRING(i)`: the input cstring on the by-ref lane.
@@ -156,11 +143,11 @@ fn arg_int64(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i64 {
 
 /// The element RANGE type's typcache for a `multirange` value: the multirange
 /// typcache's `->rngtype` (C: `multirange_get_typcache(...)->rngtype`).
-fn rangetyp_of(mr: MultirangeTypeP<'_>) -> TypeCacheEntry {
-    let mtc = ok(crate::typcache_io::multirange_get_typcache(mr.multirangetypid()));
-    *mtc
+fn rangetyp_of(mr: MultirangeTypeP<'_>) -> PgResult<TypeCacheEntry> {
+    let mtc = crate::typcache_io::multirange_get_typcache(mr.multirangetypid())?;
+    Ok(*mtc
         .rngtype
-        .expect("multirange typcache has a range subtype")
+        .expect("multirange typcache has a range subtype"))
 }
 
 /// Set a `multirange` result (read from its pointer word) on the by-ref lane.
@@ -179,13 +166,13 @@ fn getarg_range<'mcx>(
     fcinfo: &FunctionCallInfoBaseData,
     mcx: Mcx<'mcx>,
     i: usize,
-) -> RangeTypeP<'mcx> {
+) -> PgResult<RangeTypeP<'mcx>> {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("multirange fn: by-ref `range` arg missing from by-ref lane");
-    let word = ok(mr_bytes_to_arg_word(mcx, image));
-    ok(range_seams::datum_get_range_type_p::call(mcx, word))
+    let word = mr_bytes_to_arg_word(mcx, image)?;
+    range_seams::datum_get_range_type_p::call(mcx, word)
 }
 
 /// Set a `range` result (read from its pointer word) on the by-ref lane. A
@@ -200,11 +187,11 @@ fn ret_range(fcinfo: &mut FunctionCallInfoBaseData, r: RangeTypeP<'_>) -> Datum 
 
 /// The element RANGE type's typcache for a `multirange` type OID: the multirange
 /// typcache's `->rngtype` (C: `multirange_get_typcache(...)->rngtype`).
-fn rangetyp_for_mltrng(mltrngtypid: Oid) -> TypeCacheEntry {
-    let mtc = ok(crate::typcache_io::multirange_get_typcache(mltrngtypid));
-    *mtc
+fn rangetyp_for_mltrng(mltrngtypid: Oid) -> PgResult<TypeCacheEntry> {
+    let mtc = crate::typcache_io::multirange_get_typcache(mltrngtypid)?;
+    Ok(*mtc
         .rngtype
-        .expect("multirange typcache has a range subtype")
+        .expect("multirange typcache has a range subtype"))
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +199,7 @@ fn rangetyp_for_mltrng(mltrngtypid: Oid) -> TypeCacheEntry {
 // ---------------------------------------------------------------------------
 
 /// `multirange_in(cstring, oid, int4) -> anymultirange` (oid 4231).
-fn fc_multirange_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_in(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // Copy the cstring to owned so its borrow does not alias `escontext_mut()`.
     let s = arg_cstring(fcinfo, 0).to_string();
     let mltrngtypoid = arg_oid(fcinfo, 1);
@@ -222,38 +209,38 @@ fn fc_multirange_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // recoverable parse / member-range error soft-fails (PG_RETURN_NULL) for a
     // caller such as `pg_input_is_valid`.
     let escontext = fcinfo.escontext_mut();
-    match ok(crate::typcache_io::multirange_in(
+    Ok(match crate::typcache_io::multirange_in(
         m.mcx(),
         &s,
         mltrngtypoid,
         typmod,
         escontext,
-    )) {
+    )? {
         Some(mr) => ret_multirange(fcinfo, mr),
         // C: PG_RETURN_NULL() after a soft error.
         None => {
             fcinfo.set_result_null(true);
             Datum::null()
         }
-    }
+    })
 }
 
 /// `multirange_out(anymultirange) -> cstring` (oid 4232).
-fn fc_multirange_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     // `multirange_out` takes the raw `Datum` word and detoasts itself.
     let image = fcinfo
         .ref_arg(0)
         .and_then(|p| p.as_varlena())
         .expect("multirange_out arg 0 is a multirange");
-    let word = ok(mr_bytes_to_arg_word(m.mcx(), image));
-    let s = ok(crate::typcache_io::multirange_out(m.mcx(), word));
+    let word = mr_bytes_to_arg_word(m.mcx(), image)?;
+    let s = crate::typcache_io::multirange_out(m.mcx(), word)?;
     fcinfo.set_ref_result(RefPayload::Cstring(s));
-    Datum::null()
+    Ok(Datum::null())
 }
 
 /// `multirange_recv(internal, oid, int4) -> anymultirange` (oid 4233).
-fn fc_multirange_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_recv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // The wire buffer is the by-ref `Varlena` arg 0 (StringInfo message bytes).
     let buf_bytes = fcinfo
         .ref_arg(0)
@@ -264,45 +251,45 @@ fn fc_multirange_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let typmod = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
     let mut cur: &[u8] = &buf_bytes;
-    let mr = ok(crate::typcache_io::multirange_recv(
+    let mr = crate::typcache_io::multirange_recv(
         m.mcx(),
         &mut cur,
         mltrngtypoid,
         typmod,
-    ));
-    ret_multirange(fcinfo, mr)
+    )?;
+    Ok(ret_multirange(fcinfo, mr))
 }
 
 /// `multirange_send(anymultirange) -> bytea` (oid 4234).
-fn fc_multirange_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_send(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let image = fcinfo
         .ref_arg(0)
         .and_then(|p| p.as_varlena())
         .expect("multirange_send arg 0 is a multirange");
-    let word = ok(mr_bytes_to_arg_word(m.mcx(), image));
-    let bytes = ok(crate::typcache_io::multirange_send(m.mcx(), word));
+    let word = mr_bytes_to_arg_word(m.mcx(), image)?;
+    let bytes = crate::typcache_io::multirange_send(m.mcx(), word)?;
     fcinfo.set_ref_result(RefPayload::Varlena(bytes));
-    Datum::null()
+    Ok(Datum::null())
 }
 
 /// `multirange_empty(anymultirange) -> bool` (oid 4237, `isempty`).
-fn fc_multirange_empty(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_empty(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-    Datum::from_bool(ok(crate::operators::multirange_empty(mr)))
+    let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    Ok(Datum::from_bool(crate::operators::multirange_empty(mr)?))
 }
 
 /// Body of a `(multirange, multirange) -> bool` comparator around a
 /// `fn(&TypeCacheEntry, MultirangeTypeP, MultirangeTypeP) -> PgResult<bool>` core.
 macro_rules! fc_mr_cmp_bool {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
             let m = scratch_mcx();
-            let a = getarg_multirange(fcinfo, m.mcx(), 0);
-            let b = getarg_multirange(fcinfo, m.mcx(), 1);
-            let rangetyp = rangetyp_of(a);
-            Datum::from_bool(ok($core(&rangetyp, a, b)))
+            let a = getarg_multirange(fcinfo, m.mcx(), 0)?;
+            let b = getarg_multirange(fcinfo, m.mcx(), 1)?;
+            let rangetyp = rangetyp_of(a)?;
+            Ok(Datum::from_bool($core(&rangetyp, a, b)?))
         }
     };
 }
@@ -315,34 +302,34 @@ fc_mr_cmp_bool!(fc_multirange_gt, crate::setops_ordering_agg::multirange_gt);
 fc_mr_cmp_bool!(fc_multirange_ge, crate::setops_ordering_agg::multirange_ge);
 
 /// `multirange_cmp(anymultirange, anymultirange) -> int4` (oid 4273).
-fn fc_multirange_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let a = getarg_multirange(fcinfo, m.mcx(), 0);
-    let b = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(a);
-    Datum::from_i32(ok(crate::setops_ordering_agg::multirange_cmp(
+    let a = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let b = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(a)?;
+    Ok(Datum::from_i32(crate::setops_ordering_agg::multirange_cmp(
         &rangetyp, a, b,
-    )))
+    )?))
 }
 
 /// `hash_multirange(anymultirange) -> int4` (oid 4278).
-fn fc_hash_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hash_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-    let rangetyp = rangetyp_of(mr);
+    let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let rangetyp = rangetyp_of(mr)?;
     // PG_RETURN_INT32 of a uint32 hash word (reinterpret).
-    Datum::from_i32(ok(crate::setops_ordering_agg::hash_multirange(&rangetyp, mr)) as i32)
+    Ok(Datum::from_i32(crate::setops_ordering_agg::hash_multirange(&rangetyp, mr)? as i32))
 }
 
 /// `hash_multirange_extended(anymultirange, int8) -> int8` (oid 4279).
-fn fc_hash_multirange_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hash_multirange_extended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr = getarg_multirange(fcinfo, m.mcx(), 0);
+    let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
     let seed = arg_int64(fcinfo, 1) as u64;
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_i64(ok(crate::setops_ordering_agg::hash_multirange_extended(
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_i64(crate::setops_ordering_agg::hash_multirange_extended(
         &rangetyp, mr, seed,
-    )) as i64)
+    )? as i64))
 }
 
 // ---------------------------------------------------------------------------
@@ -353,65 +340,65 @@ fn fc_hash_multirange_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 /// `multirange_constructor0() -> anymultirange` (oid 4280 + per-type dups).
-fn fc_multirange_constructor0(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_constructor0(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let mltrngtypoid = get_fn_expr_rettype(fcinfo.flinfo.as_deref());
-    let rangetyp = rangetyp_for_mltrng(mltrngtypoid);
+    let rangetyp = rangetyp_for_mltrng(mltrngtypoid)?;
     let nargs = fcinfo.nargs() as i32;
-    let mr = ok(crate::serialize_core::multirange_constructor0(
+    let mr = crate::serialize_core::multirange_constructor0(
         m.mcx(),
         mltrngtypoid,
         &rangetyp,
         nargs,
-    ));
-    ret_multirange(fcinfo, mr)
+    )?;
+    Ok(ret_multirange(fcinfo, mr))
 }
 
 /// `multirange_constructor1(anyrange) -> anymultirange` (oid 4281 + per-type
 /// dups). The single member range arg crosses on the by-ref lane.
-fn fc_multirange_constructor1(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_constructor1(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let mltrngtypoid = get_fn_expr_rettype(fcinfo.flinfo.as_deref());
-    let rangetyp = rangetyp_for_mltrng(mltrngtypoid);
+    let rangetyp = rangetyp_for_mltrng(mltrngtypoid)?;
     let range_isnull = fcinfo.arg(0).map(|nd| nd.isnull).unwrap_or(true);
     // The range arg's by-value word: stage the by-ref image to a pointer word so
     // the kernel's `datum_get_range_type_p` resolves it (NULL word if absent).
     let range_word = match fcinfo.ref_arg(0).and_then(|p| p.as_varlena()) {
-        Some(image) => ok(mr_bytes_to_arg_word(m.mcx(), image)),
+        Some(image) => mr_bytes_to_arg_word(m.mcx(), image)?,
         None => Datum::null(),
     };
-    let mr = ok(crate::serialize_core::multirange_constructor1(
+    let mr = crate::serialize_core::multirange_constructor1(
         m.mcx(),
         mltrngtypoid,
         &rangetyp,
         range_isnull,
         range_word,
-    ));
-    ret_multirange(fcinfo, mr)
+    )?;
+    Ok(ret_multirange(fcinfo, mr))
 }
 
 /// `multirange_constructor2(variadic anyrange[]) -> anymultirange` (oid 4282 +
 /// per-type dups). The member-range array arrives as the `anyrange[]` arg word
 /// (a varlena image on the by-ref lane).
-fn fc_multirange_constructor2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_constructor2(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let mltrngtypoid = get_fn_expr_rettype(fcinfo.flinfo.as_deref());
-    let rangetyp = rangetyp_for_mltrng(mltrngtypoid);
+    let rangetyp = rangetyp_for_mltrng(mltrngtypoid)?;
     let nargs = fcinfo.nargs() as i32;
     let array_isnull = fcinfo.arg(0).map(|nd| nd.isnull).unwrap_or(true);
     let array_word = match fcinfo.ref_arg(0).and_then(|p| p.as_varlena()) {
-        Some(image) => ok(mr_bytes_to_arg_word(m.mcx(), image)),
+        Some(image) => mr_bytes_to_arg_word(m.mcx(), image)?,
         None => fcinfo.arg(0).map(|nd| nd.value).unwrap_or_else(Datum::null),
     };
-    let mr = ok(crate::serialize_core::multirange_constructor2(
+    let mr = crate::serialize_core::multirange_constructor2(
         m.mcx(),
         mltrngtypoid,
         &rangetyp,
         nargs,
         array_isnull,
         array_word,
-    ));
-    ret_multirange(fcinfo, mr)
+    )?;
+    Ok(ret_multirange(fcinfo, mr))
 }
 
 // ---------------------------------------------------------------------------
@@ -422,11 +409,11 @@ fn fc_multirange_constructor2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `fn(&TypeCacheEntry, MultirangeTypeP) -> PgResult<bool>` core.
 macro_rules! fc_mr_pred {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
             let m = scratch_mcx();
-            let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-            let rangetyp = rangetyp_of(mr);
-            Datum::from_bool(ok($core(&rangetyp, mr)))
+            let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+            let rangetyp = rangetyp_of(mr)?;
+            Ok(Datum::from_bool($core(&rangetyp, mr)?))
         }
     };
 }
@@ -440,11 +427,11 @@ fc_mr_pred!(fc_multirange_upper_inf, crate::operators::multirange_upper_inf);
 /// A SQL-NULL (empty/unbounded) result sets `fcinfo->isnull`.
 macro_rules! fc_mr_bound {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
             let m = scratch_mcx();
-            let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-            let rangetyp = rangetyp_of(mr);
-            match ok($core(&rangetyp, mr)) {
+            let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+            let rangetyp = rangetyp_of(mr)?;
+            Ok(match $core(&rangetyp, mr)? {
                 // `PG_RETURN_DATUM(bound.val)`: a by-value subtype returns the bare
                 // word; a by-reference subtype (`numeric`/`text`/...) rides the
                 // by-ref result lane as a header-ful varlena image (mirroring
@@ -460,7 +447,7 @@ macro_rules! fc_mr_bound {
                     fcinfo.set_result_null(true);
                     Datum::null()
                 }
-            }
+            })
         }
     };
 }
@@ -475,38 +462,38 @@ fc_mr_bound!(fc_multirange_upper, crate::operators::multirange_upper);
 // ---------------------------------------------------------------------------
 
 /// `multirange_contains_elem(anymultirange, anyelement) -> bool` (oid 4249).
-fn fc_multirange_contains_elem(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_contains_elem(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-    let val = getarg_elem_word(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::multirange_contains_elem_internal(
+    let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let val = getarg_elem_word(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::multirange_contains_elem_internal(
         &rangetyp, mr, val,
-    )))
+    )?))
 }
 
 /// `elem_contained_by_multirange(anyelement, anymultirange) -> bool` (oid 4252).
-fn fc_elem_contained_by_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_elem_contained_by_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let val = getarg_elem_word(fcinfo, m.mcx(), 0);
-    let mr = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::multirange_contains_elem_internal(
+    let val = getarg_elem_word(fcinfo, m.mcx(), 0)?;
+    let mr = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::multirange_contains_elem_internal(
         &rangetyp, mr, val,
-    )))
+    )?))
 }
 
 /// `(multirange@0, range@1) -> bool` via `multirange_contains_range_internal`.
 macro_rules! fc_mr_contains_range {
     ($fc:ident) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
             let m = scratch_mcx();
-            let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-            let r = getarg_range(fcinfo, m.mcx(), 1);
-            let rangetyp = rangetyp_of(mr);
-            Datum::from_bool(ok(crate::operators::multirange_contains_range_internal(
+            let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+            let r = getarg_range(fcinfo, m.mcx(), 1)?;
+            let rangetyp = rangetyp_of(mr)?;
+            Ok(Datum::from_bool(crate::operators::multirange_contains_range_internal(
                 &rangetyp, mr, r,
-            )))
+            )?))
         }
     };
 }
@@ -517,14 +504,14 @@ fc_mr_contains_range!(fc_multirange_contains_range);
 /// `(range@0, multirange@1) -> bool` via `range_contains_multirange_internal`.
 macro_rules! fc_range_contains_mr {
     ($fc:ident) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
             let m = scratch_mcx();
-            let r = getarg_range(fcinfo, m.mcx(), 0);
-            let mr = getarg_multirange(fcinfo, m.mcx(), 1);
-            let rangetyp = rangetyp_of(mr);
-            Datum::from_bool(ok(crate::operators::range_contains_multirange_internal(
+            let r = getarg_range(fcinfo, m.mcx(), 0)?;
+            let mr = getarg_multirange(fcinfo, m.mcx(), 1)?;
+            let rangetyp = rangetyp_of(mr)?;
+            Ok(Datum::from_bool(crate::operators::range_contains_multirange_internal(
                 &rangetyp, r, mr,
-            )))
+            )?))
         }
     };
 }
@@ -533,258 +520,258 @@ macro_rules! fc_range_contains_mr {
 fc_range_contains_mr!(fc_range_contains_multirange);
 /// `range_contained_by_multirange(anyrange, anymultirange) -> bool` (oid 4253):
 /// C calls `multirange_contains_range_internal(rngtyp, mr, r)` (mr@1, r@0).
-fn fc_range_contained_by_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_range_contained_by_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let r = getarg_range(fcinfo, m.mcx(), 0);
-    let mr = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::multirange_contains_range_internal(
+    let r = getarg_range(fcinfo, m.mcx(), 0)?;
+    let mr = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::multirange_contains_range_internal(
         &rangetyp, mr, r,
-    )))
+    )?))
 }
 
 /// `multirange_contained_by_range(anymultirange, anyrange) -> bool` (oid 4542):
 /// C calls `range_contains_multirange_internal(rngtyp, r, mr)` (mr@0, r@1).
-fn fc_multirange_contained_by_range(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_contained_by_range(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-    let r = getarg_range(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::range_contains_multirange_internal(
+    let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let r = getarg_range(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::range_contains_multirange_internal(
         &rangetyp, r, mr,
-    )))
+    )?))
 }
 
 /// `multirange_contains_multirange(anymultirange, anymultirange) -> bool` (4251).
-fn fc_multirange_contains_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_contains_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0);
-    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr1);
-    Datum::from_bool(ok(
-        crate::operators::multirange_contains_multirange_internal(&rangetyp, mr1, mr2),
+    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr1)?;
+    Ok(Datum::from_bool(
+        crate::operators::multirange_contains_multirange_internal(&rangetyp, mr1, mr2)?,
     ))
 }
 
 /// `multirange_contained_by_multirange(anymultirange, anymultirange) -> bool`
 /// (4254): C swaps the args into `multirange_contains_multirange_internal`.
-fn fc_multirange_contained_by_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_contained_by_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0);
-    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr1);
-    Datum::from_bool(ok(
-        crate::operators::multirange_contains_multirange_internal(&rangetyp, mr2, mr1),
+    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr1)?;
+    Ok(Datum::from_bool(
+        crate::operators::multirange_contains_multirange_internal(&rangetyp, mr2, mr1)?,
     ))
 }
 
 // --- overlaps --------------------------------------------------------------
 
 /// `range_overlaps_multirange(anyrange, anymultirange) -> bool` (oid 4246).
-fn fc_range_overlaps_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_range_overlaps_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let r = getarg_range(fcinfo, m.mcx(), 0);
-    let mr = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::range_overlaps_multirange_internal(
+    let r = getarg_range(fcinfo, m.mcx(), 0)?;
+    let mr = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::range_overlaps_multirange_internal(
         &rangetyp, r, mr,
-    )))
+    )?))
 }
 
 /// `multirange_overlaps_range(anymultirange, anyrange) -> bool` (oid 4247).
-fn fc_multirange_overlaps_range(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_overlaps_range(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-    let r = getarg_range(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::range_overlaps_multirange_internal(
+    let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let r = getarg_range(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::range_overlaps_multirange_internal(
         &rangetyp, r, mr,
-    )))
+    )?))
 }
 
 /// `multirange_overlaps_multirange(anymultirange, anymultirange) -> bool` (4248).
-fn fc_multirange_overlaps_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_overlaps_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0);
-    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr1);
-    Datum::from_bool(ok(
-        crate::operators::multirange_overlaps_multirange_internal(&rangetyp, mr1, mr2),
+    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr1)?;
+    Ok(Datum::from_bool(
+        crate::operators::multirange_overlaps_multirange_internal(&rangetyp, mr1, mr2)?,
     ))
 }
 
 // --- overleft / overright (range/multirange mixes) -------------------------
 
 /// `range_overleft_multirange(anyrange, anymultirange) -> bool` (oid 4264).
-fn fc_range_overleft_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_range_overleft_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let r = getarg_range(fcinfo, m.mcx(), 0);
-    let mr = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::range_overleft_multirange_internal(
+    let r = getarg_range(fcinfo, m.mcx(), 0)?;
+    let mr = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::range_overleft_multirange_internal(
         &rangetyp, r, mr,
-    )))
+    )?))
 }
 
 /// `multirange_overleft_range(anymultirange, anyrange) -> bool` (oid 4265).
-fn fc_multirange_overleft_range(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_overleft_range(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-    let r = getarg_range(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::multirange_overleft_range_internal(
+    let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let r = getarg_range(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::multirange_overleft_range_internal(
         &rangetyp, mr, r,
-    )))
+    )?))
 }
 
 /// `multirange_overleft_multirange(anymultirange, anymultirange) -> bool` (4266).
-fn fc_multirange_overleft_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_overleft_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0);
-    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr1);
-    Datum::from_bool(ok(
-        crate::operators::multirange_overleft_multirange_internal(&rangetyp, mr1, mr2),
+    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr1)?;
+    Ok(Datum::from_bool(
+        crate::operators::multirange_overleft_multirange_internal(&rangetyp, mr1, mr2)?,
     ))
 }
 
 /// `range_overright_multirange(anyrange, anymultirange) -> bool` (oid 4267).
-fn fc_range_overright_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_range_overright_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let r = getarg_range(fcinfo, m.mcx(), 0);
-    let mr = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::range_overright_multirange_internal(
+    let r = getarg_range(fcinfo, m.mcx(), 0)?;
+    let mr = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::range_overright_multirange_internal(
         &rangetyp, r, mr,
-    )))
+    )?))
 }
 
 /// `multirange_overright_range(anymultirange, anyrange) -> bool` (oid 4268).
-fn fc_multirange_overright_range(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_overright_range(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-    let r = getarg_range(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::multirange_overright_range_internal(
+    let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let r = getarg_range(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::multirange_overright_range_internal(
         &rangetyp, mr, r,
-    )))
+    )?))
 }
 
 /// `multirange_overright_multirange(anymultirange, anymultirange) -> bool` (4269).
-fn fc_multirange_overright_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_overright_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0);
-    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr1);
-    Datum::from_bool(ok(
-        crate::operators::multirange_overright_multirange_internal(&rangetyp, mr1, mr2),
+    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr1)?;
+    Ok(Datum::from_bool(
+        crate::operators::multirange_overright_multirange_internal(&rangetyp, mr1, mr2)?,
     ))
 }
 
 // --- before / after (range/multirange mixes) -------------------------------
 
 /// `range_before_multirange(anyrange, anymultirange) -> bool` (oid 4258).
-fn fc_range_before_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_range_before_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let r = getarg_range(fcinfo, m.mcx(), 0);
-    let mr = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::range_before_multirange_internal(
+    let r = getarg_range(fcinfo, m.mcx(), 0)?;
+    let mr = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::range_before_multirange_internal(
         &rangetyp, r, mr,
-    )))
+    )?))
 }
 
 /// `multirange_before_range(anymultirange, anyrange) -> bool` (oid 4259): C
 /// calls `range_after_multirange_internal(rngtyp, r, mr)` (r@1, mr@0).
-fn fc_multirange_before_range(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_before_range(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-    let r = getarg_range(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::range_after_multirange_internal(
+    let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let r = getarg_range(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::range_after_multirange_internal(
         &rangetyp, r, mr,
-    )))
+    )?))
 }
 
 /// `range_after_multirange(anyrange, anymultirange) -> bool` (oid 4261).
-fn fc_range_after_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_range_after_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let r = getarg_range(fcinfo, m.mcx(), 0);
-    let mr = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::range_after_multirange_internal(
+    let r = getarg_range(fcinfo, m.mcx(), 0)?;
+    let mr = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::range_after_multirange_internal(
         &rangetyp, r, mr,
-    )))
+    )?))
 }
 
 /// `multirange_after_range(anymultirange, anyrange) -> bool` (oid 4262): C calls
 /// `range_before_multirange_internal(rngtyp, r, mr)` (r@1, mr@0).
-fn fc_multirange_after_range(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_after_range(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-    let r = getarg_range(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::range_before_multirange_internal(
+    let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let r = getarg_range(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::range_before_multirange_internal(
         &rangetyp, r, mr,
-    )))
+    )?))
 }
 
 /// `multirange_before_multirange(anymultirange, anymultirange) -> bool` (4260).
-fn fc_multirange_before_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_before_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0);
-    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr1);
-    Datum::from_bool(ok(
-        crate::operators::multirange_before_multirange_internal(&rangetyp, mr1, mr2),
+    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr1)?;
+    Ok(Datum::from_bool(
+        crate::operators::multirange_before_multirange_internal(&rangetyp, mr1, mr2)?,
     ))
 }
 
 /// `multirange_after_multirange(anymultirange, anymultirange) -> bool` (4263): C
 /// calls `multirange_before_multirange_internal(rngtyp, mr2, mr1)`.
-fn fc_multirange_after_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_after_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0);
-    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr1);
-    Datum::from_bool(ok(
-        crate::operators::multirange_before_multirange_internal(&rangetyp, mr2, mr1),
+    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr1)?;
+    Ok(Datum::from_bool(
+        crate::operators::multirange_before_multirange_internal(&rangetyp, mr2, mr1)?,
     ))
 }
 
 // --- adjacent --------------------------------------------------------------
 
 /// `range_adjacent_multirange(anyrange, anymultirange) -> bool` (oid 4255).
-fn fc_range_adjacent_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_range_adjacent_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let r = getarg_range(fcinfo, m.mcx(), 0);
-    let mr = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::range_adjacent_multirange_internal(
+    let r = getarg_range(fcinfo, m.mcx(), 0)?;
+    let mr = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::range_adjacent_multirange_internal(
         &rangetyp, r, mr,
-    )))
+    )?))
 }
 
 /// `multirange_adjacent_range(anymultirange, anyrange) -> bool` (oid 4257): C
 /// calls `range_adjacent_multirange_internal(rngtyp, r, mr)` (r@1, mr@0).
-fn fc_multirange_adjacent_range(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_adjacent_range(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-    let r = getarg_range(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr);
-    Datum::from_bool(ok(crate::operators::range_adjacent_multirange_internal(
+    let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let r = getarg_range(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr)?;
+    Ok(Datum::from_bool(crate::operators::range_adjacent_multirange_internal(
         &rangetyp, r, mr,
-    )))
+    )?))
 }
 
 /// `multirange_adjacent_multirange(anymultirange, anymultirange) -> bool` (4256).
-fn fc_multirange_adjacent_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_multirange_adjacent_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0);
-    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1);
-    let rangetyp = rangetyp_of(mr1);
-    Datum::from_bool(ok(
-        crate::operators::multirange_adjacent_multirange_internal(&rangetyp, mr1, mr2),
+    let mr1 = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let mr2 = getarg_multirange(fcinfo, m.mcx(), 1)?;
+    let rangetyp = rangetyp_of(mr1)?;
+    Ok(Datum::from_bool(
+        crate::operators::multirange_adjacent_multirange_internal(&rangetyp, mr1, mr2)?,
     ))
 }
 
@@ -796,13 +783,13 @@ fn fc_multirange_adjacent_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> D
 /// `fn(Mcx, &TypeCacheEntry, MultirangeTypeP, MultirangeTypeP) -> PgResult<MultirangeTypeP>`.
 macro_rules! fc_mr_setop {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
             let m = scratch_mcx();
-            let mr1 = getarg_multirange(fcinfo, m.mcx(), 0);
-            let mr2 = getarg_multirange(fcinfo, m.mcx(), 1);
-            let rangetyp = rangetyp_of(mr1);
-            let out = ok($core(m.mcx(), &rangetyp, mr1, mr2));
-            ret_multirange(fcinfo, out)
+            let mr1 = getarg_multirange(fcinfo, m.mcx(), 0)?;
+            let mr2 = getarg_multirange(fcinfo, m.mcx(), 1)?;
+            let rangetyp = rangetyp_of(mr1)?;
+            let out = $core(m.mcx(), &rangetyp, mr1, mr2)?;
+            Ok(ret_multirange(fcinfo, out))
         }
     };
 }
@@ -815,16 +802,16 @@ fc_mr_setop!(
 );
 
 /// `range_merge_from_multirange(anymultirange) -> anyrange` (oid 4228).
-fn fc_range_merge_from_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_range_merge_from_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let mr = getarg_multirange(fcinfo, m.mcx(), 0);
-    let rangetyp = rangetyp_of(mr);
-    let r = ok(crate::setops_ordering_agg::range_merge_from_multirange(
+    let mr = getarg_multirange(fcinfo, m.mcx(), 0)?;
+    let rangetyp = rangetyp_of(mr)?;
+    let r = crate::setops_ordering_agg::range_merge_from_multirange(
         m.mcx(),
         &rangetyp,
         mr,
-    ));
-    ret_range(fcinfo, r)
+    )?;
+    Ok(ret_range(fcinfo, r))
 }
 
 // ---------------------------------------------------------------------------
@@ -837,16 +824,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the expressible `multirangetypes.c` builtins (C: their
@@ -865,7 +855,7 @@ fn builtin(
 ///   `internal` (`VacAttrStats`/`PlannerInfo`/`GISTENTRY`) executor-owned scratch
 ///   struct, not expressible on the by-ref boundary.
 pub fn register_multirangetypes_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // I/O: cstring/internal/bytea <-> anymultirange.
         builtin(4231, "multirange_in", 3, true, false, fc_multirange_in),
         builtin(4232, "multirange_out", 1, true, false, fc_multirange_out),
@@ -1067,8 +1057,8 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
-        (entry.func.unwrap())(&mut fcinfo).as_bool()
+        let native = backend_utils_fmgr_core::native_builtin(oid).expect("builtin registered native");
+        native(&mut fcinfo).expect("cmp ok").as_bool()
     }
 
     fn call_mr_cmp_i32(oid: u32, a: &[u8], b: &[u8]) -> i32 {
@@ -1082,8 +1072,8 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
-        (entry.func.unwrap())(&mut fcinfo).as_i32()
+        let native = backend_utils_fmgr_core::native_builtin(oid).expect("builtin registered native");
+        native(&mut fcinfo).expect("cmp ok").as_i32()
     }
 
     fn call_mr_pred(oid: u32, a: &[u8]) -> bool {
@@ -1091,8 +1081,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a.to_vec()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
-        (entry.func.unwrap())(&mut fcinfo).as_bool()
+        let native = backend_utils_fmgr_core::native_builtin(oid).expect("builtin registered native");
+        native(&mut fcinfo).expect("pred ok").as_bool()
     }
 
     #[test]
