@@ -15,7 +15,7 @@
 //! expressible through the scalar fmgr-builtin boundary.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Result writers.
@@ -33,8 +33,8 @@ fn ret_bool(v: types_tuple::Datum<'static>) -> Datum {
 // ---------------------------------------------------------------------------
 
 /// `pg_numa_available()` — no args, returns `bool`.
-fn fc_pg_numa_available(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::pg_numa_available())
+fn fc_pg_numa_available(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::pg_numa_available()))
 }
 
 // ---------------------------------------------------------------------------
@@ -47,23 +47,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every scalar `shmem.c` builtin (C: their `fmgr_builtins[]` rows).
 /// Called from this crate's `init_seams()`. OIDs/nargs/strict/retset from
 /// `pg_proc.dat`.
 pub fn register_backend_storage_ipc_shmem_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // pg_numa_available: proargtypes='' (0 args), prorettype=bool,
         // no proisstrict (=> not strict), no proretset (=> not set-returning).
         builtin(4099, "pg_numa_available", 0, true, false, fc_pg_numa_available),
