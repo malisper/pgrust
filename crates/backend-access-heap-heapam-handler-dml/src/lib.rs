@@ -1,10 +1,10 @@
 //! `access/heap/heapam_handler.c` — the physical-tuple-modification half of the
 //! heap AM's `TableAmRoutine` vtable: `heapam_tuple_insert` /
-//! `heapam_tuple_delete` / `heapam_tuple_update` and the storage-creation
-//! callback `heapam_relation_set_new_filelocator`.
+//! `heapam_tuple_delete` / `heapam_tuple_update` / `heapam_tuple_lock` and the
+//! storage-creation callback `heapam_relation_set_new_filelocator`.
 //!
 //! These are the DML marshalling wrappers around the already-ported heap modify
-//! core (`heap_insert` / `heap_delete` / `heap_update`,
+//! core (`heap_insert` / `heap_delete` / `heap_update` / `heap_lock_tuple`,
 //! `backend-access-heap-heapam`, a direct dep — this crate sits one layer above
 //! heapam, so the edge is acyclic) plus the slot→tuple bridge
 //! (`ExecFetchSlotHeapTuple`). The heapam-handler **core** crate populates the
@@ -12,14 +12,16 @@
 //! `backend-access-heap-heapam-handler-dml-seams`; this crate installs those
 //! seams from `init_seams()`, retiring their latent panics.
 //!
-//! `heapam_tuple_lock` is NOT installed here: its success path must store the
-//! locked tuple into a `BufferHeapTupleTableSlot` via
-//! `ExecStorePinnedBufferHeapTuple`, which consumes a `FormedTuple`, but
-//! `heap_lock_tuple` returns a by-reference on-page `HeapTupleData` (header +
-//! pin, no separate user-data carrier). Bridging the two requires widening
-//! `HeapLockResult` to carry a `FormedTuple` — a heapam.c change (the
-//! FormedTuple-carrier keystone) outside this stage. The seam stays declared
-//! and allowlisted until that keystone lands.
+//! `heapam_tuple_lock` runs `heap_lock_tuple` plus the
+//! `TUPLE_LOCK_FLAG_FIND_LAST_VERSION` update-chain follow loop (`heap_fetch`
+//! under a fresh DIRTY snapshot, `XactLockTableWait` /
+//! `ConditionalXactLockTableWait` on a conflicting locker), then stores the
+//! locked tuple into the `BufferHeapTupleTableSlot` via
+//! `ExecStorePinnedBufferHeapTuple`. Rust's `heap_lock_tuple` returns the locked
+//! tuple's header + the pinned buffer (`HeapLockResult`), so the success path
+//! re-materializes the full on-page `FormedTuple` (header + user-data) from the
+//! still-pinned buffer at `tuple.t_self` before the store — behaviorally the
+//! same as C, which stores the page-aliasing `t_data` under the transferred pin.
 //!
 //! The storage-creation leg of `heapam_relation_set_new_filelocator`
 //! (`RelationCreateStorage` returning a transient `SMgrRelation`, the unlogged
@@ -30,20 +32,33 @@
 #![allow(non_snake_case)]
 
 use mcx::Mcx;
-use types_core::xact::CommandId;
-use types_error::PgResult;
+use types_core::primitive::TransactionId;
+use types_core::xact::{CommandId, InvalidTransactionId};
+use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_T_R_SERIALIZATION_FAILURE};
 use types_rel::Relation;
 use types_slot::SlotData;
-use types_storage::RelFileLocator;
+use types_storage::lock::XLTW_Oper;
+use types_storage::{Buffer, RelFileLocator};
 use types_tableam::tableam::{
-    BulkInsertStateData, LockTupleMode, Snapshot, TM_FailureData, TM_Result, TU_UpdateIndexes,
+    BulkInsertStateData, LockTupleMode, LockWaitPolicy, Snapshot, TM_FailureData, TM_Result,
+    TU_UpdateIndexes, TUPLE_LOCK_FLAG_FIND_LAST_VERSION, TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS,
 };
 use types_tuple::backend_access_common_heaptuple::FormedTuple;
 use types_tuple::heaptuple::{HeapTupleHeaderData, ItemPointerData};
 
 use backend_access_heap_heapam as heapam;
 use backend_access_heap_heapam_seams::HeapUpdateResult;
+use backend_access_heap_heapam_visibility::htup::{
+    HeapTupleHeaderGetXmin, HeapTupleHeaderIsSpeculative, ItemPointerEquals,
+};
+use backend_access_heap_heapam_visibility::HeapTupleHeaderGetUpdateXid;
 use backend_executor_execTuples_seams as slot_seam;
+use backend_storage_buffer_bufmgr_seams as bufmgr_seam;
+use backend_storage_page::{
+    ItemIdGetLength, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber,
+    ItemPointerIndicatesMovedPartitions, PageGetItem, PageGetItemId, PageRef,
+};
+use backend_utils_time_combocid_seams as combocid_seam;
 
 /// `td.t_data` as `&HeapTupleHeaderData` (the header is always present on a
 /// formed heap tuple).
@@ -214,6 +229,321 @@ fn heapam_tuple_update<'mcx>(
 }
 
 // ===========================================================================
+// tuple_lock
+// ===========================================================================
+
+/// `TransactionIdIsValid(xid)` — `xid != InvalidTransactionId`.
+#[inline]
+fn transaction_id_is_valid(xid: TransactionId) -> bool {
+    xid != InvalidTransactionId
+}
+
+/// `TransactionIdEquals(x, y)`.
+#[inline]
+fn transaction_id_equals(x: TransactionId, y: TransactionId) -> bool {
+    x == y
+}
+
+/// `TransactionIdIsCurrentTransactionId(xid)` via the xact owner seam.
+#[inline]
+fn transaction_id_is_current_transaction_id(xid: TransactionId) -> bool {
+    backend_access_transam_xact_seams::transaction_id_is_current_transaction_id::call(xid)
+}
+
+/// Materialize the full on-page tuple (header incl. its null bitmap + user-data
+/// area) at `(buffer, tid)` into an owned [`FormedTuple`], reading the page under
+/// the pin the caller already holds. This is the owned rendering of C storing
+/// the page-aliasing `t_data`/`t_len` (left set by `heap_lock_tuple`) into the
+/// slot under the transferred buffer pin: C reads the on-page bytes lock-free
+/// (pin only) at store time, and so do we.
+fn materialize_on_page_formed<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel_id: types_core::primitive::Oid,
+    buffer: Buffer,
+    tid: ItemPointerData,
+) -> PgResult<FormedTuple<'mcx>> {
+    let block = ItemPointerGetBlockNumber(&tid);
+    let offnum = ItemPointerGetOffsetNumber(&tid);
+    let mut out: Option<FormedTuple<'mcx>> = None;
+    bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
+        let page = PageRef::new(page_bytes)?;
+        let item_id = PageGetItemId(&page, offnum)?;
+        let item = PageGetItem(&page, &item_id)?;
+        let len = ItemIdGetLength(&item_id) as usize;
+        out = Some(FormedTuple::read_on_page_full(
+            mcx,
+            &item[..len],
+            block,
+            offnum,
+            rel_id,
+        )?);
+        Ok(())
+    })?;
+    Ok(out.expect("with_buffer_page closure must have run"))
+}
+
+/// `heapam_tuple_lock(relation, tid, snapshot, slot, cid, mode, wait_policy,
+/// flags, tmfd)` (heapam_handler.c): lock the tuple at `tid` with
+/// `heap_lock_tuple`, optionally chasing the update chain forward to the latest
+/// row version (`TUPLE_LOCK_FLAG_FIND_LAST_VERSION`), and store the locked tuple
+/// into the buffer slot. `snapshot` is unused by the heap implementation (the
+/// chase uses its own DIRTY snapshot). Mirrors the C control flow: a
+/// `tuple_lock_retry` outer loop around `heap_lock_tuple`, and, on a
+/// `TM_Updated` result under FIND_LAST_VERSION, an inner DIRTY-snapshot fetch
+/// loop that walks `t_ctid` forward and waits on conflicting lockers.
+#[allow(clippy::too_many_arguments)]
+fn heapam_tuple_lock<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'mcx>,
+    tid: &ItemPointerData,
+    _snapshot: &Snapshot,
+    slot: &mut SlotData<'mcx>,
+    cid: CommandId,
+    mode: LockTupleMode,
+    wait_policy: LockWaitPolicy,
+    flags: u8,
+    tmfd: &mut TM_FailureData,
+) -> PgResult<TM_Result> {
+    // follow_updates = (flags & TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS) != 0;
+    let follow_updates = (flags & TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS) != 0;
+    tmfd.traversed = false;
+
+    // C mutates `*tid` across the chase; we track the working tid locally.
+    let mut cur_tid = *tid;
+
+    // The locked tuple's header + pinned buffer that we ultimately store. C's
+    // `tuple` aliases `bslot->base.tupdata`, left pointing at the on-page tuple
+    // by heap_lock_tuple; `buffer` is the pin heap_lock_tuple returned.
+    let result: TM_Result;
+    let final_buffer: Buffer;
+
+    // tuple_lock_retry: ... goto tuple_lock_retry;
+    'tuple_lock_retry: loop {
+        // tuple->t_self = *tid;
+        let lr = heapam::lock::heap_lock_tuple(
+            mcx,
+            relation,
+            cur_tid,
+            cid,
+            mode,
+            wait_policy,
+            follow_updates,
+        )?;
+        let res = lr.result;
+        let buffer = lr.buffer;
+        // heap_lock_tuple fills *tmfd on the failure paths.
+        *tmfd = lr.tmfd;
+        // The header heap_lock_tuple left (t_self == cur_tid).
+        let mut locked_hdr = lr.tuple;
+        locked_hdr.t_self = cur_tid;
+
+        if res == TM_Result::TM_Updated && (flags & TUPLE_LOCK_FLAG_FIND_LAST_VERSION) != 0 {
+            // Should not encounter speculative tuple on recheck.
+            debug_assert!(!HeapTupleHeaderIsSpeculative(
+                locked_hdr
+                    .t_data
+                    .as_ref()
+                    .expect("locked tuple has no header")
+            ));
+
+            bufmgr_seam::release_buffer::call(buffer);
+
+            if ItemPointerEquals(&tmfd.ctid, &locked_hdr.t_self) {
+                // tuple was deleted, so give up
+                return Ok(TM_Result::TM_Deleted);
+            }
+
+            // it was updated, so look at the updated version
+            cur_tid = tmfd.ctid;
+            // updated row should have xmin matching this xmax
+            let mut prior_xmax = tmfd.xmax;
+            // signal that a tuple later in the chain is getting locked
+            tmfd.traversed = true;
+
+            // fetch target tuple — loop to deal with updated or busy tuples.
+            // (InitDirtySnapshot lives inside heap_fetch_dirty, which mints a
+            // fresh SNAPSHOT_DIRTY per fetch and returns the stamped xmin/xmax.)
+            'chase: loop {
+                if ItemPointerIndicatesMovedPartitions(&cur_tid) {
+                    return Err(PgError::error(
+                        "tuple to be locked was already moved to another partition due to concurrent update",
+                    )
+                    .with_sqlstate(ERRCODE_T_R_SERIALIZATION_FAILURE)
+                    .into());
+                }
+
+                let fetched =
+                    heapam::fetch::heap_fetch_dirty(mcx, relation, cur_tid)?;
+                let fetch_buffer = fetched.userbuf;
+
+                if fetched.found {
+                    let ftup = fetched
+                        .tuple
+                        .as_ref()
+                        .expect("heap_fetch_dirty found==true must carry the tuple");
+                    let fhdr = ftup
+                        .tuple
+                        .t_data
+                        .as_ref()
+                        .expect("fetched tuple has no header");
+
+                    // If xmin isn't what we're expecting, the slot was recycled
+                    // for an unrelated tuple: the latest version was deleted,
+                    // so do nothing.
+                    if !transaction_id_equals(HeapTupleHeaderGetXmin(fhdr), prior_xmax) {
+                        bufmgr_seam::release_buffer::call(fetch_buffer);
+                        return Ok(TM_Result::TM_Deleted);
+                    }
+
+                    // otherwise xmin should not be dirty...
+                    if transaction_id_is_valid(fetched.snapshot_xmin) {
+                        let self_tid = ftup.tuple.t_self;
+                        bufmgr_seam::release_buffer::call(fetch_buffer);
+                        return Err(PgError::error(format!(
+                            "t_xmin {} is uncommitted in tuple ({},{}) to be updated in table \"{}\"",
+                            fetched.snapshot_xmin,
+                            ItemPointerGetBlockNumber(&self_tid),
+                            ItemPointerGetOffsetNumber(&self_tid),
+                            relation.rd_rel.relname.as_str(),
+                        ))
+                        .with_sqlstate(ERRCODE_DATA_CORRUPTED)
+                        .into());
+                    }
+
+                    // If the tuple is being updated by another transaction we
+                    // must wait for its commit/abort, or die trying.
+                    if transaction_id_is_valid(fetched.snapshot_xmax) {
+                        let snap_xmax = fetched.snapshot_xmax;
+                        let self_tid = ftup.tuple.t_self;
+                        bufmgr_seam::release_buffer::call(fetch_buffer);
+                        match wait_policy {
+                            LockWaitPolicy::LockWaitBlock => {
+                                heapam::lock::xact_lock_table_wait(
+                                    snap_xmax,
+                                    relation,
+                                    self_tid,
+                                    XLTW_Oper::FetchUpdated,
+                                )?;
+                            }
+                            LockWaitPolicy::LockWaitSkip => {
+                                if !backend_storage_lmgr_lmgr_seams::conditional_xact_lock_table_wait::call(
+                                    snap_xmax, false,
+                                )? {
+                                    // skip instead of waiting
+                                    return Ok(TM_Result::TM_WouldBlock);
+                                }
+                            }
+                            LockWaitPolicy::LockWaitError => {
+                                if !backend_storage_lmgr_lmgr_seams::conditional_xact_lock_table_wait::call(
+                                    snap_xmax,
+                                    log_lock_failures(),
+                                )? {
+                                    return Err(PgError::error(format!(
+                                        "could not obtain lock on row in relation \"{}\"",
+                                        relation.rd_rel.relname.as_str(),
+                                    ))
+                                    .with_sqlstate(types_error::ERRCODE_LOCK_NOT_AVAILABLE)
+                                    .into());
+                                }
+                            }
+                        }
+                        // loop back to repeat heap_fetch
+                        continue 'chase;
+                    }
+
+                    // If the tuple was inserted by our own transaction, check
+                    // cmin against cid: cmin >= current CID means our command
+                    // cannot see the tuple, so ignore it. We just checked
+                    // priorXmax == xmin, so test priorXmax instead of re-reading
+                    // xmin.
+                    if transaction_id_is_current_transaction_id(prior_xmax)
+                        && combocid_seam::heap_tuple_header_get_cmin::call(fhdr) >= cid
+                    {
+                        tmfd.xmax = prior_xmax;
+                        // Cmin is the problematic value, so store that.
+                        tmfd.cmax = combocid_seam::heap_tuple_header_get_cmin::call(fhdr);
+                        bufmgr_seam::release_buffer::call(fetch_buffer);
+                        return Ok(TM_Result::TM_SelfModified);
+                    }
+
+                    // This is a live tuple, so try to lock it again.
+                    bufmgr_seam::release_buffer::call(fetch_buffer);
+                    cur_tid = ftup.tuple.t_self;
+                    continue 'tuple_lock_retry;
+                }
+
+                // Not found (DIRTY-invisible) but kept the pin (keep_buf=true),
+                // unless the line pointer was empty (tuple == None).
+                let ftup = match fetched.tuple.as_ref() {
+                    // If the referenced slot was actually empty, the latest
+                    // version was deleted, so do nothing. (C: tuple->t_data ==
+                    // NULL, buffer invalid.)
+                    None => {
+                        debug_assert!(!types_storage::BufferIsValid(fetch_buffer));
+                        return Ok(TM_Result::TM_Deleted);
+                    }
+                    Some(t) => t,
+                };
+                let fhdr = ftup
+                    .tuple
+                    .t_data
+                    .as_ref()
+                    .expect("fetched tuple has no header");
+
+                // As above, if xmin isn't what we're expecting, do nothing.
+                if !transaction_id_equals(HeapTupleHeaderGetXmin(fhdr), prior_xmax) {
+                    bufmgr_seam::release_buffer::call(fetch_buffer);
+                    return Ok(TM_Result::TM_Deleted);
+                }
+
+                // The tuple was found but failed SnapshotDirty: it was updated
+                // or deleted by a committed xact or our own xact. If deleted,
+                // ignore; if updated, chain to the next version and repeat.
+                // Examining xmax / t_ctid without the content lock is safe under
+                // the buffer pin (they can't be changing).
+                if ItemPointerEquals(&ftup.tuple.t_self, &fhdr.t_ctid) {
+                    // deleted, so forget about it
+                    bufmgr_seam::release_buffer::call(fetch_buffer);
+                    return Ok(TM_Result::TM_Deleted);
+                }
+
+                // updated, so look at the updated row
+                cur_tid = fhdr.t_ctid;
+                // updated row should have xmin matching this xmax
+                prior_xmax = HeapTupleHeaderGetUpdateXid(fhdr)?;
+                bufmgr_seam::release_buffer::call(fetch_buffer);
+                // loop back to fetch next in chain
+            }
+        }
+
+        // Success (or a non-chased failure result): store the locked tuple.
+        result = res;
+        final_buffer = buffer;
+        break 'tuple_lock_retry;
+    }
+
+    // slot->tts_tableOid = RelationGetRelid(relation);
+    slot.base_mut().tts_tableOid = relation.rd_id;
+
+    // Materialize the locked tuple (heap_lock_tuple left it on the still-pinned
+    // page at cur_tid) and store it, transferring the existing pin. t_tableOid
+    // is stamped by ExecStorePinnedBufferHeapTuple from the tuple's header, so
+    // set it on the materialized FormedTuple to match C's `tuple->t_tableOid =
+    // slot->tts_tableOid`.
+    let mut formed = materialize_on_page_formed(mcx, relation.rd_id, final_buffer, cur_tid)?;
+    formed.tuple.t_tableOid = relation.rd_id;
+
+    slot_seam::exec_store_pinned_buffer_heap_tuple::call(formed, slot, final_buffer)?;
+
+    Ok(result)
+}
+
+/// `log_lock_failures` GUC (heapam.c reads it for the LockWaitError wait path).
+fn log_lock_failures() -> bool {
+    backend_utils_misc_guc_tables::vars::log_lock_failures.read()
+}
+
+// ===========================================================================
 // relation_set_new_filelocator
 // ===========================================================================
 
@@ -242,14 +572,15 @@ fn heapam_relation_set_new_filelocator(
 // init_seams
 // ===========================================================================
 
-/// Install the DML tuple-modification seams the heapam-handler core `::call`s.
-/// `heapam_tuple_lock` is intentionally not installed (FormedTuple-carrier
-/// keystone, see the module note); it stays allowlisted.
+/// Install the DML tuple-modification seams the heapam-handler core `::call`s,
+/// including `heapam_tuple_lock` (the heap row-lock + FIND_LAST_VERSION
+/// update-chase path).
 pub fn init_seams() {
     use backend_access_heap_heapam_handler_dml_seams as sx;
     sx::heapam_tuple_insert::set(heapam_tuple_insert);
     sx::heapam_multi_insert::set(heapam_multi_insert);
     sx::heapam_tuple_delete::set(heapam_tuple_delete);
     sx::heapam_tuple_update::set(heapam_tuple_update);
+    sx::heapam_tuple_lock::set(heapam_tuple_lock);
     sx::heapam_relation_set_new_filelocator::set(heapam_relation_set_new_filelocator);
 }

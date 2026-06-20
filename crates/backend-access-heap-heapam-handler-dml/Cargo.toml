@@ -34,3 +34,4 @@ backend-access-transam-multixact-seams = { path = "../backend-access-transam-mul
 backend-utils-time-combocid-seams = { path = "../backend-utils-time-combocid-seams" }
 backend-utils-time-snapmgr = { path = "../backend-utils-time-snapmgr" }
 backend-storage-page = { path = "../backend-storage-page" }
+backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }

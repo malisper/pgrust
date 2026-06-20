@@ -46,7 +46,7 @@ use backend_storage_page::{
     PageGetMaxOffsetNumber, PageRef,
 };
 
-use backend_access_heap_heapam_seams::{HeapFetchResult, HotSearchResult};
+use backend_access_heap_heapam_seams::{HeapDirtyFetchResult, HeapFetchResult, HotSearchResult};
 use backend_access_heap_heapam_visibility::htup::{
     HeapTupleHeaderGetXmin, HeapTupleHeaderXminInvalid, ItemPointerEquals, ItemPointerIsValid,
 };
@@ -232,6 +232,85 @@ pub fn heap_fetch<'mcx>(
         bufmgr_seam::release_buffer::call(buffer);
         Ok(not_found(InvalidBuffer))
     }
+}
+
+/// `heap_fetch(relation, &SnapshotDirty, tuple, &buffer, true)` (heapam.c)
+/// specialized for the `heapam_tuple_lock` FIND_LAST_VERSION chase. Identical to
+/// [`heap_fetch`] with a fresh `SNAPSHOT_DIRTY` snapshot and `keep_buf = true`,
+/// but threads that dirty snapshot **mutably** through
+/// [`HeapTupleSatisfiesVisibility`] so `HeapTupleSatisfiesDirty` can stamp
+/// `snapshot.xmin`/`snapshot.xmax` (the in-progress inserter/deleter xids the
+/// chase loop inspects), and returns those stamped fields. C's
+/// `InitDirtySnapshot(SnapshotDirty)` is the zeroed `SNAPSHOT_DIRTY` sentinel.
+pub fn heap_fetch_dirty<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'mcx>,
+    tid: ItemPointerData,
+) -> PgResult<HeapDirtyFetchResult<'mcx>> {
+    use types_snapshot::snapshot::SnapshotType;
+
+    let relid = relation.rd_id;
+
+    // InitDirtySnapshot(SnapshotDirty): zeroed SNAPSHOT_DIRTY (xmin == xmax ==
+    // InvalidTransactionId). HeapTupleSatisfiesDirty writes xmin/xmax back.
+    let mut snapshot = SnapshotData::sentinel(SnapshotType::SNAPSHOT_DIRTY);
+
+    let not_found = |userbuf: Buffer, snapshot: &SnapshotData| HeapDirtyFetchResult {
+        found: false,
+        userbuf,
+        tuple: None,
+        snapshot_xmin: snapshot.xmin,
+        snapshot_xmax: snapshot.xmax,
+    };
+
+    // Fetch and pin the appropriate page of the relation.
+    let buffer = bufmgr_seam::read_buffer::call(relation, ItemPointerGetBlockNumber(&tid))?;
+
+    // Need share lock on buffer to examine tuple commit status.
+    bufmgr_seam::lock_buffer::call(buffer, BUFFER_LOCK_SHARE)?;
+
+    // Out-of-range offnum guard (VACUUM may have shrunk the page).
+    let offnum = ItemPointerGetOffsetNumber(&tid);
+    let max = page_get_max_offset_number(buffer)?;
+    if offnum < FirstOffsetNumber || offnum > max {
+        unlock_release(buffer)?;
+        return Ok(not_found(InvalidBuffer, &snapshot));
+    }
+
+    // Read the line pointer; must check for a deleted (non-normal) tuple.
+    let block = ItemPointerGetBlockNumber(&tid);
+    let mut tuple = match read_page_item(mcx, buffer, block, offnum, relid)? {
+        PageItem::Normal(t) => t,
+        PageItem::Redirected(_) | PageItem::Dead => {
+            unlock_release(buffer)?;
+            return Ok(not_found(InvalidBuffer, &snapshot));
+        }
+    };
+    tuple.tuple.t_self = tid;
+
+    // check tuple visibility (DIRTY: stamps snapshot.xmin/xmax), then release lock
+    let valid = HeapTupleSatisfiesVisibility(&mut tuple.tuple, &mut snapshot, buffer)?;
+
+    if valid {
+        let xmin = HeapTupleHeaderGetXmin(data_ref(&tuple));
+        predicate_seam::predicate_lock_tid::call(relid, tuple.tuple.t_self, &snapshot, xmin)?;
+    }
+
+    predicate_seam::heap_check_for_serializable_conflict_out::call(
+        valid, relid, &tuple.tuple, buffer, &snapshot,
+    )?;
+
+    bufmgr_seam::lock_buffer::call(buffer, BUFFER_LOCK_UNLOCK)?;
+
+    // keep_buf = true: the buffer stays pinned regardless of visibility so the
+    // caller can inspect the materialized tuple under the pin.
+    Ok(HeapDirtyFetchResult {
+        found: valid,
+        userbuf: buffer,
+        tuple: Some(tuple),
+        snapshot_xmin: snapshot.xmin,
+        snapshot_xmax: snapshot.xmax,
+    })
 }
 
 /// `heap_hot_search_buffer(tid, relation, buffer, snapshot, heapTuple,

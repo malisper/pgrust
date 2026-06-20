@@ -553,6 +553,12 @@ pub fn init_seams() {
     heapam_seam::heap_fetch::set(|mcx, relation, snapshot, tid, keep_buf| {
         fetch::heap_fetch(mcx, relation, snapshot, tid, keep_buf)
     });
+    // `heap_fetch_dirty` — the DIRTY-snapshot variant the heapam-handler DML
+    // `heapam_tuple_lock` FIND_LAST_VERSION chase consumes (returns the stamped
+    // SnapshotDirty.xmin/xmax).
+    heapam_seam::heap_fetch_dirty::set(|mcx, relation, tid| {
+        fetch::heap_fetch_dirty(mcx, relation, tid)
+    });
     heapam_seam::heap_hot_search_buffer::set(
         |mcx, tid, rel, buf, snapshot, want_all_dead, first_call| {
             fetch::heap_hot_search_buffer(mcx, tid, rel, buf, snapshot, want_all_dead, first_call)

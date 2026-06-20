@@ -267,6 +267,47 @@ seam_core::seam!(
     ) -> PgResult<HeapFetchResult<'mcx>>
 );
 
+/// The result of [`heap_fetch_dirty`] — like [`HeapFetchResult`] but also
+/// surfaces the `SnapshotDirty.xmin`/`SnapshotDirty.xmax` the DIRTY-snapshot
+/// visibility test wrote back. C reaches these by passing `&SnapshotDirty` (a
+/// caller-local `SnapshotData`) to `heap_fetch`, which dispatches
+/// `HeapTupleSatisfiesDirty` and lets it stamp `snapshot->xmin`/`xmax`; the
+/// owned `heap_fetch` clones the snapshot internally, so this dedicated variant
+/// returns the two stamped fields explicitly.
+#[derive(Clone, Debug)]
+pub struct HeapDirtyFetchResult<'mcx> {
+    /// C's `bool` return: the tuple at `tid` exists and is DIRTY-visible.
+    pub found: bool,
+    /// C's `*userbuf` — pinned on success / `keep_buf`, else `InvalidBuffer`.
+    pub userbuf: Buffer,
+    /// C's `*tuple` — the materialized on-page tuple, or `None` (the C
+    /// `t_data == NULL` "not found" sentinel).
+    pub tuple: Option<FormedTuple<'mcx>>,
+    /// `SnapshotDirty.xmin` after the DIRTY visibility test (an in-progress
+    /// inserter's xid, or `InvalidTransactionId`).
+    pub snapshot_xmin: TransactionId,
+    /// `SnapshotDirty.xmax` after the DIRTY visibility test (an in-progress
+    /// deleter/updater's xid, or `InvalidTransactionId`).
+    pub snapshot_xmax: TransactionId,
+}
+
+seam_core::seam!(
+    /// `heap_fetch(relation, &SnapshotDirty, tuple, userbuf, keep_buf=true)`
+    /// (heapam.c) specialized for the `heapam_tuple_lock` FIND_LAST_VERSION
+    /// update-chain chase, where the caller needs the `SnapshotDirty.xmin` /
+    /// `SnapshotDirty.xmax` the DIRTY visibility test stamps (to detect an
+    /// uncommitted inserter and an in-progress updater of the chased tuple).
+    /// Behaves exactly like [`heap_fetch`] with a fresh `SNAPSHOT_DIRTY`
+    /// snapshot and `keep_buf = true`, additionally returning the stamped
+    /// `xmin`/`xmax`. `Err` carries the clog/multixact/buffer `ereport(ERROR)`
+    /// surface. **Owned by the heapam scan family (heapam.c).**
+    pub fn heap_fetch_dirty<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: &Relation<'mcx>,
+        tid: ItemPointerData,
+    ) -> PgResult<HeapDirtyFetchResult<'mcx>>
+);
+
 seam_core::seam!(
     /// `heap_hot_search_buffer(tid, rel, buf, snapshot, heapTuple, all_dead,
     /// first_call)` (heapam.c) — search the HOT chain rooted at `tid` (on the

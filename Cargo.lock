@@ -1581,6 +1581,7 @@ dependencies = [
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-lmgr-lmgr-seams",
  "backend-storage-page",
+ "backend-utils-misc-guc-tables",
  "backend-utils-time-combocid-seams",
  "backend-utils-time-snapmgr",
  "mcx",
