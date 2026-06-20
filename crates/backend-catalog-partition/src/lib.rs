@@ -75,7 +75,7 @@ use backend_utils_cache_syscache_seams as syscache_seams;
 /// attribute number minus one; the offset that turns a (possibly system)
 /// attno into a non-negative bitmapset index in the `pull_varattnos` /
 /// `has_partition_attrs` convention.
-const FirstLowInvalidHeapAttributeNumber: i32 = -8;
+const FirstLowInvalidHeapAttributeNumber: i32 = -7;
 
 /// `(Form_pg_inherits) GETSTRUCT(tup)` — interpret one deformed pg_inherits row.
 /// Every pg_inherits column is fixed-width and NOT NULL.
@@ -535,10 +535,10 @@ pub fn update_default_partition_oid(parentId: Oid, defaultPartId: Oid) -> PgResu
     // table_close(pg_partitioned_table, RowExclusiveLock);
     //
     // The whole open / syscache-copy / in-place partdefid write / form-and-
-    // CatalogTupleUpdate / freetuple / close sequence rides on the heap-tuple
-    // value layer and the RowExclusiveLock lifetime — it is the catalog-write
-    // half (catalog/indexing.c owns CatalogTupleUpdate), which performs the
-    // cache-lookup-failure elog itself.
+    // CatalogTupleUpdate / freetuple / close sequence is the catalog-write half
+    // (catalog/indexing.c owns CatalogTupleUpdate); the body is installed from
+    // backend-catalog-indexing (which owns the RowExclusiveLock write
+    // substrate) and performs the cache-lookup-failure elog itself.
     syscache_seams::update_default_partition_oid::call(parentId, defaultPartId)
 }
 

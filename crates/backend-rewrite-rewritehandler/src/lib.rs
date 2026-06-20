@@ -68,7 +68,7 @@ pub use seams::init_seams;
 /// `FirstLowInvalidHeapAttributeNumber` (access/sysattr.h). Consumed by the
 /// view-column-set family (`view_cols_are_auto_updatable` /
 /// `adjust_view_column_set`), used by `relation_is_updatable`.
-pub(crate) const FirstLowInvalidHeapAttributeNumber: i32 = -8;
+pub(crate) const FirstLowInvalidHeapAttributeNumber: i32 = -7;
 
 /// `ATTRIBUTE_GENERATED_VIRTUAL` (catalog/pg_attribute.h).
 pub(crate) const ATTRIBUTE_GENERATED_VIRTUAL: i8 = b'v' as i8;

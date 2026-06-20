@@ -134,8 +134,8 @@ const REPLICA_IDENTITY_FULL: u8 = b'f';
 /// `MAX_RELCACHE_INVAL_MSGS` (`commands/publicationcmds.h`).
 const MAX_RELCACHE_INVAL_MSGS: usize = 4096;
 
-/// `FirstLowInvalidHeapAttributeNumber` (`access/sysattr.h`) = -8.
-const FirstLowInvalidHeapAttributeNumber: i32 = -8;
+/// `FirstLowInvalidHeapAttributeNumber` (`access/sysattr.h`) = -7.
+const FirstLowInvalidHeapAttributeNumber: i32 = -7;
 
 /// `PUBLISH_GENCOLS_NONE` ('n') / `PUBLISH_GENCOLS_STORED` ('s')
 /// (`catalog/pg_publication.h`).
