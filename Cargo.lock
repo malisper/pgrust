@@ -4836,6 +4836,7 @@ dependencies = [
  "backend-catalog-pg-conversion-seams",
  "backend-catalog-pg-namespace-seams",
  "backend-commands-dbcommands-seams",
+ "backend-commands-matview-deps-seams",
  "backend-commands-tablecmds-seams",
  "backend-commands-vacuum-seams",
  "backend-storage-ipc-dsm-core-seams",

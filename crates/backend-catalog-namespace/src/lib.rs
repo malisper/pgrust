@@ -142,6 +142,23 @@ pub fn init_seams() {
     backend_catalog_namespace_seams::range_var_get_relid_maintains_table::set(
         crate::RangeVarGetRelidMaintainsTable,
     );
+    // REFRESH MATERIALIZED VIEW (matview.c ExecRefreshMatView) resolves+locks its
+    // target through `RangeVarGetRelidExtended(.., RangeVarCallbackMaintainsTable)`.
+    // The matview-deps seam carries the RangeVar by its resolved schema/relation
+    // names (the callback is folded in); marshal them onto the access-layer
+    // RangeVar and dispatch the shared maintains-table resolver, spinning a
+    // scratch context (the only outputs are the by-value Oid and the lock taken).
+    backend_commands_matview_deps_seams::rangevar_get_relid_extended::set(
+        |schemaname, relname, lockmode| {
+            let ctx = mcx::MemoryContext::new("RangeVarGetRelidMaintainsTable");
+            let relation = RangeVar {
+                schemaname,
+                relname,
+                ..RangeVar::default()
+            };
+            crate::RangeVarGetRelidMaintainsTable(ctx.mcx(), &relation, lockmode)
+        },
+    );
     backend_catalog_namespace_seams::range_var_get_relid_from_text::set(
         seam_range_var_get_relid_from_text,
     );
