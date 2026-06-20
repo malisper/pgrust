@@ -9,7 +9,7 @@
 //! / strict / retset are transcribed exactly from `pg_proc.dat`.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Result writers.
@@ -27,8 +27,8 @@ fn ret_int32(v: i32) -> Datum {
 
 /// `pg_trigger_depth()` (trigger.c:6719). No arguments; returns the current
 /// trigger recursion depth as `int4`.
-fn fc_pg_trigger_depth(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_int32(crate::firing::pg_trigger_depth())
+fn fc_pg_trigger_depth(_fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_int32(crate::firing::pg_trigger_depth()))
 }
 
 // ---------------------------------------------------------------------------
@@ -41,23 +41,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every scalar `trigger.c` builtin (C: their `fmgr_builtins[]` rows).
 /// Called from this crate's `init_seams()`. OIDs/nargs/strict/retset transcribed
 /// from `pg_proc.dat` (pg_trigger_depth: nargs 0, not strict, not retset).
 pub fn register_trigger_builtins() {
-    backend_utils_fmgr_core::register_builtins([builtin(
+    backend_utils_fmgr_core::register_builtins_native([builtin(
         3163,
         "pg_trigger_depth",
         0,
