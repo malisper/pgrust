@@ -946,7 +946,7 @@ pub fn AcquireRewriteLocks<'mcx>(
     if parsetree.hasSubLinks {
         let mut err: Option<types_error::PgError> = None;
         {
-            let mut walker = |node: &mut Node| {
+            let mut walker = |node: &mut Node<'mcx>| {
                 acquireLocksOnSubLinks(mcx, node, for_execute, &mut err)
             };
             backend_nodes_core::node_walker::query_tree_mutator(
@@ -954,6 +954,7 @@ pub fn AcquireRewriteLocks<'mcx>(
                 &mut walker,
                 backend_nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
                     | backend_nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
+                mcx,
             );
         }
         if let Some(e) = err {
@@ -976,7 +977,7 @@ pub fn AcquireRewriteLocks<'mcx>(
 /// the `err` out-param.
 fn acquireLocksOnSubLinks<'mcx>(
     mcx: Mcx<'mcx>,
-    node: &mut Node,
+    node: &mut Node<'mcx>,
     for_execute: bool,
     err: &mut Option<types_error::PgError>,
 ) -> bool {
@@ -1600,8 +1601,8 @@ fn ApplyRetrieveRule<'mcx>(
                 let mut new_returning: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> =
                     PgVec::new_in(mcx);
                 for tle in parsetree.returningList.iter() {
-                    let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?);
-                    ChangeVarNodes(&mut node, rt_index, new_result_relation, 0);
+                    let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?)?;
+                    ChangeVarNodes(&mut node, rt_index, new_result_relation, 0, mcx);
                     new_returning.push(node.into_targetentry().unwrap_or_else(|| {
                         unreachable!("ChangeVarNodes preserves the node kind")
                     }));
@@ -2108,12 +2109,13 @@ fn rewriteTargetView<'mcx>(
         let mut err: Option<types_error::PgError> = None;
         {
             let mut walker =
-                |node: &mut Node| acquireLocksOnSubLinks(mcx, node, true, &mut err);
+                |node: &mut Node<'mcx>| acquireLocksOnSubLinks(mcx, node, true, &mut err);
             backend_nodes_core::node_walker::query_tree_mutator(
                 &mut viewquery,
                 &mut walker,
                 backend_nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
                     | backend_nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
+                mcx,
             );
         }
         if let Some(e) = err {
@@ -2688,7 +2690,7 @@ fn RewriteQuery<'mcx>(
                                 PgVec::new_in(mcx);
                             for tle in new_tlist.into_iter() {
                                 new_tlist_nodes
-                                    .push(alloc_in(mcx, Node::TargetEntry(tle))?);
+                                    .push(alloc_in(mcx, Node::mk_target_entry(mcx, tle)?)?);
                             }
                             action.targetList = new_tlist_nodes;
                         }

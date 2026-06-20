@@ -4199,7 +4199,7 @@ fn create_lockrows_plan<'mcx>(
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
 
-    Ok(Node::mk_lock_rows(mcx, plan))
+    Node::mk_lock_rows(mcx, plan)
 }
 
 /// `make_lockrows(lefttree, rowMarks, epqParam)` (createplan.c:6906).

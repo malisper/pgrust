@@ -1015,7 +1015,7 @@ fn show_plan_tlist<'es, 'p>(
     // Likewise for a ForeignScan that executes a direct INSERT/UPDATE/DELETE:
     // its tlist contains subplan-output / row-identity junk columns confusing
     // in this context. `IsA(plan, ForeignScan) && operation != CMD_SELECT`.
-    if let Node::ForeignScan(fs) = plan_node {
+    if let Some(fs) = plan_node.as_foreignscan() {
         if fs.operation != CmdType::CMD_SELECT {
             return Ok(());
         }
@@ -1041,7 +1041,7 @@ fn show_plan_tlist<'es, 'p>(
             .as_deref()
             .expect("show_plan_tlist: TargetEntry has no expr");
         // node = (Node *) tle->expr.
-        let expr_node = Node::mk_expr(mcx, expr.clone_in(mcx)?);
+        let expr_node = Node::mk_expr(mcx, expr.clone_in(mcx)?)?;
         let exprstr = ruleutils_s::deparse_expr_for_plan::call(
             mcx,
             es_pstmt,
@@ -1167,7 +1167,7 @@ fn ExplainSubPlans<'es, 'p>(
             types_nodes::primnodes::Expr::SubPlan(
                 types_nodes::primnodes::SubPlanExpr::from_subplan(mcx, sp)?,
             ),
-        );
+        )?;
         let mut child_ancestors: PgVec<'es, PgBox<'es, Node<'es>>> = PgVec::new_in(mcx);
         child_ancestors
             .try_reserve(ancestors.len() + 1)

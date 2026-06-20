@@ -1316,9 +1316,9 @@ fn gincost_scalararrayopexpr<'mcx>(
 /// so this does not affect the cost for the standard opclasses (array_ops,
 /// tsvector_ops, jsonb_ops, jsonb_path_ops). The faithful `extractQuery` term
 /// counting (exact/partial/searchEntries, ScalarArrayOp averaging) is ported.
-pub(crate) fn gincostestimate<'mcx, 'run>(
+pub(crate) fn gincostestimate<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &PlannerRun<'run>,
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path_id: PathId,
     loop_count: f64,

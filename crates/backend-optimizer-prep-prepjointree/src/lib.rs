@@ -271,9 +271,9 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
     let mut target_fromlist: mcx::PgVec<'_, NodePtr<'_>> = mcx::PgVec::new_in(mcx);
     target_fromlist.push(mcx::alloc_in(
         mcx,
-        Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef {
+        Node::mk_range_tbl_ref(mcx, types_nodes::rawnodes::RangeTblRef {
             rtindex: parse.mergeTargetRelation,
-        }),
+        })?,
     )?);
     let target = backend_nodes_core::makefuncs::make_from_expr(target_fromlist, target_quals);
 
@@ -303,13 +303,13 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
 
     // Join the source and target. quals = parse->mergeJoinCondition.
     let join_quals: Option<NodePtr<'_>> = match parse.mergeJoinCondition.as_deref() {
-        Some(expr) => Some(mcx::alloc_in(mcx, Node::Expr(expr.clone_in(mcx)?))?),
+        Some(expr) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?)?)?),
         None => None,
     };
     let joinexpr = types_nodes::rawnodes::JoinExpr {
         jointype,
         isNatural: false,
-        larg: Some(mcx::alloc_in(mcx, Node::FromExpr(target))?),
+        larg: Some(mcx::alloc_in(mcx, Node::mk_from_expr(mcx, target)?)?),
         rarg: Some(source),
         usingClause: mcx::PgVec::new_in(mcx),
         join_using_alias: None,
@@ -322,7 +322,7 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
     {
         let jt = parse.jointree.as_deref_mut().unwrap();
         let mut new_fromlist: mcx::PgVec<'_, NodePtr<'_>> = mcx::PgVec::new_in(mcx);
-        new_fromlist.push(mcx::alloc_in(mcx, Node::JoinExpr(joinexpr))?);
+        new_fromlist.push(mcx::alloc_in(mcx, Node::mk_join_expr(mcx, joinexpr)?)?);
         jt.fromlist = new_fromlist;
         jt.quals = None;
     }
@@ -337,9 +337,9 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
             backend_rewrite_core::relids::add_member(ExprRelids::default(), parse.mergeTargetRelation);
         let added = backend_rewrite_core::relids::add_member(ExprRelids::default(), joinrti);
         for tle in parse.targetList.iter_mut() {
-            let mut node = Node::TargetEntry(tle.clone_in(mcx)?);
-            backend_rewrite_core::add_nulling_relids(&mut node, Some(&target_relids), &added);
-            if let Node::TargetEntry(new_tle) = node {
+            let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?)?;
+            backend_rewrite_core::add_nulling_relids(&mut node, Some(&target_relids), &added, mcx);
+            if let Some(new_tle) = node.into_targetentry() {
                 *tle = new_tle;
             }
         }
@@ -356,9 +356,9 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
         // mergeJoinCondition: a modified copy for use above the join (the
         // original, inside the join, is untouched).
         if let Some(expr) = parse.mergeJoinCondition.as_deref() {
-            let mut node = Node::Expr(expr.clone_in(mcx)?);
-            backend_rewrite_core::add_nulling_relids(&mut node, Some(&source_relids), &added);
-            if let Node::Expr(e) = node {
+            let mut node = Node::mk_expr(mcx, expr.clone_in(mcx)?)?;
+            backend_rewrite_core::add_nulling_relids(&mut node, Some(&source_relids), &added, mcx);
+            if let Some(e) = node.into_expr() {
                 parse.mergeJoinCondition = Some(mcx::alloc_in(mcx, e)?);
             }
         }
@@ -371,6 +371,7 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
                         &mut qnode,
                         Some(&source_relids),
                         &added,
+                        mcx,
                     );
                     action.qual = Some(mcx::alloc_in(mcx, qnode)?);
                 }
@@ -381,15 +382,16 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
                         &mut **tle_node,
                         Some(&source_relids),
                         &added,
+                        mcx,
                     );
                 }
             }
         }
 
         for tle in parse.returningList.iter_mut() {
-            let mut node = Node::TargetEntry(tle.clone_in(mcx)?);
-            backend_rewrite_core::add_nulling_relids(&mut node, Some(&source_relids), &added);
-            if let Node::TargetEntry(new_tle) = node {
+            let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?)?;
+            backend_rewrite_core::add_nulling_relids(&mut node, Some(&source_relids), &added, mcx);
+            if let Some(new_tle) = node.into_targetentry() {
                 *tle = new_tle;
             }
         }

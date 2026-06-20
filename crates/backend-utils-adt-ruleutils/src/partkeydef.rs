@@ -129,7 +129,7 @@ pub fn pg_get_partkeydef_worker<'mcx>(
 
             // The partexprs cells are bare `Expr`s; wrap as a Node for the
             // deparse engine / nodeFuncs.
-            let node = types_nodes::nodes::Node::mk_expr(mcx, partkey.clone_in(mcx)?);
+            let node = types_nodes::nodes::Node::mk_expr(mcx, partkey.clone_in(mcx)?)?;
             let node_box = mcx::alloc_in(mcx, node)?;
 
             // str = deparse_expression_pretty(partkey, context, false, false, ...).

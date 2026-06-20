@@ -991,12 +991,12 @@ pub fn ExecEvalWholeRowVar<'mcx>(
                     .map(|eref| {
                         eref.colnames
                             .iter()
-                            .map(|n| match &**n {
-                                types_nodes::nodes::Node::String(s) => s.sval.as_str().to_string(),
+                            .map(|n| match n.as_string() {
+                                Some(s) => s.sval.as_str().to_string(),
                                 // Dropped columns are represented by an empty
                                 // String node; any non-String is unexpected but
                                 // treated as an empty (skipped) name.
-                                _ => String::new(),
+                                None => String::new(),
                             })
                             .collect::<Vec<_>>()
                     });

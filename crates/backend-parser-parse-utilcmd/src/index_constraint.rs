@@ -560,21 +560,21 @@ pub fn transform_index_constraint_catalog<'mcx>(
                     // If a PK, ensure the columns get not null constraints.
                     if contype == CONSTR_PRIMARY {
                         let nn = make_not_null_constraint(mcx, &attname)?;
-                        extra_nn.push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn))?);
+                        extra_nn.push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn)?)?);
                     }
 
                     new_keys.push(mcx::alloc_in(
                         mcx,
                         Node::mk_string(mcx, types_nodes::value::StringNode {
                             sval: PgString::from_str_in(&attname, mcx)?,
-                        }),
+                        })?,
                     )?);
                 } else {
                     new_including.push(mcx::alloc_in(
                         mcx,
                         Node::mk_string(mcx, types_nodes::value::StringNode {
                             sval: PgString::from_str_in(&attname, mcx)?,
-                        }),
+                        })?,
                     )?);
                 }
             }

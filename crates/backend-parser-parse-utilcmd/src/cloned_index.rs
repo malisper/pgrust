@@ -91,7 +91,7 @@ pub fn generateClonedIndexStmt<'mcx>(
     let mut index = IndexStmt {
         idxname: None,
         relation: match heap_rel {
-            Some(rv) => Some(mcx::alloc_in(mcx, Node::mk_range_var(mcx, rv.clone_in(mcx)?))?),
+            Some(rv) => Some(mcx::alloc_in(mcx, Node::mk_range_var(mcx, rv.clone_in(mcx)?)?)?),
             None => None,
         },
         accessMethod: Some(access_method),
@@ -160,7 +160,7 @@ pub fn generateClonedIndexStmt<'mcx>(
                         v
                     };
                     let namelist_node =
-                        mcx::alloc_in(mcx, Node::List(namelist))?;
+                        mcx::alloc_in(mcx, Node::mk_list(mcx, namelist)?)?;
                     index.excludeOpNames.push(namelist_node);
                 }
             }
@@ -173,14 +173,14 @@ pub fn generateClonedIndexStmt<'mcx>(
             Some(exprs_string) => {
                 let node = read_seams::string_to_node::call(mcx, &exprs_string)?;
                 let mut v = PgVec::new_in(mcx);
-                match &*node {
-                    Node::List(items) => {
+                match (*node).as_list() {
+                    Some(items) => {
                         for it in items.iter() {
                             v.push(mcx::alloc_in(mcx, it.clone_in(mcx)?)?);
                         }
                     }
                     // A single-element list can be represented as a bare node.
-                    other => v.push(mcx::alloc_in(mcx, other.clone_in(mcx)?)?),
+                    None => v.push(mcx::alloc_in(mcx, (*node).clone_in(mcx)?)?),
                 }
                 v
             }
@@ -221,6 +221,7 @@ pub fn generateClonedIndexStmt<'mcx>(
                 &attmap.attnums,
                 InvalidOid,
                 &mut found_whole_row,
+                mcx,
             )?;
 
             // As in expandTableLikeClause, reject whole-row variables.
@@ -268,7 +269,7 @@ pub fn generateClonedIndexStmt<'mcx>(
         };
         index
             .indexParams
-            .push(mcx::alloc_in(mcx, Node::mk_index_elem(mcx, iparam))?);
+            .push(mcx::alloc_in(mcx, Node::mk_index_elem(mcx, iparam)?)?);
     }
 
     // Handle included columns separately.
@@ -300,7 +301,7 @@ pub fn generateClonedIndexStmt<'mcx>(
         };
         index
             .indexIncludingParams
-            .push(mcx::alloc_in(mcx, Node::mk_index_elem(mcx, iparam))?);
+            .push(mcx::alloc_in(mcx, Node::mk_index_elem(mcx, iparam)?)?);
     }
 
     // Copy reloptions if any (pg_class.reloptions of the index).
@@ -322,6 +323,7 @@ pub fn generateClonedIndexStmt<'mcx>(
             &attmap.attnums,
             InvalidOid,
             &mut found_whole_row,
+            mcx,
         )?;
         if found_whole_row {
             return Err(whole_row_error(source_idx));
@@ -415,7 +417,7 @@ fn make_def_elem<'mcx>(
                 StringNode {
                     sval: PgString::from_str_in(s, mcx)?,
                 },
-            ),
+            )?,
         )?),
         None => None,
     };
@@ -430,7 +432,7 @@ fn make_def_elem<'mcx>(
                 defaction: DEFELEM_UNSPEC,
                 location: -1,
             },
-        ),
+        )?,
     )
 }
 

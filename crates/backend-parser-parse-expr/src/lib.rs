@@ -3980,10 +3980,7 @@ fn transformSubLink<'mcx>(
         // the `List *` of `String` as the lifetime-free `Vec<String>`).
         out.operName = oper_name
             .iter()
-            .filter_map(|n| match &**n {
-                Node::String(s) => Some(String::from(s.sval.as_str())),
-                _ => None,
-            })
+            .filter_map(|n| n.as_string().map(|s| String::from(s.sval.as_str())))
             .collect();
 
         // Identify the combining operator(s) and generate a suitable

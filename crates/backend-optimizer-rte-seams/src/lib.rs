@@ -396,17 +396,23 @@ pub fn init_seams() {
         planner_rt_fetch(run, root, rti).tablesample.is_some()
     });
     rte_tablesample_handler::set(|run, root, rti| {
-        use types_nodes::nodes::Node;
-        match planner_rt_fetch(run, root, rti).tablesample.as_deref() {
-            Some(Node::TableSampleClause(tsc)) => tsc.tsmhandler,
+        match planner_rt_fetch(run, root, rti)
+            .tablesample
+            .as_deref()
+            .and_then(|n| n.as_tablesampleclause())
+        {
+            Some(tsc) => tsc.tsmhandler,
             _ => types_core::primitive::Oid::default(),
         }
     });
     rte_tablesample_args::set(|run, root, rti| {
-        use types_nodes::nodes::Node;
         let mcx = run.mcx();
-        match planner_rt_fetch(run, root, rti).tablesample.as_deref() {
-            Some(Node::TableSampleClause(tsc)) => match &tsc.args {
+        match planner_rt_fetch(run, root, rti)
+            .tablesample
+            .as_deref()
+            .and_then(|n| n.as_tablesampleclause())
+        {
+            Some(tsc) => match &tsc.args {
                 Some(list) => {
                     let mut out: alloc::vec::Vec<types_nodes::primnodes::Expr> =
                         alloc::vec::Vec::with_capacity(list.len());
@@ -451,10 +457,13 @@ pub fn init_seams() {
     // RelOptInfo handle. `rel->relid` is the 1-based RT index; navigate the
     // owned `tablesample` clause node through `planner_rt_fetch`.
     backend_optimizer_path_costsize_seams::rte_tablesample_tsmhandler::set(|run, root, rel| {
-        use types_nodes::nodes::Node;
         let rti = root.rel(rel).relid;
-        match planner_rt_fetch(run, root, rti).tablesample.as_deref() {
-            Some(Node::TableSampleClause(tsc)) => tsc.tsmhandler,
+        match planner_rt_fetch(run, root, rti)
+            .tablesample
+            .as_deref()
+            .and_then(|n| n.as_tablesampleclause())
+        {
+            Some(tsc) => tsc.tsmhandler,
             _ => types_core::primitive::Oid::default(),
         }
     });

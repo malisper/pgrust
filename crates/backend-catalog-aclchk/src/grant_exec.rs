@@ -1189,7 +1189,10 @@ struct InternalDefaultACL<'mcx> {
 
 /// `ExecAlterDefaultPrivilegesStmt(pstate, stmt)` (aclchk.c). The slow-path leg
 /// installed for `Node::AlterDefaultPrivilegesStmt`.
-pub fn exec_alter_default_privileges_stmt<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'_>) -> PgResult<()> {
+pub fn exec_alter_default_privileges_stmt<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &Node<'mcx>,
+) -> PgResult<()> {
     let Some(stmt) = stmt.as_alterdefaultprivilegesstmt() else {
         return Err(PgError::error(
             "exec_alter_default_privileges_stmt: not an AlterDefaultPrivilegesStmt",
@@ -1359,9 +1362,9 @@ pub fn exec_alter_default_privileges_stmt<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'_>)
 /// Extract the `List *` carried in a DefElem's `arg` as a node slice. The
 /// parser stores the FOR ROLE / IN SCHEMA lists as a `List` node in
 /// `defel->arg`.
-fn defel_list<'a>(
-    defel: &'a types_nodes::ddlnodes::DefElem<'_>,
-) -> PgResult<&'a [types_nodes::nodes::NodePtr<'a>]> {
+fn defel_list<'a, 'mcx>(
+    defel: &'a types_nodes::ddlnodes::DefElem<'mcx>,
+) -> PgResult<&'a [types_nodes::nodes::NodePtr<'mcx>]> {
     match &defel.arg {
         None => Ok(&[]),
         Some(arg) => match (**arg).as_list() {

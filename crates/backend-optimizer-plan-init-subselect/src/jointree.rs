@@ -135,9 +135,10 @@ fn quals_implicit_and(mcx: mcx::Mcx<'_>, quals: Option<&Node>) -> Vec<Expr> {
     // the `clone_in` `'static`-erasure invariant.
     match quals {
         None => Vec::new(),
-        Some(Node::List(items)) => {
+        Some(n) if n.as_list().is_some() => {
             // Already an implicit-AND conjunct list; flatten each element through
             // `make_ands_implicit` so no element is left as a top-level AND-clause.
+            let items = n.as_list().unwrap();
             let mut out: Vec<Expr> = Vec::with_capacity(items.len());
             for it in items.iter() {
                 let e = it.as_expr().unwrap_or_else(|| {

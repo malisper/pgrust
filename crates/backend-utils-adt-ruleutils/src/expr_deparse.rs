@@ -2197,7 +2197,7 @@ fn get_subplan_expr(
             Node::mk_expr(
                 mcx,
                 Expr::SubPlan(types_nodes::primnodes::SubPlanExpr::from_subplan(mcx, subplan)?),
-            ),
+            )?,
         )?;
         let dpns = &mut context.namespaces[0];
         let mut new_ancestors = PgVec::new_in(mcx);
@@ -2212,7 +2212,7 @@ fn get_subplan_expr(
         let saved = core::mem::replace(&mut dpns.ancestors, new_ancestors);
 
         let testexpr_owned = testexpr.clone_in(mcx)?;
-        let node = Node::mk_expr(mcx, testexpr_owned);
+        let node = Node::mk_expr(mcx, testexpr_owned)?;
         let r = get_rule_expr(&node, context, showimplicit);
         // Restore ancestors before propagating any error.
         context.namespaces[0].ancestors = saved;
@@ -2276,7 +2276,7 @@ pub fn get_parameter(expr: &Expr, context: &mut DeparseContext<'_>) -> PgResult<
             ch_(context, b'(')?;
         }
 
-        let node = Node::mk_expr(mcx, referent);
+        let node = Node::mk_expr(mcx, referent)?;
         get_rule_expr(&node, context, false)?;
 
         if need_paren {

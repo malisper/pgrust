@@ -1168,7 +1168,7 @@ fn subquery_planner_carried<'mcx>(
                     .as_mergeaction_mut()
                     .unwrap();
                 action.qual = match processed {
-                    Some(pe) => Some(mcx::alloc_in(mcx, Node::Expr(pe))?),
+                    Some(pe) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, pe)?)?),
                     None => None,
                 };
             }
@@ -1265,8 +1265,8 @@ fn subquery_planner_carried<'mcx>(
                                     .tablesample
                                     .as_deref()
                                     .expect("tablesample is_some");
-                                match ts_node {
-                                    Node::TableSampleClause(tsc) => {
+                                match ts_node.as_tablesampleclause() {
+                                    Some(tsc) => {
                                         let args: Vec<Expr> = match &tsc.args {
                                             Some(list) => list.iter().cloned().collect(),
                                             None => Vec::new(),
@@ -1329,12 +1329,13 @@ fn subquery_planner_carried<'mcx>(
 
                             // Write the preprocessed expressions back into the clause
                             // node in place.
-                            if let Node::TableSampleClause(tsc) = &mut **run
+                            if let Some(tsc) = (**run
                                 .resolve_mut(root.parse)
                                 .rtable[i]
                                 .tablesample
                                 .as_mut()
-                                .expect("tablesample is_some")
+                                .expect("tablesample is_some"))
+                            .as_tablesampleclause_mut()
                             {
                                 tsc.args = Some(new_args);
                                 tsc.repeatable = new_repeatable;

@@ -37,6 +37,8 @@ pub enum Node<'mcx> {
     BitmapIndexScan(crate::nodebitmapindexscan::BitmapIndexScan<'mcx>),
     /// `T_BitmapHeapScan`.
     BitmapHeapScan(crate::nodebitmapheapscan::BitmapHeapScan<'mcx>),
+    /// `T_LockRows`.
+    LockRows(crate::nodelockrows::LockRows<'mcx>),
     /// `T_Limit`.
     Limit(crate::nodelimit::Limit<'mcx>),
     /// `T_Unique`.

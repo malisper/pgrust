@@ -1,0 +1,3240 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+warning: function `ACL_GRANT_OPTION_FOR` should have a snake case name
+  --> crates/types-acl/src/acl.rs:37:14
+   |
+37 | pub const fn ACL_GRANT_OPTION_FOR(privs: AclMode) -> AclMode {
+   |              ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `acl_grant_option_for`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: `types-acl` (lib) generated 1 warning
+   Compiling types-nodes v0.0.0 (/private/tmp/nodeflip_20355/crates/types-nodes)
+warning: variant `DISPATCH_CHECK` should have an upper camel case name
+  --> crates/types-startup/src/lib.rs:18:5
+   |
+18 |     DISPATCH_CHECK = 0,
+   |     ^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `DispatchCheck`
+   |
+   = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: variant `DISPATCH_BOOT` should have an upper camel case name
+  --> crates/types-startup/src/lib.rs:19:5
+   |
+19 |     DISPATCH_BOOT,
+   |     ^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `DispatchBoot`
+
+warning: variant `DISPATCH_FORKCHILD` should have an upper camel case name
+  --> crates/types-startup/src/lib.rs:20:5
+   |
+20 |     DISPATCH_FORKCHILD,
+   |     ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `DispatchForkchild`
+
+warning: variant `DISPATCH_DESCRIBE_CONFIG` should have an upper camel case name
+  --> crates/types-startup/src/lib.rs:21:5
+   |
+21 |     DISPATCH_DESCRIBE_CONFIG,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `DispatchDescribeConfig`
+
+warning: variant `DISPATCH_SINGLE` should have an upper camel case name
+  --> crates/types-startup/src/lib.rs:22:5
+   |
+22 |     DISPATCH_SINGLE,
+   |     ^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `DispatchSingle`
+
+warning: variant `DISPATCH_POSTMASTER` should have an upper camel case name
+  --> crates/types-startup/src/lib.rs:23:5
+   |
+23 |     DISPATCH_POSTMASTER,
+   |     ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `DispatchPostmaster`
+
+warning: `types-startup` (lib) generated 6 warnings
+warning: constant `StatisticRelationId` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:39:11
+   |
+39 | pub const StatisticRelationId: Oid = 2619;
+   |           ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `STATISTIC_RELATION_ID`
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: constant `Natts_pg_statistic` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:43:11
+   |
+43 | pub const Natts_pg_statistic: usize = 31;
+   |           ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `NATTS_PG_STATISTIC`
+
+warning: constant `Anum_pg_statistic_starelid` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:46:11
+   |
+46 | pub const Anum_pg_statistic_starelid: usize = 1;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ANUM_PG_STATISTIC_STARELID`
+
+warning: constant `Anum_pg_statistic_staattnum` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:48:11
+   |
+48 | pub const Anum_pg_statistic_staattnum: usize = 2;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ANUM_PG_STATISTIC_STAATTNUM`
+
+warning: constant `Anum_pg_statistic_stainherit` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:50:11
+   |
+50 | pub const Anum_pg_statistic_stainherit: usize = 3;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ANUM_PG_STATISTIC_STAINHERIT`
+
+warning: constant `Anum_pg_statistic_stanullfrac` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:52:11
+   |
+52 | pub const Anum_pg_statistic_stanullfrac: usize = 4;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ANUM_PG_STATISTIC_STANULLFRAC`
+
+warning: constant `Anum_pg_statistic_stawidth` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:54:11
+   |
+54 | pub const Anum_pg_statistic_stawidth: usize = 5;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ANUM_PG_STATISTIC_STAWIDTH`
+
+warning: constant `Anum_pg_statistic_stadistinct` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:56:11
+   |
+56 | pub const Anum_pg_statistic_stadistinct: usize = 6;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ANUM_PG_STATISTIC_STADISTINCT`
+
+warning: constant `Anum_pg_statistic_stakind1` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:58:11
+   |
+58 | pub const Anum_pg_statistic_stakind1: usize = 7;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ANUM_PG_STATISTIC_STAKIND1`
+
+warning: constant `Anum_pg_statistic_staop1` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:60:11
+   |
+60 | pub const Anum_pg_statistic_staop1: usize = 12;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ANUM_PG_STATISTIC_STAOP1`
+
+warning: constant `Anum_pg_statistic_stacoll1` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:62:11
+   |
+62 | pub const Anum_pg_statistic_stacoll1: usize = 17;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ANUM_PG_STATISTIC_STACOLL1`
+
+warning: constant `Anum_pg_statistic_stanumbers1` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:65:11
+   |
+65 | pub const Anum_pg_statistic_stanumbers1: usize = 22;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ANUM_PG_STATISTIC_STANUMBERS1`
+
+warning: constant `Anum_pg_statistic_stavalues1` should have an upper case name
+  --> crates/types-statistics/src/lib.rs:68:11
+   |
+68 | pub const Anum_pg_statistic_stavalues1: usize = 27;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ANUM_PG_STATISTIC_STAVALUES1`
+
+warning: `types-statistics` (lib) generated 13 warnings
+warning: unused import: `std::vec::Vec`
+ --> crates/types-tableam/src/tableam.rs:8:5
+  |
+8 | use std::vec::Vec;
+  |     ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `VirtualTransactionId`
+  --> crates/backend-storage-lmgr-lmgr-seams/src/lib.rs:21:38
+   |
+21 | use types_core::{Oid, TransactionId, VirtualTransactionId};
+   |                                      ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `types-tableam` (lib) generated 1 warning (run `cargo fix --lib -p types-tableam` to apply 1 suggestion)
+warning: `backend-storage-lmgr-lmgr-seams` (lib) generated 1 warning (run `cargo fix --lib -p backend-storage-lmgr-lmgr-seams` to apply 1 suggestion)
+warning: module `SetRelationRuleStatus` should have a snake case name
+  --> crates/backend-rewrite-rewritesupport-seams/src/lib.rs:25:12
+   |
+25 |     pub fn SetRelationRuleStatus(relation_id: Oid, rel_has_rules: bool) -> PgResult<()>
+   |            ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `set_relation_rule_status`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: module `IsDefinedRewriteRule` should have a snake case name
+  --> crates/backend-rewrite-rewritesupport-seams/src/lib.rs:34:12
+   |
+34 |     pub fn IsDefinedRewriteRule(owning_rel: Oid, rule_name: &str) -> PgResult<bool>
+   |            ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `is_defined_rewrite_rule`
+
+warning: `backend-rewrite-rewritesupport-seams` (lib) generated 2 warnings
+warning: unused import: `c_uint`
+  --> crates/pgrust-pg-ffi-fgram/src/nodenestloop_abi.rs:14:24
+   |
+14 | use core::ffi::{c_int, c_uint};
+   |                        ^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `NodeTag`
+  --> crates/pgrust-pg-ffi-fgram/src/statistics.rs:25:32
+   |
+25 | use crate::{AttrNumber, Datum, NodeTag, Oid};
+   |                                ^^^^^^^
+
+warning: `pgrust-pg-ffi-fgram` (lib) generated 2 warnings (run `cargo fix --lib -p pgrust-pg-ffi-fgram` to apply 2 suggestions)
+warning: module `AlterSubscriptionOwner` should have a snake case name
+  --> crates/backend-commands-subscriptioncmds-seams/src/lib.rs:20:12
+   |
+20 |     pub fn AlterSubscriptionOwner(
+   |            ^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `alter_subscription_owner`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: `backend-commands-subscriptioncmds-seams` (lib) generated 1 warning
+warning: variant `LISTEN_LISTEN` should have an upper camel case name
+   --> crates/types-async/src/lib.rs:129:5
+    |
+129 |     LISTEN_LISTEN = 0,
+    |     ^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `ListenListen`
+    |
+    = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: variant `LISTEN_UNLISTEN` should have an upper camel case name
+   --> crates/types-async/src/lib.rs:130:5
+    |
+130 |     LISTEN_UNLISTEN = 1,
+    |     ^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `ListenUnlisten`
+
+warning: variant `LISTEN_UNLISTEN_ALL` should have an upper camel case name
+   --> crates/types-async/src/lib.rs:131:5
+    |
+131 |     LISTEN_UNLISTEN_ALL = 2,
+    |     ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `ListenUnlistenAll`
+
+warning: `types-async` (lib) generated 3 warnings
+warning: unused doc comment
+   --> crates/backend-access-common-toast-compression/src/lib.rs:421:1
+    |
+421 | / /// Install this crate's seams. Contains only `set()` calls; `init_all()` in
+422 | | /// `seams-init` invokes it at startup.
+    | |_--------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: `backend-access-common-toast-compression` (lib) generated 1 warning
+warning: unused import: `backend_nodes_types::node_tags::*`
+  --> crates/pgrust-gram-c2rust-fgram/src/gram.rs:12:5
+   |
+12 | use backend_nodes_types::node_tags::*;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `TableFunc`
+  --> crates/pgrust-gram-c2rust-fgram/src/gram.rs:17:34
+   |
+17 | use backend_nodes_types::{Alias, TableFunc};
+   |                                  ^^^^^^^^^
+
+warning: `pgrust-gram-c2rust-fgram` (lib) generated 2 warnings (run `cargo fix --lib -p pgrust-gram-c2rust-fgram` to apply 2 suggestions)
+warning: unused import: `types_slot::TupleTableSlot`
+  --> crates/types-nodes/src/modifytable.rs:35:5
+   |
+35 | use types_slot::TupleTableSlot;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `T_Var` is never used
+   --> crates/types-nodes/src/nodes.rs:505:7
+    |
+505 | const T_Var: NodeTag = NodeTag(6);
+    |       ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `T_Const` is never used
+   --> crates/types-nodes/src/nodes.rs:506:7
+    |
+506 | const T_Const: NodeTag = NodeTag(7);
+    |       ^^^^^^^
+
+warning: constant `T_Aggref` is never used
+   --> crates/types-nodes/src/nodes.rs:507:7
+    |
+507 | const T_Aggref: NodeTag = NodeTag(9);
+    |       ^^^^^^^^
+
+warning: constant `T_GroupingFunc` is never used
+   --> crates/types-nodes/src/nodes.rs:508:7
+    |
+508 | const T_GroupingFunc: NodeTag = NodeTag(10);
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `T_WindowFunc` is never used
+   --> crates/types-nodes/src/nodes.rs:509:7
+    |
+509 | const T_WindowFunc: NodeTag = NodeTag(11);
+    |       ^^^^^^^^^^^^
+
+warning: constant `T_MergeSupportFunc` is never used
+   --> crates/types-nodes/src/nodes.rs:510:7
+    |
+510 | const T_MergeSupportFunc: NodeTag = NodeTag(13);
+    |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_SubscriptingRef` is never used
+   --> crates/types-nodes/src/nodes.rs:511:7
+    |
+511 | const T_SubscriptingRef: NodeTag = NodeTag(14);
+    |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `T_FuncExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:512:7
+    |
+512 | const T_FuncExpr: NodeTag = NodeTag(15);
+    |       ^^^^^^^^^^
+
+warning: constant `T_NamedArgExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:513:7
+    |
+513 | const T_NamedArgExpr: NodeTag = NodeTag(16);
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `T_OpExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:514:7
+    |
+514 | const T_OpExpr: NodeTag = NodeTag(17);
+    |       ^^^^^^^^
+
+warning: constant `T_DistinctExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:515:7
+    |
+515 | const T_DistinctExpr: NodeTag = NodeTag(18);
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `T_NullIfExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:516:7
+    |
+516 | const T_NullIfExpr: NodeTag = NodeTag(19);
+    |       ^^^^^^^^^^^^
+
+warning: constant `T_ScalarArrayOpExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:517:7
+    |
+517 | const T_ScalarArrayOpExpr: NodeTag = NodeTag(20);
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_BoolExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:518:7
+    |
+518 | const T_BoolExpr: NodeTag = NodeTag(21);
+    |       ^^^^^^^^^^
+
+warning: constant `T_SubLink` is never used
+   --> crates/types-nodes/src/nodes.rs:519:7
+    |
+519 | const T_SubLink: NodeTag = NodeTag(22);
+    |       ^^^^^^^^^
+
+warning: constant `T_SubPlan` is never used
+   --> crates/types-nodes/src/nodes.rs:520:7
+    |
+520 | const T_SubPlan: NodeTag = NodeTag(23);
+    |       ^^^^^^^^^
+
+warning: constant `T_AlternativeSubPlan` is never used
+   --> crates/types-nodes/src/nodes.rs:521:7
+    |
+521 | const T_AlternativeSubPlan: NodeTag = NodeTag(24);
+    |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_FieldSelect` is never used
+   --> crates/types-nodes/src/nodes.rs:522:7
+    |
+522 | const T_FieldSelect: NodeTag = NodeTag(25);
+    |       ^^^^^^^^^^^^^
+
+warning: constant `T_FieldStore` is never used
+   --> crates/types-nodes/src/nodes.rs:523:7
+    |
+523 | const T_FieldStore: NodeTag = NodeTag(26);
+    |       ^^^^^^^^^^^^
+
+warning: constant `T_RelabelType` is never used
+   --> crates/types-nodes/src/nodes.rs:524:7
+    |
+524 | const T_RelabelType: NodeTag = NodeTag(27);
+    |       ^^^^^^^^^^^^^
+
+warning: constant `T_CoerceViaIO` is never used
+   --> crates/types-nodes/src/nodes.rs:525:7
+    |
+525 | const T_CoerceViaIO: NodeTag = NodeTag(28);
+    |       ^^^^^^^^^^^^^
+
+warning: constant `T_ArrayCoerceExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:526:7
+    |
+526 | const T_ArrayCoerceExpr: NodeTag = NodeTag(29);
+    |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `T_ConvertRowtypeExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:527:7
+    |
+527 | const T_ConvertRowtypeExpr: NodeTag = NodeTag(30);
+    |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_CollateExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:528:7
+    |
+528 | const T_CollateExpr: NodeTag = NodeTag(31);
+    |       ^^^^^^^^^^^^^
+
+warning: constant `T_CaseExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:529:7
+    |
+529 | const T_CaseExpr: NodeTag = NodeTag(32);
+    |       ^^^^^^^^^^
+
+warning: constant `T_CaseWhen` is never used
+   --> crates/types-nodes/src/nodes.rs:530:7
+    |
+530 | const T_CaseWhen: NodeTag = NodeTag(33);
+    |       ^^^^^^^^^^
+
+warning: constant `T_CaseTestExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:531:7
+    |
+531 | const T_CaseTestExpr: NodeTag = NodeTag(34);
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `T_ArrayExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:532:7
+    |
+532 | const T_ArrayExpr: NodeTag = NodeTag(35);
+    |       ^^^^^^^^^^^
+
+warning: constant `T_RowExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:533:7
+    |
+533 | const T_RowExpr: NodeTag = NodeTag(36);
+    |       ^^^^^^^^^
+
+warning: constant `T_RowCompareExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:534:7
+    |
+534 | const T_RowCompareExpr: NodeTag = NodeTag(37);
+    |       ^^^^^^^^^^^^^^^^
+
+warning: constant `T_CoalesceExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:535:7
+    |
+535 | const T_CoalesceExpr: NodeTag = NodeTag(38);
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `T_MinMaxExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:536:7
+    |
+536 | const T_MinMaxExpr: NodeTag = NodeTag(39);
+    |       ^^^^^^^^^^^^
+
+warning: constant `T_SQLValueFunction` is never used
+   --> crates/types-nodes/src/nodes.rs:537:7
+    |
+537 | const T_SQLValueFunction: NodeTag = NodeTag(40);
+    |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_XmlExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:538:7
+    |
+538 | const T_XmlExpr: NodeTag = NodeTag(41);
+    |       ^^^^^^^^^
+
+warning: constant `T_XmlSerialize` is never used
+   --> crates/types-nodes/src/nodes.rs:539:7
+    |
+539 | const T_XmlSerialize: NodeTag = NodeTag(95);
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `T_JsonValueExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:540:7
+    |
+540 | const T_JsonValueExpr: NodeTag = NodeTag(44);
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonConstructorExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:541:7
+    |
+541 | const T_JsonConstructorExpr: NodeTag = NodeTag(45);
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonIsPredicate` is never used
+   --> crates/types-nodes/src/nodes.rs:542:7
+    |
+542 | const T_JsonIsPredicate: NodeTag = NodeTag(46);
+    |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:543:7
+    |
+543 | const T_JsonExpr: NodeTag = NodeTag(48);
+    |       ^^^^^^^^^^
+
+warning: constant `T_JsonBehavior` is never used
+   --> crates/types-nodes/src/nodes.rs:544:7
+    |
+544 | const T_JsonBehavior: NodeTag = NodeTag(47);
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `T_JsonOutput` is never used
+   --> crates/types-nodes/src/nodes.rs:546:7
+    |
+546 | const T_JsonOutput: NodeTag = NodeTag(120);
+    |       ^^^^^^^^^^^^
+
+warning: constant `T_JsonArgument` is never used
+   --> crates/types-nodes/src/nodes.rs:547:7
+    |
+547 | const T_JsonArgument: NodeTag = NodeTag(121);
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `T_JsonFuncExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:548:7
+    |
+548 | const T_JsonFuncExpr: NodeTag = NodeTag(122);
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `T_JsonTablePathSpec` is never used
+   --> crates/types-nodes/src/nodes.rs:549:7
+    |
+549 | const T_JsonTablePathSpec: NodeTag = NodeTag(123);
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonTable` is never used
+   --> crates/types-nodes/src/nodes.rs:550:7
+    |
+550 | const T_JsonTable: NodeTag = NodeTag(124);
+    |       ^^^^^^^^^^^
+
+warning: constant `T_JsonTableColumn` is never used
+   --> crates/types-nodes/src/nodes.rs:551:7
+    |
+551 | const T_JsonTableColumn: NodeTag = NodeTag(125);
+    |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonKeyValue` is never used
+   --> crates/types-nodes/src/nodes.rs:552:7
+    |
+552 | const T_JsonKeyValue: NodeTag = NodeTag(126);
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `T_JsonParseExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:553:7
+    |
+553 | const T_JsonParseExpr: NodeTag = NodeTag(127);
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonScalarExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:554:7
+    |
+554 | const T_JsonScalarExpr: NodeTag = NodeTag(128);
+    |       ^^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonSerializeExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:555:7
+    |
+555 | const T_JsonSerializeExpr: NodeTag = NodeTag(129);
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonObjectConstructor` is never used
+   --> crates/types-nodes/src/nodes.rs:556:7
+    |
+556 | const T_JsonObjectConstructor: NodeTag = NodeTag(130);
+    |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonArrayConstructor` is never used
+   --> crates/types-nodes/src/nodes.rs:557:7
+    |
+557 | const T_JsonArrayConstructor: NodeTag = NodeTag(131);
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonArrayQueryConstructor` is never used
+   --> crates/types-nodes/src/nodes.rs:558:7
+    |
+558 | const T_JsonArrayQueryConstructor: NodeTag = NodeTag(132);
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonAggConstructor` is never used
+   --> crates/types-nodes/src/nodes.rs:559:7
+    |
+559 | const T_JsonAggConstructor: NodeTag = NodeTag(133);
+    |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonObjectAgg` is never used
+   --> crates/types-nodes/src/nodes.rs:560:7
+    |
+560 | const T_JsonObjectAgg: NodeTag = NodeTag(134);
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `T_JsonArrayAgg` is never used
+   --> crates/types-nodes/src/nodes.rs:561:7
+    |
+561 | const T_JsonArrayAgg: NodeTag = NodeTag(135);
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `T_NullTest` is never used
+   --> crates/types-nodes/src/nodes.rs:562:7
+    |
+562 | const T_NullTest: NodeTag = NodeTag(52);
+    |       ^^^^^^^^^^
+
+warning: constant `T_BooleanTest` is never used
+   --> crates/types-nodes/src/nodes.rs:563:7
+    |
+563 | const T_BooleanTest: NodeTag = NodeTag(53);
+    |       ^^^^^^^^^^^^^
+
+warning: constant `T_CoerceToDomain` is never used
+   --> crates/types-nodes/src/nodes.rs:564:7
+    |
+564 | const T_CoerceToDomain: NodeTag = NodeTag(55);
+    |       ^^^^^^^^^^^^^^^^
+
+warning: constant `T_CoerceToDomainValue` is never used
+   --> crates/types-nodes/src/nodes.rs:565:7
+    |
+565 | const T_CoerceToDomainValue: NodeTag = NodeTag(56);
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `T_SetToDefault` is never used
+   --> crates/types-nodes/src/nodes.rs:566:7
+    |
+566 | const T_SetToDefault: NodeTag = NodeTag(57);
+    |       ^^^^^^^^^^^^^^
+
+warning: constant `T_CurrentOfExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:567:7
+    |
+567 | const T_CurrentOfExpr: NodeTag = NodeTag(58);
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `T_NextValueExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:568:7
+    |
+568 | const T_NextValueExpr: NodeTag = NodeTag(59);
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `T_InferenceElem` is never used
+   --> crates/types-nodes/src/nodes.rs:569:7
+    |
+569 | const T_InferenceElem: NodeTag = NodeTag(60);
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `T_ReturningExpr` is never used
+   --> crates/types-nodes/src/nodes.rs:570:7
+    |
+570 | const T_ReturningExpr: NodeTag = NodeTag(61);
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `T_PlaceHolderVar` is never used
+   --> crates/types-nodes/src/nodes.rs:573:7
+    |
+573 | const T_PlaceHolderVar: NodeTag = NodeTag(319);
+    |       ^^^^^^^^^^^^^^^^
+
+warning: constant `T_RestrictInfo` is never used
+   --> crates/types-nodes/src/nodes.rs:576:7
+    |
+576 | const T_RestrictInfo: NodeTag = NodeTag(318);
+    |       ^^^^^^^^^^^^^^
+
+   Compiling types-parsenodes v0.0.0 (/private/tmp/nodeflip_20355/crates/types-parsenodes)
+   Compiling types-pathnodes v0.0.0 (/private/tmp/nodeflip_20355/crates/types-pathnodes)
+   Compiling types-cache v0.0.0 (/private/tmp/nodeflip_20355/crates/types-cache)
+   Compiling types-cluster v0.0.0 (/private/tmp/nodeflip_20355/crates/types-cluster)
+   Compiling types-partition v0.0.0 (/private/tmp/nodeflip_20355/crates/types-partition)
+   Compiling backend-tcop-postgres-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-tcop-postgres-seams)
+   Compiling backend-catalog-aclchk-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-aclchk-seams)
+   Compiling backend-utils-adt-arrayfuncs-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-arrayfuncs-seams)
+   Compiling backend-nodes-read-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-nodes-read-seams)
+   Compiling types-portal v0.0.0 (/private/tmp/nodeflip_20355/crates/types-portal)
+   Compiling backend-executor-execParallel-support-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execParallel-support-seams)
+   Compiling backend-executor-instrument-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-instrument-seams)
+   Compiling backend-storage-ipc-shm-toc-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-ipc-shm-toc-seams)
+   Compiling backend-catalog-catalog-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-catalog-seams)
+   Compiling backend-utils-fmgr-fmgr-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-fmgr-fmgr-seams)
+warning: structure field `typeOid` should have a snake case name
+  --> crates/types-parsenodes/src/lib.rs:92:9
+   |
+92 |     pub typeOid: Oid,
+   |         ^^^^^^^ help: convert the identifier to snake case: `type_oid`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: structure field `arrayBounds` should have a snake case name
+   --> crates/types-parsenodes/src/lib.rs:102:9
+    |
+102 |     pub arrayBounds: Vec<Node>,
+    |         ^^^^^^^^^^^ help: convert the identifier to snake case: `array_bounds`
+
+warning: structure field `argType` should have a snake case name
+   --> crates/types-parsenodes/src/lib.rs:173:9
+    |
+173 |     pub argType: Option<Box<Node>>,
+    |         ^^^^^^^ help: convert the identifier to snake case: `arg_type`
+
+warning: structure field `returnType` should have a snake case name
+   --> crates/types-parsenodes/src/lib.rs:249:9
+    |
+249 |     pub returnType: Option<Box<Node>>,
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `return_type`
+
+warning: structure field `renameType` should have a snake case name
+   --> crates/types-parsenodes/src/lib.rs:291:9
+    |
+291 |     pub renameType: ObjectType,
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `rename_type`
+
+warning: structure field `relationType` should have a snake case name
+   --> crates/types-parsenodes/src/lib.rs:294:9
+    |
+294 |     pub relationType: ObjectType,
+    |         ^^^^^^^^^^^^ help: convert the identifier to snake case: `relation_type`
+
+warning: structure field `objectType` should have a snake case name
+   --> crates/types-parsenodes/src/lib.rs:314:9
+    |
+314 |     pub objectType: ObjectType,
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `object_type`
+
+warning: structure field `objectType` should have a snake case name
+   --> crates/types-parsenodes/src/lib.rs:330:9
+    |
+330 |     pub objectType: ObjectType,
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `object_type`
+
+warning: structure field `objectType` should have a snake case name
+   --> crates/types-parsenodes/src/lib.rs:346:9
+    |
+346 |     pub objectType: ObjectType,
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `object_type`
+
+warning: structure field `langOid` should have a snake case name
+   --> crates/types-parsenodes/src/lib.rs:367:9
+    |
+367 |     pub langOid: Oid,
+    |         ^^^^^^^ help: convert the identifier to snake case: `lang_oid`
+
+warning: structure field `langIsTrusted` should have a snake case name
+   --> crates/types-parsenodes/src/lib.rs:368:9
+    |
+368 |     pub langIsTrusted: bool,
+    |         ^^^^^^^^^^^^^ help: convert the identifier to snake case: `lang_is_trusted`
+
+warning: structure field `removeType` should have a snake case name
+   --> crates/types-parsenodes/src/lib.rs:487:9
+    |
+487 |     pub removeType: ObjectType,
+    |         ^^^^^^^^^^ help: convert the identifier to snake case: `remove_type`
+
+   Compiling backend-access-transam-parallel-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-transam-parallel-seams)
+   Compiling types-replication v0.0.0 (/private/tmp/nodeflip_20355/crates/types-replication)
+   Compiling backend-catalog-pg-proc-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-proc-seams)
+warning: `types-parsenodes` (lib) generated 12 warnings
+   Compiling backend-commands-tablecmds-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-tablecmds-seams)
+   Compiling backend-commands-define-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-define-seams)
+warning: variant `REPLICATION_KIND_PHYSICAL` should have an upper camel case name
+  --> crates/types-replication/src/replnodes.rs:24:5
+   |
+24 |     REPLICATION_KIND_PHYSICAL = 0,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `ReplicationKindPhysical`
+   |
+   = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: variant `REPLICATION_KIND_LOGICAL` should have an upper camel case name
+  --> crates/types-replication/src/replnodes.rs:25:5
+   |
+25 |     REPLICATION_KIND_LOGICAL = 1,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `ReplicationKindLogical`
+
+   Compiling backend-executor-instrument v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-instrument)
+   Compiling backend-utils-adt-ruleutils-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-ruleutils-seams)
+   Compiling backend-utils-time-snapmgr-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-time-snapmgr-seams)
+warning: module `RenameRelation` should have a snake case name
+   --> crates/backend-commands-tablecmds-seams/src/lib.rs:213:12
+    |
+213 |     pub fn RenameRelation<'mcx>(
+    |            ^^^^^^^^^^^^^^ help: convert the identifier to snake case: `rename_relation`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: module `RenameConstraint` should have a snake case name
+   --> crates/backend-commands-tablecmds-seams/src/lib.rs:230:12
+    |
+230 |     pub fn RenameConstraint<'mcx>(
+    |            ^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `rename_constraint`
+
+warning: module `AlterTableNamespace` should have a snake case name
+   --> crates/backend-commands-tablecmds-seams/src/lib.rs:242:12
+    |
+242 |     pub fn AlterTableNamespace<'mcx>(
+    |            ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `alter_table_namespace`
+
+warning: module `AlterTableNamespaceInternal` should have a snake case name
+   --> crates/backend-commands-tablecmds-seams/src/lib.rs:254:12
+    |
+254 |     pub fn AlterTableNamespaceInternal<'mcx>(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `alter_table_namespace_internal`
+
+   Compiling backend-utils-cache-inval-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-inval-seams)
+   Compiling backend-commands-matview-deps-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-matview-deps-seams)
+warning: structure field `sentPtr` should have a snake case name
+  --> crates/types-replication/src/walsender.rs:37:9
+   |
+37 |     pub sentPtr: XLogRecPtr,
+   |         ^^^^^^^ help: convert the identifier to snake case: `sent_ptr`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: structure field `writeLag` should have a snake case name
+  --> crates/types-replication/src/walsender.rs:45:9
+   |
+45 |     pub writeLag: TimeOffset,
+   |         ^^^^^^^^ help: convert the identifier to snake case: `write_lag`
+
+warning: structure field `flushLag` should have a snake case name
+  --> crates/types-replication/src/walsender.rs:47:9
+   |
+47 |     pub flushLag: TimeOffset,
+   |         ^^^^^^^^ help: convert the identifier to snake case: `flush_lag`
+
+warning: structure field `applyLag` should have a snake case name
+  --> crates/types-replication/src/walsender.rs:49:9
+   |
+49 |     pub applyLag: TimeOffset,
+   |         ^^^^^^^^ help: convert the identifier to snake case: `apply_lag`
+
+warning: structure field `replyTime` should have a snake case name
+  --> crates/types-replication/src/walsender.rs:53:9
+   |
+53 |     pub replyTime: TimestampTz,
+   |         ^^^^^^^^^ help: convert the identifier to snake case: `reply_time`
+
+warning: unused import: `types_syscache::SysCacheIdentifier`
+  --> crates/backend-utils-cache-inval-seams/src/lib.rs:19:5
+   |
+19 | use types_syscache::SysCacheIdentifier;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling types-pgstat v0.0.0 (/private/tmp/nodeflip_20355/crates/types-pgstat)
+warning: `types-replication` (lib) generated 7 warnings
+   Compiling backend-utils-fmgr-funcapi-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-fmgr-funcapi-seams)
+   Compiling backend-utils-mmgr-mcxt-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-mmgr-mcxt-seams)
+   Compiling backend-commands-vacuum-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-vacuum-seams)
+   Compiling backend-catalog-namespace-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-namespace-seams)
+   Compiling backend-utils-cache-typcache-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-typcache-seams)
+warning: `backend-utils-cache-inval-seams` (lib) generated 1 warning (run `cargo fix --lib -p backend-utils-cache-inval-seams` to apply 1 suggestion)
+   Compiling backend-catalog-index-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-index-seams)
+   Compiling backend-catalog-dependency-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-dependency-seams)
+   Compiling backend-catalog-objectaddress-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-objectaddress-seams)
+   Compiling backend-utils-misc-guc-funcs-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-misc-guc-funcs-seams)
+   Compiling backend-utils-sort-storage-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-sort-storage-seams)
+   Compiling backend-nodes-makefuncs-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-nodes-makefuncs-seams)
+   Compiling backend-commands-functioncmds-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-functioncmds-seams)
+   Compiling types-selfuncs v0.0.0 (/private/tmp/nodeflip_20355/crates/types-selfuncs)
+   Compiling backend-nodes-nodeFuncs-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-nodes-nodeFuncs-seams)
+   Compiling backend-optimizer-util-clauses-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-clauses-seams)
+   Compiling backend-utils-activity-stat-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-activity-stat-seams)
+   Compiling backend-nodes-core-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-nodes-core-seams)
+   Compiling backend-utils-cache-syscache-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-syscache-seams)
+   Compiling backend-utils-cache-lsyscache-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-lsyscache-seams)
+   Compiling backend-optimizer-path-costsize-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-costsize-seams)
+   Compiling backend-executor-execTuples-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execTuples-seams)
+warning: `backend-commands-tablecmds-seams` (lib) generated 4 warnings
+   Compiling backend-utils-sort-tuplesort-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-sort-tuplesort-seams)
+   Compiling backend-optimizer-util-relnode-ext-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-relnode-ext-seams)
+   Compiling backend-utils-error v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-error)
+   Compiling backend-utils-activity-pgstat-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-activity-pgstat-seams)
+   Compiling backend-optimizer-path-equivclass-ext-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-equivclass-ext-seams)
+   Compiling backend-nodes-params-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-nodes-params-seams)
+   Compiling backend-optimizer-util-joininfo-ext-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-joininfo-ext-seams)
+   Compiling backend-tcop-utility-out-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-tcop-utility-out-seams)
+warning: unused doc comment
+   --> crates/backend-utils-error/src/config.rs:140:1
+    |
+140 | /// `CritSectionCount` (miscadmin.h; owned by the crit-section machinery).
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> crates/backend-utils-error/src/config.rs:142:1
+    |
+142 | /// `ExitOnAnyError` (globals.c; initdb sets it).
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-error/src/config.rs:144:1
+    |
+144 | /// `proc_exit_inprogress` (storage/ipc/ipc.c).
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-error/src/config.rs:146:1
+    |
+146 | /// `redirection_done` (postmaster.c): stderr is redirected into the syslogger pipe.
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-error/src/config.rs:148:1
+    |
+148 | /// Mirrors `MyBackendType == B_LOGGER` (miscinit.c): we ARE the syslogger.
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-error/src/config.rs:150:1
+    |
+150 | /// `IsUnderPostmaster` (globals.c).
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-error/src/config.rs:152:1
+    |
+152 | /// `FrontendProtocol` (globals.c); 0 = not yet negotiated.
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-error/src/config.rs:154:1
+    |
+154 | /// `OutputFileName` (globals.c); empty = none.
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+  --> crates/backend-utils-error/src/stack.rs:49:1
+   |
+49 | / /// The recursion-trouble fallback `debug_query_string = NULL`: the query
+50 | | /// string is owned by tcop (behind the context provider), so suppression is
+51 | | /// recorded here and honored by `check_log_of_query`. tcop clears it when it
+52 | | /// installs a new statement.
+   | |_----------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+   Compiling backend-nodes-readfuncs-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-nodes-readfuncs-seams)
+   Compiling backend-utils-activity-status-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-activity-status-seams)
+   Compiling backend-utils-adt-acl-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-acl-seams)
+   Compiling backend-access-index-indexam-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-index-indexam-seams)
+   Compiling backend-parser-parse-agg-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-parse-agg-seams)
+   Compiling types-plpgsql v0.0.0 (/private/tmp/nodeflip_20355/crates/types-plpgsql)
+   Compiling backend-utils-activity-backend-progress-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-activity-backend-progress-seams)
+   Compiling backend-utils-adt-oid-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-oid-seams)
+   Compiling types-foreigncmds v0.0.0 (/private/tmp/nodeflip_20355/crates/types-foreigncmds)
+   Compiling backend-utils-cache-catcache-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-catcache-seams)
+   Compiling backend-optimizer-prep-prepagg-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-prep-prepagg-seams)
+   Compiling backend-parser-small1-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-small1-seams)
+   Compiling backend-optimizer-util-plancat-ext-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-plancat-ext-seams)
+   Compiling backend-utils-cache-funccache-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-funccache-seams)
+   Compiling backend-catalog-indexing-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-indexing-seams)
+   Compiling backend-access-common-scankey v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-common-scankey)
+   Compiling backend-optimizer-plan-init-subselect-ext-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-plan-init-subselect-ext-seams)
+   Compiling backend-bootstrap-bootstrap-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-bootstrap-bootstrap-seams)
+   Compiling backend-optimizer-util-pathnode-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-pathnode-seams)
+   Compiling backend-parser-parse-type-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-parse-type-seams)
+   Compiling backend-optimizer-path-joinpath-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-joinpath-seams)
+   Compiling backend-optimizer-path-small-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-small-seams)
+   Compiling backend-optimizer-util-var-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-var-seams)
+   Compiling backend-commands-trigger-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-trigger-seams)
+   Compiling backend-access-table-tableam-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-table-tableam-seams)
+   Compiling backend-catalog-heap-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-heap-seams)
+   Compiling backend-optimizer-prep-prepqual-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-prep-prepqual-seams)
+   Compiling backend-commands-createas-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-createas-seams)
+   Compiling backend-parser-coerce-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-coerce-seams)
+   Compiling backend-utils-resowner-resowner-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-resowner-resowner-seams)
+   Compiling backend-storage-lmgr-s-lock v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-lmgr-s-lock)
+   Compiling backend-lib-hyperloglog v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-lib-hyperloglog)
+   Compiling backend-storage-lmgr-lwlock v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-lmgr-lwlock)
+   Compiling backend-storage-ipc-shm-toc v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-ipc-shm-toc)
+   Compiling backend-utils-adt-pg-locale v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-pg-locale)
+warning: variable `parentId` should have a snake case name
+    --> crates/backend-utils-cache-syscache-seams/src/lib.rs:1254:39
+     |
+1254 |     pub fn search_partrelid_partdefid(parentId: Oid) -> PgResult<Option<Oid>>
+     |                                       ^^^^^^^^ help: convert the identifier to snake case: `parent_id`
+     |
+     = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: variable `parentId` should have a snake case name
+    --> crates/backend-utils-cache-syscache-seams/src/lib.rs:1268:41
+     |
+1268 |     pub fn update_default_partition_oid(parentId: Oid, defaultPartId: Oid) -> PgResult<()>
+     |                                         ^^^^^^^^ help: convert the identifier to snake case: `parent_id`
+
+warning: variable `defaultPartId` should have a snake case name
+    --> crates/backend-utils-cache-syscache-seams/src/lib.rs:1268:56
+     |
+1268 |     pub fn update_default_partition_oid(parentId: Oid, defaultPartId: Oid) -> PgResult<()>
+     |                                                        ^^^^^^^^^^^^^ help: convert the identifier to snake case: `default_part_id`
+
+   Compiling backend-nodes-core v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-nodes-core)
+   Compiling backend-utils-init-small v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-init-small)
+   Compiling backend-executor-spi-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-spi-seams)
+   Compiling backend-parser-relation-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-relation-seams)
+   Compiling backend-access-table-tableam-bm-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-table-tableam-bm-seams)
+   Compiling backend-utils-mmgr-portalmem-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-mmgr-portalmem-seams)
+   Compiling backend-executor-execUtils-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execUtils-seams)
+   Compiling backend-parser-driver-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-driver-seams)
+   Compiling backend-commands-user-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-user-seams)
+   Compiling backend-parser-analyze-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-analyze-seams)
+   Compiling backend-storage-ipc-dsm-core v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-ipc-dsm-core)
+   Compiling backend-utils-fmgr-core v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-fmgr-core)
+   Compiling backend-access-common-tupdesc v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-common-tupdesc)
+warning: `backend-utils-error` (lib) generated 9 warnings
+   Compiling backend-utils-cache-lsyscache v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-lsyscache)
+   Compiling backend-storage-page v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-page)
+warning: unused doc comment
+    --> crates/backend-storage-page/src/lib.rs:1654:1
+     |
+1654 | / /// Install this unit's inward seams.
+1655 | | ///
+1656 | | /// `bufpage.c` *defines* the `ignore_checksum_failure` GUC (the C `bool` global
+1657 | | /// declared at bufpage.c:27 and registered in guc_tables.c). It is a plain
+...    |
+1666 | | /// value to the `READ_BUFFERS_IGNORE_CHECKSUM_FAILURES` flag) call it across
+1667 | | /// the dependency cycle via `backend-storage-page-seams`.
+     | |_---------------------------------------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+     = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling types-relcache-entry v0.0.0 (/private/tmp/nodeflip_20355/crates/types-relcache-entry)
+   Compiling backend-optimizer-util-relnode-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-relnode-seams)
+   Compiling backend-executor-execExpr-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execExpr-seams)
+   Compiling backend-utils-fmgr-funcapi v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-fmgr-funcapi)
+   Compiling backend-optimizer-plan-planner-pc-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-plan-planner-pc-seams)
+warning: structure field `lockRelId` should have a snake case name
+  --> crates/types-relcache-entry/src/lib.rs:45:9
+   |
+45 |     pub lockRelId: LockRelId,
+   |         ^^^^^^^^^ help: convert the identifier to snake case: `lock_rel_id`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: structure field `ruleId` should have a snake case name
+   --> crates/types-relcache-entry/src/lib.rs:454:9
+    |
+454 |     pub ruleId: Oid,
+    |         ^^^^^^ help: convert the identifier to snake case: `rule_id`
+
+warning: structure field `isInstead` should have a snake case name
+   --> crates/types-relcache-entry/src/lib.rs:462:9
+    |
+462 |     pub isInstead: bool,
+    |         ^^^^^^^^^ help: convert the identifier to snake case: `is_instead`
+
+warning: structure field `rd_createSubid` should have a snake case name
+   --> crates/types-relcache-entry/src/lib.rs:563:9
+    |
+563 |     pub rd_createSubid: SubTransactionId,
+    |         ^^^^^^^^^^^^^^ help: convert the identifier to snake case: `rd_create_subid`
+
+warning: structure field `rd_newRelfilelocatorSubid` should have a snake case name
+   --> crates/types-relcache-entry/src/lib.rs:565:9
+    |
+565 |     pub rd_newRelfilelocatorSubid: SubTransactionId,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `rd_new_relfilelocator_subid`
+
+warning: structure field `rd_firstRelfilelocatorSubid` should have a snake case name
+   --> crates/types-relcache-entry/src/lib.rs:567:9
+    |
+567 |     pub rd_firstRelfilelocatorSubid: SubTransactionId,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `rd_first_relfilelocator_subid`
+
+warning: structure field `rd_droppedSubid` should have a snake case name
+   --> crates/types-relcache-entry/src/lib.rs:569:9
+    |
+569 |     pub rd_droppedSubid: SubTransactionId,
+    |         ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `rd_dropped_subid`
+
+warning: structure field `rd_lockInfo` should have a snake case name
+   --> crates/types-relcache-entry/src/lib.rs:578:9
+    |
+578 |     pub rd_lockInfo: LockInfoData,
+    |         ^^^^^^^^^^^ help: convert the identifier to snake case: `rd_lock_info`
+
+   Compiling backend-utils-cache-relcache-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-relcache-seams)
+   Compiling backend-catalog-pg-shdepend-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-shdepend-seams)
+warning: `types-relcache-entry` (lib) generated 8 warnings
+   Compiling backend-parser-parse-func-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-parse-func-seams)
+warning: variable does not need to be mutable
+    --> crates/backend-utils-fmgr-core/src/lib.rs:1737:9
+     |
+1737 |     let mut escontext = escontext;
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `backend-storage-page` (lib) generated 1 warning
+   Compiling backend-access-transam-parallel v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-transam-parallel)
+   Compiling backend-rewrite-rewritemanip-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-rewrite-rewritemanip-seams)
+   Compiling backend-tcop-dest-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-tcop-dest-seams)
+   Compiling backend-utils-adt-varlena v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-varlena)
+   Compiling backend-utils-adt-format-type v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-format-type)
+warning: structure field `ruleId` should have a snake case name
+  --> crates/backend-utils-cache-relcache-seams/src/lib.rs:37:9
+   |
+37 |     pub ruleId: types_core::primitive::Oid,
+   |         ^^^^^^ help: convert the identifier to snake case: `rule_id`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: structure field `isInstead` should have a snake case name
+  --> crates/backend-utils-cache-relcache-seams/src/lib.rs:43:9
+   |
+43 |     pub isInstead: bool,
+   |         ^^^^^^^^^ help: convert the identifier to snake case: `is_instead`
+
+   Compiling backend-nodes-equalfuncs-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-nodes-equalfuncs-seams)
+   Compiling backend-utils-adt-selfuncs-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-selfuncs-seams)
+warning: unused import: `types_datum::datum::Datum`
+  --> crates/backend-utils-adt-selfuncs-seams/src/lib.rs:22:5
+   |
+22 | use types_datum::datum::Datum;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-catalog-namespace v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-namespace)
+   Compiling backend-utils-activity-small v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-activity-small)
+   Compiling backend-commands-event-trigger-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-event-trigger-seams)
+   Compiling backend-catalog-partition-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-partition-seams)
+warning: `backend-utils-adt-selfuncs-seams` (lib) generated 1 warning (run `cargo fix --lib -p backend-utils-adt-selfuncs-seams` to apply 1 suggestion)
+   Compiling backend-catalog-pg-constraint-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-constraint-seams)
+   Compiling backend-storage-ipc-latch v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-ipc-latch)
+   Compiling backend-access-table-table v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-table-table)
+   Compiling backend-access-table-tableam v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-table-tableam)
+   Compiling backend-access-transam-xact v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-transam-xact)
+warning: `backend-utils-cache-syscache-seams` (lib) generated 3 warnings
+   Compiling backend-partitioning-partbounds-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-partitioning-partbounds-seams)
+warning: unused import: `std::vec::Vec`
+  --> crates/backend-access-table-tableam/src/lib.rs:23:5
+   |
+23 | use std::vec::Vec;
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-utils-misc-queryenvironment v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-misc-queryenvironment)
+   Compiling backend-optimizer-path-equivclass-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-equivclass-seams)
+   Compiling backend-access-common-next-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-common-next-seams)
+   Compiling backend-foreign-foreign-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-foreign-foreign-seams)
+   Compiling backend-parser-parse-oper-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-parse-oper-seams)
+   Compiling backend-access-common-indextuple-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-common-indextuple-seams)
+   Compiling backend-geqo-all-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-geqo-all-seams)
+warning: `backend-access-table-tableam` (lib) generated 1 warning (run `cargo fix --lib -p backend-access-table-tableam` to apply 1 suggestion)
+   Compiling backend-executor-execMain-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execMain-seams)
+   Compiling backend-timezone-pgtz v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-timezone-pgtz)
+warning: `backend-utils-cache-relcache-seams` (lib) generated 2 warnings
+   Compiling backend-optimizer-util-appendinfo-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-appendinfo-seams)
+   Compiling backend-executor-execAmi-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execAmi-seams)
+   Compiling backend-optimizer-path-equivclass v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-equivclass)
+warning: `backend-utils-fmgr-core` (lib) generated 1 warning (run `cargo fix --lib -p backend-utils-fmgr-core` to apply 1 suggestion)
+   Compiling backend-utils-init-miscinit v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-init-miscinit)
+warning: unused doc comment
+  --> crates/backend-timezone-pgtz/src/lib.rs:32:1
+   |
+32 | / /// `static char tzdir[MAXPGPATH]` + `static bool done_tzdir` from `pg_TZDIR`:
+33 | | /// the resolved timezone data directory, computed once per backend.
+   | |_-------------------------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+   = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> crates/backend-timezone-pgtz/src/lib.rs:158:1
+    |
+158 | / /// We keep loaded timezones in a per-backend cache so we don't reload/parse the
+159 | | /// TZ definition file every time one is selected. The key is the uppercased
+160 | | /// name (timezone names are matched case-insensitively).
+161 | | ///
+162 | | /// C uses a dynahash `HTAB` of `pg_tz_cache { tznameupper, pg_tz }`; the value
+163 | | /// is shared as `pg_tz *`, mirrored here by `Rc<pg_tz>`.
+    | |_--------------------------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+   Compiling backend-optimizer-path-pathkeys-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-pathkeys-seams)
+   Compiling backend-optimizer-path-indxpath-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-indxpath-seams)
+   Compiling backend-optimizer-util-restrictinfo-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-restrictinfo-seams)
+   Compiling backend-executor-execTuples v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execTuples)
+   Compiling backend-optimizer-path-joinpath v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-joinpath)
+   Compiling backend-optimizer-util-clauses v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-clauses)
+   Compiling backend-parser-small1 v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-small1)
+   Compiling backend-optimizer-util-placeholder-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-placeholder-seams)
+warning: `backend-timezone-pgtz` (lib) generated 2 warnings
+   Compiling backend-optimizer-util-predtest-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-predtest-seams)
+   Compiling backend-optimizer-path-joinrels v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-joinrels)
+   Compiling backend-utils-fmgr-support-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-fmgr-support-seams)
+   Compiling backend-optimizer-path-pathkeys v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-pathkeys)
+   Compiling backend-commands-typecmds-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-typecmds-seams)
+   Compiling backend-optimizer-prep-prepjointree-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-prep-prepjointree-seams)
+   Compiling backend-commands-policy-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-policy-seams)
+   Compiling backend-executor-execProcnode-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execProcnode-seams)
+   Compiling backend-utils-adt-name v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-name)
+   Compiling backend-parser-parse-type v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-parse-type)
+   Compiling backend-catalog-catalog v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-catalog)
+warning: unused import: `types_datum::Datum`
+  --> crates/backend-parser-parse-type/src/lib.rs:30:5
+   |
+30 | use types_datum::Datum;
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-parser-relation v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-relation)
+   Compiling backend-utils-mb-mbutils v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-mb-mbutils)
+   Compiling backend-utils-activity-shmem-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-activity-shmem-seams)
+   Compiling backend-parser-coerce v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-coerce)
+   Compiling backend-utils-adt-domains-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-domains-seams)
+   Compiling backend-utils-activity-pgstat v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-activity-pgstat)
+warning: `backend-parser-parse-type` (lib) generated 1 warning (run `cargo fix --lib -p backend-parser-parse-type` to apply 1 suggestion)
+   Compiling backend-replication-walsender-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-replication-walsender-seams)
+   Compiling backend-tsearch-parse v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-tsearch-parse)
+   Compiling backend-commands-analyze-rt-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-analyze-rt-seams)
+   Compiling backend-parser-parse-expr-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-parse-expr-seams)
+   Compiling backend-utils-adt-xml-libxml-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-xml-libxml-seams)
+   Compiling backend-access-index-indexam v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-index-indexam)
+warning: module `transformExpr` should have a snake case name
+  --> crates/backend-parser-parse-expr-seams/src/lib.rs:23:12
+   |
+23 |     pub fn transformExpr<'mcx>(
+   |            ^^^^^^^^^^^^^ help: convert the identifier to snake case: `transform_expr`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+   Compiling backend-parser-parse-oper v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-parse-oper)
+   Compiling backend-access-common-tupconvert-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-common-tupconvert-seams)
+   Compiling backend-utils-misc-guc-file v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-misc-guc-file)
+warning: function `oom` is never used
+   --> crates/backend-tsearch-parse/src/wparser_def.rs:470:4
+    |
+470 | fn oom(what: &str) -> backend_utils_error::PgError {
+    |    ^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `backend-parser-parse-expr-seams` (lib) generated 1 warning
+   Compiling backend-optimizer-path-indxpath v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-indxpath)
+   Compiling backend-commands-tsearchcmds-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-tsearchcmds-seams)
+warning: unreachable pattern
+    --> crates/backend-parser-relation/src/lib.rs:2914:9
+     |
+2914 |         other => {
+     |         ^^^^^ no value can reach this
+     |
+note: multiple earlier patterns match some of the same values
+    --> crates/backend-parser-relation/src/lib.rs:2914:9
+     |
+2762 |         RTE_RELATION => {
+     |         ------------ matches some of the same values
+...
+2776 |         RTE_SUBQUERY => {
+     |         ------------ matches some of the same values
+...
+2816 |         RTE_FUNCTION => {
+     |         ------------ matches some of the same values
+...
+2824 |         RTE_JOIN => {
+     |         -------- matches some of the same values
+...
+2914 |         other => {
+     |         ^^^^^ ...and 2 other patterns collectively make this unreachable
+     = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+    --> crates/backend-parser-relation/src/lib.rs:3331:9
+     |
+3331 |         other => {
+     |         ^^^^^ no value can reach this
+     |
+note: multiple earlier patterns match some of the same values
+    --> crates/backend-parser-relation/src/lib.rs:3331:9
+     |
+3209 |         RTE_RELATION => {
+     |         ------------ matches some of the same values
+...
+3223 |         RTE_SUBQUERY | RTE_TABLEFUNC | RTE_VALUES | RTE_CTE | RTE_GROUP => {
+     |         --------------------------------------------------------------- matches some of the same values
+...
+3227 |         RTE_NAMEDTUPLESTORE => {
+     |         ------------------- matches some of the same values
+...
+3235 |         RTE_JOIN => {
+     |         -------- matches some of the same values
+...
+3331 |         other => {
+     |         ^^^^^ ...and 2 other patterns collectively make this unreachable
+
+   Compiling backend-parser-clause-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-clause-seams)
+   Compiling backend-utils-adt-tsvector-ext-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-tsvector-ext-seams)
+   Compiling backend-parser-func v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-func)
+   Compiling backend-access-common-next v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-common-next)
+   Compiling backend-commands-indexcmds-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-indexcmds-seams)
+   Compiling backend-catalog-dependency v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-dependency)
+   Compiling backend-utils-adt-array-more-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-array-more-seams)
+   Compiling backend-utils-misc-guc v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-misc-guc)
+   Compiling backend-utils-activity-xact v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-activity-xact)
+warning: `backend-tsearch-parse` (lib) generated 1 warning
+   Compiling backend-utils-adt-arrayfuncs v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-arrayfuncs)
+   Compiling backend-parser-parse-collate v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-parse-collate)
+   Compiling backend-access-transam-transam v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-transam-transam)
+   Compiling backend-partitioning-core-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-partitioning-core-seams)
+   Compiling backend-parser-target-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-target-seams)
+   Compiling backend-catalog-pg-depend v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-depend)
+   Compiling backend-catalog-pg-constraint v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-constraint)
+   Compiling backend-parser-parse-target v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-parse-target)
+   Compiling backend-utils-adt-acl v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-acl)
+   Compiling backend-storage-file-fd v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-file-fd)
+   Compiling types-samplescan v0.0.0 (/private/tmp/nodeflip_20355/crates/types-samplescan)
+warning: unnecessary parentheses around function argument
+   --> crates/backend-parser-parse-target/src/lib.rs:627:33
+    |
+627 |             Node::mk_const(mcx, (make_null_const(
+    |                                 ^
+...
+632 |             )?))?
+    |               ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+627 ~             Node::mk_const(mcx, make_null_const(
+628 |                 mcx,
+...
+631 |                 attrcollation,
+632 ~             )?)?
+    |
+
+warning: unnecessary parentheses around function argument
+   --> crates/backend-parser-parse-target/src/lib.rs:773:51
+    |
+773 |                 Some(Node::mk_case_test_expr(mcx, (CaseTestExpr {
+    |                                                   ^
+...
+777 |                 }))?)
+    |                  ^
+    |
+help: remove these parentheses
+    |
+773 ~                 Some(Node::mk_case_test_expr(mcx, CaseTestExpr {
+774 |                     typeId: target_type_id,
+775 |                     typeMod: target_typmod,
+776 |                     collation: target_collation,
+777 ~                 })?)
+    |
+
+warning: function `reset_value` is never used
+    --> crates/backend-utils-misc-guc/src/registry.rs:1100:4
+     |
+1100 | fn reset_value(record: &GucVariable) -> config_var_val {
+     |    ^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-utils-cache-inval v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-inval)
+   Compiling backend-access-tablesample-core-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-tablesample-core-seams)
+warning: variable does not need to be mutable
+   --> crates/backend-utils-adt-arrayfuncs/src/array_userfuncs.rs:690:9
+    |
+690 |     let mut rlbs = lbs;
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-commands-opclasscmds v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-opclasscmds)
+warning: fields `conname` and `connoinherit` are never read
+    --> crates/backend-catalog-pg-constraint/src/lib.rs:3033:9
+     |
+3031 |     struct ParentCon {
+     |            --------- fields in this struct
+3032 |         contype: i8,
+3033 |         conname: [u8; NAMEDATALEN],
+     |         ^^^^^^^
+3034 |         connoinherit: bool,
+     |         ^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-utils-activity-pgstat-function v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-activity-pgstat-function)
+   Compiling backend-nodes-copyfuncs-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-nodes-copyfuncs-seams)
+   Compiling backend-nodes-outfuncs v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-nodes-outfuncs)
+   Compiling backend-access-common-indextuple v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-common-indextuple)
+   Compiling backend-storage-lmgr-condition-variable v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-lmgr-condition-variable)
+warning: `backend-parser-relation` (lib) generated 2 warnings
+   Compiling backend-catalog-objectaccess v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-objectaccess)
+   Compiling backend-executor-execIndexing-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execIndexing-seams)
+   Compiling backend-executor-nodeModifyTable-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeModifyTable-seams)
+   Compiling backend-rewrite-rewritehandler-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-rewrite-rewritehandler-seams)
+   Compiling backend-storage-file-buffile-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-file-buffile-seams)
+   Compiling backend-postmaster-interrupt v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-postmaster-interrupt)
+   Compiling backend-executor-execGrouping-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execGrouping-seams)
+warning: `backend-parser-parse-target` (lib) generated 2 warnings (run `cargo fix --lib -p backend-parser-parse-target` to apply 2 suggestions)
+   Compiling backend-utils-cache-partcache-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-partcache-seams)
+   Compiling backend-executor-execScan-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execScan-seams)
+   Compiling backend-executor-execUtils v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execUtils)
+warning: `backend-utils-misc-guc` (lib) generated 1 warning
+   Compiling backend-access-transam-xlogutils v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-transam-xlogutils)
+   Compiling backend-access-common-relation v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-common-relation)
+   Compiling backend-optimizer-plan-planner-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-plan-planner-seams)
+   Compiling types-gist v0.0.0 (/private/tmp/nodeflip_20355/crates/types-gist)
+   Compiling backend-utils-mb-conv-string-helpers v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-mb-conv-string-helpers)
+   Compiling backend-executor-nodeHash-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeHash-seams)
+   Compiling backend-catalog-pg-shdepend v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-shdepend)
+   Compiling backend-access-common-reloptions v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-common-reloptions)
+   Compiling backend-access-gist-dispatch-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-gist-dispatch-seams)
+   Compiling backend-parser-gram-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-gram-seams)
+warning: `backend-catalog-pg-constraint` (lib) generated 1 warning
+   Compiling backend-nodes-equalfuncs v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-nodes-equalfuncs)
+   Compiling backend-access-heap-heaptoast v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-heap-heaptoast)
+   Compiling backend-tcop-cmdtag v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-tcop-cmdtag)
+warning: unused variable: `n`
+    --> crates/backend-nodes-outfuncs/src/out_ddl_family.rs:1196:43
+     |
+1196 | fn out_check_point_stmt(buf: &mut String, n: &dn::CheckPointStmt, wl: bool) {
+     |                                           ^ help: if this is intentional, prefix it with an underscore: `_n`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-executor-execPartition-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execPartition-seams)
+   Compiling backend-parser-driver v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-driver)
+   Compiling backend-utils-adt-scalar-datum-core v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-scalar-datum-core)
+warning: unused import: `Node as RawNode`
+   --> crates/backend-parser-driver/src/lib.rs:459:36
+    |
+459 |     use types_nodes::nodes::{ntag, Node as RawNode};
+    |                                    ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-utils-resowner-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-resowner-seams)
+   Compiling backend-utils-sort-tuplestore-hold-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-sort-tuplestore-hold-seams)
+   Compiling backend-access-heap-hio v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-heap-hio)
+   Compiling backend-access-common-printtup-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-common-printtup-seams)
+   Compiling backend-executor-tablefuncRoutine-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-tablefuncRoutine-seams)
+   Compiling backend-utils-adt-oid v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-oid)
+   Compiling backend-utils-adt-numeric v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-numeric)
+   Compiling backend-rewrite-rewriteDefine-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-rewrite-rewriteDefine-seams)
+   Compiling backend-executor-nodeSubplan-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeSubplan-seams)
+warning: `backend-parser-driver` (lib) generated 1 warning (run `cargo fix --lib -p backend-parser-driver` to apply 1 suggestion)
+   Compiling backend-executor-execReplication-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execReplication-seams)
+   Compiling backend-executor-nodeIndexscan-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeIndexscan-seams)
+   Compiling backend-commands-copyto-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-copyto-seams)
+warning: crate `backend_rewrite_rewriteDefine_seams` should have a snake case name
+  |
+  = help: convert the identifier to snake case: `backend_rewrite_rewrite_define_seams`
+  = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: crate `backend_executor_execReplication_seams` should have a snake case name
+  |
+  = help: convert the identifier to snake case: `backend_executor_exec_replication_seams`
+  = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+   Compiling backend-storage-ipc-shm_toc-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-ipc-shm_toc-seams)
+   Compiling backend-access-gist-core v0.1.0 (/private/tmp/nodeflip_20355/crates/backend-access-gist-core)
+warning: `backend-executor-execReplication-seams` (lib) generated 1 warning
+   Compiling backend-tcop-dest v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-tcop-dest)
+warning: `backend-rewrite-rewriteDefine-seams` (lib) generated 1 warning
+   Compiling backend-executor-nodeAgg v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeAgg)
+   Compiling backend-storage-ipc-procsignal v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-ipc-procsignal)
+   Compiling backend-commands-define v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-define)
+   Compiling backend-utils-cache-syscache v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-syscache)
+   Compiling backend-utils-hash-dynahash v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-hash-dynahash)
+   Compiling backend-tcop-utility-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-tcop-utility-seams)
+warning: constant `PqMsg_CommandComplete` should have an upper case name
+  --> crates/backend-tcop-dest/src/lib.rs:93:7
+   |
+93 | const PqMsg_CommandComplete: u8 = b'C';
+   |       ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+   |
+93 - const PqMsg_CommandComplete: u8 = b'C';
+93 + const PQ_MSG_COMMAND_COMPLETE: u8 = b'C';
+   |
+
+warning: constant `PqMsg_ReadyForQuery` should have an upper case name
+  --> crates/backend-tcop-dest/src/lib.rs:95:7
+   |
+95 | const PqMsg_ReadyForQuery: u8 = b'Z';
+   |       ^^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+95 - const PqMsg_ReadyForQuery: u8 = b'Z';
+95 + const PQ_MSG_READY_FOR_QUERY: u8 = b'Z';
+   |
+
+warning: constant `PqMsg_EmptyQueryResponse` should have an upper case name
+  --> crates/backend-tcop-dest/src/lib.rs:97:7
+   |
+97 | const PqMsg_EmptyQueryResponse: u8 = b'I';
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+97 - const PqMsg_EmptyQueryResponse: u8 = b'I';
+97 + const PQ_MSG_EMPTY_QUERY_RESPONSE: u8 = b'I';
+   |
+
+   Compiling backend-executor-nodeHashjoin-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeHashjoin-seams)
+   Compiling backend-executor-nodeBitmapIndexscan-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeBitmapIndexscan-seams)
+warning: unused import: `types_tuple::heaptuple::TupleDescData`
+  --> crates/backend-executor-nodeAgg/src/node_lifecycle.rs:18:5
+   |
+18 | use types_tuple::heaptuple::TupleDescData;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `SearchSysCache4`
+  --> crates/backend-utils-cache-syscache/src/projections.rs:18:5
+   |
+18 |     SearchSysCache4,
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `backend-tcop-dest` (lib) generated 3 warnings (run `cargo fix --lib -p backend-tcop-dest` to apply 3 suggestions)
+   Compiling backend-utils-cache-relcache-nodexform-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-relcache-nodexform-seams)
+   Compiling backend-executor-execParallel-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execParallel-seams)
+   Compiling backend-executor-execSRF-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execSRF-seams)
+   Compiling backend-executor-nodeWorktablescan-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeWorktablescan-seams)
+   Compiling backend-executor-nodeForeignscan-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeForeignscan-seams)
+   Compiling backend-executor-execCurrent-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execCurrent-seams)
+   Compiling types-tidrange v0.0.0 (/private/tmp/nodeflip_20355/crates/types-tidrange)
+   Compiling backend-nodes-extensible-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-nodes-extensible-seams)
+   Compiling backend-utils-cache-partcache v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-partcache)
+   Compiling backend-storage-smgr-md v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-smgr-md)
+   Compiling backend-executor-nodeTidrangescan-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeTidrangescan-seams)
+   Compiling backend-executor-execJunk v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execJunk)
+   Compiling backend-optimizer-prep-prepqual v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-prep-prepqual)
+   Compiling backend-optimizer-plan-setrefs-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-plan-setrefs-seams)
+   Compiling backend-executor-nodeTidscan-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeTidscan-seams)
+   Compiling backend-executor-nodeLockRows-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeLockRows-seams)
+   Compiling backend-executor-execAsync-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execAsync-seams)
+   Compiling backend-executor-nodeBitmapAnd-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeBitmapAnd-seams)
+   Compiling backend-commands-view-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-view-seams)
+   Compiling backend-executor-nodeTidscan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeTidscan)
+warning: `backend-nodes-outfuncs` (lib) generated 1 warning (run `cargo fix --lib -p backend-nodes-outfuncs` to apply 1 suggestion)
+   Compiling backend-executor-nodeModifyTable v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeModifyTable)
+warning: variable does not need to be mutable
+    --> crates/backend-executor-nodeAgg/src/exec_init_agg.rs:1063:5
+     |
+1063 |     mut all_pergroups: PgVec<'mcx, Option<PgVec<'mcx, AggStatePerGroupData<'mcx>>>>,
+     |     ----^^^^^^^^^^^^^
+     |     |
+     |     help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-executor-nodeTidrangescan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeTidrangescan)
+   Compiling backend-executor-nodeLockRows v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeLockRows)
+   Compiling backend-executor-nodeAppend v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeAppend)
+   Compiling backend-executor-nodeBitmapAnd v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeBitmapAnd)
+   Compiling backend-executor-nodeCustom v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeCustom)
+   Compiling backend-executor-nodeWorktablescan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeWorktablescan)
+   Compiling backend-executor-nodeRecursiveunion v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeRecursiveunion)
+   Compiling backend-executor-nodeForeignscan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeForeignscan)
+   Compiling backend-executor-nodeFunctionscan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeFunctionscan)
+warning: value assigned to `slot` is never read
+   --> crates/backend-executor-nodeModifyTable/src/exec.rs:313:40
+    |
+313 |         let mut slot: Option<SlotId> = Some(plan_slot);
+    |                                        ^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `tuple_ctid` is never read
+   --> crates/backend-executor-nodeModifyTable/src/exec.rs:315:30
+    |
+315 |         let mut tuple_ctid = ItemPointerData::default();
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `result` is never read
+    --> crates/backend-executor-nodeAgg/src/node_lifecycle.rs:1201:38
+     |
+1201 |     let mut result: Option<SlotId> = None;
+     |                                      ^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-executor-nodeProjectSet v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeProjectSet)
+   Compiling backend-executor-nodeGather v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeGather)
+   Compiling backend-executor-nodeGatherMerge v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeGatherMerge)
+   Compiling backend-executor-nodeBitmapOr v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeBitmapOr)
+warning: value assigned to `new_abbrev_val` is never read
+   --> crates/backend-executor-nodeAgg/src/transition.rs:651:9
+    |
+651 |         types_tuple::backend_access_common_heaptuple::Datum::null();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `new_abbrev_val` is never read
+   --> crates/backend-executor-nodeAgg/src/transition.rs:787:9
+    |
+787 |         types_tuple::backend_access_common_heaptuple::Datum::null();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+   Compiling backend-executor-nodeBitmapIndexscan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeBitmapIndexscan)
+   Compiling backend-executor-nodeHash v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeHash)
+warning: `backend-utils-adt-arrayfuncs` (lib) generated 1 warning (run `cargo fix --lib -p backend-utils-adt-arrayfuncs` to apply 1 suggestion)
+   Compiling backend-executor-nodeHashjoin v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeHashjoin)
+   Compiling backend-executor-nodeIndexonlyscan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeIndexonlyscan)
+   Compiling backend-executor-nodeIndexscan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeIndexscan)
+warning: constant `Anum_pg_opclass_oid_b2` is never used
+    --> crates/backend-utils-cache-syscache/src/projections.rs:4976:7
+     |
+4976 | const Anum_pg_opclass_oid_b2: i32 = 1;
+     |       ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `Anum_pg_class_relchecks_b2` is never used
+    --> crates/backend-utils-cache-syscache/src/projections.rs:5018:7
+     |
+5018 | const Anum_pg_class_relchecks_b2: i32 = 20;
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling backend-executor-nodeMergeAppend v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeMergeAppend)
+   Compiling backend-executor-nodeBitmapHeapscan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeBitmapHeapscan)
+warning: unused import: `backend_storage_buffer_bufmgr_seams as _bufmgr`
+  --> crates/backend-executor-nodeIndexscan/src/lib.rs:52:5
+   |
+52 | use backend_storage_buffer_bufmgr_seams as _bufmgr;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-utils-adt-datetime v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-datetime)
+   Compiling backend-executor-nodeMemoize v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeMemoize)
+   Compiling backend-utils-cache-spccache v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-spccache)
+   Compiling backend-rewrite-core v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-rewrite-core)
+   Compiling backend-catalog-indexing v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-indexing)
+   Compiling backend-executor-nodeValuesscan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeValuesscan)
+warning: `backend-executor-nodeIndexscan` (lib) generated 1 warning (run `cargo fix --lib -p backend-executor-nodeIndexscan` to apply 1 suggestion)
+   Compiling backend-optimizer-path-costsize v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-costsize)
+   Compiling backend-access-heap-heapam v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-heap-heapam)
+   Compiling backend-executor-nodeSeqscan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeSeqscan)
+warning: unused import: `HeapTupleHeaderChoice`
+  --> crates/backend-access-heap-heapam/src/insert.rs:37:22
+   |
+37 |     HeapTupleField3, HeapTupleHeaderChoice, HeapTupleHeaderData, HEAP2_XACT_MASK, HEAP_COMBOCID,
+   |                      ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `HeapTupleHeaderGetUpdateXid`
+  --> crates/backend-access-heap-heapam/src/lib.rs:69:45
+   |
+69 | use backend_access_heap_heapam_visibility::{HeapTupleHeaderGetUpdateXid, HeapTupleSetHintBits};
+   |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling backend-executor-nodeSubqueryscan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeSubqueryscan)
+   Compiling backend-executor-nodeCtescan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeCtescan)
+   Compiling backend-executor-nodeSetOp v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeSetOp)
+warning: variable does not need to be mutable
+   --> crates/backend-optimizer-path-costsize/src/sizeest.rs:125:9
+    |
+125 |     let mut subroot: alloc::boxed::Box<PlannerInfo> = root
+    |         ----^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-executor-nodeUnique v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeUnique)
+   Compiling backend-executor-nodeGroup v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeGroup)
+   Compiling backend-executor-nodeLimit v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeLimit)
+   Compiling backend-executor-nodeWindowAgg v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeWindowAgg)
+   Compiling backend-executor-nodeNestloop v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeNestloop)
+   Compiling backend-executor-nodeResult v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeResult)
+   Compiling backend-optimizer-util-vars v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-vars)
+   Compiling backend-executor-nodeIncrementalSort v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeIncrementalSort)
+   Compiling backend-executor-nodeMaterial v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeMaterial)
+   Compiling backend-executor-nodeSort v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeSort)
+warning: method `is_byval` is never used
+    --> crates/backend-executor-nodeWindowAgg/src/lib.rs:3986:8
+     |
+3982 | trait DatumByValExt<'mcx> {
+     |       ------------- method in this trait
+...
+3986 |     fn is_byval(&self) -> bool;
+     |        ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `backend-executor-nodeAgg` (lib) generated 5 warnings (run `cargo fix --lib -p backend-executor-nodeAgg` to apply 2 suggestions)
+   Compiling backend-executor-nodeMergejoin v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeMergejoin)
+warning: constant `TEXTOID` is never used
+   --> crates/backend-catalog-indexing/src/family1.rs:790:7
+    |
+790 | const TEXTOID: Oid = 25;
+    |       ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-tcop-pquery-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-tcop-pquery-seams)
+   Compiling backend-utils-cache-plancache-portal-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-plancache-portal-seams)
+warning: `backend-utils-cache-syscache` (lib) generated 3 warnings (run `cargo fix --lib -p backend-utils-cache-syscache` to apply 1 suggestion)
+   Compiling backend-executor-execExprInterp-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execExprInterp-seams)
+   Compiling backend-optimizer-util-inherit-predtest-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-inherit-predtest-seams)
+   Compiling backend-utils-cache-relcache v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-relcache)
+   Compiling backend-executor-nodeNamedtuplestorescan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeNamedtuplestorescan)
+warning: `backend-executor-nodeModifyTable` (lib) generated 2 warnings
+   Compiling backend-catalog-pg-inherits v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-inherits)
+   Compiling backend-storage-lmgr-lmgr v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-lmgr-lmgr)
+   Compiling backend-executor-execExpr v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execExpr)
+   Compiling backend-access-gin-core-probe v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-gin-core-probe)
+   Compiling backend-catalog-partition v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-partition)
+warning: unused import: `Node`
+   --> crates/backend-utils-cache-relcache/src/derived.rs:658:45
+    |
+658 |     use types_nodes::nodes::{ntag, CmdType, Node};
+    |                                             ^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-catalog-objectaddress v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-objectaddress)
+warning: `backend-optimizer-path-costsize` (lib) generated 1 warning (run `cargo fix --lib -p backend-optimizer-path-costsize` to apply 1 suggestion)
+   Compiling backend-commands-functioncmds v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-functioncmds)
+   Compiling backend-storage-smgr-smgr v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-smgr-smgr)
+warning: constant `InvalidTransactionId` is never used
+   --> crates/backend-access-heap-heapam/src/delete.rs:114:7
+    |
+114 | const InvalidTransactionId: TransactionId = 0;
+    |       ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `backend-executor-nodeWindowAgg` (lib) generated 1 warning
+   Compiling backend-access-gin-ginutil v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-gin-ginutil)
+   Compiling backend-access-transam-xloginsert v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-transam-xloginsert)
+   Compiling backend-commands-portalcmds-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-portalcmds-seams)
+   Compiling backend-commands-comment v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-comment)
+   Compiling backend-utils-adt-xml v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-xml)
+   Compiling backend-optimizer-rte-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-rte-seams)
+   Compiling backend-utils-time-snapmgr v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-time-snapmgr)
+   Compiling backend-access-transam-slru v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-transam-slru)
+   Compiling backend-utils-activity-pgstat-io-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-activity-pgstat-io-seams)
+   Compiling backend-catalog-pg-aggregate-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-aggregate-seams)
+warning: value assigned to `args` is never read
+   --> crates/backend-catalog-objectaddress/src/fmgr_sql.rs:169:31
+    |
+169 |     let mut args: Vec<Node> = Vec::new();
+    |                               ^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-utils-adt-rangetypes-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-rangetypes-seams)
+   Compiling backend-executor-tstorereceiver-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-tstorereceiver-seams)
+   Compiling backend-utils-mmgr-portalmem v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-mmgr-portalmem)
+   Compiling backend-partitioning-partdesc v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-partitioning-partdesc)
+   Compiling backend-access-transam-rmgr v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-transam-rmgr)
+   Compiling backend-libpq-pqcomm v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-libpq-pqcomm)
+warning: `types-nodes` (lib) generated 68 warnings (run `cargo fix --lib -p types-nodes` to apply 1 suggestion)
+   Compiling backend-utils-cache-plancache-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-plancache-seams)
+warning: constant in pattern `RelationRelationId` should have an upper case name
+  --> crates/backend-catalog-objectaddress/src/description.rs:74:9
+   |
+74 |         RelationRelationId => {
+   |         ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `RELATION_RELATION_ID`
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: constant in pattern `ProcedureRelationId` should have an upper case name
+  --> crates/backend-catalog-objectaddress/src/description.rs:96:9
+   |
+96 |         ProcedureRelationId => {
+   |         ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `PROCEDURE_RELATION_ID`
+
+warning: constant in pattern `TypeRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:108:9
+    |
+108 |         TypeRelationId => {
+    |         ^^^^^^^^^^^^^^ help: convert the identifier to upper case: `TYPE_RELATION_ID`
+
+warning: constant in pattern `CastRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:121:9
+    |
+121 |         CastRelationId => {
+    |         ^^^^^^^^^^^^^^ help: convert the identifier to upper case: `CAST_RELATION_ID`
+
+warning: constant in pattern `CollationRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:144:9
+    |
+144 |         CollationRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `COLLATION_RELATION_ID`
+
+warning: constant in pattern `ConstraintRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:172:9
+    |
+172 |         ConstraintRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `CONSTRAINT_RELATION_ID`
+
+warning: constant in pattern `ConversionRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:207:9
+    |
+207 |         ConversionRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `CONVERSION_RELATION_ID`
+
+warning: constant in pattern `AttrDefaultRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:235:9
+    |
+235 |         AttrDefaultRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ATTR_DEFAULT_RELATION_ID`
+
+warning: constant in pattern `LanguageRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:263:9
+    |
+263 |         LanguageRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `LANGUAGE_RELATION_ID`
+
+warning: constant in pattern `LargeObjectRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:276:9
+    |
+276 |         LargeObjectRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `LARGE_OBJECT_RELATION_ID`
+
+warning: constant in pattern `OperatorRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:283:9
+    |
+283 |         OperatorRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `OPERATOR_RELATION_ID`
+
+warning: constant in pattern `OperatorClassRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:295:9
+    |
+295 |         OperatorClassRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `OPERATOR_CLASS_RELATION_ID`
+
+warning: constant in pattern `OperatorFamilyRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:332:9
+    |
+332 |         OperatorFamilyRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `OPERATOR_FAMILY_RELATION_ID`
+
+warning: constant in pattern `AccessMethodRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:336:9
+    |
+336 |         AccessMethodRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ACCESS_METHOD_RELATION_ID`
+
+warning: constant in pattern `AccessMethodOperatorRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:351:9
+    |
+351 |         AccessMethodOperatorRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ACCESS_METHOD_OPERATOR_RELATION_ID`
+
+warning: constant in pattern `AccessMethodProcedureRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:396:9
+    |
+396 |         AccessMethodProcedureRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `ACCESS_METHOD_PROCEDURE_RELATION_ID`
+
+warning: constant in pattern `RewriteRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:440:9
+    |
+440 |         RewriteRelationId => {
+    |         ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `REWRITE_RELATION_ID`
+
+warning: constant in pattern `TriggerRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:460:9
+    |
+460 |         TriggerRelationId => {
+    |         ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `TRIGGER_RELATION_ID`
+
+warning: constant in pattern `NamespaceRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:480:9
+    |
+480 |         NamespaceRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `NAMESPACE_RELATION_ID`
+
+warning: constant in pattern `StatisticExtRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:495:9
+    |
+495 |         StatisticExtRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `STATISTIC_EXT_RELATION_ID`
+
+   Compiling backend-commands-aggregatecmds v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-aggregatecmds)
+warning: constant in pattern `TSParserRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:524:9
+    |
+524 |         TSParserRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `TSPARSER_RELATION_ID`
+
+warning: constant in pattern `TSDictionaryRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:552:9
+    |
+552 |         TSDictionaryRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `TSDICTIONARY_RELATION_ID`
+
+warning: constant in pattern `TSTemplateRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:581:9
+    |
+581 |         TSTemplateRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `TSTEMPLATE_RELATION_ID`
+
+warning: constant in pattern `TSConfigRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:610:9
+    |
+610 |         TSConfigRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `TSCONFIG_RELATION_ID`
+
+warning: constant in pattern `AuthIdRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:638:9
+    |
+638 |         AuthIdRelationId => {
+    |         ^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `AUTH_ID_RELATION_ID`
+
+warning: constant in pattern `AuthMemRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:645:9
+    |
+645 |         AuthMemRelationId => {
+    |         ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `AUTH_MEM_RELATION_ID`
+
+warning: constant in pattern `DatabaseRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:674:9
+    |
+674 |         DatabaseRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `DATABASE_RELATION_ID`
+
+warning: constant in pattern `TableSpaceRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:689:9
+    |
+689 |         TableSpaceRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `TABLE_SPACE_RELATION_ID`
+
+warning: constant in pattern `ForeignDataWrapperRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:706:9
+    |
+706 |         ForeignDataWrapperRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `FOREIGN_DATA_WRAPPER_RELATION_ID`
+
+warning: constant in pattern `ForeignServerRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:714:9
+    |
+714 |         ForeignServerRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `FOREIGN_SERVER_RELATION_ID`
+
+warning: constant in pattern `UserMappingRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:722:9
+    |
+722 |         UserMappingRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `USER_MAPPING_RELATION_ID`
+
+warning: function `xid_in_mvcc_active_snapshot` is never used
+  --> crates/backend-partitioning-partdesc/src/lib.rs:89:4
+   |
+89 | fn xid_in_mvcc_active_snapshot(xid: TransactionId) -> PgResult<bool> {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `InvalidTransactionId` should have an upper case name
+  --> crates/backend-partitioning-partdesc/src/lib.rs:74:7
+   |
+74 | const InvalidTransactionId: TransactionId = 0;
+   |       ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+help: convert the identifier to upper case
+   |
+74 - const InvalidTransactionId: TransactionId = 0;
+74 + const INVALID_TRANSACTION_ID: TransactionId = 0;
+   |
+
+warning: type `ForeignKeyCacheInfo` is more private than the item `RelationGetFKeyList`
+    --> crates/backend-utils-cache-relcache/src/derived.rs:67:1
+     |
+  67 | pub fn RelationGetFKeyList(relation: Oid) -> PgResult<Vec<ForeignKeyCacheInfo>> {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `RelationGetFKeyList` is reachable at visibility `pub`
+     |
+note: but type `ForeignKeyCacheInfo` is only usable at visibility `pub(crate)`
+    --> crates/backend-utils-cache-relcache/src/derived.rs:1208:1
+     |
+1208 | pub(crate) struct ForeignKeyCacheInfo {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: constant `REPLICA_IDENTITY_INDEX` is never used
+   --> crates/backend-utils-cache-relcache/src/lib.rs:130:18
+    |
+130 | pub(crate) const REPLICA_IDENTITY_INDEX: i8 = b'i' as i8;
+    |                  ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `REPLICA_IDENTITY_FULL` is never used
+   --> crates/backend-utils-cache-relcache/src/lib.rs:131:18
+    |
+131 | pub(crate) const REPLICA_IDENTITY_FULL: i8 = b'f' as i8;
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `rd_backend_of` is never used
+   --> crates/backend-utils-cache-relcache/src/core_entry_store.rs:634:15
+    |
+634 | pub(crate) fn rd_backend_of(rel: Oid) -> ProcNumber {
+    |               ^^^^^^^^^^^^^
+
+warning: function `rd_create_subid_of` is never used
+   --> crates/backend-utils-cache-relcache/src/core_entry_store.rs:639:15
+    |
+639 | pub(crate) fn rd_create_subid_of(rel: Oid) -> SubTransactionId {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: field `conoid` is never read
+    --> crates/backend-utils-cache-relcache/src/derived.rs:1209:16
+     |
+1208 | pub(crate) struct ForeignKeyCacheInfo {
+     |                   ------------------- field in this struct
+1209 |     pub(crate) conoid: Oid,
+     |                ^^^^^^
+     |
+     = note: `ForeignKeyCacheInfo` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+   Compiling backend-commands-seclabel v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-seclabel)
+warning: constant in pattern `DefaultAclRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:760:9
+    |
+760 |         DefaultAclRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `DEFAULT_ACL_RELATION_ID`
+
+warning: constant in pattern `ExtensionRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:855:9
+    |
+855 |         ExtensionRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `EXTENSION_RELATION_ID`
+
+warning: constant in pattern `EventTriggerRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:870:9
+    |
+870 |         EventTriggerRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `EVENT_TRIGGER_RELATION_ID`
+
+warning: constant in pattern `ParameterAclRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:887:9
+    |
+887 |         ParameterAclRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `PARAMETER_ACL_RELATION_ID`
+
+warning: constant in pattern `PolicyRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:902:9
+    |
+902 |         PolicyRelationId => {
+    |         ^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `POLICY_RELATION_ID`
+
+warning: constant in pattern `PublicationRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:922:9
+    |
+922 |         PublicationRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `PUBLICATION_RELATION_ID`
+
+warning: constant in pattern `PublicationNamespaceRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:930:9
+    |
+930 |         PublicationNamespaceRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `PUBLICATION_NAMESPACE_RELATION_ID`
+
+warning: constant in pattern `PublicationRelRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:942:9
+    |
+942 |         PublicationRelRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `PUBLICATION_REL_RELATION_ID`
+
+warning: constant in pattern `SubscriptionRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:971:9
+    |
+971 |         SubscriptionRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `SUBSCRIPTION_RELATION_ID`
+
+warning: constant in pattern `TransformRelationId` should have an upper case name
+   --> crates/backend-catalog-objectaddress/src/description.rs:979:9
+    |
+979 |         TransformRelationId => {
+    |         ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `TRANSFORM_RELATION_ID`
+
+warning: constant `Anum_pg_rewrite_ev_class` should have an upper case name
+  --> crates/backend-catalog-objectaddress/src/rewrite_lookup.rs:21:7
+   |
+21 | const Anum_pg_rewrite_ev_class: i16 = 3;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+21 - const Anum_pg_rewrite_ev_class: i16 = 3;
+21 + const ANUM_PG_REWRITE_EV_CLASS: i16 = 3;
+   |
+
+   Compiling backend-commands-operatorcmds v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-operatorcmds)
+warning: `backend-catalog-indexing` (lib) generated 1 warning
+   Compiling backend-parser-parse-expr v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-parse-expr)
+   Compiling backend-executor-nodeTableFuncscan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-nodeTableFuncscan)
+warning: unused import: `JsonValueType`
+   --> crates/backend-parser-parse-expr/src/lib.rs:112:74
+    |
+112 |     JsonFormatType, JsonReturning, JsonValueExpr as CookedJsonValueExpr, JsonValueType,
+    |                                                                          ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-catalog-pg-proc v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-proc)
+   Compiling backend-catalog-pg-type v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-type)
+warning: `backend-partitioning-partdesc` (lib) generated 2 warnings (run `cargo fix --lib -p backend-partitioning-partdesc` to apply 1 suggestion)
+   Compiling backend-storage-file-copydir v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-file-copydir)
+warning: `backend-access-heap-heapam` (lib) generated 3 warnings (run `cargo fix --lib -p backend-access-heap-heapam` to apply 2 suggestions)
+   Compiling backend-catalog-pg-enum v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-enum)
+   Compiling backend-catalog-pg-cast v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-cast)
+   Compiling backend-catalog-pg-range v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-range)
+warning: unused import: `EnumOidIndexId`
+  --> crates/backend-catalog-pg-enum/src/lib.rs:32:5
+   |
+32 |     EnumOidIndexId, EnumRelationId, EnumTupleData, EnumTypIdLabelIndexId,
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-executor-execAmi v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-executor-execAmi)
+   Compiling backend-storage-buffer-support v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-buffer-support)
+   Compiling backend-utils-misc-stack-depth v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-misc-stack-depth)
+   Compiling backend-storage-ipc-standby v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-ipc-standby)
+   Compiling backend-catalog-pg-tablespace-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-tablespace-seams)
+   Compiling backend-libpq-hba-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-libpq-hba-seams)
+   Compiling backend-storage-file-reinit v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-file-reinit)
+   Compiling backend-catalog-pg-attrdef v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-attrdef)
+   Compiling backend-storage-aio-methods v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-aio-methods)
+   Compiling backend-access-transam-xlogarchive v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-transam-xlogarchive)
+   Compiling backend-optimizer-util-joininfo v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-joininfo)
+   Compiling backend-utils-adt-jsonb-util v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-jsonb-util)
+   Compiling backend-utils-adt-multirangetypes-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-multirangetypes-seams)
+warning: `backend-catalog-pg-enum` (lib) generated 1 warning (run `cargo fix --lib -p backend-catalog-pg-enum` to apply 1 suggestion)
+   Compiling backend-commands-tablespace v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-tablespace)
+   Compiling backend-access-transam-xlog v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-transam-xlog)
+   Compiling backend-catalog-aclchk v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-aclchk)
+   Compiling backend-utils-cache-plancache v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-plancache)
+   Compiling backend-optimizer-util-relnode v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-relnode)
+warning: `backend-catalog-objectaddress` (lib) generated 43 warnings (run `cargo fix --lib -p backend-catalog-objectaddress` to apply 1 suggestion)
+   Compiling backend-access-tablesample-core v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-tablesample-core)
+   Compiling backend-storage-buffer-bufmgr v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-buffer-bufmgr)
+warning: unused doc comment
+  --> crates/backend-access-transam-xlog/src/write.rs:73:1
+   |
+73 | / /// `CHECKPOINT_SEGMENTS` arithmetic uses the GUC-derived `CheckPointSegments`
+74 | | /// (recomputed by `ReadControlFile`/GUC assign). The crate exposes its
+75 | | /// arithmetic via `recompute_segment_derived`; for the driver we keep a
+76 | | /// backend-local cache of the latest value (file-scope `int CheckPointSegments`
+77 | | /// in xlog.c).
+   | |_--------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+   = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-utils-sort-storage v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-sort-storage)
+   Compiling backend-geqo-all v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-geqo-all)
+   Compiling backend-access-gin-ginbtree v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-gin-ginbtree)
+   Compiling backend-optimizer-path-small v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-small)
+warning: constant `F_CONVERT_FROM` is never used
+  --> crates/backend-parser-parse-expr/src/lib.rs:96:7
+   |
+96 | const F_CONVERT_FROM: Oid = 1714;
+   |       ^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-storage-ipc-pmsignal v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-ipc-pmsignal)
+   Compiling backend-optimizer-plan-small-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-plan-small-seams)
+   Compiling backend-access-brin-tuple v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-brin-tuple)
+   Compiling backend-parser-parse-utilcmd-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-parse-utilcmd-seams)
+   Compiling backend-access-brin-pageops v0.1.0 (/private/tmp/nodeflip_20355/crates/backend-access-brin-pageops)
+   Compiling backend-access-gin-gindatapage v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-gin-gindatapage)
+   Compiling backend-utils-adt-jsonb-op v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-jsonb-op)
+   Compiling backend-parser-clause v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-clause)
+   Compiling backend-parser-cte v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-cte)
+   Compiling backend-commands-typecmds v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-typecmds)
+   Compiling backend-utils-adt-misc2 v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-misc2)
+   Compiling backend-utils-adt-formatting v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-formatting)
+warning: function `GinDataLeafPageGetItems` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:184:8
+    |
+184 | pub fn GinDataLeafPageGetItems(page: &[u8], advance_past: ItemPointerData) -> Vec<ItemPointerData> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gin_data_leaf_page_get_items`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: function `GinDataLeafPageGetItemsToTbm` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:218:8
+    |
+218 | pub fn GinDataLeafPageGetItemsToTbm(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gin_data_leaf_page_get_items_to_tbm`
+
+warning: function `dataIsMoveRight` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:262:4
+    |
+262 | fn dataIsMoveRight<'mcx>(btree: &mut GinBtreeData<'mcx>, buffer: Buffer) -> PgResult<bool> {
+    |    ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_is_move_right`
+
+warning: function `dataLocateItem` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:277:4
+    |
+277 | fn dataLocateItem<'mcx>(
+    |    ^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_locate_item`
+
+warning: function `dataFindChildPtr` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:325:4
+    |
+325 | fn dataFindChildPtr<'mcx>(
+    |    ^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_find_child_ptr`
+
+warning: function `dataGetLeftMostPage` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:369:4
+    |
+369 | fn dataGetLeftMostPage(page: &[u8]) -> PgResult<BlockNumber> {
+    |    ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_get_left_most_page`
+
+warning: function `dataGetLeftMostChild` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:379:4
+    |
+379 | fn dataGetLeftMostChild<'mcx>(
+    |    ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_get_left_most_child`
+
+warning: function `GinDataPageAddPostingItem` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:394:8
+    |
+394 | pub fn GinDataPageAddPostingItem(page: &mut [u8], data: &PostingItem, offset: OffsetNumber) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gin_data_page_add_posting_item`
+
+warning: function `GinPageDeletePostingItem` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:422:8
+    |
+422 | pub fn GinPageDeletePostingItem(page: &mut [u8], offset: OffsetNumber) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gin_page_delete_posting_item`
+
+warning: function `dataBeginPlaceToPageLeaf` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:470:4
+    |
+470 | fn dataBeginPlaceToPageLeaf(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_begin_place_to_page_leaf`
+
+warning: function `dataExecPlaceToPageLeaf` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:645:4
+    |
+645 | fn dataExecPlaceToPageLeaf(buf: Buffer, ws: &mut PtpWorkspace) -> PgResult<()> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_exec_place_to_page_leaf`
+
+warning: function `computeLeafRecompressWALData` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:673:4
+    |
+673 | fn computeLeafRecompressWALData(leaf: &mut DisassembledLeaf) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `compute_leaf_recompress_waldata`
+
+warning: function `dataPlaceToPageLeafRecompress` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:755:4
+    |
+755 | fn dataPlaceToPageLeafRecompress(page: &mut [u8], leaf: &DisassembledLeaf) -> PgResult<()> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_place_to_page_leaf_recompress`
+
+warning: function `dataPlaceToPageLeafSplit` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:796:4
+    |
+796 | fn dataPlaceToPageLeafSplit(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_place_to_page_leaf_split`
+
+warning: function `dataBeginPlaceToPageInternal` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:853:4
+    |
+853 | fn dataBeginPlaceToPageInternal(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_begin_place_to_page_internal`
+
+warning: function `dataExecPlaceToPageInternal` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:882:4
+    |
+882 | fn dataExecPlaceToPageInternal(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_exec_place_to_page_internal`
+
+warning: function `dataBeginPlaceToPage` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:930:4
+    |
+930 | fn dataBeginPlaceToPage<'mcx>(
+    |    ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_begin_place_to_page`
+
+warning: function `dataExecPlaceToPage` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:960:4
+    |
+960 | fn dataExecPlaceToPage<'mcx>(
+    |    ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_exec_place_to_page`
+
+warning: function `dataSplitPageInternal` should have a snake case name
+   --> crates/backend-access-gin-gindatapage/src/datatree.rs:988:4
+    |
+988 | fn dataSplitPageInternal(
+    |    ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_split_page_internal`
+
+warning: function `dataPrepareDownlink` should have a snake case name
+    --> crates/backend-access-gin-gindatapage/src/datatree.rs:1060:4
+     |
+1060 | fn dataPrepareDownlink<'mcx>(
+     |    ^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `data_prepare_downlink`
+
+warning: function `ginDataFillRoot` should have a snake case name
+    --> crates/backend-access-gin-gindatapage/src/datatree.rs:1083:4
+     |
+1083 | fn ginDataFillRoot<'mcx>(
+     |    ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gin_data_fill_root`
+
+warning: function `disassembleLeaf` should have a snake case name
+    --> crates/backend-access-gin-gindatapage/src/datatree.rs:1113:4
+     |
+1113 | fn disassembleLeaf(page: &[u8]) -> DisassembledLeaf {
+     |    ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `disassemble_leaf`
+
+warning: function `addItemsToLeaf` should have a snake case name
+    --> crates/backend-access-gin-gindatapage/src/datatree.rs:1164:4
+     |
+1164 | fn addItemsToLeaf(leaf: &mut DisassembledLeaf, new_items: &[ItemPointerData]) -> bool {
+     |    ^^^^^^^^^^^^^^ help: convert the identifier to snake case: `add_items_to_leaf`
+
+warning: function `leafRepackItems` should have a snake case name
+    --> crates/backend-access-gin-gindatapage/src/datatree.rs:1298:4
+     |
+1298 | fn leafRepackItems(leaf: &mut DisassembledLeaf, remaining: &mut ItemPointerData) -> PgResult<bool> {
+     |    ^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `leaf_repack_items`
+
+warning: function `ginVacuumPostingTreeLeaf` should have a snake case name
+    --> crates/backend-access-gin-gindatapage/src/datatree.rs:1472:8
+     |
+1472 | pub fn ginVacuumPostingTreeLeaf<'mcx>(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gin_vacuum_posting_tree_leaf`
+
+warning: function `createPostingTree` should have a snake case name
+    --> crates/backend-access-gin-gindatapage/src/datatree.rs:1574:8
+     |
+1574 | pub fn createPostingTree<'mcx>(
+     |        ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `create_posting_tree`
+
+warning: function `ginPrepareDataScan` should have a snake case name
+    --> crates/backend-access-gin-gindatapage/src/datatree.rs:1665:8
+     |
+1665 | pub fn ginPrepareDataScan<'mcx>(
+     |        ^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gin_prepare_data_scan`
+
+warning: function `ginInsertItemPointers` should have a snake case name
+    --> crates/backend-access-gin-gindatapage/src/datatree.rs:1698:8
+     |
+1698 | pub fn ginInsertItemPointers<'mcx>(
+     |        ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gin_insert_item_pointers`
+
+warning: function `ginScanBeginPostingTree` should have a snake case name
+    --> crates/backend-access-gin-gindatapage/src/datatree.rs:1751:8
+     |
+1751 | pub fn ginScanBeginPostingTree<'mcx>(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `gin_scan_begin_posting_tree`
+
+   Compiling backend-replication-logical-proto v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-replication-logical-proto)
+warning: unused `Result` that must be used
+   --> crates/backend-access-transam-xlog/src/checkpoint.rs:269:5
+    |
+269 |     crate::XLogFlush(recptr);
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+269 |     let _ = crate::XLogFlush(recptr);
+    |     +++++++
+
+warning: unused `Result` that must be used
+   --> crates/backend-access-transam-xlog/src/startup.rs:701:5
+    |
+701 |     UpdateControlFile();
+    |     ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+701 |     let _ = UpdateControlFile();
+    |     +++++++
+
+warning: unused imports: `ERRCODE_FEATURE_NOT_SUPPORTED` and `PgError`
+    --> crates/backend-utils-adt-misc2/src/scalars.rs:1068:17
+     |
+1068 |     use super::{ERRCODE_FEATURE_NOT_SUPPORTED, PgError};
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-storage-lmgr-proc v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-lmgr-proc)
+   Compiling backend-access-nbt-dedup v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-nbt-dedup)
+warning: `backend-access-gin-gindatapage` (lib) generated 29 warnings
+   Compiling backend-utils-adt-json v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-json)
+   Compiling backend-access-transam-twophase-rmgr v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-transam-twophase-rmgr)
+   Compiling types-explain v0.0.0 (/private/tmp/nodeflip_20355/crates/types-explain)
+   Compiling backend-access-brin-scan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-brin-scan)
+   Compiling backend-storage-aio-read-stream v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-aio-read-stream)
+   Compiling backend-utils-adt-jsonb v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-jsonb)
+warning: `backend-utils-cache-relcache` (lib) generated 7 warnings (run `cargo fix --lib -p backend-utils-cache-relcache` to apply 1 suggestion)
+   Compiling backend-utils-activity-pgstat-io v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-activity-pgstat-io)
+warning: `backend-parser-parse-expr` (lib) generated 2 warnings (run `cargo fix --lib -p backend-parser-parse-expr` to apply 1 suggestion)
+   Compiling backend-utils-cache-typcache v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-typcache)
+warning: field `sync_mode` is never read
+   --> crates/backend-storage-aio-read-stream/src/lib.rs:145:5
+    |
+134 | pub struct ReadStream<'mcx> {
+    |            ---------- field in this struct
+...
+145 |     sync_mode: bool,
+    |     ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `per_buffer_data_slice` is never used
+   --> crates/backend-storage-aio-read-stream/src/lib.rs:193:8
+    |
+190 | impl<'mcx> ReadStream<'mcx> {
+    | --------------------------- method in this implementation
+...
+193 |     fn per_buffer_data_slice(&mut self, buffer_index: i16) -> &mut [u8] {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+   Compiling backend-access-hash-core v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-hash-core)
+   Compiling backend-catalog-heap v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-heap)
+   Compiling backend-storage-ipc-shmem v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-ipc-shmem)
+warning: `backend-storage-aio-read-stream` (lib) generated 2 warnings
+   Compiling backend-utils-adt-network v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-network)
+warning: `backend-access-transam-xlog` (lib) generated 3 warnings
+   Compiling backend-parser-agg v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-agg)
+   Compiling backend-optimizer-path-allpaths v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-path-allpaths)
+warning: value assigned to `splitnum` is never read
+   --> crates/backend-access-hash-core/src/hashovfl.rs:157:24
+    |
+157 |     let mut splitnum = metap.hashm_ovflpoint;
+    |                        ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `last_bit` is never read
+   --> crates/backend-access-hash-core/src/hashovfl.rs:158:29
+    |
+158 |     let mut last_bit: u32 = 0;
+    |                             ^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `found` is never read
+   --> crates/backend-access-hash-core/src/hashovfl.rs:214:13
+    |
+214 |             found = true;
+    |             ^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+   Compiling backend-partitioning-partprune-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-partitioning-partprune-seams)
+warning: value assigned to `prev_blkno` is never read
+   --> crates/backend-access-hash-core/src/hashsearch.rs:337:30
+    |
+337 |         let mut prev_blkno = InvalidBlockNumber;
+    |                              ^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: constant `XLOG_HASH_DELETE` is never used
+  --> crates/backend-access-hash-core/src/hashpage.rs:84:18
+   |
+84 | pub(crate) const XLOG_HASH_DELETE: u8 = 0x90;
+   |                  ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `XLOG_HASH_SPLIT_CLEANUP` is never used
+  --> crates/backend-access-hash-core/src/hashpage.rs:85:18
+   |
+85 | pub(crate) const XLOG_HASH_SPLIT_CLEANUP: u8 = 0xA0;
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XLOG_HASH_UPDATE_META_PAGE` is never used
+  --> crates/backend-access-hash-core/src/hashpage.rs:86:18
+   |
+86 | pub(crate) const XLOG_HASH_UPDATE_META_PAGE: u8 = 0xB0;
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `meta_firstfree` is never used
+   --> crates/backend-access-hash-core/src/pagebytes.rs:280:15
+    |
+280 | pub(crate) fn meta_firstfree(page: &[u8]) -> u32 {
+    |               ^^^^^^^^^^^^^^
+
+warning: function `meta_bmsize` is never used
+   --> crates/backend-access-hash-core/src/pagebytes.rs:292:15
+    |
+292 | pub(crate) fn meta_bmsize(page: &[u8]) -> u16 {
+    |               ^^^^^^^^^^^
+
+warning: function `meta_bmshift` is never used
+   --> crates/backend-access-hash-core/src/pagebytes.rs:295:15
+    |
+295 | pub(crate) fn meta_bmshift(page: &[u8]) -> u16 {
+    |               ^^^^^^^^^^^^
+
+warning: function `page_meta_mapp` is never used
+   --> crates/backend-access-hash-core/src/pagebytes.rs:304:15
+    |
+304 | pub(crate) fn page_meta_mapp(page: &[u8], i: usize) -> BlockNumber {
+    |               ^^^^^^^^^^^^^^
+
+   Compiling backend-optimizer-util-paramassign-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-paramassign-seams)
+   Compiling types-copy v0.0.0 (/private/tmp/nodeflip_20355/crates/types-copy)
+   Compiling backend-access-nbtree-nbtree v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-nbtree-nbtree)
+   Compiling backend-access-nbtree-core v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-nbtree-core)
+   Compiling backend-access-gin-ginentrypage v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-gin-ginentrypage)
+   Compiling backend-commands-async v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-async)
+   Compiling backend-utils-misc-timeout v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-misc-timeout)
+   Compiling backend-access-hash-entry v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-hash-entry)
+   Compiling backend-parser-analyze v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-parser-analyze)
+   Compiling backend-utils-adt-float v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-float)
+   Compiling backend-access-gist-validate v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-gist-validate)
+warning: `backend-access-hash-core` (lib) generated 11 warnings
+   Compiling backend-access-spgist-core v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-spgist-core)
+   Compiling backend-replication-slot v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-replication-slot)
+   Compiling backend-optimizer-util-pathnode v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-pathnode)
+warning: unused import: `BUFFER_LOCK_UNLOCK`
+  --> crates/backend-access-spgist-core/src/spgdoinsert.rs:53:72
+   |
+53 | use types_storage::buf::{Buffer, InvalidBuffer, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
+   |                                                                        ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-optimizer-util-plancat v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-plancat)
+   Compiling backend-utils-misc-more v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-misc-more)
+   Compiling backend-access-brin-validate v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-brin-validate)
+warning: `backend-utils-adt-misc2` (lib) generated 1 warning (run `cargo fix --lib -p backend-utils-adt-misc2` to apply 1 suggestion)
+   Compiling backend-access-nbt-validate v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-nbt-validate)
+warning: value assigned to `dirty_conflict` is never read
+   --> crates/backend-access-nbtree-core/src/insert.rs:924:30
+    |
+924 |     let mut dirty_conflict = DirtyConflict::default();
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-access-hashvalidate v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-hashvalidate)
+warning: value assigned to `opaque` is never read
+    --> crates/backend-access-nbtree-core/src/insert.rs:1347:13
+     |
+1347 |             opaque = opaque_from_page(&page)?;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+   Compiling backend-access-spg-validate v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-spg-validate)
+   Compiling backend-tcop-utility-fc-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-tcop-utility-fc-seams)
+   Compiling backend-optimizer-plan-createplan-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-plan-createplan-seams)
+   Compiling backend-optimizer-plan-subselect-pullup-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-plan-subselect-pullup-seams)
+   Compiling backend-optimizer-plan-init-subselect-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-plan-init-subselect-seams)
+   Compiling backend-replication-repl-scanner-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-replication-repl-scanner-seams)
+   Compiling backend-catalog-toasting-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-toasting-seams)
+   Compiling backend-catalog-pg-db-role-setting-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-db-role-setting-seams)
+warning: value assigned to `x_inner_is_parent` is never read
+   --> crates/backend-access-spgist-core/src/spgdoinsert_actions.rs:504:33
+    |
+504 |     let mut x_inner_is_parent = false;
+    |                                 ^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-foreign-fdwapi-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-foreign-fdwapi-seams)
+warning: value assigned to `x_offnum_parent` is never read
+   --> crates/backend-access-spgist-core/src/spgdoinsert_actions.rs:505:31
+    |
+505 |     let mut x_offnum_parent = InvalidOffsetNumber;
+    |                               ^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `x_node_i` is never read
+   --> crates/backend-access-spgist-core/src/spgdoinsert_actions.rs:506:29
+    |
+506 |     let mut x_node_i: u16 = 0;
+    |                             ^
+    |
+    = help: maybe it is overwritten before being read?
+
+   Compiling backend-optimizer-plan-subselect-pullup v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-plan-subselect-pullup)
+   Compiling backend-optimizer-util-paramassign v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-util-paramassign)
+   Compiling backend-utils-adt-jsonfuncs v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-jsonfuncs)
+   Compiling backend-utils-adt-jsonpath v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-jsonpath)
+   Compiling backend-utils-activity-pgstat-backend v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-activity-pgstat-backend)
+   Compiling backend-replication-logical-applyparallelworker v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-replication-logical-applyparallelworker)
+   Compiling backend-utils-adt-multirangetypes v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-multirangetypes)
+   Compiling backend-utils-adt-rangetypes v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-rangetypes)
+   Compiling backend-postmaster-checkpointer v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-postmaster-checkpointer)
+   Compiling backend-foreign-foreign v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-foreign-foreign)
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:194:1
+    |
+194 | / /// `range_in(cstring, oid, int4) -> anyrange` (oid 3834). cstring on the by-ref
+195 | | /// lane, `typioparam`/`typmod` scalars in the by-value words; result range on the
+196 | | /// by-ref lane.
+    | |_---------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:199:1
+    |
+199 | / /// `range_recv(internal, oid, int4) -> anyrange` (oid 3836). The wire buffer is
+200 | | /// the by-ref `Varlena` arg 0 (a `StringInfo`'s message bytes — the kernel reads
+201 | | /// it as the cursor, NOT a `RangeType`, so it is not staged as a range arg).
+    | |_----------------------------------------------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:204:1
+    |
+204 | / /// `range_constructor2(anyelement, anyelement) -> anyrange` (oid 3840 + per-type
+205 | | /// dups). Element args ride the by-value words; the result range type is read
+206 | | /// off `flinfo->fn_expr` (`get_fn_expr_rettype`), so a real planned call frame is
+207 | | /// required. Result range on the by-ref lane.
+    | |_---------------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:214:1
+    |
+214 | / /// `range_constructor3(anyelement, anyelement, text) -> anyrange` (oid 3841 +
+215 | | /// per-type dups). Like `_constructor2` plus a `text` flags arg (read off its
+216 | | /// by-value Datum word through the varlena seam).
+    | |_-------------------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:223:1
+    |
+223 | / /// `range_out(anyrange) -> cstring` (oid 3835). Stages arg 0; the kernel sets the
+224 | | /// cstring result on the by-ref lane.
+    | |_-------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:227:1
+    |
+227 | / /// `range_send(anyrange) -> bytea` (oid 3837). Stages arg 0; the kernel sets the
+228 | | /// bytea result on the by-ref lane.
+    | |_-----------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:252:1
+    |
+252 | / /// `range_contains_elem(anyrange, anyelement) -> bool` (oid 3858). Stages arg 0
+253 | | /// (the range); arg 1 (the element) stays in its natural by-value/by-ref form the
+254 | | /// element compare proc reads.
+    | |_------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:315:1
+    |
+315 | /// `range_lower(anyrange) -> anyelement` (oid 3848).
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:317:1
+    |
+317 | /// `range_upper(anyrange) -> anyelement` (oid 3849).
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:319:1
+    |
+319 | /// `range_empty(anyrange) -> bool` (oid 3850).
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:321:1
+    |
+321 | /// `range_lower_inc(anyrange) -> bool` (oid 3851).
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:323:1
+    |
+323 | /// `range_upper_inc(anyrange) -> bool` (oid 3852).
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+   --> crates/backend-utils-adt-rangetypes/src/fmgr_builtins.rs:327:1
+    |
+327 | /// `range_upper_inf(anyrange) -> bool` (oid 3854).
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused variable: `root`
+   --> crates/backend-optimizer-plan-subselect-pullup/src/lib.rs:606:5
+    |
+606 |     root: &PlannerInfo,
+    |     ^^^^ help: if this is intentional, prefix it with an underscore: `_root`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `alloc_box` is never used
+   --> crates/backend-optimizer-plan-subselect-pullup/src/lib.rs:856:4
+    |
+856 | fn alloc_box<'mcx>(mcx: Mcx<'mcx>, n: Node<'mcx>) -> types_nodes::nodes::NodePtr<'mcx> {
+    |    ^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-catalog-index v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-index)
+   Compiling backend-access-heap-visibilitymap v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-heap-visibilitymap)
+   Compiling backend-utils-adt-ts-small v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-adt-ts-small)
+   Compiling backend-rewrite-rewritehandler v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-rewrite-rewritehandler)
+warning: unused import: `alloc::string::String`
+  --> crates/backend-utils-adt-ts-small/src/fmgr_builtins.rs:20:5
+   |
+20 | use alloc::string::String;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-tcop-fastpath v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-tcop-fastpath)
+   Compiling backend-storage-ipc-sinval v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-storage-ipc-sinval)
+warning: `backend-optimizer-plan-subselect-pullup` (lib) generated 2 warnings (run `cargo fix --lib -p backend-optimizer-plan-subselect-pullup` to apply 1 suggestion)
+   Compiling backend-pl-plpgsql-comp-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-pl-plpgsql-comp-seams)
+   Compiling backend-utils-cache-relmapper v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-utils-cache-relmapper)
+   Compiling backend-optimizer-prep-prepunion-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-prep-prepunion-seams)
+error[E0521]: borrowed data escapes outside of function
+   --> crates/backend-rewrite-rewritehandler/src/engine.rs:950:17
+    |
+842 | pub fn AcquireRewriteLocks<'mcx>(
+    |                            ---- lifetime `'mcx` defined here
+843 |     mcx: Mcx<'mcx>,
+    |     --- `mcx` is a reference that is only valid in the function body
+...
+950 |                 acquireLocksOnSubLinks(mcx, node, for_execute, &mut err)
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |                 |
+    |                 `mcx` escapes the function body here
+    |                 argument requires that `'mcx` must outlive `'static`
+
+   Compiling backend-optimizer-prep-preptlist-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-prep-preptlist-seams)
+warning: `backend-utils-adt-rangetypes` (lib) generated 13 warnings
+   Compiling backend-replication-basebackup-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-replication-basebackup-seams)
+error[E0521]: borrowed data escapes outside of function
+    --> crates/backend-rewrite-rewritehandler/src/engine.rs:2112:35
+     |
+1917 | fn rewriteTargetView<'mcx>(
+     |                      ---- lifetime `'mcx` defined here
+1918 |     mcx: Mcx<'mcx>,
+     |     --- `mcx` is a reference that is only valid in the function body
+...
+2112 |                 |node: &mut Node| acquireLocksOnSubLinks(mcx, node, true, &mut err);
+     |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |                                   |
+     |                                   `mcx` escapes the function body here
+     |                                   argument requires that `'mcx` must outlive `'static`
+
+   Compiling backend-commands-cluster-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-cluster-seams)
+   Compiling types-evtcache v0.0.0 (/private/tmp/nodeflip_20355/crates/types-evtcache)
+   Compiling backend-access-index-amapi v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-access-index-amapi)
+   Compiling backend-optimizer-prep-preptlist v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-prep-preptlist)
+   Compiling backend-pl-plpgsql-scanner v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-pl-plpgsql-scanner)
+   Compiling backend-optimizer-prep-prepjointree v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-prep-prepjointree)
+   Compiling backend-optimizer-plan-init-subselect v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-plan-init-subselect)
+   Compiling backend-catalog-pg-db-role-setting v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-pg-db-role-setting)
+warning: unused import: `Oid`
+  --> crates/backend-optimizer-prep-preptlist/src/lib.rs:72:39
+   |
+72 | use types_core::{INT4OID, InvalidOid, Oid};
+   |                                       ^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-catalog-toasting v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-catalog-toasting)
+warning: `backend-utils-adt-ts-small` (lib) generated 1 warning (run `cargo fix --lib -p backend-utils-adt-ts-small` to apply 1 suggestion)
+   Compiling backend-optimizer-plan-small v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-plan-small)
+   Compiling backend-replication-repl-gram v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-replication-repl-gram)
+   Compiling backend-optimizer-plan-createplan v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-optimizer-plan-createplan)
+warning: unused import: `types_nodes::nodes::Node`
+  --> crates/backend-optimizer-plan-small/src/lib.rs:47:5
+   |
+47 | use types_nodes::nodes::Node;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling backend-commands-indexcmds v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-indexcmds)
+warning: `backend-optimizer-prep-preptlist` (lib) generated 1 warning (run `cargo fix --lib -p backend-optimizer-prep-preptlist` to apply 1 suggestion)
+   Compiling backend-commands-copyfrom-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-copyfrom-seams)
+error[E0599]: no associated item named `List` found for struct `types_nodes::nodes::Node<'mcx>` in the current scope
+   --> crates/backend-optimizer-plan-init-subselect/src/jointree.rs:138:20
+    |
+138 |         Some(Node::List(items)) => {
+    |                    ^^^^ associated item not found in `types_nodes::nodes::Node<'_>`
+
+error[E0282]: type annotations needed
+   --> crates/backend-optimizer-plan-init-subselect/src/jointree.rs:143:25
+    |
+143 |                 let e = it.as_expr().unwrap_or_else(|| {
+    |                         ^^ cannot infer type
+
+For more information about this error, try `rustc --explain E0521`.
+   Compiling backend-commands-copy-seams v0.0.0 (/private/tmp/nodeflip_20355/crates/backend-commands-copy-seams)
+error: could not compile `backend-rewrite-rewritehandler` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+warning: `backend-access-spgist-core` (lib) generated 4 warnings (run `cargo fix --lib -p backend-access-spgist-core` to apply 1 suggestion)
+error[E0308]: mismatched types
+    --> crates/backend-optimizer-plan-createplan/src/lib.rs:4202:8
+     |
+4202 |     Ok(Node::mk_lock_rows(mcx, plan))
+     |     -- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Node<'_>`, found `Result<Node<'_>, PgError>`
+     |     |
+     |     arguments to this enum variant are incorrect
+     |
+     = note: expected struct `types_nodes::nodes::Node<'mcx>`
+                  found enum `core::result::Result<types_nodes::nodes::Node<'_>, PgError>`
+help: the type constructed contains `core::result::Result<types_nodes::nodes::Node<'_>, PgError>` due to the type of the argument passed
+    --> crates/backend-optimizer-plan-createplan/src/lib.rs:4202:5
+     |
+4202 |     Ok(Node::mk_lock_rows(mcx, plan))
+     |     ^^^-----------------------------^
+     |        |
+     |        this argument influences the type of `Ok`
+note: tuple variant defined here
+    --> /Users/malisper/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/result.rs:561:5
+     |
+ 561 |     Ok(#[stable(feature = "rust1", since = "1.0.0")] T),
+     |     ^^
+help: use the `?` operator to extract the `core::result::Result<types_nodes::nodes::Node<'_>, PgError>` value, propagating a `Result::Err` value to the caller
+     |
+4202 |     Ok(Node::mk_lock_rows(mcx, plan)?)
+     |                                     +
+
+error[E0599]: no associated item named `RangeTblRef` found for struct `types_nodes::nodes::Node<'mcx>` in the current scope
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:274:15
+    |
+274 |         Node::RangeTblRef(types_nodes::rawnodes::RangeTblRef {
+    |               ^^^^^^^^^^^ associated item not found in `types_nodes::nodes::Node<'_>`
+    |
+note: if you're trying to build a new `types_nodes::nodes::Node<'_>` consider using one of the following associated functions:
+      types_nodes::nodes::Node::<'mcx>::new
+      types_nodes::nodes::Node::<'mcx>::mk_expr
+      types_nodes::nodes::Node::<'mcx>::mk_append
+      types_nodes::nodes::Node::<'mcx>::mk_modify_table
+      and 299 others
+   --> /private/tmp/nodeflip_20355/crates/types-nodes/src/nodes.rs:345:5
+    |
+345 | /     pub fn new<P>(mcx: Mcx<'mcx>, payload: P) -> PgResult<Self>
+346 | |     where
+347 | |         P: crate::opaque_node::NodePayload<'mcx> + 'mcx,
+    | |________________________________________________________^
+    |
+   ::: /private/tmp/nodeflip_20355/target/debug/build/types-nodes-90fb9256c99b2e80/out/node_constructors.rs:11:5
+    |
+ 11 |       pub fn mk_expr(mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 17 |       pub fn mk_append(mcx: mcx::Mcx<'mcx>, payload: crate::nodeappend::Append<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 23 |       pub fn mk_modify_table(mcx: mcx::Mcx<'mcx>, payload: crate::modifytable::ModifyTable<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated item named `Expr` found for struct `types_nodes::nodes::Node<'mcx>` in the current scope
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:306:53
+    |
+306 |         Some(expr) => Some(mcx::alloc_in(mcx, Node::Expr(expr.clone_in(mcx)?))?),
+    |                                                     ^^^^ associated item not found in `types_nodes::nodes::Node<'_>`
+    |
+note: if you're trying to build a new `types_nodes::nodes::Node<'_>` consider using one of the following associated functions:
+      types_nodes::nodes::Node::<'mcx>::new
+      types_nodes::nodes::Node::<'mcx>::mk_expr
+      types_nodes::nodes::Node::<'mcx>::mk_append
+      types_nodes::nodes::Node::<'mcx>::mk_modify_table
+      and 299 others
+   --> /private/tmp/nodeflip_20355/crates/types-nodes/src/nodes.rs:345:5
+    |
+345 | /     pub fn new<P>(mcx: Mcx<'mcx>, payload: P) -> PgResult<Self>
+346 | |     where
+347 | |         P: crate::opaque_node::NodePayload<'mcx> + 'mcx,
+    | |________________________________________________________^
+    |
+   ::: /private/tmp/nodeflip_20355/target/debug/build/types-nodes-90fb9256c99b2e80/out/node_constructors.rs:11:5
+    |
+ 11 |       pub fn mk_expr(mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 17 |       pub fn mk_append(mcx: mcx::Mcx<'mcx>, payload: crate::nodeappend::Append<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 23 |       pub fn mk_modify_table(mcx: mcx::Mcx<'mcx>, payload: crate::modifytable::ModifyTable<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated item named `FromExpr` found for struct `types_nodes::nodes::Node<'mcx>` in the current scope
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:312:45
+    |
+312 |         larg: Some(mcx::alloc_in(mcx, Node::FromExpr(target))?),
+    |                                             ^^^^^^^^ associated item not found in `types_nodes::nodes::Node<'_>`
+    |
+note: if you're trying to build a new `types_nodes::nodes::Node<'_>` consider using one of the following associated functions:
+      types_nodes::nodes::Node::<'mcx>::new
+      types_nodes::nodes::Node::<'mcx>::mk_expr
+      types_nodes::nodes::Node::<'mcx>::mk_append
+      types_nodes::nodes::Node::<'mcx>::mk_modify_table
+      and 299 others
+   --> /private/tmp/nodeflip_20355/crates/types-nodes/src/nodes.rs:345:5
+    |
+345 | /     pub fn new<P>(mcx: Mcx<'mcx>, payload: P) -> PgResult<Self>
+346 | |     where
+347 | |         P: crate::opaque_node::NodePayload<'mcx> + 'mcx,
+    | |________________________________________________________^
+    |
+   ::: /private/tmp/nodeflip_20355/target/debug/build/types-nodes-90fb9256c99b2e80/out/node_constructors.rs:11:5
+    |
+ 11 |       pub fn mk_expr(mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 17 |       pub fn mk_append(mcx: mcx::Mcx<'mcx>, payload: crate::nodeappend::Append<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 23 |       pub fn mk_modify_table(mcx: mcx::Mcx<'mcx>, payload: crate::modifytable::ModifyTable<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no associated item named `JoinExpr` found for struct `types_nodes::nodes::Node<'mcx>` in the current scope
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:325:52
+    |
+325 |         new_fromlist.push(mcx::alloc_in(mcx, Node::JoinExpr(joinexpr))?);
+    |                                                    ^^^^^^^^ associated item not found in `types_nodes::nodes::Node<'_>`
+    |
+note: if you're trying to build a new `types_nodes::nodes::Node<'_>` consider using one of the following associated functions:
+      types_nodes::nodes::Node::<'mcx>::new
+      types_nodes::nodes::Node::<'mcx>::mk_expr
+      types_nodes::nodes::Node::<'mcx>::mk_append
+      types_nodes::nodes::Node::<'mcx>::mk_modify_table
+      and 299 others
+   --> /private/tmp/nodeflip_20355/crates/types-nodes/src/nodes.rs:345:5
+    |
+345 | /     pub fn new<P>(mcx: Mcx<'mcx>, payload: P) -> PgResult<Self>
+346 | |     where
+347 | |         P: crate::opaque_node::NodePayload<'mcx> + 'mcx,
+    | |________________________________________________________^
+    |
+   ::: /private/tmp/nodeflip_20355/target/debug/build/types-nodes-90fb9256c99b2e80/out/node_constructors.rs:11:5
+    |
+ 11 |       pub fn mk_expr(mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 17 |       pub fn mk_append(mcx: mcx::Mcx<'mcx>, payload: crate::nodeappend::Append<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 23 |       pub fn mk_modify_table(mcx: mcx::Mcx<'mcx>, payload: crate::modifytable::ModifyTable<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `backend-optimizer-plan-small` (lib) generated 1 warning (run `cargo fix --lib -p backend-optimizer-plan-small` to apply 1 suggestion)
+error[E0599]: no associated item named `TargetEntry` found for struct `types_nodes::nodes::Node<'mcx>` in the current scope
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:340:34
+    |
+340 |             let mut node = Node::TargetEntry(tle.clone_in(mcx)?);
+    |                                  ^^^^^^^^^^^ associated item not found in `types_nodes::nodes::Node<'_>`
+    |
+note: if you're trying to build a new `types_nodes::nodes::Node<'_>` consider using one of the following associated functions:
+      types_nodes::nodes::Node::<'mcx>::new
+      types_nodes::nodes::Node::<'mcx>::mk_expr
+      types_nodes::nodes::Node::<'mcx>::mk_append
+      types_nodes::nodes::Node::<'mcx>::mk_modify_table
+      and 299 others
+   --> /private/tmp/nodeflip_20355/crates/types-nodes/src/nodes.rs:345:5
+    |
+345 | /     pub fn new<P>(mcx: Mcx<'mcx>, payload: P) -> PgResult<Self>
+346 | |     where
+347 | |         P: crate::opaque_node::NodePayload<'mcx> + 'mcx,
+    | |________________________________________________________^
+    |
+   ::: /private/tmp/nodeflip_20355/target/debug/build/types-nodes-90fb9256c99b2e80/out/node_constructors.rs:11:5
+    |
+ 11 |       pub fn mk_expr(mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 17 |       pub fn mk_append(mcx: mcx::Mcx<'mcx>, payload: crate::nodeappend::Append<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 23 |       pub fn mk_modify_table(mcx: mcx::Mcx<'mcx>, payload: crate::modifytable::ModifyTable<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0061]: this function takes 4 arguments but 3 arguments were supplied
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:341:13
+    |
+341 |             backend_rewrite_core::add_nulling_relids(&mut node, Some(&target_relids), &added);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^----------------------------------------- argument #4 of type `Mcx<'_>` is missing
+    |
+note: function defined here
+   --> /private/tmp/nodeflip_20355/crates/backend-rewrite-core/src/nulling.rs:85:8
+    |
+ 85 | pub fn add_nulling_relids<'mcx>(
+    |        ^^^^^^^^^^^^^^^^^^
+help: provide the argument
+    |
+341 |             backend_rewrite_core::add_nulling_relids(&mut node, Some(&target_relids), &added, /* Mcx<'_> */);
+    |                                                                                             +++++++++++++++
+
+error[E0599]: no associated item named `TargetEntry` found for struct `types_nodes::nodes::Node<'mcx>` in the current scope
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:342:26
+    |
+342 |             if let Node::TargetEntry(new_tle) = node {
+    |                          ^^^^^^^^^^^ associated item not found in `types_nodes::nodes::Node<'_>`
+
+error[E0599]: no associated item named `Expr` found for struct `types_nodes::nodes::Node<'mcx>` in the current scope
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:359:34
+    |
+359 |             let mut node = Node::Expr(expr.clone_in(mcx)?);
+    |                                  ^^^^ associated item not found in `types_nodes::nodes::Node<'_>`
+    |
+note: if you're trying to build a new `types_nodes::nodes::Node<'_>` consider using one of the following associated functions:
+      types_nodes::nodes::Node::<'mcx>::new
+      types_nodes::nodes::Node::<'mcx>::mk_expr
+      types_nodes::nodes::Node::<'mcx>::mk_append
+      types_nodes::nodes::Node::<'mcx>::mk_modify_table
+      and 299 others
+   --> /private/tmp/nodeflip_20355/crates/types-nodes/src/nodes.rs:345:5
+    |
+345 | /     pub fn new<P>(mcx: Mcx<'mcx>, payload: P) -> PgResult<Self>
+346 | |     where
+347 | |         P: crate::opaque_node::NodePayload<'mcx> + 'mcx,
+    | |________________________________________________________^
+    |
+   ::: /private/tmp/nodeflip_20355/target/debug/build/types-nodes-90fb9256c99b2e80/out/node_constructors.rs:11:5
+    |
+ 11 |       pub fn mk_expr(mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 17 |       pub fn mk_append(mcx: mcx::Mcx<'mcx>, payload: crate::nodeappend::Append<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 23 |       pub fn mk_modify_table(mcx: mcx::Mcx<'mcx>, payload: crate::modifytable::ModifyTable<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0061]: this function takes 4 arguments but 3 arguments were supplied
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:360:13
+    |
+360 |             backend_rewrite_core::add_nulling_relids(&mut node, Some(&source_relids), &added);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^----------------------------------------- argument #4 of type `Mcx<'_>` is missing
+    |
+note: function defined here
+   --> /private/tmp/nodeflip_20355/crates/backend-rewrite-core/src/nulling.rs:85:8
+    |
+ 85 | pub fn add_nulling_relids<'mcx>(
+    |        ^^^^^^^^^^^^^^^^^^
+help: provide the argument
+    |
+360 |             backend_rewrite_core::add_nulling_relids(&mut node, Some(&source_relids), &added, /* Mcx<'_> */);
+    |                                                                                             +++++++++++++++
+
+error[E0599]: no associated item named `Expr` found for struct `types_nodes::nodes::Node<'mcx>` in the current scope
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:361:26
+    |
+361 |             if let Node::Expr(e) = node {
+    |                          ^^^^ associated item not found in `types_nodes::nodes::Node<'_>`
+
+error[E0061]: this function takes 4 arguments but 3 arguments were supplied
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:370:21
+    |
+370 |                       backend_rewrite_core::add_nulling_relids(
+    |  _____________________^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-
+371 | |                         &mut qnode,
+372 | |                         Some(&source_relids),
+373 | |                         &added,
+374 | |                     );
+    | |_____________________- argument #4 of type `Mcx<'_>` is missing
+    |
+note: function defined here
+   --> /private/tmp/nodeflip_20355/crates/backend-rewrite-core/src/nulling.rs:85:8
+    |
+ 85 | pub fn add_nulling_relids<'mcx>(
+    |        ^^^^^^^^^^^^^^^^^^
+help: provide the argument
+    |
+370 |                     backend_rewrite_core::add_nulling_relids(
+...
+373 |                         &added,
+374 ~                         /* Mcx<'_> */,
+375 ~                     );
+    |
+
+error[E0061]: this function takes 4 arguments but 3 arguments were supplied
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:380:21
+    |
+380 |                       backend_rewrite_core::add_nulling_relids(
+    |  _____________________^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-
+381 | |                         &mut **tle_node,
+382 | |                         Some(&source_relids),
+383 | |                         &added,
+384 | |                     );
+    | |_____________________- argument #4 of type `Mcx<'_>` is missing
+    |
+note: function defined here
+   --> /private/tmp/nodeflip_20355/crates/backend-rewrite-core/src/nulling.rs:85:8
+    |
+ 85 | pub fn add_nulling_relids<'mcx>(
+    |        ^^^^^^^^^^^^^^^^^^
+help: provide the argument
+    |
+380 |                     backend_rewrite_core::add_nulling_relids(
+...
+383 |                         &added,
+384 ~                         /* Mcx<'_> */,
+385 ~                     );
+    |
+
+error[E0599]: no associated item named `TargetEntry` found for struct `types_nodes::nodes::Node<'mcx>` in the current scope
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:390:34
+    |
+390 |             let mut node = Node::TargetEntry(tle.clone_in(mcx)?);
+    |                                  ^^^^^^^^^^^ associated item not found in `types_nodes::nodes::Node<'_>`
+    |
+note: if you're trying to build a new `types_nodes::nodes::Node<'_>` consider using one of the following associated functions:
+      types_nodes::nodes::Node::<'mcx>::new
+      types_nodes::nodes::Node::<'mcx>::mk_expr
+      types_nodes::nodes::Node::<'mcx>::mk_append
+      types_nodes::nodes::Node::<'mcx>::mk_modify_table
+      and 299 others
+   --> /private/tmp/nodeflip_20355/crates/types-nodes/src/nodes.rs:345:5
+    |
+345 | /     pub fn new<P>(mcx: Mcx<'mcx>, payload: P) -> PgResult<Self>
+346 | |     where
+347 | |         P: crate::opaque_node::NodePayload<'mcx> + 'mcx,
+    | |________________________________________________________^
+    |
+   ::: /private/tmp/nodeflip_20355/target/debug/build/types-nodes-90fb9256c99b2e80/out/node_constructors.rs:11:5
+    |
+ 11 |       pub fn mk_expr(mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 17 |       pub fn mk_append(mcx: mcx::Mcx<'mcx>, payload: crate::nodeappend::Append<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 23 |       pub fn mk_modify_table(mcx: mcx::Mcx<'mcx>, payload: crate::modifytable::ModifyTable<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0061]: this function takes 4 arguments but 3 arguments were supplied
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:391:13
+    |
+391 |             backend_rewrite_core::add_nulling_relids(&mut node, Some(&source_relids), &added);
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^----------------------------------------- argument #4 of type `Mcx<'_>` is missing
+    |
+note: function defined here
+   --> /private/tmp/nodeflip_20355/crates/backend-rewrite-core/src/nulling.rs:85:8
+    |
+ 85 | pub fn add_nulling_relids<'mcx>(
+    |        ^^^^^^^^^^^^^^^^^^
+help: provide the argument
+    |
+391 |             backend_rewrite_core::add_nulling_relids(&mut node, Some(&source_relids), &added, /* Mcx<'_> */);
+    |                                                                                             +++++++++++++++
+
+error[E0599]: no associated item named `TargetEntry` found for struct `types_nodes::nodes::Node<'mcx>` in the current scope
+   --> crates/backend-optimizer-prep-prepjointree/src/lib.rs:392:26
+    |
+392 |             if let Node::TargetEntry(new_tle) = node {
+    |                          ^^^^^^^^^^^ associated item not found in `types_nodes::nodes::Node<'_>`
+
+warning: `backend-access-nbtree-core` (lib) generated 2 warnings
+warning: unused variable: `root`
+    --> crates/backend-optimizer-plan-init-subselect/src/subplan.rs:1333:5
+     |
+1333 |     root: &mut PlannerInfo,
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_root`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0282, E0599.
+For more information about an error, try `rustc --explain E0282`.
+warning: `backend-optimizer-plan-init-subselect` (lib) generated 1 warning
+error: could not compile `backend-optimizer-plan-init-subselect` (lib) due to 2 previous errors; 1 warning emitted
+Some errors have detailed explanations: E0061, E0599.
+For more information about an error, try `rustc --explain E0061`.
+error: could not compile `backend-optimizer-prep-prepjointree` (lib) due to 15 previous errors
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `backend-optimizer-plan-createplan` (lib) due to 1 previous error
