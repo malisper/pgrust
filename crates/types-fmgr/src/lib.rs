@@ -20,8 +20,8 @@ pub use boundary::{ExpandedObject, FmgrArg, FmgrOut, RefPayload};
 pub use mat_srf::{MatCell, MatRow, MatSrfGuard, MatSrfSink};
 pub use fmgr::{
     ContextNode, ExternalFnExpr, FmgrBuiltin, FmgrInfo, FmgrInfoExtra, FnExpr,
-    FunctionCallInfoBaseData, PGFunction, Pg_finfo_record, TRACK_FUNC_ALL, TRACK_FUNC_OFF,
-    TRACK_FUNC_PL,
+    FunctionCallInfoBaseData, PGFunction, PgFnNative, Pg_finfo_record, TRACK_FUNC_ALL,
+    TRACK_FUNC_OFF, TRACK_FUNC_PL,
 };
 pub use resolution::{
     AclObjectType, BuiltinFunction, FmgrHookEventType, FmgrResolution, LangInfo, LoadedCFunc,

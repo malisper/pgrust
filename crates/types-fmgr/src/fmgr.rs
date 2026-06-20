@@ -46,6 +46,22 @@ pub const TRACK_FUNC_ALL: u8 = 2;
 /// dispatch invokes a `PGFunction`; other holders just store it.
 pub type PGFunction = Option<fn(&mut FunctionCallInfoBaseData) -> Datum>;
 
+/// A **Result-native** fmgr-1 builtin body (the panic→Result migration target).
+///
+/// Identical calling convention to [`PGFunction`] — reads args / writes
+/// `fcinfo->isnull` and the by-ref result through the borrowed frame — except the
+/// error channel is the function's *return value* (`Err(PgError)`) rather than an
+/// `ereport`-longjmp / `panic_any(PgError)`. A migrated builtin crate exposes its
+/// bodies in this shape so the fmgr dispatch can call them **directly** and thread
+/// the error with `?`, with no `catch_unwind` boundary.
+///
+/// This coexists with [`PGFunction`]: legacy (panicking) builtins keep the
+/// `PGFunction` shape and are still dispatched through the `catch_unwind` bridge,
+/// so bodies migrate one crate at a time without a flag day. See
+/// `docs/proposals/panic-to-result-migration.md`.
+pub type PgFnNative =
+    fn(&mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum>;
+
 /// Handler-private user-data for `FmgrInfo.fn_extra` (an untyped "extra space
 /// for use by handler" pointer in `fmgr.h`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

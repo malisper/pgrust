@@ -36,8 +36,8 @@ use types_error::{
 use types_fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
 use types_fmgr::{
     AclObjectType, BuiltinFunction, FmgrHookEventType, FmgrInfo, FmgrResolution, FnExpr,
-    FunctionCallInfoBaseData, LangInfo, LoadedCFunc, PGFunction, ProcInfo, ProcLanguage,
-    ResolvedFmgrInfo, TRACK_FUNC_ALL, TRACK_FUNC_OFF, TRACK_FUNC_PL,
+    FunctionCallInfoBaseData, LangInfo, LoadedCFunc, PGFunction, PgFnNative, ProcInfo,
+    ProcLanguage, ResolvedFmgrInfo, TRACK_FUNC_ALL, TRACK_FUNC_OFF, TRACK_FUNC_PL,
 };
 use types_guc::GucContext;
 use types_nodes::parsenodes::ObjectType;
@@ -97,6 +97,62 @@ pub fn register_builtins(entries: impl IntoIterator<Item = BuiltinFunction>) {
 /// Clear the registry (test/re-init support; no C analogue).
 pub fn clear_builtins() {
     REGISTRY.with(|r| *r.borrow_mut() = BuiltinRegistry::default());
+    NATIVE.with(|r| r.borrow_mut().clear());
+}
+
+// ===========================================================================
+// RESULT-NATIVE built-in registry (the panic→Result migration foundation).
+//
+// A SECOND, purely-additive registry that maps an already-registered builtin
+// Oid to a `PgFnNative` body (`fn(&mut Fcinfo) -> PgResult<Datum>`). A builtin
+// crate that has migrated its bodies off the panicking `-> Datum` shape
+// registers them here; the dispatch chokepoint (`invoke_builtin`) calls the
+// native body DIRECTLY and threads its `Err` with `?`, with no `catch_unwind`.
+//
+// This is the coexistence seam: a migrated Oid lives in BOTH `REGISTRY` (so
+// name/strict/retset resolution, `fmgr_isbuiltin`, the gap-guard, and every
+// other reader keep working unchanged) AND `NATIVE` (the Result-native
+// callable). An UN-migrated Oid lives only in `REGISTRY` and dispatches through
+// the legacy `invoke_pgfunction` `catch_unwind` bridge exactly as before. With
+// zero crates migrated, `NATIVE` is empty and every call routes legacy — the
+// build and runtime are byte-for-byte unchanged. See
+// `docs/proposals/panic-to-result-migration.md`.
+// ===========================================================================
+
+thread_local! {
+    /// C: no analogue (the panic→Result migration overlay). Keyed by `foid`.
+    static NATIVE: RefCell<HashMap<Oid, PgFnNative>> = RefCell::new(HashMap::new());
+}
+
+/// Register a single **Result-native** built-in (the migration target shape).
+///
+/// `entry` is the ordinary [`BuiltinFunction`] metadata row (name / nargs /
+/// strict / retset / foid) — registered into the legacy `REGISTRY` exactly like
+/// [`register_builtin`] so all resolution paths see it — and `native` is the
+/// Result-native callable, recorded in the `NATIVE` overlay keyed by `entry.foid`.
+/// A migrated crate sets `entry.func` to `None` (the legacy callable is unused;
+/// dispatch goes through `native`), but a non-`None` `func` is harmless — the
+/// native overlay takes precedence at dispatch.
+pub fn register_builtin_native(entry: BuiltinFunction, native: PgFnNative) {
+    let foid = entry.foid;
+    register_builtin(entry);
+    NATIVE.with(|r| {
+        r.borrow_mut().insert(foid, native);
+    });
+}
+
+/// Bulk-register Result-native built-ins.
+pub fn register_builtins_native(
+    entries: impl IntoIterator<Item = (BuiltinFunction, PgFnNative)>,
+) {
+    for (e, n) in entries {
+        register_builtin_native(e, n);
+    }
+}
+
+/// Look up the Result-native callable for `foid`, if this Oid has been migrated.
+fn native_builtin(foid: Oid) -> Option<PgFnNative> {
+    NATIVE.with(|r| r.borrow().get(&foid).copied())
 }
 
 /// C: `fmgr_last_builtin_oid`.
@@ -330,7 +386,7 @@ pub fn function_call_invoke_with_expr(
     match res {
         FmgrResolution::Builtin(b)
         | FmgrResolution::InternalByName(b)
-        | FmgrResolution::CLanguage(b) => invoke_pgfunction(&b.func, fcinfo),
+        | FmgrResolution::CLanguage(b) => invoke_builtin(b, fcinfo),
         FmgrResolution::SecurityDefiner { fn_oid } => {
             fmgr_security_definer(mcx, *fn_oid, fn_expr, fcinfo)
         }
@@ -411,6 +467,23 @@ fn push_current_fcinfo(fcinfo: &FunctionCallInfoBaseData) -> CurrentFcinfoGuard 
 pub fn with_current_fcinfo<R>(f: impl FnOnce(Option<&CurrentFcinfo>) -> R) -> R {
     let snapshot = CURRENT_FCINFO.with(|s| s.borrow().last().cloned());
     f(snapshot.as_ref())
+}
+
+/// Dispatch a resolved built-in row, preferring its **Result-native** body.
+///
+/// This is the single coexistence chokepoint for the panic→Result migration. If
+/// the built-in's Oid has been registered as Result-native
+/// ([`register_builtin_native`]), call that body DIRECTLY and thread its `Err`
+/// with `?` — no `catch_unwind`, the error never becomes a panic. Otherwise fall
+/// back to the legacy `catch_unwind` bridge over the panicking `PGFunction`
+/// ([`invoke_pgfunction`]). With no crates migrated the `NATIVE` overlay is empty
+/// and this is exactly the prior behavior.
+fn invoke_builtin(b: &BuiltinFunction, fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    if let Some(native) = native_builtin(b.foid) {
+        let _current = push_current_fcinfo(fcinfo);
+        return native(fcinfo);
+    }
+    invoke_pgfunction(&b.func, fcinfo)
 }
 
 /// Invoke a resolved safe `PGFunction` (C: `(*fn_addr)(fcinfo)`). A `None`
