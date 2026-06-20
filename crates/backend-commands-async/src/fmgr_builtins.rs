@@ -14,13 +14,7 @@
 //! core.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
-
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `PG_ARGISNULL(i)`.
 #[inline]
@@ -59,21 +53,19 @@ fn ret_f64(v: f64) -> Datum {
 
 /// `Datum pg_notify(PG_FUNCTION_ARGS)` (async.c:556). Not strict: a NULL
 /// channel or payload becomes `""`.
-fn fc_pg_notify(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_notify(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let channel = if arg_is_null(fcinfo, 0) { "" } else { arg_text(fcinfo, 0) };
     let payload = if arg_is_null(fcinfo, 1) { "" } else { arg_text(fcinfo, 1) };
-    match crate::pg_notify_core(channel, payload) {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
-    }
+    crate::pg_notify_core(channel, payload)?;
+    Ok(ret_void())
 }
 
 /// `Datum pg_notification_queue_usage(PG_FUNCTION_ARGS)` (async.c:1481).
-fn fc_pg_notification_queue_usage(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::pg_notification_queue_usage_core() {
-        Ok(usage) => ret_f64(usage),
-        Err(e) => raise(e),
-    }
+fn fc_pg_notification_queue_usage(
+    _fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let usage = crate::pg_notification_queue_usage_core()?;
+    Ok(ret_f64(usage))
 }
 
 // ---------------------------------------------------------------------------
@@ -86,21 +78,24 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the async-function builtins into the fmgr-core builtin table.
 pub fn register_async_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // pg_proc.dat oid 3036: pg_notify(text, text) -> void, proisstrict='f'.
         builtin(3036, "pg_notify", 2, false, false, fc_pg_notify),
         // pg_proc.dat oid 3296: pg_notification_queue_usage() -> float8.
