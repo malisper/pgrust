@@ -462,6 +462,11 @@ pub(crate) fn out_datum(buf: &mut String, value: &Datum<'_>, typlen: i32, typbyv
         buf.push(']');
     } else {
         // s = (char *) DatumGetPointer(value);
+        // length = datumGetSize(value, false, typlen). For a varlena
+        // (typlen == -1) that is VARSIZE_ANY(s); for a cstring (typlen == -2)
+        // that is strlen(s) + 1 (the string plus its trailing NUL). We obtain
+        // the flat image of the value and emit it byte-for-byte, which carries
+        // exactly datumGetSize bytes for each by-reference arm.
         match value {
             Datum::ByRef(bytes) => {
                 let _ = write!(buf, "{} [ ", bytes.len() as u32);
@@ -470,11 +475,35 @@ pub(crate) fn out_datum(buf: &mut String, value: &Datum<'_>, typlen: i32, typbyv
                 }
                 buf.push(']');
             }
-            // PointerIsValid(NULL) is false → "0 [ ]".
+            // A cstring datum (typlen == -2): datumGetSize is strlen(s) + 1, the
+            // raw bytes plus the terminating NUL. readDatum reads these back as a
+            // by-reference image (the cstring's flat form), so the round-trip is
+            // faithful.
+            Datum::Cstring(s) => {
+                let raw = s.as_bytes();
+                let _ = write!(buf, "{} [ ", (raw.len() + 1) as u32);
+                for &b in raw.iter() {
+                    let _ = write!(buf, "{} ", b as i8 as i32);
+                }
+                // trailing NUL terminator
+                buf.push_str("0 ");
+                buf.push(']');
+            }
+            // A composite/record value is itself a self-describing varlena
+            // (HeapTupleHeader Datum image); emit that flat image.
+            Datum::Composite(t) => {
+                let image = t.to_datum_image();
+                let _ = write!(buf, "{} [ ", image.len() as u32);
+                for &b in image.iter() {
+                    let _ = write!(buf, "{} ", b as i8 as i32);
+                }
+                buf.push(']');
+            }
+            // make_const rejects Expanded/Internal; a Const never carries them.
             other => panic!(
                 "outDatum: by-reference Const but constvalue is {:?} (a by-reference \
-                 Const carries its flat image in Datum::ByRef; make_const rejects \
-                 Cstring/Composite/Expanded/Internal)",
+                 Const carries its flat image in Datum::ByRef/Cstring/Composite; \
+                 make_const rejects Expanded/Internal)",
                 core::mem::discriminant(other)
             ),
         }
