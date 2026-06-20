@@ -23,7 +23,7 @@
 //! core remains in-crate for that owner to call.
 
 use types_datum::Datum;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writer.
@@ -64,41 +64,41 @@ fn ret_i32(v: i32) -> Datum {
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
-fn fc_btint2cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btint2cmp(arg_i16(fcinfo, 0), arg_i16(fcinfo, 1)))
+fn fc_btint2cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btint2cmp(arg_i16(fcinfo, 0), arg_i16(fcinfo, 1))))
 }
-fn fc_btint4cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btint4cmp(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_btint4cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btint4cmp(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_btint8cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btint8cmp(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_btint8cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btint8cmp(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_btint48cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btint48cmp(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_btint48cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btint48cmp(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_btint84cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btint84cmp(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_btint84cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btint84cmp(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_btint24cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btint24cmp(arg_i16(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_btint24cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btint24cmp(arg_i16(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_btint42cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btint42cmp(arg_i32(fcinfo, 0), arg_i16(fcinfo, 1)))
+fn fc_btint42cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btint42cmp(arg_i32(fcinfo, 0), arg_i16(fcinfo, 1))))
 }
-fn fc_btint28cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btint28cmp(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_btint28cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btint28cmp(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_btint82cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btint82cmp(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1)))
+fn fc_btint82cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btint82cmp(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1))))
 }
-fn fc_btoidcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btoidcmp(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+fn fc_btoidcmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btoidcmp(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1))))
 }
-fn fc_btcharcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btcharcmp(arg_char(fcinfo, 0), arg_char(fcinfo, 1)))
+fn fc_btcharcmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btcharcmp(arg_char(fcinfo, 0), arg_char(fcinfo, 1))))
 }
-fn fc_btboolcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::btboolcmp(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1)))
+fn fc_btboolcmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::btboolcmp(arg_bool(fcinfo, 0), arg_bool(fcinfo, 1))))
 }
 
 /// Decode an `oidvector` on-disk image to its `Oid` element list. An
@@ -133,7 +133,7 @@ fn decode_oidvector(image: &[u8]) -> Vec<types_core::Oid> {
     out
 }
 
-fn fc_btoidvectorcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_btoidvectorcmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a_img = fcinfo
         .ref_arg(0)
         .and_then(|p| p.as_varlena())
@@ -144,7 +144,7 @@ fn fc_btoidvectorcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         .and_then(|p| p.as_varlena())
         .expect("btoidvectorcmp: oidvector arg 1 missing from by-ref lane");
     let b = decode_oidvector(b_img);
-    ret_i32(crate::btoidvectorcmp(&a, &b))
+    Ok(ret_i32(crate::btoidvectorcmp(&a, &b)))
 }
 
 // ---------------------------------------------------------------------------
@@ -155,16 +155,19 @@ fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every scalar `nbtcompare.c` btree comparison builtin (C: their
@@ -173,7 +176,7 @@ fn builtin(
 ///
 /// `btoidvectorcmp` (oid 404) is deferred with the `oidvector` carrier.
 pub fn register_nbtcompare_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(350, "btint2cmp", 2, fc_btint2cmp),
         builtin(351, "btint4cmp", 2, fc_btint4cmp),
         builtin(842, "btint8cmp", 2, fc_btint8cmp),

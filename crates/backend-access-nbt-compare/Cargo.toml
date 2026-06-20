@@ -15,6 +15,7 @@ types-sortsupport = { path = "../types-sortsupport" }
 
 # fmgr builtin fast-path registration (the btree BTORDER_PROC comparators).
 types-fmgr = { path = "../types-fmgr" }
+types-error = { path = "../types-error" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 
 # Outward seam crate: the sort/skip substrate installs the comparator /
