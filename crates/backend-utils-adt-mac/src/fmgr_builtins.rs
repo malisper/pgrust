@@ -23,7 +23,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_network::macaddr;
 
 /// A scratch context for the `_send` adapter to frame the `bytea` result, copied
@@ -86,26 +86,12 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
-// fc_ adapters.
+// fc_ adapters (Result-native: `ereport(ERROR)` travels as `Err(PgError)`
+// straight back to the fmgr dispatch `invoke_builtin`, no panic/catch_unwind).
 // ---------------------------------------------------------------------------
 
-fn fc_macaddr_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_macaddr_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     // Forward `fcinfo->context` (the soft ErrorSaveContext installed by
     // InputFunctionCallSafe) so a recoverable parse failure `ereturn`s into the
@@ -113,24 +99,24 @@ fn fc_macaddr_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // body returns `Ok(None)`; the caller checks `soft_error_occurred()` first
     // and discards this placeholder result word.
     let escontext = fcinfo.escontext_mut();
-    match ok(crate::macaddr_in(&s, escontext)) {
-        Some(m) => ret_macaddr(fcinfo, m),
-        None => Datum::null(),
+    match crate::macaddr_in(&s, escontext)? {
+        Some(m) => Ok(ret_macaddr(fcinfo, m)),
+        None => Ok(Datum::null()),
     }
 }
 
-fn fc_macaddr_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_macaddr_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = arg_macaddr(fcinfo, 0);
     let s = String::from_utf8(crate::macaddr_out(&m)).expect("macaddr_out: valid utf8");
-    ret_cstring(fcinfo, s)
+    Ok(ret_cstring(fcinfo, s))
 }
 
 macro_rules! fc_cmp_bool {
     ($name:ident, $core:path) => {
-        fn $name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $name(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let a = arg_macaddr(fcinfo, 0);
             let b = arg_macaddr(fcinfo, 1);
-            Datum::from_bool($core(&a, &b))
+            Ok(Datum::from_bool($core(&a, &b)))
         }
     };
 }
@@ -142,70 +128,69 @@ fc_cmp_bool!(fc_macaddr_gt, crate::macaddr_gt);
 fc_cmp_bool!(fc_macaddr_ge, crate::macaddr_ge);
 fc_cmp_bool!(fc_macaddr_ne, crate::macaddr_ne);
 
-fn fc_macaddr_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_macaddr_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_macaddr(fcinfo, 0);
     let b = arg_macaddr(fcinfo, 1);
-    Datum::from_i32(crate::macaddr_cmp(&a, &b))
+    Ok(Datum::from_i32(crate::macaddr_cmp(&a, &b)))
 }
 
-fn fc_hashmacaddr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashmacaddr(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = arg_macaddr(fcinfo, 0);
-    Datum::from_i32(crate::hashmacaddr(&m) as i32)
+    Ok(Datum::from_i32(crate::hashmacaddr(&m) as i32))
 }
 
-fn fc_hashmacaddrextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hashmacaddrextended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = arg_macaddr(fcinfo, 0);
     let seed = arg_int64(fcinfo, 1) as u64;
-    Datum::from_i64(crate::hashmacaddrextended(&m, seed) as i64)
+    Ok(Datum::from_i64(crate::hashmacaddrextended(&m, seed) as i64))
 }
 
-fn fc_macaddr_not(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_macaddr_not(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = arg_macaddr(fcinfo, 0);
-    ret_macaddr(fcinfo, crate::macaddr_not(&m))
+    Ok(ret_macaddr(fcinfo, crate::macaddr_not(&m)))
 }
 
-fn fc_macaddr_and(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_macaddr_and(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_macaddr(fcinfo, 0);
     let b = arg_macaddr(fcinfo, 1);
-    ret_macaddr(fcinfo, crate::macaddr_and(&a, &b))
+    Ok(ret_macaddr(fcinfo, crate::macaddr_and(&a, &b)))
 }
 
-fn fc_macaddr_or(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_macaddr_or(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_macaddr(fcinfo, 0);
     let b = arg_macaddr(fcinfo, 1);
-    ret_macaddr(fcinfo, crate::macaddr_or(&a, &b))
+    Ok(ret_macaddr(fcinfo, crate::macaddr_or(&a, &b)))
 }
 
 /// `macaddr_recv(internal) -> macaddr` (oid 2494). The raw wire-message bytes
 /// ride the by-ref lane (as `oidrecv`/`uuid_recv` do); the core reads the six
 /// octets off them.
-fn fc_macaddr_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_macaddr_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let src = fcinfo
         .ref_arg(0)
         .and_then(|p| p.as_varlena())
         .expect("macaddr_recv: by-ref message arg missing from by-ref lane");
-    let m = ok(crate::macaddr_recv(src));
-    ret_macaddr(fcinfo, m)
+    let m = crate::macaddr_recv(src)?;
+    Ok(ret_macaddr(fcinfo, m))
 }
 
 /// `macaddr_send(macaddr) -> bytea` (oid 2495). The core returns the six wire
 /// octets; frame them into a `bytea` varlena image through the same pq_*typsend
 /// path C uses, and carry it on the by-ref `Varlena` result lane.
-fn fc_macaddr_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_macaddr_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = arg_macaddr(fcinfo, 0);
     let wire = crate::macaddr_send(&m);
     let scratch = scratch_mcx();
-    let mut buf =
-        ok(backend_libpq_pqformat::pq_begintypsend(scratch.mcx()));
-    ok(backend_libpq_pqformat::pq_sendbytes(&mut buf, &wire));
+    let mut buf = backend_libpq_pqformat::pq_begintypsend(scratch.mcx())?;
+    backend_libpq_pqformat::pq_sendbytes(&mut buf, &wire)?;
     let bytea = backend_libpq_pqformat::pq_endtypsend(buf);
     fcinfo.set_ref_result(RefPayload::Varlena(bytea.as_bytes().to_vec()));
-    Datum::from_usize(0)
+    Ok(Datum::from_usize(0))
 }
 
-fn fc_macaddr_trunc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_macaddr_trunc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = arg_macaddr(fcinfo, 0);
-    ret_macaddr(fcinfo, crate::macaddr_trunc(&m))
+    Ok(ret_macaddr(fcinfo, crate::macaddr_trunc(&m)))
 }
 
 // ---------------------------------------------------------------------------
@@ -218,23 +203,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the `mac.c` `macaddr` builtins (C: their `fmgr_builtins[]` rows).
 /// Called from this crate's `init_seams()`. OIDs/nargs/strict/retset transcribed
 /// exactly from `pg_proc.dat` (every row is `proisstrict => 't'`, non-retset).
 pub fn register_mac_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(436, "macaddr_in", 1, true, false, fc_macaddr_in),
         builtin(437, "macaddr_out", 1, true, false, fc_macaddr_out),
         builtin(2494, "macaddr_recv", 1, true, false, fc_macaddr_recv),
@@ -266,8 +254,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Cstring(s.to_string()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(436).expect("macaddr_in registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let native = backend_utils_fmgr_core::native_builtin(436).expect("macaddr_in registered");
+        native(&mut fcinfo).unwrap();
         match fcinfo.take_ref_result().expect("macaddr_in produced a result") {
             RefPayload::Varlena(b) => b,
             other => panic!("macaddr_in returned non-varlena: {other:?}"),
@@ -279,8 +267,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(image.to_vec()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(437).expect("macaddr_out registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let native = backend_utils_fmgr_core::native_builtin(437).expect("macaddr_out registered");
+        native(&mut fcinfo).unwrap();
         match fcinfo.take_ref_result().expect("macaddr_out produced a result") {
             RefPayload::Cstring(s) => s,
             other => panic!("macaddr_out returned non-cstring: {other:?}"),
@@ -297,8 +285,8 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("op registered");
-        (entry.func.unwrap())(&mut fcinfo).as_bool()
+        let native = backend_utils_fmgr_core::native_builtin(oid).expect("op registered");
+        native(&mut fcinfo).unwrap().as_bool()
     }
 
     fn call_bin_macaddr(oid: u32, a: &[u8], b: &[u8]) -> Vec<u8> {
@@ -311,8 +299,8 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("op registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let native = backend_utils_fmgr_core::native_builtin(oid).expect("op registered");
+        native(&mut fcinfo).unwrap();
         match fcinfo.take_ref_result().expect("op produced a result") {
             RefPayload::Varlena(b) => b,
             other => panic!("non-varlena result: {other:?}"),
@@ -351,8 +339,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(b.clone()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(753).unwrap();
-        (entry.func.unwrap())(&mut fcinfo);
+        let native = backend_utils_fmgr_core::native_builtin(753).unwrap();
+        native(&mut fcinfo).unwrap();
         let tr = match fcinfo.take_ref_result().unwrap() {
             RefPayload::Varlena(v) => v,
             o => panic!("{o:?}"),
@@ -367,8 +355,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a.clone()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(399).unwrap();
-        let h = (entry.func.unwrap())(&mut fcinfo).as_i32();
+        let native = backend_utils_fmgr_core::native_builtin(399).unwrap();
+        let h = native(&mut fcinfo).unwrap().as_i32();
         // Matches the value-core hash of the same bytes.
         assert_eq!(h, crate::hashmacaddr(&arg_macaddr_from(&a)) as i32);
     }
