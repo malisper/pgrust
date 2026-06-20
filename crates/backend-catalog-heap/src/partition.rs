@@ -439,3 +439,87 @@ pub fn StorePartitionBound<'mcx>(
 
     Ok(())
 }
+
+/*
+ *	ClearPartitionBound
+ *		Update pg_class tuple of `rel` to clear `relpartbound` (set SQL NULL) and
+ *		reset `relispartition` to false.
+ *
+ * The exact inverse of the `StorePartitionBound` pg_class write — the catalog
+ * update of `DetachPartitionFinalize` (commands/tablecmds.c:21342). The full
+ * pg_class row is fetched + rewritten via `heap_modify_tuple` (the trimmed
+ * `PgClassForm` carrier omits the variable-length `relpartbound` tail).
+ */
+pub fn ClearPartitionBound<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+) -> PgResult<()> {
+    use types_storage::lock::RowExclusiveLock;
+
+    // classRel = table_open(RelationRelationId, RowExclusiveLock);
+    let class_rel = backend_access_table_table::table_open(mcx, RelationRelationId, RowExclusiveLock)?;
+
+    // tuple = SearchSysCacheCopy1(RELOID, RelationGetRelid(rel)); — via the
+    // pg_class OID-index scan (matching StorePartitionBound).
+    let mut key = [ScanKeyData::empty()];
+    ScanKeyInit(
+        &mut key[0],
+        Anum_pg_class_oid,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(rel.rd_id),
+    )?;
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &class_rel,
+        ClassOidIndexId,
+        true,
+        None,
+        &key[..1],
+    )?;
+    let tuple = backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?;
+    let Some(tuple) = tuple else {
+        scan.end()?;
+        class_rel.close(RowExclusiveLock)?;
+        return backend_utils_error::elog(
+            types_error::ERROR,
+            &format!("cache lookup failed for relation {}", rel.rd_id),
+        );
+    };
+
+    // memset new_val/new_null/new_repl; relpartbound = NULL, relispartition = false.
+    let mut new_val: Vec<Datum> = vec![Datum::null(); Natts_pg_class];
+    let mut new_null: Vec<bool> = vec![false; Natts_pg_class];
+    let mut new_repl: Vec<bool> = vec![false; Natts_pg_class];
+
+    // new_val[relpartbound] = (Datum) 0; new_null = true; new_repl = true;
+    new_val[(Anum_pg_class_relpartbound - 1) as usize] = Datum::null();
+    new_null[(Anum_pg_class_relpartbound - 1) as usize] = true;
+    new_repl[(Anum_pg_class_relpartbound - 1) as usize] = true;
+
+    // GETSTRUCT(newtuple)->relispartition = false; — routed through the replace
+    // arrays (same as StorePartitionBound sets it true).
+    new_val[(Anum_pg_class_relispartition - 1) as usize] = Datum::from_bool(false);
+    new_repl[(Anum_pg_class_relispartition - 1) as usize] = true;
+
+    let mut newtuple = backend_access_common_heaptuple::heap_modify_tuple(
+        mcx,
+        &tuple,
+        &class_rel.rd_att,
+        &new_val,
+        &new_null,
+        &new_repl,
+    )?;
+
+    // CatalogTupleUpdate(classRel, &newtuple->t_self, newtuple);
+    backend_catalog_indexing::keystone::CatalogTupleUpdate(
+        mcx,
+        &class_rel,
+        tuple.tuple.t_self,
+        &mut newtuple,
+    )?;
+
+    scan.end()?;
+    class_rel.close(RowExclusiveLock)?;
+
+    Ok(())
+}

@@ -771,6 +771,138 @@ pub fn findNotNullConstraintAttnum<'mcx>(
 }
 
 /* ===========================================================================
+ * disinherit_constraints — the pg_constraint half of RemoveInheritance
+ * (tablecmds.c:18025-18138)
+ * ========================================================================= */
+
+/// The constraint-disinheriting leg of `RemoveInheritance` (tablecmds.c:18025).
+///
+/// Find the parent's inheritable CHECK / NOT NULL constraints, match them to the
+/// child (CHECK by name, NOT NULL by column number mapped through `attmap`), and
+/// decrement each matched child constraint's `coninhcount` (flipping
+/// `conislocal` to true when it reaches zero). Errors if a matched child
+/// constraint is non-inherited, or if any parent constraint goes unmatched.
+///
+/// Lives here (not in tablecmds) because the `Form_pg_constraint` deform
+/// substrate and the catalog scan machinery are owned by this crate, mirroring
+/// `verifyNotNullPKCompatible` / `merge_constraints_into_existing`.
+///
+/// `attmap.attnums[parent_attno - 1]` maps a parent attribute number to the
+/// child's.
+pub fn disinherit_constraints(
+    mcx: Mcx<'_>,
+    child_rel: &RelationData<'_>,
+    parent_rel: &RelationData<'_>,
+    attmap: &types_tuple::attmap::AttrMap<'_>,
+) -> PgResult<()> {
+    let child_relid = child_rel.rd_id;
+    let parent_relid = parent_rel.rd_id;
+
+    let catalog = table::table_open(mcx, CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+
+    // First scan: collect the parent's inheritable CHECK names + NOT NULL
+    // columns (mapped to the child's attnos).
+    let mut connames: Vec<String> = Vec::new();
+    let mut nncolumns: Vec<AttrNumber> = Vec::new();
+
+    let parent_key = [oid_key(Anum_pg_constraint_conrelid, parent_relid)?];
+    systable_scan_foreach(&catalog, ConstraintRelidTypidNameIndexId, &parent_key, |row| {
+        if row.form.connoinherit {
+            return Ok(true);
+        }
+        if row.form.contype == CONSTRAINT_CHECK {
+            connames.push(name_str(&row.form.conname).to_string());
+        }
+        if row.form.contype == CONSTRAINT_NOTNULL {
+            let parent_attno = extractNotNullColumn(&row.htup)?;
+            // nncolumns = lappend_int(nncolumns, attmap->attnums[parent_attno - 1]);
+            let mapped = attmap.attnums[(parent_attno - 1) as usize];
+            nncolumns.push(mapped);
+        }
+        Ok(true)
+    })?;
+
+    // Second scan: the child's constraints; match and decrement.
+    let child_key = [oid_key(Anum_pg_constraint_conrelid, child_relid)?];
+    systable_scan_foreach(&catalog, ConstraintRelidTypidNameIndexId, &child_key, |row| {
+        let mut matched = false;
+
+        if row.form.contype == CONSTRAINT_CHECK {
+            let chkname = name_str(&row.form.conname);
+            if let Some(pos) = connames.iter().position(|c| c == chkname) {
+                matched = true;
+                connames.remove(pos);
+            }
+        } else if row.form.contype == CONSTRAINT_NOTNULL {
+            let child_attno = extractNotNullColumn(&row.htup)?;
+            if let Some(pos) = nncolumns.iter().position(|&c| c == child_attno) {
+                matched = true;
+                nncolumns.remove(pos);
+            }
+        } else {
+            return Ok(true);
+        }
+
+        if matched {
+            let mut con = row.form.clone();
+            if con.coninhcount <= 0 {
+                // shouldn't happen
+                return Err(PgError::new(
+                    ERROR,
+                    format!(
+                        "relation {} has non-inherited constraint \"{}\"",
+                        child_relid,
+                        name_str(&con.conname)
+                    ),
+                ));
+            }
+            con.coninhcount -= 1;
+            if con.coninhcount == 0 {
+                con.conislocal = true;
+            }
+            let fields = ConstraintFieldUpdate {
+                conname: con.conname,
+                connamespace: con.connamespace,
+                conislocal: con.conislocal,
+                coninhcount: con.coninhcount,
+                conparentid: con.conparentid,
+                convalidated: con.convalidated,
+                connoinherit: con.connoinherit,
+                conenforced: con.conenforced,
+            };
+            indexing_seams::catalog_tuple_update_pg_constraint::call(
+                &catalog,
+                row.tid,
+                &fields,
+            )?;
+        }
+        Ok(true)
+    })?;
+
+    // We should have matched all constraints.
+    if !connames.is_empty() || !nncolumns.is_empty() {
+        return Err(PgError::new(
+            ERROR,
+            format!(
+                "{} unmatched constraints while removing inheritance from \"{}\" to \"{}\"",
+                connames.len() + nncolumns.len(),
+                name_str_relation(child_rel),
+                name_str_relation(parent_rel)
+            ),
+        ));
+    }
+
+    catalog.close(RowExclusiveLock)?;
+    Ok(())
+}
+
+/// Helper: the relation's name as an owned `String` (mirrors
+/// `RelationGetRelationName`).
+fn name_str_relation(rel: &RelationData<'_>) -> String {
+    rel.rd_rel.relname.as_str().to_string()
+}
+
+/* ===========================================================================
  * verifyNotNullPKCompatible (tablecmds.c:9576)
  * ========================================================================= */
 

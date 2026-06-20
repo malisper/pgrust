@@ -877,7 +877,9 @@ pub use delete::{
     RelationRemoveInheritance,
 };
 pub use drop::heap_drop_with_catalog;
-pub use partition::{RemovePartitionKeyByRelId, StorePartitionBound, StorePartitionKey};
+pub use partition::{
+    ClearPartitionBound, RemovePartitionKeyByRelId, StorePartitionBound, StorePartitionKey,
+};
 pub use statistics::{CopyStatistics, RemoveStatistics};
 
 pub use constraints::{

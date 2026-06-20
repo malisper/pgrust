@@ -1030,11 +1030,13 @@ pub(crate) fn ATPrepCmd<'mcx>(
         }
         AT_DetachPartition => {
             ATSimplePermissions(cmd.subtype, rel, ATT_PARTITIONED_TABLE)?;
-            unported("DETACH PARTITION");
+            // No command-specific prep needed; execution happens in phase 2.
+            pass = AT_PASS_MISC;
         }
         AT_DetachPartitionFinalize => {
             ATSimplePermissions(cmd.subtype, rel, ATT_PARTITIONED_TABLE)?;
-            unported("DETACH PARTITION FINALIZE");
+            // No command-specific prep needed; execution happens in phase 2.
+            pass = AT_PASS_MISC;
         }
         _ => {
             return backend_utils_error::ereport(ERROR)
@@ -1555,9 +1557,46 @@ fn ATExecCmd<'mcx>(
             wqueue[ti].rel = Some(owned_rel);
             _address = res?;
         }
-        AT_DetachPartition => unported("DETACH PARTITION (ATExecDetachPartition)"),
+        AT_DetachPartition => {
+            // cmd = ATParseTransformCmd(...): transform the bound (a no-op for
+            // DETACH, which carries no FOR VALUES bound) before execution, exactly
+            // as C's ATExecCmd does. ATPrepCmd ensures rel is a partitioned table.
+            let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");
+            let res = (|| {
+                let transformed = crate::at_coladd::ATParseTransformCmd(
+                    mcx,
+                    wqueue,
+                    ti,
+                    &owned_rel,
+                    cmd.clone_in(mcx)?,
+                    false,
+                    lockmode,
+                    cur_pass,
+                    context,
+                )?
+                .expect("ATParseTransformCmd returned None for DETACH PARTITION");
+                let pc = transformed
+                    .def
+                    .as_deref()
+                    .and_then(|d| d.as_partitioncmd())
+                    .expect("AT_DetachPartition: transformed cmd.def is not a PartitionCmd");
+                crate::at_detach::ATExecDetachPartition(mcx, wqueue, &owned_rel, pc)
+            })();
+            wqueue[ti].rel = Some(owned_rel);
+            _address = res?;
+        }
         AT_DetachPartitionFinalize => {
-            unported("DETACH PARTITION FINALIZE (ATExecDetachPartitionFinalize)")
+            let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");
+            let res = (|| {
+                let pc = cmd
+                    .def
+                    .as_deref()
+                    .and_then(|d| d.as_partitioncmd())
+                    .expect("AT_DetachPartitionFinalize: cmd.def is not a PartitionCmd");
+                crate::at_detach::ATExecDetachPartitionFinalize(mcx, &owned_rel, pc)
+            })();
+            wqueue[ti].rel = Some(owned_rel);
+            _address = res?;
         }
         // C: `default: elog(ERROR, "unexpected alter table type")`, unreachable
         // here because `AlterTableType` is exhaustively matched above.
