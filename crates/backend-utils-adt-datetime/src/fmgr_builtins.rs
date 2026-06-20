@@ -17,8 +17,10 @@
 //!  * by-value result: `Datum::from_i32/.../from_bool`.
 //!  * cstring result (`_out`): `set_ref_result(Cstring(s))` + a 0 word.
 //!  * varlena result (interval/timetz/bytea/text): `set_ref_result(Varlena(b))`.
-//!  * a fallible core's `Err` is raised through the one fmgr dispatch point via
-//!    `raise()` (a structured SQLSTATE panic the dispatcher rebuilds).
+//!  * a fallible core's `Err` is propagated as the `Err` arm of each builtin's
+//!    `-> PgResult<Datum>` return (the panic→Result migration; see
+//!    `docs/proposals/panic-to-result-migration.md`), surfaced directly at the
+//!    `invoke_builtin` native dispatch arm with no `catch_unwind`.
 
 use types_fmgr::FunctionCallInfoBaseData;
 use types_datum::Datum;
@@ -127,12 +129,6 @@ fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // POD byte (de)serializers for the by-reference fixed-length types.
 //
@@ -188,15 +184,15 @@ fn ret_timetz(fcinfo: &mut FunctionCallInfoBaseData, t: &TimeTzADT) -> Datum {
 
 /// Serialize a `NumericVar` to its numeric varlena byte image (C: `make_result`),
 /// copying into an owned `Vec` so the scratch context can drop. Raises on OOM.
-fn numericvar_to_bytes(var: &types_numeric::var::NumericVar<'_>) -> Vec<u8> {
+fn numericvar_to_bytes(var: &types_numeric::var::NumericVar<'_>) -> types_error::PgResult<Vec<u8>> {
     let m = scratch_mcx();
     let pgvec = match backend_utils_adt_numeric::convert::make_result(m.mcx(), var) {
         Ok(b) => b,
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     };
     let copy = pgvec.as_slice().to_vec();
     drop(pgvec);
-    copy
+    Ok(copy)
 }
 
 /// A scratch context for cores that allocate their result through `Mcx`
@@ -213,17 +209,17 @@ fn ret_extract(
     fcinfo: &mut FunctionCallInfoBaseData,
     r: crate::extract::ExtractResult<'_>,
     retnumeric: bool,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     match r {
-        crate::extract::ExtractResult::Float8(f) => ret_f64(f),
+        crate::extract::ExtractResult::Float8(f) => Ok(ret_f64(f)),
         crate::extract::ExtractResult::Numeric(var) => {
             let _ = retnumeric;
-            let bytes = numericvar_to_bytes(&var);
-            ret_varlena(fcinfo, bytes)
+            let bytes = numericvar_to_bytes(&var)?;
+            Ok(ret_varlena(fcinfo, bytes))
         }
         crate::extract::ExtractResult::Null => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
     }
 }
@@ -232,98 +228,98 @@ fn ret_extract(
 // date.c builtins.
 // ===========================================================================
 
-fn fc_date_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_date_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     match crate::date::date_in_safe(&s, fcinfo.escontext_mut()) {
-        Ok(d) => ret_i32(d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_i32(d)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_date_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_date_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let d = arg_i32(fcinfo, 0);
     let s = crate::date::date_out(d);
-    ret_cstring(fcinfo, s)
+    Ok(ret_cstring(fcinfo, s))
 }
-fn fc_date_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_date_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let bytes = arg_varlena(fcinfo, 0);
     let mut r = WireReader::new(bytes);
     match crate::binio::date_recv(&mut r) {
-        Ok(d) => ret_i32(d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_i32(d)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_date_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_date_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let d = arg_i32(fcinfo, 0);
-    ret_varlena(fcinfo, crate::binio::date_send(d))
+    Ok(ret_varlena(fcinfo, crate::binio::date_send(d)))
 }
-fn fc_make_date(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_make_date(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::date::make_date(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1), arg_i32(fcinfo, 2)) {
-        Ok(d) => ret_i32(d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_i32(d)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_date_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::date::date_eq(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_date_eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::date::date_eq(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_date_ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::date::date_ne(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_date_ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::date::date_ne(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_date_lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::date::date_lt(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_date_lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::date::date_lt(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_date_le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::date::date_le(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_date_le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::date::date_le(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_date_gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::date::date_gt(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_date_gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::date::date_gt(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_date_ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::date::date_ge(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_date_ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::date::date_ge(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_date_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::date::date_cmp(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_date_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::date::date_cmp(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_hashdate(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(crate::hash::hashdate(arg_i32(fcinfo, 0)))
+fn fc_hashdate(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_u32(crate::hash::hashdate(arg_i32(fcinfo, 0))))
 }
-fn fc_hashdateextended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(crate::hash::hashdateextended(arg_i32(fcinfo, 0), arg_u64(fcinfo, 1)))
+fn fc_hashdateextended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_u64(crate::hash::hashdateextended(arg_i32(fcinfo, 0), arg_u64(fcinfo, 1))))
 }
-fn fc_date_finite(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::date::date_finite(arg_i32(fcinfo, 0)))
+fn fc_date_finite(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::date::date_finite(arg_i32(fcinfo, 0))))
 }
-fn fc_date_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::date::date_larger(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_date_larger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::date::date_larger(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_date_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::date::date_smaller(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_date_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::date::date_smaller(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_date_mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_date_mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::date::date_mi(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)) {
-        Ok(v) => ret_i32(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(ret_i32(v)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_date_pli(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_date_pli(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::date::date_pli(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)) {
-        Ok(v) => ret_i32(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(ret_i32(v)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_date_mii(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_date_mii(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::date::date_mii(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1)) {
-        Ok(v) => ret_i32(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(ret_i32(v)),
+        Err(e) => return Err(e),
     }
 }
 
 // date vs timestamp / timestamptz comparisons (via the internal-cmp cores).
 macro_rules! date_ts_cmp {
     ($fn:ident, $core:path, $op:tt) => {
-        fn $fn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fn(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let d = arg_i32(fcinfo, 0);
             let ts = arg_i64(fcinfo, 1);
-            ret_bool($core(d, ts) $op 0)
+            Ok(ret_bool($core(d, ts) $op 0))
         }
     };
 }
@@ -340,20 +336,20 @@ date_ts_cmp!(fc_date_gt_timestamptz, crate::date::date_cmp_timestamptz_internal,
 date_ts_cmp!(fc_date_le_timestamptz, crate::date::date_cmp_timestamptz_internal, <=);
 date_ts_cmp!(fc_date_ge_timestamptz, crate::date::date_cmp_timestamptz_internal, >=);
 
-fn fc_date_cmp_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::date::date_cmp_timestamp_internal(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_date_cmp_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::date::date_cmp_timestamp_internal(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_date_cmp_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::date::date_cmp_timestamptz_internal(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_date_cmp_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::date::date_cmp_timestamptz_internal(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
 
 // timestamp/timestamptz vs date comparisons (args swapped; negate the cmp).
 macro_rules! ts_date_cmp {
     ($fn:ident, $core:path, $op:tt) => {
-        fn $fn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fn(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let ts = arg_i64(fcinfo, 0);
             let d = arg_i32(fcinfo, 1);
-            ret_bool((-$core(d, ts)) $op 0)
+            Ok(ret_bool((-$core(d, ts)) $op 0))
         }
     };
 }
@@ -370,37 +366,37 @@ ts_date_cmp!(fc_timestamptz_gt_date, crate::date::date_cmp_timestamptz_internal,
 ts_date_cmp!(fc_timestamptz_le_date, crate::date::date_cmp_timestamptz_internal, <=);
 ts_date_cmp!(fc_timestamptz_ge_date, crate::date::date_cmp_timestamptz_internal, >=);
 
-fn fc_timestamp_cmp_date(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(-crate::date::date_cmp_timestamp_internal(arg_i32(fcinfo, 1), arg_i64(fcinfo, 0)))
+fn fc_timestamp_cmp_date(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(-crate::date::date_cmp_timestamp_internal(arg_i32(fcinfo, 1), arg_i64(fcinfo, 0))))
 }
-fn fc_timestamptz_cmp_date(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(-crate::date::date_cmp_timestamptz_internal(arg_i32(fcinfo, 1), arg_i64(fcinfo, 0)))
+fn fc_timestamptz_cmp_date(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(-crate::date::date_cmp_timestamptz_internal(arg_i32(fcinfo, 1), arg_i64(fcinfo, 0))))
 }
 
-fn fc_in_range_date_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_in_range_date_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_i32(fcinfo, 0);
     let base = arg_i32(fcinfo, 1);
     let offset = arg_interval(fcinfo, 2);
     let sub = arg_bool(fcinfo, 3);
     let less = arg_bool(fcinfo, 4);
     match crate::in_range::in_range_date_interval(val, base, &offset, sub, less) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
+        Ok(b) => Ok(ret_bool(b)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_extract_date(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_extract_date(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // extract(text, date): unit lowercased, returns numeric.
     let units = arg_text(fcinfo, 0).to_lowercase();
     let date = arg_i32(fcinfo, 1);
     match crate::date::extract_date(&units, date) {
         Ok(r) => ret_extract_date(fcinfo, r),
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     }
 }
 fn ret_extract_date(
     fcinfo: &mut FunctionCallInfoBaseData,
     r: crate::date::ExtractDateResult,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     use crate::date::ExtractDateResult::*;
     use types_numeric::var::{NumericSign, NumericVar};
     let m = scratch_mcx();
@@ -410,342 +406,342 @@ fn ret_extract_date(
             i,
         ) {
             Ok(v) => v,
-            Err(e) => raise(e),
+            Err(e) => return Err(e),
         },
         Null => {
             fcinfo.set_result_null(true);
-            return Datum::from_usize(0);
+            return Ok(Datum::from_usize(0));
         }
         PosInfinity => NumericVar::special(m.mcx(), NumericSign::PInf),
         NegInfinity => NumericVar::special(m.mcx(), NumericSign::NInf),
     };
-    let bytes = numericvar_to_bytes(&var);
-    ret_varlena(fcinfo, bytes)
+    let bytes = numericvar_to_bytes(&var)?;
+    Ok(ret_varlena(fcinfo, bytes))
 }
-fn fc_date_pl_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_date_pl_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let d = arg_i32(fcinfo, 0);
     let iv = arg_interval(fcinfo, 1);
     match crate::date::date_pl_interval(d, &iv) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_date_mi_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_date_mi_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let d = arg_i32(fcinfo, 0);
     let iv = arg_interval(fcinfo, 1);
     match crate::date::date_mi_interval(d, &iv) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_date_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_date_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::date::date2timestamp(arg_i32(fcinfo, 0)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_date(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_date(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::date::timestamp_date(arg_i64(fcinfo, 0)) {
-        Ok(d) => ret_i32(d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_i32(d)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_date_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_date_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::date::date2timestamptz(arg_i32(fcinfo, 0)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_date(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_date(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::date::timestamptz_date(arg_i64(fcinfo, 0)) {
-        Ok(d) => ret_i32(d),
-        Err(e) => raise(e),
+        Ok(d) => Ok(ret_i32(d)),
+        Err(e) => return Err(e),
     }
 }
 
 // --- TIME (date.c) ---------------------------------------------------------
 
-fn fc_time_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_time_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     let typmod = arg_i32(fcinfo, 2);
     match crate::time::time_in_safe(&s, typmod, fcinfo.escontext_mut()) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_time_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_time_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = crate::time::time_out(arg_i64(fcinfo, 0));
-    ret_cstring(fcinfo, s)
+    Ok(ret_cstring(fcinfo, s))
 }
-fn fc_time_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_time_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let typmod = arg_i32(fcinfo, 2);
     let bytes = arg_varlena(fcinfo, 0);
     let mut r = WireReader::new(bytes);
     match crate::binio::time_recv(&mut r, typmod) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_time_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_varlena(fcinfo, crate::binio::time_send(arg_i64(fcinfo, 0)))
+fn fc_time_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_varlena(fcinfo, crate::binio::time_send(arg_i64(fcinfo, 0))))
 }
-fn fc_make_time(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_make_time(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::time::make_time(arg_i32(fcinfo, 0), arg_i32(fcinfo, 1), arg_f64(fcinfo, 2)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_time_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_time_scale(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut t = arg_i64(fcinfo, 0);
     let typmod = arg_i32(fcinfo, 1);
     crate::time::AdjustTimeForTypmod(&mut t, typmod);
-    ret_i64(t)
+    Ok(ret_i64(t))
 }
 // --- typmodin/typmodout (cstring[] array argument decoded via the
 // arrayutils-seams ArrayGetIntegerTypmods seam) ---
-fn anytime_typmodin_wrapper(fcinfo: &mut FunctionCallInfoBaseData, istz: bool) -> Datum {
+fn anytime_typmodin_wrapper(fcinfo: &mut FunctionCallInfoBaseData, istz: bool) -> types_error::PgResult<Datum> {
     let ta = arg_varlena(fcinfo, 0);
     let m = scratch_mcx();
     let tl = match backend_utils_adt_arrayutils_seams::array_get_integer_typmods::call(m.mcx(), ta)
     {
         Ok(tl) => tl,
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     };
     match crate::time::anytime_typmodin(istz, &tl) {
-        Ok(t) => ret_i32(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i32(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timetypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     anytime_typmodin_wrapper(fcinfo, false)
 }
-fn fc_timetztypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetztypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     anytime_typmodin_wrapper(fcinfo, true)
 }
-fn fc_timetypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let typmod = arg_i32(fcinfo, 0);
-    ret_cstring(fcinfo, crate::time::anytime_typmodout(false, typmod))
+    Ok(ret_cstring(fcinfo, crate::time::anytime_typmodout(false, typmod)))
 }
-fn fc_timetztypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetztypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let typmod = arg_i32(fcinfo, 0);
-    ret_cstring(fcinfo, crate::time::anytime_typmodout(true, typmod))
+    Ok(ret_cstring(fcinfo, crate::time::anytime_typmodout(true, typmod)))
 }
 
-fn anytimestamp_typmodin_wrapper(fcinfo: &mut FunctionCallInfoBaseData, istz: bool) -> Datum {
+fn anytimestamp_typmodin_wrapper(fcinfo: &mut FunctionCallInfoBaseData, istz: bool) -> types_error::PgResult<Datum> {
     let ta = arg_varlena(fcinfo, 0);
     let m = scratch_mcx();
     let tl = match backend_utils_adt_arrayutils_seams::array_get_integer_typmods::call(m.mcx(), ta)
     {
         Ok(tl) => tl,
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     };
     match crate::timestamp::anytimestamp_typmodin(istz, &tl) {
-        Ok(t) => ret_i32(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i32(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     anytimestamp_typmodin_wrapper(fcinfo, false)
 }
-fn fc_timestamptztypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptztypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     anytimestamp_typmodin_wrapper(fcinfo, true)
 }
-fn fc_timestamptypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let typmod = arg_i32(fcinfo, 0);
-    ret_cstring(fcinfo, crate::timestamp::anytimestamp_typmodout(false, typmod))
+    Ok(ret_cstring(fcinfo, crate::timestamp::anytimestamp_typmodout(false, typmod)))
 }
-fn fc_timestamptztypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptztypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let typmod = arg_i32(fcinfo, 0);
-    ret_cstring(fcinfo, crate::timestamp::anytimestamp_typmodout(true, typmod))
+    Ok(ret_cstring(fcinfo, crate::timestamp::anytimestamp_typmodout(true, typmod)))
 }
 
-fn fc_intervaltypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_intervaltypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let ta = arg_varlena(fcinfo, 0);
     let m = scratch_mcx();
     let tl = match backend_utils_adt_arrayutils_seams::array_get_integer_typmods::call(m.mcx(), ta)
     {
         Ok(tl) => tl,
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     };
     match crate::interval::intervaltypmodin(&tl) {
-        Ok(t) => ret_i32(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i32(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_intervaltypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_intervaltypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let typmod = arg_i32(fcinfo, 0);
     match crate::interval::intervaltypmodout(typmod) {
-        Ok(s) => ret_cstring(fcinfo, s),
-        Err(e) => raise(e),
+        Ok(s) => Ok(ret_cstring(fcinfo, s)),
+        Err(e) => return Err(e),
     }
 }
 
-fn fc_time_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::time::time_eq(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_time_eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::time::time_eq(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_time_ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::time::time_ne(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_time_ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::time::time_ne(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_time_lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::time::time_lt(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_time_lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::time::time_lt(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_time_le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::time::time_le(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_time_le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::time::time_le(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_time_gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::time::time_gt(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_time_gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::time::time_gt(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_time_ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::time::time_ge(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_time_ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::time::time_ge(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_time_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::time::time_cmp(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_time_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::time::time_cmp(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_time_hash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(crate::hash::time_hash(arg_i64(fcinfo, 0)))
+fn fc_time_hash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_u32(crate::hash::time_hash(arg_i64(fcinfo, 0))))
 }
-fn fc_time_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(crate::hash::time_hash_extended(arg_i64(fcinfo, 0), arg_u64(fcinfo, 1)))
+fn fc_time_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_u64(crate::hash::time_hash_extended(arg_i64(fcinfo, 0), arg_u64(fcinfo, 1))))
 }
-fn fc_time_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::time::time_larger(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_time_larger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::time::time_larger(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_time_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::time::time_smaller(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_time_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::time::time_smaller(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_overlaps_time(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_overlaps_time(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // overlaps is NOT strict: each arg may be NULL. The core takes Option<TimeADT>.
     let ts1 = nullable_i64(fcinfo, 0);
     let te1 = nullable_i64(fcinfo, 1);
     let ts2 = nullable_i64(fcinfo, 2);
     let te2 = nullable_i64(fcinfo, 3);
     match crate::overlaps::overlaps_time(ts1, te1, ts2, te2) {
-        Some(b) => ret_bool(b),
+        Some(b) => Ok(ret_bool(b)),
         None => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
     }
 }
-fn fc_timestamp_time(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_time(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::timestamp_time(arg_i64(fcinfo, 0)) {
-        Ok(Some(t)) => ret_i64(t),
+        Ok(Some(t)) => Ok(ret_i64(t)),
         Ok(None) => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_time(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_time(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::timestamptz_time(arg_i64(fcinfo, 0)) {
-        Ok(Some(t)) => ret_i64(t),
+        Ok(Some(t)) => Ok(ret_i64(t)),
         Ok(None) => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     }
 }
-fn fc_datetime_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_datetime_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::datetime_timestamp(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_time_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_time_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = crate::time::time_interval(arg_i64(fcinfo, 0));
-    ret_interval(fcinfo, &iv)
+    Ok(ret_interval(fcinfo, &iv))
 }
-fn fc_interval_time(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_time(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 0);
     match crate::time::interval_time(&iv) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_time_mi_time(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_time_mi_time(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = crate::time::time_mi_time(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1));
-    ret_interval(fcinfo, &iv)
+    Ok(ret_interval(fcinfo, &iv))
 }
-fn fc_time_pl_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_time_pl_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 1);
     match crate::time::time_pl_interval(arg_i64(fcinfo, 0), &iv) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_time_mi_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_time_mi_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 1);
     match crate::time::time_mi_interval(arg_i64(fcinfo, 0), &iv) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_in_range_time_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_in_range_time_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_i64(fcinfo, 0);
     let base = arg_i64(fcinfo, 1);
     let offset = arg_interval(fcinfo, 2);
     let sub = arg_bool(fcinfo, 3);
     let less = arg_bool(fcinfo, 4);
     match crate::in_range::in_range_time_interval(val, base, &offset, sub, less) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
+        Ok(b) => Ok(ret_bool(b)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_time_part(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_time_part(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     ret_time_part(fcinfo, false)
 }
-fn fc_extract_time(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_extract_time(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     ret_time_part(fcinfo, true)
 }
-fn ret_time_part(fcinfo: &mut FunctionCallInfoBaseData, retnumeric: bool) -> Datum {
+fn ret_time_part(fcinfo: &mut FunctionCallInfoBaseData, retnumeric: bool) -> types_error::PgResult<Datum> {
     let units = arg_text(fcinfo, 0).to_lowercase();
     let time = arg_i64(fcinfo, 1);
     let m = scratch_mcx();
     let r = match crate::time::time_part_common(m.mcx(), &units, time, retnumeric) {
         Ok(r) => r,
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     };
     ret_time_part_result(fcinfo, r)
 }
 fn ret_time_part_result(
     fcinfo: &mut FunctionCallInfoBaseData,
     r: crate::time::TimePartResult<'_>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     use crate::time::TimePartResult::*;
     match r {
-        Float(f) => ret_f64(f),
+        Float(f) => Ok(ret_f64(f)),
         // The `Int` variant is produced only on the EXTRACT (retnumeric) path
         // (the core returns `Float` for `date_part`); C does
         // `PG_RETURN_NUMERIC(int64_to_numeric(intresult))` (date.c:2302), so the
         // integer field must be returned as a numeric varlena, not a float8.
         Int(i) => ret_int64_numeric(fcinfo, i),
         Numeric(var) => {
-            let bytes = numericvar_to_bytes(&var);
-            ret_varlena(fcinfo, bytes)
+            let bytes = numericvar_to_bytes(&var)?;
+            Ok(ret_varlena(fcinfo, bytes))
         }
     }
 }
 
 /// `int64_to_numeric(i)` -> numeric varlena result (the EXTRACT integer-field
 /// path, C `PG_RETURN_NUMERIC(int64_to_numeric(intresult))`).
-fn ret_int64_numeric(fcinfo: &mut FunctionCallInfoBaseData, i: i64) -> Datum {
+fn ret_int64_numeric(fcinfo: &mut FunctionCallInfoBaseData, i: i64) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let var = match backend_utils_adt_numeric::kernel_transcendental::int64_to_numericvar(
         m.mcx(),
         i,
     ) {
         Ok(v) => v,
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     };
-    let bytes = numericvar_to_bytes(&var);
-    ret_varlena(fcinfo, bytes)
+    let bytes = numericvar_to_bytes(&var)?;
+    Ok(ret_varlena(fcinfo, bytes))
 }
 
 // --- TIMETZ (date.c) -------------------------------------------------------
 
-fn fc_timetz_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: `escontext = (Node *) fcinfo->context`. Copy the input first since
     // `arg_cstring` borrows `fcinfo` immutably while `escontext_mut` needs
     // `&mut`. With no soft sink installed escontext is None and a syntax/range
@@ -753,39 +749,39 @@ fn fc_timetz_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let s = arg_cstring(fcinfo, 0).to_string();
     let typmod = arg_i32(fcinfo, 2);
     match crate::timetz::timetz_in(&s, typmod, fcinfo.escontext_mut()) {
-        Ok(t) => ret_timetz(fcinfo, &t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_timetz(fcinfo, &t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timetz_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let t = arg_timetz(fcinfo, 0);
-    ret_cstring(fcinfo, crate::timetz::timetz_out(&t))
+    Ok(ret_cstring(fcinfo, crate::timetz::timetz_out(&t)))
 }
-fn fc_timetz_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let typmod = arg_i32(fcinfo, 2);
     let bytes = arg_varlena(fcinfo, 0);
     let mut r = WireReader::new(bytes);
     match crate::binio::timetz_recv(&mut r, typmod) {
-        Ok(t) => ret_timetz(fcinfo, &t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_timetz(fcinfo, &t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timetz_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let t = arg_timetz(fcinfo, 0);
-    ret_varlena(fcinfo, crate::binio::timetz_send(&t))
+    Ok(ret_varlena(fcinfo, crate::binio::timetz_send(&t)))
 }
-fn fc_timetz_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_scale(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let t = arg_timetz(fcinfo, 0);
     let typmod = arg_i32(fcinfo, 1);
     let r = crate::timetz::timetz_scale(&t, typmod);
-    ret_timetz(fcinfo, &r)
+    Ok(ret_timetz(fcinfo, &r))
 }
 macro_rules! timetz_cmp_bool {
     ($fn:ident, $core:path) => {
-        fn $fn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fn(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let a = arg_timetz(fcinfo, 0);
             let b = arg_timetz(fcinfo, 1);
-            ret_bool($core(&a, &b))
+            Ok(ret_bool($core(&a, &b)))
         }
     };
 }
@@ -795,153 +791,153 @@ timetz_cmp_bool!(fc_timetz_lt, crate::timetz::timetz_lt);
 timetz_cmp_bool!(fc_timetz_le, crate::timetz::timetz_le);
 timetz_cmp_bool!(fc_timetz_gt, crate::timetz::timetz_gt);
 timetz_cmp_bool!(fc_timetz_ge, crate::timetz::timetz_ge);
-fn fc_timetz_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_timetz(fcinfo, 0);
     let b = arg_timetz(fcinfo, 1);
-    ret_i32(crate::timetz::timetz_cmp(&a, &b))
+    Ok(ret_i32(crate::timetz::timetz_cmp(&a, &b)))
 }
-fn fc_timetz_hash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_hash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let t = arg_timetz(fcinfo, 0);
-    ret_u32(crate::hash::timetz_hash(&t))
+    Ok(ret_u32(crate::hash::timetz_hash(&t)))
 }
-fn fc_timetz_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let t = arg_timetz(fcinfo, 0);
-    ret_u64(crate::hash::timetz_hash_extended(&t, arg_u64(fcinfo, 1)))
+    Ok(ret_u64(crate::hash::timetz_hash_extended(&t, arg_u64(fcinfo, 1))))
 }
-fn fc_timetz_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_larger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_timetz(fcinfo, 0);
     let b = arg_timetz(fcinfo, 1);
     let r = crate::timetz::timetz_larger(a, b);
-    ret_timetz(fcinfo, &r)
+    Ok(ret_timetz(fcinfo, &r))
 }
-fn fc_timetz_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_timetz(fcinfo, 0);
     let b = arg_timetz(fcinfo, 1);
     let r = crate::timetz::timetz_smaller(a, b);
-    ret_timetz(fcinfo, &r)
+    Ok(ret_timetz(fcinfo, &r))
 }
-fn fc_timetz_pl_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_pl_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let t = arg_timetz(fcinfo, 0);
     let iv = arg_interval(fcinfo, 1);
     match crate::timetz::timetz_pl_interval(&t, &iv) {
-        Ok(r) => ret_timetz(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_timetz(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timetz_mi_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_mi_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let t = arg_timetz(fcinfo, 0);
     let iv = arg_interval(fcinfo, 1);
     match crate::timetz::timetz_mi_interval(&t, &iv) {
-        Ok(r) => ret_timetz(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_timetz(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_in_range_timetz_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_in_range_timetz_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_timetz(fcinfo, 0);
     let base = arg_timetz(fcinfo, 1);
     let offset = arg_interval(fcinfo, 2);
     let sub = arg_bool(fcinfo, 3);
     let less = arg_bool(fcinfo, 4);
     match crate::in_range::in_range_timetz_interval(&val, &base, &offset, sub, less) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
+        Ok(b) => Ok(ret_bool(b)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_overlaps_timetz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_overlaps_timetz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let ts1 = nullable_timetz(fcinfo, 0);
     let te1 = nullable_timetz(fcinfo, 1);
     let ts2 = nullable_timetz(fcinfo, 2);
     let te2 = nullable_timetz(fcinfo, 3);
     match crate::overlaps::overlaps_timetz(ts1, te1, ts2, te2) {
-        Some(b) => ret_bool(b),
+        Some(b) => Ok(ret_bool(b)),
         None => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
     }
 }
-fn fc_timetz_time(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_time(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let t = arg_timetz(fcinfo, 0);
-    ret_i64(crate::timetz::timetz_time(&t))
+    Ok(ret_i64(crate::timetz::timetz_time(&t)))
 }
-fn fc_time_timetz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_time_timetz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let r = crate::date::time_timetz(arg_i64(fcinfo, 0));
-    ret_timetz(fcinfo, &r)
+    Ok(ret_timetz(fcinfo, &r))
 }
-fn fc_timestamptz_timetz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_timetz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::timestamptz_timetz(arg_i64(fcinfo, 0)) {
-        Ok(Some(t)) => ret_timetz(fcinfo, &t),
+        Ok(Some(t)) => Ok(ret_timetz(fcinfo, &t)),
         Ok(None) => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     }
 }
-fn fc_datetimetz_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_datetimetz_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let d = arg_i32(fcinfo, 0);
     let t = arg_timetz(fcinfo, 1);
     match crate::timestamp::datetimetz_timestamptz(d, &t) {
-        Ok(ts) => ret_i64(ts),
-        Err(e) => raise(e),
+        Ok(ts) => Ok(ret_i64(ts)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timetz_part(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_part(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     ret_timetz_part(fcinfo, false)
 }
-fn fc_extract_timetz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_extract_timetz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     ret_timetz_part(fcinfo, true)
 }
-fn ret_timetz_part(fcinfo: &mut FunctionCallInfoBaseData, retnumeric: bool) -> Datum {
+fn ret_timetz_part(fcinfo: &mut FunctionCallInfoBaseData, retnumeric: bool) -> types_error::PgResult<Datum> {
     let units = arg_text(fcinfo, 0).to_lowercase();
     let t = arg_timetz(fcinfo, 1);
     let m = scratch_mcx();
     let r = match crate::timetz::timetz_part_common(m.mcx(), &units, &t, retnumeric) {
         Ok(r) => r,
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     };
     ret_timetz_part_result(fcinfo, r)
 }
 fn ret_timetz_part_result(
     fcinfo: &mut FunctionCallInfoBaseData,
     r: crate::timetz::TimetzPartResult<'_>,
-) -> Datum {
+) -> types_error::PgResult<Datum> {
     use crate::timetz::TimetzPartResult::*;
     match r {
-        Float(f) => ret_f64(f),
+        Float(f) => Ok(ret_f64(f)),
         // EXTRACT (retnumeric) integer-field path: C returns
         // `int64_to_numeric(intresult)` (date.c:3102), a numeric varlena.
         Int(i) => ret_int64_numeric(fcinfo, i),
         Numeric(var) => {
-            let bytes = numericvar_to_bytes(&var);
-            ret_varlena(fcinfo, bytes)
+            let bytes = numericvar_to_bytes(&var)?;
+            Ok(ret_varlena(fcinfo, bytes))
         }
     }
 }
-fn fc_timetz_zone(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_zone(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let zone = arg_text(fcinfo, 0);
     let t = arg_timetz(fcinfo, 1);
     match crate::timetz::timetz_zone(zone, &t) {
-        Ok(r) => ret_timetz(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_timetz(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timetz_izone(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_izone(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let zone = arg_interval(fcinfo, 0);
     let t = arg_timetz(fcinfo, 1);
     match crate::timetz::timetz_izone(&zone, &t) {
-        Ok(r) => ret_timetz(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_timetz(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timetz_at_local(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timetz_at_local(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: timetz_at_local(time) = timetz_zone(pg_get_timezone_name(session), time).
     let t = arg_timetz(fcinfo, 0);
     let stz = state_pgtz::session_timezone();
     let tzn = backend_timezone_localtime::pg_get_timezone_name(&stz).to_string();
     match crate::timetz::timetz_zone(&tzn, &t) {
-        Ok(r) => ret_timetz(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_timetz(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
 
@@ -949,49 +945,49 @@ fn fc_timetz_at_local(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // timestamp.c builtins.
 // ===========================================================================
 
-fn fc_timestamp_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     let typmod = arg_i32(fcinfo, 2);
     match crate::timestamp::timestamp_in_safe(&s, typmod, fcinfo.escontext_mut()) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::timestamp_out(arg_i64(fcinfo, 0)) {
-        Ok(s) => ret_cstring(fcinfo, s),
-        Err(e) => raise(e),
+        Ok(s) => Ok(ret_cstring(fcinfo, s)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let typmod = arg_i32(fcinfo, 2);
     let bytes = arg_varlena(fcinfo, 0);
     let mut r = WireReader::new(bytes);
     match crate::binio::timestamp_recv(&mut r, typmod) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_varlena(fcinfo, crate::binio::timestamp_send(arg_i64(fcinfo, 0)))
+fn fc_timestamp_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_varlena(fcinfo, crate::binio::timestamp_send(arg_i64(fcinfo, 0))))
 }
-fn fc_timestamp_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_scale(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut t = arg_i64(fcinfo, 0);
     let typmod = arg_i32(fcinfo, 1);
     match crate::timestamp::AdjustTimestampForTypmod(&mut t, typmod) {
-        Ok(()) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(()) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     let typmod = arg_i32(fcinfo, 2);
     match crate::timestamp::timestamptz_in_safe(&s, typmod, fcinfo.escontext_mut()) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_make_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_make_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::make_timestamp(
         arg_i32(fcinfo, 0),
         arg_i32(fcinfo, 1),
@@ -1000,11 +996,11 @@ fn fc_make_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         arg_i32(fcinfo, 4),
         arg_f64(fcinfo, 5),
     ) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_make_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_make_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::make_timestamptz(
         arg_i32(fcinfo, 0),
         arg_i32(fcinfo, 1),
@@ -1013,11 +1009,11 @@ fn fc_make_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         arg_i32(fcinfo, 4),
         arg_f64(fcinfo, 5),
     ) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_make_timestamptz_at_timezone(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_make_timestamptz_at_timezone(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let zone = arg_text(fcinfo, 6);
     match crate::timestamp::make_timestamptz_at_timezone(
         arg_i32(fcinfo, 0),
@@ -1028,66 +1024,66 @@ fn fc_make_timestamptz_at_timezone(fcinfo: &mut FunctionCallInfoBaseData) -> Dat
         arg_f64(fcinfo, 5),
         zone,
     ) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_float8_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float8_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::float8_timestamptz(arg_f64(fcinfo, 0)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::timestamptz_out(arg_i64(fcinfo, 0)) {
-        Ok(s) => ret_cstring(fcinfo, s),
-        Err(e) => raise(e),
+        Ok(s) => Ok(ret_cstring(fcinfo, s)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let typmod = arg_i32(fcinfo, 2);
     let bytes = arg_varlena(fcinfo, 0);
     let mut r = WireReader::new(bytes);
     match crate::binio::timestamptz_recv(&mut r, typmod) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_varlena(fcinfo, crate::binio::timestamptz_send(arg_i64(fcinfo, 0)))
+fn fc_timestamptz_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_varlena(fcinfo, crate::binio::timestamptz_send(arg_i64(fcinfo, 0))))
 }
-fn fc_timestamptz_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_scale(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut t = arg_i64(fcinfo, 0);
     let typmod = arg_i32(fcinfo, 1);
     match crate::timestamp::AdjustTimestampForTypmod(&mut t, typmod) {
-        Ok(()) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(()) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_interval_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     let typmod = arg_i32(fcinfo, 2);
     match crate::interval::interval_in_safe(&s, typmod, fcinfo.escontext_mut()) {
-        Ok(iv) => ret_interval(fcinfo, &iv),
-        Err(e) => raise(e),
+        Ok(iv) => Ok(ret_interval(fcinfo, &iv)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_interval_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 0);
-    ret_cstring(fcinfo, crate::interval::interval_out(&iv))
+    Ok(ret_cstring(fcinfo, crate::interval::interval_out(&iv)))
 }
-fn fc_interval_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let typmod = arg_i32(fcinfo, 2);
     let bytes = arg_varlena(fcinfo, 0);
     let mut r = WireReader::new(bytes);
     match crate::binio::interval_recv(&mut r, typmod) {
-        Ok(iv) => ret_interval(fcinfo, &iv),
-        Err(e) => raise(e),
+        Ok(iv) => Ok(ret_interval(fcinfo, &iv)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_interval_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 0);
-    ret_varlena(fcinfo, crate::binio::interval_send(&iv))
+    Ok(ret_varlena(fcinfo, crate::binio::interval_send(&iv)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,86 +1136,86 @@ fn ret_interval_state(
 }
 
 /// `interval_avg_accum(internal, interval) -> internal` (oid 1843).
-fn fc_interval_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut state = take_interval_state(fcinfo, 0).unwrap_or_default();
     if !arg_isnull(fcinfo, 1) {
         let newval = arg_interval(fcinfo, 1);
         if let Err(e) = crate::interval::do_interval_accum(&mut state, &newval) {
-            raise(e);
+            return Err(e);
         }
     }
-    ret_interval_state(fcinfo, state)
+    Ok(ret_interval_state(fcinfo, state))
 }
 
 /// `interval_avg_accum_inv(internal, interval) -> internal` (oid 3549).
-fn fc_interval_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut state = take_interval_state(fcinfo, 0)
         .unwrap_or_else(|| panic!("interval_avg_accum_inv called with NULL state"));
     if !arg_isnull(fcinfo, 1) {
         let newval = arg_interval(fcinfo, 1);
         if let Err(e) = crate::interval::do_interval_discard(&mut state, &newval) {
-            raise(e);
+            return Err(e);
         }
     }
-    ret_interval_state(fcinfo, state)
+    Ok(ret_interval_state(fcinfo, state))
 }
 
 /// `interval_avg_combine(internal, internal) -> internal` (oid 3325).
-fn fc_interval_avg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_avg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let state1 = take_interval_state(fcinfo, 0).map(|b| *b);
     let state2 = take_interval_state(fcinfo, 1).map(|b| *b);
     match crate::interval::interval_avg_combine(state1, state2) {
-        Ok(None) => ret_null(fcinfo),
-        Ok(Some(s)) => ret_interval_state(fcinfo, Box::new(s)),
-        Err(e) => raise(e),
+        Ok(None) => Ok(ret_null(fcinfo)),
+        Ok(Some(s)) => Ok(ret_interval_state(fcinfo, Box::new(s))),
+        Err(e) => return Err(e),
     }
 }
 
 /// `interval_avg_serialize(internal) -> bytea` (oid 6324).
-fn fc_interval_avg_serialize(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_avg_serialize(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let state = take_interval_state(fcinfo, 0)
         .expect("interval_avg_serialize: NULL internal state");
-    ret_varlena(fcinfo, crate::interval::interval_avg_serialize(&state))
+    Ok(ret_varlena(fcinfo, crate::interval::interval_avg_serialize(&state)))
 }
 
 /// `interval_avg_deserialize(bytea, internal) -> internal` (oid 6325).
-fn fc_interval_avg_deserialize(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_avg_deserialize(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let bytes = arg_varlena(fcinfo, 0);
     let mut r = WireReader::new(bytes);
     match crate::interval::interval_avg_deserialize(&mut r) {
-        Ok(s) => ret_interval_state(fcinfo, Box::new(s)),
-        Err(e) => raise(e),
+        Ok(s) => Ok(ret_interval_state(fcinfo, Box::new(s))),
+        Err(e) => return Err(e),
     }
 }
 
 /// `interval_avg(internal) -> interval` (oid 1844) — avg() final.
-fn fc_interval_avg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_avg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let state = take_interval_state(fcinfo, 0);
     match crate::interval::interval_avg(state.as_deref()) {
-        Ok(Some(iv)) => ret_interval(fcinfo, &iv),
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+        Ok(Some(iv)) => Ok(ret_interval(fcinfo, &iv)),
+        Ok(None) => Ok(ret_null(fcinfo)),
+        Err(e) => return Err(e),
     }
 }
 
 /// `interval_sum(internal) -> interval` (oid 6326) — sum() final.
-fn fc_interval_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_sum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let state = take_interval_state(fcinfo, 0);
     match crate::interval::interval_sum(state.as_deref()) {
-        Ok(Some(iv)) => ret_interval(fcinfo, &iv),
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+        Ok(Some(iv)) => Ok(ret_interval(fcinfo, &iv)),
+        Ok(None) => Ok(ret_null(fcinfo)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_interval_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_scale(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut iv = arg_interval(fcinfo, 0);
     let typmod = arg_i32(fcinfo, 1);
     match crate::interval::AdjustIntervalForTypmod(&mut iv, typmod) {
-        Ok(()) => ret_interval(fcinfo, &iv),
-        Err(e) => raise(e),
+        Ok(()) => Ok(ret_interval(fcinfo, &iv)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_make_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_make_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::make_interval(
         arg_i32(fcinfo, 0),
         arg_i32(fcinfo, 1),
@@ -1229,95 +1225,95 @@ fn fc_make_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         arg_i32(fcinfo, 5),
         arg_f64(fcinfo, 6),
     ) {
-        Ok(iv) => ret_interval(fcinfo, &iv),
-        Err(e) => raise(e),
+        Ok(iv) => Ok(ret_interval(fcinfo, &iv)),
+        Err(e) => return Err(e),
     }
 }
 
 // now-family.
-fn fc_now(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_now(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let _ = fcinfo;
-    ret_i64(crate::current::now())
+    Ok(ret_i64(crate::current::now()))
 }
-fn fc_transaction_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_transaction_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let _ = fcinfo;
-    ret_i64(crate::current::transaction_timestamp())
+    Ok(ret_i64(crate::current::transaction_timestamp()))
 }
-fn fc_statement_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_statement_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let _ = fcinfo;
-    ret_i64(crate::current::statement_timestamp())
+    Ok(ret_i64(crate::current::statement_timestamp()))
 }
-fn fc_clock_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_clock_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let _ = fcinfo;
-    ret_i64(crate::current::clock_timestamp())
+    Ok(ret_i64(crate::current::clock_timestamp()))
 }
-fn fc_timeofday(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timeofday(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // returns text.
     let s = crate::current::timeofday();
-    ret_text(fcinfo, s.into_bytes())
+    Ok(ret_text(fcinfo, s.into_bytes()))
 }
 
-fn fc_timestamp_finite(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(!crate::timestamp::TIMESTAMP_NOT_FINITE(arg_i64(fcinfo, 0)))
+fn fc_timestamp_finite(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(!crate::timestamp::TIMESTAMP_NOT_FINITE(arg_i64(fcinfo, 0))))
 }
-fn fc_interval_finite(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_finite(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 0);
-    ret_bool(!crate::interval::INTERVAL_NOT_FINITE(&iv))
+    Ok(ret_bool(!crate::interval::INTERVAL_NOT_FINITE(&iv)))
 }
 
 // timestamp(tz) comparison/min/max/diff (the bare timestamp_* core works on
 // both since the representation is identical i64; the timestamptz variants in
 // pg_proc map to the SAME C function).
-fn fc_timestamp_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::timestamp::timestamp_eq(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_timestamp_eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::timestamp::timestamp_eq(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_timestamp_ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::timestamp::timestamp_ne(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_timestamp_ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::timestamp::timestamp_ne(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_timestamp_lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::timestamp::timestamp_lt(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_timestamp_lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::timestamp::timestamp_lt(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_timestamp_gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::timestamp::timestamp_gt(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_timestamp_gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::timestamp::timestamp_gt(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_timestamp_le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::timestamp::timestamp_le(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_timestamp_le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::timestamp::timestamp_le(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_timestamp_ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::timestamp::timestamp_ge(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_timestamp_ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::timestamp::timestamp_ge(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_timestamp_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::timestamp::timestamp_cmp(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_timestamp_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::timestamp::timestamp_cmp(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_timestamp_hash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(crate::hash::timestamp_hash(arg_i64(fcinfo, 0)))
+fn fc_timestamp_hash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_u32(crate::hash::timestamp_hash(arg_i64(fcinfo, 0))))
 }
-fn fc_timestamp_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(crate::hash::timestamp_hash_extended(arg_i64(fcinfo, 0), arg_u64(fcinfo, 1)))
+fn fc_timestamp_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_u64(crate::hash::timestamp_hash_extended(arg_i64(fcinfo, 0), arg_u64(fcinfo, 1))))
 }
-fn fc_timestamptz_hash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u32(crate::hash::timestamptz_hash(arg_i64(fcinfo, 0)))
+fn fc_timestamptz_hash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_u32(crate::hash::timestamptz_hash(arg_i64(fcinfo, 0))))
 }
-fn fc_timestamptz_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_u64(crate::hash::timestamptz_hash_extended(arg_i64(fcinfo, 0), arg_u64(fcinfo, 1)))
+fn fc_timestamptz_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_u64(crate::hash::timestamptz_hash_extended(arg_i64(fcinfo, 0), arg_u64(fcinfo, 1))))
 }
-fn fc_timestamp_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::timestamp::timestamp_smaller(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_timestamp_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::timestamp::timestamp_smaller(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_timestamp_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::timestamp::timestamp_larger(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_timestamp_larger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::timestamp::timestamp_larger(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_timestamp_mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::timestamp_mi(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)) {
-        Ok(iv) => ret_interval(fcinfo, &iv),
-        Err(e) => raise(e),
+        Ok(iv) => Ok(ret_interval(fcinfo, &iv)),
+        Err(e) => return Err(e),
     }
 }
 
 // timestamp vs timestamptz cross-type comparisons (via the internal core).
 macro_rules! ts_tstz_cmp {
     ($fn:ident, $op:tt, $swap:expr) => {
-        fn $fn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fn(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             // C compares a timestamp against a timestamptz via
             // timestamp_cmp_timestamptz_internal; the *_timestamptz row has the
             // timestamp first, the timestamptz_* row has the timestamptz first.
@@ -1328,7 +1324,7 @@ macro_rules! ts_tstz_cmp {
             };
             let c = crate::timestamp::timestamp_cmp_timestamptz_internal(tsval, tstz);
             let c = if $swap { -c } else { c };
-            ret_bool(c $op 0)
+            Ok(ret_bool(c $op 0))
         }
     };
 }
@@ -1344,20 +1340,20 @@ ts_tstz_cmp!(fc_timestamptz_lt_timestamp, <, true);
 ts_tstz_cmp!(fc_timestamptz_gt_timestamp, >, true);
 ts_tstz_cmp!(fc_timestamptz_le_timestamp, <=, true);
 ts_tstz_cmp!(fc_timestamptz_ge_timestamp, >=, true);
-fn fc_timestamp_cmp_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::timestamp::timestamp_cmp_timestamptz_internal(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_timestamp_cmp_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::timestamp::timestamp_cmp_timestamptz_internal(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_timestamptz_cmp_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(-crate::timestamp::timestamp_cmp_timestamptz_internal(arg_i64(fcinfo, 1), arg_i64(fcinfo, 0)))
+fn fc_timestamptz_cmp_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(-crate::timestamp::timestamp_cmp_timestamptz_internal(arg_i64(fcinfo, 1), arg_i64(fcinfo, 0))))
 }
 
 // interval comparisons / hash.
 macro_rules! interval_cmp_bool {
     ($fn:ident, $core:path) => {
-        fn $fn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fn(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let a = arg_interval(fcinfo, 0);
             let b = arg_interval(fcinfo, 1);
-            ret_bool($core(&a, &b))
+            Ok(ret_bool($core(&a, &b)))
         }
     };
 }
@@ -1367,354 +1363,354 @@ interval_cmp_bool!(fc_interval_lt, crate::interval::interval_lt);
 interval_cmp_bool!(fc_interval_gt, crate::interval::interval_gt);
 interval_cmp_bool!(fc_interval_le, crate::interval::interval_le);
 interval_cmp_bool!(fc_interval_ge, crate::interval::interval_ge);
-fn fc_interval_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_interval(fcinfo, 0);
     let b = arg_interval(fcinfo, 1);
-    ret_i32(crate::interval::interval_cmp(&a, &b))
+    Ok(ret_i32(crate::interval::interval_cmp(&a, &b)))
 }
-fn fc_interval_hash(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_hash(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_interval(fcinfo, 0);
-    ret_u32(crate::hash::interval_hash(&a))
+    Ok(ret_u32(crate::hash::interval_hash(&a)))
 }
-fn fc_interval_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_hash_extended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_interval(fcinfo, 0);
-    ret_u64(crate::hash::interval_hash_extended(&a, arg_u64(fcinfo, 1)))
+    Ok(ret_u64(crate::hash::interval_hash_extended(&a, arg_u64(fcinfo, 1))))
 }
 
-fn fc_overlaps_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_overlaps_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let ts1 = nullable_i64(fcinfo, 0);
     let te1 = nullable_i64(fcinfo, 1);
     let ts2 = nullable_i64(fcinfo, 2);
     let te2 = nullable_i64(fcinfo, 3);
     match crate::overlaps::overlaps_timestamp(ts1, te1, ts2, te2) {
-        Some(b) => ret_bool(b),
+        Some(b) => Ok(ret_bool(b)),
         None => {
             fcinfo.set_result_null(true);
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
     }
 }
 
 // interval justify / arithmetic.
-fn fc_interval_justify_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_justify_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 0);
     match crate::interval::interval_justify_interval(&iv) {
-        Ok(r) => ret_interval(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_interval(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_interval_justify_hours(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_justify_hours(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 0);
     match crate::interval::interval_justify_hours(&iv) {
-        Ok(r) => ret_interval(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_interval(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_interval_justify_days(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_justify_days(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 0);
     match crate::interval::interval_justify_days(&iv) {
-        Ok(r) => ret_interval(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_interval(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_pl_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_pl_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 1);
     match crate::timestamp::timestamp_pl_interval(arg_i64(fcinfo, 0), &iv) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_mi_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_mi_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 1);
     match crate::timestamp::timestamp_mi_interval(arg_i64(fcinfo, 0), &iv) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_pl_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_pl_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 1);
     match crate::timestamp::timestamptz_pl_interval(arg_i64(fcinfo, 0), &iv) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_mi_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_mi_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 1);
     match crate::timestamp::timestamptz_mi_interval(arg_i64(fcinfo, 0), &iv) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_pl_interval_at_zone(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_pl_interval_at_zone(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 1);
     let zone = arg_text(fcinfo, 2);
     match crate::timestamp::timestamptz_pl_interval_at_zone(arg_i64(fcinfo, 0), &iv, zone) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_mi_interval_at_zone(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_mi_interval_at_zone(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 1);
     let zone = arg_text(fcinfo, 2);
     match crate::timestamp::timestamptz_mi_interval_at_zone(arg_i64(fcinfo, 0), &iv, zone) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_interval_um(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_um(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let iv = arg_interval(fcinfo, 0);
     match crate::interval::interval_um(&iv) {
-        Ok(r) => ret_interval(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_interval(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_interval_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_interval(fcinfo, 0);
     let b = arg_interval(fcinfo, 1);
     let r = crate::interval::interval_smaller(a, b);
-    ret_interval(fcinfo, &r)
+    Ok(ret_interval(fcinfo, &r))
 }
-fn fc_interval_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_larger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_interval(fcinfo, 0);
     let b = arg_interval(fcinfo, 1);
     let r = crate::interval::interval_larger(a, b);
-    ret_interval(fcinfo, &r)
+    Ok(ret_interval(fcinfo, &r))
 }
-fn fc_interval_pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_interval(fcinfo, 0);
     let b = arg_interval(fcinfo, 1);
     match crate::interval::interval_pl(&a, &b) {
-        Ok(r) => ret_interval(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_interval(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_interval_mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_interval(fcinfo, 0);
     let b = arg_interval(fcinfo, 1);
     match crate::interval::interval_mi(&a, &b) {
-        Ok(r) => ret_interval(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_interval(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_interval_mul(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_mul(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_interval(fcinfo, 0);
     let f = arg_f64(fcinfo, 1);
     match crate::interval::interval_mul(&a, f) {
-        Ok(r) => ret_interval(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_interval(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_mul_d_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_mul_d_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C mul_d_interval(float8, interval) = interval_mul(interval, float8).
     let f = arg_f64(fcinfo, 0);
     let a = arg_interval(fcinfo, 1);
     match crate::interval::interval_mul(&a, f) {
-        Ok(r) => ret_interval(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_interval(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_interval_div(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_div(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_interval(fcinfo, 0);
     let f = arg_f64(fcinfo, 1);
     match crate::interval::interval_div(&a, f) {
-        Ok(r) => ret_interval(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_interval(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_in_range_timestamptz_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_in_range_timestamptz_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_i64(fcinfo, 0);
     let base = arg_i64(fcinfo, 1);
     let offset = arg_interval(fcinfo, 2);
     let sub = arg_bool(fcinfo, 3);
     let less = arg_bool(fcinfo, 4);
     match crate::in_range::in_range_timestamptz_interval(val, base, &offset, sub, less) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
+        Ok(b) => Ok(ret_bool(b)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_in_range_timestamp_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_in_range_timestamp_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_i64(fcinfo, 0);
     let base = arg_i64(fcinfo, 1);
     let offset = arg_interval(fcinfo, 2);
     let sub = arg_bool(fcinfo, 3);
     let less = arg_bool(fcinfo, 4);
     match crate::in_range::in_range_timestamp_interval(val, base, &offset, sub, less) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
+        Ok(b) => Ok(ret_bool(b)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_in_range_interval_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_in_range_interval_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_interval(fcinfo, 0);
     let base = arg_interval(fcinfo, 1);
     let offset = arg_interval(fcinfo, 2);
     let sub = arg_bool(fcinfo, 3);
     let less = arg_bool(fcinfo, 4);
     match crate::in_range::in_range_interval_interval(&val, &base, &offset, sub, less) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
+        Ok(b) => Ok(ret_bool(b)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_age(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_age(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::timestamp_age(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)) {
-        Ok(iv) => ret_interval(fcinfo, &iv),
-        Err(e) => raise(e),
+        Ok(iv) => Ok(ret_interval(fcinfo, &iv)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_age(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_age(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::timestamptz_age(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)) {
-        Ok(iv) => ret_interval(fcinfo, &iv),
-        Err(e) => raise(e),
+        Ok(iv) => Ok(ret_interval(fcinfo, &iv)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_bin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_bin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let stride = arg_interval(fcinfo, 0);
     let ts = arg_i64(fcinfo, 1);
     let origin = arg_i64(fcinfo, 2);
     match crate::timestamp::timestamp_bin(&stride, ts, origin) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_bin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_bin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let stride = arg_interval(fcinfo, 0);
     let ts = arg_i64(fcinfo, 1);
     let origin = arg_i64(fcinfo, 2);
     match crate::timestamp::timestamptz_bin(&stride, ts, origin) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_trunc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_trunc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let units = arg_text(fcinfo, 0).to_lowercase();
     match crate::extract::timestamp_trunc(&units, arg_i64(fcinfo, 1)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_trunc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_trunc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let units = arg_text(fcinfo, 0).to_lowercase();
     match crate::timestamp::timestamptz_trunc(&units, arg_i64(fcinfo, 1)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_trunc_zone(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_trunc_zone(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let units = arg_text(fcinfo, 0).to_lowercase();
     let ts = arg_i64(fcinfo, 1);
     let zone = arg_text(fcinfo, 2);
     match crate::timestamp::timestamptz_trunc_zone(&units, ts, zone) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_interval_trunc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_trunc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let units = arg_text(fcinfo, 0).to_lowercase();
     let iv = arg_interval(fcinfo, 1);
     match crate::extract::interval_trunc(&units, &iv) {
-        Ok(r) => ret_interval(fcinfo, &r),
-        Err(e) => raise(e),
+        Ok(r) => Ok(ret_interval(fcinfo, &r)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_part(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_part(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     ret_timestamp_part(fcinfo, false)
 }
-fn fc_extract_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_extract_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     ret_timestamp_part(fcinfo, true)
 }
-fn ret_timestamp_part(fcinfo: &mut FunctionCallInfoBaseData, retnumeric: bool) -> Datum {
+fn ret_timestamp_part(fcinfo: &mut FunctionCallInfoBaseData, retnumeric: bool) -> types_error::PgResult<Datum> {
     let units = arg_text(fcinfo, 0).to_lowercase();
     let ts = arg_i64(fcinfo, 1);
     let m = scratch_mcx();
     let r = match crate::extract::timestamp_part(m.mcx(), ts, &units, retnumeric) {
         Ok(r) => r,
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     };
     ret_extract(fcinfo, r, retnumeric)
 }
-fn fc_timestamptz_part(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_part(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     ret_timestamptz_part(fcinfo, false)
 }
-fn fc_extract_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_extract_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     ret_timestamptz_part(fcinfo, true)
 }
-fn ret_timestamptz_part(fcinfo: &mut FunctionCallInfoBaseData, retnumeric: bool) -> Datum {
+fn ret_timestamptz_part(fcinfo: &mut FunctionCallInfoBaseData, retnumeric: bool) -> types_error::PgResult<Datum> {
     let units = arg_text(fcinfo, 0).to_lowercase();
     let ts = arg_i64(fcinfo, 1);
     let m = scratch_mcx();
     let r = match crate::extract::timestamptz_part(m.mcx(), ts, &units, retnumeric) {
         Ok(r) => r,
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     };
     ret_extract(fcinfo, r, retnumeric)
 }
-fn fc_interval_part(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_part(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     ret_interval_part(fcinfo, false)
 }
-fn fc_extract_interval(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_extract_interval(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     ret_interval_part(fcinfo, true)
 }
-fn ret_interval_part(fcinfo: &mut FunctionCallInfoBaseData, retnumeric: bool) -> Datum {
+fn ret_interval_part(fcinfo: &mut FunctionCallInfoBaseData, retnumeric: bool) -> types_error::PgResult<Datum> {
     let units = arg_text(fcinfo, 0).to_lowercase();
     let iv = arg_interval(fcinfo, 1);
     let m = scratch_mcx();
     let r = match crate::extract::interval_part(m.mcx(), &iv, &units, retnumeric) {
         Ok(r) => r,
-        Err(e) => raise(e),
+        Err(e) => return Err(e),
     };
     ret_extract(fcinfo, r, retnumeric)
 }
-fn fc_timestamp_zone(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_zone(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let zone = arg_text(fcinfo, 0);
     match crate::timestamp::timestamp_zone(zone, arg_i64(fcinfo, 1)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_izone(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_izone(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let zone = arg_interval(fcinfo, 0);
     match crate::timestamp::timestamp_izone(&zone, arg_i64(fcinfo, 1)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_timestamptz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::timestamp2timestamptz(arg_i64(fcinfo, 0)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::timestamptz2timestamp(arg_i64(fcinfo, 0)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_zone(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_zone(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let zone = arg_text(fcinfo, 0);
     match crate::timestamp::timestamptz_zone(zone, arg_i64(fcinfo, 1)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_izone(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_izone(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let zone = arg_interval(fcinfo, 0);
     match crate::timestamp::timestamptz_izone(&zone, arg_i64(fcinfo, 1)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamp_at_local(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_at_local(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // timezone(timestamp) AT LOCAL == timestamp_timestamptz (treat the local
     // wall-clock timestamp as being in the session zone).
     match crate::timestamp::timestamp2timestamptz(arg_i64(fcinfo, 0)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
-fn fc_timestamptz_at_local(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_at_local(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::timestamp::timestamptz_at_local(arg_i64(fcinfo, 0)) {
-        Ok(t) => ret_i64(t),
-        Err(e) => raise(e),
+        Ok(t) => Ok(ret_i64(t)),
+        Err(e) => return Err(e),
     }
 }
 
@@ -1740,22 +1736,28 @@ fn nullable_timetz(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Option<TimeTz
 // Registration.
 // ===========================================================================
 
+/// Build one Result-native builtin row: the [`types_fmgr::BuiltinFunction`]
+/// metadata (with `func: None` — the legacy callable is unused; dispatch goes
+/// through the native overlay) paired with its [`types_fmgr::PgFnNative`] body.
 fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> types_fmgr::BuiltinFunction {
-    types_fmgr::BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: types_fmgr::PgFnNative,
+) -> (types_fmgr::BuiltinFunction, types_fmgr::PgFnNative) {
+    (
+        types_fmgr::BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every date.c / timestamp.c / datetime.c builtin (C: their
@@ -1782,7 +1784,7 @@ fn builtin(
 ///  * pg_postmaster_start_time/pg_conf_load_time: read postmaster globals owned
 ///    by the postmaster subsystem (PgStartTime / PgReloadTime), not this crate.
 pub fn register_datetime_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- date.c: DATE ----
         builtin(1084, "date_in", 1, true, false, fc_date_in),
         builtin(1085, "date_out", 1, true, false, fc_date_out),
