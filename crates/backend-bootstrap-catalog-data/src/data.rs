@@ -53,6 +53,10 @@ fn attr(
         attidentity,
         attgenerated,
         attisdropped,
+        // `formrdesc` builds every nailed-catalog column as a locally-defined,
+        // non-inherited attribute (C: `attislocal = true`, `attinhcount = 0`).
+        attislocal: true,
+        attinhcount: 0,
         attcollation,
         // `populate_compact_attribute` for a catalog relation:
         // VALID when not-null, else UNRESTRICTED (IsCatalogRelationOid
