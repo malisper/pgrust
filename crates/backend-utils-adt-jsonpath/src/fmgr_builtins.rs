@@ -19,7 +19,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `VARHDRSZ` — the uncompressed 4-byte varlena length-word size.
 const VARHDRSZ: usize = 4;
@@ -71,21 +71,6 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("jsonpath fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // I/O adapters (jsonpath.c).
 // ---------------------------------------------------------------------------
@@ -99,29 +84,29 @@ fn ok<T>(r: types_error::PgResult<T>) -> T {
 /// rather than thrown; on a recorded soft error `jsonpath_in` returns `None`
 /// (C's `(Datum) 0`) and we mark the result NULL — the safe-call caller reads
 /// the captured error off the escontext, not this value.
-fn fc_jsonpath_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonpath_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // Copy the cstring out so the immutable arg borrow is released before we
     // take a mutable borrow of fcinfo.escontext.
     let s = arg_cstring(fcinfo, 0).to_owned();
     let m = scratch_mcx();
-    let result = ok(crate::jsonpath_in(m.mcx(), s.as_bytes(), fcinfo.escontext.as_mut()));
-    match result {
+    let result = crate::jsonpath_in(m.mcx(), s.as_bytes(), fcinfo.escontext.as_mut())?;
+    Ok(match result {
         Some(image) => ret_varlena(fcinfo, image.as_slice().to_vec()),
         None => {
             // Soft error was recorded in escontext; return a NULL result.
             fcinfo.set_result_null(true);
             Datum::from_usize(0)
         }
-    }
+    })
 }
 
 /// `jsonpath_out(jsonpath) -> cstring` (oid 4003): render the on-disk image to
 /// text.
-fn fc_jsonpath_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_jsonpath_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let jp = arg_jsonpath_payload(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(crate::jsonpath_out(m.mcx(), jp));
-    ret_cstring(fcinfo, String::from_utf8_lossy(bytes.as_slice()).into_owned())
+    let bytes = crate::jsonpath_out(m.mcx(), jp)?;
+    Ok(ret_cstring(fcinfo, String::from_utf8_lossy(bytes.as_slice()).into_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -137,22 +122,25 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the expressible `jsonpath.c` I/O builtins. Called from this crate's
 /// `init_seams()`. OIDs/nargs/strict/retset transcribed from `pg_proc.dat`.
 pub fn register_jsonpath_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(4001, "jsonpath_in", 1, true, false, fc_jsonpath_in),
         builtin(4003, "jsonpath_out", 1, true, false, fc_jsonpath_out),
     ]);
