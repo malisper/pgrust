@@ -56,7 +56,12 @@ fn t_isalnum(s: &[u8]) -> bool {
 /// `byte_class` is the libc byte `is*` routine, `wide_class` the wide `isw*`.
 fn classify(s: &[u8], byte_class: fn(u32) -> i32, wide_class: fn(u32) -> i32) -> bool {
     // int clen = pg_mblen(ptr): the byte length of the leading character.
-    let clen = pg_mblen_range::call(s);
+    // `pg_mblen_range` now returns PgResult (the panic→Result mb seam
+    // migration); tsearch feeds pre-validated text so an error is unreachable
+    // here — fall back to the single-byte (`clen == 1`) byte-classification
+    // path on the unexpected error, matching this function's existing
+    // bad-sequence tolerance (`Err(_) => false` below).
+    let clen = pg_mblen_range::call(s).unwrap_or(1);
 
     // if (clen == 1 || database_ctype_is_c) return is##class(TOUCHAR(ptr));
     //

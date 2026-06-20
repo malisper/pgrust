@@ -131,7 +131,11 @@ fn readstoplist<'mcx>(mcx: Mcx<'mcx>, fname: &[u8], lowercase: bool) -> PgResult
              */
             let mut end = 0usize;
             while end < line.len() && line[end] != 0 && !is_space(line[end]) {
-                let adv = pg_mblen_range::call(&line[end..]) as usize;
+                // `pg_mblen_range` now returns PgResult (the panic→Result mb
+                // seam migration); the `adv.max(1)` below already floors a
+                // zero/short advance, so fall back to 1 on the unreachable
+                // error (the stop-word file is pre-validated UTF-8 text).
+                let adv = pg_mblen_range::call(&line[end..]).unwrap_or(1) as usize;
                 end += adv.max(1);
             }
             if end > line.len() {
