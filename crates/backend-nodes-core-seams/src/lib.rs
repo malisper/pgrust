@@ -293,7 +293,7 @@ seam_core::seam!(
     pub fn print_expr<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         expr: Option<&types_nodes::nodes::Node<'_>>,
-        rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
+        rtable: &[types_nodes::parsenodes::RangeTblEntry<'mcx>],
     ) -> types_error::PgResult<()>
 );
 
@@ -314,7 +314,7 @@ seam_core::seam!(
     pub fn print_tl<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         tlist: &[types_nodes::primnodes::TargetEntry<'mcx>],
-        rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
+        rtable: &[types_nodes::parsenodes::RangeTblEntry<'mcx>],
     ) -> types_error::PgResult<()>
 );
 

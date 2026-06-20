@@ -276,16 +276,17 @@ fn walk_expr_children(
 /// here (the read-only walker contract returns a plain `bool`), so it is a loud
 /// `expect` — mirror-PG-and-fail, not a silent skip.
 #[inline]
-pub fn node_expr_wrapper(e: &Expr, mcx: mcx::Mcx<'_>) -> Node<'static> {
-    // `Node::Expr` carries the lifetime-free `primnodes::Expr`, so the wrapper
-    // type does not borrow `mcx` (the deep-copied arena children live in `mcx`,
-    // but the `Expr` enum erases that lifetime — the same `'static` marker the
-    // planner uses for `clone_in`-produced expressions). The scratch context
-    // outliving each callback invocation keeps those children valid.
-    Node::Expr(
+pub fn node_expr_wrapper<'mcx>(e: &Expr, mcx: mcx::Mcx<'mcx>) -> Node<'mcx> {
+    // The opaque `Node` is invariant in `'mcx` (the trait-object payload), so the
+    // wrapper is tied to `mcx` (the scratch context the deep-copied children live
+    // in). The scratch context outliving each callback invocation keeps the
+    // wrapped node valid for the duration of the walk.
+    Node::mk_expr(
+        mcx,
         e.clone_in(mcx)
             .expect("node_expr_wrapper: Expr::clone_in failed (out of memory) during read-only tree walk"),
     )
+    .expect("node_expr_wrapper: opaque Node alloc failed (out of memory) during read-only tree walk")
 }
 
 /// C `T_TableFunc` arm of `expression_tree_walker` (nodeFuncs.c:2647): WALK
@@ -386,10 +387,10 @@ fn expr_walk_sentinel() -> Expr {
 /// mutates it in place, reads the assigned collation state back, and aborts on a
 /// `walker` `true`. Same child set/order as [`expression_tree_walker`]; threads
 /// `&mut Node` instead of `&Node`.
-pub fn expression_tree_walker_mut(
-    node: &mut Node,
-    walker: &mut dyn FnMut(&mut Node) -> bool,
-    mcx: mcx::Mcx<'_>,
+pub fn expression_tree_walker_mut<'mcx>(
+    node: &mut Node<'mcx>,
+    walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
+    mcx: mcx::Mcx<'mcx>,
 ) -> bool {
     macro_rules! walk_opt {
         ($opt:expr) => {
@@ -449,7 +450,8 @@ pub fn expression_tree_walker_mut(
                 // walk it, then move the result back. The transient sentinel is
                 // always overwritten before it can be observed.
                 let owned = core::mem::replace(e, expr_walk_sentinel());
-                let mut wrapped = Node::Expr(owned);
+                let mut wrapped = Node::mk_expr(mcx, owned)
+                    .expect("expression_tree_walker_mut: opaque Node alloc failed (OOM)");
                 let aborted = walker(&mut wrapped);
                 if let Some(ne) = wrapped.into_expr() {
                     *e = ne;
@@ -522,27 +524,27 @@ pub fn expression_tree_walker_mut(
 
 /// In-place analogue of [`walk_table_func`]: walk each `Expr` child as a wrapped
 /// `Node::Expr`, writing the (possibly mutated) child back into its field.
-fn walk_table_func_mut(
+fn walk_table_func_mut<'mcx>(
     tf: &mut types_nodes::primnodes::TableFunc,
-    walker: &mut dyn FnMut(&mut Node) -> bool,
-    mcx: mcx::Mcx<'_>,
+    walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
+    mcx: mcx::Mcx<'mcx>,
 ) -> bool {
-    fn one(e: &mut Expr, walker: &mut dyn FnMut(&mut Node) -> bool, mcx: mcx::Mcx<'_>) -> bool {
-        let _ = mcx;
+    fn one<'mcx>(e: &mut Expr, walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool, mcx: mcx::Mcx<'mcx>) -> bool {
         // Move the child out rather than `.clone()` it — an `Aggref` child's
         // `Clone` is a deliberate panic (see `expr_walk_sentinel`).
         let owned = core::mem::replace(e, expr_walk_sentinel());
-        let mut wrapped = Node::Expr(owned);
+        let mut wrapped = Node::mk_expr(mcx, owned)
+            .expect("walk_table_func_mut: opaque Node alloc failed (OOM)");
         let aborted = walker(&mut wrapped);
         if let Some(ne) = wrapped.into_expr() {
             *e = ne;
         }
         aborted
     }
-    fn list(
+    fn list<'mcx>(
         l: &mut Option<mcx::PgVec<'_, mcx::PgBox<'_, Expr>>>,
-        walker: &mut dyn FnMut(&mut Node) -> bool,
-        mcx: mcx::Mcx<'_>,
+        walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
+        mcx: mcx::Mcx<'mcx>,
     ) -> bool {
         if let Some(v) = l {
             for e in v.iter_mut() {
@@ -553,10 +555,10 @@ fn walk_table_func_mut(
         }
         false
     }
-    fn list_opt(
+    fn list_opt<'mcx>(
         l: &mut Option<mcx::PgVec<'_, Option<mcx::PgBox<'_, Expr>>>>,
-        walker: &mut dyn FnMut(&mut Node) -> bool,
-        mcx: mcx::Mcx<'_>,
+        walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
+        mcx: mcx::Mcx<'mcx>,
     ) -> bool {
         if let Some(v) = l {
             for e in v.iter_mut().flatten() {
@@ -567,10 +569,10 @@ fn walk_table_func_mut(
         }
         false
     }
-    fn opt(
+    fn opt<'mcx>(
         e: &mut Option<mcx::PgBox<'_, Expr>>,
-        walker: &mut dyn FnMut(&mut Node) -> bool,
-        mcx: mcx::Mcx<'_>,
+        walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
+        mcx: mcx::Mcx<'mcx>,
     ) -> bool {
         match e.as_deref_mut() {
             Some(e) => one(e, walker, mcx),
@@ -590,12 +592,11 @@ fn walk_table_func_mut(
 /// wrapped `Node::Expr`, then write the (possibly mutated) child back into its
 /// field. Uses the canonical Expr-level in-place driver
 /// [`crate::nodefuncs`]'s child set via a per-child wrap/unwrap.
-fn walk_expr_children_mut(
+fn walk_expr_children_mut<'mcx>(
     e: &mut Expr,
-    walker: &mut dyn FnMut(&mut Node) -> bool,
-    mcx: mcx::Mcx<'_>,
+    walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
+    mcx: mcx::Mcx<'mcx>,
 ) -> bool {
-    let _ = mcx;
     let mut aborted = false;
     crate::nodefuncs::for_each_expr_child_mut(e, &mut |child: &mut Expr| {
         if aborted {
@@ -604,7 +605,8 @@ fn walk_expr_children_mut(
         // Move the child out rather than `.clone()` it — an `Aggref` child's
         // `Clone` is a deliberate panic (see `expr_walk_sentinel`).
         let owned = core::mem::replace(child, expr_walk_sentinel());
-        let mut wrapped = Node::Expr(owned);
+        let mut wrapped = Node::mk_expr(mcx, owned)
+            .expect("walk_expr_children_mut: opaque Node alloc failed (OOM)");
         if walker(&mut wrapped) {
             aborted = true;
         }
@@ -1227,10 +1229,11 @@ pub fn query_or_expression_tree_walker(
 /// place. Returns `true` on abort (the mutator's `true`). The C "make a modified
 /// copy" is realized as in-place mutation through `&mut Node` children, the
 /// owned-tree convention used across this repo's `*_mut` walkers.
-pub fn query_tree_mutator(
-    query: &mut types_nodes::copy_query::Query,
-    mutator: &mut dyn FnMut(&mut Node) -> bool,
+pub fn query_tree_mutator<'mcx>(
+    query: &mut types_nodes::copy_query::Query<'mcx>,
+    mutator: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
     flags: i32,
+    mcx: mcx::Mcx<'mcx>,
 ) -> bool {
     macro_rules! walk_opt {
         ($opt:expr) => {
@@ -1265,7 +1268,8 @@ pub fn query_tree_mutator(
                     // (possibly mutated) result back — the in-place no-copy
                     // analogue used throughout the `*_mut` walkers.
                     let owned = core::mem::replace(&mut **e, expr_walk_sentinel());
-                    let mut wrapped = Node::Expr(owned);
+                    let mut wrapped = Node::mk_expr(mcx, owned)
+                        .expect("query_tree_mutator: opaque Node alloc failed (OOM)");
                     let aborted = mutator(&mut wrapped);
                     if let Some(ne) = wrapped.into_expr() {
                         **e = ne;
@@ -1277,10 +1281,10 @@ pub fn query_tree_mutator(
         };
     }
 
-    if mutate_targetentry_list(&mut query.targetList, mutator) {
+    if mutate_targetentry_list(&mut query.targetList, mutator, mcx) {
         return true;
     }
-    if mutate_targetentry_list(&mut query.returningList, mutator) {
+    if mutate_targetentry_list(&mut query.returningList, mutator, mcx) {
         return true;
     }
     if let Some(jt) = query.jointree.as_deref_mut() {
@@ -1316,7 +1320,7 @@ pub fn query_tree_mutator(
         return true;
     }
     if flags & QTW_IGNORE_RANGE_TABLE == 0 {
-        if range_table_mutator(&mut query.rtable, mutator, flags) {
+        if range_table_mutator(&mut query.rtable, mutator, flags, mcx) {
             return true;
         }
     }
@@ -1325,10 +1329,11 @@ pub fn query_tree_mutator(
 
 /// `range_table_mutator(rtable, mutator, context, flags)` (nodeFuncs.c) —
 /// in-place owned-tree variant.
-pub fn range_table_mutator(
-    rtable: &mut [types_nodes::parsenodes::RangeTblEntry],
-    mutator: &mut dyn FnMut(&mut Node) -> bool,
+pub fn range_table_mutator<'mcx>(
+    rtable: &mut [types_nodes::parsenodes::RangeTblEntry<'mcx>],
+    mutator: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
     flags: i32,
+    mcx: mcx::Mcx<'mcx>,
 ) -> bool {
     use types_nodes::parsenodes::RTEKind;
     macro_rules! list_walk {
@@ -1348,7 +1353,7 @@ pub fn range_table_mutator(
             RTEKind::RTE_SUBQUERY => {
                 if flags & QTW_IGNORE_RT_SUBQUERIES == 0 {
                     if let Some(sub) = rte.subquery.as_deref_mut() {
-                        if query_tree_mutator(sub, mutator, flags) {
+                        if query_tree_mutator(sub, mutator, flags, mcx) {
                             return true;
                         }
                     }
@@ -1401,27 +1406,30 @@ pub fn range_table_mutator(
 
 /// `query_or_expression_tree_mutator(node, mutator, context, flags)`
 /// (nodeFuncs.c) — in-place owned-tree variant.
-pub fn query_or_expression_tree_mutator(
-    node: &mut Node,
-    mutator: &mut dyn FnMut(&mut Node) -> bool,
+pub fn query_or_expression_tree_mutator<'mcx>(
+    node: &mut Node<'mcx>,
+    mutator: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
     flags: i32,
+    mcx: mcx::Mcx<'mcx>,
 ) -> bool {
     match node.node_tag() {
-        ntag::T_Query => query_tree_mutator(node.expect_query_mut(), mutator, flags),
+        ntag::T_Query => query_tree_mutator(node.expect_query_mut(), mutator, flags, mcx),
         _ => mutator(node),
     }
 }
 
-fn mutate_targetentry_list(
+fn mutate_targetentry_list<'mcx>(
     list: &mut [types_nodes::primnodes::TargetEntry],
-    mutator: &mut dyn FnMut(&mut Node) -> bool,
+    mutator: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
+    mcx: mcx::Mcx<'mcx>,
 ) -> bool {
     for te in list.iter_mut() {
         if let Some(e) = te.expr.as_deref_mut() {
             // Move the child out rather than `.clone()` it — an `Aggref` child's
             // `Clone` is a deliberate panic (see `expr_walk_sentinel`).
             let owned = core::mem::replace(e, expr_walk_sentinel());
-            let mut wrapped = Node::Expr(owned);
+            let mut wrapped = Node::mk_expr(mcx, owned)
+                .expect("mutate_targetentry_list: opaque Node alloc failed (OOM)");
             let aborted = mutator(&mut wrapped);
             if let Some(ne) = wrapped.into_expr() {
                 *e = ne;
@@ -1434,9 +1442,9 @@ fn mutate_targetentry_list(
     false
 }
 
-fn mutate_fromexpr(
-    from: &mut types_nodes::rawnodes::FromExpr,
-    mutator: &mut dyn FnMut(&mut Node) -> bool,
+fn mutate_fromexpr<'mcx>(
+    from: &mut types_nodes::rawnodes::FromExpr<'mcx>,
+    mutator: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
 ) -> bool {
     for e in from.fromlist.iter_mut() {
         if mutator(&mut **e) {

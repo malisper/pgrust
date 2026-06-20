@@ -318,10 +318,10 @@ pub fn print_rt(mcx: Mcx<'_>, rtable: &[types_nodes::parsenodes::RangeTblEntry<'
 /// `"unknown expr"`. The `Var` default arm resolves the relation/attribute names
 /// through the parser/lsyscache owner seams; Const value text through the type's
 /// output function; operator/function names through lsyscache.
-pub fn print_expr(
-    mcx: Mcx<'_>,
+pub fn print_expr<'a>(
+    mcx: Mcx<'a>,
     expr: Option<&Node<'_>>,
-    rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
+    rtable: &[types_nodes::parsenodes::RangeTblEntry<'a>],
 ) -> PgResult<()> {
     // C: `if (expr == NULL) { printf("<>"); return; }`.
     let node = match expr {
@@ -348,10 +348,10 @@ pub fn print_expr(
 /// directly back into `print_expr((Node *) child, ...)`; this repo carries those
 /// children as borrowed [`Expr`] values, so the recursion stays at the `&Expr`
 /// level (no `Node` allocation/clone). `None` mirrors a NULL child (`"<>"`).
-fn print_expr_inner(
-    mcx: Mcx<'_>,
+fn print_expr_inner<'a>(
+    mcx: Mcx<'a>,
     expr: Option<&types_nodes::primnodes::Expr>,
-    rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
+    rtable: &[types_nodes::parsenodes::RangeTblEntry<'a>],
 ) -> PgResult<()> {
     use types_nodes::primnodes::Expr;
 
@@ -461,10 +461,10 @@ pub fn print_pathkeys(
 /// (`nodes/print.c`). Each entry: `resno`, `resname` (or `<null>`), the
 /// `ressortgroupref` (when nonzero), then the entry's expression via
 /// [`print_expr`].
-pub fn print_tl(
-    mcx: Mcx<'_>,
+pub fn print_tl<'a>(
+    mcx: Mcx<'a>,
     tlist: &[types_nodes::primnodes::TargetEntry<'_>],
-    rtable: &[types_nodes::parsenodes::RangeTblEntry<'_>],
+    rtable: &[types_nodes::parsenodes::RangeTblEntry<'a>],
 ) -> PgResult<()> {
     print!("(\n");
     for tle in tlist {
