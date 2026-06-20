@@ -122,10 +122,10 @@ seam!(
     /// is_reset)`, validate via `tablespace_reloptions`, then
     /// `heap_modify_tuple` (replacing `spcoptions`) + `CatalogTupleUpdate` +
     /// `heap_freetuple`.
-    pub fn update_tablespace_options<'mcx>(
-        rel: &Relation<'mcx>,
+    pub fn update_tablespace_options<'mcx, 'a>(
+        rel: &Relation<'a>,
         handle: ItemPointerData,
-        options: &[DefElem<'mcx>],
+        options: &[DefElem<'a>],
         is_reset: bool,
     ) -> PgResult<()>
 );

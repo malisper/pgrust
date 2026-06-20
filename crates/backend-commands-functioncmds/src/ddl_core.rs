@@ -821,14 +821,14 @@ fn compute_function_attributes(
 // interpret_AS_clause (functioncmds.c:865)
 // ===========================================================================
 
-fn interpret_AS_clause(
-    mcx: Mcx<'_>,
+fn interpret_AS_clause<'a>(
+    mcx: Mcx<'a>,
     language_oid: Oid,
     language_name: &str,
     funcname: &str,
     as_clause: &[Node],
     as_clause_set: bool,
-    sql_body_in: Option<&types_nodes::nodes::Node<'_>>,
+    sql_body_in: Option<&types_nodes::nodes::Node<'a>>,
     parameter_types: Vec<Oid>,
     in_parameter_names: Vec<String>,
     query_string: Option<String>,

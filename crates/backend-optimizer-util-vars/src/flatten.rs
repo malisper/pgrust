@@ -93,7 +93,7 @@ pub fn flatten_join_alias_vars<'mcx>(
 /// on success; `Err` carries the rewrite `ereport(ERROR)` surface.
 fn flatten_join_alias_vars_mutator<'mcx>(
     mcx: Mcx<'mcx>,
-    node: &mut Node,
+    node: &mut Node<'mcx>,
     context: &mut FlattenCtx<'_, 'mcx>,
 ) -> PgResult<()> {
     // Classify the node by peeling the `Expr` first (dual-homed-tag rule); the
@@ -153,12 +153,12 @@ fn flatten_join_alias_vars_mutator<'mcx>(
                         }
                     };
 
-                    let mut newvar = Node::Expr(aliasvar_expr);
+                    let mut newvar = Node::mk_expr(mcx, aliasvar_expr)?;
 
                     // If we are expanding an alias carried down from an upper
                     // query, must adjust its varlevelsup fields.
                     if context.sublevels_up != 0 {
-                        IncrementVarSublevelsUp(&mut newvar, context.sublevels_up, 0)?;
+                        IncrementVarSublevelsUp(&mut newvar, context.sublevels_up, 0, mcx)?;
                     }
                     // Preserve original Var's location, if possible.
                     if let Some(nv) = newvar.as_var_mut() {
@@ -197,7 +197,7 @@ fn flatten_join_alias_vars_mutator<'mcx>(
                 let replacement = add_nullingrels_if_needed(
                     mcx,
                     context,
-                    Node::Expr(Expr::RowExpr(rowexpr)),
+                    Node::mk_expr(mcx, Expr::RowExpr(rowexpr))?,
                     &var,
                 )?;
                 *node = replacement;
@@ -220,12 +220,12 @@ fn flatten_join_alias_vars_mutator<'mcx>(
                     ))
                 }
             };
-            let mut newvar = Node::Expr(aliasvar_expr);
+            let mut newvar = Node::mk_expr(mcx, aliasvar_expr)?;
 
             // If we are expanding an alias carried down from an upper query, must
             // adjust its varlevelsup fields.
             if context.sublevels_up != 0 {
-                IncrementVarSublevelsUp(&mut newvar, context.sublevels_up, 0)?;
+                IncrementVarSublevelsUp(&mut newvar, context.sublevels_up, 0, mcx)?;
             }
 
             // Preserve original Var's location, if possible.
@@ -252,7 +252,7 @@ fn flatten_join_alias_vars_mutator<'mcx>(
         // PlaceHolderVar's phexpr, so do it explicitly here (matching C).
         if let Some(Expr::PlaceHolderVar(phv)) = node.as_expr_mut() {
             if let Some(phexpr) = phv.phexpr.as_deref_mut() {
-                let mut child = Node::Expr(phexpr.clone());
+                let mut child = Node::mk_expr(mcx, phexpr.clone())?;
                 flatten_join_alias_vars_mutator(mcx, &mut child, context)?;
                 if let Some(e) = child.into_expr() {
                     if let Some(Expr::PlaceHolderVar(phv)) = node.as_expr_mut() {
@@ -296,6 +296,7 @@ fn flatten_join_alias_vars_mutator<'mcx>(
                 }
             },
             backend_nodes_core::node_walker::QTW_IGNORE_JOINALIASES,
+            mcx,
         );
         if let Some(e) = err {
             return Err(e);
@@ -357,12 +358,12 @@ fn rt_fetch<'a, 'mcx>(
 /// "standard" join alias expression, push the nullingrels into it in place;
 /// otherwise raise `elog(ERROR, "unsupported join alias expression")` (the C
 /// final `else` arm — the PlaceHolderVar fallback requires a non-NULL `root`).
-fn add_nullingrels_if_needed<'n, 'mcx>(
+fn add_nullingrels_if_needed<'mcx>(
     _mcx: Mcx<'mcx>,
     _context: &mut FlattenCtx<'_, 'mcx>,
-    mut newnode: Node<'n>,
+    mut newnode: Node<'mcx>,
     oldvar: &Var,
-) -> PgResult<Node<'n>> {
+) -> PgResult<Node<'mcx>> {
     if expr_relids::is_empty(&oldvar.varnullingrels) {
         return Ok(newnode); // nothing to do
     }
@@ -543,7 +544,7 @@ pub fn flatten_group_exprs<'mcx>(
 
 fn flatten_group_exprs_mutator<'mcx>(
     mcx: Mcx<'mcx>,
-    node: &mut Node,
+    node: &mut Node<'mcx>,
     context: &mut FlattenGroupCtx<'_, 'mcx>,
 ) -> PgResult<()> {
     // Classify by peeling the `Expr` first (dual-homed-tag rule).
@@ -583,12 +584,12 @@ fn flatten_group_exprs_mutator<'mcx>(
                 ))
             }
         };
-        let mut newvar = Node::Expr(group_expr);
+        let mut newvar = Node::mk_expr(mcx, group_expr)?;
 
         // If expanding an expr carried down from an upper query, adjust its
         // varlevelsup fields.
         if context.sublevels_up != 0 {
-            IncrementVarSublevelsUp(&mut newvar, context.sublevels_up, 0)?;
+            IncrementVarSublevelsUp(&mut newvar, context.sublevels_up, 0, mcx)?;
         }
 
         // Preserve original Var's location, if possible.
@@ -617,7 +618,7 @@ fn flatten_group_exprs_mutator<'mcx>(
                 let mut dargs = core::mem::take(&mut agg.aggdirectargs);
                 for e in dargs.iter_mut() {
                     let owned = core::mem::replace(e, Expr::Const(Default::default()));
-                    let mut wrapped = Node::Expr(owned);
+                    let mut wrapped = Node::mk_expr(mcx, owned)?;
                     flatten_group_exprs_mutator(mcx, &mut wrapped, context)?;
                     if let Some(ne) = wrapped.into_expr() {
                         *e = ne;
@@ -668,6 +669,7 @@ fn flatten_group_exprs_mutator<'mcx>(
                 }
             },
             backend_nodes_core::node_walker::QTW_IGNORE_GROUPEXPRS,
+            mcx,
         );
         if let Some(e) = err {
             return Err(e);
@@ -685,7 +687,7 @@ fn flatten_group_exprs_mutator<'mcx>(
 /// recursion over a node's expression children (in place).
 fn generic_recurse<'mcx>(
     mcx: Mcx<'mcx>,
-    node: &mut Node,
+    node: &mut Node<'mcx>,
     context: &mut FlattenGroupCtx<'_, 'mcx>,
 ) -> PgResult<()> {
     let mut err: Option<PgError> = None;
@@ -716,13 +718,13 @@ fn generic_recurse<'mcx>(
 /// `newnode` (already copied, so freely mutable). For the common case (no
 /// nullingrels — no GROUPING SETS and no grouping under an outer join) the
 /// replacement is returned unchanged.
-fn mark_nullable_by_grouping<'n, 'mcx>(
+fn mark_nullable_by_grouping<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     query: &Query<'mcx>,
-    mut newnode: Node<'n>,
+    mut newnode: Node<'mcx>,
     oldvar: &Var,
-) -> PgResult<Node<'n>> {
+) -> PgResult<Node<'mcx>> {
     // C: if (root == NULL) return newnode; — root is always non-NULL here.
     if expr_relids::is_empty(&oldvar.varnullingrels) {
         return Ok(newnode); // nothing to do
@@ -750,7 +752,7 @@ fn mark_nullable_by_grouping<'n, 'mcx>(
     if !expr_relids::is_empty(&relids) {
         // If the newnode is not variable-free, set the nullingrels of the Vars /
         // PHVs contained in the expression.
-        add_nulling_relids(&mut newnode, Some(&relids), &oldvar.varnullingrels);
+        add_nulling_relids(&mut newnode, Some(&relids), &oldvar.varnullingrels, mcx);
     } else {
         // Variable-free: if it contains neither volatile functions nor
         // set-returning functions, wrap it in a new PlaceHolderVar carrying the
@@ -790,7 +792,7 @@ fn mark_nullable_by_grouping<'n, 'mcx>(
             // newphv has zero phlevelsup and NULL phnullingrels; fix it.
             newphv.phlevelsup = oldvar.varlevelsup;
             newphv.phnullingrels = expr_relids::copy(&oldvar.varnullingrels);
-            newnode = Node::Expr(Expr::PlaceHolderVar(newphv));
+            newnode = Node::mk_expr(mcx, Expr::PlaceHolderVar(newphv))?;
         }
     }
 

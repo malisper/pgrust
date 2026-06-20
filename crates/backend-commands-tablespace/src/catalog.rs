@@ -315,11 +315,11 @@ fn update_tablespace_name<'mcx>(
 /// (`heap_getattr`), `transformRelOptions(old, options, …, is_reset)`, validate
 /// via `tablespace_reloptions`, `heap_modify_tuple` (replacing `spcoptions`) +
 /// `CatalogTupleUpdate`.
-fn update_tablespace_options<'mcx>(
+fn update_tablespace_options<'mcx, 'a>(
     mcx: Mcx<'mcx>,
-    rel: &Relation<'mcx>,
+    rel: &Relation<'a>,
     handle: ItemPointerData,
-    options: &[DefElem<'mcx>],
+    options: &[DefElem<'a>],
     is_reset: bool,
 ) -> PgResult<()> {
     let tup = fetch_tuple_by_tid(mcx, rel, handle)?;
@@ -375,10 +375,10 @@ fn delete_tablespace_tuple<'mcx>(
 /// Copies any old options not being replaced/reset, applies/removes the
 /// `defList` options, then validates. Returns the serialized `text[]` image
 /// (`None` ⇒ `(Datum) 0`).
-fn transform_options_bytes<'mcx>(
+fn transform_options_bytes<'mcx, 'a>(
     mcx: Mcx<'mcx>,
     old_options: Option<&[u8]>,
-    def_list: &[DefElem<'mcx>],
+    def_list: &[DefElem<'a>],
     is_reset: bool,
 ) -> PgResult<Option<Vec<u8>>> {
     // Start with the old options as "name=value" strings (those not replaced).
