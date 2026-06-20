@@ -1330,6 +1330,130 @@ pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
 }
 
 /* ===========================================================================
+ * partition_bounds_equal (partbounds.c:896)
+ * ========================================================================= */
+
+/// `datumIsEqual(value1, value2, typByVal, typLen)` (datum.c) restricted to the
+/// planner-layer [`DatumImage`] representation of a partition-bound datum. The
+/// by-value arm compares the machine words; the by-ref arm compares the raw
+/// bytes (length then `memcmp`), exactly as `datumIsEqual` does for a flat
+/// pass-by-reference value. `typbyval`/`typlen` are implied by the image arm.
+fn datum_image_is_equal(
+    a: &types_pathnodes::DatumImage,
+    b: &types_pathnodes::DatumImage,
+) -> bool {
+    use types_pathnodes::DatumImage;
+    match (a, b) {
+        (DatumImage::ByVal(x), DatumImage::ByVal(y)) => x == y,
+        (DatumImage::Bytes(x), DatumImage::Bytes(y)) => x == y,
+        // Mixed arms can only occur if the two bounds disagree on by-val-ness,
+        // which means the values are not equal.
+        _ => false,
+    }
+}
+
+/// `partition_bounds_equal(partnatts, parttyplen, parttypbyval, b1, b2)`
+/// (partbounds.c:896). Are two partition-bound collections logically equal? Used
+/// for partitionwise join: when two partitioned inputs have exactly equal
+/// bounds, their same-position partitions pair 1:1. `PartitionBoundInfo` is a
+/// canonical representation, so a faithful structural compare (no partitioning
+/// operator) decides equality. `parttyplen`/`parttypbyval` are unused here
+/// because the [`DatumImage`] carrier already encodes by-val-ness per datum; the
+/// parameters are retained to mirror the C signature.
+fn partition_bounds_equal(
+    _partnatts: i32,
+    _parttyplen: &[i16],
+    _parttypbyval: &[bool],
+    b1: &types_pathnodes::PartitionBoundInfoData,
+    b2: &types_pathnodes::PartitionBoundInfoData,
+) -> bool {
+    // PARTITION_STRATEGY_HASH = 'h'.
+    const PARTITION_STRATEGY_HASH: i8 = b'h' as i8;
+
+    if b1.strategy != b2.strategy {
+        return false;
+    }
+    if b1.ndatums != b2.ndatums {
+        return false;
+    }
+    if b1.nindexes != b2.nindexes {
+        return false;
+    }
+    if b1.null_index != b2.null_index {
+        return false;
+    }
+    if b1.default_index != b2.default_index {
+        return false;
+    }
+
+    // For all partition strategies, the indexes[] arrays have to match.
+    if b1.indexes != b2.indexes {
+        return false;
+    }
+
+    // Finally, compare the datums[] arrays.
+    if b1.strategy == PARTITION_STRATEGY_HASH {
+        // For hash, the datums[] arrays are the same iff the indexes[] arrays
+        // are (partbounds.c:924) — the modulus/remainder layout makes datums a
+        // function of indexes. Having matched indexes above, we are done.
+    } else {
+        for i in 0..(b1.ndatums as usize) {
+            let row1 = &b1.datums[i];
+            let row2 = &b2.datums[i];
+            let partnatts = row1.len().min(row2.len());
+            for j in 0..partnatts {
+                // For range partitions, the bounds might not be finite.
+                if let (Some(k1), Some(k2)) = (b1.kind.as_ref(), b2.kind.as_ref()) {
+                    // The different kinds of bound all differ from each other.
+                    if k1[i][j] != k2[i][j] {
+                        return false;
+                    }
+                    // Non-finite bounds are equal without further examination.
+                    // PARTITION_RANGE_DATUM_VALUE = 0.
+                    if k1[i][j] != 0 {
+                        continue;
+                    }
+                }
+                // Compare the actual values bit-for-bit (datumIsEqual).
+                if !datum_image_is_equal(&row1[j], &row2[j]) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// `partition_bounds_merge(partnatts, partsupfunc, partcollation, rel1, rel2,
+/// jointype, &outer_parts, &inner_parts)` (partbounds.c:1118) — merge the
+/// partition bounds of two inputs whose bounds are *not* identical but may be
+/// compatible (range/list merge producing the per-segment partition pairings).
+///
+/// The merge leg (`partition_range_bounds_merge` / `partition_list_bounds_merge`
+/// and `merge_*` helpers, ~600 lines of partbounds.c) is not yet ported. Until
+/// it lands, report "not mergeable" (`Ok(None)`), which is a faithful outcome of
+/// `partition_bounds_merge` itself: `compute_partition_bounds` then sets
+/// `joinrel->nparts = 0` and the join is planned as an ordinary (non
+/// partitionwise) join — correct results, just without the per-partition
+/// optimization for non-identical bounds. Identical-bounds partitionwise join
+/// (the common case) is fully handled by `partition_bounds_equal` above and does
+/// not reach this path.
+fn partition_bounds_merge(
+    _root: &mut types_pathnodes::PlannerInfo,
+    _rel1: types_pathnodes::RelId,
+    _rel2: types_pathnodes::RelId,
+    _jointype: types_pathnodes::JoinType,
+) -> PgResult<
+    Option<(
+        types_pathnodes::PartitionBoundInfoData,
+        std::vec::Vec<Option<types_pathnodes::RelId>>,
+        std::vec::Vec<Option<types_pathnodes::RelId>>,
+    )>,
+> {
+    Ok(None)
+}
+
+/* ===========================================================================
  * seam installation
  * ========================================================================= */
 
@@ -1337,6 +1461,8 @@ pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
 pub fn init_seams() {
     use backend_partitioning_partbounds_seams as seams;
 
+    seams::partition_bounds_equal::set(partition_bounds_equal);
+    seams::partition_bounds_merge::set(partition_bounds_merge);
     seams::partition_bounds_create::set(partition_bounds_create);
     seams::partition_bounds_copy::set(partition_bounds_copy);
     seams::compute_partition_hash_value::set(compute_partition_hash_value);

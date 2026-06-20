@@ -22,6 +22,7 @@ use types_error::{PgError, PgResult};
 use types_nodes::primnodes::Expr;
 use types_pathnodes::{NodeId, PartitionBoundInfoData, PartitionScheme, PartitionSchemeData, PlannerInfo, RelId};
 use types_storage::lock::NoLock;
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_optimizer_util_plancat_ext_seams as plancat_ext;
 
@@ -156,11 +157,13 @@ fn set_relation_partition_info(
 
     // rel->boundinfo = partdesc->boundinfo;
     //
-    // The full bound algebra (datums/kinds/indexes) lives with partbounds and
-    // is not modeled at the consumer layer; carry the three scalar fields the
-    // planner actually reads off `rel->boundinfo` (strategy, default_index,
-    // interleaved_parts — used by `partitions_are_ordered`). A partitioned
-    // table with a partdesc always has boundinfo.
+    // The full bound algebra lives with partbounds; carry the consumer-layer
+    // image the planner reads off `rel->boundinfo`: the scalars used by
+    // `partitions_are_ordered` (strategy, default_index, interleaved_parts) plus
+    // the bound algebra `partition_bounds_equal` compares for partitionwise join
+    // (ndatums/nindexes/null_index, indexes[], and `'mcx`-free images of the
+    // datums[][] / kind[][] matrices). A partitioned table with a partdesc
+    // always has boundinfo.
     let boundinfo_carrier = partdesc.boundinfo.as_ref().map(|bi| {
         // interleaved_parts is the C `Bitmapset *` of interleaved LIST-partition
         // indexes; translate to the planner `Relids` representation (same member
@@ -179,9 +182,40 @@ fn set_relation_partition_info(
                 Some(alloc::boxed::Box::new(types_pathnodes::Bitmapset { words }))
             }
         });
+        // Convert one full-boundinfo Datum into the `'mcx`-free `DatumImage`
+        // used for `datumIsEqual`-style comparison. Bound datums are plain
+        // scalars or flat by-ref values; map by-value words verbatim and by-ref
+        // / cstring payloads to their raw bytes.
+        let datum_image = |d: &Datum<'_>| -> types_pathnodes::DatumImage {
+            match d {
+                Datum::ByVal(w) => types_pathnodes::DatumImage::ByVal(*w),
+                Datum::ByRef(b) => types_pathnodes::DatumImage::Bytes(b.to_vec()),
+                Datum::Cstring(s) => types_pathnodes::DatumImage::Bytes(s.clone().into_bytes()),
+                // A partition bound never holds a composite/expanded/internal
+                // datum; fall back to the zero word (datumIsEqual on it is only
+                // reached if two bounds genuinely disagree elsewhere).
+                _ => types_pathnodes::DatumImage::ByVal(0),
+            }
+        };
+        let datums: Vec<Vec<types_pathnodes::DatumImage>> = bi
+            .datums
+            .iter()
+            .map(|row| row.iter().map(&datum_image).collect())
+            .collect();
+        let kind: Option<Vec<Vec<i8>>> = bi.kind.as_ref().map(|k| {
+            k.iter()
+                .map(|row| row.iter().map(|rk| *rk as i8).collect())
+                .collect()
+        });
         Box::new(PartitionBoundInfoData {
             strategy: bi.strategy as i8,
+            ndatums: bi.ndatums,
+            nindexes: bi.nindexes,
+            null_index: bi.null_index,
             default_index: bi.default_index,
+            indexes: bi.indexes.to_vec(),
+            datums,
+            kind,
             interleaved_parts: interleaved,
         })
     });

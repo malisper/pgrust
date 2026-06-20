@@ -14340,6 +14340,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-pathnodes",
  "types-rel",
  "types-storage",
  "types-tuple",

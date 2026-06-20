@@ -293,21 +293,55 @@ impl PartialEq for PartitionSchemeData {
 /// partitioned.
 pub type PartitionScheme = Option<Box<PartitionSchemeData>>;
 
+/// `Datum` raw image for `datumIsEqual`-style comparison at the planner layer.
+///
+/// The partition-bound datums carried on `RelOptInfo::boundinfo` are only ever
+/// compared bit-for-bit by `partition_bounds_equal` (partbounds.c:983, via
+/// `datumIsEqual`) — never through a partitioning operator. So an `'mcx`-free
+/// raw image of each datum suffices and keeps `RelOptInfo` lifetime-free. Bound
+/// datums are always plain scalars or flat by-ref values (text/numeric/etc),
+/// never composite/expanded/internal objects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DatumImage {
+    /// Pass-by-value scalar: the machine word (`attbyval`). `datumIsEqual`
+    /// compares the words directly.
+    ByVal(usize),
+    /// Flat by-reference value: the verbatim bytes (varlena image / cstring).
+    /// `datumIsEqual` compares length then `memcmp`.
+    Bytes(Vec<u8>),
+}
+
 /// `struct PartitionBoundInfoData` (partition/partbounds.h) — the specific
-/// partition bounds of a partitioned relation. The full bound algebra (datums,
-/// kinds, indexes) lives with the partbounds unit and is not modeled at the
-/// consumer layer. The planner reads only three scalar fields off the
-/// descriptor — `strategy`, `default_index`, and `interleaved_parts` — in
-/// `partitions_are_ordered` (allpaths.c / partbounds.c), so those are carried
-/// here. `interleaved_parts` is the planner `Relids` representation of the C
-/// `Bitmapset *` (LIST-partition indexes that interleave). The rest stays with
-/// partbounds.
+/// partition bounds of a partitioned relation. The full bound algebra lives
+/// with the partbounds unit; this consumer-layer carrier holds exactly the
+/// fields read off `rel->boundinfo` by the planner: the three scalars used by
+/// `partitions_are_ordered` (allpaths.c / partbounds.c) — `strategy`,
+/// `default_index`, `interleaved_parts` — plus the bound algebra
+/// `partition_bounds_equal` (partbounds.c:896) compares for partitionwise join:
+/// `ndatums`/`nindexes`/`null_index`, the `indexes[]` array, and an `'mcx`-free
+/// image of the `datums[][]` / `kind[][]` matrices. `interleaved_parts` is the
+/// planner `Relids` representation of the C `Bitmapset *`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PartitionBoundInfoData {
     /// `char strategy` — hash, list or range (`PARTITION_STRATEGY_*` as i8).
     pub strategy: i8,
+    /// `int ndatums` — length of the `datums[]` array.
+    pub ndatums: i32,
+    /// `int nindexes` — length of the `indexes[]` array.
+    pub nindexes: i32,
+    /// `int null_index` — null-accepting partition index; -1 if none.
+    pub null_index: i32,
     /// `int default_index` — default partition index; -1 if none.
     pub default_index: i32,
+    /// `int *indexes` — partition indexes.
+    pub indexes: Vec<i32>,
+    /// `Datum **datums` — per-bound key-datum images (outer = bound, inner =
+    /// partition column). Empty for the HASH strategy (where `indexes[]` alone
+    /// determines equality — partbounds.c:924).
+    pub datums: Vec<Vec<DatumImage>>,
+    /// `PartitionRangeDatumKind **kind` — `None` for hash and list; otherwise
+    /// per-bound, per-column range-datum kind (as `i8`).
+    pub kind: Option<Vec<Vec<i8>>>,
     /// `Bitmapset *interleaved_parts` — interleaved LIST partition indexes.
     pub interleaved_parts: Relids,
 }
