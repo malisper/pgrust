@@ -78,10 +78,11 @@ pub struct ReplaceRteVariablesContext {
 pub type ReplaceRteVariablesCallbackDyn =
     dyn FnMut(&Var, &mut ReplaceRteVariablesContext) -> PgResult<Expr>;
 
-fn replace_rte_variables_mutator(
-    node: &mut Node,
+fn replace_rte_variables_mutator<'mcx>(
+    node: &mut Node<'mcx>,
     context: &mut ReplaceRteVariablesContext,
     callback: &mut (dyn FnMut(&Var, &mut ReplaceRteVariablesContext) -> PgResult<Expr> + '_),
+    mcx: Mcx<'mcx>,
 ) -> PgResult<bool> {
     match node.node_tag() {
         ntag::T_Var => {
@@ -99,9 +100,9 @@ fn replace_rte_variables_mutator(
                 // Detect if we are adding a sublink to query.
                 if !context.inserted_sublink {
                     context.inserted_sublink =
-                        checkExprHasSubLink(&Node::Expr(newexpr.clone()));
+                        checkExprHasSubLink(&Node::mk_expr(mcx, newexpr.clone())?);
                 }
-                *node = Node::Expr(newexpr);
+                *node = Node::mk_expr(mcx, newexpr)?;
                 return Ok(false);
             }
             Ok(false)
@@ -127,7 +128,7 @@ fn replace_rte_variables_mutator(
                     if err.is_some() {
                         return true;
                     }
-                    match replace_rte_variables_mutator(n, context, &mut *callback) {
+                    match replace_rte_variables_mutator(n, context, &mut *callback, mcx) {
                         Ok(abort) => abort,
                         Err(e) => {
                             err = Some(e);
@@ -136,6 +137,7 @@ fn replace_rte_variables_mutator(
                     }
                 },
                 0,
+                mcx,
             );
             if let Some(e) = err {
                 return Err(e);
@@ -147,15 +149,13 @@ fn replace_rte_variables_mutator(
         }
         _ => {
             let mut err: Option<PgError> = None;
-            let scratch = mcx::MemoryContext::new("replace_rte_variables scratch");
-            let scratch_mcx = scratch.mcx();
             let aborted = expression_tree_walker_mut(
                 node,
                 &mut |n| {
                     if err.is_some() {
                         return true;
                     }
-                    match replace_rte_variables_mutator(n, context, &mut *callback) {
+                    match replace_rte_variables_mutator(n, context, &mut *callback, mcx) {
                         Ok(abort) => abort,
                         Err(e) => {
                             err = Some(e);
@@ -163,7 +163,7 @@ fn replace_rte_variables_mutator(
                         }
                     }
                 },
-                scratch_mcx,
+                mcx,
             );
             if let Some(e) = err {
                 return Err(e);
@@ -178,12 +178,13 @@ fn replace_rte_variables_mutator(
 ///
 /// `outer_has_sublinks` is the C `bool *outer_hasSubLinks` (pass `None` for a
 /// bare non-Query expression).
-pub fn replace_rte_variables(
-    node: &mut Node,
+pub fn replace_rte_variables<'mcx>(
+    node: &mut Node<'mcx>,
     target_varno: i32,
     sublevels_up: i32,
     callback: &mut (dyn FnMut(&Var, &mut ReplaceRteVariablesContext) -> PgResult<Expr> + '_),
     outer_has_sublinks: &mut Option<bool>,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
     let mut context = ReplaceRteVariablesContext {
         target_varno,
@@ -207,7 +208,7 @@ pub fn replace_rte_variables(
                 if err.is_some() {
                     return true;
                 }
-                match replace_rte_variables_mutator(n, &mut context, &mut *callback) {
+                match replace_rte_variables_mutator(n, &mut context, &mut *callback, mcx) {
                     Ok(abort) => abort,
                     Err(e) => {
                         err = Some(e);
@@ -216,12 +217,13 @@ pub fn replace_rte_variables(
                 }
             },
             0,
+            mcx,
         );
         if let Some(e) = err {
             return Err(e);
         }
     } else {
-        replace_rte_variables_mutator(node, &mut context, &mut *callback)?;
+        replace_rte_variables_mutator(node, &mut context, &mut *callback, mcx)?;
     }
 
     if context.inserted_sublink {
@@ -243,15 +245,16 @@ pub fn replace_rte_variables(
 // map_variable_attnos (rewriteManip.c:1546)
 // ===========================================================================
 
-struct MapAttnosCtx<'a> {
+struct MapAttnosCtx<'a, 'mcx> {
     target_varno: i32,
     sublevels_up: i32,
     attno_map: &'a [i16],
     to_rowtype: Oid,
     found_whole_row: &'a mut bool,
+    mcx: Mcx<'mcx>,
 }
 
-fn map_variable_attnos_mutator(node: &mut Node, ctx: &mut MapAttnosCtx<'_>) -> PgResult<bool> {
+fn map_variable_attnos_mutator<'mcx>(node: &mut Node<'mcx>, ctx: &mut MapAttnosCtx<'_, 'mcx>) -> PgResult<bool> {
     match node.node_tag() {
         ntag::T_Var => {
             let matched = {
@@ -294,7 +297,7 @@ fn map_variable_attnos_mutator(node: &mut Node, ctx: &mut MapAttnosCtx<'_>) -> P
                             convertformat: CoercionForm::COERCE_IMPLICIT_CAST,
                             location: -1,
                         };
-                        *node = Node::Expr(Expr::ConvertRowtypeExpr(r));
+                        *node = Node::mk_expr(ctx.mcx, Expr::ConvertRowtypeExpr(r))?;
                         return Ok(false);
                     }
                 }
@@ -332,6 +335,7 @@ fn map_variable_attnos_mutator(node: &mut Node, ctx: &mut MapAttnosCtx<'_>) -> P
             recurse_map_attnos(node, ctx)
         }
         ntag::T_Query => {
+            let mcx = ctx.mcx;
             let q = node.as_query_mut().unwrap();
             ctx.sublevels_up += 1;
             let mut err: Option<PgError> = None;
@@ -350,6 +354,7 @@ fn map_variable_attnos_mutator(node: &mut Node, ctx: &mut MapAttnosCtx<'_>) -> P
                     }
                 },
                 0,
+                mcx,
             );
             ctx.sublevels_up -= 1;
             if let Some(e) = err {
@@ -361,10 +366,9 @@ fn map_variable_attnos_mutator(node: &mut Node, ctx: &mut MapAttnosCtx<'_>) -> P
     }
 }
 
-fn recurse_map_attnos(node: &mut Node, ctx: &mut MapAttnosCtx<'_>) -> PgResult<bool> {
+fn recurse_map_attnos<'mcx>(node: &mut Node<'mcx>, ctx: &mut MapAttnosCtx<'_, 'mcx>) -> PgResult<bool> {
     let mut err: Option<PgError> = None;
-    let scratch = mcx::MemoryContext::new("map_variable_attnos scratch");
-    let scratch_mcx = scratch.mcx();
+    let scratch_mcx = ctx.mcx;
     let aborted = expression_tree_walker_mut(
         node,
         &mut |n| {
@@ -390,13 +394,14 @@ fn recurse_map_attnos(node: &mut Node, ctx: &mut MapAttnosCtx<'_>) -> PgResult<b
 /// `map_variable_attnos(node, target_varno, sublevels_up, attno_map, to_rowtype,
 /// found_whole_row)` (rewriteManip.c:1701). `attno_map` is the `AttrMap.attnums`
 /// slice (varattno `n` is replaced by `attno_map[n-1]`).
-pub fn map_variable_attnos(
-    node: &mut Node,
+pub fn map_variable_attnos<'mcx>(
+    node: &mut Node<'mcx>,
     target_varno: i32,
     sublevels_up: i32,
     attno_map: &[i16],
     to_rowtype: Oid,
     found_whole_row: &mut bool,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
     *found_whole_row = false;
     let mut ctx = MapAttnosCtx {
@@ -405,6 +410,7 @@ pub fn map_variable_attnos(
         attno_map,
         to_rowtype,
         found_whole_row,
+        mcx,
     };
     if let Some(q) = node.as_query_mut() {
         let mut err: Option<PgError> = None;
@@ -423,6 +429,7 @@ pub fn map_variable_attnos(
                 }
             },
             0,
+            mcx,
         );
         if let Some(e) = err {
             return Err(e);
@@ -458,7 +465,7 @@ pub fn map_variable_attnos_expr_list<'mcx>(
         // collect it back. found_whole_row is OR-accumulated across the list.
         let mut node = Node::mk_expr(mcx, owned)?;
         let mut one_fwr = false;
-        map_variable_attnos(&mut node, 1, 0, attmap, INVALID_OID, &mut one_fwr)?;
+        map_variable_attnos(&mut node, 1, 0, attmap, INVALID_OID, &mut one_fwr, mcx)?;
         found_whole_row |= one_fwr;
         match node.into_expr() {
             Some(mapped) => out.push(mapped),
@@ -595,6 +602,7 @@ pub fn ReplaceVarFromTargetList<'mcx>(
                     result_relation,
                     0,
                     var.varreturningtype,
+                    mcx,
                 );
                 newnode = node_into_expr(wrapped)?;
 
@@ -666,7 +674,7 @@ fn node_into_expr(node: Node) -> PgResult<Expr> {
 /// outer_hasSubLinks)` (rewriteManip.c:1957).
 #[allow(clippy::too_many_arguments)]
 pub fn ReplaceVarsFromTargetList<'mcx>(
-    node: &mut Node,
+    node: &mut Node<'mcx>,
     target_varno: i32,
     sublevels_up: i32,
     target_rte: &RangeTblEntry<'mcx>,
@@ -691,7 +699,7 @@ pub fn ReplaceVarsFromTargetList<'mcx>(
         )?;
         if var.varlevelsup > 0 {
             let mut wrapped = Node::mk_expr(mcx, newexpr)?;
-            crate::increment::IncrementVarSublevelsUp(&mut wrapped, var.varlevelsup as i32, 0)?;
+            crate::increment::IncrementVarSublevelsUp(&mut wrapped, var.varlevelsup as i32, 0, mcx)?;
             node_into_expr(wrapped)
         } else {
             Ok(newexpr)
@@ -704,5 +712,6 @@ pub fn ReplaceVarsFromTargetList<'mcx>(
         sublevels_up,
         &mut callback,
         outer_has_sublinks,
+        mcx,
     )
 }

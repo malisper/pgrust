@@ -49,19 +49,21 @@ pub fn adjust_relid_set(relids_set: &ExprRelids, oldrelid: i32, newrelid: i32) -
 
 /// The C `ChangeVarNodes_context` (callback threaded separately — see module
 /// docs).
-pub struct ChangeVarNodesContext {
+pub struct ChangeVarNodesContext<'mcx> {
     pub rt_index: i32,
     pub new_index: i32,
     pub sublevels_up: i32,
+    /// Query arena the walked tree lives in (opaque `Node` invariance).
+    pub mcx: mcx::Mcx<'mcx>,
 }
 
 /// `ChangeVarNodes_callback` — process a node before the standard walker; a
 /// `true` return tells the walker to skip the node entirely.
 pub type ChangeVarNodesCallback<'a> = &'a mut dyn FnMut(&mut Node, &mut ChangeVarNodesContext) -> bool;
 
-fn ChangeVarNodes_walker(
-    node: &mut Node,
-    context: &mut ChangeVarNodesContext,
+fn ChangeVarNodes_walker<'mcx>(
+    node: &mut Node<'mcx>,
+    context: &mut ChangeVarNodesContext<'mcx>,
     callback: &mut Option<ChangeVarNodesCallback>,
 ) -> bool {
     if let Some(cb) = callback {
@@ -104,8 +106,7 @@ fn ChangeVarNodes_walker(
             if context.sublevels_up == 0 && j.rtindex == context.rt_index {
                 j.rtindex = context.new_index;
             }
-            let scratch = mcx::MemoryContext::new("ChangeVarNodes scratch");
-            let mcx = scratch.mcx();
+            let mcx = context.mcx;
             expression_tree_walker_mut(
                 node,
                 &mut |n| ChangeVarNodes_walker(n, context, callback),
@@ -123,8 +124,7 @@ fn ChangeVarNodes_walker(
                     context.new_index,
                 );
             }
-            let scratch = mcx::MemoryContext::new("ChangeVarNodes scratch");
-            let mcx = scratch.mcx();
+            let mcx = context.mcx;
             expression_tree_walker_mut(
                 node,
                 &mut |n| ChangeVarNodes_walker(n, context, callback),
@@ -132,16 +132,16 @@ fn ChangeVarNodes_walker(
             )
         }
         ntag::T_Query => {
+            let mcx = context.mcx;
             let q = node.as_query_mut().unwrap();
             context.sublevels_up += 1;
             let result =
-                query_tree_mutator(q, &mut |n| ChangeVarNodes_walker(n, context, callback), 0);
+                query_tree_mutator(q, &mut |n| ChangeVarNodes_walker(n, context, callback), 0, mcx);
             context.sublevels_up -= 1;
             result
         }
         _ => {
-            let scratch = mcx::MemoryContext::new("ChangeVarNodes scratch");
-            let mcx = scratch.mcx();
+            let mcx = context.mcx;
             expression_tree_walker_mut(
                 node,
                 &mut |n| ChangeVarNodes_walker(n, context, callback),
@@ -153,17 +153,19 @@ fn ChangeVarNodes_walker(
 
 /// `ChangeVarNodesExtended(node, rt_index, new_index, sublevels_up, callback)`
 /// (rewriteManip.c:676).
-pub fn ChangeVarNodesExtended(
-    node: &mut Node,
+pub fn ChangeVarNodesExtended<'mcx>(
+    node: &mut Node<'mcx>,
     rt_index: i32,
     new_index: i32,
     sublevels_up: i32,
     callback: Option<ChangeVarNodesCallback>,
+    mcx: mcx::Mcx<'mcx>,
 ) {
     let mut context = ChangeVarNodesContext {
         rt_index,
         new_index,
         sublevels_up,
+        mcx,
     };
     let mut callback = callback;
 
@@ -173,6 +175,7 @@ pub fn ChangeVarNodesExtended(
             qry,
             &mut |n| ChangeVarNodes_walker(n, &mut context, &mut callback),
             0,
+            mcx,
         );
     } else {
         ChangeVarNodes_walker(node, &mut context, &mut callback);
@@ -180,18 +183,26 @@ pub fn ChangeVarNodesExtended(
 }
 
 /// `ChangeVarNodes(node, rt_index, new_index, sublevels_up)` (rewriteManip.c:732).
-pub fn ChangeVarNodes(node: &mut Node, rt_index: i32, new_index: i32, sublevels_up: i32) {
-    ChangeVarNodesExtended(node, rt_index, new_index, sublevels_up, None);
+pub fn ChangeVarNodes<'mcx>(
+    node: &mut Node<'mcx>,
+    rt_index: i32,
+    new_index: i32,
+    sublevels_up: i32,
+    mcx: mcx::Mcx<'mcx>,
+) {
+    ChangeVarNodesExtended(node, rt_index, new_index, sublevels_up, None, mcx);
 }
 
 /// `ChangeVarNodesWalkExpression(node, context)` (rewriteManip.c:743) — process
 /// an expression within a custom `ChangeVarNodesExtended` callback. Re-enters the
 /// standard walker without a callback (the callback delegates here only for plain
 /// expression recursion).
-pub fn ChangeVarNodesWalkExpression(node: &mut Node, context: &mut ChangeVarNodesContext) -> bool {
+pub fn ChangeVarNodesWalkExpression<'mcx>(
+    node: &mut Node<'mcx>,
+    context: &mut ChangeVarNodesContext<'mcx>,
+) -> bool {
     let mut no_cb: Option<ChangeVarNodesCallback> = None;
-    let scratch = mcx::MemoryContext::new("ChangeVarNodes scratch");
-    let mcx = scratch.mcx();
+    let mcx = context.mcx;
     expression_tree_walker_mut(
         node,
         &mut |n| ChangeVarNodes_walker(n, context, &mut no_cb),

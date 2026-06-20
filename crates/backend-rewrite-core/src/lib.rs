@@ -126,6 +126,7 @@ pub fn init_seams() {
                 attmap,
                 to_rowtype,
                 &mut found_whole_row,
+                mcx,
             )?;
             Ok((node, found_whole_row))
         },
@@ -154,8 +155,11 @@ pub fn init_seams() {
     backend_optimizer_util_plancat_ext_seams::change_var_nodes::set(
         |root: &mut types_pathnodes::PlannerInfo, nodes, rt_index, new_index| {
             for &id in nodes {
-                let mut node = types_nodes::nodes::Node::Expr(root.node(id).clone());
-                change::ChangeVarNodes(&mut node, rt_index, new_index, 0);
+                let scratch = mcx::MemoryContext::new("change_var_nodes seam");
+                let mcx = scratch.mcx();
+                let mut node = types_nodes::nodes::Node::mk_expr(mcx, root.node(id).clone())
+                    .expect("change_var_nodes: opaque Node alloc failed (OOM)");
+                change::ChangeVarNodes(&mut node, rt_index, new_index, 0, mcx);
                 let walked = match node.into_expr() {
                     Some(e) => e,
                     // ChangeVarNodes never changes the top-level node kind for an
@@ -181,8 +185,11 @@ pub fn init_seams() {
             let added_er = added
                 .map(|b| types_nodes::primnodes::ExprRelids { words: b.words })
                 .unwrap_or_default();
-            let mut node = types_nodes::nodes::Node::Expr(expr);
-            nulling::add_nulling_relids(&mut node, target_er.as_ref(), &added_er);
+            let scratch = mcx::MemoryContext::new("add_nulling_relids seam");
+            let mcx = scratch.mcx();
+            let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)
+                .expect("add_nulling_relids: opaque Node alloc failed (OOM)");
+            nulling::add_nulling_relids(&mut node, target_er.as_ref(), &added_er, mcx);
             match node.into_expr() {
                 Some(e) => e,
                 None => unreachable!("add_nulling_relids returned a non-Expr for an Expr input"),
@@ -196,8 +203,10 @@ pub fn init_seams() {
     // wrap/unwrap as above; the walker is fallible (catalog lookups), propagated.
     backend_optimizer_plan_init_subselect_ext_seams::increment_var_sublevels_up_expr::set(
         |expr, delta_sublevels_up, min_sublevels_up| {
-            let mut node = types_nodes::nodes::Node::Expr(expr);
-            increment::IncrementVarSublevelsUp(&mut node, delta_sublevels_up, min_sublevels_up)?;
+            let scratch = mcx::MemoryContext::new("increment_var_sublevels_up seam");
+            let mcx = scratch.mcx();
+            let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)?;
+            increment::IncrementVarSublevelsUp(&mut node, delta_sublevels_up, min_sublevels_up, mcx)?;
             Ok(match node.into_expr() {
                 Some(e) => e,
                 None => unreachable!(
@@ -224,8 +233,11 @@ pub fn init_seams() {
             // `expr` is moved in (the seam takes it by value), so wrapping it in a
             // `Node` is a move — no `.clone()` (which would panic on an owned-
             // subtree Expr such as `Aggref`). C mutates the node tree in place.
-            let mut node = types_nodes::nodes::Node::Expr(expr);
-            nulling::remove_nulling_relids(&mut node, &removable_er, &except_er);
+            let scratch = mcx::MemoryContext::new("remove_nulling_relids seam");
+            let mcx = scratch.mcx();
+            let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)
+                .expect("remove_nulling_relids: opaque Node alloc failed (OOM)");
+            nulling::remove_nulling_relids(&mut node, &removable_er, &except_er, mcx);
             match node.into_expr() {
                 Some(e) => e,
                 None => unreachable!("remove_nulling_relids returned a non-Expr for an Expr input"),
@@ -244,8 +256,11 @@ pub fn init_seams() {
             };
             let removable_er = to_er(&removable);
             let except_er = to_er(&except);
-            let mut node = types_nodes::nodes::Node::Expr(expr);
-            nulling::remove_nulling_relids(&mut node, &removable_er, &except_er);
+            let scratch = mcx::MemoryContext::new("remove_nulling_relids seam");
+            let mcx = scratch.mcx();
+            let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)
+                .expect("remove_nulling_relids: opaque Node alloc failed (OOM)");
+            nulling::remove_nulling_relids(&mut node, &removable_er, &except_er, mcx);
             match node.into_expr() {
                 Some(e) => e,
                 None => unreachable!("remove_nulling_relids returned a non-Expr for an Expr input"),

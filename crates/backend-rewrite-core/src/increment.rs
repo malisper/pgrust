@@ -34,12 +34,13 @@ fn elog_error(msg: &str) -> PgError {
 // IncrementVarSublevelsUp (rewriteManip.c:776)
 // ===========================================================================
 
-struct IncrCtx {
+struct IncrCtx<'mcx> {
     delta_sublevels_up: i32,
     min_sublevels_up: i32,
     /// Captured `elog(ERROR)` from inside the infallible walker callback; the
     /// public entry points surface it as `Err(PgError)` (mirrors C ereport).
     err: Option<PgError>,
+    mcx: mcx::Mcx<'mcx>,
 }
 
 /// Recurse into a node's children via the in-place walker, supplying a per-call
@@ -47,13 +48,12 @@ struct IncrCtx {
 /// allocates (it `mem::replace`s children in place); the `Mcx` is threaded only
 /// so the future opaque-`Node` flip's `mk_expr` has a context. Scratch is freed
 /// on return.
-fn incr_walk_children(node: &mut Node, ctx: &mut IncrCtx) -> bool {
-    let scratch = mcx::MemoryContext::new("IncrementVarSublevelsUp scratch");
-    let mcx = scratch.mcx();
+fn incr_walk_children<'mcx>(node: &mut Node<'mcx>, ctx: &mut IncrCtx<'mcx>) -> bool {
+    let mcx = ctx.mcx;
     expression_tree_walker_mut(node, &mut |n| IncrementVarSublevelsUp_walker(n, ctx), mcx)
 }
 
-fn IncrementVarSublevelsUp_walker(node: &mut Node, ctx: &mut IncrCtx) -> bool {
+fn IncrementVarSublevelsUp_walker<'mcx>(node: &mut Node<'mcx>, ctx: &mut IncrCtx<'mcx>) -> bool {
     if ctx.err.is_some() {
         return true; // abort the remaining walk
     }
@@ -107,11 +107,12 @@ fn IncrementVarSublevelsUp_walker(node: &mut Node, ctx: &mut IncrCtx) -> bool {
             incr_walk_children(node, ctx)
         }
         ntag::T_Query => {
+            let mcx = ctx.mcx;
             let q = node.as_query_mut().unwrap();
             ctx.min_sublevels_up += 1;
             increment_query_ctes(q, ctx);
             let result =
-                query_tree_mutator(q, &mut |n| IncrementVarSublevelsUp_walker(n, ctx), 0);
+                query_tree_mutator(q, &mut |n| IncrementVarSublevelsUp_walker(n, ctx), 0, mcx);
             ctx.min_sublevels_up -= 1;
             result
         }
@@ -136,15 +137,17 @@ fn increment_rte_cte(rte: &mut RangeTblEntry, ctx: &IncrCtx) {
 
 /// `IncrementVarSublevelsUp(node, delta_sublevels_up, min_sublevels_up)`
 /// (rewriteManip.c:880).
-pub fn IncrementVarSublevelsUp(
-    node: &mut Node,
+pub fn IncrementVarSublevelsUp<'mcx>(
+    node: &mut Node<'mcx>,
     delta_sublevels_up: i32,
     min_sublevels_up: i32,
+    mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<()> {
     let mut ctx = IncrCtx {
         delta_sublevels_up,
         min_sublevels_up,
         err: None,
+        mcx,
     };
     // C uses query_or_expression_tree_walker(..., QTW_EXAMINE_RTES_BEFORE).
     // Starting at a Query does NOT increment min_sublevels_up, so we bump the
@@ -156,6 +159,7 @@ pub fn IncrementVarSublevelsUp(
         node,
         &mut |n| IncrementVarSublevelsUp_walker(n, &mut ctx),
         0,
+        mcx,
     );
     match ctx.err {
         Some(e) => Err(e),
@@ -165,15 +169,17 @@ pub fn IncrementVarSublevelsUp(
 
 /// `IncrementVarSublevelsUp_rtable(rtable, delta_sublevels_up, min_sublevels_up)`
 /// (rewriteManip.c:903).
-pub fn IncrementVarSublevelsUp_rtable(
-    rtable: &mut [RangeTblEntry],
+pub fn IncrementVarSublevelsUp_rtable<'mcx>(
+    rtable: &mut [RangeTblEntry<'mcx>],
     delta_sublevels_up: i32,
     min_sublevels_up: i32,
+    mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<()> {
     let mut ctx = IncrCtx {
         delta_sublevels_up,
         min_sublevels_up,
         err: None,
+        mcx,
     };
     // Examine each RTE node before its contents (QTW_EXAMINE_RTES_BEFORE): bump
     // RTE_CTE ctelevelsup, then walk the RTE's expression trees.
@@ -184,6 +190,7 @@ pub fn IncrementVarSublevelsUp_rtable(
         rtable,
         &mut |n| IncrementVarSublevelsUp_walker(n, &mut ctx),
         0,
+        mcx,
     );
     match ctx.err {
         Some(e) => Err(e),
@@ -195,13 +202,14 @@ pub fn IncrementVarSublevelsUp_rtable(
 // SetVarReturningType (rewriteManip.c:919)
 // ===========================================================================
 
-struct SetReturnCtx {
+struct SetReturnCtx<'mcx> {
     result_relation: i32,
     sublevels_up: i32,
     returning_type: VarReturningType,
+    mcx: mcx::Mcx<'mcx>,
 }
 
-fn SetVarReturningType_walker(node: &mut Node, ctx: &mut SetReturnCtx) -> bool {
+fn SetVarReturningType_walker<'mcx>(node: &mut Node<'mcx>, ctx: &mut SetReturnCtx<'mcx>) -> bool {
     match node.node_tag() {
         ntag::T_Var => {
             let var = node.as_var_mut().unwrap();
@@ -211,16 +219,16 @@ fn SetVarReturningType_walker(node: &mut Node, ctx: &mut SetReturnCtx) -> bool {
             false
         }
         ntag::T_Query => {
+            let mcx = ctx.mcx;
             let q = node.as_query_mut().unwrap();
             ctx.sublevels_up += 1;
             let result =
-                query_tree_mutator(q, &mut |n| SetVarReturningType_walker(n, ctx), 0);
+                query_tree_mutator(q, &mut |n| SetVarReturningType_walker(n, ctx), 0, mcx);
             ctx.sublevels_up -= 1;
             result
         }
         _ => {
-            let scratch = mcx::MemoryContext::new("SetVarReturningType scratch");
-            let mcx = scratch.mcx();
+            let mcx = ctx.mcx;
             expression_tree_walker_mut(node, &mut |n| SetVarReturningType_walker(n, ctx), mcx)
         }
     }
@@ -228,16 +236,18 @@ fn SetVarReturningType_walker(node: &mut Node, ctx: &mut SetReturnCtx) -> bool {
 
 /// `SetVarReturningType(node, result_relation, sublevels_up, returning_type)`
 /// (rewriteManip.c:966). Expects to start with an expression (not a Query).
-pub fn SetVarReturningType(
-    node: &mut Node,
+pub fn SetVarReturningType<'mcx>(
+    node: &mut Node<'mcx>,
     result_relation: i32,
     sublevels_up: i32,
     returning_type: VarReturningType,
+    mcx: mcx::Mcx<'mcx>,
 ) {
     let mut ctx = SetReturnCtx {
         result_relation,
         sublevels_up,
         returning_type,
+        mcx,
     };
     SetVarReturningType_walker(node, &mut ctx);
 }

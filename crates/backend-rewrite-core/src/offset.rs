@@ -39,7 +39,7 @@ fn offset_relid_set(relids_set: &ExprRelids, offset: i32) -> ExprRelids {
     result
 }
 
-fn OffsetVarNodes_walker(node: &mut Node, ctx: &mut OffsetCtx<'_>) -> bool {
+fn OffsetVarNodes_walker<'mcx>(node: &mut Node<'mcx>, ctx: &mut OffsetCtx<'mcx>) -> bool {
     match node.node_tag() {
         ntag::T_Var => {
             let var = node.as_var_mut().unwrap();
@@ -87,9 +87,10 @@ fn OffsetVarNodes_walker(node: &mut Node, ctx: &mut OffsetCtx<'_>) -> bool {
             expression_tree_walker_mut(node, &mut |n| OffsetVarNodes_walker(n, ctx), mcx)
         }
         ntag::T_Query => {
+            let mcx = ctx.mcx;
             let q = node.as_query_mut().unwrap();
             ctx.sublevels_up += 1;
-            let result = query_tree_mutator(q, &mut |n| OffsetVarNodes_walker(n, ctx), 0);
+            let result = query_tree_mutator(q, &mut |n| OffsetVarNodes_walker(n, ctx), 0, mcx);
             ctx.sublevels_up -= 1;
             result
         }
@@ -106,16 +107,13 @@ fn OffsetVarNodes_walker(node: &mut Node, ctx: &mut OffsetCtx<'_>) -> bool {
 }
 
 /// `OffsetVarNodes(node, offset, sublevels_up)` (rewriteManip.c:475).
-pub fn OffsetVarNodes(node: &mut Node, offset: i32, sublevels_up: i32) {
-    // Per-walk scratch arena for the in-place walker's transient `Node::Expr`
-    // wrappers (mcx is unused today — the walk mutates in place and never
-    // allocates — but is threaded so the opaque-`Node` flip's `mk_expr` has a
-    // context). Freed when this function returns.
-    let scratch = mcx::MemoryContext::new("OffsetVarNodes scratch");
+pub fn OffsetVarNodes<'mcx>(node: &mut Node<'mcx>, offset: i32, sublevels_up: i32, mcx: mcx::Mcx<'mcx>) {
+    // The opaque `Node` is invariant, so the in-place walker's transient
+    // `mk_expr` wrappers must share the walked tree's arena (`mcx`).
     let mut ctx = OffsetCtx {
         offset,
         sublevels_up,
-        mcx: scratch.mcx(),
+        mcx,
     };
 
     // Must be prepared to start with a Query or a bare expression tree; if it's a
@@ -123,7 +121,7 @@ pub fn OffsetVarNodes(node: &mut Node, offset: i32, sublevels_up: i32) {
     // prematurely.
     if let Some(qry) = node.as_query_mut() {
         offset_query_self(qry, offset, sublevels_up);
-        query_tree_mutator(qry, &mut |n| OffsetVarNodes_walker(n, &mut ctx), 0);
+        query_tree_mutator(qry, &mut |n| OffsetVarNodes_walker(n, &mut ctx), 0, mcx);
     } else {
         OffsetVarNodes_walker(node, &mut ctx);
     }
