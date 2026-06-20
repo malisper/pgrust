@@ -67,6 +67,7 @@ use backend_optimizer_path_costsize_seams as cz_seam;
 use backend_optimizer_path_equivclass_seams as ec_seam;
 use backend_optimizer_path_joinpath_seams as jp_seam;
 use backend_optimizer_path_small_seams as ps_seam;
+use backend_optimizer_util_relnode_ext_seams as relnode_ext;
 use types_error::PgResult;
 use types_pathnodes::{
     EcId, PathNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
@@ -118,6 +119,28 @@ pub fn init_seams() {
     ec_seam::add_child_rel_equivalences::set(|root, run, appinfo, parent_rel, child_rel| {
         add_child_rel_equivalences(root, run, appinfo, parent_rel, child_rel)
     });
+    // `add_child_join_rel_equivalences` (equivclass.c:2940) is owned here but its
+    // public seam is declared on relnode-ext-seams (relnode.c's
+    // `build_child_join_rel` is the sole consumer). `relnode-ext-seams` is a pure
+    // leaf seam crate (types + seam-core only, no equivclass dep) so installing
+    // it here introduces no cycle. The seam carries the AppendRelInfo array as
+    // the C `AppendRelInfo **appinfos`; the equivclass body's only use of it is
+    // the single-level `adjust_appendrel_attrs` translation, whose seam takes the
+    // repo's `Vec<RelId>` child-rel model (each child rel's relids drive
+    // `find_appinfos_by_relids`). Passing the child joinrel itself reconstructs
+    // exactly that AppendRelInfo array (`find_appinfos_by_relids` indexes
+    // `append_rel_array` by the child join's RT-index bits), so this is faithful.
+    relnode_ext::add_child_join_rel_equivalences::set(
+        |root, run, _appinfos, parent_joinrel, child_joinrel| {
+            add_child_join_rel_equivalences(
+                root,
+                run,
+                alloc::vec![child_joinrel],
+                parent_joinrel,
+                child_joinrel,
+            )
+        },
+    );
 
     // `EC_MUST_BE_REDUNDANT(eclass)` == `eclass->ec_has_const` (pathnodes.h
     // macro, equivclass-owned vocabulary). joinpath.c reads it on a mergejoinable
