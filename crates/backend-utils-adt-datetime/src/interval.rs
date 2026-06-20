@@ -1062,6 +1062,197 @@ pub fn interval_div(span: &Interval, factor: f64) -> DtResult<Interval> {
     Ok(result)
 }
 
+// ---------------------------------------------------------------------------
+// avg(interval) / sum(interval) aggregate transition state
+// (utils/adt/timestamp.c: IntervalAggState + do_interval_accum/discard,
+//  interval_avg_combine/serialize/deserialize/avg/sum)
+// ---------------------------------------------------------------------------
+
+/// `IntervalAggState` — the `internal` transition value for sum()/avg(interval).
+///
+/// Infinite inputs are tallied separately and are *not* counted in `N`; use
+/// [`IntervalAggState::total_count`] (C `IA_TOTAL_COUNT`) when the combined
+/// count is needed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IntervalAggState {
+    /// count of finite intervals processed
+    pub n: i64,
+    /// sum of finite intervals processed
+    pub sum_x: Interval,
+    /// count of +infinity intervals
+    pub p_inf_count: i64,
+    /// count of -infinity intervals
+    pub n_inf_count: i64,
+}
+
+impl IntervalAggState {
+    /// `IA_TOTAL_COUNT(state)` — finite plus infinite inputs.
+    #[inline]
+    pub fn total_count(&self) -> i64 {
+        self.n + self.p_inf_count + self.n_inf_count
+    }
+}
+
+/// `do_interval_accum()` — accumulate a new input value.
+pub fn do_interval_accum(state: &mut IntervalAggState, newval: &Interval) -> DtResult<()> {
+    // Infinite inputs are counted separately, and do not affect "N".
+    if INTERVAL_IS_NOBEGIN(newval) {
+        state.n_inf_count += 1;
+        return Ok(());
+    }
+    if INTERVAL_IS_NOEND(newval) {
+        state.p_inf_count += 1;
+        return Ok(());
+    }
+
+    let mut sum = state.sum_x;
+    finite_interval_pl(&state.sum_x, newval, &mut sum)?;
+    state.sum_x = sum;
+    state.n += 1;
+    Ok(())
+}
+
+/// `do_interval_discard()` — remove the given interval value from the state
+/// (inverse transition for moving-window aggregation).
+pub fn do_interval_discard(state: &mut IntervalAggState, newval: &Interval) -> DtResult<()> {
+    // Infinite inputs are counted separately, and do not affect "N".
+    if INTERVAL_IS_NOBEGIN(newval) {
+        state.n_inf_count -= 1;
+        return Ok(());
+    }
+    if INTERVAL_IS_NOEND(newval) {
+        state.p_inf_count -= 1;
+        return Ok(());
+    }
+
+    // Handle the to-be-discarded finite value.
+    state.n -= 1;
+    if state.n > 0 {
+        let mut diff = state.sum_x;
+        finite_interval_mi(&state.sum_x, newval, &mut diff)?;
+        state.sum_x = diff;
+    } else {
+        // All values discarded, reset the state.
+        debug_assert_eq!(state.n, 0);
+        state.sum_x = Interval::default();
+    }
+    Ok(())
+}
+
+/// `interval_avg_combine()` core — combine `state2` into `state1`, returning the
+/// merged state (C places the combination in the first argument).
+pub fn interval_avg_combine(
+    state1: Option<IntervalAggState>,
+    state2: Option<IntervalAggState>,
+) -> DtResult<Option<IntervalAggState>> {
+    let state2 = match state2 {
+        None => return Ok(state1),
+        Some(s) => s,
+    };
+
+    let mut state1 = match state1 {
+        // manually copy all fields from state2 to state1
+        None => return Ok(Some(state2)),
+        Some(s) => s,
+    };
+
+    state1.n += state2.n;
+    state1.p_inf_count += state2.p_inf_count;
+    state1.n_inf_count += state2.n_inf_count;
+
+    // Accumulate finite interval values, if any.
+    if state2.n > 0 {
+        let mut sum = state1.sum_x;
+        finite_interval_pl(&state1.sum_x, &state2.sum_x, &mut sum)?;
+        state1.sum_x = sum;
+    }
+
+    Ok(Some(state1))
+}
+
+/// `interval_avg_serialize()` core — serialize the state to wire bytes (the
+/// `bytea` payload `pq_endtypsend` produces, minus the varlena header).
+pub fn interval_avg_serialize(state: &IntervalAggState) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8 + 8 + 4 + 4 + 8 + 8);
+    // N
+    buf.extend_from_slice(&state.n.to_be_bytes());
+    // sumX
+    buf.extend_from_slice(&state.sum_x.time.to_be_bytes());
+    buf.extend_from_slice(&state.sum_x.day.to_be_bytes());
+    buf.extend_from_slice(&state.sum_x.month.to_be_bytes());
+    // pInfcount
+    buf.extend_from_slice(&state.p_inf_count.to_be_bytes());
+    // nInfcount
+    buf.extend_from_slice(&state.n_inf_count.to_be_bytes());
+    buf
+}
+
+/// `interval_avg_deserialize()` core — read the state back from wire bytes.
+pub fn interval_avg_deserialize(buf: &mut crate::binio::WireReader<'_>) -> DtResult<IntervalAggState> {
+    let n = buf.get_i64()?;
+    let time = buf.get_i64()?;
+    let day = buf.get_i32()?;
+    let month = buf.get_i32()?;
+    let p_inf_count = buf.get_i64()?;
+    let n_inf_count = buf.get_i64()?;
+    Ok(IntervalAggState {
+        n,
+        sum_x: Interval { time, day, month },
+        p_inf_count,
+        n_inf_count,
+    })
+}
+
+/// `interval_avg()` final function core — `avg(interval)`. Returns `None` for
+/// the SQL NULL produced when there were no non-null inputs.
+pub fn interval_avg(state: Option<&IntervalAggState>) -> DtResult<Option<Interval>> {
+    let state = match state {
+        Some(s) if s.total_count() != 0 => s,
+        _ => return Ok(None),
+    };
+
+    // Aggregating infinities that all have the same sign produces infinity with
+    // that sign; differing signs is an error.
+    if state.p_inf_count > 0 || state.n_inf_count > 0 {
+        if state.p_inf_count > 0 && state.n_inf_count > 0 {
+            return Err(crate::timestamp::interval_out_of_range());
+        }
+        let mut result = Interval::default();
+        if state.p_inf_count > 0 {
+            set_noend(&mut result);
+        } else {
+            set_nobegin(&mut result);
+        }
+        return Ok(Some(result));
+    }
+
+    Ok(Some(interval_div(&state.sum_x, state.n as f64)?))
+}
+
+/// `interval_sum()` final function core — `sum(interval)`. Returns `None` for
+/// the SQL NULL produced when there were no non-null inputs.
+pub fn interval_sum(state: Option<&IntervalAggState>) -> DtResult<Option<Interval>> {
+    let state = match state {
+        Some(s) if s.total_count() != 0 => s,
+        _ => return Ok(None),
+    };
+
+    // Differing-sign infinities are an error.
+    if state.p_inf_count > 0 && state.n_inf_count > 0 {
+        return Err(crate::timestamp::interval_out_of_range());
+    }
+
+    let mut result = Interval::default();
+    if state.p_inf_count > 0 {
+        set_noend(&mut result);
+    } else if state.n_inf_count > 0 {
+        set_nobegin(&mut result);
+    } else {
+        result = state.sum_x;
+    }
+    Ok(Some(result))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

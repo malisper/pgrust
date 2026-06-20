@@ -1089,6 +1089,128 @@ fn fc_interval_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let iv = arg_interval(fcinfo, 0);
     ret_varlena(fcinfo, crate::binio::interval_send(&iv))
 }
+
+// ---------------------------------------------------------------------------
+// avg(interval) / sum(interval): the `internal` IntervalAggState transition.
+//
+// The transition value crosses the fmgr boundary on the canonical
+// `RefPayload::Internal(Box<dyn Any>)` arm (mirroring the numeric_avg_accum
+// family). `IntervalAggState` is POD/Copy, so it needs no per-aggregate
+// MemoryContext — the box just carries the struct.
+// ---------------------------------------------------------------------------
+
+/// `PG_ARGISNULL(i)`.
+#[inline]
+fn arg_isnull(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
+    fcinfo.arg(i).map(|d| d.isnull).unwrap_or(true)
+}
+/// `PG_RETURN_NULL()`.
+#[inline]
+fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    fcinfo.set_result_null(true);
+    Datum::from_usize(0)
+}
+/// Take the `internal` IntervalAggState out of `args[i]` (C `PG_GETARG_POINTER`).
+/// `None` is `PG_ARGISNULL(i)` (the first-call / empty-group case).
+fn take_interval_state(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    i: usize,
+) -> Option<Box<crate::interval::IntervalAggState>> {
+    if arg_isnull(fcinfo, i) {
+        return None;
+    }
+    match fcinfo.take_ref_arg(i) {
+        Some(types_fmgr::boundary::RefPayload::Internal(b)) => Some(
+            b.downcast::<crate::interval::IntervalAggState>().unwrap_or_else(|_| {
+                panic!("interval agg fn: args[{i}] internal state is not an IntervalAggState")
+            }),
+        ),
+        Some(other) => panic!("interval agg fn: args[{i}] is not an internal state ({other:?})"),
+        None => None,
+    }
+}
+/// `PG_RETURN_POINTER(state)`.
+#[inline]
+fn ret_interval_state(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    state: Box<crate::interval::IntervalAggState>,
+) -> Datum {
+    fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Internal(state));
+    Datum::from_usize(0)
+}
+
+/// `interval_avg_accum(internal, interval) -> internal` (oid 1843).
+fn fc_interval_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut state = take_interval_state(fcinfo, 0).unwrap_or_default();
+    if !arg_isnull(fcinfo, 1) {
+        let newval = arg_interval(fcinfo, 1);
+        if let Err(e) = crate::interval::do_interval_accum(&mut state, &newval) {
+            raise(e);
+        }
+    }
+    ret_interval_state(fcinfo, state)
+}
+
+/// `interval_avg_accum_inv(internal, interval) -> internal` (oid 3549).
+fn fc_interval_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let mut state = take_interval_state(fcinfo, 0)
+        .unwrap_or_else(|| panic!("interval_avg_accum_inv called with NULL state"));
+    if !arg_isnull(fcinfo, 1) {
+        let newval = arg_interval(fcinfo, 1);
+        if let Err(e) = crate::interval::do_interval_discard(&mut state, &newval) {
+            raise(e);
+        }
+    }
+    ret_interval_state(fcinfo, state)
+}
+
+/// `interval_avg_combine(internal, internal) -> internal` (oid 3325).
+fn fc_interval_avg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let state1 = take_interval_state(fcinfo, 0).map(|b| *b);
+    let state2 = take_interval_state(fcinfo, 1).map(|b| *b);
+    match crate::interval::interval_avg_combine(state1, state2) {
+        Ok(None) => ret_null(fcinfo),
+        Ok(Some(s)) => ret_interval_state(fcinfo, Box::new(s)),
+        Err(e) => raise(e),
+    }
+}
+
+/// `interval_avg_serialize(internal) -> bytea` (oid 6324).
+fn fc_interval_avg_serialize(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let state = take_interval_state(fcinfo, 0)
+        .expect("interval_avg_serialize: NULL internal state");
+    ret_varlena(fcinfo, crate::interval::interval_avg_serialize(&state))
+}
+
+/// `interval_avg_deserialize(bytea, internal) -> internal` (oid 6325).
+fn fc_interval_avg_deserialize(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let bytes = arg_varlena(fcinfo, 0);
+    let mut r = WireReader::new(bytes);
+    match crate::interval::interval_avg_deserialize(&mut r) {
+        Ok(s) => ret_interval_state(fcinfo, Box::new(s)),
+        Err(e) => raise(e),
+    }
+}
+
+/// `interval_avg(internal) -> interval` (oid 1844) — avg() final.
+fn fc_interval_avg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let state = take_interval_state(fcinfo, 0);
+    match crate::interval::interval_avg(state.as_deref()) {
+        Ok(Some(iv)) => ret_interval(fcinfo, &iv),
+        Ok(None) => ret_null(fcinfo),
+        Err(e) => raise(e),
+    }
+}
+
+/// `interval_sum(internal) -> interval` (oid 6326) — sum() final.
+fn fc_interval_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let state = take_interval_state(fcinfo, 0);
+    match crate::interval::interval_sum(state.as_deref()) {
+        Ok(Some(iv)) => ret_interval(fcinfo, &iv),
+        Ok(None) => ret_null(fcinfo),
+        Err(e) => raise(e),
+    }
+}
 fn fc_interval_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let mut iv = arg_interval(fcinfo, 0);
     let typmod = arg_i32(fcinfo, 1);
@@ -1817,6 +1939,14 @@ pub fn register_datetime_builtins() {
         builtin(2479, "interval_send", 1, true, false, fc_interval_send),
         builtin(1200, "interval_scale", 2, true, false, fc_interval_scale),
         builtin(3464, "make_interval", 7, true, false, fc_make_interval),
+        // ---- timestamp.c: avg(interval)/sum(interval) IntervalAggState ----
+        builtin(1843, "interval_avg_accum", 2, false, false, fc_interval_avg_accum),
+        builtin(3549, "interval_avg_accum_inv", 2, false, false, fc_interval_avg_accum_inv),
+        builtin(3325, "interval_avg_combine", 2, false, false, fc_interval_avg_combine),
+        builtin(6324, "interval_avg_serialize", 1, true, false, fc_interval_avg_serialize),
+        builtin(6325, "interval_avg_deserialize", 2, true, false, fc_interval_avg_deserialize),
+        builtin(1844, "interval_avg", 1, false, false, fc_interval_avg),
+        builtin(6326, "interval_sum", 1, false, false, fc_interval_sum),
         // ---- timestamp.c: now-family ----
         builtin(1299, "now", 0, true, false, fc_now),
         builtin(2647, "now", 0, true, false, fc_transaction_timestamp),
