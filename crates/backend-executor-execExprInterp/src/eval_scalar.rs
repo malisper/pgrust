@@ -175,7 +175,8 @@ pub fn exec_func_step<'mcx>(
     // result is materialized into the per-query context.
     let mcx = estate.es_query_cxt;
     let fn_expr = func_step_fn_expr(state, op);
-    let (value, isnull) = function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
+    let (value, isnull) =
+        function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &nulls, fn_expr)?;
 
     // *op->resvalue = d;  *op->resnull = fcinfo->isnull;
     crate::interp_loop::write_cell(state, resvalue_id, value, isnull);
@@ -269,7 +270,7 @@ pub fn exec_distinct_step<'mcx>(
         let mcx = estate.es_query_cxt;
         let fn_expr = func_step_fn_expr(state, op);
         let (eqval, isnull) =
-            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
+            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &[], fn_expr)?;
         // DISTINCT inverts "=" (BoolGetDatum(!DatumGetBool(eqresult))); NOT
         // DISTINCT returns the raw "=" result.
         let value = if not_distinct {
@@ -327,7 +328,7 @@ pub fn exec_nullif_step<'mcx>(
         let mcx = estate.es_query_cxt;
         let fn_expr = func_step_fn_expr(state, op);
         let (result_val, isnull) =
-            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
+            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &[], fn_expr)?;
 
         // if (!fcinfo->isnull && DatumGetBool(result)) -> equal -> return NULL.
         // Write through `write_cell` so a STATE_RESULT_CELL target reaches
@@ -425,7 +426,7 @@ pub fn exec_rowcompare_step<'mcx>(
     // I/O-coerce strict shim, so no fn_expr node is threaded.
     let mcx = estate.es_query_cxt;
     let (value, isnull) =
-        function_call_invoke_datum::call(mcx, fn_oid, collation, &args, None)?;
+        function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &[], None)?;
 
     // force NULL result if NULL function result
     if isnull {
@@ -545,14 +546,14 @@ pub fn exec_hashdatum_step<'mcx>(
                 return Ok(jumpdone as usize);
             }
             let (value, _isnull) =
-                function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
+                function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &[], fn_expr)?;
             crate::interp_loop::write_cell(state, resvalue_id, value, false);
             return Ok(op + 1);
         }
         // EEOP_HASHDATUM_FIRST: non-null -> hash; null -> 0.
         let value = if !arg0_isnull {
             let (value, _isnull) =
-                function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
+                function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &[], fn_expr)?;
             value
         } else {
             DatumV::from_usize(0)
@@ -571,7 +572,7 @@ pub fn exec_hashdatum_step<'mcx>(
             return Ok(jumpdone as usize);
         }
         let (value, _isnull) =
-            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
+            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &[], fn_expr)?;
         let hashvalue = value.as_u32();
         crate::interp_loop::write_cell(
             state,
@@ -585,7 +586,7 @@ pub fn exec_hashdatum_step<'mcx>(
     // EEOP_HASHDATUM_NEXT32: leave the hash alone on NULL inputs.
     let combined = if !arg0_isnull {
         let (value, _isnull) =
-            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
+            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &[], fn_expr)?;
         let hashvalue = value.as_u32();
         rotated ^ hashvalue
     } else {
@@ -974,7 +975,7 @@ fn iocoerce_core<'mcx>(
     } else {
         let out_call_args = [cur_value.clone()];
         let (val, _isnull) =
-            function_call_invoke_datum::call(mcx, out_oid, out_coll, &out_call_args, None)?;
+            function_call_invoke_datum::call(mcx, out_oid, out_coll, &out_call_args, &[], None)?;
         // Assert(!fcinfo_out->isnull) — output functions never return NULL.
         Some(val)
     };
@@ -1017,7 +1018,7 @@ fn iocoerce_core<'mcx>(
         }
 
         let (value, isnull) =
-            function_call_invoke_datum::call(mcx, in_oid, in_coll, &in_datum_args, None)?;
+            function_call_invoke_datum::call(mcx, in_oid, in_coll, &in_datum_args, &[], None)?;
         // *op->resvalue = d;  (resnull is unchanged: null iff str was NULL).
         // Write through `write_cell` so a STATE_RESULT_CELL target reaches the
         // ExprState's own resvalue/resnull (mirror of the read above).
@@ -1137,7 +1138,7 @@ fn sql_value_builtin<'mcx>(
     fn_oid: u32,
 ) -> PgResult<(DatumV<'mcx>, bool)> {
     // Oid is `u32`; InvalidOid (0) collation matches C's InitFunctionCallInfoData.
-    function_call_invoke_datum::call(mcx, fn_oid, 0, &[], None)
+    function_call_invoke_datum::call(mcx, fn_oid, 0, &[], &[], None)
 }
 
 /// `ExecEvalCurrentOfExpr(ExprState *state, ExprEvalStep *op)` — CURRENT OF
@@ -1529,7 +1530,7 @@ pub fn ExecEvalScalarArrayOp<'mcx>(
                 [scalar_value.clone(), elt]
             };
             let (result_v, isnull) =
-                function_call_invoke_datum::call(mcx, fn_oid, collation, &args[..], None)?;
+                function_call_invoke_datum::call(mcx, fn_oid, collation, &args[..], &[], None)?;
             (isnull, result_v.as_bool())
         };
 
@@ -1836,7 +1837,7 @@ pub fn ExecEvalHashedScalarArrayOp<'mcx>(
                 [scalar_value.clone(), DatumV::null()]
             };
             let (result_v, isnull) =
-                function_call_invoke_datum::call(mcx, matchfuncid, collation, &args[..], None)?;
+                function_call_invoke_datum::call(mcx, matchfuncid, collation, &args[..], &[], None)?;
             // result = DatumGetBool(...); resultnull = fcinfo->isnull;
             result = result_v.as_bool();
             resultnull = isnull;

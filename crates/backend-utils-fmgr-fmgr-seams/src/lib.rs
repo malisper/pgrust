@@ -976,11 +976,17 @@ seam_core::seam!(
     /// Returns the result as a canonical `Datum<'mcx>` (by-value `ByVal` or a
     /// by-reference value materialized into `mcx`) and the callee's read-back
     /// `fcinfo->isnull`. `Err` carries whatever the called function raises.
+    /// `args_null[i]` carries `fcinfo->args[i].isnull` explicitly: the canonical
+    /// `Datum::ByVal(0)` word cannot encode SQL NULL on its own, so a non-strict
+    /// function (e.g. `pg_notify`) receiving a NULL argument needs the flag
+    /// threaded alongside (mirrors `function_call_invoke_datum_owned`). An empty
+    /// slice means "no argument is NULL".
     pub fn function_call_invoke_datum<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         fn_oid: Oid,
         collation: Oid,
         args: &[Datum<'mcx>],
+        args_null: &[bool],
         fn_expr: Option<&types_nodes::primnodes::Expr>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );

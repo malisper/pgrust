@@ -119,6 +119,7 @@ pub(crate) fn mcv_selectivity<'mcx>(
                         opproc_oid,
                         collation,
                         &[arg0, arg1],
+                        &[],
                         None,
                     )?;
                     if !isnull && fresult.as_bool() {
@@ -203,6 +204,7 @@ pub(crate) fn histogram_selectivity<'mcx>(
                             opproc_oid,
                             collation,
                             &[arg0, arg1],
+                            &[],
                             None,
                         )?;
                         if !isnull && fresult.as_bool() {
@@ -562,6 +564,7 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
                             opproc_oid,
                             collation,
                             &[bin, constval.clone_in(mcx)?],
+                            &[],
                             None,
                         )?;
                         if !res.1 && res.0.as_bool() {

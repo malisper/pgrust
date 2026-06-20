@@ -655,6 +655,7 @@ pub fn make_range<'mcx>(
             typcache.rng_canonical_finfo.fn_oid,
             typcache.rng_collation,
             &[arg],
+            &[],
             None,
         )?;
         if isnull {

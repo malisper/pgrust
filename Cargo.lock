@@ -6264,6 +6264,7 @@ dependencies = [
  "backend-tcop-utility-seams",
  "backend-utils-adt-timestamp-seams",
  "backend-utils-error",
+ "backend-utils-fmgr-core",
  "backend-utils-init-small",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
@@ -6275,8 +6276,10 @@ dependencies = [
  "seam-core",
  "types-async",
  "types-core",
+ "types-datum",
  "types-dest",
  "types-error",
+ "types-fmgr",
  "types-guc",
  "types-snapshot",
  "types-storage",
@@ -17994,6 +17997,7 @@ dependencies = [
 name = "backend-tcop-utility"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-xlog-seams",
  "backend-parser-analyze-seams",
  "backend-tcop-cmdtag",
  "backend-tcop-dest",

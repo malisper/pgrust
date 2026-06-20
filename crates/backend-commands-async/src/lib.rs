@@ -30,6 +30,8 @@
 #[cfg(test)]
 mod tests;
 
+pub mod fmgr_builtins;
+
 use std::cell::{Cell, RefCell};
 
 use backend_utils_error::{ereport, PgError};
@@ -772,12 +774,16 @@ pub fn PreCommit_Notify() -> PgResult<()> {
 
         // Serialize writers by acquiring the "database 0" heavyweight lock.
         //   LockSharedObject(DatabaseRelationId, InvalidOid, 0, AccessExclusiveLock)
+        // C holds this lock until transaction end (lmgr locks are
+        // transaction-scoped); `keep()` consumes the RAII guard without
+        // releasing, leaving the lock for the normal end-of-xact lock cleanup.
         lmgr_seams::lock_shared_object::call(
             types_async::DatabaseRelationId,
             InvalidOid,
             0,
             types_storage::lock::AccessExclusiveLock,
-        )?;
+        )?
+        .keep();
 
         let mut next_notify: Option<usize> = {
             let len = PENDING_NOTIFIES.with(|pn| pn.borrow().as_ref().unwrap().events.len());
@@ -2011,6 +2017,9 @@ pub fn max_notify_queue_pages() -> i32 {
 
 /// Install every seam this crate owns (`backend-commands-async-seams`).
 pub fn init_seams() {
+    // SQL-callable builtins (pg_notify / pg_notification_queue_usage).
+    fmgr_builtins::register_async_builtins();
+
     backend_commands_async_seams::handle_notify_interrupt::set(HandleNotifyInterrupt);
     backend_commands_async_seams::pre_commit_notify::set(PreCommit_Notify);
     backend_commands_async_seams::at_commit_notify::set(AtCommit_Notify);

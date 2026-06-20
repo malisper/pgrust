@@ -136,6 +136,7 @@ fn get_stats_slot_range<'mcx>(
             opfuncoid,
             collation,
             &[v.clone_in(mcx)?, tmin.as_ref().unwrap().clone_in(mcx)?],
+            &[],
             None,
         )?;
         if !lt_min_null && lt_min.as_bool() {
@@ -148,6 +149,7 @@ fn get_stats_slot_range<'mcx>(
             opfuncoid,
             collation,
             &[tmax.as_ref().unwrap().clone_in(mcx)?, v.clone_in(mcx)?],
+            &[],
             None,
         )?;
         if !gt_max_null && gt_max.as_bool() {

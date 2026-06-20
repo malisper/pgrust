@@ -1386,22 +1386,25 @@ pub fn parseCheckAggregates<'mcx>(
         }
     }
 
+    // In C, pstate->p_rtable and qry->rtable alias the same List, so every later
+    // reference (the ungrouped-column check's `rt_fetch(var->varno, p_rtable)`,
+    // and the RTE_GROUP append below) sees the FROM-clause RTEs. The owned model
+    // moved p_rtable into qry->rtable during transformStmt (emptying p_rtable),
+    // so restore p_rtable from the current qry->rtable here — unconditionally,
+    // before any p_rtable consumer — not just on the GROUP BY path (a HAVING
+    // without GROUP BY still resolves ungrouped Vars against p_rtable).
+    if pstate.p_rtable.is_empty() && !qry.rtable.is_empty() {
+        let mut restored: PgVec<RangeTblEntry<'mcx>> = PgVec::new_in(mcx);
+        for rte in qry.rtable.iter() {
+            restored.push(rte.clone_in(mcx)?);
+        }
+        pstate.p_rtable = restored;
+    }
+
     // Build RTE_GROUP RTE/nsitem if there are acceptable GROUP BY expressions.
     if !group_clauses.is_empty() {
-        // In C, pstate->p_rtable and qry->rtable alias the same List, so the
-        // group RTE that addRangeTableEntryForGroup appends to p_rtable also
-        // lands at the tail of qry->rtable (which already holds the FROM-clause
-        // RTEs). The owned model moved p_rtable into qry->rtable during
-        // transformStmt (emptying p_rtable), so restore p_rtable from the
-        // current qry->rtable first; the group RTE then appends after the
-        // FROM-clause entries, preserving their indices.
-        if pstate.p_rtable.is_empty() && !qry.rtable.is_empty() {
-            let mut restored: PgVec<RangeTblEntry<'mcx>> = PgVec::new_in(mcx);
-            for rte in qry.rtable.iter() {
-                restored.push(rte.clone_in(mcx)?);
-            }
-            pstate.p_rtable = restored;
-        }
+        // The group RTE appends after the FROM-clause entries (which p_rtable now
+        // holds), preserving their indices.
         let nsitem = backend_parser_relation::addRangeTableEntryForGroup(
             mcx,
             pstate,

@@ -4494,10 +4494,11 @@ fn create_grouping_paths<'mcx>(
     };
     let is_degenerate = (root.hasHavingQual || has_grouping_sets) && !has_aggs && !has_group_clause;
     if is_degenerate {
-        panic!(
-            "create_grouping_paths: degenerate grouping (create_degenerate_grouping_paths \
-             + create_group_result_path, planner.c:3966) is not ported"
-        );
+        // create_degenerate_grouping_paths(root, input_rel, grouped_rel) (C:3966).
+        create_degenerate_grouping_paths(mcx, run, root, grouped_rel)?;
+        // set_cheapest(grouped_rel) (C:3880).
+        backend_optimizer_util_pathnode::set_cheapest(root, grouped_rel)?;
+        return Ok(grouped_rel);
     }
 
     // create_ordinary_grouping_paths(root, input_rel, grouped_rel, &agg_costs,
@@ -4519,6 +4520,86 @@ fn create_grouping_paths<'mcx>(
     // set_cheapest(grouped_rel) (C:3880).
     backend_optimizer_util_pathnode::set_cheapest(root, grouped_rel)?;
     Ok(grouped_rel)
+}
+
+/// `create_degenerate_grouping_paths(root, input_rel, grouped_rel)`
+/// (planner.c:3953). The degenerate case: a query with `HAVING`/grouping sets
+/// but no aggregates and an empty `groupClause`. The only path is a trivial
+/// `GroupResultPath` carrying the HAVING qual; with multiple grouping sets we
+/// emit one clone per set and `Append` them (a volatile HAVING then yields
+/// between 0 and N rows, which is the desired behaviour). `input_rel` is unused
+/// here (mirrors C: it is only passed for symmetry), so it is omitted from the
+/// Rust signature.
+fn create_degenerate_grouping_paths<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    grouped_rel: RelId,
+) -> PgResult<()> {
+    // nrows = list_length(parse->groupingSets).
+    let nrows = run.resolve(root.parse).groupingSets.len();
+
+    // havingqual: (List *) parse->havingQual — clone the qual Expr into the
+    // planner arena as a one-element implicit-AND list (empty when no HAVING).
+    let make_havingqual = |root: &mut PlannerInfo| -> PgResult<Vec<types_pathnodes::NodeId>> {
+        match run.resolve(root.parse).havingQual.as_deref() {
+            Some(e) => {
+                let cloned = e.clone_in(mcx)?;
+                Ok(alloc::vec![root.alloc_node(cloned)])
+            }
+            None => Ok(Vec::new()),
+        }
+    };
+
+    // grouped_rel->reltarget (clone: create_group_result_path takes it by value).
+    let target = |root: &PlannerInfo| -> Box<types_pathnodes::PathTarget> {
+        root.rel(grouped_rel)
+            .reltarget
+            .clone()
+            .expect("create_degenerate_grouping_paths: grouped_rel has no reltarget")
+    };
+
+    let path: PathId = if nrows > 1 {
+        // Make N clones and Append them (one GroupResultPath per grouping set).
+        let mut paths: Vec<PathId> = Vec::with_capacity(nrows);
+        for _ in 0..nrows {
+            let t = target(root);
+            let hq = make_havingqual(root)?;
+            let p = backend_optimizer_util_pathnode::create::create_group_result_path(
+                root,
+                grouped_rel,
+                t,
+                hq,
+            )?;
+            paths.push(p);
+        }
+        backend_optimizer_util_pathnode::create::create_append_path(
+            root,
+            run,
+            /* have_root */ true,
+            grouped_rel,
+            paths,
+            /* partial_subpaths */ Vec::new(),
+            /* pathkeys */ Vec::new(),
+            /* required_outer */ &None,
+            /* parallel_workers */ 0,
+            /* parallel_aware */ false,
+            /* rows */ -1.0,
+        )?
+    } else {
+        // No grouping sets, or just one, so one output row.
+        let t = target(root);
+        let hq = make_havingqual(root)?;
+        backend_optimizer_util_pathnode::create::create_group_result_path(
+            root,
+            grouped_rel,
+            t,
+            hq,
+        )?
+    };
+
+    backend_optimizer_util_pathnode::add_path(root, grouped_rel, path)?;
+    Ok(())
 }
 
 /// The reachable core of `create_ordinary_grouping_paths` (planner.c:4031):

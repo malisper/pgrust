@@ -777,6 +777,7 @@ pub fn init_seams() {
                 language_validator,
                 types_core::primitive::InvalidOid,
                 &[types_tuple::backend_access_common_heaptuple::Datum::from_oid(retval)],
+                &[],
                 None,
             )
             .map(|_| ());

@@ -99,6 +99,18 @@ pub fn init_seams() {
     backend_tcop_utility_seams::prevent_command_during_recovery::set(PreventCommandDuringRecovery);
     backend_tcop_utility_seams::process_utility::set(ProcessUtility);
 
+    // `RecoveryInProgress()` (xlog.c) backs both PreventCommandDuringRecovery
+    // (classify.rs) and the CHECKPOINT_FORCE gate (dispatch.rs); the canonical
+    // body lives in xlog and is installed into xlog-seams. Delegate the
+    // utility-out copies to it so NOTIFY/CHECKPOINT/etc. don't hit an
+    // uninstalled seam.
+    backend_tcop_utility_out_seams::recovery_in_progress::set(|| {
+        backend_access_transam_xlog_seams::recovery_in_progress::call()
+    });
+    backend_tcop_utility_out_seams::checkpoint_recovery_in_progress::set(|| {
+        backend_access_transam_xlog_seams::recovery_in_progress::call()
+    });
+
     // The event-trigger-fenced DDL fan-out (`ProcessUtilitySlow`). The dispatch's
     // GRANT/DROP/RENAME/ALTER…/COMMENT/SECURITY LABEL fast-path arms and the
     // `_ =>` arm reach it through the `process_utility_slow` outward seam; install

@@ -280,6 +280,7 @@ pub(crate) fn var_eq_const<'mcx>(
                 opfuncoid,
                 collation,
                 &[arg0, arg1],
+                &[],
                 None,
             )?;
             if !isnull && fresult.as_bool() {

@@ -102,6 +102,7 @@ pub fn eqjoinsel_inner<'mcx>(
                     opfuncoid,
                     collation,
                     &[arg0, arg1],
+                    &[],
                     None,
                 )?;
                 if !isnull && fresult.as_bool() {
@@ -244,6 +245,7 @@ pub fn eqjoinsel_semi<'mcx>(
                     opfuncoid,
                     collation,
                     &[arg0, arg1],
+                    &[],
                     None,
                 )?;
                 if !isnull && fresult.as_bool() {

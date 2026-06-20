@@ -44,7 +44,7 @@ fn hash_one_datum<'mcx>(
 ) -> PgResult<u32> {
     let mcx = estate.es_query_cxt;
     let args = [value.clone()];
-    let (result, _isnull) = function_call_invoke_datum::call(mcx, fn_oid, collation, &args, None)?;
+    let (result, _isnull) = function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &[], None)?;
     Ok(result.as_u32())
 }
 use types_nodes::execexpr::{ExprEvalStepData, ExprState};
@@ -563,7 +563,7 @@ pub fn ExecJustApplyFuncToCase<'mcx>(
     // returning the result `Datum` and the callee's `fcinfo->isnull`.
     let mcx = estate.es_query_cxt;
     let (value, isnull) =
-        function_call_invoke_datum::call(mcx, fn_oid, collation, &args, fn_expr)?;
+        function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &[], fn_expr)?;
     Ok((value, isnull))
 }
 

@@ -722,6 +722,7 @@ fn make_greater_string<'mcx>(
                 ltproc_oid,
                 collation,
                 &[cmpstr.clone_in(mcx)?, workstr_const.constvalue.clone_in(mcx)?],
+                &[],
                 None,
             )?;
             if !isnull && res.as_bool() {

@@ -881,6 +881,10 @@ pub fn init_seams() {
     backend_tcop_utility_out_seams::in_security_restricted_operation::set(
         InSecurityRestrictedOperation,
     );
+    // ProcessUtility rejects LISTEN in a background process (utility.c:822) by
+    // reading MyBackendType; the global lives in globals.c but the accessor is
+    // miscinit-owned, so install the utility-out copy here.
+    backend_tcop_utility_out_seams::my_backend_type::set(GetMyBackendType);
     // plancache's GetCachedPlan revalidation slice (backendstate-pc-seams):
     // get_user_id is this crate's body; row_security reads the guc-tables slot
     // (the `plan_cache_mode` member is installed by plancache itself).

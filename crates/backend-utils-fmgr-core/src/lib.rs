@@ -3258,17 +3258,26 @@ fn function_call_invoke_datum_seam<'mcx>(
     fn_oid: Oid,
     collation: Oid,
     args: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+    args_null: &[bool],
     fn_expr: Option<&types_nodes::primnodes::Expr>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
     // Build the `fcinfo->args[]` frame: by-value word lane + by-reference side
-    // channel. The canonical arg's own NULL state rides its variant; the
-    // interpreter has already applied the strict-null short-circuit upstream.
+    // channel. The canonical `Datum::ByVal(0)` word cannot encode SQL NULL, so
+    // `args_null[i]` (`fcinfo->args[i].isnull`) is threaded explicitly — a
+    // non-strict function reads `PG_ARGISNULL(i)` (the interpreter has already
+    // applied the strict-null short-circuit upstream for strict functions). An
+    // empty `args_null` slice means "no argument is NULL".
     let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
     let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
-    for val in args.iter() {
-        let (nd, refp) = datum_to_ref_arg(val);
+    for (i, val) in args.iter().enumerate() {
+        let is_null = args_null.get(i).copied().unwrap_or(false);
+        let (mut nd, refp) = datum_to_ref_arg(val);
+        // A NULL arg never carries a by-reference referent (fmgr invariant (1)).
+        if is_null {
+            nd.isnull = true;
+        }
         nargs.push(nd);
-        ref_args.push(refp);
+        ref_args.push(if is_null { None } else { refp });
     }
     function_call_invoke_datum_core(mcx, fn_oid, collation, nargs, ref_args, fn_expr)
 }

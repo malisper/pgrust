@@ -32,6 +32,11 @@ mcx = { path = "../mcx" }
 backend-commands-async-seams = { path = "../backend-commands-async-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
+# fmgr builtin registration (pg_notify / pg_notification_queue_usage).
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+types-fmgr = { path = "../types-fmgr" }
+types-datum = { path = "../types-datum" }
+
 # ProcessUtility dispatch arms (installs the NOTIFY/LISTEN/UNLISTEN seams).
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 # Parallel-worker NotifyMyFrontEnd forwarding (parallel.c HandleParallelMessage).
