@@ -1339,7 +1339,13 @@ pub fn index_opclass_options<'mcx>(
     }
 
     if procid == InvalidOid {
-        if attoptions.as_u64() == 0 {
+        // C: `if (!PointerIsValid(DatumGetPointer(attoptions)))`. The unified
+        // Datum carries the `(Datum) 0` SQL-NULL as `ByVal(0)` and a real
+        // `text[]` attoptions image as `ByRef(..)`; `as_byref_word()` reads the
+        // pointer word for both arms (0 for the null, the non-zero byte-image
+        // address for a by-ref value) — `as_u64()` would panic on the by-ref
+        // arm ("scalar accessor called on a by-reference value").
+        if attoptions.as_byref_word() == 0 {
             return Ok(None); // ok, no options, no procedure
         }
 

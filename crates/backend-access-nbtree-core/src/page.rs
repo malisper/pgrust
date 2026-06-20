@@ -2648,13 +2648,21 @@ pub fn build_empty_metapage<'mcx>(index: &Relation<'mcx>, allequalimage: bool) -
 // PredicateLockPageCombine
 // ---------------------------------------------------------------------------
 
+/// `PredicateLockPageCombine(rel, oldblkno, newblkno)` (predicate.c) — transfer
+/// SIREAD (predicate) locks from a page about to be unlinked onto its right
+/// sibling. SSI is not plumbed into this layer: like the sibling stubs
+/// `predicate_lock_page_split` / `predicate_lock_relation` / `predicate_lock_page`
+/// (insert.rs / search.rs), this is a behaviour-preserving no-op for the
+/// non-serializable common case — under non-SERIALIZABLE isolation
+/// `PredicateLockPageCombine` does nothing (it early-returns when SSI is not in
+/// use), so page deletion (`_bt_mark_page_halfdead`) proceeds unchanged.
+#[inline]
 fn predicate_lock_page_combine<'mcx>(
     _rel: &Relation<'mcx>,
     _oldblkno: BlockNumber,
     _newblkno: BlockNumber,
 ) -> PgResult<()> {
-    /* PredicateLockPageCombine (predicate.c) has no seam exposed to this crate. */
-    panic!("_bt_mark_page_halfdead: PredicateLockPageCombine not yet ported")
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -272,6 +272,59 @@ fn explain_pre_scan_node<'es, 'p>(
     Ok(acc)
 }
 
+/// `plan_is_disabled(Plan *plan)` (explain.c:1245) — a node was disabled during
+/// planning iff its `disabled_nodes` count exceeds the sum of its immediate
+/// children's. Append/MergeAppend/SubqueryScan/CustomScan carry their child
+/// plans in special fields (children of BitmapAnd/BitmapOr can't be disabled);
+/// everything else uses outer (`lefttree`) + inner (`righttree`).
+fn plan_is_disabled(plan_node: &Node<'_>) -> bool {
+    let plan = plan_node.plan_head();
+    // The node is certainly not disabled if this is zero.
+    if plan.disabled_nodes == 0 {
+        return false;
+    }
+
+    let mut child_disabled_nodes: i32 = 0;
+    match plan_node.node_tag() {
+        ntag::T_Append => {
+            // Purposefully includes any run-time pruned children.
+            for subplan in plan_node.expect_append().appendplans.iter() {
+                child_disabled_nodes += subplan.plan_head().disabled_nodes;
+            }
+        }
+        ntag::T_MergeAppend => {
+            for subplan in plan_node.expect_mergeappend().mergeplans.iter() {
+                child_disabled_nodes += subplan.plan_head().disabled_nodes;
+            }
+        }
+        ntag::T_SubqueryScan => {
+            if let Some(subplan) = plan_node.expect_subqueryscan().subplan.as_deref() {
+                child_disabled_nodes += subplan.plan_head().disabled_nodes;
+            }
+        }
+        ntag::T_CustomScan => {
+            if let Some(custom_plans) = plan_node.expect_customscan().custom_plans.as_ref() {
+                for subplan in custom_plans.iter() {
+                    child_disabled_nodes += subplan.plan_head().disabled_nodes;
+                }
+            }
+        }
+        _ => {
+            // Else, sum up disabled_nodes from the inner and outer side.
+            if let Some(outer) = plan.lefttree.as_deref() {
+                child_disabled_nodes += outer.plan_head().disabled_nodes;
+            }
+            if let Some(inner) = plan.righttree.as_deref() {
+                child_disabled_nodes += inner.plan_head().disabled_nodes;
+            }
+        }
+    }
+
+    // It's disabled if the plan's disabled_nodes is higher than the sum of its
+    // children's.
+    plan.disabled_nodes > child_disabled_nodes
+}
+
 /// `ExplainNode(planstate, ancestors, relationship, plan_name, es)`
 /// (explain.c:1349) — the structural slice (name switch, generic details, cost
 /// block, child recursion).
@@ -682,18 +735,21 @@ pub fn ExplainNode<'es, 'p>(
         );
     }
 
-    // Disabled flag: plan_is_disabled reads plan->disabled_nodes, a field the
-    // trimmed Plan does not carry. With no disabled_nodes the node is never
-    // disabled (C returns false when disabled_nodes == 0), so isdisabled =
-    // false; the property is emitted only for non-text format.
-    let isdisabled = false;
-    if es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT || isdisabled {
-        fmt::ExplainPropertyBool("Disabled", isdisabled, es)?;
-    }
-
-    // End the line in text format.
+    // In text format, the first line ends here (explain.c:1877) — BEFORE the
+    // Disabled property, so the property lands on its own indented line.
     if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
         es.str.try_push('\n')?;
+    }
+
+    // Disabled flag (explain.c plan_is_disabled): a node is "disabled" when its
+    // own `disabled_nodes` count exceeds the sum of its children's — i.e. the
+    // planner applied an `enable_*`-GUC penalty at this node. The trimmed Plan
+    // DOES carry `disabled_nodes` (the planner's accumulator), so reproduce
+    // plan_is_disabled() faithfully: total the immediate children's counts and
+    // compare. The property is emitted in text format only when true.
+    let isdisabled = plan_is_disabled(plan_node);
+    if es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT || isdisabled {
+        fmt::ExplainPropertyBool("Disabled", isdisabled, es)?;
     }
 
     // target list (explain.c:1932): `if (es->verbose) show_plan_tlist(...)`.
