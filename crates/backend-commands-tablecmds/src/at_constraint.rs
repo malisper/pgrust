@@ -231,6 +231,261 @@ fn make_not_null_constraint<'mcx>(mcx: Mcx<'mcx>, colname: &str) -> PgResult<Con
 }
 
 // ===========================================================================
+// ATExecSetNotNull (tablecmds.c:7457)
+// ===========================================================================
+
+const RELKIND_PARTITIONED_TABLE: u8 = b'p';
+
+/// `pg_add_s16_overflow(a, b, *result)` (`common/int.h`) — returns true on
+/// overflow.
+fn pg_add_s16_overflow(a: i16, b: i16, result: &mut i16) -> bool {
+    match a.checked_add(b) {
+        Some(v) => {
+            *result = v;
+            false
+        }
+        None => true,
+    }
+}
+
+/// `ATExecSetNotNull(wqueue, rel, conName, colName, recurse, recursing,
+/// lockmode)` (tablecmds.c) — ALTER COLUMN SET NOT NULL. Add a not-null
+/// constraint to a single table and its children, marking
+/// `pg_attribute.attnotnull` and queuing the phase-3 existing-rows verification.
+/// Returns the address of the constraint added to the parent relation, if one
+/// gets added, or `InvalidObjectAddress` otherwise.
+///
+/// Recurses to child tables during execution (not via ALTER TABLE's prep-time
+/// recursion).
+pub fn ATExecSetNotNull<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    rel: &Relation<'mcx>,
+    con_name: Option<&str>,
+    col_name: &str,
+    recurse: bool,
+    recursing: bool,
+    lockmode: LOCKMODE,
+) -> PgResult<ObjectAddress> {
+    // Guard against stack overflow due to overly deep inheritance tree.
+    check_stack_depth()?;
+
+    // At top level, permission check was done in ATPrepCmd, else do it.
+    if recursing {
+        ATSimplePermissions(
+            AlterTableType::AT_AddConstraint,
+            rel,
+            ATT_PARTITIONED_TABLE | ATT_TABLE | ATT_FOREIGN_TABLE,
+        )?;
+        debug_assert!(con_name.is_some());
+    }
+
+    // attnum = get_attnum(RelationGetRelid(rel), colName);
+    let attnum: AttrNumber =
+        backend_utils_cache_lsyscache_seams::get_attnum::call(rel.rd_id, col_name)?;
+    if attnum == 0 {
+        return Err(backend_utils_error::ereport(ERROR)
+            .errcode(types_error::ERRCODE_UNDEFINED_COLUMN)
+            .errmsg(format!(
+                "column \"{col_name}\" of relation \"{}\" does not exist",
+                rel.name()
+            ))
+            .into_error());
+    }
+
+    // Prevent them from altering a system attribute.
+    if attnum <= 0 {
+        return Err(backend_utils_error::ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("cannot alter system column \"{col_name}\""))
+            .into_error());
+    }
+
+    // See if there's already a constraint.
+    let tuple =
+        backend_catalog_pg_constraint::findNotNullConstraintAttnum(mcx, rel.rd_id, attnum)?;
+    if let Some(tuple) = tuple {
+        let mut con_form =
+            backend_utils_cache_syscache_seams::read_constraint_form::call(&tuple)?;
+        let mut changed = false;
+
+        // Don't let a NO INHERIT constraint be changed into inherit.
+        if con_form.connoinherit && recurse {
+            return Err(backend_utils_error::ereport(ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg(format!(
+                    "cannot change NO INHERIT status of NOT NULL constraint \"{}\" on relation \"{}\"",
+                    con_form.conname_str(),
+                    rel.name()
+                ))
+                .into_error());
+        }
+
+        // If we find an appropriate constraint: if recursing, increment
+        // coninhcount; if not, set conislocal if not already set; otherwise if
+        // it isn't validated yet, validate it.
+        if recursing {
+            let mut newcount = con_form.coninhcount;
+            if pg_add_s16_overflow(con_form.coninhcount, 1, &mut newcount) {
+                return Err(backend_utils_error::ereport(ERROR)
+                    .errcode(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+                    .errmsg("too many inheritance parents".to_string())
+                    .into_error());
+            }
+            con_form.coninhcount = newcount;
+            changed = true;
+        } else if !con_form.conislocal {
+            con_form.conislocal = true;
+            changed = true;
+        } else if !con_form.convalidated {
+            // Flip attnotnull and convalidated, and also validate the
+            // constraint.
+            let conname = con_form.conname_str().to_string();
+            return crate::at_dropvalidate::ATExecValidateConstraint(
+                mcx, wqueue, rel, &conname, recurse, recursing, lockmode,
+            );
+        }
+
+        if changed {
+            // constr_rel = table_open(ConstraintRelationId, RowExclusiveLock);
+            let constr_rel = relation_open(
+                mcx,
+                ConstraintRelationId,
+                types_storage::lock::RowExclusiveLock,
+            )?;
+            let fields = types_catalog::pg_constraint::ConstraintFieldUpdate {
+                conname: con_form.conname,
+                connamespace: con_form.connamespace,
+                conislocal: con_form.conislocal,
+                coninhcount: con_form.coninhcount,
+                conparentid: con_form.conparentid,
+                convalidated: con_form.convalidated,
+                connoinherit: con_form.connoinherit,
+                conenforced: con_form.conenforced,
+            };
+            backend_catalog_indexing_seams::catalog_tuple_update_pg_constraint::call(
+                &constr_rel,
+                tuple.tuple.t_self,
+                &fields,
+            )?;
+            let address = ObjectAddress {
+                classId: ConstraintRelationId,
+                objectId: con_form.oid,
+                objectSubId: 0,
+            };
+            drop(constr_rel);
+            return Ok(address);
+        } else {
+            return Ok(ObjectAddress {
+                classId: InvalidOid,
+                objectId: InvalidOid,
+                objectSubId: 0,
+            });
+        }
+    }
+
+    // If we're asked not to recurse, and children exist, raise an error for
+    // partitioned tables.  For inheritance, we act as if NO INHERIT had been
+    // specified.
+    let mut is_no_inherit = false;
+    if !recurse {
+        let children = find_inheritance_children(mcx, rel.rd_id, NoLock)?;
+        if !children.is_empty() {
+            if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+                return Err(backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
+                    .errmsg("constraint must be added to child tables too".to_string())
+                    .errhint("Do not specify the ONLY keyword.".to_string())
+                    .into_error());
+            } else {
+                is_no_inherit = true;
+            }
+        }
+    }
+
+    // No constraint exists; we must add one. First determine a name to use, if
+    // we haven't already.
+    let chosen_name: String = if !recursing {
+        debug_assert!(con_name.is_none());
+        backend_catalog_pg_constraint::ChooseConstraintName(
+            mcx,
+            &rel.name(),
+            col_name,
+            "not_null",
+            rel.rd_rel.relnamespace,
+            &[],
+        )?
+    } else {
+        con_name.expect("recursing SET NOT NULL requires a constraint name").to_string()
+    };
+
+    // constraint = makeNotNullConstraint(makeString(colName));
+    // constraint->is_no_inherit = is_no_inherit; constraint->conname = conName;
+    let mut constraint = make_not_null_constraint(mcx, col_name)?;
+    constraint.is_no_inherit = is_no_inherit;
+    constraint.conname = Some(PgString::from_str_in(&chosen_name, mcx)?);
+
+    // cooked = AddRelationNewConstraints(rel, NIL, list_make1(constraint),
+    //     false, !recursing, false, NULL);
+    let constr_node = mcx::alloc_in(mcx, Node::mk_constraint(mcx, constraint.clone_in(mcx)?)?)?;
+    let new_constraints = [constr_node];
+    let cooked = backend_catalog_heap::AddRelationNewConstraints(
+        mcx,
+        rel,
+        &[],
+        &new_constraints,
+        false,      // allow_merge
+        !recursing, // is_local
+        false,      // is_internal
+        None,       // queryString
+    )?;
+
+    // ccon = linitial(cooked); ObjectAddressSet(address, ConstraintRelationId, ccon->conoid);
+    // The cooked-constraint carrier does not carry conoid (event-trigger surface
+    // only); leave objectId Invalid, as the rest of this crate's NOT NULL path.
+    debug_assert!(!cooked.is_empty());
+    let address = ObjectAddress {
+        classId: ConstraintRelationId,
+        objectId: InvalidOid,
+        objectSubId: 0,
+    };
+
+    // Mark pg_attribute.attnotnull for the column and queue validation.
+    // C: set_attnotnull(wqueue, rel, attnum, true, true). The owned
+    // set_attnotnull cannot take wqueue, so it sets the flag and we queue the
+    // phase-3 verify here (NotNullImpliedByRelConstraints is a pure skip
+    // optimization; conservatively scanning is always correct).
+    crate::create::set_attnotnull(mcx, rel, attnum, true, true)?;
+    let tab = ATGetQueueEntry(mcx, wqueue, rel)?;
+    wqueue[tab].verify_new_notnull = true;
+
+    // Recurse to propagate the constraint to children that don't have one.
+    if recurse {
+        let children = find_inheritance_children(mcx, rel.rd_id, lockmode)?;
+        for &childoid in children.iter() {
+            let childrel = relation_open(mcx, childoid, NoLock)?;
+
+            CommandCounterIncrement()?;
+
+            ATExecSetNotNull(
+                mcx,
+                wqueue,
+                &childrel,
+                Some(&chosen_name),
+                col_name,
+                recurse,
+                true,
+                lockmode,
+            )?;
+
+            drop(childrel);
+        }
+    }
+
+    Ok(address)
+}
+
+// ===========================================================================
 // ATExecAddIndex (tablecmds.c:9620)
 // ===========================================================================
 

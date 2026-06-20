@@ -798,7 +798,11 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
             )?;
-            unported("ALTER COLUMN DROP NOT NULL (pg_constraint-modeled in PG18)");
+            // Set up recursion for phase 2; no other prep needed.
+            if recurse {
+                cmd.recurse = true;
+            }
+            pass = AT_PASS_DROP;
         }
         AT_SetNotNull => {
             ATSimplePermissions(
@@ -806,7 +810,11 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
             )?;
-            unported("ALTER COLUMN SET NOT NULL (pg_constraint-modeled in PG18)");
+            // Set up recursion for phase 2; no other prep needed.
+            if recurse {
+                cmd.recurse = true;
+            }
+            pass = AT_PASS_COL_ATTRS;
         }
         AT_SetExpression => {
             ATSimplePermissions(
@@ -1377,8 +1385,48 @@ fn ATExecCmd<'mcx>(
         AT_AddIdentity => unported("ADD IDENTITY (ATExecAddIdentity)"),
         AT_SetIdentity => unported("SET IDENTITY (ATExecSetIdentity)"),
         AT_DropIdentity => unported("DROP IDENTITY (ATExecDropIdentity)"),
-        AT_DropNotNull => unported("DROP NOT NULL (ATExecDropNotNull, pg_constraint-modeled)"),
-        AT_SetNotNull => unported("SET NOT NULL (ATExecSetNotNull, pg_constraint-modeled)"),
+        AT_DropNotNull => {
+            // ATExecDropNotNull(rel, cmd->name, cmd->recurse, lockmode)
+            let colname = cmd
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("DROP NOT NULL requires a column name");
+            _address = crate::at_dropvalidate::ATExecDropNotNull(
+                mcx,
+                rel,
+                colname,
+                cmd.recurse,
+                lockmode,
+            )?;
+        }
+        AT_SetNotNull => {
+            // ATExecSetNotNull(wqueue, rel, NULL, cmd->name, cmd->recurse,
+            //     false, lockmode). Needs &mut wqueue (queue phase-3 verify,
+            // recurse into children) alongside &rel; take the single open rel
+            // out of the queue entry (a second relation_open would bump
+            // rd_refcnt and trip CheckTableNotInUse), then restore it.
+            let colname = cmd
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("SET NOT NULL requires a column name")
+                .to_string();
+            let recurse = cmd.recurse;
+            let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");
+            let res = crate::at_constraint::ATExecSetNotNull(
+                mcx,
+                wqueue,
+                &owned_rel,
+                None,
+                &colname,
+                recurse,
+                false,
+                lockmode,
+            );
+            wqueue[ti].rel = Some(owned_rel);
+            _address = res?;
+        }
         AT_SetExpression => unported("SET EXPRESSION (ATExecSetExpression + ATRewriteTable)"),
         AT_DropExpression => unported("DROP EXPRESSION (ATExecDropExpression)"),
         AT_SetCompression => unported("SET COMPRESSION (ATExecSetCompression)"),
