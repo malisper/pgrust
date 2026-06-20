@@ -30,7 +30,7 @@ use backend_utils_adt_numeric::kernel_var::{add_var, cmp_var, const_one};
 use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
-use types_error::PgError;
+use types_error::{PgError, PgResult};
 use types_nodes::execexpr::ExprDoneCond;
 use types_nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_numeric::var::{NumericSign, NumericVar};
@@ -87,26 +87,26 @@ impl OwnedNumericVal {
 
     /// Rebuild a `NumericVar` in `mcx` from this snapshot, reserving one leading
     /// carry-slack digit (`headroom = 1`) like `set_var_from_num`/`alloc_var`.
-    fn to_var<'mcx>(&self, mcx: Mcx<'mcx>) -> NumericVar<'mcx> {
+    fn to_var<'mcx>(&self, mcx: Mcx<'mcx>) -> PgResult<NumericVar<'mcx>> {
         if self.sign.is_special() {
-            return NumericVar::special(mcx, self.sign);
+            return Ok(NumericVar::special(mcx, self.sign));
         }
         // Reserve one leading carry-slack digit (`headroom = 1`), mirroring
         // `set_var_from_num`/`alloc_var`.
         let ndigits = self.digits.len();
         let mut digits = mcx::vec_with_capacity_in::<i16>(mcx, ndigits + 1)
-            .unwrap_or_else(|_| std::panic::panic_any(mcx.oom(ndigits + 1)));
+            .map_err(|_| mcx.oom(ndigits + 1))?;
         digits.resize(ndigits + 1, 0);
         for (i, &d) in self.digits.iter().enumerate() {
             digits[i + 1] = d;
         }
-        NumericVar {
+        Ok(NumericVar {
             sign: self.sign,
             weight: self.weight,
             dscale: self.dscale,
             digits,
             headroom: 1,
-        }
+        })
     }
 }
 
@@ -152,12 +152,12 @@ fn arg_numeric_image(fcinfo: &FunctionCallInfoBaseData<'_>, index: usize) -> Vec
 /// (C: `NumericGetDatum(make_result(&current))`). The image is the complete
 /// 4-byte-header varlena, crossing verbatim on the by-ref lane (like `unnest`'s
 /// by-ref element).
-fn numeric_image_datum<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> Datum<'mcx> {
+fn numeric_image_datum<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum<'mcx>> {
     let mut buf = mcx::PgVec::new_in(mcx);
     buf.try_reserve(image.len())
-        .unwrap_or_else(|_| std::panic::panic_any(mcx.oom(image.len())));
+        .map_err(|_| mcx.oom(image.len()))?;
     buf.extend_from_slice(image);
-    Datum::ByRef(buf)
+    Ok(Datum::ByRef(buf))
 }
 
 /// `generate_series_step_numeric(PG_FUNCTION_ARGS)` (numeric.c:1708) over the
@@ -165,7 +165,7 @@ fn numeric_image_datum<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> Datum<'mcx> {
 /// 3-arg forms. Drives the value-per-call protocol directly.
 fn generate_series_step_numeric<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> Datum<'mcx> {
+) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("generate_series_numeric: fn_mcxt set by the SRF caller");
@@ -180,36 +180,31 @@ fn generate_series_step_numeric<'mcx>(
             let stop = arg_numeric_image(fcinfo, 1);
 
             // C: reject NaN/infinity in start and stop.
-            check_special(&start, "start value");
-            check_special(&stop, "stop value");
+            check_special(&start, "start value")?;
+            check_special(&stop, "stop value")?;
 
             // C: steploc = const_one; if (PG_NARGS() == 3) read the explicit step.
             let (step_image, step_is_positive) = if fcinfo.nargs == 3 {
                 let step = arg_numeric_image(fcinfo, 2);
-                check_special(&step, "step size");
+                check_special(&step, "step size")?;
                 // set_var_from_num to decide sign + the zero check.
-                let stepvar = set_var_from_num(mcx, &step)
-                    .unwrap_or_else(|e| std::panic::panic_any(e));
+                let stepvar = set_var_from_num(mcx, &step)?;
                 // C: if (cmp_var(&steploc, &const_zero) == 0) error.
                 if stepvar.ndigits() == 0 {
-                    std::panic::panic_any(
-                        PgError::error("step size cannot equal zero")
-                            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
-                    );
+                    return Err(PgError::error("step size cannot equal zero")
+                        .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
                 }
                 (step, stepvar.sign == NumericSign::Pos)
             } else {
                 // steploc = const_one (positive); canonical image of 1.
                 let one = const_one(mcx);
-                let image = make_result(mcx, &one)
-                    .unwrap_or_else(|e| std::panic::panic_any(e));
+                let image = make_result(mcx, &one)?;
                 (image.as_slice().to_vec(), true)
             };
 
             // Seed `current` with the original start value as a raw snapshot (C
             // copies the live `NumericVar` into the fctx).
-            let start_var = set_var_from_num(mcx, &start)
-                .unwrap_or_else(|e| std::panic::panic_any(e));
+            let start_var = set_var_from_num(mcx, &start)?;
             SeriesNumericFctx {
                 current: OwnedNumericVal::from_var(&start_var),
                 stop,
@@ -235,11 +230,9 @@ fn generate_series_step_numeric<'mcx>(
 
     // Re-materialize current (from its raw snapshot) and stop/step (from their
     // canonical images).
-    let current = state.current.to_var(mcx);
-    let stop = set_var_from_num(mcx, &state.stop)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
-    let step = set_var_from_num(mcx, &state.step)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    let current = state.current.to_var(mcx)?;
+    let stop = set_var_from_num(mcx, &state.stop)?;
+    let step = set_var_from_num(mcx, &state.step)?;
 
     // C: if ((fctx->step.sign == NUMERIC_POS && cmp_var(&fctx->current, &fctx->stop) <= 0) ||
     //        (fctx->step.sign == NUMERIC_NEG && cmp_var(&fctx->current, &fctx->stop) >= 0))
@@ -252,43 +245,40 @@ fn generate_series_step_numeric<'mcx>(
 
     if in_range {
         // C: result = make_result(&fctx->current); SRF_RETURN_NEXT(...).
-        let result_image = make_result(mcx, &current)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
-        let datum = numeric_image_datum(mcx, result_image.as_slice());
+        let result_image = make_result(mcx, &current)?;
+        let datum = numeric_image_datum(mcx, result_image.as_slice())?;
 
         // C: add_var(&fctx->current, &fctx->step, &fctx->current); — advance.
         // Snapshot the raw var (NOT `make_result`): the advance may step past
         // `stop` to an on-disk-unrepresentable weight that C only ever compares.
-        let next = add_var(mcx, &current, &step)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        let next = add_var(mcx, &current, &step)?;
         state.current = OwnedNumericVal::from_var(&next);
 
         funcctx.call_cntr += 1;
         set_isdone(fcinfo, ExprDoneCond::ExprMultipleResult);
         fcinfo.isnull = false;
-        datum
+        Ok(datum)
     } else {
         // SRF_RETURN_DONE(funcctx).
         end_MultiFuncCall(fcinfo).expect("end_MultiFuncCall");
         set_isdone(fcinfo, ExprDoneCond::ExprEndResult);
         fcinfo.isnull = true;
-        Datum::null()
+        Ok(Datum::null())
     }
 }
 
 /// C: the NaN/infinity rejection on a numeric argument. `label` is the C error
 /// prefix (`"start value"` / `"stop value"` / `"step size"`).
-fn check_special(image: &[u8], label: &str) {
+fn check_special(image: &[u8], label: &str) -> PgResult<()> {
     if numeric_is_special(image) {
         let msg = if numeric_is_nan(image) {
             alloc::format!("{label} cannot be NaN")
         } else {
             alloc::format!("{label} cannot be infinity")
         };
-        std::panic::panic_any(
-            PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
-        );
+        return Err(PgError::error(msg).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
+    Ok(())
 }
 
 /// `rsi->isDone = cond` (the `SRF_RETURN_NEXT`/`SRF_RETURN_DONE` write onto the

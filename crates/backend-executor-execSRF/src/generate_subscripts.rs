@@ -21,6 +21,7 @@ use core::any::Any;
 
 use mcx::{Mcx, PgBox};
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::execexpr::ExprDoneCond;
 use types_nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -66,7 +67,9 @@ fn erase_user_fctx<'mcx, T: Any>(mcx: Mcx<'mcx>, v: T) -> PgBox<'mcx, dyn Any> {
 /// `generate_subscripts(PG_FUNCTION_ARGS)` (arrayfuncs.c:5922) over the executor
 /// frame. Drives the value-per-call protocol; `SRF_RETURN_NEXT` /
 /// `SRF_RETURN_DONE` are the `isDone` writes + the multi-call teardown.
-fn generate_subscripts<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn generate_subscripts<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("generate_subscripts: fn_mcxt set by the SRF caller");
@@ -92,8 +95,7 @@ fn generate_subscripts<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Dat
                 false
             };
             let materialized =
-                backend_utils_adt_arrayfuncs::sql::generate_subscripts(mcx, image, dim, reverse)
-                    .unwrap_or_else(|e| std::panic::panic_any(e));
+                backend_utils_adt_arrayfuncs::sql::generate_subscripts(mcx, image, dim, reverse)?;
             materialized.iter().copied().collect()
         };
 
@@ -119,13 +121,13 @@ fn generate_subscripts<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Dat
         funcctx.call_cntr += 1;
         set_isdone(fcinfo, ExprDoneCond::ExprMultipleResult);
         fcinfo.isnull = false;
-        Datum::from_i32(result)
+        Ok(Datum::from_i32(result))
     } else {
         // SRF_RETURN_DONE(funcctx).
         end_MultiFuncCall(fcinfo).expect("end_MultiFuncCall");
         set_isdone(fcinfo, ExprDoneCond::ExprEndResult);
         fcinfo.isnull = true;
-        Datum::from_i32(0)
+        Ok(Datum::from_i32(0))
     }
 }
 

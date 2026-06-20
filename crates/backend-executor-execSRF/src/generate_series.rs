@@ -29,7 +29,7 @@ use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_datetime::Interval;
 use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
-use types_error::PgError;
+use types_error::{PgError, PgResult};
 use types_nodes::execexpr::ExprDoneCond;
 use types_nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -79,7 +79,9 @@ fn erase_user_fctx<'mcx, T: Any>(mcx: Mcx<'mcx>, v: T) -> PgBox<'mcx, dyn Any> {
 /// `generate_series_step_int4(PG_FUNCTION_ARGS)` (int.c:1537) over the executor
 /// frame. Drives the value-per-call protocol; `SRF_RETURN_NEXT` /
 /// `SRF_RETURN_DONE` are the `isDone` writes + the multi-call teardown.
-fn generate_series_step_int4<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn generate_series_step_int4<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("generate_series_int4: fn_mcxt set by the SRF caller");
@@ -95,14 +97,9 @@ fn generate_series_step_int4<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) 
             1
         };
         // C: GenerateSeriesInt4::new validates step != 0 (ereport on zero).
-        // Raise the hard ereport through the PGFunction dispatch boundary
-        // (`invoke_pgfunction` catch_unwind) so the structured `PgError` —
-        // sqlstate + "step size cannot equal zero" — reaches the client, rather
-        // than `.expect()` panicking with a Debug-formatted string.
-        let state = match GenerateSeriesInt4::new(start, finish, step) {
-            Ok(state) => state,
-            Err(e) => std::panic::panic_any(e),
-        };
+        // The structured `PgError` — sqlstate + "step size cannot equal zero" —
+        // propagates as the Result error to the SRF caller.
+        let state = GenerateSeriesInt4::new(start, finish, step)?;
         init_MultiFuncCall(fcinfo).expect("init_MultiFuncCall");
         let fctx = erase_user_fctx(mcx, state);
         let funcctx = per_MultiFuncCall(fcinfo).expect("per_MultiFuncCall");
@@ -124,14 +121,14 @@ fn generate_series_step_int4<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) 
             funcctx.call_cntr += 1;
             set_isdone(fcinfo, ExprDoneCond::ExprMultipleResult);
             fcinfo.isnull = false;
-            Datum::from_i32(result)
+            Ok(Datum::from_i32(result))
         }
         None => {
             // SRF_RETURN_DONE(funcctx).
             end_MultiFuncCall(fcinfo).expect("end_MultiFuncCall");
             set_isdone(fcinfo, ExprDoneCond::ExprEndResult);
             fcinfo.isnull = true;
-            Datum::from_i32(0)
+            Ok(Datum::from_i32(0))
         }
     }
 }
@@ -145,7 +142,9 @@ struct GenerateSeriesInt8 {
 }
 
 /// `generate_series_step_int8(PG_FUNCTION_ARGS)` (int8.c) over the executor frame.
-fn generate_series_step_int8<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn generate_series_step_int8<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("generate_series_int8: fn_mcxt set by the SRF caller");
@@ -159,16 +158,9 @@ fn generate_series_step_int8<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) 
             1
         };
         // C: if (step == 0) ereport(ERROR, "step size cannot equal zero").
-        // This is a hard ereport from a bare-Datum PGFunction frame; raise it
-        // through the one dispatch point every PGFunction crosses
-        // (`invoke_pgfunction`'s `catch_unwind`), which downcasts the structured
-        // `PgError` back into a proper ereport — exactly as `pg_input_error_info`
-        // and the fmgr-builtin adapters do. Using `.expect()` here would instead
-        // panic with a Debug-formatted string, losing the sqlstate/message and
-        // surfacing the raw `PgError { .. }` dump to the client.
-        if let Err(e) = backend_utils_adt_int8::generate_series_int8_check_step(step) {
-            std::panic::panic_any(e);
-        }
+        // The structured `PgError` propagates as the Result error to the SRF
+        // caller, carrying the sqlstate/message.
+        backend_utils_adt_int8::generate_series_int8_check_step(step)?;
         init_MultiFuncCall(fcinfo).expect("init_MultiFuncCall");
         let fctx = erase_user_fctx(
             mcx,
@@ -202,13 +194,13 @@ fn generate_series_step_int8<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) 
             funcctx.call_cntr += 1;
             set_isdone(fcinfo, ExprDoneCond::ExprMultipleResult);
             fcinfo.isnull = false;
-            Datum::from_i64(result)
+            Ok(Datum::from_i64(result))
         }
         None => {
             end_MultiFuncCall(fcinfo).expect("end_MultiFuncCall");
             set_isdone(fcinfo, ExprDoneCond::ExprEndResult);
             fcinfo.isnull = true;
-            Datum::from_i64(0)
+            Ok(Datum::from_i64(0))
         }
     }
 }
@@ -261,21 +253,17 @@ fn arg_text(fcinfo: &FunctionCallInfoBaseData<'_>, index: usize) -> String {
 /// and `INTERVAL_NOT_FINITE(&step)` guards in `generate_series_timestamp`),
 /// raising the structured `PgError` through the dispatch boundary's
 /// `catch_unwind` (as the int4/int8 cores do for their zero-step error).
-fn check_series_step(step: &Interval) -> i32 {
+fn check_series_step(step: &Interval) -> PgResult<i32> {
     let sign = backend_utils_adt_datetime::interval_sign(step);
     if sign == 0 {
-        std::panic::panic_any(
-            PgError::error("step size cannot equal zero")
-                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
-        );
+        return Err(PgError::error("step size cannot equal zero")
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
     if backend_utils_adt_datetime::INTERVAL_NOT_FINITE(step) {
-        std::panic::panic_any(
-            PgError::error("step size cannot be infinite")
-                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
-        );
+        return Err(PgError::error("step size cannot be infinite")
+            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
-    sign
+    Ok(sign)
 }
 
 /// Cross-call state for `generate_series_timestamp` /
@@ -296,7 +284,7 @@ struct GenerateSeriesTimestamp {
 /// added with `timestamp_pl_interval`.
 fn generate_series_timestamp<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> Datum<'mcx> {
+) -> PgResult<Datum<'mcx>> {
     series_timestamp(fcinfo, false)
 }
 
@@ -307,7 +295,7 @@ fn generate_series_timestamp<'mcx>(
 /// `timestamptz_pl_interval{,_at_zone}` (TZ-aware addition).
 fn generate_series_timestamptz<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-) -> Datum<'mcx> {
+) -> PgResult<Datum<'mcx>> {
     series_timestamp(fcinfo, true)
 }
 
@@ -317,7 +305,7 @@ fn generate_series_timestamptz<'mcx>(
 fn series_timestamp<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     tz: bool,
-) -> Datum<'mcx> {
+) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("generate_series_timestamp: fn_mcxt set by the SRF caller");
@@ -333,7 +321,7 @@ fn series_timestamp<'mcx>(
         } else {
             None
         };
-        let step_sign = check_series_step(&step);
+        let step_sign = check_series_step(&step)?;
 
         init_MultiFuncCall(fcinfo).expect("init_MultiFuncCall");
         let fctx = erase_user_fctx(
@@ -379,18 +367,15 @@ fn series_timestamp<'mcx>(
         } else {
             backend_utils_adt_datetime::timestamp_pl_interval(state.current, &state.step)
         };
-        match next {
-            Ok(n) => state.current = n,
-            Err(e) => std::panic::panic_any(e),
-        }
+        state.current = next?;
         funcctx.call_cntr += 1;
         set_isdone(fcinfo, ExprDoneCond::ExprMultipleResult);
         fcinfo.isnull = false;
-        Datum::from_i64(result)
+        Ok(Datum::from_i64(result))
     } else {
         end_MultiFuncCall(fcinfo).expect("end_MultiFuncCall");
         set_isdone(fcinfo, ExprDoneCond::ExprEndResult);
         fcinfo.isnull = true;
-        Datum::from_i64(0)
+        Ok(Datum::from_i64(0))
     }
 }

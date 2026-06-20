@@ -26,6 +26,7 @@
 
 use mcx::Mcx;
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -43,7 +44,7 @@ pub(crate) fn register_pg_prepared_xact() {
 }
 
 /// `pg_prepared_xact(PG_FUNCTION_ARGS)` (twophase.c) over the executor frame.
-fn pg_prepared_xact<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_prepared_xact<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx: Mcx<'mcx> = fcinfo
         .fn_mcxt
         .expect("pg_prepared_xact: fn_mcxt set by ExecMakeTableFunctionResult");
@@ -53,13 +54,11 @@ fn pg_prepared_xact<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<
     // the snapshot-and-project core over the live process-global TwoPhaseState.
     let rows = backend_access_transam_twophase::with_twophase_state(|state| {
         backend_access_transam_twophase::pg_prepared_xact_rows(state)
-    })
-    .unwrap_or_else(|e| std::panic::panic_any(e));
+    })?;
 
     // C: get_call_result_type → the (xid, text, timestamptz, oid, oid) row type.
     // Take the executor's already-resolved descriptor.
-    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)?;
 
     let rsinfo = fcinfo
         .resultinfo
@@ -72,8 +71,7 @@ fn pg_prepared_xact<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<
         // TimestampTzGetDatum(gxact->prepared_at); values[3] =
         // ObjectIdGetDatum(gxact->owner); values[4] =
         // ObjectIdGetDatum(proc->databaseId). All non-NULL.
-        let gid = backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, &row.gid)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        let gid = backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, &row.gid)?;
         let values = [
             Datum::from_transaction_id(row.transaction),
             gid,
@@ -82,11 +80,10 @@ fn pg_prepared_xact<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<
             Datum::from_oid(row.dbid),
         ];
         let nulls = [false, false, false, false, false];
-        materialized_srf_putvalues(rsinfo, &values, &nulls)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        materialized_srf_putvalues(rsinfo, &values, &nulls)?;
     }
 
     // C: SRF_RETURN_DONE — the whole set is in the materialize tuplestore.
     fcinfo.isnull = true;
-    Datum::null()
+    Ok(Datum::null())
 }

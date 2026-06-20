@@ -24,6 +24,7 @@ use mcx::Mcx;
 use types_core::Oid;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
+use types_error::PgResult;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_utils_fmgr_funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
@@ -40,7 +41,9 @@ pub(crate) fn register_pg_get_multixact_members() {
 
 /// `pg_get_multixact_members(PG_FUNCTION_ARGS)` (multixact.c) over the executor
 /// frame.
-fn pg_get_multixact_members<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_get_multixact_members<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx: Mcx<'mcx> = fcinfo
         .fn_mcxt
         .expect("pg_get_multixact_members: fn_mcxt set by ExecMakeTableFunctionResult");
@@ -51,13 +54,11 @@ fn pg_get_multixact_members<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -
 
     // The member-resolution core (validity guard + GetMultiXactIdMembers +
     // mxstatus_to_string). An invalid MultiXactId is a hard `ereport(ERROR)`.
-    let members = backend_access_transam_multixact::pg_get_multixact_members(mxid)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    let members = backend_access_transam_multixact::pg_get_multixact_members(mxid)?;
 
     // C: get_call_result_type → the `(xid, text)` row type. Take the executor's
     // already-resolved descriptor.
-    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)?;
 
     let rsinfo = fcinfo
         .resultinfo
@@ -70,14 +71,12 @@ fn pg_get_multixact_members<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -
         // values[1] = mode text (`mxstatus_to_string`→CStringGetTextDatum).
         let values = [
             Datum::from_transaction_id(xid),
-            backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, status)
-                .unwrap_or_else(|e| std::panic::panic_any(e)),
+            backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, status)?,
         ];
         let nulls = [false, false];
-        materialized_srf_putvalues(rsinfo, &values, &nulls)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        materialized_srf_putvalues(rsinfo, &values, &nulls)?;
     }
 
     fcinfo.isnull = true;
-    Datum::null()
+    Ok(Datum::null())
 }

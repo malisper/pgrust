@@ -35,6 +35,7 @@ use types_core::Oid;
 use types_acl::AclItem;
 use types_nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
+use types_error::PgResult;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_utils_adt_arrayfuncs::sql::array_unnest;
@@ -52,7 +53,7 @@ pub(crate) fn register_aclexplode() {
 }
 
 /// `aclexplode(PG_FUNCTION_ARGS)` (acl.c) over the executor frame.
-fn aclexplode<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn aclexplode<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx: Mcx<'mcx> = fcinfo
         .fn_mcxt
         .expect("aclexplode: fn_mcxt set by ExecMakeTableFunctionResult");
@@ -70,7 +71,7 @@ fn aclexplode<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> 
             Some(FmgrArgRef::Varlena(b)) => b.as_slice(),
             _ => panic!("aclexplode: aclitem[] argument missing from the by-ref lane"),
         };
-        let elems = array_unnest(mcx, image).unwrap_or_else(|e| std::panic::panic_any(e));
+        let elems = array_unnest(mcx, image)?;
         let mut items: alloc::vec::Vec<AclItem> = alloc::vec::Vec::with_capacity(elems.len());
         for (elem, isnull) in elems.iter() {
             if *isnull {
@@ -96,8 +97,7 @@ fn aclexplode<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> 
     // C: tupdesc = CreateTemplateTupleDesc(4) (grantor oid, grantee oid,
     // privilege_type text, is_grantable bool). Take the executor's
     // already-resolved descriptor via MAT_SRF_USE_EXPECTED_DESC.
-    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)?;
 
     let rsinfo = fcinfo
         .resultinfo
@@ -112,8 +112,7 @@ fn aclexplode<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> 
         let priv_text = backend_utils_adt_varlena_seams::cstring_to_text_v::call(
             mcx,
             row.privilege_type,
-        )
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+        )?;
         let values = [
             Datum::from_oid(row.grantor),
             Datum::from_oid(row.grantee),
@@ -121,11 +120,10 @@ fn aclexplode<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> 
             Datum::from_bool(row.is_grantable),
         ];
         let nulls = [false, false, false, false];
-        materialized_srf_putvalues(rsinfo, &values, &nulls)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        materialized_srf_putvalues(rsinfo, &values, &nulls)?;
     }
 
     // C: SRF_RETURN_DONE — the whole set is in the materialize tuplestore.
     fcinfo.isnull = true;
-    Datum::null()
+    Ok(Datum::null())
 }

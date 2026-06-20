@@ -43,6 +43,7 @@
 
 use mcx::Mcx;
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
@@ -113,51 +114,52 @@ unsafe fn reborrow_mcx<'mcx>(
 // ===========================================================================
 
 /// `json_to_record(PG_FUNCTION_ARGS)` (jsonfuncs.c:2502) over the executor frame.
-fn json_to_record<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn json_to_record<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     // SAFETY: see `reborrow_mcx`.
     let fc = unsafe { reborrow_mcx(fcinfo) };
     backend_utils_adt_jsonfuncs::populate::json_to_record(mcx, fc)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `jsonb_to_record(PG_FUNCTION_ARGS)` (jsonfuncs.c:2488) over the executor frame.
-fn jsonb_to_record<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn jsonb_to_record<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     // SAFETY: see `reborrow_mcx`.
     let fc = unsafe { reborrow_mcx(fcinfo) };
     backend_utils_adt_jsonfuncs::populate::jsonb_to_record(mcx, fc)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `json_populate_record(PG_FUNCTION_ARGS)` (jsonfuncs.c:2495) over the executor
 /// frame.
-fn json_populate_record<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn json_populate_record<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     // SAFETY: see `reborrow_mcx`.
     let fc = unsafe { reborrow_mcx(fcinfo) };
     backend_utils_adt_jsonfuncs::populate::json_populate_record(mcx, fc)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `jsonb_populate_record(PG_FUNCTION_ARGS)` (jsonfuncs.c:2471) over the executor
 /// frame.
-fn jsonb_populate_record<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn jsonb_populate_record<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     // SAFETY: see `reborrow_mcx`.
     let fc = unsafe { reborrow_mcx(fcinfo) };
     backend_utils_adt_jsonfuncs::populate::jsonb_populate_record(mcx, fc)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `jsonb_populate_record_valid(PG_FUNCTION_ARGS)` (jsonfuncs.c:2477) over the
 /// executor frame.
-fn jsonb_populate_record_valid<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn jsonb_populate_record_valid<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     // SAFETY: see `reborrow_mcx`.
     let fc = unsafe { reborrow_mcx(fcinfo) };
     backend_utils_adt_jsonfuncs::populate::jsonb_populate_record_valid(mcx, fc)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 // ===========================================================================
@@ -166,20 +168,22 @@ fn jsonb_populate_record_valid<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>
 
 /// `json_populate_recordset(PG_FUNCTION_ARGS)` (jsonfuncs.c:3988) over the
 /// executor frame.
-fn json_populate_recordset<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn json_populate_recordset<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     // SAFETY: see `reborrow_mcx`.
     let fc = unsafe { reborrow_mcx(fcinfo) };
     backend_utils_adt_jsonfuncs::recordset::json_populate_recordset(mcx, fc)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `jsonb_populate_recordset(PG_FUNCTION_ARGS)` (jsonfuncs.c:3974) over the
 /// executor frame.
-fn jsonb_populate_recordset<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn jsonb_populate_recordset<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     // SAFETY: see `reborrow_mcx`.
     let fc = unsafe { reborrow_mcx(fcinfo) };
     backend_utils_adt_jsonfuncs::recordset::jsonb_populate_recordset(mcx, fc)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }

@@ -26,6 +26,7 @@ use mcx::Mcx;
 use types_core::Oid;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
+use types_error::PgResult;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_utils_fmgr_funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
@@ -41,13 +42,12 @@ pub(crate) fn register_pg_get_keywords() {
 }
 
 /// `CStringGetTextDatum(s)` over the call's per-query context.
-fn text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> Datum<'mcx> {
+fn text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
     backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, s)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `pg_get_keywords(PG_FUNCTION_ARGS)` (misc.c:417) over the executor frame.
-fn pg_get_keywords<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_get_keywords<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx: Mcx<'mcx> = fcinfo
         .fn_mcxt
         .expect("pg_get_keywords: fn_mcxt set by ExecMakeTableFunctionResult");
@@ -58,8 +58,7 @@ fn pg_get_keywords<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'
     // C: get_call_result_type(fcinfo, NULL, &tupdesc). The owned model takes the
     // executor's already-resolved `(text, "char", bool, text, text)` descriptor
     // via MAT_SRF_USE_EXPECTED_DESC.
-    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)?;
 
     let rsinfo = fcinfo
         .resultinfo
@@ -75,7 +74,7 @@ fn pg_get_keywords<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'
         let word = text_datum(
             mcx,
             core::str::from_utf8(&row.word).expect("pg_get_keywords: keyword is valid UTF-8"),
-        );
+        )?;
 
         // values[1] = catcode "char" (charin of the one-letter "U"/"C"/"T"/"R");
         // the "shouldn't be possible" default arm is NULL.
@@ -92,20 +91,19 @@ fn pg_get_keywords<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'
 
         // values[3] = catdesc text (textin); NULL for the default arm.
         let (catdesc, catdesc_null) = match row.catdesc {
-            Some(desc) => (text_datum(mcx, desc), false),
+            Some(desc) => (text_datum(mcx, desc)?, false),
             None => (Datum::null(), true),
         };
 
         // values[4] = baredesc text (textin).
-        let baredesc = text_datum(mcx, row.baredesc);
+        let baredesc = text_datum(mcx, row.baredesc)?;
 
         let values = [word, catcode, barelabel, catdesc, baredesc];
         let nulls = [false, catcode_null, false, catdesc_null, false];
-        materialized_srf_putvalues(rsinfo, &values, &nulls)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        materialized_srf_putvalues(rsinfo, &values, &nulls)?;
     }
 
     // C: SRF_RETURN_DONE — the whole set is in the materialize tuplestore.
     fcinfo.isnull = true;
-    Datum::null()
+    Ok(Datum::null())
 }

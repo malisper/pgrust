@@ -18,6 +18,7 @@
 
 use mcx::Mcx;
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -36,7 +37,9 @@ pub(crate) fn register_pg_listening_channels() {
 
 /// `pg_listening_channels(PG_FUNCTION_ARGS)` (async.c:788) over the executor
 /// frame.
-fn pg_listening_channels<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_listening_channels<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx: Mcx<'mcx> = fcinfo
         .fn_mcxt
         .expect("pg_listening_channels: fn_mcxt set by ExecMakeTableFunctionResult");
@@ -47,8 +50,7 @@ fn pg_listening_channels<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> D
 
     // C: SRF returns one `text` (`CStringGetTextDatum(channel)`) per channel; take
     // the executor's already-resolved one-column `text` descriptor.
-    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)?;
 
     let rsinfo = fcinfo
         .resultinfo
@@ -56,13 +58,11 @@ fn pg_listening_channels<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> D
         .expect("pg_listening_channels: InitMaterializedSRF establishes fcinfo->resultinfo");
 
     for channel in &channels {
-        let values = [backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, channel)
-            .unwrap_or_else(|e| std::panic::panic_any(e))];
+        let values = [backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, channel)?];
         let nulls = [false];
-        materialized_srf_putvalues(rsinfo, &values, &nulls)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        materialized_srf_putvalues(rsinfo, &values, &nulls)?;
     }
 
     fcinfo.isnull = true;
-    Datum::null()
+    Ok(Datum::null())
 }

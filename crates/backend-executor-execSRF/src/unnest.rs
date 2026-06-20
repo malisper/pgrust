@@ -31,6 +31,7 @@ use core::any::Any;
 use mcx::{Mcx, PgBox};
 use types_array::ArrayElementDatum;
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::execexpr::ExprDoneCond;
 use types_nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -86,7 +87,7 @@ fn erase_user_fctx<'mcx, T: Any>(mcx: Mcx<'mcx>, v: T) -> PgBox<'mcx, dyn Any> {
 /// `array_unnest(PG_FUNCTION_ARGS)` (arrayfuncs.c:6259) over the executor frame.
 /// Drives the value-per-call protocol; `SRF_RETURN_NEXT` / `SRF_RETURN_DONE` are
 /// the `isDone` writes + the multi-call teardown.
-fn unnest<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn unnest<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("unnest: fn_mcxt set by the SRF caller");
@@ -115,8 +116,7 @@ fn unnest<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
                 _ => panic!("unnest: array argument missing from by-ref lane"),
             };
             let materialized =
-                backend_utils_adt_arrayfuncs::sql::array_unnest(mcx, image)
-                    .unwrap_or_else(|e| std::panic::panic_any(e));
+                backend_utils_adt_arrayfuncs::sql::array_unnest(mcx, image)?;
 
             let mut elems: Vec<UnnestElem> = Vec::with_capacity(materialized.len());
             for (elem, isnull) in materialized.iter() {
@@ -159,7 +159,7 @@ fn unnest<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
             UnnestElem::ByRef(image) => {
                 let mut buf = mcx::PgVec::new_in(mcx);
                 buf.try_reserve(image.len())
-                    .unwrap_or_else(|_| std::panic::panic_any(mcx.oom(image.len())));
+                    .map_err(|_| mcx.oom(image.len()))?;
                 buf.extend_from_slice(image);
                 (Datum::ByRef(buf), false)
             }
@@ -168,13 +168,13 @@ fn unnest<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
         funcctx.call_cntr += 1;
         set_isdone(fcinfo, ExprDoneCond::ExprMultipleResult);
         fcinfo.isnull = isnull;
-        value
+        Ok(value)
     } else {
         // SRF_RETURN_DONE(funcctx).
         end_MultiFuncCall(fcinfo).expect("end_MultiFuncCall");
         set_isdone(fcinfo, ExprDoneCond::ExprEndResult);
         fcinfo.isnull = true;
-        Datum::null()
+        Ok(Datum::null())
     }
 }
 

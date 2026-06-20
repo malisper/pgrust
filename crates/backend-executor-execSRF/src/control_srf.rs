@@ -29,6 +29,7 @@
 use mcx::Mcx;
 use types_core::Oid;
 use types_datum::varlena::VARHDRSZ;
+use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
@@ -92,46 +93,42 @@ fn arg_bool(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
 //  pg_controldata.c — pg_control_* (no arguments).
 // ===========================================================================
 
-fn pg_control_system<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_control_system<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_utils_misc_more::pg_controldata::pg_control_system_datum(mcx)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
-fn pg_control_checkpoint<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_control_checkpoint<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_utils_misc_more::pg_controldata::pg_control_checkpoint_datum(mcx)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
-fn pg_control_recovery<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_control_recovery<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_utils_misc_more::pg_controldata::pg_control_recovery_datum(mcx)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
-fn pg_control_init<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_control_init<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_utils_misc_more::pg_controldata::pg_control_init_datum(mcx)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 // ===========================================================================
 //  genfile.c — pg_stat_file (text [, bool]).
 // ===========================================================================
 
-fn pg_stat_file<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_stat_file<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     let filename = arg_text(fcinfo, 0);
     let missing_ok = arg_bool(fcinfo, 1);
     // C: PG_NARGS() == 2 here.
     backend_utils_adt_misc2::admin::pg_stat_file(mcx, filename, missing_ok, true)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
-fn pg_stat_file_1arg<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_stat_file_1arg<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     let filename = arg_text(fcinfo, 0);
     backend_utils_adt_misc2::admin::pg_stat_file_1arg(mcx, filename)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }

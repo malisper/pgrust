@@ -20,6 +20,7 @@
 
 use mcx::Mcx;
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
@@ -45,15 +46,15 @@ fn srf_mcx<'mcx>(fcinfo: &FunctionCallInfoBaseData<'mcx>) -> Mcx<'mcx> {
 }
 
 /// `pg_options_to_table(PG_FUNCTION_ARGS)` (foreign.c) over the executor frame.
-fn pg_options_to_table<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_options_to_table<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_foreign_foreign::pg_options_to_table(mcx, fcinfo)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `pg_prepared_statement(PG_FUNCTION_ARGS)` (prepare.c) over the executor frame.
-fn pg_prepared_statement<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_prepared_statement<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_commands_prepare::pg_prepared_statement(mcx, fcinfo)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }

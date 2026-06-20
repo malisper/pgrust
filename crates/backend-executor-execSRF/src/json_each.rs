@@ -20,6 +20,7 @@
 
 use mcx::Mcx;
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
@@ -53,29 +54,25 @@ fn srf_mcx<'mcx>(fcinfo: &FunctionCallInfoBaseData<'mcx>) -> Mcx<'mcx> {
 }
 
 /// `json_each(PG_FUNCTION_ARGS)` (jsonfuncs.c:1950) over the executor frame.
-fn json_each<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn json_each<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_utils_adt_jsonfuncs::each::json_each(mcx, fcinfo)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `json_each_text(PG_FUNCTION_ARGS)` (jsonfuncs.c:1962) over the executor frame.
-fn json_each_text<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn json_each_text<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_utils_adt_jsonfuncs::each::json_each_text(mcx, fcinfo)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `jsonb_each(PG_FUNCTION_ARGS)` (jsonfuncs.c:1956) over the executor frame.
-fn jsonb_each<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn jsonb_each<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_utils_adt_jsonfuncs::each::jsonb_each(mcx, fcinfo)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `jsonb_each_text(PG_FUNCTION_ARGS)` (jsonfuncs.c:1968) over the executor frame.
-fn jsonb_each_text<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn jsonb_each_text<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_utils_adt_jsonfuncs::each::jsonb_each_text(mcx, fcinfo)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }

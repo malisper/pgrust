@@ -21,6 +21,7 @@ use core::any::Any;
 
 use mcx::{Mcx, PgBox};
 use types_core::{FullTransactionId, Oid};
+use types_error::PgResult;
 use types_nodes::execexpr::ExprDoneCond;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -78,7 +79,7 @@ fn erase_user_fctx<'mcx, T: Any>(mcx: Mcx<'mcx>, v: T) -> PgBox<'mcx, dyn Any> {
 }
 
 /// `pg_snapshot_xip(PG_FUNCTION_ARGS)` (xid8funcs.c:594) over the executor frame.
-fn pg_snapshot_xip<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_snapshot_xip<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx: Mcx<'mcx> = fcinfo
         .fn_mcxt
         .expect("pg_snapshot_xip: fn_mcxt set by the SRF caller");
@@ -91,12 +92,14 @@ fn pg_snapshot_xip<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'
             .ref_arg(0)
             .and_then(|p| p.as_varlena())
             .expect("pg_snapshot_xip: by-ref pg_snapshot arg missing from by-ref lane");
-        let snap = backend_utils_adt_xid8funcs::PgSnapshot::from_varlena_bytes(image)
-            .unwrap_or_else(|| {
-                std::panic::panic_any(types_error::PgError::error(
+        let snap = match backend_utils_adt_xid8funcs::PgSnapshot::from_varlena_bytes(image) {
+            Some(snap) => snap,
+            None => {
+                return Err(types_error::PgError::error(
                     "invalid pg_snapshot image".to_string(),
                 ))
-            });
+            }
+        };
         // The value sequence (snap->xip[0..nxip]); copied here, mirroring C's
         // copy of the whole snapshot into multi_call_memory_ctx.
         let xip = backend_utils_adt_xid8funcs::pg_snapshot_xip(&snap);
@@ -124,12 +127,12 @@ fn pg_snapshot_xip<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'
         funcctx.call_cntr += 1;
         set_isdone(fcinfo, ExprDoneCond::ExprMultipleResult);
         fcinfo.isnull = false;
-        Datum::from_u64(value.to_u64())
+        Ok(Datum::from_u64(value.to_u64()))
     } else {
         // SRF_RETURN_DONE(fctx).
         end_MultiFuncCall(fcinfo).expect("end_MultiFuncCall");
         set_isdone(fcinfo, ExprDoneCond::ExprEndResult);
         fcinfo.isnull = true;
-        Datum::null()
+        Ok(Datum::null())
     }
 }

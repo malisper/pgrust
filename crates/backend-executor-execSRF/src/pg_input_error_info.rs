@@ -18,6 +18,7 @@
 //! reached here through `rsinfo.expectedDesc`).
 
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
@@ -56,7 +57,7 @@ fn arg_text_payload<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [
 }
 
 /// `pg_input_error_info(PG_FUNCTION_ARGS)` (misc.c:716) over the executor frame.
-fn pg_input_error_info<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_input_error_info<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("pg_input_error_info: fn_mcxt set by the SRF caller");
@@ -81,10 +82,7 @@ fn pg_input_error_info<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Dat
     // parse); raise it through the one dispatch point every PGFunction crosses
     // (`invoke_pgfunction`'s `catch_unwind`), exactly as the fmgr-builtin
     // adapters do.
-    let info = match backend_utils_adt_misc::pg_input_error_info(txt, typname) {
-        Ok(info) => info,
-        Err(e) => std::panic::panic_any(e),
-    };
+    let info = backend_utils_adt_misc::pg_input_error_info(txt, typname)?;
 
     // C: heap_form_tuple(tupdesc, values, isnull). Each non-NULL column is a
     // CStringGetTextDatum (a `text` varlena `Datum::ByRef`); a missing
@@ -119,5 +117,5 @@ fn pg_input_error_info<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Dat
     // C: return HeapTupleGetDatum(...). One single-result row; the value-per-call
     // loop stores it and stops (isDone stays ExprSingleResult).
     fcinfo.isnull = false;
-    Datum::Composite(formed)
+    Ok(Datum::Composite(formed))
 }

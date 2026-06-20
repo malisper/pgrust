@@ -28,6 +28,7 @@
 
 use mcx::Mcx;
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
@@ -78,20 +79,18 @@ unsafe fn frame_mcx<'mcx>(
 
 /// `json_to_recordset(PG_FUNCTION_ARGS)` (jsonfuncs.c:3995) over the executor
 /// frame.
-fn json_to_recordset<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn json_to_recordset<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     // SAFETY: see `frame_mcx`.
     let frame = unsafe { frame_mcx(fcinfo) };
     backend_utils_adt_jsonfuncs::recordset::json_to_recordset(mcx, frame)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `jsonb_to_recordset(PG_FUNCTION_ARGS)` (jsonfuncs.c:3981) over the executor
 /// frame.
-fn jsonb_to_recordset<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn jsonb_to_recordset<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     // SAFETY: see `frame_mcx`.
     let frame = unsafe { frame_mcx(fcinfo) };
     backend_utils_adt_jsonfuncs::recordset::jsonb_to_recordset(mcx, frame)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }

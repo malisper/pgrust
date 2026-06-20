@@ -21,6 +21,7 @@ use core::any::Any;
 use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_nodes::execexpr::ExprDoneCond;
+use types_error::PgResult;
 use types_nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::backend_access_common_heaptuple::Datum;
 
@@ -84,7 +85,7 @@ fn arg_text_payload(fcinfo: &FunctionCallInfoBaseData<'_>, index: usize) -> Vec<
 /// `regexp_matches(PG_FUNCTION_ARGS)` (regexp.c) over the executor frame. Drives
 /// the value-per-call protocol; `SRF_RETURN_NEXT` / `SRF_RETURN_DONE` are the
 /// `isDone` writes + the multi-call teardown.
-fn regexp_matches<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn regexp_matches<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("regexp_matches: fn_mcxt set by the SRF caller");
@@ -112,8 +113,7 @@ fn regexp_matches<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'m
                 &pattern,
                 flags.as_deref(),
                 collation,
-            )
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+            )?;
 
             materialized
                 .iter()
@@ -150,24 +150,24 @@ fn regexp_matches<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'m
             .iter()
             .map(|e| e.as_ref().map(|p| p.as_slice()))
             .collect();
-        let image = backend_utils_adt_arrayfuncs::construct::build_text_array_nullable(mcx, &views)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        let image =
+            backend_utils_adt_arrayfuncs::construct::build_text_array_nullable(mcx, &views)?;
         let mut buf = mcx::PgVec::new_in(mcx);
         buf.try_reserve(image.len())
-            .unwrap_or_else(|_| std::panic::panic_any(mcx.oom(image.len())));
+            .map_err(|_| mcx.oom(image.len()))?;
         buf.extend_from_slice(image.as_slice());
 
         state.next += 1;
         funcctx.call_cntr += 1;
         set_isdone(fcinfo, ExprDoneCond::ExprMultipleResult);
         fcinfo.isnull = false;
-        Datum::ByRef(buf)
+        Ok(Datum::ByRef(buf))
     } else {
         // SRF_RETURN_DONE(funcctx).
         end_MultiFuncCall(fcinfo).expect("end_MultiFuncCall");
         set_isdone(fcinfo, ExprDoneCond::ExprEndResult);
         fcinfo.isnull = true;
-        Datum::null()
+        Ok(Datum::null())
     }
 }
 

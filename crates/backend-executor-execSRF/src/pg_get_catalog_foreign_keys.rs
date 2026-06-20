@@ -28,6 +28,7 @@ use mcx::Mcx;
 use types_core::Oid;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
+use types_error::PgResult;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_utils_fmgr_funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
@@ -47,17 +48,19 @@ pub(crate) fn register_pg_get_catalog_foreign_keys() {
 /// into the per-query context. The image already carries a complete varlena
 /// header (the array constructor emits one), so it round-trips header-for-header
 /// through the tuplestore / printtup output lane.
-fn byref_image<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> Datum<'mcx> {
+fn byref_image<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum<'mcx>> {
     let mut buf = mcx::PgVec::new_in(mcx);
     buf.try_reserve(image.len())
-        .unwrap_or_else(|_| std::panic::panic_any(mcx.oom(image.len())));
+        .map_err(|_| mcx.oom(image.len()))?;
     buf.extend_from_slice(image);
-    Datum::ByRef(buf)
+    Ok(Datum::ByRef(buf))
 }
 
 /// `pg_get_catalog_foreign_keys(PG_FUNCTION_ARGS)` (misc.c) over the executor
 /// frame.
-fn pg_get_catalog_foreign_keys<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_get_catalog_foreign_keys<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx: Mcx<'mcx> = fcinfo
         .fn_mcxt
         .expect("pg_get_catalog_foreign_keys: fn_mcxt set by ExecMakeTableFunctionResult");
@@ -65,13 +68,11 @@ fn pg_get_catalog_foreign_keys<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>
     // The catalog foreign-key render core (the sys_fk_relationships[] walk; pure
     // static catalog metadata). `fkcols`/`pkcols` are the decoded text[] element
     // byte strings (C: array_in result elements).
-    let rows = backend_utils_adt_misc::pg_get_catalog_foreign_keys()
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    let rows = backend_utils_adt_misc::pg_get_catalog_foreign_keys()?;
 
     // C: get_call_result_type → the (regclass, text[], regclass, text[], bool,
     // bool) row type. Take the executor's already-resolved descriptor.
-    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)?;
 
     let rsinfo = fcinfo
         .resultinfo
@@ -83,28 +84,25 @@ fn pg_get_catalog_foreign_keys<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>
         // text[] on-disk image (construct_array_builtin(elems, n, TEXTOID)) and
         // place it on the by-reference Datum lane.
         let fkcols_img =
-            backend_utils_adt_array_more_seams::construct_text_array::call(&row.fkcols)
-                .unwrap_or_else(|e| std::panic::panic_any(e));
+            backend_utils_adt_array_more_seams::construct_text_array::call(&row.fkcols)?;
         let pkcols_img =
-            backend_utils_adt_array_more_seams::construct_text_array::call(&row.pkcols)
-                .unwrap_or_else(|e| std::panic::panic_any(e));
+            backend_utils_adt_array_more_seams::construct_text_array::call(&row.pkcols)?;
 
         // Catalog column order: (fktable regclass, fkcols text[], pktable
         // regclass, pkcols text[], is_array bool, is_opt bool).
         let values = [
             Datum::from_oid(row.fktable),
-            byref_image(mcx, &fkcols_img),
+            byref_image(mcx, &fkcols_img)?,
             Datum::from_oid(row.pktable),
-            byref_image(mcx, &pkcols_img),
+            byref_image(mcx, &pkcols_img)?,
             Datum::from_bool(row.is_array),
             Datum::from_bool(row.is_opt),
         ];
         let nulls = [false, false, false, false, false, false];
-        materialized_srf_putvalues(rsinfo, &values, &nulls)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        materialized_srf_putvalues(rsinfo, &values, &nulls)?;
     }
 
     // C: SRF_RETURN_DONE — the whole set is in the materialize tuplestore.
     fcinfo.isnull = true;
-    Datum::null()
+    Ok(Datum::null())
 }

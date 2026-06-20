@@ -22,6 +22,7 @@
 
 use mcx::Mcx;
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
@@ -62,26 +63,27 @@ fn srf_mcx<'mcx>(fcinfo: &FunctionCallInfoBaseData<'mcx>) -> Mcx<'mcx> {
 
 /// `jsonb_array_elements(PG_FUNCTION_ARGS)` (jsonfuncs.c:2207) over the executor
 /// frame.
-fn jsonb_array_elements<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn jsonb_array_elements<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_utils_adt_jsonfuncs::elements::jsonb_array_elements(mcx, fcinfo)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `jsonb_array_elements_text(PG_FUNCTION_ARGS)` (jsonfuncs.c:2213) over the
 /// executor frame.
-fn jsonb_array_elements_text<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn jsonb_array_elements_text<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_utils_adt_jsonfuncs::elements::jsonb_array_elements_text(mcx, fcinfo)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 /// `jsonb_object_keys(PG_FUNCTION_ARGS)` (jsonfuncs.c:568) over the executor
 /// frame.
-fn jsonb_object_keys<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn jsonb_object_keys<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     backend_utils_adt_jsonfuncs::keys::jsonb_object_keys(mcx, fcinfo)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
 }
 
 // ===========================================================================
@@ -165,31 +167,30 @@ fn put_jsonb_path_rows<'mcx>(
 
 /// `jsonb_path_query(PG_FUNCTION_ARGS)` (jsonpath_exec.c:572) over the executor
 /// frame.
-fn jsonb_path_query<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
-    let mcx = srf_mcx(fcinfo);
-    let jb = arg_jsonb_image(fcinfo, 0).to_vec();
-    let jp = arg_jsonpath_image(fcinfo, 1).to_vec();
-    let vars = arg_jsonb_image(fcinfo, 2).to_vec();
-    let silent = arg_bool(fcinfo, 3);
-    let images = backend_utils_adt_jsonpath_exec::jsonb_path_query(mcx, &jb, &jp, Some(&vars), silent)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
-    put_jsonb_path_rows(mcx, fcinfo, images).unwrap_or_else(|e| std::panic::panic_any(e));
-    // PG_RETURN_NULL();
-    Datum::null()
-}
-
-/// `jsonb_path_query_tz(PG_FUNCTION_ARGS)` (jsonpath_exec.c:578) over the executor
-/// frame.
-fn jsonb_path_query_tz<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn jsonb_path_query<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = srf_mcx(fcinfo);
     let jb = arg_jsonb_image(fcinfo, 0).to_vec();
     let jp = arg_jsonpath_image(fcinfo, 1).to_vec();
     let vars = arg_jsonb_image(fcinfo, 2).to_vec();
     let silent = arg_bool(fcinfo, 3);
     let images =
-        backend_utils_adt_jsonpath_exec::jsonb_path_query_tz(mcx, &jb, &jp, Some(&vars), silent)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
-    put_jsonb_path_rows(mcx, fcinfo, images).unwrap_or_else(|e| std::panic::panic_any(e));
+        backend_utils_adt_jsonpath_exec::jsonb_path_query(mcx, &jb, &jp, Some(&vars), silent)?;
+    put_jsonb_path_rows(mcx, fcinfo, images)?;
     // PG_RETURN_NULL();
-    Datum::null()
+    Ok(Datum::null())
+}
+
+/// `jsonb_path_query_tz(PG_FUNCTION_ARGS)` (jsonpath_exec.c:578) over the executor
+/// frame.
+fn jsonb_path_query_tz<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
+    let mcx = srf_mcx(fcinfo);
+    let jb = arg_jsonb_image(fcinfo, 0).to_vec();
+    let jp = arg_jsonpath_image(fcinfo, 1).to_vec();
+    let vars = arg_jsonb_image(fcinfo, 2).to_vec();
+    let silent = arg_bool(fcinfo, 3);
+    let images =
+        backend_utils_adt_jsonpath_exec::jsonb_path_query_tz(mcx, &jb, &jp, Some(&vars), silent)?;
+    put_jsonb_path_rows(mcx, fcinfo, images)?;
+    // PG_RETURN_NULL();
+    Ok(Datum::null())
 }

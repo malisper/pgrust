@@ -32,6 +32,7 @@ use types_core::Oid;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_storage::lock::AccessShareLock;
+use types_error::PgResult;
 use types_tuple::backend_access_common_heaptuple::Datum;
 
 use backend_utils_fmgr_funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
@@ -65,30 +66,26 @@ fn relkind_has_partitions(relkind: u8) -> bool {
 /// partitioned table/index). A missing relation, or one that is neither a
 /// partition nor a partitioned table/index, yields `false` (C: the function
 /// returns an empty set in those cases).
-fn check_rel_can_be_partition(relid: Oid) -> bool {
+fn check_rel_can_be_partition(relid: Oid) -> PgResult<bool> {
     // C: if (!SearchSysCacheExists1(RELOID, ...)) return false;
-    if !backend_utils_cache_syscache_seams::reloid_exists::call(relid)
-        .unwrap_or_else(|e| std::panic::panic_any(e))
-    {
-        return false;
+    if !backend_utils_cache_syscache_seams::reloid_exists::call(relid)? {
+        return Ok(false);
     }
 
-    let relkind = backend_utils_cache_lsyscache_seams::get_rel_relkind::call(relid)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
-    let relispartition = backend_utils_cache_lsyscache_seams::get_rel_relispartition::call(relid)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    let relkind = backend_utils_cache_lsyscache_seams::get_rel_relkind::call(relid)?;
+    let relispartition = backend_utils_cache_lsyscache_seams::get_rel_relispartition::call(relid)?;
 
     // C: only relations that can appear in partition trees.
     if !relispartition && !relkind_has_partitions(relkind) {
-        return false;
+        return Ok(false);
     }
 
-    true
+    Ok(true)
 }
 
 /// `pg_partition_tree(PG_FUNCTION_ARGS)` (partitionfuncs.c) over the executor
 /// frame.
-fn pg_partition_tree<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_partition_tree<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("pg_partition_tree: fn_mcxt set by ExecMakeTableFunctionResult");
@@ -99,13 +96,12 @@ fn pg_partition_tree<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum
     // C: if (!check_rel_can_be_partition(rootrelid)) SRF_RETURN_DONE — an empty
     // materialize set. InitMaterializedSRF still establishes the empty
     // tuplestore so the executor drains zero rows.
-    let can_be_partition = check_rel_can_be_partition(rootrelid);
+    let can_be_partition = check_rel_can_be_partition(rootrelid)?;
 
     // C: list of members via find_all_inheritors(rootrelid, AccessShareLock,
     // NULL) — the root plus every descendant partition, breadth-first.
     let members: alloc::vec::Vec<Oid> = if can_be_partition {
-        backend_catalog_pg_inherits_seams::find_all_inheritors::call(mcx, rootrelid, AccessShareLock)
-            .unwrap_or_else(|e| std::panic::panic_any(e))
+        backend_catalog_pg_inherits_seams::find_all_inheritors::call(mcx, rootrelid, AccessShareLock)?
             .iter()
             .copied()
             .collect()
@@ -113,8 +109,7 @@ fn pg_partition_tree<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum
         alloc::vec::Vec::new()
     };
 
-    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)?;
 
     let rsinfo = fcinfo
         .resultinfo
@@ -124,11 +119,9 @@ fn pg_partition_tree<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum
     for relid in members {
         // C inner block: relkind = get_rel_relkind(relid); ancestors =
         // get_partition_ancestors(relid).
-        let relkind = backend_utils_cache_lsyscache_seams::get_rel_relkind::call(relid)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        let relkind = backend_utils_cache_lsyscache_seams::get_rel_relkind::call(relid)?;
         let ancestors: alloc::vec::Vec<Oid> =
-            backend_catalog_partition_seams::get_partition_ancestors::call(mcx, relid)
-                .unwrap_or_else(|e| std::panic::panic_any(e))
+            backend_catalog_partition_seams::get_partition_ancestors::call(mcx, relid)?
                 .iter()
                 .copied()
                 .collect();
@@ -163,18 +156,19 @@ fn pg_partition_tree<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum
 
         let values = [relid_d, parent_d, isleaf_d, level_d];
         let nulls = [false, parent_null, false, false];
-        materialized_srf_putvalues(rsinfo, &values, &nulls)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        materialized_srf_putvalues(rsinfo, &values, &nulls)?;
     }
 
     // C: SRF_RETURN_DONE.
     fcinfo.isnull = true;
-    Datum::null()
+    Ok(Datum::null())
 }
 
 /// `pg_partition_ancestors(PG_FUNCTION_ARGS)` (partitionfuncs.c) over the
 /// executor frame.
-fn pg_partition_ancestors<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_partition_ancestors<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("pg_partition_ancestors: fn_mcxt set by ExecMakeTableFunctionResult");
@@ -185,12 +179,11 @@ fn pg_partition_ancestors<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> 
     // C: if (!check_rel_can_be_partition(relid)) SRF_RETURN_DONE — empty set.
     // ancestors = lcons_oid(relid, get_partition_ancestors(relid)): the relation
     // itself first, then each ancestor (immediate parent first, root last).
-    let ancestors: alloc::vec::Vec<Oid> = if check_rel_can_be_partition(relid) {
+    let ancestors: alloc::vec::Vec<Oid> = if check_rel_can_be_partition(relid)? {
         let mut v: alloc::vec::Vec<Oid> = alloc::vec::Vec::new();
         v.push(relid);
         v.extend(
-            backend_catalog_partition_seams::get_partition_ancestors::call(mcx, relid)
-                .unwrap_or_else(|e| std::panic::panic_any(e))
+            backend_catalog_partition_seams::get_partition_ancestors::call(mcx, relid)?
                 .iter()
                 .copied(),
         );
@@ -199,8 +192,7 @@ fn pg_partition_ancestors<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> 
         alloc::vec::Vec::new()
     };
 
-    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)?;
 
     let rsinfo = fcinfo
         .resultinfo
@@ -211,11 +203,10 @@ fn pg_partition_ancestors<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> 
         // values[0] = relid (regclass).
         let values = [Datum::from_oid(relid)];
         let nulls = [false];
-        materialized_srf_putvalues(rsinfo, &values, &nulls)
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        materialized_srf_putvalues(rsinfo, &values, &nulls)?;
     }
 
     // C: SRF_RETURN_DONE.
     fcinfo.isnull = true;
-    Datum::null()
+    Ok(Datum::null())
 }

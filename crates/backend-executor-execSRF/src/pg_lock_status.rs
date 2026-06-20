@@ -25,6 +25,7 @@
 
 use mcx::Mcx;
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
 use types_nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -42,7 +43,7 @@ pub(crate) fn register_pg_lock_status() {
 }
 
 /// `pg_lock_status(PG_FUNCTION_ARGS)` (lockfuncs.c) over the executor frame.
-fn pg_lock_status<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn pg_lock_status<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx: Mcx<'mcx> = fcinfo
         .fn_mcxt
         .expect("pg_lock_status: fn_mcxt set by ExecMakeTableFunctionResult");
@@ -50,13 +51,11 @@ fn pg_lock_status<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'m
     // C: GetLockStatusData() + GetPredicateLockStatusData() under their locks,
     // then the per-PROCLOCK holdMask expansion + 16-column projection. Run the
     // snapshot-and-project core (lockfuncs.c's owner).
-    let rows = backend_utils_adt_misc2::admin::pg_lock_status_rows(mcx)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    let rows = backend_utils_adt_misc2::admin::pg_lock_status_rows(mcx)?;
 
     // C: get_call_result_type → the 16-column row type. Take the executor's
     // already-resolved descriptor.
-    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+    InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)?;
 
     let rsinfo = fcinfo
         .resultinfo
@@ -65,11 +64,10 @@ fn pg_lock_status<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'m
 
     for (values, nulls) in &rows {
         // C: heap_form_tuple(tupdesc, values, nulls); SRF_RETURN_NEXT(...).
-        materialized_srf_putvalues(rsinfo, &values[..], &nulls[..])
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+        materialized_srf_putvalues(rsinfo, &values[..], &nulls[..])?;
     }
 
     // C: SRF_RETURN_DONE — the whole set is in the materialize tuplestore.
     fcinfo.isnull = true;
-    Datum::null()
+    Ok(Datum::null())
 }

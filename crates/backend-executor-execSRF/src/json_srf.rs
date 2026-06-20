@@ -26,6 +26,7 @@ use core::any::Any;
 
 use mcx::{Mcx, PgBox};
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::execexpr::ExprDoneCond;
 use types_nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -94,13 +95,15 @@ fn arg_json_payload(fcinfo: &FunctionCallInfoBaseData<'_>, index: usize) -> Vec<
 
 /// `json_array_elements(PG_FUNCTION_ARGS)` (jsonfuncs.c:2295) over the executor
 /// frame.
-fn json_array_elements<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn json_array_elements<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     json_array_elements_impl(fcinfo, "json_array_elements", false)
 }
 
 /// `json_array_elements_text(PG_FUNCTION_ARGS)` (jsonfuncs.c:2301) over the
 /// executor frame.
-fn json_array_elements_text<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn json_array_elements_text<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     json_array_elements_impl(fcinfo, "json_array_elements_text", true)
 }
 
@@ -111,7 +114,7 @@ fn json_array_elements_impl<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     funcname: &str,
     as_text: bool,
-) -> Datum<'mcx> {
+) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("json_array_elements: fn_mcxt set by the SRF caller");
@@ -120,8 +123,7 @@ fn json_array_elements_impl<'mcx>(
     if fcinfo.fn_extra.is_none() {
         let rows: Vec<Row> = {
             let json = arg_json_payload(fcinfo, 0);
-            backend_utils_adt_jsonfuncs::elements::elements_worker(&json, funcname, as_text)
-                .unwrap_or_else(|e| std::panic::panic_any(e))
+            backend_utils_adt_jsonfuncs::elements::elements_worker(&json, funcname, as_text)?
         };
         init_MultiFuncCall(fcinfo).expect("init_MultiFuncCall");
         let fctx = erase_user_fctx(
@@ -140,7 +142,7 @@ fn json_array_elements_impl<'mcx>(
 }
 
 /// `json_object_keys(PG_FUNCTION_ARGS)` (jsonfuncs.c:601) over the executor frame.
-fn json_object_keys<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn json_object_keys<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("json_object_keys: fn_mcxt set by the SRF caller");
@@ -149,8 +151,7 @@ fn json_object_keys<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<
     if fcinfo.fn_extra.is_none() {
         let rows: Vec<Row> = {
             let json = arg_json_payload(fcinfo, 0);
-            backend_utils_adt_jsonfuncs::keys::json_object_keys_worker(&json)
-                .unwrap_or_else(|e| std::panic::panic_any(e))
+            backend_utils_adt_jsonfuncs::keys::json_object_keys_worker(&json)?
                 .into_iter()
                 .map(Some)
                 .collect()
@@ -176,7 +177,7 @@ fn json_object_keys<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<
 fn emit_next<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     mcx: Mcx<'mcx>,
-) -> Datum<'mcx> {
+) -> PgResult<Datum<'mcx>> {
     let funcctx = per_MultiFuncCall(fcinfo).expect("per_MultiFuncCall");
     let state: &mut JsonSrfFctx = funcctx
         .user_fctx
@@ -189,8 +190,7 @@ fn emit_next<'mcx>(
         let (value, isnull): (Datum<'mcx>, bool) = match &state.rows[state.next] {
             None => (Datum::null(), true),
             Some(bytes) => (
-                backend_utils_adt_varlena_seams::bytes_to_varlena_v::call(mcx, bytes)
-                    .unwrap_or_else(|e| std::panic::panic_any(e)),
+                backend_utils_adt_varlena_seams::bytes_to_varlena_v::call(mcx, bytes)?,
                 false,
             ),
         };
@@ -198,12 +198,12 @@ fn emit_next<'mcx>(
         funcctx.call_cntr += 1;
         set_isdone(fcinfo, ExprDoneCond::ExprMultipleResult);
         fcinfo.isnull = isnull;
-        value
+        Ok(value)
     } else {
         end_MultiFuncCall(fcinfo).expect("end_MultiFuncCall");
         set_isdone(fcinfo, ExprDoneCond::ExprEndResult);
         fcinfo.isnull = true;
-        Datum::null()
+        Ok(Datum::null())
     }
 }
 

@@ -28,6 +28,7 @@ use core::any::Any;
 
 use mcx::{Mcx, PgBox};
 use types_core::Oid;
+use types_error::PgResult;
 use types_nodes::execexpr::ExprDoneCond;
 use types_nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::backend_access_common_heaptuple::Datum;
@@ -87,7 +88,9 @@ fn arg_text_payload(fcinfo: &FunctionCallInfoBaseData<'_>, index: usize) -> Vec<
 /// `regexp_split_to_table(PG_FUNCTION_ARGS)` (regexp.c) over the executor frame.
 /// Drives the value-per-call protocol; `SRF_RETURN_NEXT` / `SRF_RETURN_DONE` are
 /// the `isDone` writes + the multi-call teardown.
-fn regexp_split_to_table<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx> {
+fn regexp_split_to_table<'mcx>(
+    fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
+) -> PgResult<Datum<'mcx>> {
     let mcx = fcinfo
         .fn_mcxt
         .expect("regexp_split_to_table: fn_mcxt set by the SRF caller");
@@ -119,8 +122,7 @@ fn regexp_split_to_table<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> D
                 &pattern,
                 flags.as_deref(),
                 collation,
-            )
-            .unwrap_or_else(|e| std::panic::panic_any(e));
+            )?;
 
             materialized.iter().map(|r| r.as_slice().to_vec()).collect()
         };
@@ -146,19 +148,18 @@ fn regexp_split_to_table<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> D
         let datum = backend_utils_adt_varlena_seams::bytes_to_varlena_v::call(
             mcx,
             &state.rows[state.next],
-        )
-        .unwrap_or_else(|e| std::panic::panic_any(e));
+        )?;
         state.next += 1;
         funcctx.call_cntr += 1;
         set_isdone(fcinfo, ExprDoneCond::ExprMultipleResult);
         fcinfo.isnull = false;
-        datum
+        Ok(datum)
     } else {
         // SRF_RETURN_DONE(funcctx).
         end_MultiFuncCall(fcinfo).expect("end_MultiFuncCall");
         set_isdone(fcinfo, ExprDoneCond::ExprEndResult);
         fcinfo.isnull = true;
-        Datum::null()
+        Ok(Datum::null())
     }
 }
 
