@@ -317,6 +317,50 @@ fc_in!(fc_anycompatiblerange_in, crate::anycompatiblerange_in);
 fc_in!(fc_anymultirange_in, crate::anymultirange_in);
 fc_in!(fc_anycompatiblemultirange_in, crate::anycompatiblemultirange_in);
 
+/// `return range_out(fcinfo)` / `return multirange_out(fcinfo)` — the pseudotype
+/// output functions for `anyrange`/`anycompatiblerange` (pseudotypes.c
+/// `anyrange_out`/`anycompatiblerange_out`) and `anymultirange`/
+/// `anycompatiblemultirange` (`anymultirange_out`/`anycompatiblemultirange_out`)
+/// each tail-call the concrete range/multirange output function. In C this is a
+/// direct C call into `range_out`/`multirange_out` with the same `fcinfo`; the
+/// owned port mirrors it by invoking the already-registered Result-native body
+/// of the target OID with the same `fcinfo` (the range value rides in unchanged
+/// on the same arg, the rendered cstring back out on the same by-ref result
+/// lane). `range_out` is OID 3835, `multirange_out` is OID 4232 (pg_proc.dat).
+fn fc_out_delegate(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    target_oid: u32,
+    pseudotype: &str,
+) -> PgResult<Datum> {
+    let native = backend_utils_fmgr_core::native_builtin(target_oid).ok_or_else(|| {
+        types_error::PgError::error(alloc::format!(
+            "{pseudotype}: concrete output function (OID {target_oid}) is not registered"
+        ))
+    })?;
+    native(fcinfo)
+}
+
+/// `anyrange_out` (pseudotypes.c:210): `return range_out(fcinfo)`.
+fn fc_anyrange_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    fc_out_delegate(fcinfo, 3835, "anyrange_out")
+}
+
+/// `anycompatiblerange_out` (pseudotypes.c:223): `return range_out(fcinfo)`.
+fn fc_anycompatiblerange_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    fc_out_delegate(fcinfo, 3835, "anycompatiblerange_out")
+}
+
+/// `anymultirange_out` (pseudotypes.c:236): `return multirange_out(fcinfo)`.
+fn fc_anymultirange_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    fc_out_delegate(fcinfo, 4232, "anymultirange_out")
+}
+
+/// `anycompatiblemultirange_out` (pseudotypes.c:249): `return
+/// multirange_out(fcinfo)`.
+fn fc_anycompatiblemultirange_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    fc_out_delegate(fcinfo, 4232, "anycompatiblemultirange_out")
+}
+
 // --- pg_node_tree (in/recv throw; out/send are real) ---
 fc_in!(fc_pg_node_tree_in, crate::pg_node_tree_in);
 fc_recv!(fc_pg_node_tree_recv, crate::pg_node_tree_recv);
@@ -470,9 +514,13 @@ pub fn register_pseudotypes_builtins() {
         builtin(5091, "anycompatiblearray_send", 1, true, false, fc_anycompatiblearray_send),
         builtin(3505, "anyenum_out", 1, true, false, fc_anyenum_out),
         builtin(3832, "anyrange_in", 3, true, false, fc_anyrange_in),
+        builtin(3833, "anyrange_out", 1, true, false, fc_anyrange_out),
         builtin(5094, "anycompatiblerange_in", 3, true, false, fc_anycompatiblerange_in),
+        builtin(5095, "anycompatiblerange_out", 1, true, false, fc_anycompatiblerange_out),
         builtin(4229, "anymultirange_in", 3, true, false, fc_anymultirange_in),
+        builtin(4230, "anymultirange_out", 1, true, false, fc_anymultirange_out),
         builtin(4226, "anycompatiblemultirange_in", 3, true, false, fc_anycompatiblemultirange_in),
+        builtin(4227, "anycompatiblemultirange_out", 1, true, false, fc_anycompatiblemultirange_out),
         // ---- pg_node_tree (in/recv throw; out/send delegate to text I/O) ----
         builtin(195, "pg_node_tree_in", 1, true, false, fc_pg_node_tree_in),
         builtin(196, "pg_node_tree_out", 1, true, false, fc_pg_node_tree_out),
