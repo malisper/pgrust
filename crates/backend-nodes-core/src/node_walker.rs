@@ -1488,8 +1488,33 @@ pub fn range_table_mutator<'mcx>(
         match rte.rtekind {
             RTEKind::RTE_SUBQUERY => {
                 if flags & QTW_IGNORE_RT_SUBQUERIES == 0 {
-                    if let Some(sub) = rte.subquery.as_deref_mut() {
-                        if query_tree_mutator(sub, mutator, flags, mcx) {
+                    if let Some(boxed) = rte.subquery.take() {
+                        // C: `MUTATE(newrte->subquery, rte->subquery, Query *)`.
+                        // MUTATE invokes the user *mutator* on the sub-`Query`
+                        // node — it does NOT recurse via `query_tree_mutator`
+                        // directly. A mutator that does per-`Query` bookkeeping
+                        // before descending (e.g. ChangeVarNodes bumping
+                        // `sublevels_up` in its `T_Query` arm) must see the
+                        // `Query` node itself; calling `query_tree_mutator`
+                        // here would skip that and walk the subquery's jointree
+                        // at the wrong level. So wrap the subquery as a
+                        // `Node::Query`, invoke the mutator, and store the
+                        // (mutated) `Query` back — exactly like C.
+                        let q = mcx::PgBox::into_inner(boxed);
+                        let mut node = match Node::mk_query(mcx, q) {
+                            Ok(n) => n,
+                            Err(_) => return false,
+                        };
+                        let aborted = mutator(&mut node);
+                        let q = match node.into_query() {
+                            Some(q) => q,
+                            None => return false,
+                        };
+                        rte.subquery = match mcx::alloc_in(mcx, q) {
+                            Ok(b) => Some(b),
+                            Err(_) => return false,
+                        };
+                        if aborted {
                             return true;
                         }
                     }
