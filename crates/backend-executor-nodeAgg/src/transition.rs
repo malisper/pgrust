@@ -227,8 +227,16 @@ pub fn advance_transition_function<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     pertrans: &mut AggStatePerTransData<'mcx>,
     pergroupstate: &mut AggStatePerGroupData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // FunctionCallInfo fcinfo = pertrans->transfn_fcinfo;
+    //
+    // This is the ordered/distinct drain path (process_ordered_aggregate_*).
+    // The single-input drain loads the just-fetched sorted column into C's
+    // `fcinfo->args[1]`; the owned model carries that by-ref-faithful value on
+    // `pertrans->distinct_value` / `distinct_value_isnull` (see `fcinfo_set_arg`
+    // / the per-trans frame doc). Only `args[1]` is modeled here (single column);
+    // the multi-column variant is gated separately on slot deform.
     let _ = pertrans.transfn_fcinfo.as_ref();
 
     if transfn_is_strict(pertrans) {
@@ -255,11 +263,13 @@ pub fn advance_transition_function<'mcx>(
             // pergroupstate->transValue = datumCopy(fcinfo->args[1].value,
             //   pertrans->transtypeByVal, pertrans->transtypeLen);
             let arg1_value = fcinfo_arg_value(pertrans, 1);
-            curaggcontext_assert_built(aggstate);
-            pergroupstate.trans_value = datum_copy_into(
+            let aggcontext = curaggcontext_ecxt(aggstate);
+            pergroupstate.trans_value = datum_copy_into_ecxt(
                 arg1_value,
                 pertrans.transtype_by_val,
                 pertrans.transtype_len,
+                aggcontext,
+                estate,
             )?;
             pergroupstate.trans_value_is_null = false;
             pergroupstate.no_trans_value = false;
@@ -289,39 +299,53 @@ pub fn advance_transition_function<'mcx>(
     //   newVal = FunctionCallInvoke(fcinfo);
     //   aggstate->curpertrans = NULL;
     //
-    // FunctionCallInvoke + InitFunctionCallInfoData ARE ported (fmgr-core, #52)
-    // and `transfn_fcinfo` is now BUILT by build_pertrans_for_aggref (#324/#165)
-    // WITH the live-AggState `fcinfo.context` back-reference installed (K1: the
-    // `FmgrCallContext::Agg(AggStateContextLink)` channel — a transfn that calls
-    // AggCheckCallContext / AggGetAggref / AggStateIsShared now reaches the
-    // AggState through `(AggState *) fcinfo->context`). The remaining residual on
-    // THIS deobfuscated invoke path is that the by-value transfn dispatch the
-    // executor actually uses re-resolves by OID through the
-    // `function_call_invoke` seam (fn_oid, collation, &args), which does NOT
-    // thread `fcinfo.context` to the callee — so a transfn reached via this seam
-    // still observes a context-less frame. Threading context across that seam is
-    // the (K2-class) `function_call_invoke` re-sign, deferred with the std/no_std
-    // `FunctionCallInfoBaseData` dual-home (DESIGN_DEBT). `ExecAggCopyTransValue`
-    // (the by-ref transValue reparent) is the secondary residual. The plain
-    // count(*) / int8inc path ignores both context and by-ref copy, so it is not
-    // gated by either; ExecInitAgg construction is complete and returns a real
-    // AggStateData carrying the K1 context link.
-    //
+    // The transfn is dispatched through the owned by-value seam
+    // (`invoke_transfn` -> `function_call_invoke_datum_owned`), which moves the
+    // running state (a `Datum::Internal` box for `internal`-transtype aggregates)
+    // through the fcinfo side channel and stamps the live-AggState `fcinfo.context`
+    // tag (K1/K2: `AggCheckCallContext` reaches back via the call-context channel).
+    // arg[1] is the single ordered/distinct input on `distinct_value`.
+    let trans_value = pergroupstate.trans_value.clone();
+    let trans_value_is_null = pergroupstate.trans_value_is_null;
+    let input_args = [pertrans.distinct_value.clone()];
+    let input_args_null = [pertrans.distinct_value_isnull];
+    let mcx = estate.es_query_cxt;
+    let (new_val, isnull) = invoke_transfn(
+        pertrans,
+        trans_value.clone(),
+        trans_value_is_null,
+        &input_args,
+        &input_args_null,
+        mcx,
+    )?;
+
     //   if (!pertrans->transtypeByVal &&
     //       DatumGetPointer(newVal) != DatumGetPointer(pergroupstate->transValue))
     //       newVal = ExecAggCopyTransValue(...);
     //   pergroupstate->transValue = newVal;
     //   pergroupstate->transValueIsNull = fcinfo->isnull;
-    panic!(
-        "backend-executor-nodeAgg::advance_transition_function: runtime residual \
-         — the live-AggState `fcinfo.context` channel now works (K1), but the \
-         by-value transfn dispatch (`function_call_invoke` seam, fn_oid/collation/&args) \
-         does not thread fcinfo.context to the callee (the K2-class seam re-sign, \
-         deferred with the FunctionCallInfoBaseData dual-home), and \
-         ExecAggCopyTransValue (by-ref transValue reparent) is unported \
-         (transtypeByVal={})",
-        pertrans.transtype_by_val
-    );
+    let transtype_by_val = pertrans.transtype_by_val;
+    let transtype_len = pertrans.transtype_len;
+    let aggcontext = curaggcontext_ecxt(aggstate);
+    let new_val = if !transtype_by_val && !datum_ptr_eq(&new_val, &trans_value) {
+        ExecAggCopyTransValue(
+            aggstate,
+            aggstate.curpertrans.max(0) as usize,
+            new_val,
+            isnull,
+            trans_value,
+            trans_value_is_null,
+            transtype_by_val,
+            transtype_len,
+            aggcontext,
+            estate,
+        )?
+    } else {
+        new_val
+    };
+    pergroupstate.trans_value = new_val;
+    pergroupstate.trans_value_is_null = isnull;
+    Ok(())
 }
 
 /// `advance_aggregates(aggstate)` — run the compiled `evaltrans` expression
@@ -714,7 +738,7 @@ pub fn process_ordered_aggregate_single<'mcx>(
             // MemoryContextSwitchTo(oldContext); continue;
             continue;
         } else {
-            advance_transition_function(aggstate, pertrans, pergroupstate)?;
+            advance_transition_function(aggstate, pertrans, pergroupstate, estate)?;
 
             // MemoryContextSwitchTo(oldContext);
 
@@ -734,6 +758,7 @@ pub fn process_ordered_aggregate_single<'mcx>(
                         new_val.clone(),
                         pertrans.inputtype_by_val,
                         pertrans.inputtype_len,
+                        estate,
                     )?;
                 }
             } else {
@@ -854,7 +879,7 @@ pub fn process_ordered_aggregate_multi<'mcx>(
             //   }
             load_transfn_args_from_slot(aggstate, pertrans, slot1, num_trans_inputs)?;
 
-            advance_transition_function(aggstate, pertrans, pergroupstate)?;
+            advance_transition_function(aggstate, pertrans, pergroupstate, estate)?;
 
             if num_distinct_cols > 0 {
                 // swap the slot pointers to retain the current tuple
@@ -1038,6 +1063,19 @@ fn curaggcontext_assert_built(aggstate: &AggStateData<'_>) {
     let _: types_nodes::EcxtId = aggcontexts[idx];
 }
 
+/// `aggstate->curaggcontext` resolved to its [`EcxtId`] (the per-grouping-set
+/// aggregate context, or the hashcontext for the hashed path). C switches into
+/// `curaggcontext->ecxt_per_tuple_memory` before reparenting a by-ref transition
+/// value; the owned by-ref copy targets this id (its lifetime resolution lives
+/// in `datum_copy_into_ecxt`).
+fn curaggcontext_ecxt(aggstate: &AggStateData<'_>) -> Option<types_nodes::execnodes::EcxtId> {
+    if aggstate.curaggcontext == crate::node_lifecycle::CURAGGCONTEXT_HASH {
+        return aggstate.hashcontext;
+    }
+    let idx = aggstate.curaggcontext as usize;
+    aggstate.aggcontexts.as_ref().and_then(|c| c.get(idx).copied())
+}
+
 /// `aggstate->tmpcontext` (as an [`EcxtId`] for the execExpr seam). The owned
 /// model addresses ExprContexts by pool id; the AggState carries the tmpcontext
 /// inline, but the evaltrans expression evaluates against the EState's pool, so
@@ -1063,47 +1101,30 @@ fn current_phase_numsets(aggstate: &AggStateData<'_>) -> i32 {
 /// `datumCopy(value, typByVal, typLen)` into the given memory context. Datum
 /// copy is the datum.c surface; for pass-by-value datums it is a plain copy
 /// (no allocation). Pass-by-ref copy is owned by the not-yet-ported datum unit.
-fn datum_copy_into<'mcx>(
-    value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
-    typ_by_val: bool,
-    typ_len: i16,
-) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
-    if typ_by_val {
-        // datumCopy of a pass-by-value datum is the value itself.
-        return Ok(value);
-    }
-    let _ = typ_len;
-    panic!(
-        "backend-executor-nodeAgg::datumCopy: pass-by-reference datumCopy is owned \
-         by the not-yet-ported datum (utils/adt/datum.c) unit; no seam yet"
-    );
-}
-
 /// `datumCopy(value, typByVal, typLen)` into CurrentMemoryContext (the
-/// process_ordered_* working context).
+/// process_ordered_* working context). By-value is verbatim; by-reference is
+/// deep-copied via the datum.c seam. The owned model materializes into the
+/// per-query context (its `Datum<'mcx>` lifetime), faithful for the single-group
+/// drain (the multi-group/hashagg per-group reset is gated elsewhere).
 fn datum_copy_current<'mcx>(
     value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     typ_by_val: bool,
     typ_len: i16,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
     if typ_by_val {
         return Ok(value);
     }
-    let _ = typ_len;
-    panic!(
-        "backend-executor-nodeAgg::datumCopy: pass-by-reference datumCopy is owned \
-         by the not-yet-ported datum (utils/adt/datum.c) unit; no seam yet"
-    );
+    let mcx = estate.es_query_cxt;
+    backend_utils_adt_datum_seams::datum_copy_v::call(mcx, &value, typ_by_val, typ_len as i32)
 }
 
-/// `pfree(DatumGetPointer(d))` — free a pass-by-ref datum. The chunk allocator
-/// (`pfree`) is owned by the not-yet-ported mmgr surface; reached only for
-/// pass-by-ref inputs in the DISTINCT path.
+/// `pfree(DatumGetPointer(d))` — free a pass-by-ref sort datum. In the owned
+/// model the value is held by an arena-managed `Datum` whose backing memory is
+/// reclaimed when the owning context drops (the per-query / working context),
+/// so an explicit free is a faithful no-op (the move-out here drops the handle).
 fn pfree_datum(_d: types_tuple::backend_access_common_heaptuple::Datum<'_>) {
-    panic!(
-        "backend-executor-nodeAgg::pfree: freeing a pass-by-reference sort datum is \
-         owned by the not-yet-ported mmgr (pfree) surface; no seam yet"
-    );
+    // drop(_d): the arena owns the bytes; nothing to hand back to a chunk allocator.
 }
 
 /// `pertrans->transfn.fn_strict` — whether the transition function is strict.
@@ -1111,13 +1132,7 @@ fn pfree_datum(_d: types_tuple::backend_access_common_heaptuple::Datum<'_>) {
 /// resolved per-trans transfn FmgrInfo on the nodeAgg-owned `AggStatePerTransData`,
 /// which the unported `ExecInitAgg`/build_pertrans path has not yet populated.
 fn transfn_is_strict(pertrans: &AggStatePerTransData<'_>) -> bool {
-    let _ = &pertrans.transfn;
-    panic!(
-        "backend-executor-nodeAgg::advance_transition_function: FmgrInfo.fn_strict is \
-         modeled (fmgr #52), but the per-trans transfn FmgrInfo \
-         (AggStatePerTransData.transfn) is not yet populated by the unported \
-         ExecInitAgg/build_pertrans path"
-    );
+    pertrans.transfn.fn_strict
 }
 
 /// `fcinfo->args[i].isnull` — the transfn call frame's argument null flag.
@@ -1126,28 +1141,26 @@ fn transfn_is_strict(pertrans: &AggStatePerTransData<'_>) -> bool {
 /// `AggStatePerTransData.transfn_fcinfo` as a populated args carrier — it is a
 /// long-lived per-trans frame set up by the unported `build_pertrans_for_aggref`
 /// / `ExecInitAgg` path, so there is no populated `args[]` here to read.
-fn fcinfo_arg_isnull(pertrans: &AggStatePerTransData<'_>, _i: i32) -> bool {
-    let _ = pertrans.transfn_fcinfo.as_ref();
-    panic!(
-        "backend-executor-nodeAgg::advance_transition_function: the shared call frame \
-         carries args[] (#296), but the nodeAgg-owned per-trans frame \
-         AggStatePerTransData.transfn_fcinfo is not yet built/populated by the \
-         unported ExecInitAgg/build_pertrans path; nothing to read"
+fn fcinfo_arg_isnull(pertrans: &AggStatePerTransData<'_>, i: i32) -> bool {
+    // The ordered/distinct single-column drain only ever loads index 1, carried
+    // (by-ref-faithfully) on `distinct_value_isnull` (see `fcinfo_set_arg`).
+    debug_assert_eq!(
+        i, 1,
+        "fcinfo_arg_isnull: only the single-column ordered/distinct args[1] is modeled"
     );
+    pertrans.distinct_value_isnull
 }
 
 /// `fcinfo->args[i].value` — the transfn call frame's argument value.
 fn fcinfo_arg_value<'mcx>(
     pertrans: &AggStatePerTransData<'mcx>,
-    _i: i32,
+    i: i32,
 ) -> types_tuple::backend_access_common_heaptuple::Datum<'mcx> {
-    let _ = pertrans.transfn_fcinfo.as_ref();
-    panic!(
-        "backend-executor-nodeAgg::advance_transition_function: the shared call frame \
-         carries args[] (#296), but the nodeAgg-owned per-trans frame \
-         AggStatePerTransData.transfn_fcinfo is not yet built/populated by the \
-         unported ExecInitAgg/build_pertrans path; nothing to read"
+    debug_assert_eq!(
+        i, 1,
+        "fcinfo_arg_value: only the single-column ordered/distinct args[1] is modeled"
     );
+    pertrans.distinct_value.clone()
 }
 
 /// `fcinfo->args[i].value = v; fcinfo->args[i].isnull = isnull;` — store one
