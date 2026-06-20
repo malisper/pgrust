@@ -11,7 +11,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::Oid;
 
@@ -56,12 +56,6 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("dbcommands fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters.
 // ---------------------------------------------------------------------------
@@ -69,13 +63,14 @@ fn raise(err: types_error::PgError) -> ! {
 /// `pg_database_collation_actual_version(oid) -> text` (dbcommands.c:2776). The
 /// core returns `Option<String>`: `Some` → `PG_RETURN_TEXT_P`, `None` →
 /// `PG_RETURN_NULL` (the database has no recorded collation version).
-fn fc_pg_database_collation_actual_version(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_database_collation_actual_version(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let dbid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    match crate::pg_database_collation_actual_version(m.mcx(), dbid) {
-        Ok(Some(version)) => ret_text(fcinfo, version),
-        Ok(None) => ret_null(fcinfo),
-        Err(e) => raise(e),
+    match crate::pg_database_collation_actual_version(m.mcx(), dbid)? {
+        Some(version) => Ok(ret_text(fcinfo, version)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 
@@ -89,23 +84,26 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every SQL-callable `dbcommands.c` builtin (C: their
 /// `fmgr_builtins[]` rows). Called from this crate's `init_seams()`.
 /// OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat`.
 pub fn register_dbcommands_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // proargtypes => 'oid' (nargs 1); proisstrict default 't'; not retset.
         builtin(
             6249,
