@@ -1378,7 +1378,12 @@ fn subquery_planner_carried<'mcx>(
                                 let mut v = mcx::vec_with_capacity_in(mcx, cols.len())?;
                                 for c in cols.iter() {
                                     match c.as_expr() {
-                                        Some(e) => v.push(e.clone()),
+                                        // Deep-copy through `clone_in` (copyObject shape),
+                                        // not a plain `.clone()`: a VALUES column may be a
+                                        // `SubLink` (e.g. `(select 2)`) whose embedded owned
+                                        // `Query` is context-allocated and panics under the
+                                        // derived `Clone` (mirrors Aggref/SubPlan).
+                                        Some(e) => v.push(e.clone_in(mcx)?),
                                         None => {
                                             return Err(types_error::PgError::error(
                                                 "subquery_planner: VALUES column is not an Expr",

@@ -66,16 +66,57 @@ fn detoast_container<'mcx>(
     }
 }
 
-/// Bridge a canonical replacement value into the bare-word `Datum` the array
-/// primitives accept: a by-value scalar is its word; a by-reference value is
-/// addressed by its bytes' pointer (mirroring C `DatumGetPointer`). The bytes
-/// live in the caller's arena and outlive the call.
+/// Normalize a canonical replacement value into a form whose flat bytes live in
+/// `mcx` and can be addressed by a bare pointer word (mirroring C, where the
+/// replacement value reaching `array_set_element` for a by-reference element is
+/// already a `struct varlena *`/`Pointer` Datum). A `ByVal` scalar is its word
+/// and needs no buffer; a `ByRef`/`Cstring` already holds flat bytes; a
+/// `Composite` is serialized to its `HeapTupleHeader` Datum image (the
+/// self-describing varlena image — same block C would hand to the array
+/// primitive when assigning a composite array element, e.g.
+/// `f4[1].if2[1]` over an array of composite type); an `Expanded` object is
+/// flattened to its varlena image. `Internal` has no flat image (C never stores
+/// an `internal` value into an array element) and stays a hard error.
+fn flatten_replacement<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: &DatumV<'mcx>,
+) -> PgResult<DatumV<'mcx>> {
+    match value {
+        DatumV::ByVal(w) => Ok(DatumV::ByVal(*w)),
+        DatumV::ByRef(b) => {
+            let mut v = mcx::vec_with_capacity_in(mcx, b.len())?;
+            v.extend_from_slice(b);
+            Ok(DatumV::ByRef(v))
+        }
+        DatumV::Cstring(s) => Ok(DatumV::Cstring(s.clone())),
+        DatumV::Composite(_) | DatumV::Expanded(_) => {
+            // `as_varlena_bytes()` materializes a Composite to its datum image
+            // (Cow::Owned); clone_in flattens Expanded. Use clone_in, which
+            // routes Composite→Composite and Expanded→ByRef, then take the flat
+            // image. Simpler: materialize the varlena bytes directly.
+            let bytes = value.as_varlena_bytes();
+            let mut v = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+            v.extend_from_slice(&bytes);
+            Ok(DatumV::ByRef(v))
+        }
+        DatumV::Internal(_) => Err(types_error::PgError::error(
+            "array_set_element: cannot store an internal-typed value into an array element",
+        )),
+    }
+}
+
+/// Bridge a (already flattened, see [`flatten_replacement`]) canonical
+/// replacement value into the bare-word `Datum` the array primitives accept: a
+/// by-value scalar is its word; a by-reference value is addressed by its bytes'
+/// pointer (mirroring C `DatumGetPointer`). The bytes live in the caller's arena
+/// and outlive the call.
 fn value_word(value: &DatumV<'_>) -> Datum {
     match value {
         DatumV::ByVal(w) => Datum::from_usize(*w),
         DatumV::ByRef(b) => Datum::from_usize(b.as_ptr() as usize),
-        DatumV::Cstring(_) | DatumV::Composite(_) | DatumV::Expanded(_) | DatumV::Internal(_) => {
-            panic!("arraysubs::value_word: Cstring/Composite/Expanded/Internal replacement value not yet produced — wave 2")
+        DatumV::Cstring(s) => Datum::from_usize(s.as_ptr() as usize),
+        DatumV::Composite(_) | DatumV::Expanded(_) | DatumV::Internal(_) => {
+            panic!("arraysubs::value_word: replacement value must be flattened via flatten_replacement first")
         }
     }
 }
@@ -215,12 +256,16 @@ pub fn array_subscript_assign<'mcx>(
     // source array before array_set_element reads its ArrayType header.
     let array_buf = detoast_container(mcx, &array_owned, refattrlength as i32)?;
     let array = array_buf.as_slice();
+    // Materialize a by-reference / composite / expanded replacement into flat
+    // arena bytes addressable by a pointer word (C hands `array_set_element` a
+    // `Pointer` Datum for a by-reference element). Kept alive across the call.
+    let replace_flat = flatten_replacement(mcx, &replacevalue)?;
     let result = array_set_element(
         mcx,
         array,
         numupper,
         upperindex,
-        value_word(&replacevalue),
+        value_word(&replace_flat),
         replacenull,
         refattrlength as i32,
         refelemlength as i32,
