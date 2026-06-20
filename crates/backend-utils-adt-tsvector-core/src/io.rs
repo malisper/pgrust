@@ -382,7 +382,7 @@ pub fn tsvectorout<'mcx>(mcx: Mcx<'mcx>, vec: &[u8]) -> PgResult<Vec<u8>> {
         }
         outbuf.push(b'\'');
         while curin < curend {
-            let mut mlen = mb::pg_mblen_range::call(&vec[curin..curend]);
+            let mut mlen = mb::pg_mblen_range::call(&vec[curin..curend])?;
             if vec[curin] == b'\'' {
                 outbuf.push(b'\'');
             } else if vec[curin] == b'\\' {

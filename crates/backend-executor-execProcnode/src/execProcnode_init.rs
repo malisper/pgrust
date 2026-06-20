@@ -404,6 +404,26 @@ pub fn exec_init_node<'mcx>(
         _ => return Err(unrecognized_node_type(node)),
     };
 
+    // The post-dispatch init tail (parent back-link stamping, initPlan build,
+    // instrumentation) is hoisted into a separate `#[inline(never)]` function so
+    // its locals (the `SubPlan` clone, the `Instrumentation` box, the loop
+    // bookkeeping) are NOT reserved in `exec_init_node`'s own frame. Because
+    // `exec_init_node` recurses (each interior plan node inits its children),
+    // keeping that tail out of the recursive frame removes its cost from every
+    // level of the plan-state tree, mirroring C's pointer-passing frame size.
+    exec_init_node_finish(mcx, node, estate, result)
+}
+
+/// The init tail of [`exec_init_node`], factored out (`#[inline(never)]`) so its
+/// locals live in their own frame rather than inflating the recursive
+/// `exec_init_node` frame. Behavior is identical to the original inline tail.
+#[inline(never)]
+fn exec_init_node_finish<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &'mcx Node<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mut result: PgBox<'mcx, PlanStateNode<'mcx>>,
+) -> PgResult<Option<PgBox<'mcx, PlanStateNode<'mcx>>>> {
     // Set the `ExprState.parent` back-link on every expression this node owns.
     //
     // In C, `ExecInit*` builds its quals/projection with `ExecInitExpr(node,

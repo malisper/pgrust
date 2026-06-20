@@ -137,14 +137,20 @@ fn GetDatabaseEncoding() -> i32 {
 /// `limit` bytes; the seam returns the encoded-character count.
 #[inline]
 fn pg_mbstrlen_with_len(bytes: &[u8], limit: i32) -> i32 {
-    mb::pg_mbstrlen_with_len::call(bytes, limit)
+    // Called on already server-encoded string-function input, so the
+    // `report_invalid_encoding` path is dead; fall back to the byte length (an
+    // upper bound on the char count) rather than escalate.
+    mb::pg_mbstrlen_with_len::call(bytes, limit).unwrap_or(limit)
 }
 
 /// C: `pg_mblen_range(mbstr, end)` (mbutils.c) — byte length of the leading
 /// encoded character within a bounded slice.
 #[inline]
 fn pg_mblen_range(bytes: &[u8]) -> i32 {
-    mb::pg_mblen_range::call(bytes)
+    // C's `pg_mblen` does not validate; the seam only Errs on a
+    // slice-overrunning leading char, where the clamped length is the slice
+    // length (the dead error path falls back to `bytes.len()`).
+    mb::pg_mblen_range::call(bytes).unwrap_or(bytes.len() as i32)
 }
 
 /// C: `pg_mblen_unbounded(mbstr)` (mbutils.c) — byte length of the leading

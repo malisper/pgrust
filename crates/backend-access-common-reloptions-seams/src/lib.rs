@@ -142,3 +142,19 @@ seam_core::seam!(
         validate: bool,
     ) -> PgResult<Option<std::vec::Vec<u8>>>
 );
+
+seam_core::seam!(
+    /// `build_reloptions(reloptions, validate, RELOPT_KIND_BRIN,
+    /// sizeof(BrinOptions), tab, lengthof(tab))` — the BRIN AM's `brinoptions`
+    /// (brin.c), whose options are `pages_per_range` (INT) at
+    /// `offsetof(BrinOptions, pagesPerRange)` and `autosummarize` (BOOL) at
+    /// `offsetof(BrinOptions, autosummarize)`. The relopt-table layout and parse
+    /// are the reloptions owner's; the seam takes the raw `reloptions` varlena
+    /// bytes (`None` for a NULL datum) and returns the serialized `BrinOptions`
+    /// `bytea` (`None` when no options apply). `Err` carries the validation
+    /// `ereport(ERROR)`s.
+    pub fn build_reloptions_brin(
+        reloptions: Option<&[u8]>,
+        validate: bool,
+    ) -> PgResult<Option<std::vec::Vec<u8>>>
+);

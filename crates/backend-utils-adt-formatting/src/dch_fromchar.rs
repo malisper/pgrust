@@ -90,9 +90,11 @@ fn loc_abbrev_days<'mcx>(mcx: Mcx<'mcx>) -> Option<Vec<Vec<u8>>> {
 
 /// C: `pg_mblen(s)` over a NUL-terminated cursor remainder, via the per-owner
 /// mbutils seam: the byte length of the multibyte character whose lead byte is
-/// `s[0]`. Infallible.
+/// `s[0]`. C's `pg_mblen` does not validate; the range-clamped seam only Errs
+/// when the leading char would overrun the slice, in which case the clamped
+/// length is the slice length (the dead error path falls back to `s.len()`).
 fn pg_mblen_cstr(s: &[u8]) -> i32 {
-    backend_utils_mb_mbutils_seams::pg_mblen_range::call(s)
+    backend_utils_mb_mbutils_seams::pg_mblen_range::call(s).unwrap_or(s.len() as i32)
 }
 
 /// C: `DecodeTimezoneAbbrevPrefix(str, &gmtoffset, &tzp)` via the per-owner

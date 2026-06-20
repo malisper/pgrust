@@ -221,6 +221,23 @@ seam_core::seam!(
         form: &types_cluster::PgClassForm,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `ATExecSetRelOptions`'s pg_class write (tablecmds.c:16758-16772): update
+    /// only the variable `pg_class.reloptions` (`text[]`) column of `relid`.
+    /// `new_reloptions` is the constructed `text[]` varlena image
+    /// (`transformRelOptions`), or `None` for the C `(Datum) 0` (store SQL NULL).
+    /// `table_open(RelationRelationId)` → fetch by oid → deform → set the
+    /// reloptions column (or NULL) with `repl_repl = true` → `heap_modify_tuple`
+    /// → `CatalogTupleUpdate`; all other columns ride from the old tuple. `Err`
+    /// carries "cache lookup failed for relation %u" + heap/index-mutation
+    /// `ereport(ERROR)`s.
+    pub fn update_pg_class_reloptions<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        relid: Oid,
+        new_reloptions: Option<&[u8]>,
+    ) -> PgResult<()>
+);
 seam_core::seam!(
     /// `CatalogTupleUpdate(pg_index_rel, &tup->t_self, tup)` after reforming
     /// the mutated `PgIndexForm` (indexing.c).

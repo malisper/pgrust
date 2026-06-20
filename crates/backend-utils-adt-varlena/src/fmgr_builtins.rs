@@ -26,7 +26,7 @@
 use types_core::Oid;
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -214,74 +214,63 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("varlena fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters — text relational family (comparison.rs).
+//
+// Result-native: a builtin's `ereport(ERROR)` travels as `Err(PgError)`
+// straight back to the dispatch (`invoke_builtin`), with no panic /
+// `catch_unwind` (see `docs/proposals/panic-to-result-migration.md`).
 // ---------------------------------------------------------------------------
 
-fn fc_texteq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_texteq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::comparison::texteq(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::comparison::texteq(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_textne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::comparison::textne(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::comparison::textne(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_text_lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::comparison::text_lt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::comparison::text_lt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_text_le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::comparison::text_le(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::comparison::text_le(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_text_gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::comparison::text_gt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::comparison::text_gt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_text_ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::comparison::text_ge(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::comparison::text_ge(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_bttextcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bttextcmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_i32(ok(crate::comparison::bttextcmp(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_i32((crate::comparison::bttextcmp(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_text_starts_with(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_starts_with(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::comparison::text_starts_with(
+    Ok(ret_bool((crate::comparison::text_starts_with(
         arg_bytes(fcinfo, 0),
         arg_bytes(fcinfo, 1),
         c,
-    )))
+    ))?))
 }
-fn fc_btvarstrequalimage(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_btvarstrequalimage(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: btvarstrequalimage(internal) — arg0 (`opcintype`/internal) is ignored;
     // the answer depends only on the collation read from the frame.
     let c = collation(fcinfo);
-    ret_bool(ok(crate::comparison::btvarstrequalimage(c)))
+    Ok(ret_bool((crate::comparison::btvarstrequalimage(c))?))
 }
 
 // ---------------------------------------------------------------------------
@@ -289,75 +278,75 @@ fn fc_btvarstrequalimage(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // functions arg0 is the `name`; for `text`-first functions arg0 is the `text`.
 // ---------------------------------------------------------------------------
 
-fn fc_nameeqtext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_nameeqtext(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::nameeqtext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::name_pattern::nameeqtext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_namenetext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_namenetext(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::namenetext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::name_pattern::namenetext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_namelttext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_namelttext(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::namelttext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::name_pattern::namelttext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_nameletext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_nameletext(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::nameletext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::name_pattern::nameletext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_namegttext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_namegttext(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::namegttext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::name_pattern::namegttext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_namegetext(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_namegetext(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::namegetext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::name_pattern::namegetext(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_btnametextcmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_btnametextcmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_i32(ok(crate::name_pattern::btnametextcmp(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_i32((crate::name_pattern::btnametextcmp(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_texteqname(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_texteqname(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::texteqname(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::name_pattern::texteqname(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c))?))
 }
-fn fc_textnename(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textnename(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::textnename(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::name_pattern::textnename(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c))?))
 }
-fn fc_textltname(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textltname(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::textltname(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::name_pattern::textltname(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c))?))
 }
-fn fc_textlename(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textlename(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::textlename(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::name_pattern::textlename(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c))?))
 }
-fn fc_textgtname(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textgtname(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::textgtname(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::name_pattern::textgtname(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c))?))
 }
-fn fc_textgename(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textgename(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_bool(ok(crate::name_pattern::textgename(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
+    Ok(ret_bool((crate::name_pattern::textgename(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c))?))
 }
-fn fc_bttextnamecmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bttextnamecmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
-    ret_i32(ok(crate::name_pattern::bttextnamecmp(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c)))
+    Ok(ret_i32((crate::name_pattern::bttextnamecmp(arg_bytes(fcinfo, 0), arg_name_bytes(fcinfo, 1), c))?))
 }
 
 // ---------------------------------------------------------------------------
@@ -372,25 +361,25 @@ fn fc_bttextnamecmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 // --- text/bytea wire I/O (wire_io.rs / bytea.rs) ---
 
-fn fc_textin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
     let m = scratch_mcx();
-    let out = ok(crate::wire_io::textin(m.mcx(), &s)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::wire_io::textin(m.mcx(), &s))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_textout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::wire_io::textout(m.mcx(), arg_bytes(fcinfo, 0)));
-    ret_cstring(fcinfo, cstring_lane(&out))
+    let out = (crate::wire_io::textout(m.mcx(), arg_bytes(fcinfo, 0)))?;
+    Ok(ret_cstring(fcinfo, cstring_lane(&out)))
 }
-fn fc_textsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textsend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let bytes = ok(crate::wire_io::textsend(m.mcx(), arg_bytes(fcinfo, 0))).as_bytes().to_vec();
-    ret_varlena(fcinfo, bytes)
+    let bytes = (crate::wire_io::textsend(m.mcx(), arg_bytes(fcinfo, 0)))?.as_bytes().to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
 }
-fn fc_byteain(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteain(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // Copy the cstring out first so the immutable arg borrow ends before we take
     // the `&mut` escontext frame (C: `byteain` reads `fcinfo->context`).
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
@@ -399,35 +388,35 @@ fn fc_byteain(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // and escape parse-error paths; a recoverable error lands in the frame
     // escontext and yields `Ok(None)` (SQL NULL), which `pg_input_is_valid`
     // reads back via `soft_error_occurred`.
-    let out = ok(crate::bytea::byteain(m.mcx(), &s, fcinfo.escontext_mut()))
+    let out = (crate::bytea::byteain(m.mcx(), &s, fcinfo.escontext_mut()))?
         .map(|v| v.to_vec());
-    match out {
+    Ok(match out {
         Some(bytes) => ret_varlena(fcinfo, bytes),
         None => Datum::null(),
-    }
+    })
 }
-fn fc_byteaout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteaout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::bytea::byteaout(m.mcx(), arg_bytes(fcinfo, 0)));
-    ret_cstring(fcinfo, cstring_lane(&out))
+    let out = (crate::bytea::byteaout(m.mcx(), arg_bytes(fcinfo, 0)))?;
+    Ok(ret_cstring(fcinfo, cstring_lane(&out)))
 }
-fn fc_byteasend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteasend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let bytes = ok(crate::bytea::byteasend(m.mcx(), arg_bytes(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, bytes)
+    let bytes = (crate::bytea::byteasend(m.mcx(), arg_bytes(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
 }
 
 // --- name <-> text casts (wire_io.rs) ---
 
-fn fc_name_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_name_text(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: name -> text (proname `text`, prosrc name_text). arg0 is a `name`.
     let m = scratch_mcx();
-    let out = ok(crate::wire_io::name_text(m.mcx(), arg_name_bytes(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::wire_io::name_text(m.mcx(), arg_name_bytes(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_text_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_name(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     // C: text -> name (proname `name`, prosrc text_name). The result is a
     // `Name` — a fixed NAMEDATALEN, zero-padded buffer with NO varlena header.
@@ -435,341 +424,341 @@ fn fc_text_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // `ret_name`); `ret_varlena` would prepend a 4-byte varlena header and
     // corrupt the value (e.g. a text[]::name[] cast then renders each element
     // as the stray header bytes).
-    let nd = ok(crate::wire_io::text_name(arg_bytes(fcinfo, 0)));
+    let nd = (crate::wire_io::text_name(arg_bytes(fcinfo, 0)))?;
     fcinfo.set_ref_result(RefPayload::Varlena(nd.to_vec()));
-    Datum::from_usize(0)
+    Ok(Datum::from_usize(0))
 }
 
 // --- length / octet-length / concat (wire_io.rs / bytea.rs) ---
 
-fn fc_textlen(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textlen(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_i32(ok(crate::wire_io::textlen(arg_bytes(fcinfo, 0))))
+    Ok(ret_i32((crate::wire_io::textlen(arg_bytes(fcinfo, 0)))?))
 }
-fn fc_textoctetlen(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textoctetlen(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_i32(ok(crate::wire_io::textoctetlen(arg_bytes(fcinfo, 0))))
+    Ok(ret_i32((crate::wire_io::textoctetlen(arg_bytes(fcinfo, 0)))?))
 }
-fn fc_byteaoctetlen(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteaoctetlen(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_i32(ok(crate::bytea::byteaoctetlen(arg_bytes(fcinfo, 0))))
+    Ok(ret_i32((crate::bytea::byteaoctetlen(arg_bytes(fcinfo, 0)))?))
 }
-fn fc_textcat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textcat(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::wire_io::textcat(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::wire_io::textcat(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_byteacat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteacat(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::bytea::byteacat(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::byteacat(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // --- text larger/smaller + bytea larger/smaller (comparison.rs / bytea.rs) ---
 
-fn fc_text_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_larger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::comparison::text_larger(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::comparison::text_larger(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_text_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::comparison::text_smaller(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::comparison::text_smaller(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // --- substring / position / overlay (position_ops.rs / bytea.rs) ---
 
-fn fc_textpos(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textpos(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_i32(ok(crate::position_ops::textpos(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c)))
+    Ok(ret_i32((crate::position_ops::textpos(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c))?))
 }
-fn fc_byteapos(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteapos(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_i32(ok(crate::bytea::byteapos(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_i32((crate::bytea::byteapos(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
-fn fc_bytea_substr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytea_substr(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
     let s = arg_i32(fcinfo, 1);
     let l = arg_i32(fcinfo, 2);
-    let out = ok(crate::bytea::bytea_substr(m.mcx(), arg_bytes(fcinfo, 0), s, l)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::bytea_substr(m.mcx(), arg_bytes(fcinfo, 0), s, l))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_bytea_substr_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytea_substr_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
     let s = arg_i32(fcinfo, 1);
-    let out = ok(crate::bytea::bytea_substr_no_len(m.mcx(), arg_bytes(fcinfo, 0), s)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::bytea_substr_no_len(m.mcx(), arg_bytes(fcinfo, 0), s))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_byteaoverlay(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteaoverlay(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
     let sp = arg_i32(fcinfo, 2);
     let sl = arg_i32(fcinfo, 3);
-    let out = ok(crate::bytea::byteaoverlay(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), sp, sl)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::byteaoverlay(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), sp, sl))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_byteaoverlay_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteaoverlay_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
     let sp = arg_i32(fcinfo, 2);
-    let out = ok(crate::bytea::byteaoverlay_no_len(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), sp)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::byteaoverlay_no_len(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), sp))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // --- left / right / reverse (position_ops.rs / bytea.rs) ---
 
-fn fc_text_left(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_left(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
     let n = arg_i32(fcinfo, 1);
-    let out = ok(crate::position_ops::text_left(m.mcx(), arg_bytes(fcinfo, 0), n)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::position_ops::text_left(m.mcx(), arg_bytes(fcinfo, 0), n))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_text_right(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_right(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
     let n = arg_i32(fcinfo, 1);
-    let out = ok(crate::position_ops::text_right(m.mcx(), arg_bytes(fcinfo, 0), n)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::position_ops::text_right(m.mcx(), arg_bytes(fcinfo, 0), n))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_text_reverse(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_reverse(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::position_ops::text_reverse(m.mcx(), arg_bytes(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::position_ops::text_reverse(m.mcx(), arg_bytes(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_bytea_reverse(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytea_reverse(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::bytea::bytea_reverse(m.mcx(), arg_bytes(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::bytea_reverse(m.mcx(), arg_bytes(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // --- replace / split_part (position_ops.rs / split_format.rs) ---
 
-fn fc_replace_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_replace_text(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::position_ops::replace_text(
+    let out = (crate::position_ops::replace_text(
         m.mcx(),
         arg_bytes(fcinfo, 0),
         arg_bytes(fcinfo, 1),
         arg_bytes(fcinfo, 2),
         c,
-    ))
+    ))?
     .to_vec();
-    ret_varlena(fcinfo, out)
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_split_part(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_split_part(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
     let m = scratch_mcx();
     let fldnum = arg_i32(fcinfo, 2);
-    let out = ok(crate::split_format::split_part(
+    let out = (crate::split_format::split_part(
         m.mcx(),
         arg_bytes(fcinfo, 0),
         arg_bytes(fcinfo, 1),
         fldnum,
         c,
-    ))
+    ))?
     .to_vec();
-    ret_varlena(fcinfo, out)
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // --- bytea comparison operators + cmp (bytea.rs) ---
 
-fn fc_byteaeq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteaeq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_bool(ok(crate::bytea::byteaeq(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_bool((crate::bytea::byteaeq(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
-fn fc_byteane(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteane(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_bool(ok(crate::bytea::byteane(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_bool((crate::bytea::byteane(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
-fn fc_bytealt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytealt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_bool(ok(crate::bytea::bytealt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_bool((crate::bytea::bytealt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
-fn fc_byteale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteale(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_bool(ok(crate::bytea::byteale(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_bool((crate::bytea::byteale(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
-fn fc_byteagt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteagt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_bool(ok(crate::bytea::byteagt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_bool((crate::bytea::byteagt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
-fn fc_byteage(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteage(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_bool(ok(crate::bytea::byteage(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_bool((crate::bytea::byteage(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
-fn fc_byteacmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteacmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_i32(ok(crate::bytea::byteacmp(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_i32((crate::bytea::byteacmp(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
-fn fc_bytea_larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytea_larger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::bytea::bytea_larger(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::bytea_larger(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_bytea_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytea_smaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::bytea::bytea_smaller(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::bytea_smaller(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_bytea_bit_count(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytea_bit_count(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_i64(ok(crate::bytea::bytea_bit_count(arg_bytes(fcinfo, 0))))
+    Ok(ret_i64((crate::bytea::bytea_bit_count(arg_bytes(fcinfo, 0)))?))
 }
 
 // --- bytea <-> int casts (bytea.rs) ---
 
-fn fc_bytea_int2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytea_int2(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_i16(ok(crate::bytea::bytea_int2(arg_bytes(fcinfo, 0))))
+    Ok(ret_i16((crate::bytea::bytea_int2(arg_bytes(fcinfo, 0)))?))
 }
-fn fc_bytea_int4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytea_int4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_i32(ok(crate::bytea::bytea_int4(arg_bytes(fcinfo, 0))))
+    Ok(ret_i32((crate::bytea::bytea_int4(arg_bytes(fcinfo, 0)))?))
 }
-fn fc_bytea_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytea_int8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_i64(ok(crate::bytea::bytea_int8(arg_bytes(fcinfo, 0))))
+    Ok(ret_i64((crate::bytea::bytea_int8(arg_bytes(fcinfo, 0)))?))
 }
-fn fc_int2_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int2_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::bytea::int2_bytea(m.mcx(), arg_i16(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::int2_bytea(m.mcx(), arg_i16(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_int4_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int4_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::bytea::int4_bytea(m.mcx(), arg_i32(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::int4_bytea(m.mcx(), arg_i32(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_int8_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::bytea::int8_bytea(m.mcx(), arg_i64(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::int8_bytea(m.mcx(), arg_i64(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // --- text_pattern_ops (name_pattern.rs) ---
 
-fn fc_text_pattern_lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_pattern_lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_bool(ok(crate::name_pattern::text_pattern_lt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_bool((crate::name_pattern::text_pattern_lt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
-fn fc_text_pattern_le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_pattern_le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_bool(ok(crate::name_pattern::text_pattern_le(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_bool((crate::name_pattern::text_pattern_le(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
-fn fc_text_pattern_ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_pattern_ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_bool(ok(crate::name_pattern::text_pattern_ge(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_bool((crate::name_pattern::text_pattern_ge(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
-fn fc_text_pattern_gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_pattern_gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_bool(ok(crate::name_pattern::text_pattern_gt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_bool((crate::name_pattern::text_pattern_gt(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
-fn fc_bttext_pattern_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bttext_pattern_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_i32(ok(crate::name_pattern::bttext_pattern_cmp(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1))))
+    Ok(ret_i32((crate::name_pattern::bttext_pattern_cmp(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1)))?))
 }
 
 // --- base conversions / to_hex / to_bin / to_oct (misc_encoding.rs) ---
 
-fn fc_to_hex32(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_hex32(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::misc_encoding::to_hex32(m.mcx(), arg_i32(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::misc_encoding::to_hex32(m.mcx(), arg_i32(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_to_hex64(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_hex64(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::misc_encoding::to_hex64(m.mcx(), arg_i64(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::misc_encoding::to_hex64(m.mcx(), arg_i64(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_to_bin32(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_bin32(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::misc_encoding::to_bin32(m.mcx(), arg_i32(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::misc_encoding::to_bin32(m.mcx(), arg_i32(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_to_bin64(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_bin64(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::misc_encoding::to_bin64(m.mcx(), arg_i64(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::misc_encoding::to_bin64(m.mcx(), arg_i64(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_to_oct32(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_oct32(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::misc_encoding::to_oct32(m.mcx(), arg_i32(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::misc_encoding::to_oct32(m.mcx(), arg_i32(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_to_oct64(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_to_oct64(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::misc_encoding::to_oct64(m.mcx(), arg_i64(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::misc_encoding::to_oct64(m.mcx(), arg_i64(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // --- unicode / unistr (misc_encoding.rs) ---
 
-fn fc_unicode_version(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_unicode_version(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let out = ok(crate::misc_encoding::unicode_version(m.mcx())).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::misc_encoding::unicode_version(m.mcx()))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_icu_unicode_version(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_icu_unicode_version(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: returns the ICU collator's Unicode version; this build has no ICU
     // (the value core returns `None`), so the result is NULL.
     let m = scratch_mcx();
-    let out = ok(crate::misc_encoding::icu_unicode_version(m.mcx())).map(|b| b.to_vec());
-    match out {
+    let out = (crate::misc_encoding::icu_unicode_version(m.mcx()))?.map(|b| b.to_vec());
+    Ok(match out {
         Some(b) => ret_varlena(fcinfo, b),
         None => {
             fcinfo.set_result_null(true);
             Datum::from_usize(0)
         }
-    }
+    })
 }
-fn fc_unicode_assigned(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_unicode_assigned(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
-    ret_bool(ok(crate::misc_encoding::unicode_assigned(arg_bytes(fcinfo, 0))))
+    Ok(ret_bool((crate::misc_encoding::unicode_assigned(arg_bytes(fcinfo, 0)))?))
 }
-fn fc_unicode_normalize_func(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_unicode_normalize_func(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::misc_encoding::unicode_normalize_func(
+    let out = (crate::misc_encoding::unicode_normalize_func(
         m.mcx(),
         arg_bytes(fcinfo, 0),
         arg_bytes(fcinfo, 1),
-    ))
+    ))?
     .to_vec();
-    ret_varlena(fcinfo, out)
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_unicode_is_normalized(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_unicode_is_normalized(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::misc_encoding::unicode_is_normalized(
+    Ok(ret_bool((crate::misc_encoding::unicode_is_normalized(
         m.mcx(),
         arg_bytes(fcinfo, 0),
         arg_bytes(fcinfo, 1),
-    )))
+    ))?))
 }
-fn fc_unistr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_unistr(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let out = ok(crate::misc_encoding::unistr(m.mcx(), arg_bytes(fcinfo, 0))).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::misc_encoding::unistr(m.mcx(), arg_bytes(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // ---------------------------------------------------------------------------
@@ -784,62 +773,62 @@ fn fc_unistr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 // --- bytea get/set byte/bit (bytea.rs: byteaGetByte/Bit, byteaSetByte/Bit) ---
 
-fn fc_byteaGetByte(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteaGetByte(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let n = arg_i32(fcinfo, 1);
-    ret_i32(ok(crate::bytea::bytea_get_byte(arg_bytes(fcinfo, 0), n)))
+    Ok(ret_i32((crate::bytea::bytea_get_byte(arg_bytes(fcinfo, 0), n))?))
 }
-fn fc_byteaGetBit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteaGetBit(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let n = arg_i64(fcinfo, 1);
-    ret_i32(ok(crate::bytea::bytea_get_bit(arg_bytes(fcinfo, 0), n)))
+    Ok(ret_i32((crate::bytea::bytea_get_bit(arg_bytes(fcinfo, 0), n))?))
 }
-fn fc_byteaSetByte(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteaSetByte(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
     let n = arg_i32(fcinfo, 1);
     let newbyte = arg_i32(fcinfo, 2);
-    let out = ok(crate::bytea::bytea_set_byte(m.mcx(), arg_bytes(fcinfo, 0), n, newbyte)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::bytea_set_byte(m.mcx(), arg_bytes(fcinfo, 0), n, newbyte))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_byteaSetBit(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteaSetBit(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
     let n = arg_i64(fcinfo, 1);
     let newbit = arg_i32(fcinfo, 2);
-    let out = ok(crate::bytea::bytea_set_bit(m.mcx(), arg_bytes(fcinfo, 0), n, newbit)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::bytea::bytea_set_bit(m.mcx(), arg_bytes(fcinfo, 0), n, newbit))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // --- text substring / overlay (position_ops.rs: text_substring/text_overlay) ---
 
-fn fc_text_substr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_substr(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     // C: text_substr -> text_substring(str, start, length, false).
     let m = scratch_mcx();
     let start = arg_i32(fcinfo, 1);
     let length = arg_i32(fcinfo, 2);
-    let out = ok(crate::position_ops::text_substring(m.mcx(), arg_bytes(fcinfo, 0), start, length, false)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::position_ops::text_substring(m.mcx(), arg_bytes(fcinfo, 0), start, length, false))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_text_substr_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_substr_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     // C: text_substr_no_len -> text_substring(str, start, -1, true).
     let m = scratch_mcx();
     let start = arg_i32(fcinfo, 1);
-    let out = ok(crate::position_ops::text_substring(m.mcx(), arg_bytes(fcinfo, 0), start, -1, true)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::position_ops::text_substring(m.mcx(), arg_bytes(fcinfo, 0), start, -1, true))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_textoverlay(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textoverlay(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     // C: textoverlay -> text_overlay(t1, t2, sp, sl).
     let m = scratch_mcx();
     let sp = arg_i32(fcinfo, 2);
     let sl = arg_i32(fcinfo, 3);
-    let out = ok(crate::position_ops::text_overlay(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), sp, sl)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::position_ops::text_overlay(m.mcx(), arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), sp, sl))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_textoverlay_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textoverlay_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     // C: textoverlay_no_len -> text_overlay computes sl = textlen(t2) internally.
     // The value core `text_overlay` requires the explicit `sl`; C's no-len
@@ -847,29 +836,29 @@ fn fc_textoverlay_no_len(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // string's character length (textlen core) and forward.
     let m = scratch_mcx();
     let t2 = arg_bytes(fcinfo, 1);
-    let sl = ok(crate::wire_io::textlen(t2));
+    let sl = (crate::wire_io::textlen(t2))?;
     let sp = arg_i32(fcinfo, 2);
-    let out = ok(crate::position_ops::text_overlay(m.mcx(), arg_bytes(fcinfo, 0), t2, sp, sl)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::position_ops::text_overlay(m.mcx(), arg_bytes(fcinfo, 0), t2, sp, sl))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // --- unknown I/O (wire_io.rs: unknownin/unknownout). `unknown` is a
 // cstring-representation type (typlen -2): both the arg and the result are the
 // raw cstring bytes on the by-ref cstring lane. ---
 
-fn fc_unknownin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_unknownin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: unknownin(cstring) -> unknown == pstrdup(str). `unknown` crosses on the
     // cstring lane (typlen -2), so the result is the raw bytes as a cstring.
     let m = scratch_mcx();
-    let out = ok(crate::wire_io::unknownin(m.mcx(), arg_cstring(fcinfo, 0).as_bytes())).to_vec();
-    ret_cstring(fcinfo, cstring_lane(&out))
+    let out = (crate::wire_io::unknownin(m.mcx(), arg_cstring(fcinfo, 0).as_bytes()))?.to_vec();
+    Ok(ret_cstring(fcinfo, cstring_lane(&out)))
 }
-fn fc_unknownout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_unknownout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: unknownout(unknown) -> cstring == pstrdup(str). The `unknown` arg is a
     // cstring on the by-ref lane.
     let m = scratch_mcx();
-    let out = ok(crate::wire_io::unknownout(m.mcx(), arg_cstring(fcinfo, 0).as_bytes())).to_vec();
-    ret_cstring(fcinfo, cstring_lane(&out))
+    let out = (crate::wire_io::unknownout(m.mcx(), arg_cstring(fcinfo, 0).as_bytes()))?.to_vec();
+    Ok(ret_cstring(fcinfo, cstring_lane(&out)))
 }
 
 /// The `unknown`/`cstring` cores `pstrdup` their argument, so the returned bytes
@@ -930,10 +919,10 @@ fn arg_array_datum<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
-) -> types_tuple::backend_access_common_heaptuple::Datum<'mcx> {
+) -> types_error::PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
     let bytes = arg_array_image(fcinfo, i);
-    let v = ok(mcx::slice_in(mcx, bytes));
-    types_tuple::backend_access_common_heaptuple::Datum::ByRef(v)
+    let v = mcx::slice_in(mcx, bytes)?;
+    Ok(types_tuple::backend_access_common_heaptuple::Datum::ByRef(v))
 }
 
 /// `ARR_ELEMTYPE(array)` — the element type Oid stored in the header-FUL flat
@@ -945,14 +934,14 @@ fn arr_elemtype(array: &[u8]) -> Oid {
     u32::from_ne_bytes([array[12], array[13], array[14], array[15]])
 }
 
-fn fc_text_to_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_to_array(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
     let m = scratch_mcx();
     let inputstring = opt_arg_bytes(fcinfo, 0);
     let fldsep = opt_arg_bytes(fcinfo, 1);
-    let out = ok(crate::split_format::text_to_array(m.mcx(), inputstring, fldsep, None, c));
-    match out {
+    let out = (crate::split_format::text_to_array(m.mcx(), inputstring, fldsep, None, c))?;
+    Ok(match out {
         // `d` is already a complete array varlena (`Datum::ByRef(ArrayType
         // image)`); set it as the varlena result directly — do NOT re-wrap it in
         // another `SET_VARSIZE` header.
@@ -961,9 +950,9 @@ fn fc_text_to_array(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
             fcinfo.set_result_null(true);
             Datum::from_usize(0)
         }
-    }
+    })
 }
-fn fc_text_to_array_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_to_array_null(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let c = collation(fcinfo);
     let m = scratch_mcx();
@@ -971,8 +960,8 @@ fn fc_text_to_array_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let fldsep = opt_arg_bytes(fcinfo, 1);
     let null_string = opt_arg_bytes(fcinfo, 2);
     let out =
-        ok(crate::split_format::text_to_array_null(m.mcx(), inputstring, fldsep, null_string, c));
-    match out {
+        (crate::split_format::text_to_array_null(m.mcx(), inputstring, fldsep, null_string, c))?;
+    Ok(match out {
         // `d` is already a complete array varlena (`Datum::ByRef(ArrayType
         // image)`); set it as the varlena result directly — do NOT re-wrap it in
         // another `SET_VARSIZE` header.
@@ -981,30 +970,30 @@ fn fc_text_to_array_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
             fcinfo.set_result_null(true);
             Datum::from_usize(0)
         }
-    }
+    })
 }
-fn fc_array_to_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_array_to_text(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
     let elemtype = arr_elemtype(arg_array_image(fcinfo, 0));
-    let v = arg_array_datum(m.mcx(), fcinfo, 0);
+    let v = arg_array_datum(m.mcx(), fcinfo, 0)?;
     let fldsep = arg_bytes(fcinfo, 1);
-    let out = ok(crate::split_format::array_to_text(m.mcx(), v, elemtype, fldsep)).to_vec();
-    ret_varlena(fcinfo, out)
+    let out = (crate::split_format::array_to_text(m.mcx(), v, elemtype, fldsep))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
-fn fc_array_to_text_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_array_to_text_null(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     // C `array_to_text_null` is `proisstrict => 'f'`: the array (arg0) and
     // `fldsep` (arg1) are still required (C reads them unconditionally), only
     // `null_string` (arg2) may be NULL.
     let m = scratch_mcx();
     let elemtype = arr_elemtype(arg_array_image(fcinfo, 0));
-    let v = arg_array_datum(m.mcx(), fcinfo, 0);
+    let v = arg_array_datum(m.mcx(), fcinfo, 0)?;
     let fldsep = arg_bytes(fcinfo, 1);
     let null_string = opt_arg_bytes(fcinfo, 2);
     let out =
-        ok(crate::split_format::array_to_text_null(m.mcx(), v, elemtype, fldsep, null_string)).to_vec();
-    ret_varlena(fcinfo, out)
+        (crate::split_format::array_to_text_null(m.mcx(), v, elemtype, fldsep, null_string))?.to_vec();
+    Ok(ret_varlena(fcinfo, out))
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,7 +1018,7 @@ use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
 /// Build one `FormatArg` for fmgr arg `i`: its canonical value, SQL-NULL flag,
 /// and actual type OID. NULL args carry a placeholder value (`concat_internal`
 /// /`text_format` only consult `value` when `!is_null`).
-fn format_arg<'mcx>(mcx: mcx::Mcx<'mcx>, fcinfo: &FunctionCallInfoBaseData, i: usize) -> FormatArg<'mcx> {
+fn format_arg<'mcx>(mcx: mcx::Mcx<'mcx>, fcinfo: &FunctionCallInfoBaseData, i: usize) -> types_error::PgResult<FormatArg<'mcx>> {
     let is_null = fcinfo.arg(i).map(|d| d.isnull).unwrap_or(true);
     let typid = backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), i as i32);
     let value = if is_null {
@@ -1037,15 +1026,15 @@ fn format_arg<'mcx>(mcx: mcx::Mcx<'mcx>, fcinfo: &FunctionCallInfoBaseData, i: u
     } else if let Some(p) = fcinfo.ref_arg(i) {
         // By-reference arg: the header-ful image crosses verbatim.
         match p {
-            RefPayload::Varlena(b) => CanonDatum::ByRef(ok(mcx::slice_in(mcx, b))),
+            RefPayload::Varlena(b) => CanonDatum::ByRef(mcx::slice_in(mcx, b)?),
             RefPayload::Cstring(s) => CanonDatum::Cstring(s.clone()),
-            _ => CanonDatum::ByRef(ok(mcx::slice_in(mcx, p.as_varlena().unwrap_or(&[])))),
+            _ => CanonDatum::ByRef(mcx::slice_in(mcx, p.as_varlena().unwrap_or(&[]))?),
         }
     } else {
         // By-value arg: the bare machine word.
         CanonDatum::ByVal(fcinfo.arg(i).map(|d| d.value.as_usize()).unwrap_or(0))
     };
-    FormatArg { value, is_null, typid }
+    Ok(FormatArg { value, is_null, typid })
 }
 
 /// Collect all fmgr args (from `start`) into a `FormatArg` vector.
@@ -1053,7 +1042,7 @@ fn collect_format_args<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     start: usize,
-) -> Vec<FormatArg<'mcx>> {
+) -> types_error::PgResult<Vec<FormatArg<'mcx>>> {
     (start..fcinfo.nargs()).map(|i| format_arg(mcx, fcinfo, i)).collect()
 }
 
@@ -1065,25 +1054,25 @@ fn variadic_array<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     argidx: usize,
-) -> Option<Option<(CanonDatum<'mcx>, Oid)>> {
+) -> types_error::PgResult<Option<Option<(CanonDatum<'mcx>, Oid)>>> {
     if fcinfo.nargs() != argidx + 1 {
-        return None;
+        return Ok(None);
     }
     if !backend_utils_fmgr_core::get_fn_expr_variadic(fcinfo.flinfo.as_deref()) {
-        return None;
+        return Ok(None);
     }
     // The single trailing arg is the variadic array.
     if fcinfo.arg(argidx).map(|d| d.isnull).unwrap_or(true) {
         // concat(VARIADIC NULL) / format(..., VARIADIC NULL) -> NULL.
-        return Some(None);
+        return Ok(Some(None));
     }
     let arrtype = backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), argidx as i32);
-    let elemtype = ok(backend_utils_cache_lsyscache_seams::get_base_element_type::call(arrtype));
+    let elemtype = backend_utils_cache_lsyscache_seams::get_base_element_type::call(arrtype)?;
     // The array image rides the by-ref lane; wrap it the same way the
     // `array_to_text` adapter does (header-less payload, the convention
     // `array_to_text_internal` reads).
-    let v = arg_array_datum(mcx, fcinfo, argidx);
-    Some(Some((v, elemtype)))
+    let v = arg_array_datum(mcx, fcinfo, argidx)?;
+    Ok(Some(Some((v, elemtype))))
 }
 
 /// Write an `Option<Vec<u8>>` text result back onto the by-ref lane: `Some` is a
@@ -1100,42 +1089,42 @@ fn ret_opt_text(fcinfo: &mut FunctionCallInfoBaseData, result: Option<Vec<u8>>) 
     }
 }
 
-fn fc_text_concat(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_concat(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let mcx = m.mcx();
-    let result: Option<Vec<u8>> = match variadic_array(mcx, fcinfo, 0) {
+    let result: Option<Vec<u8>> = match variadic_array(mcx, fcinfo, 0)? {
         Some(None) => None, // VARIADIC NULL -> NULL
         Some(Some(arr)) => {
-            ok(crate::split_format::text_concat(mcx, &[], Some(arr))).map(|b| b.as_slice().to_vec())
+            (crate::split_format::text_concat(mcx, &[], Some(arr)))?.map(|b| b.as_slice().to_vec())
         }
         None => {
-            let args = collect_format_args(mcx, fcinfo, 0);
-            ok(crate::split_format::text_concat(mcx, &args, None)).map(|b| b.as_slice().to_vec())
+            let args = collect_format_args(mcx, fcinfo, 0)?;
+            (crate::split_format::text_concat(mcx, &args, None))?.map(|b| b.as_slice().to_vec())
         }
     };
-    ret_opt_text(fcinfo, result)
+    Ok(ret_opt_text(fcinfo, result))
 }
 
-fn fc_text_concat_ws(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_concat_ws(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
     let mcx = m.mcx();
     // arg0 is the separator (text, may be NULL -> whole result NULL).
     let sep = opt_arg_bytes(fcinfo, 0).map(|b| b.to_vec());
-    let result: Option<Vec<u8>> = match variadic_array(mcx, fcinfo, 1) {
+    let result: Option<Vec<u8>> = match variadic_array(mcx, fcinfo, 1)? {
         Some(None) => None,
-        Some(Some(arr)) => ok(crate::split_format::text_concat_ws(mcx, sep.as_deref(), &[], Some(arr)))
+        Some(Some(arr)) => (crate::split_format::text_concat_ws(mcx, sep.as_deref(), &[], Some(arr)))?
             .map(|b| b.as_slice().to_vec()),
         None => {
-            let args = collect_format_args(mcx, fcinfo, 0);
-            ok(crate::split_format::text_concat_ws(mcx, sep.as_deref(), &args, None))
+            let args = collect_format_args(mcx, fcinfo, 0)?;
+            (crate::split_format::text_concat_ws(mcx, sep.as_deref(), &args, None))?
                 .map(|b| b.as_slice().to_vec())
         }
     };
-    ret_opt_text(fcinfo, result)
+    Ok(ret_opt_text(fcinfo, result))
 }
 
-fn fc_text_format(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_format(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
     let mcx = m.mcx();
@@ -1148,33 +1137,33 @@ fn fc_text_format(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         // format(fmt, VARIADIC arr): expand the array into the value list.
         if fcinfo.arg(1).map(|d| d.isnull).unwrap_or(true) {
             // format(fmt, VARIADIC NULL): an all-NULL/empty value list.
-            ok(crate::split_format::text_format(mcx, fmt.as_deref(), &[])).map(|b| b.as_slice().to_vec())
+            (crate::split_format::text_format(mcx, fmt.as_deref(), &[]))?.map(|b| b.as_slice().to_vec())
         } else {
             let arrtype = backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 1);
-            let elemtype = ok(backend_utils_cache_lsyscache_seams::get_base_element_type::call(arrtype));
-            let v = arg_array_datum(mcx, fcinfo, 1);
-            let elems = ok(crate::split_format::array_to_format_args(mcx, v, elemtype));
-            ok(crate::split_format::text_format(mcx, fmt.as_deref(), &elems))
+            let elemtype = (backend_utils_cache_lsyscache_seams::get_base_element_type::call(arrtype))?;
+            let v = arg_array_datum(mcx, fcinfo, 1)?;
+            let elems = (crate::split_format::array_to_format_args(mcx, v, elemtype))?;
+            (crate::split_format::text_format(mcx, fmt.as_deref(), &elems))?
                 .map(|b| b.as_slice().to_vec())
         }
     } else {
-        let args = collect_format_args(mcx, fcinfo, 1);
-        ok(crate::split_format::text_format(mcx, fmt.as_deref(), &args)).map(|b| b.as_slice().to_vec())
+        let args = collect_format_args(mcx, fcinfo, 1)?;
+        (crate::split_format::text_format(mcx, fmt.as_deref(), &args))?.map(|b| b.as_slice().to_vec())
     };
-    ret_opt_text(fcinfo, result)
+    Ok(ret_opt_text(fcinfo, result))
 }
 
-fn fc_text_format_nv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_text_format_nv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     // C: text_format_nv is a thin nonvariadic wrapper (it exists only for
     // opr_sanity); it never sees the VARIADIC keyword.
     let m = scratch_mcx();
     let mcx = m.mcx();
     let fmt = opt_arg_bytes(fcinfo, 0).map(|b| b.to_vec());
-    let args = collect_format_args(mcx, fcinfo, 1);
+    let args = collect_format_args(mcx, fcinfo, 1)?;
     let result: Option<Vec<u8>> =
-        ok(crate::split_format::text_format_nv(mcx, fmt.as_deref(), &args)).map(|b| b.as_slice().to_vec());
-    ret_opt_text(fcinfo, result)
+        (crate::split_format::text_format_nv(mcx, fmt.as_deref(), &args))?.map(|b| b.as_slice().to_vec());
+    Ok(ret_opt_text(fcinfo, result))
 }
 
 // ---------------------------------------------------------------------------
@@ -1198,12 +1187,12 @@ fn fc_text_format_nv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn pg_column_arg<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
-) -> (i32, CanonDatum<'mcx>) {
+) -> types_error::PgResult<(i32, CanonDatum<'mcx>)> {
     let argtypeid = backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 0);
-    let typlen = ok(backend_utils_cache_lsyscache_seams::get_typlen::call(argtypeid));
+    let typlen = backend_utils_cache_lsyscache_seams::get_typlen::call(argtypeid)?;
     if typlen == 0 {
         // C: elog(ERROR, "cache lookup failed for type %u", argtypeid).
-        raise(
+        return Err(
             types_error::PgError::error(format!(
                 "cache lookup failed for type {}",
                 argtypeid
@@ -1214,51 +1203,56 @@ fn pg_column_arg<'mcx>(
     let value = match fcinfo.ref_arg(0) {
         // By-reference arg (varlena / cstring): the header-ful image crosses
         // verbatim onto the canonical `Datum`.
-        Some(RefPayload::Varlena(b)) => CanonDatum::ByRef(ok(mcx::slice_in(mcx, b))),
+        Some(RefPayload::Varlena(b)) => CanonDatum::ByRef(mcx::slice_in(mcx, b)?),
         Some(RefPayload::Cstring(s)) => CanonDatum::Cstring(s.clone()),
-        Some(p) => CanonDatum::ByRef(ok(mcx::slice_in(mcx, p.as_varlena().unwrap_or(&[])))),
+        Some(p) => CanonDatum::ByRef(mcx::slice_in(mcx, p.as_varlena().unwrap_or(&[]))?),
         // By-value arg: the bare machine word.
         None => CanonDatum::ByVal(fcinfo.arg(0).map(|d| d.value.as_usize()).unwrap_or(0)),
     };
-    (typlen as i32, value)
+    Ok((typlen as i32, value))
 }
 
-fn fc_pg_column_size(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_column_size(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let (typlen, value) = pg_column_arg(m.mcx(), fcinfo);
-    ret_i32(ok(crate::split_format::pg_column_size(m.mcx(), &value, typlen)))
+    let (typlen, value) = pg_column_arg(m.mcx(), fcinfo)?;
+    Ok(ret_i32((crate::split_format::pg_column_size(m.mcx(), &value, typlen))?))
 }
 
-fn fc_pg_column_toast_chunk_id(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_column_toast_chunk_id(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
-    let (typlen, value) = pg_column_arg(m.mcx(), fcinfo);
-    match ok(crate::split_format::pg_column_toast_chunk_id(&value, typlen)) {
+    let (typlen, value) = pg_column_arg(m.mcx(), fcinfo)?;
+    Ok(match (crate::split_format::pg_column_toast_chunk_id(&value, typlen))? {
         Some(oid) => Datum::from_oid(oid),
         None => {
             fcinfo.set_result_null(true);
             Datum::from_usize(0)
         }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
+/// Build one strict Result-native builtin row (`func: None`; dispatch goes
+/// through the native overlay) paired with its [`PgFnNative`] body.
 fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Like [`builtin`] but `proisstrict => 'f'` (the function must run even when an
@@ -1267,23 +1261,26 @@ fn builtin_ns(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: false,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: false,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the boot-critical `text` / `name`<->`text` comparison builtins (C:
 /// their `fmgr_builtins[]` rows). Called from this crate's `init_seams()`.
 /// OIDs/nargs from `pg_proc.dat`; all are `proisstrict => 't'` and not retset.
 pub fn register_varlena_compare_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- text relational (comparison.rs) ----
         builtin(67, "texteq", 2, fc_texteq),
         builtin(157, "textne", 2, fc_textne),
@@ -1325,7 +1322,7 @@ pub fn register_varlena_compare_builtins() {
 ///   array (per-arg Datums with their types) is not carried at this fmgr
 ///   boundary (`text_format`/`text_format_nv` need the typed variadic args).
 pub fn register_varlena_more_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- text/bytea wire I/O ----
         builtin(46, "textin", 1, fc_textin),
         builtin(47, "textout", 1, fc_textout),
@@ -1423,7 +1420,7 @@ pub fn register_varlena_more_builtins() {
 /// strict / retset transcribed exactly from `pg_proc.dat`; every row here is
 /// `proisstrict => 't'` and not `proretset`.
 pub fn register_varlena_text_bytea_byref_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- bytea get/set byte/bit (bytea.rs) ----
         // builtin `name` is the `prosrc` C symbol (canonical fmgr_builtins[]
         // keys on prosrc, not the SQL proname).
@@ -1459,7 +1456,7 @@ pub fn register_varlena_text_bytea_byref_builtins() {
 /// `proretset => 't'` — need the SRF tuplestore boundary) and the variadic
 /// `concat`/`concat_ws`/`format` (no typed-variadic frame at this boundary).
 pub fn register_varlena_array_string_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin_ns(394, "text_to_array", 2, fc_text_to_array),
         builtin_ns(376, "text_to_array_null", 3, fc_text_to_array_null),
         builtin(395, "array_to_text", 2, fc_array_to_text),
@@ -1472,7 +1469,7 @@ pub fn register_varlena_array_string_builtins() {
 /// retset; OIDs / nargs transcribed from `pg_proc.dat`. The builtin `name` is
 /// the `prosrc` C symbol.
 pub fn register_varlena_pg_column_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(1269, "pg_column_size", 1, fc_pg_column_size),
         builtin(6316, "pg_column_toast_chunk_id", 1, fc_pg_column_toast_chunk_id),
     ]);
@@ -1483,7 +1480,7 @@ pub fn register_varlena_pg_column_builtins() {
 /// are `provariadic => 'any'`, `proisstrict => 'f'` and not retset
 /// (`text_format_nv` is the nonvariadic opr_sanity wrapper, still non-strict).
 pub fn register_varlena_format_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin_ns(3058, "text_concat", 1, fc_text_concat),
         builtin_ns(3059, "text_concat_ws", 2, fc_text_concat_ws),
         builtin_ns(3539, "text_format", 2, fc_text_format),
@@ -1516,6 +1513,27 @@ mod tests {
         }
     }
 
+    /// Resolve a migrated builtin OID to its Result-native body. The metadata row
+    /// is still registered (and asserted present below); since these builtins are
+    /// now Native their callable lives in the fmgr-core `NATIVE` overlay (private),
+    /// so the tests dispatch the body directly — exactly the function `invoke_builtin`
+    /// runs. Panics on an OID the migrated set does not cover.
+    fn native_body(oid: u32) -> PgFnNative {
+        match oid {
+            721 => fc_byteaGetByte,
+            723 => fc_byteaGetBit,
+            722 => fc_byteaSetByte,
+            724 => fc_byteaSetBit,
+            936 => fc_text_substr,
+            937 => fc_text_substr_no_len,
+            1404 => fc_textoverlay,
+            1405 => fc_textoverlay_no_len,
+            109 => fc_unknownin,
+            110 => fc_unknownout,
+            other => panic!("native_body: unmapped test OID {other}"),
+        }
+    }
+
     /// Call a registered by-ref builtin by OID: `n` by-ref `Varlena` args (raw
     /// header-stripped payloads, the form the cores consume) plus optional
     /// trailing by-value int args. Returns the produced `Varlena` payload.
@@ -1539,8 +1557,10 @@ mod tests {
         }
         fcinfo.args = args;
         fcinfo.ref_args = refs;
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        // Metadata row is registered (by-name/strict/etc. readers see it)...
+        backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
+        // ...and the Result-native body is dispatched directly.
+        native_body(oid)(&mut fcinfo).expect("native builtin returned Ok");
         match fcinfo.take_ref_result().expect("by-ref result produced") {
             RefPayload::Varlena(b) => b,
             other => panic!("unexpected result lane {other:?}"),
@@ -1564,8 +1584,8 @@ mod tests {
         }
         fcinfo.args = args;
         fcinfo.ref_args = refs;
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
-        let d = (entry.func.unwrap())(&mut fcinfo);
+        backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("builtin registered");
+        let d = native_body(oid)(&mut fcinfo).expect("native builtin returned Ok");
         d.as_i32()
     }
 
@@ -1651,8 +1671,8 @@ mod tests {
         let mut fc = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fc.args = vec![NullableDatum::value(Datum::null())];
         fc.ref_args = vec![Some(RefPayload::Cstring("abc".to_string()))];
-        let e_in = backend_utils_fmgr_core::fmgr_isbuiltin(109).expect("unknownin registered");
-        (e_in.func.unwrap())(&mut fc);
+        backend_utils_fmgr_core::fmgr_isbuiltin(109).expect("unknownin registered");
+        native_body(109)(&mut fc).expect("unknownin returned Ok");
         let mid = match fc.take_ref_result().expect("unknownin result") {
             RefPayload::Cstring(s) => s,
             other => panic!("unexpected lane {other:?}"),
@@ -1662,8 +1682,8 @@ mod tests {
         let mut fc2 = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fc2.args = vec![NullableDatum::value(Datum::null())];
         fc2.ref_args = vec![Some(RefPayload::Cstring(mid))];
-        let e_out = backend_utils_fmgr_core::fmgr_isbuiltin(110).expect("unknownout registered");
-        (e_out.func.unwrap())(&mut fc2);
+        backend_utils_fmgr_core::fmgr_isbuiltin(110).expect("unknownout registered");
+        native_body(110)(&mut fc2).expect("unknownout returned Ok");
         let out = match fc2.take_ref_result().expect("unknownout result") {
             RefPayload::Cstring(s) => s,
             other => panic!("unexpected lane {other:?}"),

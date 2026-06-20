@@ -41,14 +41,20 @@ fn pglc_localeconv() -> CashLconv {
     backend_utils_adt_pg_locale_seams::pglc_localeconv::call()
 }
 
-/// C: `pg_mbstrlen` via the mbutils seam (`pg_mbstrlen_with_len`, infallible).
+/// C: `pg_mbstrlen` via the mbutils seam (`pg_mbstrlen_with_len`). Called on the
+/// numeric format pattern (server-encoding-valid SQL text), so the
+/// `report_invalid_encoding` path is dead; fall back to the byte length (an
+/// upper bound on the char count) rather than escalate.
 fn pg_mbstrlen(s: &[u8]) -> i32 {
     backend_utils_mb_mbutils_seams::pg_mbstrlen_with_len::call(s, s.len() as i32)
+        .unwrap_or(s.len() as i32)
 }
 
-/// C: bounded `pg_mblen` via the mbutils seam (`pg_mblen_range`, infallible).
+/// C: bounded `pg_mblen` via the mbutils seam (`pg_mblen_range`). C's `pg_mblen`
+/// does not validate; the seam only Errs on a slice-overrunning leading char,
+/// where the clamped length is the slice length (dead path falls back there).
 fn pg_mblen_range(s: &[u8]) -> i32 {
-    backend_utils_mb_mbutils_seams::pg_mblen_range::call(s)
+    backend_utils_mb_mbutils_seams::pg_mblen_range::call(s).unwrap_or(s.len() as i32)
 }
 
 /// C: `fill_str` (formatting.c:4875) -- fill `max` bytes with `c`, NUL-terminate.

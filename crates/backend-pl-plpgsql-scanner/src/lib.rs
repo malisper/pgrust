@@ -830,11 +830,19 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
         if location < 0 {
             return 0; // no-op if location is unknown
         }
-        // Convert byte offset to character number.
-        backend_utils_mb_mbutils_seams::pg_mbstrlen_with_len::call(
+        // Convert byte offset to character number. `scanorig` is the source
+        // text already accepted by the lexer, so it is valid in the server
+        // encoding and `pg_mbstrlen_with_len` cannot actually report an invalid
+        // byte sequence here (in C it would longjmp; the infallible C signature
+        // relies on this). If the dead error path is ever reached, fall back to
+        // the byte offset as a best-effort cursor rather than panicking.
+        match backend_utils_mb_mbutils_seams::pg_mbstrlen_with_len::call(
             self.scanorig.as_bytes(),
             location,
-        ) + 1
+        ) {
+            Ok(nchars) => nchars + 1,
+            Err(_) => location + 1,
+        }
     }
 
     /// `plpgsql_yyerror(yyllocp, plpgsql_parse_result_p, yyscanner, message)` —

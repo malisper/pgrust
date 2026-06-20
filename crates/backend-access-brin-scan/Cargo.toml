@@ -25,6 +25,7 @@ types-tidbitmap = { path = "../types-tidbitmap" }
 # owned engine layers (direct deps — acyclic: scan owns brin.c, consumes pageops/tuple)
 backend-access-brin-pageops = { path = "../backend-access-brin-pageops" }
 backend-access-brin-tuple = { path = "../backend-access-brin-tuple" }
+backend-access-common-reloptions-seams = { path = "../backend-access-common-reloptions-seams" }
 
 # cross-owner seam crates
 backend-access-brin-entry-seams = { path = "../backend-access-brin-entry-seams" }

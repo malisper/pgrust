@@ -502,25 +502,23 @@ pub fn DefineIndex<'mcx>(
     //    false, false); (void) index_reloptions(amoptions, reloptions, true);
     //    where amoptions = accessMethodForm->amoptions.
     //
-    // `transformRelOptions` yields a bare-word `types_datum::Datum` (a `text[]`
-    // varlena pointer) but `index_reloptions` wants the varlena bytes and
-    // `IndexCreateArgs.reloptions` is a `types_tuple::Datum` (ByRef-bytes lane).
-    // There is no bridge between the two Datum lanes (the documented
-    // Datum-redesign keystone), and `index_create` itself panics on a non-null
-    // reloptions `types_tuple::Datum` for the same reason. So a CREATE INDEX
-    // carrying a WITH (...) clause is deferred as a precise panic, not silently
-    // dropped; the (overwhelmingly common) no-WITH path runs end-to-end.
+    // `transformRelOptionsBytes` builds the on-disk `text[]` varlena image (the
+    // bytes `pg_class.reloptions` stores); it rides the `types_tuple::Datum`
+    // by-reference lane as `Datum::ByRef` so `index_create`'s catalog write
+    // (`reloptions_to_bytes`) reads the real array (the Datum-bridge fix —
+    // construct_text_array_bytes, mirroring the array-producer ByRef fixes).
     let reloptions: types_tuple::Datum<'mcx> = if stmt.options.is_empty() {
         types_tuple::Datum::null()
     } else {
-        let _ = (access_method_id, mcx);
-        panic!(
-            "backend-commands-indexcmds: DefineIndex WITH (...) AM-specific index \
-             reloptions are deferred — transformRelOptions yields a bare-word \
-             types_datum::Datum with no bridge to the types_tuple::Datum \
-             ByRef-bytes lane that index_reloptions / index_create consume \
-             (Datum-redesign keystone; index_create panics on the same path)"
-        );
+        // amoptions = accessMethodForm->amoptions; the port keys the AM's option
+        // parser on the handler OID (rd_amhandler), the same dispatch the
+        // relcache uses for index_reloptions.
+        let amhandler = match syscache::search_am_handler::call(access_method_id)? {
+            Some(h) => h,
+            None => InvalidOid,
+        };
+        let bytes = transform_index_reloptions_byref(mcx, &stmt.options, amhandler)?;
+        types_tuple::Datum::from_byref_bytes_in(mcx, &bytes)?
     };
 
     // Prepare the IndexInfo. Predicates must be in implicit-AND format. In a
@@ -2136,4 +2134,87 @@ fn define_index_dispatch_arm<'mcx>(
         false,
         false,
     )
+}
+
+// ===========================================================================
+// reloptions / attoptions text[] producers (the Datum-bridge for CREATE INDEX)
+// ===========================================================================
+
+/// Build the reloptions-crate [`DefElem`](backend_access_common_reloptions::DefElem)
+/// working view from a parser `DefElem` node (the `T_DefElem` payload of a
+/// `WITH (...)` / `OPCLASS (...)` option). The value node is projected to the
+/// `DefElemArg` the reloptions `defGetString` seam reads (`def->arg == NULL` is
+/// `None`).
+fn reloptions_view_defel(
+    def: &DefElem<'_>,
+) -> backend_access_common_reloptions::DefElem {
+    use backend_commands_define_seams::DefElemArg;
+    let arg = def.arg.as_deref().map(|node| match node.node_tag() {
+        ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
+        ntag::T_Float => DefElemArg::Float(node.expect_float().fval.as_str().to_string()),
+        ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
+        ntag::T_String => DefElemArg::String(node.expect_string().sval.as_str().to_string()),
+        _ => DefElemArg::AStar,
+    });
+    backend_access_common_reloptions::DefElem::new(
+        def.defnamespace.as_deref(),
+        def.defname.as_deref().unwrap_or(""),
+        arg,
+    )
+}
+
+/// Build the reloptions-crate `DefElem` view list from a parser option list (a
+/// `List *` of `DefElem` — `IndexStmt.options` or `IndexElem.opclassopts`).
+fn reloptions_view_list(
+    options: &[types_nodes::nodes::NodePtr<'_>],
+) -> Vec<backend_access_common_reloptions::DefElem> {
+    options
+        .iter()
+        .map(|opt| {
+            let opt: &Node = opt;
+            let def = match opt.node_tag() {
+                t if t == ntag::T_DefElem => opt.expect_defelem(),
+                _ => panic!("reloptions option list element is not a DefElem"),
+            };
+            reloptions_view_defel(def)
+        })
+        .collect()
+}
+
+/// `reloptions = transformRelOptions((Datum) 0, stmt->options, NULL, NULL,
+/// false, false); (void) index_reloptions(amoptions, reloptions, true);`
+/// (indexcmds.c DefineIndex). Build the index `text[]` reloptions varlena image
+/// (the bytes `pg_class.reloptions` stores) and validate it through the AM's
+/// option parser; the caller lowers the bytes onto the `Datum::ByRef` lane.
+fn transform_index_reloptions_byref<'mcx>(
+    mcx: Mcx<'mcx>,
+    options: &[types_nodes::nodes::NodePtr<'mcx>],
+    amhandler: Oid,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let def_list = reloptions_view_list(options);
+    // namspace = NULL, validnsps = NULL, acceptOidsOff = false, isReset = false.
+    let bytes = backend_access_common_reloptions::transformRelOptionsBytes(
+        mcx, None, &def_list, None, None, false, false,
+    )?;
+    let bytes = bytes.expect("CREATE INDEX WITH (...) has at least one option");
+    // (void) index_reloptions(amoptions, reloptions, true): validate; the parsed
+    // struct is discarded, only the ereport(ERROR) on a bad option matters.
+    let _ = backend_access_common_reloptions::index_reloptions(mcx, amhandler, Some(&bytes), true)?;
+    Ok(bytes)
+}
+
+/// `opclassOptions[attn] = transformRelOptions((Datum) 0,
+/// attribute->opclassopts, NULL, NULL, false, false);` (indexcmds.c
+/// ComputeIndexAttrs). Build the per-column attoptions `text[]` varlena image
+/// (the bytes `pg_attribute.attoptions` stores); the caller lowers it onto the
+/// `Datum::ByRef` lane that `index_create` / `AppendAttributeTuples` consume.
+pub(crate) fn transform_attoptions_byref<'mcx>(
+    mcx: Mcx<'mcx>,
+    opclassopts: &[types_nodes::nodes::NodePtr<'mcx>],
+) -> PgResult<PgVec<'mcx, u8>> {
+    let def_list = reloptions_view_list(opclassopts);
+    let bytes = backend_access_common_reloptions::transformRelOptionsBytes(
+        mcx, None, &def_list, None, None, false, false,
+    )?;
+    Ok(bytes.expect("OPCLASS (...) has at least one option"))
 }

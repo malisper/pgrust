@@ -255,7 +255,7 @@ fn parse_bitstring(
             if ch == b'1' {
                 data[r] |= x;
             } else if ch != b'0' {
-                let mblen = mb::pg_mblen_range::call(&sp[idx..]).max(1) as usize;
+                let mblen = mb::pg_mblen_range::call(&sp[idx..])?.max(1) as usize;
                 let frag = String::from_utf8_lossy(&sp[idx..idx + mblen.min(sp.len() - idx)]);
                 ereturn(
                     escontext,
@@ -282,7 +282,7 @@ fn parse_bitstring(
             } else if (b'a'..=b'f').contains(&ch) {
                 ch - b'a' + 10
             } else {
-                let mblen = mb::pg_mblen_range::call(&sp[idx..]).max(1) as usize;
+                let mblen = mb::pg_mblen_range::call(&sp[idx..])?.max(1) as usize;
                 let frag = String::from_utf8_lossy(&sp[idx..idx + mblen.min(sp.len() - idx)]);
                 ereturn(
                     escontext,

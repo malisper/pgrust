@@ -292,6 +292,8 @@ pub fn init_seams() {
         )
     });
 
+    seams::predicate_lock_status_rows::set(|mcx| engine::pg_lock_status_predicate_rows(mcx));
+
     // GUC variable backing storage owned by predicate.c, read at
     // shmem-sizing time (PredicateLockShmemSize): `serializable_buffers`
     // directly and `max_predicate_locks_per_xact` via the NPREDICATELOCKTARGETENTS

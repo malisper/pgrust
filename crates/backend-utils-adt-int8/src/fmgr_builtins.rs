@@ -20,7 +20,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::Oid;
 
@@ -108,19 +108,12 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult<i64>` core, raising its `ereport(ERROR)` on `Err`.
+/// Map a `PgResult<i64>` core to the Result-native fmgr return: its
+/// `ereport(ERROR)` travels as `Err(PgError)` straight back to the dispatch
+/// (`invoke_builtin`), with no panic / `catch_unwind`.
 #[inline]
-fn try_i64(r: types_error::PgResult<i64>) -> Datum {
-    match r {
-        Ok(v) => ret_i64(v),
-        Err(e) => raise(e),
-    }
+fn try_i64(r: types_error::PgResult<i64>) -> types_error::PgResult<Datum> {
+    r.map(ret_i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +122,7 @@ fn try_i64(r: types_error::PgResult<i64>) -> Datum {
 
 // ---- I/O ----
 
-fn fc_int8in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: `int8in` does `pg_strtoint64_safe(str, fcinfo->context)`, forwarding the
     // frame's soft `ErrorSaveContext` (installed by `InputFunctionCallSafe`) so a
     // recoverable parse failure `ereturn`s into the sink instead of throwing. We
@@ -138,300 +131,300 @@ fn fc_int8in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let s = arg_cstring(fcinfo, 0).to_string();
     let escontext = fcinfo.escontext_mut();
     match crate::int8in(&s, escontext) {
-        Ok(v) => ret_i64(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(ret_i64(v)),
+        Err(e) => Err(e),
     }
 }
 
-fn fc_int8out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let v = arg_i64(fcinfo, 0);
-    ret_cstring(fcinfo, crate::int8out(v))
+    Ok(ret_cstring(fcinfo, crate::int8out(v)))
 }
 
 // ---- comparison operators (int8 / int84 / int48 / int82 / int28) ----
 
-fn fc_int8eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int8eq(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int8eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int8eq(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int8ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int8ne(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int8ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int8ne(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int8lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int8lt(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int8lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int8lt(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int8gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int8gt(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int8gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int8gt(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int8le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int8le(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int8le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int8le(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int8ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int8ge(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
-}
-
-fn fc_int84eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int84eq(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
-}
-fn fc_int84ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int84ne(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
-}
-fn fc_int84lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int84lt(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
-}
-fn fc_int84gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int84gt(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
-}
-fn fc_int84le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int84le(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
-}
-fn fc_int84ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int84ge(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_int8ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int8ge(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
 
-fn fc_int48eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int48eq(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int84eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int84eq(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_int48ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int48ne(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int84ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int84ne(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_int48lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int48lt(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int84lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int84lt(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_int48gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int48gt(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int84gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int84gt(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_int48le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int48le(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int84le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int84le(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_int48ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int48ge(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
-}
-
-fn fc_int82eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int82eq(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1)))
-}
-fn fc_int82ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int82ne(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1)))
-}
-fn fc_int82lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int82lt(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1)))
-}
-fn fc_int82gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int82gt(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1)))
-}
-fn fc_int82le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int82le(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1)))
-}
-fn fc_int82ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int82ge(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1)))
+fn fc_int84ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int84ge(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
 
-fn fc_int28eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int28eq(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int48eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int48eq(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int28ne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int28ne(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int48ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int48ne(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int28lt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int28lt(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int48lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int48lt(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int28gt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int28gt(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int48gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int48gt(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int28le(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int28le(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int48le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int48le(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int28ge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::int28ge(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int48ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int48ge(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1))))
+}
+
+fn fc_int82eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int82eq(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1))))
+}
+fn fc_int82ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int82ne(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1))))
+}
+fn fc_int82lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int82lt(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1))))
+}
+fn fc_int82gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int82gt(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1))))
+}
+fn fc_int82le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int82le(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1))))
+}
+fn fc_int82ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int82ge(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1))))
+}
+
+fn fc_int28eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int28eq(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1))))
+}
+fn fc_int28ne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int28ne(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1))))
+}
+fn fc_int28lt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int28lt(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1))))
+}
+fn fc_int28gt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int28gt(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1))))
+}
+fn fc_int28le(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int28le(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1))))
+}
+fn fc_int28ge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::int28ge(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
 
 // ---- unary / arithmetic on int8 ----
 
-fn fc_int8um(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8um(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int8um(arg_i64(fcinfo, 0)))
 }
-fn fc_int8up(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::int8up(arg_i64(fcinfo, 0)))
+fn fc_int8up(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::int8up(arg_i64(fcinfo, 0))))
 }
-fn fc_int8pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int8pl(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int8mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int8mi(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int8mul(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8mul(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int8mul(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int8div(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8div(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int8div(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int8abs(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8abs(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int8abs(arg_i64(fcinfo, 0)))
 }
-fn fc_int8mod(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8mod(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int8mod(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int8gcd(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8gcd(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int8gcd(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int8lcm(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8lcm(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int8lcm(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int8inc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8inc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int8inc(arg_i64(fcinfo, 0)))
 }
-fn fc_int8dec(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8dec(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int8dec(arg_i64(fcinfo, 0)))
 }
-fn fc_int8inc_any(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8inc_any(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: int8inc_any(fcinfo) { return int8inc(fcinfo); } — the count(any) transfn:
     // increments arg0 (the running int8 count), ignoring the (any-typed) input.
     try_i64(crate::int8inc_any(arg_i64(fcinfo, 0)))
 }
-fn fc_int8inc_float8_float8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8inc_float8_float8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: int8inc_float8_float8(fcinfo) { return int8inc(fcinfo); } — ignores the
     // two trailing float8 args and increments arg0 in place.
     try_i64(crate::int8inc_float8_float8(arg_i64(fcinfo, 0)))
 }
-fn fc_int8dec_any(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8dec_any(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: int8dec_any(fcinfo) { return int8dec(fcinfo); } — the count(*)/count(any)
     // inverse-transition: decrements arg0 (the running int8 count), ignoring the
     // (any-typed) second input.
     try_i64(crate::int8dec_any(arg_i64(fcinfo, 0)))
 }
-fn fc_int8larger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::int8larger(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int8larger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::int8larger(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int8smaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::int8smaller(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int8smaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::int8smaller(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
 
 // ---- mixed-width arithmetic (int84 / int48 / int82 / int28) ----
 
-fn fc_int84pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int84pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int84pl(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
 }
-fn fc_int84mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int84mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int84mi(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
 }
-fn fc_int84mul(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int84mul(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int84mul(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
 }
-fn fc_int84div(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int84div(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int84div(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
 }
 
-fn fc_int48pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int48pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int48pl(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int48mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int48mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int48mi(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int48mul(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int48mul(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int48mul(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int48div(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int48div(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int48div(arg_i32(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
 
-fn fc_int82pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int82pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int82pl(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1)))
 }
-fn fc_int82mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int82mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int82mi(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1)))
 }
-fn fc_int82mul(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int82mul(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int82mul(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1)))
 }
-fn fc_int82div(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int82div(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int82div(arg_i64(fcinfo, 0), arg_i16(fcinfo, 1)))
 }
 
-fn fc_int28pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int28pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int28pl(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int28mi(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int28mi(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int28mi(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int28mul(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int28mul(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int28mul(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
-fn fc_int28div(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int28div(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     try_i64(crate::int28div(arg_i16(fcinfo, 0), arg_i64(fcinfo, 1)))
 }
 
 // ---- bit operators ----
 
-fn fc_int8and(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::int8and(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int8and(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::int8and(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int8or(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::int8or(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int8or(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::int8or(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int8xor(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::int8xor(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1)))
+fn fc_int8xor(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::int8xor(arg_i64(fcinfo, 0), arg_i64(fcinfo, 1))))
 }
-fn fc_int8not(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::int8not(arg_i64(fcinfo, 0)))
+fn fc_int8not(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::int8not(arg_i64(fcinfo, 0))))
 }
-fn fc_int8shl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::int8shl(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_int8shl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::int8shl(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
-fn fc_int8shr(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::int8shr(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1)))
+fn fc_int8shr(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::int8shr(arg_i64(fcinfo, 0), arg_i32(fcinfo, 1))))
 }
 
 // ---- casts ----
 
-fn fc_int84(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int84(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::int84(arg_i64(fcinfo, 0)) {
-        Ok(v) => ret_i32(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(ret_i32(v)),
+        Err(e) => Err(e),
     }
 }
-fn fc_int48(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::int48(arg_i32(fcinfo, 0)))
+fn fc_int48(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::int48(arg_i32(fcinfo, 0))))
 }
-fn fc_int82(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int82(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::int82(arg_i64(fcinfo, 0)) {
-        Ok(v) => ret_i16(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(ret_i16(v)),
+        Err(e) => Err(e),
     }
 }
-fn fc_int28(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::int28(arg_i16(fcinfo, 0)))
+fn fc_int28(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::int28(arg_i16(fcinfo, 0))))
 }
-fn fc_i8tod(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(crate::i8tod(arg_i64(fcinfo, 0)))
+fn fc_i8tod(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::i8tod(arg_i64(fcinfo, 0))))
 }
-fn fc_dtoi8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_dtoi8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::dtoi8(arg_f64(fcinfo, 0)) {
-        Ok(v) => ret_i64(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(ret_i64(v)),
+        Err(e) => Err(e),
     }
 }
-fn fc_i8tof(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f32(crate::i8tof(arg_i64(fcinfo, 0)))
+fn fc_i8tof(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f32(crate::i8tof(arg_i64(fcinfo, 0))))
 }
-fn fc_ftoi8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_ftoi8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::ftoi8(arg_f32(fcinfo, 0)) {
-        Ok(v) => ret_i64(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(ret_i64(v)),
+        Err(e) => Err(e),
     }
 }
-fn fc_i8tooid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_i8tooid(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::i8tooid(arg_i64(fcinfo, 0)) {
-        Ok(v) => ret_oid(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(ret_oid(v)),
+        Err(e) => Err(e),
     }
 }
-fn fc_oidtoi8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i64(crate::oidtoi8(arg_oid(fcinfo, 0)))
+fn fc_oidtoi8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i64(crate::oidtoi8(arg_oid(fcinfo, 0))))
 }
 
 // ---- window in_range ----
 
-fn fc_in_range_int8_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_in_range_int8_int8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     match crate::in_range_int8_int8(
         arg_i64(fcinfo, 0),
         arg_i64(fcinfo, 1),
@@ -439,8 +432,8 @@ fn fc_in_range_int8_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         arg_bool(fcinfo, 3),
         arg_bool(fcinfo, 4),
     ) {
-        Ok(v) => ret_bool(v),
-        Err(e) => raise(e),
+        Ok(v) => Ok(ret_bool(v)),
+        Err(e) => Err(e),
     }
 }
 
@@ -448,30 +441,37 @@ fn fc_in_range_int8_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // Registration.
 // ---------------------------------------------------------------------------
 
+/// Build one Result-native builtin row: the [`BuiltinFunction`] metadata (with
+/// `func: None` — the legacy callable is unused; dispatch goes through the native
+/// overlay) paired with its [`PgFnNative`] body.
 fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
-/// Register every scalar `int8.c` builtin (C: their `fmgr_builtins[]` rows).
-/// Called from this crate's [`crate::init_seams`]. OIDs / nargs / strict /
-/// retset transcribed exactly from `pg_proc.dat` (all `proisstrict => 't'`,
-/// none retset).
+/// Register every scalar `int8.c` builtin (C: their `fmgr_builtins[]` rows) as
+/// **Result-native** (the panic→Result migration; see
+/// `docs/proposals/panic-to-result-migration.md`). Called from this crate's
+/// [`crate::init_seams`]. OIDs / nargs / strict / retset transcribed exactly from
+/// `pg_proc.dat` (all `proisstrict => 't'`, none retset).
 pub fn register_int8_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- I/O ----
         builtin(460, "int8in", 1, true, false, fc_int8in),
         builtin(461, "int8out", 1, true, false, fc_int8out),

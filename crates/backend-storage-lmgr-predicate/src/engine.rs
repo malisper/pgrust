@@ -666,6 +666,59 @@ pub fn GetPredicateLockStatusData() -> PgResult<PredicateLockData> {
 }
 
 // ===========================================================================
+// pg_lock_status predicate (SIREAD) leg projection.
+// ===========================================================================
+
+/// `PredicateLockTagTypeNames[]` (lockfuncs.c) indexed by
+/// [`PredicateLockTargetType`]: relation / page / tuple.
+const PREDICATE_LOCK_TAG_TYPE_NAMES: [&str; 3] = ["relation", "page", "tuple"];
+
+/// The predicate (SIREAD) leg of `pg_lock_status` (lockfuncs.c): snapshot the
+/// predicate-lock hash via [`GetPredicateLockStatusData`] and project each entry
+/// to a [`types_storage::lock::PredLockStatusRow`] (the columns the listing
+/// function emits). The target-tag decode and the holder-`SERIALIZABLEXACT`
+/// reads are predicate.c-internal, so they happen here; the column layout is
+/// applied by lockfuncs.c's owner from these scalars.
+pub fn pg_lock_status_predicate_rows<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+) -> PgResult<mcx::PgVec<'mcx, types_storage::lock::PredLockStatusRow>> {
+    let data = GetPredicateLockStatusData()?;
+
+    let mut out = mcx::PgVec::new_in(mcx);
+    for i in 0..(data.nelements as usize) {
+        let tag = &data.locktags[i];
+        let xact = &data.xacts[i];
+
+        let lock_type = GET_PREDICATELOCKTARGETTAG_TYPE(tag);
+        // values[0] = PredicateLockTagTypeNames[lockType]
+        let locktypename = String::from(PREDICATE_LOCK_TAG_TYPE_NAMES[lock_type as usize]);
+        // values[1] = db; values[2] = relation
+        let database = GET_PREDICATELOCKTARGETTAG_DB(tag);
+        let relation = GET_PREDICATELOCKTARGETTAG_RELATION(tag);
+        // page non-NULL for TUPLE or PAGE; tuple non-NULL for TUPLE only.
+        let has_page = lock_type == PREDLOCKTAG_TUPLE || lock_type == PREDLOCKTAG_PAGE;
+        let has_tuple = lock_type == PREDLOCKTAG_TUPLE;
+        let page = if has_page { GET_PREDICATELOCKTARGETTAG_PAGE(tag) } else { 0 };
+        let tuple = if has_tuple { GET_PREDICATELOCKTARGETTAG_OFFSET(tag) } else { 0 };
+
+        out.push(types_storage::lock::PredLockStatusRow {
+            locktypename,
+            database,
+            relation,
+            has_page,
+            page,
+            has_tuple,
+            tuple,
+            proc_number: xact.vxid.procNumber,
+            local_xid: xact.vxid.localTransactionId,
+            pid: xact.pid,
+        });
+    }
+
+    Ok(out)
+}
+
+// ===========================================================================
 // SummarizeOldestCommittedSxact.
 // ===========================================================================
 

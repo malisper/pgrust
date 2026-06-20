@@ -33,7 +33,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
 
@@ -173,75 +173,60 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     Datum::from_usize(0)
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // I/O adapters (cstring <-> by-ref geometric).
 // ---------------------------------------------------------------------------
 
-fn fc_point_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_point_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: `point_in` forwards `fcinfo->context` for soft `pg_input_is_valid`.
     let s = arg_cstring(fcinfo, 0).to_string();
     let escontext = fcinfo.escontext_mut();
-    let p = ok(crate::io::point_in(&s, escontext));
-    ret_point(fcinfo, p)
+    let p = crate::io::point_in(&s, escontext)?;
+    Ok(ret_point(fcinfo, p))
 }
-fn fc_point_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_point_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let p = arg_point(fcinfo, 0);
-    ret_cstring(fcinfo, crate::io::point_out(&p))
+    Ok(ret_cstring(fcinfo, crate::io::point_out(&p)))
 }
-fn fc_box_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_box_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     let escontext = fcinfo.escontext_mut();
-    let b = ok(crate::io::box_in(&s, escontext));
-    ret_box(fcinfo, b)
+    let b = crate::io::box_in(&s, escontext)?;
+    Ok(ret_box(fcinfo, b))
 }
-fn fc_box_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_box_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let b = arg_box(fcinfo, 0);
-    ret_cstring(fcinfo, crate::io::box_out(&b))
+    Ok(ret_cstring(fcinfo, crate::io::box_out(&b)))
 }
-fn fc_lseg_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lseg_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     let escontext = fcinfo.escontext_mut();
-    let ls = ok(crate::io::lseg_in(&s, escontext));
-    ret_ref(fcinfo, lseg_bytes(&ls))
+    let ls = crate::io::lseg_in(&s, escontext)?;
+    Ok(ret_ref(fcinfo, lseg_bytes(&ls)))
 }
-fn fc_lseg_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lseg_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let ls = arg_lseg(fcinfo, 0);
-    ret_cstring(fcinfo, crate::io::lseg_out(&ls))
+    Ok(ret_cstring(fcinfo, crate::io::lseg_out(&ls)))
 }
-fn fc_line_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_line_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     let escontext = fcinfo.escontext_mut();
-    let l = ok(crate::io::line_in(&s, escontext));
-    ret_ref(fcinfo, line_bytes(&l))
+    let l = crate::io::line_in(&s, escontext)?;
+    Ok(ret_ref(fcinfo, line_bytes(&l)))
 }
-fn fc_line_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_line_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let l = arg_line(fcinfo, 0);
-    ret_cstring(fcinfo, crate::io::line_out(&l))
+    Ok(ret_cstring(fcinfo, crate::io::line_out(&l)))
 }
-fn fc_circle_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_circle_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     let escontext = fcinfo.escontext_mut();
-    let c = ok(crate::io::circle_in(&s, escontext));
-    ret_circle(fcinfo, c)
+    let c = crate::io::circle_in(&s, escontext)?;
+    Ok(ret_circle(fcinfo, c))
 }
-fn fc_circle_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_circle_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let c = arg_circle(fcinfo, 0);
-    ret_cstring(fcinfo, crate::io::circle_out(&c))
+    Ok(ret_cstring(fcinfo, crate::io::circle_out(&c)))
 }
 
 // ---------------------------------------------------------------------------
@@ -251,57 +236,57 @@ fn fc_circle_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 macro_rules! fc_pred_point {
     ($fc:ident, $core:path, pure) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
-            ret_bool($core(&a, &b))
+            Ok(ret_bool($core(&a, &b)))
         }
     };
     ($fc:ident, $core:path, res) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
-            ret_bool(ok($core(&a, &b)))
+            Ok(ret_bool($core(&a, &b)?))
         }
     };
 }
 macro_rules! fc_pred_box {
     ($fc:ident, $core:path, pure) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_box(fcinfo, 0), arg_box(fcinfo, 1));
-            ret_bool($core(&a, &b))
+            Ok(ret_bool($core(&a, &b)))
         }
     };
     ($fc:ident, $core:path, res) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_box(fcinfo, 0), arg_box(fcinfo, 1));
-            ret_bool(ok($core(&a, &b)))
+            Ok(ret_bool($core(&a, &b)?))
         }
     };
 }
 macro_rules! fc_pred_circle {
     ($fc:ident, $core:path, pure) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_circle(fcinfo, 0), arg_circle(fcinfo, 1));
-            ret_bool($core(&a, &b))
+            Ok(ret_bool($core(&a, &b)))
         }
     };
     ($fc:ident, $core:path, res) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_circle(fcinfo, 0), arg_circle(fcinfo, 1));
-            ret_bool(ok($core(&a, &b)))
+            Ok(ret_bool($core(&a, &b)?))
         }
     };
 }
 macro_rules! fc_pred_lseg {
     ($fc:ident, $core:path, pure) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_lseg(fcinfo, 0), arg_lseg(fcinfo, 1));
-            ret_bool($core(&a, &b))
+            Ok(ret_bool($core(&a, &b)))
         }
     };
     ($fc:ident, $core:path, res) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_lseg(fcinfo, 0), arg_lseg(fcinfo, 1));
-            ret_bool(ok($core(&a, &b)))
+            Ok(ret_bool($core(&a, &b)?))
         }
     };
 }
@@ -359,138 +344,138 @@ fc_pred_lseg!(fc_lseg_perp, crate::lseg::lseg_perp, res);
 
 // intersection predicates (mixed geometric types)
 /// `inter_sl(lseg, line) -> bool` (geo_ops.c).
-fn fc_inter_sl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inter_sl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let ls = arg_lseg(fcinfo, 0);
     let l = arg_line(fcinfo, 1);
-    ret_bool(ok(crate::proximity::inter_sl(&ls, &l)))
+    Ok(ret_bool(crate::proximity::inter_sl(&ls, &l)?))
 }
 /// `inter_lb(line, box) -> bool` (geo_ops.c).
-fn fc_inter_lb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inter_lb(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let l = arg_line(fcinfo, 0);
     let b = arg_box(fcinfo, 1);
-    ret_bool(ok(crate::proximity::inter_lb(&l, &b)))
+    Ok(ret_bool(crate::proximity::inter_lb(&l, &b)?))
 }
 /// `inter_sb(lseg, box) -> bool` (geo_ops.c).
-fn fc_inter_sb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_inter_sb(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let ls = arg_lseg(fcinfo, 0);
     let b = arg_box(fcinfo, 1);
-    ret_bool(ok(crate::proximity::inter_sb(&ls, &b)))
+    Ok(ret_bool(crate::proximity::inter_sb(&ls, &b)?))
 }
 
 /// `boxes_bound_box(box, box) -> box` (geo_ops.c) — the bounding box of two boxes.
-fn fc_boxes_bound_box(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_boxes_bound_box(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let b1 = arg_box(fcinfo, 0);
     let b2 = arg_box(fcinfo, 1);
-    ret_box(fcinfo, crate::boxes::boxes_bound_box(&b1, &b2))
+    Ok(ret_box(fcinfo, crate::boxes::boxes_bound_box(&b1, &b2)))
 }
 
 // lseg unary predicates
-fn fc_lseg_vertical(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lseg_vertical(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let ls = arg_lseg(fcinfo, 0);
-    ret_bool(crate::lseg::lseg_vertical(&ls))
+    Ok(ret_bool(crate::lseg::lseg_vertical(&ls)))
 }
-fn fc_lseg_horizontal(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lseg_horizontal(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let ls = arg_lseg(fcinfo, 0);
-    ret_bool(crate::lseg::lseg_horizontal(&ls))
+    Ok(ret_bool(crate::lseg::lseg_horizontal(&ls)))
 }
 
 // line predicates
-fn fc_line_parallel(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_line_parallel(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_line(fcinfo, 0), arg_line(fcinfo, 1));
-    ret_bool(ok(crate::line::line_parallel(&a, &b)))
+    Ok(ret_bool(crate::line::line_parallel(&a, &b)?))
 }
-fn fc_line_perp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_line_perp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_line(fcinfo, 0), arg_line(fcinfo, 1));
-    ret_bool(ok(crate::line::line_perp(&a, &b)))
+    Ok(ret_bool(crate::line::line_perp(&a, &b)?))
 }
-fn fc_line_vertical(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_line_vertical(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let l = arg_line(fcinfo, 0);
-    ret_bool(crate::line::line_vertical(&l))
+    Ok(ret_bool(crate::line::line_vertical(&l)))
 }
-fn fc_line_horizontal(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_line_horizontal(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let l = arg_line(fcinfo, 0);
-    ret_bool(crate::line::line_horizontal(&l))
+    Ok(ret_bool(crate::line::line_horizontal(&l)))
 }
 
 // circle/point predicate (mixed arg types).
-fn fc_circle_contain_pt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_circle_contain_pt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let c = arg_circle(fcinfo, 0);
     let p = arg_point(fcinfo, 1);
-    ret_bool(ok(crate::circle::circle_contain_pt(&c, &p)))
+    Ok(ret_bool(crate::circle::circle_contain_pt(&c, &p)?))
 }
-fn fc_pt_contained_circle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pt_contained_circle(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let p = arg_point(fcinfo, 0);
     let c = arg_circle(fcinfo, 1);
-    ret_bool(ok(crate::circle::pt_contained_circle(&p, &c)))
+    Ok(ret_bool(crate::circle::pt_contained_circle(&p, &c)?))
 }
 
 // ---------------------------------------------------------------------------
 // Distance/measurement -> float8.
 // ---------------------------------------------------------------------------
 
-fn fc_point_distance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_point_distance(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
-    ret_f64(ok(crate::point::point_distance(&a, &b)))
+    Ok(ret_f64(crate::point::point_distance(&a, &b)?))
 }
-fn fc_box_distance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_box_distance(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_box(fcinfo, 0), arg_box(fcinfo, 1));
-    ret_f64(ok(crate::boxes::box_distance(&a, &b)))
+    Ok(ret_f64(crate::boxes::box_distance(&a, &b)?))
 }
-fn fc_circle_distance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_circle_distance(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_circle(fcinfo, 0), arg_circle(fcinfo, 1));
-    ret_f64(ok(crate::circle::circle_distance(&a, &b)))
+    Ok(ret_f64(crate::circle::circle_distance(&a, &b)?))
 }
-fn fc_lseg_distance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lseg_distance(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_lseg(fcinfo, 0), arg_lseg(fcinfo, 1));
-    ret_f64(ok(crate::proximity::lseg_distance(&a, &b)))
+    Ok(ret_f64(crate::proximity::lseg_distance(&a, &b)?))
 }
-fn fc_box_area(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_box_area(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let b = arg_box(fcinfo, 0);
-    ret_f64(ok(crate::boxes::box_area(&b)))
+    Ok(ret_f64(crate::boxes::box_area(&b)?))
 }
-fn fc_box_width(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_box_width(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let b = arg_box(fcinfo, 0);
-    ret_f64(ok(crate::boxes::box_width(&b)))
+    Ok(ret_f64(crate::boxes::box_width(&b)?))
 }
-fn fc_box_height(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_box_height(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let b = arg_box(fcinfo, 0);
-    ret_f64(ok(crate::boxes::box_height(&b)))
+    Ok(ret_f64(crate::boxes::box_height(&b)?))
 }
-fn fc_circle_area(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_circle_area(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let c = arg_circle(fcinfo, 0);
-    ret_f64(ok(crate::circle::circle_area(&c)))
+    Ok(ret_f64(crate::circle::circle_area(&c)?))
 }
-fn fc_circle_diameter(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_circle_diameter(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let c = arg_circle(fcinfo, 0);
-    ret_f64(ok(crate::circle::circle_diameter(&c)))
+    Ok(ret_f64(crate::circle::circle_diameter(&c)?))
 }
-fn fc_circle_radius(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_circle_radius(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let c = arg_circle(fcinfo, 0);
-    ret_f64(crate::circle::circle_radius(&c))
+    Ok(ret_f64(crate::circle::circle_radius(&c)))
 }
-fn fc_lseg_length(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lseg_length(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let ls = arg_lseg(fcinfo, 0);
-    ret_f64(ok(crate::lseg::lseg_length(&ls)))
+    Ok(ret_f64(crate::lseg::lseg_length(&ls)?))
 }
 
 // ---------------------------------------------------------------------------
 // "center" -> point.
 // ---------------------------------------------------------------------------
 
-fn fc_box_center(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_box_center(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let b = arg_box(fcinfo, 0);
-    let p = ok(crate::boxes::box_center(&b));
-    ret_point(fcinfo, p)
+    let p = crate::boxes::box_center(&b)?;
+    Ok(ret_point(fcinfo, p))
 }
-fn fc_circle_center(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_circle_center(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let c = arg_circle(fcinfo, 0);
     let p = crate::circle::circle_center(&c);
-    ret_point(fcinfo, p)
+    Ok(ret_point(fcinfo, p))
 }
-fn fc_lseg_center(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lseg_center(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let ls = arg_lseg(fcinfo, 0);
-    let p = ok(crate::lseg::lseg_center(&ls));
-    ret_point(fcinfo, p)
+    let p = crate::lseg::lseg_center(&ls)?;
+    Ok(ret_point(fcinfo, p))
 }
 
 // ---------------------------------------------------------------------------
@@ -499,10 +484,10 @@ fn fc_lseg_center(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 macro_rules! fc_arith_point {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
-            let p = ok($core(&a, &b));
-            ret_point(fcinfo, p)
+            let p = $core(&a, &b)?;
+            Ok(ret_point(fcinfo, p))
         }
     };
 }
@@ -513,11 +498,11 @@ fc_arith_point!(fc_point_div, crate::point::point_div);
 
 macro_rules! fc_arith_box {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let b = arg_box(fcinfo, 0);
             let p = arg_point(fcinfo, 1);
-            let r = ok($core(&b, &p));
-            ret_box(fcinfo, r)
+            let r = $core(&b, &p)?;
+            Ok(ret_box(fcinfo, r))
         }
     };
 }
@@ -526,21 +511,21 @@ fc_arith_box!(fc_box_sub, crate::boxes::box_sub);
 fc_arith_box!(fc_box_mul, crate::boxes::box_mul);
 fc_arith_box!(fc_box_div, crate::boxes::box_div);
 
-fn fc_box_intersect(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_box_intersect(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_box(fcinfo, 0), arg_box(fcinfo, 1));
     match crate::boxes::box_intersect(&a, &b) {
-        Some(r) => ret_box(fcinfo, r),
-        None => ret_null(fcinfo),
+        Some(r) => Ok(ret_box(fcinfo, r)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 
 macro_rules! fc_arith_circle {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let c = arg_circle(fcinfo, 0);
             let p = arg_point(fcinfo, 1);
-            let r = ok($core(&c, &p));
-            ret_circle(fcinfo, r)
+            let r = $core(&c, &p)?;
+            Ok(ret_circle(fcinfo, r))
         }
     };
 }
@@ -598,25 +583,25 @@ fn ret_opt_point(fcinfo: &mut FunctionCallInfoBaseData, p: Option<Point>) -> Dat
 
 // --- point: vert/horiz/slope + the float8 constructor + point->box coercion ---
 
-fn fc_point_vert(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_point_vert(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
-    ret_bool(crate::point::point_vert(&a, &b))
+    Ok(ret_bool(crate::point::point_vert(&a, &b)))
 }
-fn fc_point_horiz(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_point_horiz(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
-    ret_bool(crate::point::point_horiz(&a, &b))
+    Ok(ret_bool(crate::point::point_horiz(&a, &b)))
 }
-fn fc_point_slope(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_point_slope(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
-    ret_f64(ok(crate::point::point_slope(&a, &b)))
+    Ok(ret_f64(crate::point::point_slope(&a, &b)?))
 }
-fn fc_construct_point(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_construct_point(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let p = crate::point::construct_point(arg_f64(fcinfo, 0), arg_f64(fcinfo, 1));
-    ret_point(fcinfo, p)
+    Ok(ret_point(fcinfo, p))
 }
-fn fc_point_box(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_point_box(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let b = crate::boxes::point_box(&arg_point(fcinfo, 0));
-    ret_box(fcinfo, b)
+    Ok(ret_box(fcinfo, b))
 }
 
 // --- box: overleft/overright/overbelow/overabove + contain_pt + diagonal +
@@ -627,65 +612,65 @@ fc_pred_box!(fc_box_overright, crate::boxes::box_overright, pure);
 fc_pred_box!(fc_box_overbelow, crate::boxes::box_overbelow, pure);
 fc_pred_box!(fc_box_overabove, crate::boxes::box_overabove, pure);
 
-fn fc_box_contain_pt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_box_contain_pt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let b = arg_box(fcinfo, 0);
     let p = arg_point(fcinfo, 1);
-    ret_bool(crate::proximity::box_contain_pt(&b, &p))
+    Ok(ret_bool(crate::proximity::box_contain_pt(&b, &p)))
 }
-fn fc_box_diagonal(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_box_diagonal(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let ls = crate::boxes::box_diagonal(&arg_box(fcinfo, 0));
-    ret_lseg(fcinfo, ls)
+    Ok(ret_lseg(fcinfo, ls))
 }
-fn fc_points_box(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_points_box(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
-    ret_box(fcinfo, crate::boxes::points_box(&a, &b))
+    Ok(ret_box(fcinfo, crate::boxes::points_box(&a, &b)))
 }
-fn fc_box_circle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let c = ok(crate::boxes::box_circle(&arg_box(fcinfo, 0)));
-    ret_circle(fcinfo, c)
+fn fc_box_circle(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let c = crate::boxes::box_circle(&arg_box(fcinfo, 0))?;
+    Ok(ret_circle(fcinfo, c))
 }
-fn fc_circle_box(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let b = ok(crate::boxes::circle_box(&arg_circle(fcinfo, 0)));
-    ret_box(fcinfo, b)
+fn fc_circle_box(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let b = crate::boxes::circle_box(&arg_circle(fcinfo, 0))?;
+    Ok(ret_box(fcinfo, b))
 }
 
 // --- lseg: construct / intersect / interpt ---
 
-fn fc_lseg_construct(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lseg_construct(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
-    ret_lseg(fcinfo, crate::lseg::lseg_construct(&a, &b))
+    Ok(ret_lseg(fcinfo, crate::lseg::lseg_construct(&a, &b)))
 }
-fn fc_lseg_intersect(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lseg_intersect(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_lseg(fcinfo, 0), arg_lseg(fcinfo, 1));
-    ret_bool(ok(crate::lseg::lseg_intersect(&a, &b)))
+    Ok(ret_bool(crate::lseg::lseg_intersect(&a, &b)?))
 }
-fn fc_lseg_interpt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lseg_interpt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_lseg(fcinfo, 0), arg_lseg(fcinfo, 1));
-    ret_opt_point(fcinfo, ok(crate::lseg::lseg_interpt(&a, &b)))
+    Ok(ret_opt_point(fcinfo, crate::lseg::lseg_interpt(&a, &b)?))
 }
 
 // --- line: eq / construct_pp / interpt / intersect / distance + isparallel etc.
 //     (the duplicate `line_*` OIDs 1412-1415 share the already-defined adapters) ---
 
-fn fc_line_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_line_eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_line(fcinfo, 0), arg_line(fcinfo, 1));
-    ret_bool(ok(crate::line::line_eq(&a, &b)))
+    Ok(ret_bool(crate::line::line_eq(&a, &b)?))
 }
-fn fc_line_construct_pp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_line_construct_pp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_point(fcinfo, 0), arg_point(fcinfo, 1));
-    ret_line(fcinfo, ok(crate::line::line_construct_pp(&a, &b)))
+    Ok(ret_line(fcinfo, crate::line::line_construct_pp(&a, &b)?))
 }
-fn fc_line_interpt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_line_interpt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_line(fcinfo, 0), arg_line(fcinfo, 1));
-    ret_opt_point(fcinfo, ok(crate::line::line_interpt(&a, &b)))
+    Ok(ret_opt_point(fcinfo, crate::line::line_interpt(&a, &b)?))
 }
-fn fc_line_intersect(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_line_intersect(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_line(fcinfo, 0), arg_line(fcinfo, 1));
-    ret_bool(ok(crate::line::line_intersect(&a, &b)))
+    Ok(ret_bool(crate::line::line_intersect(&a, &b)?))
 }
-fn fc_line_distance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_line_distance(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_line(fcinfo, 0), arg_line(fcinfo, 1));
-    ret_f64(ok(crate::line::line_distance(&a, &b)))
+    Ok(ret_f64(crate::line::line_distance(&a, &b)?))
 }
 
 // --- circle: overleft/overright/overbelow/overabove + cr_circle + circle_poly ---
@@ -695,80 +680,80 @@ fc_pred_circle!(fc_circle_overright, crate::circle::circle_overright, res);
 fc_pred_circle!(fc_circle_overbelow, crate::circle::circle_overbelow, res);
 fc_pred_circle!(fc_circle_overabove, crate::circle::circle_overabove, res);
 
-fn fc_cr_circle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_cr_circle(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let center = arg_point(fcinfo, 0);
     let radius = arg_f64(fcinfo, 1);
-    ret_circle(fcinfo, crate::circle::cr_circle(&center, radius))
+    Ok(ret_circle(fcinfo, crate::circle::cr_circle(&center, radius)))
 }
-fn fc_circle_poly(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_circle_poly(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let npts = arg_i32(fcinfo, 0);
     let circle = arg_circle(fcinfo, 1);
-    let poly = ok(crate::circle::circle_poly(npts, &circle));
-    ret_poly(fcinfo, poly)
+    let poly = crate::circle::circle_poly(npts, &circle)?;
+    Ok(ret_poly(fcinfo, poly))
 }
 
 // --- `on_*` containment predicates (point/lseg on line/lseg/box/path) ---
 
-fn fc_on_pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_on_pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (p, l) = (arg_point(fcinfo, 0), arg_line(fcinfo, 1));
-    ret_bool(ok(crate::proximity::on_pl(&p, &l)))
+    Ok(ret_bool(crate::proximity::on_pl(&p, &l)?))
 }
-fn fc_on_ps(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_on_ps(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (p, ls) = (arg_point(fcinfo, 0), arg_lseg(fcinfo, 1));
-    ret_bool(ok(crate::proximity::on_ps(&p, &ls)))
+    Ok(ret_bool(crate::proximity::on_ps(&p, &ls)?))
 }
-fn fc_on_pb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_on_pb(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (p, b) = (arg_point(fcinfo, 0), arg_box(fcinfo, 1));
-    ret_bool(crate::proximity::on_pb(&p, &b))
+    Ok(ret_bool(crate::proximity::on_pb(&p, &b)))
 }
-fn fc_on_ppath(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_on_ppath(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (p, path) = (arg_point(fcinfo, 0), arg_path(fcinfo, 1));
-    ret_bool(ok(crate::proximity::on_ppath(&p, &path)))
+    Ok(ret_bool(crate::proximity::on_ppath(&p, &path)?))
 }
-fn fc_on_sl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_on_sl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (ls, l) = (arg_lseg(fcinfo, 0), arg_line(fcinfo, 1));
-    ret_bool(ok(crate::proximity::on_sl(&ls, &l)))
+    Ok(ret_bool(crate::proximity::on_sl(&ls, &l)?))
 }
-fn fc_on_sb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_on_sb(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (ls, b) = (arg_lseg(fcinfo, 0), arg_box(fcinfo, 1));
-    ret_bool(crate::proximity::on_sb(&ls, &b))
+    Ok(ret_bool(crate::proximity::on_sb(&ls, &b)))
 }
 
 // --- `close_*` closest-point family (-> point, may be NULL) ---
 
-fn fc_close_pl(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_close_pl(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (p, l) = (arg_point(fcinfo, 0), arg_line(fcinfo, 1));
-    ret_opt_point(fcinfo, ok(crate::proximity::close_pl(&p, &l)))
+    Ok(ret_opt_point(fcinfo, crate::proximity::close_pl(&p, &l)?))
 }
-fn fc_close_ps(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_close_ps(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (p, ls) = (arg_point(fcinfo, 0), arg_lseg(fcinfo, 1));
-    ret_opt_point(fcinfo, ok(crate::proximity::close_ps(&p, &ls)))
+    Ok(ret_opt_point(fcinfo, crate::proximity::close_ps(&p, &ls)?))
 }
-fn fc_close_pb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_close_pb(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (p, b) = (arg_point(fcinfo, 0), arg_box(fcinfo, 1));
-    ret_opt_point(fcinfo, ok(crate::proximity::close_pb(&p, &b)))
+    Ok(ret_opt_point(fcinfo, crate::proximity::close_pb(&p, &b)?))
 }
-fn fc_close_lseg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_close_lseg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_lseg(fcinfo, 0), arg_lseg(fcinfo, 1));
-    ret_opt_point(fcinfo, ok(crate::proximity::close_lseg(&a, &b)))
+    Ok(ret_opt_point(fcinfo, crate::proximity::close_lseg(&a, &b)?))
 }
-fn fc_close_ls(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_close_ls(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (l, ls) = (arg_line(fcinfo, 0), arg_lseg(fcinfo, 1));
-    ret_opt_point(fcinfo, ok(crate::proximity::close_ls(&l, &ls)))
+    Ok(ret_opt_point(fcinfo, crate::proximity::close_ls(&l, &ls)?))
 }
-fn fc_close_sb(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_close_sb(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (ls, b) = (arg_lseg(fcinfo, 0), arg_box(fcinfo, 1));
-    ret_opt_point(fcinfo, ok(crate::proximity::close_sb(&ls, &b)))
+    Ok(ret_opt_point(fcinfo, crate::proximity::close_sb(&ls, &b)?))
 }
 
 // --- `dist_*` distance family (-> float8) ---
 
 macro_rules! fc_dist {
     ($fc:ident, $core:path, $ra:ident, $rb:ident) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let a = $ra(fcinfo, 0);
             let b = $rb(fcinfo, 1);
-            ret_f64(ok($core(&a, &b)))
+            Ok(ret_f64($core(&a, &b)?))
         }
     };
 }
@@ -803,7 +788,7 @@ fc_dist!(fc_dist_polyp, crate::proximity::dist_polyp, arg_poly, arg_point);
 /// `internal` (a `StringInfo`) which is not expressible at this fmgr boundary,
 /// so they remain deferred (as for every other type's `*_recv`).
 pub fn register_geo_ops_cross_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // point: vert/horiz/slope (two OIDs each for the named SQL fns).
         builtin(989, "point_vert", 2, true, false, fc_point_vert),
         builtin(1406, "point_vert", 2, true, false, fc_point_vert),
@@ -904,16 +889,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every expressible by-ref `geo_ops.c` builtin over the fixed-size
@@ -921,7 +909,7 @@ fn builtin(
 /// Called from this crate's `init_seams()`. OIDs/nargs/strict/retset are
 /// transcribed exactly from `pg_proc.dat`; all are strict, none retset.
 pub fn register_geo_ops_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // I/O: cstring <-> geometric.
         builtin(117, "point_in", 1, true, false, fc_point_in),
         builtin(118, "point_out", 1, true, false, fc_point_out),
@@ -1089,43 +1077,43 @@ fn ret_i32(v: i32) -> Datum {
 
 // --- path I/O (cstring <-> path) ---
 
-fn fc_path_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_path_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     let escontext = fcinfo.escontext_mut();
-    let p = ok(crate::io::path_in(&s, escontext));
-    ret_path(fcinfo, p)
+    let p = crate::io::path_in(&s, escontext)?;
+    Ok(ret_path(fcinfo, p))
 }
-fn fc_path_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_path_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let p = arg_path(fcinfo, 0);
-    ret_cstring(fcinfo, crate::io::path_out(&p))
+    Ok(ret_cstring(fcinfo, crate::io::path_out(&p)))
 }
 
 // --- polygon I/O (cstring <-> polygon) ---
 
-fn fc_poly_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_poly_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     let escontext = fcinfo.escontext_mut();
-    let p = ok(crate::io::poly_in(&s, escontext));
-    ret_poly(fcinfo, p)
+    let p = crate::io::poly_in(&s, escontext)?;
+    Ok(ret_poly(fcinfo, p))
 }
-fn fc_poly_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_poly_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let p = arg_poly(fcinfo, 0);
-    ret_cstring(fcinfo, crate::io::poly_out(&p))
+    Ok(ret_cstring(fcinfo, crate::io::poly_out(&p)))
 }
 
 // --- path comparison predicates: (path, path) -> bool (pure) ---
 
 macro_rules! fc_pred_path {
     ($fc:ident, $core:path, pure) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_path(fcinfo, 0), arg_path(fcinfo, 1));
-            ret_bool($core(&a, &b))
+            Ok(ret_bool($core(&a, &b)))
         }
     };
     ($fc:ident, $core:path, res) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_path(fcinfo, 0), arg_path(fcinfo, 1));
-            ret_bool(ok($core(&a, &b)))
+            Ok(ret_bool($core(&a, &b)?))
         }
     };
 }
@@ -1138,62 +1126,62 @@ fc_pred_path!(fc_path_inter, crate::path::path_inter, res);
 
 // --- path unary predicates / accessors ---
 
-fn fc_path_isclosed(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::path::path_isclosed(&arg_path(fcinfo, 0)))
+fn fc_path_isclosed(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::path::path_isclosed(&arg_path(fcinfo, 0))))
 }
-fn fc_path_isopen(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::path::path_isopen(&arg_path(fcinfo, 0)))
+fn fc_path_isopen(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::path::path_isopen(&arg_path(fcinfo, 0))))
 }
-fn fc_path_npoints(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::path::path_npoints(&arg_path(fcinfo, 0)))
+fn fc_path_npoints(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::path::path_npoints(&arg_path(fcinfo, 0))))
 }
 
 // --- path close/open -> path ---
 
-fn fc_path_close(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_path_close(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let p = crate::path::path_close(&arg_path(fcinfo, 0));
-    ret_path(fcinfo, p)
+    Ok(ret_path(fcinfo, p))
 }
-fn fc_path_open(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_path_open(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let p = crate::path::path_open(&arg_path(fcinfo, 0));
-    ret_path(fcinfo, p)
+    Ok(ret_path(fcinfo, p))
 }
 
 // --- path measurement -> float8 (area/length can be NULL on an empty/open path) ---
 
-fn fc_path_area(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match ok(crate::path::path_area(&arg_path(fcinfo, 0))) {
-        Some(v) => ret_f64(v),
-        None => ret_null(fcinfo),
+fn fc_path_area(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    match crate::path::path_area(&arg_path(fcinfo, 0))? {
+        Some(v) => Ok(ret_f64(v)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
-fn fc_path_length(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_f64(ok(crate::path::path_length(&arg_path(fcinfo, 0))))
+fn fc_path_length(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_f64(crate::path::path_length(&arg_path(fcinfo, 0))?))
 }
-fn fc_path_distance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_path_distance(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_path(fcinfo, 0), arg_path(fcinfo, 1));
-    match ok(crate::path::path_distance(&a, &b)) {
-        Some(v) => ret_f64(v),
-        None => ret_null(fcinfo),
+    match crate::path::path_distance(&a, &b)? {
+        Some(v) => Ok(ret_f64(v)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 
 // --- path arithmetic -> path ---
 
-fn fc_path_add(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_path_add(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_path(fcinfo, 0), arg_path(fcinfo, 1));
-    match ok(crate::path::path_add(&a, &b)) {
-        Some(p) => ret_path(fcinfo, p),
-        None => ret_null(fcinfo),
+    match crate::path::path_add(&a, &b)? {
+        Some(p) => Ok(ret_path(fcinfo, p)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
 macro_rules! fc_path_pt {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let path = arg_path(fcinfo, 0);
             let pt = arg_point(fcinfo, 1);
-            let p = ok($core(&path, &pt));
-            ret_path(fcinfo, p)
+            let p = $core(&path, &pt)?;
+            Ok(ret_path(fcinfo, p))
         }
     };
 }
@@ -1204,28 +1192,28 @@ fc_path_pt!(fc_path_div_pt, crate::path::path_div_pt);
 
 // --- path <-> polygon conversions ---
 
-fn fc_path_poly(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let poly = ok(crate::path::path_poly(&arg_path(fcinfo, 0)));
-    ret_poly(fcinfo, poly)
+fn fc_path_poly(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let poly = crate::path::path_poly(&arg_path(fcinfo, 0))?;
+    Ok(ret_poly(fcinfo, poly))
 }
-fn fc_poly_path(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_poly_path(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let path = crate::path::poly_path(&arg_poly(fcinfo, 0));
-    ret_path(fcinfo, path)
+    Ok(ret_path(fcinfo, path))
 }
 
 // --- polygon comparison/containment predicates: (poly, poly) -> bool ---
 
 macro_rules! fc_pred_poly {
     ($fc:ident, $core:path, pure) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_poly(fcinfo, 0), arg_poly(fcinfo, 1));
-            ret_bool($core(&a, &b))
+            Ok(ret_bool($core(&a, &b)))
         }
     };
     ($fc:ident, $core:path, res) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let (a, b) = (arg_poly(fcinfo, 0), arg_poly(fcinfo, 1));
-            ret_bool(ok($core(&a, &b)))
+            Ok(ret_bool($core(&a, &b)?))
         }
     };
 }
@@ -1244,71 +1232,71 @@ fc_pred_poly!(fc_poly_contained, crate::poly::poly_contained, res);
 
 // --- polygon/point predicates ---
 
-fn fc_poly_contain_pt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_poly_contain_pt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let poly = arg_poly(fcinfo, 0);
     let p = arg_point(fcinfo, 1);
-    ret_bool(ok(crate::poly::poly_contain_pt(&poly, &p)))
+    Ok(ret_bool(crate::poly::poly_contain_pt(&poly, &p)?))
 }
-fn fc_pt_contained_poly(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pt_contained_poly(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let p = arg_point(fcinfo, 0);
     let poly = arg_poly(fcinfo, 1);
-    ret_bool(ok(crate::poly::pt_contained_poly(&p, &poly)))
+    Ok(ret_bool(crate::poly::pt_contained_poly(&p, &poly)?))
 }
 
 // --- polygon measurement / accessors ---
 
-fn fc_poly_distance(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_poly_distance(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let (a, b) = (arg_poly(fcinfo, 0), arg_poly(fcinfo, 1));
-    match ok(crate::poly::poly_distance(&a, &b)) {
-        Some(v) => ret_f64(v),
-        None => ret_null(fcinfo),
+    match crate::poly::poly_distance(&a, &b)? {
+        Some(v) => Ok(ret_f64(v)),
+        None => Ok(ret_null(fcinfo)),
     }
 }
-fn fc_poly_npoints(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::poly::poly_npoints(&arg_poly(fcinfo, 0)))
+fn fc_poly_npoints(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::poly::poly_npoints(&arg_poly(fcinfo, 0))))
 }
-fn fc_poly_center(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let p = ok(crate::poly::poly_center(&arg_poly(fcinfo, 0)));
-    ret_point(fcinfo, p)
+fn fc_poly_center(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let p = crate::poly::poly_center(&arg_poly(fcinfo, 0))?;
+    Ok(ret_point(fcinfo, p))
 }
 
 // --- polygon <-> box / circle conversions ---
 
-fn fc_poly_box(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_poly_box(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let b = crate::poly::poly_box(&arg_poly(fcinfo, 0));
-    ret_box(fcinfo, b)
+    Ok(ret_box(fcinfo, b))
 }
-fn fc_box_poly(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_box_poly(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let poly = crate::io::box_poly(&arg_box(fcinfo, 0));
-    ret_poly(fcinfo, poly)
+    Ok(ret_poly(fcinfo, poly))
 }
-fn fc_poly_circle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let c = ok(crate::poly::poly_circle(&arg_poly(fcinfo, 0)));
-    ret_circle(fcinfo, c)
+fn fc_poly_circle(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let c = crate::poly::poly_circle(&arg_poly(fcinfo, 0))?;
+    Ok(ret_circle(fcinfo, c))
 }
 
 // --- binary `*_send` -> bytea (wire bytes, header-stripped on the by-ref lane) ---
 
-fn fc_point_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_ref(fcinfo, crate::io::point_send(&arg_point(fcinfo, 0)))
+fn fc_point_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_ref(fcinfo, crate::io::point_send(&arg_point(fcinfo, 0))))
 }
-fn fc_box_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_ref(fcinfo, crate::io::box_send(&arg_box(fcinfo, 0)))
+fn fc_box_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_ref(fcinfo, crate::io::box_send(&arg_box(fcinfo, 0))))
 }
-fn fc_lseg_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_ref(fcinfo, crate::io::lseg_send(&arg_lseg(fcinfo, 0)))
+fn fc_lseg_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_ref(fcinfo, crate::io::lseg_send(&arg_lseg(fcinfo, 0))))
 }
-fn fc_line_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_ref(fcinfo, crate::io::line_send(&arg_line(fcinfo, 0)))
+fn fc_line_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_ref(fcinfo, crate::io::line_send(&arg_line(fcinfo, 0))))
 }
-fn fc_circle_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_ref(fcinfo, crate::io::circle_send(&arg_circle(fcinfo, 0)))
+fn fc_circle_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_ref(fcinfo, crate::io::circle_send(&arg_circle(fcinfo, 0))))
 }
-fn fc_path_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_ref(fcinfo, crate::io::path_send(&arg_path(fcinfo, 0)))
+fn fc_path_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_ref(fcinfo, crate::io::path_send(&arg_path(fcinfo, 0))))
 }
-fn fc_poly_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_ref(fcinfo, crate::io::poly_send(&arg_poly(fcinfo, 0)))
+fn fc_poly_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_ref(fcinfo, crate::io::poly_send(&arg_poly(fcinfo, 0))))
 }
 
 // --- binary `*_recv` <- internal (the wire message rides the by-ref lane) ---
@@ -1318,40 +1306,40 @@ fn fc_poly_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // value, which crosses back as its header-ful varlena image via the existing
 // `ret_*` helpers.
 
-fn fc_point_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_point_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut buf = arg_bytes(fcinfo, 0);
-    let p = ok(crate::io::point_recv(&mut buf));
-    ret_point(fcinfo, p)
+    let p = crate::io::point_recv(&mut buf)?;
+    Ok(ret_point(fcinfo, p))
 }
-fn fc_box_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_box_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut buf = arg_bytes(fcinfo, 0);
-    let b = ok(crate::io::box_recv(&mut buf));
-    ret_box(fcinfo, b)
+    let b = crate::io::box_recv(&mut buf)?;
+    Ok(ret_box(fcinfo, b))
 }
-fn fc_lseg_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_lseg_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut buf = arg_bytes(fcinfo, 0);
-    let ls = ok(crate::io::lseg_recv(&mut buf));
-    ret_lseg(fcinfo, ls)
+    let ls = crate::io::lseg_recv(&mut buf)?;
+    Ok(ret_lseg(fcinfo, ls))
 }
-fn fc_line_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_line_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut buf = arg_bytes(fcinfo, 0);
-    let l = ok(crate::io::line_recv(&mut buf));
-    ret_line(fcinfo, l)
+    let l = crate::io::line_recv(&mut buf)?;
+    Ok(ret_line(fcinfo, l))
 }
-fn fc_circle_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_circle_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut buf = arg_bytes(fcinfo, 0);
-    let c = ok(crate::io::circle_recv(&mut buf));
-    ret_circle(fcinfo, c)
+    let c = crate::io::circle_recv(&mut buf)?;
+    Ok(ret_circle(fcinfo, c))
 }
-fn fc_path_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_path_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut buf = arg_bytes(fcinfo, 0);
-    let p = ok(crate::io::path_recv(&mut buf));
-    ret_path(fcinfo, p)
+    let p = crate::io::path_recv(&mut buf)?;
+    Ok(ret_path(fcinfo, p))
 }
-fn fc_poly_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_poly_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut buf = arg_bytes(fcinfo, 0);
-    let p = ok(crate::io::poly_recv(&mut buf));
-    ret_poly(fcinfo, p)
+    let p = crate::io::poly_recv(&mut buf)?;
+    Ok(ret_poly(fcinfo, p))
 }
 
 /// Register the varlena `path`/`polygon` `geo_ops.c` builtins (I/O, comparison,
@@ -1361,7 +1349,7 @@ fn fc_poly_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// cursor). OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat`; all
 /// strict, none retset. The builtin `name` is the `prosrc` C symbol.
 pub fn register_geo_ops_path_poly_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // path I/O.
         builtin(121, "path_in", 1, true, false, fc_path_in),
         builtin(122, "path_out", 1, true, false, fc_path_out),
@@ -1465,8 +1453,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Cstring(s.to_string()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("in registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let entry = backend_utils_fmgr_core::native_builtin(oid).expect("in registered");
+        entry(&mut fcinfo).expect("native call ok");
         match fcinfo.take_ref_result().expect("in produced a result") {
             RefPayload::Varlena(b) => b,
             other => panic!("in: unexpected lane {other:?}"),
@@ -1479,8 +1467,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(image))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("out registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let entry = backend_utils_fmgr_core::native_builtin(oid).expect("out registered");
+        entry(&mut fcinfo).expect("native call ok");
         match fcinfo.take_ref_result().expect("out produced a result") {
             RefPayload::Cstring(s) => s,
             other => panic!("out: unexpected lane {other:?}"),
@@ -1496,8 +1484,8 @@ mod tests {
             NullableDatum::value(Datum::null()),
         ];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a)), Some(RefPayload::Varlena(b))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("pred registered");
-        let r = (entry.func.unwrap())(&mut fcinfo);
+        let entry = backend_utils_fmgr_core::native_builtin(oid).expect("pred registered");
+        let r = entry(&mut fcinfo).expect("native call ok");
         r.as_bool()
     }
 
@@ -1510,8 +1498,8 @@ mod tests {
             NullableDatum::value(Datum::null()),
         ];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a)), Some(RefPayload::Varlena(b))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("dist registered");
-        let r = (entry.func.unwrap())(&mut fcinfo);
+        let entry = backend_utils_fmgr_core::native_builtin(oid).expect("dist registered");
+        let r = entry(&mut fcinfo).expect("native call ok");
         r.as_f64()
     }
 
@@ -1525,8 +1513,8 @@ mod tests {
             NullableDatum::value(Datum::null()),
         ];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a)), Some(RefPayload::Varlena(b))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("binary registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let entry = backend_utils_fmgr_core::native_builtin(oid).expect("binary registered");
+        entry(&mut fcinfo).expect("native call ok");
         match fcinfo.take_ref_result().expect("binary produced a result") {
             RefPayload::Varlena(out) => out,
             other => panic!("binary: unexpected lane {other:?}"),
@@ -1605,8 +1593,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(ls.clone()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(1530).unwrap();
-        let r = (entry.func.unwrap())(&mut fcinfo);
+        let entry = backend_utils_fmgr_core::native_builtin(1530).unwrap();
+        let r = entry(&mut fcinfo).expect("native call ok");
         assert_eq!(r.as_f64(), 5.0);
         // lseg_eq(999) with itself.
         assert!(call_pred2(999, ls.clone(), ls));
@@ -1622,8 +1610,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(l.clone()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(1498).unwrap();
-        let r = (entry.func.unwrap())(&mut fcinfo);
+        let entry = backend_utils_fmgr_core::native_builtin(1498).unwrap();
+        let r = entry(&mut fcinfo).expect("native call ok");
         assert!(r.as_bool());
         // line_out(1491) round-trips through the registry without panic.
         let _ = image_out(1491, l);
@@ -1641,8 +1629,8 @@ mod tests {
             NullableDatum::value(Datum::null()),
         ];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a)), Some(RefPayload::Varlena(b))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(980).unwrap();
-        (entry.func.unwrap())(&mut fcinfo);
+        let entry = backend_utils_fmgr_core::native_builtin(980).unwrap();
+        entry(&mut fcinfo).expect("native call ok");
         assert!(fcinfo.isnull, "disjoint box_intersect must be NULL");
         assert!(fcinfo.take_ref_result().is_none());
     }
@@ -1653,8 +1641,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("int1 registered");
-        (entry.func.unwrap())(&mut fcinfo).as_i32()
+        let entry = backend_utils_fmgr_core::native_builtin(oid).expect("int1 registered");
+        entry(&mut fcinfo).expect("native call ok").as_i32()
     }
 
     /// Invoke a registered (img,) -> bool builtin by OID.
@@ -1663,8 +1651,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("pred1 registered");
-        (entry.func.unwrap())(&mut fcinfo).as_bool()
+        let entry = backend_utils_fmgr_core::native_builtin(oid).expect("pred1 registered");
+        entry(&mut fcinfo).expect("native call ok").as_bool()
     }
 
     /// Invoke a registered (img,) -> img builtin by OID, reading the result lane.
@@ -1673,8 +1661,8 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid).expect("unary registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        let entry = backend_utils_fmgr_core::native_builtin(oid).expect("unary registered");
+        entry(&mut fcinfo).expect("native call ok");
         match fcinfo.take_ref_result().expect("unary produced a result") {
             RefPayload::Varlena(out) => out,
             other => panic!("unary: unexpected lane {other:?}"),

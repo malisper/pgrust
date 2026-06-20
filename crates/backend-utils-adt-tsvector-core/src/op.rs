@@ -2162,7 +2162,7 @@ fn parse_weight_string(ws: &[u8]) -> PgResult<i32> {
     let mut weight = 0i32;
     let mut pos = 0usize;
     while pos < ws.len() {
-        let len = mb::pg_mblen_range::call(&ws[pos..]) as usize;
+        let len = mb::pg_mblen_range::call(&ws[pos..])? as usize;
         if len == 1 {
             match ws[pos] {
                 b'A' | b'a' => weight |= 1 << 3,

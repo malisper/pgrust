@@ -20,10 +20,10 @@ static INIT: Once = Once::new();
 /// deterministic branch and `pg_strxfrm` is only the fallback when forced.
 fn install_seams() {
     INIT.call_once(|| {
-        mb::pg_mbstrlen_with_len::set(|s: &[u8], _limit: i32| s.len() as i32);
+        mb::pg_mbstrlen_with_len::set(|s: &[u8], _limit: i32| Ok(s.len() as i32));
         mb::pg_mbcliplen::set(|_s: &[u8], len: i32, limit: i32| len.min(limit));
         // single-byte: chars == bytes, so char-clip == min(len, limit).
-        mb::pg_mbcharcliplen::set(|_s: &[u8], len: i32, limit: i32| len.min(limit));
+        mb::pg_mbcharcliplen::set(|_s: &[u8], len: i32, limit: i32| Ok(len.min(limit)));
         mb::pg_database_encoding_max_length::set(|| 1);
         // deterministic for every collation except the sentinel 999 (non-det).
         loc::collation_is_deterministic::set(|collid: Oid| Ok(collid != 999));

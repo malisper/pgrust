@@ -81,7 +81,10 @@ fn locale_nondeterministic(locale: Locale<'_>) -> bool {
 /// seam's `pg_mblen_range`).
 #[inline]
 fn pg_mblen_with_len(s: &[u8]) -> usize {
-    mb_seam::pg_mblen_range::call(s) as usize
+    // C's `pg_mblen` does not validate; the range-clamped seam only Errs when
+    // the leading char would overrun the slice, where the clamped length is the
+    // slice length (the dead error path falls back to `s.len()`).
+    mb_seam::pg_mblen_range::call(s).unwrap_or(s.len() as i32) as usize
 }
 
 // ===========================================================================

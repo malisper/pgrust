@@ -69,6 +69,59 @@ fn is_w_xdigit(wc: u32) -> i32 {
     }
 }
 
+/// C: `char2wchar(to, tolen, from, fromlen, locale)` (`pg_locale_libc.c`) — the
+/// libc-locale wide path: `mbstowcs` the database-encoding string `from` into a
+/// `wchar_t` array (without the trailing NUL). This seam is the default-locale
+/// branch (`locale == 0` → `mbstowcs`), which is the only one the TS callers
+/// reach (the nondefault-locale `mbstowcs_l` branch needs a `pg_locale_t`
+/// handle the seam does not carry). On an invalid multibyte sequence
+/// (`mbstowcs` returns `(size_t) -1`) the C code reports an
+/// `ERRCODE_CHARACTER_NOT_IN_REPERTOIRE` error; we mirror that as an `Err`.
+fn char2wchar(from: alloc::vec::Vec<u8>) -> types_error::PgResult<alloc::vec::Vec<u32>> {
+    // The libc `mbstowcs` binding is not exposed by the `libc` crate on every
+    // target, so declare it directly (the symbol is in the C standard library
+    // this build already links). `(size_t) -1` signals a bad multibyte
+    // sequence.
+    extern "C" {
+        fn mbstowcs(
+            to: *mut libc::wchar_t,
+            from: *const libc::c_char,
+            n: libc::size_t,
+        ) -> libc::size_t;
+    }
+
+    // mbstowcs requires a NUL-terminated source (C `pnstrdup(from, fromlen)`).
+    let mut cstr: alloc::vec::Vec<u8> = from;
+    cstr.push(0);
+
+    // First pass: query the required wchar_t count (mbstowcs(NULL, str, 0)).
+    let needed = unsafe { mbstowcs(core::ptr::null_mut(), cstr.as_ptr() as *const libc::c_char, 0) };
+    if needed == usize::MAX {
+        return Err(invalid_multibyte_error());
+    }
+
+    let mut to: alloc::vec::Vec<libc::wchar_t> = alloc::vec![0; needed + 1];
+    let result =
+        unsafe { mbstowcs(to.as_mut_ptr(), cstr.as_ptr() as *const libc::c_char, needed + 1) };
+    if result == usize::MAX {
+        return Err(invalid_multibyte_error());
+    }
+
+    to.truncate(result);
+    Ok(to.into_iter().map(|w| w as u32).collect())
+}
+
+/// `ereport(ERROR, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, "invalid multibyte
+/// character for locale")` — the C `char2wchar` bad-sequence path.
+fn invalid_multibyte_error() -> types_error::PgError {
+    use backend_utils_error::ereport;
+    use types_error::{error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERROR};
+    ereport(ERROR)
+        .errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+        .errmsg("invalid multibyte character for locale")
+        .into_error()
+}
+
 /// Install the `backend-tsearch-parse` unit's seams. Single-threaded startup
 /// install, before any seam is observed.
 pub fn init_seams() {
@@ -110,10 +163,15 @@ pub fn init_seams() {
     // the libc `char2wchar` path.
     s::database_ctype_is_c::set(backend_utils_adt_pg_locale::database_ctype_is_c);
 
+    // --- pg_locale_libc.c: libc-locale wide conversion ----------------------
+    // `char2wchar` (the non-C-locale wide path `prsd_start` takes when
+    // `!database_ctype_is_c()`), and reused by ts_locale's `t_isalpha` /
+    // `t_isalnum` multibyte branch.
+    s::char2wchar::set(char2wchar);
+
     // The remaining seams stay at their loud-panic default until their owners
-    // land: `char2wchar` / `pg_mb2wchar_with_len` (the libc-locale wide
-    // conversion path, dormant while `database_ctype_is_c` is true and no
-    // caller-buffer/locale-handle provider is wired); `config_lenmap` /
+    // land: `pg_mb2wchar_with_len` (the C-locale `pg_wchar` wide path, dormant
+    // while no caller-buffer provider is wired); `config_lenmap` /
     // `config_dict_ids` / `dict_lexize` (the ts-config dictionary cache + fmgr
     // lexize dispatch, whose ts_cache catalog cores are unwired in production);
     // and `ts_execute_hl` / `ts_execute_locations_hl` (the generic TS_execute

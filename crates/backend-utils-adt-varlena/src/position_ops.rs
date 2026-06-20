@@ -33,8 +33,12 @@ const PG_UTF8: i32 = 6;
 /// the carrier here is a bounded slice, so we use the range-clamped mbutils
 /// seam, which never reads past the slice end and returns at least 1.
 #[inline]
-fn pg_mblen_unbounded(p: &[u8]) -> i32 {
-    mb::pg_mblen_range::call(p).max(1)
+fn pg_mblen_unbounded(p: &[u8]) -> PgResult<i32> {
+    // C: pg_mblen_unbounded reads without a bound on an already-verified
+    // string. The range-clamped seam never reads past the slice end and
+    // report_invalid_encoding's (carried on Err) only on a byte sequence
+    // invalid in the database encoding.
+    Ok(mb::pg_mblen_range::call(p)?.max(1))
 }
 
 // ===========================================================================
@@ -151,9 +155,9 @@ pub fn text_substring<'mcx>(
         // Actual length of the slice in MB characters, stopping at the end of
         // the substring (when the end is known).
         let slice_strlen = if slice_size == -1 {
-            mb::pg_mbstrlen_with_len::call(slice, slice_len)
+            mb::pg_mbstrlen_with_len::call(slice, slice_len)?
         } else {
-            pg_mbcharcliplen_chars(slice, slice_len, E - 1)
+            pg_mbcharcliplen_chars(slice, slice_len, E - 1)?
         };
 
         // If the start position is past the slice's char length, return empty.
@@ -175,7 +179,7 @@ pub fn text_substring<'mcx>(
         let mut p: usize = 0;
         let mut i = 0;
         while i < S1 - 1 {
-            p += pg_mblen_unbounded(&slice[p..]) as usize;
+            p += pg_mblen_unbounded(&slice[p..])? as usize;
             i += 1;
         }
 
@@ -185,7 +189,7 @@ pub fn text_substring<'mcx>(
         // Count the actual bytes used by the substring of the requested length.
         let mut i = S1;
         while i < E1 {
-            p += pg_mblen_unbounded(&slice[p..]) as usize;
+            p += pg_mblen_unbounded(&slice[p..])? as usize;
             i += 1;
         }
 
@@ -228,7 +232,7 @@ fn text_p_slice<'mcx>(
 /// (it counts the limit'th char before consuming it).
 ///
 /// C asserts `len > 0`, `limit > 0`, `pg_database_encoding_max_length() > 1`.
-pub fn pg_mbcharcliplen_chars(mbstr: &[u8], len: i32, limit: i32) -> i32 {
+pub fn pg_mbcharcliplen_chars(mbstr: &[u8], len: i32, limit: i32) -> PgResult<i32> {
     debug_assert!(len > 0);
     debug_assert!(limit > 0);
     debug_assert!(mb::pg_database_encoding_max_length::call() > 1);
@@ -240,7 +244,7 @@ pub fn pg_mbcharcliplen_chars(mbstr: &[u8], len: i32, limit: i32) -> i32 {
     while remaining > 0 && off < mbstr.len() && mbstr[off] != 0 {
         // C: pg_mblen_with_len(mbstr, len) — bytes of the current char,
         // bounded by the remaining slice.
-        let l = pg_mblen_unbounded(&mbstr[off..]);
+        let l = pg_mblen_unbounded(&mbstr[off..])?;
         nch += 1;
         if nch == limit {
             break;
@@ -248,7 +252,7 @@ pub fn pg_mbcharcliplen_chars(mbstr: &[u8], len: i32, limit: i32) -> i32 {
         remaining -= l;
         off += l as usize;
     }
-    nch
+    Ok(nch)
 }
 
 /// C: `bytea_substring(Datum str, int S, int L, bool length_not_specified)`.
@@ -370,7 +374,7 @@ pub fn text_position<'mcx>(mcx: Mcx<'mcx>, t1: &[u8], t2: &[u8], collid: Oid) ->
     let result = if !text_position_next(&mut state)? {
         0
     } else {
-        text_position_get_match_pos(&mut state)
+        text_position_get_match_pos(&mut state)?
     };
     text_position_cleanup(&mut state);
     Ok(result)
@@ -502,7 +506,7 @@ pub(crate) fn text_position_next(state: &mut TextPositionState) -> PgResult<bool
             let mut false_positive = false;
             while state.refpoint < matchptr {
                 // step to next character
-                state.refpoint += pg_mblen_unbounded(&state.str1[state.refpoint..]) as usize;
+                state.refpoint += pg_mblen_unbounded(&state.str1[state.refpoint..])? as usize;
                 state.refpos += 1;
 
                 // If we stepped over the match start, it was a false positive
@@ -571,7 +575,7 @@ fn text_position_next_internal(
             // Else check every nonempty substring starting at hptr.
             let mut test_end = hptr;
             loop {
-                test_end += pg_mblen_unbounded(&haystack[test_end..]) as usize;
+                test_end += pg_mblen_unbounded(&haystack[test_end..])? as usize;
                 if locale::pg_strncoll::call(
                     collid,
                     &haystack[hptr..test_end],
@@ -593,7 +597,7 @@ fn text_position_next_internal(
                 break;
             }
 
-            hptr += pg_mblen_unbounded(&haystack[hptr..]) as usize;
+            hptr += pg_mblen_unbounded(&haystack[hptr..])? as usize;
         }
 
         return Ok(result_hptr);
@@ -638,15 +642,17 @@ fn text_position_next_internal(
 /// character offset of the current match. Converts the cached byte position to
 /// a char position, advancing `refpoint`/`refpos` so successive calls are O(1)
 /// amortized.
-fn text_position_get_match_pos(state: &mut TextPositionState) -> i32 {
+fn text_position_get_match_pos(state: &mut TextPositionState) -> PgResult<i32> {
     let last_match = state.last_match.expect("match must be set");
-    // Convert the byte position to char position.
+    // Convert the byte position to char position. C: pg_mbstrlen_with_len,
+    // which report_invalid_encoding's (ereport ERROR) on a byte sequence
+    // invalid in the database encoding; carried on Err.
     state.refpos += mb::pg_mbstrlen_with_len::call(
         &state.str1[state.refpoint..last_match],
         (last_match - state.refpoint) as i32,
-    );
+    )?;
     state.refpoint = last_match;
-    state.refpos + 1
+    Ok(state.refpos + 1)
 }
 
 /// C: `text_position_get_match_ptr(TextPositionState *state)` — the byte offset
@@ -682,7 +688,7 @@ pub fn text_left<'mcx>(mcx: Mcx<'mcx>, t: &[u8], n: i32) -> PgResult<PgVec<'mcx,
     if n < 0 {
         let p = t;
         let len = t.len() as i32;
-        let nn = mb::pg_mbstrlen_with_len::call(p, len) + n;
+        let nn = mb::pg_mbstrlen_with_len::call(p, len)? + n;
         let rlen = mb::pg_mbcliplen::call(p, len, nn);
         cstring_to_text_with_len(mcx, &p[..rlen.max(0) as usize], rlen)
     } else {
@@ -699,7 +705,7 @@ pub fn text_right<'mcx>(mcx: Mcx<'mcx>, t: &[u8], n: i32) -> PgResult<PgVec<'mcx
     let nn = if n < 0 {
         -n
     } else {
-        mb::pg_mbstrlen_with_len::call(p, len) - n
+        mb::pg_mbstrlen_with_len::call(p, len)? - n
     };
     let off = mb::pg_mbcliplen::call(p, len, nn);
     let off = off.max(0);
@@ -722,7 +728,7 @@ pub fn text_reverse<'mcx>(mcx: Mcx<'mcx>, t: &[u8]) -> PgResult<PgVec<'mcx, u8>>
         // multibyte version
         let mut off = 0usize;
         while off < len {
-            let sz = pg_mblen_unbounded(&p[off..]) as usize;
+            let sz = pg_mblen_unbounded(&p[off..])? as usize;
             dst -= sz;
             buf[dst..dst + sz].copy_from_slice(&p[off..off + sz]);
             off += sz;

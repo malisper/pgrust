@@ -46,6 +46,22 @@ pub const TRACK_FUNC_ALL: u8 = 2;
 /// dispatch invokes a `PGFunction`; other holders just store it.
 pub type PGFunction = Option<fn(&mut FunctionCallInfoBaseData) -> Datum>;
 
+/// A **Result-native** fmgr-1 builtin body (the panic→Result migration target).
+///
+/// Identical calling convention to [`PGFunction`] — reads args / writes
+/// `fcinfo->isnull` and the by-ref result through the borrowed frame — except the
+/// error channel is the function's *return value* (`Err(PgError)`) rather than an
+/// `ereport`-longjmp / `panic_any(PgError)`. A migrated builtin crate exposes its
+/// bodies in this shape so the fmgr dispatch can call them **directly** and thread
+/// the error with `?`, with no `catch_unwind` boundary.
+///
+/// This coexists with [`PGFunction`]: legacy (panicking) builtins keep the
+/// `PGFunction` shape and are still dispatched through the `catch_unwind` bridge,
+/// so bodies migrate one crate at a time without a flag day. See
+/// `docs/proposals/panic-to-result-migration.md`.
+pub type PgFnNative =
+    fn(&mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum>;
+
 /// Handler-private user-data for `FmgrInfo.fn_extra` (an untyped "extra space
 /// for use by handler" pointer in `fmgr.h`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -318,6 +334,18 @@ impl FunctionCallInfoBaseData {
     /// (move an `internal` state box out of the call frame).
     pub fn take_ref_arg(&mut self, index: usize) -> Option<RefPayload> {
         self.ref_args.get_mut(index).and_then(|slot| slot.take())
+    }
+
+    /// Install a by-reference payload for argument `index`, growing `ref_args`
+    /// with empty slots as needed. An aggregate **final** function restores the
+    /// `internal` transition state it read (C `PG_GETARG_POINTER(0)` does not
+    /// consume it) so the executor can hand the live state to the next aggregate
+    /// sharing the same transition state.
+    pub fn set_ref_arg(&mut self, index: usize, payload: RefPayload) {
+        if self.ref_args.len() <= index {
+            self.ref_args.resize_with(index + 1, || None);
+        }
+        self.ref_args[index] = Some(payload);
     }
 
     /// Store the by-reference result (C: a pointer-`Datum` return).

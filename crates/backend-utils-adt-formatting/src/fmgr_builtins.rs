@@ -21,11 +21,11 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FmgrArg, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FmgrArg, FunctionCallInfoBaseData, PgFnNative};
 
 use mcx::Mcx;
 use types_core::Oid;
-use types_error::PgError;
+use types_error::{PgError, PgResult};
 
 use crate::fmgr_boundary::{
     float4_to_char_boundary, float8_to_char_boundary, int4_to_char_boundary,
@@ -104,12 +104,6 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("to_char fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 /// Drive one `to_char(scalar, text)` overload: take the owned `text` format
 /// payload off the by-ref lane, hand it (plus the scalar `value` and the
 /// `fncollation`) to the matching `*_boundary` marshal entry, copy the produced
@@ -117,7 +111,7 @@ fn raise(err: PgError) -> ! {
 /// lane (`PG_RETURN_TEXT_P`). The scratch `Mcx` outlives the boundary call's
 /// `PgVec`, which is flattened to an owned `Vec` before the context drops.
 #[inline]
-fn run<F>(fcinfo: &mut FunctionCallInfoBaseData, boundary: F) -> Datum
+fn run<F>(fcinfo: &mut FunctionCallInfoBaseData, boundary: F) -> PgResult<Datum>
 where
     F: for<'mcx> FnOnce(
         Mcx<'mcx>,
@@ -130,20 +124,17 @@ where
     let m = scratch_mcx();
     let bytes: Vec<u8> = {
         let fmt = FmgrArg::Ref(&fmt_payload);
-        match boundary(m.mcx(), &fmt, collid) {
-            Ok(image) => image.as_slice().to_vec(),
-            Err(e) => raise(e),
-        }
+        boundary(m.mcx(), &fmt, collid)?.as_slice().to_vec()
     };
     fcinfo.set_ref_result(RefPayload::Varlena(bytes));
-    Datum::from_usize(0)
+    Ok(Datum::from_usize(0))
 }
 
 /// Like [`run`], but the boundary entry may return SQL NULL (`None`, the C
 /// `PG_RETURN_NULL()` arm for an empty format or a non-finite datetime input).
 /// On `None` the call frame's `isnull` flag is set and a 0 `Datum` returned.
 #[inline]
-fn run_opt<F>(fcinfo: &mut FunctionCallInfoBaseData, boundary: F) -> Datum
+fn run_opt<F>(fcinfo: &mut FunctionCallInfoBaseData, boundary: F) -> PgResult<Datum>
 where
     F: for<'mcx> FnOnce(
         Mcx<'mcx>,
@@ -156,20 +147,16 @@ where
     let m = scratch_mcx();
     let result: Option<Vec<u8>> = {
         let fmt = FmgrArg::Ref(&fmt_payload);
-        match boundary(m.mcx(), &fmt, collid) {
-            Ok(Some(image)) => Some(image.as_slice().to_vec()),
-            Ok(None) => None,
-            Err(e) => raise(e),
-        }
+        boundary(m.mcx(), &fmt, collid)?.map(|image| image.as_slice().to_vec())
     };
     match result {
         Some(bytes) => {
             fcinfo.set_ref_result(RefPayload::Varlena(bytes));
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
         None => {
             fcinfo.isnull = true;
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
     }
 }
@@ -178,49 +165,49 @@ where
 // fc_ adapters.
 // ---------------------------------------------------------------------------
 
-fn fc_int4_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int4_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let value = arg_int32(fcinfo, 0);
     run(fcinfo, |mcx, fmt, collid| {
         int4_to_char_boundary(mcx, value, fmt, collid)
     })
 }
 
-fn fc_int8_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let value = arg_int64(fcinfo, 0);
     run(fcinfo, |mcx, fmt, collid| {
         int8_to_char_boundary(mcx, value, fmt, collid)
     })
 }
 
-fn fc_float4_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float4_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let value = arg_float4(fcinfo, 0);
     run(fcinfo, |mcx, fmt, collid| {
         float4_to_char_boundary(mcx, value, fmt, collid)
     })
 }
 
-fn fc_float8_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float8_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let value = arg_float8(fcinfo, 0);
     run(fcinfo, |mcx, fmt, collid| {
         float8_to_char_boundary(mcx, value, fmt, collid)
     })
 }
 
-fn fc_timestamp_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamp_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let dt = arg_timestamp(fcinfo, 0);
     run_opt(fcinfo, move |mcx, fmt, collid| {
         timestamp_to_char_boundary(mcx, dt, fmt, collid)
     })
 }
 
-fn fc_timestamptz_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_timestamptz_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let dt = arg_timestamp(fcinfo, 0);
     run_opt(fcinfo, move |mcx, fmt, collid| {
         timestamptz_to_char_boundary(mcx, dt, fmt, collid)
     })
 }
 
-fn fc_interval_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_interval_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let it = arg_interval(fcinfo, 0);
     run_opt(fcinfo, move |mcx, fmt, collid| {
         interval_to_char_boundary(mcx, &it, fmt, collid)
@@ -230,11 +217,11 @@ fn fc_interval_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `VARDATA_ANY` of a by-reference `text` argument: the payload bytes after the
 /// 4-byte uncompressed length header (`RefPayload::Cstring` is verbatim).
 #[inline]
-fn arg_text_body(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
+fn arg_text_body(fcinfo: &FunctionCallInfoBaseData, i: usize) -> PgResult<Vec<u8>> {
     let payload = fcinfo
         .ref_arg(i)
         .expect("to_date/to_timestamp fn: text arg missing from by-ref lane");
-    match payload {
+    Ok(match payload {
         RefPayload::Varlena(b) => {
             let img = b.as_slice();
             if img.len() >= 4 {
@@ -244,43 +231,41 @@ fn arg_text_body(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
             }
         }
         RefPayload::Cstring(s) => s.as_bytes().to_vec(),
-        _ => raise(PgError::error(
-            "to_date/to_timestamp fmgr arg: expected a by-reference text varlena",
-        )),
-    }
+        _ => {
+            return Err(PgError::error(
+                "to_date/to_timestamp fmgr arg: expected a by-reference text varlena",
+            ))
+        }
+    })
 }
 
 /// `to_date(text, text) -> date` (formatting.c). Both args are by-reference
 /// `text`; the `date` result is the by-value `DateADT` (int32).
-fn fc_to_date(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let date_txt = arg_text_body(fcinfo, 0);
-    let fmt = arg_text_body(fcinfo, 1);
+fn fc_to_date(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let date_txt = arg_text_body(fcinfo, 0)?;
+    let fmt = arg_text_body(fcinfo, 1)?;
     let collid = fcinfo.fncollation;
     let m = scratch_mcx();
-    match crate::to_date(m.mcx(), &date_txt, &fmt, collid) {
-        Ok(d) => Datum::from_i32(d),
-        Err(e) => raise(e),
-    }
+    Ok(Datum::from_i32(crate::to_date(m.mcx(), &date_txt, &fmt, collid)?))
 }
 
 /// `to_timestamp(text, text) -> timestamptz` (formatting.c). Both args are
 /// by-reference `text`; the `timestamptz` result is the by-value `Timestamp`
 /// (int64).
-fn fc_to_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    let date_txt = arg_text_body(fcinfo, 0);
-    let fmt = arg_text_body(fcinfo, 1);
+fn fc_to_timestamp(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let date_txt = arg_text_body(fcinfo, 0)?;
+    let fmt = arg_text_body(fcinfo, 1)?;
     let collid = fcinfo.fncollation;
     let m = scratch_mcx();
-    match crate::to_timestamp(m.mcx(), &date_txt, &fmt, collid) {
-        Ok(r) => Datum::from_i64(r.timestamp),
-        Err(e) => raise(e),
-    }
+    Ok(Datum::from_i64(
+        crate::to_timestamp(m.mcx(), &date_txt, &fmt, collid)?.timestamp,
+    ))
 }
 
 /// `numeric_to_char(numeric, text) -> text` (oid 1772). Arg 0 is the by-ref
 /// `numeric` image, arg 1 the by-ref `text` format; the `text` result goes back
 /// on the by-ref lane.
-fn fc_numeric_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let collid = fcinfo.fncollation;
     let num_payload = arg_text_payload(fcinfo, 0);
     let fmt_payload = arg_text_payload(fcinfo, 1);
@@ -288,19 +273,18 @@ fn fc_numeric_to_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let bytes: Vec<u8> = {
         let num = FmgrArg::Ref(&num_payload);
         let fmt = FmgrArg::Ref(&fmt_payload);
-        match crate::fmgr_boundary::numeric_to_char_boundary(m.mcx(), &num, &fmt, collid) {
-            Ok(image) => image.as_slice().to_vec(),
-            Err(e) => raise(e),
-        }
+        crate::fmgr_boundary::numeric_to_char_boundary(m.mcx(), &num, &fmt, collid)?
+            .as_slice()
+            .to_vec()
     };
     fcinfo.set_ref_result(RefPayload::Varlena(bytes));
-    Datum::from_usize(0)
+    Ok(Datum::from_usize(0))
 }
 
 /// `to_number(text, text) -> numeric` (oid 1777). Both args are by-ref `text`;
 /// the `numeric` result goes back on the by-ref lane, or SQL NULL for the C
 /// `PG_RETURN_NULL()` empty/oversized-format arm.
-fn fc_numeric_to_number(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_to_number(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let collid = fcinfo.fncollation;
     let value_payload = arg_text_payload(fcinfo, 0);
     let fmt_payload = arg_text_payload(fcinfo, 1);
@@ -308,20 +292,17 @@ fn fc_numeric_to_number(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let result: Option<Vec<u8>> = {
         let value = FmgrArg::Ref(&value_payload);
         let fmt = FmgrArg::Ref(&fmt_payload);
-        match crate::fmgr_boundary::numeric_to_number_boundary(m.mcx(), &value, &fmt, collid) {
-            Ok(Some(image)) => Some(image.as_slice().to_vec()),
-            Ok(None) => None,
-            Err(e) => raise(e),
-        }
+        crate::fmgr_boundary::numeric_to_number_boundary(m.mcx(), &value, &fmt, collid)?
+            .map(|image| image.as_slice().to_vec())
     };
     match result {
         Some(bytes) => {
             fcinfo.set_ref_result(RefPayload::Varlena(bytes));
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
         None => {
             fcinfo.isnull = true;
-            Datum::from_usize(0)
+            Ok(Datum::from_usize(0))
         }
     }
 }
@@ -336,16 +317,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register the `to_char(scalar, text)` `formatting.c` builtins (their
@@ -354,7 +338,7 @@ fn builtin(
 /// 1773-1776 (all `proisstrict` is the catalog default `'t'`; none is retset;
 /// each takes 2 args).
 pub fn register_formatting_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(1773, "int4_to_char", 2, true, false, fc_int4_to_char),
         builtin(1774, "int8_to_char", 2, true, false, fc_int8_to_char),
         builtin(1775, "float4_to_char", 2, true, false, fc_float4_to_char),

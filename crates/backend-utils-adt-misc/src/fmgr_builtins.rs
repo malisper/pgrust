@@ -36,7 +36,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::{AttrNumber, Oid};
 
@@ -158,14 +158,9 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("misc fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
-// fc_ adapters.
+// fc_ adapters (Result-native: `ereport(ERROR)` travels as `Err(PgError)`
+// straight back to the fmgr dispatch `invoke_builtin`, no panic/catch_unwind).
 // ---------------------------------------------------------------------------
 
 /// `current_database()` (misc.c:194) -> `name`.
@@ -173,47 +168,39 @@ fn raise(err: types_error::PgError) -> ! {
 /// C reads the backend global `MyDatabaseId`; here it comes from the backend
 /// globals crate (`backend_utils_init_small::globals::MyDatabaseId`), exactly
 /// as the fmgr shim supplies it. The result is a `name` (the `NameData` image).
-fn fc_current_database(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_current_database(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let dboid = backend_utils_init_small::globals::MyDatabaseId();
     // Copy the name bytes out of `m` before it is dropped (the `PgVec` borrows
     // the scratch context).
-    let name: Vec<u8> = match crate::current_database(m.mcx(), dboid) {
-        Ok(name) => name.as_slice().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_name(fcinfo, &name)
+    let name: Vec<u8> = crate::current_database(m.mcx(), dboid)?.as_slice().to_vec();
+    Ok(ret_name(fcinfo, &name))
 }
 
 /// `pg_sleep(float8)` (misc.c:369) -> `void`.
-fn fc_pg_sleep(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_sleep(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let secs = arg_float8(fcinfo, 0);
-    match crate::pg_sleep(secs) {
-        Ok(()) => ret_void(),
-        Err(e) => raise(e),
-    }
+    crate::pg_sleep(secs)?;
+    Ok(ret_void())
 }
 
 /// `pg_tablespace_location(oid)` (misc.c:300) -> `text`.
-fn fc_pg_tablespace_location(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_tablespace_location(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let tablespace_oid = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let path: Vec<u8> = match crate::pg_tablespace_location(m.mcx(), tablespace_oid) {
-        Ok(path) => path.as_slice().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_text(fcinfo, path)
+    let path: Vec<u8> = crate::pg_tablespace_location(m.mcx(), tablespace_oid)?
+        .as_slice()
+        .to_vec();
+    Ok(ret_text(fcinfo, path))
 }
 
 /// `pg_current_logfile()` (misc.c:1083) -> `text` (0-arg overload).
-fn fc_pg_current_logfile(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_current_logfile(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     // No argument: logfmt = NULL (the C 0-arg entry passes no format).
-    let out: Option<Vec<u8>> = match crate::pg_current_logfile(m.mcx(), None) {
-        Ok(opt) => opt.map(|v| v.as_slice().to_vec()),
-        Err(e) => raise(e),
-    };
-    ret_text_opt(fcinfo, out)
+    let out: Option<Vec<u8>> = crate::pg_current_logfile(m.mcx(), None)?
+        .map(|v| v.as_slice().to_vec());
+    Ok(ret_text_opt(fcinfo, out))
 }
 
 /// `pg_current_logfile_1arg(text)` (misc.c:1091) -> `text`.
@@ -221,59 +208,61 @@ fn fc_pg_current_logfile(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// Not strict (`proisstrict => 'f'`): a SQL NULL `logfmt` argument maps to the
 /// C `PG_ARGISNULL(0)` -> NULL `logfmt` (i.e. `None`), exactly like the 0-arg
 /// overload.
-fn fc_pg_current_logfile_1arg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_current_logfile_1arg(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let logfmt: Option<Vec<u8>> = if fcinfo.arg(0).map(|d| d.isnull).unwrap_or(true) {
         None
     } else {
         Some(arg_text_bytes(fcinfo, 0).to_vec())
     };
     let m = scratch_mcx();
-    let out: Option<Vec<u8>> = match crate::pg_current_logfile_1arg(m.mcx(), logfmt.as_deref()) {
-        Ok(opt) => opt.map(|v| v.as_slice().to_vec()),
-        Err(e) => raise(e),
-    };
-    ret_text_opt(fcinfo, out)
+    let out: Option<Vec<u8>> = crate::pg_current_logfile_1arg(m.mcx(), logfmt.as_deref())?
+        .map(|v| v.as_slice().to_vec());
+    Ok(ret_text_opt(fcinfo, out))
 }
 
 /// `pg_relation_is_updatable(regclass, bool)` (misc.c:647) -> `int4`.
-fn fc_pg_relation_is_updatable(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_relation_is_updatable(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let reloid = arg_oid(fcinfo, 0);
     let include_triggers = arg_bool(fcinfo, 1);
-    match crate::pg_relation_is_updatable(reloid, include_triggers) {
-        Ok(events) => ret_i32(events),
-        Err(e) => raise(e),
-    }
+    Ok(ret_i32(crate::pg_relation_is_updatable(
+        reloid,
+        include_triggers,
+    )?))
 }
 
 /// `pg_column_is_updatable(regclass, int2, bool)` (misc.c:664) -> `bool`.
-fn fc_pg_column_is_updatable(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_column_is_updatable(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let reloid = arg_oid(fcinfo, 0);
     let attnum: AttrNumber = arg_int16(fcinfo, 1);
     let include_triggers = arg_bool(fcinfo, 2);
-    match crate::pg_column_is_updatable(reloid, attnum, include_triggers) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+    Ok(ret_bool(crate::pg_column_is_updatable(
+        reloid,
+        attnum,
+        include_triggers,
+    )?))
 }
 
 /// `pg_get_replica_identity_index(regclass)` (misc.c:1100) -> `regclass`
 /// (`PG_RETURN_OID` / `PG_RETURN_NULL`).
-fn fc_pg_get_replica_identity_index(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_get_replica_identity_index(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
     let reloid = arg_oid(fcinfo, 0);
-    match crate::pg_get_replica_identity_index(reloid) {
-        Ok(opt) => ret_oid_opt(fcinfo, opt),
-        Err(e) => raise(e),
-    }
+    let opt = crate::pg_get_replica_identity_index(reloid)?;
+    Ok(ret_oid_opt(fcinfo, opt))
 }
 
 /// `pg_input_is_valid(text, text)` (misc.c:695) -> `bool`.
-fn fc_pg_input_is_valid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_input_is_valid(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let str = arg_text_bytes(fcinfo, 0);
     let typname = arg_text_bytes(fcinfo, 1);
-    match crate::pg_input_is_valid(str, typname) {
-        Ok(b) => ret_bool(b),
-        Err(e) => raise(e),
-    }
+    Ok(ret_bool(crate::pg_input_is_valid(str, typname)?))
 }
 
 /// `pg_basetype(regtype)` (misc.c:582) -> `regtype` (`PG_RETURN_OID` /
@@ -282,7 +271,7 @@ fn fc_pg_input_is_valid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// The per-step `SearchSysCache1(TYPEOID, ...)` projection is supplied by the
 /// syscache `pg_type_form` seam (`Form_pg_type.typtype`/`typbasetype`); the
 /// domain-stack loop lives in [`crate::pg_basetype`]. `TYPTYPE_DOMAIN` is `'d'`.
-fn fc_pg_basetype(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_basetype(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     const TYPTYPE_DOMAIN: i8 = b'd' as i8;
     let typid = arg_oid(fcinfo, 0);
     let step_lookup = |t: Oid| -> types_error::PgResult<Option<crate::TypeBaseStep>> {
@@ -295,10 +284,8 @@ fn fc_pg_basetype(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
             None => Ok(None),
         }
     };
-    match crate::pg_basetype(typid, step_lookup) {
-        Ok(opt) => ret_oid_opt(fcinfo, opt),
-        Err(e) => raise(e),
-    }
+    let opt = crate::pg_basetype(typid, step_lookup)?;
+    Ok(ret_oid_opt(fcinfo, opt))
 }
 
 /// `parse_ident(text, bool)` (misc.c:860) -> `text[]` (OID 1268).
@@ -311,25 +298,18 @@ fn fc_pg_basetype(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// element Datums). The flat array varlena rides back on the by-ref `Varlena`
 /// lane (C `PG_RETURN_ARRAYTYPE_P`). Both args are strict (`proisstrict`
 /// default `'t'`), so the frame always carries non-NULL words.
-fn fc_parse_ident(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_parse_ident(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let qualname = arg_text_bytes(fcinfo, 0).to_vec();
     let strict = arg_bool(fcinfo, 1);
     let m = scratch_mcx();
-    let parts = match crate::parse_ident(m.mcx(), &qualname, strict) {
-        Ok(parts) => parts,
-        Err(e) => raise(e),
-    };
+    let parts = crate::parse_ident(m.mcx(), &qualname, strict)?;
     // Each parsed part is a non-null `text` element (C `CStringGetTextDatum`).
     let elems: Vec<Option<&[u8]>> = parts.iter().map(|p| Some(p.as_slice())).collect();
-    let image = match backend_utils_adt_arrayfuncs_seams::build_text_array_nullable::call(
-        m.mcx(),
-        &elems,
-    ) {
-        Ok(img) => img.as_slice().to_vec(),
-        Err(e) => raise(e),
-    };
+    let image = backend_utils_adt_arrayfuncs_seams::build_text_array_nullable::call(m.mcx(), &elems)?
+        .as_slice()
+        .to_vec();
     fcinfo.set_ref_result(RefPayload::Varlena(image));
-    Datum::from_usize(0)
+    Ok(Datum::from_usize(0))
 }
 
 /// `pg_typeof(any)` (misc.c:563) -> `regtype` (`PG_RETURN_OID`).
@@ -338,10 +318,10 @@ fn fc_parse_ident(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// regardless of whether the value is NULL. The arg-type OID comes from the
 /// call expression via `get_fn_expr_argtype(fcinfo->flinfo, 0)` (the fmgr
 /// shim's job), exactly as C does.
-fn fc_pg_typeof(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_pg_typeof(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let arg0_type =
         backend_utils_fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 0);
-    Datum::from_oid(crate::pg_typeof(arg0_type))
+    Ok(Datum::from_oid(crate::pg_typeof(arg0_type)))
 }
 
 // ---------------------------------------------------------------------------
@@ -354,16 +334,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// `any_value_transfn(state, value)` (misc.c:1120) — `PG_RETURN_DATUM(
@@ -371,7 +354,7 @@ fn builtin(
 /// `proisstrict => 't'` so a NULL is never the running state once any non-NULL
 /// has been seen. Pass arg 0 through verbatim: the value word, and — for a
 /// by-ref type (anyelement may be `text`, an array, ...) — its `RefPayload`.
-fn fc_any_value_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_any_value_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let value = fcinfo
         .arg(0)
         .expect("any_value_transfn: missing state arg")
@@ -379,14 +362,16 @@ fn fc_any_value_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     if let Some(payload) = fcinfo.take_ref_arg(0) {
         fcinfo.set_ref_result(payload);
     }
-    value
+    Ok(value)
 }
 
 /// Register every `misc.c` builtin this lane covers (C: their `fmgr_builtins[]`
-/// rows). Called from this crate's `init_seams()`. OIDs / nargs / strict /
-/// retset are transcribed exactly from `pg_proc.dat` (none are `retset`).
+/// rows) as **Result-native** (the panic→Result migration; see
+/// `docs/proposals/panic-to-result-migration.md`). Called from this crate's
+/// `init_seams()`. OIDs / nargs / strict / retset are transcribed exactly from
+/// `pg_proc.dat` (none are `retset`).
 pub fn register_misc_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // 861  current_database()              -> name   (strict default 't', 0 args)
         builtin(861, "current_database", 0, true, false, fc_current_database),
         // 6292 any_value_transfn(anyelement, anyelement) -> anyelement

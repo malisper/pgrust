@@ -403,24 +403,16 @@ pub fn ComputeIndexAttrs<'mcx>(
         // C: opclassOptions[attn] = transformRelOptions((Datum) 0,
         //    attribute->opclassopts, NULL, NULL, false, false).
         //
-        // `transformRelOptions` yields a bare-word `types_datum::Datum`
-        // (a `text[]` varlena pointer), but the output vector + the downstream
-        // `IndexCreateArgs.opclass_options` are `types_tuple::Datum` (the
-        // ByRef-bytes lane). There is no bridge between the bare-word Datum lane
-        // and the ByRef-bytes lane (the documented Datum-redesign keystone), and
-        // `index_create` itself panics on a non-null reloptions/attoptions
-        // `types_tuple::Datum` for the same reason. So a column carrying explicit
-        // opclass options is deferred as a precise panic, not silently dropped.
+        // `transform_attoptions_byref` builds the per-column `text[]` attoptions
+        // varlena image (the bytes `pg_attribute.attoptions` stores) and lowers
+        // it onto the `Datum::ByRef` lane `index_create` / `AppendAttributeTuples`
+        // consume (the Datum-bridge fix). An empty `opclassopts` is the C
+        // `(Datum) 0` (SQL NULL attoptions).
         if !attribute.opclassopts.is_empty() {
             debug_assert!(attn < nkeycols);
-            let _ = mcx;
-            panic!(
-                "backend-commands-indexcmds: ComputeIndexAttrs per-column opclass \
-                 options (OPCLASS (...) attoptions) are deferred — transformRelOptions \
-                 yields a bare-word types_datum::Datum with no bridge to the \
-                 types_tuple::Datum ByRef-bytes lane index_create consumes \
-                 (Datum-redesign keystone; index_create panics on the same path)"
-            );
+            let bytes = crate::transform_attoptions_byref(mcx, &attribute.opclassopts)?;
+            opclass_options[attn as usize] =
+                types_tuple::Datum::from_byref_bytes_in(mcx, &bytes)?;
         } else {
             opclass_options[attn as usize] = types_tuple::Datum::null();
         }

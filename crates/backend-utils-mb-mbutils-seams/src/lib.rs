@@ -53,8 +53,11 @@ seam_core::seam!(
     /// `pg_mbstrlen_with_len(mbstr, limit)` (mbutils.c): the number of
     /// characters (not bytes) in the first `limit` bytes of `mbstr`, in the
     /// current database encoding. C takes `const char *` bytes in the
-    /// database encoding (not necessarily UTF-8). Infallible.
-    pub fn pg_mbstrlen_with_len(mbstr: &[u8], limit: i32) -> i32
+    /// database encoding (not necessarily UTF-8). C walks the string with
+    /// `pg_mblen_with_len`, which `report_invalid_encoding`s (ereport ERROR,
+    /// via longjmp) on a byte sequence invalid in the database encoding; that
+    /// error is carried on `Err` here.
+    pub fn pg_mbstrlen_with_len(mbstr: &[u8], limit: i32) -> PgResult<i32>
 );
 
 seam_core::seam!(
@@ -72,8 +75,10 @@ seam_core::seam!(
     /// — the byte length of the longest prefix of the first `len` bytes of
     /// `mbstr` holding at most `limit` characters without splitting a multibyte
     /// character, in the current database encoding. C takes `const char *`
-    /// bytes in the database encoding. Infallible.
-    pub fn pg_mbcharcliplen(mbstr: &[u8], len: i32, limit: i32) -> i32
+    /// bytes in the database encoding. C walks the string with
+    /// `pg_mblen_with_len`, which `report_invalid_encoding`s (ereport ERROR)
+    /// on a byte sequence invalid in the database encoding; carried on `Err`.
+    pub fn pg_mbcharcliplen(mbstr: &[u8], len: i32, limit: i32) -> PgResult<i32>
 );
 
 seam_core::seam!(
@@ -103,8 +108,10 @@ seam_core::seam!(
 seam_core::seam!(
     /// `pg_mblen_range(mbstr, end)` (mbutils.c): byte length of the leading
     /// encoded character of `mbstr`, clamped so it never extends past `end`
-    /// (here: the slice end). Infallible.
-    pub fn pg_mblen_range(mbstr: &[u8]) -> i32
+    /// (here: the slice end). C `report_invalid_encoding`s (ereport ERROR) if
+    /// the leading character's length would extend past `end` (a byte sequence
+    /// invalid in the database encoding); that error is carried on `Err`.
+    pub fn pg_mblen_range(mbstr: &[u8]) -> PgResult<i32>
 );
 
 seam_core::seam!(

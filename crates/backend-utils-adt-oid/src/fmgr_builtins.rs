@@ -18,7 +18,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::Oid;
 use types_stringinfo::StringInfo;
@@ -79,59 +79,45 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("oid fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
-// fc_ adapters.
+// fc_ adapters (Result-native: `ereport(ERROR)` travels as `Err(PgError)`
+// straight back to the fmgr dispatch `invoke_builtin`, no panic/catch_unwind).
 // ---------------------------------------------------------------------------
 
-fn fc_oidin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_oidin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     // C: uint32in_subr(s, NULL, "oid", fcinfo->context). Forward the soft
     // ErrorSaveContext so a recoverable parse failure `ereturn`s into the sink
     // (returning a placeholder 0 that the caller discards) instead of throwing.
     let escontext = fcinfo.escontext_mut();
-    match crate::oidin(&s, escontext) {
-        Ok(o) => ret_oid(o),
-        Err(e) => raise(e),
-    }
+    Ok(ret_oid(crate::oidin(&s, escontext)?))
 }
 
-fn fc_oidout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_oidout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let o = arg_oid(fcinfo, 0);
-    ret_cstring(fcinfo, crate::oidout(o))
+    Ok(ret_cstring(fcinfo, crate::oidout(o)))
 }
 
-fn fc_oidrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_oidrecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let src = arg_varlena(fcinfo, 0);
     let mut data = mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(src.len()).is_err() {
-        raise(types_error::PgError::error("out of memory"));
+        return Err(types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(src);
     let mut buf = StringInfo::from_vec(data);
-    match crate::oidrecv(&mut buf) {
-        Ok(o) => ret_oid(o),
-        Err(e) => raise(e),
-    }
+    Ok(ret_oid(crate::oidrecv(&mut buf)?))
 }
 
-fn fc_oidsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_oidsend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let arg1 = arg_oid(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = match crate::oidsend(m.mcx(), arg1) {
-        Ok(bytea) => bytea.as_bytes().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_varlena(fcinfo, bytes)
+    let bytes = crate::oidsend(m.mcx(), arg1)?.as_bytes().to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
 }
 
-fn fc_oidvectorin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_oidvectorin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let s = arg_cstring(fcinfo, 0).to_string();
     let m = scratch_mcx();
     // C passes fcinfo->context (the soft ErrorSaveContext) to uint32in_subr.
@@ -139,15 +125,14 @@ fn fc_oidvectorin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     // throwing; on the soft path the body returns `Ok(None)` and the caller
     // discards this placeholder after `soft_error_occurred()`.
     let escontext = fcinfo.escontext_mut();
-    let image_bytes: Vec<u8> = match crate::oidvectorin(m.mcx(), &s, escontext) {
-        Ok(Some(image)) => image.as_slice().to_vec(),
-        Ok(None) => return Datum::null(),
-        Err(e) => raise(e),
+    let image_bytes: Vec<u8> = match crate::oidvectorin(m.mcx(), &s, escontext)? {
+        Some(image) => image.as_slice().to_vec(),
+        None => return Ok(Datum::null()),
     };
-    ret_varlena(fcinfo, image_bytes)
+    Ok(ret_varlena(fcinfo, image_bytes))
 }
 
-fn fc_oidvectorout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_oidvectorout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     use backend_utils_adt_arrayfuncs::foundation;
     let m = scratch_mcx();
     let bytes = arg_varlena(fcinfo, 0).to_vec();
@@ -158,14 +143,14 @@ fn fc_oidvectorout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let dataoffset = foundation::arr_dataoffset_field(&bytes);
     let elemtype = foundation::arr_elemtype(&bytes);
     let values: Vec<types_core::Oid> =
-        match backend_utils_adt_arrayfuncs::construct::oidvector_to_oids_bytes(m.mcx(), &bytes) {
-            Ok(v) => v.iter().copied().collect(),
-            Err(e) => raise(e),
-        };
-    match crate::oidvectorout(ndim, dataoffset, elemtype, &values) {
-        Ok(s) => ret_cstring(fcinfo, s),
-        Err(e) => raise(e),
-    }
+        backend_utils_adt_arrayfuncs::construct::oidvector_to_oids_bytes(m.mcx(), &bytes)?
+            .iter()
+            .copied()
+            .collect();
+    Ok(ret_cstring(
+        fcinfo,
+        crate::oidvectorout(ndim, dataoffset, elemtype, &values)?,
+    ))
 }
 
 /// Decode an `oidvector` argument (a 1-D `ArrayType` varlena image) off the
@@ -174,7 +159,7 @@ fn fc_oidvectorout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn arg_oidvector(
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
-) -> (i32, i32, Oid, Vec<Oid>) {
+) -> types_error::PgResult<(i32, i32, Oid, Vec<Oid>)> {
     use backend_utils_adt_arrayfuncs::foundation;
     let m = scratch_mcx();
     let bytes = arg_varlena(fcinfo, i).to_vec();
@@ -182,65 +167,62 @@ fn arg_oidvector(
     let dataoffset = foundation::arr_dataoffset_field(&bytes);
     let elemtype = foundation::arr_elemtype(&bytes);
     let values: Vec<Oid> =
-        match backend_utils_adt_arrayfuncs::construct::oidvector_to_oids_bytes(m.mcx(), &bytes) {
-            Ok(v) => v.iter().copied().collect(),
-            Err(e) => raise(e),
-        };
-    (ndim, dataoffset, elemtype, values)
+        backend_utils_adt_arrayfuncs::construct::oidvector_to_oids_bytes(m.mcx(), &bytes)?
+            .iter()
+            .copied()
+            .collect();
+    Ok((ndim, dataoffset, elemtype, values))
 }
 
 /// `btoidvectorcmp` over the two by-ref `oidvector` arguments.
-fn oidvector_cmp(fcinfo: &FunctionCallInfoBaseData) -> i32 {
-    let (a_ndim, a_doff, a_et, a) = arg_oidvector(fcinfo, 0);
-    let (b_ndim, b_doff, b_et, b) = arg_oidvector(fcinfo, 1);
-    match crate::btoidvectorcmp(a_ndim, a_doff, a_et, &a, b_ndim, b_doff, b_et, &b) {
-        Ok(c) => c,
-        Err(e) => raise(e),
-    }
+fn oidvector_cmp(fcinfo: &FunctionCallInfoBaseData) -> types_error::PgResult<i32> {
+    let (a_ndim, a_doff, a_et, a) = arg_oidvector(fcinfo, 0)?;
+    let (b_ndim, b_doff, b_et, b) = arg_oidvector(fcinfo, 1)?;
+    crate::btoidvectorcmp(a_ndim, a_doff, a_et, &a, b_ndim, b_doff, b_et, &b)
 }
 
-fn fc_oidvectoreq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::oidvectoreq(oidvector_cmp(fcinfo)))
+fn fc_oidvectoreq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::oidvectoreq(oidvector_cmp(fcinfo)?)))
 }
-fn fc_oidvectorne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::oidvectorne(oidvector_cmp(fcinfo)))
+fn fc_oidvectorne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::oidvectorne(oidvector_cmp(fcinfo)?)))
 }
-fn fc_oidvectorlt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::oidvectorlt(oidvector_cmp(fcinfo)))
+fn fc_oidvectorlt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::oidvectorlt(oidvector_cmp(fcinfo)?)))
 }
-fn fc_oidvectorle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::oidvectorle(oidvector_cmp(fcinfo)))
+fn fc_oidvectorle(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::oidvectorle(oidvector_cmp(fcinfo)?)))
 }
-fn fc_oidvectorge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::oidvectorge(oidvector_cmp(fcinfo)))
+fn fc_oidvectorge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::oidvectorge(oidvector_cmp(fcinfo)?)))
 }
-fn fc_oidvectorgt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::oidvectorgt(oidvector_cmp(fcinfo)))
+fn fc_oidvectorgt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::oidvectorgt(oidvector_cmp(fcinfo)?)))
 }
 
-fn fc_oideq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::oideq(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+fn fc_oideq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::oideq(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1))))
 }
-fn fc_oidne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::oidne(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+fn fc_oidne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::oidne(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1))))
 }
-fn fc_oidlt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::oidlt(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+fn fc_oidlt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::oidlt(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1))))
 }
-fn fc_oidle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::oidle(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+fn fc_oidle(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::oidle(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1))))
 }
-fn fc_oidgt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::oidgt(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+fn fc_oidgt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::oidgt(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1))))
 }
-fn fc_oidge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::oidge(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+fn fc_oidge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::oidge(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1))))
 }
-fn fc_oidlarger(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_oid(crate::oidlarger(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+fn fc_oidlarger(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_oid(crate::oidlarger(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1))))
 }
-fn fc_oidsmaller(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_oid(crate::oidsmaller(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1)))
+fn fc_oidsmaller(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_oid(crate::oidsmaller(arg_oid(fcinfo, 0), arg_oid(fcinfo, 1))))
 }
 
 // ---------------------------------------------------------------------------
@@ -253,23 +235,28 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
-/// Register every scalar `oid.c` builtin (C: their `fmgr_builtins[]` rows).
-/// Called from this crate's `init_seams()`. OIDs/nargs/strict from
-/// `pg_proc.dat` (all are `proisstrict => 't'`, none retset).
+/// Register every scalar `oid.c` builtin (C: their `fmgr_builtins[]` rows) as
+/// **Result-native** (the panic→Result migration; see
+/// `docs/proposals/panic-to-result-migration.md`). Called from this crate's
+/// `init_seams()`. OIDs/nargs/strict from `pg_proc.dat` (all are
+/// `proisstrict => 't'`, none retset).
 pub fn register_oid_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- I/O ----
         builtin(1798, "oidin", 1, true, false, fc_oidin),
         builtin(1799, "oidout", 1, true, false, fc_oidout),

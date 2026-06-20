@@ -177,13 +177,25 @@ pub fn finalize_aggregate<'mcx>(
             // *resultIsNull = fcinfo->isnull;
             // *resultVal = MakeExpandedObjectReadOnly(result, fcinfo->isnull,
             //                                         peragg->resulttypeLen);
-            let (result, isnull) = invoke_finalfn(
+            let (result, isnull, surviving_arg0) = invoke_finalfn(
                 peragg.finalfn_oid,
                 agg_collation,
                 final_args,
                 final_arg_isnull,
                 estate,
             )?;
+            // C `PG_GETARG_*(0)` does not consume the transition value: a finalfn
+            // only reads it, leaving the (possibly `internal`) state live so that
+            // another aggregate sharing this same transition state (e.g.
+            // `sum(numeric)` + `avg(numeric)`, which share `numeric_avg_accum`) can
+            // finalize against it in turn. The owned-finalfn seam hands the state
+            // back as `surviving_arg0`; restore it into the shared pergroup so the
+            // next sharing aggregate's finalfn still sees it (we moved an `internal`
+            // box out above; a by-value/by-ref value was cloned, so only restore
+            // when the seam actually returned the live state).
+            if let Some(state) = surviving_arg0 {
+                pergroupstate.trans_value = state;
+            }
             result_is_null = isnull;
             result_val =
                 make_expanded_object_read_only(result, isnull, peragg.resulttype_len);
@@ -345,13 +357,17 @@ fn invoke_finalfn<'mcx>(
     args: alloc::vec::Vec<Datum<'mcx>>,
     arg_isnull: alloc::vec::Vec<bool>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<(Datum<'mcx>, bool)> {
+) -> PgResult<(Datum<'mcx>, bool, Option<Datum<'mcx>>)> {
     let mcx = estate.es_query_cxt;
     // The finalfn takes its args by value: an `internal`-transtype aggregate's
     // `args[0]` is a `Datum::Internal` box that cannot be cloned out of a
     // borrow, so it crosses by move through the by-value dispatch (the same form
     // the transition path uses). `arg_isnull[i]` carries `PG_ARGISNULL(i)`.
-    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum_owned::call(
+    //
+    // Use the FINAL form, which returns `args[0]` back: C's finalfn reads but does
+    // not consume the transition value, so an `internal` state shared across
+    // sibling aggregates must survive the call (restored by the caller).
+    backend_utils_fmgr_fmgr_seams::function_call_finalfn_owned::call(
         mcx,
         finalfn_oid,
         collation,

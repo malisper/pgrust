@@ -2278,10 +2278,16 @@ fn tuplesort_sort_memtuples<'mcx>(state: &mut TuplesortStateImpl<'mcx>) -> PgRes
 }
 
 /// In-place sort of `memtuples[lo..hi]` using the fallible [`comparetup`].
-/// Heapsort (deterministic, no extra alloc, matches qsort's O(n log n) without
-/// needing a comparator that can't error — `sort_unstable_by` can't carry a
-/// `PgResult`). Mirrors the C qsort result (the order is fully determined by
-/// `comparetup`).
+///
+/// Faithful port of PostgreSQL's `ST_SORT` from `src/include/lib/sort_template.h`
+/// (the Bentley-McIlroy three-way quicksort that backs `qsort_tuple` /
+/// `qsort_interruptible`). We MUST reproduce this exact algorithm — not merely
+/// "some O(n log n) sort" — because the sort is not stable and the regression
+/// `.out` files encode the precise output order this partitioning produces for
+/// equal-key runs. (Heapsort gives a different, wrong order for all-equal
+/// inputs, e.g. rotating the first element to the end.)
+///
+/// Indices are absolute into `state.memtuples`; the window is `[lo, hi)`.
 fn sort_slice_by<'mcx>(
     state: &mut TuplesortStateImpl<'mcx>,
     lo: usize,
@@ -2291,48 +2297,181 @@ fn sort_slice_by<'mcx>(
     if n < 2 {
         return Ok(());
     }
-    // Build a max-heap, then repeatedly extract the max to the end.
-    // sift-down helper operates on the [lo..hi) window.
-    for start in (0..n / 2).rev() {
-        sift_down(state, lo, n, start)?;
-    }
-    for end in (1..n).rev() {
-        state.memtuples.swap(lo, lo + end);
-        sift_down(state, lo, end, 0)?;
-    }
-    Ok(())
+    qsort_tuple(state, lo, n)
 }
 
-/// Sift-down within `memtuples[lo .. lo+len)` from logical index `root`.
-fn sift_down<'mcx>(
+/// `DO_COMPARE(i, j)` for absolute memtuple indices.
+#[inline]
+fn qsort_cmp<'mcx>(state: &mut TuplesortStateImpl<'mcx>, i: usize, j: usize) -> PgResult<i32> {
+    comparetup(state, &state.memtuples[i], &state.memtuples[j])
+}
+
+/// `med3` over absolute indices: returns the index whose element is the median.
+fn qsort_med3<'mcx>(
     state: &mut TuplesortStateImpl<'mcx>,
-    lo: usize,
-    len: usize,
-    mut root: usize,
+    a: usize,
+    b: usize,
+    c: usize,
+) -> PgResult<usize> {
+    // C: return DO_COMPARE(a, b) < 0 ?
+    //          (DO_COMPARE(b, c) < 0 ? b : (DO_COMPARE(a, c) < 0 ? c : a))
+    //        : (DO_COMPARE(b, c) > 0 ? b : (DO_COMPARE(a, c) < 0 ? a : c));
+    Ok(if qsort_cmp(state, a, b)? < 0 {
+        if qsort_cmp(state, b, c)? < 0 {
+            b
+        } else if qsort_cmp(state, a, c)? < 0 {
+            c
+        } else {
+            a
+        }
+    } else if qsort_cmp(state, b, c)? > 0 {
+        b
+    } else if qsort_cmp(state, a, c)? < 0 {
+        a
+    } else {
+        c
+    })
+}
+
+/// Swap `cnt` consecutive elements starting at absolute indices `i` and `j`
+/// (`DO_SWAPN`/`swapN`).
+#[inline]
+fn qsort_swapn<'mcx>(state: &mut TuplesortStateImpl<'mcx>, mut i: usize, mut j: usize, cnt: usize) {
+    for _ in 0..cnt {
+        state.memtuples.swap(i, j);
+        i += 1;
+        j += 1;
+    }
+}
+
+/// Faithful port of `ST_SORT(data, n)` operating on `state.memtuples[a .. a+n)`.
+/// Mirrors `sort_template.h`: insertion sort for `n < 7`, a presorted-input
+/// fast path, median-of-(3 or 9) pivot, three-way partition, then recurse on
+/// the smaller partition and iterate (`goto loop`, here a `loop`) on the larger.
+fn qsort_tuple<'mcx>(
+    state: &mut TuplesortStateImpl<'mcx>,
+    mut a: usize,
+    mut n: usize,
 ) -> PgResult<()> {
     loop {
-        let mut largest = root;
-        let l = 2 * root + 1;
-        let r = 2 * root + 2;
-        if l < len {
-            let cmp = comparetup(state, &state.memtuples[lo + l], &state.memtuples[lo + largest])?;
-            if cmp > 0 {
-                largest = l;
+        // if (n < 7) { insertion sort; return; }
+        if n < 7 {
+            // for (pm = a+1; pm < a+n; pm++)
+            //   for (pl = pm; pl > a && DO_COMPARE(pl-1, pl) > 0; pl--) swap(pl, pl-1);
+            for pm in (a + 1)..(a + n) {
+                let mut pl = pm;
+                while pl > a && qsort_cmp(state, pl - 1, pl)? > 0 {
+                    state.memtuples.swap(pl, pl - 1);
+                    pl -= 1;
+                }
+            }
+            return Ok(());
+        }
+
+        // presorted check
+        let mut presorted = true;
+        for pm in (a + 1)..(a + n) {
+            if qsort_cmp(state, pm - 1, pm)? > 0 {
+                presorted = false;
+                break;
             }
         }
-        if r < len {
-            let cmp = comparetup(state, &state.memtuples[lo + r], &state.memtuples[lo + largest])?;
-            if cmp > 0 {
-                largest = r;
+        if presorted {
+            return Ok(());
+        }
+
+        // Pivot selection (median of 3, or median of medians for n > 40).
+        let mut pm = a + (n / 2);
+        {
+            let mut pl = a;
+            let mut pn = a + (n - 1);
+            if n > 40 {
+                let d = n / 8;
+                pl = qsort_med3(state, pl, pl + d, pl + 2 * d)?;
+                pm = qsort_med3(state, pm - d, pm, pm + d)?;
+                pn = qsort_med3(state, pn - 2 * d, pn - d, pn)?;
             }
+            pm = qsort_med3(state, pl, pm, pn)?;
         }
-        if largest == root {
-            break;
+        // DO_SWAP(a, pm): move pivot to front. The pivot element now lives at a.
+        state.memtuples.swap(a, pm);
+
+        let mut pa = a + 1;
+        let mut pb = a + 1;
+        let mut pc = a + (n - 1);
+        let mut pd = a + (n - 1);
+        loop {
+            // while (pb <= pc && (r = DO_COMPARE(pb, a)) <= 0)
+            while pb <= pc {
+                let r = qsort_cmp(state, pb, a)?;
+                if r > 0 {
+                    break;
+                }
+                if r == 0 {
+                    state.memtuples.swap(pa, pb);
+                    pa += 1;
+                }
+                pb += 1;
+            }
+            // while (pb <= pc && (r = DO_COMPARE(pc, a)) >= 0)
+            while pb <= pc {
+                let r = qsort_cmp(state, pc, a)?;
+                if r < 0 {
+                    break;
+                }
+                if r == 0 {
+                    state.memtuples.swap(pc, pd);
+                    // pd -= 1, guarding underflow is unnecessary: pd starts at
+                    // a+(n-1) >= a, and pd only decrements while equal elements
+                    // exist on the right, bounded by pc >= pb > a.
+                    pd -= 1;
+                }
+                // pc -= 1; pc >= pb >= a+1 here, so no underflow.
+                pc -= 1;
+            }
+            if pb > pc {
+                break;
+            }
+            state.memtuples.swap(pb, pc);
+            pb += 1;
+            // pc > pb-1 >= a+1 here.
+            pc -= 1;
         }
-        state.memtuples.swap(lo + root, lo + largest);
-        root = largest;
+
+        // pn = a + n;  (one past the end)
+        let pn = a + n;
+        // d1 = Min(pa - a, pb - pa); swapN(a, pb - d1, d1);
+        let d1 = core::cmp::min(pa - a, pb - pa);
+        qsort_swapn(state, a, pb - d1, d1);
+        // d1 = Min(pd - pc, pn - pd - 1); swapN(pb, pn - d1, d1);
+        let d1b = core::cmp::min(pd - pc, pn - pd - 1);
+        qsort_swapn(state, pb, pn - d1b, d1b);
+
+        let dl = pb - pa; // left partition size (elements equal handled)
+        let dr = pd - pc; // right partition size
+        if dl <= dr {
+            // Recurse on left, iterate on right.
+            if dl > 1 {
+                qsort_tuple(state, a, dl)?;
+            }
+            if dr > 1 {
+                a = pn - dr;
+                n = dr;
+                continue;
+            }
+            return Ok(());
+        } else {
+            // Recurse on right, iterate on left.
+            if dr > 1 {
+                qsort_tuple(state, pn - dr, dr)?;
+            }
+            if dl > 1 {
+                n = dl;
+                continue;
+            }
+            return Ok(());
+        }
     }
-    Ok(())
 }
 
 /// `tuplesort_heap_insert(state, tuple)` (tuplesort.c): sift-up a new entry.

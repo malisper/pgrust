@@ -113,8 +113,8 @@ fn t_isalpha(s: &[u8]) -> bool {
 /// `pg_mblen_cstr(c)` for a byte slice positioned at a character boundary.
 /// C returns the byte length of the leading character (`1..=s.len()`).
 #[inline]
-fn pg_mblen(s: &[u8]) -> usize {
-    pg_mblen_range::call(s) as usize
+fn pg_mblen(s: &[u8]) -> PgResult<usize> {
+    Ok(pg_mblen_range::call(s)? as usize)
 }
 
 /// `t_iseq(c, x)`: the leading byte of `s` equals the (ASCII) byte `x`. Pure.
@@ -164,7 +164,7 @@ pub fn rs_is_regis(str: &[u8]) -> PgResult<bool> {
                 .errmsg(alloc::format!("internal error in RS_isRegis: state {state}"))
                 .into_error());
         }
-        off += pg_mblen(c);
+        off += pg_mblen(c)?;
     }
 
     Ok(state == RS_IN_WAIT)
@@ -190,7 +190,7 @@ pub fn rs_compile<'mcx>(mcx: Mcx<'mcx>, issuffix: bool, str: &[u8]) -> PgResult<
 
     while off < str.len() {
         let c = &str[off..];
-        let clen = pg_mblen(c);
+        let clen = pg_mblen(c)?;
         let ch = &c[..clen];
 
         if state == RS_IN_WAIT {
@@ -284,13 +284,13 @@ fn copy_char_into<'mcx>(mcx: Mcx<'mcx>, data: &mut PgVec<'mcx, u8>, ch: &[u8]) -
 /// occurs as a whole character within the class bytes `str`. Mirrors the C
 /// `while (*ptr && !res)` walk: each class character of the same byte length as
 /// `c`'s leading character is compared byte-for-byte.
-fn mb_strchr(str: &[u8], c: &[u8]) -> bool {
-    let clen = pg_mblen(c);
+fn mb_strchr(str: &[u8], c: &[u8]) -> PgResult<bool> {
+    let clen = pg_mblen(c)?;
     let mut pos = 0usize;
     let mut res = false;
 
     while pos < str.len() && !res {
-        let plen = pg_mblen(&str[pos..]);
+        let plen = pg_mblen(&str[pos..])?;
         if plen == clen {
             // Compare the `clen` bytes (the C `while (i--)` byte loop).
             res = str[pos..pos + plen] == c[..clen];
@@ -298,7 +298,7 @@ fn mb_strchr(str: &[u8], c: &[u8]) -> bool {
         pos += plen;
     }
 
-    res
+    Ok(res)
 }
 
 /// `RS_execute`: true iff `str` matches the compiled pattern `r`. Mirrors C
@@ -311,7 +311,7 @@ pub fn rs_execute(r: &Regis<'_>, str: &[u8]) -> PgResult<bool> {
     let mut off = 0usize;
     while off < str.len() {
         len += 1;
-        off += pg_mblen(&str[off..]);
+        off += pg_mblen(&str[off..])?;
     }
 
     if len < r.nchar as i64 {
@@ -324,7 +324,7 @@ pub fn rs_execute(r: &Regis<'_>, str: &[u8]) -> PgResult<bool> {
         len -= r.nchar as i64;
         while len > 0 {
             len -= 1;
-            off += pg_mblen(&str[off..]);
+            off += pg_mblen(&str[off..])?;
         }
     }
 
@@ -332,17 +332,17 @@ pub fn rs_execute(r: &Regis<'_>, str: &[u8]) -> PgResult<bool> {
         let c = &str[off..];
         match node.kind {
             RegisNodeKind::OneOf => {
-                if !mb_strchr(&node.data, c) {
+                if !mb_strchr(&node.data, c)? {
                     return Ok(false);
                 }
             }
             RegisNodeKind::NoneOf => {
-                if mb_strchr(&node.data, c) {
+                if mb_strchr(&node.data, c)? {
                     return Ok(false);
                 }
             }
         }
-        off += pg_mblen(c);
+        off += pg_mblen(c)?;
     }
 
     Ok(true)

@@ -100,10 +100,26 @@ fn cmd_def_elem_list<'mcx>(
         if let Some(items) = def.as_list() {
             for it in items.iter() {
                 if let Some(de) = it.as_defelem() {
+                    // Project the value node (`def->arg`) to the `DefElemArg` the
+                    // reloptions `defGetString`/`defGetBoolean` seams read; `None`
+                    // mirrors `def->arg == NULL`. Without this the option value
+                    // (e.g. `fillfactor=90`) is dropped and `defGetString` falls
+                    // back to the no-arg "true" — a wrong reloption.
+                    let arg = de.arg.as_deref().map(|node| {
+                        use backend_commands_define_seams::DefElemArg;
+                        use types_nodes::nodes::ntag;
+                        match node.node_tag() {
+                            ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
+                            ntag::T_Float => DefElemArg::Float(node.expect_float().fval.as_str().to_string()),
+                            ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
+                            ntag::T_String => DefElemArg::String(node.expect_string().sval.as_str().to_string()),
+                            _ => DefElemArg::AStar,
+                        }
+                    });
                     out.push(backend_access_common_reloptions::DefElem::new(
                         de.defnamespace.as_ref().map(|s| s.as_str()),
                         de.defname.as_ref().map(|s| s.as_str()).unwrap_or(""),
-                        None,
+                        arg,
                     ));
                 }
             }

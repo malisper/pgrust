@@ -1,5 +1,7 @@
 //! `fmgr`-callable wrappers for the `internal`-transtype `string_agg` aggregate
-//! (`varlena.c`): `string_agg_transfn`(3535) / `string_agg_finalfn`(3536).
+//! (`varlena.c`): `string_agg_transfn`(3535) / `string_agg_finalfn`(3536), plus
+//! the `bytea` variants `bytea_string_agg_transfn`(3543) /
+//! `bytea_string_agg_finalfn`(3544).
 //!
 //! ## The `internal` transition state crosses the fmgr boundary
 //!
@@ -19,7 +21,7 @@
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `StringInfo` transition state for `string_agg`. `data` is the accumulated
 /// buffer (`StringInfoData.data`); `cursor` is `StringInfoData.cursor`, reused
@@ -111,7 +113,7 @@ fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
 
 /// `string_agg_transfn`(3535): append `value` (and the preceding `delim`) to the
 /// running buffer.
-fn fc_string_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_string_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // state = PG_ARGISNULL(0) ? NULL : (StringInfo) PG_GETARG_POINTER(0);
     let mut state = take_string_state(fcinfo);
 
@@ -150,17 +152,17 @@ fn fc_string_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     }
 
     // if (state) PG_RETURN_POINTER(state); else PG_RETURN_NULL();
-    match state {
+    Ok(match state {
         Some(s) => ret_internal(fcinfo, s),
         None => ret_null(fcinfo),
-    }
+    })
 }
 
 /// `string_agg_finalfn`(3536): the accumulated string with the first delimiter
 /// stripped off the front.
-fn fc_string_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_string_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // state = PG_ARGISNULL(0) ? NULL : (StringInfo) PG_GETARG_POINTER(0);
-    match take_string_state(fcinfo) {
+    Ok(match take_string_state(fcinfo) {
         None => ret_null(fcinfo),
         Some(state) => {
             // PG_RETURN_TEXT_P(cstring_to_text_with_len(&state->data[state->cursor],
@@ -169,34 +171,136 @@ fn fc_string_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
             let payload = state.data[cursor..].to_vec();
             ret_text(fcinfo, payload)
         }
+    })
+}
+
+/// `PG_GETARG_BYTEA_PP(i)` — the detoasted `bytea` payload (`VARDATA_ANY`).
+/// Identical on-wire framing to `text` under the header-ful-everywhere
+/// convention: the by-ref lane carries the full varlena image (4-byte length
+/// word + payload); this skips the header. C's `bytea_string_agg_transfn` reads
+/// args via the same `VARDATA_ANY`/`VARSIZE_ANY_EXHDR` macros as the `text`
+/// transfn, so the byte handling is byte-for-byte identical.
+#[inline]
+fn arg_bytea<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    let image = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("bytea_string_agg fn: by-ref `bytea` arg missing from by-ref lane");
+    if image.len() >= VARHDRSZ {
+        &image[VARHDRSZ..]
+    } else {
+        &[]
     }
 }
 
+/// `PG_RETURN_BYTEA_P(image)` — a by-ref `bytea` result. Same varlena framing as
+/// `ret_text` (`SET_VARSIZE` over a 4-byte uncompressed length word + payload).
+fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
+    let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(&payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
+
+/// `bytea_string_agg_transfn`(3543): append `value` (and the preceding `delim`)
+/// to the running buffer. Mirrors `bytea_string_agg_transfn` in `varlena.c`,
+/// which is structurally identical to `string_agg_transfn` but reads `bytea`
+/// args; the transition state is the same `internal` `StringInfo`.
+fn fc_bytea_string_agg_transfn(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    // state = PG_ARGISNULL(0) ? NULL : (StringInfo) PG_GETARG_POINTER(0);
+    let mut state = take_string_state(fcinfo);
+
+    // if (!PG_ARGISNULL(1))
+    if !arg_isnull(fcinfo, 1) {
+        // bytea *value = PG_GETARG_BYTEA_PP(1);
+        let value = arg_bytea(fcinfo, 1).to_vec();
+        let mut isfirst = false;
+
+        // if (state == NULL) { state = makeStringAggState(fcinfo); isfirst = true; }
+        let st = match state.as_mut() {
+            Some(s) => s,
+            None => {
+                state = Some(StringAggState::new());
+                isfirst = true;
+                state.as_mut().unwrap()
+            }
+        };
+
+        // if (!PG_ARGISNULL(2)) {
+        //     bytea *delim = PG_GETARG_BYTEA_PP(2);
+        //     appendBinaryStringInfo(state, VARDATA_ANY(delim), VARSIZE_ANY_EXHDR(delim));
+        //     if (isfirst) state->cursor = VARSIZE_ANY_EXHDR(delim);
+        // }
+        if !arg_isnull(fcinfo, 2) {
+            let delim = arg_bytea(fcinfo, 2);
+            st.data.extend_from_slice(delim);
+            if isfirst {
+                st.cursor = delim.len();
+            }
+        }
+
+        // appendBinaryStringInfo(state, VARDATA_ANY(value), VARSIZE_ANY_EXHDR(value));
+        st.data.extend_from_slice(&value);
+    }
+
+    // if (state) PG_RETURN_POINTER(state); else PG_RETURN_NULL();
+    Ok(match state {
+        Some(s) => ret_internal(fcinfo, s),
+        None => ret_null(fcinfo),
+    })
+}
+
+/// `bytea_string_agg_finalfn`(3544): the accumulated bytes with the first
+/// delimiter stripped off the front (C: `PG_RETURN_BYTEA_P` over
+/// `&state->data[state->cursor]`, length `state->len - state->cursor`).
+fn fc_bytea_string_agg_finalfn(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    // state = PG_ARGISNULL(0) ? NULL : (StringInfo) PG_GETARG_POINTER(0);
+    Ok(match take_string_state(fcinfo) {
+        None => ret_null(fcinfo),
+        Some(state) => {
+            let cursor = state.cursor.min(state.data.len());
+            let payload = state.data[cursor..].to_vec();
+            ret_bytea(fcinfo, payload)
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
-// Registration (C: their `fmgr_builtins[]` rows; both `proisstrict => 'f'` —
+// Registration (C: their `fmgr_builtins[]` rows; all `proisstrict => 'f'` —
 // they handle the NULL `internal` running state / NULL input themselves).
 // ---------------------------------------------------------------------------
 
 pub fn register_string_agg_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         builtin(3535, "string_agg_transfn", 3, fc_string_agg_transfn),
         builtin(3536, "string_agg_finalfn", 1, fc_string_agg_finalfn),
+        builtin(3543, "bytea_string_agg_transfn", 3, fc_bytea_string_agg_transfn),
+        builtin(3544, "bytea_string_agg_finalfn", 1, fc_bytea_string_agg_finalfn),
     ]);
 }
 
-/// A non-strict (`proisstrict => 'f'`) builtin row.
+/// A non-strict (`proisstrict => 'f'`) Result-native builtin row (`func: None`;
+/// dispatch goes through the native overlay) paired with its [`PgFnNative`] body.
 fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: false,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: false,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }

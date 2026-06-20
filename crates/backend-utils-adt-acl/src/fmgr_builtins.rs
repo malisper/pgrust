@@ -30,7 +30,7 @@ use types_acl::AclItem;
 use types_core::{AttrNumber, Oid};
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::has_privilege as hp;
 
@@ -161,38 +161,23 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("acl fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // aclitem type I/O + hashing + equality + makeaclitem.
 // ---------------------------------------------------------------------------
 
-fn fc_aclitemin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_aclitemin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: aclitemin(cstring) — forward the soft ErrorSaveContext installed on the
     // fmgr frame by InputFunctionCallSafe so a recoverable parse failure
     // `ereturn`s into the sink (returning `Ok(None)`) instead of throwing past
     // `invoke?`. `s` is an owned copy so it does not conflict with the mutable
     // `escontext_mut` borrow.
     let s = arg_cstring(fcinfo, 0).as_bytes().to_vec();
-    let res = ok(crate::aclitem_io::aclitemin(&s, fcinfo.escontext_mut()));
+    let res = crate::aclitem_io::aclitemin(&s, fcinfo.escontext_mut())?;
     // Soft-error path: escontext recorded the failure; return a NULL placeholder
     // the caller discards after `soft_error_occurred()`.
     let parsed = match res {
         Some(p) => p,
-        None => return Datum::null(),
+        None => return Ok(Datum::null()),
     };
     // ereport(WARNING) for a defaulted grantor (acl.c).
     if let Some(w) = parsed.warning {
@@ -202,61 +187,57 @@ fn fc_aclitemin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
             w.detail().map(Into::into),
         );
     }
-    ret_aclitem(fcinfo, &parsed.item)
+    Ok(ret_aclitem(fcinfo, &parsed.item))
 }
 
-fn fc_aclitemout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_aclitemout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let aip = arg_aclitem(fcinfo, 0);
     let m = scratch_mcx();
-    let out = ok(crate::aclitem_io::aclitemout(m.mcx(), &aip));
-    ret_cstring(fcinfo, String::from_utf8_lossy(&out).into_owned())
+    let out = crate::aclitem_io::aclitemout(m.mcx(), &aip)?;
+    Ok(ret_cstring(fcinfo, String::from_utf8_lossy(&out).into_owned()))
 }
 
-fn fc_aclitem_eq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_aclitem_eq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a1 = arg_aclitem(fcinfo, 0);
     let a2 = arg_aclitem(fcinfo, 1);
     fcinfo.isnull = false;
-    Datum::from_bool(crate::aclitem_io::aclitem_eq(&a1, &a2))
+    Ok(Datum::from_bool(crate::aclitem_io::aclitem_eq(&a1, &a2)))
 }
 
-fn fc_hash_aclitem(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hash_aclitem(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_aclitem(fcinfo, 0);
     fcinfo.isnull = false;
-    Datum::from_i32(crate::aclitem_io::hash_aclitem(&a) as i32)
+    Ok(Datum::from_i32(crate::aclitem_io::hash_aclitem(&a) as i32))
 }
 
-fn fc_hash_aclitem_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hash_aclitem_extended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_aclitem(fcinfo, 0);
     let seed = arg_int64(fcinfo, 1) as u64;
     fcinfo.isnull = false;
-    Datum::from_i64(crate::aclitem_io::hash_aclitem_extended(&a, seed) as i64)
+    Ok(Datum::from_i64(crate::aclitem_io::hash_aclitem_extended(&a, seed) as i64))
 }
 
-fn fc_makeaclitem(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_makeaclitem(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: makeaclitem(oid grantee, oid grantor, text privileges, bool is_grantable).
     let grantee = arg_oid(fcinfo, 0);
     let grantor = arg_oid(fcinfo, 1);
     let privtext = String::from_utf8_lossy(arg_text(fcinfo, 2)).into_owned();
     let goption = arg_bool(fcinfo, 3);
-    let item = ok(crate::acl_ops::makeaclitem_impl(grantee, grantor, &privtext, goption));
-    ret_aclitem(fcinfo, &item)
+    let item = crate::acl_ops::makeaclitem_impl(grantee, grantor, &privtext, goption)?;
+    Ok(ret_aclitem(fcinfo, &item))
 }
 
-fn fc_aclinsert(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_aclinsert(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: deprecated; always ereport(ERROR).
     let _ = fcinfo;
-    match crate::acl_ops::aclinsert() {
-        Ok(()) => Datum::from_usize(0),
-        Err(e) => raise(e),
-    }
+    crate::acl_ops::aclinsert()?;
+    Ok(Datum::from_usize(0))
 }
 
-fn fc_aclremove(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_aclremove(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let _ = fcinfo;
-    match crate::acl_ops::aclremove() {
-        Ok(()) => Datum::from_usize(0),
-        Err(e) => raise(e),
-    }
+    crate::acl_ops::aclremove()?;
+    Ok(Datum::from_usize(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -278,179 +259,179 @@ macro_rules! with_mcx {
 }
 
 // --- table ---
-fn fc_has_table_privilege_name_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_table_privilege_name_name(
+fn fc_has_table_privilege_name_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_table_privilege_name_name(
         mcx, arg_name(f, 0), arg_text(f, 1), arg_text(f, 2)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_table_privilege_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_table_privilege_name(
+fn fc_has_table_privilege_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_table_privilege_name(
         mcx, current_user(), arg_text(f, 0), arg_text(f, 1)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_table_privilege_name_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_table_privilege_name_id(arg_name(f, 0), arg_oid(f, 1), arg_text(f, 2)));
-    ret_bool_opt(f, v)
+fn fc_has_table_privilege_name_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_table_privilege_name_id(arg_name(f, 0), arg_oid(f, 1), arg_text(f, 2))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_table_privilege_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_table_privilege_id(current_user(), arg_oid(f, 0), arg_text(f, 1)));
-    ret_bool_opt(f, v)
+fn fc_has_table_privilege_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_table_privilege_id(current_user(), arg_oid(f, 0), arg_text(f, 1))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_table_privilege_id_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_table_privilege_id_name(
+fn fc_has_table_privilege_id_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_table_privilege_id_name(
         mcx, arg_oid(f, 0), arg_text(f, 1), arg_text(f, 2)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_table_privilege_id_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_table_privilege_id_id(arg_oid(f, 0), arg_oid(f, 1), arg_text(f, 2)));
-    ret_bool_opt(f, v)
+fn fc_has_table_privilege_id_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_table_privilege_id_id(arg_oid(f, 0), arg_oid(f, 1), arg_text(f, 2))?;
+    Ok(ret_bool_opt(f, v))
 }
 
 // --- sequence ---
-fn fc_has_sequence_privilege_name_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_sequence_privilege_name_name(
+fn fc_has_sequence_privilege_name_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_sequence_privilege_name_name(
         mcx, arg_name(f, 0), arg_text(f, 1), arg_text(f, 2)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_sequence_privilege_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_sequence_privilege_name(
+fn fc_has_sequence_privilege_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_sequence_privilege_name(
         mcx, current_user(), arg_text(f, 0), arg_text(f, 1)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_sequence_privilege_name_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_sequence_privilege_name_id(
+fn fc_has_sequence_privilege_name_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_sequence_privilege_name_id(
         mcx, arg_name(f, 0), arg_oid(f, 1), arg_text(f, 2)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_sequence_privilege_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_sequence_privilege_id(
+fn fc_has_sequence_privilege_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_sequence_privilege_id(
         mcx, current_user(), arg_oid(f, 0), arg_text(f, 1)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_sequence_privilege_id_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_sequence_privilege_id_name(
+fn fc_has_sequence_privilege_id_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_sequence_privilege_id_name(
         mcx, arg_oid(f, 0), arg_text(f, 1), arg_text(f, 2)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_sequence_privilege_id_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_sequence_privilege_id_id(
+fn fc_has_sequence_privilege_id_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_sequence_privilege_id_id(
         mcx, arg_oid(f, 0), arg_oid(f, 1), arg_text(f, 2)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
 
 // --- any column ---
-fn fc_has_any_column_privilege_name_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_any_column_privilege_name_name(
+fn fc_has_any_column_privilege_name_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_any_column_privilege_name_name(
         mcx, arg_name(f, 0), arg_text(f, 1), arg_text(f, 2)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_any_column_privilege_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_any_column_privilege_name(
+fn fc_has_any_column_privilege_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_any_column_privilege_name(
         mcx, current_user(), arg_text(f, 0), arg_text(f, 1)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_any_column_privilege_name_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_any_column_privilege_name_id(arg_name(f, 0), arg_oid(f, 1), arg_text(f, 2)));
-    ret_bool_opt(f, v)
+fn fc_has_any_column_privilege_name_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_any_column_privilege_name_id(arg_name(f, 0), arg_oid(f, 1), arg_text(f, 2))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_any_column_privilege_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_any_column_privilege_id(current_user(), arg_oid(f, 0), arg_text(f, 1)));
-    ret_bool_opt(f, v)
+fn fc_has_any_column_privilege_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_any_column_privilege_id(current_user(), arg_oid(f, 0), arg_text(f, 1))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_any_column_privilege_id_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_any_column_privilege_id_name(
+fn fc_has_any_column_privilege_id_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_any_column_privilege_id_name(
         mcx, arg_oid(f, 0), arg_text(f, 1), arg_text(f, 2)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_any_column_privilege_id_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_any_column_privilege_id_id(arg_oid(f, 0), arg_oid(f, 1), arg_text(f, 2)));
-    ret_bool_opt(f, v)
+fn fc_has_any_column_privilege_id_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_any_column_privilege_id_id(arg_oid(f, 0), arg_oid(f, 1), arg_text(f, 2))?;
+    Ok(ret_bool_opt(f, v))
 }
 
 // --- column ---
-fn fc_has_column_privilege_name_name_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_column_privilege_name_name_name(
+fn fc_has_column_privilege_name_name_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_column_privilege_name_name_name(
         mcx, arg_name(f, 0), arg_text(f, 1), arg_text(f, 2), arg_text(f, 3)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_column_privilege_name_name_attnum(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_column_privilege_name_name_attnum(
+fn fc_has_column_privilege_name_name_attnum(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_column_privilege_name_name_attnum(
         mcx, arg_name(f, 0), arg_text(f, 1), arg_int16(f, 2), arg_text(f, 3)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_column_privilege_name_id_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_column_privilege_name_id_name(
+fn fc_has_column_privilege_name_id_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_column_privilege_name_id_name(
         mcx, arg_name(f, 0), arg_oid(f, 1), arg_text(f, 2), arg_text(f, 3)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_column_privilege_name_id_attnum(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_column_privilege_name_id_attnum(
+fn fc_has_column_privilege_name_id_attnum(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_column_privilege_name_id_attnum(
         arg_name(f, 0), arg_oid(f, 1), arg_int16(f, 2), arg_text(f, 3),
-    ));
-    ret_bool_opt(f, v)
+    )?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_column_privilege_id_name_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_column_privilege_id_name_name(
+fn fc_has_column_privilege_id_name_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_column_privilege_id_name_name(
         mcx, arg_oid(f, 0), arg_text(f, 1), arg_text(f, 2), arg_text(f, 3)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_column_privilege_id_name_attnum(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_column_privilege_id_name_attnum(
+fn fc_has_column_privilege_id_name_attnum(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_column_privilege_id_name_attnum(
         mcx, arg_oid(f, 0), arg_text(f, 1), arg_int16(f, 2), arg_text(f, 3)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_column_privilege_id_id_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_column_privilege_id_id_name(
+fn fc_has_column_privilege_id_id_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_column_privilege_id_id_name(
         mcx, arg_oid(f, 0), arg_oid(f, 1), arg_text(f, 2), arg_text(f, 3)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_column_privilege_id_id_attnum(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_column_privilege_id_id_attnum(
+fn fc_has_column_privilege_id_id_attnum(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_column_privilege_id_id_attnum(
         arg_oid(f, 0), arg_oid(f, 1), arg_int16(f, 2), arg_text(f, 3),
-    ));
-    ret_bool_opt(f, v)
+    )?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_column_privilege_name_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_column_privilege_name_name(
+fn fc_has_column_privilege_name_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_column_privilege_name_name(
         mcx, current_user(), arg_text(f, 0), arg_text(f, 1), arg_text(f, 2)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_column_privilege_name_attnum(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_column_privilege_name_attnum(
+fn fc_has_column_privilege_name_attnum(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_column_privilege_name_attnum(
         mcx, current_user(), arg_text(f, 0), arg_int16(f, 1), arg_text(f, 2)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_column_privilege_id_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = with_mcx!(|mcx| ok(hp::has_column_privilege_id_name(
+fn fc_has_column_privilege_id_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = with_mcx!(|mcx| hp::has_column_privilege_id_name(
         mcx, current_user(), arg_oid(f, 0), arg_text(f, 1), arg_text(f, 2)
-    )));
-    ret_bool_opt(f, v)
+    ))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_column_privilege_id_attnum(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_column_privilege_id_attnum(
+fn fc_has_column_privilege_id_attnum(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_column_privilege_id_attnum(
         current_user(), arg_oid(f, 0), arg_int16(f, 1), arg_text(f, 2),
-    ));
-    ret_bool_opt(f, v)
+    )?;
+    Ok(ret_bool_opt(f, v))
 }
 
 // --- object-class families (database/fdw/function/language/schema/server/
@@ -459,29 +440,29 @@ fn fc_has_column_privilege_id_attnum(f: &mut FunctionCallInfoBaseData) -> Datum 
 macro_rules! object_class_fcs {
     ($nn:ident => $core_nn:path, $n:ident => $core_n:path, $ni:ident => $core_ni:path,
      $i:ident => $core_i:path, $in_:ident => $core_in:path, $ii:ident => $core_ii:path) => {
-        fn $nn(f: &mut FunctionCallInfoBaseData) -> Datum {
-            let v = with_mcx!(|mcx| ok($core_nn(mcx, arg_name(f, 0), arg_text(f, 1), arg_text(f, 2))));
-            ret_bool_opt(f, v)
+        fn $nn(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+            let v = with_mcx!(|mcx| $core_nn(mcx, arg_name(f, 0), arg_text(f, 1), arg_text(f, 2)))?;
+            Ok(ret_bool_opt(f, v))
         }
-        fn $n(f: &mut FunctionCallInfoBaseData) -> Datum {
-            let v = with_mcx!(|mcx| ok($core_n(mcx, current_user(), arg_text(f, 0), arg_text(f, 1))));
-            ret_bool_opt(f, v)
+        fn $n(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+            let v = with_mcx!(|mcx| $core_n(mcx, current_user(), arg_text(f, 0), arg_text(f, 1)))?;
+            Ok(ret_bool_opt(f, v))
         }
-        fn $ni(f: &mut FunctionCallInfoBaseData) -> Datum {
-            let v = ok($core_ni(arg_name(f, 0), arg_oid(f, 1), arg_text(f, 2)));
-            ret_bool_opt(f, v)
+        fn $ni(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+            let v = $core_ni(arg_name(f, 0), arg_oid(f, 1), arg_text(f, 2))?;
+            Ok(ret_bool_opt(f, v))
         }
-        fn $i(f: &mut FunctionCallInfoBaseData) -> Datum {
-            let v = ok($core_i(current_user(), arg_oid(f, 0), arg_text(f, 1)));
-            ret_bool_opt(f, v)
+        fn $i(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+            let v = $core_i(current_user(), arg_oid(f, 0), arg_text(f, 1))?;
+            Ok(ret_bool_opt(f, v))
         }
-        fn $in_(f: &mut FunctionCallInfoBaseData) -> Datum {
-            let v = with_mcx!(|mcx| ok($core_in(mcx, arg_oid(f, 0), arg_text(f, 1), arg_text(f, 2))));
-            ret_bool_opt(f, v)
+        fn $in_(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+            let v = with_mcx!(|mcx| $core_in(mcx, arg_oid(f, 0), arg_text(f, 1), arg_text(f, 2)))?;
+            Ok(ret_bool_opt(f, v))
         }
-        fn $ii(f: &mut FunctionCallInfoBaseData) -> Datum {
-            let v = ok($core_ii(arg_oid(f, 0), arg_oid(f, 1), arg_text(f, 2)));
-            ret_bool_opt(f, v)
+        fn $ii(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+            let v = $core_ii(arg_oid(f, 0), arg_oid(f, 1), arg_text(f, 2))?;
+            Ok(ret_bool_opt(f, v))
         }
     };
 }
@@ -552,57 +533,57 @@ object_class_fcs!(
 );
 
 // --- parameter ---
-fn fc_has_parameter_privilege_name_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_parameter_privilege_name_name(arg_name(f, 0), arg_text(f, 1), arg_text(f, 2)));
-    ret_bool_opt(f, v)
+fn fc_has_parameter_privilege_name_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_parameter_privilege_name_name(arg_name(f, 0), arg_text(f, 1), arg_text(f, 2))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_parameter_privilege_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_parameter_privilege_name(current_user(), arg_text(f, 0), arg_text(f, 1)));
-    ret_bool_opt(f, v)
+fn fc_has_parameter_privilege_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_parameter_privilege_name(current_user(), arg_text(f, 0), arg_text(f, 1))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_parameter_privilege_id_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_parameter_privilege_id_name(arg_oid(f, 0), arg_text(f, 1), arg_text(f, 2)));
-    ret_bool_opt(f, v)
+fn fc_has_parameter_privilege_id_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_parameter_privilege_id_name(arg_oid(f, 0), arg_text(f, 1), arg_text(f, 2))?;
+    Ok(ret_bool_opt(f, v))
 }
 
 // --- largeobject ---
-fn fc_has_largeobject_privilege_name_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_largeobject_privilege_name_id(arg_name(f, 0), arg_oid(f, 1), arg_text(f, 2)));
-    ret_bool_opt(f, v)
+fn fc_has_largeobject_privilege_name_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_largeobject_privilege_name_id(arg_name(f, 0), arg_oid(f, 1), arg_text(f, 2))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_largeobject_privilege_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_largeobject_privilege_id(current_user(), arg_oid(f, 0), arg_text(f, 1)));
-    ret_bool_opt(f, v)
+fn fc_has_largeobject_privilege_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_largeobject_privilege_id(current_user(), arg_oid(f, 0), arg_text(f, 1))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_has_largeobject_privilege_id_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::has_largeobject_privilege_id_id(arg_oid(f, 0), arg_oid(f, 1), arg_text(f, 2)));
-    ret_bool_opt(f, v)
+fn fc_has_largeobject_privilege_id_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::has_largeobject_privilege_id_id(arg_oid(f, 0), arg_oid(f, 1), arg_text(f, 2))?;
+    Ok(ret_bool_opt(f, v))
 }
 
 // --- pg_has_role ---
-fn fc_pg_has_role_name_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::pg_has_role_name_name(arg_name(f, 0), arg_name(f, 1), arg_text(f, 2)));
-    ret_bool_opt(f, v)
+fn fc_pg_has_role_name_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::pg_has_role_name_name(arg_name(f, 0), arg_name(f, 1), arg_text(f, 2))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_pg_has_role_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::pg_has_role_name(current_user(), arg_name(f, 0), arg_text(f, 1)));
-    ret_bool_opt(f, v)
+fn fc_pg_has_role_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::pg_has_role_name(current_user(), arg_name(f, 0), arg_text(f, 1))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_pg_has_role_name_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::pg_has_role_name_id(arg_name(f, 0), arg_oid(f, 1), arg_text(f, 2)));
-    ret_bool_opt(f, v)
+fn fc_pg_has_role_name_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::pg_has_role_name_id(arg_name(f, 0), arg_oid(f, 1), arg_text(f, 2))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_pg_has_role_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::pg_has_role_id(current_user(), arg_oid(f, 0), arg_text(f, 1)));
-    ret_bool_opt(f, v)
+fn fc_pg_has_role_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::pg_has_role_id(current_user(), arg_oid(f, 0), arg_text(f, 1))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_pg_has_role_id_name(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::pg_has_role_id_name(arg_oid(f, 0), arg_name(f, 1), arg_text(f, 2)));
-    ret_bool_opt(f, v)
+fn fc_pg_has_role_id_name(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::pg_has_role_id_name(arg_oid(f, 0), arg_name(f, 1), arg_text(f, 2))?;
+    Ok(ret_bool_opt(f, v))
 }
-fn fc_pg_has_role_id_id(f: &mut FunctionCallInfoBaseData) -> Datum {
-    let v = ok(hp::pg_has_role_id_id(arg_oid(f, 0), arg_oid(f, 1), arg_text(f, 2)));
-    ret_bool_opt(f, v)
+fn fc_pg_has_role_id_id(f: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let v = hp::pg_has_role_id_id(arg_oid(f, 0), arg_oid(f, 1), arg_text(f, 2))?;
+    Ok(ret_bool_opt(f, v))
 }
 
 /// `GetUserId()` (miscinit) — the current user OID the `_name`/`_id`
@@ -620,9 +601,12 @@ fn builtin(
     name: &str,
     nargs: i16,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction { foid, name: name.to_string(), nargs, strict: true, retset, func: Some(func) }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction { foid, name: name.to_string(), nargs, strict: true, retset, func: None },
+        native,
+    )
 }
 
 /// Register every `acl.c` fmgr builtin whose value core is ported and whose
@@ -630,7 +614,7 @@ fn builtin(
 /// `fmgr_builtins[]` rows). Called from this crate's `init_seams()`. OIDs/nargs
 /// from `pg_proc.dat`; every row here is `proisstrict => 't'` and not retset.
 pub fn register_acl_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- aclitem type ----
         builtin(329, "hash_aclitem", 1, false, fc_hash_aclitem),
         builtin(777, "hash_aclitem_extended", 2, false, fc_hash_aclitem_extended),

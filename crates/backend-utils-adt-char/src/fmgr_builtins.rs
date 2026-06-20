@@ -19,7 +19,7 @@
 use mcx::MemoryContext;
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
@@ -110,92 +110,72 @@ fn scratch_mcx() -> MemoryContext {
     MemoryContext::new("char fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
 // ---------------------------------------------------------------------------
-// fc_ adapters.
+// fc_ adapters (Result-native: `ereport(ERROR)` travels as `Err(PgError)`
+// straight back to the fmgr dispatch `invoke_builtin`, no panic/catch_unwind).
 // ---------------------------------------------------------------------------
 
-fn fc_charin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_char(crate::charin(arg_cstring(fcinfo, 0)))
+fn fc_charin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_char(crate::charin(arg_cstring(fcinfo, 0))))
 }
-fn fc_charout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_charout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let ch = arg_char(fcinfo, 0);
-    let out = match crate::charout(m.mcx(), ch) {
-        Ok(s) => s.as_str().to_string(),
-        Err(e) => raise(e),
-    };
-    ret_cstring(fcinfo, out)
+    let out = crate::charout(m.mcx(), ch)?.as_str().to_string();
+    Ok(ret_cstring(fcinfo, out))
 }
-fn fc_charrecv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_charrecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let src = arg_varlena(fcinfo, 0);
     let mut data = mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(src.len()).is_err() {
-        raise(types_error::PgError::error("out of memory"));
+        return Err(types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(src);
     let mut buf = StringInfo::from_vec(data);
-    match crate::charrecv(&mut buf) {
-        Ok(c) => ret_char(c),
-        Err(e) => raise(e),
-    }
+    Ok(ret_char(crate::charrecv(&mut buf)?))
 }
-fn fc_charsend(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_charsend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let arg1 = arg_char(fcinfo, 0);
-    let bytes = match crate::charsend(m.mcx(), arg1) {
-        Ok(bytea) => bytea.as_bytes().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_varlena(fcinfo, bytes)
+    let bytes = crate::charsend(m.mcx(), arg1)?.as_bytes().to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
 }
-fn fc_chareq(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::chareq(arg_char(fcinfo, 0), arg_char(fcinfo, 1)))
+fn fc_chareq(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::chareq(arg_char(fcinfo, 0), arg_char(fcinfo, 1))))
 }
-fn fc_charne(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::charne(arg_char(fcinfo, 0), arg_char(fcinfo, 1)))
+fn fc_charne(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::charne(arg_char(fcinfo, 0), arg_char(fcinfo, 1))))
 }
-fn fc_charlt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::charlt(arg_char(fcinfo, 0), arg_char(fcinfo, 1)))
+fn fc_charlt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::charlt(arg_char(fcinfo, 0), arg_char(fcinfo, 1))))
 }
-fn fc_charle(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::charle(arg_char(fcinfo, 0), arg_char(fcinfo, 1)))
+fn fc_charle(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::charle(arg_char(fcinfo, 0), arg_char(fcinfo, 1))))
 }
-fn fc_chargt(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::chargt(arg_char(fcinfo, 0), arg_char(fcinfo, 1)))
+fn fc_chargt(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::chargt(arg_char(fcinfo, 0), arg_char(fcinfo, 1))))
 }
-fn fc_charge(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_bool(crate::charge(arg_char(fcinfo, 0), arg_char(fcinfo, 1)))
+fn fc_charge(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_bool(crate::charge(arg_char(fcinfo, 0), arg_char(fcinfo, 1))))
 }
-fn fc_chartoi4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_i32(crate::chartoi4(arg_char(fcinfo, 0)))
+fn fc_chartoi4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_i32(crate::chartoi4(arg_char(fcinfo, 0))))
 }
-fn fc_i4tochar(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    match crate::i4tochar(arg_i32(fcinfo, 0)) {
-        Ok(c) => ret_char(c),
-        Err(e) => raise(e),
-    }
+fn fc_i4tochar(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_char(crate::i4tochar(arg_i32(fcinfo, 0))?))
 }
-fn fc_text_char(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    ret_char(crate::text_char(arg_text(fcinfo, 0)))
+fn fc_text_char(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    Ok(ret_char(crate::text_char(arg_text(fcinfo, 0))))
 }
-fn fc_char_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_char_text(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: char_text wraps charout's cstring into a `text` varlena. `ret_text`
     // prepends the 4-byte VARHDRSZ length word (cstring_to_text's SET_VARSIZE +
     // memcpy), so the image crosses header-ful like every other text value.
     let m = scratch_mcx();
     let arg1 = arg_char(fcinfo, 0);
-    let bytes = match crate::charout(m.mcx(), arg1) {
-        Ok(s) => s.as_str().as_bytes().to_vec(),
-        Err(e) => raise(e),
-    };
-    ret_text(fcinfo, &bytes)
+    let bytes = crate::charout(m.mcx(), arg1)?.as_str().as_bytes().to_vec();
+    Ok(ret_text(fcinfo, &bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -206,23 +186,28 @@ fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict: true,
-        retset: false,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
-/// Register every `char.c` builtin (C: their `fmgr_builtins[]` rows). Called
-/// from this crate's `init_seams()`. OIDs/nargs from `pg_proc.dat`; all are
-/// `proisstrict => 't'` and not retset.
+/// Register every `char.c` builtin (C: their `fmgr_builtins[]` rows) as
+/// **Result-native** (the panic→Result migration; see
+/// `docs/proposals/panic-to-result-migration.md`). Called from this crate's
+/// `init_seams()`. OIDs/nargs from `pg_proc.dat`; all are `proisstrict => 't'`
+/// and not retset.
 pub fn register_char_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- I/O ----
         builtin(1245, "charin", 1, fc_charin),
         builtin(33, "charout", 1, fc_charout),

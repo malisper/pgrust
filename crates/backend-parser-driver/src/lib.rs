@@ -146,7 +146,13 @@ pub fn scanner_errposition(location: i32, scanbuf: &[u8]) -> i32 {
         return 0;
     }
     // Convert byte offset to character number (+1 for the 1-based cursor).
-    mb::pg_mbstrlen_with_len::call(scanbuf, location) + 1
+    // `scanbuf` is the query text (valid in the server encoding), so the
+    // `report_invalid_encoding` path is dead; report 0 ("no position") if it
+    // somehow fires rather than escalate an error while building an error.
+    match mb::pg_mbstrlen_with_len::call(scanbuf, location) {
+        Ok(n) => n + 1,
+        Err(_) => 0,
+    }
 }
 
 // ===========================================================================

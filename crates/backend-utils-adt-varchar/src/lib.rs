@@ -181,10 +181,10 @@ fn bpchar_input<'mcx>(
     } else {
         // number of CHARACTERS allowed for this bpchar type
         let maxchars = (atttypmod - VARHDRSZ) as usize;
-        let charlen = mb::pg_mbstrlen_with_len::call(s, s.len() as i32) as usize;
+        let charlen = mb::pg_mbstrlen_with_len::call(s, s.len() as i32)? as usize;
         if charlen > maxchars {
             // Verify that extra characters are spaces, and clip them off
-            let mbmaxlen = mb::pg_mbcharcliplen::call(s, len as i32, maxchars as i32) as usize;
+            let mbmaxlen = mb::pg_mbcharcliplen::call(s, len as i32, maxchars as i32)? as usize;
 
             // at this point, len is the actual BYTE length of the input string,
             // maxchars is the max number of CHARACTERS, mbmaxlen is the length
@@ -299,7 +299,7 @@ pub fn bpchar<'mcx>(
     let mut len = source.len() as i32;
     let s = source;
 
-    let charlen = mb::pg_mbstrlen_with_len::call(s, s.len() as i32);
+    let charlen = mb::pg_mbstrlen_with_len::call(s, s.len() as i32)?;
 
     // No work if supplied data matches typmod already
     if charlen == maxlen {
@@ -308,7 +308,7 @@ pub fn bpchar<'mcx>(
 
     if charlen > maxlen {
         // Verify that extra characters are spaces, and clip them off
-        let maxmblen = mb::pg_mbcharcliplen::call(s, len, maxlen);
+        let maxmblen = mb::pg_mbcharcliplen::call(s, len, maxlen)?;
 
         if !is_explicit {
             for &b in &s[maxmblen as usize..len as usize] {
@@ -433,7 +433,7 @@ fn varchar_input<'mcx>(
 
     if atttypmod >= VARHDRSZ && len > maxlen {
         // Verify that extra characters are spaces, and clip them off
-        let mbmaxlen = mb::pg_mbcharcliplen::call(s, len as i32, maxlen as i32) as usize;
+        let mbmaxlen = mb::pg_mbcharcliplen::call(s, len as i32, maxlen as i32)? as usize;
 
         for &b in &s[mbmaxlen..len] {
             if b != b' ' {
@@ -514,7 +514,7 @@ pub fn varchar<'mcx>(
     // only reach here if string is too long...
 
     // truncate multibyte string preserving multibyte boundary
-    let maxmblen = mb::pg_mbcharcliplen::call(s_data, len, maxlen);
+    let maxmblen = mb::pg_mbcharcliplen::call(s_data, len, maxlen)?;
 
     if !is_explicit {
         for &b in &s_data[maxmblen as usize..len as usize] {
@@ -558,7 +558,7 @@ pub fn bpcharlen(arg: &[u8]) -> PgResult<i32> {
 
     // in multibyte encoding, convert to number of characters
     if mb::pg_database_encoding_max_length::call() != 1 {
-        len = mb::pg_mbstrlen_with_len::call(&arg[..len as usize], len);
+        len = mb::pg_mbstrlen_with_len::call(&arg[..len as usize], len)?;
     }
 
     Ok(len)

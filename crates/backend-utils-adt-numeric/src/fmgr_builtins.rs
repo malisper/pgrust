@@ -34,7 +34,7 @@ use std::cmp::Ordering;
 
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -116,28 +116,15 @@ pub(crate) fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("numeric fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
-// fc_ adapters.
+// fc_ adapters (Result-native: a builtin's `ereport(ERROR)` travels as
+// `Err(PgError)` straight back to the dispatch, with no panic / `catch_unwind`
+// — see `docs/proposals/panic-to-result-migration.md`).
 // ---------------------------------------------------------------------------
 
 /// `numeric_in(cstring, oid, int4) -> numeric` (oid 1701). The `typelem` oid arg
 /// (arg 1) is unused by `numeric_in`, exactly as in C; the typmod is arg 2.
-fn fc_numeric_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // C: `numeric_in` threads `fcinfo->context` so a recoverable
     // syntax/range/typmod failure `ereturn`s into the soft sink installed by
     // `InputFunctionCallSafe` (then `PG_RETURN_NULL`). Own-copy the cstring to
@@ -148,35 +135,35 @@ fn fc_numeric_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let escontext = fcinfo.escontext_mut();
     // Materialize the image out of the escontext borrow before re-borrowing
     // `fcinfo` for the result write.
-    let image = ok(crate::io::numeric_in_safe(m.mcx(), &s, typmod, escontext))
+    let image = crate::io::numeric_in_safe(m.mcx(), &s, typmod, escontext)?
         .map(|img| img.as_slice().to_vec());
-    match image {
+    Ok(match image {
         Some(bytes) => ret_numeric(fcinfo, bytes),
         None => {
             // Soft error recorded into the frame's escontext; C `PG_RETURN_NULL`.
             fcinfo.set_result_null(true);
             Datum::from_usize(0)
         }
-    }
+    })
 }
 
 /// `numeric_out(numeric) -> cstring` (oid 1702).
-fn fc_numeric_out(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_numeric(fcinfo, 0);
     let m = scratch_mcx();
-    let s = ok(crate::io::numeric_out(m.mcx(), &num));
-    ret_cstring(fcinfo, s)
+    let s = crate::io::numeric_out(m.mcx(), &num)?;
+    Ok(ret_cstring(fcinfo, s))
 }
 
 /// Body of a unary `numeric -> numeric` builtin around a `fn(Mcx, &[u8]) ->
 /// PgResult<PgVec<u8>>` core.
 macro_rules! fc_unary_numeric {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let num = arg_numeric(fcinfo, 0);
             let m = scratch_mcx();
-            let image = ok($core(m.mcx(), &num));
-            ret_numeric(fcinfo, image.as_slice().to_vec())
+            let image = $core(m.mcx(), &num)?;
+            Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
         }
     };
 }
@@ -189,12 +176,12 @@ fc_unary_numeric!(fc_numeric_uplus, crate::ops_sql::numeric_uplus);
 /// `fn(Mcx, &[u8], &[u8]) -> PgResult<PgVec<u8>>` core.
 macro_rules! fc_binary_numeric {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let a = arg_numeric(fcinfo, 0);
             let b = arg_numeric(fcinfo, 1);
             let m = scratch_mcx();
-            let image = ok($core(m.mcx(), &a, &b));
-            ret_numeric(fcinfo, image.as_slice().to_vec())
+            let image = $core(m.mcx(), &a, &b)?;
+            Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
         }
     };
 }
@@ -213,10 +200,10 @@ fc_binary_numeric!(fc_numeric_larger, crate::ops_sql::numeric_max);
 /// `fn(&[u8], &[u8]) -> bool` (pure) core.
 macro_rules! fc_cmp_bool {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let a = arg_numeric(fcinfo, 0);
             let b = arg_numeric(fcinfo, 1);
-            ret_bool($core(&a, &b))
+            Ok(ret_bool($core(&a, &b)))
         }
     };
 }
@@ -229,7 +216,7 @@ fc_cmp_bool!(fc_numeric_gt, crate::ops_sql::numeric_gt);
 fc_cmp_bool!(fc_numeric_ge, crate::ops_sql::numeric_ge);
 
 /// `numeric_cmp(numeric, numeric) -> int4` (oid 1769): -1/0/1.
-fn fc_numeric_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let a = arg_numeric(fcinfo, 0);
     let b = arg_numeric(fcinfo, 1);
     let c = match crate::ops_sql::numeric_cmp(&a, &b) {
@@ -237,21 +224,21 @@ fn fc_numeric_cmp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         Ordering::Equal => 0,
         Ordering::Greater => 1,
     };
-    ret_i32(c)
+    Ok(ret_i32(c))
 }
 
 /// `hash_numeric(numeric) -> int4` (oid 432).
-fn fc_hash_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hash_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_numeric(fcinfo, 0);
     // C: PG_RETURN_INT32 of a uint32 hash word (reinterpret, not numeric range).
-    ret_i32(crate::aggregate::hash_numeric(&num) as i32)
+    Ok(ret_i32(crate::aggregate::hash_numeric(&num) as i32))
 }
 
 /// `hash_numeric_extended(numeric, int8) -> int8` (oid 780).
-fn fc_hash_numeric_extended(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_hash_numeric_extended(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_numeric(fcinfo, 0);
     let seed = arg_int64(fcinfo, 1) as u64;
-    ret_i64(crate::aggregate::hash_numeric_extended(&num, seed) as i64)
+    Ok(ret_i64(crate::aggregate::hash_numeric_extended(&num, seed) as i64))
 }
 
 /// A `bytea`/`internal StringInfo` arg's raw byte payload, read from the by-ref
@@ -295,12 +282,12 @@ fc_binary_numeric!(fc_numeric_lcm, crate::ops_sql::numeric_lcm);
 /// `fn(Mcx, &[u8], i32) -> PgResult<PgVec<u8>>` core.
 macro_rules! fc_numeric_scale_arg {
     ($fc:ident, $core:path) => {
-        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        fn $fc(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
             let num = arg_numeric(fcinfo, 0);
             let scale = arg_int32(fcinfo, 1);
             let m = scratch_mcx();
-            let image = ok($core(m.mcx(), &num, scale));
-            ret_numeric(fcinfo, image.as_slice().to_vec())
+            let image = $core(m.mcx(), &num, scale)?;
+            Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
         }
     };
 }
@@ -312,63 +299,63 @@ fc_numeric_scale_arg!(fc_numeric, crate::ops_sql::numeric);
 
 /// `numeric_scale(numeric) -> int4` (oid 3281): the display scale. C returns
 /// SQL NULL for special (NaN/Inf) inputs.
-fn fc_numeric_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_scale(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_numeric(fcinfo, 0);
     if types_numeric::numeric_is_special(&num) {
         fcinfo.set_result_null(true);
-        return Datum::from_usize(0);
+        return Ok(Datum::from_usize(0));
     }
-    ret_i32(ok(crate::ops_sql::numeric_scale(&num)))
+    Ok(ret_i32(crate::ops_sql::numeric_scale(&num)?))
 }
 
 /// `width_bucket_numeric(numeric, numeric, numeric, int4) -> int4` (oid 2170).
 /// The `count` arg is int4 in `pg_proc`; the core decodes it from a numeric byte
 /// image, so re-encode the int4 to a numeric for the core call.
-fn fc_width_bucket_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_width_bucket_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let operand = arg_numeric(fcinfo, 0);
     let bound1 = arg_numeric(fcinfo, 1);
     let bound2 = arg_numeric(fcinfo, 2);
     let count = arg_int32(fcinfo, 3);
     let m = scratch_mcx();
-    let count_num = ok(crate::convert::int64_to_numeric(m.mcx(), count as i64));
-    ret_i32(ok(crate::ops_sql::width_bucket_numeric(
+    let count_num = crate::convert::int64_to_numeric(m.mcx(), count as i64)?;
+    Ok(ret_i32(crate::ops_sql::width_bucket_numeric(
         &operand,
         &bound1,
         &bound2,
         count_num.as_slice(),
-    )))
+    )?))
 }
 
 /// `in_range_numeric_numeric(numeric, numeric, numeric, bool, bool) -> bool`
 /// (oid 4141): the window `RANGE` offset predicate.
-fn fc_in_range_numeric_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_in_range_numeric_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_numeric(fcinfo, 0);
     let base = arg_numeric(fcinfo, 1);
     let offset = arg_numeric(fcinfo, 2);
     let sub = fcinfo.arg(3).expect("missing arg").value.as_bool();
     let less = fcinfo.arg(4).expect("missing arg").value.as_bool();
-    ret_bool(ok(crate::ops_sql::in_range_numeric_numeric(
+    Ok(ret_bool(crate::ops_sql::in_range_numeric_numeric(
         &val, &base, &offset, sub, less,
-    )))
+    )?))
 }
 
 /// `numeric_recv(internal, oid, int4) -> numeric` (oid 2460). Arg 0 is the
 /// binary message buffer (StringInfo); arg 1 (typelem oid) is unused; arg 2 is
 /// the typmod.
-fn fc_numeric_recv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let buf = arg_varlena(fcinfo, 0);
     let typmod = arg_int32(fcinfo, 2);
     let m = scratch_mcx();
-    let image = ok(crate::io::numeric_recv(m.mcx(), buf, typmod));
-    ret_numeric(fcinfo, image.as_slice().to_vec())
+    let image = crate::io::numeric_recv(m.mcx(), buf, typmod)?;
+    Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
 }
 
 /// `numeric_send(numeric) -> bytea` (oid 2461): binary wire form.
-fn fc_numeric_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_numeric(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = ok(crate::io::numeric_send(m.mcx(), &num));
-    ret_varlena(fcinfo, bytes.as_slice().to_vec())
+    let bytes = crate::io::numeric_send(m.mcx(), &num)?;
+    Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -380,94 +367,94 @@ fn fc_numeric_send(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 
 /// `int4_numeric(int4) -> numeric` (oid 1740). C widens to int64 then calls
 /// `int64_to_numeric`.
-fn fc_int4_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int4_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_int32(fcinfo, 0) as i64;
     let m = scratch_mcx();
-    let image = ok(crate::convert::int64_to_numeric(m.mcx(), val));
-    ret_numeric(fcinfo, image.as_slice().to_vec())
+    let image = crate::convert::int64_to_numeric(m.mcx(), val)?;
+    Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
 }
 
 /// `int2_numeric(int2) -> numeric` (oid 1782).
-fn fc_int2_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int2_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = fcinfo.arg(0).expect("missing arg").value.as_i16() as i64;
     let m = scratch_mcx();
-    let image = ok(crate::convert::int64_to_numeric(m.mcx(), val));
-    ret_numeric(fcinfo, image.as_slice().to_vec())
+    let image = crate::convert::int64_to_numeric(m.mcx(), val)?;
+    Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
 }
 
 /// `int8_numeric(int8) -> numeric` (oid 1781).
-fn fc_int8_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = arg_int64(fcinfo, 0);
     let m = scratch_mcx();
-    let image = ok(crate::convert::int64_to_numeric(m.mcx(), val));
-    ret_numeric(fcinfo, image.as_slice().to_vec())
+    let image = crate::convert::int64_to_numeric(m.mcx(), val)?;
+    Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
 }
 
 /// `numeric_int4(numeric) -> int4` (oid 1744): round to nearest, range-checked.
-fn fc_numeric_int4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_int4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_numeric(fcinfo, 0);
-    ret_i32(ok(crate::ops_sql::seam_numeric_int4(&num)))
+    Ok(ret_i32(crate::ops_sql::seam_numeric_int4(&num)?))
 }
 
 /// `numeric_int2(numeric) -> int2` (oid 1783).
-fn fc_numeric_int2(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_int2(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_numeric(fcinfo, 0);
-    Datum::from_i16(ok(crate::ops_sql::seam_numeric_int2(&num)))
+    Ok(Datum::from_i16(crate::ops_sql::seam_numeric_int2(&num)?))
 }
 
 /// `numeric_int8(numeric) -> int8` (oid 1779).
-fn fc_numeric_int8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_int8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_numeric(fcinfo, 0);
-    ret_i64(ok(crate::ops_sql::seam_numeric_int8(&num)))
+    Ok(ret_i64(crate::ops_sql::seam_numeric_int8(&num)?))
 }
 
 /// `float8_numeric(float8) -> numeric` (oid 1743).
-fn fc_float8_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float8_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = fcinfo.arg(0).expect("missing arg").value.as_f64();
     let m = scratch_mcx();
-    let image = ok(crate::convert::float8_to_numeric(m.mcx(), val));
-    ret_numeric(fcinfo, image.as_slice().to_vec())
+    let image = crate::convert::float8_to_numeric(m.mcx(), val)?;
+    Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
 }
 
 /// `float4_numeric(float4) -> numeric` (oid 1742). C widens `float4` to
 /// `float8` before the decimal rendering (`float4_numeric` -> `(float8) val`).
-fn fc_float4_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_float4_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let val = fcinfo.arg(0).expect("missing arg").value.as_f32() as f64;
     let m = scratch_mcx();
-    let image = ok(crate::convert::float8_to_numeric(m.mcx(), val));
-    ret_numeric(fcinfo, image.as_slice().to_vec())
+    let image = crate::convert::float8_to_numeric(m.mcx(), val)?;
+    Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
 }
 
 /// `numeric_float8(numeric) -> float8` (oid 1746).
-fn fc_numeric_float8(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_float8(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_numeric(fcinfo, 0);
-    Datum::from_f64(ok(crate::convert::numeric_to_float8(&num)))
+    Ok(Datum::from_f64(crate::convert::numeric_to_float8(&num)?))
 }
 
 /// `numeric_float4(numeric) -> float4` (oid 1745).
-fn fc_numeric_float4(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_float4(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_numeric(fcinfo, 0);
-    Datum::from_f32(ok(crate::convert::numeric_to_float4(&num)))
+    Ok(Datum::from_f32(crate::convert::numeric_to_float4(&num)?))
 }
 
 /// `numeric_fac(int8) -> numeric` (oid 1376): `factorial(int8)`.
-fn fc_numeric_fac(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_fac(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let n = arg_int64(fcinfo, 0);
     let m = scratch_mcx();
-    let image = ok(crate::ops_sql::numeric_factorial(m.mcx(), n));
-    ret_numeric(fcinfo, image.as_slice().to_vec())
+    let image = crate::ops_sql::numeric_factorial(m.mcx(), n)?;
+    Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
 }
 
 /// `numeric_min_scale(numeric) -> int4` (oid 5042). C returns SQL NULL for a
 /// special (NaN/Inf) input; a finite value yields its minimum representable
 /// scale.
-fn fc_numeric_min_scale(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numeric_min_scale(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_numeric(fcinfo, 0);
     if types_numeric::numeric_is_special(&num) {
         fcinfo.set_result_null(true);
-        return Datum::from_usize(0);
+        return Ok(Datum::from_usize(0));
     }
-    ret_i32(crate::ops_sql::get_min_scale(&num))
+    Ok(ret_i32(crate::ops_sql::get_min_scale(&num)))
 }
 
 // ---------------------------------------------------------------------------
@@ -503,79 +490,79 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `int2_sum(int8, int2) -> int8` (oid 1840). NON-STRICT aggregate transition
 /// function for `sum(int2)`. The transtype is `int8`; arg 0 is the running sum
 /// (NULL until the first non-null input), arg 1 the new `int2` input.
-fn fc_int2_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int2_sum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     if arg_is_null(fcinfo, 0) {
         // No non-null input seen so far...
         if arg_is_null(fcinfo, 1) {
-            return ret_null(fcinfo); // still no non-null
+            return Ok(ret_null(fcinfo)); // still no non-null
         }
         // This is the first non-null input.
         let newval = arg_int32(fcinfo, 1) as i64; // PG_GETARG_INT16 widened
-        return ret_i64(newval);
+        return Ok(ret_i64(newval));
     }
 
     let oldsum = arg_int64(fcinfo, 0);
 
     // Leave sum unchanged if new input is null.
     if arg_is_null(fcinfo, 1) {
-        return ret_i64(oldsum);
+        return Ok(ret_i64(oldsum));
     }
 
     // OK to do the addition. (int2 arg is delivered on the by-val word, low
     // bits sign-extended; read it as i32 and widen, matching PG_GETARG_INT16.)
     let newval = oldsum + arg_int32(fcinfo, 1) as i64;
-    ret_i64(newval)
+    Ok(ret_i64(newval))
 }
 
 /// `int4_sum(int8, int4) -> int8` (oid 1841). NON-STRICT aggregate transition
 /// function for `sum(int4)`. Same shape as `int2_sum` with an `int4` input.
-fn fc_int4_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int4_sum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     if arg_is_null(fcinfo, 0) {
         if arg_is_null(fcinfo, 1) {
-            return ret_null(fcinfo);
+            return Ok(ret_null(fcinfo));
         }
         let newval = arg_int32(fcinfo, 1) as i64;
-        return ret_i64(newval);
+        return Ok(ret_i64(newval));
     }
 
     let oldsum = arg_int64(fcinfo, 0);
 
     if arg_is_null(fcinfo, 1) {
-        return ret_i64(oldsum);
+        return Ok(ret_i64(oldsum));
     }
 
     let newval = oldsum + arg_int32(fcinfo, 1) as i64;
-    ret_i64(newval)
+    Ok(ret_i64(newval))
 }
 
 /// `int8_sum(numeric, int8) -> numeric` (oid 1842). NON-STRICT aggregate
 /// transition function. (Obsolete; no longer used for `sum(int8)`, but still a
 /// registered builtin.) The transtype is `numeric`; arg 0 is the running sum
 /// (NULL until the first non-null input), arg 1 the new `int8` input.
-fn fc_int8_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8_sum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     if arg_is_null(fcinfo, 0) {
         if arg_is_null(fcinfo, 1) {
-            return ret_null(fcinfo);
+            return Ok(ret_null(fcinfo));
         }
         // First non-null input: int64_to_numeric(PG_GETARG_INT64(1)).
         let m = scratch_mcx();
-        let image = ok(crate::convert::int64_to_numeric(m.mcx(), arg_int64(fcinfo, 1)));
-        return ret_numeric(fcinfo, image.as_slice().to_vec());
+        let image = crate::convert::int64_to_numeric(m.mcx(), arg_int64(fcinfo, 1))?;
+        return Ok(ret_numeric(fcinfo, image.as_slice().to_vec()));
     }
 
     let oldsum = arg_numeric(fcinfo, 0).to_vec();
 
     // Leave sum unchanged if new input is null.
     if arg_is_null(fcinfo, 1) {
-        return ret_numeric(fcinfo, oldsum);
+        return Ok(ret_numeric(fcinfo, oldsum));
     }
 
     // numeric_add(oldsum, int64_to_numeric(PG_GETARG_INT64(1))).
     let m = scratch_mcx();
-    let addend = ok(crate::convert::int64_to_numeric(m.mcx(), arg_int64(fcinfo, 1)));
-    let sum = ok(crate::ops_sql::numeric_add(m.mcx(), &oldsum, addend.as_slice()));
+    let addend = crate::convert::int64_to_numeric(m.mcx(), arg_int64(fcinfo, 1))?;
+    let sum = crate::ops_sql::numeric_add(m.mcx(), &oldsum, addend.as_slice())?;
     let image = sum.as_slice().to_vec();
-    ret_numeric(fcinfo, image)
+    Ok(ret_numeric(fcinfo, image))
 }
 
 // ---------------------------------------------------------------------------
@@ -587,92 +574,98 @@ fn fc_int8_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 // ---------------------------------------------------------------------------
 
 /// `int2_avg_accum(_int8, int2) -> _int8` (oid 1962).
-fn fc_int2_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int2_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let transarray = arg_varlena(fcinfo, 0).to_vec();
     let newval = fcinfo.arg(1).expect("missing arg").value.as_i16();
     let m = scratch_mcx();
-    let out = ok(crate::aggregate::int2_avg_accum(m.mcx(), &transarray, newval));
-    ret_varlena(fcinfo, out.as_slice().to_vec())
+    let out = crate::aggregate::int2_avg_accum(m.mcx(), &transarray, newval)?;
+    Ok(ret_varlena(fcinfo, out.as_slice().to_vec()))
 }
 
 /// `int4_avg_accum(_int8, int4) -> _int8` (oid 1963).
-fn fc_int4_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int4_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let transarray = arg_varlena(fcinfo, 0).to_vec();
     let newval = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
-    let out = ok(crate::aggregate::int4_avg_accum(m.mcx(), &transarray, newval));
-    ret_varlena(fcinfo, out.as_slice().to_vec())
+    let out = crate::aggregate::int4_avg_accum(m.mcx(), &transarray, newval)?;
+    Ok(ret_varlena(fcinfo, out.as_slice().to_vec()))
 }
 
 /// `int4_avg_combine(_int8, _int8) -> _int8` (oid 3324). Shared by
 /// avg(int2)/avg(int4).
-fn fc_int4_avg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int4_avg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let t1 = arg_varlena(fcinfo, 0).to_vec();
     let t2 = arg_varlena(fcinfo, 1).to_vec();
     let m = scratch_mcx();
-    let out = ok(crate::aggregate::int4_avg_combine(m.mcx(), &t1, &t2));
-    ret_varlena(fcinfo, out.as_slice().to_vec())
+    let out = crate::aggregate::int4_avg_combine(m.mcx(), &t1, &t2)?;
+    Ok(ret_varlena(fcinfo, out.as_slice().to_vec()))
 }
 
 /// `int2_avg_accum_inv(_int8, int2) -> _int8` (oid 3570).
-fn fc_int2_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int2_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let transarray = arg_varlena(fcinfo, 0).to_vec();
     let newval = fcinfo.arg(1).expect("missing arg").value.as_i16();
     let m = scratch_mcx();
-    let out = ok(crate::aggregate::int2_avg_accum_inv(m.mcx(), &transarray, newval));
-    ret_varlena(fcinfo, out.as_slice().to_vec())
+    let out = crate::aggregate::int2_avg_accum_inv(m.mcx(), &transarray, newval)?;
+    Ok(ret_varlena(fcinfo, out.as_slice().to_vec()))
 }
 
 /// `int4_avg_accum_inv(_int8, int4) -> _int8` (oid 3571).
-fn fc_int4_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int4_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let transarray = arg_varlena(fcinfo, 0).to_vec();
     let newval = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
-    let out = ok(crate::aggregate::int4_avg_accum_inv(m.mcx(), &transarray, newval));
-    ret_varlena(fcinfo, out.as_slice().to_vec())
+    let out = crate::aggregate::int4_avg_accum_inv(m.mcx(), &transarray, newval)?;
+    Ok(ret_varlena(fcinfo, out.as_slice().to_vec()))
 }
 
 /// `int8_avg(_int8) -> numeric` (oid 1964): AVG(int2)/AVG(int4) final.
-fn fc_int8_avg(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int8_avg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let transarray = arg_varlena(fcinfo, 0).to_vec();
     let m = scratch_mcx();
-    let image = ok(crate::aggregate::int8_avg(m.mcx(), &transarray)).map(|v| v.as_slice().to_vec());
-    match image {
+    let image = crate::aggregate::int8_avg(m.mcx(), &transarray)?.map(|v| v.as_slice().to_vec());
+    Ok(match image {
         Some(image) => ret_numeric(fcinfo, image),
         None => ret_null(fcinfo),
-    }
+    })
 }
 
 /// `int2int4_sum(_int8) -> int8` (oid 3572): SUM(int2)/SUM(int4) final in
 /// moving-aggregate mode (both return int8).
-fn fc_int2int4_sum(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_int2int4_sum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let transarray = arg_varlena(fcinfo, 0).to_vec();
-    match ok(crate::aggregate::int2int4_sum(&transarray)) {
+    Ok(match crate::aggregate::int2int4_sum(&transarray)? {
         Some(sum) => ret_i64(sum),
         None => ret_null(fcinfo),
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
+/// Build one Result-native builtin row: the [`BuiltinFunction`] metadata (with
+/// `func: None` — the legacy callable is unused; dispatch goes through the native
+/// overlay) paired with its [`PgFnNative`] body.
 pub(crate) fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every expressible scalar `numeric.c` builtin (C: their
@@ -680,7 +673,7 @@ pub(crate) fn builtin(
 /// OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat`
 /// (all of these are `proisstrict => 't'` default and none `proretset`).
 pub fn register_numeric_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // I/O: cstring <-> numeric.
         builtin(1701, "numeric_in", 3, true, false, fc_numeric_in),
         builtin(1702, "numeric_out", 1, true, false, fc_numeric_out),
@@ -790,37 +783,26 @@ pub fn register_numeric_builtins() {
 
 /// `numerictypmodin(cstring[]) -> int4` (oid 2917): arg 0 is the typmod array's
 /// varlena image on the by-reference lane, decoded via ArrayGetIntegerTypmods.
-fn fc_numerictypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numerictypmodin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let ta = arg_varlena(fcinfo, 0);
     let m = scratch_mcx();
-    let tl = match backend_utils_adt_arrayutils_seams::array_get_integer_typmods::call(m.mcx(), ta)
-    {
-        Ok(tl) => tl,
-        Err(e) => raise(e),
-    };
-    match crate::ops_sql::numerictypmodin(&tl) {
-        Ok(t) => ret_i32(t),
-        Err(e) => raise(e),
-    }
+    let tl = backend_utils_adt_arrayutils_seams::array_get_integer_typmods::call(m.mcx(), ta)?;
+    Ok(ret_i32(crate::ops_sql::numerictypmodin(&tl)?))
 }
 
 /// `numerictypmodout(int4) -> cstring` (oid 2918): the typmod output function,
 /// producing "(prec,scale)" or "". The core allocates a NUL-terminated cstring
 /// byte buffer through `Mcx`; we strip the trailing NUL and decode to a `String`
 /// for the by-ref `cstring` lane.
-fn fc_numerictypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_numerictypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let typmod = arg_int32(fcinfo, 0);
     let m = scratch_mcx();
-    let s = match crate::ops_sql::numerictypmodout(m.mcx(), typmod) {
-        Ok(bytes) => {
-            // Drop the trailing NUL terminator produced by PG_RETURN_CSTRING.
-            let raw = bytes.as_slice();
-            let body = raw.strip_suffix(&[0u8]).unwrap_or(raw);
-            String::from_utf8_lossy(body).into_owned()
-        }
-        Err(e) => raise(e),
-    };
-    ret_cstring(fcinfo, s)
+    let bytes = crate::ops_sql::numerictypmodout(m.mcx(), typmod)?;
+    // Drop the trailing NUL terminator produced by PG_RETURN_CSTRING.
+    let raw = bytes.as_slice();
+    let body = raw.strip_suffix(&[0u8]).unwrap_or(raw);
+    let s = String::from_utf8_lossy(body).into_owned();
+    Ok(ret_cstring(fcinfo, s))
 }
 
 // ===========================================================================
@@ -833,6 +815,29 @@ mod tests {
     use types_datum::NullableDatum;
     use types_fmgr::FunctionCallInfoBaseData;
 
+    /// Dispatch a migrated (Result-native) numeric builtin by OID for the tests.
+    /// Mirrors the fmgr-core native overlay: registration records `func: None`,
+    /// so the test invokes the Result-native `fc_*` body directly (propagating an
+    /// `ereport(ERROR)` as `Err`, exactly as `invoke_builtin` does in production).
+    fn dispatch(oid: u32, fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+        let native: PgFnNative = match oid {
+            1701 => fc_numeric_in,
+            1702 => fc_numeric_out,
+            1704 => fc_numeric_abs,
+            1771 => fc_numeric_uminus,
+            1718 => fc_numeric_eq,
+            1720 => fc_numeric_gt,
+            1722 => fc_numeric_lt,
+            1724 => fc_numeric_add,
+            1725 => fc_numeric_sub,
+            1726 => fc_numeric_mul,
+            1727 => fc_numeric_div,
+            1769 => fc_numeric_cmp,
+            other => panic!("test dispatch: unmigrated/unknown oid {other}"),
+        };
+        native(fcinfo).expect("numeric builtin returned Err in test")
+    }
+
     /// Build a fresh numeric varlena image from its decimal text via the
     /// registered `numeric_in` path (proving the in-function too).
     fn numeric_image(s: &str) -> Vec<u8> {
@@ -844,9 +849,7 @@ mod tests {
             NullableDatum::value(Datum::from_i32(-1)), // typmod = -1
         ];
         fcinfo.ref_args = vec![Some(RefPayload::Cstring(s.to_string())), None, None];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(1701)
-            .expect("numeric_in registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        dispatch(1701, &mut fcinfo);
         match fcinfo.take_ref_result().expect("numeric_in produced a result") {
             RefPayload::Varlena(b) => b,
             other => panic!("numeric_in: unexpected result lane {other:?}"),
@@ -867,9 +870,7 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid)
-            .expect("builtin registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        dispatch(oid, &mut fcinfo);
         match fcinfo.take_ref_result().expect("numeric op produced a result") {
             RefPayload::Varlena(b) => b,
             other => panic!("numeric op: unexpected result lane {other:?}"),
@@ -887,9 +888,7 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid)
-            .expect("builtin registered");
-        let d = (entry.func.unwrap())(&mut fcinfo);
+        let d = dispatch(oid, &mut fcinfo);
         d.as_bool()
     }
 
@@ -899,9 +898,7 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(image.to_vec()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(1702)
-            .expect("numeric_out registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        dispatch(1702, &mut fcinfo);
         match fcinfo.take_ref_result().expect("numeric_out produced a result") {
             RefPayload::Cstring(s) => s,
             other => panic!("numeric_out: unexpected result lane {other:?}"),
@@ -957,9 +954,7 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a.to_vec()))];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid)
-            .expect("builtin registered");
-        (entry.func.unwrap())(&mut fcinfo);
+        dispatch(oid, &mut fcinfo);
         match fcinfo.take_ref_result().expect("unary numeric produced a result") {
             RefPayload::Varlena(b) => b,
             other => panic!("unary numeric: unexpected result lane {other:?}"),
@@ -977,9 +972,7 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let entry = backend_utils_fmgr_core::fmgr_isbuiltin(oid)
-            .expect("builtin registered");
-        let d = (entry.func.unwrap())(&mut fcinfo);
+        let d = dispatch(oid, &mut fcinfo);
         d.as_i32()
     }
 }

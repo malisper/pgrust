@@ -221,13 +221,9 @@ fn am_reloptions<'mcx>(
         F_SPGHANDLER => {
             backend_access_spgist_core::spgoptions(Some(reloptions), validate)?
         }
-        // BRIN's `brinoptions` (brin.c) is itself unported (its `*_am` adapter
-        // panics); a built-in BRIN index with reloptions set seam-and-panics
-        // here, the same `mirror PG and panic` as the dynamic-AM leg above.
-        F_BRINHANDLER => panic!(
-            "am_reloptions: BRIN reloptions parse (brin.c `brinoptions`) is not \
-             yet ported"
-        ),
+        F_BRINHANDLER => {
+            backend_access_brin_scan::brinoptions(Some(reloptions), validate)?
+        }
         // Any other handler OID is a dynamically loaded extension AM, whose
         // `amoptions` would be reached through the (unported) dynamic-fmgr
         // dispatch. `mirror PG and panic`; a built-in catalog never gets here.

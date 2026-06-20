@@ -104,6 +104,7 @@ port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
 backend-common-path-seams = { path = "../backend-common-path-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
+backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }

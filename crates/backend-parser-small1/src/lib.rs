@@ -365,7 +365,15 @@ pub fn parser_errposition(pstate: &ParseState<'_>, location: i32) -> i32 {
         None => return 0,
     };
     // pos = pg_mbstrlen_with_len(p_sourcetext, location) + 1;
-    mb::pg_mbstrlen_with_len::call(sourcetext.as_bytes(), location) + 1
+    //
+    // `p_sourcetext` is the query string, always valid in the server encoding
+    // (it passed `pg_client_to_server` on receipt), so the
+    // `report_invalid_encoding` path is dead here. If it somehow fires we report
+    // "no position" (0) rather than escalate an error while building an error.
+    match mb::pg_mbstrlen_with_len::call(sourcetext.as_bytes(), location) {
+        Ok(n) => n + 1,
+        Err(_) => 0,
+    }
 }
 
 /// `setup_parser_errposition_callback` / `cancel_parser_errposition_callback` /
@@ -1098,7 +1106,13 @@ pub fn init_seams() {
             return 0;
         }
         match source {
-            Some(s) => mb::pg_mbstrlen_with_len::call(s.as_bytes(), location) + 1,
+            // `p_sourcetext` is valid in the server encoding, so the
+            // `report_invalid_encoding` path is dead; report 0 ("no position")
+            // if it somehow fires rather than escalate while building an error.
+            Some(s) => match mb::pg_mbstrlen_with_len::call(s.as_bytes(), location) {
+                Ok(n) => n + 1,
+                Err(_) => 0,
+            },
             None => 0,
         }
     });

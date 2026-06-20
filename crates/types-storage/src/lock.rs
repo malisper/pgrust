@@ -173,6 +173,35 @@ pub struct LockInstanceData {
     pub fastpath: bool,
 }
 
+/// One already-decoded SIREAD predicate-lock row for `pg_lock_status`'s
+/// predicate leg (lockfuncs.c). The target-tag decode + the
+/// `SERIALIZABLEXACT` holder fields are predicate.c-internal; this carries the
+/// scalar projection (the columns lockfuncs.c emits) across the predicate seam
+/// so the column-layout logic stays in lockfuncs.c's owner.
+#[derive(Clone, Debug)]
+pub struct PredLockStatusRow {
+    /// `PredicateLockTagTypeNames[lockType]` — the `locktype` text.
+    pub locktypename: alloc::string::String,
+    /// `GET_PREDICATELOCKTARGETTAG_DB` — the `database` OID.
+    pub database: u32,
+    /// `GET_PREDICATELOCKTARGETTAG_RELATION` — the `relation` OID.
+    pub relation: u32,
+    /// True for TUPLE or PAGE target types (the `page` column is non-NULL).
+    pub has_page: bool,
+    /// `GET_PREDICATELOCKTARGETTAG_PAGE` — the `page` block number.
+    pub page: u32,
+    /// True for the TUPLE target type (the `tuple` column is non-NULL).
+    pub has_tuple: bool,
+    /// `GET_PREDICATELOCKTARGETTAG_OFFSET` — the `tuple` offset.
+    pub tuple: u16,
+    /// `xact->vxid.procNumber` — the holder's proc number.
+    pub proc_number: i32,
+    /// `xact->vxid.localTransactionId` — the holder's local xid.
+    pub local_xid: u32,
+    /// `xact->pid` — the holder's pid (0 ⇒ NULL `pid` column).
+    pub pid: i32,
+}
+
 /// The outcome of lock.c's `VirtualXactLock` examination of a target backend's
 /// `MyProc->fpInfoLock`-guarded fast-path VXID state (the cross-proc critical
 /// section owned by proc.c). lock.c uses this to decide its next step.

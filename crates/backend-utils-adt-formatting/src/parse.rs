@@ -16,9 +16,12 @@ fn syntax_error(msg: impl Into<String>) -> PgError {
     PgError::error(msg.into()).with_sqlstate(ERRCODE_SYNTAX_ERROR)
 }
 
-/// C: `pg_mblen` of the lead byte of `s`, via the mbutils seam (infallible).
+/// C: `pg_mblen` of the lead byte of `s`, via the mbutils seam. C's `pg_mblen`
+/// does not validate; the range-clamped seam only Errs when the leading char
+/// would overrun the slice, where the clamped length is the slice length (the
+/// dead error path falls back to `s.len()`).
 fn pg_mblen_cstr(s: &[u8]) -> i32 {
-    backend_utils_mb_mbutils_seams::pg_mblen_range::call(s)
+    backend_utils_mb_mbutils_seams::pg_mblen_range::call(s).unwrap_or(s.len() as i32)
 }
 
 /// C: `NUMDesc_prepare` (formatting.c:1202).

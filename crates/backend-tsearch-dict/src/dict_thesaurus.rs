@@ -154,7 +154,7 @@ fn thesaurus_read<'mcx>(
 
         // is it a comment? skip leading spaces.
         while i < line.len() && line[i] != 0 && is_space(line[i]) {
-            i += pg_mblen_range::call(&line[i..]) as usize;
+            i += pg_mblen_range::call(&line[i..])? as usize;
         }
         let first = byte_at(line, i);
         if first == b'#' || first == 0 || first == b'\n' || first == b'\r' {
@@ -191,11 +191,11 @@ fn thesaurus_read<'mcx>(
                 if c == b'*' {
                     useasis = true;
                     state = TR_INSUBS;
-                    beginwrd = Some(i + pg_mblen_range::call(&line[i..]) as usize);
+                    beginwrd = Some(i + pg_mblen_range::call(&line[i..])? as usize);
                 } else if c == b'\\' {
                     useasis = false;
                     state = TR_INSUBS;
-                    beginwrd = Some(i + pg_mblen_range::call(&line[i..]) as usize);
+                    beginwrd = Some(i + pg_mblen_range::call(&line[i..])? as usize);
                 } else if !is_space(c) {
                     useasis = false;
                     beginwrd = Some(i);
@@ -216,7 +216,7 @@ fn thesaurus_read<'mcx>(
                 return Err(elog_error(format!("unrecognized thesaurus state: {state}")));
             }
 
-            i += pg_mblen_range::call(&line[i..]) as usize;
+            i += pg_mblen_range::call(&line[i..])? as usize;
         }
 
         if state == TR_INSUBS {

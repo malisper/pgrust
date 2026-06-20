@@ -716,77 +716,11 @@ fn dispatch_message<'mcx>(
         }
 
         x if x == pqmsg::FUNCTION_CALL => {
-            forbidden_in_wal_sender(firstchar)?;
-
-            // Set statement_timestamp().
-            xact_seams::set_current_statement_start_timestamp::call();
-
-            // Report query to monitoring facilities.
-            // pgstat_report_activity(STATE_FASTPATH, NULL): the STATE_FASTPATH
-            // BackendState report seam is not modeled (monitoring-only); the PS
-            // display is set below.
-            more_seams::set_ps_display::call("<FASTPATH>");
-
-            // Start an xact for this function invocation.
-            crate::simple_query::start_xact_command()?;
-
-            // Note: we may be inside an aborted transaction here;
-            // HandleFunctionRequest checks for that after reading the message.
-
-            // (MemoryContextSwitchTo(MessageContext) — already in `mcx`.)
-            fastpath::handle_function_request(mcx, input_message)?;
-
-            // Commit the function-invocation transaction.
-            crate::simple_query::finish_xact_command()?;
-
-            state.send_ready_for_query = true;
+            dispatch_function_call_message(mcx, firstchar, input_message, state)?;
         }
 
         x if x == pqmsg::CLOSE => {
-            forbidden_in_wal_sender(firstchar)?;
-
-            let close_type = pqformat::pq_getmsgbyte(input_message)?;
-            let close_target = pqformat::pq_getmsgstring(mcx, input_message)?;
-            let close_target = String::from_utf8_lossy(close_target.as_bytes()).into_owned();
-            pqformat::pq_getmsgend(input_message)?;
-
-            match close_type as u8 {
-                b'S' => {
-                    if !close_target.is_empty() {
-                        // DropPreparedStatement: the prepared-statement store is
-                        // the extended-query (F2) plancache path. A named
-                        // prepared statement can only exist after a Parse, which
-                        // is unported, so this is never reached on this target.
-                        panic!(
-                            "PostgresMain Close 'S': DropPreparedStatement for a \
-                             named prepared statement requires the unported \
-                             extended-query (Parse) path to have created one"
-                        );
-                    } else {
-                        // special-case the unnamed statement
-                        crate::simple_query::drop_unnamed_stmt()?;
-                    }
-                }
-                b'P' => {
-                    if let Some(portal) =
-                        backend_utils_mmgr_portalmem_seams::get_portal_by_name::call(
-                            &close_target,
-                        )?
-                    {
-                        backend_utils_mmgr_portalmem_seams::portal_drop::call(&portal, false)?;
-                    }
-                }
-                other => {
-                    return Err(ereport(ERROR)
-                        .errcode(types_error::error::ERRCODE_PROTOCOL_VIOLATION)
-                        .errmsg(alloc::format!("invalid CLOSE message subtype {other}"))
-                        .into_error());
-                }
-            }
-
-            if globals::where_to_send_output() == CommandDest::Remote {
-                pqformat::pq_putemptymessage(pqmsg::CLOSE_COMPLETE)?;
-            }
+            dispatch_close_message(mcx, firstchar, input_message)?;
         }
 
         x if x == pqmsg::DESCRIBE => {
@@ -848,6 +782,105 @@ fn dispatch_message<'mcx>(
         }
     }
 
+    Ok(())
+}
+
+/// The `'C'` (Close) dispatch arm, postgres.c:4922. Extracted into its own
+/// `#[inline(never)]` frame so its owned `close_target: String`, the nested
+/// subtype `match`, and that match's `panic!`/`ereport` builders do not enlarge
+/// `dispatch_message`'s frame — in an unoptimized build that frame otherwise
+/// reserves the union of every arm's locals for the whole dispatch, including
+/// the hot `'Q'` path that stays resident through planning/execution. Mirrors C,
+/// where the Close arm's work is a plain block but the heavy state is local to
+/// that block. Behavior-preserving: statements and `?` flow are unchanged.
+#[inline(never)]
+fn dispatch_close_message<'mcx>(
+    mcx: Mcx<'mcx>,
+    firstchar: i32,
+    input_message: &mut StringInfo<'mcx>,
+) -> PgResult<()> {
+    forbidden_in_wal_sender(firstchar)?;
+
+    let close_type = pqformat::pq_getmsgbyte(input_message)?;
+    let close_target = pqformat::pq_getmsgstring(mcx, input_message)?;
+    let close_target = String::from_utf8_lossy(close_target.as_bytes()).into_owned();
+    pqformat::pq_getmsgend(input_message)?;
+
+    match close_type as u8 {
+        b'S' => {
+            if !close_target.is_empty() {
+                // DropPreparedStatement: the prepared-statement store is
+                // the extended-query (F2) plancache path. A named
+                // prepared statement can only exist after a Parse, which
+                // is unported, so this is never reached on this target.
+                panic!(
+                    "PostgresMain Close 'S': DropPreparedStatement for a \
+                     named prepared statement requires the unported \
+                     extended-query (Parse) path to have created one"
+                );
+            } else {
+                // special-case the unnamed statement
+                crate::simple_query::drop_unnamed_stmt()?;
+            }
+        }
+        b'P' => {
+            if let Some(portal) =
+                backend_utils_mmgr_portalmem_seams::get_portal_by_name::call(&close_target)?
+            {
+                backend_utils_mmgr_portalmem_seams::portal_drop::call(&portal, false)?;
+            }
+        }
+        other => {
+            return Err(ereport(ERROR)
+                .errcode(types_error::error::ERRCODE_PROTOCOL_VIOLATION)
+                .errmsg(alloc::format!("invalid CLOSE message subtype {other}"))
+                .into_error());
+        }
+    }
+
+    if globals::where_to_send_output() == CommandDest::Remote {
+        pqformat::pq_putemptymessage(pqmsg::CLOSE_COMPLETE)?;
+    }
+    Ok(())
+}
+
+/// The `'F'` (fast-path Function call) dispatch arm, postgres.c:4892. Extracted
+/// into its own `#[inline(never)]` frame for the same reason as
+/// [`dispatch_close_message`]: keep the fast-path xact bookkeeping and the
+/// `handle_function_request` call out of the shared `dispatch_message` frame so
+/// the hot `'Q'` path does not carry this arm's locals. Mirrors C
+/// (`HandleFunctionRequest` is a separate function). Behavior-preserving.
+#[inline(never)]
+fn dispatch_function_call_message<'mcx>(
+    mcx: Mcx<'mcx>,
+    firstchar: i32,
+    input_message: &mut StringInfo<'mcx>,
+    state: &mut LoopState,
+) -> PgResult<()> {
+    forbidden_in_wal_sender(firstchar)?;
+
+    // Set statement_timestamp().
+    xact_seams::set_current_statement_start_timestamp::call();
+
+    // Report query to monitoring facilities.
+    // pgstat_report_activity(STATE_FASTPATH, NULL): the STATE_FASTPATH
+    // BackendState report seam is not modeled (monitoring-only); the PS
+    // display is set below.
+    more_seams::set_ps_display::call("<FASTPATH>");
+
+    // Start an xact for this function invocation.
+    crate::simple_query::start_xact_command()?;
+
+    // Note: we may be inside an aborted transaction here;
+    // HandleFunctionRequest checks for that after reading the message.
+
+    // (MemoryContextSwitchTo(MessageContext) — already in `mcx`.)
+    fastpath::handle_function_request(mcx, input_message)?;
+
+    // Commit the function-invocation transaction.
+    crate::simple_query::finish_xact_command()?;
+
+    state.send_ready_for_query = true;
     Ok(())
 }
 
