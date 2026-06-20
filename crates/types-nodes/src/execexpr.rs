@@ -1652,29 +1652,23 @@ impl<'mcx> Clone for ExprState<'mcx> {
     /// the trivial pre-union `ExprState { flags }`). Recompile via
     /// `ExecInitExpr` to obtain a fresh program.
     fn clone(&self) -> Self {
-        ExprState {
-            flags: self.flags,
-            resnull: self.resnull,
-            resvalue: self.resvalue.clone(),
-            resultslot: None,
-            steps: None,
-            result_cells: ResultCellArena::default(),
-            evalfunc: self.evalfunc,
-            expr: None,
-            evalfunc_private: self.evalfunc_private,
-            steps_len: self.steps_len,
-            steps_alloc: self.steps_alloc,
-            parent: None,
-            es_link: None,
-            ext_params: self.ext_params,
-            innermost_caseval: None,
-            innermost_domainval: None,
-            escontext: self.escontext,
-            json_states: JsonExprStateArena::default(),
-            json_coercion_caches: JsonCoercionCacheArena::default(),
-            found_aggs: None,
-            found_window_funcs: None,
-        }
+        // MODE-B GUARD (was a silent field-drop, the b4d2d5566 bug class): a
+        // derived/handle-only clone of a *compiled* `ExprState` would reset
+        // `steps`/`result_cells`/`resultslot`/`expr`/the json + found_* arenas
+        // to `None`/empty, silently losing the linear `ExprEvalStep` program and
+        // yielding a hollow state that the interpreter would reject ("steps not
+        // built"). A compiled `ExprState` is owned by its EState's per-query
+        // context and is NEVER deep-cloned during execution; to obtain a fresh
+        // program, recompile via `ExecInitExpr`/`ExecInitQual` (the C path).
+        // There is no `ExprState` copyObject in PostgreSQL either. Mirror the
+        // Aggref/SubLink/Tuplestorestate guards and stop LOUD rather than hand
+        // back a program-less state.
+        panic!(
+            "ExprState::clone: a compiled ExprState carries a context-allocated \
+             `steps` program (plus result_cells / json arenas / found_* lists) \
+             that a plain `.clone()` would silently drop — there is no copyObject \
+             for ExprState; recompile via ExecInitExpr/ExecInitQual instead"
+        )
     }
 }
 
