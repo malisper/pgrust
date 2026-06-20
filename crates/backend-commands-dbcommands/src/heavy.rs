@@ -2141,7 +2141,7 @@ fn movedb(mcx: Mcx<'_>, dbname: &str, tblspcname: &str) -> PgResult<()> {
         backend_access_transam_xact::ForceSyncCommit();
 
         // Close pg_database, but keep lock till commit.
-        table_close(pgdbrel.alias(), NoLock)?;
+        table_close(pgdbrel, NoLock)?;
         Ok(())
     })();
 

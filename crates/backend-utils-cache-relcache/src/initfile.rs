@@ -1032,9 +1032,18 @@ fn encode_attr(att: &OwnedAttr) -> Vec<u8> {
     v.extend_from_slice(&att.atttypmod.to_ne_bytes());
     v.push(att.attbyval as u8);
     v.push(att.attalign as u8);
+    v.push(att.attstorage as u8);
+    v.push(att.attcompression as u8);
     v.push(att.attnotnull as u8);
+    v.push(att.atthasdef as u8);
+    v.extend_from_slice(&att.attndims.to_ne_bytes());
+    v.push(att.attidentity as u8);
+    v.push(att.attgenerated as u8);
     v.push(att.attisdropped as u8);
+    v.push(att.attislocal as u8);
+    v.extend_from_slice(&att.attinhcount.to_ne_bytes());
     v.extend_from_slice(&att.attcollation.to_ne_bytes());
+    v.push(att.attnullability as u8);
     v
 }
 
@@ -1392,9 +1401,18 @@ fn decode_attr(b: &[u8]) -> Option<OwnedAttr> {
     a.atttypmod = c.read_i32()?;
     a.attbyval = c.read_u8()? != 0;
     a.attalign = c.read_u8()? as i8;
+    a.attstorage = c.read_u8()? as i8;
+    a.attcompression = c.read_u8()? as i8;
     a.attnotnull = c.read_u8()? != 0;
+    a.atthasdef = c.read_u8()? != 0;
+    a.attndims = c.read_i16()?;
+    a.attidentity = c.read_u8()? as i8;
+    a.attgenerated = c.read_u8()? as i8;
     a.attisdropped = c.read_u8()? != 0;
+    a.attislocal = c.read_u8()? != 0;
+    a.attinhcount = c.read_i16()?;
     a.attcollation = c.read_oid()?;
+    a.attnullability = c.read_u8()? as i8;
     Some(a)
 }
 
