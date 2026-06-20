@@ -4117,18 +4117,45 @@ fn create_limit_plan<'mcx>(
     // Extract information necessary for comparing rows for WITH TIES. The
     // LIMIT_OPTION_COUNT (plain LIMIT/OFFSET) case needs no uniq-key arrays.
     // FETCH FIRST ... WITH TIES walks parse->sortClause matching each
-    // SortGroupClause to parse->targetList for uniqColIdx/uniqOperators; that
-    // requires the owned Query's sortClause/targetList (not yet threaded into
-    // create_limit_plan), so the WITH TIES sub-case loud-errors until then.
+    // SortGroupClause to parse->targetList for uniqColIdx/uniqOperators/
+    // uniqCollations (createplan.c create_limit_plan).
+    let mut uniq_num_cols: i32 = 0;
+    let mut uniq_col_idx: Option<PgVec<'mcx, AttrNumber>> = None;
+    let mut uniq_operators: Option<PgVec<'mcx, Oid>> = None;
+    let mut uniq_collations: Option<PgVec<'mcx, Oid>> = None;
     if limit_option == types_pathnodes::LIMIT_OPTION_WITH_TIES {
-        return Err(PgError::error(
-            "create_limit_plan: FETCH FIRST ... WITH TIES not yet supported",
-        ));
+        let parse = run.resolve(root.parse);
+        // parse->sortClause is a List of SortGroupClause node handles; resolve
+        // each to its value, then match it to parse->targetList.
+        let sort_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = parse
+            .sortClause
+            .iter()
+            .map(|np| {
+                let np = &**np;
+                match np.node_tag() {
+                    ntag::T_SortGroupClause => Ok(*np.expect_sortgroupclause()),
+                    _ => Err(PgError::error(
+                        "create_limit_plan: sortClause element is not a SortGroupClause",
+                    )),
+                }
+            })
+            .collect::<PgResult<Vec<_>>>()?;
+
+        let mut col_idx: Vec<AttrNumber> = Vec::with_capacity(sort_clauses.len());
+        let mut operators: Vec<Oid> = Vec::with_capacity(sort_clauses.len());
+        let mut collations: Vec<Oid> = Vec::with_capacity(sort_clauses.len());
+        let target_list: &[TargetEntry<'mcx>] = &parse.targetList;
+        for sortcl in &sort_clauses {
+            let tle = util_tlist::get_sortgroupclause_tle(sortcl, target_list)?;
+            col_idx.push(tle.resno);
+            operators.push(sortcl.eqop);
+            collations.push(expr_collation_of_tle(tle)?);
+        }
+        uniq_num_cols = sort_clauses.len() as i32;
+        uniq_col_idx = oid_attr_vec_opt(mcx, col_idx)?;
+        uniq_operators = oid_vec_opt(mcx, operators)?;
+        uniq_collations = oid_vec_opt(mcx, collations)?;
     }
-    let uniq_num_cols: i32 = 0;
-    let uniq_col_idx: Option<PgVec<'mcx, AttrNumber>> = None;
-    let uniq_operators: Option<PgVec<'mcx, Oid>> = None;
-    let uniq_collations: Option<PgVec<'mcx, Oid>> = None;
 
     // best_path->limitOffset / limitCount are bare expr node handles; clone the
     // Expr out of the arena into the owned plan node.
