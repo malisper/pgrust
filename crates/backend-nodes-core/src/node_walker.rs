@@ -825,6 +825,94 @@ pub fn raw_expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> 
             list_walk!(from.fromlist) || walk_opt!(from.quals.as_ref())
         }
 
+        // C `case T_List: foreach(temp, (List *) node) WALK(lfirst(temp))` —
+        // a bare List node (e.g. a row of a VALUES list, or an `A_Expr`'s
+        // IN-list rexpr) is a legitimate walker argument; visit each element.
+        ntag::T_List => list_walk!(node.expect_list()),
+
+        // ---- Expr-deriving nodes the grammar emits (raw form, with raw `Node`
+        // children: nodeFuncs.c raw_expression_tree_walker T_SubLink/T_CaseExpr/
+        // … arms). Their children are `NodePtr` (raw parse-tree nodes), so they
+        // recurse directly through `walk_opt!`/`list_walk!`.
+        ntag::T_SubLink => {
+            let sl = node.expect_sublink();
+            // C: WALK(testexpr) then WALK(subselect); operName is uninteresting.
+            walk_opt!(sl.testexpr.as_ref()) || walk_opt!(sl.subselect.as_ref())
+        }
+
+        ntag::T_CaseExpr => {
+            // C: WALK(arg); foreach WHEN { WALK(when->expr); WALK(when->result) };
+            // WALK(defresult). Here `args` is a list of raw `CaseWhen` nodes, so
+            // `list_walk!` visits each CaseWhen (handled by its own arm below).
+            let ce = node.expect_caseexpr();
+            walk_opt!(ce.arg.as_ref()) || list_walk!(ce.args) || walk_opt!(ce.defresult.as_ref())
+        }
+
+        ntag::T_CaseWhen => {
+            let cw = node.expect_casewhen();
+            walk_opt!(cw.expr.as_ref()) || walk_opt!(cw.result.as_ref())
+        }
+
+        // C: `return WALK(((RowExpr *) node)->args)` — colnames uninteresting.
+        ntag::T_RowExpr => list_walk!(node.expect_rowexpr().args),
+
+        // C: `return WALK(((CoalesceExpr *) node)->args)`.
+        ntag::T_CoalesceExpr => list_walk!(node.expect_coalesceexpr().args),
+
+        // C: `return WALK(((MinMaxExpr *) node)->args)`.
+        ntag::T_MinMaxExpr => list_walk!(node.expect_minmaxexpr().args),
+
+        // C: `return WALK(((BoolExpr *) node)->args)`.
+        ntag::T_BoolExpr => list_walk!(node.expect_boolexpr().args),
+
+        // C: WALK(named_args) then WALK(args); arg_names uninteresting.
+        ntag::T_XmlExpr => {
+            let x = node.expect_xmlexpr();
+            list_walk!(x.named_args) || list_walk!(x.args)
+        }
+
+        // C: `return WALK(((GroupingFunc *) node)->args)`.
+        ntag::T_GroupingFunc => list_walk!(node.expect_groupingfunc().args),
+
+        // C: `return WALK(((NullTest *) node)->arg)`.
+        ntag::T_NullTest => walk_opt!(node.expect_nulltest().arg.as_ref()),
+
+        // C: `return WALK(((BooleanTest *) node)->arg)`.
+        ntag::T_BooleanTest => walk_opt!(node.expect_booleantest().arg.as_ref()),
+
+        // C: `return WALK(((NamedArgExpr *) node)->arg)`.
+        ntag::T_NamedArgExpr => walk_opt!(node.expect_namedargexpr().arg.as_ref()),
+
+        // C: `return WALK(((CollateExpr *) node)->arg)`.
+        ntag::T_CollateExpr => walk_opt!(node.expect_collateexpr().arg.as_ref()),
+
+        // C: WALK(indirection) then WALK(val).
+        ntag::T_PLAssignStmt => {
+            let p = node.expect_plassignstmt();
+            list_walk!(p.indirection) || walk_opt!(p.val.as_ref())
+        }
+
+        // C: WALK(options) then WALK(exprs).
+        ntag::T_ReturningClause => {
+            let r = node.expect_returningclause();
+            list_walk!(r.options) || list_walk!(r.exprs)
+        }
+
+        // C leaves with no expression subnodes the raw walker stops at
+        // (T_SetToDefault/T_CurrentOfExpr/T_SQLValueFunction/T_MergeSupportFunc/
+        // T_ReturningOption/T_Alias). T_LockingClause is not an explicit C case
+        // but carries no CTE-relevant subnodes (lockedRels are RangeVars by name,
+        // deemed uninteresting); treat it as a leaf so a `FOR UPDATE` recursive
+        // query reaches its dedicated "not implemented" check instead of erroring
+        // in the walker.
+        ntag::T_SetToDefault
+        | ntag::T_CurrentOfExpr
+        | ntag::T_SQLValueFunction
+        | ntag::T_MergeSupportFunc
+        | ntag::T_ReturningOption
+        | ntag::T_LockingClause
+        | ntag::T_Alias => false,
+
         // a sub-Query (post-analysis) embedded in raw output is walked by
         // recursing the central expression walker over it
         ntag::T_Query => false,
