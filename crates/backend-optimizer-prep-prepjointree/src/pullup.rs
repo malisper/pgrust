@@ -3169,6 +3169,20 @@ fn offset_var_nodes_in_append_rel_list(
     offset: i32,
     sublevels_up: i32,
 ) -> PgResult<()> {
+    // C: OffsetVarNodes_walker has an explicit `IsA(node, AppendRelInfo)` case
+    // (rewriteManip.c:444) that, when sublevels_up == 0, adds `offset` to the
+    // integer fields parent_relid and child_relid (then falls through to recurse
+    // into translated_vars). The earlier port dropped the integer fixup, so a
+    // pulled-up subquery's appendrel members kept their subquery-local relids and
+    // collided with the upper query's appendrel relids ("child relation already
+    // exists" on nested UNION ALL). Restore the integer offset.
+    if sublevels_up == 0 {
+        for ai in subroot.append_rel_list.iter_mut() {
+            ai.parent_relid = (ai.parent_relid as i32 + offset) as u32;
+            ai.child_relid = (ai.child_relid as i32 + offset) as u32;
+        }
+    }
+
     let mut ids: Vec<NodeId> = Vec::new();
     for ai in subroot.append_rel_list.iter() {
         for &id in ai.translated_vars.iter() {
@@ -3186,10 +3200,6 @@ fn offset_var_nodes_in_append_rel_list(
             *subroot.node_mut(id) = e;
         }
     }
-    // Also adjust the parent_relid/child_relid integer fields? In C,
-    // OffsetVarNodes over the append_rel_list list adjusts only the Var nodes
-    // within translated_vars (parent_relid/child_relid are plain ints not Vars),
-    // matching this walk.
     Ok(())
 }
 
