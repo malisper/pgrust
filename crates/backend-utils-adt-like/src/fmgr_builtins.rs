@@ -27,8 +27,9 @@
 
 use types_core::Oid;
 use types_datum::Datum;
+use types_error::PgResult;
 use types_fmgr::boundary::RefPayload;
-use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -99,99 +100,84 @@ fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("like fmgr scratch")
 }
 
-/// Raise a builtin's `ereport(ERROR)` through the one dispatch point every
-/// builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
-fn raise(err: types_error::PgError) -> ! {
-    std::panic::panic_any(err);
-}
-
-/// Unwrap a `PgResult`, re-raising its error through `raise`.
-#[inline]
-fn ok<T>(r: types_error::PgResult<T>) -> T {
-    match r {
-        Ok(v) => v,
-        Err(e) => raise(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // fc_ adapters — text/name LIKE family.
 // ---------------------------------------------------------------------------
 
-fn fc_textlike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textlike(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::textlike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
+    Ok(ret_bool(crate::textlike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())?))
 }
-fn fc_textnlike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_textnlike(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::textnlike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
+    Ok(ret_bool(crate::textnlike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())?))
 }
-fn fc_namelike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_namelike(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::namelike(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
+    Ok(ret_bool(crate::namelike(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())?))
 }
-fn fc_namenlike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_namenlike(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::namenlike(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
+    Ok(ret_bool(crate::namenlike(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())?))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — text/name ILIKE family.
 // ---------------------------------------------------------------------------
 
-fn fc_texticlike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_texticlike(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::texticlike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
+    Ok(ret_bool(crate::texticlike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())?))
 }
-fn fc_texticnlike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_texticnlike(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::texticnlike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
+    Ok(ret_bool(crate::texticnlike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())?))
 }
-fn fc_nameiclike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_nameiclike(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::nameiclike(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
+    Ok(ret_bool(crate::nameiclike(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())?))
 }
-fn fc_nameicnlike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_nameicnlike(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let c = collation(fcinfo);
     let m = scratch_mcx();
-    ret_bool(ok(crate::nameicnlike(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())))
+    Ok(ret_bool(crate::nameicnlike(arg_name_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), c, m.mcx())?))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — bytea LIKE family (no collation).
 // ---------------------------------------------------------------------------
 
-fn fc_bytealike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_bytealike(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_bool(ok(crate::bytealike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), m.mcx())))
+    Ok(ret_bool(crate::bytealike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), m.mcx())?))
 }
-fn fc_byteanlike(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_byteanlike(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    ret_bool(ok(crate::byteanlike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), m.mcx())))
+    Ok(ret_bool(crate::byteanlike(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), m.mcx())?))
 }
 
 // ---------------------------------------------------------------------------
 // fc_ adapters — like_escape (text) / like_escape_bytea (bytea).
 // ---------------------------------------------------------------------------
 
-fn fc_like_escape(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_like_escape(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let payload = ok(crate::like_escape(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), m.mcx()));
+    let payload = crate::like_escape(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), m.mcx())?;
     let bytes = payload.as_slice().to_vec();
-    ret_varlena(fcinfo, bytes)
+    Ok(ret_varlena(fcinfo, bytes))
 }
-fn fc_like_escape_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+fn fc_like_escape_bytea(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
-    let payload = ok(crate::like_escape_bytea(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), m.mcx()));
+    let payload = crate::like_escape_bytea(arg_bytes(fcinfo, 0), arg_bytes(fcinfo, 1), m.mcx())?;
     let bytes = payload.as_slice().to_vec();
-    ret_varlena(fcinfo, bytes)
+    Ok(ret_varlena(fcinfo, bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -204,16 +190,19 @@ fn builtin(
     nargs: i16,
     strict: bool,
     retset: bool,
-    func: fn(&mut FunctionCallInfoBaseData) -> Datum,
-) -> BuiltinFunction {
-    BuiltinFunction {
-        foid,
-        name: name.to_string(),
-        nargs,
-        strict,
-        retset,
-        func: Some(func),
-    }
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict,
+            retset,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// Register every SQL-callable `like.c` builtin (C: their `fmgr_builtins[]`
@@ -221,7 +210,7 @@ fn builtin(
 /// retset transcribed exactly from `pg_proc.dat` (all `nargs => 2`, all strict
 /// by default, none retset).
 pub fn register_like_builtins() {
-    backend_utils_fmgr_core::register_builtins([
+    backend_utils_fmgr_core::register_builtins_native([
         // ---- text/name LIKE ----
         builtin(850, "textlike", 2, true, false, fc_textlike),
         builtin(851, "textnlike", 2, true, false, fc_textnlike),
