@@ -32,6 +32,7 @@ use backend_access_gist_dispatch_seams as dispatch;
 use backend_access_gist_proc_seams as gist_sortsupport_seams;
 use backend_utils_adt_network_gist_seams as inet_gist;
 use backend_utils_adt_geo_ops_seams as geo;
+use backend_utils_adt_rangetypes_gist as range_gist;
 use types_network::{inet_struct, GistInetKey};
 use dispatch::{GistConsistentResult, GistDistanceResult, StrategyNumber};
 use mcx::{Mcx, PgBox};
@@ -1317,6 +1318,199 @@ fn unrecognized_proc(proc_oid: Oid) -> PgError {
     PgError::error(format!("unrecognized GiST support function OID: {proc_oid}"))
 }
 
+// ---------------------------------------------------------------------------
+// range_ops / multirange_ops opclass support-proc OIDs (pg_proc.dat) and the
+// marshalling between the GiST core's by-reference key [`Datum`] lane and the
+// range ADT's `DatumGetRangeTypeP` pointer-word convention.
+//
+// Range GiST keys are stored as plain (never-toasted) `RangeType *`; the range
+// bodies read `entry->key` as `DatumGetRangeTypeP(key)` — i.e. they treat the
+// key Datum's word as the address of a `RangeType` varlena. The GiST core hands
+// us the key as a by-reference [`Datum::ByRef`] image (the on-disk varlena
+// bytes), so we materialize that image into an 8-byte-aligned `mcx` buffer and
+// hand the body a `RangeTypeP { ptr }` over it (mirroring
+// `range_bytes_to_arg_word` in `rangetypes`'s fmgr boundary). Symmetrically a
+// `RangeType` RESULT (union / picksplit union keys) comes back as a pointer
+// word into `mcx`; we copy the full varlena image off it onto the by-reference
+// result lane as `Datum::ByRef`.
+// ---------------------------------------------------------------------------
+
+/// `range_gist_consistent` (pg_proc.dat oid 3875).
+const F_RANGE_GIST_CONSISTENT: Oid = 3875;
+/// `range_gist_union` (pg_proc.dat oid 3876).
+const F_RANGE_GIST_UNION: Oid = 3876;
+/// `range_gist_penalty` (pg_proc.dat oid 3879).
+const F_RANGE_GIST_PENALTY: Oid = 3879;
+/// `range_gist_picksplit` (pg_proc.dat oid 3880).
+const F_RANGE_GIST_PICKSPLIT: Oid = 3880;
+/// `range_gist_same` (pg_proc.dat oid 3881).
+const F_RANGE_GIST_SAME: Oid = 3881;
+/// `range_sortsupport` (pg_proc.dat oid 6391).
+const F_RANGE_GIST_SORTSUPPORT: Oid = 6391;
+/// `multirange_gist_consistent` (pg_proc.dat oid 6154).
+const F_MULTIRANGE_GIST_CONSISTENT: Oid = 6154;
+/// `multirange_gist_compress` (pg_proc.dat oid 6156).
+const F_MULTIRANGE_GIST_COMPRESS: Oid = 6156;
+
+/// `VARSIZE_4B(ptr)` — the total image length of a plain (uncompressed, 4-byte
+/// header) varlena. A serialized `RangeType` / `MultirangeType` always carries a
+/// plain 4B header (`SET_VARSIZE`), so this is the exact byte length.
+///
+/// # Safety
+/// `ptr` must point at a valid plain 4B varlena header.
+#[inline]
+unsafe fn varsize_4b(ptr: *const u8) -> usize {
+    let word = (ptr as *const u32).read_unaligned();
+    ((word >> 2) & 0x3FFF_FFFF) as usize
+}
+
+/// Materialize a by-reference varlena `image` (the GiST key bytes, header and
+/// all) into an 8-byte-aligned (`MAXALIGN`) `mcx` copy and return its address
+/// word. The range ADT's relative-offset payload accounting only matches
+/// absolute-address reads when the base is `MAXALIGN(8)`-aligned (the alignment
+/// `range_serialize` produces).
+fn materialize_varlena<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<*const u8> {
+    use allocator_api2::alloc::Allocator;
+    use core::alloc::Layout;
+    mcx::check_alloc_size(image.len())?;
+    let layout = Layout::from_size_align(image.len().max(1), 8)
+        .expect("valid varlena image layout");
+    let block = mcx.allocate(layout).map_err(|_| mcx.oom(image.len()))?;
+    let dst = block.as_ptr() as *mut u8;
+    // SAFETY: `dst` heads a freshly allocated image.len()-byte region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(image.as_ptr(), dst, image.len());
+    }
+    Ok(dst as *const u8)
+}
+
+/// `DatumGetRangeTypeP(entry->key)` at the GiST dispatch boundary: materialize
+/// the by-reference key image into `mcx` and build a `RangeTypeP` over it.
+fn range_key_from_entry<'mcx>(
+    mcx: Mcx<'mcx>,
+    key: &Datum<'mcx>,
+) -> PgResult<types_rangetypes::RangeTypeP<'mcx>> {
+    let ptr = materialize_varlena(mcx, key.as_ref_bytes())?;
+    Ok(types_rangetypes::RangeTypeP {
+        ptr: ptr as *const types_rangetypes::RangeType,
+        _marker: core::marker::PhantomData,
+    })
+}
+
+/// `DatumGetMultirangeTypeP(query)` at the GiST dispatch boundary.
+fn multirange_from_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    d: &Datum<'mcx>,
+) -> PgResult<types_rangetypes::MultirangeTypeP<'mcx>> {
+    let ptr = materialize_varlena(mcx, d.as_ref_bytes())?;
+    Ok(types_rangetypes::MultirangeTypeP {
+        ptr: ptr as *const types_rangetypes::MultirangeType,
+        _marker: core::marker::PhantomData,
+    })
+}
+
+/// Build the [`range_gist::GistQuery`] for a range/multirange consistent call
+/// from the GiST core's by-reference query [`Datum`] and the operator's
+/// right-hand-side `subtype` (`PG_GETARG_OID(3)`):
+///   * invalid / `ANYRANGEOID` => `DatumGetRangeTypeP(query)`,
+///   * `ANYMULTIRANGEOID`      => `DatumGetMultirangeTypeP(query)`,
+///   * any other subtype       => the bare element value `Datum`.
+/// (Matches the `if/else` in `range_gist_consistent` / `multirange_gist_consistent`.)
+fn gist_range_query<'mcx>(
+    mcx: Mcx<'mcx>,
+    query: &Datum<'mcx>,
+    subtype: Oid,
+) -> PgResult<range_gist::GistQuery<'mcx>> {
+    if !types_core::primitive::OidIsValid(subtype) || subtype == range_gist::ANYRANGEOID {
+        Ok(range_gist::GistQuery::Range(range_key_from_entry(mcx, query)?))
+    } else if subtype == range_gist::ANYMULTIRANGEOID {
+        Ok(range_gist::GistQuery::Multirange(multirange_from_datum(mcx, query)?))
+    } else {
+        // The bare element value (`query`), as the range ADT's bare-word Datum.
+        Ok(range_gist::GistQuery::Elem(elem_word(query)))
+    }
+}
+
+/// Convert the GiST core's by-reference / by-value query [`Datum`] into the
+/// range ADT's bare-word `Datum` (`types_datum::datum::Datum`). A by-value
+/// element (e.g. `int4`) carries its word directly; a by-reference element
+/// carries the address of its (already-detoasted) image. The element comparison
+/// proc the range body invokes reads exactly that word (`DatumGetX`).
+fn elem_word(d: &Datum<'_>) -> types_datum::datum::Datum {
+    let word = match d {
+        Datum::ByVal(w) => *w,
+        // A by-reference element's word is the address of its image bytes; the
+        // bytes are owned by the caller's lane for the duration of the consistent
+        // call, so the pointer is valid across it.
+        _ => d.as_ref_bytes().as_ptr() as usize,
+    };
+    types_datum::datum::Datum::from_usize(word)
+}
+
+/// Copy a `RangeType` RESULT (a pointer word into `mcx`) off onto the GiST
+/// by-reference key lane as the full varlena image (`Datum::ByRef`), the form a
+/// GiST union / split key takes (`RangeTypePGetDatum`).
+fn range_result_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    r: types_rangetypes::RangeTypeP<'mcx>,
+) -> PgResult<Datum<'mcx>> {
+    // SAFETY: `r.ptr` is a plain `RangeType` varlena the body allocated in `mcx`
+    // (it lives for `'mcx`).
+    let bytes = unsafe {
+        let len = varsize_4b(r.ptr as *const u8);
+        core::slice::from_raw_parts(r.ptr as *const u8, len)
+    };
+    Ok(Datum::ByRef(mcx::slice_in(mcx, bytes)?))
+}
+
+/// Copy a pointer-word `RangeType *` key [`Datum`] (the form the range body
+/// emits via `RangeTypePGetDatum`) onto the GiST by-reference key lane as its
+/// full varlena image (`Datum::ByRef`).
+fn range_word_datum_to_byref<'mcx>(
+    mcx: Mcx<'mcx>,
+    d: &Datum<'mcx>,
+) -> PgResult<Datum<'mcx>> {
+    let r = types_rangetypes::RangeTypeP {
+        ptr: d.as_usize() as *const types_rangetypes::RangeType,
+        _marker: core::marker::PhantomData,
+    };
+    range_result_datum(mcx, r)
+}
+
+/// Rebuild `entryvec` with each entry's key materialized into `mcx` as a
+/// pointer-word `Datum` (the `DatumGetRangeTypeP` form `entry_range` reads).
+/// The range union / picksplit bodies index `entryvec->vector[i].key` and call
+/// `DatumGetRangeTypeP` on the word, so every key must be a live `RangeType *`
+/// address (not the on-disk by-reference image the GiST core supplies).
+fn range_entryvec<'mcx>(
+    mcx: Mcx<'mcx>,
+    entryvec: &GistEntryVector<'mcx>,
+) -> PgResult<GistEntryVector<'mcx>> {
+    let mut vector = Vec::with_capacity(entryvec.vector.len());
+    for e in &entryvec.vector {
+        // A null/by-value key (the placeholder slot at index 0 the methods skip,
+        // or a NULL key) has no by-reference image; pass its word through.
+        let key = match &e.key {
+            Datum::ByRef(_) => {
+                let ptr = materialize_varlena(mcx, e.key.as_ref_bytes())?;
+                Datum::from_usize(ptr as usize)
+            }
+            other => other.clone(),
+        };
+        vector.push(GISTENTRY {
+            key,
+            rel: e.rel,
+            page: e.page,
+            offset: e.offset,
+            leafkey: e.leafkey,
+        });
+    }
+    Ok(GistEntryVector {
+        n: entryvec.n,
+        vector,
+    })
+}
+
 fn dispatch_consistent<'mcx>(
     _mcx: Mcx<'mcx>,
     proc_oid: Oid,
@@ -1338,6 +1532,20 @@ fn dispatch_consistent<'mcx>(
             let (matched, recheck) = inet_gist::inet_gist_consistent::call(key, q, strategy, is_leaf)?;
             Ok(GistConsistentResult { matched, recheck })
         }
+        F_RANGE_GIST_CONSISTENT => {
+            let key = range_key_from_entry(_mcx, &entry.key)?;
+            let q = gist_range_query(_mcx, query, _subtype)?;
+            let (matched, recheck) =
+                range_gist::range_gist_consistent(_mcx, is_leaf, key, &q, strategy, _subtype)?;
+            Ok(GistConsistentResult { matched, recheck })
+        }
+        F_MULTIRANGE_GIST_CONSISTENT => {
+            let key = range_key_from_entry(_mcx, &entry.key)?;
+            let q = gist_range_query(_mcx, query, _subtype)?;
+            let (matched, recheck) =
+                range_gist::multirange_gist_consistent(_mcx, is_leaf, key, &q, strategy, _subtype)?;
+            Ok(GistConsistentResult { matched, recheck })
+        }
         _ => Err(unrecognized_proc(proc_oid)),
     }
 }
@@ -1354,6 +1562,11 @@ fn dispatch_union<'mcx>(
             let keys = inet_keys_from_vec(entryvec);
             let u = inet_gist::inet_gist_union::call(keys);
             inet_key_datum(mcx, &u)
+        }
+        F_RANGE_GIST_UNION => {
+            let evec = range_entryvec(mcx, entryvec)?;
+            let r = range_gist::range_gist_union(mcx, &evec)?;
+            range_result_datum(mcx, r)
         }
         _ => Err(unrecognized_proc(proc_oid)),
     }
@@ -1392,6 +1605,33 @@ fn dispatch_compress<'mcx>(
         }
         F_GIST_POLY_COMPRESS => gist_poly_compress(mcx, entry),
         F_GIST_CIRCLE_COMPRESS => gist_circle_compress(mcx, entry),
+        F_MULTIRANGE_GIST_COMPRESS => {
+            // multirange_gist_compress: a leaf multirange is approximated by its
+            // union range; an inner entry passes through unchanged. The leaf key
+            // arrives as the on-disk MultirangeType by-reference image, which the
+            // body reads as `DatumGetMultirangeTypeP(entry->key)`.
+            if entry.leafkey {
+                let mr = multirange_from_datum(mcx, &entry.key)?;
+                let staged = GISTENTRY {
+                    key: Datum::from_usize(0),
+                    rel: entry.rel,
+                    page: entry.page,
+                    offset: entry.offset,
+                    leafkey: entry.leafkey,
+                };
+                let out = range_gist::multirange_gist_compress(mcx, &staged, mr)?;
+                // The body packed the union RangeType as a pointer-word key; copy
+                // its varlena image onto the by-reference key lane.
+                let r = types_rangetypes::RangeTypeP {
+                    ptr: out.key.as_usize() as *const types_rangetypes::RangeType,
+                    _marker: core::marker::PhantomData,
+                };
+                let key = range_result_datum(mcx, r)?;
+                let retval = gistentryinit(key, out.rel, out.page, out.offset, out.leafkey);
+                return mcx::alloc_in(mcx, retval);
+            }
+            mcx::alloc_in(mcx, entry.clone())
+        }
         // The box opclass has no compress proc (gistproc.c: "we store boxes as
         // boxes ... so we do not need compress").
         _ => Err(unrecognized_proc(proc_oid)),
@@ -1424,6 +1664,11 @@ fn dispatch_penalty<'mcx>(
             let new_ = GistInetKey::from_datum_bytes(newentry.key.as_ref_bytes());
             Ok(inet_gist::inet_gist_penalty::call(orig, new_))
         }
+        F_RANGE_GIST_PENALTY => {
+            let orig = range_key_from_entry(_mcx, &origentry.key)?;
+            let new_ = range_key_from_entry(_mcx, &newentry.key)?;
+            range_gist::range_gist_penalty(_mcx, orig, new_)
+        }
         _ => Err(unrecognized_proc(proc_oid)),
     }
 }
@@ -1448,6 +1693,26 @@ fn dispatch_picksplit<'mcx>(
             splitvec.spl_rdatum_exists = false;
             Ok(())
         }
+        F_RANGE_GIST_PICKSPLIT => {
+            let evec = range_entryvec(mcx, entryvec)?;
+            let sv = range_gist::range_gist_picksplit(mcx, &evec)?;
+            splitvec.spl_left = sv.spl_left;
+            splitvec.spl_right = sv.spl_right;
+            // The body packed the per-group union keys as pointer-word
+            // `RangeType *`; copy their varlena images onto the by-reference key
+            // lane (the form the GiST core's split machinery consumes).
+            splitvec.spl_ldatum = match sv.spl_ldatum {
+                Some(d) => Some(range_word_datum_to_byref(mcx, &d)?),
+                None => None,
+            };
+            splitvec.spl_ldatum_exists = sv.spl_ldatum_exists;
+            splitvec.spl_rdatum = match sv.spl_rdatum {
+                Some(d) => Some(range_word_datum_to_byref(mcx, &d)?),
+                None => None,
+            };
+            splitvec.spl_rdatum_exists = sv.spl_rdatum_exists;
+            Ok(())
+        }
         _ => Err(unrecognized_proc(proc_oid)),
     }
 }
@@ -1465,6 +1730,11 @@ fn dispatch_same<'mcx>(
             let left = GistInetKey::from_datum_bytes(a.as_ref_bytes());
             let right = GistInetKey::from_datum_bytes(b.as_ref_bytes());
             Ok(inet_gist::inet_gist_same::call(left, right))
+        }
+        F_RANGE_GIST_SAME => {
+            let r1 = range_key_from_entry(_mcx, a)?;
+            let r2 = range_key_from_entry(_mcx, b)?;
+            range_gist::range_gist_same(r1, r2)
         }
         _ => Err(unrecognized_proc(proc_oid)),
     }
@@ -1554,6 +1824,17 @@ fn dispatch_sortsupport<'mcx>(
                     gist_bbox_zorder_cmp_datum,
                 );
             }
+            Ok(())
+        }
+        F_RANGE_GIST_SORTSUPPORT => {
+            // range_sortsupport (rangetypes.c:1297): `ssup->comparator =
+            // range_fast_cmp;` — no abbreviation. Install the range comparator
+            // through the substrate seam (the GiST sorted build sorts leaf keys
+            // with it).
+            gist_sortsupport_seams::install_gist_sortsupport_comparator::call(
+                ssup,
+                range_gist::range_fast_cmp,
+            );
             Ok(())
         }
         _ => Err(unrecognized_proc(proc_oid)),

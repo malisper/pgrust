@@ -1233,10 +1233,12 @@ dependencies = [
 name = "backend-access-gist-proc"
 version = "0.0.0"
 dependencies = [
+ "allocator-api2",
  "backend-access-gist-dispatch-seams",
  "backend-access-gist-proc-seams",
  "backend-utils-adt-geo-ops-seams",
  "backend-utils-adt-network-gist-seams",
+ "backend-utils-adt-rangetypes-gist",
  "backend-utils-fmgr-core",
  "mcx",
  "seam-core",
@@ -1246,6 +1248,7 @@ dependencies = [
  "types-fmgr",
  "types-gist",
  "types-network",
+ "types-rangetypes",
  "types-sortsupport",
  "types-tuple",
 ]
@@ -20313,11 +20316,13 @@ dependencies = [
  "backend-utils-adt-float",
  "backend-utils-adt-multirangetypes",
  "backend-utils-adt-rangetypes",
+ "backend-utils-fmgr-core",
  "mcx",
  "types-cache",
  "types-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
  "types-gist",
  "types-rangetypes",
  "types-tuple",
@@ -24274,6 +24279,7 @@ dependencies = [
  "backend-utils-adt-quote",
  "backend-utils-adt-range-selfuncs",
  "backend-utils-adt-rangetypes",
+ "backend-utils-adt-rangetypes-gist",
  "backend-utils-adt-rangetypes-typanalyze",
  "backend-utils-adt-regexp",
  "backend-utils-adt-ri-triggers",

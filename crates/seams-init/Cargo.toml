@@ -517,6 +517,7 @@ backend-utils-adt-range-selfuncs = { path = "../backend-utils-adt-range-selfuncs
 backend-utils-adt-selfuncs = { path = "../backend-utils-adt-selfuncs" }
 backend-utils-adt-version = { path = "../backend-utils-adt-version" }
 backend-utils-adt-rangetypes = { path = "../backend-utils-adt-rangetypes" }
+backend-utils-adt-rangetypes-gist = { path = "../backend-utils-adt-rangetypes-gist" }
 backend-utils-adt-rangetypes-typanalyze = { path = "../backend-utils-adt-rangetypes-typanalyze" }
 backend-utils-adt-regexp = { path = "../backend-utils-adt-regexp" }
 backend-utils-adt-scalar-datum-core = { path = "../backend-utils-adt-scalar-datum-core" }
