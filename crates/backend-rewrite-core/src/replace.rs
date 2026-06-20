@@ -456,7 +456,7 @@ pub fn map_variable_attnos_expr_list<'mcx>(
         // Wrap each list element as a Node::Expr, map it in place (mirroring the
         // C in-place per-element rewrite under the `T_List` mutator arm), and
         // collect it back. found_whole_row is OR-accumulated across the list.
-        let mut node = Node::mk_expr(mcx, owned);
+        let mut node = Node::mk_expr(mcx, owned)?;
         let mut one_fwr = false;
         map_variable_attnos(&mut node, 1, 0, attmap, INVALID_OID, &mut one_fwr)?;
         found_whole_row |= one_fwr;
@@ -576,7 +576,7 @@ pub fn ReplaceVarFromTargetList<'mcx>(
             let mut newnode: Expr = tle.expr.as_deref().expect("tle->expr set").clone();
 
             // Check for a PARAM_MULTIEXPR Param and throw error if so.
-            if contains_multiexpr_param(&Node::mk_expr(mcx, newnode.clone())) {
+            if contains_multiexpr_param(&Node::mk_expr(mcx, newnode.clone())?) {
                 return Err(feature_not_supported(
                     "NEW variables in ON UPDATE rules cannot reference columns that are part of a multiple assignment in the subject UPDATE command",
                 ));
@@ -589,7 +589,7 @@ pub fn ReplaceVarFromTargetList<'mcx>(
                         "variable returning old/new found outside RETURNING list",
                     ));
                 }
-                let mut wrapped = Node::mk_expr(mcx, newnode);
+                let mut wrapped = Node::mk_expr(mcx, newnode)?;
                 crate::increment::SetVarReturningType(
                     &mut wrapped,
                     result_relation,
@@ -690,7 +690,7 @@ pub fn ReplaceVarsFromTargetList<'mcx>(
             mcx,
         )?;
         if var.varlevelsup > 0 {
-            let mut wrapped = Node::mk_expr(mcx, newexpr);
+            let mut wrapped = Node::mk_expr(mcx, newexpr)?;
             crate::increment::IncrementVarSublevelsUp(&mut wrapped, var.varlevelsup as i32, 0)?;
             node_into_expr(wrapped)
         } else {

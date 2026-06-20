@@ -151,7 +151,7 @@ pub fn AddQual<'mcx>(
     let combined = make_and_qual(existing, Some(copy_expr));
     jointree.quals = match combined {
         None => None,
-        Some(e) => Some(node_box(Node::mk_expr(mcx, e), mcx)?),
+        Some(e) => Some(node_box(Node::mk_expr(mcx, e)?, mcx)?),
     };
 
     /*
@@ -215,7 +215,7 @@ pub fn AddInvertedQual<'mcx>(
     });
 
     // AddQual(parsetree, (Node *) invqual);
-    let invnode = node_box(Node::mk_expr(mcx, invqual), mcx)?;
+    let invnode = node_box(Node::mk_expr(mcx, invqual)?, mcx)?;
     AddQual(parsetree, Some(&invnode), mcx)
 }
 
