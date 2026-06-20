@@ -22,13 +22,15 @@ use types_nodes::portalcmds::{
     DeclareCursorStmt, FetchStmt, ParamListInfo, ParseState, Query, CURSOR_OPT_HOLD,
     CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL,
 };
-use types_nodes::parsestmt::DestReceiverHandle;
+use types_nodes::nodes::{CmdType, Node};
+use types_nodes::parsestmt::{DestReceiverHandle, ParseState as CanonParseState};
 use types_portal::{
     CommandTag, FetchDirection, Portal, QueryCompletion, CMDTAG_FETCH, CMDTAG_MOVE, PORTAL_FAILED,
     PORTAL_ONE_SELECT, PORTAL_READY,
 };
 use types_snapshot::SnapshotData;
 
+use backend_access_common_tupdesc_seams as tupdesc;
 use backend_access_transam_xact_seams as xact;
 use backend_executor_execMain_seams as executor;
 use backend_nodes_queryjumble_seams as queryjumble;
@@ -57,16 +59,19 @@ pub fn init_seams() {
 
     // The `tcop/utility.c` dispatch (backend-tcop-utility) routes the portal /
     // cursor verbs and the FETCH returns-tuples predicate through its own
-    // outward seams. CLOSE and the FETCH returns-tuples predicate operate on
-    // the shared `Portal` only, so install their real arms here. (DECLARE
-    // CURSOR / FETCH are keystone-blocked: `PerformCursorOpen` /
-    // `PerformPortalFetch` are built on the trimmed `portalcmds::Query` model,
-    // which is *incompatible* (per its own doc comment) with the canonical
-    // `copy_query::Query` carried by the raw parse tree at dispatch time — the
-    // jumble/rewrite/plan seams they call expect the trimmed model. Bridging
-    // the two Query models is out of scope for a seam install.)
+    // outward seams. All four are installed here over the *canonical*
+    // `copy_query::Query` carried by the raw parse tree at dispatch time:
+    // `PerformCursorOpen` / `PerformPortalFetch` decode the canonical
+    // `Node<'mcx>` into the cursor/fetch fields and plan via the canonical
+    // `query_rewrite_canonical` + `pg_plan_queries_value` seams (the same value
+    // entries the simple-Query / plancache pipeline uses), so the trimmed
+    // `portalcmds::Query` legacy path (and its uninstalled jumble/rewrite/plan
+    // seams) is bypassed entirely on the dispatch spine.
+    backend_tcop_utility_out_seams::perform_cursor_open::set(perform_cursor_open_canon_arm);
+    backend_tcop_utility_out_seams::perform_portal_fetch::set(perform_portal_fetch_canon_arm);
     backend_tcop_utility_out_seams::perform_portal_close::set(perform_portal_close_seam);
     backend_tcop_utility_out_seams::fetch_stmt_portal_tupdesc::set(fetch_stmt_portal_tupdesc_arm);
+    backend_tcop_utility_out_seams::fetch_stmt_result_desc::set(fetch_stmt_result_desc_arm);
 }
 
 /// `UtilityReturnsTuples` FETCH leg — `GetPortalByName(name)->tupDesc != NULL`.
@@ -82,6 +87,38 @@ fn fetch_stmt_portal_tupdesc_arm(parsetree: &types_nodes::nodes::Node) -> bool {
     match portalmem::get_portal_by_name::call(name) {
         Ok(Some(portal)) => portal.borrow().tupDesc.is_some(),
         _ => false,
+    }
+}
+
+/// `UtilityTupleDescriptor` FETCH leg —
+/// `CreateTupleDescCopy(GetPortalByName(name)->tupDesc)` (utility.c:2186). MOVE
+/// has no result descriptor (`None`); an invalid portal folds to `None`.
+fn fetch_stmt_result_desc_arm<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> types_tuple::heaptuple::TupleDesc<'mcx> {
+    let Some(fstmt) = stmt.as_fetchstmt() else {
+        panic!("fetch_stmt_result_desc: parse tree is not a FetchStmt");
+    };
+    // MOVE returns no tuples → no descriptor (the returns.rs predicate already
+    // gates `ismove`, but mirror the C `if (stmt->ismove) return NULL;`).
+    if fstmt.ismove {
+        return None;
+    }
+    let Some(name) = fstmt.portalname.as_deref() else {
+        return None;
+    };
+    // portal = GetPortalByName(name); if (!PortalIsValid(portal)) return NULL;
+    // return CreateTupleDescCopy(portal->tupDesc);
+    let portal = match portalmem::get_portal_by_name::call(name) {
+        Ok(Some(p)) => p,
+        _ => return None,
+    };
+    let p = portal.borrow();
+    let src = p.tupDesc.as_ref()?;
+    match tupdesc::create_tupledesc_copy::call(mcx, src) {
+        Ok(copy) => Some(copy),
+        Err(_) => None,
     }
 }
 
@@ -104,6 +141,215 @@ fn perform_portal_fetch_seam(
 }
 fn perform_portal_close_seam(name: Option<&str>) -> PgResult<()> {
     PerformPortalClose(name)
+}
+
+// ===========================================================================
+// Canonical dispatch bridge — DECLARE CURSOR / FETCH over the canonical
+// `Node<'mcx>` / `copy_query::Query<'mcx>` carried by the raw parse tree.
+//
+// `tcop/utility.c` hands the cursor verbs the canonical arena-lifetimed
+// `Node<'mcx>` (not the trimmed `portalcmds::Query`). These arms decode the
+// node's cursor/fetch fields and drive `PerformCursorOpen` / `PerformPortalFetch`
+// directly off the canonical query, planning via the canonical
+// `query_rewrite_canonical` + `pg_plan_queries_value` value seams (the same
+// entries `exec_simple_query` / plancache use). This is the Query-model bridge
+// the seam-install note used to defer: the canonical Query *is* the model the
+// rest of the plan/exec pipeline now consumes, so DECLARE CURSOR / FETCH plan
+// the real query tree end-to-end rather than the empty trimmed `QueryPayload`.
+// ===========================================================================
+
+/// Dispatch arm for `T_DeclareCursorStmt` — decode the canonical `Node` and run
+/// the canonical `PerformCursorOpen`.
+fn perform_cursor_open_canon_arm<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    pstate: &mut CanonParseState<'mcx>,
+    cstmt: &Node<'mcx>,
+    params: ParamListInfo,
+    is_top_level: bool,
+) -> PgResult<()> {
+    let Some(stmt) = cstmt.as_declarecursorstmt() else {
+        panic!("perform_cursor_open: parse tree is not a DeclareCursorStmt");
+    };
+    PerformCursorOpenCanonical(mcx, pstate, stmt, params, is_top_level)
+}
+
+/// Dispatch arm for `T_FetchStmt` — decode the canonical `Node` and run the
+/// canonical `PerformPortalFetch`.
+fn perform_portal_fetch_canon_arm<'mcx>(
+    _mcx: mcx::Mcx<'mcx>,
+    stmt: &Node<'mcx>,
+    dest: DestReceiverHandle,
+    qc: Option<&mut QueryCompletion>,
+) -> PgResult<()> {
+    let Some(fstmt) = stmt.as_fetchstmt() else {
+        panic!("perform_portal_fetch: parse tree is not a FetchStmt");
+    };
+    // The canonical `FetchStmt<'mcx>` and the runtime `PerformPortalFetch` agree
+    // field-for-field (direction / howMany / portalname / ismove); reuse the
+    // existing driver by projecting the canonical node into the trimmed
+    // `FetchStmt` it consumes (all four fields are plain scalars / an owned
+    // name copy — no query tree is involved in FETCH).
+    let trimmed = FetchStmt {
+        direction: map_canon_fetch_direction(fstmt.direction),
+        howMany: fstmt.how_many,
+        portalname: fstmt.portalname.as_ref().map(|s| s.as_str().into()),
+        ismove: fstmt.ismove,
+    };
+    PerformPortalFetch(&trimmed, dest, qc)
+}
+
+/// Map the canonical (ddlnodes) `FetchDirection` onto the trimmed-model
+/// `FetchDirection` the [`FetchStmt`] driver consumes. The two are the same
+/// underlying enum (`crate::ddlnodes::FetchDirection`, re-exported by both
+/// modules), so this is the identity — written explicitly to document the
+/// crossing.
+fn map_canon_fetch_direction(
+    d: types_nodes::ddlnodes::FetchDirection,
+) -> types_nodes::portalcmds::FetchDirection {
+    d
+}
+
+/// `PerformCursorOpen` over the canonical `copy_query::Query<'mcx>` carried by
+/// the raw parse tree (portalcmds.c lines 40-164). Mirrors [`PerformCursorOpen`]
+/// but plans through the canonical value rewrite/plan seams instead of the
+/// trimmed-Query legacy seams.
+pub fn PerformCursorOpenCanonical<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    pstate: &CanonParseState<'mcx>,
+    cstmt: &types_nodes::ddlnodes::DeclareCursorStmt<'mcx>,
+    params: ParamListInfo,
+    is_top_level: bool,
+) -> PgResult<()> {
+    // Query *query = castNode(Query, cstmt->query);
+    let query_node = cstmt
+        .query
+        .as_ref()
+        .expect("PerformCursorOpen: DeclareCursorStmt->query is NULL");
+    let query = query_node
+        .as_query()
+        .expect("PerformCursorOpen: cstmt->query is not a Query node")
+        .clone_in(mcx)?;
+
+    let portalname = cstmt.portalname.as_ref().map(|s| s.as_str());
+    let options = cstmt.options;
+
+    // Disallow empty-string cursor name (conflicts with protocol-level unnamed
+    // portal).
+    if portalname.is_none_or(str::is_empty) {
+        return Err(PgError::new(ERROR, "invalid cursor name: must not be empty")
+            .with_sqlstate(ERRCODE_INVALID_CURSOR_NAME));
+    }
+    let portalname = portalname.unwrap();
+
+    // If this is a non-holdable cursor, we require that this statement has been
+    // executed inside a transaction block (or else, it would have no
+    // user-visible effect).
+    if (options & CURSOR_OPT_HOLD) == 0 {
+        xact::require_transaction_block::call(is_top_level, "DECLARE CURSOR")?;
+    } else if miscinit::in_security_restricted_operation::call() {
+        return Err(PgError::new(
+            ERROR,
+            "cannot create a cursor WITH HOLD within security-restricted operation",
+        )
+        .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE));
+    }
+
+    let p_sourcetext = pstate
+        .p_sourcetext
+        .as_ref()
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+
+    // Query contained by DeclareCursor needs to be jumbled if requested.
+    //   if (IsQueryIdEnabled()) jstate = JumbleQuery(query);
+    //   if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query, jstate);
+    //
+    // queryId jumbling is unported (queryId stays 0, jstate NULL) and the
+    // post_parse_analyze_hook is NULL by default, so both C `if` guards fall
+    // through — identical no-op handling to createas.c's `jumble_and_post_analyze`
+    // and analyze.c's `run_post_parse_analyze_hook` (which the rest of the parse
+    // pipeline relies on). The cursor query was already jumbled/hooked when it
+    // was parse-analyzed as a sub-statement; re-running them here is only
+    // observable under `compute_query_id`/an extension hook — a deferred leg
+    // (DESIGN_DEBT: canonical jumble/hook for DECLARE CURSOR, gated on the
+    // unported queryjumble body + a value-typed post-parse-analyze runner).
+
+    // Parse analysis was done already, but we still have to run the rule
+    // rewriter. We do not do AcquireRewriteLocks: we assume the query either
+    // came straight from the parser, or suitable locks were acquired by
+    // plancache.c.
+    //   rewritten = QueryRewrite(query);
+    let mut rewritten = rewrite::query_rewrite_canonical::call(mcx, query)?;
+
+    // SELECT should never rewrite to more or less than one query.
+    if rewritten.len() != 1 {
+        return Err(PgError::new(ERROR, "non-SELECT statement in DECLARE CURSOR"));
+    }
+
+    // query = linitial_node(Query, rewritten);
+    let query = rewritten.pop().unwrap();
+
+    // if (query->commandType != CMD_SELECT)
+    if query.commandType != CmdType::CMD_SELECT {
+        return Err(PgError::new(ERROR, "non-SELECT statement in DECLARE CURSOR"));
+    }
+
+    // Plan the query, applying the specified options.
+    //   plan = pg_plan_query(query, pstate->p_sourcetext, cstmt->options, params);
+    let mut plans = postgres::pg_plan_queries_value::call(
+        mcx,
+        core::slice::from_ref(&query),
+        &p_sourcetext,
+        options,
+        params.clone(),
+    )?;
+    debug_assert_eq!(plans.len(), 1);
+    let plan = plans.pop().expect("pg_plan_queries_value yielded no plan");
+
+    // The scroll decision below inspects `plan->rowMarks`/`plan->planTree`.
+    let plan_row_marks_nil = plan.rowMarks.is_none();
+    let plan_supports_backward = executor::exec_supports_backward_scan::call(&plan)?;
+
+    // Create a portal and copy the plan and query string into its memory.
+    let portal = portalmem::create_portal::call(portalname, false, false)?;
+
+    //    PortalDefineQuery(portal, NULL, queryString, CMDTAG_SELECT,
+    //                      list_make1(plan), NULL);  /* always a SELECT */
+    portalmem::portal_define_query_select::call(&portal, &p_sourcetext, plan)?;
+
+    // Also copy the outer portal's parameter list into the inner portal's
+    // memory context.
+    //   params = copyParamList(params);
+    let params = portalmem::copy_param_list_into_portal::call(&portal, params)?;
+
+    // Set up options for portal.
+    //   portal->cursorOptions = cstmt->options;
+    {
+        let mut p = portal.borrow_mut();
+        p.cursorOptions = options;
+    }
+    let cursor_options = portal.borrow().cursorOptions;
+    if (cursor_options & (CURSOR_OPT_SCROLL | CURSOR_OPT_NO_SCROLL)) == 0 {
+        // plan->rowMarks == NIL && ExecSupportsBackwardScan(plan->planTree)
+        let mut p = portal.borrow_mut();
+        if plan_row_marks_nil && plan_supports_backward {
+            p.cursorOptions |= CURSOR_OPT_SCROLL;
+        } else {
+            p.cursorOptions |= CURSOR_OPT_NO_SCROLL;
+        }
+    }
+
+    // Start execution, inserting parameters if any.
+    //   PortalStart(portal, params, 0, GetActiveSnapshot());
+    let active_snapshot = snapmgr::get_active_snapshot::call()?;
+    pquery::portal_start::call(&portal, params, 0, active_snapshot)?;
+
+    // Assert(portal->strategy == PORTAL_ONE_SELECT);
+    debug_assert_eq!(portal.borrow().strategy, PORTAL_ONE_SELECT);
+
+    // We're done; the query won't actually be run until PerformPortalFetch is
+    // called.
+    Ok(())
 }
 
 // ===========================================================================

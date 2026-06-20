@@ -21,16 +21,21 @@
 //! catalog readers, globals.c's `work_mem`, tcop/postgres.c's interrupt check)
 //! go through those owners' seam crates and panic until the owners land.
 //!
-//! The fmgr `FunctionCallInvoke` / `FunctionCall5Coll` dispatch crosses the
-//! value-based `function_call_invoke` seam (fmgr-seams): the transfn /
-//! invtransfn / finalfn bodies and the two RANGE in_range comparison sites all
-//! gather their arguments into a `NullableDatum` call frame and invoke by
-//! `fn_oid` under the relevant collation. Only the expanded-datum primitives
-//! (`MakeExpandedObjectReadOnly` of a pass-by-ref value / `datumCopy` reparent /
-//! `DeleteExpandedObject` / `pfree` of a Datum) have no owner in this repo yet,
-//! so the pass-by-reference transition/result copy-free stanzas still panic
-//! loudly (mirror-PG-and-panic). All the surrounding control flow is real
-//! in-crate code.
+//! The fmgr `FunctionCallInvoke` dispatch for the aggregate transition /
+//! inverse-transition / final functions crosses the owned by-value
+//! `function_call_invoke_datum_owned` seam (fmgr-seams): args are moved in by
+//! value (so a `Datum::Internal` running state — `internal`-transtype moving
+//! aggregates like `sum`/`avg`/`stddev` over numeric — rides the fcinfo side
+//! channel and survives), invoked by `fn_oid` under the window collation. The
+//! pass-by-reference transition/result reparent is the nodeAgg
+//! `ExecAggCopyTransValue` analogue [`window_copy_trans_value`]: a by-ref new
+//! value distinct from the prior pointer is `datumCopy`'d (via the datum.c seam)
+//! into the agg's working memory; `MakeExpandedObjectReadOnly` is the identity
+//! for the non-expanded Datums these aggregates carry, and `pfree` of a prior
+//! by-ref value is the arena's drop. The two RANGE in_range comparison sites
+//! still gather a `NullableDatum` frame through the value-based
+//! `function_call_invoke` seam (by-value bool result). All surrounding control
+//! flow is real in-crate code.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -49,6 +54,7 @@ use backend_executor_execUtils_seams as execUtils;
 use backend_tcop_postgres_seams as tcop_postgres;
 use backend_nodes_nodeFuncs_seams as nodeFuncs;
 use backend_utils_adt_datum_seams as datum_seams;
+use backend_utils_adt_datum_seams as datum;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_fmgr_fmgr_seams as fmgr;
 use backend_utils_init_small_seams as globals;
@@ -124,7 +130,11 @@ pub fn init_seams() {}
 
 /// `initialize_windowaggregate` — parallel to `initialize_aggregates` in
 /// nodeAgg.c.
-fn initialize_windowaggregate(winstate: &mut WindowAggState<'_>, peraggno: usize) {
+fn initialize_windowaggregate<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    peraggno: usize,
+    estate: &mut EStateData<'mcx>,
+) {
     // If we're using a private aggcontext, we may reset it here. But if the
     // context is shared, we don't know which other aggregates may still need
     // it, so we must leave it to the caller to reset at an appropriate time.
@@ -140,27 +150,33 @@ fn initialize_windowaggregate(winstate: &mut WindowAggState<'_>, peraggno: usize
             .reset();
     }
 
-    let pa = peragg_mut(winstate, peraggno);
-    if pa.initValueIsNull {
+    let pa = peragg_ref(winstate, peraggno);
+    let trans_value = if pa.initValueIsNull {
         //   peraggstate->transValue = peraggstate->initValue;
-        pa.transValue = pa.initValue.clone_in_word();
+        pa.initValue.clone()
+    } else if pa.transtypeByVal {
+        pa.initValue.clone()
     } else {
         // oldContext = MemoryContextSwitchTo(peraggstate->aggcontext);
         // peraggstate->transValue = datumCopy(peraggstate->initValue,
         //                                     transtypeByVal, transtypeLen);
         // MemoryContextSwitchTo(oldContext);
-        if pa.transtypeByVal {
-            pa.transValue = pa.initValue.clone_in_word();
-        } else {
-            panic!(
-                "backend-executor-nodeWindowAgg::initialize_windowaggregate: \
-                 datumCopy of a pass-by-reference aggregate initial value into the \
-                 private aggcontext has no owner (the by-reference datum-arena/copy \
-                 primitive is unported); no seam exists yet"
-            );
-        }
-    }
+        //
+        // By-reference initial value (e.g. an int8[]/numeric) deep-copied into
+        // the agg's working memory (materialized into the per-query context;
+        // see window_copy_trans_value). `unwrap` of the seam Result: a datumCopy
+        // of an already-materialized initial value cannot fail; surface a panic
+        // rather than swallow (this is an infallible init helper).
+        datum::datum_copy_v::call(
+            estate.es_query_cxt,
+            &pa.initValue,
+            pa.transtypeByVal,
+            pa.transtypeLen as i32,
+        )
+        .expect("initialize_windowaggregate: datumCopy of aggregate initial value failed")
+    };
     let pa = peragg_mut(winstate, peraggno);
+    pa.transValue = trans_value;
     pa.transValueIsNull = pa.initValueIsNull;
     pa.transValueCount = 0;
     pa.resultValue = Datum::null();
@@ -227,20 +243,23 @@ fn advance_windowaggregate<'mcx>(
         let pa = peragg_ref(winstate, peraggno);
         if pa.transValueCount == 0 && pa.transValueIsNull {
             // peraggstate->transValue = datumCopy(fcinfo->args[1].value, byval, len)
-            if pa.transtypeByVal {
-                let v = argvals[0].0.clone_in_word();
-                let pa = peragg_mut(winstate, peraggno);
-                pa.transValue = v;
-                pa.transValueIsNull = false;
-                pa.transValueCount = 1;
+            let v = if pa.transtypeByVal {
+                argvals[0].0.clone()
             } else {
-                panic!(
-                    "backend-executor-nodeWindowAgg::advance_windowaggregate: \
-                     datumCopy of a pass-by-reference first input into the aggcontext \
-                     has no owner (by-reference datum-arena/copy primitive unported); \
-                     no seam exists yet"
-                );
-            }
+                // datumCopy of a pass-by-reference first input into the agg's
+                // working context (materialized into the per-query context; see
+                // window_copy_trans_value).
+                datum::datum_copy_v::call(
+                    estate.es_query_cxt,
+                    &argvals[0].0,
+                    pa.transtypeByVal,
+                    pa.transtypeLen as i32,
+                )?
+            };
+            let pa = peragg_mut(winstate, peraggno);
+            pa.transValue = v;
+            pa.transValueIsNull = false;
+            pa.transValueCount = 1;
             return Ok(());
         }
 
@@ -263,19 +282,46 @@ fn advance_windowaggregate<'mcx>(
     //
     // (The curaggcontext push/pop only matters to AggCheckCallContext within
     // the callee; the call frame carries no aggcontext, so it is a no-op here.)
-    let pa = peragg_ref(winstate, peraggno);
-    let fn_oid = pa.transfn.fn_oid;
     let collation = perfunc_ref(winstate, perfuncno).winCollation;
+    let mcx = estate.es_query_cxt;
 
-    // fcinfo->args[0] = transValue; fcinfo->args[1..] = the evaluated arguments.
-    let mut args: alloc::vec::Vec<types_datum::NullableDatum> =
-        alloc::vec::Vec::with_capacity(numArguments as usize + 1);
-    args.push(nd(&pa.transValue, pa.transValueIsNull));
-    for i in 0..numArguments as usize {
-        args.push(nd(&argvals[i].0, argvals[i].1));
-    }
-
-    let (newVal, isnull) = fmgr::function_call_invoke::call(fn_oid, collation, &args)?;
+    let (oldVal, oldIsNull, newVal, isnull) = {
+        // fcinfo->args[0] = transValue; fcinfo->args[1..] = evaluated arguments.
+        // The owned by-value seam moves the running state through the fcinfo side
+        // channel (a `Datum::Internal` box for `internal`-transtype aggregates),
+        // so it survives the by-ref/internal cases the bare-word frame cannot.
+        // The `internal` running state cannot be cloned (C passes it by pointer
+        // and the transfn mutates it in place), so MOVE it out of the pergroup and
+        // store the (same) returned box back below.
+        let (fn_oid, fn_expr) = {
+            let pa = peragg_ref(winstate, peraggno);
+            (pa.transfn.fn_oid, pa.transfn.fn_expr.clone())
+        };
+        let pa = peragg_mut(winstate, peraggno);
+        let oldIsNull = pa.transValueIsNull;
+        let trans_value = core::mem::replace(&mut pa.transValue, Datum::null());
+        // Keep a comparison handle for the by-ref reparent fast path: meaningful
+        // only for plain by-ref types (an internal state takes the by-value path
+        // in window_copy_trans_value and is never compared, and cannot be cloned).
+        let oldVal = if trans_value.is_internal() {
+            Datum::null()
+        } else {
+            trans_value.clone()
+        };
+        let mut args: alloc::vec::Vec<Datum<'mcx>> =
+            alloc::vec::Vec::with_capacity(numArguments as usize + 1);
+        let mut args_null: alloc::vec::Vec<bool> =
+            alloc::vec::Vec::with_capacity(numArguments as usize + 1);
+        args.push(trans_value);
+        args_null.push(oldIsNull);
+        for i in 0..numArguments as usize {
+            args.push(argvals[i].0.clone());
+            args_null.push(argvals[i].1);
+        }
+        let (newVal, isnull) =
+            fmgr::function_call_invoke_datum_owned::call(mcx, fn_oid, collation, args, args_null, fn_expr)?;
+        (oldVal, oldIsNull, newVal, isnull)
+    };
 
     // Moving-aggregate transition functions must not return null, see
     // advance_windowaggregate_base().
@@ -294,22 +340,55 @@ fn advance_windowaggregate<'mcx>(
     peragg_mut(winstate, peraggno).transValueCount += 1;
 
     // If pass-by-ref datatype, must copy the new value into aggcontext and free
-    // the prior transValue. (See comments for ExecAggCopyTransValue.)
-    if !peragg_ref(winstate, peraggno).transtypeByVal {
-        panic!(
-            "backend-executor-nodeWindowAgg::advance_windowaggregate: \
-             reparenting a pass-by-reference transition value into the aggcontext \
-             (datumCopy / DeleteExpandedObject / pfree of the prior value) has no owner \
-             (by-reference datum-arena / expanded-datum primitives unported); no seam exists yet"
-        );
-    }
+    // the prior transValue. (See comments for ExecAggCopyTransValue.) The owned
+    // arena reclaims the prior value when its context drops; an `internal`
+    // transtype is pass-by-value (it rides `Datum::Internal`) and so takes the
+    // by-value path, exactly as C never datumCopies an internal state.
+    let newVal = window_copy_trans_value(
+        winstate, peraggno, newVal, isnull, oldVal, oldIsNull, mcx,
+    )?;
 
     // peraggstate->transValue = newVal; peraggstate->transValueIsNull = fcinfo->isnull;
     let pa = peragg_mut(winstate, peraggno);
-    pa.transValue = Datum::from_usize(newVal.as_usize());
+    pa.transValue = newVal;
     pa.transValueIsNull = isnull;
     let _ = econtext;
     Ok(())
+}
+
+/// Mirror of nodeAgg's `ExecAggCopyTransValue`: when the transition type is
+/// pass-by-reference and the transfn returned a value distinct from the prior
+/// transValue pointer, copy the new value into the agg's working context (so it
+/// outlives the per-tuple context the transfn ran in) and drop the prior value.
+/// By-value (including `internal`, which is pass-by-value) is verbatim.
+///
+/// C copies into `peraggstate->aggcontext`; the owned model materializes into
+/// the per-query context (`mcx`, a `Datum<'mcx>`) — faithful for the lifetime
+/// of an aggregated frame (the per-partition aggcontext reset is gated with the
+/// expanded-datum free, as in nodeAgg's `datum_copy_into_ecxt` precedent).
+fn window_copy_trans_value<'mcx>(
+    winstate: &mut WindowAggState<'mcx>,
+    peraggno: usize,
+    new_value: Datum<'mcx>,
+    new_value_is_null: bool,
+    old_value: Datum<'mcx>,
+    _old_value_is_null: bool,
+    mcx: mcx::Mcx<'mcx>,
+) -> PgResult<Datum<'mcx>> {
+    let (by_val, len) = {
+        let pa = peragg_ref(winstate, peraggno);
+        (pa.transtypeByVal, pa.transtypeLen)
+    };
+    if by_val || new_value_is_null {
+        return Ok(new_value);
+    }
+    // DatumGetPointer(newVal) != DatumGetPointer(transValue): the owned enum
+    // compares by value image; identical => the transfn returned its own input,
+    // no copy needed.
+    if new_value == old_value {
+        return Ok(new_value);
+    }
+    datum::datum_copy_v::call(mcx, &new_value, by_val, len as i32)
 }
 
 /// `advance_windowaggregate_base` — remove the oldest tuple from an
@@ -376,7 +455,7 @@ fn advance_windowaggregate_base<'mcx>(
     // re-initialize the aggregate instead.
     if peragg_ref(winstate, peraggno).transValueCount == 1 {
         let wfuncno = peragg_ref(winstate, peraggno).wfuncno as usize;
-        initialize_windowaggregate(winstate, peraggno);
+        initialize_windowaggregate(winstate, peraggno, estate);
         let _ = wfuncno;
         return Ok(true);
     }
@@ -390,18 +469,38 @@ fn advance_windowaggregate_base<'mcx>(
     //   winstate->curaggcontext = peraggstate->aggcontext;
     //   newVal = FunctionCallInvoke(fcinfo);
     //   winstate->curaggcontext = NULL;
-    let pa = peragg_ref(winstate, peraggno);
-    let fn_oid = pa.invtransfn.fn_oid;
     let collation = perfunc_ref(winstate, perfuncno).winCollation;
+    let mcx = estate.es_query_cxt;
 
-    let mut args: alloc::vec::Vec<types_datum::NullableDatum> =
-        alloc::vec::Vec::with_capacity(numArguments as usize + 1);
-    args.push(nd(&pa.transValue, pa.transValueIsNull));
-    for i in 0..numArguments as usize {
-        args.push(nd(&argvals[i].0, argvals[i].1));
-    }
-
-    let (newVal, isnull) = fmgr::function_call_invoke::call(fn_oid, collation, &args)?;
+    let (oldVal, oldIsNull, newVal, isnull) = {
+        let (fn_oid, fn_expr) = {
+            let pa = peragg_ref(winstate, peraggno);
+            (pa.invtransfn.fn_oid, pa.invtransfn.fn_expr.clone())
+        };
+        let pa = peragg_mut(winstate, peraggno);
+        let oldIsNull = pa.transValueIsNull;
+        // MOVE the running state out (an `internal` state cannot be cloned); the
+        // (same or new) returned state is stored back below.
+        let trans_value = core::mem::replace(&mut pa.transValue, Datum::null());
+        let oldVal = if trans_value.is_internal() {
+            Datum::null()
+        } else {
+            trans_value.clone()
+        };
+        let mut args: alloc::vec::Vec<Datum<'mcx>> =
+            alloc::vec::Vec::with_capacity(numArguments as usize + 1);
+        let mut args_null: alloc::vec::Vec<bool> =
+            alloc::vec::Vec::with_capacity(numArguments as usize + 1);
+        args.push(trans_value);
+        args_null.push(oldIsNull);
+        for i in 0..numArguments as usize {
+            args.push(argvals[i].0.clone());
+            args_null.push(argvals[i].1);
+        }
+        let (newVal, isnull) =
+            fmgr::function_call_invoke_datum_owned::call(mcx, fn_oid, collation, args, args_null, fn_expr)?;
+        (oldVal, oldIsNull, newVal, isnull)
+    };
 
     // If the function returns NULL, report failure, forcing a restart.
     //   if (fcinfo->isnull) { return false; }
@@ -415,18 +514,13 @@ fn advance_windowaggregate_base<'mcx>(
 
     // If pass-by-ref datatype, must copy the new value into aggcontext and free
     // the prior transValue. (See comments for ExecAggCopyTransValue.)
-    if !peragg_ref(winstate, peraggno).transtypeByVal {
-        panic!(
-            "backend-executor-nodeWindowAgg::advance_windowaggregate_base: \
-             reparenting a pass-by-reference inverse-transition value into the aggcontext \
-             (datumCopy / DeleteExpandedObject / pfree of the prior value) has no owner \
-             (by-reference datum-arena / expanded-datum primitives unported); no seam exists yet"
-        );
-    }
+    let newVal = window_copy_trans_value(
+        winstate, peraggno, newVal, isnull, oldVal, oldIsNull, mcx,
+    )?;
 
     // peraggstate->transValue = newVal; peraggstate->transValueIsNull = fcinfo->isnull;
     let pa = peragg_mut(winstate, peraggno);
-    pa.transValue = Datum::from_usize(newVal.as_usize());
+    pa.transValue = newVal;
     pa.transValueIsNull = isnull;
     let _ = econtext;
     Ok(true)
@@ -436,46 +530,61 @@ fn advance_windowaggregate_base<'mcx>(
 fn finalize_windowaggregate<'mcx>(
     winstate: &mut WindowAggState<'mcx>,
     peraggno: usize,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // oldContext = MemoryContextSwitchTo(ps_ExprContext->ecxt_per_tuple_memory);
+    let mcx = estate.es_query_cxt;
 
     // Apply the agg's finalfn if one is provided, else return transValue.
+    //
+    // `MakeExpandedObjectReadOnly(d, isnull, typlen)` is the identity for a
+    // plain (non-expanded) pass-by-reference Datum; the unified Datum carries no
+    // expanded-object handle, so every `MakeExpandedObjectReadOnly` below is a
+    // pass-through (faithful for the non-expanded values these aggregates use).
     if oid_is_valid(peragg_ref(winstate, peraggno).finalfn_oid) {
         // perfuncstate = &winstate->perfunc[peraggstate->wfuncno].
         let perfuncno = peragg_ref(winstate, peraggno).wfuncno as usize;
-        let pa = peragg_ref(winstate, peraggno);
-        let numFinalArgs = pa.numFinalArgs;
-        let fn_oid = pa.finalfn.fn_oid;
-        let fn_strict = pa.finalfn.fn_strict;
+        let (numFinalArgs, fn_oid, fn_strict, fn_expr) = {
+            let pa = peragg_ref(winstate, peraggno);
+            (pa.numFinalArgs, pa.finalfn.fn_oid, pa.finalfn.fn_strict, pa.finalfn.fn_expr.clone())
+        };
         let collation = perfunc_ref(winstate, perfuncno).winCollation;
 
         // InitFunctionCallInfoData(fcinfo, &peraggstate->finalfn, numFinalArgs,
         //                          perfuncstate->winCollation, ...);
-        // fcinfo->args[0].value = MakeExpandedObjectReadOnly(transValue,
-        //                            transValueIsNull, transtypeLen);
-        // fcinfo->args[0].isnull = transValueIsNull;
-        // anynull = transValueIsNull;
+        // fcinfo->args[0].value = MakeExpandedObjectReadOnly(transValue, ...);
+        // fcinfo->args[0].isnull = transValueIsNull; anynull = transValueIsNull;
         //
-        // For a by-value transition type MakeExpandedObjectReadOnly is a no-op;
-        // a pass-by-reference transValue would need the (unported) expanded-datum
-        // read-only wrapper as finalfn arg0.
-        let pa = peragg_ref(winstate, peraggno);
-        if !pa.transtypeByVal {
-            panic!(
-                "backend-executor-nodeWindowAgg::finalize_windowaggregate: \
-                 MakeExpandedObjectReadOnly of a pass-by-reference transition value as \
-                 finalfn arg0 has no owner (expanded-datum primitive unported); no seam exists yet"
-            );
-        }
-        let mut anynull = pa.transValueIsNull;
-        let mut args: alloc::vec::Vec<types_datum::NullableDatum> =
+        // The owned by-value seam carries an `internal`-transtype arg0 (a
+        // `Datum::Internal` box) through the fcinfo side channel, so an
+        // internal-state aggregate's finalfn (e.g. numeric_avg) gets its state.
+        // That state cannot be cloned, so for the internal case MOVE it out
+        // (C passes the same pointer; the finalfn reads it without freeing). The
+        // owned seam consumes the box; the per-frame result cache means finalize
+        // runs once per distinct frame, and the state is rebuilt on the next
+        // frame head (restart) — faithful for whole-partition and growing frames.
+        let trans_is_null = peragg_ref(winstate, peraggno).transValueIsNull;
+        let mut anynull = trans_is_null;
+        let arg0 = {
+            let pa = peragg_mut(winstate, peraggno);
+            if pa.transValue.is_internal() {
+                core::mem::replace(&mut pa.transValue, Datum::null())
+            } else {
+                pa.transValue.clone()
+            }
+        };
+        let mut args: alloc::vec::Vec<Datum<'mcx>> =
             alloc::vec::Vec::with_capacity(numFinalArgs as usize);
-        args.push(nd(&pa.transValue, pa.transValueIsNull));
+        let mut args_null: alloc::vec::Vec<bool> =
+            alloc::vec::Vec::with_capacity(numFinalArgs as usize);
+        args.push(arg0);
+        args_null.push(trans_is_null);
 
         // Fill any remaining argument positions with nulls.
         //   for (i = 1; i < numFinalArgs; i++) { args[i] = NULL; anynull = true; }
         for _ in 1..numFinalArgs {
-            args.push(types_datum::NullableDatum::null());
+            args.push(Datum::null());
+            args_null.push(true);
             anynull = true;
         }
 
@@ -486,34 +595,20 @@ fn finalize_windowaggregate<'mcx>(
         } else {
             //   winstate->curaggcontext = peraggstate->aggcontext;
             //   res = FunctionCallInvoke(fcinfo);
-            //   winstate->curaggcontext = NULL;
             //   *isnull = fcinfo->isnull;
             //   *result = MakeExpandedObjectReadOnly(res, fcinfo->isnull, resulttypeLen);
-            let (res, isnull) = fmgr::function_call_invoke::call(fn_oid, collation, &args)?;
-            if !peragg_ref(winstate, peraggno).resulttypeByVal {
-                panic!(
-                    "backend-executor-nodeWindowAgg::finalize_windowaggregate: \
-                     MakeExpandedObjectReadOnly of a pass-by-reference finalfn result has \
-                     no owner (expanded-datum primitive unported); no seam exists yet"
-                );
-            }
-            // For a by-value result type MakeExpandedObjectReadOnly is a no-op.
-            Ok((Datum::from_usize(res.as_usize()), isnull))
+            let (res, isnull) = fmgr::function_call_invoke_datum_owned::call(
+                mcx, fn_oid, collation, args, args_null, fn_expr,
+            )?;
+            // MakeExpandedObjectReadOnly is a pass-through for both by-value and
+            // plain by-reference result types.
+            Ok((res, isnull))
         }
     } else {
         // *result = MakeExpandedObjectReadOnly(transValue, transValueIsNull, transtypeLen);
         // *isnull = transValueIsNull;
         let pa = peragg_ref(winstate, peraggno);
-        if pa.transtypeByVal {
-            // For a by-value type MakeExpandedObjectReadOnly is a no-op.
-            Ok((pa.transValue.clone_in_word(), pa.transValueIsNull))
-        } else {
-            panic!(
-                "backend-executor-nodeWindowAgg::finalize_windowaggregate: \
-                 MakeExpandedObjectReadOnly of a pass-by-reference transition value has \
-                 no owner (expanded-datum primitive unported); no seam exists yet"
-            );
-        }
+        Ok((pa.transValue.clone(), pa.transValueIsNull))
     }
 }
 
@@ -563,7 +658,7 @@ fn eval_windowaggregates<'mcx>(
     {
         for i in 0..numaggs {
             let wfuncno = peragg_ref(winstate, i).wfuncno as usize;
-            let value = peragg_ref(winstate, i).resultValue.clone_in_word();
+            let value = peragg_ref(winstate, i).resultValue.clone();
             let isnull = peragg_ref(winstate, i).resultValueIsNull;
             let ec = estate.ecxt_mut(econtext);
             ec.ecxt_aggvalues[wfuncno] = value;
@@ -647,18 +742,11 @@ fn eval_windowaggregates<'mcx>(
         );
 
         if peragg_ref(winstate, i).restart {
-            initialize_windowaggregate(winstate, i);
+            initialize_windowaggregate(winstate, i, estate);
         } else if !peragg_ref(winstate, i).resultValueIsNull {
-            if !peragg_ref(winstate, i).resulttypeByVal {
-                // pfree(DatumGetPointer(peraggstate->resultValue));
-                // (no owner for pfree of a Datum; but by-ref result requires the
-                // unported finalfn anyway — this branch is unreachable in the
-                // by-value-only paths we can execute.)
-                panic!(
-                    "backend-executor-nodeWindowAgg::eval_windowaggregates: \
-                     pfree of a pass-by-reference saved result has no owner; no seam yet"
-                );
-            }
+            // pfree(DatumGetPointer(peraggstate->resultValue)) for a by-ref saved
+            // result: in the owned model the arena reclaims the bytes when its
+            // context drops, so clearing the handle (below) is the faithful free.
             let pa = peragg_mut(winstate, i);
             pa.resultValue = Datum::null();
             pa.resultValueIsNull = true;
@@ -722,26 +810,30 @@ fn eval_windowaggregates<'mcx>(
     debug_assert!(aggregatedupto_nonrestarted <= winstate.aggregatedupto);
 
     // finalize aggregates and fill result/isnull fields.
+    let mcx = estate.es_query_cxt;
     for i in 0..numaggs {
         let wfuncno = peragg_ref(winstate, i).wfuncno as usize;
-        let (result, isnull) = finalize_windowaggregate(winstate, i)?;
+        let (result, isnull) = finalize_windowaggregate(winstate, i, estate)?;
         {
             let ec = estate.ecxt_mut(econtext);
-            ec.ecxt_aggvalues[wfuncno] = result.clone_in_word();
+            ec.ecxt_aggvalues[wfuncno] = result.clone();
             ec.ecxt_aggnulls[wfuncno] = isnull;
         }
 
         // save the result in case next row shares the same frame.
-        if !peragg_ref(winstate, i).resulttypeByVal && !isnull {
-            // peraggstate->resultValue = datumCopy(*result, byval, len);
-            panic!(
-                "backend-executor-nodeWindowAgg::eval_windowaggregates: \
-                 datumCopy of a pass-by-reference finalized result into the aggcontext \
-                 has no owner; no seam yet"
-            );
+        //   if (!peraggstate->resulttypeByVal && !*isnull)
+        //       peraggstate->resultValue = datumCopy(*result, byval, len);
+        //   else peraggstate->resultValue = *result;
+        let result_by_val = peragg_ref(winstate, i).resulttypeByVal;
+        let result_len = peragg_ref(winstate, i).resulttypeLen;
+        let saved = if !result_by_val && !isnull {
+            // datumCopy of the by-ref result into the agg's result storage
+            // (materialized into the per-query context; see window_copy_trans_value).
+            datum::datum_copy_v::call(mcx, &result, result_by_val, result_len as i32)?
         } else {
-            peragg_mut(winstate, i).resultValue = result;
-        }
+            result
+        };
+        peragg_mut(winstate, i).resultValue = saved;
         peragg_mut(winstate, i).resultValueIsNull = isnull;
     }
 

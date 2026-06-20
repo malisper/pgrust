@@ -938,7 +938,26 @@ fn subquery_planner_carried<'mcx>(
     // `SS_process_sublinks` when `hasSubLinks`, `flatten_group_exprs` /
     // `expand_grouping_sets` for grouping queries) panic precisely inside the
     // helpers, exactly where the C performs them.
-    {
+    //
+    // FRAME-BLOAT: this ~860-line expression-preprocessing block holds a large
+    // union of branch-local temporaries (owned `Expr`s, cloned `Query` nodes,
+    // per-clause `PgBox`es). In an unoptimized (dev) build the compiler reserves
+    // stack for every local in the enclosing function at once, so inlining this
+    // block into `subquery_planner_carried` makes its single frame ~260 KB —
+    // the dominant per-statement stack cost (it sits on every query's path,
+    // including `SELECT 1`). Hoisting it behind an `#[inline(never)]` boundary
+    // gives it its own frame that is released before `grouping_planner` runs, so
+    // peak stack becomes max(preprocess, grouping) instead of their sum. This is
+    // purely a stack-layout change; the body and its control flow (including the
+    // `return Err(..)` early exits, which now return from the helper and are
+    // propagated by `?`) are unchanged. Mirrors C, where preprocessing lives in
+    // its own callee frames.
+    #[inline(never)]
+    fn preprocess_query_expressions<'mcx>(
+        mcx: Mcx<'mcx>,
+        run: &mut PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+    ) -> PgResult<()> {
         // When the query has join RTEs, `preprocess_expression` must flatten
         // join-alias Vars first (C:1274-1279, via flatten_join_alias_vars). That
         // seam reads the outer Query's range table (root->parse) for the
@@ -964,7 +983,7 @@ fn subquery_planner_carried<'mcx>(
                     Some(b) => Some(mcx::PgBox::into_inner(b)),
                     None => None,
                 };
-                let processed = preprocess_expression(mcx, &mut root, run, outer_query_ref, e, EXPRKIND_TARGET)?;
+                let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_TARGET)?;
                 run.resolve_mut(root.parse).targetList[i].expr = match processed {
                     Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                     None => None,
@@ -994,7 +1013,7 @@ fn subquery_planner_carried<'mcx>(
                     Some(b) => Some(mcx::PgBox::into_inner(b)),
                     None => None,
                 };
-                let processed = preprocess_expression(mcx, &mut root, run, outer_query_ref, e, EXPRKIND_TARGET)?;
+                let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_TARGET)?;
                 run.resolve_mut(root.parse).returningList[i].expr = match processed {
                     Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                     None => None,
@@ -1003,13 +1022,13 @@ fn subquery_planner_carried<'mcx>(
         }
 
         // preprocess_qual_conditions(root, (Node *) parse->jointree) (C:922).
-        preprocess_qual_conditions_query(mcx, &mut root, outer_query_ref, run)?;
+        preprocess_qual_conditions_query(mcx, &mut *root, outer_query_ref, run)?;
 
         // parse->havingQual = preprocess_expression(..., EXPRKIND_QUAL) (C:924).
         {
             let h = run.resolve_mut(root.parse).havingQual.take();
             let h = h.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &mut root, run, outer_query_ref, h, EXPRKIND_QUAL)?;
+            let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, h, EXPRKIND_QUAL)?;
             run.resolve_mut(root.parse).havingQual = match processed {
                 Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                 None => None,
@@ -1025,13 +1044,13 @@ fn subquery_planner_carried<'mcx>(
                 // wc->startOffset = preprocess_expression(startOffset, EXPRKIND_LIMIT).
                 let start = extract_windowclause_offset(run, &root, i, true);
                 let processed =
-                    preprocess_expression(mcx, &mut root, run, outer_query_ref, start, EXPRKIND_LIMIT)?;
+                    preprocess_expression(mcx, &mut *root, run, outer_query_ref, start, EXPRKIND_LIMIT)?;
                 set_windowclause_offset(mcx, run, &root, i, true, processed)?;
 
                 // wc->endOffset = preprocess_expression(endOffset, EXPRKIND_LIMIT).
                 let end = extract_windowclause_offset(run, &root, i, false);
                 let processed =
-                    preprocess_expression(mcx, &mut root, run, outer_query_ref, end, EXPRKIND_LIMIT)?;
+                    preprocess_expression(mcx, &mut *root, run, outer_query_ref, end, EXPRKIND_LIMIT)?;
                 set_windowclause_offset(mcx, run, &root, i, false, processed)?;
             }
         }
@@ -1041,7 +1060,7 @@ fn subquery_planner_carried<'mcx>(
         {
             let lo = run.resolve_mut(root.parse).limitOffset.take();
             let lo = lo.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &mut root, run, outer_query_ref, lo, EXPRKIND_LIMIT)?;
+            let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, lo, EXPRKIND_LIMIT)?;
             run.resolve_mut(root.parse).limitOffset = match processed {
                 Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                 None => None,
@@ -1050,7 +1069,7 @@ fn subquery_planner_carried<'mcx>(
         {
             let lc = run.resolve_mut(root.parse).limitCount.take();
             let lc = lc.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &mut root, run, outer_query_ref, lc, EXPRKIND_LIMIT)?;
+            let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, lc, EXPRKIND_LIMIT)?;
             run.resolve_mut(root.parse).limitCount = match processed {
                 Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                 None => None,
@@ -1071,7 +1090,7 @@ fn subquery_planner_carried<'mcx>(
             for i in 0..n {
                 let e = take_onconflict_list_expr(run, &root, OcList::ArbiterElems, i);
                 let processed = preprocess_expression(
-                    mcx, &mut root, run, outer_query_ref, e, EXPRKIND_ARBITER_ELEM,
+                    mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_ARBITER_ELEM,
                 )?;
                 set_onconflict_list_expr(mcx, run, &root, OcList::ArbiterElems, i, processed)?;
             }
@@ -1080,7 +1099,7 @@ fn subquery_planner_carried<'mcx>(
             {
                 let w = take_onconflict_scalar(run, &root, OcScalar::ArbiterWhere);
                 let processed =
-                    preprocess_expression(mcx, &mut root, run, outer_query_ref, w, EXPRKIND_QUAL)?;
+                    preprocess_expression(mcx, &mut *root, run, outer_query_ref, w, EXPRKIND_QUAL)?;
                 set_onconflict_scalar(mcx, run, &root, OcScalar::ArbiterWhere, processed)?;
             }
 
@@ -1095,7 +1114,7 @@ fn subquery_planner_carried<'mcx>(
             for i in 0..n {
                 let e = take_onconflict_list_expr(run, &root, OcList::OnConflictSet, i);
                 let processed = preprocess_expression(
-                    mcx, &mut root, run, outer_query_ref, e, EXPRKIND_TARGET,
+                    mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_TARGET,
                 )?;
                 set_onconflict_list_expr(mcx, run, &root, OcList::OnConflictSet, i, processed)?;
             }
@@ -1104,7 +1123,7 @@ fn subquery_planner_carried<'mcx>(
             {
                 let w = take_onconflict_scalar(run, &root, OcScalar::OnConflictWhere);
                 let processed =
-                    preprocess_expression(mcx, &mut root, run, outer_query_ref, w, EXPRKIND_QUAL)?;
+                    preprocess_expression(mcx, &mut *root, run, outer_query_ref, w, EXPRKIND_QUAL)?;
                 set_onconflict_scalar(mcx, run, &root, OcScalar::OnConflictWhere, processed)?;
             }
             // exclRelTlist contains only Vars, so no preprocessing needed.
@@ -1137,7 +1156,7 @@ fn subquery_planner_carried<'mcx>(
                             .map(mcx::PgBox::into_inner)
                     };
                     let processed = preprocess_expression(
-                        mcx, &mut root, run, outer_query_ref, e, EXPRKIND_TARGET,
+                        mcx, &mut *root, run, outer_query_ref, e, EXPRKIND_TARGET,
                     )?;
                     let processed = match processed {
                         Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
@@ -1163,7 +1182,7 @@ fn subquery_planner_carried<'mcx>(
                         .and_then(|node| node.into_expr())
                 };
                 let processed =
-                    preprocess_expression(mcx, &mut root, run, outer_query_ref, q, EXPRKIND_QUAL)?;
+                    preprocess_expression(mcx, &mut *root, run, outer_query_ref, q, EXPRKIND_QUAL)?;
                 let action = run.resolve_mut(root.parse).mergeActionList[ai]
                     .as_mergeaction_mut()
                     .unwrap();
@@ -1179,7 +1198,7 @@ fn subquery_planner_carried<'mcx>(
         {
             let c = run.resolve_mut(root.parse).mergeJoinCondition.take();
             let c = c.map(mcx::PgBox::into_inner);
-            let processed = preprocess_expression(mcx, &mut root, run, outer_query_ref, c, EXPRKIND_QUAL)?;
+            let processed = preprocess_expression(mcx, &mut *root, run, outer_query_ref, c, EXPRKIND_QUAL)?;
             run.resolve_mut(root.parse).mergeJoinCondition = match processed {
                 Some(pe) => Some(mcx::alloc_in(mcx, pe)?),
                 None => None,
@@ -1193,7 +1212,7 @@ fn subquery_planner_carried<'mcx>(
         // other field is scalar). In the owned model `translated_vars` is a
         // `Vec<NodeId>` of arena `Expr`s, so process each translated Var in
         // place: take it out of the node arena (resolving the borrow against
-        // `&mut root`, as the processed_tlist aggref block does), run
+        // `&mut *root`, as the processed_tlist aggref block does), run
         // `preprocess_expression` with EXPRKIND_APPINFO, and write it back.
         {
             // Snapshot (appinfo index, var slot index, NodeId) for every
@@ -1212,7 +1231,7 @@ fn subquery_planner_carried<'mcx>(
                 let live = root.node(id).clone_in(mcx)?;
                 let processed = preprocess_expression(
                     mcx,
-                    &mut root,
+                    &mut *root,
                     run,
                     outer_query_ref,
                     Some(live),
@@ -1290,7 +1309,7 @@ fn subquery_planner_carried<'mcx>(
                             for e in args.into_iter() {
                                 let pe = preprocess_expression(
                                     mcx,
-                                    &mut root,
+                                    &mut *root,
                                     run,
                                     outer_query_ref,
                                     Some(e),
@@ -1310,7 +1329,7 @@ fn subquery_planner_carried<'mcx>(
                                     Some(e) => {
                                         let pe = preprocess_expression(
                                             mcx,
-                                            &mut root,
+                                            &mut *root,
                                             run,
                                             outer_query_ref,
                                             Some(e),
@@ -1397,7 +1416,7 @@ fn subquery_planner_carried<'mcx>(
                             let mut new_cols: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
                                 mcx::vec_with_capacity_in(mcx, row_exprs.len())?;
                             for e in row_exprs.into_iter() {
-                                let pe = preprocess_expression(mcx, &mut root, run, outer_query_ref, Some(e), kind)?;
+                                let pe = preprocess_expression(mcx, &mut *root, run, outer_query_ref, Some(e), kind)?;
                                 let pe = pe.ok_or_else(|| {
                                     types_error::PgError::error(
                                         "subquery_planner: VALUES column folded to NULL",
@@ -1430,7 +1449,7 @@ fn subquery_planner_carried<'mcx>(
                             };
                             let pe = preprocess_expression(
                                 mcx,
-                                &mut root,
+                                &mut *root,
                                 run,
                                 outer_query_ref,
                                 Some(e),
@@ -1483,7 +1502,7 @@ fn subquery_planner_carried<'mcx>(
                             if let Some(e) = fe {
                                 let pe = preprocess_expression(
                                     mcx,
-                                    &mut root,
+                                    &mut *root,
                                     run,
                                     outer_query_ref,
                                     Some(e),
@@ -1566,7 +1585,7 @@ fn subquery_planner_carried<'mcx>(
                 if let Some(e) = expr_opt {
                     let node = Node::mk_expr(mcx, e)?;
                     let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
-                        mcx, &mut root, &ctx_query, node,
+                        mcx, &mut *root, &ctx_query, node,
                     )?;
                     if let Some(ne) = flattened.into_expr() {
                         run.resolve_mut(root.parse).targetList[t].expr =
@@ -1583,7 +1602,7 @@ fn subquery_planner_carried<'mcx>(
             if let Some(e) = having_opt {
                 let node = Node::mk_expr(mcx, e)?;
                 let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
-                    mcx, &mut root, &ctx_query, node,
+                    mcx, &mut *root, &ctx_query, node,
                 )?;
                 if let Some(ne) = flattened.into_expr() {
                     run.resolve_mut(root.parse).havingQual = Some(mcx::alloc_in(mcx, ne)?);
@@ -1719,7 +1738,7 @@ fn subquery_planner_carried<'mcx>(
                     // preprocess fully and move it to WHERE.
                     let whereclause = preprocess_expression(
                         mcx,
-                        &mut root,
+                        &mut *root,
                         run,
                         outer_query_ref,
                         Some(havingclause),
@@ -1739,7 +1758,7 @@ fn subquery_planner_carried<'mcx>(
                     let copy = havingclause.clone_in(mcx)?;
                     let whereclause = preprocess_expression(
                         mcx,
-                        &mut root,
+                        &mut *root,
                         run,
                         outer_query_ref,
                         Some(copy),
@@ -1800,7 +1819,9 @@ fn subquery_planner_carried<'mcx>(
                 }
             }
         }
+        Ok(())
     }
+    preprocess_query_expressions(mcx, run, &mut root)?;
 
     // reduce_outer_joins / remove_useless_result_rtes (C:1206-1216):
     {

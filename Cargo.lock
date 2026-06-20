@@ -7584,6 +7584,7 @@ dependencies = [
 name = "backend-commands-portalcmds"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-tupdesc-seams",
  "backend-access-transam-xact-seams",
  "backend-commands-portalcmds-seams",
  "backend-executor-execMain-seams",
@@ -7608,6 +7609,7 @@ dependencies = [
  "types-portal",
  "types-scan",
  "types-snapshot",
+ "types-tuple",
 ]
 
 [[package]]
@@ -18197,15 +18199,27 @@ name = "backend-test-regress"
 version = "0.0.0"
 dependencies = [
  "backend-catalog-catalog",
+ "backend-common-relpath",
  "backend-parser-coerce-seams",
+ "backend-utils-adt-arrayfuncs",
  "backend-utils-adt-geo-ops",
+ "backend-utils-error-elog-seams",
  "backend-utils-fmgr-dfmgr-seams",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-mb-mbutils",
+ "backend-utils-mb-mbutils-seams",
+ "backend-utils-misc-superuser-seams",
  "common-extra-encnames-fgram",
  "common-path-seams",
+ "common-wchar",
+ "mcx",
  "types-core",
  "types-datum",
  "types-error",
  "types-fmgr",
+ "types-tuple",
+ "types-wchar",
 ]
 
 [[package]]

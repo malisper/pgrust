@@ -1430,10 +1430,12 @@ fn boxed_mcx_expr_as<'a>(b: &'a mcx::PgBox<'static, Expr>) -> &'a Expr {
 /// node.
 ///
 /// Mirrors the C "copy this node, mutate sub-nodes" structure for the modeled
-/// `Expr` variants. The SubPlan/AlternativeSubPlan children are context-
-/// allocated (`PgBox`/`PgVec`) and a mutator that wants to change them must
-/// recognize the node itself; the generic mutator returns those links unchanged
-/// (the C behavior of "simply copy the link to the inner plan").
+/// `Expr` variants. For SubPlan/AlternativeSubPlan, C mutates the `testexpr`
+/// and `args` (the correlation/param-setting expressions) while copying the
+/// inner `Plan` link as-is; the context-allocated (`PgBox`/`PgVec`) children are
+/// mutated in place here (the arena allocation is reused), matching that C
+/// behavior. Failing to mutate `args` leaves a correlation Var with its
+/// base-relation varno, which execExpr later miscompiles as an `EEOP_SCAN_VAR`.
 pub fn expression_tree_mutator<F>(mut node: Expr, mutator: &mut F) -> Expr
 where
     F: FnMut(Expr) -> Expr,
@@ -1458,6 +1460,26 @@ where
                 .into_iter()
                 .map(|e| e.map(|inner| mutator(inner)))
                 .collect();
+        }};
+    }
+    // Mutate an `Option<PgBox<Expr>>` (SubPlan.testexpr) in place: the arena
+    // allocation is reused; only the inner `Expr` is swapped out, mutated, and
+    // written back.
+    macro_rules! mut_pgbox_opt {
+        ($child:expr) => {{
+            if let Some(b) = $child.as_mut() {
+                let old = core::mem::replace(&mut **b, Expr::Const(Const::default()));
+                **b = mutator(old);
+            }
+        }};
+    }
+    // Mutate each element of a `PgVec<PgBox<Expr>>` (SubPlan.args) in place.
+    macro_rules! mut_pgvec_box {
+        ($list:expr) => {{
+            for b in $list.iter_mut() {
+                let old = core::mem::replace(&mut **b, Expr::Const(Const::default()));
+                **b = mutator(old);
+            }
         }};
     }
 
@@ -1497,8 +1519,31 @@ where
         Expr::ScalarArrayOpExpr(s) => mut_vec!(s.args),
         Expr::BoolExpr(b) => mut_vec!(b.args),
         Expr::SubLink(s) => mut_box!(s.testexpr),
-        Expr::SubPlan(_) | Expr::AlternativeSubPlan(_) => {
-            // context-allocated subplan; link copied unchanged (C behavior)
+        Expr::SubPlan(sp) => {
+            // C (expression_tree_mutator, T_SubPlan):
+            //   MUTATE(newnode->testexpr, subplan->testexpr, Node *);
+            //   MUTATE(newnode->args, subplan->args, List *);
+            //   /* but not the sub-Plan itself, which is referenced as-is */
+            // The testexpr / args carry correlation Vars (e.g. setrefs.c
+            // fix_join_expr rewriting a parParam-setting Var into an
+            // OUTER_VAR/INNER_VAR); they MUST be mutated, or the args Var keeps
+            // its base-relation varno and execExpr later compiles it as an
+            // EEOP_SCAN_VAR whose econtext has no scantuple under a join.
+            //
+            // The children are context-allocated (`PgBox`/`PgVec`), so rather
+            // than re-boxing into a (here-unavailable) arena we mutate each in
+            // place: pull the inner `Expr` out of its existing allocation, run
+            // the mutator, and write the replacement back into the same slot.
+            mut_pgbox_opt!(sp.0.testexpr);
+            mut_pgvec_box!(sp.0.args);
+        }
+        Expr::AlternativeSubPlan(asp) => {
+            // C treats AlternativeSubPlan like SubPlan: each contained SubPlan's
+            // testexpr/args are mutated, the sub-Plan link copied as-is.
+            for sub in asp.0.subplans.iter_mut() {
+                mut_pgbox_opt!(sub.testexpr);
+                mut_pgvec_box!(sub.args);
+            }
         }
         Expr::FieldSelect(f) => mut_box!(f.arg),
         Expr::FieldStore(f) => {

@@ -19,3 +19,15 @@ backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-utils-adt-geo-ops = { path = "../backend-utils-adt-geo-ops" }
 common-extra-encnames-fgram = { path = "../common-extra-encnames-fgram" }
 common-path-seams = { path = "../common-path-seams" }
+backend-common-relpath = { path = "../backend-common-relpath" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-utils-error-elog-seams = { path = "../backend-utils-error-elog-seams" }
+backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
+mcx = { path = "../mcx" }
+types-tuple = { path = "../types-tuple" }
+types-wchar = { path = "../types-wchar" }
+common-wchar = { path = "../common-wchar" }
+backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }
+backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }

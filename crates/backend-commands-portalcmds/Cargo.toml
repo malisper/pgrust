@@ -17,8 +17,10 @@ types-nodes = { path = "../types-nodes" }
 types-portal = { path = "../types-portal" }
 types-scan = { path = "../types-scan" }
 types-snapshot = { path = "../types-snapshot" }
+types-tuple = { path = "../types-tuple" }
 
 backend-commands-portalcmds-seams = { path = "../backend-commands-portalcmds-seams" }
+backend-access-common-tupdesc-seams = { path = "../backend-access-common-tupdesc-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
 backend-executor-tstorereceiver-seams = { path = "../backend-executor-tstorereceiver-seams" }
