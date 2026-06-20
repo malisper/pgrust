@@ -1907,10 +1907,13 @@ fn process_owned_by<'mcx>(
 
         /* Open and lock rel to ensure it won't go away meanwhile */
         let rv = backend_catalog_namespace_seams::make_range_var_from_name_list::call(&relname)?;
-        // relation_openrv(rel, AccessShareLock): resolve the RangeVar and open.
-        let trelid =
-            backend_catalog_namespace_seams::range_var_get_relid::call(mcx, &rv, AccessShareLock, false)?;
-        let trel = backend_access_table_table_seams::table_open::call(mcx, trelid, NoLock)?;
+        // tablerel = relation_openrv(rel, AccessShareLock): resolve the RangeVar
+        // and open *any* relkind (C uses relation_openrv, not table_openrv) so
+        // the wrong-relkind check below fires with the proper message/detail
+        // (e.g. an index gets "sequence cannot be owned by relation ..." +
+        // "This operation is not supported for indexes.", not "cannot open").
+        let trel = backend_access_common_relation_seams::relation_openrv::call(mcx, &rv, AccessShareLock)?;
+        let trelid = rel_relid(&trel);
 
         /* Must be a regular or foreign table (or view / partitioned table) */
         let relkind = rel_relkind(&trel);
@@ -1919,12 +1922,14 @@ fn process_owned_by<'mcx>(
             || relkind == RELKIND_VIEW
             || relkind == RELKIND_PARTITIONED_TABLE)
         {
+            let detail = backend_catalog_pg_class_seams::errdetail_relkind_not_supported::call(relkind)?;
             return ereport(ERROR)
                 .errcode(ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!(
                     "sequence cannot be owned by relation \"{}\"",
                     rel_name(&trel)
                 ))
+                .errdetail(detail)
                 .finish(here("process_owned_by"));
         }
 
@@ -2100,7 +2105,16 @@ pub fn pg_sequence_parameters<'mcx>(
 ) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
     let relid = backend_utils_fmgr_fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
+    pg_sequence_parameters_core(mcx, relid)
+}
 
+/// The frame-independent core of [`pg_sequence_parameters`]: it reads only the
+/// relation OID from the call, so the native fmgr adapter drives it directly
+/// (the body only used the frame for `PG_GETARG_OID` / the call's `Mcx`).
+pub fn pg_sequence_parameters_core<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<ValueDatum<'mcx>> {
     if backend_catalog_aclchk_seams::pg_class_aclcheck::call(
         relid,
         backend_utils_init_miscinit_seams::get_user_id::call(),
@@ -2152,7 +2166,15 @@ pub fn pg_get_sequence_data<'mcx>(
 ) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
     let relid = backend_utils_fmgr_fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
+    pg_get_sequence_data_core(mcx, relid)
+}
 
+/// The frame-independent core of [`pg_get_sequence_data`] (reads only the
+/// relation OID from the call).
+pub fn pg_get_sequence_data_core<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<ValueDatum<'mcx>> {
     let coltypes = [INT8OID, BOOLOID];
     let mut values = [ValueDatum::from_i64(0), ValueDatum::from_bool(false)];
     let mut isnull = [false; 2];
@@ -2204,6 +2226,24 @@ pub fn pg_sequence_last_value<'mcx>(
 ) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
     let relid = backend_utils_fmgr_fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
+    match pg_sequence_last_value_core(mcx, relid)? {
+        Some(v) => Ok(ValueDatum::from_i64(v)),
+        None => {
+            // C: PG_RETURN_NULL().
+            fcinfo.isnull = true;
+            Ok(ValueDatum::null())
+        }
+    }
+}
+
+/// The frame-independent core of [`pg_sequence_last_value`] (reads only the
+/// relation OID from the call). Returns `None` when the sequence has not been
+/// called (C: `PG_RETURN_NULL()`), carried explicitly so a real `last_value` of
+/// 0 is not mistaken for NULL.
+pub fn pg_sequence_last_value_core<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<Option<i64>> {
     let mut is_called = false;
     let mut result: i64 = 0;
 
@@ -2229,9 +2269,9 @@ pub fn pg_sequence_last_value<'mcx>(
     seqrel.close(NoLock)?;
 
     if is_called {
-        Ok(ValueDatum::from_i64(result))
+        Ok(Some(result))
     } else {
-        Ok(ValueDatum::null())
+        Ok(None)
     }
 }
 

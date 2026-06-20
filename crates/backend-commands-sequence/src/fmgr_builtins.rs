@@ -94,6 +94,72 @@ fn fc_setval3_oid(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResul
     Ok(ret_i64(next))
 }
 
+/// `PG_RETURN_DATUM(HeapTupleGetDatum(tuple))` for the record-returning
+/// sequence-info functions: the value core returns the composite as a
+/// `types_tuple::Datum`; route it onto the fmgr frame's by-reference `Composite`
+/// lane (mirrors `regclass.c`'s `ret_composite_datum`). A `ByVal(0)` is the
+/// core's `Datum::null()` (e.g. the missing-relation path of
+/// `pg_get_sequence_data`), routed to a NULL fmgr result.
+fn ret_composite_datum(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    d: types_tuple::Datum<'_>,
+) -> Datum {
+    use types_fmgr::boundary::RefPayload;
+    match d {
+        types_tuple::Datum::ByRef(bytes) => {
+            fcinfo.set_ref_result(RefPayload::Composite(bytes.as_slice().to_vec()));
+            Datum::from_usize(0)
+        }
+        types_tuple::Datum::Composite(t) => {
+            fcinfo.set_ref_result(RefPayload::Composite(t.to_datum_image()));
+            Datum::from_usize(0)
+        }
+        types_tuple::Datum::ByVal(0) => {
+            fcinfo.set_result_null(true);
+            Datum::from_usize(0)
+        }
+        _ => panic!("sequence fmgr: unexpected Datum arm from composite-returning core"),
+    }
+}
+
+/// `pg_sequence_parameters(PG_FUNCTION_ARGS)` — SQL `pg_sequence_parameters(oid)`.
+fn fc_pg_sequence_parameters(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let relid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let d = crate::pg_sequence_parameters_core(m.mcx(), relid)?;
+    Ok(ret_composite_datum(fcinfo, d))
+}
+
+/// `pg_get_sequence_data(PG_FUNCTION_ARGS)` — SQL `pg_get_sequence_data(regclass)`.
+fn fc_pg_get_sequence_data(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let relid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    let d = crate::pg_get_sequence_data_core(m.mcx(), relid)?;
+    Ok(ret_composite_datum(fcinfo, d))
+}
+
+/// `pg_sequence_last_value(PG_FUNCTION_ARGS)` — SQL `pg_sequence_last_value(regclass)`.
+/// Returns int8 by value, or NULL when the sequence has not been called.
+fn fc_pg_sequence_last_value(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let relid = arg_oid(fcinfo, 0);
+    let m = scratch_mcx();
+    // The core returns `None` for the not-yet-called case (C: `PG_RETURN_NULL()`),
+    // carried explicitly so a real last_value of 0 isn't mistaken for NULL.
+    match crate::pg_sequence_last_value_core(m.mcx(), relid)? {
+        Some(v) => Ok(ret_i64(v)),
+        None => {
+            fcinfo.set_result_null(true);
+            Ok(Datum::from_usize(0))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
@@ -127,5 +193,8 @@ pub fn register_sequence_builtins() {
         builtin(1576, "setval_oid", 2, true, false, fc_setval_oid),
         builtin(1765, "setval3_oid", 3, true, false, fc_setval3_oid),
         builtin(2559, "lastval", 0, true, false, fc_lastval),
+        builtin(3078, "pg_sequence_parameters", 1, true, false, fc_pg_sequence_parameters),
+        builtin(4032, "pg_sequence_last_value", 1, true, false, fc_pg_sequence_last_value),
+        builtin(6427, "pg_get_sequence_data", 1, true, false, fc_pg_get_sequence_data),
     ]);
 }

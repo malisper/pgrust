@@ -7911,6 +7911,7 @@ dependencies = [
  "backend-catalog-dependency-seams",
  "backend-catalog-indexing-seams",
  "backend-catalog-namespace-seams",
+ "backend-catalog-pg-class-seams",
  "backend-catalog-pg-depend-seams",
  "backend-catalog-storage-seams",
  "backend-commands-define-seams",
