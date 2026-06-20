@@ -77,6 +77,9 @@ backend-utils-sort-sortsupport-seams = { path = "../backend-utils-sort-sortsuppo
 backend-access-heap-hio-seams = { path = "../backend-access-heap-hio-seams" }
 backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
+backend-utils-adt-rangetypes-typanalyze-seams = { path = "../backend-utils-adt-rangetypes-typanalyze-seams" }
+backend-utils-adt-array-typanalyze-seams = { path = "../backend-utils-adt-array-typanalyze-seams" }
+backend-utils-adt-tsvector-typanalyze-seams = { path = "../backend-utils-adt-tsvector-typanalyze-seams" }
 backend-utils-misc-guc-seams = { path = "../backend-utils-misc-guc-seams" }
 types-datum = { path = "../types-datum" }
 types-cache = { path = "../types-cache" }

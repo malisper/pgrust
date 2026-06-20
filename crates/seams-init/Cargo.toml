@@ -460,6 +460,7 @@ backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 backend-utils-adt-array-selfuncs = { path = "../backend-utils-adt-array-selfuncs" }
 backend-utils-adt-geo-selfuncs = { path = "../backend-utils-adt-geo-selfuncs" }
 backend-utils-adt-array-typanalyze = { path = "../backend-utils-adt-array-typanalyze" }
+backend-utils-adt-tsvector-typanalyze = { path = "../backend-utils-adt-tsvector-typanalyze" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-arrayutils = { path = "../backend-utils-adt-arrayutils" }
 backend-utils-adt-dbsize = { path = "../backend-utils-adt-dbsize" }

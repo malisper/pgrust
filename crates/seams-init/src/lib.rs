@@ -469,6 +469,7 @@ pub fn init_all() {
     backend_utils_adt_array_selfuncs::init_seams();
     backend_utils_adt_geo_selfuncs::init_seams();
     backend_utils_adt_array_typanalyze::init_seams();
+    backend_utils_adt_tsvector_typanalyze::init_seams();
     backend_utils_adt_arrayfuncs::init_seams();
     backend_utils_adt_arrayutils::init_seams();
     backend_utils_adt_dbsize::init_seams();

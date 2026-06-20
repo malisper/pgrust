@@ -680,6 +680,15 @@ fn pglz_decompress_datum_slice<'mcx>(
 
 /// `toast_raw_datum_size` — raw (detoasted) size of a varlena datum, including
 /// the `VARHDRSZ` header.
+/// `VARSIZE_ANY(PTR)` (varatt.h): the total on-the-wire size of any varlena
+/// form (1-byte short, 1-byte external TOAST pointer, or 4-byte header). The
+/// public wrapper over the crate-private [`varsize_any`], exposed for callers
+/// (e.g. `ts_typanalyze`'s `compute_tsvector_stats` width accumulation) that
+/// need the C `VARSIZE_ANY` of a raw datum without detoasting it.
+pub fn pg_varsize_any(value: &[u8]) -> PgResult<usize> {
+    varsize_any(value)
+}
+
 pub fn toast_raw_datum_size(mcx: Mcx<'_>, value: &[u8]) -> PgResult<Size> {
     if varatt_is_external_ondisk(value) {
         // va_rawsize is the size of the original datum -- including header.
@@ -835,6 +844,7 @@ pub fn init_seams() {
     backend_access_common_detoast_seams::toast_datum_size::set(toast_datum_size_seam);
     backend_access_common_detoast_seams::toast_raw_datum_size::set(toast_raw_datum_size_seam);
     backend_access_common_detoast_seams::toast_chunk_id::set(toast_chunk_id);
+    backend_access_common_detoast_seams::pg_varsize_any::set(pg_varsize_any);
 }
 
 #[cfg(test)]
