@@ -720,6 +720,39 @@ thread_local! {
     /// as a `thread_local` [`Cell`], the same idiom procsignal uses for
     /// `MyProcSignalSlot`.
     static PGAIO_MY_BACKEND: Cell<Option<usize>> = const { Cell::new(None) };
+
+    /// The issuer-owned `PgAioReturn` for the most-recently-completed IO this
+    /// backend issued, keyed by the handle's `aio_index`.
+    ///
+    /// In C, `pgaio_io_acquire(resowner, ret)` records the caller's
+    /// `PgAioReturn *ret` (e.g. `&operation->io_return`) on the handle's
+    /// `report_return`; the completion path (`pgaio_io_reclaim`) writes the
+    /// distilled result through that pointer into the caller's own storage,
+    /// which then outlives the handle's recycle. The value-typed model stores
+    /// `report_return` by value on the handle and clears it on recycle, so the
+    /// completed result would be lost to the issuer. This backend-local cell
+    /// mirrors C's issuer-owned slot: `pgaio_io_reclaim` publishes the final
+    /// `PgAioReturn` here (under the same single-handed-out-IO-per-backend
+    /// invariant the engine already enforces), and the buffer-read `wait` seam
+    /// reads it back after `pgaio_wref_wait`. Keyed by `aio_index` so a stale
+    /// entry from a recycled handle is never mistaken for a fresh completion.
+    static PGAIO_LAST_RETURN: Cell<Option<(u32, PgAioReturn)>> = const { Cell::new(None) };
+}
+
+/// Publish the issuer-owned `PgAioReturn` for `aio_index`'s just-completed IO
+/// (`pgaio_io_reclaim` writing through C's `report_return` pointer into the
+/// caller's slot). See [`PGAIO_LAST_RETURN`].
+pub(crate) fn set_pgaio_last_return(aio_index: u32, ret: PgAioReturn) {
+    PGAIO_LAST_RETURN.with(|c| c.set(Some((aio_index, ret))));
+}
+
+/// Read back the issuer-owned `PgAioReturn` published for `aio_index`, or `None`
+/// if no completion has been recorded for that handle. See [`PGAIO_LAST_RETURN`].
+pub(crate) fn take_pgaio_last_return(aio_index: u32) -> Option<PgAioReturn> {
+    PGAIO_LAST_RETURN.with(|c| match c.get() {
+        Some((idx, ret)) if idx == aio_index => Some(ret),
+        _ => None,
+    })
 }
 
 /// `pgaio_my_backend` accessor returning the per-backend index, or `None` when
@@ -1137,6 +1170,25 @@ pub fn init_seams() {
     backend_storage_aio_core_seams::pgaio_closing_fd::set(aio::pgaio_closing_fd);
     backend_storage_aio_core_seams::pgaio_error_cleanup::set(aio::pgaio_error_cleanup);
 
+    // The buffer manager's explicit multi-block read pipeline AIO handle seams
+    // (bufmgr.c AsyncReadBuffers / WaitReadBuffers). The engine owns the
+    // PgAioHandle lifecycle; the per-buffer page verification + TerminateBufferIO
+    // completion callbacks + the synchronous read syscall live in the buffer
+    // manager (installed there into the aio-completion seams).
+    backend_storage_buffer_bufmgr_seams::pgaio_io_acquire::set(
+        aio_buffer_read::pgaio_io_acquire_for_buffer_read,
+    );
+    backend_storage_buffer_bufmgr_seams::pgaio_register_callbacks::set(
+        aio_buffer_read::pgaio_register_callbacks_for_buffer_read,
+    );
+    backend_storage_buffer_bufmgr_seams::start_read_buffers::set(
+        aio_buffer_read::start_read_buffers_aio,
+    );
+    backend_storage_buffer_bufmgr_seams::wait_read_buffers::set(
+        aio_buffer_read::wait_read_buffers_aio,
+    );
+    backend_storage_buffer_bufmgr_seams::wref_check_done::set(aio_buffer_read::wref_check_done_aio);
+
     // io_method_options[] + the io_method enum variable accessor + assign hook.
     option_sets::io_method_options.install(IO_METHOD_OPTIONS);
     vars::io_method.install(GucVarAccessors {
@@ -1164,6 +1216,7 @@ pub fn init_seams() {
 
 // The AIO engine + its aio-owned satellite source files.
 pub mod aio;
+pub mod aio_buffer_read;
 pub mod aio_callback;
 pub mod aio_funcs;
 pub mod aio_io;

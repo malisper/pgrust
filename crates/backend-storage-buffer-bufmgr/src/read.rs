@@ -1103,18 +1103,26 @@ impl BufferManager {
                 // Track the time spent waiting for the IO to complete. As tracking
                 // a wait even if we don't actually need to wait is not cheap, we
                 // first check if the IO is already complete.
-                if operation.io_status == PGAIO_RS_UNKNOWN
-                    && !sb::wref_check_done::call(operation.io_wref)?
-                {
-                    // pgaio_wref_wait(&operation->io_wref): block until done;
+                if operation.io_status == PGAIO_RS_UNKNOWN {
+                    // pgaio_wref_wait(&operation->io_wref): block until done and
                     // refresh the issuer-owned io_return slot with the result.
+                    //
+                    // C only takes the wait-time instrumentation branch when the
+                    // IO is not yet complete (`!pgaio_wref_check_done`), because
+                    // there the completion has already written the result through
+                    // the issuer's `&operation->io_return` pointer. In the
+                    // value-typed engine the completed result is published into a
+                    // backend-local slot that this seam reads back, so we must
+                    // fetch it here whether or not the IO already finished
+                    // (`pgaio_wref_wait` on an already-complete IO returns
+                    // immediately). The `wref_check_done` probe is retained only
+                    // to gate the (deferred) wait-time accounting.
+                    let _already_done = sb::wref_check_done::call(operation.io_wref)?;
                     let (result, status) = sb::wait_read_buffers::call(operation.io_wref)?;
                     operation.io_result = result;
                     operation.io_status = status;
                     // pgstat_count_io_op_time(... wait-time ...): cnt 0, bytes 0,
                     // deferred (instrumentation only).
-                } else {
-                    debug_assert!(sb::wref_check_done::call(operation.io_wref)?);
                 }
 
                 // We now are sure the IO completed. Check the results (reports on

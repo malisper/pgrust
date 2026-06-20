@@ -105,6 +105,23 @@ pub fn pgaio_io_set_handle_data_32(ioh_index: usize, data: &[u32]) {
     pgaio_io_set_handle_data_64(ioh_index, &widened);
 }
 
+/// The `cb_data` (`callbacks_data[i]`) a callback was registered with. The C
+/// completion dispatch passes `ce->cb_data` to each callback; the value-typed
+/// seam dispatch carries only `(cb_id, ioh_index)`, so the callback owner reads
+/// its own registered `cb_data` back here. Returns the `cb_data` of the first
+/// registered callback matching `cb_id` (each handle registers a given readv
+/// callback at most once), or 0 if not found.
+pub fn pgaio_io_get_callback_data_for(ioh_index: usize, cb_id: u8) -> u8 {
+    let h = ioh(ioh_index);
+    let d = h.data();
+    for i in 0..d.num_callbacks as usize {
+        if d.callbacks[i] == cb_id {
+            return d.callbacks_data[i];
+        }
+    }
+    0
+}
+
 /// `uint64 *pgaio_io_get_handle_data(PgAioHandle *ioh, uint8 *len)`
 /// (aio_callback.c) — copy out the handle's data array.
 pub fn pgaio_io_get_handle_data(ioh_index: usize) -> alloc::vec::Vec<u64> {

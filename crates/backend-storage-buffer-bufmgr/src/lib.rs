@@ -21,6 +21,7 @@
 
 extern crate alloc;
 
+mod buf_aio;
 #[path = "alloc.rs"]
 mod bufalloc;
 mod buf_drop;
@@ -711,6 +712,11 @@ fn smgr_extend_page(
 /// / `incr_buffer_ref_count` / `buffer_is_permanent`). The lock/mark/page seams
 /// arrive in F1c-d.
 pub fn init_seams() {
+    // The AIO buffer-readv completion callbacks + synchronous read syscall this
+    // crate owns (bufmgr.c buffer_readv_complete / buffer_stage_common), installed
+    // into the aio-completion seams the AIO engine dispatches through.
+    buf_aio::init_seams();
+
     backend_storage_buffer_bufmgr_seams::lock_buf_hdr::set(lock_buf_hdr);
     backend_storage_buffer_bufmgr_seams::unlock_buf_hdr::set(unlock_buf_hdr);
     backend_storage_buffer_bufmgr_seams::buf_free_next::set(buf_free_next);
