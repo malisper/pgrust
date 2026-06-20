@@ -12,8 +12,12 @@
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use types_tuple::Datum as DatumV;
 
 use types_core::Oid;
+
+const OIDOID: Oid = 26;
+const INT4OID: Oid = 23;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -59,6 +63,47 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     Datum::from_usize(0)
 }
 
+/// `PG_GETARG_TEXT_PP(i)` → `text_to_cstring`: the detoasted `VARDATA_ANY`
+/// payload of a `text` arg as a UTF-8 `&str`.
+#[inline]
+fn arg_text_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
+    let image = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("objectaddress fn: text arg missing from by-ref lane");
+    let payload = &image[types_datum::varlena::VARHDRSZ..];
+    std::str::from_utf8(payload).expect("objectaddress fn: text arg not valid UTF-8")
+}
+
+/// `PG_GETARG_ARRAYTYPE_P(i)`: the verbatim header-ful on-disk `ArrayType` image
+/// of an array (`text[]`) arg, as the array-deconstruction cores consume it
+/// (they detoast the header-bearing image themselves).
+#[inline]
+fn arg_array_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("objectaddress fn: array arg missing from by-ref lane")
+}
+
+/// Carry a composite-record `Datum` (built by `record_from_values`) onto the
+/// fmgr frame's by-reference `Composite` lane, returning the `(Datum) 0`
+/// placeholder word.
+#[inline]
+fn ret_record(fcinfo: &mut FunctionCallInfoBaseData, built: DatumV<'_>) -> Datum {
+    match built {
+        DatumV::ByRef(bytes) => {
+            fcinfo.set_ref_result(RefPayload::Composite(bytes.as_slice().to_vec()));
+            Datum::from_usize(0)
+        }
+        DatumV::Composite(t) => {
+            fcinfo.set_ref_result(RefPayload::Composite(t.to_datum_image()));
+            Datum::from_usize(0)
+        }
+        _ => panic!("objectaddress record fmgr: record_from_values produced a non-composite Datum"),
+    }
+}
+
 /// A scratch context for cores that allocate their result through `Mcx`.
 fn scratch_mcx() -> mcx::MemoryContext {
     mcx::MemoryContext::new("objectaddress fmgr scratch")
@@ -88,6 +133,41 @@ fn fc_pg_describe_object(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::
         Some(b) => Ok(ret_text(fcinfo, b)),
         None => Ok(ret_null(fcinfo)),
     }
+}
+
+/// `pg_get_object_address(type text, object_names text[], object_args text[])
+/// -> record(classid oid, objid oid, objsubid int4)` (objectaddress.c 2109).
+/// Resolve the name/args to an `ObjectAddress` and return the 3-column record.
+fn fc_pg_get_object_address(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let m = scratch_mcx();
+    // Own-copy the args so the immutable arg borrow is released before forming
+    // the result onto the mutable frame.
+    let type_name = arg_text_str(fcinfo, 0).to_string();
+    let name_arr = arg_array_image(fcinfo, 1).to_vec();
+    let args_arr = arg_array_image(fcinfo, 2).to_vec();
+
+    let addr =
+        crate::fmgr_sql::pg_get_object_address(m.mcx(), &type_name, &name_arr, &args_arr)?;
+
+    // C: values[0]=ObjectIdGetDatum(address.classId);
+    //    values[1]=ObjectIdGetDatum(address.objectId);
+    //    values[2]=Int32GetDatum(address.objectSubId);
+    let coltypes = [OIDOID, OIDOID, INT4OID];
+    let values = [
+        DatumV::from_oid(addr.classId),
+        DatumV::from_oid(addr.objectId),
+        DatumV::from_i32(addr.objectSubId),
+    ];
+    let nulls = [false, false, false];
+    let rec = backend_utils_fmgr_funcapi_seams::record_from_values::call(
+        m.mcx(),
+        &coltypes,
+        &values,
+        &nulls,
+    )?;
+    Ok(ret_record(fcinfo, rec))
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +210,17 @@ pub fn register_objectaddress_builtins() {
             true,
             false,
             fc_pg_describe_object,
+        ),
+        // pg_get_object_address: oid '3954', proargtypes 'text _text _text',
+        // prorettype 'record'; provolatile 's', no proisstrict (=> strict
+        // false), not retset (returns one record, not a set).
+        builtin(
+            3954,
+            "pg_get_object_address",
+            3,
+            false,
+            false,
+            fc_pg_get_object_address,
         ),
     ]);
 }
