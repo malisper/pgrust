@@ -1533,6 +1533,36 @@ pub fn set_before_trigger_result_tuple_impl<'mcx>(
     BEFORE_TRIGGER_RESULT.with(|c| *c.borrow_mut() = Some(v));
 }
 
+/// `return PointerGetDatum(trigdata->tg_trigtuple)` — deposit the trigger's OLD
+/// (`tg_trigtuple`) row, fully formed off the per-call slot side-channel, as the
+/// BEFORE-trigger result.  This is the kernel of `src/test/regress/regress.c`'s
+/// `trigger_return_old`: a C trigger function that returns the unmodified OLD
+/// tuple.  Because a registry-loaded C trigger function returns through the same
+/// [`BEFORE_TRIGGER_RESULT`] channel the PL executor uses (the result `Datum` the
+/// fmgr call returns is the ignored sentinel), it deposits here rather than
+/// lowering a tuple onto the fmgr return lane.
+///
+/// Returns `false` when no trigger slot side-channel is installed or the OLD slot
+/// is empty (the analogue of a NULL `tg_trigtuple`); the caller then mirrors C's
+/// `PointerGetDatum(NULL)` "do nothing".
+pub fn set_before_trigger_result_to_trigtuple() -> bool {
+    CURRENT_TRIGGER_SLOTS.with(|cell| {
+        let b = cell.borrow();
+        let Some(s) = b.as_ref() else {
+            return false;
+        };
+        let Some(trigtuple) = s.trigtuple.as_ref() else {
+            return false;
+        };
+        // The slot tuple already lives 'static in the firing query context (it is
+        // taken back within the same ExecCallTriggerFunc call), so depositing a
+        // clone-free copy is sound.
+        let v = BeforeTriggerResult::Tuple(trigtuple.clone());
+        BEFORE_TRIGGER_RESULT.with(|c| *c.borrow_mut() = Some(v));
+        true
+    })
+}
+
 /// `(HeapTuple) DatumGetPointer(result)` for a BEFORE/INSTEAD-OF row trigger —
 /// take back the row the trigger function deposited on the per-call channel.
 ///

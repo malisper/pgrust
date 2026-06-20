@@ -31,3 +31,8 @@ backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-executor-execUtils = { path = "../backend-executor-execUtils" }
+backend-commands-trigger = { path = "../backend-commands-trigger" }
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
+libc = "0.2"
+port-pgsleep = { path = "../port-pgsleep" }

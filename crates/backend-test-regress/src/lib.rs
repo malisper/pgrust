@@ -1207,6 +1207,219 @@ fn fc_get_environ(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     Datum::from_usize(0)
 }
 
+/* ===========================================================================
+ * overpaid(emp) RETURNS bool  (regress.c)
+ *
+ *   Datum
+ *   overpaid(PG_FUNCTION_ARGS)
+ *   {
+ *       HeapTupleHeader tuple = PG_GETARG_HEAPTUPLEHEADER(0);
+ *       bool        isnull;
+ *       int32       salary;
+ *
+ *       salary = DatumGetInt32(GetAttributeByName(tuple, "salary", &isnull));
+ *       if (isnull)
+ *           PG_RETURN_NULL();
+ *       PG_RETURN_BOOL(salary > 699);
+ *   }
+ * ========================================================================= */
+
+fn fc_overpaid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // PG_GETARG_HEAPTUPLEHEADER(0): the composite/record Datum arrives on the
+    // by-ref Composite lane as the flat HeapTupleHeader Datum image.
+    let image = match fcinfo.ref_arg(0).and_then(|p| p.as_composite()) {
+        Some(b) => b.to_vec(),
+        None => panic!("overpaid: composite arg missing from by-ref lane"),
+    };
+    let m = MemoryContext::new("overpaid scratch");
+    let tuple = match types_tuple::FormedTuple::from_datum_image(m.mcx(), &image) {
+        Ok(t) => t,
+        Err(err) => raise(err),
+    };
+    // salary = DatumGetInt32(GetAttributeByName(tuple, "salary", &isnull));
+    let (value, isnull) =
+        match backend_executor_execUtils::GetAttributeByName(m.mcx(), Some(&tuple), "salary") {
+            Ok(pair) => pair,
+            Err(err) => raise(err),
+        };
+    if isnull {
+        return ret_null(fcinfo);
+    }
+    let salary = value.as_i32();
+    fcinfo.isnull = false;
+    Datum::from_bool(salary > 699)
+}
+
+/* ===========================================================================
+ * trigger_return_old() RETURNS trigger  (regress.c)
+ *
+ *   Datum
+ *   trigger_return_old(PG_FUNCTION_ARGS)
+ *   {
+ *       TriggerData *trigdata = (TriggerData *) fcinfo->context;
+ *       HeapTuple   tuple;
+ *
+ *       if (!CALLED_AS_TRIGGER(fcinfo))
+ *           elog(ERROR, "trigger_return_old: not fired by trigger manager");
+ *
+ *       tuple = trigdata->tg_trigtuple;
+ *       return PointerGetDatum(tuple);
+ *   }
+ *
+ * Returns the OLD/unmodified row the trigger manager handed in, so a BEFORE
+ * trigger leaves the operation's tuple unchanged.  The rich `TriggerData` is
+ * read off the `CURRENT_TRIGGER_DATA` thread-local side-channel the trigger
+ * manager installs around the call (`fcinfo->context` carries only the
+ * `T_TriggerData` demux tag); the returned tuple is lowered onto the by-ref
+ * Composite lane the trigger firing path reads its result tuple from.
+ * ========================================================================= */
+
+fn fc_trigger_return_old(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    // if (!CALLED_AS_TRIGGER(fcinfo)) elog(ERROR, "... not fired by trigger manager");
+    // CALLED_AS_TRIGGER == `fcinfo->context` is a TriggerData node; the trigger
+    // manager installs the rich TriggerData on the per-call side-channel exactly
+    // when that demux tag is stamped, so its presence is the same predicate.
+    let called_as_trigger =
+        backend_commands_trigger::firing::with_current_trigger_data(|td| td.is_some());
+    if !called_as_trigger {
+        raise(PgError::error(
+            "trigger_return_old: not fired by trigger manager",
+        ));
+    }
+
+    // tuple = trigdata->tg_trigtuple; return PointerGetDatum(tuple).
+    //
+    // A registry-loaded C trigger function returns its result row through the
+    // BEFORE-trigger return-tuple channel (the fmgr-returned Datum is the ignored
+    // sentinel), so deposit the OLD tuple there.  A NULL tg_trigtuple mirrors C's
+    // PointerGetDatum(NULL) ("do nothing"): leave the channel as the DoNothing /
+    // empty default, which the firing path decodes as no row change.
+    backend_commands_trigger::firing::set_before_trigger_result_to_trigtuple();
+
+    // The fmgr result is the trigger sentinel; isnull must stay false (the
+    // trigger protocol forbids a SQL-NULL result flag).
+    fcinfo.isnull = false;
+    Datum::from_usize(0)
+}
+
+/* ===========================================================================
+ * wait_pid(int4) RETURNS void  (regress.c)
+ *
+ *   Datum
+ *   wait_pid(PG_FUNCTION_ARGS)
+ *   {
+ *       int pid = PG_GETARG_INT32(0);
+ *       if (!superuser())
+ *           elog(ERROR, "must be superuser to check PID liveness");
+ *       while (kill(pid, 0) == 0)
+ *       {
+ *           CHECK_FOR_INTERRUPTS();
+ *           pg_usleep(50000);
+ *       }
+ *       if (errno != ESRCH)
+ *           elog(ERROR, "could not check PID %d liveness: %m", pid);
+ *       PG_RETURN_VOID();
+ *   }
+ *
+ * Blocks until the given PID exits.  Used by the TAP/isolation harness, not the
+ * core SQL schedule, but declared via `CREATE FUNCTION ... 'wait_pid'`.
+ * ========================================================================= */
+
+fn fc_wait_pid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    let pid = arg_int32(fcinfo, 0);
+
+    // if (!superuser()) elog(ERROR, "must be superuser to check PID liveness");
+    match backend_utils_misc_superuser_seams::superuser::call() {
+        Ok(true) => {}
+        Ok(false) => raise(PgError::error("must be superuser to check PID liveness")),
+        Err(err) => raise(err),
+    }
+
+    // while (kill(pid, 0) == 0) { CHECK_FOR_INTERRUPTS(); pg_usleep(50000); }
+    loop {
+        // SAFETY: kill(pid, 0) only probes for the process's existence /
+        // signalability; signal 0 sends nothing.  errno is read immediately
+        // after, before any other libc call.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if rc != 0 {
+            // Loop ends; classify the failure below.
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            // if (errno != ESRCH) elog(ERROR, "could not check PID %d liveness: %m", pid);
+            if errno != libc::ESRCH {
+                raise(PgError::error(format!(
+                    "could not check PID {pid} liveness: {}",
+                    std::io::Error::from_raw_os_error(errno)
+                )));
+            }
+            break;
+        }
+        // CHECK_FOR_INTERRUPTS();
+        if let Err(err) =
+            backend_access_transam_parallel_rt_seams::check_for_interrupts::call()
+        {
+            raise(err);
+        }
+        // pg_usleep(50000);
+        port_pgsleep::pg_usleep(50000);
+    }
+
+    // PG_RETURN_VOID().
+    fcinfo.isnull = false;
+    Datum::from_usize(0)
+}
+
+/* ===========================================================================
+ * make_tuple_indirect(record) RETURNS record  (regress.c)
+ *
+ * Rewrites each not-null, toastable varlena attribute of the input record into
+ * an *indirect* TOAST pointer (`VARTAG_INDIRECT`) that points at a copy of the
+ * datum living in `TopTransactionContext`, then returns the rebuilt
+ * HeapTupleHeader *without* flattening the indirect pointers (so the
+ * indirect-toast machinery can be exercised downstream).
+ *
+ * UNPORTED — genuinely blocked, not a stub: building a `VARATT_INDIRECT`
+ * datum requires the indirect-TOAST-pointer substrate (`varatt_indirect` /
+ * `SET_VARTAG_EXTERNAL(VARTAG_INDIRECT)` / `INDIRECT_POINTER_SIZE`) plus a
+ * `TopTransactionContext`-lived datum copy and the deliberate non-flattening
+ * return convention.  None of `INDIRECT_POINTER_SIZE`, the indirect-pointer
+ * builder, or a by-Oid `TopTransactionContext` handle are ported (confirmed by
+ * substrate audit).  The symbol still *resolves* (so `CREATE FUNCTION
+ * make_tuple_indirect(record)` validates as in real PG); calling it raises a
+ * precise feature error until the indirect-TOAST substrate lands.
+ * ========================================================================= */
+
+fn fc_make_tuple_indirect(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    raise(PgError::error(
+        "make_tuple_indirect is not supported: indirect-TOAST pointer substrate \
+         (VARATT_INDIRECT / INDIRECT_POINTER_SIZE / TopTransactionContext) is not yet ported",
+    ));
+}
+
+/* ===========================================================================
+ * test_support_func(internal) RETURNS internal  (regress.c)
+ *
+ * A planner-support function: receives a `SupportRequestSelectivity` /
+ * `SupportRequestCost` / `SupportRequestRows` request node by `internal`
+ * pointer, fills in its estimate fields in place, and returns it.
+ *
+ * UNPORTED — genuinely blocked, not a stub: the port decomposes planner-support
+ * into per-Oid kernel function tables (`backend-optimizer-util-clauses`
+ * `support_cost`/`support_rows`/`support_simplify`) rather than passing a
+ * mutable `SupportRequest*` `Node` across the fmgr `internal` lane, so there is
+ * no `SupportRequestSelectivity`/`SupportRequestCost`/`SupportRequestRows`
+ * carrier to receive and mutate here (confirmed by substrate audit).  The
+ * symbol resolves so `CREATE FUNCTION test_support_func(internal)` validates;
+ * invoking it raises a precise feature error until a `SupportRequest*` Node
+ * carrier crosses the fmgr `internal` boundary.
+ * ========================================================================= */
+
+fn fc_test_support_func(_fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    raise(PgError::error(
+        "test_support_func is not supported: planner SupportRequest* node carrier \
+         does not cross the fmgr `internal` lane in this port",
+    ));
+}
+
 /// Resolve a symbol of the `regress` module to its ported `PGFunction` (the
 /// `PG_FUNCTION_INFO_V1`-exposed `(user_fn, api_version=1)` pair). Returns `None`
 /// for an unported / unknown symbol, exactly as the OS loader would fail to find
@@ -1214,6 +1427,11 @@ fn fc_get_environ(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn lookup(function: &str) -> Option<LoadedExternalFunc> {
     let user_fn: PGFunction = match function {
         "binary_coercible" => Some(fc_binary_coercible),
+        "overpaid" => Some(fc_overpaid),
+        "trigger_return_old" => Some(fc_trigger_return_old),
+        "wait_pid" => Some(fc_wait_pid),
+        "make_tuple_indirect" => Some(fc_make_tuple_indirect),
+        "test_support_func" => Some(fc_test_support_func),
         "reverse_name" => Some(fc_reverse_name),
         "int44in" => Some(fc_int44in),
         "int44out" => Some(fc_int44out),
