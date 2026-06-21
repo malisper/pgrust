@@ -3979,8 +3979,23 @@ fn make_group_input_target<'mcx>(
         .map(|&id| *root.sortgroupclause(id))
         .collect();
 
-    // The parser/grouping-sets RT-index removal (parse->hasGroupRTE &&
-    // groupingSets) is gated out on this path (groupingSets loud-panics upstream).
+    // The target is logically below the grouping step. So with grouping sets we
+    // need to remove the RT index of the grouping step (if any) from the target
+    // expressions, otherwise the input Vars carry the group nulling that only
+    // belongs above the grouping step — and the sort built over this input
+    // (whose pathkeys are the un-nulled group_pathkeys) can't find its keys
+    // ("could not find pathkey item to sort"). (planner.c:5560 / :5605.)
+    let strip_group_rtindex = {
+        let parse = run.resolve(root.parse);
+        parse.hasGroupRTE && !parse.groupingSets.is_empty()
+    };
+    let group_singleton: Relids = if strip_group_rtindex {
+        debug_assert!(root.group_rtindex > 0);
+        bms_make_singleton_relids(root.group_rtindex)
+    } else {
+        None
+    };
+
     let mut non_group_cols: Vec<types_pathnodes::NodeId> = Vec::new();
     for (i, &expr_id) in final_target.exprs.iter().enumerate() {
         let sgref = get_pathtarget_sortgroupref(final_target, i);
@@ -3988,8 +4003,20 @@ fn make_group_input_target<'mcx>(
             && !group_clauses.is_empty()
             && get_sortgroupref_clause_noerr(sgref, &group_clauses).is_some();
         if is_group_col {
-            // It's a grouping column; add it to the input target as-is.
-            add_column_to_pathtarget(&mut input_target, expr_id, sgref);
+            // It's a grouping column; add it to the input target. With grouping
+            // sets, strip the grouping step's RT index from the expr first.
+            let col_id = if strip_group_rtindex {
+                let owned = root.node(expr_id).clone_in(mcx)?;
+                let stripped = backend_nodes_nodeFuncs_seams::remove_nulling_relids::call(
+                    owned,
+                    &group_singleton,
+                    &None,
+                );
+                root.alloc_node(stripped)
+            } else {
+                expr_id
+            };
+            add_column_to_pathtarget(&mut input_target, col_id, sgref);
         } else {
             // Non-grouping column; remember the expression for the later
             // pull_var_clause call.
@@ -4029,7 +4056,21 @@ fn make_group_input_target<'mcx>(
         // child (Aggref TargetEntry args).
         let vars = pull_var_clause(mcx, &node, flags)?;
         for v in vars {
-            non_group_var_ids.push(root.alloc_node(v));
+            // The target is logically below the grouping step; with grouping
+            // sets, strip the grouping step's RT index from the pulled Vars too
+            // (C:5605). Otherwise these non-group input Vars carry group nulling
+            // that breaks downstream sort-key matching.
+            let vid = if strip_group_rtindex {
+                let stripped = backend_nodes_nodeFuncs_seams::remove_nulling_relids::call(
+                    v,
+                    &group_singleton,
+                    &None,
+                );
+                root.alloc_node(stripped)
+            } else {
+                root.alloc_node(v)
+            };
+            non_group_var_ids.push(vid);
         }
     }
     add_new_columns_to_pathtarget(root, &mut input_target, &non_group_var_ids);
