@@ -16672,6 +16672,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-statistics-import"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-heaptuple",
+ "backend-access-common-relation-seams",
+ "backend-access-table-table",
+ "backend-access-transam-xact",
+ "backend-access-transam-xlog",
+ "backend-catalog-aclchk",
+ "backend-catalog-aclchk-seams",
+ "backend-catalog-index",
+ "backend-catalog-indexing",
+ "backend-catalog-namespace",
+ "backend-catalog-objectaddress",
+ "backend-catalog-pg-class",
+ "backend-nodes-core",
+ "backend-nodes-nodeFuncs-seams",
+ "backend-storage-lmgr-lmgr-seams",
+ "backend-utils-adt-arrayfuncs",
+ "backend-utils-adt-format-type",
+ "backend-utils-adt-jsonb-seams",
+ "backend-utils-adt-varlena",
+ "backend-utils-cache-lsyscache",
+ "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-core",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-small-seams",
+ "mcx",
+ "types-acl",
+ "types-cache",
+ "types-catalog",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-nodes",
+ "types-rel",
+ "types-statistics",
+ "types-storage",
+ "types-tuple",
+ "types-typcache",
+]
+
+[[package]]
 name = "backend-statistics-mcv"
 version = "0.0.0"
 dependencies = [
@@ -24769,6 +24816,7 @@ dependencies = [
  "backend-statistics-core",
  "backend-statistics-dependencies",
  "backend-statistics-extended-stats",
+ "backend-statistics-import",
  "backend-statistics-mvdistinct",
  "backend-storage-aio-methods",
  "backend-storage-aio-read-stream",

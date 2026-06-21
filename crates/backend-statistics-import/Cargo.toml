@@ -1,0 +1,59 @@
+[package]
+name = "backend-statistics-import"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_statistics_import"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-error = { path = "../types-error" }
+types-statistics = { path = "../types-statistics" }
+types-catalog = { path = "../types-catalog" }
+types-tuple = { path = "../types-tuple" }
+types-rel = { path = "../types-rel" }
+types-nodes = { path = "../types-nodes" }
+types-storage = { path = "../types-storage" }
+types-cache = { path = "../types-cache" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }
+mcx = { path = "../mcx" }
+
+backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+backend-nodes-core = { path = "../backend-nodes-core" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
+
+backend-access-table-table = { path = "../backend-access-table-table" }
+backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-access-transam-xact = { path = "../backend-access-transam-xact" }
+
+backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-catalog-index = { path = "../backend-catalog-index" }
+backend-catalog-indexing = { path = "../backend-catalog-indexing" }
+backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
+backend-catalog-aclchk = { path = "../backend-catalog-aclchk" }
+backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+
+backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
+backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
+backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+backend-utils-adt-jsonb-seams = { path = "../backend-utils-adt-jsonb-seams" }
+backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
+backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
+backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
+
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
+backend-catalog-pg-class = { path = "../backend-catalog-pg-class" }
+types-acl = { path = "../types-acl" }
+types-typcache = { path = "../types-typcache" }
+
+backend-access-transam-xlog = { path = "../backend-access-transam-xlog" }
