@@ -931,12 +931,14 @@ fn bms_overlap(a: &types_pathnodes::Relids, b: &types_pathnodes::Relids) -> bool
     }
 }
 
-/// `get_cheapest_fractional_path(childrel, tuple_fraction)` (pathkeys.c).
+/// `get_cheapest_fractional_path(rel, tuple_fraction)` (planner.c:6617).
 ///
 /// Find the cheapest path (by `compare_fractional_path_costs`) for retrieving
 /// `tuple_fraction` of `rel`'s rows. Mirrors `get_cheapest_fractional_path`:
 /// start from the cheapest-total path and replace it whenever a path is strictly
-/// cheaper for the requested fraction.
+/// cheaper for the requested fraction. Parameterized paths are NOT considered:
+/// the cheapest-total path of an upper rel can't be parameterized, and for an
+/// append subpath callers require an unparameterized result.
 pub(crate) fn get_cheapest_fractional_path(
     root: &PlannerInfo,
     rel: RelId,
@@ -963,6 +965,11 @@ pub(crate) fn get_cheapest_fractional_path(
 
     let cheapest_total = best_path;
     for &path in &root.rel(rel).pathlist {
+        // Do not consider parameterized paths.
+        if root.path(path).base().param_info.is_some() {
+            continue;
+        }
+
         if path == cheapest_total
             || pathnode::compare_fractional_path_costs::call(
                 root,
