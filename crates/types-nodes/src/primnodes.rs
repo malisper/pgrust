@@ -2519,6 +2519,27 @@ pub fn targetentry_into_static(te: TargetEntry<'_>) -> TargetEntry<'static> {
     unsafe { core::mem::transmute(te) }
 }
 
+impl<'mcx> Expr<'mcx> {
+    /// Erase an `Expr<'mcx>`'s lifetime to the planner `node_arena`'s notional
+    /// `'static`. The `node_arena` is an index-handle (`NodeId`) intern table that
+    /// *owns* its nodes for the planner run and is addressed by dense index, not by
+    /// borrow — exactly the `RinfoRef(u32)` handle-space carve-out the Expr-`'mcx`
+    /// campaign excludes from the borrow check. This is the single sanctioned
+    /// arena-intern erasure (sibling of [`targetentry_into_static`]), living here in
+    /// the unsafe-permitting `types-nodes` crate so the `#![forbid(unsafe_code)]`
+    /// `types-pathnodes` arena (`PlannerInfo::alloc_node`) can intern into it.
+    ///
+    /// SAFETY: `Expr<'mcx>` and `Expr<'static>` are the same type up to the
+    /// (invariant) lifetime parameter; the data is fully owned (moved in), so this
+    /// is a lifetime-parameter-only erase. The interning arena outlives no longer
+    /// than the planner run that produced the node, so the notional `'static` is
+    /// never observed as a real `'static` borrow.
+    #[must_use]
+    pub fn erase_lifetime(self) -> Expr<'static> {
+        unsafe { core::mem::transmute::<Expr<'mcx>, Expr<'static>>(self) }
+    }
+}
+
 pub fn query_box_into_static<'b>(
     q: crate::copy_query::Query<'b>,
     mcx: Mcx<'b>,

@@ -3284,9 +3284,17 @@ impl PlannerInfo {
     /// stored in the W0''-added `exprs`/`clause`/… fields, giving every such
     /// field a real backing node that the walking seams can dereference.
     #[inline]
-    pub fn alloc_node(&mut self, node: Expr<'static>) -> NodeId {
+    pub fn alloc_node<'mcx>(&mut self, node: Expr<'mcx>) -> NodeId {
         let id = self.reserve_node_id();
-        self.node_arena.push(ArenaNode::Expr(node));
+        // The `node_arena` is an index-handle (`NodeId`) intern table that *owns*
+        // its interned nodes for the planner run — it is addressed by dense index,
+        // not by borrow, so it is carved out of the Expr-`'mcx` borrow check exactly
+        // like the `RinfoRef(u32)` handle space (campaign plan). Interning moves the
+        // caller's `'mcx`-branded node into the arena's owning storage; the brand is
+        // forgotten here (`Expr::erase_lifetime`, the one sanctioned arena-intern
+        // erasure) because the arena, not Rust's borrow tracker, governs the node's
+        // validity (it lives as long as the `PlannerInfo`).
+        self.node_arena.push(ArenaNode::Expr(node.erase_lifetime()));
         id
     }
 
