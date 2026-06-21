@@ -453,6 +453,46 @@ pub(crate) enum PipeReadLineOutcome {
     Error(i32),
 }
 
+/// `bytesread = fread(databuf, 1, maxread, copy_file)` against a pipe stream at
+/// table `index` (the read side of `OpenPipeStream(command, "r")`, COPY FROM
+/// PROGRAM). Reads up to `maxread` bytes from the child's stdout; mirrors
+/// stdio's `fread`, which returns a short count only at EOF. Returns the bytes
+/// read (an empty `Vec` signals EOF) or the read error's errno.
+pub(crate) fn pipe_read_chunk(index: i32, maxread: usize) -> Result<Vec<u8>, i32> {
+    use std::io::Read;
+    if maxread == 0 {
+        return Ok(Vec::new());
+    }
+    with_fd(|fd| {
+        let i = index as usize;
+        if i >= fd.allocated_descs.len() {
+            return Err(libc::EBADF);
+        }
+        let stdout = match &mut fd.allocated_descs[i].desc {
+            AllocatedHandle::Pipe(pipe) => match pipe.stdout.as_mut() {
+                Some(s) => s,
+                None => return Err(libc::EBADF),
+            },
+            _ => return Err(libc::EBADF),
+        };
+        // fread fills up to `maxread` bytes; a pipe `read(2)` can return fewer
+        // than requested before EOF, which fread papers over only at EOF.
+        // Loop until the buffer is full or the stream signals EOF, so a single
+        // call delivers a full chunk (matching fread's count semantics).
+        let mut out = vec![0u8; maxread];
+        let mut filled = 0usize;
+        while filled < maxread {
+            match stdout.read(&mut out[filled..]) {
+                Ok(0) => break, // EOF
+                Ok(k) => filled += k,
+                Err(e) => return Err(e.raw_os_error().unwrap_or(libc::EIO)),
+            }
+        }
+        out.truncate(filled);
+        Ok(out)
+    })
+}
+
 /// `AllocateDir(const char *dirname)` (fd.c:2907) — `opendir` a tracked
 /// directory. `Ok(None)` mirrors C returning NULL (caller checks errno via the
 /// following `ReadDir`).

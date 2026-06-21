@@ -304,6 +304,43 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// COPY FROM PROGRAM input open (copyfrom.c:1856-1865):
+    /// `OpenPipeStream(command, PG_BINARY_R)` (`popen` for reading, registered
+    /// with the vfd machinery), then the C `if (copy_file == NULL) ereport(ERROR,
+    /// errcode_for_file_access, "could not execute command \"%s\": %m")`. Unlike
+    /// [`open_pipe_stream_read`] (the SSL-passphrase NULL-tolerant variant), this
+    /// reproduces COPY's `ereport`-on-NULL, carried on `Err`. Success returns the
+    /// open stream token.
+    pub fn open_pipe_from_program(command: &str) -> PgResult<PgFileStream>
+);
+
+seam_core::seam!(
+    /// `bytesread = fread(databuf, 1, maxread, copy_file)` against a COPY FROM
+    /// PROGRAM pipe stream (the `CopyGetData` `COPY_FILE` leg, copyfromparse.c:
+    /// 251-259, when `copy_file` is a program pipe). Reads up to `maxread` bytes
+    /// from the child's stdout. An empty `Vec` signals EOF (`bytesread == 0`,
+    /// which sets `raw_reached_eof`). A read error is the C
+    /// `ferror`/`ereport(ERROR, "could not read from COPY program: %m")`, carried
+    /// on `Err`.
+    pub fn copy_pipe_read(stream: PgFileStream, maxread: i32) -> PgResult<Vec<u8>>
+);
+
+seam_core::seam!(
+    /// `ClosePipeFromProgram(cstate)` (copyfrom.c:1942-1971) —
+    /// `ClosePipeStream(copy_file)` (`pclose`) then the exit-status check.
+    /// `-1` is "could not close pipe to external command: %m". A nonzero child
+    /// status is `ERRCODE_EXTERNAL_ROUTINE_EXCEPTION` "program \"%s\" failed"
+    /// with the `wait_result_to_str` detail — EXCEPT when the COPY ended before
+    /// EOF (`!raw_reached_eof`) and the child died of `SIGPIPE`, which is
+    /// expectable and tolerated. Errors are carried on `Err`.
+    pub fn close_pipe_from_program(
+        stream: PgFileStream,
+        filename: &str,
+        raw_reached_eof: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `ClosePipeStream(fh)` (fd.c) — `pclose` the pipe and deregister it,
     /// returning the raw `pclose` wait status (`-1` on a `pclose` error with
     /// `errno` set, `0` on a clean child exit, non-zero for the child's wait

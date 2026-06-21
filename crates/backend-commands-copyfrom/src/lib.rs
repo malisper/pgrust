@@ -110,6 +110,10 @@ enum CopySourceReader {
     /// `AllocateFile(filename, PG_BINARY_R)`: the whole file image, read once,
     /// consumed front to back.
     File { data: Vec<u8>, pos: usize },
+    /// `OpenPipeStream(command, PG_BINARY_R)` (COPY FROM PROGRAM): a program pipe
+    /// whose stdout is streamed via the fd owner. Each `CopyGetData` `COPY_FILE`
+    /// read does an `fread` chunk off the pipe; `ClosePipeFromProgram` on end.
+    Pipe { stream: backend_storage_file_fd_seams::PgFileStream },
     /// `copy_src == COPY_FRONTEND`: COPY data arriving over the libpq wire as
     /// `CopyData`/`CopyDone` protocol messages. `residual` holds bytes from the
     /// last `CopyData` message not yet consumed; `eof` is set when `CopyDone`
@@ -188,6 +192,21 @@ fn copy_get_data_file_impl(
                 let reached_eof = chunk.is_empty();
                 Ok(CopyGetDataResult {
                     data: chunk,
+                    reached_eof,
+                })
+            }
+            CopySourceReader::Pipe { stream } => {
+                // C: bytesread = fread(databuf, 1, maxread, copy_file); the
+                // COPY_FILE leg is shared between AllocateFile and the program
+                // pipe (copyfromparse.c:251-259). EOF is signalled only by a
+                // zero-byte read.
+                let data = backend_storage_file_fd_seams::copy_pipe_read::call(
+                    *stream,
+                    maxread as i32,
+                )?;
+                let reached_eof = data.is_empty();
+                Ok(CopyGetDataResult {
+                    data,
                     reached_eof,
                 })
             }
@@ -439,6 +458,10 @@ pub struct CopyFromStateData<'mcx> {
     pub volatile_defexprs: bool,
     /// `bool is_program`.
     pub is_program: bool,
+    /// `char *filename` (== `cstate->filename`): for COPY FROM PROGRAM this is
+    /// the command string, retained so `EndCopyFrom`/`ClosePipeFromProgram` can
+    /// build the `program "%s" failed` error. `None` for non-program sources.
+    pub filename: Option<String>,
     /// Per physical attribute, the *unplanned* default-value `Expr` returned by
     /// `build_column_default` (`None` ⇒ the column has no default). In C
     /// `BeginCopyFrom` runs `expression_planner` + `ExecInitExpr(defexpr, NULL)`
@@ -679,10 +702,16 @@ pub fn BeginCopyFrom<'mcx>(
     } else {
         let filename = filename.expect("checked not-None above");
         if is_program {
-            return Err(unsupported(
-                "BeginCopyFrom: COPY FROM PROGRAM (OpenPipeStream) is not yet wired",
-            ));
-        }
+            // C (copyfrom.c:1856-1865): cstate->copy_file =
+            //   OpenPipeStream(cstate->filename, PG_BINARY_R); the NULL check is
+            //   the "could not execute command" ereport (folded into the seam).
+            let stream =
+                backend_storage_file_fd_seams::open_pipe_from_program::call(filename)?;
+            cstate.copy_file = Some(register_source(CopySourceReader::Pipe { stream }));
+            // copy_src stays COPY_FILE (the program pipe is read through the
+            // COPY_FILE leg, exactly as the AllocateFile path).
+            cstate.copy_src = CopySource::COPY_FILE;
+        } else {
         // AllocateFile(filename, PG_BINARY_R) + fstat: read the whole file image.
         let data =
             backend_storage_file_fd_seams::read_server_file::call(mcx, filename, 0, -1, false)?;
@@ -695,6 +724,7 @@ pub fn BeginCopyFrom<'mcx>(
             }
         };
         cstate.copy_file = Some(register_source(CopySourceReader::File { data, pos: 0 }));
+        }
     }
 
     // cstate->routine->CopyFromStart(cstate, tupDesc): the text/CSV start
@@ -708,6 +738,11 @@ pub fn BeginCopyFrom<'mcx>(
         rteperminfos,
         volatile_defexprs: false,
         is_program,
+        filename: if is_program {
+            filename.map(|s| s.to_string())
+        } else {
+            None
+        },
         raw_defexprs,
     })
 }
@@ -754,10 +789,32 @@ fn copy_from_start(cstate: &mut CopyParseState<'_>) -> PgResult<()> {
 /// `EndCopyFrom(cstate)` (copyfrom.c:1914) — close the data source and free the
 /// COPY context.
 pub fn EndCopyFrom(state: CopyFromStateData<'_>) -> PgResult<()> {
-    // EndCopy(cstate): if copy_src == COPY_FILE && copy_file is a real file,
-    // FreeFile / ClosePipeFromProgram. Here: drop the registered reader.
+    // EndCopy(cstate): if is_program, ClosePipeFromProgram (pclose + exit-status
+    // check); else FreeFile (no-op here — the file image was read into memory).
+    // C: cstate->routine->CopyFromEnd is a no-op for the text/CSV/binary paths.
     if let Some(handle) = state.cstate.copy_file {
-        release_source(handle);
+        if state.is_program {
+            // ClosePipeFromProgram(cstate): pclose the pipe, then check the exit
+            // status (tolerating a pre-EOF SIGPIPE). Resolve the pipe stream
+            // token registered under this handle.
+            let stream = SOURCES.with(|s| match s.borrow().get(&handle.0) {
+                Some(CopySourceReader::Pipe { stream }) => Some(*stream),
+                _ => None,
+            });
+            // Drop the registered reader first (mirrors C freeing copy_file),
+            // then run the close so its error (if any) propagates.
+            release_source(handle);
+            if let Some(stream) = stream {
+                let cmd = state.filename.as_deref().unwrap_or("");
+                backend_storage_file_fd_seams::close_pipe_from_program::call(
+                    stream,
+                    cmd,
+                    state.cstate.raw_reached_eof,
+                )?;
+            }
+        } else {
+            release_source(handle);
+        }
     }
     Ok(())
 }
