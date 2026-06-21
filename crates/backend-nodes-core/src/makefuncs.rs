@@ -120,13 +120,12 @@ pub fn make_var(
 /// `makeWholeRowVar(rte, varno, varlevelsup, allowScalar)` (makefuncs.c) —
 /// build a whole-row `Var` referencing range-table entry `rte`.
 ///
-/// The RELATION / join / VALUES / CTE / tablefunc cases are ported in full
-/// (a named composite rowtype from `get_rel_type_id`, or a RECORD). The
-/// SUBQUERY-expanded-from-SRF and FUNCTION cases need `exprType` over a
-/// `RangeTblFunction.funcexpr` carried as a `Node *`; the repo's
-/// `expr_type` works over the trimmed `Expr`, not a parse `Node`, so those
-/// arms mirror PG and panic precisely (the planner only reaches them when a
-/// view/SRF subquery or a FUNCTION RTE is whole-row-referenced).
+/// All arms are ported in full: the RELATION case (a named composite rowtype
+/// from `get_rel_type_id`), the join / VALUES / CTE / tablefunc cases (RECORD),
+/// and the SUBQUERY-expanded-from-SRF and FUNCTION cases — these read `exprType`
+/// (and `exprCollation` for the allowScalar branch) over the
+/// `RangeTblFunction.funcexpr`, which is an expression node reached via
+/// `Node::as_expr()`.
 pub fn make_whole_row_var(
     rte: &types_nodes::parsenodes::RangeTblEntry<'_>,
     varno: i32,
@@ -162,14 +161,21 @@ pub fn make_whole_row_var(
                 }
                 make_var(varno, InvalidAttrNumber, toid, -1, InvalidOid, varlevelsup)
             } else if !rte.functions.is_empty() {
-                // Subquery expanded from a set-returning function — must match
-                // the RTE_FUNCTION single-function path. Needs exprType over the
-                // RangeTblFunction.funcexpr Node, which the repo can't yet take.
-                panic!(
-                    "make_whole_row_var: RTE_SUBQUERY-from-SRF needs exprType over \
-                     RangeTblFunction.funcexpr (a parse Node, not a trimmed Expr) — \
-                     model gap, not reached by the inheritance path"
-                );
+                // Subquery was expanded from a set-returning function.  That
+                // would not have happened if there's more than one function or
+                // ordinality was requested.  We also needn't worry about the
+                // allowScalar case, since the planner doesn't use that.
+                // Otherwise this must match the RTE_FUNCTION code below.
+                debug_assert!(!allow_scalar);
+                let rtf = rte.functions[0]
+                    .as_rangetblfunction()
+                    .expect("RTE_SUBQUERY functions element must be a RangeTblFunction");
+                let fexpr = rtf.funcexpr.as_deref().and_then(|n| n.as_expr());
+                let mut toid = super::nodefuncs::expr_type(fexpr)?;
+                if !lsyscache::type_is_rowtype::call(toid)? {
+                    toid = RECORDOID;
+                }
+                make_var(varno, InvalidAttrNumber, toid, -1, InvalidOid, varlevelsup)
             } else {
                 // Normal subquery-in-FROM: anonymous RECORD.
                 make_var(varno, InvalidAttrNumber, RECORDOID, -1, InvalidOid, varlevelsup)
@@ -180,12 +186,28 @@ pub fn make_whole_row_var(
                 // More than one function or ordinality: anonymous RECORD.
                 make_var(varno, InvalidAttrNumber, RECORDOID, -1, InvalidOid, varlevelsup)
             } else {
-                let _ = allow_scalar;
-                panic!(
-                    "make_whole_row_var: single-function RTE_FUNCTION needs exprType/\
-                     exprCollation over RangeTblFunction.funcexpr (a parse Node, not a \
-                     trimmed Expr) — model gap, not reached by the inheritance path"
-                );
+                let rtf = rte.functions[0]
+                    .as_rangetblfunction()
+                    .expect("RTE_FUNCTION functions element must be a RangeTblFunction");
+                let fexpr = rtf.funcexpr.as_deref().and_then(|n| n.as_expr());
+                let toid = super::nodefuncs::expr_type(fexpr)?;
+                if lsyscache::type_is_rowtype::call(toid)? {
+                    // func returns composite; same as relation case
+                    make_var(varno, InvalidAttrNumber, toid, -1, InvalidOid, varlevelsup)
+                } else if allow_scalar {
+                    // func returns scalar; just return its output as-is
+                    make_var(
+                        varno,
+                        1,
+                        toid,
+                        -1,
+                        super::nodefuncs::expr_collation(fexpr)?,
+                        varlevelsup,
+                    )
+                } else {
+                    // func returns scalar, but we want a composite result
+                    make_var(varno, InvalidAttrNumber, RECORDOID, -1, InvalidOid, varlevelsup)
+                }
             }
         }
         // join, tablefunc, VALUES, CTE, etc. — whole-row Var of RECORD type.
