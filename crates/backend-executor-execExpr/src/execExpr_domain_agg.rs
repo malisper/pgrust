@@ -629,24 +629,32 @@ pub fn exec_build_agg_trans<'mcx>(
             // Non-presorted DISTINCT and/or ORDER BY case, multiple sort
             // columns. The C recurses each input into
             // &pertrans->sortslot->tts_values[argno] / tts_isnull[argno] — the
-            // value/null cells of the nodeAgg-owned input TupleTableSlot. Those
-            // slot cells are not arena ResultCellIds: the owned-model
-            // TupleTableSlot does not expose its tts_values/tts_isnull as
-            // addressable per-attribute result cells (the execTuples slot model
-            // expansion — task #113, Bucket C — is required to name them as
-            // recursion outputs). strictnulls then points at
-            // sortslot->tts_isnull, the same un-nameable cells.
-            let _ = argno;
-            panic!(
-                "execExpr-domain-agg: ExecBuildAggTrans multi-column non-presorted ORDER BY/DISTINCT \
-                 path recurses each transition input into &pertrans->sortslot->tts_values[i] / \
-                 tts_isnull[i] (the nodeAgg-owned input TupleTableSlot's per-attribute cells) and \
-                 sets strictnulls = sortslot->tts_isnull. The owned TupleTableSlot (execTuples, \
-                 task #113 Bucket C decomp) does not yet expose tts_values/tts_isnull as \
-                 addressable ResultCell targets, so these recursion outputs cannot be named. The \
-                 single-column sort, presorted/non-sorted, and combine paths above are fully \
-                 emitted."
-            );
+            // value/null cells of the nodeAgg-owned input TupleTableSlot — and
+            // sets `strictnulls = nulls` (sortslot->tts_isnull).
+            //
+            // The owned-model TupleTableSlot does not expose its
+            // tts_values/tts_isnull as addressable per-attribute ResultCells, so
+            // each input is recursed into a fresh arena cell instead; the
+            // interpreter's EEOP_AGG_ORDERED_TRANS_TUPLE step reads those cells
+            // and stages them onto the sortslot through store_virtual_values
+            // (the same indirection EEOP_AGG_PRESORTED_DISTINCT_MULTI uses to
+            // avoid naming the slot cells). The strict-input null check reads
+            // the same per-column cells via the ARGS variant — equivalent to C
+            // scanning sortslot->tts_isnull, since those nulls came from these
+            // very recursions.
+            let mut cells: PgVec<'mcx, ResultCellId> =
+                mcx::vec_with_capacity_in(mcx, p.aggref_args_len.max(0) as usize)?;
+            for i in 0..p.aggref_args_len {
+                let arg = arg_tle_expr_clone(aggstate, transno, i, mcx)?;
+                // Recurse into &values[argno] / &nulls[argno].
+                let arg_cell = new_result_cell(mcx, &mut state)?;
+                core::exec_init_expr_rec(mcx, &arg, &mut state, arg_cell)?;
+                cells.push(arg_cell);
+                trans_input_cells.push(arg_cell);
+                argno += 1;
+            }
+            debug_assert_eq!(p.num_inputs, argno);
+            strict_arg_cells = Some(cells);
         }
 
         // ---- strict-input null check ----
@@ -921,22 +929,24 @@ pub fn exec_build_agg_trans_call<'mcx>(
     };
 
     // scratch->d.agg_trans = { pertrans, setno, setoff, transno, aggcontext };
-    // The ordered (DATUM/TUPLE) opcodes feed input through the per-trans sort,
-    // not `fcinfo->args` — leave arg_cells empty for them; the plain TRANS
-    // opcodes gather these into `fcinfo->args[1..]`.
-    let arg_cells: PgVec<'mcx, ResultCellId> = if matches!(
-        opcode,
-        ExprEvalOp::EEOP_AGG_ORDERED_TRANS_DATUM | ExprEvalOp::EEOP_AGG_ORDERED_TRANS_TUPLE
-    ) {
-        mcx::vec_with_capacity_in(mcx, 0)?
-    } else {
-        let mut v: PgVec<'mcx, ResultCellId> =
-            mcx::vec_with_capacity_in(mcx, trans_input_cells.len())?;
-        for &c in trans_input_cells {
-            v.push(c);
-        }
-        v
-    };
+    // The ORDERED_TRANS_DATUM (single-column) opcode feeds its input through
+    // `&state->resvalue`/`&state->resnull` (STATE_RESULT_CELL) — leave arg_cells
+    // empty. ORDERED_TRANS_TUPLE (multi-column) needs the per-column input cells
+    // so the interpreter can stage them onto the sortslot virtual tuple via
+    // store_virtual_values (the owned-model replacement for C recursing each
+    // input straight into &sortslot->tts_values[i]); thread them through
+    // arg_cells. The plain TRANS opcodes gather these into `fcinfo->args[1..]`.
+    let arg_cells: PgVec<'mcx, ResultCellId> =
+        if opcode == ExprEvalOp::EEOP_AGG_ORDERED_TRANS_DATUM {
+            mcx::vec_with_capacity_in(mcx, 0)?
+        } else {
+            let mut v: PgVec<'mcx, ResultCellId> =
+                mcx::vec_with_capacity_in(mcx, trans_input_cells.len())?;
+            for &c in trans_input_cells {
+                v.push(c);
+            }
+            v
+        };
     let scratch = ExprEvalStep {
         opcode,
         resvalue: STATE_RESULT_CELL,

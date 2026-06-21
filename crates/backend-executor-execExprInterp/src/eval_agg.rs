@@ -34,7 +34,7 @@
 //! is the interpreter's own logic and is implemented faithfully here.
 
 use backend_executor_execTuples_seams::{
-    exec_clear_tuple, exec_copy_slot, exec_store_virtual_tuple, store_virtual_values,
+    exec_clear_tuple, exec_copy_slot, store_virtual_values,
 };
 use backend_utils_fmgr_fmgr_seams::function_call2_coll_datum;
 use backend_utils_sort_tuplesort_seams::{tuplesort_putdatum, tuplesort_puttupleslot};
@@ -579,36 +579,63 @@ pub fn ExecEvalAggOrderedTransTuple<'mcx>(
     let _ = econtext;
     // AggStatePerTrans pertrans = op->d.agg_trans.pertrans;
     // int setno = op->d.agg_trans.setno;
-    let steps = state
-        .steps
-        .as_ref()
-        .expect("ExecEvalAggOrderedTransTuple: steps not ready");
-    let (pertrans, setno) = match &steps[op].d {
-        ExprEvalStepData::AggTrans { pertrans, setno, .. } => (*pertrans, *setno),
-        _ => unreachable!("ExecEvalAggOrderedTransTuple: step is not EEOP_AGG_ORDERED_TRANS_TUPLE"),
+    // C reads `slot1->tts_values[i]`/`tts_isnull[i]` straight from the sortslot,
+    // which ExecInitExprRec wrote each input column into. The owned compiler
+    // cannot name the sortslot's per-attribute cells, so it recursed each input
+    // into a fresh arena cell instead and threaded them through `arg_cells`;
+    // read them here and stage them onto the sortslot via store_virtual_values
+    // (the same indirection EEOP_AGG_PRESORTED_DISTINCT_MULTI uses). Read the
+    // cells BEFORE re-deriving the &mut AggState — they live on `state`, the
+    // sortslot/sortstate on the parent AggState (disjoint, as in C).
+    let (pertrans, setno, input_values, input_nulls) = {
+        let steps = state
+            .steps
+            .as_ref()
+            .expect("ExecEvalAggOrderedTransTuple: steps not ready");
+        let (pertrans, setno, arg_cells) = match &steps[op].d {
+            ExprEvalStepData::AggTrans {
+                pertrans,
+                setno,
+                arg_cells,
+                ..
+            } => (*pertrans, *setno, arg_cells),
+            _ => unreachable!(
+                "ExecEvalAggOrderedTransTuple: step is not EEOP_AGG_ORDERED_TRANS_TUPLE"
+            ),
+        };
+        let mut values: Vec<DatumV> = Vec::with_capacity(arg_cells.len());
+        let mut nulls: Vec<bool> = Vec::with_capacity(arg_cells.len());
+        for &c in arg_cells.iter() {
+            // read_cell returns the input by-reference-faithfully (its ByRef arm
+            // for a typbyval=false sort key), so the comparison-tuple formation
+            // reads varlena bytes rather than a collapsed by-value word.
+            let (v, n) = crate::interp_loop::read_cell(state, c);
+            values.push(v);
+            nulls.push(n);
+        }
+        (pertrans, setno, values, nulls)
     };
 
-    let (sortslot, num_inputs) = {
+    let sortslot = {
         let pt = ordered_pertrans(state, pertrans)?;
-        (
-            pt.sortslot.expect("ExecEvalAggOrderedTransTuple: sortslot"),
-            pt.num_inputs,
-        )
+        pt.sortslot.expect("ExecEvalAggOrderedTransTuple: sortslot")
     };
+
+    // The sortslot's descriptor (ExecTypeFromTL(aggref->args)) has exactly
+    // numInputs columns, the full set of aggregate input expressions the
+    // compiler recursed; store all of them.
+    let values_v: Vec<DatumV> = input_values
+        .iter()
+        .map(|v| v.clone_in(estate.es_query_cxt))
+        .collect::<PgResult<Vec<_>>>()?;
 
     // ExecClearTuple(pertrans->sortslot);
-    exec_clear_tuple::call(estate, sortslot)?;
     // pertrans->sortslot->tts_nvalid = pertrans->numInputs;
     // ExecStoreVirtualTuple(pertrans->sortslot);
     //
-    // The slot's tts_values were filled by the preceding eval steps the
-    // compiler emitted; tts_nvalid is set to numInputs by the virtual-tuple
-    // store (the execTuples owner). The (value, isnull) payload lives in the
-    // nodeAgg sortslot the compiler wrote into — represented through the
-    // owner's exec_store_virtual_tuple, which marks nvalid from the slot's
-    // already-populated columns.
-    let _ = num_inputs;
-    exec_store_virtual_tuple::call(estate, sortslot)?;
+    // store_virtual_values clears the slot, writes the per-column
+    // values/isnull, and performs ExecStoreVirtualTuple (which sets tts_nvalid).
+    store_virtual_values::call(estate, sortslot, &values_v, &input_nulls)?;
 
     // tuplesort_puttupleslot(pertrans->sortstates[setno], pertrans->sortslot);
     let slot_ref = estate.slot(sortslot);
