@@ -206,6 +206,30 @@ pub fn expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> bool
         // hold NULL elements).
         ntag::T_TableFunc => walk_table_func(node.expect_tablefunc(), walker, mcx),
 
+        // C `T_TableSampleClause` (nodeFuncs.c:2637): LIST_WALK(tsc->args) then
+        // WALK(tsc->repeatable). `args` is a `List *` of `Expr *` and
+        // `repeatable` an `Expr *`; both are owned `Expr` in the Rust
+        // `TableSampleClause`, so each is wrapped back into a `Node::Expr` clone
+        // for the `FnMut(&Node)` walker (same clone-wrap as `walk_table_func`).
+        // Hit when a manip walker re-recurses on the `TableSampleClause` Node
+        // that `range_table_entry_walker`'s RTE_RELATION arm hands to the
+        // callback (the `TABLESAMPLE`-in-partition_join "unrecognized node type
+        // 104" panic).
+        ntag::T_TableSampleClause => {
+            let tsc = node.expect_tablesampleclause();
+            if let Some(args) = tsc.args.as_ref() {
+                for e in args.iter() {
+                    if walker(&node_expr_wrapper(e, mcx)) {
+                        return true;
+                    }
+                }
+            }
+            match tsc.repeatable.as_deref() {
+                Some(e) => walker(&node_expr_wrapper(e, mcx)),
+                None => false,
+            }
+        }
+
         ntag::T_SetOperationStmt => {
             let setop = node.expect_setoperationstmt();
             walk_opt!(setop.larg.as_ref()) || walk_opt!(setop.rarg.as_ref())
@@ -216,6 +240,21 @@ pub fn expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> bool
         ntag::T_RangeTblFunction => walk_opt!(node.expect_rangetblfunction().funcexpr.as_ref()),
 
         ntag::T_GroupingSet => list_walk!(node.expect_groupingset().content),
+
+        // C `T_PartitionBoundSpec` (nodeFuncs.c:2507): WALK listdatums,
+        // lowerdatums, upperdatums (each a `List *` of `Node *`, directly
+        // walkable `NodePtr`s).
+        ntag::T_PartitionBoundSpec => {
+            let pbs = node.expect_partitionboundspec();
+            list_walk!(pbs.listdatums)
+                || list_walk!(pbs.lowerdatums)
+                || list_walk!(pbs.upperdatums)
+        }
+
+        // C `T_PartitionRangeDatum` (nodeFuncs.c:2519): WALK value (a `Node *`).
+        ntag::T_PartitionRangeDatum => {
+            walk_opt!(node.expect_partitionrangedatum().value.as_ref())
+        }
 
         // C `expression_tree_walker` does not descend the planner/raw-grammar
         // *statement* nodes here (the raw walker does). The parse-tree producer
@@ -534,6 +573,40 @@ pub fn expression_tree_walker_mut<'mcx>(
 
         ntag::T_TableFunc => walk_table_func_mut(node.expect_tablefunc_mut(), walker, mcx),
 
+        // In-place analogue of the read-only `T_TableSampleClause` arm: MUTATE
+        // tsc->args (List of Expr) then tsc->repeatable (Expr). Each owned `Expr`
+        // is moved out, wrapped as a `Node::Expr`, mutated, and written back
+        // (the no-copy `*_mut` pattern; a plain `.clone()` would hit `Aggref`'s
+        // deliberate panic-`Clone`).
+        ntag::T_TableSampleClause => {
+            fn one<'mcx>(
+                e: &mut Expr,
+                walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
+                mcx: mcx::Mcx<'mcx>,
+            ) -> bool {
+                let owned = core::mem::replace(e, expr_walk_sentinel());
+                let mut wrapped = Node::mk_expr(mcx, owned)
+                    .expect("expression_tree_walker_mut: opaque Node alloc failed (OOM)");
+                let aborted = walker(&mut wrapped);
+                if let Some(ne) = wrapped.into_expr() {
+                    *e = ne;
+                }
+                aborted
+            }
+            let tsc = node.expect_tablesampleclause_mut();
+            if let Some(args) = tsc.args.as_mut() {
+                for e in args.iter_mut() {
+                    if one(e, walker, mcx) {
+                        return true;
+                    }
+                }
+            }
+            match tsc.repeatable.as_deref_mut() {
+                Some(e) => one(e, walker, mcx),
+                None => false,
+            }
+        }
+
         ntag::T_SetOperationStmt => {
             let setop = node.expect_setoperationstmt_mut();
             walk_opt!(setop.larg.as_mut()) || walk_opt!(setop.rarg.as_mut())
@@ -544,6 +617,18 @@ pub fn expression_tree_walker_mut<'mcx>(
         ntag::T_RangeTblFunction => walk_opt!(node.expect_rangetblfunction_mut().funcexpr.as_mut()),
 
         ntag::T_GroupingSet => list_walk!(node.expect_groupingset_mut().content),
+
+        // In-place analogues of the read-only PartitionBoundSpec/RangeDatum arms.
+        ntag::T_PartitionBoundSpec => {
+            let pbs = node.expect_partitionboundspec_mut();
+            list_walk!(pbs.listdatums)
+                || list_walk!(pbs.lowerdatums)
+                || list_walk!(pbs.upperdatums)
+        }
+
+        ntag::T_PartitionRangeDatum => {
+            walk_opt!(node.expect_partitionrangedatum_mut().value.as_mut())
+        }
 
         _ => unrecognized_expression_node(node),
     }
