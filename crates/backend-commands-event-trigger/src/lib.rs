@@ -52,6 +52,8 @@ use types_nodes::parsenodes::{ObjectType, OBJECT_EVENT_TRIGGER};
 
 use backend_commands_event_trigger_fire_seams as fire_seams;
 use backend_commands_extension_seams as extension_seams;
+mod fmgr_builtins;
+
 use backend_utils_cache_evtcache_seams as evtcache_seams;
 use backend_utils_init_small_seams as init_small_seams;
 use backend_utils_misc_guc_tables::vars;
@@ -518,6 +520,44 @@ pub fn event_trigger_sql_drop_add_object(
         st.sql_drop_list.insert(0, obj);
         Ok(())
     })
+}
+
+/// `pg_event_trigger_table_rewrite_oid()` (event_trigger.c) — return the Oid of
+/// the table getting rewritten. Only valid inside a `table_rewrite` event
+/// trigger function: errors with the protocol-violation SQLSTATE when called
+/// outside that context (`!currentEventTriggerState ||
+/// table_rewrite_oid == InvalidOid`).
+pub fn pg_event_trigger_table_rewrite_oid() -> PgResult<Oid> {
+    let oid = CURRENT_STATE.with(|s| s.borrow().last().map(|st| st.table_rewrite_oid));
+    match oid {
+        Some(o) if types_core::primitive::OidIsValid(o) => Ok(o),
+        _ => Err(ereport(ERROR)
+            .errcode(ERRCODE_E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED)
+            .errmsg(
+                "pg_event_trigger_table_rewrite_oid() can only be called in a table_rewrite event trigger function"
+                    .to_string(),
+            )
+            .into_error()),
+    }
+}
+
+/// `pg_event_trigger_table_rewrite_reason()` (event_trigger.c) — return the
+/// reason code (`AT_REWRITE_*` bitmask) for the table getting rewritten. Only
+/// valid inside a `table_rewrite` event trigger function: errors with the
+/// protocol-violation SQLSTATE when called outside that context
+/// (`!currentEventTriggerState || table_rewrite_reason == 0`).
+pub fn pg_event_trigger_table_rewrite_reason() -> PgResult<i32> {
+    let reason = CURRENT_STATE.with(|s| s.borrow().last().map(|st| st.table_rewrite_reason));
+    match reason {
+        Some(r) if r != 0 => Ok(r),
+        _ => Err(ereport(ERROR)
+            .errcode(ERRCODE_E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED)
+            .errmsg(
+                "pg_event_trigger_table_rewrite_reason() can only be called in a table_rewrite event trigger function"
+                    .to_string(),
+            )
+            .into_error()),
+    }
 }
 
 /// `pg_event_trigger_dropped_objects()` (event_trigger.c) — the `sql_drop`
@@ -1415,25 +1455,86 @@ pub fn event_trigger_collect_alter_table_subcmd(
 /// No-op when no event-trigger collection state is set up (the standalone /
 /// no-relevant-trigger case: the C `!currentEventTriggerState` early return,
 /// which is *necessary* per the C comment, since `EventTriggerCommonSetup` might
-/// otherwise find triggers created mid-command). The active firing path
-/// (`EventTriggerCommonSetup`/`EventTriggerInvoke` + the
-/// `pg_event_trigger_table_rewrite_oid` state) is part of the event-trigger
-/// firing sub-campaign and stops loudly until it lands.
+/// otherwise find triggers created mid-command).
+///
+/// Sets `currentEventTriggerState->table_rewrite_oid`/`table_rewrite_reason`
+/// around the invoke so `pg_event_trigger_table_rewrite_oid()` /
+/// `pg_event_trigger_table_rewrite_reason()` work inside the trigger body, and
+/// resets them on both success and failure (the C `PG_TRY`/`PG_FINALLY`).
 pub fn event_trigger_table_rewrite(
-    _parsetree: Option<&Node>,
-    _table_oid: Oid,
-    _reason: i32,
+    parsetree: Option<&Node>,
+    table_oid: Oid,
+    reason: i32,
 ) -> PgResult<()> {
     // if (!IsUnderPostmaster || !event_triggers) return;
-    // if (!currentEventTriggerState) return;
-    if !collecting() {
+    if !event_triggers_active() {
         return Ok(());
     }
-    panic!(
-        "EventTriggerTableRewrite: firing table_rewrite event triggers \
-         (EventTriggerCommonSetup + EventTriggerInvoke) is part of the \
-         event-trigger firing sub-campaign and is not modelled here"
-    );
+    // if (!currentEventTriggerState) return; — *necessary*, not optional: a
+    // command that started with no relevant trigger never installed a state, and
+    // EventTriggerCommonSetup might otherwise find triggers created mid-command.
+    if !state_is_set() {
+        return Ok(());
+    }
+
+    // runlist = EventTriggerCommonSetup(parsetree, EVT_TableRewrite,
+    //                                   "table_rewrite", &trigdata, false);
+    // EventTriggerGetTag consults the parse tree, so a parse tree is required
+    // here (unlike the login event); the caller always passes the ALTER TABLE
+    // statement.
+    let parsetree = match parsetree {
+        Some(p) => p,
+        None => {
+            return Err(PgError::error(
+                "EventTriggerTableRewrite: parsetree is required for the table_rewrite event",
+            ))
+        }
+    };
+
+    // EventTriggerCommonSetup: look up the cache and build the run-list. Fast
+    // exit if no table_rewrite trigger exists or none matches the tag.
+    let setup_cxt = MemoryContext::new("event trigger common-setup");
+    let cachelist =
+        evtcache_seams::event_cache_lookup::call(setup_cxt.mcx(), EventTriggerEvent::TableRewrite)?;
+    if cachelist.is_empty() {
+        return Ok(());
+    }
+    let tag = event_trigger_get_tag(parsetree, EventTriggerEvent::TableRewrite)?;
+    let mut runlist: Vec<Oid> = Vec::new();
+    for item in cachelist.iter() {
+        if filter_event_trigger(tag, item) {
+            runlist.push(item.fnoid);
+        }
+    }
+    if runlist.is_empty() {
+        return Ok(());
+    }
+
+    // Make sure pg_event_trigger_table_rewrite_oid only works when running these
+    // triggers; reset table_rewrite_oid/reason even when a trigger fails.
+    CURRENT_STATE.with(|s| {
+        if let Some(st) = s.borrow_mut().last_mut() {
+            st.table_rewrite_oid = table_oid;
+            st.table_rewrite_reason = reason;
+        }
+    });
+
+    let res = event_trigger_invoke(&runlist, "table_rewrite", tag);
+
+    CURRENT_STATE.with(|s| {
+        if let Some(st) = s.borrow_mut().last_mut() {
+            st.table_rewrite_oid = InvalidOid;
+            st.table_rewrite_reason = 0;
+        }
+    });
+
+    res?;
+
+    // Make sure anything the event triggers did will be visible to the main
+    // command.
+    backend_access_transam_xact_seams::command_counter_increment::call()?;
+
+    Ok(())
 }
 
 /// `EventTriggerAlterTableEnd()` (event_trigger.c:1840) — finish collecting the
@@ -2191,5 +2292,9 @@ pub fn init_seams() {
     backend_commands_event_trigger_seams::event_trigger_collect_alter_opfam::set(
         event_trigger_collect_alter_opfam,
     );
+
+    // Scalar SQL-callable builtins (event_trigger.c): the table_rewrite-context
+    // accessors a `table_rewrite` trigger body reads.
+    fmgr_builtins::register_event_trigger_builtins();
 }
 

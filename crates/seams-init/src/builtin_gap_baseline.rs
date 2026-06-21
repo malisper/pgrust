@@ -491,8 +491,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (4300, "range_agg_finalfn", BuiltinGapKind::NotRegistered),
     (4388, "multirange_intersect_agg_transfn", BuiltinGapKind::NotRegistered),
     (4401, "range_intersect_agg_transfn", BuiltinGapKind::NotRegistered),
-    (4566, "pg_event_trigger_table_rewrite_oid", BuiltinGapKind::NotRegistered),
-    (4567, "pg_event_trigger_table_rewrite_reason", BuiltinGapKind::NotRegistered),
     (4568, "pg_event_trigger_ddl_commands", BuiltinGapKind::NotRegistered),
     (4591, "brin_bloom_opcinfo", BuiltinGapKind::NotRegistered),
     (4592, "brin_bloom_add_value", BuiltinGapKind::NotRegistered),

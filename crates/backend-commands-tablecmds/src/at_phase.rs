@@ -317,6 +317,7 @@ pub(crate) fn ATCheckPartitionsNotInUse<'mcx>(
 /// an adequate lock (`AlterTableGetLockLevel(stmt->cmds)` or higher).
 pub fn AlterTable<'mcx>(
     mcx: Mcx<'mcx>,
+    parsetree: &Node<'mcx>,
     stmt: &AlterTableStmt<'mcx>,
     lockmode: LOCKMODE,
     context: &AlterTableUtilityContext<'_>,
@@ -336,7 +337,7 @@ pub fn AlterTable<'mcx>(
         })
         .unwrap_or(false);
 
-    ATController(mcx, Some(stmt), rel, &stmt.cmds, inh, lockmode, context)
+    ATController(mcx, Some(parsetree), rel, &stmt.cmds, inh, lockmode, context)
 }
 
 /// `AlterTableInternal(relid, cmds, recurse)` (tablecmds.c:4563) — ALTER TABLE
@@ -652,7 +653,7 @@ pub fn AlterTableGetLockLevel(cmds: &PgVec<'_, NodePtr<'_>>) -> PgResult<LOCKMOD
 /// `ATController(...)` (tablecmds.c:4869) — top-level control over the phases.
 fn ATController<'mcx>(
     mcx: Mcx<'mcx>,
-    parsetree: Option<&AlterTableStmt<'mcx>>,
+    parsetree: Option<&Node<'mcx>>,
     rel: Relation<'mcx>,
     cmds: &PgVec<'mcx, NodePtr<'mcx>>,
     recurse: bool,
@@ -2045,7 +2046,7 @@ fn ATExecCmd<'mcx>(
 /// seam-and-panic rather than silently skip the scan.
 fn ATRewriteTables<'mcx>(
     mcx: Mcx<'mcx>,
-    _parsetree: Option<&AlterTableStmt<'mcx>>,
+    parsetree: Option<&Node<'mcx>>,
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     _lockmode: LOCKMODE,
     _context: &AlterTableUtilityContext<'_>,
@@ -2145,9 +2146,9 @@ fn ATRewriteTables<'mcx>(
             // Fire the table_rewrite Event Trigger now, before rewriting (only
             // once, and only when parsetree is non-NULL — not from
             // AlterTableInternal). A no-op without active event-trigger state.
-            if _parsetree.is_some() {
+            if parsetree.is_some() {
                 backend_commands_event_trigger_seams::event_trigger_table_rewrite::call(
-                    None,
+                    parsetree,
                     relid,
                     wqueue[ti].rewrite,
                 )?;

@@ -48,6 +48,7 @@ backend-access-table-table-seams = { path = "../backend-access-table-table-seams
 backend-tcop-cmdtag = { path = "../backend-tcop-cmdtag" }
 backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 types-fmgr = { path = "../types-fmgr" }
