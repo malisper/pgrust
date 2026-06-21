@@ -155,6 +155,9 @@ backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 # record_from_values: the BlessTupleDesc + heap_form_tuple + HeapTupleGetDatum
 # composite-Datum builder the single-row pg_stat_get_* functions return through.
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+# tupledesc_match per-attribute cross-check: IsBinaryCoercible + format_type_be.
+backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 types-pgstat = { path = "../types-pgstat" }
 # CONFLICT_NUM_TYPES (subscription conflict counters).
 types-replication = { path = "../types-replication" }

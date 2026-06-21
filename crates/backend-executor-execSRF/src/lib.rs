@@ -1040,7 +1040,7 @@ fn ExecMakeTableFunctionResult<'mcx>(
     // C: if (rsinfo.setDesc) { tupledesc_match(expectedDesc, rsinfo.setDesc);
     //    if (rsinfo.setDesc->tdrefcount == -1) FreeTupleDesc(rsinfo.setDesc); }
     if let Some(set_desc) = rsinfo.setDesc.as_deref() {
-        tupledesc_match(expected_desc, set_desc)?;
+        tupledesc_match(per_query, expected_desc, set_desc)?;
         // Dynamically-allocated TupleDesc is dropped by ownership (RAII).
     }
 
@@ -1208,7 +1208,7 @@ fn exec_prepare_tuplestore_result<'mcx>(
     // `result_desc` by ownership at end of scope.
     if let Some(rd) = result_desc.as_deref() {
         if let Some(frd) = sexpr.funcResultDesc.as_deref() {
-            tupledesc_match(frd, rd)?;
+            tupledesc_match(per_query, frd, rd)?;
         }
     }
 
@@ -1449,21 +1449,85 @@ fn ExecMakeFunctionResultSet<'mcx>(
 /// attributes; per-attribute binary-coercibility, ignoring dropped columns
 /// whose physical storage still matches).
 fn tupledesc_match<'mcx>(
+    mcx: Mcx<'mcx>,
     dst: &TupleDescData<'mcx>,
     src: &TupleDescData<'mcx>,
 ) -> PgResult<()> {
     // C: if (dst->natts != src->natts) ereport(ERROR, "function return row and
-    //    query-specified return row do not match");
+    //    query-specified return row do not match",
+    //    errdetail_plural("Returned row contains %d attribute, ...", ...));
     if dst.natts != src.natts {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_DATATYPE_MISMATCH)
             .errmsg("function return row and query-specified return row do not match")
+            .errdetail_plural(
+                alloc::format!(
+                    "Returned row contains {} attribute, but query expects {}.",
+                    src.natts, dst.natts
+                ),
+                alloc::format!(
+                    "Returned row contains {} attributes, but query expects {}.",
+                    src.natts, dst.natts
+                ),
+                src.natts as u64,
+            )
             .into_error());
     }
-    // Per-attribute checks: the full IsBinaryCoercible / dropped-column physical
-    // storage cross-check needs the per-attribute Form_pg_attribute fields and
-    // the coercion catalog. For the scalar 1-column SRF path the natts check is
-    // the operative guard (a single matching column). The richer per-attribute
-    // RECORD cross-check lands with the composite-returning path.
+
+    // for (i = 0; i < dst->natts; i++)
+    for i in 0..dst.natts as usize {
+        // Form_pg_attribute dattr = TupleDescAttr(dst_tupdesc, i);
+        // Form_pg_attribute sattr = TupleDescAttr(src_tupdesc, i);
+        let dattr = &dst.attrs[i];
+        let sattr = &src.attrs[i];
+
+        // if (IsBinaryCoercible(sattr->atttypid, dattr->atttypid)) continue;
+        //
+        // IsBinaryCoercibleWithCast (parse_coerce.c) short-circuits identical
+        // types before any pg_cast lookup; mirror that fast path here so the
+        // overwhelmingly-common matching-type case needs no catalog access.
+        if sattr.atttypid == dattr.atttypid
+            || backend_parser_coerce_seams::is_binary_coercible::call(
+                sattr.atttypid,
+                dattr.atttypid,
+            )?
+        {
+            continue; // no worries
+        }
+
+        // if (!dattr->attisdropped)
+        //     ereport("Returned type %s at ordinal position %d, but query expects %s.")
+        if !dattr.attisdropped {
+            let returned =
+                backend_utils_adt_format_type_seams::format_type_be::call(mcx, sattr.atttypid)?;
+            let expects =
+                backend_utils_adt_format_type_seams::format_type_be::call(mcx, dattr.atttypid)?;
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_DATATYPE_MISMATCH)
+                .errmsg("function return row and query-specified return row do not match")
+                .errdetail(alloc::format!(
+                    "Returned type {} at ordinal position {}, but query expects {}.",
+                    returned.as_str(),
+                    i + 1,
+                    expects.as_str(),
+                ))
+                .into_error());
+        }
+
+        // Dropped column: physical storage must still match.
+        // if (dattr->attlen != sattr->attlen || dattr->attalign != sattr->attalign)
+        //     ereport("Physical storage mismatch on dropped attribute ...")
+        if dattr.attlen != sattr.attlen || dattr.attalign != sattr.attalign {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_DATATYPE_MISMATCH)
+                .errmsg("function return row and query-specified return row do not match")
+                .errdetail(alloc::format!(
+                    "Physical storage mismatch on dropped attribute at ordinal position {}.",
+                    i + 1
+                ))
+                .into_error());
+        }
+    }
+
     Ok(())
 }

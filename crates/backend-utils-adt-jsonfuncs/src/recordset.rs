@@ -467,9 +467,20 @@ fn populate_recordset_worker<'mcx>(
         }
     }
 
-    // rsi->setResult / rsi->setDesc are already established by
-    // InitMaterializedSRF (C's CreateTupleDescCopy of the cached tupdesc maps to
-    // the seam's blessed setDesc). Append each collected tuple's columns.
+    // C jsonfuncs.c:4204-4205:
+    //   rsi->setResult = state.tuple_store;
+    //   rsi->setDesc = CreateTupleDescCopy(cache->c.io.composite.tupdesc);
+    // The result row type is the INPUT-RECORD's cached composite tupdesc, NOT
+    // the query's column-def-list (`expectedDesc`). InitMaterializedSRF set
+    // setDesc from the result-type resolution (expectedDesc) above; overwrite it
+    // here with the cached composite tupdesc so the rows are materialized against
+    // the type they were actually formed with. When the supplied record's type
+    // disagrees with the query's column definitions, the executor's
+    // `tupledesc_match(expectedDesc, setDesc)` (execSRF) raises
+    // "function return row and query-specified return row do not match" — which
+    // is exactly the user-facing error for the wrong-record-type negative cases.
+    // Forming the rows against this same descriptor also means no value ever
+    // crosses a by-value/by-reference type boundary.
     let tupdesc_box = {
         let io = match &cache.c.io {
             ColumnIOUnion::Composite(c) => c,
@@ -477,6 +488,14 @@ fn populate_recordset_worker<'mcx>(
         };
         io.tupdesc.as_ref().expect("tupdesc cached").clone_in(mcx)?
     };
+
+    {
+        let rsi = fcinfo
+            .resultinfo
+            .as_mut()
+            .expect("InitMaterializedSRF set fcinfo->resultinfo");
+        rsi.setDesc = Some(mcx::alloc_in(mcx, tupdesc_box.clone_in(mcx)?)?);
+    }
 
     for tuple in &result {
         put_recordset_tuple(mcx, fcinfo, &tupdesc_box, tuple)?;
