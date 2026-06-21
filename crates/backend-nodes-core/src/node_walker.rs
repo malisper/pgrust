@@ -1166,7 +1166,9 @@ fn raw_walk_typename(tn: &types_nodes::rawnodes::TypeName, walker: &mut dyn FnMu
 // ===========================================================================
 
 /// QTW flag: ignore RTEs that are subqueries (`query_tree_walker` skip mask).
-pub const QTW_IGNORE_RT_SUBQUERIES: i32 = 0x02;
+pub const QTW_IGNORE_RT_SUBQUERIES: i32 = 0x01;
+/// QTW flag: ignore subqueries in the cteList.
+pub const QTW_IGNORE_CTE_SUBQUERIES: i32 = 0x02;
 /// QTW flag: ignore JOIN alias var lists.
 pub const QTW_IGNORE_JOINALIASES: i32 = 0x04;
 /// QTW flag: ignore expressions in range table entirely.
@@ -1175,8 +1177,8 @@ pub const QTW_IGNORE_RANGE_TABLE: i32 = 0x08;
 pub const QTW_EXAMINE_RTES_BEFORE: i32 = 0x10;
 /// QTW flag: examine RTEs after their contents.
 pub const QTW_EXAMINE_RTES_AFTER: i32 = 0x20;
-/// QTW flag: do not descend into sublink subqueries.
-pub const QTW_IGNORE_CTE_SUBQUERIES: i32 = 0x40;
+/// QTW flag: do not copy the top `Query` (nodeFuncs.h).
+pub const QTW_DONT_COPY_QUERY: i32 = 0x40;
 /// QTW flag: ignore GROUP-clause RTEs.
 pub const QTW_EXAMINE_SORTGROUP: i32 = 0x80;
 /// QTW flag: ignore the RTE_GROUP groupexprs list (nodeFuncs.h).
