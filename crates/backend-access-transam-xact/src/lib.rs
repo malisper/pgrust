@@ -1884,6 +1884,17 @@ pub fn init_seams() {
 fn install_parallel_rt_seams() {
     use backend_access_transam_parallel_rt_seams as rt;
 
+    // `XactLastRecEnd` read/write (xact.h) used by the parallel worker's
+    // end-of-transaction WAL flush bookkeeping. The xlog engine owns the
+    // global; xact already proxies it via `xlog_seams`. The `-rt` variants are
+    // the parallel-runtime consumers (parallel.c), distinct from xact's own
+    // `xact_last_rec_end` seam already installed above.
+    rt::xact_last_rec_end::set(|| Ok(seam_xact_last_rec_end()));
+    rt::set_xact_last_rec_end::set(|lsn| {
+        xlog_seams::set_xact_last_rec_end::call(lsn);
+        Ok(())
+    });
+
     // EnterParallelMode / ExitParallelMode return `()`; the seam is fallible.
     rt::enter_parallel_mode::set(|| {
         EnterParallelMode();
