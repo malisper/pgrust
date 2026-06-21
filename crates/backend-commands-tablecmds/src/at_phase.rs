@@ -1256,6 +1256,22 @@ fn ATRewriteCatalogs<'mcx>(
                     Some(c) => c.clone_in(mcx)?,
                     None => unreachable!("subcmds hold Node::AlterTableCmd"),
                 };
+                // In C, `tab->rel` is a single long-lived Relation pointer whose
+                // `rd_rel`/`rd_att` are rebuilt in place by relcache invalidation
+                // as prior subcommands in this pass mutate the catalog (each
+                // subcommand routine CommandCounterIncrements). Our owned `rel`
+                // is an immutable snapshot taken once, so a later subcommand
+                // would read a stale image — e.g. two AT_AddConstraint CHECKs in
+                // the same pass would each read the same stale
+                // `rd_att->constr->num_check` (numoldchecks) and clobber relchecks
+                // to the same value instead of accumulating. Re-open before each
+                // subcommand (lock already held) to mirror C's in-place rebuild.
+                if si > 0 {
+                    if let Some(old) = wqueue[ti].rel.take() {
+                        old.close(NoLock)?;
+                    }
+                    wqueue[ti].rel = Some(relation_open(mcx, relid, NoLock)?);
+                }
                 ATExecCmd(mcx, wqueue, ti, &cmd, lockmode, pass, context)?;
             }
 

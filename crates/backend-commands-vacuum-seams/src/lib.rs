@@ -256,6 +256,10 @@ seam_core::seam!(pub fn new_guc_nest_level() -> PgResult<i32>);
 
 // ---- vac_open_indexes / vac_*_one_index leaves ------------------------
 seam_core::seam!(pub fn relation_get_index_list(relation: Oid) -> PgResult<Vec<Oid>>);
+/// `RelationGetStatExtList(relation)` (relcache.c) — OIDs of the relation's
+/// extended-statistics objects (`rd_statlist`). Used by `expandTableLikeClause`
+/// for INCLUDING STATISTICS.
+seam_core::seam!(pub fn relation_get_stat_ext_list(relation: Oid) -> PgResult<Vec<Oid>>);
 seam_core::seam!(pub fn index_open(indexoid: Oid, lockmode: i32) -> PgResult<OpenedIndex>);
 seam_core::seam!(pub fn index_close(index: Oid, lockmode: i32) -> PgResult<()>);
 seam_core::seam!(pub fn index_bulk_delete(
