@@ -586,6 +586,72 @@ fn materialize_sink_into_rsinfo<'mcx>(
     // parallel to `result_desc`.
     let natts = result_desc.natts.max(0) as usize;
     for row in sink.rows.into_iter() {
+        // C `exec_stmt_return_next` (pl_exec.c), the `estate->retistuple` arm:
+        // when a composite-returning SETOF function does `RETURN NEXT <row-expr>`,
+        // the producer (plpgsql) hands the whole composite back as ONE column
+        // carrying its HeapTupleHeader image, but the result descriptor has the
+        // rowtype's `natts` columns. C deconstructs that composite Datum into the
+        // per-column tuple (`deconstruct_composite_datum` + `tuplestore_puttuple`);
+        // mirror that here by deforming the single composite cell against
+        // `result_desc` before storing. (A genuinely scalar SETOF, `natts == 1`,
+        // never takes this branch.)
+        if returns_tuple && natts != 1 && row.len() == 1 {
+            let col = &row[0];
+            if col.isnull {
+                // Composite NULL: store a row of all-NULLs (C's else arm).
+                let vals: alloc::vec::Vec<CanonDatum> =
+                    (0..natts).map(|_| CanonDatum::default()).collect();
+                let nuls: alloc::vec::Vec<bool> = (0..natts).map(|_| true).collect();
+                backend_utils_sort_storage_seams::tuplestore_putvalues::call(
+                    &mut rsinfo.setResult,
+                    &result_desc,
+                    &vals,
+                    &nuls,
+                )?;
+                continue;
+            }
+            let comp: CanonDatum = match &col.ref_payload {
+                Some(types_fmgr::boundary::RefPayload::Varlena(b))
+                | Some(types_fmgr::boundary::RefPayload::Composite(b)) => {
+                    CanonDatum::ByRef(mcx::slice_in(per_query, b.as_slice())?)
+                }
+                _ => {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_DATATYPE_MISMATCH)
+                        .errmsg(
+                            "cannot return non-composite value from function returning \
+                             composite type",
+                        )
+                        .into_error());
+                }
+            };
+            let formed =
+                backend_access_common_heaptuple::DatumGetHeapTupleHeader(per_query, &comp)?;
+            let cols = backend_access_common_heaptuple::heap_deform_tuple(
+                per_query,
+                &formed.tuple,
+                &result_desc,
+                &formed.data,
+            )
+            .map_err(|e| {
+                ereport(ERROR)
+                    .errcode(ERRCODE_INTERNAL_ERROR)
+                    .errmsg(alloc::format!(
+                        "heap_deform_tuple in RETURN NEXT composite: {e:?}"
+                    ))
+                    .into_error()
+            })?;
+            let vals: alloc::vec::Vec<CanonDatum> = cols.iter().map(|(d, _)| d.clone()).collect();
+            let nuls: alloc::vec::Vec<bool> = cols.iter().map(|(_, n)| *n).collect();
+            backend_utils_sort_storage_seams::tuplestore_putvalues::call(
+                &mut rsinfo.setResult,
+                &result_desc,
+                &vals,
+                &nuls,
+            )?;
+            continue;
+        }
+
         let mut values: alloc::vec::Vec<CanonDatum> = alloc::vec::Vec::with_capacity(natts);
         let mut nulls: alloc::vec::Vec<bool> = alloc::vec::Vec::with_capacity(natts);
         for col in row.into_iter() {
