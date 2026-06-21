@@ -24,6 +24,7 @@ backend-utils-misc-guc-funcs-seams = { path = "../backend-utils-misc-guc-funcs-s
 mcx = { path = "../mcx" }
 types-acl = { path = "../types-acl" }
 types-fmgr = { path = "../types-fmgr" }
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-error-elog-seams = { path = "../backend-utils-error-elog-seams" }
 types-cache = { path = "../types-cache" }

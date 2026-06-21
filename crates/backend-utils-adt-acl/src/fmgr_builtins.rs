@@ -16,12 +16,17 @@
 //! table (C: `fmgr_builtins[]`). OIDs / nargs / strict / retset are transcribed
 //! exactly from `pg_proc.dat`.
 //!
+//! `aclcontains` (1037, `aclitem[] @> aclitem`) and `acldefault_sql` (3943,
+//! `(char, oid) -> aclitem[]`) ARE registered here: their `aclitem[]`
+//! (`ArrayType`) argument / result is marshalled through the owner's value-lane
+//! `deconstruct_array_values_bytes` / `construct_array_values` (`arg_acl_array`
+//! / `ret_acl_array`), so the fixed-16-byte `'d'`-aligned elements cross the
+//! by-ref boundary cleanly.
+//!
 //! NOT registered here (and still listed in the seams-init builtin gap
-//! baseline): `aclcontains` (1037), `aclexplode` (1689), `acldefault_sql`
-//! (3943), and `pg_get_acl` (6385). These read or return an `aclitem[]`
-//! (`ArrayType`) value and/or use the set-returning-function machinery; that
-//! array-detoast / SRF boundary is the not-yet-grown fmgr edge (the value cores
-//! `aclcontains_impl` / `acldefault` exist and are exercised directly).
+//! baseline): `aclexplode` (1689) and `pg_get_acl` (6385) — the former uses the
+//! set-returning-function machinery, the latter's catalog-lookup core is not yet
+//! ported.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -125,6 +130,78 @@ fn aclitem_to_bytes(a: &AclItem) -> Vec<u8> {
     out
 }
 
+/// `ACLITEMOID` — the element type of an `aclitem[]` (`_aclitem`) array.
+const ACLITEMOID: Oid = 1033;
+/// `aclitem` is a fixed 16-byte by-reference type with `'d'` (double) alignment
+/// (`pg_type.dat`: `typlen => '16'`, `typbyval => 'f'`, `typalign => 'd'`).
+const ACLITEM_LEN: i16 = 16;
+const ACLITEM_ALIGN: core::ffi::c_char = b'd' as core::ffi::c_char;
+
+/// `PG_GETARG_ACLITEM_ARRAY_P(i)` decode: deconstruct an `aclitem[]` arg's full
+/// `ArrayType` varlena image (on the by-ref lane) into a `Vec<AclItem>`. The
+/// owner's value-lane `deconstruct_array_values_bytes` detoasts and walks the
+/// fixed-16-byte, `'d'`-aligned elements; each by-reference element arrives as a
+/// [`types_tuple::Datum::ByRef`] carrying the verbatim 16 stored bytes, which
+/// [`aclitem_from_bytes`] decodes. Any SQL-NULL element decodes to the all-zero
+/// `AclItem` (the C `aclcontains` path runs over `ACL_NUM`/`ACL_DAT`, so a
+/// genuine null-containing acl never reaches here; `check_acl` in the core
+/// rejects the malformed shapes).
+fn arg_acl_array<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &FunctionCallInfoBaseData,
+    i: usize,
+) -> types_error::PgResult<Vec<AclItem>> {
+    let image = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("acl fn: aclitem[] arg missing from by-ref lane");
+    let elems = backend_utils_adt_arrayfuncs::construct::deconstruct_array_values_bytes(
+        mcx,
+        image,
+        ACLITEMOID,
+        ACLITEM_LEN,
+        false,
+        ACLITEM_ALIGN,
+    )?;
+    let mut out = Vec::with_capacity(elems.len());
+    for (d, isnull) in elems.iter() {
+        if *isnull {
+            out.push(AclItem { ai_grantee: 0, ai_grantor: 0, ai_privs: 0 });
+        } else {
+            out.push(aclitem_from_bytes(d.as_ref_bytes()));
+        }
+    }
+    Ok(out)
+}
+
+/// Write an `aclitem[]` result on the by-ref lane (C: `PG_RETURN_ACLITEM_P` of
+/// a `construct_array` over the `Acl`). The owner's value-lane
+/// `construct_array_values` builds the 1-D `ArrayType` image from per-element
+/// [`types_tuple::Datum::ByRef`] (each the 16-byte `aclitem` repr).
+fn ret_acl_array<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    fcinfo: &mut FunctionCallInfoBaseData,
+    acl: &[AclItem],
+) -> types_error::PgResult<Datum> {
+    let mut values: Vec<types_tuple::Datum<'mcx>> = Vec::with_capacity(acl.len());
+    for a in acl {
+        let bytes = aclitem_to_bytes(a);
+        let pv = mcx::slice_in(mcx, &bytes)?;
+        values.push(types_tuple::Datum::ByRef(pv));
+    }
+    let image = backend_utils_adt_arrayfuncs::construct::construct_array_values(
+        mcx,
+        &values,
+        ACLITEMOID,
+        ACLITEM_LEN as i32,
+        false,
+        ACLITEM_ALIGN as u8,
+    )?;
+    fcinfo.isnull = false;
+    fcinfo.set_ref_result(RefPayload::Varlena(image.as_slice().to_vec()));
+    Ok(Datum::from_usize(0))
+}
+
 /// Write a `bool`-or-NULL result (C: `PG_RETURN_BOOL` / `PG_RETURN_NULL`).
 #[inline]
 fn ret_bool_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<bool>) -> Datum {
@@ -225,6 +302,31 @@ fn fc_makeaclitem(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResul
     let goption = arg_bool(fcinfo, 3);
     let item = crate::acl_ops::makeaclitem_impl(grantee, grantor, &privtext, goption)?;
     Ok(ret_aclitem(fcinfo, &item))
+}
+
+/// `aclcontains(_aclitem, aclitem) -> bool` (oid 1037): true iff some entry of
+/// the `Acl` array has the same grantee+grantor as the probe and includes all
+/// of its rights. C deconstructs `PG_GETARG_ACLITEM_P(1)` against the `Acl`
+/// array `PG_GETARG_ACL_P(0)` (`acl.c` `aclcontains`).
+fn fc_aclcontains(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let m = scratch_mcx();
+    let acl = arg_acl_array(m.mcx(), fcinfo, 0)?;
+    let aip = arg_aclitem(fcinfo, 1);
+    let r = crate::acl_ops::aclcontains_impl(&acl, &aip)?;
+    fcinfo.isnull = false;
+    Ok(Datum::from_bool(r))
+}
+
+/// `acldefault_sql(char, oid) -> _aclitem` (oid 3943): the default ACL for an
+/// object of the given type-abbreviation owned by the given role, materialized
+/// as an `aclitem[]` (`acl.c` `acldefault_sql`).
+fn fc_acldefault_sql(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let m = scratch_mcx();
+    // PG_GETARG_CHAR(0): the single "char" type-abbreviation byte.
+    let objtypec = fcinfo.arg(0).expect("acl fn: missing char arg").value.as_i8();
+    let owner = arg_oid(fcinfo, 1);
+    let acl = crate::acldefault::acldefault_sql(m.mcx(), objtypec, owner)?;
+    ret_acl_array(m.mcx(), fcinfo, acl)
 }
 
 fn fc_aclinsert(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
@@ -623,7 +725,9 @@ pub fn register_acl_builtins() {
         builtin(1035, "aclinsert", 2, false, fc_aclinsert),
         builtin(1036, "aclremove", 2, false, fc_aclremove),
         builtin(1062, "aclitem_eq", 2, false, fc_aclitem_eq),
+        builtin(1037, "aclcontains", 2, false, fc_aclcontains),
         builtin(1365, "makeaclitem", 4, false, fc_makeaclitem),
+        builtin(3943, "acldefault_sql", 2, false, fc_acldefault_sql),
         // ---- has_table_privilege ----
         builtin(1922, "has_table_privilege_name_name", 3, false, fc_has_table_privilege_name_name),
         builtin(1923, "has_table_privilege_name_id", 3, false, fc_has_table_privilege_name_id),
