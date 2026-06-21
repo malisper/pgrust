@@ -974,10 +974,17 @@ pub fn ExplainNode<'es, 'p>(
             }
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
         }
+        ntag::T_Agg | ntag::T_WindowAgg | ntag::T_Group | ntag::T_Result => {
+            // explain.c:2197/2208/2215/2237: these upper plan nodes show their
+            // plan->qual via show_upper_qual (useprefix = list_length(rtable) > 1
+            // || verbose), NOT show_scan_qual. Their `Filter` line must follow
+            // their node-specific detail lines (Group Key / Run Condition /
+            // One-Time Filter) to match C's single-case ordering, so it is emitted
+            // in the sort-/group-key switch below — nothing here.
+        }
         _ => {
             // The generic `Filter` leg (SeqScan / ValuesScan / CteScan /
-            // NamedTuplestoreScan / WorkTableScan / SubqueryScan / Gather /
-            // Result / etc).
+            // NamedTuplestoreScan / WorkTableScan / SubqueryScan / Gather / etc).
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
         }
     }
@@ -1078,6 +1085,57 @@ pub fn ExplainNode<'es, 'p>(
                     )?;
                 }
             }
+            // explain.c:2198: show_upper_qual(plan->qual, "Filter") AFTER the
+            // Group Key detail.
+            let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
+            show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
+        }
+        ntag::T_MergeAppend => {
+            // show_merge_append_keys (explain.c:2600): the merge sort keys refer
+            // to the MergeAppend node's own targetlist (context plan = the node
+            // itself), printed as "Sort Key".
+            let ma = plan_node.expect_mergeappend();
+            // The MergeAppend's sort-key arrays are plain Vecs; show_sort_group_keys
+            // takes mcx-allocated PgVecs (like the Sort node's), so copy them in.
+            let mut col_idx: PgVec<'es, AttrNumber> = PgVec::new_in(mcx);
+            col_idx.try_reserve(ma.sortColIdx.len()).map_err(|_| mcx.oom(0))?;
+            for &v in ma.sortColIdx.iter() {
+                col_idx.push(v);
+            }
+            let mut sort_ops: PgVec<'es, Oid> = PgVec::new_in(mcx);
+            sort_ops.try_reserve(ma.sortOperators.len()).map_err(|_| mcx.oom(0))?;
+            for &v in ma.sortOperators.iter() {
+                sort_ops.push(v);
+            }
+            let mut colls: PgVec<'es, Oid> = PgVec::new_in(mcx);
+            colls.try_reserve(ma.collations.len()).map_err(|_| mcx.oom(0))?;
+            for &v in ma.collations.iter() {
+                colls.push(v);
+            }
+            let mut nulls_first: PgVec<'es, bool> = PgVec::new_in(mcx);
+            nulls_first.try_reserve(ma.nullsFirst.len()).map_err(|_| mcx.oom(0))?;
+            for &v in ma.nullsFirst.iter() {
+                nulls_first.push(v);
+            }
+            let numcols = ma.numCols;
+            // Clone the MergeAppend node into the 'es arena so the context plan
+            // and the 'es-allocated key arrays share one lifetime.
+            let ma_node: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+            let ma_head = ma_node.plan_head();
+            show_sort_group_keys(
+                es,
+                mcx,
+                &ma_node,
+                ma_head,
+                ancestors,
+                "Sort Key",
+                numcols,
+                0,
+                &col_idx,
+                Some(&sort_ops),
+                Some(&colls),
+                Some(&nulls_first),
+            )?;
         }
         ntag::T_Group => {
             // show_group_keys: keys refer to the *child* plan's tlist (no
@@ -1102,6 +1160,17 @@ pub fn ExplainNode<'es, 'p>(
                 None,
                 None,
             )?;
+            // explain.c:2216: show_upper_qual(plan->qual, "Filter") AFTER Group Key.
+            let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
+            show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
+        }
+        ntag::T_WindowAgg | ntag::T_Result => {
+            // explain.c:2208/2238: the WindowAgg `Run Condition` / Result
+            // `One-Time Filter` detail lines were emitted earlier (before the
+            // scan-qual switch); their plan->qual `Filter` follows via
+            // show_upper_qual.
+            let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
+            show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
         }
         _ => {}
     }

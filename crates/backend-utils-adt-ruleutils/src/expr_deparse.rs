@@ -1832,11 +1832,26 @@ fn get_agg_expr_helper(
     };
 
     // For a combining aggregate, we look up and deparse the corresponding
-    // partial aggregate instead — needs resolve_special_varno (#159 plan-tree).
+    // partial aggregate instead. This is necessary because our input argument
+    // list has been replaced; the new argument list always has just one element,
+    // which points to a partial Aggref that supplies the transition states to
+    // combine (ruleutils.c:10899-10907).
     if (a.aggsplit & AGGSPLITOP_COMBINE) != 0 {
-        return Err(deferred(
-            "get_agg_expr (AGGSPLITOP_COMBINE / resolve_special_varno; #159 plan-tree)",
-        ));
+        debug_assert_eq!(a.args.len(), 1);
+        let tle = a
+            .args
+            .first()
+            .ok_or_else(|| missing_field("combining Aggref args"))?;
+        let tle_expr = tle
+            .expr
+            .as_deref()
+            .ok_or_else(|| missing_field("combining Aggref TargetEntry.expr"))?;
+        let node = Node::mk_expr(mcx, tle_expr.clone_in(mcx)?)?;
+        return resolve_special_varno(
+            &node,
+            context,
+            &RsvCallback::AggCombineExpr(original_aggref),
+        );
     }
 
     // Mark as PARTIAL, if appropriate (look at the original aggref).
@@ -3118,20 +3133,40 @@ fn get_special_variable<'mcx>(node: &Node<'mcx>, context: &mut DeparseContext<'m
     Ok(())
 }
 
+/// The two `rsv_callback`s used in `ruleutils.c` for `resolve_special_varno`:
+/// `get_special_variable` (from `get_variable`, no callback_arg) and
+/// `get_agg_combine_expr` (from `get_agg_expr_helper`, callback_arg is the
+/// original Aggref whose combine split is being deparsed).
+enum RsvCallback<'a> {
+    SpecialVariable,
+    AggCombineExpr(&'a Expr),
+}
+
+impl<'a> RsvCallback<'a> {
+    fn invoke<'mcx>(&self, node: &Node<'mcx>, context: &mut DeparseContext<'mcx>) -> PgResult<()> {
+        match self {
+            RsvCallback::SpecialVariable => get_special_variable(node, context),
+            RsvCallback::AggCombineExpr(original_aggref) => {
+                get_agg_combine_expr(node, context, original_aggref)
+            }
+        }
+    }
+}
+
 /// `resolve_special_varno(node, context, callback, callback_arg)` (`ruleutils.c`
 /// 7920-8000) — chase a special-varno `Var` (OUTER_VAR / INNER_VAR / INDEX_VAR)
 /// down through the plan tree's referent targetlists to the real expression, then
 /// invoke the rendering callback. Recursive (the resolved expr may itself be a
-/// special Var). The only callback used by `get_variable` is
-/// [`get_special_variable`], so it is invoked directly.
+/// special Var).
 fn resolve_special_varno<'mcx>(
     node: &Node<'mcx>,
     context: &mut DeparseContext<'mcx>,
+    callback: &RsvCallback<'_>,
 ) -> PgResult<()> {
     // If it's not a Var, invoke the callback.
     let var = match node.as_var() {
         Some(v) => v.clone(),
-        None => return get_special_variable(node, context),
+        None => return callback.invoke(node, context),
     };
 
     let mcx = context.buf.allocator();
@@ -3201,7 +3236,7 @@ fn resolve_special_varno<'mcx>(
                 None => None,
             }
         };
-        resolve_special_varno(&tle_expr, context)?;
+        resolve_special_varno(&tle_expr, context, callback)?;
         if let Some(save) = save {
             crate::pop_child_plan(&mut context.namespaces[dpns_idx], save);
         }
@@ -3227,7 +3262,7 @@ fn resolve_special_varno<'mcx>(
                 None => None,
             }
         };
-        resolve_special_varno(&tle_expr, context)?;
+        resolve_special_varno(&tle_expr, context, callback)?;
         if let Some(save) = save {
             crate::pop_child_plan(&mut context.namespaces[dpns_idx], save);
         }
@@ -3240,14 +3275,34 @@ fn resolve_special_varno<'mcx>(
         let tle_expr = tle_expr.ok_or_else(|| {
             elog_error(format!("bogus varattno for INDEX_VAR var: {}", var.varattno))
         })?;
-        resolve_special_varno(&tle_expr, context)?;
+        resolve_special_varno(&tle_expr, context, callback)?;
         return Ok(());
     } else if var.varno < 1 || var.varno > context.namespaces[dpns_idx].rtable.len() as i32 {
         return Err(elog_error(format!("bogus varno: {}", var.varno)));
     }
 
     // Not special. Just invoke the callback.
-    get_special_variable(node, context)
+    callback.invoke(node, context)
+}
+
+/// `get_agg_combine_expr(node, context, callback_arg)` (`ruleutils.c` 11009-11020)
+/// — the `resolve_special_varno` callback for a combining aggregate: the resolved
+/// node must be the partial `Aggref`; deparse it via `get_agg_expr`, carrying the
+/// original (combining) Aggref so PARTIAL/aggsplit decisions look at the original.
+fn get_agg_combine_expr<'mcx>(
+    node: &Node<'mcx>,
+    context: &mut DeparseContext<'mcx>,
+    original_aggref: &Expr,
+) -> PgResult<()> {
+    let aggref = match node.as_expr() {
+        Some(e) if matches!(e, Expr::Aggref(_)) => e,
+        _ => {
+            return Err(elog_error(
+                "combining Aggref does not point to an Aggref".to_string(),
+            ))
+        }
+    };
+    get_agg_expr(aggref, context, original_aggref)
 }
 
 /// `static char *get_variable(Var *var, int levelsup, bool istoplevel,
@@ -3297,7 +3352,7 @@ pub fn get_variable<'mcx>(
         // OUTER_VAR/INNER_VAR/INDEX_VAR resolution walks the plan tlists, rendering
         // the resolved referent into context->buf (no refname returned).
         let node = Node::mk_expr(context.buf.allocator(), Expr::Var(var.clone()))?;
-        resolve_special_varno(&node, context)?;
+        resolve_special_varno(&node, context, &RsvCallback::SpecialVariable)?;
         return Ok(None);
     }
 
