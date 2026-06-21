@@ -1530,8 +1530,16 @@ pub fn init_seams() {
         },
     );
 
-    // NOTE (F2/F3 STOP): the three init-privs/executor seams
-    // (remove_role_from_object_acl, remove_role_from_init_priv,
+    // `RemoveRoleFromObjectACL(roleid, classid, objid)` (aclchk.c:1423) — the
+    // DROP OWNED ACL-revoke leg. Now ported: it routes through the GRANT
+    // executor (`ExecGrantStmt_oids` / `SetDefaultACL`), both of which are
+    // ported in `grant_exec`.
+    seam::remove_role_from_object_acl::set(|roleid, classid, objid| {
+        let ctx = MemoryContext::new("remove_role_from_object_acl");
+        grant_exec::remove_role_from_object_acl(ctx.mcx(), roleid, classid, objid)
+    });
+
+    // NOTE (F3 STOP): the two init-privs seams (remove_role_from_init_priv,
     // replace_role_in_init_priv) remain deliberately NOT installed; the CATALOG
     // row is held at `scaffold` so the seam-install guard exempts that
     // unfinished surface.

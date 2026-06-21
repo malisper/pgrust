@@ -299,16 +299,109 @@ pub fn ATExecAddColumn<'mcx>(
 
     // Merge with an existing definition when adding to a recursion child.
     if col_def.inhcount > 0 {
-        if let Some(_tuple) = SearchSysCacheAttName(mcx, myrelid, columndef_colname(&col_def))? {
-            // Child already has the column. The full type/typmod/collation match
-            // checks + attinhcount bump + NOTICE require typenameTypeIdAndMod and
-            // a pg_attribute inhcount write; the inheritance-merge path is not
-            // exercised by non-inherited ADD COLUMN. Faithful stop.
-            panic!(
-                "ALTER TABLE ADD COLUMN inheritance-merge (colDef->inhcount > 0 and child \
-                 already has the column): the type/typmod/collation match + attinhcount \
-                 bump path is not yet ported (faithful seam-and-panic)"
-            );
+        // Does child already have a column by this name?
+        if let Some(tuple) =
+            backend_utils_cache_syscache::SearchSysCacheCopyAttName(
+                mcx,
+                myrelid,
+                columndef_colname(&col_def),
+            )?
+        {
+            let childatt_typid = SysCacheGetAttrNotNull(
+                mcx,
+                ATTNAME,
+                &tuple,
+                types_catalog::pg_attribute::Anum_pg_attribute_atttypid as i32,
+            )?
+            .as_oid();
+            let childatt_typmod = SysCacheGetAttrNotNull(
+                mcx,
+                ATTNAME,
+                &tuple,
+                types_catalog::pg_attribute::Anum_pg_attribute_atttypmod as i32,
+            )?
+            .as_i32();
+            let childatt_collation = SysCacheGetAttrNotNull(
+                mcx,
+                ATTNAME,
+                &tuple,
+                types_catalog::pg_attribute::Anum_pg_attribute_attcollation as i32,
+            )?
+            .as_oid();
+            let childatt_inhcount = SysCacheGetAttrNotNull(
+                mcx,
+                ATTNAME,
+                &tuple,
+                types_catalog::pg_attribute::Anum_pg_attribute_attinhcount as i32,
+            )?
+            .as_i16();
+
+            // Child column must match on type, typmod, and collation.
+            let (ctype_id, ctypmod) = {
+                let tn = col_def.typeName.as_ref().ok_or_else(|| {
+                    types_error::PgError::error("ATExecAddColumn: ColumnDef has no type name")
+                })?;
+                seam::typename_type_id_and_mod::call(mcx, tn)?
+            };
+            if ctype_id != childatt_typid || ctypmod != childatt_typmod {
+                return Err(backend_utils_error::ereport(ERROR)
+                    .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                    .errmsg(format!(
+                        "child table \"{}\" has different type for column \"{}\"",
+                        rel.name(),
+                        columndef_colname(&col_def)
+                    ))
+                    .into_error());
+            }
+            let ccollid = seam::get_column_def_collation::call(mcx, &col_def, ctype_id)?;
+            if ccollid != childatt_collation {
+                let n1 = backend_utils_cache_lsyscache::collation_constraint_language_cast::get_collation_name(mcx, ccollid)?;
+                let n2 = backend_utils_cache_lsyscache::collation_constraint_language_cast::get_collation_name(mcx, childatt_collation)?;
+                let n1 = n1.as_ref().map(|s| s.as_str()).unwrap_or("(null)");
+                let n2 = n2.as_ref().map(|s| s.as_str()).unwrap_or("(null)");
+                return Err(backend_utils_error::ereport(ERROR)
+                    .errcode(types_error::ERRCODE_COLLATION_MISMATCH)
+                    .errmsg(format!(
+                        "child table \"{}\" has different collation for column \"{}\"",
+                        rel.name(),
+                        columndef_colname(&col_def)
+                    ))
+                    .errdetail(format!("\"{n1}\" versus \"{n2}\""))
+                    .into_error());
+            }
+
+            // Bump the existing child att's inhcount.
+            let new_inhcount = childatt_inhcount.checked_add(1).ok_or_else(|| {
+                backend_utils_error::ereport(ERROR)
+                    .errcode(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+                    .errmsg("too many inheritance parents".to_string())
+                    .into_error()
+            })?;
+            let row = types_catalog::pg_attribute::PgAttributeUpdateRow {
+                attinhcount: Some(new_inhcount),
+                ..Default::default()
+            };
+            indexing_seam::catalog_tuple_update_pg_attribute::call(mcx, &attrdesc, &tuple, &row)?;
+
+            // Inform the user about the merge.
+            backend_utils_error::ereport(NOTICE)
+                .errmsg(format!(
+                    "merging definition of column \"{}\" for child \"{}\"",
+                    columndef_colname(&col_def),
+                    rel.name()
+                ))
+                .finish(here("ATExecAddColumn"))?;
+
+            drop(attrdesc);
+
+            // Make the child column change visible.
+            backend_access_transam_xact_seams::command_counter_increment::call()?;
+
+            return Ok(ObjectAddress {
+                classId: types_core::InvalidOid,
+                objectId: types_core::InvalidOid,
+                objectSubId: 0,
+            });
         }
     }
 

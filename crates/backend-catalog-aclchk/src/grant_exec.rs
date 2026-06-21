@@ -212,6 +212,7 @@ fn restrict_and_check_grant(
         ObjectType::Table => ACL_ALL_RIGHTS_RELATION,
         ObjectType::Sequence => ACL_ALL_RIGHTS_SEQUENCE,
         ObjectType::Schema => ACL_ALL_RIGHTS_SCHEMA,
+        ObjectType::Database => ACL_ALL_RIGHTS_DATABASE,
         ObjectType::Type | ObjectType::Domain => ACL_ALL_RIGHTS_TYPE,
         ObjectType::Function | ObjectType::Procedure | ObjectType::Routine => {
             ACL_ALL_RIGHTS_FUNCTION
@@ -1181,10 +1182,14 @@ fn read_name(mcx: Mcx<'_>, cacheid: i32, tuple: &FormedTuple<'_>, attnum: i32) -
 
 /// `ExecGrantStmt_oids(istmt)` (aclchk.c) — dispatch on object type.
 fn exec_grant_stmt_oids(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<()> {
+    use backend_catalog_objectaddress::consts::DatabaseRelationId;
     match istmt.objtype {
         ObjectType::Table | ObjectType::Sequence => exec_grant_relation(mcx, istmt),
         OBJECT_SCHEMA => {
             exec_grant_common(mcx, istmt, NamespaceRelationId, ACL_ALL_RIGHTS_SCHEMA, None)
+        }
+        ObjectType::Database => {
+            exec_grant_common(mcx, istmt, DatabaseRelationId, ACL_ALL_RIGHTS_DATABASE, None)
         }
         ObjectType::Domain | ObjectType::Type => exec_grant_common(
             mcx,
@@ -1233,6 +1238,9 @@ fn rolespec_oid(role: &DdlRoleSpec<'_>, mcx: Mcx<'_>) -> PgResult<Oid> {
 const ACL_ALL_RIGHTS_FUNCTION: AclMode = types_acl::ACL_EXECUTE;
 const ACL_ALL_RIGHTS_TYPE: AclMode = ACL_USAGE;
 const ACL_ALL_RIGHTS_LARGEOBJECT: AclMode = ACL_SELECT | ACL_UPDATE;
+// `ACL_ALL_RIGHTS_DATABASE` (`utils/acl.h`).
+const ACL_ALL_RIGHTS_DATABASE: AclMode =
+    types_acl::ACL_CREATE | types_acl::ACL_CREATE_TEMP | types_acl::ACL_CONNECT;
 
 /// `InternalDefaultACL` (`aclchk.c`) — the internal form
 /// `ExecAlterDefaultPrivilegesStmt` builds before dispatching to
@@ -1753,6 +1761,152 @@ fn set_default_acl<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'mcx>) -> Pg
     Ok(())
 }
 
+/// `RemoveRoleFromObjectACL(roleid, classid, objid)` (aclchk.c:1423). During
+/// `DROP OWNED`, revoke (with CASCADE semantics) every privilege the role holds
+/// on the given object. For a `pg_default_acl` row this re-runs
+/// `SetDefaultACL` with the role as the lone grantee being removed; for every
+/// other catalog it builds an `InternalGrant` REVOKE and runs
+/// `ExecGrantStmt_oids`.
+pub(crate) fn remove_role_from_object_acl<'mcx>(
+    mcx: Mcx<'mcx>,
+    roleid: Oid,
+    classid: Oid,
+    objid: Oid,
+) -> PgResult<()> {
+    use backend_catalog_objectaddress::consts::{
+        DatabaseRelationId, DefaultAclRelationId, ForeignDataWrapperRelationId,
+        ForeignServerRelationId, LanguageRelationId, LargeObjectRelationId,
+        ParameterAclRelationId, TableSpaceRelationId,
+    };
+
+    if classid == DefaultAclRelationId {
+        use backend_access_common_scankey::ScanKeyInit;
+        use backend_access_index_genam_seams as genam;
+        use types_core::fmgr::F_OIDEQ;
+        use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+
+        // first fetch info needed by SetDefaultACL
+        let rel = table_open(mcx, DefaultAclRelationId, AccessShareLock)?;
+
+        let mut key = ScanKeyData::empty();
+        ScanKeyInit(
+            &mut key,
+            Anum_pg_default_acl_oid as i16,
+            BTEqualStrategyNumber,
+            F_OIDEQ,
+            Datum::from_oid(objid),
+        )?;
+        let keys = [key];
+
+        let mut scan =
+            genam::systable_beginscan::call(&rel, DefaultAclOidIndexId, true, None, &keys)?;
+        let tuple = genam::systable_getnext::call(mcx, scan.desc_mut())?;
+        let Some(tuple) = tuple else {
+            scan.end()?;
+            rel.close(AccessShareLock)?;
+            return Err(PgError::error(format!(
+                "could not find tuple for default ACL {objid}"
+            )));
+        };
+
+        let cols = backend_access_common_heaptuple::heap_deform_tuple(
+            mcx,
+            &tuple.tuple,
+            &rel.rd_att,
+            &tuple.data,
+        )?;
+        let defaclrole: Oid = {
+            let (v, n) = &cols[(Anum_pg_default_acl_defaclrole - 1) as usize];
+            debug_assert!(!*n);
+            v.as_oid()
+        };
+        let defaclnamespace: Oid = {
+            let (v, n) = &cols[(Anum_pg_default_acl_defaclnamespace - 1) as usize];
+            debug_assert!(!*n);
+            v.as_oid()
+        };
+        let defaclobjtype: i8 = {
+            let (v, n) = &cols[(Anum_pg_default_acl_defaclobjtype - 1) as usize];
+            debug_assert!(!*n);
+            v.as_char()
+        };
+
+        let objtype = match defaclobjtype {
+            x if x == DEFACLOBJ_RELATION => ObjectType::Table,
+            x if x == DEFACLOBJ_SEQUENCE => ObjectType::Sequence,
+            x if x == DEFACLOBJ_FUNCTION => ObjectType::Function,
+            x if x == DEFACLOBJ_TYPE => ObjectType::Type,
+            x if x == DEFACLOBJ_NAMESPACE => ObjectType::Schema,
+            x if x == DEFACLOBJ_LARGEOBJECT => ObjectType::Largeobject,
+            other => {
+                scan.end()?;
+                rel.close(AccessShareLock)?;
+                return Err(PgError::error(format!(
+                    "unexpected default ACL type: {}",
+                    other as i32
+                )));
+            }
+        };
+
+        scan.end()?;
+        rel.close(AccessShareLock)?;
+
+        let mut grantees: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
+        grantees.push(roleid);
+
+        let iacls = InternalDefaultACL {
+            roleid: defaclrole,
+            nspid: defaclnamespace,
+            is_grant: false,
+            objtype,
+            all_privs: true,
+            privileges: ACL_NO_RIGHTS,
+            grantees,
+            grant_option: false,
+            behavior: DropBehavior::Cascade,
+        };
+
+        set_default_acl(mcx, &iacls)?;
+        return Ok(());
+    }
+
+    let objtype = match classid {
+        x if x == RelationRelationId => ObjectType::Table,
+        x if x == DatabaseRelationId => ObjectType::Database,
+        x if x == TypeRelationId => ObjectType::Type,
+        x if x == ProcedureRelationId => ObjectType::Routine,
+        x if x == LanguageRelationId => ObjectType::Language,
+        x if x == LargeObjectRelationId => ObjectType::Largeobject,
+        x if x == NamespaceRelationId => ObjectType::Schema,
+        x if x == TableSpaceRelationId => ObjectType::Tablespace,
+        x if x == ForeignServerRelationId => ObjectType::ForeignServer,
+        x if x == ForeignDataWrapperRelationId => ObjectType::Fdw,
+        x if x == ParameterAclRelationId => ObjectType::ParameterAcl,
+        other => {
+            return Err(PgError::error(format!("unexpected object class {other}")));
+        }
+    };
+
+    let mut objects: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
+    objects.push(objid);
+    let mut grantees: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
+    grantees.push(roleid);
+
+    let mut istmt = InternalGrant {
+        is_grant: false,
+        objtype,
+        objects,
+        all_privs: true,
+        privileges: ACL_NO_RIGHTS,
+        col_privs: mcx::vec_with_capacity_in(mcx, 0)?,
+        grantees,
+        grant_option: false,
+        behavior: DropBehavior::Cascade,
+    };
+
+    exec_grant_stmt_oids(mcx, &mut istmt)
+}
+
 /// `ExecuteGrantStmt(stmt)` (aclchk.c). The slow-path leg installed for
 /// `Node::GrantStmt`.
 pub fn execute_grant_stmt(mcx: Mcx<'_>, stmt: &Node<'_>) -> PgResult<()> {
@@ -1978,6 +2132,9 @@ fn objtype_all_privileges(objtype: ObjectType) -> PgResult<(AclMode, &'static st
         )),
         ObjectType::Sequence => Ok((ACL_ALL_RIGHTS_SEQUENCE, "invalid privilege type %s for sequence")),
         OBJECT_SCHEMA => Ok((ACL_ALL_RIGHTS_SCHEMA, "invalid privilege type %s for schema")),
+        ObjectType::Database => {
+            Ok((ACL_ALL_RIGHTS_DATABASE, "invalid privilege type %s for database"))
+        }
         ObjectType::Domain => Ok((ACL_ALL_RIGHTS_TYPE, "invalid privilege type %s for domain")),
         ObjectType::Type => Ok((ACL_ALL_RIGHTS_TYPE, "invalid privilege type %s for type")),
         ObjectType::Function => Ok((ACL_ALL_RIGHTS_FUNCTION, "invalid privilege type %s for function")),
