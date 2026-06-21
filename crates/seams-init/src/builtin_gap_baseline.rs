@@ -97,7 +97,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (1573, "pg_get_ruledef", BuiltinGapKind::NotRegistered),
     (1641, "pg_get_viewdef", BuiltinGapKind::NotRegistered),
     (1642, "pg_get_userbyid", BuiltinGapKind::NotRegistered),
-    (1665, "pg_get_serial_sequence", BuiltinGapKind::NotRegistered),
     (1686, "pg_get_keywords", BuiltinGapKind::NotRegistered),
     (1689, "aclexplode", BuiltinGapKind::NotRegistered),
     (1814, "iclikesel", BuiltinGapKind::NotRegistered),

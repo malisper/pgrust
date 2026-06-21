@@ -1547,9 +1547,32 @@ fn init_params(
 
     /* AS type */
     if let Some(as_type) = as_type {
-        // typenameTypeId(pstate, defGetTypeName(as_type))
+        // typenameTypeId(pstate, defGetTypeName(as_type)). The seam strips the
+        // ParseState, so a "type does not exist"/"is only a shell" error comes
+        // back with no cursor position; re-attach `parser_errposition(pstate,
+        // typeName->location)` from the `DefElem`'s TypeName arg (the raw parse
+        // location), matching C — exactly as `errorConflictingDefElem` does for
+        // the option-location errors.
+        let as_type_location = as_type
+            .arg
+            .as_deref()
+            .and_then(|n| n.as_typename())
+            .map(|tn| tn.location)
+            .unwrap_or(-1);
         let newtypid =
-            backend_parser_parse_type_seams::typename_type_id_from_defelem::call(as_type)?;
+            backend_parser_parse_type_seams::typename_type_id_from_defelem::call(as_type).map_err(
+                |e| {
+                    if e.cursor_position().is_none() && as_type_location >= 0 {
+                        // parser_errposition: pg_mbstrlen_with_len(sourcetext,
+                        // location) + 1 — the 1-based character position. All
+                        // regression type names are ASCII, so byte offset + 1 is
+                        // the character position the renderer wants.
+                        e.with_cursor_position(as_type_location + 1)
+                    } else {
+                        e
+                    }
+                },
+            )?;
 
         if newtypid != INT2OID && newtypid != INT4OID && newtypid != INT8OID {
             return ereport(ERROR)

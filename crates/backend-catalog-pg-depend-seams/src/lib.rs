@@ -157,6 +157,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The pg_depend scan at the heart of `pg_get_serial_sequence` (ruleutils.c):
+    /// the first auto/internal sequence dependency on `(relid, attnum)`, or
+    /// `None`. (`getOwnedSequences_internal(relid, attnum, 0)` restricted to one
+    /// result, matching the C `break` on the first match.)
+    pub fn get_serial_sequence_for_column(relid: Oid, attnum: AttrNumber) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
     /// `getIdentitySequence(rel, attnum, missing_ok)` — the caller's open
     /// `Relation` crosses as `&RelationData`.
     pub fn getIdentitySequence(

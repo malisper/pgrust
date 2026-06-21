@@ -1029,6 +1029,16 @@ pub fn getOwnedSequences<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<PgVec<'mc
     getOwnedSequences_internal(mcx, relid, 0, 0)
 }
 
+/// The pg_depend scan body of `pg_get_serial_sequence` (ruleutils.c): scan for
+/// an auto (serial) or internal (identity) sequence dependency on the specific
+/// `(relid, attnum)` column and return the first match (`break` in C), or `None`
+/// when there is no owned sequence.
+pub fn get_serial_sequence_for_column(relid: Oid, attnum: AttrNumber) -> PgResult<Option<Oid>> {
+    let ctx = MemoryContext::new("get_serial_sequence_for_column");
+    let seqs = getOwnedSequences_internal(ctx.mcx(), relid, attnum, 0)?;
+    Ok(seqs.first().copied())
+}
+
 /// Get owned identity sequence, error if not exactly one.
 ///
 /// `rel` is the caller's open relation; the `relispartition` field is read
@@ -1188,6 +1198,7 @@ pub fn init_seams() {
     seams::getExtensionType::set(getExtensionType);
     seams::sequenceIsOwned::set(sequenceIsOwned);
     seams::getOwnedSequences::set(getOwnedSequences);
+    seams::get_serial_sequence_for_column::set(get_serial_sequence_for_column);
     seams::getIdentitySequence::set(getIdentitySequence);
     seams::get_index_constraint::set(get_index_constraint);
     seams::get_index_ref_constraints::set(get_index_ref_constraints);

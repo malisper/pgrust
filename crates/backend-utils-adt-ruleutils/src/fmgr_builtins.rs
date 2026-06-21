@@ -555,6 +555,57 @@ fn builtin(
 /// `fmgr_builtins[]` rows). Called from this crate's `init_seams()`.
 /// OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat` (all of
 /// these are `proisstrict => 't'` default and none `proretset`).
+/// `pg_get_serial_sequence(tablename text, columnname text) -> text` (oid 1665,
+/// ruleutils.c:2833). Get the name of the sequence used by an identity or serial
+/// column, formatted for setval/nextval/currval. The first parameter is *not*
+/// double-quoted (parsed as a qualified name); the second *is* (used verbatim as
+/// the column name).
+fn fc_pg_get_serial_sequence(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    use types_core::primitive::AttrNumber;
+    const INVALID_ATTR_NUMBER: AttrNumber = 0;
+
+    let m = scratch_mcx();
+    let mcx = m.mcx();
+    let tablename = arg_text_str(fcinfo, 0);
+    let column = String::from(arg_text_str(fcinfo, 1));
+
+    // tablerv = makeRangeVarFromNameList(textToQualifiedNameList(tablename));
+    // tableOid = RangeVarGetRelid(tablerv, NoLock, false);
+    let table_oid = backend_catalog_namespace_seams::range_var_get_relid_from_text::call(
+        mcx,
+        tablename,
+        0,     /* NoLock */
+        false, /* missing_ok = false */
+    )?;
+
+    // attnum = get_attnum(tableOid, column);
+    let attnum = backend_utils_cache_lsyscache_seams::get_attnum::call(table_oid, &column)?;
+    if attnum == INVALID_ATTR_NUMBER {
+        // tablerv->relname — the parsed (possibly unqualified) name's last
+        // component; equals the resolved relation's name here.
+        let relname = backend_utils_cache_lsyscache_seams::get_rel_name::call(mcx, table_oid)?
+            .map(|s| String::from(s.as_str()))
+            .unwrap_or_else(|| String::from(tablename));
+        return Err(types_error::PgError::error(alloc::format!(
+            "column \"{column}\" of relation \"{relname}\" does not exist"
+        ))
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN));
+    }
+
+    // Search pg_depend for the dependent (auto/internal) sequence on this column.
+    let sequence_id =
+        backend_catalog_pg_depend_seams::get_serial_sequence_for_column::call(table_oid, attnum)?;
+
+    match sequence_id {
+        Some(seq) => {
+            // result = generate_qualified_relation_name(sequenceId);
+            let result = crate::constraintdef::generate_qualified_relation_name(mcx, seq)?;
+            ret_text(fcinfo, result.as_str().as_bytes().to_vec())
+        }
+        None => ret_null(fcinfo),
+    }
+}
+
 pub fn register_ruleutils_builtins() {
     backend_utils_fmgr_core::register_builtins_native([
         // Slice 1: fully working (deparse via the ported get_rule_expr).
@@ -568,6 +619,7 @@ pub fn register_ruleutils_builtins() {
         builtin(2508, "pg_get_constraintdef_ext", 2, true, false, fc_pg_get_constraintdef_ext),
         // pg_get_userbyid(oid) -> name (roleid -> rolname, unknown-OID fallback).
         builtin(1642, "pg_get_userbyid", 1, true, false, fc_pg_get_userbyid),
+        builtin(1665, "pg_get_serial_sequence", 2, true, false, fc_pg_get_serial_sequence),
         // Slice 3: extended-statistics deparse (resolvable; workers seam-and-panic
         // at the unported Form_pg_statistic_ext deform — empty-input psql `\d`
         // describe only needs resolution, see statisticsdef.rs).

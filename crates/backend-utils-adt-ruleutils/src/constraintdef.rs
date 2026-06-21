@@ -445,7 +445,7 @@ fn extract_not_null_column(conkey: Option<&ConKeyArray>) -> PgResult<i16> {
 
 /// `generate_qualified_relation_name(relid)` (ruleutils.c 13213) — the
 /// always-schema-qualified, quoted relation name.
-fn generate_qualified_relation_name<'mcx>(
+pub(crate) fn generate_qualified_relation_name<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
 ) -> PgResult<PgString<'mcx>> {

@@ -21015,6 +21015,7 @@ dependencies = [
  "backend-access-index-amapi-seams",
  "backend-access-index-genam-seams",
  "backend-catalog-namespace-seams",
+ "backend-catalog-pg-depend-seams",
  "backend-commands-functioncmds-seams",
  "backend-commands-tablespace-seams",
  "backend-commands-typecmds-seams",
