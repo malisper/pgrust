@@ -34,6 +34,8 @@ use backend_commands_tablespace_globals_seams as ts_globals_seam;
 use backend_utils_init_miscinit_seams as miscinit_seam;
 
 use backend_commands_tablecmds_seams as seam;
+use backend_catalog_pg_depend_seams as pg_depend_seam;
+use backend_commands_sequence_seams as sequence_seam;
 
 use crate::helpers::{here, to_access_range_var, LargeObjectRelationId, RelationRelationId};
 
@@ -213,7 +215,7 @@ pub fn execute_truncate_guts<'mcx>(
      */
     if restart_seqs {
         for rel in rels.iter() {
-            let seqlist = seam::get_owned_sequences::call(mcx, rel.rd_id)?;
+            let seqlist = pg_depend_seam::getOwnedSequences::call(mcx, rel.rd_id)?;
             for &seq_relid in seqlist.iter() {
                 let seq_rel = relation_open(mcx, seq_relid, AccessExclusiveLock)?;
 
@@ -329,7 +331,7 @@ pub fn execute_truncate_guts<'mcx>(
 
     /* Restart owned sequences if we were asked to. */
     for &seq_relid in seq_relids.iter() {
-        seam::reset_sequence::call(seq_relid)?;
+        sequence_seam::reset_sequence::call(mcx, seq_relid)?;
     }
 
     /*

@@ -28,6 +28,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ResetSequence(seq_relid)` (commands/sequence.c): reset a sequence to its
+    /// start value — the `TRUNCATE ... RESTART IDENTITY` support called by
+    /// `ExecuteTruncateGuts`. Allocates while building the new sequence tuple,
+    /// and may `ereport(ERROR)`.
+    pub fn reset_sequence<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        seq_relid: types_core::primitive::Oid,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `DeleteSequenceTuple(seqid)` (commands/sequence.c): the per-class
     /// `OCLASS_CLASS` sequence-drop handler dependency.c's `doDeletion` invokes
     /// for a sequence relation. Removes its `pg_sequence` row. Can

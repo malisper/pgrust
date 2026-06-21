@@ -556,21 +556,6 @@ seam_core::seam!(
     pub fn pgstat_count_truncate(rel: &types_rel::Relation<'_>) -> PgResult<()>
 );
 
-/* ---- owned-sequence reset (pg_depend.c / sequence.c) ---------------------- */
-
-seam_core::seam!(
-    /// `getOwnedSequences(relid)` (pg_depend.c): the OIDs of the sequences
-    /// owned by (any column of) `relid`.
-    pub fn get_owned_sequences<'mcx>(mcx: mcx::Mcx<'mcx>, relid: Oid) -> PgResult<mcx::PgVec<'mcx, Oid>>
-);
-
-seam_core::seam!(
-    /// `ResetSequence(seq_relid)` (sequence.c): reset a sequence to its start
-    /// value (TRUNCATE ... RESTART IDENTITY). `Err` carries its
-    /// `ereport(ERROR)`s.
-    pub fn reset_sequence(seq_relid: Oid) -> PgResult<()>
-);
-
 /* ---- FDW truncate dispatch (foreign.c + FdwRoutine) ----------------------- */
 
 seam_core::seam!(

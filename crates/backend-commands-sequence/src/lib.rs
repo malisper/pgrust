@@ -2509,6 +2509,7 @@ pub fn init_seams() {
     backend_commands_sequence_seams::seq_redo::set(seq_redo);
     backend_commands_sequence_seams::seq_mask::set(seq_mask);
     backend_commands_sequence_seams::reset_sequence_caches::set(ResetSequenceCaches);
+    backend_commands_sequence_seams::reset_sequence::set(ResetSequence);
     backend_commands_sequence_seams::DeleteSequenceTuple::set(DeleteSequenceTuple);
     backend_commands_sequence_seams::nextval_internal::set(nextval_internal);
     backend_commands_sequence_seams::sequence_change_persistence::set(SequenceChangePersistence);

@@ -1494,67 +1494,241 @@ fn exec_as_delete_triggers_impl(
 
 // ---- TRUNCATE STATEMENT (tablecmds.c ExecuteTruncateGuts + trigger.c) ----
 
+/// The throwaway EState that C's `ExecuteTruncateGuts` builds to fire the
+/// statement-level TRUNCATE triggers (tablecmds.c:2090-2136). It is created in
+/// the BEFORE-trigger call and torn down in the AFTER-trigger call, so it must
+/// outlive the seam boundary between them — the same single `EState` spans
+/// `ExecBSTruncateTriggers` … truncation … `ExecASTruncateTriggers` …
+/// `AfterTriggerEndQuery` … `FreeExecutorState` in C.
+struct TruncateTriggerState {
+    /// `EState *estate` (`CreateExecutorState`), allocated in the truncate
+    /// query context; transmuted to `'static` only to cross the two-call
+    /// boundary — it never escapes a matched begin/end pair.
+    estate: mcx::PgBox<'static, EStateData<'static>>,
+    /// The per-rel `ResultRelInfo` ids, in `rels` order (also held in
+    /// `estate.es_opened_result_relations`).
+    rri_ids: Vec<types_nodes::RriId>,
+    /// The relations re-opened for the firing block; closed `NoLock` (keeping
+    /// the caller's AccessExclusiveLock) once the AFTER triggers are queued.
+    rels: Vec<types_rel::Relation<'static>>,
+}
+
+thread_local! {
+    /// In-flight truncate firing state, set by the BEFORE call and consumed by
+    /// the AFTER call. `None` between truncate statements.
+    static TRUNCATE_TRIGGER_STATE: RefCell<Option<TruncateTriggerState>> =
+        const { RefCell::new(None) };
+}
+
 /// `AfterTriggerBeginQuery() + CreateExecutorState() + InitResultRelInfo() per
 /// rel + ExecBSTruncateTriggers()` (tablecmds.c:2090-2136 / trigger.c:3281).
 ///
-/// Coarse seam: the EState / ResultRelInfo machinery lives in the C caller, so
-/// the whole BEFORE-STATEMENT-TRUNCATE block crosses by relids. We open each
-/// relation (already locked AccessExclusiveLock by the caller; the relcache
-/// entry is hot), and consult its `rd_trigdesc`. `ExecBSTruncateTriggers`
-/// early-returns when `trigdesc == NULL || !trig_truncate_before_statement`
-/// (trigger.c:3289-3292) — the no-trigger common case is a faithful no-op. A
-/// rel that actually carries a BEFORE STATEMENT TRUNCATE trigger needs the
-/// per-trigger firing substrate (`front_half`), still unported.
+/// Builds the throwaway `EState` and a `ResultRelInfo` per relation (mirroring
+/// `ExecuteTruncateGuts`), fires every BEFORE STATEMENT TRUNCATE trigger, and
+/// stashes the `EState` for the matching AFTER call. The relations are re-opened
+/// here (the caller already holds AccessExclusiveLock; this only bumps the
+/// relcache refcount) so their `TriggerDesc`/descriptor stay valid through the
+/// firing block.
 fn exec_truncate_fire_before_triggers_impl(
     mcx: Mcx<'_>,
     relids: &[Oid],
-    _run_as_table_owner: bool,
+    run_as_table_owner: bool,
 ) -> PgResult<()> {
+    // run_as_table_owner drives SwitchToUntrustedUser/RestoreUserContext around
+    // each trigger in C; that user-switch substrate is not modeled here, and the
+    // reachable TRUNCATE-trigger tests do not exercise it.
+    let _ = run_as_table_owner;
+
+    // AfterTriggerBeginQuery();
+    crate::queue::after_trigger_begin_query();
+
+    // estate = CreateExecutorState();
+    let mut estate: mcx::PgBox<'_, EStateData<'_>> =
+        backend_executor_execUtils_seams::create_executor_state::call(mcx)?;
+
+    let mut rri_ids: Vec<types_nodes::RriId> = Vec::new();
+    let mut rels: Vec<types_rel::Relation<'_>> = Vec::new();
+
+    // foreach rel: InitResultRelInfo(...); es_opened_result_relations =
+    // lappend(es_opened_result_relations, resultRelInfo);
     for &relid in relids {
-        // C holds AccessExclusiveLock from the caller's table_open; re-open to
-        // read the relcache TriggerDesc, then release our extra refcount but
-        // keep the lock (NoLock close, as the caller does).
         let rel =
             backend_access_table_table_seams::table_open::call(mcx, relid, AccessExclusiveLock)?;
-        let fires = rel
-            .rd_trigdesc
-            .as_ref()
-            .is_some_and(|td| td.trig_truncate_before_statement);
-        rel.close(NoLock)?;
-        if fires {
-            front_half("ExecBSTruncateTriggers", 3281);
-        }
+
+        let mut rri = types_nodes::ResultRelInfo::default();
+        backend_executor_execMain_seams::init_result_rel_info::call(
+            mcx,
+            &mut rri,
+            rel.alias(),
+            /* dummy rangetable index */ 0,
+            /* partition_root_rri */ None,
+            /* instrument_options */ 0,
+        )?;
+        let id = estate.add_result_rel(rri)?;
+        estate
+            .es_opened_result_relations
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<types_nodes::RriId>()))?;
+        estate.es_opened_result_relations.push(id);
+        rri_ids.push(id);
+        rels.push(rel);
     }
+
+    // Process all BEFORE STATEMENT TRUNCATE triggers (one estate, all rels).
+    for &id in &rri_ids {
+        exec_bs_truncate_triggers(&mut estate, id)?;
+    }
+
+    // Stash the estate + rels for the AFTER call. SAFETY: the state never
+    // escapes the matched begin/end pair on this thread; the truncate query
+    // context (`mcx`) outlives both calls.
+    let state = TruncateTriggerState {
+        estate: unsafe {
+            core::mem::transmute::<
+                mcx::PgBox<'_, EStateData<'_>>,
+                mcx::PgBox<'static, EStateData<'static>>,
+            >(estate)
+        },
+        rri_ids,
+        rels: unsafe {
+            core::mem::transmute::<
+                Vec<types_rel::Relation<'_>>,
+                Vec<types_rel::Relation<'static>>,
+            >(rels)
+        },
+    };
+    TRUNCATE_TRIGGER_STATE.with(|s| *s.borrow_mut() = Some(state));
     Ok(())
 }
 
 /// `ExecASTruncateTriggers() per rel + AfterTriggerEndQuery() +
 /// FreeExecutorState()` (tablecmds.c:2334-2352 / trigger.c:3327).
-///
-/// `ExecASTruncateTriggers` only queues an AFTER event when
-/// `trigdesc && trig_truncate_after_statement` (trigger.c:3332); otherwise it
-/// is a no-op. With no truncate triggers there is nothing to queue, so the
-/// `AfterTriggerBeginQuery`/`AfterTriggerEndQuery` bracket and the EState are
-/// pure overhead — a faithful no-op. A rel carrying an AFTER STATEMENT
-/// TRUNCATE trigger needs `AfterTriggerSaveEvent`, still unported.
 fn exec_truncate_fire_after_triggers_impl(
     mcx: Mcx<'_>,
-    relids: &[Oid],
-    _run_as_table_owner: bool,
+    _relids: &[Oid],
+    run_as_table_owner: bool,
 ) -> PgResult<()> {
-    for &relid in relids {
-        let rel =
-            backend_access_table_table_seams::table_open::call(mcx, relid, AccessExclusiveLock)?;
-        let fires = rel
-            .rd_trigdesc
-            .as_ref()
-            .is_some_and(|td| td.trig_truncate_after_statement);
+    let _ = run_as_table_owner;
+
+    let mut state = TRUNCATE_TRIGGER_STATE
+        .with(|s| s.borrow_mut().take())
+        .expect("exec_truncate_fire_after_triggers without a matching before call");
+
+    // Process all AFTER STATEMENT TRUNCATE triggers.
+    for &id in &state.rri_ids {
+        exec_as_truncate_triggers(&mut state.estate, id)?;
+    }
+
+    // AfterTriggerEndQuery(estate);
+    after_trigger_end_query(&mut state.estate)?;
+
+    // FreeExecutorState(estate);
+    backend_executor_execUtils_seams::free_executor_state::call(state.estate)?;
+
+    // Close the rels we re-opened, keeping the caller's AccessExclusiveLock.
+    for rel in state.rels.drain(..) {
         rel.close(NoLock)?;
-        if fires {
-            front_half("ExecASTruncateTriggers", 3327);
+    }
+    let _ = mcx;
+    Ok(())
+}
+
+/// `ExecBSTruncateTriggers(estate, relinfo)` (trigger.c:3281) — fire the BEFORE
+/// STATEMENT TRUNCATE triggers for one relation.
+fn exec_bs_truncate_triggers(
+    estate: &mut EStateData<'_>,
+    relinfo: types_nodes::RriId,
+) -> PgResult<()> {
+    use types_catalog::pg_trigger::{
+        TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TRUNCATE,
+    };
+    use types_nodes::trigger::TRIGGER_EVENT_TRUNCATE;
+
+    // if (trigdesc == NULL) return;
+    // if (!trigdesc->trig_truncate_before_statement) return;
+    let fires = estate
+        .result_rel(relinfo)
+        .ri_TrigDesc
+        .as_ref()
+        .is_some_and(|td| td.trig_truncate_before_statement);
+    if !fires {
+        return Ok(());
+    }
+
+    // LocTriggerData.tg_event = TRIGGER_EVENT_TRUNCATE | TRIGGER_EVENT_BEFORE;
+    let tg_event = TRIGGER_EVENT_TRUNCATE | TRIGGER_EVENT_BEFORE;
+
+    let numtriggers = estate
+        .result_rel(relinfo)
+        .ri_TrigDesc
+        .as_ref()
+        .map(|td| td.triggers.len())
+        .unwrap_or(0);
+
+    for i in 0..numtriggers {
+        let (tgtype, tgenabled, tgnattr, has_qual) = {
+            let trig = &estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[i];
+            (trig.tgtype, trig.tgenabled, trig.tgnattr, trig.tgqual.is_some())
+        };
+        // if (!TRIGGER_TYPE_MATCHES(tgtype, STATEMENT, BEFORE, TRUNCATE)) continue;
+        if !TRIGGER_TYPE_MATCHES(
+            tgtype,
+            TRIGGER_TYPE_STATEMENT,
+            TRIGGER_TYPE_BEFORE,
+            TRIGGER_TYPE_TRUNCATE,
+        ) {
+            continue;
+        }
+        // if (!TriggerEnabled(estate, relinfo, trigger, tg_event, NULL, NULL, NULL)) continue;
+        if !trigger_enabled(
+            estate, relinfo, i, tgenabled, tgnattr, has_qual, tg_event,
+            /* oldslot */ None, /* newslot */ None,
+        )? {
+            continue;
+        }
+
+        // newtuple = ExecCallTriggerFunc(&LocTriggerData, ...);
+        let returned = fire_statement_trigger(estate, relinfo, i, tg_event)?;
+
+        // if (newtuple) ereport(ERROR, "BEFORE STATEMENT trigger cannot return a value");
+        if returned {
+            return Err(PgError::error(
+                "BEFORE STATEMENT trigger cannot return a value".to_string(),
+            )
+            .with_sqlstate(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED));
         }
     }
     Ok(())
+}
+
+/// `ExecASTruncateTriggers(estate, relinfo)` (trigger.c:3327) — queue the AFTER
+/// STATEMENT TRUNCATE event for one relation, if it has a matching trigger.
+fn exec_as_truncate_triggers(
+    estate: &mut EStateData<'_>,
+    relinfo: types_nodes::RriId,
+) -> PgResult<()> {
+    use types_nodes::trigger::TRIGGER_EVENT_TRUNCATE;
+
+    // if (trigdesc && trigdesc->trig_truncate_after_statement)
+    //   AfterTriggerSaveEvent(estate, relinfo, NULL, NULL, TRIGGER_EVENT_TRUNCATE,
+    //                         false, NULL, NULL, NIL, NULL, NULL, false);
+    let fires = estate
+        .result_rel(relinfo)
+        .ri_TrigDesc
+        .as_ref()
+        .is_some_and(|td| td.trig_truncate_after_statement);
+    if !fires {
+        return Ok(());
+    }
+    // cmd_type is unused on the TRUNCATE leg (no cancel/transition-table dedup);
+    // pass any value.
+    after_trigger_save_event_stmt(
+        estate,
+        relinfo,
+        TRIGGER_EVENT_TRUNCATE,
+        crate::queue::CmdType::Insert,
+        None,
+    )
 }
 
 // ---- ROW INSERT (trigger.c:2466-2570) ----
@@ -2784,10 +2958,11 @@ fn after_trigger_save_event_stmt(
 ) -> PgResult<()> {
     use types_catalog::pg_trigger::{
         TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_MATCHES,
-        TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_UPDATE,
+        TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TRUNCATE, TRIGGER_TYPE_UPDATE,
     };
     use types_nodes::trigger::{
         AFTER_TRIGGER_1CTID, AFTER_TRIGGER_DEFERRABLE, AFTER_TRIGGER_INITDEFERRED,
+        TRIGGER_EVENT_TRUNCATE,
     };
     const TRIGGER_EVENT_DELETE: u32 = 1;
     const TRIGGER_EVENT_UPDATE: u32 = 2;
@@ -2813,6 +2988,7 @@ fn after_trigger_save_event_stmt(
         TRIGGER_EVENT_INSERT => TRIGGER_TYPE_INSERT,
         TRIGGER_EVENT_DELETE => TRIGGER_TYPE_DELETE,
         TRIGGER_EVENT_UPDATE => TRIGGER_TYPE_UPDATE,
+        TRIGGER_EVENT_TRUNCATE => TRIGGER_TYPE_TRUNCATE,
         other => {
             return Err(PgError::error(format!(
                 "invalid after-trigger event code: {other}"
@@ -2820,7 +2996,12 @@ fn after_trigger_save_event_stmt(
         }
     };
     // ItemPointerSetInvalid on both ctids; cancel any prior AS batch.
-    crate::queue::cancel_prior_stmt_triggers(rel_oid, cmd_type, event & TRIGGER_EVENT_OPMASK);
+    // The TRUNCATE statement event has no transition-table dedup
+    // (trigger.c:6352): it neither calls cancel_prior_stmt_triggers nor uses an
+    // AfterTriggersTableData.
+    if event != TRIGGER_EVENT_TRUNCATE {
+        crate::queue::cancel_prior_stmt_triggers(rel_oid, cmd_type, event & TRIGGER_EVENT_OPMASK);
+    }
 
     let new_event = types_nodes::trigger::AfterTriggerEventData {
         ate_flags: AFTER_TRIGGER_1CTID,
