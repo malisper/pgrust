@@ -25,11 +25,6 @@ use types_rel::Relation;
 
 use backend_commands_copyfrom_seams as s;
 
-fn unsupported(msg: &str) -> PgError {
-    PgError::error(msg.to_string())
-        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-}
-
 /// `pg_encoding_max_length(encoding)` — the longest valid multibyte sequence
 /// for `encoding` (mb/wchar.c `pg_wchar_table[encoding].maxmblen`). Inlined for
 /// the encodings COPY FROM supports on the no-transcoding path; an unknown
@@ -59,10 +54,8 @@ pub fn init_seams() {
         },
     );
     s::copy_get_data_callback::set(
-        |_cstate: &CopyParseState<'_>, _minread: i32, _maxread: i32| -> PgResult<CopyGetDataResult> {
-            Err(unsupported(
-                "COPY FROM callback (COPY_CALLBACK data_source_cb) is not yet wired",
-            ))
+        |cstate: &CopyParseState<'_>, minread: i32, maxread: i32| -> PgResult<CopyGetDataResult> {
+            crate::copy_get_data_callback_impl(cstate, minread, maxread)
         },
     );
 
@@ -150,10 +143,12 @@ pub fn init_seams() {
         },
     );
     s::receive_function_call::set(
-        |_cstate: &mut CopyParseState<'_>, _m: i32, _buf: Option<&[u8]>, _typmod: i32| -> PgResult<RichDatum<'_>> {
-            Err(unsupported(
-                "COPY FROM binary receive function (ReceiveFunctionCall) is not yet wired",
-            ))
+        |cstate: &mut CopyParseState<'_>, m: i32, buf: Option<&[u8]>, typmod: i32| -> PgResult<RichDatum<'_>> {
+            // The receive-function output is allocated in the per-query context;
+            // reach it through the cstate's own allocator, as the text input leg
+            // does.
+            let mcx: Mcx<'_> = *cstate.attnumlist.allocator();
+            crate::receive_function_call_impl(mcx, cstate, m, buf, typmod)
         },
     );
     s::exec_eval_expr::set(
@@ -191,10 +186,12 @@ pub fn init_seams() {
 
     // -- libpq frontend --
     s::receive_copy_begin::set(
-        |_cstate: &mut CopyParseState<'_>, _natts: i32, _binary: bool| -> PgResult<()> {
-            Err(unsupported(
-                "COPY FROM frontend ReceiveCopyBegin (CopyInResponse) is not yet wired",
-            ))
+        |cstate: &mut CopyParseState<'_>, natts: i32, binary: bool| -> PgResult<()> {
+            // The `CopyInResponse` is built in the per-query context; reach it
+            // through the cstate's own allocator (the attnumlist PgVec lives in
+            // the copy context), exactly as the other allocating seam bodies do.
+            let mcx: Mcx<'_> = *cstate.attnumlist.allocator();
+            crate::receive_copy_begin_impl(mcx, natts, binary)
         },
     );
 }

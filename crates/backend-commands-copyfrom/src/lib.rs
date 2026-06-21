@@ -114,7 +114,19 @@ enum CopySourceReader {
     /// last `CopyData` message not yet consumed; `eof` is set when `CopyDone`
     /// (or the EOF marker) was seen.
     Frontend { residual: Vec<u8>, pos: usize, eof: bool },
+    /// `copy_src == COPY_CALLBACK`: COPY data pulled through a caller-supplied
+    /// `copy_data_source_cb` (commands/copy.h:
+    /// `int (*)(void *outbuf, int minread, int maxread)`). The callback fills
+    /// `outbuf` with at least `minread`, at most `maxread`, bytes and returns the
+    /// count read; a short read (fewer than `minread`) signals EOF.
+    Callback { cb: CopyDataSourceCb },
 }
+
+/// `copy_data_source_cb` (commands/copy.h) — the caller-supplied data-reading
+/// callback. C: `int (*)(void *outbuf, int minread, int maxread)`. The Rust form
+/// fills the destination slice and returns the number of bytes read; it may
+/// raise, so it is fallible.
+pub type CopyDataSourceCb = fn(&mut [u8], i32, i32) -> PgResult<i32>;
 
 thread_local! {
     /// `CopyFileHandle` → its open reader. Keyed by the token the driver stamps
@@ -187,15 +199,58 @@ fn copy_get_data_file_impl(
                     reached_eof: n == 0,
                 })
             }
-            CopySourceReader::Frontend { .. } => {
-                // Frontend reads are served by `copy_get_data_frontend_impl`
-                // (the COPY_FRONTEND seam); `copy_get_data_file` is the
-                // COPY_FILE leg only and must never see a frontend source.
+            CopySourceReader::Frontend { .. } | CopySourceReader::Callback { .. } => {
+                // Frontend / callback reads are served by their own legs
+                // (`copy_get_data_frontend_impl` / `copy_get_data_callback_impl`);
+                // `copy_get_data_file` is the COPY_FILE leg only and must never
+                // see a non-file source.
                 Err(PgError::error(
-                    "COPY FROM: COPY_FILE read leg invoked on a COPY_FRONTEND source",
+                    "COPY FROM: COPY_FILE read leg invoked on a non-file source",
                 ))
             }
         }
+    })
+}
+
+/// `CopyGetData` `COPY_CALLBACK` leg (copyfromparse.c:343-345) —
+/// `bytesread = cstate->data_source_cb(databuf, minread, maxread);`. Resolves the
+/// registered `copy_data_source_cb` keyed by `cstate.copy_file` and invokes it.
+/// Installed as the `copy_get_data_callback` seam body.
+fn copy_get_data_callback_impl(
+    cstate: &CopyParseState<'_>,
+    minread: i32,
+    maxread: i32,
+) -> PgResult<CopyGetDataResult> {
+    let handle = cstate
+        .copy_file
+        .ok_or_else(|| PgError::error("COPY FROM: callback source is not open"))?;
+    let maxread = maxread.max(0) as usize;
+
+    let cb = SOURCES.with(|s| -> PgResult<CopyDataSourceCb> {
+        let map = s.borrow();
+        match map.get(&handle.0) {
+            Some(CopySourceReader::Callback { cb }) => Ok(*cb),
+            Some(_) => Err(PgError::error(
+                "COPY FROM: COPY_CALLBACK read leg invoked on a non-callback source",
+            )),
+            None => Err(PgError::error(
+                "COPY FROM: callback source handle is not registered",
+            )),
+        }
+    })?;
+
+    // The callback fills the caller's buffer in place; mirror that over an owned
+    // scratch buffer sized to `maxread`, then hand back exactly what it wrote.
+    let mut buf = vec![0u8; maxread];
+    let bytesread = cb(&mut buf, minread, maxread as i32)?;
+    let bytesread = bytesread.clamp(0, maxread as i32) as usize;
+    buf.truncate(bytesread);
+    // C `CopyLoadRawBuf` sets `raw_reached_eof` only when the source returns
+    // *zero* bytes (`inbytes == 0`); a non-empty short read is not yet EOF.
+    let reached_eof = bytesread == 0;
+    Ok(CopyGetDataResult {
+        data: buf,
+        reached_eof,
     })
 }
 
@@ -336,7 +391,7 @@ fn copy_get_data_frontend_impl(
 /// `ReceiveCopyBegin(cstate)` (copyfromparse.c:169-187) — build and send the
 /// `CopyInResponse` (`'G'`) message announcing the per-column wire formats, then
 /// flush so the frontend knows it may start sending COPY data.
-fn receive_copy_begin_impl(mcx: Mcx<'_>, natts: i32, binary: bool) -> PgResult<()> {
+pub(crate) fn receive_copy_begin_impl(mcx: Mcx<'_>, natts: i32, binary: bool) -> PgResult<()> {
     use backend_libpq_pqformat as pqf;
 
     let format: u16 = if binary { 1 } else { 0 };
@@ -416,6 +471,7 @@ pub fn BeginCopyFrom<'mcx>(
     rteperminfos: mcx::PgVec<'mcx, types_nodes::RTEPermissionInfo<'mcx>>,
     filename: Option<&str>,
     is_program: bool,
+    data_source_cb: Option<CopyDataSourceCb>,
     has_where: bool,
 ) -> PgResult<CopyFromStateData<'mcx>> {
     let binary = opts.binary;
@@ -449,18 +505,16 @@ pub fn BeginCopyFrom<'mcx>(
             continue;
         }
 
-        // CopyFromInFunc: getTypeInputInfo(atttypid, &infunc, &typioparam) +
-        // fmgr_info(infunc, &in_functions[m]); (binary uses getTypeBinaryInputInfo
-        // + the receive function — gated below.)
-        if binary {
-            return Err(unsupported(
-                "BeginCopyFrom: binary-format COPY FROM input function setup \
-                 (getTypeBinaryInputInfo) is not yet wired",
-            ));
-        }
-        let (infunc_oid, typioparam) =
-            backend_utils_cache_lsyscache_seams::get_type_input_info::call(att.atttypid)?;
-        let resolved = backend_utils_fmgr_core::fmgr_info(mcx, infunc_oid)?;
+        // CopyFromInFunc (copyfrom.c:204-240): the text/CSV routine resolves the
+        // type's input function (`getTypeInputInfo` + `fmgr_info`); the binary
+        // routine resolves its receive function (`getTypeBinaryInputInfo` +
+        // `fmgr_info`). Either way `in_functions[m]`/`typioparams[m]` get filled.
+        let (func_oid, typioparam) = if binary {
+            backend_utils_cache_lsyscache_seams::get_type_binary_input_info::call(att.atttypid)?
+        } else {
+            backend_utils_cache_lsyscache_seams::get_type_input_info::call(att.atttypid)?
+        };
+        let resolved = backend_utils_fmgr_core::fmgr_info(mcx, func_oid)?;
         in_functions.push(resolved.finfo);
         typioparams.push(typioparam);
 
@@ -548,7 +602,10 @@ pub fn BeginCopyFrom<'mcx>(
         raw_buf_index: 0,
         raw_buf_len: 0,
         raw_reached_eof: false,
-        input_is_raw: !need_transcoding,
+        // `input_buf` (and the `input_is_raw` aliasing onto `raw_buf`) is a
+        // text-mode-only buffer (copyfrom.c:1727-1728); the text start callback
+        // sets it. Binary mode reads `raw_buf` directly and must leave it false.
+        input_is_raw: false,
         input_buf: Vec::new(),
         input_buf_index: 0,
         input_buf_len: 0,
@@ -588,9 +645,15 @@ pub fn BeginCopyFrom<'mcx>(
     cstate.input_buf_index = 0;
     cstate.input_buf_len = 0;
 
-    // Open the data source: stdin (pipe) or a server-side file.
+    // Open the data source (copyfrom.c:1837-1918): a caller-supplied callback
+    // takes precedence; else stdin (pipe) or a server-side file.
     let pipe = filename.is_none();
-    if pipe {
+    if let Some(cb) = data_source_cb {
+        // C: progress source = COPY_SOURCE_CALLBACK; cstate->copy_src =
+        //    COPY_CALLBACK; cstate->data_source_cb = data_source_cb;
+        cstate.copy_file = Some(register_source(CopySourceReader::Callback { cb }));
+        cstate.copy_src = CopySource::COPY_CALLBACK;
+    } else if pipe {
         // C: if (whereToSendOutput == DestRemote) ReceiveCopyBegin(cstate);
         //    else cstate->copy_file = stdin;
         if backend_utils_error::config::where_to_send_output() == types_dest::CommandDest::Remote {
@@ -645,10 +708,21 @@ pub fn BeginCopyFrom<'mcx>(
     })
 }
 
-/// `CopyFromTextLikeStart` (copyfrom.c:169) — the text/CSV start callback
-/// (no-transcoding branch). Binary's `CopyFromBinaryStart` (the header read) is
-/// gated upstream.
+/// The COPY FROM start callback (`cstate->routine->CopyFromStart`): for binary
+/// format `CopyFromBinaryStart` (copyfrom.c:301) reads and verifies the file
+/// header; for text/CSV `CopyFromTextLikeStart` (copyfrom.c:169) sets up the
+/// line/field workspace.
 fn copy_from_start(cstate: &mut CopyParseState<'_>) -> PgResult<()> {
+    if cstate.opts.binary {
+        // CopyFromBinaryStart: read and verify the 11-byte signature, the flags
+        // field, and the header extension. Binary never uses `input_buf`.
+        return parse::ReceiveCopyBinaryHeader(cstate);
+    }
+    // CopyFromTextLikeStart: when no transcoding is needed, `input_buf` aliases
+    // `raw_buf` (copyfrom.c:175-184). Model that aliasing with `input_is_raw`;
+    // it is a text-mode-only buffer, so it is established here, not in
+    // BeginCopyFrom.
+    cstate.input_is_raw = !cstate.need_transcoding;
     // NB: `cstate.need_transcoding` may be set — `BeginCopyFrom` configures the
     // file→server conversion (conversion_proc + sized input_buf) when the file
     // encoding differs from the database encoding, and the text/CSV read loop
@@ -1024,6 +1098,44 @@ fn input_function_call_safe_impl<'mcx>(
         // via its `ByRef`/`Cstring` arm — exactly the slot `tts_values` element.
         Some(fmgr_out) => Ok(Some(fmgr_out_to_datum(mcx, fmgr_out)?)),
     }
+}
+
+/// `ReceiveFunctionCall(&cstate->in_functions[m], buf, typioparam, typmod)`
+/// (the binary leg of `CopyReadBinaryAttribute`, copyfromparse.c:2046). Resolves
+/// the receive function recorded for physical attribute `m` and runs it over the
+/// binary field bytes (`buf == None` is C's NULL buffer for a -1 field size).
+/// Installed as the `receive_function_call` seam body.
+fn receive_function_call_impl<'mcx>(
+    mcx: Mcx<'mcx>,
+    cstate: &mut CopyParseState<'mcx>,
+    m: i32,
+    buf: Option<&[u8]>,
+    typmod: i32,
+) -> PgResult<RichDatum<'mcx>> {
+    let idx = m as usize;
+    let flinfo = cstate.in_functions[idx].clone();
+    let typioparam = cstate.typioparams[idx];
+    // Re-derive the resolution from the resolved fn_oid (the builtin fast path),
+    // exactly as the text input leg does.
+    let resolved = backend_utils_fmgr_core::fmgr_info(mcx, flinfo.fn_oid)?;
+
+    let out = backend_utils_fmgr_core::receive_function_call_typed(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        buf,
+        typioparam,
+        typmod,
+    )?;
+
+    // The receive function consumes its whole `StringInfo` (recv routines call
+    // `pq_getmsgend`, which errors on residual bytes); a successful return thus
+    // means the field buffer was fully read. Record that so the caller's
+    // `attribute_buf.cursor == len` check (copyfromparse.c:2078) holds.
+    if buf.is_some() {
+        cstate.attribute_cursor = cstate.attribute_buf.len() as i32;
+    }
+    fmgr_out_to_datum(mcx, out)
 }
 
 /// `FmgrOut<'mcx>` → the canonical rich [`RichDatum`]. By-value carries the

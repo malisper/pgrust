@@ -1114,6 +1114,9 @@ fn copy_from_driver<'mcx>(
         rteperminfos,
         stmt.filename.as_deref(),
         stmt.is_program,
+        // DoCopy (the SQL `COPY ... FROM` path) never supplies a programmatic
+        // data source — that is the SPI/extension `BeginCopyFrom` entry only.
+        None,
         has_where,
     )?;
     let processed = backend_commands_copyfrom::CopyFrom(mcx, &mut state)?;
