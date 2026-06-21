@@ -753,20 +753,36 @@ pub fn ExecInitModifyTable<'mcx>(
     //       estate->es_auxmodifytables = lcons(mtstate, estate->es_auxmodifytables);
     //
     // C `lcons` stores an alias to `mtstate` — a node we are about to return by
-    // value to `InitPlan`, which pushes it into `estate->es_subplanstates` (a
-    // non-canSetTag ModifyTable is a data-modifying CTE, always a top-level
-    // `plannedstmt->subplans` entry → always a direct `es_subplanstates` slot).
-    // The owned model has one owner per node, so — exactly like the CTE leader
-    // (`es_cte_shared`) and the SubPlan child (`SubPlanState.planstate`) — we
-    // register the **future `es_subplanstates` index** of this node rather than
-    // an alias. We are running inside `InitPlan`'s subplan loop and have NOT yet
-    // been pushed, so our slot will be `es_subplanstates.len()`. The leaked
-    // `es_subplanstates` slot keeps owning the `mtstate`; `ExecPostprocessPlan`
-    // reaches it by this index to run it to completion. `lcons` prepends, so we
-    // insert at the front (index 0).
+    // value to `InitPlan`. The owned model has one owner per node, so — exactly
+    // like the CTE leader (`es_cte_shared`) and the SubPlan child
+    // (`SubPlanState.planstate`) — we register the **`es_subplanstates` index** of
+    // this node rather than an alias, and `ExecPostprocessPlan` reaches it by that
+    // index to run it to completion (take/run/put). `lcons` prepends, so we insert
+    // at the front (index 0).
+    //
+    // But the index is only meaningful when this ModifyTable *is* a subplan root:
+    // a data-modifying CTE's ModifyTable is always a top-level
+    // `plannedstmt->subplans` entry → its own subplan root, so it lands directly in
+    // `es_subplanstates` at the slot `InitPlan`'s subplan loop is currently
+    // building (recorded in `es_subplan_root_slot`). A non-canSetTag ModifyTable
+    // that is the *main* plan tree instead — the rewritten query of a `DO ALSO` /
+    // `DO INSTEAD` rule, run as its own PlannedStmt — is NOT a subplan and never
+    // lands in `es_subplanstates`; the portal already drives it to completion via
+    // `ExecutorRun(count = 0)`, so C's `ExecPostprocessPlan` re-run of it is a
+    // documented redundant no-op ("It'd actually work fine to add the primary
+    // ModifyTable node too, but there's no need."). Registering an `es_subplanstates`
+    // index for it would dangle (no such slot) — so when `es_subplan_root_slot` is
+    // `None` we faithfully reproduce the no-op by not registering.
+    //
+    // Consume the marker (one-shot `take`): only the subplan *root* ModifyTable
+    // must use it. A data-modifying CTE is always planned with the ModifyTable as
+    // its own subplan root, so the root init is the first (and only) reader; taking
+    // the marker guards against a deeper ModifyTable in the same subplan subtree
+    // ever re-using the root's slot.
     if !mtstate.canSetTag {
-        let aux_idx = estate.es_subplanstates.len();
-        estate.es_auxmodifytables.insert(0, aux_idx);
+        if let Some(aux_idx) = estate.es_subplan_root_slot.take() {
+            estate.es_auxmodifytables.insert(0, aux_idx);
+        }
     }
 
     // return mtstate;

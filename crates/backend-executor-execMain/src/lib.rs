@@ -369,8 +369,19 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
                 // es_subplanstates = lappend(es_subplanstates, subplanstate).
                 // A NULL subplan slot (pruned/unused) lappends a NULL, preserving
                 // the 1-based plan_id index.
-                let subplanstate =
-                    procnode::exec_init_node::call(mcx, subnode, estate, sp_eflags)?;
+                //
+                // Owned-model only: mark the slot this subplan root will occupy so a
+                // non-canSetTag ModifyTable that *is* this subplan root (a
+                // data-modifying CTE) can register the correct `es_subplanstates`
+                // index in `es_auxmodifytables`. The marker is cleared after the init
+                // so the main plan tree (and anything outside the subplan loop) reads
+                // `None` — a non-canSetTag ModifyTable there is the main tree, run to
+                // completion by the portal, not a subplan, and must not be registered.
+                let slot = estate.es_subplanstates.len();
+                estate.es_subplan_root_slot = Some(slot);
+                let init_result = procnode::exec_init_node::call(mcx, subnode, estate, sp_eflags);
+                estate.es_subplan_root_slot = None;
+                let subplanstate = init_result?;
                 estate.es_subplanstates.push(subplanstate);
             }
         }

@@ -1028,6 +1028,26 @@ pub struct EStateData<'mcx> {
     /// `ExecPostprocessPlan` can take/run/put each to completion by index. The C
     /// `lcons` prepend order (front-of-list) is preserved by inserting at index 0.
     pub es_auxmodifytables: PgVec<'mcx, usize>,
+    /// Owned-model bookkeeping with **no C counterpart**: the `es_subplanstates`
+    /// slot index that `InitPlan`'s subplan loop is currently initializing (the
+    /// future slot of the subplan root being built), or `None` when `ExecInitNode`
+    /// is running over the main plan tree (or any tree outside the subplan loop).
+    ///
+    /// C stores a live `ModifyTableState *` pointer in `es_auxmodifytables`, so it
+    /// never needs to know "where will this node land?" — the pointer is the node.
+    /// The owned model replaces that alias with an `es_subplanstates` index, which
+    /// is only meaningful for a node that actually becomes a subplan-root slot (a
+    /// data-modifying CTE's ModifyTable is always a top-level `plannedstmt->subplans`
+    /// entry → its own subplan root). A non-canSetTag ModifyTable that is the *main*
+    /// plan tree (a rule-rewritten `DO ALSO` / `DO INSTEAD` query, run as its own
+    /// PlannedStmt) is **not** a subplan and never lands in `es_subplanstates`; it is
+    /// already driven to completion by the portal's `ExecutorRun(count=0)`, so the
+    /// C `ExecPostprocessPlan` re-run of it is a redundant no-op. `ExecInitModifyTable`
+    /// reads this marker to register an aux index **only** when the node is the
+    /// current subplan root (marker is `Some`), and otherwise leaves the main-tree
+    /// ModifyTable alone (matching the harmless C no-op behaviour without a dangling
+    /// index).
+    pub es_subplan_root_slot: Option<usize>,
     /// `ExprContext *es_per_tuple_exprcontext` — for per-output-tuple work.
     pub es_per_tuple_exprcontext: Option<EcxtId>,
     /// `const char *es_sourceText` — source query text.
@@ -1127,6 +1147,8 @@ impl<'mcx> EStateData<'mcx> {
             es_recursive_shared: PgVec::new_in(mcx),
             // es_auxmodifytables = NIL;
             es_auxmodifytables: PgVec::new_in(mcx),
+            // Owned-model marker; no node is being initialized as a subplan root yet.
+            es_subplan_root_slot: None,
             // es_per_tuple_exprcontext = NULL;
             es_per_tuple_exprcontext: None,
             // es_sourceText = NULL;
