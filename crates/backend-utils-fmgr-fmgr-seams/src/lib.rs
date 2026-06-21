@@ -596,6 +596,27 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `OidReceiveFunctionCall(typreceive, buf, typioparam, typmod)` (fmgr.c) as
+    /// used by `exec_bind_message`'s binary-parameter path: one-shot lookup +
+    /// call of a type's binary receive function on the message bytes `buf`
+    /// (`None` is C's NULL `bufptr`, the strict-NULL case). Returns the value as
+    /// the canonical `Datum<'mcx>` (by-value scalar → `ByVal`; by-reference
+    /// result → owned `ByRef` over the receive function's flattened payload in
+    /// `mcx`). `Err` carries an invalid binary representation, cache-lookup
+    /// failure, and OOM. (Unlike the `fastpath_receive_function_call` variant,
+    /// this classifies into the unified `Datum` directly — the
+    /// "consumed the whole buffer" check is the caller's, over the input
+    /// length, since the typed receive helper consumes the supplied slice.)
+    pub fn oid_receive_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        function_id: Oid,
+        buf: Option<&[u8]>,
+        typioparam: Oid,
+        typmod: i32,
+    ) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>
+);
+
+seam_core::seam!(
     /// `InputFunctionCall(flinfo, str, typioparam, typmod)` (fmgr.c) on a
     /// caller-cached `FmgrInfo`, returning the result classified as a
     /// [`Datum`] ready for `heap_form_tuple`. Call a type's text input

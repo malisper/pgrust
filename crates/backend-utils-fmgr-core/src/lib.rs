@@ -2822,6 +2822,38 @@ fn oid_input_function_call_seam<'mcx>(
     }
 }
 
+/// `OidReceiveFunctionCall(typreceive, buf, typioparam, typmod)` seam
+/// (`exec_bind_message`'s binary-parameter path): one-shot lookup + call of a
+/// type's binary receive function, classifying the result into the canonical
+/// `Datum<'mcx>` (a by-value scalar travels as `ByVal`; a by-reference result
+/// is materialized into an `mcx`-owned `ByRef`). `buf == None` is C's NULL
+/// `bufptr` (strict-NULL).
+fn oid_receive_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    function_id: Oid,
+    buf: Option<&[u8]>,
+    typioparam: Oid,
+    typmod: i32,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+    let resolved = fmgr_info(mcx, function_id)?;
+    let out = receive_function_call_typed(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        buf,
+        typioparam,
+        typmod,
+    )?;
+    match out {
+        FmgrOut::ByVal(d) => Ok(d),
+        FmgrOut::Ref(payload) => {
+            let bytes: Vec<u8> = payload.flatten();
+            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
+        }
+    }
+}
+
 /// `InputFunctionCall(&flinfo, str, typioparam, typmod)` seam over a
 /// caller-cached `FmgrInfo` (`BuildTupleFromCStrings`), returning the result
 /// classified as a [`Datum`] for `heap_form_tuple`. The owned `FmgrInfo`
@@ -4293,6 +4325,7 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::output_function_call::set(output_function_call_seam);
     backend_utils_fmgr_fmgr_seams::send_function_call::set(send_function_call_seam);
     backend_utils_fmgr_fmgr_seams::oid_input_function_call::set(oid_input_function_call_seam);
+    backend_utils_fmgr_fmgr_seams::oid_receive_function_call::set(oid_receive_function_call_seam);
     backend_utils_fmgr_fmgr_seams::input_function_call_for_heap_form::set(
         input_function_call_for_heap_form_seam,
     );
