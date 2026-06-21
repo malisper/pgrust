@@ -172,6 +172,27 @@ pub fn init_seams() {
         backend_access_common_heaptuple::item_pointer_from_bytes(datum.as_ref_bytes())
     });
 
+    // `DatumGetHeapTupleHeader(datum)` + the `oldtupdata` assembly: reconstruct
+    // the wholerow OLD tuple from a wholerow junk Datum. C points the composite
+    // Datum at a self-describing `HeapTupleHeader` varlena block and reads
+    // `t_data`/`t_len` off it; the data-bearing `FormedTuple` carrier mirrors
+    // that block (header + user-data area). A `Datum::Composite` already carries
+    // the formed tuple (clone it into the query context); any other flat by-ref
+    // value is detoasted to its `HeapTupleHeader` image and decoded. C then sets
+    //   ItemPointerSetInvalid(&oldtupdata.t_self);
+    //   oldtupdata.t_tableOid = (relkind == RELKIND_VIEW) ? InvalidOid
+    //                                                     : RelationGetRelid(rel);
+    exec::datum_get_wholerow_heap_tuple::set(|mcx, datum, tableoid| {
+        use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple};
+        let mut formed = match datum {
+            Datum::Composite(t) => t.clone_in(mcx)?,
+            other => FormedTuple::from_datum_image(mcx, &other.as_varlena_bytes())?,
+        };
+        formed.tuple.t_self = types_tuple::heaptuple::ItemPointerData::invalid();
+        formed.tuple.t_tableOid = tableoid;
+        Ok(formed)
+    });
+
     exec::ri_row_id_attno::set(|estate, rri| estate.result_rel(rri).ri_RowIdAttNo as i32);
     // `ri_usesFdwDirectModify` is not carried on the trimmed ResultRelInfo, but
     // it is only ever true for a foreign table whose FDW does direct modify —

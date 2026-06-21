@@ -299,6 +299,12 @@ impl ItemPointerData {
             ip_posid: offset_number,
         }
     }
+
+    /// `ItemPointerSetInvalid(pointer)` (`storage/itemptr.h`): blkid =
+    /// `InvalidBlockNumber`, posid = `InvalidOffsetNumber`.
+    pub const fn invalid() -> Self {
+        Self::new(types_core::primitive::InvalidBlockNumber, INVALID_OFFSET_NUMBER)
+    }
 }
 
 /// `InvalidOffsetNumber` (`storage/off.h`): `((OffsetNumber) 0)`.

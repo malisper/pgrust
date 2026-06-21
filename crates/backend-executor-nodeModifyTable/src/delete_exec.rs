@@ -12,7 +12,8 @@ use types_nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use types_tableam::tableam::{
     LockTupleExclusive, LockTupleMode, Snapshot, TM_FailureData, TM_Result,
 };
-use types_tuple::heaptuple::{HeapTuple, ItemPointerData};
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
+use types_tuple::heaptuple::ItemPointerData;
 
 use crate::delete::{ExecDeleteAct, ExecDeleteEpilogue, ExecDeletePrologue};
 use crate::lifecycle::ExecProcessReturning;
@@ -78,16 +79,6 @@ seam_core::seam!(
     ) -> types_core::Oid
 );
 
-seam_core::seam!(
-    /// `ExecIRDeleteTriggers(estate, relinfo, trigtuple)` (trigger.c): fire
-    /// INSTEAD OF ROW DELETE triggers; returns `false` ("do nothing") to skip
-    /// the delete. User trigger code can `ereport(ERROR)`.
-    pub fn exec_ir_delete_triggers<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        result_rel_info: RriId,
-        trigtuple: HeapTuple<'mcx>,
-    ) -> PgResult<bool>
-);
 
 seam_core::seam!(
     /// `resultRelInfo->ri_FdwRoutine->ExecForeignDelete(estate, relinfo, slot,
@@ -211,16 +202,6 @@ seam_core::seam!(
     ) -> PgResult<bool>
 );
 
-seam_core::seam!(
-    /// `ExecForceStoreHeapTuple(tuple, slot, shouldFree)` (execTuples.c): force
-    /// the given heap tuple into the slot.
-    pub fn exec_force_store_heap_tuple<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        tuple: HeapTuple<'mcx>,
-        slot: SlotId,
-        should_free: bool,
-    ) -> PgResult<()>
-);
 
 seam_core::seam!(
     /// `ExecGetChildToRootMap(resultRelInfo) != NULL` (execPartition.c): does
@@ -278,7 +259,7 @@ pub fn ExecDelete<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     tupleid: Option<&ItemPointerData>,
-    oldtuple: HeapTuple<'mcx>,
+    oldtuple: Option<FormedTuple<'mcx>>,
     process_returning: bool,
     changing_part: bool,
     can_set_tag: bool,
@@ -314,7 +295,11 @@ pub fn ExecDelete<'mcx>(
     if ri_has_instead_delete_row::call(estate, result_rel_info) {
         // Assert(oldtuple != NULL);
         debug_assert!(oldtuple.is_some());
-        let dodelete = exec_ir_delete_triggers::call(estate, result_rel_info, oldtuple.clone())?;
+        let dodelete = backend_commands_trigger_seams::exec_ir_delete_triggers::call(
+            estate,
+            result_rel_info,
+            oldtuple.clone(),
+        )?;
 
         if !dodelete {
             // "do nothing"
@@ -548,8 +533,12 @@ pub fn ExecDelete<'mcx>(
         } else {
             let rslot = exec_get_returning_slot::call(estate, result_rel_info)?;
             slot = Some(rslot);
-            if oldtuple.is_some() {
-                exec_force_store_heap_tuple::call(estate, oldtuple.clone(), rslot, false)?;
+            if let Some(ot) = oldtuple.as_ref() {
+                let mcx = estate.es_query_cxt;
+                let formed = ot.clone_in(mcx)?;
+                backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+                    estate, rslot, formed, false,
+                )?;
             } else {
                 let tupleid = tupleid.expect("DELETE RETURNING fetch requires a TID");
                 if !table_tuple_fetch_row_version_any::call(

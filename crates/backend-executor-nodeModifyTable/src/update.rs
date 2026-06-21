@@ -10,7 +10,8 @@ use types_snapshot::{SnapshotData, SnapshotType};
 use types_tableam::tableam::{
     LockWaitPolicy, TM_Result, TU_UpdateIndexes, TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
 };
-use types_tuple::heaptuple::{HeapTuple, ItemPointerData};
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
+use types_tuple::heaptuple::ItemPointerData;
 
 use crate::lifecycle::ExecProcessReturning;
 use crate::{ModifyTableContext, UpdateContext};
@@ -40,7 +41,7 @@ pub fn ExecUpdate<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     tupleid: Option<&ItemPointerData>,
-    oldtuple: HeapTuple<'mcx>,
+    oldtuple: Option<FormedTuple<'mcx>>,
     mut old_slot: Option<SlotId>,
     mut slot: SlotId,
     can_set_tag: bool,
@@ -339,7 +340,7 @@ pub fn ExecUpdatePrologue<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     tupleid: Option<&ItemPointerData>,
-    oldtuple: HeapTuple<'mcx>,
+    oldtuple: Option<FormedTuple<'mcx>>,
     slot: SlotId,
     result: Option<&mut TM_Result>,
 ) -> PgResult<bool> {
@@ -429,7 +430,7 @@ pub fn ExecUpdateAct<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     tupleid: Option<&ItemPointerData>,
-    oldtuple: HeapTuple<'mcx>,
+    oldtuple: Option<FormedTuple<'mcx>>,
     mut slot: SlotId,
     can_set_tag: bool,
     update_cxt: &mut UpdateContext,
@@ -579,7 +580,7 @@ pub fn ExecUpdateEpilogue<'mcx>(
     update_cxt: &UpdateContext,
     result_rel_info: RriId,
     tupleid: Option<&ItemPointerData>,
-    oldtuple: HeapTuple<'mcx>,
+    oldtuple: Option<FormedTuple<'mcx>>,
     slot: SlotId,
 ) -> PgResult<()> {
     let _ = &oldtuple;
@@ -646,7 +647,7 @@ pub fn ExecCrossPartitionUpdate<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     tupleid: Option<&ItemPointerData>,
-    oldtuple: HeapTuple<'mcx>,
+    oldtuple: Option<FormedTuple<'mcx>>,
     mut slot: SlotId,
     can_set_tag: bool,
     _update_cxt: &mut UpdateContext,

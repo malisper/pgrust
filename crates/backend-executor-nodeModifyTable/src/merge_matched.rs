@@ -16,7 +16,8 @@ use types_tableam::tableam::{
     LockWaitPolicy, Snapshot, TM_Result, TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
 };
 use types_snapshot::{SnapshotData, SnapshotType};
-use types_tuple::heaptuple::{HeapTuple, ItemPointerData};
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
+use types_tuple::heaptuple::ItemPointerData;
 
 use crate::lifecycle::ExecProcessReturning;
 use crate::{ModifyTableContext, UpdateContext};
@@ -120,7 +121,7 @@ pub fn ExecMergeMatched<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     tupleid: Option<&ItemPointerData>,
-    oldtuple: HeapTuple<'mcx>,
+    oldtuple: Option<FormedTuple<'mcx>>,
     can_set_tag: bool,
     matched: &mut bool,
 ) -> PgResult<Option<SlotId>> {
@@ -175,10 +176,12 @@ pub fn ExecMergeMatched<'mcx>(
 
     if let Some(tuple) = oldtuple.as_ref() {
         debug_assert!(!need_lock_tag_tuple);
-        backend_executor_execTuples_seams::exec_force_store_heap_tuple::call(
+        let mcx = estate.es_query_cxt;
+        let formed = tuple.clone_in(mcx)?;
+        backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
             estate,
             old_tuple_slot,
-            tuple,
+            formed,
             false,
         )?;
     } else {

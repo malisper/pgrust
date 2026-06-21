@@ -3283,7 +3283,7 @@ fn exec_br_delete_triggers_impl<'mcx>(
     epqstate: &mut types_nodes::EPQState<'mcx>,
     relinfo: types_nodes::RriId,
     tupleid: Option<&ItemPointerData>,
-    fdw_trigtuple: Option<&HeapTupleData<'mcx>>,
+    fdw_trigtuple: Option<&types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
     epqslot: Option<&mut Option<types_nodes::SlotId>>,
     tmresult: Option<&mut types_tableam::tableam::TM_Result>,
     tmfd: &mut types_tableam::tableam::TM_FailureData,
@@ -3299,48 +3299,54 @@ fn exec_br_delete_triggers_impl<'mcx>(
     let slot = backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
 
     // Assert(HeapTupleIsValid(fdw_trigtuple) ^ ItemPointerIsValid(tupleid));
-    if fdw_trigtuple.is_some() {
-        // The FDW-supplied tuple leg (foreign table) goes through
-        // ExecForceStoreHeapTuple into the OLD slot — not the common heap path.
-        let _ = is_merge_delete;
-        return Err(fdw_tuple_fetch_unported());
-    }
+    let trigtuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx> =
+        if let Some(fdw_tuple) = fdw_trigtuple {
+            // trigtuple = fdw_trigtuple;
+            // ExecForceStoreHeapTuple(trigtuple, slot, false);
+            let formed = fdw_tuple.clone_in(mcx)?;
+            backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+                estate,
+                slot,
+                formed,
+                false,
+            )?;
+            fdw_tuple.clone_in(mcx)?
+        } else {
+            // Get + lock a copy of the on-disk tuple we are planning to delete,
+            // into the OLD slot (GetTupleForTrigger).
+            // `do_epq_recheck = !is_merge_delete`.
+            let mut epqslot_candidate: Option<types_nodes::SlotId> = None;
+            let tid = tupleid.expect("ExecBRDeleteTriggers: a non-FDW delete needs a tupleid");
+            if !get_tuple_for_trigger(
+                estate,
+                epqstate,
+                relinfo,
+                tid,
+                types_tableam::tableam::LockTupleMode::LockTupleExclusive,
+                slot,
+                /* do_epq_recheck */ !is_merge_delete,
+                Some(&mut epqslot_candidate),
+                tmresult,
+                tmfd,
+            )? {
+                return Ok(false);
+            }
 
-    // Get + lock a copy of the on-disk tuple we are planning to delete, into the
-    // OLD slot (GetTupleForTrigger).  `do_epq_recheck = !is_merge_delete`.
-    let mut epqslot_candidate: Option<types_nodes::SlotId> = None;
-    let tid = tupleid.expect("ExecBRDeleteTriggers: a non-FDW delete needs a tupleid");
-    if !get_tuple_for_trigger(
-        estate,
-        epqstate,
-        relinfo,
-        tid,
-        types_tableam::tableam::LockTupleMode::LockTupleExclusive,
-        slot,
-        /* do_epq_recheck */ !is_merge_delete,
-        Some(&mut epqslot_candidate),
-        tmresult,
-        tmfd,
-    )? {
-        return Ok(false);
-    }
+            // If the tuple was concurrently updated and the caller wanted the
+            // updated tuple, skip the trigger execution.
+            if let Some(cand) = epqslot_candidate {
+                if let Some(out) = epqslot {
+                    *out = Some(cand);
+                    return Ok(false);
+                }
+            }
 
-    // If the tuple was concurrently updated and the caller wanted the updated
-    // tuple, skip the trigger execution.
-    if let Some(cand) = epqslot_candidate {
-        if let Some(out) = epqslot {
-            *out = Some(cand);
-            return Ok(false);
-        }
-    }
-
-    // trigtuple = ExecFetchSlotHeapTuple(slot, true, &should_free);
-    let trigtuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx> = {
-        let sd = estate.slot_data_mut(slot);
-        let (formed, _should_free) =
-            backend_executor_execTuples_seams::exec_fetch_slot_heap_tuple::call(mcx, sd, true)?;
-        formed
-    };
+            // trigtuple = ExecFetchSlotHeapTuple(slot, true, &should_free);
+            let sd = estate.slot_data_mut(slot);
+            let (formed, _should_free) =
+                backend_executor_execTuples_seams::exec_fetch_slot_heap_tuple::call(mcx, sd, true)?;
+            formed
+        };
 
     // LocTriggerData.tg_event = TRIGGER_EVENT_DELETE | ROW | BEFORE;
     let tg_event = TRIGGER_EVENT_DELETE | TRIGGER_EVENT_ROW | TRIGGER_EVENT_BEFORE;
@@ -3399,7 +3405,7 @@ fn exec_ar_delete_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
     relinfo: types_nodes::RriId,
     tupleid: Option<&ItemPointerData>,
-    fdw_trigtuple: Option<&HeapTupleData<'mcx>>,
+    fdw_trigtuple: Option<&types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
     tc: Option<&types_nodes::TransitionCaptureState>,
     _is_crosspart_update: bool,
 ) -> PgResult<()> {
@@ -3429,14 +3435,20 @@ fn exec_ar_delete_triggers_impl<'mcx>(
         return Ok(());
     }
 
-    // The FDW-supplied tuple leg (ExecForceStoreHeapTuple) is only reached for a
-    // foreign table; the on-disk delete passes the `tupleid` (the OLD slot's tid
-    // after GetTupleForTrigger).  AFTER firing re-fetches that ctid by SnapshotAny.
+    // Assert(HeapTupleIsValid(fdw_trigtuple) ^ ItemPointerIsValid(tupleid));
+    const TRIGGER_EVENT_DELETE: u32 = 1;
+
+    // The FDW/wholerow-supplied tuple leg: C stores `fdw_trigtuple` into the OLD
+    // slot (ExecForceStoreHeapTuple) and queues the event with that slot.  The
+    // AFTER-trigger queue's foreign-table storage of the OLD image is the
+    // separate unported FDW-queue leg (after_trigger_save_event RELKIND_FOREIGN
+    // guard); a wholerow view-INSTEAD-OF delete reaches here only when an AFTER
+    // ROW trigger or delete transition table exists on the view's INSTEAD-OF
+    // target, which is rejected at DDL time, so this leg is currently
+    // unreachable for the supported relkinds and stays loud-guarded.
     if fdw_trigtuple.is_some() {
         return Err(fdw_tuple_fetch_unported());
     }
-    // Assert(HeapTupleIsValid(fdw_trigtuple) ^ ItemPointerIsValid(tupleid));
-    const TRIGGER_EVENT_DELETE: u32 = 1;
     let old_ctid =
         tupleid.copied().expect("ExecARDeleteTriggers: a non-FDW delete needs a tupleid");
 
@@ -3495,7 +3507,7 @@ fn exec_ar_delete_triggers_impl<'mcx>(
 fn exec_ir_delete_triggers_impl<'mcx>(
     _estate: &mut EStateData<'mcx>,
     _relinfo: types_nodes::RriId,
-    _trigtuple: HeapTuple<'mcx>,
+    _trigtuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
 ) -> PgResult<bool> {
     front_half("ExecIRDeleteTriggers", 2849)
 }
@@ -3507,7 +3519,7 @@ fn exec_br_update_triggers_impl<'mcx>(
     epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
     relinfo: types_nodes::RriId,
     tupleid: Option<&ItemPointerData>,
-    fdw_trigtuple: HeapTuple<'mcx>,
+    fdw_trigtuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
     newslot: types_nodes::SlotId,
     tmresult: Option<&mut types_tableam::tableam::TM_Result>,
     tmfd: &mut types_tableam::tableam::TM_FailureData,
@@ -3526,47 +3538,55 @@ fn exec_br_update_triggers_impl<'mcx>(
     let lockmode = backend_commands_trigger_seams::exec_update_lock_mode::call(estate, relinfo)?;
 
     // Assert(HeapTupleIsValid(fdw_trigtuple) ^ ItemPointerIsValid(tupleid));
-    if fdw_trigtuple.is_some() {
-        // The FDW-supplied tuple leg (foreign table) — ExecForceStoreHeapTuple
-        // into the OLD slot; not the common heap path.
-        return Err(fdw_tuple_fetch_unported());
-    }
+    let trigtuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx> =
+        if let Some(fdw_tuple) = fdw_trigtuple {
+            // trigtuple = fdw_trigtuple;
+            // ExecForceStoreHeapTuple(fdw_trigtuple, oldslot, false);
+            let formed = fdw_tuple.clone_in(mcx)?;
+            backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+                estate,
+                oldslot,
+                formed,
+                false,
+            )?;
+            fdw_tuple
+        } else {
+            // Get + lock a copy of the on-disk tuple we are planning to update,
+            // into the OLD slot (GetTupleForTrigger).
+            // `do_epq_recheck = !is_merge_update`.
+            let mut epqslot_candidate: Option<types_nodes::SlotId> = None;
+            let tid = tupleid.expect("ExecBRUpdateTriggers: a non-FDW update needs a tupleid");
+            if !get_tuple_for_trigger(
+                estate,
+                epqstate,
+                relinfo,
+                tid,
+                lockmode,
+                oldslot,
+                /* do_epq_recheck */ !is_merge_update,
+                Some(&mut epqslot_candidate),
+                tmresult,
+                tmfd,
+            )? {
+                return Ok(false); // cancel the update action
+            }
 
-    // Get + lock a copy of the on-disk tuple we are planning to update, into the
-    // OLD slot (GetTupleForTrigger).  `do_epq_recheck = !is_merge_update`.
-    let mut epqslot_candidate: Option<types_nodes::SlotId> = None;
-    let tid = tupleid.expect("ExecBRUpdateTriggers: a non-FDW update needs a tupleid");
-    if !get_tuple_for_trigger(
-        estate,
-        epqstate,
-        relinfo,
-        tid,
-        lockmode,
-        oldslot,
-        /* do_epq_recheck */ !is_merge_update,
-        Some(&mut epqslot_candidate),
-        tmresult,
-        tmfd,
-    )? {
-        return Ok(false); // cancel the update action
-    }
+            // A concurrent READ-COMMITTED update would hand back a raw subplan
+            // tuple in epqslot_candidate that must be re-formed via
+            // ExecGetUpdateNewTuple to replace `newslot`.  GetTupleForTrigger
+            // only sets epqslot_candidate on the `traversed` EPQ leg (a genuine
+            // concurrent update); the common clean-lock path leaves it None, so a
+            // present value is the deferred EPQ-recheck leg.
+            if epqslot_candidate.is_some() {
+                return Err(epq_recheck_unported());
+            }
 
-    // A concurrent READ-COMMITTED update would hand back a raw subplan tuple in
-    // epqslot_candidate that must be re-formed via ExecGetUpdateNewTuple to
-    // replace `newslot`.  GetTupleForTrigger only sets epqslot_candidate on the
-    // `traversed` EPQ leg (a genuine concurrent update); the common clean-lock
-    // path leaves it None, so a present value is the deferred EPQ-recheck leg.
-    if epqslot_candidate.is_some() {
-        return Err(epq_recheck_unported());
-    }
-
-    // trigtuple = ExecFetchSlotHeapTuple(oldslot, true, &should_free_trig);
-    let trigtuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx> = {
-        let sd = estate.slot_data_mut(oldslot);
-        let (formed, _should_free) =
-            backend_executor_execTuples_seams::exec_fetch_slot_heap_tuple::call(mcx, sd, true)?;
-        formed
-    };
+            // trigtuple = ExecFetchSlotHeapTuple(oldslot, true, &should_free_trig);
+            let sd = estate.slot_data_mut(oldslot);
+            let (formed, _should_free) =
+                backend_executor_execTuples_seams::exec_fetch_slot_heap_tuple::call(mcx, sd, true)?;
+            formed
+        };
 
     // LocTriggerData.tg_event = TRIGGER_EVENT_UPDATE | ROW | BEFORE;
     let tg_event = TRIGGER_EVENT_UPDATE | TRIGGER_EVENT_ROW | TRIGGER_EVENT_BEFORE;
@@ -3812,7 +3832,7 @@ fn epq_recheck_unported() -> PgError {
 fn exec_ir_update_triggers_impl<'mcx>(
     _estate: &mut EStateData<'mcx>,
     _relinfo: types_nodes::RriId,
-    _trigtuple: HeapTuple<'mcx>,
+    _trigtuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
     _newslot: types_nodes::SlotId,
 ) -> PgResult<bool> {
     front_half("ExecIRUpdateTriggers", 3215)
@@ -3823,7 +3843,7 @@ fn exec_ar_update_triggers_impl<'mcx>(
     src_partinfo: Option<types_nodes::RriId>,
     _dst_partinfo: Option<types_nodes::RriId>,
     tupleid: Option<&ItemPointerData>,
-    fdw_trigtuple: Option<&HeapTupleData<'mcx>>,
+    fdw_trigtuple: Option<&types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
     newslot: Option<types_nodes::SlotId>,
     recheck_indexes: &[Oid],
     tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,

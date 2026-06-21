@@ -8,7 +8,8 @@ use types_error::PgResult;
 use types_nodes::nodes::CmdType;
 use types_nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use types_tableam::tableam::TM_Result;
-use types_tuple::heaptuple::{HeapTuple, ItemPointerData};
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
+use types_tuple::heaptuple::ItemPointerData;
 
 use crate::ModifyTableContext;
 
@@ -23,7 +24,7 @@ pub fn ExecDeletePrologue<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     tupleid: Option<&ItemPointerData>,
-    oldtuple: HeapTuple<'mcx>,
+    oldtuple: Option<FormedTuple<'mcx>>,
     epqreturnslot: Option<&mut Option<SlotId>>,
     result: Option<&mut TM_Result>,
 ) -> PgResult<bool> {
@@ -51,7 +52,7 @@ pub fn ExecDeletePrologue<'mcx>(
             &mut mtstate.mt_epqstate,
             result_rel_info,
             tupleid,
-            oldtuple.as_deref(),
+            oldtuple.as_ref(),
             epqreturnslot,
             result,
             &mut context.tmfd,
@@ -104,7 +105,7 @@ pub fn ExecDeleteEpilogue<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     tupleid: Option<&ItemPointerData>,
-    oldtuple: HeapTuple<'mcx>,
+    oldtuple: Option<FormedTuple<'mcx>>,
     changing_part: bool,
 ) -> PgResult<()> {
     let _ = (mcx, context);
@@ -134,7 +135,7 @@ pub fn ExecDeleteEpilogue<'mcx>(
             None,
             None,
             tupleid,
-            oldtuple.as_deref(),
+            oldtuple.as_ref(),
             None,
             &[],
             mtstate.mt_transition_capture.as_deref_mut(),
@@ -156,7 +157,7 @@ pub fn ExecDeleteEpilogue<'mcx>(
         estate,
         result_rel_info,
         tupleid,
-        oldtuple.as_deref(),
+        oldtuple.as_ref(),
         tcs,
         changing_part,
     )

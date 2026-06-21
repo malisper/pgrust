@@ -469,7 +469,7 @@ seam_core::seam!(
         epqstate: &mut types_nodes::EPQState<'mcx>,
         relinfo: types_nodes::RriId,
         tupleid: Option<&types_tuple::heaptuple::ItemPointerData>,
-        fdw_trigtuple: Option<&types_tuple::heaptuple::HeapTupleData<'mcx>>,
+        fdw_trigtuple: Option<&types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
         epqslot: Option<&mut Option<types_nodes::SlotId>>,
         tmresult: Option<&mut types_tableam::tableam::TM_Result>,
         tmfd: &mut types_tableam::tableam::TM_FailureData,
@@ -485,7 +485,7 @@ seam_core::seam!(
         estate: &mut types_nodes::EStateData<'mcx>,
         relinfo: types_nodes::RriId,
         tupleid: Option<&types_tuple::heaptuple::ItemPointerData>,
-        fdw_trigtuple: Option<&types_tuple::heaptuple::HeapTupleData<'mcx>>,
+        fdw_trigtuple: Option<&types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
         transition_capture: Option<&types_nodes::TransitionCaptureState>,
         is_crosspart_update: bool,
     ) -> PgResult<()>
@@ -514,7 +514,7 @@ seam_core::seam!(
         epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
         result_rel_info: types_nodes::RriId,
         tupleid: Option<&types_tuple::heaptuple::ItemPointerData>,
-        fdw_trigtuple: types_tuple::heaptuple::HeapTuple<'mcx>,
+        fdw_trigtuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
         newslot: types_nodes::SlotId,
         tmresult: Option<&mut types_tableam::tableam::TM_Result>,
         tmfd: &mut types_tableam::tableam::TM_FailureData,
@@ -529,7 +529,7 @@ seam_core::seam!(
     pub fn exec_ir_update_triggers<'mcx>(
         estate: &mut types_nodes::EStateData<'mcx>,
         result_rel_info: types_nodes::RriId,
-        trigtuple: types_tuple::heaptuple::HeapTuple<'mcx>,
+        trigtuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
         newslot: types_nodes::SlotId,
     ) -> types_error::PgResult<bool>
 );
@@ -542,7 +542,7 @@ seam_core::seam!(
     pub fn exec_ir_delete_triggers<'mcx>(
         estate: &mut types_nodes::EStateData<'mcx>,
         result_rel_info: types_nodes::RriId,
-        trigtuple: types_tuple::heaptuple::HeapTuple<'mcx>,
+        trigtuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
     ) -> types_error::PgResult<bool>
 );
 
@@ -562,7 +562,7 @@ seam_core::seam!(
         src_partinfo: Option<types_nodes::RriId>,
         dst_partinfo: Option<types_nodes::RriId>,
         tupleid: Option<&types_tuple::heaptuple::ItemPointerData>,
-        fdw_trigtuple: Option<&types_tuple::heaptuple::HeapTupleData<'mcx>>,
+        fdw_trigtuple: Option<&types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
         newslot: Option<types_nodes::SlotId>,
         recheck_indexes: &[types_core::Oid],
         transition_capture: Option<&mut types_nodes::modifytable::TransitionCaptureState>,

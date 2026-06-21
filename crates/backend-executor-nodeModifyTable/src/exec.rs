@@ -9,8 +9,8 @@ use types_nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use types_tuple::access::{
     RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
-use types_tuple::backend_access_common_heaptuple::{Datum, SlotAttr};
-use types_tuple::heaptuple::{HeapTuple, HeapTupleData, ItemPointerData};
+use types_tuple::backend_access_common_heaptuple::{Datum, FormedTuple, SlotAttr};
+use types_tuple::heaptuple::ItemPointerData;
 
 use crate::lifecycle::{ExecLookupResultRelByOid, ExecProcessReturning};
 use crate::{
@@ -78,25 +78,18 @@ seam_core::seam!(
 seam_core::seam!(
     /// `DatumGetHeapTupleHeader(datum)` then the
     /// `oldtupdata.t_data/t_len/t_self/t_tableOid` assembly (htup_details.h):
-    /// reconstruct a `HeapTupleData` from a wholerow junk Datum, with
-    /// `t_tableOid` set to `tableoid` (`InvalidOid` for a view). The varlena
-    /// detoast + header decode is owned by the heaptuple model.
+    /// reconstruct a tuple from a wholerow junk Datum, with `t_tableOid` set to
+    /// `tableoid` (`InvalidOid` for a view) and `t_self` invalid. The carrier is
+    /// the data-bearing [`FormedTuple`](types_tuple::backend_access_common_heaptuple::FormedTuple)
+    /// (header + user-data area) — a bare `HeapTupleData` header would drop the
+    /// column data the wholerow Datum carries, which the downstream
+    /// `ExecForceStoreHeapTuple` deform and the FDW/view trigger paths read. The
+    /// varlena detoast + header decode is owned by the heaptuple model.
     pub fn datum_get_wholerow_heap_tuple<'mcx>(
         mcx: Mcx<'mcx>,
         datum: &Datum<'mcx>,
         tableoid: types_core::Oid,
-    ) -> PgResult<HeapTupleData<'mcx>>
-);
-
-seam_core::seam!(
-    /// `ExecForceStoreHeapTuple(tuple, slot, shouldFree)` (execTuples.c): force
-    /// the given heap tuple into the slot (owned by the execTuples slot model).
-    pub fn exec_force_store_heap_tuple<'mcx>(
-        estate: &mut EStateData<'mcx>,
-        tuple: HeapTuple<'mcx>,
-        slot: SlotId,
-        should_free: bool,
-    ) -> PgResult<()>
+    ) -> PgResult<FormedTuple<'mcx>>
 );
 
 /// The `PlanState.ExecProcNode` callback installed by `ExecInitModifyTable`
@@ -314,7 +307,7 @@ pub fn ExecModifyTable<'mcx>(
 
         let mut tuple_ctid = ItemPointerData::default();
         let mut tupleid: Option<&ItemPointerData> = None;
-        let mut oldtuple: HeapTuple<'mcx> = None;
+        let mut oldtuple: Option<FormedTuple<'mcx>> = None;
 
         // For UPDATE/DELETE/MERGE, fetch the row identity info for the tuple to
         // be updated/deleted/merged.  For a heap relation, that's a TID;
@@ -416,7 +409,7 @@ pub fn ExecModifyTable<'mcx>(
                     relation_relid(estate, result_rel_info)
                 };
                 let oldtupdata = datum_get_wholerow_heap_tuple::call(mcx, &attr.value, tableoid)?;
-                oldtuple = Some(mcx::alloc_in(mcx, oldtupdata)?);
+                oldtuple = Some(oldtupdata);
             } else {
                 // Only foreign tables are allowed to omit a row-ID attr.
                 // Assert(relkind == RELKIND_FOREIGN_TABLE);
@@ -469,10 +462,13 @@ pub fn ExecModifyTable<'mcx>(
                     .result_rel(result_rel_info)
                     .ri_oldTupleSlot
                     .expect("ExecUpdate: ri_oldTupleSlot not initialized");
-                if oldtuple.is_some() {
+                if let Some(ot) = oldtuple.as_ref() {
                     // Assert(!resultRelInfo->ri_needLockTagTuple);
                     // Use the wholerow junk attr as the old tuple.
-                    exec_force_store_heap_tuple::call(estate, oldtuple.clone(), old_slot, false)?;
+                    let formed = ot.clone_in(mcx)?;
+                    backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+                        estate, old_slot, formed, false,
+                    )?;
                 } else {
                     // Fetch the most recent version of old tuple.
                     //   Relation relation = resultRelInfo->ri_RelationDesc;

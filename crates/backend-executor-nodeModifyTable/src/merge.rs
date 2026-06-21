@@ -7,7 +7,8 @@ use mcx::Mcx;
 use types_error::PgResult;
 use types_nodes::nodes::CmdType;
 use types_nodes::{EStateData, ModifyTableState, RriId, SlotId};
-use types_tuple::heaptuple::{HeapTuple, ItemPointerData};
+use types_tuple::backend_access_common_heaptuple::FormedTuple;
+use types_tuple::heaptuple::ItemPointerData;
 
 use crate::{insert_exec, ModifyTableContext};
 
@@ -31,7 +32,7 @@ pub fn ExecMerge<'mcx>(
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
     tupleid: Option<&ItemPointerData>,
-    oldtuple: HeapTuple<'mcx>,
+    oldtuple: Option<FormedTuple<'mcx>>,
     can_set_tag: bool,
 ) -> PgResult<Option<SlotId>> {
     let mut rslot: Option<SlotId> = None;
