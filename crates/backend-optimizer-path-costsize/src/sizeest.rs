@@ -323,7 +323,7 @@ pub fn set_rel_width<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: 
             tuple_width += item_width as i64;
         } else if is_placeholdervar(root, node) {
             let (ph_width, cost_startup, cost_per_tuple) =
-                cz::find_placeholder_info_width::call(root, node);
+                cz::find_placeholder_info_width::call(run.mcx(), root, node);
             tuple_width += ph_width as i64;
             if let Some(rt) = root.rel_mut(rel).reltarget.as_deref_mut() {
                 rt.cost.startup += cost_startup;

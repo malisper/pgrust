@@ -269,7 +269,7 @@ seam_core::seam!(
     /// eval cost. Returns `(ph_width, cost_startup, cost_per_tuple)`. `root` is
     /// `&mut` because `find_placeholder_info` builds the `PlaceHolderInfo` on
     /// first sight (placeholder.c).
-    pub fn find_placeholder_info_width(root: &mut PlannerInfo, node: NodeId) -> (i32, Cost, Cost)
+    pub fn find_placeholder_info_width<'mcx>(mcx: mcx::Mcx<'mcx>, root: &mut PlannerInfo, node: NodeId) -> (i32, Cost, Cost)
 );
 
 /* --- index-AM / tablespace / parallel-worker (plancat.c, spccache.c,

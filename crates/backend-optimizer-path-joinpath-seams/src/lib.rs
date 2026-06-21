@@ -28,6 +28,7 @@
 
 extern crate alloc;
 
+use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::PgResult;
 use types_nodes::nodes::NodeTag;
@@ -413,7 +414,7 @@ seam_core::seam!(
     /// expression of a 2-arg `OpExpr` clause, interned into the node arena and
     /// returned as a node handle (the owned-arena `OpExpr` stores its args as
     /// inline `Expr` values, so producing a handle requires `&mut` to intern).
-    pub fn opexpr_arg(root: &mut PlannerInfo, rinfo: RinfoId, n: i32) -> NodeId
+    pub fn opexpr_arg<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, rinfo: RinfoId, n: i32) -> PgResult<NodeId>
 );
 
 /* ======================================================================
@@ -455,8 +456,11 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `pull_vars_of_level((Node *) expr, 0)` (var.c) — the level-0 Vars/PHVs in
-    /// `expr`, as a fresh list of node handles (allocates).
-    pub fn pull_vars_of_level(root: &mut PlannerInfo, node: NodeId, levelsup: i32)
+    /// `expr`, as a fresh list of node handles (allocates). A collected
+    /// `PlaceHolderVar` is deep-copied into `mcx` (`copyObject` shape; its
+    /// `'mcx`-tagged children would otherwise alias a freed transient), so `mcx`
+    /// must outlive the returned handles' use.
+    pub fn pull_vars_of_level<'mcx>(mcx: Mcx<'mcx>, root: &mut PlannerInfo, node: NodeId, levelsup: i32)
         -> PgResult<alloc::vec::Vec<NodeId>>
 );
 seam_core::seam!(

@@ -238,7 +238,7 @@ pub fn query_planner<'mcx>(
 
     joininfo::placeholder::find_placeholders_in_jointree(root, run)?;
 
-    initsplan_seam::find_lateral_references::call(root, run);
+    initsplan_seam::find_lateral_references::call(root, run)?;
 
     let mut joinlist = initsplan_seam::deconstruct_jointree::call(root, run)?;
 

@@ -852,7 +852,10 @@ pub(crate) fn get_restriction_variable<'mcx, 'run>(
 /// `estimate_expression_value(root, node)` over an arena node handle — fold the
 /// node to a `Const` if possible (the ported clauses.c folder).
 fn estimate_other<'mcx>(mcx: Mcx<'mcx>, root: &PlannerInfo, node: NodeId) -> PgResult<Expr> {
-    let expr = root.node(node).clone();
+    // copyObject shape: a bare `.clone()` recurses into the panicking `Expr::clone`
+    // arm when the operand carries a SubPlan/SubLink/Aggref (a correlated scalar
+    // subselect on the non-Var side), so deep-copy through `clone_in`.
+    let expr = root.node(node).clone_in(mcx)?;
     backend_optimizer_util_clauses::estimate_expression_value(mcx, expr)
 }
 

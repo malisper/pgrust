@@ -252,7 +252,9 @@ fn flatten_join_alias_vars_mutator<'mcx>(
         // PlaceHolderVar's phexpr, so do it explicitly here (matching C).
         if let Some(Expr::PlaceHolderVar(phv)) = node.as_expr_mut() {
             if let Some(phexpr) = phv.phexpr.as_deref_mut() {
-                let mut child = Node::mk_expr(mcx, phexpr.clone())?;
+                // copyObject shape: the phexpr may carry a SubLink/SubPlan whose
+                // derived `Expr::clone` panics; deep-copy through `clone_in`.
+                let mut child = Node::mk_expr(mcx, phexpr.clone_in(mcx)?)?;
                 flatten_join_alias_vars_mutator(mcx, &mut child, context)?;
                 if let Some(e) = child.into_expr() {
                     if let Some(Expr::PlaceHolderVar(phv)) = node.as_expr_mut() {

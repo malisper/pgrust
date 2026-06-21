@@ -90,7 +90,7 @@ seam_core::seam!(
     /// (each a `Node *` in C). var.c is ported but its installed `&Expr`/`NodeId`
     /// var seams cannot name a whole parse `Node`; this per-`Node` seam is the
     /// home, loud-panic until var.c installs it.
-    pub fn pull_vars_of_level_node<'mcx>(node: &Node<'mcx>, levelsup: i32) -> alloc::vec::Vec<Expr>
+    pub fn pull_vars_of_level_node<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node<'mcx>, levelsup: i32) -> PgResult<alloc::vec::Vec<Expr>>
 );
 
 seam_core::seam!(
@@ -99,7 +99,7 @@ seam_core::seam!(
     /// needs to walk the sub-`Query` (which enters one more query level); the
     /// owned `Query<'mcx>` is not a `Node` value and is not `Clone`, so it rides
     /// its own seam. Loud-panic until var.c installs it.
-    pub fn pull_vars_of_level_query<'mcx>(query: &Query<'mcx>, levelsup: i32) -> alloc::vec::Vec<Expr>
+    pub fn pull_vars_of_level_query<'mcx>(mcx: mcx::Mcx<'mcx>, query: &Query<'mcx>, levelsup: i32) -> PgResult<alloc::vec::Vec<Expr>>
 );
 
 seam_core::seam!(

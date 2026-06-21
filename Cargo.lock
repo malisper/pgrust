@@ -12578,6 +12578,7 @@ dependencies = [
 name = "backend-optimizer-path-costsize-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",
@@ -12685,6 +12686,7 @@ dependencies = [
 name = "backend-optimizer-path-joinpath-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
  "types-core",
  "types-error",

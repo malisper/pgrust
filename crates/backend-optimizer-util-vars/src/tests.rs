@@ -68,7 +68,8 @@ fn pull_vars_of_level_clones_matching_vars() {
         Expr::Var(var_at(3, 0)),
         Expr::Var(var_at(4, 1)),
     ]));
-    let vars = pull_vars_of_level(&node, 0);
+    let scratch = mcx::MemoryContext::new("pull_vars_of_level test");
+    let vars = pull_vars_of_level(scratch.mcx(), &node, 0).expect("ok");
     assert_eq!(vars.len(), 1);
     match &vars[0] {
         Expr::Var(v) => assert_eq!(v.varno, 3),

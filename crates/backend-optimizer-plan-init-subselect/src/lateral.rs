@@ -51,10 +51,10 @@ use backend_optimizer_plan_init_subselect_ext_seams as initext;
 /// relations' targetlists, so that those values will be available for evaluation
 /// of the subquery. This has to run before `deconstruct_jointree`, since it
 /// might result in creation of PlaceHolderInfos.
-pub fn find_lateral_references<'mcx>(root: &mut PlannerInfo, run: &mut PlannerRun<'mcx>) {
+pub fn find_lateral_references<'mcx>(root: &mut PlannerInfo, run: &mut PlannerRun<'mcx>) -> types_error::PgResult<()> {
     // We need do nothing if the query contains no LATERAL RTEs.
     if !root.hasLateralRTEs {
-        return;
+        return Ok(());
     }
 
     // Examine all baserels (the rel array has been set up by now).
@@ -74,8 +74,9 @@ pub fn find_lateral_references<'mcx>(root: &mut PlannerInfo, run: &mut PlannerRu
             continue;
         }
 
-        extract_lateral_references(root, run, rel_id, rti);
+        extract_lateral_references(root, run, rel_id, rti)?;
     }
+    Ok(())
 }
 
 /// `extract_lateral_references` (static, initsplan.c:705).
@@ -89,8 +90,12 @@ fn extract_lateral_references<'mcx>(
     run: &mut PlannerRun<'mcx>,
     rel_id: types_pathnodes::RelId,
     rtindex: i32,
-) {
+) -> types_error::PgResult<()> {
     let rte_id = root.simple_rte_array[rtindex as usize];
+    // Planner-run context: a pulled PlaceHolderVar is deep-copied (copyObject)
+    // into here, so its `'mcx`-tagged children outlive the arena handles stored
+    // on the rel below. `Mcx` is Copy, so snapshot it before the RTE borrow.
+    let mcx = run.mcx();
 
     // Gather the appropriate variables per RTE kind. We resolve the borrowed
     // RTE and copy out the vars (cloned `Expr`s) before any `&mut root` work,
@@ -100,21 +105,21 @@ fn extract_lateral_references<'mcx>(
 
         // No cross-references are possible if it's not LATERAL.
         if !rte.lateral {
-            return;
+            return Ok(());
         }
 
         match rte.rtekind {
             RTEKind::RTE_RELATION => {
                 // pull_vars_of_level((Node *) rte->tablesample, 0)
                 match rte.tablesample.as_deref() {
-                    Some(ts) => initext::pull_vars_of_level_node::call(ts, 0),
+                    Some(ts) => initext::pull_vars_of_level_node::call(mcx, ts, 0)?,
                     None => Vec::new(),
                 }
             }
             RTEKind::RTE_SUBQUERY => {
                 // pull_vars_of_level((Node *) rte->subquery, 1)
                 match rte.subquery.as_deref() {
-                    Some(sub) => initext::pull_vars_of_level_query::call(sub, 1),
+                    Some(sub) => initext::pull_vars_of_level_query::call(mcx, sub, 1)?,
                     None => Vec::new(),
                 }
             }
@@ -122,14 +127,14 @@ fn extract_lateral_references<'mcx>(
                 // pull_vars_of_level((Node *) rte->functions, 0)
                 let mut v = Vec::new();
                 for func in rte.functions.iter() {
-                    v.extend(initext::pull_vars_of_level_node::call(func, 0));
+                    v.extend(initext::pull_vars_of_level_node::call(mcx, func, 0)?);
                 }
                 v
             }
             RTEKind::RTE_TABLEFUNC => {
                 // pull_vars_of_level((Node *) rte->tablefunc, 0)
                 match rte.tablefunc.as_deref() {
-                    Some(tf) => initext::pull_vars_of_level_node::call(tf, 0),
+                    Some(tf) => initext::pull_vars_of_level_node::call(mcx, tf, 0)?,
                     None => Vec::new(),
                 }
             }
@@ -137,19 +142,19 @@ fn extract_lateral_references<'mcx>(
                 // pull_vars_of_level((Node *) rte->values_lists, 0)
                 let mut v = Vec::new();
                 for vl in rte.values_lists.iter() {
-                    v.extend(initext::pull_vars_of_level_node::call(vl, 0));
+                    v.extend(initext::pull_vars_of_level_node::call(mcx, vl, 0)?);
                 }
                 v
             }
             _ => {
                 debug_assert!(false);
-                return; // keep compiler quiet
+                return Ok(()); // keep compiler quiet
             }
         }
     };
 
     if vars.is_empty() {
-        return; // nothing to do
+        return Ok(()); // nothing to do
     }
 
     // Copy each Var (or PlaceHolderVar) and adjust it to match our level. The
@@ -236,6 +241,7 @@ fn extract_lateral_references<'mcx>(
         handles.push(root.alloc_node(v));
     }
     root.rel_mut(rel_id).lateral_vars = handles;
+    Ok(())
 }
 
 /// `rebuild_lateral_attr_needed` (initsplan.c:807).

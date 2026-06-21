@@ -428,10 +428,10 @@ fn paraminfo_get_equal_hashops<'mcx>(
                 let ri = root.rinfo(rinfo);
                 if ri.outer_is_left {
                     let hasheq = ri.left_hasheqoperator;
-                    (jp::opexpr_arg::call(root, rinfo, 0), hasheq)
+                    (jp::opexpr_arg::call(mcx, root, rinfo, 0)?, hasheq)
                 } else {
                     let hasheq = ri.right_hasheqoperator;
-                    (jp::opexpr_arg::call(root, rinfo, 1), hasheq)
+                    (jp::opexpr_arg::call(mcx, root, rinfo, 1)?, hasheq)
                 }
             };
 
@@ -541,7 +541,7 @@ fn extract_lateral_vars_from_PHVs<'mcx>(
         }
 
         // Otherwise fetch the level-0 Vars/PHVs of the contained expression.
-        let vars = jp::pull_vars_of_level::call(root, phexpr, 0)?;
+        let vars = jp::pull_vars_of_level::call(mcx, root, phexpr, 0)?;
         for &node in vars.iter() {
             if jp::node_is_var::call(root, node) {
                 // Assert(var->varlevelsup == 0) in C.
@@ -2353,13 +2353,16 @@ fn clause_is_opexpr_with_two_args(root: &PlannerInfo, rinfo: RinfoId) -> bool {
 // values, so producing a node handle interns a clone into the node arena (hence
 // the `&mut PlannerInfo`). Reached on the Memoize path
 // (`paraminfo_get_equal_hashops`).
-fn opexpr_arg(root: &mut PlannerInfo, rinfo: RinfoId, n: i32) -> NodeId {
+fn opexpr_arg<'mcx>(mcx: mcx::Mcx<'mcx>, root: &mut PlannerInfo, rinfo: RinfoId, n: i32) -> PgResult<NodeId> {
     let clause = root.rinfo(rinfo).clause;
+    // copyObject shape: the arg may be a correlated SubPlan whose derived
+    // `Expr::clone` panics; deep-copy through `clone_in` (also drops the `&root`
+    // borrow so `alloc_node` can run below).
     let arg = match root.node(clause) {
-        types_nodes::primnodes::Expr::OpExpr(o) => o.args[n as usize].clone(),
+        types_nodes::primnodes::Expr::OpExpr(o) => o.args[n as usize].clone_in(mcx)?,
         _ => unreachable!("opexpr_arg: rinfo->clause is not an OpExpr"),
     };
-    root.alloc_node(arg)
+    Ok(root.alloc_node(arg))
 }
 
 pub fn init_seams() {

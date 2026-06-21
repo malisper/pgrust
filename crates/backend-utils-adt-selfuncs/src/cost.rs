@@ -95,28 +95,54 @@ fn get_quals_from_indexclauses(path: &types_pathnodes::IndexPath) -> Vec<RinfoId
 /// to evaluate the "other operands" (the non-index-column inputs) of a list of
 /// index quals. The list elements are RestrictInfos (`indexQuals`) or bare
 /// ORDER BY expressions (`indexOrderBys`); pass each through [`ClauseRef`].
-fn index_other_operands_eval_cost(
+fn index_other_operands_eval_cost<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     quals: &[ClauseRef],
-) -> f64 {
+) -> PgResult<f64> {
     let mut qual_arg_cost = 0.0f64;
 
     for q in quals {
         // Index quals will have RestrictInfos, indexorderbys won't. Look through
-        // RestrictInfo if present.
+        // RestrictInfo if present. copyObject shape: the clause may carry a
+        // correlated SubPlan operand whose derived `Expr::clone` panics, so
+        // deep-copy through `clone_in` (it also drops the `&root` borrow so the
+        // operand can `alloc_node` below).
         let clause: Expr = match q {
-            ClauseRef::Rinfo(rid) => root.node(root.rinfo(*rid).clause).clone(),
-            ClauseRef::Bare(node) => root.node(*node).clone(),
+            ClauseRef::Rinfo(rid) => root.node(root.rinfo(*rid).clause).clone_in(mcx)?,
+            ClauseRef::Bare(node) => root.node(*node).clone_in(mcx)?,
         };
 
-        let other_operand: Option<Expr> = match &clause {
-            Expr::OpExpr(op) => op.args.get(1).cloned(),
-            Expr::RowCompareExpr(rc) => rc.rargs.first().cloned(),
-            Expr::ScalarArrayOpExpr(saop) => saop.args.get(1).cloned(),
+        // `clause` is an owned deep copy, so MOVE the second operand out of it
+        // (C reads `get_rightop(clause)` as a borrowed pointer). A derived
+        // `.cloned()` here would recurse into the panicking `Expr::clone` arm
+        // when the operand is a correlated SubPlan.
+        let other_operand: Option<Expr> = match clause {
+            Expr::OpExpr(mut op) => {
+                if op.args.len() > 1 {
+                    Some(op.args.swap_remove(1))
+                } else {
+                    None
+                }
+            }
+            Expr::RowCompareExpr(mut rc) => {
+                if rc.rargs.is_empty() {
+                    None
+                } else {
+                    Some(rc.rargs.swap_remove(0))
+                }
+            }
+            Expr::ScalarArrayOpExpr(mut saop) => {
+                if saop.args.len() > 1 {
+                    Some(saop.args.swap_remove(1))
+                } else {
+                    None
+                }
+            }
             Expr::NullTest(_) => None,
             other => panic!(
                 "unsupported indexqual type: {:?}",
-                core::mem::discriminant(other)
+                core::mem::discriminant(&other)
             ),
         };
 
@@ -129,7 +155,7 @@ fn index_other_operands_eval_cost(
         };
         qual_arg_cost += startup + per_tuple;
     }
-    qual_arg_cost
+    Ok(qual_arg_cost)
 }
 
 /// An element of a qual list `index_other_operands_eval_cost` walks — either a
@@ -146,7 +172,8 @@ enum ClauseRef {
 /// `clauselist_selectivity`. `predicate_implied_by` (predtest.c) takes bare
 /// `Node *` lists, so the indexqual RestrictInfos' clause nodes are resolved to
 /// NodeIds for the implication test.
-fn add_predicate_to_index_quals(
+fn add_predicate_to_index_quals<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     index: &IndexOptInfo,
     index_quals: &[RinfoId],
@@ -170,7 +197,7 @@ fn add_predicate_to_index_quals(
     for &pred_qual in &index.indpred {
         let one_qual = [pred_qual];
         if !predtest::predicate_implied_by::call(root, &one_qual, &restriction_nodes, false) {
-            pred_extra.push(ClauseListEntry::Bare(root.node(pred_qual).clone()));
+            pred_extra.push(ClauseListEntry::Bare(root.node(pred_qual).clone_in(mcx)?));
         }
     }
     result.extend(pred_extra);
@@ -213,7 +240,7 @@ pub(crate) fn genericcostestimate<'mcx, 'run>(
 
     // If the index is partial, AND the index predicate with the explicitly
     // given indexquals to produce a more accurate idea of the index selectivity.
-    let selectivity_quals = add_predicate_to_index_quals(root, &index, &index_quals)?;
+    let selectivity_quals = add_predicate_to_index_quals(mcx, root, &index, &index_quals)?;
 
     // If caller didn't give us an estimate for ScalarArrayOpExpr index scans,
     // just assume that the number of index descents is the number of distinct
@@ -222,9 +249,12 @@ pub(crate) fn genericcostestimate<'mcx, 'run>(
     if num_sa_scans < 1.0 {
         num_sa_scans = 1.0;
         for &rid in &index_quals {
-            let clause = root.node(root.rinfo(rid).clause).clone();
+            // copyObject shape: deep-copy via `clone_in` (a SAOP operand may be a
+            // SubPlan; also drops the `&root` borrow for the `alloc_node` below).
+            let clause = root.node(root.rinfo(rid).clause).clone_in(mcx)?;
             if let Some(saop) = clause.as_scalararrayopexpr() {
-                if let Some(arr) = saop.args.get(1).cloned() {
+                // copyObject shape: deep-copy the array operand via `clone_in`.
+                if let Some(arr) = saop.args.get(1).map(|e| e.clone_in(mcx)).transpose()? {
                     let node_id = root.alloc_node(arr);
                     let alength = crate::misc::estimate_array_length(mcx, root, node_id)?;
                     if alength > 1.0 {
@@ -299,8 +329,8 @@ pub(crate) fn genericcostestimate<'mcx, 'run>(
         index_quals.iter().map(|&r| ClauseRef::Rinfo(r)).collect();
     let orderby_refs: Vec<ClauseRef> =
         index_order_bys.iter().map(|&n| ClauseRef::Bare(n)).collect();
-    let qual_arg_cost = index_other_operands_eval_cost(root, &qual_refs)
-        + index_other_operands_eval_cost(root, &orderby_refs);
+    let qual_arg_cost = index_other_operands_eval_cost(mcx, root, &qual_refs)?
+        + index_other_operands_eval_cost(mcx, root, &orderby_refs)?;
     let cpu_operator_cost = cz::cpu_operator_cost::call();
     let cpu_index_tuple_cost = cz::cpu_index_tuple_cost::call();
     let qual_op_cost = cpu_operator_cost
@@ -460,7 +490,7 @@ pub(crate) fn btcostestimate<'mcx, 'run>(
                 // Apply indexcol's indexSkipQuals selectivity to ndistinct.
                 if !index_skip_quals.is_empty() {
                     let partial_skip_quals =
-                        add_predicate_to_index_quals(root, &index, &index_skip_quals)?;
+                        add_predicate_to_index_quals(mcx, root, &index, &index_skip_quals)?;
                     let ndistinctfrac = sel::clauselist_selectivity_mixed::call(
                         run,
                         root,
@@ -512,7 +542,11 @@ pub(crate) fn btcostestimate<'mcx, 'run>(
 
         // Examine each indexqual associated with this index clause.
         for &rid in &iclause.indexquals {
-            let clause = root.node(root.rinfo(rid).clause).clone();
+            // copyObject shape: an OpExpr/SAOP indexqual operand may be a
+            // correlated SubPlan whose derived `Expr::clone` panics; deep-copy
+            // through `clone_in` (the clone also drops the `&root` borrow so the
+            // SAOP arm can `alloc_node` below).
+            let clause = root.node(root.rinfo(rid).clause).clone_in(mcx)?;
             let mut clause_op: Oid = InvalidOid;
 
             match &clause {
@@ -524,7 +558,12 @@ pub(crate) fn btcostestimate<'mcx, 'run>(
                     found_row_compare = true;
                 }
                 Expr::ScalarArrayOpExpr(saop) => {
-                    if let Some(other_operand) = saop.args.get(1).cloned() {
+                    // copyObject shape: deep-copy the array operand via `clone_in`
+                    // (a `= ANY (subquery)` operand can be a SubPlan, whose derived
+                    // `Expr::clone` panics).
+                    if let Some(other_operand) =
+                        saop.args.get(1).map(|e| e.clone_in(mcx)).transpose()?
+                    {
                         let node_id = root.alloc_node(other_operand);
                         let alength = crate::misc::estimate_array_length(mcx, root, node_id)?;
                         clause_op = saop.opno;
@@ -593,7 +632,7 @@ pub(crate) fn btcostestimate<'mcx, 'run>(
     } else {
         // If the index is partial, AND the index predicate with the index-bound
         // quals to produce a more accurate idea of the rows covered.
-        let selectivity_quals = add_predicate_to_index_quals(root, &index, &index_bound_quals)?;
+        let selectivity_quals = add_predicate_to_index_quals(mcx, root, &index, &index_bound_quals)?;
         let btree_selectivity = sel::clauselist_selectivity_mixed::call(
             run,
             root,
@@ -944,7 +983,7 @@ pub(crate) fn brincostestimate<'mcx, 'run>(
     let qual_arg_cost = {
         let refs: Vec<ClauseRef> =
             index_quals.iter().map(|&r| ClauseRef::Rinfo(r)).collect();
-        index_other_operands_eval_cost(root, &refs)
+        index_other_operands_eval_cost(mcx, root, &refs)?
     };
 
     let cpu_operator_cost = cz::cpu_operator_cost::call();
@@ -1146,10 +1185,12 @@ fn gincost_opexpr<'mcx>(
     counts: &mut GinQualCounts,
 ) -> PgResult<bool> {
     let clause_op = clause.opno;
+    // copyObject shape: deep-copy the operand via `clone_in` (it may be a SubPlan).
     let operand = clause
         .args
         .get(1)
-        .cloned()
+        .map(|e| e.clone_in(mcx))
+        .transpose()?
         .expect("gincost_opexpr: OpExpr must have a second argument");
 
     // Aggressively reduce to a constant, and look through relabeling.
@@ -1199,17 +1240,19 @@ fn gincost_scalararrayopexpr<'mcx>(
     let clause_op = clause.opno;
     debug_assert!(clause.useOr);
 
+    // copyObject shape: deep-copy the operand via `clone_in` (it may be a SubPlan).
     let rightop = clause
         .args
         .get(1)
-        .cloned()
+        .map(|e| e.clone_in(mcx))
+        .transpose()?
         .expect("gincost_scalararrayopexpr: SAOP must have a second argument");
 
     // Aggressively reduce to a constant, and look through relabeling.
     let mut rightop = sel::estimate_expression_value::call(run, root, &rightop)?;
     if let Expr::RelabelType(r) = &rightop {
         if let Some(arg) = &r.arg {
-            rightop = (**arg).clone();
+            rightop = (**arg).clone_in(mcx)?;
         }
     }
 
@@ -1220,7 +1263,7 @@ fn gincost_scalararrayopexpr<'mcx>(
     let c = match &rightop {
         Expr::Const(c) => c,
         _ => {
-            let node_id = root.alloc_node(rightop.clone());
+            let node_id = root.alloc_node(rightop.clone_in(mcx)?);
             counts.exact_entries += 1.0;
             counts.search_entries += 1.0;
             counts.array_scans *= cz::estimate_array_length::call(root, node_id);
@@ -1414,7 +1457,7 @@ pub(crate) fn gincostestimate<'mcx>(
 
     // If the index is partial, AND the index predicate with the index-bound
     // quals to produce a more accurate idea of the rows covered.
-    let selectivity_quals = add_predicate_to_index_quals(root, &index, &index_quals)?;
+    let selectivity_quals = add_predicate_to_index_quals(mcx, root, &index, &index_quals)?;
 
     let baserel = index.rel.expect("gincostestimate: index.rel must be set");
     let baserel_relid = root.rel(baserel).relid as i32;
@@ -1445,8 +1488,11 @@ pub(crate) fn gincostestimate<'mcx>(
         let indexcol = iclause.indexcol as usize;
         for &rid in &iclause.indexquals {
             let clause: Expr = {
+                // copyObject shape: deep-copy via `clone_in` (an OpExpr/SAOP
+                // operand may carry a correlated SubPlan whose derived
+                // `Expr::clone` panics).
                 let clause_node = root.rinfo(rid).clause;
-                root.node(clause_node).clone()
+                root.node(clause_node).clone_in(mcx)?
             };
 
             match &clause {
@@ -1645,7 +1691,7 @@ pub(crate) fn gincostestimate<'mcx>(
     let qual_arg_cost = {
         let refs: Vec<ClauseRef> =
             index_quals.iter().map(|&r| ClauseRef::Rinfo(r)).collect();
-        index_other_operands_eval_cost(root, &refs)
+        index_other_operands_eval_cost(mcx, root, &refs)?
     };
     let qual_op_cost = cpu_operator_cost * index_quals.len() as f64;
 

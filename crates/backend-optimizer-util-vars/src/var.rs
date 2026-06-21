@@ -388,27 +388,38 @@ fn pull_varattnos_walker(node: &Node, context: &mut PullVarattnosContext) -> boo
 // ===========================================================================
 
 /// `pull_vars_context` (var.c:46-50). The Vars/PHVs are cloned into the list
-/// (the owned tree does not hand out shared `Node *` aliases).
-struct PullVarsContext {
+/// (the owned tree does not hand out shared `Node *` aliases). A
+/// `PlaceHolderVar` wraps an owned `phexpr` whose children may be a panicking
+/// derived-`Clone` node (`SubLink`/`Aggref`/`SubPlan`), so the PHV is deep-copied
+/// through [`PlaceHolderVar::clone_in`] into `mcx` (which must outlive the
+/// returned list); a bare `phv.clone()` would recurse into the panicking
+/// `Expr::clone` arm.
+struct PullVarsContext<'mcx> {
     vars: Vec<Expr>,
     sublevels_up: i32,
+    mcx: mcx::Mcx<'mcx>,
 }
 
 /// `pull_vars_of_level(node, levelsup)` (var.c:338). Create a list of all Vars
 /// (and PlaceHolderVars) referencing the specified query level. The cloned
 /// `Var`/`PlaceHolderVar` `Expr`s are returned (the seam interns them into the
 /// arena and hands back `NodeId`s).
-pub fn pull_vars_of_level(node: &Node, levelsup: i32) -> Vec<Expr> {
+pub fn pull_vars_of_level<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node, levelsup: i32) -> PgResult<Vec<Expr>> {
     let mut context = PullVarsContext {
         vars: Vec::new(),
         sublevels_up: levelsup,
+        mcx,
     };
+    let mut err: Option<types_error::PgError> = None;
     query_or_expression_tree_walker(
         node,
-        &mut |n: &Node| pull_vars_walker(n, &mut context),
+        &mut |n: &Node| pull_vars_walker(n, &mut context, &mut err),
         0,
     );
-    context.vars
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(context.vars)
 }
 
 /// `pull_vars_of_level((Node *) query, levelsup)` over an owned `Query<'mcx>`
@@ -418,21 +429,31 @@ pub fn pull_vars_of_level(node: &Node, levelsup: i32) -> Vec<Expr> {
 /// by `pull_vars_walker`'s `T_Query` arm only for *nested* sub-queries reached
 /// during the walk). Installs the `pull_vars_of_level_query` seam for
 /// `extract_lateral_references`' `RTE_SUBQUERY` arm.
-pub fn pull_vars_of_level_query(query: &types_nodes::copy_query::Query, levelsup: i32) -> Vec<Expr> {
+pub fn pull_vars_of_level_query<'mcx>(mcx: mcx::Mcx<'mcx>, query: &types_nodes::copy_query::Query, levelsup: i32) -> PgResult<Vec<Expr>> {
     let mut context = PullVarsContext {
         vars: Vec::new(),
         sublevels_up: levelsup,
+        mcx,
     };
+    let mut err: Option<types_error::PgError> = None;
     query_tree_walker(
         query,
-        &mut |n: &Node| pull_vars_walker(n, &mut context),
+        &mut |n: &Node| pull_vars_walker(n, &mut context, &mut err),
         0,
     );
-    context.vars
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(context.vars)
 }
 
-/// `pull_vars_walker` (var.c:358).
-fn pull_vars_walker(node: &Node, context: &mut PullVarsContext) -> bool {
+/// `pull_vars_walker` (var.c:358). `err` carries out a deep-copy failure from
+/// the `PlaceHolderVar::clone_in` arm (the walker signature is `-> bool`, so a
+/// fallible clone reports through this out-param and aborts the walk).
+fn pull_vars_walker(node: &Node, context: &mut PullVarsContext, err: &mut Option<types_error::PgError>) -> bool {
+    if err.is_some() {
+        return true; // abort: a prior deep-copy failed
+    }
     if let Some(expr) = node.as_expr() {
         match expr {
             Expr::Var(var) => {
@@ -443,22 +464,31 @@ fn pull_vars_walker(node: &Node, context: &mut PullVarsContext) -> bool {
             }
             Expr::PlaceHolderVar(phv) => {
                 if phv.phlevelsup as i32 == context.sublevels_up {
-                    context.vars.push(Expr::PlaceHolderVar(phv.clone()));
+                    // copyObject shape: deep-copy through clone_in (the derived
+                    // `phv.clone()` recurses into the panicking `Expr::clone`
+                    // arm if `phexpr` carries a SubLink/Aggref/SubPlan).
+                    match phv.clone_in(context.mcx) {
+                        Ok(copy) => context.vars.push(Expr::PlaceHolderVar(copy)),
+                        Err(e) => {
+                            *err = Some(e);
+                            return true;
+                        }
+                    }
                 }
                 // we don't want to look into the contained expression
                 return false;
             }
-            _ => return expression_tree_walker(node, &mut |n: &Node| pull_vars_walker(n, context)),
+            _ => return expression_tree_walker(node, &mut |n: &Node| pull_vars_walker(n, context, err)),
         }
     }
     if node.node_tag() == ntag::T_Query {
         let q = node.as_query().unwrap();
         context.sublevels_up += 1;
-        let result = query_tree_walker(q, &mut |n: &Node| pull_vars_walker(n, context), 0);
+        let result = query_tree_walker(q, &mut |n: &Node| pull_vars_walker(n, context, err), 0);
         context.sublevels_up -= 1;
         return result;
     }
-    expression_tree_walker(node, &mut |n: &Node| pull_vars_walker(n, context))
+    expression_tree_walker(node, &mut |n: &Node| pull_vars_walker(n, context, err))
 }
 
 // ===========================================================================
@@ -835,14 +865,19 @@ fn bms_is_member(x: i32, a: &Relids) -> bool {
 
 /// `pull_vars_of_level((Node *) node, levelsup)` (var.c) — installed seam.
 /// Returns the level-`levelsup` Vars/PHVs as fresh arena handles.
-fn seam_pull_vars_of_level(
+fn seam_pull_vars_of_level<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     root: &mut PlannerInfo,
     node: NodeId,
     levelsup: i32,
 ) -> PgResult<Vec<NodeId>> {
+    // The input is wrapped into a transient scratch only for the walk; collected
+    // PlaceHolderVars are deep-copied into the caller's long-lived `mcx` (their
+    // `'mcx`-tagged children must outlive the returned arena handles), then
+    // interned into `root`.
     let scratch = mcx::MemoryContext::new("pull_vars_of_level seam wrapper");
     let wrapped = node_expr_wrapper(root.node(node), scratch.mcx());
-    let vars = pull_vars_of_level(&wrapped, levelsup);
+    let vars = pull_vars_of_level(mcx, &wrapped, levelsup)?;
     let mut out = Vec::with_capacity(vars.len());
     for v in vars {
         out.push(root.alloc_node(v));
@@ -1046,11 +1081,11 @@ pub fn init_seams() {
     // init-subselect-ext stub crate declares it (it cannot name a whole parse
     // `Node`); var.c is the real owner and installs it here.
     use backend_optimizer_plan_init_subselect_ext_seams as isub;
-    isub::pull_vars_of_level_node::set(|node, levelsup| pull_vars_of_level(node, levelsup));
+    isub::pull_vars_of_level_node::set(|mcx, node, levelsup| pull_vars_of_level(mcx, node, levelsup));
     // The RTE_SUBQUERY arm walks `rte->subquery` (an owned `Query`, not a `Node`)
     // through the sibling `_query` seam (same owner, var.c).
-    isub::pull_vars_of_level_query::set(|query, levelsup| {
-        pull_vars_of_level_query(query, levelsup)
+    isub::pull_vars_of_level_query::set(|mcx, query, levelsup| {
+        pull_vars_of_level_query(mcx, query, levelsup)
     });
 }
 

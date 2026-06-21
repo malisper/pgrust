@@ -354,7 +354,24 @@ fn adjust_appendrel_attrs_mutator(
                         )));
                         return Expr::Var(var);
                     }
-                    let newnode = context.root.node(handle).clone();
+                    // C: `newnode = copyObject(list_nth(translated_vars, ...))`.
+                    // The translated expr is usually a Var (derived clone safe),
+                    // but on the targetlist/scan-join path it can be a PHV/expr
+                    // carrying a SubPlan whose derived `Expr::clone` panics, so
+                    // deep-copy through `clone_in` into the planner-run context
+                    // when one is threaded (that path always threads `run`).
+                    let src = context.root.node(handle);
+                    let newnode = match (src.as_var().is_some(), context.run) {
+                        (true, _) => src.clone(),
+                        (false, Some(run)) => match src.clone_in(run.mcx()) {
+                            Ok(n) => n,
+                            Err(e) => {
+                                context.err = Some(e);
+                                return Expr::Var(var);
+                            }
+                        },
+                        (false, None) => src.clone(),
+                    };
                     if let Expr::Var(mut newvar) = newnode {
                         newvar.varreturningtype = var.varreturningtype;
                         newvar.varnullingrels = expr_relids_add_all(

@@ -222,9 +222,13 @@ pub fn init_seams() {
     //   cost_qual_eval_node(&cost, (Node *) phv->phexpr, root);
     // Returns `(ph_width, cost.startup, cost.per_tuple)`. Homed here because this
     // unit ports `find_placeholder_info`. Mirrors `add_placeholders_to_joinrel`.
-    costsize_seam::find_placeholder_info_width::set(|root, node| {
+    costsize_seam::find_placeholder_info_width::set(|mcx, root, node| {
+        // copyObject shape: the PHV's `phexpr` may carry a SubPlan whose derived
+        // `Expr::clone` panics, so deep-copy through `clone_in`.
         let phv = match root.node(node) {
-            Expr::PlaceHolderVar(phv) => phv.clone(),
+            Expr::PlaceHolderVar(phv) => phv
+                .clone_in(mcx)
+                .expect("find_placeholder_info_width: PHV clone_in failed"),
             _ => panic!("find_placeholder_info_width: node is not a PlaceHolderVar"),
         };
         let phid = find_placeholder_info(root, &phv)
@@ -235,7 +239,8 @@ pub fn init_seams() {
             .as_ref()
             .expect("find_placeholder_info_width: PHV has no phexpr")
             .as_ref()
-            .clone();
+            .clone_in(mcx)
+            .expect("find_placeholder_info_width: phexpr clone_in failed");
         let (cost_startup, cost_per_tuple) =
             crate::ext_seam::cost_qual_eval_node_expr::call(root, &phexpr);
         (ph_width, cost_startup, cost_per_tuple)

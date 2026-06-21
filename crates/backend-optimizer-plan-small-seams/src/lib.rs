@@ -57,7 +57,7 @@ seam_core::seam!(
     /// by LATERAL references in the jointree. Takes `&mut PlannerRun` because
     /// upper-level PHV preprocessing (`preprocess_phv_expression` ->
     /// `preprocess_expression` -> `SS_process_sublinks`) can intern subplans.
-    pub fn find_lateral_references<'mcx>(root: &mut PlannerInfo, run: &mut PlannerRun<'mcx>)
+    pub fn find_lateral_references<'mcx>(root: &mut PlannerInfo, run: &mut PlannerRun<'mcx>) -> types_error::PgResult<()>
 );
 
 seam_core::seam!(
