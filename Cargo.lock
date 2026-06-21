@@ -14461,6 +14461,7 @@ dependencies = [
  "backend-optimizer-prep-prepqual-seams",
  "backend-optimizer-util-appendinfo",
  "backend-optimizer-util-appendinfo-seams",
+ "backend-optimizer-util-predtest-seams",
  "backend-optimizer-util-relnode",
  "backend-optimizer-util-var-seams",
  "backend-partitioning-partbounds-seams",

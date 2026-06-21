@@ -204,6 +204,9 @@ struct GeneratePruningStepsContext<'a, 'mcx> {
     has_default: bool,
     /// `rel->partition_qual` (NIL for a top-level partitioned table).
     has_partition_qual: bool,
+    /// `rel->partition_qual` — the partition constraint clauses (implicit-AND
+    /// list of bare Exprs), used by the default-partition refutation check.
+    partition_qual: &'a [Expr],
     target: PartClauseTarget,
     /// Result: the list of pruning steps.
     steps: Vec<PartitionPruneStep>,
@@ -1077,6 +1080,7 @@ fn gen_partprune_steps<'a, 'mcx>(
         partexprs: &inputs.partexprs,
         has_default: inputs.has_default,
         has_partition_qual: inputs.has_partition_qual,
+        partition_qual: &inputs.partition_qual,
         target,
         steps: Vec::new(),
         has_mutable_op: false,
@@ -1126,11 +1130,24 @@ fn gen_partprune_steps_internal(
     let mut generate_opsteps = false;
     let mut result: Vec<PartitionPruneStep> = Vec::new();
 
-    // Default-vs-partition-constraint contradiction check. Only when the rel is
-    // itself a partition (partition_qual set) with a default partition.
+    // Default-vs-partition-constraint contradiction check (partprune.c:1013):
+    //   if (partition_bound_has_default(rel->boundinfo) &&
+    //       predicate_refuted_by(rel->partition_qual, clauses, false))
+    //   { context->contradictory = true; return NIL; }
+    // Only fires when the rel is itself a partition (partition_qual set) with a
+    // default partition. Detecting that the query clauses refute this partition's
+    // own constraint lets the default sub-partition be pruned, and (via the
+    // per-OR-arm recursion) drops contradictory OR arms.
     if context.has_default && context.has_partition_qual {
-        // predicate_refuted_by(partition_qual, clauses, false). Deferred with the
-        // partition_qual deref (run-time lane). Top-level tables skip this.
+        if backend_optimizer_util_predtest_seams::predicate_refuted_by_exprs::call(
+            context.mcx,
+            context.partition_qual,
+            clauses,
+            false,
+        )? {
+            context.contradictory = true;
+            return Ok(Vec::new());
+        }
     }
 
     for clause in clauses {

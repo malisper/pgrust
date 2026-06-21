@@ -403,6 +403,19 @@ pub fn predicate_implied_by_exprs<'mcx>(
     predicate_implied_by_impl(mcx, predicate, clause, weak)
 }
 
+/// `predicate_refuted_by(predicate, clause, weak)` over bare owned `Expr` lists
+/// with a NULL planner root — the form partprune.c's `gen_partprune_steps_internal`
+/// calls to prune the default partition. Install body for the
+/// `predicate_refuted_by_exprs` seam.
+pub fn predicate_refuted_by_exprs<'mcx>(
+    mcx: Mcx<'mcx>,
+    predicate: &[Expr],
+    clause: &[Expr],
+    weak: bool,
+) -> PgResult<bool> {
+    predicate_refuted_by_impl(mcx, predicate, clause, weak)
+}
+
 /// `predicate_implied_by` over already-resolved owned `Expr` lists, fallible
 /// and `Mcx`-threaded (the catalog lookups allocate).
 pub(crate) fn predicate_implied_by_impl<'mcx>(

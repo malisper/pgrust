@@ -40,6 +40,9 @@ pub fn init_seams() {
     backend_optimizer_util_predtest_seams::predicate_implied_by_exprs::set(
         predtest::predicate_implied_by_exprs,
     );
+    backend_optimizer_util_predtest_seams::predicate_refuted_by_exprs::set(
+        predtest::predicate_refuted_by_exprs,
+    );
     // relation_excluded_by_constraints (plancat.c) refutation half; predtest.c
     // owns predicate_refuted_by, declared in plancat-ext-seams.
     backend_optimizer_util_plancat_ext_seams::predicate_refuted_by::set(

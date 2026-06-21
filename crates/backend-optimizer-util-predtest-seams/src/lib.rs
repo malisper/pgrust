@@ -43,3 +43,19 @@ seam_core::seam!(
         weak: bool
     ) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// `predicate_refuted_by(predicate, clause, weak)` (predtest.c) over bare
+    /// owned `Expr` lists with a NULL planner root — the form partprune.c calls
+    /// from `gen_partprune_steps_internal` to detect that a partition's
+    /// constraint (`rel->partition_qual`) is refuted by the query clauses, so the
+    /// default partition can be pruned. Both lists are implicit-AND conjunctions;
+    /// returns whether `clause` proves `predicate` false. The catalog lookups in
+    /// the prover can `ereport(ERROR)`, carried on `Err`.
+    pub fn predicate_refuted_by_exprs<'mcx>(
+        mcx: Mcx<'mcx>,
+        predicate: &[Expr],
+        clause: &[Expr],
+        weak: bool
+    ) -> PgResult<bool>
+);
