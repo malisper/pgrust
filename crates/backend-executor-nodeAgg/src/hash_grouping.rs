@@ -1153,7 +1153,7 @@ fn hash_setoff_base(aggstate: &AggStateData<'_>) -> usize {
 /// borrow record. No-op for sets that spilled / had no entry this tuple. C has no
 /// analogue: it aliases the entry's additional bytes, so the transition mutates
 /// the entry storage directly and nothing is written back.
-fn store_hash_pergroups_back(aggstate: &mut AggStateData<'_>) {
+pub(crate) fn store_hash_pergroups_back(aggstate: &mut AggStateData<'_>) {
     let num_hashes = aggstate.num_hashes as usize;
     let hash_setoff_base = hash_setoff_base(aggstate);
 

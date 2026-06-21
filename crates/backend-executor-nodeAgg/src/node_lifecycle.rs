@@ -163,6 +163,20 @@ pub fn fetch_input_tuple<'mcx>(
     }
 
     // if (!TupIsNull(slot) && aggstate->sort_out)
+    //     tuplesort_puttupleslot(aggstate->sort_out, slot);
+    //
+    // C's tuplesort_puttupleslot does ExecCopySlotMinimalTuple(slot), which
+    // materializes the FULL tuple regardless of slot type. The owned tuplesort
+    // forms the minimal tuple from slot->tts_values/tts_isnull, so the source
+    // slot must be fully deformed first — a lazily-deformed outer slot
+    // (tts_nvalid < natts, e.g. a SeqScan that only touched the grouping cols)
+    // would otherwise feed stale values for the unread columns (the aggregated
+    // input vars), silently corrupting the re-sorted phase's aggregates.
+    if let Some(s) = slot {
+        if aggstate.sort_out.is_some() {
+            backend_executor_execTuples_seams::slot_getallattrs_by_id::call(estate, s)?;
+        }
+    }
     if let (Some(s), Some(sort_out)) = (slot, aggstate.sort_out.as_mut()) {
         backend_utils_sort_tuplesort_seams::tuplesort_puttupleslot::call(
             sort_out,

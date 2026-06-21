@@ -331,6 +331,16 @@ pub fn agg_retrieve_direct<'mcx>(
                     // Advance the aggregates (or combine functions).
                     crate::transition::advance_aggregates(aggstate, estate)?;
 
+                    // During phase 1 of a mixed agg, lookup_hash_entries borrowed
+                    // each grouping set's per-group PgVec out of its side-table slot
+                    // into all_pergroups[setoff] so advance_aggregates could mutate
+                    // it in place (C aliases the entry's additional bytes directly;
+                    // the owned model takes/restores). Return each borrowed PgVec to
+                    // its side-table slot before the next tuple re-probes the tables.
+                    if aggstate.aggstrategy == AGG_MIXED && aggstate.current_phase == 1 {
+                        crate::hash_grouping::store_hash_pergroups_back(aggstate);
+                    }
+
                     // Reset per-input-tuple context after each tuple.
                     reset_expr_context_tmp(aggstate, estate)?;
 
