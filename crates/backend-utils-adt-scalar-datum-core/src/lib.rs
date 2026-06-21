@@ -215,6 +215,17 @@ pub fn datum_copy<'mcx>(
         });
     }
 
+    // A composite value (RECORD / named row, e.g. a whole-row Var or RowExpr
+    // result) is carried by the model as `Datum::Composite(FormedTuple)` rather
+    // than a flat varlena image. In C such a value IS a `struct varlena *`
+    // (HeapTupleHeader, always plain not external) and datumCopy's typLen==-1 leg
+    // copies it verbatim into the caller's context. The faithful model copy is a
+    // deep clone of the FormedTuple into `mcx`, preserving the composite arm.
+    if let Datum::Composite(t) = value {
+        debug_assert_eq!(typ_len, -1, "datumCopy: composite value with non-varlena typLen");
+        return Ok(Datum::Composite(t.clone_in(mcx)?));
+    }
+
     let bytes = value.as_ref_bytes();
 
     if typ_len == -1 {
