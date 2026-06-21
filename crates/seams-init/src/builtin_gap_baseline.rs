@@ -79,7 +79,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (1192, "generate_subscripts_nodir", BuiltinGapKind::NotRegistered),
     (1193, "array_fill", BuiltinGapKind::NotRegistered),
     (1286, "array_fill_with_lower_bounds", BuiltinGapKind::NotRegistered),
-    (1291, "suppress_redundant_updates_trigger", BuiltinGapKind::NotRegistered),
     (1293, "multirange_unnest", BuiltinGapKind::NotRegistered),
     (1300, "positionsel", BuiltinGapKind::NotRegistered),
     (1301, "positionjoinsel", BuiltinGapKind::NotRegistered),

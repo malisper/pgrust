@@ -8461,6 +8461,7 @@ dependencies = [
  "backend-catalog-objectaddress",
  "backend-catalog-partition-seams",
  "backend-catalog-pg-class-seams",
+ "backend-catalog-pg-constraint-seams",
  "backend-catalog-pg-depend",
  "backend-catalog-pg-inherits",
  "backend-commands-dbcommands-seams",

@@ -42,4 +42,5 @@ pub mod trigfuncs;
 /// so by-OID dispatch resolves them. Called from `seams-init::init_all`.
 pub fn init_seams() {
     fmgr_builtins::register_pg_lsn_builtins();
+    fmgr_builtins::register_trigfuncs_builtins();
 }

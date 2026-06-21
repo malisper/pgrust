@@ -444,6 +444,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `return PointerGetDatum(rettuple)` where `rettuple == trigdata->tg_newtuple`
+    /// — deposit the firing trigger's NEW row on the BEFORE-trigger return-tuple
+    /// channel. Used by `suppress_redundant_updates_trigger` (trigfuncs.c) when
+    /// the NEW row differs from OLD: the C function returns the unmodified NEW
+    /// tuple so the UPDATE proceeds. Returns `false` when no NEW slot payload is
+    /// installed (the analogue of a NULL `tg_newtuple` -> "do nothing").
+    pub fn set_before_trigger_result_to_newtuple() -> bool
+);
+
+seam_core::seam!(
+    /// `return PointerGetDatum(NULL)` — deposit the C "do nothing" sentinel on the
+    /// BEFORE-trigger return-tuple channel (the firing path decodes it as no row
+    /// change). Used by `suppress_redundant_updates_trigger` (trigfuncs.c) when
+    /// the NEW row is byte-identical to OLD and the UPDATE is suppressed.
+    pub fn set_before_trigger_result_do_nothing()
+);
+
+seam_core::seam!(
     /// `ExecARInsertTriggers(estate, relinfo, slot, recheckIndexes,
     /// transition_capture)` (trigger.c): queue AFTER ROW INSERT trigger events
     /// (and capture the NEW tuple for transition tables). The transition-capture

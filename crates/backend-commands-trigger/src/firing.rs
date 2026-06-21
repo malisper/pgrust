@@ -2191,6 +2191,45 @@ pub fn set_before_trigger_result_to_trigtuple() -> bool {
     })
 }
 
+/// `return PointerGetDatum(rettuple)` where `rettuple == newtuple ==
+/// trigdata->tg_newtuple` — deposit the trigger's NEW (`tg_newtuple`) row as the
+/// BEFORE-trigger result.  This is the kernel of
+/// `src/backend/utils/adt/trigfuncs.c`'s `suppress_redundant_updates_trigger`
+/// when the NEW row differs from the OLD row: the C function returns the
+/// unmodified NEW tuple to let the UPDATE proceed.  Like
+/// [`set_before_trigger_result_to_trigtuple`], a builtin C trigger function
+/// returns through the [`BEFORE_TRIGGER_RESULT`] channel (the fmgr-returned
+/// `Datum` is the ignored sentinel), so it deposits here.
+///
+/// Returns `false` when no trigger slot side-channel is installed or the NEW slot
+/// is empty (the analogue of a NULL `tg_newtuple`); the caller then mirrors C's
+/// `PointerGetDatum(NULL)` "do nothing".
+pub fn set_before_trigger_result_to_newtuple() -> bool {
+    CURRENT_TRIGGER_SLOTS.with(|cell| {
+        let b = cell.borrow();
+        let Some(s) = b.as_ref() else {
+            return false;
+        };
+        let Some(newtuple) = s.newtuple.as_ref() else {
+            return false;
+        };
+        // The slot tuple already lives 'static in the firing query context (it is
+        // taken back within the same ExecCallTriggerFunc call), so depositing a
+        // clone-free copy is sound.
+        let v = BeforeTriggerResult::Tuple(newtuple.clone());
+        BEFORE_TRIGGER_RESULT.with(|c| *c.borrow_mut() = Some(v));
+        true
+    })
+}
+
+/// Deposit C's `PointerGetDatum(NULL)` ("do nothing") as the BEFORE-trigger
+/// result — the `suppress_redundant_updates_trigger` suppression path (NEW row
+/// is byte-identical to OLD, so the UPDATE is suppressed).  The firing path
+/// decodes this as no row change.
+pub fn set_before_trigger_result_do_nothing() {
+    BEFORE_TRIGGER_RESULT.with(|c| *c.borrow_mut() = Some(BeforeTriggerResult::DoNothing));
+}
+
 /// `(HeapTuple) DatumGetPointer(result)` for a BEFORE/INSTEAD-OF row trigger —
 /// take back the row the trigger function deposited on the per-call channel.
 ///
@@ -5191,6 +5230,10 @@ pub fn init_seams() {
     // C's `(HeapTuple) DatumGetPointer(result)`); the PL/C trigger handlers
     // deposit the returned row here.
     s::set_before_trigger_result_tuple::set(set_before_trigger_result_tuple_impl);
+    // The C-builtin trigger result helpers (suppress_redundant_updates_trigger):
+    // deposit the NEW (`tg_newtuple`) row, or the "do nothing" sentinel.
+    s::set_before_trigger_result_to_newtuple::set(set_before_trigger_result_to_newtuple);
+    s::set_before_trigger_result_do_nothing::set(set_before_trigger_result_do_nothing);
 
     // ROW DELETE firing.
     s::exec_br_delete_triggers::set(exec_br_delete_triggers_impl);

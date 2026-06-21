@@ -206,6 +206,73 @@ fn builtin(
     )
 }
 
+// ---------------------------------------------------------------------------
+// suppress_redundant_updates_trigger (trigfuncs.c) — the single SQL-callable
+// trigger-support function of `utils/adt/trigfuncs.c`.
+// ---------------------------------------------------------------------------
+
+/// The current-`TriggerData` marker handle. The per-call `TriggerData` rides
+/// the trigger manager's thread-local side-channel (installed by
+/// `ExecCallTriggerFunc`); the trigger-data accessor seams read it off that
+/// channel, so the handle value is just the marker the firing path mints.
+const CURRENT_TRIGGER: types_ri_triggers::TriggerDataRef = types_ri_triggers::TriggerDataRef(1);
+
+/// `Datum suppress_redundant_updates_trigger(PG_FUNCTION_ARGS)` (trigfuncs.c:28).
+///
+/// The fmgr boundary for the ported value core in [`crate::trigfuncs`]. The core
+/// runs the four trigger-protocol checks and the OLD/NEW tuple comparison; this
+/// adapter marshals its decision onto the BEFORE-trigger return-tuple channel,
+/// exactly as `src/test/regress/regress.c`'s `trigger_return_old` does:
+///
+///   * `Ok(Some(_))` — the NEW row differs from OLD; the C code returns
+///     `PointerGetDatum(rettuple)` with `rettuple == newtuple ==
+///     trigdata->tg_newtuple` to let the UPDATE proceed unchanged. Deposit the
+///     NEW (`tg_newtuple`) row.
+///   * `Ok(None)`    — the rows are byte-identical; the C code returns
+///     `PointerGetDatum(NULL)` to suppress the UPDATE ("do nothing").
+///
+/// A registry-dispatched C trigger function returns its result row through that
+/// channel (the fmgr-returned `Datum` is the ignored sentinel; `isnull` must
+/// stay clear — the trigger protocol forbids a SQL-NULL result flag).
+fn fc_suppress_redundant_updates_trigger(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    let m = mcx::MemoryContext::new("suppress_redundant_updates_trigger fmgr scratch");
+    let mcx = m.mcx();
+
+    let rettuple = crate::trigfuncs::suppress_redundant_updates_trigger(mcx, CURRENT_TRIGGER)?;
+
+    match rettuple {
+        // rettuple = newtuple (NEW differs from OLD) — deposit the NEW row.
+        Some(_) => {
+            backend_commands_trigger_seams::set_before_trigger_result_to_newtuple::call();
+        }
+        // rettuple = NULL — suppress the UPDATE.
+        None => {
+            backend_commands_trigger_seams::set_before_trigger_result_do_nothing::call();
+        }
+    }
+
+    fcinfo.isnull = false;
+    Ok(Datum::null())
+}
+
+/// Register the `trigfuncs.c` builtin (`suppress_redundant_updates_trigger`,
+/// OID 1291) into the fmgr-core builtin table. `pg_proc.dat`: `pronargs 0`
+/// (proargtypes ''), `proisstrict` defaults `t`, no `proretset`. Called from
+/// this crate's `init_seams()`; without it the trigger function dispatches to a
+/// null `fn_addr` ("not in internal lookup table").
+pub fn register_trigfuncs_builtins() {
+    backend_utils_fmgr_core::register_builtins_native([builtin(
+        1291,
+        "suppress_redundant_updates_trigger",
+        0,
+        true,
+        false,
+        fc_suppress_redundant_updates_trigger,
+    )]);
+}
+
 /// Register every `pg_lsn.c` builtin into the fmgr-core builtin table (C:
 /// `fmgr_builtins[]`), so by-OID dispatch resolves them. Called from this
 /// crate's `init_seams()`.
