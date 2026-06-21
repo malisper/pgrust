@@ -162,9 +162,17 @@ pub fn ParseFuncOrColumn<'mcx>(
         // If not recognized as a projection, just press on.
     }
 
-    // func_get_detail looks up the function in the catalogs, etc. The
-    // setup/cancel_parser_errposition_callback bracket is a no-op pair here since
-    // location is threaded directly into the error builders.
+    // func_get_detail looks up the function in the catalogs, etc. C brackets it
+    // with setup_parser_errposition_callback(&pcbstate, pstate, location): the
+    // "function does not exist"/ambiguity ereports below are raised by THIS
+    // caller and already carry parser_errposition(location), but func_get_detail's
+    // own callees can throw without a position of their own — notably
+    // FuncnameGetCandidates' namespace resolution, which raises "schema does not
+    // exist" for a bad schema-qualified function name. The ambient
+    // error_context_stack is retired (docs/query-lifecycle-raii.md), so we attach
+    // the cursor position where func_get_detail returns Err, only when the error
+    // has none of its own (C: pcb_error_callback runs errposition() and errstart
+    // honors it only if edata->cursorpos == 0).
     let detail = func_get_detail(
         mcx,
         funcname,
@@ -176,7 +184,18 @@ pub fn ParseFuncOrColumn<'mcx>(
         true,
         proc_call,
         true,
-    )?;
+    )
+    .map_err(|e| {
+        if e.cursor_position().is_some() {
+            return e;
+        }
+        let pos = parser_errposition(Some(pstate), location);
+        if pos > 0 {
+            e.with_cursor_position(pos)
+        } else {
+            e
+        }
+    })?;
     let fdresult = detail.fdresult;
     let funcid = detail.funcid;
     let mut rettype = detail.rettype;

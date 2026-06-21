@@ -108,6 +108,29 @@ fn with_errposition(
     }
 }
 
+/// Attach a parse-location cursor position to an already-built `PgError` from a
+/// non-parser callee, mirroring the C `setup_parser_errposition_callback` /
+/// `pcb_error_callback` pair: tag the error with `parser_errposition(pstate,
+/// location)` only when the error carries no position of its own (C:
+/// `pcb_error_callback` calls `errposition`, which `errstart` honors only if
+/// `edata->cursorpos == 0`). The ambient `error_context_stack` is retired
+/// (docs/query-lifecycle-raii.md); the location attaches where the fallible
+/// callee returns `Err`. `pstate == None` contributes 0, exactly as C's
+/// `parser_errposition(NULL, ...)`.
+fn attach_parser_errpos(
+    e: PgError,
+    pstate: Option<&types_cluster::ParseState<'_>>,
+    location: i32,
+) -> PgError {
+    if e.cursor_position().is_some() {
+        return e;
+    }
+    match parser_errposition(pstate, location) {
+        Ok(pos) if pos > 0 => e.with_cursor_position(pos),
+        _ => e,
+    }
+}
+
 /// `NameStr(form->typname)` as a `&str` — the fixed-length name column trimmed
 /// at its first NUL.
 fn name_str(form: &FormData_pg_type) -> String {
@@ -240,11 +263,13 @@ pub fn LookupTypeNameExtended(
 
         if let Some(schemaname) = schemaname {
             /* Look in specific schema only */
-            // setup_parser_errposition_callback / cancel: the callback merely
-            // tags any ereport raised during the lookup with the location; the
-            // namespace lookups already surface their own errors, so the
-            // behavior is preserved without a live error-context push.
-            let namespaceId = namespace::LookupExplicitNamespace(schemaname, missing_ok)?;
+            // C brackets the schema lookup with setup/cancel_parser_errposition_
+            // callback(pstate, typeName->location) so a "schema does not exist"
+            // ereport from LookupExplicitNamespace carries the type name's parse
+            // position. That callee raises its error with no position of its own,
+            // so we attach typeName.location where it returns Err.
+            let namespaceId = namespace::LookupExplicitNamespace(schemaname, missing_ok)
+                .map_err(|e| attach_parser_errpos(e, pstate, typeName.location))?;
             if OidIsValid(namespaceId) {
                 typoid = syscache::get_type_oid::call(typname, namespaceId)?;
             } else {
@@ -526,13 +551,14 @@ pub fn LookupCollation(
     location: i32,
 ) -> PgResult<Oid> {
     // C installs setup_parser_errposition_callback(&pcbstate, pstate, location)
-    // around get_collation_oid only when pstate is non-NULL, so a lookup
-    // failure is tagged with `location`. namespace::get_collation_oid surfaces
-    // its own error; when pstate is NULL the callback is not installed and the
-    // location contributes nothing, exactly as in C.
-    let _ = (pstate, location);
+    // around get_collation_oid only when pstate is non-NULL, so a "collation
+    // does not exist" failure is tagged with `location`. get_collation_oid
+    // raises that error with no position of its own; attach `location` where it
+    // returns Err. When pstate is None the callback is not installed and the
+    // location contributes nothing, exactly as in C (`if (pstate)`).
     let names = name_list_owned(collnames)?;
     namespace::get_collation_oid(mcx, &names, false)
+        .map_err(|e| attach_parser_errpos(e, pstate, location))
 }
 
 /// `GetColumnDefCollation()` (parse_type.c:540): resolve the collation that

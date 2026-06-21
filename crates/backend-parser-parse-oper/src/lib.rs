@@ -1155,12 +1155,24 @@ fn make_oper_cache_key(
          *   key->search_path[0] = LookupExplicitNamespace(schemaname, false);
          *   cancel_parser_errposition_callback(&pcbstate);
          *
-         * The setup/cancel pair pushes/pops a callback on the host's
-         * error_context_stack; the lookup's failure ereport carries the parse
-         * cursor position via the seam's bracketed call.
+         * LookupExplicitNamespace raises "schema does not exist" with no parse
+         * position of its own; the C callback supplies `location`. The ambient
+         * error_context_stack is retired (docs/query-lifecycle-raii.md), so we
+         * attach the cursor position where the fallible lookup returns Err, only
+         * when the error has none of its own.
          */
-        let _ = (pstate, location);
-        key.search_path[0] = lookup_explicit_namespace::call(schemaname, false)?;
+        key.search_path[0] = lookup_explicit_namespace::call(schemaname, false)
+            .map_err(|e| {
+                if e.cursor_position().is_some() {
+                    return e;
+                }
+                let pos = errpos(pstate, location);
+                if pos > 0 {
+                    e.with_cursor_position(pos)
+                } else {
+                    e
+                }
+            })?;
     } else {
         /* get the active search path */
         let mut path = [InvalidOid; MAX_CACHED_PATH_LEN + 1];
