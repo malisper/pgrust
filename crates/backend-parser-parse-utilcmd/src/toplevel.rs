@@ -60,11 +60,20 @@ pub fn transformCreateStmt<'mcx>(
     // struct is `CreateStmt`; the foreign-table variant carries the same fields.
     let stmt_node = PgBox::into_inner(stmt);
     let stmt_tag = stmt_node.node_tag();
+    // For CREATE FOREIGN TABLE the input node is a CreateForeignTableStmt whose
+    // `base` is the shared CreateStmt; in C the original node pointer is cast to
+    // CreateStmt* and re-appended to `result` with its T_CreateForeignTableStmt
+    // tag intact (parse_utilcmd.c:373), so ProcessUtilitySlow takes the foreign
+    // branch and DefineRelation is called with RELKIND_FOREIGN_TABLE. We must
+    // therefore carry the servername/options forward and re-wrap below.
+    let mut foreign_extra: Option<(Option<PgString<'mcx>>, PgVec<'mcx, NodePtr<'mcx>>)> = None;
     let (mut stmt, isforeign, stmt_type): (CreateStmt<'mcx>, bool, &'static str) =
         match stmt_tag {
             ntag::T_CreateStmt => (stmt_node.into_createstmt().unwrap(), false, "CREATE TABLE"),
             ntag::T_CreateForeignTableStmt => {
-                (PgBox::into_inner(stmt_node.into_createforeigntablestmt().unwrap().base), true, "CREATE FOREIGN TABLE")
+                let cft = stmt_node.into_createforeigntablestmt().unwrap();
+                foreign_extra = Some((cft.servername, cft.options));
+                (PgBox::into_inner(cft.base), true, "CREATE FOREIGN TABLE")
             }
             _ => unreachable!("transformCreateStmt: not a CreateStmt node: {}", stmt_tag),
         };
@@ -230,7 +239,22 @@ pub fn transformCreateStmt<'mcx>(
     stmt.nnconstraints = core::mem::replace(&mut cxt.nnconstraints, PgVec::new_in(mcx));
 
     let mut result = core::mem::replace(&mut cxt.blist, PgVec::new_in(mcx));
-    result.push(mcx::alloc_in(mcx, Node::mk_create_stmt(mcx, stmt)?)?);
+    // Re-wrap the transformed CreateStmt as the original node kind so the tag is
+    // preserved (C re-appends the same node pointer): a foreign table must stay a
+    // CreateForeignTableStmt so ProcessUtilitySlow uses RELKIND_FOREIGN_TABLE and
+    // CreateForeignTable runs with the carried servername/options.
+    let stmt_out = match foreign_extra {
+        Some((servername, options)) => {
+            let cft = types_nodes::ddlnodes::CreateForeignTableStmt {
+                base: mcx::alloc_in(mcx, stmt)?,
+                servername,
+                options,
+            };
+            Node::mk_create_foreign_table_stmt(mcx, cft)?
+        }
+        None => Node::mk_create_stmt(mcx, stmt)?,
+    };
+    result.push(mcx::alloc_in(mcx, stmt_out)?);
     let alist = core::mem::replace(&mut cxt.alist, PgVec::new_in(mcx));
     result.extend(alist);
     result.extend(save_alist);

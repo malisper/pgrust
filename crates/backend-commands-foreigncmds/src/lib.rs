@@ -1715,6 +1715,31 @@ fn alter_fdw_seam<'mcx>(
     AlterForeignDataWrapper(mcx, &flat)
 }
 
+/// Outward-seam adapter for `CreateForeignTable(stmt, relid)`.
+fn create_foreign_table_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: &RichNode<'mcx>,
+    relid: Oid,
+) -> PgResult<()> {
+    let s = match stmt.as_createforeigntablestmt() {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error(
+                "create_foreign_table_seam: not a CreateForeignTableStmt",
+            ))
+        }
+    };
+    let servername = match s.servername.as_ref() {
+        Some(n) => mcx::PgString::from_str_in(n.as_str(), mcx)?,
+        None => return Err(PgError::error("CREATE FOREIGN TABLE: missing server name")),
+    };
+    let flat = CreateForeignTableStmt {
+        servername,
+        options: rich_options_to_flat(mcx, &s.options)?,
+    };
+    CreateForeignTable(mcx, &flat, relid)
+}
+
 /// Outward-seam adapter for `CreateForeignServer(stmt)`.
 fn create_foreign_server_seam<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1931,6 +1956,7 @@ pub fn init_seams() {
     // ProcessUtilitySlow dispatch arms (utility.c).
     backend_tcop_utility_out_seams::create_foreign_data_wrapper::set(create_fdw_seam);
     backend_tcop_utility_out_seams::alter_foreign_data_wrapper::set(alter_fdw_seam);
+    backend_tcop_utility_out_seams::create_foreign_table::set(create_foreign_table_seam);
     backend_tcop_utility_out_seams::create_foreign_server::set(create_foreign_server_seam);
     backend_tcop_utility_out_seams::alter_foreign_server::set(alter_foreign_server_seam);
     backend_tcop_utility_out_seams::create_user_mapping::set(create_user_mapping_seam);
