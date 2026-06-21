@@ -1189,6 +1189,7 @@ fn transformMergeSupportFunc<'mcx>(
                 .errmsg(
                     "MERGE_ACTION() can only be used in the RETURNING list of a MERGE command",
                 )
+                .errposition(parser_errposition(pstate, f.location))
                 .into_error());
         }
     }
