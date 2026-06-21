@@ -206,19 +206,25 @@ fn to_owned_lexeme(l: OwnedLexeme) -> OwnedTSLexeme {
     }
 }
 
-/// Convert the `deserialize_deflist` rows into the `(defname, Some(String arg))`
-/// pairs the `*_init` functions read. `deserialize_deflist` always builds a
-/// `String`-node `arg`.
+/// Convert the `deserialize_deflist` rows into the `(defname, arg)` pairs the
+/// `*_init` functions read, rebuilding each arg with its `buildDefItem`-inferred
+/// node kind so `defGetBoolean`/`defGetInt32`/... see the same `nodeTag` C does
+/// (e.g. `casesensitive = 1` reaches `defGetBoolean` as a `T_Integer`).
 fn deflist_pairs(
     options: &PgVec<'_, types_cache::deflist::DefElemString<'_>>,
 ) -> Vec<(String, Option<DefElemArg>)> {
+    use types_cache::deflist::DefElemValKind;
     options
         .iter()
         .map(|de| {
-            (
-                de.defname.as_str().to_string(),
-                Some(DefElemArg::String(de.arg.as_str().to_string())),
-            )
+            let val = de.arg.as_str();
+            let arg = match de.kind {
+                DefElemValKind::Integer => DefElemArg::Integer(val.parse::<i64>().unwrap_or(0)),
+                DefElemValKind::Float => DefElemArg::Float(val.to_string()),
+                DefElemValKind::Boolean => DefElemArg::Boolean(val == "true"),
+                DefElemValKind::String => DefElemArg::String(val.to_string()),
+            };
+            (de.defname.as_str().to_string(), Some(arg))
         })
         .collect()
 }

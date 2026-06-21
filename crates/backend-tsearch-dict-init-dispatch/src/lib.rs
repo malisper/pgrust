@@ -10,21 +10,19 @@
 //! The owned model has no live fmgr `internal`-pointer ABI here, so this crate
 //! installs the [`call_dict_init`] seam and dispatches on the init method's
 //! `pg_proc` OID to the corresponding ported `*_init` function, threading the
-//! `DefElem` option list (every `arg` is a `String` node, as
-//! `deserialize_deflist` always produces) into the `(defname, arg)` shape the
-//! init functions consume.
+//! `(defname, arg)` option list — each `arg` keeping its original `DefElem`
+//! node kind (`T_Integer`/`T_Float`/`T_Boolean`/`T_String`/...), so the init
+//! methods' `defGetBoolean`/`defGetInt32`/... see the same node tag C does.
 
 #![no_std]
 
 extern crate alloc;
 
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
+use alloc::string::String;
 
 use backend_commands_define_seams::DefElemArg;
 use backend_commands_tsearchcmds_seams as ts_seams;
 use mcx::{Mcx, MemoryContext};
-use types_cache::DefElemString;
 use types_core::Oid;
 use types_error::{PgError, PgResult};
 
@@ -37,44 +35,30 @@ const F_DSYNONYM_INIT: Oid = 3728;
 const F_DISPELL_INIT: Oid = 3731;
 const F_THESAURUS_INIT: Oid = 3740;
 
-/// Convert the `deserialize_deflist` rows into the `(defname, Some(String arg))`
-/// pairs the `*_init` functions read. `deserialize_deflist` always builds a
-/// `String`-node `arg`, so each entry maps to `Some(DefElemArg::String(..))`.
-fn to_pairs(dictoptions: &[DefElemString<'_>]) -> Vec<(String, Option<DefElemArg>)> {
-    dictoptions
-        .iter()
-        .map(|de| {
-            (
-                de.defname.as_str().to_string(),
-                Some(DefElemArg::String(de.arg.as_str().to_string())),
-            )
-        })
-        .collect()
-}
-
-/// `OidFunctionCall1(initmethod, deserialize_deflist(...))` — call the template
-/// init method to validate the options. The built dictionary is discarded.
-fn call_dict_init(initmethod: Oid, dictoptions: &[DefElemString<'_>]) -> PgResult<()> {
+/// `OidFunctionCall1(initmethod, dictoptions)` — call the template init method
+/// to validate the options. The built dictionary is discarded.
+fn call_dict_init(
+    initmethod: Oid,
+    pairs: &[(String, Option<DefElemArg>)],
+) -> PgResult<()> {
     // Private context for the throw-away dictionary the init method builds; the
     // C code "doesn't worry about leaking memory; our command will soon be over
     // anyway", but here we just drop the scratch arena when done.
     let ctx = MemoryContext::new("call_dict_init");
     let mcx: Mcx<'_> = ctx.mcx();
 
-    let pairs = to_pairs(dictoptions);
-
     match initmethod {
         F_DSIMPLE_INIT => {
-            backend_tsearch_dict::dict_simple::dsimple_init(mcx, &pairs)?;
+            backend_tsearch_dict::dict_simple::dsimple_init(mcx, pairs)?;
         }
         F_DSYNONYM_INIT => {
-            backend_tsearch_dict::dict_synonym::dsynonym_init(mcx, &pairs)?;
+            backend_tsearch_dict::dict_synonym::dsynonym_init(mcx, pairs)?;
         }
         F_DISPELL_INIT => {
-            backend_tsearch_ispell_regis::dispell_init(mcx, &pairs)?;
+            backend_tsearch_ispell_regis::dispell_init(mcx, pairs)?;
         }
         F_THESAURUS_INIT => {
-            backend_tsearch_dict::dict_thesaurus::thesaurus_init(mcx, &pairs)?;
+            backend_tsearch_dict::dict_thesaurus::thesaurus_init(mcx, pairs)?;
         }
         other => {
             // Mirrors the C fmgr "function N not found" failure for an

@@ -7044,6 +7044,7 @@ dependencies = [
  "backend-commands-extension-seams",
  "backend-commands-tablecmds-seams",
  "backend-commands-tablespace-globals-seams",
+ "backend-commands-tsearchcmds-seams",
  "backend-nodes-core",
  "backend-parser-func",
  "backend-storage-lmgr-lmgr-seams",
@@ -8523,6 +8524,7 @@ dependencies = [
  "backend-catalog-objectaccess-seams",
  "backend-catalog-pg-depend-seams",
  "backend-catalog-pg-shdepend-seams",
+ "backend-commands-define-seams",
  "backend-commands-tsearchcmds-seams",
  "backend-parser-func",
  "backend-parser-parse-func-seams",
@@ -8547,6 +8549,7 @@ dependencies = [
 name = "backend-commands-tsearchcmds-seams"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-define-seams",
  "mcx",
  "seam-core",
  "types-cache",
@@ -18846,12 +18849,14 @@ dependencies = [
 name = "backend-tsearch-parse"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-tsearchcmds-seams",
  "backend-tsearch-parse-seams",
  "backend-utils-adt-pg-locale",
  "backend-utils-error",
  "backend-utils-mb-mbutils",
  "libc",
  "mcx",
+ "types-core",
  "types-error",
 ]
 
@@ -20526,6 +20531,7 @@ dependencies = [
  "backend-storage-file-fd-seams",
  "backend-storage-lmgr-lock-seams",
  "backend-storage-lmgr-predicate-seams",
+ "backend-tsearch-dict-seams",
  "backend-utils-adt-acl-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-datum-seams",

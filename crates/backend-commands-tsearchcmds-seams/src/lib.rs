@@ -12,6 +12,7 @@ use alloc::string::String;
 
 use mcx::{Mcx, PgVec};
 use types_cache::DefElemString;
+use backend_commands_define_seams::DefElemArg;
 use types_core::Oid;
 use types_error::PgResult;
 
@@ -276,11 +277,17 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `verify_dictoptions` init dispatch:
-    /// `OidFunctionCall1(initmethod, PointerGetDatum(deserialize_deflist(...)))`
-    /// — call the template's init method on the option list (passed as
-    /// `(defname, value)` string pairs); the call's only purpose is to let the
-    /// init method validate the options and complain via `ereport(ERROR)`.
-    pub fn call_dict_init(initmethod: Oid, dictoptions: &[DefElemString<'_>]) -> PgResult<()>
+    /// `OidFunctionCall1(initmethod, PointerGetDatum(dictoptions))` — call the
+    /// template's init method on the option list; the call's only purpose is to
+    /// let the init method validate the options and complain via
+    /// `ereport(ERROR)`. Each option crosses as `(defname, arg)` where `arg`
+    /// preserves the `DefElem`'s node kind (`T_Integer`/`T_Float`/`T_Boolean`/
+    /// `T_String`/...), because init methods read it with `defGetBoolean` etc.,
+    /// which switch on the node tag (e.g. `casesensitive = 1` is a `T_Integer`).
+    pub fn call_dict_init(
+        initmethod: Oid,
+        dictoptions: &[(String, Option<DefElemArg>)],
+    ) -> PgResult<()>
 );
 
 seam_core::seam!(

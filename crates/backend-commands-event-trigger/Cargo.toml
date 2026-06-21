@@ -24,6 +24,7 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-commands-event-trigger-fire-seams = { path = "../backend-commands-event-trigger-fire-seams" }
 backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
 backend-commands-tablecmds-seams = { path = "../backend-commands-tablecmds-seams" }
+backend-commands-tsearchcmds-seams = { path = "../backend-commands-tsearchcmds-seams" }
 backend-catalog-objectaddress-seams = { path = "../backend-catalog-objectaddress-seams" }
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }

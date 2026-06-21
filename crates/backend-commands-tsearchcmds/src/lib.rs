@@ -47,6 +47,7 @@ use types_error::{
     ERRCODE_UNDEFINED_OBJECT, ERROR, NOTICE,
 };
 use types_nodes::nodes::{ntag, Node, NodePtr};
+use backend_commands_define_seams::DefElemArg;
 use types_nodes::value::{Boolean, Float, Integer, StringNode};
 use types_nodes::ddlnodes::{
     AlterTSConfigurationStmt, AlterTSDictionaryStmt, DefElem, DEFELEM_UNSPEC,
@@ -328,15 +329,39 @@ fn makeDictionaryDependencies<'mcx>(mcx: Mcx<'mcx>, dict: &TSDictForm) -> PgResu
     Ok(myself)
 }
 
+/// `defGetX`-shaped projection of a `DefElem`'s `arg` node into the typed
+/// [`DefElemArg`] the init methods read — preserving the node tag
+/// (`T_Integer`/`T_Float`/`T_Boolean`/`T_String`/...) so `defGetBoolean` etc.
+/// see the same node kind C does (e.g. `casesensitive = 1` stays `T_Integer`).
+/// `None` mirrors a NULL `def->arg`.
+fn defelem_to_arg(defel: &DefElem<'_>) -> PgResult<(String, Option<DefElemArg>)> {
+    let defname = def_name(defel).to_string();
+    let arg = match defel.arg.as_deref() {
+        None => None,
+        Some(arg) => Some(match arg.node_tag() {
+            ntag::T_Integer => DefElemArg::Integer(arg.expect_integer().ival as i64),
+            ntag::T_Float => DefElemArg::Float(arg.expect_float().fval.as_str().to_string()),
+            ntag::T_Boolean => DefElemArg::Boolean(arg.expect_boolean().boolval),
+            ntag::T_String => DefElemArg::String(arg.expect_string().sval.as_str().to_string()),
+            ntag::T_TypeName => DefElemArg::TypeName(type_name_to_string(arg.expect_typename())?),
+            ntag::T_List => DefElemArg::List(name_list_to_string(arg.expect_list())?),
+            ntag::T_A_Star => DefElemArg::AStar,
+            _ => {
+                return Err(ereport(ERROR)
+                    .errmsg_internal(format!("unrecognized node type: {}", arg.node_tag()))
+                    .into_error())
+            }
+        }),
+    };
+    Ok((defname, arg))
+}
+
 /// `verify_dictoptions(tmplId, dictoptions)` (tsearchcmds.c:341).
 ///
-/// The owned port carries the option list as its already-serialized text
-/// (`dictoptions`), which the init method re-parses; `None` means an empty list.
-fn verify_dictoptions<'mcx>(
-    mcx: Mcx<'mcx>,
-    tmpl_id: Oid,
-    dictoptions: Option<&str>,
-) -> PgResult<()> {
+/// `dictoptions` is the merged `DefElem` list, exactly as C passes it — each
+/// option keeps its original parse-tree (or `buildDefItem`-typed) arg node, so
+/// the init method's `defGetBoolean`/`defGetInt32`/... see the right node kind.
+fn verify_dictoptions(tmpl_id: Oid, dictoptions: &[&DefElem<'_>]) -> PgResult<()> {
     /* Suppress this test when running in a standalone backend (initdb hack). */
     if !backend_utils_init_small_seams::is_under_postmaster::call() {
         return Ok(());
@@ -345,8 +370,7 @@ fn verify_dictoptions<'mcx>(
     let (tmplname, initmethod) = match seam::ts_template_init_method::call(tmpl_id)? {
         Some(v) => v,
         None => {
-            return elog_error(
-                mcx,
+            return elog_error_noctx(
                 format!("cache lookup failed for text search template {tmpl_id}"),
                 "verify_dictoptions",
             );
@@ -355,7 +379,7 @@ fn verify_dictoptions<'mcx>(
 
     if !OidIsValid(initmethod) {
         /* If there is no init method, disallow any options */
-        if dictoptions.is_some() {
+        if !dictoptions.is_empty() {
             return ereport(ERROR)
                 .errcode(ERRCODE_SYNTAX_ERROR)
                 .errmsg(format!(
@@ -368,12 +392,12 @@ fn verify_dictoptions<'mcx>(
         /*
          * Call the init method and see if it complains.  We don't worry about
          * leaking memory; our command will soon be over anyway. The option list
-         * crosses as the `(defname, value)` string pairs the init method reads.
+         * crosses as `(defname, arg)` pairs preserving each node's kind.
          */
-        let pairs = match dictoptions {
-            Some(txt) => deserialize_deflist_strings(mcx, txt)?,
-            None => Vec::new(),
-        };
+        let mut pairs: Vec<(String, Option<DefElemArg>)> = Vec::with_capacity(dictoptions.len());
+        for defel in dictoptions {
+            pairs.push(defelem_to_arg(defel)?);
+        }
         seam::call_dict_init::call(initmethod, &pairs)?;
     }
 
@@ -419,7 +443,7 @@ pub fn DefineTSDictionary<'mcx>(
         None
     };
 
-    verify_dictoptions(mcx, templ_id, dictoption_text.as_deref())?;
+    verify_dictoptions(templ_id, &dictoptions)?;
 
     /* Looks good, insert */
     let (dict_oid, dict) = seam::insert_ts_dict::call(
@@ -490,16 +514,18 @@ pub fn AlterTSDictionary<'mcx>(
         }
     }
 
-    /* Validate. (None => set dictinitoption to NULL). */
+    /* Validate against the merged DefElem list (original arg node kinds
+     * preserved), exactly as C passes it to verify_dictoptions. */
+    let refs: Vec<&DefElem> = dictoptions.iter().collect();
+    verify_dictoptions(dicttemplate, &refs)?;
+
+    /* Looks good, update. (None => set dictinitoption to NULL). */
     let opttext = if !dictoptions.is_empty() {
-        let refs: Vec<&DefElem> = dictoptions.iter().collect();
         Some(serialize_deflist(mcx, &refs)?)
     } else {
         None
     };
-    verify_dictoptions(mcx, dicttemplate, opttext.as_deref())?;
 
-    /* Looks good, update. */
     seam::update_dict_options::call(dict_id, opttext.as_deref())?;
 
     backend_catalog_objectaccess_seams::invoke_object_post_alter_hook::call(
@@ -1630,13 +1656,22 @@ fn deserialize_deflist_strings<'mcx>(
     mcx: Mcx<'mcx>,
     txt: &str,
 ) -> PgResult<Vec<DefElemString<'mcx>>> {
+    use types_cache::deflist::DefElemValKind;
     let list = deserialize_deflist(mcx, txt)?;
     let mut out: Vec<DefElemString> = Vec::with_capacity(list.len());
     for de in &list {
         let defname = PgString::from_str_in(def_name(de), mcx)?;
         let val = def_get_string(mcx, de)?;
         let arg = PgString::from_str_in(&val, mcx)?;
-        out.push(DefElemString { defname, arg });
+        /* Preserve the buildDefItem-inferred node kind so the dict init
+         * method's defGetBoolean/defGetInt32 see the right nodeTag. */
+        let kind = match de.arg.as_deref().map(|a| a.node_tag()) {
+            Some(ntag::T_Integer) => DefElemValKind::Integer,
+            Some(ntag::T_Float) => DefElemValKind::Float,
+            Some(ntag::T_Boolean) => DefElemValKind::Boolean,
+            _ => DefElemValKind::String,
+        };
+        out.push(DefElemString { defname, arg, kind });
     }
     Ok(out)
 }
@@ -1675,6 +1710,14 @@ fn quote_identifier(ident: &str) -> String {
 
 /// `elog(ERROR, msg)` — internal error (ERRCODE_INTERNAL_ERROR by default).
 fn elog_error<'mcx, T>(_mcx: Mcx<'mcx>, msg: String, funcname: &'static str) -> PgResult<T> {
+    ereport(ERROR)
+        .errmsg_internal(msg)
+        .finish(here(funcname))
+        .map(|()| unreachable!())
+}
+
+/// `elog(ERROR, msg)` with no `mcx` in scope.
+fn elog_error_noctx<T>(msg: String, funcname: &'static str) -> PgResult<T> {
     ereport(ERROR)
         .errmsg_internal(msg)
         .finish(here(funcname))

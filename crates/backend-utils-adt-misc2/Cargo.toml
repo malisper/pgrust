@@ -67,6 +67,7 @@ backend-utils-adt-expanded-methods-seams = { path = "../backend-utils-adt-expand
 # Outward seams the regproc family reaches its (genuinely-unported or
 # cross-unit-cycle) catalog / type / role owners through.
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-tsearch-dict-seams = { path = "../backend-tsearch-dict-seams" }
 # SystemAttributeByName (catalog/heap.c) for record system-column field refs.
 backend-catalog-heap-seams = { path = "../backend-catalog-heap-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }

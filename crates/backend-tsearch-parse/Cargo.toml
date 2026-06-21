@@ -14,6 +14,8 @@ mcx = { path = "../mcx" }
 types-error = { path = "../types-error" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-tsearch-parse-seams = { path = "../backend-tsearch-parse-seams" }
+backend-commands-tsearchcmds-seams = { path = "../backend-commands-tsearchcmds-seams" }
+types-core = { path = "../types-core" }
 backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }
 backend-utils-adt-pg-locale = { path = "../backend-utils-adt-pg-locale" }
 libc = "0.2"

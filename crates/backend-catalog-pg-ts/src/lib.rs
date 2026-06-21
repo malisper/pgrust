@@ -40,7 +40,7 @@ use backend_access_common_scankey::ScanKeyInit;
 use backend_access_index_genam_seams as genam_seams;
 use backend_access_table_table::{table_close, table_open};
 use backend_catalog_catalog::GetNewOidWithIndex;
-use backend_catalog_indexing::keystone::CatalogTupleInsert;
+use backend_catalog_indexing::keystone::{CatalogTupleInsert, CatalogTupleUpdate};
 use backend_catalog_indexing_seams as indexing_seams;
 use backend_utils_cache_syscache as syscache;
 
@@ -49,7 +49,7 @@ use backend_commands_tsearchcmds_seams::{
     TSTemplateForm,
 };
 
-use types_core::fmgr::F_OIDEQ;
+use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 
 /* ===========================================================================
  * Catalog OIDs + attribute numbers (catalog/pg_ts_*_d.h).
@@ -106,6 +106,7 @@ const Anum_pg_ts_template_tmpllexize: AttrNumber = 5;
 
 const TSCONFIGOID: i32 = syscache::TSCONFIGOID;
 const TSTEMPLATEOID: i32 = syscache::TSTEMPLATEOID;
+const TSDICTOID: i32 = syscache::TSDICTOID;
 
 /* ===========================================================================
  * Shared helpers.
@@ -148,6 +149,20 @@ fn oid_key<'mcx>(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
         BTEqualStrategyNumber,
         F_OIDEQ,
         Datum::from_oid(value),
+    )?;
+    Ok(key)
+}
+
+/// `ScanKeyInit(&key, attno, BTEqualStrategyNumber, F_INT4EQ,
+/// Int32GetDatum(value))`.
+fn i32_key<'mcx>(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData<'mcx>> {
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key,
+        attno,
+        BTEqualStrategyNumber,
+        F_INT4EQ,
+        Datum::from_i32(value),
     )?;
     Ok(key)
 }
@@ -536,6 +551,207 @@ fn delete_config_map_for_cfg(cfg_id: Oid) -> PgResult<()> {
     Ok(())
 }
 
+/* ===========================================================================
+ * `delete_config_map_for_token` — MakeConfigurationMapping / DropConfigurationMapping
+ * per-token delete: CatalogTupleDelete every pg_ts_config_map row with
+ * (mapcfg = cfg_id, maptokentype = token_num); returns the deleted count.
+ * ========================================================================= */
+
+fn delete_config_map_for_token(cfg_id: Oid, token_num: i32) -> PgResult<i64> {
+    let ctx = MemoryContext::new("delete_config_map_for_token");
+    let mcx = ctx.mcx();
+    let rel = table_open(mcx, TSConfigMapRelationId, RowExclusiveLock)?;
+
+    let key = [
+        oid_key(Anum_pg_ts_config_map_mapcfg, cfg_id)?,
+        i32_key(Anum_pg_ts_config_map_maptokentype, token_num)?,
+    ];
+
+    let mut tids: Vec<ItemPointerData> = Vec::new();
+    systable_scan_foreach(&rel, TSConfigMapIndexId, &key, |row| {
+        tids.push(row.tid);
+        Ok(true)
+    })?;
+    let count = tids.len() as i64;
+    for tid in tids {
+        indexing_seams::catalog_tuple_delete::call(&rel, tid)?;
+    }
+
+    table_close(rel, RowExclusiveLock)?;
+    Ok(count)
+}
+
+/* ===========================================================================
+ * `replace_config_map_dict` — MakeConfigurationMapping REPLACE path: for
+ * pg_ts_config_map rows of cfg_id whose maptokentype is in token_nums (or all
+ * rows when token_nums is empty) and whose mapdict == dict_old, set mapdict to
+ * dict_new (heap_modify_tuple-equivalent re-form + CatalogTupleUpdate).
+ * ========================================================================= */
+
+fn replace_config_map_dict(
+    cfg_id: Oid,
+    token_nums: &[i32],
+    dict_old: Oid,
+    dict_new: Oid,
+) -> PgResult<()> {
+    let ctx = MemoryContext::new("replace_config_map_dict");
+    let mcx = ctx.mcx();
+    let rel = table_open(mcx, TSConfigMapRelationId, RowExclusiveLock)?;
+
+    let key = [oid_key(Anum_pg_ts_config_map_mapcfg, cfg_id)?];
+
+    /* Collect the (tid, maptokentype, mapseqno) of every row to rewrite. The
+     * C scans pg_ts_config_map for mapcfg = cfg_id, restricts to rows whose
+     * maptokentype is in `tokens` (when nonempty), and replaces mapdict when
+     * it equals dictOld. */
+    struct Hit {
+        tid: ItemPointerData,
+        maptokentype: i32,
+        mapseqno: i32,
+    }
+    let mut hits: Vec<Hit> = Vec::new();
+    systable_scan_foreach(&rel, TSConfigMapIndexId, &key, |row| {
+        let maptokentype = row.values[Anum_pg_ts_config_map_maptokentype as usize - 1].as_i32();
+        let mapseqno = row.values[Anum_pg_ts_config_map_mapseqno as usize - 1].as_i32();
+        let mapdict = row.values[Anum_pg_ts_config_map_mapdict as usize - 1].as_oid();
+
+        /* if tokens is nonempty, only rows whose maptokentype matches one */
+        let token_match = token_nums.is_empty() || token_nums.contains(&maptokentype);
+        if token_match && mapdict == dict_old {
+            hits.push(Hit {
+                tid: row.tid,
+                maptokentype,
+                mapseqno,
+            });
+        }
+        Ok(true)
+    })?;
+
+    for hit in hits {
+        let mut values: Vec<Datum> = vec![Datum::null(); Natts_pg_ts_config_map];
+        let nulls: Vec<bool> = vec![false; Natts_pg_ts_config_map];
+        values[Anum_pg_ts_config_map_mapcfg as usize - 1] = Datum::from_oid(cfg_id);
+        values[Anum_pg_ts_config_map_maptokentype as usize - 1] = Datum::from_i32(hit.maptokentype);
+        values[Anum_pg_ts_config_map_mapseqno as usize - 1] = Datum::from_i32(hit.mapseqno);
+        values[Anum_pg_ts_config_map_mapdict as usize - 1] = Datum::from_oid(dict_new);
+
+        let tupdesc = rel.rd_att_clone_in(mcx)?;
+        let mut newtup = heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+        CatalogTupleUpdate(mcx, &rel, hit.tid, &mut newtup)?;
+    }
+
+    table_close(rel, RowExclusiveLock)?;
+    Ok(())
+}
+
+/* ===========================================================================
+ * `dict_options_and_template` — AlterTSDictionary syscache read:
+ * SearchSysCache1(TSDICTOID, dict_id) then (dicttemplate OID, raw dictinitoption
+ * text). `None` for the option when the attribute is SQL NULL.
+ * ========================================================================= */
+
+fn dict_options_and_template(
+    dict_id: Oid,
+) -> PgResult<(Oid, Option<alloc::string::String>)> {
+    let ctx = MemoryContext::new("dict_options_and_template");
+    let mcx = ctx.mcx();
+
+    let tp = syscache::SearchSysCache1(
+        mcx,
+        TSDICTOID,
+        SysCacheKey::Value(ScalarWord::from_oid(dict_id)),
+    )?;
+    let Some(tup) = tp else {
+        return Err(PgError::error(alloc::format!(
+            "cache lookup failed for text search dictionary {dict_id}"
+        )));
+    };
+
+    /* dicttemplate: regdictionary/oid (NOT NULL). */
+    let dicttemplate = syscache::SysCacheGetAttrNotNull(
+        mcx,
+        TSDICTOID,
+        &tup,
+        Anum_pg_ts_dict_dicttemplate as i32,
+    )?
+    .as_oid();
+
+    /* dictinitoption: text, nullable. */
+    let (opt_datum, opt_isnull) = syscache::SysCacheGetAttr(
+        mcx,
+        TSDICTOID,
+        &tup,
+        Anum_pg_ts_dict_dictinitoption as i32,
+    )?;
+    let existing_opt = if opt_isnull {
+        None
+    } else {
+        let s = backend_utils_adt_varlena_seams::text_to_cstring_v::call(mcx, &opt_datum)?;
+        Some(s.as_str().to_string())
+    };
+
+    syscache::ReleaseSysCache(tup);
+    Ok((dicttemplate, existing_opt))
+}
+
+/* ===========================================================================
+ * `update_dict_options` — AlterTSDictionary update: set the pg_ts_dict row's
+ * dictinitoption to opttext (None => SQL NULL) + CatalogTupleUpdate.
+ * ========================================================================= */
+
+fn update_dict_options(dict_id: Oid, opttext: Option<&str>) -> PgResult<()> {
+    let ctx = MemoryContext::new("update_dict_options");
+    let mcx = ctx.mcx();
+    let rel = table_open(mcx, TSDictionaryRelationId, RowExclusiveLock)?;
+
+    let tp = syscache::SearchSysCache1(
+        mcx,
+        TSDICTOID,
+        SysCacheKey::Value(ScalarWord::from_oid(dict_id)),
+    )?;
+    let Some(tup) = tp else {
+        return Err(PgError::error(alloc::format!(
+            "cache lookup failed for text search dictionary {dict_id}"
+        )));
+    };
+
+    /* The C uses heap_modify_tuple over repl_repl[dictinitoption]; rebuild the
+     * full row from the cached tuple's deformed columns with the one attribute
+     * replaced. */
+    let tupdesc = rel.rd_att_clone_in(mcx)?;
+    let cols = backend_access_common_heaptuple::heap_deform_tuple(
+        mcx,
+        &tup.tuple,
+        &rel.rd_att,
+        &tup.data,
+    )?;
+    let mut values: Vec<Datum> = Vec::with_capacity(cols.len());
+    let mut nulls: Vec<bool> = Vec::with_capacity(cols.len());
+    for (value, isnull) in cols.iter() {
+        values.push(value.clone());
+        nulls.push(*isnull);
+    }
+
+    match opttext {
+        Some(opt) => {
+            values[Anum_pg_ts_dict_dictinitoption as usize - 1] = text_datum(mcx, opt)?;
+            nulls[Anum_pg_ts_dict_dictinitoption as usize - 1] = false;
+        }
+        None => {
+            values[Anum_pg_ts_dict_dictinitoption as usize - 1] = Datum::null();
+            nulls[Anum_pg_ts_dict_dictinitoption as usize - 1] = true;
+        }
+    }
+
+    let otid = tup.tuple.t_self;
+    let mut newtup = heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
+    CatalogTupleUpdate(mcx, &rel, otid, &mut newtup)?;
+
+    syscache::ReleaseSysCache(tup);
+    table_close(rel, RowExclusiveLock)?;
+    Ok(())
+}
+
 /// Install the `pg_ts_dict` / `pg_ts_config` / `pg_ts_config_map` catalog
 /// read+write seams `commands/tsearchcmds.c` calls.
 pub fn init_seams() {
@@ -550,4 +766,8 @@ pub fn init_seams() {
     s::insert_config_map_entries::set(insert_config_map_entries);
     s::delete_ts_config_row::set(delete_ts_config_row);
     s::delete_config_map_for_cfg::set(delete_config_map_for_cfg);
+    s::delete_config_map_for_token::set(delete_config_map_for_token);
+    s::replace_config_map_dict::set(replace_config_map_dict);
+    s::dict_options_and_template::set(dict_options_and_template);
+    s::update_dict_options::set(update_dict_options);
 }

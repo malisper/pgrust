@@ -983,6 +983,36 @@ fn collecting() -> bool {
     })
 }
 
+/// `EventTriggerCollectAlterTSConfig(stmt, cfgId, dictIds, ndicts)`
+/// (event_trigger.c) — collect an ALTER TEXT SEARCH CONFIGURATION ... ALTER/DROP
+/// MAPPING command so `ddl_command_end` triggers can deparse it.
+///
+/// No-op without an active collection state (the standalone / no-event-trigger
+/// case — the entire regression path), matching the C early `return`.
+///
+/// The active-collection path stores `command->d.atscfg` (`SCT_AlterTSConfig`:
+/// the `TSConfigRelationId/cfgId` address plus the `dictIds` array) together
+/// with a `copyObject(stmt)` parse tree. The parse-tree copy needs the opaque
+/// `Node` wrapper for `AlterTSConfigurationStmt`, which is not yet wired into
+/// `types-nodes` (no `mk_alter_ts_configuration_stmt`); the only consumer of the
+/// stored command is the `pg_event_trigger_ddl_commands` deparse reader, which
+/// is part of the not-yet-ported firing/deparse sub-campaign. Until that node
+/// accessor lands, the active path errors loudly rather than dropping a
+/// half-formed command — the sanctioned "missing neighbor" surface, never a
+/// silent stub.
+pub fn event_trigger_collect_alter_ts_config(cfg_id: Oid, _dict_ids: &[Oid]) -> PgResult<()> {
+    // Ignore if event trigger context not set, or collection disabled.
+    if !collecting() {
+        return Ok(());
+    }
+
+    Err(PgError::error(format!(
+        "EventTriggerCollectAlterTSConfig for configuration {cfg_id}: \
+         command collection during an active event trigger requires the \
+         AlterTSConfigurationStmt opaque-Node accessor, not yet ported"
+    )))
+}
+
 /// `EventTriggerCollectSimpleCommand` (event_trigger.c) — collect a simple DDL
 /// command so `ddl_command_end` triggers can reach it.
 ///
@@ -2177,6 +2207,10 @@ pub fn init_seams() {
         get: gucs::event_triggers,
         set: gucs::set_event_triggers,
     });
+
+    backend_commands_tsearchcmds_seams::event_trigger_collect_alter_ts_config::set(
+        event_trigger_collect_alter_ts_config,
+    );
 
     backend_tcop_utility_out_seams::event_trigger_begin_complete_query::set(
         event_trigger_begin_complete_query,

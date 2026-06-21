@@ -93,6 +93,9 @@ pub fn init_seams() {
     backend_utils_adt_regproc_seams::string_to_qualified_name_list::set(
         seam_string_to_qualified_name_list,
     );
+    backend_tsearch_dict_seams::get_ts_dict_oid_from_name::set(
+        regproc::get_ts_dict_oid_from_name,
+    );
 
     // Register this unit's SQL-callable builtins into the fmgr-core builtin
     // table (C: `fmgr_builtins[]`), so by-OID dispatch resolves them.

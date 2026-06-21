@@ -425,6 +425,12 @@ pub fn lookup_ts_parser_cache(prsId: Oid) -> PgResult<TSParserCacheEntry> {
     Ok(entry)
 }
 
+/// `getTokenTypes`'s parser-cache read (tsearchcmds.c): the parser's
+/// `lextypeOid` (InvalidOid when the parser defines no lextype method).
+fn parser_lextype_oid(prs_id: Oid) -> PgResult<Oid> {
+    Ok(lookup_ts_parser_cache(prs_id)?.lextypeOid)
+}
+
 /* ---------------------------------------------------------------------------
  * lookup_ts_dictionary_cache
  * ------------------------------------------------------------------------- */
@@ -1094,4 +1100,7 @@ pub fn init_seams() {
         get: || with_state(|st| st.ts_current_config.clone()),
         set: |v| with_state(|st| st.ts_current_config = v),
     });
+
+    // getTokenTypes's parser-cache `lextypeOid` read.
+    backend_commands_tsearchcmds_seams::parser_lextype_oid::set(parser_lextype_oid);
 }

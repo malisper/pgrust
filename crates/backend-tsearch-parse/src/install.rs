@@ -21,6 +21,42 @@
 
 use core::ffi::c_int;
 
+use backend_commands_tsearchcmds_seams::LexDescr;
+use mcx::{Mcx, PgVec};
+use types_core::primitive::Oid;
+
+/// `F_PRSD_LEXTYPE` (`catalog/pg_proc.dat`): the default word parser's
+/// `prsd_lextype` method OID.
+const F_PRSD_LEXTYPE: Oid = 3721;
+
+/// `getTokenTypes`'s `OidFunctionCall1(prs->lextypeOid, 0)` (tsearchcmds.c):
+/// invoke the parser's `lextype` method, yielding its `LexDescr[]`. The only
+/// built-in text-search parser is the default word parser, whose lextype method
+/// is `prsd_lextype` (OID 3721); the full descriptor list, including the
+/// trailing `lexid == 0` sentinel `getTokenTypes` stops at, is returned.
+fn call_parser_lextype<'mcx>(
+    mcx: Mcx<'mcx>,
+    lextype_oid: Oid,
+) -> types_error::PgResult<PgVec<'mcx, LexDescr>> {
+    use backend_utils_error::ereport;
+    use types_error::ERROR;
+
+    if lextype_oid != F_PRSD_LEXTYPE {
+        return Err(ereport(ERROR)
+            .errmsg(alloc::format!(
+                "text search lextype method {lextype_oid} is not supported"
+            ))
+            .into_error());
+    }
+
+    let descrs = crate::wparser_def::prsd_lextype();
+    let mut out: PgVec<'mcx, LexDescr> = mcx::vec_with_capacity_in(mcx, descrs.len())?;
+    for (lexid, alias, _descr) in descrs {
+        out.push(LexDescr { lexid, alias });
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Wide `<wctype.h>` predicates (the `p_iswhat` wide path), C/POSIX locale.
 // ---------------------------------------------------------------------------
@@ -184,6 +220,10 @@ pub fn init_seams() {
     // `pg_mb2wchar_with_len` (the C-locale wide path `prsd_start` takes when
     // `database_ctype_is_c()` — reached under a `--no-locale` cluster).
     s::pg_mb2wchar_with_len::set(pg_mb2wchar_with_len);
+
+    // getTokenTypes's lextype dispatch (OidFunctionCall1 of the parser's
+    // lextype method) — the default word parser's prsd_lextype.
+    backend_commands_tsearchcmds_seams::call_parser_lextype::set(call_parser_lextype);
 
     // The remaining seams stay at their loud-panic default until their owners
     // land: `ts_execute_hl` / `ts_execute_locations_hl` (the generic TS_execute

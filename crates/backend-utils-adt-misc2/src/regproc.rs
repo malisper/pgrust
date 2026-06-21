@@ -993,6 +993,24 @@ pub fn regdictionaryin(
     Ok(Some(result))
 }
 
+/// `get_ts_dict_oid_from_name(name)` (dict_thesaurus.c's `subdictOid`
+/// resolution): `stringToQualifiedNameList(name, NULL)` then
+/// `get_ts_dict_oid(namelist, false)` — raising `ERRCODE_UNDEFINED_OBJECT` on a
+/// miss (the hard-error `missing_ok = false` path).
+pub fn get_ts_dict_oid_from_name(name: alloc::string::String) -> PgResult<Oid> {
+    let ctx = mcx::MemoryContext::new("get_ts_dict_oid_from_name");
+    let mcx = ctx.mcx();
+
+    /* stringToQualifiedNameList(name, NULL): a hard (NULL escontext) parse. */
+    let names = match stringToQualifiedNameList(mcx, &name, None)? {
+        Some(names) => names,
+        None => unreachable!("NULL escontext: stringToQualifiedNameList errors, never NIL"),
+    };
+
+    let name_refs = as_str_slice(&names);
+    namespace::get_ts_dict_oid::call(mcx, &name_refs, false)
+}
+
 /// `regdictionaryout(dictid)`.
 pub fn regdictionaryout<'mcx>(mcx: Mcx<'mcx>, dictid: Oid) -> PgResult<PgString<'mcx>> {
     if dictid == InvalidOid {
