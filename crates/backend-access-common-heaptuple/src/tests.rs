@@ -131,9 +131,10 @@ fn composite_datum_bridge_round_trip() {
         | Datum::Expanded(_)
         | Datum::Internal(_) => panic!("composite Datum must be ByRef"),
     };
-    // The leading varlena length word (datum_len_) equals the image length.
-    let datum_len = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    assert_eq!(datum_len as usize, bytes.len());
+    // The leading word is the TAGGED varlena length header (SET_VARSIZE ==
+    // `len << 2`); decoding it (`VARSIZE == word >> 2`) equals the image length.
+    let datum_word = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    assert_eq!((datum_word >> 2) as usize, bytes.len());
 
     // composite Datum -> FormedTuple, then deform: columns survive, the header
     // carries the TDatum union arm with the descriptor's typeid/typmod.

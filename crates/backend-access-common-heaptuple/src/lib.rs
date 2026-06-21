@@ -2460,7 +2460,22 @@ pub fn heap_tuple_to_disk_image<'mcx>(
         }
         HeapTupleHeaderChoice::TDatum(d) => {
             // datum_len_(4) datum_typmod(4) datum_typeid(4)
-            img.extend_from_slice(&d.datum_len_.to_ne_bytes());
+            //
+            // A composite Datum IS a `struct varlena *`-tagged block
+            // (`HeapTupleHeaderSetDatumLength` == `SET_VARSIZE`), so the first
+            // word must be the TAGGED 4-byte-header varlena length (`total << 2`,
+            // low two bits 00 = uncompressed 4B), NOT the raw byte length the
+            // on-machine `datum_len_` field carries. This makes the produced image
+            // a self-describing varlena, so when the composite value is stored as
+            // a table/record column the generic varlena path
+            // (`ensure_headerful_varlena`, `VARSIZE`) reads its length correctly
+            // and copies it verbatim rather than re-framing it and shifting the
+            // inner header. `DatumGetHeapTupleHeader` decodes this tagged word back
+            // into the raw `datum_len_`. (Mirrors the sibling
+            // `FormedTuple::to_datum_image` / `from_datum_image` convention.)
+            let total = (t_hoff + user.len()) as u32;
+            let tagged_len = total << 2;
+            img.extend_from_slice(&tagged_len.to_ne_bytes());
             img.extend_from_slice(&d.datum_typmod.to_ne_bytes());
             img.extend_from_slice(&d.datum_typeid.to_ne_bytes());
         }
@@ -2693,7 +2708,20 @@ pub fn DatumGetHeapTupleHeader<'mcx>(
     let u16_at = |o: usize| u16::from_ne_bytes([image[o], image[o + 1]]);
 
     // --- t_choice (12 bytes): a composite Datum carries the TDatum union arm ---
-    let datum_len_ = u32_at(0) as i32;
+    // The first word is the TAGGED varlena length header (`heap_tuple_to_disk_image`
+    // writes `total << 2`, matching C `SET_VARSIZE`). Decode it back to the raw
+    // byte length the on-machine `datum_len_` field carries (`VARSIZE_4B ==
+    // va_header >> 2`). Tolerate a stray raw-length image (a value minted before
+    // the tagged convention) by falling back to the raw word if the tagged decode
+    // disagrees with the image length — the same disambiguation as
+    // `FormedTuple::from_datum_image`.
+    let raw_word = u32_at(0);
+    let tagged_len = (raw_word >> 2) as usize;
+    let datum_len_ = if tagged_len == image.len() {
+        tagged_len as i32
+    } else {
+        raw_word as i32
+    };
     let datum_typmod = u32_at(4) as i32;
     let datum_typeid: Oid = u32_at(8);
 
