@@ -104,6 +104,7 @@ pub mod rawnodes;
 pub mod rawexprnodes;
 pub mod partition;
 pub mod partprune_carrier;
+pub mod appendrel_carrier;
 pub mod pathnodes;
 pub mod portalcmds;
 pub mod planstate;

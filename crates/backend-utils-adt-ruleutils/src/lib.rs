@@ -722,9 +722,10 @@ pub struct DeparseNamespace<'mcx> {
     pub subplans: PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
     /// `List *ctes` — list of `CommonTableExpr` nodes (Query case).
     pub ctes: PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
-    /// `AppendRelInfo **appendrels` — array of `AppendRelInfo` nodes, indexed by
-    /// child relid, or empty. Plan-only (PlannedStmt case).
-    pub appendrels: PgVec<'mcx, Option<PgBox<'mcx, Node<'mcx>>>>,
+    /// `AppendRelInfo **appendrels` — array indexed by child relid, or empty.
+    /// Plan-only (PlannedStmt case); holds the trimmed plan-data carrier the
+    /// child->parent Var mapping reads.
+    pub appendrels: PgVec<'mcx, Option<types_nodes::appendrel_carrier::AppendRelInfoCarrier>>,
     /// `char *ret_old_alias` — alias for OLD in RETURNING list.
     pub ret_old_alias: Option<PgString<'mcx>>,
     /// `char *ret_new_alias` — alias for NEW in RETURNING list.
@@ -2596,11 +2597,26 @@ pub fn deparse_context_for_plan_tree<'mcx, 'p>(
 
     // dpns->ctes = NIL; (plan trees carry no CTE list at this level — zeroed.)
 
-    // pstmt->appendRelations: build the appendrels array indexed by child relid.
-    // The trimmed PlannedStmt does not carry appendRelations as AppendRelInfo
-    // nodes the deparser can index by child relid; with no appendrels recorded
-    // the appendparents child->parent Var mapping is a no-op (handled in
-    // get_variable), which is correct for the non-partitioned plans this serves.
+    // pstmt->appendRelations: build the appendrels array indexed by child relid
+    // (ruleutils.c:3700-3715). For each AppendRelInfo carrier, slot it at
+    // [child_relid]; later get_variable uses it to map an Append child Var up to
+    // its inheritance parent for EXPLAIN display.
+    if !pstmt.appendRelations.is_empty() {
+        let nrels = dpns.rtable.len();
+        let mut appendrels: PgVec<Option<types_nodes::appendrel_carrier::AppendRelInfoCarrier>> =
+            PgVec::new_in(mcx);
+        appendrels.try_reserve(nrels + 1).map_err(|_| mcx.oom(0))?;
+        for _ in 0..(nrels + 1) {
+            appendrels.push(None);
+        }
+        for appinfo in pstmt.appendRelations.iter() {
+            let cr = appinfo.child_relid as usize;
+            if cr < appendrels.len() {
+                appendrels[cr] = Some(appinfo.clone());
+            }
+        }
+        dpns.appendrels = appendrels;
+    }
 
     // set_simple_column_names(dpns): assign per-RTE column aliases (ignoring JOIN
     // RTEs — plan trees contain no join alias Vars).
@@ -2772,7 +2788,14 @@ fn clone_namespace<'mcx>(
         rtable_columns,
         subplans: clone_node_vec(mcx, &dpns.subplans)?,
         ctes: clone_node_vec(mcx, &dpns.ctes)?,
-        appendrels: opt_box_node_vec(&dpns.appendrels)?,
+        appendrels: {
+            let mut v = PgVec::new_in(mcx);
+            v.try_reserve(dpns.appendrels.len()).map_err(|_| mcx.oom(0))?;
+            for a in dpns.appendrels.iter() {
+                v.push(a.clone());
+            }
+            v
+        },
         ret_old_alias: match dpns.ret_old_alias.as_ref() {
             Some(s) => Some(pstrdup(mcx, s.as_str())?),
             None => None,

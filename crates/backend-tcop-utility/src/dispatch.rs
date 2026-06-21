@@ -754,6 +754,7 @@ pub fn process_utility_wrapper<'mcx, 'a>(
         dependsOnRole: false,
         invalItems: None,
         partPruneInfos: Vec::new(),
+        appendRelations: Vec::new(),
     };
 
     // qc == NULL in C: a throwaway completion the subcommand never reports.

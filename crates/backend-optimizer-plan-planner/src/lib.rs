@@ -755,6 +755,13 @@ fn standard_planner<'mcx>(
         types_nodes::partprune_carrier::PartitionPruneInfo,
     > = root.glob.as_ref().map(|g| g.part_prune_infos.clone()).unwrap_or_default();
 
+    // result->appendRelations = glob->appendRelations; (planner.c:574). The
+    // glob list carries the flattened `AppendRelInfo` carriers accumulated by
+    // set_plan_references; the deparser indexes them by child relid.
+    let append_relations: alloc::vec::Vec<
+        types_nodes::appendrel_carrier::AppendRelInfoCarrier,
+    > = root.glob.as_ref().map(|g| g.append_relations.clone()).unwrap_or_default();
+
     // if (glob->partition_directory != NULL)
     //     DestroyPartitionDirectory(glob->partition_directory); (planner.c:611)
     //
@@ -797,6 +804,7 @@ fn standard_planner<'mcx>(
         dependsOnRole: glob_depends_on_role,
         invalItems: inval_items,
         partPruneInfos: part_prune_infos,
+        appendRelations: append_relations,
     };
 
     Ok(result)

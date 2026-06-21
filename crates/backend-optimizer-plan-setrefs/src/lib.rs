@@ -216,16 +216,33 @@ pub fn set_plan_references<'mcx>(
     }
 
     // 3. Adjust RT indexes of AppendRelInfos and add to final appendrels list.
-    //    The owned AppendRelInfo values live in root.append_rel_list; the global
-    //    `append_relations` list carries opaque NodeId handles (AppendRelInfo is
-    //    not a node_arena Expr), so the flattened appendrels are accumulated by
-    //    the cohort that owns the appendrel node space. We still apply the RT
-    //    index bumps + translated_vars drop to the owned values in place.
-    for appinfo in root.append_rel_list.iter_mut() {
-        appinfo.parent_relid = appinfo.parent_relid.wrapping_add(rtoffset as u32);
-        appinfo.child_relid = appinfo.child_relid.wrapping_add(rtoffset as u32);
-        // Rather than adjust the translated_vars entries, just drop 'em.
-        appinfo.translated_vars = Vec::new();
+    //    C: appinfo->parent_relid/child_relid += rtoffset; translated_vars are
+    //    dropped; glob->appendRelations = lappend(glob->appendRelations, appinfo)
+    //    (setrefs.c:333-344). The owned AppendRelInfo values live in
+    //    root.append_rel_list; the global list carries the trimmed
+    //    `AppendRelInfoCarrier` plan data the deparser reads (child->parent Var
+    //    mapping for EXPLAIN of Append/MergeAppend nodes).
+    {
+        let mut carriers: Vec<types_nodes::appendrel_carrier::AppendRelInfoCarrier> =
+            Vec::with_capacity(root.append_rel_list.len());
+        for appinfo in root.append_rel_list.iter_mut() {
+            appinfo.parent_relid = appinfo.parent_relid.wrapping_add(rtoffset as u32);
+            appinfo.child_relid = appinfo.child_relid.wrapping_add(rtoffset as u32);
+            // Rather than adjust the translated_vars entries, just drop 'em.
+            appinfo.translated_vars = Vec::new();
+            carriers.push(types_nodes::appendrel_carrier::AppendRelInfoCarrier {
+                parent_relid: appinfo.parent_relid,
+                child_relid: appinfo.child_relid,
+                num_child_cols: appinfo.num_child_cols,
+                parent_colnos: appinfo.parent_colnos.clone(),
+                parent_reloid: appinfo.parent_reloid,
+            });
+        }
+        let glob = glob_mut(root)?;
+        glob.append_relations.try_reserve(carriers.len()).map_err(|_| PgError::error("out of memory"))?;
+        for c in carriers {
+            glob.append_relations.push(c);
+        }
     }
 
     // 4. If needed, create workspace for processing AlternativeSubPlans.

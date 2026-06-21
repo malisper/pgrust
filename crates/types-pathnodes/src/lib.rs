@@ -631,8 +631,11 @@ pub struct PlannerGlobal {
     pub finalrowmarks: Vec<PlanRowMarkId>,
     /// `List *resultRelations`.
     pub result_relations: Vec<i32>,
-    /// `List *appendRelations`.
-    pub append_relations: Vec<NodeId>,
+    /// `List *appendRelations` — flattened `AppendRelInfo` carriers accumulated
+    /// by `set_plan_references` (mirrors C's `glob->appendRelations`). Copied
+    /// onto `PlannedStmt.appendRelations`; the deparser maps Append child Vars
+    /// up to their inheritance parent from this list.
+    pub append_relations: Vec<types_nodes::appendrel_carrier::AppendRelInfoCarrier>,
     /// `List *partPruneInfos` — `PartitionPruneInfo` plan-data carriers
     /// registered by `set_plan_references`' `register_partpruneinfo`; the final
     /// list is copied onto `PlannedStmt.partPruneInfos`.

@@ -434,6 +434,13 @@ pub struct PlannedStmt<'mcx> {
     /// `es_part_prune_infos`. Empty = the C `NIL`. The carrier is `'static`
     /// owned plan data, so it is a plain `Vec` (not arena-bound).
     pub partPruneInfos: alloc::vec::Vec<crate::partprune_carrier::PartitionPruneInfo>,
+    /// `List *appendRelations` — flattened `AppendRelInfo` carriers
+    /// (`glob->appendRelations`, copied by `standard_planner`). The deparser
+    /// (`ruleutils.c` `get_variable`) builds a child-relid-indexed array from
+    /// these to map an Append/MergeAppend child Var up to its inheritance
+    /// parent for EXPLAIN. Empty = the C `NIL`; the carrier is `'static` owned
+    /// plan data, so it is a plain `Vec`.
+    pub appendRelations: alloc::vec::Vec<crate::appendrel_carrier::AppendRelInfoCarrier>,
 }
 
 impl<'mcx> PlannedStmt<'mcx> {
@@ -498,6 +505,7 @@ impl<'mcx> PlannedStmt<'mcx> {
             dependsOnRole: false,
             invalItems: None,
             partPruneInfos: alloc::vec::Vec::new(),
+            appendRelations: alloc::vec::Vec::new(),
         })
     }
 }
@@ -622,6 +630,7 @@ impl PlannedStmt<'_> {
             dependsOnRole: self.dependsOnRole,
             invalItems,
             partPruneInfos: self.partPruneInfos.clone(),
+            appendRelations: self.appendRelations.clone(),
         })
     }
 }

@@ -3155,17 +3155,36 @@ fn resolve_special_varno<'mcx>(
             None => None,
         };
         {
-            let dpns_plan_tag = context.namespaces[dpns_idx]
-                .plan
-                .as_ref()
-                .map(|p| p.node_tag());
-            if dpns_plan_tag == Some(types_nodes::nodes::ntag::T_Append)
-                || dpns_plan_tag == Some(types_nodes::nodes::ntag::T_MergeAppend)
-            {
-                // bms_union with the Append/MergeAppend apprelids. The trimmed
-                // plan nodes do not carry apprelids; with no parent rels recorded
-                // the union is a no-op (appendparents stays as-is), which is sound
-                // for the non-partitioned scan/join cases this path serves.
+            // If we're descending to the first child of an Append/MergeAppend,
+            // update appendparents (bms_union with the node's apprelids). This
+            // affects deparsing of all child Vars in the resolved subexpression
+            // (ruleutils.c:7948-7956).
+            let apprelids: Option<types_nodes::bitmapset::Bitmapset<'mcx>> = {
+                let plan = context.namespaces[dpns_idx].plan.as_ref();
+                match plan {
+                    Some(p) if p.node_tag() == types_nodes::nodes::ntag::T_Append => p
+                        .as_append()
+                        .and_then(|a| a.apprelids.as_deref())
+                        .map(|b| b.clone_in(mcx))
+                        .transpose()?,
+                    Some(p) if p.node_tag() == types_nodes::nodes::ntag::T_MergeAppend => p
+                        .as_mergeappend()
+                        .and_then(|m| m.apprelids.as_deref())
+                        .map(|b| b.clone_in(mcx))
+                        .transpose()?,
+                    _ => None,
+                }
+            };
+            if let Some(ar) = apprelids {
+                let unioned = backend_nodes_core_seams::bms_union::call(
+                    mcx,
+                    context.appendparents.as_ref(),
+                    Some(&ar),
+                )?;
+                context.appendparents = match unioned {
+                    Some(b) => Some((*b).clone_in(mcx)?),
+                    None => None,
+                };
             }
         }
 
@@ -3281,17 +3300,61 @@ pub fn get_variable<'mcx>(
         return Ok(None);
     }
 
-    // We might have been asked to map child Vars to some parent relation.
-    {
+    // We might have been asked to map child Vars to some parent relation
+    // (ruleutils.c:7654-7696). Walk up the AppendRelInfo chain to an inheritance
+    // parent; if that ancestor is in appendparents, print its column instead.
+    let (varno, varattno) = {
         let dpns = &context.namespaces[dpns_idx];
         if context.appendparents.is_some() && !dpns.appendrels.is_empty() {
-            // The appendparents child→parent Var mapping reads AppendRelInfo
-            // nodes that only exist in a PlannedStmt namespace (#159).
-            return Err(deferred(
-                "get_variable appendparents (child→parent Var mapping; #159 plan-tree)",
-            ));
+            let mut pvarno = varno;
+            let mut pvarattno = varattno;
+            let mut found = false;
+            // appinfo = dpns->appendrels[pvarno]
+            loop {
+                let appinfo = match dpns.appendrels.get(pvarno as usize).and_then(|o| o.as_ref()) {
+                    Some(a) => a,
+                    None => break,
+                };
+                // Only map up to inheritance parents, not UNION ALL appendrels:
+                // rt_fetch(appinfo->parent_relid)->rtekind == RTE_RELATION.
+                let parent_idx = appinfo.parent_relid as usize;
+                let is_rel_parent = parent_idx >= 1
+                    && parent_idx <= dpns.rtable.len()
+                    && dpns.rtable[parent_idx - 1].rtekind == RTE_RELATION;
+                if !is_rel_parent {
+                    break;
+                }
+                found = false;
+                if pvarattno > 0 {
+                    // system columns stay as-is
+                    if pvarattno as i32 > appinfo.num_child_cols {
+                        break; // safety check
+                    }
+                    pvarattno = appinfo.parent_colnos[(pvarattno - 1) as usize];
+                    if pvarattno == 0 {
+                        break; // Var is local to child
+                    }
+                }
+                pvarno = appinfo.parent_relid as i32;
+                found = true;
+                // If the parent is itself a child, continue up (loop re-reads
+                // dpns.appendrels[pvarno]).
+            }
+            // If we found an ancestral rel in appendparents, use its column.
+            let in_appendparents = found
+                && backend_nodes_core_seams::bms_is_member::call(
+                    pvarno,
+                    context.appendparents.as_ref(),
+                );
+            if in_appendparents {
+                (pvarno, pvarattno)
+            } else {
+                (varno, varattno)
+            }
+        } else {
+            (varno, varattno)
         }
-    }
+    };
 
     // rte = rt_fetch(varno, dpns->rtable); refname = …
     // (Borrow the bits we need, releasing the namespace borrow before recursing.)

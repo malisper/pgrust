@@ -915,6 +915,16 @@ fn is_join_rel(root: &PlannerInfo, rel_id: types_pathnodes::RelId) -> bool {
     k == RELOPT_JOINREL || k == RELOPT_OTHER_JOINREL
 }
 
+/// `IS_OTHER_REL(rel)` (pathnodes.h:878) — `reloptkind` is one of
+/// `OTHER_MEMBER_REL`, `OTHER_JOINREL`, `OTHER_UPPER_REL`. Note this set
+/// deliberately EXCLUDES `RELOPT_UPPER_REL` (4), so a `>= OTHER_MEMBER_REL`
+/// comparison is wrong — it would wrongly include plain upper rels.
+fn is_other_rel(root: &PlannerInfo, rel_id: types_pathnodes::RelId) -> bool {
+    use types_pathnodes::{RELOPT_OTHER_JOINREL, RELOPT_OTHER_MEMBER_REL, RELOPT_OTHER_UPPER_REL};
+    let k = root.rel(rel_id).reloptkind;
+    k == RELOPT_OTHER_MEMBER_REL || k == RELOPT_OTHER_JOINREL || k == RELOPT_OTHER_UPPER_REL
+}
+
 /// `IS_PARTITIONED_REL(rel)` (pathnodes.h) — `rel->part_scheme && rel->boundinfo
 /// && rel->nparts > 0 && rel->part_rels && !IS_DUMMY_REL(rel)`. A plain
 /// inheritance parent (`INHERITS (...)`) has no `part_scheme`, so this is false
@@ -4282,7 +4292,7 @@ fn create_sort_plan<'mcx>(
     // relids. Thus, if this sort path is based on a child relation, we must
     // pass its relids: IS_OTHER_REL(subpath->parent) ? path.parent->relids : NULL.
     let subpath_parent = root.path(subpath).base().parent;
-    let relids: Relids = if root.rel(subpath_parent).reloptkind >= RELOPT_OTHER_MEMBER_REL {
+    let relids: Relids = if is_other_rel(root, subpath_parent) {
         let parent = root.path(best_path).base().parent;
         root.rel(parent).relids.clone()
     } else {
@@ -8196,7 +8206,7 @@ fn create_incrementalsort_plan<'mcx>(
 
     // IS_OTHER_REL(subpath->parent) ? path.parent->relids : NULL.
     let subpath_parent = root.path(subpath).base().parent;
-    let relids: Relids = if root.rel(subpath_parent).reloptkind >= RELOPT_OTHER_MEMBER_REL {
+    let relids: Relids = if is_other_rel(root, subpath_parent) {
         let parent = root.path(best_path).base().parent;
         root.rel(parent).relids.clone()
     } else {
