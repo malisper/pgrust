@@ -192,7 +192,10 @@ struct PruneStepResult {
 /// PLANNER-only path this lane lands (the PARTTARGET_INITIAL/EXEC reader is the
 /// follow-on run-time lane).
 #[allow(dead_code)]
-struct GeneratePruningStepsContext<'a> {
+struct GeneratePruningStepsContext<'a, 'mcx> {
+    /// The arena the per-element `Const` nodes deconstructed from a constant
+    /// SAOP array allocate into (`deconstruct_const_array` / `makeConst`).
+    mcx: Mcx<'mcx>,
     /// The partition scheme (column metadata) of the partitioned relation.
     part_scheme: &'a PartitionScheme,
     /// The partition key expressions (`rel->partexprs[i]` — first per key).
@@ -1023,11 +1026,12 @@ fn partition_bound_accepts_nulls(bi: &PartitionBoundInfoData) -> bool {
 // =============================================================================
 
 /// `gen_partprune_steps(rel, clauses, target, context)` (partprune.c:743).
-fn gen_partprune_steps<'a>(
-    inputs: &'a PruneInputs,
+fn gen_partprune_steps<'a, 'mcx>(
+    inputs: &'a PruneInputs<'mcx>,
     target: PartClauseTarget,
-) -> PgResult<GeneratePruningStepsContext<'a>> {
+) -> PgResult<GeneratePruningStepsContext<'a, 'mcx>> {
     let mut context = GeneratePruningStepsContext {
+        mcx: inputs.mcx,
         part_scheme: &inputs.part_scheme,
         partexprs: &inputs.partexprs,
         has_default: inputs.has_default,
@@ -1061,7 +1065,7 @@ fn gen_partprune_steps<'a>(
 
 /// `gen_partprune_steps_internal(context, clauses)` (partprune.c:990).
 fn gen_partprune_steps_internal(
-    context: &mut GeneratePruningStepsContext,
+    context: &mut GeneratePruningStepsContext<'_, '_>,
     clauses: &[Expr],
 ) -> PgResult<Vec<PartitionPruneStep>> {
     let partnatts = context.part_scheme.partnatts;
@@ -1244,7 +1248,7 @@ fn gen_partprune_steps_internal(
 /// Return the just-generated step (looked up by id from context.steps), cloned
 /// for inclusion in a result list. The C code returns the step pointer; here we
 /// clone the owned value out of the steps store.
-fn step_ref(context: &GeneratePruningStepsContext, step_id: i32) -> PartitionPruneStep {
+fn step_ref(context: &GeneratePruningStepsContext<'_, '_>, step_id: i32) -> PartitionPruneStep {
     context
         .steps
         .iter()
@@ -1256,7 +1260,7 @@ fn step_ref(context: &GeneratePruningStepsContext, step_id: i32) -> PartitionPru
 /// `gen_prune_step_op(...)` (partprune.c:1342). Appends a step to context.steps
 /// and returns its step_id.
 fn gen_prune_step_op(
-    context: &mut GeneratePruningStepsContext,
+    context: &mut GeneratePruningStepsContext<'_, '_>,
     opstrategy: i32,
     op_is_ne: bool,
     exprs: Vec<Expr>,
@@ -1279,7 +1283,7 @@ fn gen_prune_step_op(
 
 /// `gen_prune_step_combine(...)` (partprune.c:1375).
 fn gen_prune_step_combine(
-    context: &mut GeneratePruningStepsContext,
+    context: &mut GeneratePruningStepsContext<'_, '_>,
     source_stepids: Vec<i32>,
     combine_op: PartitionPruneCombineOp,
 ) -> i32 {
@@ -1300,7 +1304,7 @@ fn gen_prune_step_combine(
 /// `gen_prune_steps_from_opexps(context, keyclauses, nullkeys)`
 /// (partprune.c:1412).
 fn gen_prune_steps_from_opexps(
-    context: &mut GeneratePruningStepsContext,
+    context: &mut GeneratePruningStepsContext<'_, '_>,
     keyclauses: &[Vec<PartClauseInfo>],
     nullkeys: &Bitmapset,
 ) -> PgResult<Vec<PartitionPruneStep>> {
@@ -1500,7 +1504,7 @@ fn gen_prune_steps_from_opexps(
 /// `get_steps_using_prefix(...)` (partprune.c:2467).
 #[allow(clippy::too_many_arguments)]
 fn get_steps_using_prefix(
-    context: &mut GeneratePruningStepsContext,
+    context: &mut GeneratePruningStepsContext<'_, '_>,
     step_opstrategy: i32,
     step_op_is_ne: bool,
     step_lastexpr: Expr,
@@ -1537,7 +1541,7 @@ fn get_steps_using_prefix(
 /// `get_steps_using_prefix_recurse(...)` (partprune.c:2525).
 #[allow(clippy::too_many_arguments)]
 fn get_steps_using_prefix_recurse(
-    context: &mut GeneratePruningStepsContext,
+    context: &mut GeneratePruningStepsContext<'_, '_>,
     step_opstrategy: i32,
     step_op_is_ne: bool,
     step_lastexpr: &Expr,
@@ -1625,7 +1629,7 @@ fn get_steps_using_prefix_recurse(
 /// `match_clause_to_partition_key(...)` (partprune.c:1819).
 #[allow(clippy::too_many_arguments)]
 fn match_clause_to_partition_key(
-    context: &mut GeneratePruningStepsContext,
+    context: &mut GeneratePruningStepsContext<'_, '_>,
     clause: &Expr,
     partkey: &Expr,
     partkeyidx: i32,
@@ -1725,7 +1729,7 @@ fn match_clause_to_partition_key(
 /// The OpExpr branch of `match_clause_to_partition_key`.
 #[allow(clippy::too_many_arguments)]
 fn match_opexpr_to_partition_key(
-    context: &mut GeneratePruningStepsContext,
+    context: &mut GeneratePruningStepsContext<'_, '_>,
     opclause: &types_nodes::primnodes::OpExpr,
     partkey: &Expr,
     partkeyidx: i32,
@@ -1880,7 +1884,7 @@ fn match_opexpr_to_partition_key(
 /// The ScalarArrayOpExpr branch of `match_clause_to_partition_key`.
 #[allow(clippy::too_many_arguments)]
 fn match_saop_to_partition_key(
-    context: &mut GeneratePruningStepsContext,
+    context: &mut GeneratePruningStepsContext<'_, '_>,
     saop: &ScalarArrayOpExpr,
     partkey: &Expr,
     _partkeyidx: i32,
@@ -1961,7 +1965,7 @@ fn match_saop_to_partition_key(
             if arr.constisnull {
                 return Ok(PartClauseMatchStatus::MatchContradict);
             }
-            match deconstruct_const_array(arr, saop.useOr)? {
+            match deconstruct_const_array(context.mcx, arr, saop.useOr)? {
                 Some(e) => e,
                 None => return Ok(PartClauseMatchStatus::MatchContradict),
             }
@@ -3148,17 +3152,74 @@ fn make_opclause(
     )
 }
 
-/// Deconstruct a constant array into per-element non-null Const exprs. Returns
-/// None if the saop is self-contradictory (a null element under useAnd).
-fn deconstruct_const_array(_arr: &Const, _use_or: bool) -> PgResult<Option<Vec<Expr>>> {
-    // deconstruct_array + makeConst per element. The array-deconstruction seam
-    // (utils/adt/arrayfuncs) is the remaining piece for SAOP plan-time pruning;
-    // until it is threaded here, IN-list (SAOP) pruning falls back to NOMATCH at
-    // the caller. Constant scalar = / range pruning (the bulk of static cases)
-    // does not reach here.
-    Err(PgError::error(
-        "deconstruct_const_array: SAOP array deconstruction unported (run-time/IN-list pruning)",
-    ))
+/// Deconstruct a constant array into per-element non-null `Const` exprs
+/// (partprune.c:2301-2348, the `IsA(rightop, Const)` arm of
+/// `match_clause_to_partition_key`'s SAOP handling).
+///
+/// `arrval = DatumGetArrayTypeP(arr->constvalue)`,
+/// `get_typlenbyvalalign(ARR_ELEMTYPE(arrval), ...)`, `deconstruct_array(...)`,
+/// then one `makeConst(ARR_ELEMTYPE, -1, arr->constcollid, elemlen,
+/// elem_values[i], false, elembyval)` per element. A null element makes the
+/// strict `saop_op` return null: it is skipped under `useOr`, but otherwise
+/// implies self-contradiction — signalled here by returning `Ok(None)` (the
+/// caller maps it to `PARTCLAUSE_MATCH_CONTRADICT`). The caller has already
+/// excluded the `arr->constisnull` case.
+fn deconstruct_const_array<'mcx>(
+    mcx: Mcx<'mcx>,
+    arr: &Const,
+    use_or: bool,
+) -> PgResult<Option<Vec<Expr>>> {
+    // ARR_ELEMTYPE(arrval): for a base-element constant array the element type
+    // is `get_element_type(arr->consttype)`.
+    let elemtype =
+        match backend_utils_cache_lsyscache_seams::get_element_type::call(arr.consttype)? {
+            Some(t) => t,
+            // Not an array type — the C path always has an array Const here, but
+            // be defensive rather than fabricate.
+            None => return Ok(Some(Vec::new())),
+        };
+
+    // get_typlenbyvalalign(ARR_ELEMTYPE(arrval), &elemlen, &elembyval, &elemalign);
+    let s = backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(elemtype)?;
+
+    // deconstruct_array(DatumGetArrayTypeP(arr->constvalue), ARR_ELEMTYPE,
+    //                   elemlen, elembyval, elemalign,
+    //                   &elem_values, &elem_nulls, &num_elems);
+    let deconstructed = backend_utils_adt_arrayfuncs_seams::deconstruct_array_v::call(
+        mcx,
+        arr.constvalue.clone(),
+        elemtype,
+        s.typlen,
+        s.typbyval,
+        s.typalign as core::ffi::c_char,
+    )?;
+
+    let mut elem_exprs: Vec<Expr> = Vec::with_capacity(deconstructed.len());
+    for (elem_value, elem_isnull) in deconstructed.iter() {
+        // A null array element must lead to a null comparison result, since
+        // saop_op is known strict. We can ignore it in the useOr case, but
+        // otherwise it implies self-contradiction.
+        if *elem_isnull {
+            if use_or {
+                continue;
+            }
+            return Ok(None);
+        }
+
+        let elem_expr = backend_nodes_core::makefuncs::make_const(
+            mcx,
+            elemtype,
+            -1,
+            arr.constcollid,
+            s.typlen as i32,
+            elem_value.clone(),
+            false,
+            s.typbyval,
+        )?;
+        elem_exprs.push(Expr::Const(elem_expr));
+    }
+
+    Ok(Some(elem_exprs))
 }
 
 use types_pathnodes::planner_run::planner_rt_fetch;

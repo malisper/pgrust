@@ -14363,6 +14363,7 @@ dependencies = [
  "backend-partitioning-partbounds-seams",
  "backend-partitioning-partdesc",
  "backend-partitioning-partprune-seams",
+ "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-partcache",
  "backend-utils-cache-partcache-seams",
