@@ -22,6 +22,7 @@
 //! out on the unported `transformPartitionBound` / catalog node-construction
 //! machinery); only the routing-search leg lands.
 
+mod merge;
 mod qual;
 mod satisfies_hash_partition;
 
@@ -93,6 +94,22 @@ fn call_hash(
     let result =
         fmgr::function_call2_coll_datum::call(ctx.mcx(), finfo.fn_oid, collation, value, seed)?
             .as_u64();
+    Ok(result)
+}
+
+/// `DatumGetInt32(FunctionCall2Coll(...))` keyed directly by the support
+/// function OID, with the two live `Datum`s already reconstructed by the caller
+/// in `mcx`. Shared with the partitionwise-join merge cluster (`merge.rs`),
+/// which carries bound datums as planner-layer `DatumImage`s.
+pub(crate) fn call_cmp_oid<'mcx>(
+    fn_oid: Oid,
+    collation: Oid,
+    mcx: Mcx<'mcx>,
+    arg1: Datum<'mcx>,
+    arg2: Datum<'mcx>,
+) -> PgResult<i32> {
+    let result =
+        fmgr::function_call2_coll_datum::call(mcx, fn_oid, collation, arg1, arg2)?.as_i32();
     Ok(result)
 }
 
@@ -1486,11 +1503,17 @@ fn partition_bounds_equal(
 /// optimization for non-identical bounds. Identical-bounds partitionwise join
 /// (the common case) is fully handled by `partition_bounds_equal` above and does
 /// not reach this path.
+///
+/// The full RANGE/LIST merge cluster (`merge_list_bounds` / `merge_range_bounds`
+/// and the `merge_*` helpers, ~600 lines of partbounds.c) is implemented in
+/// [`crate::merge`]; this adapter forwards to it. HASH inputs with non-identical
+/// bounds are not mergeable (mirroring C's `return NULL` for HASH) and report
+/// `Ok(None)`.
 fn partition_bounds_merge(
-    _root: &mut types_pathnodes::PlannerInfo,
-    _rel1: types_pathnodes::RelId,
-    _rel2: types_pathnodes::RelId,
-    _jointype: types_pathnodes::JoinType,
+    root: &mut types_pathnodes::PlannerInfo,
+    rel1: types_pathnodes::RelId,
+    rel2: types_pathnodes::RelId,
+    jointype: types_pathnodes::JoinType,
 ) -> PgResult<
     Option<(
         types_pathnodes::PartitionBoundInfoData,
@@ -1498,7 +1521,7 @@ fn partition_bounds_merge(
         std::vec::Vec<Option<types_pathnodes::RelId>>,
     )>,
 > {
-    Ok(None)
+    merge::partition_bounds_merge(root, rel1, rel2, jointype)
 }
 
 /* ===========================================================================

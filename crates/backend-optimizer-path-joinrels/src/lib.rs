@@ -1661,6 +1661,11 @@ pub fn init_seams() {
             sjinfo
         },
     );
+
+    // `is_dummy_rel(root, rel)` (joinrels.c, owned here) is read by the
+    // partbounds.c merge routines (`is_dummy_partition`) through the
+    // partbounds-seams crate; install the real body.
+    partbounds::is_dummy_rel::set(is_dummy_rel);
 }
 
 #[cfg(test)]

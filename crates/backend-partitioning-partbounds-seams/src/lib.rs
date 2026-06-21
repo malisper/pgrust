@@ -265,3 +265,12 @@ seam_core::seam!(
         )>,
     >
 );
+
+seam_core::seam!(
+    /// `is_dummy_partition(rel, part_index)` (partbounds.c:1842) — has the given
+    /// partition of `rel` been proven empty? In C this is `rel->part_rels[i] ==
+    /// NULL || IS_DUMMY_REL(rel->part_rels[i])`. The owning unit (joinrels, which
+    /// owns `is_dummy_rel`) installs this so the merge routines can test a
+    /// partition rel for dummy-ness without depending on the path machinery.
+    pub fn is_dummy_rel(root: &types_pathnodes::PlannerInfo, rel: types_pathnodes::RelId) -> bool
+);
