@@ -276,7 +276,7 @@ pub fn make_const<'mcx>(
     mut constvalue: Datum<'mcx>,
     constisnull: bool,
     constbyval: bool,
-) -> PgResult<Const> {
+) -> PgResult<Const<'mcx>> {
     // if (!constisnull && constlen == -1)
     //     constvalue = PointerGetDatum(PG_DETOAST_DATUM(constvalue));
     //
@@ -345,7 +345,7 @@ pub fn make_const<'mcx>(
 /// `makeBoolConst(value, isnull)` (makefuncs.c) — a `Const` of type `bool`.
 /// The C hardwires bool's `constlen == 1` / `constbyval == true`, so no
 /// detoast and no allocation can occur.
-pub fn make_bool_const(value: bool, isnull: bool) -> Const {
+pub fn make_bool_const<'mcx>(value: bool, isnull: bool) -> Const<'mcx> {
     // makeConst(BOOLOID, -1, InvalidOid, 1, BoolGetDatum(value), isnull, true)
     Const {
         consttype: BOOLOID,
@@ -363,7 +363,7 @@ pub fn make_bool_const(value: bool, isnull: bool) -> Const {
 /// Build the `arg IS NOT NULL` `NullTest` node used by `process_equivalence`
 /// (equivclass.c): `argisrow=false` (correct even for a composite arg),
 /// `location=-1`.
-pub fn make_is_not_null(arg: Expr) -> Expr {
+pub fn make_is_not_null<'mcx>(arg: Expr<'mcx>) -> Expr<'mcx> {
     Expr::NullTest(NullTest {
         arg: Some(Box::new(arg)),
         nulltesttype: NullTestType::IS_NOT_NULL,
@@ -373,7 +373,7 @@ pub fn make_is_not_null(arg: Expr) -> Expr {
 }
 
 /// `makeBoolExpr(boolop, args, location)` (makefuncs.c) — a `BoolExpr` node.
-pub fn make_bool_expr(boolop: BoolExprType, args: Vec<Expr>, location: i32) -> Expr {
+pub fn make_bool_expr<'mcx>(boolop: BoolExprType, args: Vec<Expr<'mcx>>, location: i32) -> Expr<'mcx> {
     Expr::BoolExpr(BoolExpr {
         boolop,
         args,
@@ -383,7 +383,7 @@ pub fn make_bool_expr(boolop: BoolExprType, args: Vec<Expr>, location: i32) -> E
 
 /// `make_andclause(andclauses)` (makefuncs.c) — `BoolExpr` with `AND_EXPR`.
 /// (clauses.c sets `location = -1`.)
-pub fn make_andclause(andclauses: Vec<Expr>) -> Expr {
+pub fn make_andclause<'mcx>(andclauses: Vec<Expr<'mcx>>) -> Expr<'mcx> {
     Expr::BoolExpr(BoolExpr {
         boolop: AND_EXPR,
         args: andclauses,
@@ -393,7 +393,7 @@ pub fn make_andclause(andclauses: Vec<Expr>) -> Expr {
 
 /// `make_orclause(orclauses)` (makefuncs.c) — `BoolExpr` with `OR_EXPR`.
 /// (clauses.c sets `location = -1`.)
-pub fn make_orclause(orclauses: Vec<Expr>) -> Expr {
+pub fn make_orclause<'mcx>(orclauses: Vec<Expr<'mcx>>) -> Expr<'mcx> {
     Expr::BoolExpr(BoolExpr {
         boolop: OR_EXPR,
         args: orclauses,
@@ -404,7 +404,7 @@ pub fn make_orclause(orclauses: Vec<Expr>) -> Expr {
 /// `make_notclause(notclause)` (makefuncs.c) — `BoolExpr` with `NOT_EXPR` over
 /// the single negated expression (`list_make1(notclause)`). (clauses.c sets
 /// `location = -1`.)
-pub fn make_notclause(notclause: Expr) -> Expr {
+pub fn make_notclause<'mcx>(notclause: Expr<'mcx>) -> Expr<'mcx> {
     Expr::BoolExpr(BoolExpr {
         boolop: NOT_EXPR,
         args: vec![notclause],
@@ -414,7 +414,7 @@ pub fn make_notclause(notclause: Expr) -> Expr {
 
 /// `make_and_qual(qual1, qual2)` (makefuncs.c) — AND two qual conditions,
 /// treating a `None` (C `NULL`) nodetree as TRUE.
-pub fn make_and_qual(qual1: Option<Expr>, qual2: Option<Expr>) -> Option<Expr> {
+pub fn make_and_qual<'mcx>(qual1: Option<Expr<'mcx>>, qual2: Option<Expr<'mcx>>) -> Option<Expr<'mcx>> {
     match (qual1, qual2) {
         // if (qual1 == NULL) return qual2;
         (None, q2) => q2,
@@ -427,7 +427,7 @@ pub fn make_and_qual(qual1: Option<Expr>, qual2: Option<Expr>) -> Option<Expr> {
 
 /// `make_ands_explicit(andclauses)` (makefuncs.c) — convert an AND-semantics
 /// expression list to an ordinary boolean expression. An empty list is TRUE.
-pub fn make_ands_explicit(mut andclauses: Vec<Expr>) -> Expr {
+pub fn make_ands_explicit<'mcx>(mut andclauses: Vec<Expr<'mcx>>) -> Expr<'mcx> {
     if andclauses.is_empty() {
         // return (Expr *) makeBoolConst(true, false);
         Expr::Const(make_bool_const(true, false))
@@ -443,7 +443,7 @@ pub fn make_ands_explicit(mut andclauses: Vec<Expr>) -> Expr {
 /// `make_ands_implicit(clause)` (makefuncs.c) — convert an ordinary boolean
 /// expression to an AND-semantics list. A `None`/constant-TRUE clause yields
 /// the empty list (TRUE).
-pub fn make_ands_implicit(clause: Option<Expr>) -> Vec<Expr> {
+pub fn make_ands_implicit<'mcx>(clause: Option<Expr<'mcx>>) -> Vec<Expr<'mcx>> {
     match clause {
         // if (clause == NULL) return NIL; /* NULL -> NIL list == TRUE */
         None => Vec::new(),
@@ -464,13 +464,13 @@ pub fn make_ands_implicit(clause: Option<Expr>) -> Vec<Expr> {
 ///
 /// The [`RelabelType`] carries every field the C sets; `makeRelabelType` sets
 /// `location = -1`.
-pub fn make_relabel_type(
-    arg: Expr,
+pub fn make_relabel_type<'mcx>(
+    arg: Expr<'mcx>,
     rtype: Oid,
     rtypmod: i32,
     rcollid: Oid,
     rformat: CoercionForm,
-) -> Expr {
+) -> Expr<'mcx> {
     Expr::RelabelType(RelabelType {
         arg: Some(Box::new(arg)),
         resulttype: rtype,
@@ -485,14 +485,14 @@ pub fn make_relabel_type(
 /// (makefuncs.c) — a function-call expression. `funcretset`/`funcvariadic` are
 /// always `false` here (the only allowed case); `makeFuncExpr` sets
 /// `location = -1`.
-pub fn make_func_expr(
+pub fn make_func_expr<'mcx>(
     funcid: Oid,
     rettype: Oid,
-    args: Vec<Expr>,
+    args: Vec<Expr<'mcx>>,
     funccollid: Oid,
     inputcollid: Oid,
     fformat: CoercionForm,
-) -> Expr {
+) -> Expr<'mcx> {
     Expr::FuncExpr(FuncExpr {
         funcid,
         funcresulttype: rettype,
@@ -511,15 +511,15 @@ pub fn make_func_expr(
 /// `rightop == None` for a single-operand clause. `opfuncid` is left
 /// `InvalidOid` (resolved later); `location` (set to -1 by the C) is not
 /// modeled in the trimmed [`OpExpr`].
-pub fn make_opclause(
+pub fn make_opclause<'mcx>(
     opno: Oid,
     opresulttype: Oid,
     opretset: bool,
-    leftop: Expr,
-    rightop: Option<Expr>,
+    leftop: Expr<'mcx>,
+    rightop: Option<Expr<'mcx>>,
     opcollid: Oid,
     inputcollid: Oid,
-) -> Expr {
+) -> Expr<'mcx> {
     let args = match rightop {
         // expr->args = list_make2(leftop, rightop);
         Some(r) => vec![leftop, r],
@@ -544,7 +544,7 @@ pub fn make_opclause(
 /// `ressortgroupref`/`resorigtbl`/`resorigcol`.
 pub fn make_target_entry<'mcx>(
     mcx: Mcx<'mcx>,
-    expr: Expr,
+    expr: Expr<'mcx>,
     resno: AttrNumber,
     resname: Option<&str>,
     resjunk: bool,
@@ -590,11 +590,11 @@ pub fn make_json_format(format_type: JsonFormatType, encoding: JsonEncoding, loc
 
 /// `makeJsonValueExpr(raw_expr, formatted_expr, format)` (makefuncs.c) — a
 /// `JsonValueExpr` node.
-pub fn make_json_value_expr(
-    raw_expr: Option<Expr>,
-    formatted_expr: Option<Expr>,
+pub fn make_json_value_expr<'mcx>(
+    raw_expr: Option<Expr<'mcx>>,
+    formatted_expr: Option<Expr<'mcx>>,
     format: Option<JsonFormat>,
-) -> JsonValueExpr {
+) -> JsonValueExpr<'mcx> {
     JsonValueExpr {
         raw_expr: raw_expr.map(Box::new),
         formatted_expr: formatted_expr.map(Box::new),
@@ -604,7 +604,7 @@ pub fn make_json_value_expr(
 
 /// `makeJsonBehavior(btype, expr, location)` (makefuncs.c) — a `JsonBehavior`
 /// node. `coerce` is left at its default (the C leaves it zero too).
-pub fn make_json_behavior(btype: JsonBehaviorType, expr: Option<Expr>, location: i32) -> JsonBehavior {
+pub fn make_json_behavior<'mcx>(btype: JsonBehaviorType, expr: Option<Expr<'mcx>>, location: i32) -> JsonBehavior<'mcx> {
     JsonBehavior {
         btype,
         expr: expr.map(Box::new),
@@ -615,13 +615,13 @@ pub fn make_json_behavior(btype: JsonBehaviorType, expr: Option<Expr>, location:
 
 /// `makeJsonIsPredicate(expr, format, item_type, unique_keys, location)`
 /// (makefuncs.c) — a `JsonIsPredicate` node, returned as a `Node` in the C.
-pub fn make_json_is_predicate(
-    expr: Option<Expr>,
+pub fn make_json_is_predicate<'mcx>(
+    expr: Option<Expr<'mcx>>,
     format: Option<JsonFormat>,
     item_type: JsonValueType,
     unique_keys: bool,
     location: i32,
-) -> Expr {
+) -> Expr<'mcx> {
     Expr::JsonIsPredicate(JsonIsPredicate {
         expr: expr.map(Box::new),
         format,
@@ -637,16 +637,16 @@ pub fn make_json_is_predicate(
 /// `coerceJsonFuncExpr` because it needs the `ParseState`). `coercion` starts
 /// `None`; the caller sets it.
 #[allow(clippy::too_many_arguments)]
-pub fn make_json_constructor_expr(
+pub fn make_json_constructor_expr<'mcx>(
     r#type: JsonConstructorType,
-    args: Vec<Expr>,
-    func: Option<Expr>,
-    coercion: Option<Expr>,
+    args: Vec<Expr<'mcx>>,
+    func: Option<Expr<'mcx>>,
+    coercion: Option<Expr<'mcx>>,
     returning: Option<JsonReturning>,
     unique: bool,
     absent_on_null: bool,
     location: i32,
-) -> JsonConstructorExpr {
+) -> JsonConstructorExpr<'mcx> {
     JsonConstructorExpr {
         r#type,
         args,
@@ -1117,7 +1117,7 @@ pub fn make_and_boolexpr_seam<'mcx>(
     // The arg list crosses as `Node`s (the partition-qual elements). Each is a
     // `Node::Expr` (the qual clauses generate_partition_qual produced); unwrap
     // to the underlying `Expr` to populate the BoolExpr's `Vec<Expr>` args.
-    let mut exprs: Vec<Expr> = Vec::with_capacity(args.len());
+    let mut exprs: Vec<Expr<'mcx>> = Vec::with_capacity(args.len());
     for n in args.into_iter() {
         let tag = n.tag();
         match n.into_expr() {

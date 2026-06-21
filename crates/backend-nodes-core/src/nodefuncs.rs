@@ -205,10 +205,10 @@ pub fn expr_type(expr: Option<&Expr>) -> PgResult<Oid> {
 /// the first target entry's expr. C asserts the embedded subselect IsA Query
 /// and the first target entry is not resjunk; we surface the missing-Query case
 /// as the C "untransformed sublink" elog.
-fn sublink_first_target_expr<'a>(
-    sublink: &'a SubLink,
+fn sublink_first_target_expr<'a, 'mcx>(
+    sublink: &'a SubLink<'mcx>,
     what: &str,
-) -> PgResult<&'a Expr> {
+) -> PgResult<&'a Expr<'mcx>> {
     let qtree = sublink
         .subselect
         .as_ref()
@@ -572,7 +572,7 @@ pub fn relabel_to_typmod(expr: Expr, typmod: i32) -> PgResult<Expr> {
 /// `strip_implicit_coercions(node)` (nodeFuncs.c) — remove implicit coercions
 /// at the top level of the tree, returning a borrow into a suitable place
 /// within it. (A RowExpr is returned unchanged even if implicit.)
-pub fn strip_implicit_coercions(node: &Expr) -> &Expr {
+pub fn strip_implicit_coercions<'a, 'mcx>(node: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     match node {
         Expr::FuncExpr(f) if f.funcformat == CoercionForm::COERCE_IMPLICIT_CAST => {
             match f.args.first() {
@@ -1207,9 +1207,9 @@ where
 /// The C arms over node types the layered model does not carry (List/Query/
 /// FromExpr/JoinExpr/parser-and-planner nodes) are absent — the model cannot
 /// construct those nodes.
-pub fn expression_tree_walker<F>(node: Option<&Expr>, walker: &mut F) -> bool
+pub fn expression_tree_walker<'mcx, F>(node: Option<&Expr<'mcx>>, walker: &mut F) -> bool
 where
-    F: FnMut(&Expr) -> bool,
+    F: FnMut(&Expr<'mcx>) -> bool,
 {
     let Some(node) = node else {
         return false;
@@ -1387,9 +1387,9 @@ where
 }
 
 /// `T_JsonBehavior` recursion inside the JsonExpr walker arm.
-fn walk_json_behavior<F>(behavior: Option<&primnodes::JsonBehavior>, walker: &mut F) -> bool
+fn walk_json_behavior<'mcx, F>(behavior: Option<&primnodes::JsonBehavior<'mcx>>, walker: &mut F) -> bool
 where
-    F: FnMut(&Expr) -> bool,
+    F: FnMut(&Expr<'mcx>) -> bool,
 {
     match behavior.and_then(|b| b.expr.as_deref()) {
         Some(e) => walker(e),
@@ -1398,9 +1398,9 @@ where
 }
 
 /// Walk an `Option<PgBox<Expr>>` SubPlan child.
-fn walk_pgbox_opt<F>(child: &Option<mcx::PgBox<'static, Expr>>, walker: &mut F) -> bool
+fn walk_pgbox_opt<'mcx, F>(child: &Option<mcx::PgBox<'mcx, Expr<'mcx>>>, walker: &mut F) -> bool
 where
-    F: FnMut(&Expr) -> bool,
+    F: FnMut(&Expr<'mcx>) -> bool,
 {
     match child {
         Some(b) => walker(&**b),
@@ -1409,9 +1409,9 @@ where
 }
 
 /// Walk a `PgVec<PgBox<Expr>>` SubPlan args list.
-fn walk_pgvec_box<F>(list: &mcx::PgVec<'static, mcx::PgBox<'static, Expr>>, walker: &mut F) -> bool
+fn walk_pgvec_box<'mcx, F>(list: &mcx::PgVec<'mcx, mcx::PgBox<'mcx, Expr<'mcx>>>, walker: &mut F) -> bool
 where
-    F: FnMut(&Expr) -> bool,
+    F: FnMut(&Expr<'mcx>) -> bool,
 {
     for b in list.iter() {
         if walker(&**b) {
@@ -1422,7 +1422,7 @@ where
 }
 
 /// Reborrow a `PgBox<'static, Expr>` (TargetEntry.expr) as `&Expr`.
-fn boxed_mcx_expr_as<'a>(b: &'a mcx::PgBox<'static, Expr>) -> &'a Expr {
+fn boxed_mcx_expr_as<'a, 'mcx>(b: &'a mcx::PgBox<'mcx, Expr<'mcx>>) -> &'a Expr<'mcx> {
     &**b
 }
 
@@ -1442,9 +1442,9 @@ fn boxed_mcx_expr_as<'a>(b: &'a mcx::PgBox<'static, Expr>) -> &'a Expr {
 /// mutated in place here (the arena allocation is reused), matching that C
 /// behavior. Failing to mutate `args` leaves a correlation Var with its
 /// base-relation varno, which execExpr later miscompiles as an `EEOP_SCAN_VAR`.
-pub fn expression_tree_mutator<F>(mut node: Expr, mutator: &mut F) -> Expr
+pub fn expression_tree_mutator<'mcx, F>(mut node: Expr<'mcx>, mutator: &mut F) -> Expr<'mcx>
 where
-    F: FnMut(Expr) -> Expr,
+    F: FnMut(Expr<'mcx>) -> Expr<'mcx>,
 {
     macro_rules! mut_box {
         ($child:expr) => {
@@ -1664,9 +1664,9 @@ where
 /// `pub(crate)` entry to [`for_each_child_mut`] for the `Node`-level in-place
 /// walker (`node_walker::expression_tree_walker_mut`), which drives the mutating
 /// recursion over an embedded `Expr`'s immediate children.
-pub(crate) fn for_each_expr_child_mut<F>(node: &mut Expr, f: &mut F)
+pub(crate) fn for_each_expr_child_mut<'mcx, F>(node: &mut Expr<'mcx>, f: &mut F)
 where
-    F: FnMut(&mut Expr),
+    F: FnMut(&mut Expr<'mcx>),
 {
     for_each_child_mut(node, f)
 }
@@ -1674,9 +1674,9 @@ where
 /// Drive `mutator` over the immediate `Box<Expr>`/`Vec<Expr>` children of a
 /// node in place (the in-place analogue used by `fix_opfuncids_walker`, where
 /// the recursion reads-and-writes the same tree rather than rebuilding it).
-fn for_each_child_mut<F>(node: &mut Expr, f: &mut F)
+fn for_each_child_mut<'mcx, F>(node: &mut Expr<'mcx>, f: &mut F)
 where
-    F: FnMut(&mut Expr),
+    F: FnMut(&mut Expr<'mcx>),
 {
     macro_rules! on_box {
         ($child:expr) => {
@@ -1842,7 +1842,7 @@ fn expr_variant_name(expr: &Expr) -> &'static str {
 /// `location = -1`. The node build is trivial but needs `exprType`/
 /// `exprCollation` (nodeFuncs.c, this crate), so relnode reaches it through the
 /// relnode-ext seam; this crate owns it.
-pub fn make_coalesce_expr(larg: &Expr, rarg: &Expr) -> Expr {
+pub fn make_coalesce_expr<'mcx>(larg: &Expr<'mcx>, rarg: &Expr<'mcx>) -> Expr<'mcx> {
     Expr::CoalesceExpr(types_nodes::primnodes::CoalesceExpr {
         coalescetype: expr_type(Some(larg)).expect("exprType"),
         coalescecollid: expr_collation(Some(larg)).expect("exprCollation"),
