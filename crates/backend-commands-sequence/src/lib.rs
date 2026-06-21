@@ -763,6 +763,18 @@ pub fn SequenceChangePersistence<'mcx>(
         rel_relid(&seqrel),
         new_relpersistence as i8,
     )?;
+
+    /*
+     * RelationSetNewRelfilenumber updated the relcache entry's rd_locator. In C
+     * `seqrel` is a live relcache pointer so it now reflects the new, empty
+     * relfilenode. Our `seqrel` is an owned projection captured before the
+     * change, so re-open it (lock already held, NoLock) to pick up the fresh
+     * locator before extending its storage — mirroring the do_setval/restart
+     * path. Without this, fill_seq_with_data extends the OLD relfilenode whose
+     * block 0 is already populated, and ExtendBufferedRel returns block 1
+     * (tripping the `== 0` assertion).
+     */
+    let seqrel = backend_access_sequence_seams::sequence_open::call(mcx, relid, NoLock)?;
     fill_seq_with_data(mcx, &seqrel, &seqdatatuple)?;
     backend_storage_buffer_bufmgr_seams::unlock_release_buffer::call(buf);
 
