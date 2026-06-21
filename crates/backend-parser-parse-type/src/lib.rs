@@ -1128,6 +1128,10 @@ pub fn rich_node_to_parse(
             let de = n.expect_defelem();
             types_parsenodes::Node::DefElem(rich_defelem_to_parse(de)?)
         }
+        ntag::T_VariableSetStmt => {
+            let vss = n.expect_variablesetstmt();
+            types_parsenodes::Node::VariableSetStmt(rich_variablesetstmt_to_parse(vss)?)
+        }
         ntag::T_ObjectWithArgs => {
             let owa = n.expect_objectwithargs();
             types_parsenodes::Node::ObjectWithArgs(rich_objectwithargs_to_parse(owa)?)
@@ -1168,6 +1172,38 @@ pub fn rich_defelem_to_parse(
         arg,
         defaction: de.defaction,
         location: de.location,
+    })
+}
+
+/// `VariableSetStmt` (rich → flat). The `args` list (`A_Const` / `DefElem`
+/// members) is recursively converted; the `jumble_args` field is not carried by
+/// the flat node. This lets a `SET`/`RESET` subcommand embedded in another
+/// statement (e.g. `CREATE FUNCTION ... SET x = y`, whose proconfig items are
+/// `VariableSetStmt` nodes) round-trip through `rich_node_to_parse`.
+pub fn rich_variablesetstmt_to_parse(
+    vss: &types_nodes::ddlnodes::VariableSetStmt<'_>,
+) -> PgResult<types_parsenodes::VariableSetStmt> {
+    use types_nodes::ddlnodes::VariableSetKind as RichKind;
+    use types_parsenodes::VariableSetKind as FlatKind;
+
+    let kind = match vss.kind {
+        RichKind::VAR_SET_VALUE => FlatKind::SetValue,
+        RichKind::VAR_SET_DEFAULT => FlatKind::SetDefault,
+        RichKind::VAR_SET_CURRENT => FlatKind::SetCurrent,
+        RichKind::VAR_SET_MULTI => FlatKind::SetMulti,
+        RichKind::VAR_RESET => FlatKind::Reset,
+        RichKind::VAR_RESET_ALL => FlatKind::ResetAll,
+    };
+    let mut args: Vec<types_parsenodes::Node> = Vec::with_capacity(vss.args.len());
+    for n in vss.args.iter() {
+        args.push(rich_node_to_parse(n)?);
+    }
+    Ok(types_parsenodes::VariableSetStmt {
+        kind,
+        name: vss.name.as_ref().map(|s| s.as_str().to_string()),
+        args,
+        is_local: vss.is_local,
+        location: vss.location,
     })
 }
 

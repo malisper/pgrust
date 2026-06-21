@@ -973,6 +973,27 @@ fn variable_set_stmt_from_nodes(
                     sval: Some(st.sval.to_string()),
                 })
             }
+            // `SET TRANSACTION ...` / `SET SESSION CHARACTERISTICS ...`
+            // (VAR_SET_MULTI) carry `DefElem` members (one per option, e.g.
+            // `DefElem("transaction_read_only", A_Const(true))`). Project the
+            // DefElem into the flat node, recursively converting its inner value
+            // arg with the same value-node projection. Mirrors C's
+            // `castNode(VariableSetStmt, ...)` — the DefElems are just viewed
+            // through the trimmed projection, not reconstructed.
+            ntag::T_DefElem => {
+                let de = val_node.expect_defelem();
+                let arg = match de.arg.as_deref() {
+                    Some(a) => Some(Box::new(set_arg_from_nodes(a)?)),
+                    None => None,
+                };
+                Node::DefElem(types_parsenodes::DefElem {
+                    defnamespace: de.defnamespace.as_ref().map(|s| s.to_string()),
+                    defname: de.defname.as_ref().map(|s| s.to_string()),
+                    arg,
+                    defaction: de.defaction,
+                    location: de.location,
+                })
+            }
             _ => {
                 let other = val_node;
                 return Err(types_error::PgError::error(format!(
