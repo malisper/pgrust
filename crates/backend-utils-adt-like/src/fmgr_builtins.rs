@@ -38,18 +38,42 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 /// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
 const VARHDRSZ: usize = 4;
 
-/// A `text`/`bytea`/`name` arg's `VARDATA_ANY` payload bytes. Under the
-/// header-ful-everywhere convention the by-ref lane carries the full varlena
-/// image (4-byte length word + payload); this skips the header. For `name`
-/// (typlen 64, framed as a varlena-headered NAMEDATALEN buffer) this yields the
-/// 64-byte buffer, which the cores NUL-trim or `name_text`.
+/// A `text`/`bytea`/`name` arg's `VARDATA_ANY` payload bytes. The by-ref lane
+/// carries an already-detoasted INLINE varlena image, which is EITHER a 4-byte
+/// header (`VARATT_IS_4B_U` — freshly built Const / detoasted value) OR a short
+/// 1-byte header (`VARATT_IS_1B` — how the heap stores small values, what
+/// `heap_deform_tuple` hands back). `VARDATA_ANY` skips the correct header size
+/// for each: a naive fixed `VARHDRSZ` strip over a short image silently drops
+/// three payload bytes from the front (e.g. `multirange_constructor0` → matches
+/// a prefix `LIKE` against the wrong start). For `name` (typlen 64, framed as a
+/// varlena-headered NAMEDATALEN buffer) the 4-byte form is used and the cores
+/// NUL-trim or `name_text`.
 #[inline]
 fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("like fn: by-ref arg missing from by-ref lane");
-    if image.len() >= VARHDRSZ {
+    vardata_any_slice(image)
+}
+
+/// C: `VARDATA_ANY(image) .. VARSIZE_ANY_EXHDR(image)` — borrow the payload of an
+/// inline varlena image, handling BOTH the 4-byte-header (`VARATT_IS_4B_U`) and
+/// the short 1-byte-header (`VARATT_IS_1B`) forms.
+#[inline]
+fn vardata_any_slice(image: &[u8]) -> &[u8] {
+    if image.is_empty() {
+        return &[];
+    }
+    let header = image[0];
+    if header != 0x01 && header & 0x01 == 0x01 {
+        // VARATT_IS_1B (and not 1B-E external): short 1-byte-header inline datum.
+        let total = ((header >> 1) & 0x7F) as usize;
+        let total = total.min(image.len());
+        &image[1..total.max(1)]
+    } else if image.len() >= VARHDRSZ {
+        // VARATT_IS_4B_U (uncompressed) or the framed-`name` buffer: skip the
+        // 4-byte header. (Compressed/external images never reach this adapter.)
         &image[VARHDRSZ..]
     } else {
         &[]
