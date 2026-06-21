@@ -624,7 +624,11 @@ fn generate_nonunion_paths<'mcx>(
     let can_hash = tlist::grouping_is_hashable(&group_clauses_owned);
     if !can_sort && !can_hash {
         let what = if op.op == SetOperation::SETOP_INTERSECT { "INTERSECT" } else { "EXCEPT" };
-        return Err(PgError::error(alloc::format!("could not implement {what}")));
+        return Err(PgError::error(alloc::format!("could not implement {what}"))
+            .with_sqlstate(types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_detail(
+                "Some of the datatypes only support hashing, while others only support sorting.",
+            ));
     }
 
     let nonunion_pathkeys = if can_sort {
@@ -836,9 +840,9 @@ fn generate_recursion_path<'mcx>(
         let group_clauses_owned: Vec<SortGroupClause> =
             group_list.iter().map(|&id| *root.sortgroupclause(id)).collect();
         if !tlist::grouping_is_hashable(&group_clauses_owned) {
-            return Err(PgError::error(String::from(
-                "could not implement recursive UNION: all column datatypes must be hashable",
-            )));
+            return Err(PgError::error(String::from("could not implement recursive UNION"))
+                .with_sqlstate(types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_detail("All column datatypes must be hashable."));
         }
         // Worst case: distinct groups == total input size (C:446).
         (group_list, lrows + rrows * 10.0)
