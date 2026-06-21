@@ -155,8 +155,6 @@ pub fn set_CheckPointCompletionTarget(value: f64) {
 struct PrivateState {
     /// `static bool ckpt_active`.
     ckpt_active: bool,
-    /// `static volatile sig_atomic_t ShutdownXLOGPending`.
-    shutdown_xlog_pending: bool,
     /// `static pg_time_t ckpt_start_time` (valid while ckpt_active).
     ckpt_start_time: i64,
     /// `static XLogRecPtr ckpt_start_recptr` (valid while ckpt_active).
@@ -177,7 +175,6 @@ impl PrivateState {
     const fn new() -> Self {
         Self {
             ckpt_active: false,
-            shutdown_xlog_pending: false,
             ckpt_start_time: 0,
             ckpt_start_recptr: 0,
             ckpt_cached_elapsed: 0.0,
@@ -193,6 +190,16 @@ thread_local! {
     static PRIVATE: core::cell::RefCell<PrivateState> =
         const { core::cell::RefCell::new(PrivateState::new()) };
 
+    /// `static volatile sig_atomic_t ShutdownXLOGPending = false;`
+    /// (checkpointer.c:155). This is a standalone signal-set flag in C, written
+    /// from the `ReqShutdownXLOG` SIGINT handler. It MUST live outside the
+    /// `RefCell<PrivateState>` so the signal handler can set it without taking a
+    /// `borrow_mut()` — a signal arriving while the main loop holds the RefCell
+    /// borrow would otherwise panic ("already mutably borrowed"), an
+    /// async-signal-unsafe escalation C never has (a `volatile sig_atomic_t`
+    /// store is reentrant). A plain `Cell<bool>` store mirrors C's atomic write.
+    static SHUTDOWN_XLOG_PENDING: Cell<bool> = const { Cell::new(false) };
+
     /// `static CheckpointerShmemStruct *CheckpointerShmem;` — the shmem control
     /// block base pointer, set by `CheckpointerShmemInit`. Null until attached.
     static CHECKPOINTER_SHMEM: Cell<*mut u8> = const { Cell::new(core::ptr::null_mut()) };
@@ -204,7 +211,7 @@ fn with_private<R>(f: impl FnOnce(&mut PrivateState) -> R) -> R {
 
 /// `ShutdownXLOGPending` accessor.
 fn shutdown_xlog_pending() -> bool {
-    with_private(|p| p.shutdown_xlog_pending)
+    SHUTDOWN_XLOG_PENDING.with(Cell::get)
 }
 
 fn ckpt_location(funcname: &str) -> ErrorLocation {
@@ -469,7 +476,7 @@ pub fn CheckpointerMain(startup_data: &StartupData) -> PgResult<()> {
 
         // Tell postmaster that we're done.
         pmsignal::send_postmaster_signal_xlog_is_shutdown::call();
-        with_private(|p| p.shutdown_xlog_pending = false);
+        SHUTDOWN_XLOG_PENDING.with(|c| c.set(false));
     }
 
     // Wait until we're asked to shut down (separating the shutdown-checkpoint
@@ -941,7 +948,11 @@ pub fn IsCheckpointOnSchedule(progress: f64) -> PgResult<bool> {
 /// trigger writing of the shutdown checkpoint, then `SetLatch(MyLatch)`. The
 /// `SetLatch` is the host's signal-handler responsibility; this records the flag.
 pub fn ReqShutdownXLOG() {
-    with_private(|p| p.shutdown_xlog_pending = true);
+    // Signal-handler context: a single signal-safe `Cell` store, mirroring C's
+    // `ShutdownXLOGPending = true` write to a `volatile sig_atomic_t`. Must NOT
+    // touch the `RefCell<PrivateState>` (a `borrow_mut()` here would panic if the
+    // interrupted main-loop code already holds the borrow).
+    SHUTDOWN_XLOG_PENDING.with(|c| c.set(true));
     // SetLatch(MyLatch) — done by the host signal-handler shim.
 }
 

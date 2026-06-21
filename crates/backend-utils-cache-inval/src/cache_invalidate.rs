@@ -74,6 +74,39 @@ pub(crate) fn cache_invalidate_heap_tuple_common(
         return Ok(());
     }
 
+    let tuple_rel_id = relation.rd_id; /* RelationGetRelid(relation) */
+
+    /*
+     * First let the catcache do its thing.
+     *
+     * PrepareToInvalidateCacheTuple() may lazily initialize a not-yet-built
+     * catcache (CatalogCacheInitializeCache), which in turn fires syscache
+     * callbacks (CallSyscacheCallbacks) — i.e. it RE-ENTERS the invalidation
+     * machinery. We must therefore run it BEFORE taking the `with_state`
+     * borrow; doing it inside the borrow would make the re-entrant
+     * CallSyscacheCallbacks take a second `borrow_mut()` and panic
+     * ("already borrowed"). C's flat file-statics re-enter freely, so this is
+     * a port-introduced escalation. The request structs are plain Copy values,
+     * so we collect them into an owned Vec here and replay them under the
+     * borrow below. The scratch context hosts the transient PgVec the seam
+     * allocates (mirroring C's PrepareToInvalidateCacheTuple workspace).
+     */
+    let catcache_reqs: Vec<types_storage::PrepareToInvalidateCacheTuple> =
+        if catalog_seams::relation_invalidates_snapshots_only::call(tuple_rel_id) {
+            Vec::new()
+        } else {
+            let ctx = mcx::MemoryContext::new("PrepareToInvalidateCacheTuple");
+            let reqs = catcache_seams::prepare_to_invalidate_cache_tuple::call(
+                ctx.mcx(),
+                relation,
+                tuple,
+                tuple_data,
+                newtuple,
+                newtuple_data,
+            )?;
+            reqs.iter().copied().collect()
+        };
+
     with_state(|state| {
         let mcx = state.mcx;
 
@@ -84,10 +117,6 @@ pub(crate) fn cache_invalidate_heap_tuple_common(
             prepare_invalidation_state(mcx, state)?
         };
 
-        /*
-         * First let the catcache do its thing
-         */
-        let tuple_rel_id = relation.rd_id; /* RelationGetRelid(relation) */
         if catalog_seams::relation_invalidates_snapshots_only::call(tuple_rel_id) {
             let database_id = if catalog_seams::is_shared_relation::call(tuple_rel_id) {
                 InvalidOid
@@ -97,21 +126,10 @@ pub(crate) fn cache_invalidate_heap_tuple_common(
             register_snapshot_invalidation(mcx, state, info, database_id, tuple_rel_id)?;
         } else {
             /*
-             * PrepareToInvalidateCacheTuple(relation, tuple, newtuple,
-             *     RegisterCatcacheInvalidation, (void *) info)
-             *
              * The owned model returns one request per callback invocation in
              * the same order; replay each through RegisterCatcacheInvalidation.
              */
-            let reqs = catcache_seams::prepare_to_invalidate_cache_tuple::call(
-                mcx,
-                relation,
-                tuple,
-                tuple_data,
-                newtuple,
-                newtuple_data,
-            )?;
-            for req in reqs.iter() {
+            for req in &catcache_reqs {
                 register_catcache_invalidation(
                     mcx,
                     state,
