@@ -259,7 +259,7 @@ pub fn set_base_rel_sizes<'mcx>(
         // If parallelism is allowable for this query in general, see whether
         // it's allowable for this rel in particular (must precede set_rel_size).
         if parallel_mode_ok(root) {
-            set_rel_consider_parallel(run, root, rel, rti as Index);
+            set_rel_consider_parallel(run, root, rel, rti as Index)?;
         }
 
         set_rel_size(mcx, run, root, rel, rti as Index)?;
@@ -453,7 +453,7 @@ pub fn set_rel_consider_parallel<'mcx>(
     root: &mut PlannerInfo,
     rel: RelId,
     rti: Index,
-) {
+) -> PgResult<()> {
     debug_assert!(!root.rel(rel).consider_parallel);
     debug_assert!(parallel_mode_ok(root));
     debug_assert!(is_simple_rel(root.rel(rel)));
@@ -462,19 +462,19 @@ pub fn set_rel_consider_parallel<'mcx>(
     match rte::rte_rtekind::call(run, root, rti) {
         RTE_RELATION => {
             // Temp tables can't be accessed by workers.
-            if get_rel_persistence(rte::rte_relid::call(run, root, rti)) == RELPERSISTENCE_TEMP {
-                return;
+            if get_rel_persistence(rte::rte_relid::call(run, root, rti))? == RELPERSISTENCE_TEMP {
+                return Ok(());
             }
             // TABLESAMPLE pushdown safety (the sample function + args).
             if rte::rte_has_tablesample::call(run, root, rti) {
                 if !tablesample_is_parallel_safe(root, rti) {
-                    return;
+                    return Ok(());
                 }
             }
             // FDW parallel-safety dispatch.
             if rte::rte_relkind::call(run, root, rti) == RELKIND_FOREIGN_TABLE {
                 if !foreign_scan_parallel_safe(root, rel, rti) {
-                    return;
+                    return Ok(());
                 }
             }
             // Appendrel-specific considerations are handled in
@@ -483,40 +483,41 @@ pub fn set_rel_consider_parallel<'mcx>(
         RTE_SUBQUERY => {
             // Subquery-in-FROM is fine, except LIMIT/OFFSET.
             if subquery_limit_needed(root, rti) {
-                return;
+                return Ok(());
             }
         }
         RTE_FUNCTION => {
             if !rel_functions_parallel_safe(run, root, rti) {
-                return;
+                return Ok(());
             }
         }
-        RTE_TABLEFUNC => return, // not parallel safe
+        RTE_TABLEFUNC => return Ok(()), // not parallel safe
         RTE_VALUES => {
             if !rel_values_parallel_safe(run, root, rti) {
-                return;
+                return Ok(());
             }
         }
-        RTE_CTE => return,           // CTE tuplestores aren't shared
-        RTE_NAMEDTUPLESTORE => return, // tuplestore cannot be shared
+        RTE_CTE => return Ok(()),           // CTE tuplestores aren't shared
+        RTE_NAMEDTUPLESTORE => return Ok(()), // tuplestore cannot be shared
         RTE_RESULT => {}            // RESULT RTEs are fine
         _ => {
             // RTE_JOIN / RTE_GROUP: shouldn't happen for baserels.
-            return;
+            return Ok(());
         }
     }
 
     // If anything in baserestrictinfo is parallel-restricted, give up.
     if !baserestrictinfo_parallel_safe(root, rel) {
-        return;
+        return Ok(());
     }
     // If the rel's outputs are not parallel-safe, give up.
     if !reltarget_exprs_parallel_safe(root, rel) {
-        return;
+        return Ok(());
     }
 
     // We have a winner.
     root.rel_mut(rel).consider_parallel = true;
+    Ok(())
 }
 
 /* ==========================================================================
@@ -753,8 +754,8 @@ fn create_tidscan_paths<'mcx>(
 }
 
 /// `get_rel_persistence(relid)` (lsyscache.c).
-fn get_rel_persistence(relid: Oid) -> i8 {
-    seams::get_rel_persistence::call(relid)
+fn get_rel_persistence(relid: Oid) -> PgResult<i8> {
+    Ok(backend_utils_cache_lsyscache_seams::get_rel_persistence::call(relid)? as i8)
 }
 
 /// `set_foreign_size_estimates(root, rel)` (costsize.c).

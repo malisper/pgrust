@@ -161,7 +161,7 @@ pub fn set_append_rel_size<'mcx>(
 
         // Parallel-safety for the child (only if the appendrel is still safe).
         if parallel_mode_ok(root) && root.rel(rel).consider_parallel {
-            set_rel_consider_parallel(run, root, childrel, child_rtindex);
+            set_rel_consider_parallel(run, root, childrel, child_rtindex)?;
         }
 
         // Compute the child's size.

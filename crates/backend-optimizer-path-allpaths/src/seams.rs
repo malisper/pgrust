@@ -41,12 +41,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `get_rel_persistence(relid)` (lsyscache.c) — the relation persistence
-    /// char (`RELPERSISTENCE_TEMP`/`PERMANENT`/`UNLOGGED`).
-    pub fn get_rel_persistence(relid: Oid) -> i8
-);
-
-seam_core::seam!(
     /// `set_foreign_size_estimates(root, rel)` (costsize.c). Not yet a pub fn on
     /// the landed costsize crate.
     pub fn set_foreign_size_estimates(root: &mut PlannerInfo, rel: RelId)
