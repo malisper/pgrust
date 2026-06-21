@@ -144,6 +144,7 @@ backend-optimizer-plan-planner = { path = "../backend-optimizer-plan-planner" }
 # dependency records, opclass/coercion lookups for the equality operators.
 backend-commands-trigger = { path = "../backend-commands-trigger" }
 backend-catalog-pg-depend-seams = { path = "../backend-catalog-pg-depend-seams" }
+backend-catalog-pg-publication-seams = { path = "../backend-catalog-pg-publication-seams" }
 backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
 backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
