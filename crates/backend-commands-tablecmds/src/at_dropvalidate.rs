@@ -148,9 +148,9 @@ pub fn dropconstraint_internal<'mcx>(
     rel: &Relation<'mcx>,
     conoid: Oid,
     behavior: DropBehavior,
-    _recurse: bool,
+    recurse: bool,
     recursing: bool,
-    _missing_ok: bool,
+    missing_ok: bool,
     lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
     // Guard against stack overflow due to overly deep inheritance tree.
@@ -358,14 +358,155 @@ pub fn dropconstraint_internal<'mcx>(
         PgVec::new_in(mcx)
     };
 
-    if !children.is_empty() {
-        // C carries `colname` (resolved above for NOT NULL) into the per-child
-        // recursion; that one-level-at-a-time child loop is not reachable here.
-        let _ = &colname;
-        unported("DROP CONSTRAINT recursion to inheritance children (dropconstraint_internal child loop)");
+    // constrName = NameStr(con->conname) — the parent constraint's name, used to
+    // match the inherited child constraint by name (CHECK case).
+    let constr_name = conform.conname_str().to_string();
+    let parent_contype = conform.contype;
+
+    for &childrelid in children.iter() {
+        // find_inheritance_children already got lock.
+        let childrel = relation_open(mcx, childrelid, NoLock)?;
+        CheckAlterTableIsSafe(&childrel)?;
+
+        // We search for not-null constraints by column name, and others by
+        // constraint name.  Each lookup yields the child constraint's form plus
+        // the heap TID we write the coninhcount/conislocal update at.
+        let (mut childcon, child_tid, child_conoid): (
+            types_catalog::pg_constraint::FormData_pg_constraint,
+            types_tuple::heaptuple::ItemPointerData,
+            Oid,
+        ) = if parent_contype == CONSTRAINT_NOTNULL {
+            // tuple = findNotNullConstraint(childrelid, colname);
+            let colname = colname.as_deref().unwrap_or_default();
+            let tuple = backend_catalog_pg_constraint::findNotNullConstraint(
+                mcx, childrelid, colname,
+            )?
+            .ok_or_else(|| {
+                backend_utils_error::ereport(ERROR)
+                    .errmsg_internal(format!(
+                        "cache lookup failed for not-null constraint on column \"{colname}\" of relation {}",
+                        childrel.rd_id
+                    ))
+                    .into_error()
+            })?;
+            let form =
+                backend_utils_cache_syscache_seams::read_constraint_form::call(&tuple)?;
+            let oid = form.oid;
+            (form, tuple.tuple.t_self, oid)
+        } else {
+            // Scan (conrelid = childrelid, contypid = Invalid, conname = constrName);
+            // there can only be one.
+            let oid = backend_catalog_pg_constraint::get_relation_constraint_oid(
+                mcx, childrelid, &constr_name, true,
+            )?;
+            if !OidIsValid(oid) {
+                return Err(backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_UNDEFINED_OBJECT)
+                    .errmsg(format!(
+                        "constraint \"{constr_name}\" of relation \"{}\" does not exist",
+                        childrel.name()
+                    ))
+                    .into_error());
+            }
+            let copy =
+                backend_utils_cache_syscache_seams::search_constraint_form_by_oid::call(oid)?
+                    .ok_or_else(|| {
+                        backend_utils_error::ereport(ERROR)
+                            .errmsg_internal(format!("cache lookup failed for constraint {oid}"))
+                            .into_error()
+                    })?;
+            (copy.form, copy.tid, copy.form.oid)
+        };
+
+        // Right now only CHECK and not-null constraints can be inherited.
+        if childcon.contype != CONSTRAINT_CHECK && childcon.contype != CONSTRAINT_NOTNULL {
+            return Err(backend_utils_error::ereport(ERROR)
+                .errmsg_internal(
+                    "inherited constraint is not a CHECK or not-null constraint".to_string(),
+                )
+                .into_error());
+        }
+
+        if childcon.coninhcount <= 0 {
+            // shouldn't happen
+            return Err(backend_utils_error::ereport(ERROR)
+                .errmsg_internal(format!(
+                    "relation {childrelid} has non-inherited constraint \"{}\"",
+                    childcon.conname_str()
+                ))
+                .into_error());
+        }
+
+        if recurse {
+            // If the child constraint has other definition sources, just
+            // decrement its inheritance count; if not, recurse to delete it.
+            if childcon.coninhcount == 1 && !childcon.conislocal {
+                // Time to delete this child constraint, too.
+                dropconstraint_internal(
+                    mcx,
+                    &childrel,
+                    child_conoid,
+                    behavior,
+                    recurse,
+                    true,
+                    missing_ok,
+                    lockmode,
+                )?;
+            } else {
+                // Child constraint must survive my deletion.
+                childcon.coninhcount -= 1;
+                update_constraint_inhcount(mcx, &childcon, child_tid)?;
+
+                // Make update visible.
+                CommandCounterIncrement()?;
+            }
+        } else {
+            // If we were told to drop ONLY in this table (no recursion) and
+            // there are no further parents for this constraint, we need to mark
+            // the inheritors' constraints as locally defined rather than
+            // inherited.
+            childcon.coninhcount -= 1;
+            if childcon.coninhcount == 0 {
+                childcon.conislocal = true;
+            }
+            update_constraint_inhcount(mcx, &childcon, child_tid)?;
+
+            // Make update visible.
+            CommandCounterIncrement()?;
+        }
+
+        // table_close(childrel, NoLock): RAII drop.
+        childrel.close(NoLock)?;
     }
 
     Ok(conobj)
+}
+
+/// `CatalogTupleUpdate(conrel, &tuple->t_self, tuple)` for the child-recursion
+/// coninhcount/conislocal scribble in `dropconstraint_internal`: re-store the
+/// child `pg_constraint` row at `tid` with the (already-decremented) inheritance
+/// bookkeeping fields, carrying through every other column from `childcon`.
+fn update_constraint_inhcount<'mcx>(
+    mcx: Mcx<'mcx>,
+    childcon: &types_catalog::pg_constraint::FormData_pg_constraint,
+    tid: types_tuple::heaptuple::ItemPointerData,
+) -> PgResult<()> {
+    let conrel = relation_open(mcx, ConstraintRelationId, RowExclusiveLock)?;
+    let fields = types_catalog::pg_constraint::ConstraintFieldUpdate {
+        conname: childcon.conname,
+        connamespace: childcon.connamespace,
+        conislocal: childcon.conislocal,
+        coninhcount: childcon.coninhcount,
+        conparentid: childcon.conparentid,
+        convalidated: childcon.convalidated,
+        connoinherit: childcon.connoinherit,
+        conenforced: childcon.conenforced,
+        condeferrable: childcon.condeferrable,
+        condeferred: childcon.condeferred,
+    };
+    indexing_seam::catalog_tuple_update_pg_constraint::call(&conrel, tid, &fields)?;
+    conrel.close(RowExclusiveLock)?;
+    Ok(())
 }
 
 // ===========================================================================
