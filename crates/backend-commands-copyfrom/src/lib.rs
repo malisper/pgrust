@@ -13,12 +13,13 @@
 //! Faithful 1:1 port of the control flow of `BeginCopyFrom` (copyfrom.c:1529),
 //! `CopyFrom` (copyfrom.c:779) and `EndCopyFrom` (copyfrom.c:1914). The runtime
 //! path exercised end to end is the **plain-table, text-format, all-columns,
-//! no-default, single-insert** case (`CIM_SINGLE`); the partition-routing /
-//! FDW-batch / multi-insert-buffer / trigger / volatile-default branches are
-//! ported faithfully in structure but reach machinery that is gated behind a
-//! loud `ereport(ERROR)` (those paths bottom out on keystone-blocked
-//! subsystems — partition tuple routing, the FDW api, the trigger F1 front-half,
-//! and the `expression_planner` plan-layer gate for column defaults).
+//! single-insert** case (`CIM_SINGLE`), including row/statement/transition-table
+//! **triggers** (BEFORE/INSTEAD-OF/AFTER ROW and BEFORE/AFTER STATEMENT, with
+//! transition capture). The partition-routing / FDW-batch / multi-insert-buffer
+//! branches are ported faithfully in structure but reach machinery that is gated
+//! behind a loud `ereport(ERROR)` (those paths bottom out on keystone-blocked
+//! subsystems — partition tuple routing and the FDW api). Triggers force
+//! `CIM_SINGLE` in C, so the per-row single-insert path here is exact.
 //!
 //! # By-reference input values (resolved)
 //!
@@ -818,12 +819,6 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
             "CopyFrom: COPY FROM ... WHERE (ExecInitQual/ExecQual) is not yet wired",
         ));
     }
-    if state.cstate.rel.rd_trigdesc.is_some() {
-        return Err(unsupported(
-            "CopyFrom: COPY FROM into a table with triggers \
-             (trigger F1 front-half) is not yet wired",
-        ));
-    }
 
     // CommandId mycid = GetCurrentCommandId(true);
     let mycid = backend_access_transam_xact_seams::get_current_command_id::call(true)?;
@@ -867,10 +862,14 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         // ExecOpenIndices(resultRelInfo, false);
         backend_executor_execIndexing_seams::exec_open_indices::call(estate, rri, false)?;
 
-        // We do not set up a ModifyTableState / FDW init / batch size — CIM_SINGLE
-        // plain table. AfterTriggerBeginQuery / BS/AS statement triggers and the
-        // transition-capture setup are no-ops with no trigger descriptor; we skip
-        // them faithfully (the has-trigger case was gated above).
+        // We do not set up a ModifyTableState / FDW init / batch size. The fake
+        // ModifyTableState C builds (copyfrom.c:930-936) exists only so FDWs and
+        // ExecFindPartition work (both gated here); its only field the trigger
+        // path reads is mt_transition_capture, which we carry as the local
+        // `transition_capture` below. insertMethod is always CIM_SINGLE on the
+        // ported (plain-table) path: when BEFORE/INSTEAD-OF row triggers exist C
+        // forces CIM_SINGLE (copyfrom.c:995-1006), and the multi-insert buffer is
+        // not ported, so the per-row single-insert path below is the only one.
 
         // singleslot = table_slot_create(rri->ri_RelationDesc, &estate->es_tupleTable);
         // bistate = GetBulkInsertState();
@@ -922,6 +921,38 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
 
         let result_oid = relation_alias(estate, rri).rd_id;
 
+        // Prepare to catch AFTER triggers (copyfrom.c:960-961). Bumps the
+        // after-trigger query level; balanced by AfterTriggerEndQuery below.
+        backend_commands_trigger_seams::after_trigger_begin_query::call()?;
+
+        // If there are any triggers with transition tables on the named
+        // relation, be prepared to capture transition tuples
+        // (copyfrom.c:963-974). C assigns to both cstate->transition_capture and
+        // mtstate->mt_transition_capture; here it is the local `transition_capture`
+        // owner threaded into the AR (per-row) and AS (statement) trigger calls.
+        // `None` is the C NULL (no transition tables wanted for CMD_INSERT).
+        let mut transition_capture = backend_commands_trigger_seams::make_transition_capture_state::call(
+            mcx,
+            estate,
+            rri,
+            types_nodes::nodes::CmdType::CMD_INSERT,
+        )?;
+
+        // has_before_insert_row_trig / has_instead_insert_row_trig
+        // (copyfrom.c:1090-1094): precomputed from the result-rel's trigger
+        // descriptor; the per-row BEFORE/INSTEAD-OF calls are gated on these.
+        let (has_before_insert_row_trig, has_instead_insert_row_trig) = {
+            match estate.result_rel(rri).ri_TrigDesc.as_ref() {
+                Some(td) => (td.trig_insert_before_row, td.trig_insert_instead_row),
+                None => (false, false),
+            }
+        };
+
+        // Check BEFORE STATEMENT insertion triggers (copyfrom.c:1102). It
+        // can't change the COPY itself, but it can do anything else, including
+        // INSERTing into the destination table. No-op without a trigger desc.
+        backend_commands_trigger_seams::exec_bs_insert_triggers::call(estate, rri)?;
+
         let mut processed: u64 = 0;
         loop {
             // ResetPerTupleExprContext(estate);
@@ -947,63 +978,106 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
             // (re-)initialize tts_tableOid before constraints.
             estate.slot_mut(singleslot).tts_tableOid = result_oid;
 
-            // Compute stored generated columns (copyfrom.c L1347-1350): if the
-            // relation has a constraint descriptor with has_generated_stored,
-            // evaluate the per-column generation expressions and write them back
-            // into the slot before checking constraints.
+            // BEFORE ROW INSERT Triggers (copyfrom.c:1324-1331). A BEFORE ROW
+            // trigger may modify the slot (in place) or return "do nothing" — in
+            // which case this row is skipped (not inserted, not counted). The C
+            // sets `skip_tuple = true` and gates the whole insert body on
+            // `if (!skip_tuple)` rather than `continue`; an early `continue` is
+            // behaviorally identical here since nothing else follows in the loop.
+            if has_before_insert_row_trig
+                && !backend_commands_trigger_seams::exec_br_insert_triggers::call(
+                    estate, rri, singleslot,
+                )?
             {
-                let has_gen_stored = relation_alias(estate, rri)
-                    .rd_att
-                    .constr
-                    .as_ref()
-                    .map(|c| c.has_generated_stored)
-                    .unwrap_or(false);
-                if has_gen_stored {
-                    backend_executor_nodeModifyTable_seams::exec_compute_stored_generated::call(
-                        mcx,
-                        estate,
-                        rri,
-                        singleslot,
-                        types_nodes::nodes::CmdType::CMD_INSERT,
+                // "do nothing": skip this tuple.
+                continue;
+            }
+
+            // If there is an INSTEAD OF INSERT ROW trigger, let it handle the
+            // tuple. Otherwise proceed with inserting into the table
+            // (copyfrom.c:1338-1444).
+            if has_instead_insert_row_trig {
+                // ExecIRInsertTriggers(estate, resultRelInfo, myslot).
+                backend_commands_trigger_seams::exec_ir_insert_triggers::call(
+                    estate, rri, singleslot,
+                )?;
+            } else {
+                // Compute stored generated columns (copyfrom.c:1347-1350): if the
+                // relation has a constraint descriptor with has_generated_stored,
+                // evaluate the per-column generation expressions and write them
+                // back into the slot before checking constraints.
+                {
+                    let has_gen_stored = relation_alias(estate, rri)
+                        .rd_att
+                        .constr
+                        .as_ref()
+                        .map(|c| c.has_generated_stored)
+                        .unwrap_or(false);
+                    if has_gen_stored {
+                        backend_executor_nodeModifyTable_seams::exec_compute_stored_generated::call(
+                            mcx,
+                            estate,
+                            rri,
+                            singleslot,
+                            types_nodes::nodes::CmdType::CMD_INSERT,
+                        )?;
+                    }
+                }
+
+                // ExecConstraints: if the relation has constraints, check them.
+                if relation_alias(estate, rri).rd_att.constr.is_some() {
+                    backend_executor_execMain_seams::exec_constraints::call(
+                        estate, rri, singleslot,
                     )?;
                 }
-            }
 
-            // ExecConstraints: if the relation has constraints, check them.
-            if relation_alias(estate, rri).rd_att.constr.is_some() {
-                backend_executor_execMain_seams::exec_constraints::call(estate, rri, singleslot)?;
-            }
+                // table_tuple_insert(rel, myslot, mycid, ti_options, bistate);
+                {
+                    let rel = relation_alias(estate, rri);
+                    let slot_ref = estate.slot_data_mut(singleslot);
+                    backend_access_table_tableam::table_tuple_insert(
+                        mcx,
+                        &rel,
+                        slot_ref,
+                        mycid,
+                        ti_options,
+                        Some(&mut bistate),
+                    )?;
+                }
 
-            // table_tuple_insert(rel, myslot, mycid, ti_options, bistate);
-            {
-                let rel = relation_alias(estate, rri);
-                let slot_ref = estate.slot_data_mut(singleslot);
-                backend_access_table_tableam::table_tuple_insert(
-                    mcx,
-                    &rel,
-                    slot_ref,
-                    mycid,
-                    ti_options,
-                    Some(&mut bistate),
-                )?;
-            }
+                // index entries. C captures recheckIndexes and threads it into
+                // ExecARInsertTriggers; the recheck list is only used by deferred
+                // unique-index checks, which the AR queue replays — pass the
+                // produced OID list straight through.
+                let recheck_indexes: mcx::PgVec<'mcx, Oid> =
+                    if estate.result_rel(rri).ri_NumIndices > 0 {
+                        backend_executor_execIndexing_seams::exec_insert_index_tuples::call(
+                            mcx,
+                            estate,
+                            rri,
+                            singleslot,
+                            false,
+                            false,
+                            None,
+                            &[],
+                            false,
+                        )?
+                    } else {
+                        mcx::PgVec::new_in(mcx)
+                    };
 
-            // index entries.
-            if estate.result_rel(rri).ri_NumIndices > 0 {
-                let _recheck = backend_executor_execIndexing_seams::exec_insert_index_tuples::call(
-                    mcx,
+                // AFTER ROW INSERT Triggers (copyfrom.c:1441-1443) — unconditional
+                // (the trig_after_row guard is internal to ExecARInsertTriggers),
+                // queues the AFTER ROW event and captures the NEW tuple for any
+                // transition table via `transition_capture`.
+                backend_commands_trigger_seams::exec_ar_insert_triggers::call(
                     estate,
                     rri,
                     singleslot,
-                    false,
-                    false,
-                    None,
-                    &[],
-                    false,
+                    &recheck_indexes,
+                    transition_capture.as_deref_mut(),
                 )?;
             }
-
-            // ExecARInsertTriggers: no-op with no trigger descriptor.
 
             processed += 1;
         }
@@ -1011,7 +1085,24 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         // FreeBulkInsertState(bistate).
         backend_access_heap_heapam::FreeBulkInsertState(&mut bistate);
 
-        // AfterTriggerEndQuery / ExecASInsertTriggers: no-op (no triggers).
+        // Execute AFTER STATEMENT insertion triggers (copyfrom.c:1484-1485) —
+        // unconditional on the target result-rel (the trig_after_statement guard
+        // is internal to ExecASInsertTriggers), threading the statement-level
+        // transition capture.
+        backend_commands_trigger_seams::exec_as_insert_triggers::call(
+            estate,
+            rri,
+            transition_capture.as_deref_mut(),
+        )?;
+
+        // Handle queued AFTER triggers (copyfrom.c:1487-1488): fire this query
+        // level's AFTER IMMEDIATE events, balancing AfterTriggerBeginQuery above.
+        backend_commands_trigger_seams::after_trigger_end_query::call(estate)?;
+
+        // Drop the transition-capture state before tearing down the executor
+        // state it borrows from (its tuplestores live in the AfterTriggers cxt).
+        drop(transition_capture);
+
         // ExecResetTupleTable / ExecCloseResultRelations / ExecCloseRangeTableRelations.
         backend_executor_execUtils::ExecResetTupleTable(estate, false)?;
         backend_executor_execUtils::ExecCloseResultRelations(estate)?;
