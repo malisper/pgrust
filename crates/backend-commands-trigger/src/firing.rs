@@ -2472,6 +2472,7 @@ fn exec_ar_insert_triggers_impl<'mcx>(
         TRIGGER_EVENT_INSERT,
         /* row_trigger */ true,
         /* old_ctid */ None,
+        /* oldslot */ None,
         /* newslot */ Some(slot),
         recheck_indexes,
         tc.as_deref(),
@@ -2848,6 +2849,7 @@ fn after_trigger_save_event<'mcx>(
     event: u32,
     row_trigger: bool,
     old_ctid: Option<ItemPointerData>,
+    oldslot: Option<types_nodes::SlotId>,
     newslot: Option<types_nodes::SlotId>,
     recheck_indexes: &[Oid],
     tc: Option<&types_nodes::modifytable::TransitionCaptureState>,
@@ -2990,25 +2992,61 @@ fn after_trigger_save_event<'mcx>(
     // for (i = 0; i < trigdesc->numtriggers; i++) { ... afterTriggerAddEvent }
     // Collect the matching triggers first (immutable borrow of estate), then add
     // events into the query-level list.
-    let trigs: Vec<(Oid, bool, bool, Oid, Oid, bool)> = {
+    // First pass: collect the type-matching triggers (immutable borrow), carrying
+    // their index so the WHEN-clause (tgqual) leg of TriggerEnabled can key
+    // ri_TrigWhenExprs[i]. The replication-role / WHEN-qual check runs in the
+    // second pass, which needs &mut estate (predicate compile + ExecQual).
+    let candidates: Vec<(usize, i8, bool, Oid, bool, bool, Oid, Oid, bool)> = {
         let rri = estate.result_rel(relinfo);
         let trigdesc = rri
             .ri_TrigDesc
             .as_ref()
             .expect("AfterTriggerSaveEvent: ri_TrigDesc is NULL but event reached save");
         let mut out = Vec::new();
-        for trig in trigdesc.triggers.iter() {
+        for (i, trig) in trigdesc.triggers.iter().enumerate() {
             if !TRIGGER_TYPE_MATCHES(trig.tgtype, tgtype_level, TRIGGER_TYPE_AFTER, tgtype_event) {
                 continue;
             }
-            // TriggerEnabled(estate, relinfo, trigger, event, ...). The WHEN-clause
-            // (tgqual) leg compiles an ExprState (ExecPrepareQual / stringToNode),
-            // which is the #159 plan-layer gate — keep it loud. The no-WHEN common
-            // case is the replication-role / tgenabled check below.
-            if trig.tgqual.is_some() {
-                return Err(when_qual_unported());
-            }
-            if !trigger_enabled_no_qual(trig.tgenabled) {
+            out.push((
+                i,
+                trig.tgenabled,
+                trig.tgqual.is_some(),
+                trig.tgoid,
+                trig.tgdeferrable,
+                trig.tginitdeferred,
+                trig.tgconstrindid,
+                trig.tgfoid,
+                trig.tgoldtable.is_some() || trig.tgnewtable.is_some(),
+            ));
+        }
+        out
+    };
+
+    // Second pass: run TriggerEnabled (replication-role / tgenabled + the WHEN
+    // tgqual ExprState eval against oldslot/newslot) for each candidate, then the
+    // FK-enforcement / unique-recheck skips, and collect the survivors to queue.
+    let mut trigs: Vec<(Oid, bool, bool, Oid, Oid, bool)> = Vec::new();
+    for (i, tgenabled, has_qual, tgoid, tgdeferrable, tginitdeferred, tgconstrindid, tgfoid, uses_transition) in
+        candidates
+    {
+        {
+            // TriggerEnabled(estate, relinfo, trigger, event, modifiedCols,
+            // oldslot, newslot). A statement event (row_trigger == false) has no
+            // WHEN clause and no slots, reducing to the no-qual check; a row event
+            // evaluates the WHEN qual against the OLD/NEW slots. tgnattr (the
+            // column-specific UPDATE check) is ignored here as on the BR/AR paths.
+            let enabled = trigger_enabled(
+                estate,
+                relinfo,
+                i,
+                tgenabled,
+                /* tgnattr */ 0,
+                has_qual,
+                event,
+                oldslot,
+                newslot,
+            )?;
+            if !enabled {
                 continue;
             }
             // FK-enforcement-trigger skip (trigger.c:6442). On UPDATE/DELETE,
@@ -3023,25 +3061,21 @@ fn after_trigger_save_event<'mcx>(
             // in recheckIndexes (otherwise uniqueness was definitely not
             // violated). F_UNIQUE_KEY_RECHECK == 1250 (pg_proc.dat).
             const F_UNIQUE_KEY_RECHECK: Oid = 1250;
-            if trig.tgfoid == F_UNIQUE_KEY_RECHECK
-                && !recheck_indexes.contains(&trig.tgconstrindid)
-            {
+            if tgfoid == F_UNIQUE_KEY_RECHECK && !recheck_indexes.contains(&tgconstrindid) {
                 continue;
             }
             // Whether this trigger uses a transition table (tgoldtable/tgnewtable);
             // the shared record's ats_table is only set for such a trigger.
-            let uses_transition = trig.tgoldtable.is_some() || trig.tgnewtable.is_some();
-            out.push((
-                trig.tgoid,
-                trig.tgdeferrable,
-                trig.tginitdeferred,
-                trig.tgconstrindid,
-                trig.tgfoid,
+            trigs.push((
+                tgoid,
+                tgdeferrable,
+                tginitdeferred,
+                tgconstrindid,
+                tgfoid,
                 uses_transition,
             ));
         }
-        out
-    };
+    }
 
     let qd = query_depth as usize;
     for (tgoid, tgdeferrable, tginitdeferred, _tgconstrindid, _tgfoid, uses_transition) in trigs {
@@ -3242,17 +3276,6 @@ fn trigger_enabled_no_qual(tgenabled: i8) -> bool {
     true
 }
 
-#[cold]
-#[inline(never)]
-fn when_qual_unported() -> PgError {
-    PgError::error(
-        "TriggerEnabled: a WHEN-clause (tgqual) trigger needs ExecPrepareQual / \
-         stringToNode to compile the predicate into ri_TrigWhenExprs (the #159 \
-         plan-layer expression gate) — not ported"
-            .to_string(),
-    )
-}
-
 // ---- ROW DELETE (trigger.c:2702-2849) ----
 
 fn exec_br_delete_triggers_impl<'mcx>(
@@ -3420,13 +3443,13 @@ fn exec_ar_delete_triggers_impl<'mcx>(
     // C: TupleTableSlot *slot = ExecGetTriggerOldSlot(estate, relinfo);
     //    GetTupleForTrigger(... tupleid ... slot ...);   (fetches the OLD tuple)
     //    AfterTriggerSaveEvent(... slot, transition_capture ...);
-    // The OLD slot is only needed for the transition-table capture; the queued
-    // event records the OLD ctid (re-fetched at fire time).  So when a delete
-    // transition table is active, fetch the OLD tuple into the OLD slot and spool
-    // it.  We use the SnapshotAny fetch (`fetch_trigger_tuple`) — the same view
-    // AFTER triggers use — and force-store it into the OLD slot, avoiding the
-    // EPQ-recheck machinery (an AFTER-ROW delete does not re-lock).
-    if cap_old {
+    // The OLD slot is always fetched when an AFTER-ROW DELETE trigger exists (or a
+    // delete transition table is active): AfterTriggerSaveEvent needs the OLD row
+    // to evaluate a WHEN (OLD...) clause, and a transition table needs it spooled.
+    // We use the SnapshotAny fetch (`fetch_trigger_tuple`) — the same view AFTER
+    // triggers use — and force-store it into the OLD slot, avoiding the EPQ-recheck
+    // machinery (an AFTER-ROW delete does not re-lock).
+    let oldslot = {
         let mcx = estate.es_query_cxt;
         let rel_oid = estate
             .result_rel(relinfo)
@@ -3434,16 +3457,16 @@ fn exec_ar_delete_triggers_impl<'mcx>(
             .as_ref()
             .map(|r| r.rd_id)
             .expect("ExecARDeleteTriggers: ResultRelInfo has no relation");
-        let oldslot =
+        let slot =
             backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
         let formed = fetch_trigger_tuple(mcx, rel_oid, &old_ctid)?;
         let formed_mcx = formed.clone_in(mcx)?;
         backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
-            estate,
-            oldslot,
-            formed_mcx,
-            false,
+            estate, slot, formed_mcx, false,
         )?;
+        slot
+    };
+    if cap_old {
         let tcs = tc.expect("cap_old implies transition_capture is present");
         capture_transition_tuples(
             estate,
@@ -3463,6 +3486,7 @@ fn exec_ar_delete_triggers_impl<'mcx>(
         TRIGGER_EVENT_DELETE,
         /* row_trigger */ true,
         /* old_ctid */ Some(old_ctid),
+        /* oldslot */ Some(oldslot),
         /* newslot */ None,
         &[],
         tc,
@@ -3851,38 +3875,40 @@ fn exec_ar_update_triggers_impl<'mcx>(
     };
     let ns = newslot.expect("ExecARUpdateTriggers: a non-FDW update needs a newslot");
 
-    // Capture the OLD (fetched into the OLD slot) and NEW transition tuples for
-    // an UPDATE.  C fetches the OLD slot via GetTupleForTrigger; we fetch by ctid
-    // under SnapshotAny (the AFTER-trigger view) and force-store it.
+    // C always fetches the OLD slot via GetTupleForTrigger when an AFTER-ROW
+    // UPDATE trigger exists (or either update transition table is wanted):
+    // AfterTriggerSaveEvent needs the OLD row to evaluate a WHEN (OLD...) clause,
+    // and the update-old transition table needs it spooled. We fetch by ctid under
+    // SnapshotAny (the AFTER-trigger view) and force-store it into the OLD slot.
+    let oldslot = {
+        let mcx = estate.es_query_cxt;
+        let rel_oid = estate
+            .result_rel(relinfo)
+            .ri_RelationDesc
+            .as_ref()
+            .map(|r| r.rd_id)
+            .expect("ExecARUpdateTriggers: ResultRelInfo has no relation");
+        let octid = old_ctid.expect("ExecARUpdateTriggers UPDATE needs the old ctid");
+        let slot =
+            backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
+        let formed = fetch_trigger_tuple(mcx, rel_oid, &octid)?;
+        let formed_mcx = formed.clone_in(mcx)?;
+        backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+            estate, slot, formed_mcx, false,
+        )?;
+        slot
+    };
+
+    // Capture the OLD/NEW transition tuples for an UPDATE.
     if cap_old || cap_new {
-        // Build the OLD slot only when the update-old transition table is wanted.
-        let oldslot = if cap_old {
-            let mcx = estate.es_query_cxt;
-            let rel_oid = estate
-                .result_rel(relinfo)
-                .ri_RelationDesc
-                .as_ref()
-                .map(|r| r.rd_id)
-                .expect("ExecARUpdateTriggers: ResultRelInfo has no relation");
-            let octid = old_ctid.expect("cap_old UPDATE needs the old ctid");
-            let slot =
-                backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
-            let formed = fetch_trigger_tuple(mcx, rel_oid, &octid)?;
-            let formed_mcx = formed.clone_in(mcx)?;
-            backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
-                estate, slot, formed_mcx, false,
-            )?;
-            Some(slot)
-        } else {
-            None
-        };
+        let oldslot_cap = if cap_old { Some(oldslot) } else { None };
         let newslot_cap = if cap_new { Some(ns) } else { None };
         let tcs = tc.as_deref().expect("cap_old/cap_new implies transition_capture present");
         capture_transition_tuples(
             estate,
             relinfo,
             TRIGGER_EVENT_UPDATE,
-            oldslot,
+            oldslot_cap,
             newslot_cap,
             tcs,
         )?;
@@ -3898,6 +3924,7 @@ fn exec_ar_update_triggers_impl<'mcx>(
         TRIGGER_EVENT_UPDATE,
         /* row_trigger */ true,
         /* old_ctid */ old_ctid,
+        /* oldslot */ Some(oldslot),
         /* newslot */ Some(ns),
         recheck_indexes,
         tc.as_deref(),
