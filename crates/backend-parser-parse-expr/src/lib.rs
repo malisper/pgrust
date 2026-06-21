@@ -115,7 +115,7 @@ use types_nodes::nodes::{self, ntag, Node};
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::{
     Aggref, ArrayExpr, BoolTestType, BooleanTest, CaseExpr, CaseTestExpr, CaseWhen, CoalesceExpr,
-    CoercionForm, CollateExpr, CurrentOfExpr, Expr, JsonBehavior, JsonBehaviorType,
+    CoercionForm, CollateExpr, CurrentOfExpr, Expr, FuncExpr, JsonBehavior, JsonBehaviorType,
     JsonConstructorType, JsonEncoding, JsonExpr, JsonExprOp, JsonFormat,
     JsonFormatType, JsonQuotes, JsonReturning, JsonValueExpr as CookedJsonValueExpr, JsonValueType,
     JsonWrapper, MergeSupportFunc, MinMaxExpr, MinMaxOp,
@@ -133,7 +133,8 @@ use types_parsenodes::CoercionContext;
 use backend_utils_error::ereport;
 use backend_nodes_core::makefuncs::{
     make_bool_const, make_bool_expr, make_const, make_func_expr, make_json_behavior,
-    make_json_constructor_expr, make_json_format, make_json_is_predicate, make_target_entry,
+    make_json_constructor_expr, make_json_format, make_json_is_predicate, make_json_value_expr,
+    make_target_entry,
 };
 use backend_nodes_core::nodefuncs::{
     expr_collation, expr_location, expr_type, expr_typmod, expression_returns_set,
@@ -4309,19 +4310,88 @@ fn transformXmlSerialize<'mcx>(
 // executor (`ExecEvalJsonConstructor`) builds it, exactly as in C.
 // ===========================================================================
 
-/// `makeJsonByteaToTextConversion(expr, format, location)` (parse_expr.c:3287) —
-/// `convert_from(expr, <encoding>)`. The encoding `Const` is a by-ref `name`;
-/// this narrow path (FORMAT JSON over a `bytea` input) is not yet ported.
-fn make_json_bytea_to_text_conversion<'mcx>(
-    _pstate: &mut ParseState<'mcx>,
-    _expr: Expr,
-    _format: &Option<JsonFormat>,
-    _location: i32,
+/// `getJsonEncodingConst(format)` (parse_expr.c:3249) — a NAMEOID `Const`
+/// carrying the JSON encoding name (UTF8 default). A `name` is a fixed-length
+/// pass-by-reference value: it crosses the by-ref lane as a NUL-padded
+/// `NAMEDATALEN` buffer with no varlena header (the canonical `name` framing),
+/// exactly as `convert_from`'s name arg reads it back.
+fn get_json_encoding_const<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    format: &Option<JsonFormat>,
 ) -> PgResult<Expr> {
-    Err(ereport(ERROR)
-        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-        .errmsg("FORMAT JSON ENCODING over bytea input is not yet supported")
-        .into_error())
+    let encoding = match format {
+        Some(f)
+            if f.format_type != JsonFormatType::JS_FORMAT_DEFAULT
+                && f.encoding != JsonEncoding::JS_ENC_DEFAULT =>
+        {
+            f.encoding
+        }
+        _ => JsonEncoding::JS_ENC_UTF8,
+    };
+
+    let enc: &str = match encoding {
+        JsonEncoding::JS_ENC_UTF16 => "UTF16",
+        JsonEncoding::JS_ENC_UTF32 => "UTF32",
+        JsonEncoding::JS_ENC_UTF8 => "UTF8",
+        other => {
+            return Err(PgError::error(alloc::format!(
+                "invalid JSON encoding: {}",
+                other as i32
+            )));
+        }
+    };
+
+    // namestrcpy into a NAMEDATALEN-byte NUL-padded buffer.
+    let namedatalen = types_core::NAMEDATALEN as usize;
+    let mut buf = alloc::vec![0u8; namedatalen];
+    let bytes = enc.as_bytes();
+    let n = bytes.len().min(namedatalen - 1);
+    buf[..n].copy_from_slice(&bytes[..n]);
+
+    let value = Datum::ByRef(mcx::slice_in(mcx, &buf)?);
+
+    // makeConst(NAMEOID, -1, InvalidOid, NAMEDATALEN, NameGetDatum(encname),
+    //           false, false)
+    Ok(Expr::Const(make_const(
+        mcx,
+        NAMEOID,
+        -1,
+        InvalidOid,
+        types_core::NAMEDATALEN,
+        value,
+        false,
+        false,
+    )?))
+}
+
+/// `makeJsonByteaToTextConversion(expr, format, location)` (parse_expr.c:3287) —
+/// `convert_from(expr, <encoding>)` decoding the bytea input per the JSON
+/// FORMAT ENCODING before JSON parsing.
+fn make_json_bytea_to_text_conversion<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    expr: Expr,
+    format: &Option<JsonFormat>,
+    location: i32,
+) -> PgResult<Expr> {
+    let mcx = aexpr_clone_ctx(pstate);
+    let encoding = get_json_encoding_const(mcx, format)?;
+
+    // makeFuncExpr(F_CONVERT_FROM, TEXTOID, list_make2(expr, encoding),
+    //              InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+    // then fexpr->location = location.
+    let fexpr = FuncExpr {
+        funcid: F_CONVERT_FROM,
+        funcresulttype: TEXTOID,
+        funcretset: false,
+        funcvariadic: false,
+        funcformat: CoercionForm::COERCE_EXPLICIT_CALL,
+        funccollid: InvalidOid,
+        inputcollid: InvalidOid,
+        args: alloc::vec![expr, encoding],
+        location,
+    };
+
+    Ok(Expr::FuncExpr(fexpr))
 }
 
 /// `checkJsonOutputFormat(pstate, format, targettype, allow_format)`
@@ -4959,27 +5029,37 @@ fn transformJsonSerializeExpr<'mcx>(
         false,
     )?;
 
-    let returning = transform_json_output(pstate, jsexpr.output.as_deref(), true)?;
+    let returning: JsonReturning;
 
-    if OidIsValid(returning.typid) {
-        let (typcategory, _typispreferred) =
-            lsyscache::get_type_category_preferred::call(returning.typid)?;
-        if returning.typid != BYTEAOID && typcategory != TYPCATEGORY_STRING {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_DATATYPE_MISMATCH)
-                .errmsg(alloc::format!(
-                    "cannot use RETURNING type {} in {}",
-                    format_type_be(returning.typid).unwrap_or_else(|_| String::from("?")),
-                    "JSON_SERIALIZE()"
-                ))
-                .into_error());
+    if jsexpr.output.is_some() {
+        returning = transform_json_output(pstate, jsexpr.output.as_deref(), true)?;
+
+        if returning.typid != BYTEAOID {
+            let (typcategory, _typispreferred) =
+                lsyscache::get_type_category_preferred::call(returning.typid)?;
+            if typcategory != TYPCATEGORY_STRING {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_DATATYPE_MISMATCH)
+                    .errmsg(alloc::format!(
+                        "cannot use type {} in RETURNING clause of {}",
+                        format_type_be(returning.typid).unwrap_or_else(|_| String::from("?")),
+                        "JSON_SERIALIZE()"
+                    ))
+                    .errhint("Try returning a string type or bytea.")
+                    .into_error());
+            }
         }
     } else {
-        // RETURNING text by default
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("JSON_SERIALIZE() without explicit RETURNING is not yet supported")
-            .into_error());
+        // RETURNING TEXT FORMAT JSON is by default
+        returning = JsonReturning {
+            format: Some(make_json_format(
+                JsonFormatType::JS_FORMAT_JSON,
+                JsonEncoding::JS_ENC_DEFAULT,
+                -1,
+            )),
+            typid: TEXTOID,
+            typmod: -1,
+        };
     }
 
     build_json_constructor_expr(
@@ -4994,6 +5074,70 @@ fn transformJsonSerializeExpr<'mcx>(
     )
 }
 
+/// `transformJsonParseArg(pstate, jsexpr, format, exprtype)`
+/// (parse_expr.c:4061) — prepare the input document of `JSON()` / `IS JSON`:
+/// coerce the (string/bytea) argument to text. Returns the prepared expression
+/// and reports the resulting type via `exprtype`.
+fn transform_json_parse_arg<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    raw: Option<Node<'mcx>>,
+    format: &Option<JsonFormat>,
+) -> PgResult<(Expr, Oid)> {
+    let raw_expr = transformExprRecurse(pstate, raw)?
+        .ok_or_else(|| PgError::error("transformJsonParseArg: NULL argument"))?;
+
+    let mut exprtype = expr_type(Some(&raw_expr))?;
+    let expr: Expr;
+
+    // prepare input document
+    if exprtype == BYTEAOID {
+        let raw_clone = raw_expr.clone_in(aexpr_clone_ctx(pstate))?;
+        let location = expr_location(Some(&raw_expr))?;
+        let converted = make_json_bytea_to_text_conversion(pstate, raw_expr, format, location)?;
+        exprtype = TEXTOID;
+
+        // jve = makeJsonValueExpr(raw_expr, converted, format);
+        let jve =
+            make_json_value_expr(Some(raw_clone), Some(converted), *format);
+        expr = Expr::JsonValueExpr(jve);
+    } else {
+        let mut e = raw_expr;
+        let (typcategory, _typispreferred) =
+            lsyscache::get_type_category_preferred::call(exprtype)?;
+
+        if exprtype == UNKNOWNOID || typcategory == TYPCATEGORY_STRING {
+            e = coerce::coerce_to_target_type::call(
+                pstate,
+                e,
+                exprtype,
+                TEXTOID,
+                -1,
+                CoercionContext::COERCION_IMPLICIT,
+                CoercionForm::COERCE_IMPLICIT_CAST,
+                -1,
+            )?
+            .ok_or_else(|| {
+                PgError::error("transformJsonParseArg: cannot coerce string input to text")
+            })?;
+            exprtype = TEXTOID;
+        }
+
+        if let Some(f) = format.as_ref() {
+            if f.encoding != JsonEncoding::JS_ENC_DEFAULT {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errposition(parser_errposition(pstate, f.location))
+                    .errmsg("cannot use JSON FORMAT ENCODING clause for non-bytea input types")
+                    .into_error());
+            }
+        }
+
+        expr = e;
+    }
+
+    Ok((expr, exprtype))
+}
+
 /// `transformJsonParseExpr(pstate, jsexpr)` (parse_expr.c:4174).
 fn transformJsonParseExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
@@ -5006,30 +5150,48 @@ fn transformJsonParseExpr<'mcx>(
         .as_ref()
         .ok_or_else(|| PgError::error("JSON(): missing argument"))?;
 
-    if jsexpr.unique_keys {
-        // Coercing this slightly differently (with UNIQUE KEYS) needs the
-        // transformJsonParseArg + json IS-unique check path which is not yet
-        // ported; report the gap precisely.
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("JSON(... WITH UNIQUE KEYS) is not yet supported")
-            .into_error());
-    }
+    let arg = if jsexpr.unique_keys {
+        // Coerce string argument to text and then to json[b] in the executor
+        // node with key uniqueness check.
+        let raw = boxed_node(
+            arg_ve
+                .raw_expr
+                .as_ref()
+                .map(|p| p.clone_in(aexpr_clone_ctx(pstate)))
+                .transpose()?
+                .map(|n| mcx::alloc_in(aexpr_clone_ctx(pstate), n))
+                .transpose()?,
+        );
 
-    let arg = transform_json_value_expr(
-        pstate,
-        "JSON()",
-        arg_ve,
-        JsonFormatType::JS_FORMAT_JSON,
-        returning.typid,
-        false,
-    )?;
+        let (arg, arg_type) = transform_json_parse_arg(pstate, raw, &arg_ve.format)?;
+
+        if arg_type != TEXTOID {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_DATATYPE_MISMATCH)
+                .errmsg("cannot use non-string types with WITH UNIQUE KEYS clause")
+                .errposition(parser_errposition(pstate, jsexpr.location))
+                .into_error());
+        }
+
+        arg
+    } else {
+        // Coerce argument to target type using CAST for compatibility with PG
+        // function-like CASTs.
+        transform_json_value_expr(
+            pstate,
+            "JSON()",
+            arg_ve,
+            JsonFormatType::JS_FORMAT_JSON,
+            returning.typid,
+            false,
+        )?
+    };
 
     build_json_constructor_expr(
         pstate,
         JsonConstructorType::JSCTOR_JSON_PARSE,
-        Vec::new(),
-        Some(arg),
+        alloc::vec![arg],
+        None,
         returning,
         jsexpr.unique_keys,
         false,
