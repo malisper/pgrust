@@ -49,6 +49,7 @@ types-stringinfo = { path = "../types-stringinfo" }
 # Outward seams (would cycle as direct deps).
 backend-commands-copy-seams = { path = "../backend-commands-copy-seams" }
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
 backend-executor-execIndexing-seams = { path = "../backend-executor-execIndexing-seams" }

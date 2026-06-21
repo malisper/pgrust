@@ -6726,6 +6726,7 @@ dependencies = [
  "backend-executor-execTuples",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils",
+ "backend-executor-execUtils-seams",
  "backend-executor-nodeModifyTable-seams",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
