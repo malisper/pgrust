@@ -546,11 +546,11 @@ fn skip_decrement(
     _rel: &Relation,
     decrement: Option<types_sortsupport::SkipSupportIncDecId>,
     arg: &Datum,
-) -> (Datum<'static>, bool) {
+) -> PgResult<(Datum<'static>, bool)> {
     let id = decrement
         .expect("_bt_array_decrement: skip array's decrement callback must be set");
-    let (res, underflow) = nbtcompare::run_skip_decrement::call(id, datum_to_word(arg));
-    (word_to_datum(res), underflow)
+    let (res, underflow) = nbtcompare::run_skip_decrement::call(id, datum_to_word(arg)?);
+    Ok((word_to_datum(res), underflow))
 }
 
 /// `array->sksup->increment(rel, sk_argument, &overflow)` — opclass skip
@@ -560,24 +560,28 @@ fn skip_increment(
     _rel: &Relation,
     increment: Option<types_sortsupport::SkipSupportIncDecId>,
     arg: &Datum,
-) -> (Datum<'static>, bool) {
+) -> PgResult<(Datum<'static>, bool)> {
     let id = increment
         .expect("_bt_array_increment: skip array's increment callback must be set");
-    let (res, overflow) = nbtcompare::run_skip_increment::call(id, datum_to_word(arg));
-    (word_to_datum(res), overflow)
+    let (res, overflow) = nbtcompare::run_skip_increment::call(id, datum_to_word(arg)?);
+    Ok((word_to_datum(res), overflow))
 }
 
 /// Convert a canonical by-value `Datum` into the bare-word fmgr-seam `Datum`
 /// the skip-support kernels operate on (the trivial skip-support types are all
 /// pass-by-value). A by-reference argument is not produced for these types.
 #[inline]
-fn datum_to_word(d: &Datum) -> types_datum::Datum {
+fn datum_to_word(d: &Datum) -> PgResult<types_datum::Datum> {
     match d {
-        Datum::ByVal(w) => types_datum::Datum::from_usize(*w),
-        _ => panic!(
-            "_bt_array_increment/decrement: by-reference skip-support argument not produced \
-             for a trivial skip-support type"
-        ),
+        Datum::ByVal(w) => Ok(types_datum::Datum::from_usize(*w)),
+        // Unreachable for the registered (all pass-by-value) skip-support types;
+        // a by-ref argument would only arise once uuid/date/timestamp skip
+        // support is registered (a separate keystone). Degrade to a clean query
+        // error rather than killing the backend.
+        _ => Err(PgError::error(
+            "_bt_array_increment/decrement: by-reference skip-support argument \
+             not supported for a trivial skip-support type",
+        )),
     }
 }
 
@@ -1251,7 +1255,7 @@ fn bt_array_decrement<'mcx>(
 
     // Ask opclass support routine for a decremented copy of sk_argument.
     let decrement = array.sksup_data.as_ref().and_then(|d| d.decrement);
-    let (dec_sk_argument, uflow) = skip_decrement(rel, decrement, &skey.sk_argument);
+    let (dec_sk_argument, uflow) = skip_decrement(rel, decrement, &skey.sk_argument)?;
     if uflow {
         // dec_sk_argument has undefined value (so no pfree).
         if array.null_elem && (skey.sk_flags & SK_BT_NULLS_FIRST) != 0 {
@@ -1341,7 +1345,7 @@ fn bt_array_increment<'mcx>(
 
     // Ask opclass support routine for an incremented copy of sk_argument.
     let increment = array.sksup_data.as_ref().and_then(|d| d.increment);
-    let (inc_sk_argument, oflow) = skip_increment(rel, increment, &skey.sk_argument);
+    let (inc_sk_argument, oflow) = skip_increment(rel, increment, &skey.sk_argument)?;
     if oflow {
         if array.null_elem && (skey.sk_flags & SK_BT_NULLS_FIRST) == 0 {
             bt_skiparray_set_isnull(rel, skey, array);

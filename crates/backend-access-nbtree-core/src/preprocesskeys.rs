@@ -284,12 +284,12 @@ fn skip_decrement(
     _rel: &Relation,
     decrement: Option<types_sortsupport::SkipSupportIncDecId>,
     arg: &Datum,
-) -> (Datum<'static>, bool) {
+) -> PgResult<(Datum<'static>, bool)> {
     let id = decrement
         .expect("_bt_skiparray_strat_decrement: skip array's decrement callback must be set");
     let (res, underflow) =
-        nbtcompare::run_skip_decrement::call(id, datum_to_word(arg));
-    (word_to_datum(res), underflow)
+        nbtcompare::run_skip_decrement::call(id, datum_to_word(arg)?);
+    Ok((word_to_datum(res), underflow))
 }
 
 /// `array->sksup->increment(rel, sk_argument, &overflow)` — opclass skip-support
@@ -298,25 +298,30 @@ fn skip_increment(
     _rel: &Relation,
     increment: Option<types_sortsupport::SkipSupportIncDecId>,
     arg: &Datum,
-) -> (Datum<'static>, bool) {
+) -> PgResult<(Datum<'static>, bool)> {
     let id = increment
         .expect("_bt_skiparray_strat_increment: skip array's increment callback must be set");
     let (res, overflow) =
-        nbtcompare::run_skip_increment::call(id, datum_to_word(arg));
-    (word_to_datum(res), overflow)
+        nbtcompare::run_skip_increment::call(id, datum_to_word(arg)?);
+    Ok((word_to_datum(res), overflow))
 }
 
 /// Convert a canonical by-value `Datum` into the bare-word fmgr-seam `Datum`
 /// the skip-support kernels operate on (the trivial skip-support types are all
 /// pass-by-value). A by-reference argument is not produced for these types.
 #[inline]
-fn datum_to_word(d: &Datum) -> types_datum::Datum {
+fn datum_to_word(d: &Datum) -> PgResult<types_datum::Datum> {
     match d {
-        Datum::ByVal(w) => types_datum::Datum::from_usize(*w),
-        _ => panic!(
-            "_bt_skiparray_strat_adjust: by-reference skip-support argument not produced \
-             for a trivial skip-support type"
-        ),
+        Datum::ByVal(w) => Ok(types_datum::Datum::from_usize(*w)),
+        // Unreachable for the registered (all pass-by-value) skip-support types;
+        // a by-ref argument would only arise once uuid/date/timestamp skip
+        // support is registered (a separate keystone). Degrade to a clean query
+        // error rather than killing the backend.
+        _ => Err(elog_error(
+            "_bt_skiparray_strat_adjust: by-reference skip-support argument not \
+             supported for a trivial skip-support type"
+                .into(),
+        )),
     }
 }
 
@@ -1396,7 +1401,7 @@ fn _bt_skiparray_strat_decrement<'mcx>(
         .sksup_data
         .as_ref()
         .and_then(|d| d.decrement);
-    let (new_sk_argument, uflow) = skip_decrement(rel, decrement, &orig_sk_argument);
+    let (new_sk_argument, uflow) = skip_decrement(rel, decrement, &orig_sk_argument)?;
     if uflow {
         so.qual_ok = false;
         return Ok(());
@@ -1414,7 +1419,7 @@ fn _bt_skiparray_strat_decrement<'mcx>(
     if reg_procedure_is_valid(cmp_proc) {
         let hc = so.arrayKeys[array].high_compare.as_deref_mut().unwrap();
         hc.sk_func.fn_oid = cmp_proc;
-        hc.sk_argument = relocate_datum(new_sk_argument);
+        hc.sk_argument = relocate_datum(new_sk_argument)?;
         hc.sk_strategy = BTLessEqualStrategyNumber;
     }
 
@@ -1445,7 +1450,7 @@ fn _bt_skiparray_strat_increment<'mcx>(
         .sksup_data
         .as_ref()
         .and_then(|d| d.increment);
-    let (new_sk_argument, oflow) = skip_increment(rel, increment, &orig_sk_argument);
+    let (new_sk_argument, oflow) = skip_increment(rel, increment, &orig_sk_argument)?;
     if oflow {
         so.qual_ok = false;
         return Ok(());
@@ -1463,7 +1468,7 @@ fn _bt_skiparray_strat_increment<'mcx>(
     if reg_procedure_is_valid(cmp_proc) {
         let lc = so.arrayKeys[array].low_compare.as_deref_mut().unwrap();
         lc.sk_func.fn_oid = cmp_proc;
-        lc.sk_argument = relocate_datum(new_sk_argument);
+        lc.sk_argument = relocate_datum(new_sk_argument)?;
         lc.sk_strategy = BTGreaterEqualStrategyNumber;
     }
 
@@ -1474,15 +1479,23 @@ fn _bt_skiparray_strat_increment<'mcx>(
 /// the scan's `'mcx` lifetime. Only the by-value arm is ever produced by the
 /// skip-support increment/decrement on a by-value attribute (its only call
 /// site); a by-ref result would carry owned bytes into `'mcx`.
-fn relocate_datum<'mcx>(d: Datum<'static>) -> Datum<'mcx> {
+fn relocate_datum<'mcx>(d: Datum<'static>) -> PgResult<Datum<'mcx>> {
     match d {
-        Datum::ByVal(w) => Datum::ByVal(w),
-        Datum::ByRef(_) => {
-            panic!("_bt_skiparray_strat_adjust: by-ref skip-support result relocation not yet ported")
-        }
-        Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => {
-            panic!("_bt_skiparray_strat_adjust: non-ByVal/ByRef skip-support result not yet produced — wave 2")
-        }
+        Datum::ByVal(w) => Ok(Datum::ByVal(w)),
+        // Every skip-support routine currently registered through the
+        // nbtcompare dispatch (bool/int2/int4/int8/oid/char) is pass-by-value,
+        // so the increment/decrement kernels can only ever return a `ByVal`
+        // word. A by-ref result would require registering uuid/date/timestamp
+        // skipsupport plus widening the bare-word `run_skip_*` seam to carry
+        // owned bytes into `'mcx` (a separate keystone). Until then this arm is
+        // unreachable; surface it as a clean query error rather than a panic so
+        // a future mis-registration degrades gracefully instead of killing the
+        // backend.
+        _ => Err(elog_error(
+            "_bt_skiparray_strat_adjust: by-reference skip-support result \
+             relocation not supported"
+                .into(),
+        )),
     }
 }
 
@@ -1764,7 +1777,7 @@ pub fn _bt_preprocess_array_keys<'mcx>(
             match prepare_skip_support(rel, attno_skip, opfamily, opcintype, reverse)? {
                 Some((handle, data)) => {
                     so.arrayKeys[numArrayKeys as usize].sksup = Some(handle);
-                    so.arrayKeys[numArrayKeys as usize].sksup_data = Some(relocate_sksup(data));
+                    so.arrayKeys[numArrayKeys as usize].sksup_data = Some(relocate_sksup(data)?);
                 }
                 None => {
                     so.arrayKeys[numArrayKeys as usize].sksup = None;
@@ -2000,14 +2013,16 @@ pub fn _bt_preprocess_array_keys<'mcx>(
 /// Re-bind a `'static` `BTSkipSupport` (from the unported skip-support owner) to
 /// `'mcx`. Both sentinels are by-value on the only call path; a by-ref sentinel
 /// would carry owned bytes into `'mcx`.
-fn relocate_sksup<'mcx>(s: types_nbtree::BTSkipSupport<'static>) -> types_nbtree::BTSkipSupport<'mcx> {
-    types_nbtree::BTSkipSupport {
-        low_elem: relocate_datum(s.low_elem),
-        high_elem: relocate_datum(s.high_elem),
+fn relocate_sksup<'mcx>(
+    s: types_nbtree::BTSkipSupport<'static>,
+) -> PgResult<types_nbtree::BTSkipSupport<'mcx>> {
+    Ok(types_nbtree::BTSkipSupport {
+        low_elem: relocate_datum(s.low_elem)?,
+        high_elem: relocate_datum(s.high_elem)?,
         increment: s.increment,
         decrement: s.decrement,
         attno: s.attno,
-    }
+    })
 }
 
 /// Convert a bare-word fmgr-seam `Datum` into the canonical by-value `Datum`.
