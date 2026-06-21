@@ -4,8 +4,6 @@
 //! dispatch wrappers are ported.
 
 use std::boxed::Box;
-use std::sync::Arc;
-use std::vec::Vec;
 
 use mcx::{Mcx, PgVec};
 use types_core::xact::CommandId;
@@ -18,7 +16,9 @@ use types_snapshot::SnapshotData;
 use types_storage::RelFileLocator;
 use types_tuple::heaptuple::ItemPointerData;
 
-use crate::relscan::{ParallelTableScanDescData, TableScanDesc, TableScanDescData};
+use crate::relscan::{
+    ParallelBlockTableScanDescData, ParallelTableScanDesc, TableScanDesc, TableScanDescData,
+};
 use crate::scankey::ScanKeyData;
 
 /// `Snapshot` (`typedef struct SnapshotData *Snapshot`) as it crosses the
@@ -249,7 +249,7 @@ pub struct TableAmRoutine {
         snapshot: Snapshot,
         nkeys: i32,
         key: PgVec<'mcx, ScanKeyData<'mcx>>,
-        pscan: Option<Arc<ParallelTableScanDescData>>,
+        pscan: Option<ParallelTableScanDesc>,
         flags: u32,
     ) -> PgResult<TableScanDesc<'mcx>>,
 
@@ -287,11 +287,11 @@ pub struct TableAmRoutine {
     /// `parallelscan_initialize(rel, pscan)` — initialize the shared
     /// descriptor; returns the size needed (same as the estimate).
     pub parallelscan_initialize:
-        fn(rel: &Relation<'_>, pscan: &mut ParallelTableScanDescData) -> PgResult<usize>,
+        fn(rel: &Relation<'_>, pscan: &mut ParallelBlockTableScanDescData) -> PgResult<usize>,
 
     /// `parallelscan_reinitialize(rel, pscan)` — reinitialize for a rescan.
     pub parallelscan_reinitialize:
-        fn(rel: &Relation<'_>, pscan: &ParallelTableScanDescData) -> PgResult<()>,
+        fn(rel: &Relation<'_>, pscan: &ParallelBlockTableScanDescData) -> PgResult<()>,
 
     /// `index_fetch_begin(mcx, rel)` — set up index-fetch state in the `mcx`
     /// arena (convention A).

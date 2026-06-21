@@ -33,6 +33,7 @@ backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-sea
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
 backend-optimizer-util-plancat-seams = { path = "../backend-optimizer-util-plancat-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }

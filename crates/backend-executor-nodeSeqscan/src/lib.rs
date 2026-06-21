@@ -42,15 +42,17 @@ use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
 use backend_tcop_postgres_seams as tcop;
 use backend_access_transam_parallel as parallel;
+use backend_access_transam_parallel::shared_dsm_object;
 use backend_nodes_core_seams as bitmapset;
 
 use types_error::PgResult;
 use types_execparallel::{
-    ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle, SerializeCursor,
+    DsmSegmentHandle, ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
+    SerializeCursor,
 };
 use types_nodes::execnodes::ScanDirection;
 use types_nodes::{EStateData, SeqScan, SeqScanState, SlotId, TupleTableSlot};
-use types_tableam::relscan::ParallelTableScanDescData;
+use types_tableam::relscan::{ParallelBlockTableScanDescData, ParallelTableScanDesc};
 
 // ===========================================================================
 // Access/recheck method types.
@@ -171,37 +173,40 @@ fn SeqRecheck<'mcx>(_node: &mut SeqScanState<'mcx>, _estate: &mut EStateData<'mc
     true
 }
 
-// --- The one genuinely-unresolved parallel-scan primitive -------------------
+// --- Parallel-scan DSM placement helpers ------------------------------------
 //
-// In C a `ParallelTableScanDesc` is a pointer into DSM bytes that `shm_toc_
-// allocate`/`shm_toc_lookup` hand back as a raw address (`SerializeCursor`
-// here). Typing a `ParallelTableScanDescData` over those raw shared bytes — and
-// mutating one in place through its shared (`Arc`) alias — is the DSM
-// byte-cursor-to-typed-shared-object model that the parallel-executor
-// subsystem (`execParallel` / `shm_toc`) owns and has not yet landed. The three
-// parallel DSM entry points carry their full table-AM / shm_toc orchestration
-// over these helpers; only these primitives panic.
+// In C a `ParallelTableScanDesc` is a pointer into DSM bytes that
+// `shm_toc_allocate`/`shm_toc_lookup` hand back as a raw address
+// (`SerializeCursor` here). The flat-repr `ParallelBlockTableScanDescData` is a
+// `SharedDsmObject`, so we place/attach it through the execParallel keystone's
+// `shared_dsm_object` primitive — exactly like nodeBitmapHeapscan places its
+// `ParallelBitmapHeapState`. The serialized snapshot is the `[u8]` flexible
+// tail at `cursor + size_of::<header>()` (the `phs_snapshot_off` the AM
+// returns) inside the SAME chunk.
 
-/// `(ParallelTableScanDesc) <dsm bytes at cursor>` — reinterpret a shm_toc DSM
-/// byte cursor as the typed parallel-scan descriptor placed over it.
-fn pscan_over_chunk(_cursor: SerializeCursor) -> alloc::boxed::Box<ParallelTableScanDescData> {
-    panic!(
-        "ParallelTableScanDescData over a shm_toc DSM byte cursor requires the \
-         DSM/shm_toc typed-shared-object resolution (execParallel), not yet landed"
-    );
+/// The `pcxt->seg` handle as the `DsmSegmentHandle` the keystone uses purely as
+/// the `'seg` lifetime carrier (it never dereferences it). `None` (leader-only,
+/// no DSM) maps to the sentinel `DsmSegmentHandle(0)`, the same convention
+/// nodeBitmapHeapscan uses on the worker side.
+fn pcxt_seg_handle(pcxt: ParallelContextHandle) -> DsmSegmentHandle {
+    match parallel::pcxt_seg(pcxt) {
+        Some(seg) => seg,
+        None => DsmSegmentHandle(0),
+    }
 }
 
-/// `*pscan` as a mutable reference — C mutates the DSM-resident shared
-/// descriptor in place; the shared `Arc` alias here cannot yield `&mut` until
-/// the DSM interior-mutability model lands.
-fn pscan_arc_get_mut(
-    _pscan: &std::sync::Arc<ParallelTableScanDescData>,
-) -> &mut ParallelTableScanDescData {
-    panic!(
-        "mutating the shared (DSM-resident, Arc) ParallelTableScanDescData in \
-         place requires the parallel-scan shared-descriptor DSM interior- \
-         mutability resolution (execParallel), not yet landed"
-    );
+/// The serialized-snapshot tail slice of a freshly-allocated chunk: the bytes
+/// `[cursor + size_of::<header>(), cursor + pscan_len)`. The leader is the sole
+/// writer pre-launch, so a unique `&mut [u8]` over those in-segment bytes is
+/// valid (same reasoning as `place_and_init_mut`).
+fn snapshot_tail_mut(cursor: SerializeCursor, pscan_len: usize) -> &'static mut [u8] {
+    let off = core::mem::size_of::<ParallelBlockTableScanDescData>();
+    let base = cursor.0 + off;
+    let len = pscan_len.saturating_sub(off);
+    // SAFETY: `cursor` is a real `shm_toc_allocate`'d chunk of `pscan_len`
+    // writable in-segment bytes; the tail begins at `phs_snapshot_off` and the
+    // leader is the sole writer pre-launch.
+    unsafe { core::slice::from_raw_parts_mut(base as *mut u8, len) }
 }
 
 // ===========================================================================
@@ -782,17 +787,17 @@ pub fn ExecSeqScanInitializeDSM<'mcx>(
     // pscan = shm_toc_allocate(pcxt->toc, node->pscan_len);
     let toc = parallel::pcxt_toc(pcxt);
     let pscan_cursor = parallel::shm_toc_allocate(toc, node.pscan_len);
+    let seg = pcxt_seg_handle(pcxt);
 
     // table_parallelscan_initialize(node->ss.ss_currentRelation, pscan,
     //                               estate->es_snapshot);
     //
-    // `pscan` is a `ParallelTableScanDescData` placed over the DSM bytes named
-    // by `pscan_cursor` (a `SerializeCursor`). Typing that struct over the raw
-    // shm_toc byte cursor — so it can be handed (`&mut`) to
-    // `table_parallelscan_initialize` and (`Arc`) to `table_beginscan_parallel`
-    // — is owned by the DSM/shm_toc byte-cursor-to-typed-shared-object
-    // resolution (execParallel), which has not yet landed. The two table-AM
-    // callees and `shm_toc_insert` are all wired and ready for it.
+    // `pscan` is the flat-repr `ParallelBlockTableScanDescData` placed DIRECTLY
+    // in the DSM chunk named by `pscan_cursor` (a `SharedDsmObject`, placed
+    // through the keystone). The leader is the sole writer pre-launch, so the
+    // in-place header `&mut` and the snapshot-tail `&mut [u8]` (the bytes at
+    // `phs_snapshot_off`) are both valid; the AM init fills the header and the
+    // snapshot serializes into the tail.
     let snapshot: types_tableam::Snapshot = estate.es_snapshot.as_ref().map(|rc| (**rc).clone());
     let plan_node_id = node
         .ss
@@ -800,29 +805,59 @@ pub fn ExecSeqScanInitializeDSM<'mcx>(
         .plan
         .map(|p| p.plan_head().plan_node_id)
         .expect("ExecSeqScanInitializeDSM: no plan");
+    let pscan_len = node.pscan_len;
 
-    let mut pscan: alloc::boxed::Box<ParallelTableScanDescData> = pscan_over_chunk(pscan_cursor);
+    // Placement-init a zeroed/Default header in the chunk (S_INIT_LOCK and the
+    // atomics' init are its Default), returning the keystone `SharedRef`.
+    let header = shared_dsm_object::place_value::<ParallelBlockTableScanDescData>(
+        seg,
+        pscan_cursor,
+        ParallelBlockTableScanDescData::default(),
+    );
+
+    // Fill the header + serialize the snapshot into the tail through the
+    // sole-writer-pre-launch `with_mut` window.
     {
         let rel = node
             .ss
             .ss_currentRelation
             .as_ref()
             .expect("ExecSeqScanInitializeDSM: ss_currentRelation not opened");
-        backend_access_table_tableam::table_parallelscan_initialize(rel, &mut pscan, &snapshot)?;
+        let snapshot_buf = snapshot_tail_mut(pscan_cursor, pscan_len);
+        shared_dsm_object::with_mut::<ParallelBlockTableScanDescData, PgResult<()>>(
+            seg,
+            pscan_cursor,
+            |pscan| {
+                backend_access_table_tableam::table_parallelscan_initialize(
+                    rel,
+                    pscan,
+                    snapshot_buf,
+                    &snapshot,
+                )
+            },
+        )?;
     }
+
+    // The serialized-snapshot tail's in-segment start address. The handle
+    // records both the header and the tail bytes (C's `pscan` pointer reaches
+    // both); the tail length is self-delimiting (`snapshot_bytes`), so a
+    // non-zero "present" sentinel suffices, and `phs_snapshot_any` guards the
+    // SnapshotAny case.
+    let off = header.get().phs_snapshot_off;
+    let snap_present = if header.get().phs_snapshot_any { 0 } else { 1 };
+    let pscan = ParallelTableScanDesc::from_shared(header, pscan_cursor.0 + off, snap_present);
 
     // shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, pscan);
     parallel::shm_toc_insert(toc, plan_node_id as u64, pscan_cursor);
 
     // node->ss.ss_currentScanDesc = table_beginscan_parallel(rel, pscan);
-    let pscan_arc: std::sync::Arc<ParallelTableScanDescData> = std::sync::Arc::from(pscan);
     let rel = node
         .ss
         .ss_currentRelation
         .as_ref()
         .expect("ExecSeqScanInitializeDSM: ss_currentRelation not opened");
     let scandesc =
-        backend_access_table_tableam::table_beginscan_parallel(estate.es_query_cxt, rel, pscan_arc)?;
+        backend_access_table_tableam::table_beginscan_parallel(estate.es_query_cxt, rel, pscan)?;
     node.ss_currentScanDesc = Some(scandesc);
     Ok(())
 }
@@ -833,16 +868,11 @@ pub fn ExecSeqScanReInitializeDSM<'mcx>(
     node: &mut SeqScanState<'mcx>,
     _pcxt: ParallelContextHandle,
 ) -> PgResult<()> {
-    // ParallelTableScanDesc pscan;
-
     // pscan = node->ss.ss_currentScanDesc->rs_parallel;
     //
-    // `rs_parallel` is the shared (DSM-resident, refcounted) descriptor; C
-    // dereferences and mutates it in place. Producing both the typed descriptor
-    // from the opaque carrier and the `&mut ParallelTableScanDescData` the wired
-    // `table_parallelscan_reinitialize` seam expects out of the shared `Arc` is
-    // the parallel-scan shared-descriptor resolution (DSM interior mutability),
-    // not yet landed.
+    // `rs_parallel` is the `Copy` handle into the DSM-resident descriptor; the
+    // reinit resets `phs_nallocated` through the descriptor's shared `&self`
+    // (an atomic write — sound across processes).
     let pscan = parallel_scandesc_rs_parallel(&node.ss_currentScanDesc);
 
     // table_parallelscan_reinitialize(node->ss.ss_currentRelation, pscan);
@@ -851,8 +881,7 @@ pub fn ExecSeqScanReInitializeDSM<'mcx>(
         .ss_currentRelation
         .as_ref()
         .expect("ExecSeqScanReInitializeDSM: ss_currentRelation not opened");
-    let pscan: &mut ParallelTableScanDescData = pscan_arc_get_mut(&pscan);
-    tableam_seam::table_parallelscan_reinitialize::call(rel, pscan)
+    tableam_seam::table_parallelscan_reinitialize::call(rel, pscan.desc())
 }
 
 /// `ExecSeqScanInitializeWorker(node, pwcxt)` — copy relevant information from
@@ -862,8 +891,6 @@ pub fn ExecSeqScanInitializeWorker<'mcx>(
     pwcxt: ParallelWorkerContextHandle,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // ParallelTableScanDesc pscan;
-
     // pscan = shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, false);
     let plan_node_id = node
         .ss
@@ -877,20 +904,33 @@ pub fn ExecSeqScanInitializeWorker<'mcx>(
 
     // node->ss.ss_currentScanDesc = table_beginscan_parallel(rel, pscan);
     //
-    // `pscan` is the typed `ParallelTableScanDescData` placed over the DSM bytes
-    // named by `pscan_cursor`; producing the `Arc` view of it over the raw
-    // shm_toc byte cursor is the DSM byte-cursor-to-typed-shared-object
-    // resolution (execParallel), not yet landed. `table_beginscan_parallel` is
-    // wired and ready for it.
+    // The worker recovers the SAME in-DSM `ParallelBlockTableScanDescData` the
+    // leader placed in `ExecSeqScanInitializeDSM`, by attaching to the
+    // looked-up chunk through the keystone (the segment handle is only the
+    // `'seg` lifetime carrier, never dereferenced). The serialized-snapshot
+    // tail is the bytes immediately after the header in the same chunk; the
+    // worker reads `phs_snapshot_off` off the attached header to locate it.
+    let seg = DsmSegmentHandle(0);
+    let header =
+        shared_dsm_object::attach::<ParallelBlockTableScanDescData>(seg, pscan_cursor);
+    // The serialized-snapshot tail begins at `phs_snapshot_off` in the SAME
+    // chunk; its length is self-delimiting (read off the snapshot's own header
+    // — see `ParallelTableScanDesc::snapshot_bytes`), so the worker only needs
+    // its start address. A non-zero `snapshot_len` here is a "snapshot present"
+    // sentinel; the snapshot-any case zeroes it (and `phs_snapshot_any` guards
+    // it regardless).
+    let off = header.get().phs_snapshot_off;
+    let snap_addr = pscan_cursor.0 + off;
+    let snap_present = if header.get().phs_snapshot_any { 0 } else { 1 };
+    let pscan = ParallelTableScanDesc::from_shared(header, snap_addr, snap_present);
+
     let rel = node
         .ss
         .ss_currentRelation
         .as_ref()
         .expect("ExecSeqScanInitializeWorker: ss_currentRelation not opened");
-    let pscan_arc: std::sync::Arc<ParallelTableScanDescData> =
-        std::sync::Arc::from(pscan_over_chunk(pscan_cursor));
     let scandesc =
-        backend_access_table_tableam::table_beginscan_parallel(estate.es_query_cxt, rel, pscan_arc)?;
+        backend_access_table_tableam::table_beginscan_parallel(estate.es_query_cxt, rel, pscan)?;
     node.ss_currentScanDesc = Some(scandesc);
     Ok(())
 }
@@ -902,21 +942,18 @@ pub fn ExecSeqScanInitializeWorker<'mcx>(
 // `ss_currentScanDesc` field (the value model). Reading the shared parallel
 // descriptor off `rs_parallel` is a plain field read.
 
-/// `node->ss.ss_currentScanDesc->rs_parallel` — the shared (DSM-resident,
-/// refcounted) parallel-scan descriptor. C dereferences `ss_currentScanDesc`
-/// unconditionally here (a NULL would be a crash), so a missing descriptor /
-/// non-parallel scan panics loudly.
+/// `node->ss.ss_currentScanDesc->rs_parallel` — the DSM-resident parallel-scan
+/// descriptor handle. C dereferences `ss_currentScanDesc` unconditionally here
+/// (a NULL would be a crash), so a missing descriptor / non-parallel scan
+/// panics loudly.
 fn parallel_scandesc_rs_parallel(
     slot: &Option<types_tableam::relscan::TableScanDesc<'_>>,
-) -> std::sync::Arc<ParallelTableScanDescData> {
+) -> ParallelTableScanDesc {
     let scan = slot
         .as_ref()
         .expect("ExecSeqScanReInitializeDSM: ss_currentScanDesc not set");
-    std::sync::Arc::clone(
-        scan.rs_parallel
-            .as_ref()
-            .expect("ExecSeqScanReInitializeDSM: scan descriptor is not parallel (rs_parallel NULL)"),
-    )
+    scan.rs_parallel
+        .expect("ExecSeqScanReInitializeDSM: scan descriptor is not parallel (rs_parallel NULL)")
 }
 
 // --- Inward seam installers (opaque-handle adapters) ------------------------

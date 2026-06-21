@@ -23,7 +23,6 @@
 
 use mcx::{Mcx, PgVec};
 use std::boxed::Box;
-use std::sync::Arc;
 
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
@@ -32,7 +31,7 @@ use types_scan::sdir::{ForwardScanDirection, ScanDirection};
 use types_slot::{SlotData, TupleSlotKind};
 use types_tableam::amopaque::{tags, AmOpaque, AmOpaqueTag, AmOpaqueType};
 use types_tableam::relscan::{
-    ParallelTableScanDescData, TableScanDesc, TableScanDescData,
+    ParallelBlockTableScanDescData, ParallelTableScanDesc, TableScanDesc, TableScanDescData,
 };
 use types_tableam::scankey::ScanKeyData;
 use types_tableam::tableam::{
@@ -135,7 +134,7 @@ fn heapam_scan_begin<'mcx>(
     snapshot: Snapshot,
     nkeys: i32,
     key: PgVec<'mcx, ScanKeyData<'mcx>>,
-    pscan: Option<Arc<ParallelTableScanDescData>>,
+    pscan: Option<ParallelTableScanDesc>,
     flags: u32,
 ) -> PgResult<TableScanDesc<'mcx>> {
     heapam::scan::heap_beginscan(mcx, rel.alias(), snapshot, nkeys, key, pscan, flags)
@@ -242,7 +241,7 @@ fn heapam_parallelscan_estimate(rel: &Relation<'_>) -> usize {
 /// `.parallelscan_initialize = table_block_parallelscan_initialize`.
 fn heapam_parallelscan_initialize(
     rel: &Relation<'_>,
-    pscan: &mut ParallelTableScanDescData,
+    pscan: &mut ParallelBlockTableScanDescData,
 ) -> PgResult<usize> {
     backend_access_table_tableam::table_block_parallelscan_initialize(rel, pscan)
 }
@@ -250,7 +249,7 @@ fn heapam_parallelscan_initialize(
 /// `.parallelscan_reinitialize = table_block_parallelscan_reinitialize`.
 fn heapam_parallelscan_reinitialize(
     rel: &Relation<'_>,
-    pscan: &ParallelTableScanDescData,
+    pscan: &ParallelBlockTableScanDescData,
 ) -> PgResult<()> {
     backend_access_table_tableam::table_block_parallelscan_reinitialize(rel, pscan);
     Ok(())
@@ -777,7 +776,7 @@ fn table_relation_needs_toast_table(rel: &Relation<'_>) -> bool {
 
 fn table_parallelscan_reinitialize(
     rel: &Relation<'_>,
-    pscan: &mut ParallelTableScanDescData,
+    pscan: &ParallelBlockTableScanDescData,
 ) -> PgResult<()> {
     heapam_parallelscan_reinitialize(rel, pscan)
 }

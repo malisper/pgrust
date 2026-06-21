@@ -18,9 +18,6 @@
 use std::boxed::Box;
 use std::cell::{Cell, RefCell};
 use std::string::String;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::vec::Vec;
 
 use mcx::Mcx;
 use types_core::primitive::{
@@ -34,7 +31,7 @@ use types_nodes::TupleSlotKind;
 use types_nodes::tuptable::SlotData;
 use types_snapshot::snapshot::IsMVCCSnapshot;
 use types_tableam::relscan::{
-    ParallelBlockTableScanExt, ParallelBlockTableScanWorkerData, ParallelTableScanDescData,
+    ParallelBlockTableScanDescData, ParallelBlockTableScanWorkerData, ParallelTableScanDesc,
     TableScanDesc, TableScanDescData, SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC,
     SO_TEMP_SNAPSHOT, SO_TYPE_ANALYZE, SO_TYPE_BITMAPSCAN, SO_TYPE_SAMPLESCAN, SO_TYPE_SEQSCAN,
     SO_TYPE_TIDRANGESCAN, SO_TYPE_TIDSCAN,
@@ -561,9 +558,17 @@ pub fn table_parallelscan_estimate(rel: &Relation<'_>, snapshot: &Snapshot) -> P
 }
 
 /// `table_parallelscan_initialize(rel, pscan, snapshot)`.
+///
+/// `pscan` is the in-DSM [`ParallelBlockTableScanDescData`] header the caller
+/// (`ExecSeqScanInitializeDSM`) just placed in the `shm_toc` chunk;
+/// `snapshot_buf` is the chunk's flexible-array tail (the bytes at
+/// `(char *) pscan + phs_snapshot_off`), already sized by
+/// [`table_parallelscan_estimate`]. C writes the serialized snapshot directly
+/// into that tail; the owned model serializes to a `Vec` and copies it in.
 pub fn table_parallelscan_initialize(
     rel: &Relation<'_>,
-    pscan: &mut ParallelTableScanDescData,
+    pscan: &mut ParallelBlockTableScanDescData,
+    snapshot_buf: &mut [u8],
     snapshot: &Snapshot,
 ) -> PgResult<()> {
     let snapshot_off = (am(rel).parallelscan_initialize)(rel, pscan)?;
@@ -573,8 +578,9 @@ pub fn table_parallelscan_initialize(
     match snapshot {
         Some(s) if IsMVCCSnapshot(s) => {
             // SerializeSnapshot(snapshot, (char *) pscan + pscan->phs_snapshot_off)
-            pscan.phs_snapshot_data =
-                Some(backend_utils_time_snapmgr_seams::serialize_snapshot::call(s)?);
+            let bytes = backend_utils_time_snapmgr_seams::serialize_snapshot::call(s)?;
+            debug_assert!(bytes.len() <= snapshot_buf.len());
+            snapshot_buf[..bytes.len()].copy_from_slice(&bytes);
             pscan.phs_snapshot_any = false;
         }
         _ => {
@@ -591,22 +597,19 @@ pub fn table_parallelscan_initialize(
 pub fn table_beginscan_parallel<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &Relation<'mcx>,
-    pscan: Arc<ParallelTableScanDescData>,
+    pscan: ParallelTableScanDesc,
 ) -> PgResult<TableScanDesc<'mcx>> {
     let mut flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
 
     debug_assert!(types_storage::RelFileLocatorEquals(
         &relation.rd_locator,
-        &pscan.phs_locator
+        &pscan.desc().phs_locator
     ));
 
     let snapshot: Snapshot;
-    if !pscan.phs_snapshot_any {
+    if !pscan.desc().phs_snapshot_any {
         // Snapshot was serialized -- restore it
-        let bytes = pscan
-            .phs_snapshot_data
-            .as_deref()
-            .expect("parallel scan descriptor carries no serialized snapshot");
+        let bytes = pscan.snapshot_bytes();
         let restored = backend_utils_time_snapmgr_seams::restore_snapshot::call(bytes)?;
         snapshot = Some(backend_utils_time_snapmgr_seams::register_snapshot::call(
             restored,
@@ -1263,43 +1266,71 @@ pub fn simple_table_tuple_update<'mcx>(
 // (tableam.c)
 // ===========================================================================
 
+/// RAII spinlock guard: `SpinLockAcquire(lock)` on construction (the
+/// `TAS_SPIN`; on contention, the `s_lock` backoff loop), `SpinLockRelease` on
+/// drop. Mirrors the C `SpinLockAcquire`/`SpinLockRelease` bracket around
+/// `phs_mutex`.
+struct SpinLockGuard<'a> {
+    lock: &'a types_storage::Spinlock,
+}
+
+impl<'a> SpinLockGuard<'a> {
+    fn acquire(lock: &'a types_storage::Spinlock) -> Self {
+        if lock.tas_spin() != 0 {
+            backend_storage_lmgr_s_lock::s_lock(lock, Some(file!()), line!() as i32, None);
+        }
+        SpinLockGuard { lock }
+    }
+}
+
+impl Drop for SpinLockGuard<'_> {
+    fn drop(&mut self) {
+        self.lock.unlock();
+    }
+}
+
 /// `table_block_parallelscan_estimate(rel)`.
 pub fn table_block_parallelscan_estimate(_rel: &Relation<'_>) -> usize {
-    core::mem::size_of::<ParallelTableScanDescData>()
+    core::mem::size_of::<ParallelBlockTableScanDescData>()
 }
 
 /// `table_block_parallelscan_initialize(rel, pscan)`.
+///
+/// `pscan` is the freshly-placed in-DSM header (the leader is the sole writer
+/// pre-launch, so the `&mut` is sound). Mirrors the C
+/// `ParallelBlockTableScanDesc bpscan = (ParallelBlockTableScanDesc) pscan;
+/// bpscan->base.phs_locator = …; SpinLockInit(&bpscan->phs_mutex);
+/// bpscan->phs_startblock = InvalidBlockNumber;
+/// pg_atomic_init_u64(&bpscan->phs_nallocated, 0)`.
 pub fn table_block_parallelscan_initialize(
     rel: &Relation<'_>,
-    pscan: &mut ParallelTableScanDescData,
+    pscan: &mut ParallelBlockTableScanDescData,
 ) -> PgResult<usize> {
     pscan.phs_locator = rel.rd_locator;
     let phs_nblocks = backend_storage_buffer_bufmgr_seams::
         relation_get_number_of_blocks_in_fork::call(rel, MAIN_FORKNUM)?;
+    pscan.phs_nblocks = phs_nblocks;
     // compare phs_syncscan initialization to similar logic in initscan
     pscan.phs_syncscan = synchronize_seqscans()
         && !rel.uses_local_buffers()
         && phs_nblocks > (backend_utils_init_small_seams::nbuffers::call() / 4) as BlockNumber;
-    // SpinLockInit(&bpscan->phs_mutex); bpscan->phs_startblock =
-    // InvalidBlockNumber; pg_atomic_init_u64(&bpscan->phs_nallocated, 0) —
-    // a freshly defaulted block extension.
-    let block = ParallelBlockTableScanExt {
-        phs_nblocks,
-        ..ParallelBlockTableScanExt::default()
-    };
-    pscan.block = Some(block);
+    // SpinLockInit(&bpscan->phs_mutex)
+    pscan.phs_mutex = types_storage::Spinlock::new();
+    // bpscan->phs_startblock = InvalidBlockNumber
+    pscan.set_phs_startblock(InvalidBlockNumber);
+    // pg_atomic_init_u64(&bpscan->phs_nallocated, 0)
+    pscan.phs_nallocated.write(0);
 
-    Ok(core::mem::size_of::<ParallelTableScanDescData>())
+    Ok(core::mem::size_of::<ParallelBlockTableScanDescData>())
 }
 
 /// `table_block_parallelscan_reinitialize(rel, pscan)`.
 pub fn table_block_parallelscan_reinitialize(
     _rel: &Relation<'_>,
-    pscan: &ParallelTableScanDescData,
+    pscan: &ParallelBlockTableScanDescData,
 ) {
-    let bpscan = block_ext(pscan);
     // pg_atomic_write_u64(&bpscan->phs_nallocated, 0)
-    bpscan.phs_nallocated.store(0, Ordering::SeqCst);
+    pscan.phs_nallocated.write(0);
 }
 
 /// `table_block_parallelscan_startblock_init(rel, pbscanwork, pbscan)` —
@@ -1311,10 +1342,10 @@ pub fn table_block_parallelscan_reinitialize(
 pub fn table_block_parallelscan_startblock_init(
     rel: &Relation<'_>,
     pbscanwork: &mut ParallelBlockTableScanWorkerData,
-    pbscan: &ParallelTableScanDescData,
+    pbscan: &ParallelBlockTableScanDescData,
 ) -> PgResult<()> {
     let mut sync_startpage: BlockNumber = InvalidBlockNumber;
-    let bpscan = block_ext(pbscan);
+    let bpscan = pbscan;
 
     // Reset the state we use for controlling allocation size.
     *pbscanwork = ParallelBlockTableScanWorkerData::default();
@@ -1345,10 +1376,7 @@ pub fn table_block_parallelscan_startblock_init(
     // retry:
     loop {
         // Grab the spinlock.
-        let mut startblock = bpscan
-            .phs_startblock
-            .lock()
-            .expect("phs_mutex poisoned");
+        let guard = SpinLockGuard::acquire(&bpscan.phs_mutex);
 
         // If the scan's startblock has not yet been initialized, we must do
         // so now. If this is not a synchronized scan, we just start at block
@@ -1358,13 +1386,13 @@ pub fn table_block_parallelscan_startblock_init(
         // the information we need, and retry. If nobody else has initialized
         // the scan in the meantime, we'll fill in the value we fetched on
         // the second time through.
-        if *startblock == InvalidBlockNumber {
+        if bpscan.phs_startblock() == InvalidBlockNumber {
             if !pbscan.phs_syncscan {
-                *startblock = 0;
+                bpscan.set_phs_startblock(0);
             } else if sync_startpage != InvalidBlockNumber {
-                *startblock = sync_startpage;
+                bpscan.set_phs_startblock(sync_startpage);
             } else {
-                drop(startblock); // SpinLockRelease(&pbscan->phs_mutex)
+                drop(guard); // SpinLockRelease(&pbscan->phs_mutex)
                 sync_startpage = backend_access_common_syncscan_seams::ss_get_location::call(
                     rel.rd_id,
                     bpscan.phs_nblocks,
@@ -1373,6 +1401,7 @@ pub fn table_block_parallelscan_startblock_init(
             }
         }
         // SpinLockRelease(&pbscan->phs_mutex) — guard drops here.
+        drop(guard);
         break;
     }
 
@@ -1389,9 +1418,9 @@ pub fn table_block_parallelscan_startblock_init(
 pub fn table_block_parallelscan_nextpage(
     rel: &Relation<'_>,
     pbscanwork: &mut ParallelBlockTableScanWorkerData,
-    pbscan: &ParallelTableScanDescData,
+    pbscan: &ParallelBlockTableScanDescData,
 ) -> PgResult<BlockNumber> {
-    let bpscan = block_ext(pbscan);
+    let bpscan = pbscan;
     let nallocated: u64;
 
     // The logic below allocates block numbers out to parallel workers in a
@@ -1436,7 +1465,7 @@ pub fn table_block_parallelscan_nextpage(
 
         pbscanwork.phsw_nallocated = bpscan
             .phs_nallocated
-            .fetch_add(pbscanwork.phsw_chunk_size as u64, Ordering::SeqCst);
+            .fetch_add(pbscanwork.phsw_chunk_size as u64);
         nallocated = pbscanwork.phsw_nallocated;
 
         // Set the remaining number of blocks in this chunk so that
@@ -1445,7 +1474,7 @@ pub fn table_block_parallelscan_nextpage(
         pbscanwork.phsw_chunk_remaining = pbscanwork.phsw_chunk_size.wrapping_sub(1);
     }
 
-    let phs_startblock = *bpscan.phs_startblock.lock().expect("phs_mutex poisoned");
+    let phs_startblock = bpscan.phs_startblock();
 
     let page: BlockNumber = if nallocated >= bpscan.phs_nblocks as u64 {
         InvalidBlockNumber // all blocks have been allocated
@@ -1474,15 +1503,6 @@ pub fn table_block_parallelscan_nextpage(
     Ok(page)
 }
 
-/// The block-oriented extension of a shared parallel-scan descriptor — the C
-/// `(ParallelBlockTableScanDesc) pscan` downcast; absent means the C cast
-/// would have read uninitialized memory, so panic loudly.
-fn block_ext(pscan: &ParallelTableScanDescData) -> &ParallelBlockTableScanExt {
-    pscan
-        .block
-        .as_ref()
-        .expect("parallel scan descriptor is not block-oriented")
-}
 
 // ===========================================================================
 // Helper functions to implement relation sizing for block oriented AMs

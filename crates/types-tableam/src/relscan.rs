@@ -1,21 +1,33 @@
 //! `access/relscan.h` — relation-scan descriptor vocabulary, trimmed.
 //!
 //! These descriptors are AM working state in C (`palloc`d by the AM's
-//! `scan_begin`; the parallel descriptors live in DSM shared memory). The
-//! owned model crosses the per-backend descriptors as boxes; the shared
-//! parallel descriptor's concurrently-mutated fields use real atomics and a
-//! `Mutex` standing in for the C spinlock.
+//! `scan_begin`). The block-oriented parallel scan descriptor
+//! ([`ParallelBlockTableScanDescData`]) lives in DSM shared memory: it is a
+//! flat `#[repr(C)]` object the leader placement-initializes directly in the
+//! `shm_toc` chunk and every worker reinterprets over the SAME in-segment
+//! bytes — exactly the [`SharedDsmObject`] keystone the parallel-bitmap state
+//! uses. Its concurrently-mutated fields are interior-mutable: `phs_mutex` is
+//! the in-segment [`Spinlock`] (the C `slock_t`), `phs_startblock` a
+//! `pg_atomic_uint32` (the C plain field, serialized by `phs_mutex` — a
+//! relaxed atomic load/store under the spinlock is behaviour-preserving), and
+//! `phs_nallocated` the C `pg_atomic_uint64`. There is no `Vec`/`Mutex`/`Arc`
+//! (process-heap pointers cannot live in DSM); the serialized snapshot is a
+//! `[u8]` flexible-array tail inside the same chunk, located at
+//! `phs_snapshot_off`. A [`ParallelTableScanDesc`] is the `Copy` raw-pointer
+//! handle the executor threads through scan descriptors — C's
+//! `ParallelTableScanDesc` (a pointer into DSM bytes).
 
-use core::sync::atomic::AtomicU64;
 use std::boxed::Box;
-use std::sync::Mutex;
 use std::vec::Vec as StdVec;
 
+use types_parallel::shared_dsm_object::SharedRef;
+use types_parallel::SharedDsmObject;
 use types_tuple::backend_access_common_heaptuple::Datum;
-use types_core::primitive::{BlockNumber, InvalidBlockNumber};
+use types_core::primitive::BlockNumber;
 use types_rel::Relation;
 use types_snapshot::SnapshotData;
-use types_storage::RelFileLocator;
+use types_storage::storage::{pg_atomic_uint32, pg_atomic_uint64};
+use types_storage::{RelFileLocator, Spinlock};
 use types_tuple::backend_access_common_heaptuple::FormedTuple;
 use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
@@ -69,8 +81,11 @@ pub struct TableScanDescData<'mcx> {
     pub rs_key: mcx::PgVec<'mcx, ScanKeyData<'mcx>>,
     /// `rs_flags` — `SO_*` `ScanOptions` bitmask.
     pub rs_flags: u32,
-    /// `rs_parallel` — parallel scan information (shared descriptor).
-    pub rs_parallel: Option<std::sync::Arc<ParallelTableScanDescData>>,
+    /// `rs_parallel` — parallel scan information (shared descriptor), a `Copy`
+    /// raw-pointer handle into the DSM-resident [`ParallelBlockTableScanDescData`]
+    /// (C's `ParallelTableScanDesc`, a pointer into DSM bytes). `None` for a
+    /// non-parallel scan.
+    pub rs_parallel: Option<ParallelTableScanDesc>,
     /// `union { ... struct { TBMIterator rs_tbmiterator; } st; ... }` — the
     /// scan-type-specific union. Trimmed to the bitmap-scan member
     /// `st.rs_tbmiterator`, the only one any ported consumer reads
@@ -91,61 +106,160 @@ pub type TableScanDesc<'mcx> = std::boxed::Box<TableScanDescData<'mcx>>;
  * access/relscan.h: parallel scan descriptors
  * ---------------------------------------------------------------- */
 
-/// `ParallelTableScanDescData` (`access/relscan.h`) — shared state for a
-/// parallel table scan, living in DSM in C. The serialized snapshot that C
-/// stores at byte offset `phs_snapshot_off` inside the same DSM chunk is the
-/// `phs_snapshot_data` byte buffer here.
-pub struct ParallelTableScanDescData {
-    /// `phs_locator` — physical relation to scan.
+/// `ParallelBlockTableScanDescData` (`access/relscan.h`) — shared state for a
+/// parallel table scan over a block-oriented AM, living in DSM. C embeds a
+/// `ParallelTableScanDescData base` as the first member; the owned model
+/// flattens the base fields in directly (the base is only ever consumed via
+/// the block-oriented descriptor — there is no AM whose parallel scan uses the
+/// bare base). The serialized snapshot is the `[u8]` flexible-array tail
+/// inside the same chunk, located at `phs_snapshot_off`.
+///
+/// `#[repr(C)]` with the C field order (base fields, then `phs_nblocks`,
+/// `phs_mutex`, `phs_startblock`, `phs_nallocated`) because the leader
+/// placement-initializes this struct DIRECTLY in the DSM chunk and every
+/// worker reinterprets the SAME in-segment bytes through the keystone
+/// [`SharedRef`]; the layout must match across processes.
+///
+/// `phs_startblock` and `phs_nallocated` are the two fields C mutates after
+/// the launch barrier; to be a sound [`SharedDsmObject`] (mutated through a
+/// shared `&self`) they are interior-mutable atomic words. C accesses
+/// `phs_startblock` as a plain `BlockNumber` while holding `phs_mutex`; a
+/// relaxed atomic load/store under that same spinlock is behaviour-preserving
+/// (the spinlock supplies the ordering). `phs_nallocated` is the C
+/// `pg_atomic_uint64`.
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct ParallelBlockTableScanDescData {
+    /* --- ParallelTableScanDescData base --- */
+    /// `base.phs_locator` — physical relation to scan.
     pub phs_locator: RelFileLocator,
-    /// `phs_syncscan` — report location to syncscan logic?
+    /// `base.phs_syncscan` — report location to syncscan logic?
     pub phs_syncscan: bool,
-    /// `phs_snapshot_any` — SnapshotAny, not the serialized snapshot.
+    /// `base.phs_snapshot_any` — SnapshotAny, not the serialized snapshot.
     pub phs_snapshot_any: bool,
-    /// `phs_snapshot_off` — data offset of the serialized snapshot.
+    /// `base.phs_snapshot_off` — byte offset (within the same chunk) of the
+    /// serialized snapshot flexible-array tail.
     pub phs_snapshot_off: usize,
-    /// The serialized snapshot bytes (C: at `phs_snapshot_off`).
-    pub phs_snapshot_data: Option<std::vec::Vec<u8>>,
-    /// The block-oriented extension (`ParallelBlockTableScanDescData`'s
-    /// fields beyond the embedded base), present once a block-oriented AM's
-    /// `parallelscan_initialize` has run.
-    pub block: Option<ParallelBlockTableScanExt>,
+
+    /* --- block-oriented extension --- */
+    /// `phs_nblocks` — number of blocks in relation at start of scan.
+    pub phs_nblocks: BlockNumber,
+    /// `phs_mutex` — `slock_t`, mutual exclusion for setting `phs_startblock`.
+    pub phs_mutex: Spinlock,
+    /// `phs_startblock` — starting block number, the C plain field serialized
+    /// by `phs_mutex`, held in an atomic word so it round-trips through the
+    /// shared `&self`.
+    pub phs_startblock: pg_atomic_uint32,
+    /// `phs_nallocated` — number of blocks allocated to workers so far.
+    pub phs_nallocated: pg_atomic_uint64,
 }
 
-impl Default for ParallelTableScanDescData {
-    fn default() -> Self {
-        ParallelTableScanDescData {
-            phs_locator: RelFileLocator::default(),
-            phs_syncscan: false,
-            phs_snapshot_any: false,
-            phs_snapshot_off: 0,
-            phs_snapshot_data: None,
-            block: None,
-        }
+// SAFETY: `#[repr(C)]` matching the C `ParallelBlockTableScanDescData`
+// field-for-field (the embedded base flattened in C order); every field C
+// mutates concurrently after the launch barrier is interior-mutable —
+// `phs_startblock`/`phs_nallocated` are atomic words and `phs_mutex` is the
+// in-segment spinlock; the leader's placement initializer writes every field.
+// A shared `&Self` is therefore sound to alias across processes.
+unsafe impl SharedDsmObject for ParallelBlockTableScanDescData {}
+
+impl ParallelBlockTableScanDescData {
+    /// `pbscan->phs_startblock` (read) — the relaxed load issued while holding
+    /// `phs_mutex` (the C plain read).
+    #[inline]
+    pub fn phs_startblock(&self) -> BlockNumber {
+        self.phs_startblock.read()
+    }
+
+    /// `pbscan->phs_startblock = b` (the C plain store under `phs_mutex`).
+    #[inline]
+    pub fn set_phs_startblock(&self, b: BlockNumber) {
+        self.phs_startblock
+            .value
+            .store(b, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
-/// The block-oriented tail of `ParallelBlockTableScanDescData`
-/// (`access/relscan.h`). `phs_mutex` + `phs_startblock` become one
-/// `Mutex<BlockNumber>` (the C spinlock exists only to protect that field);
-/// `phs_nallocated` is the C `pg_atomic_uint64`.
-pub struct ParallelBlockTableScanExt {
-    /// `phs_nblocks` — number of blocks in relation at start of scan.
-    pub phs_nblocks: BlockNumber,
-    /// `phs_startblock` — starting block number, guarded by the C
-    /// `phs_mutex` spinlock.
-    pub phs_startblock: Mutex<BlockNumber>,
-    /// `phs_nallocated` — number of blocks allocated to workers so far.
-    pub phs_nallocated: AtomicU64,
+/// `ParallelTableScanDesc` (`access/relscan.h`) — C's pointer into DSM bytes.
+/// The `Copy` raw-pointer handle the executor threads through scan
+/// descriptors: the in-DSM [`ParallelBlockTableScanDescData`] header plus the
+/// `[u8]` serialized-snapshot tail. The DSM segment that backs it is owned by
+/// the `ParallelContext` and outlives every scan that references it (exactly
+/// C's lifetime relationship), so the handle carries no Rust lifetime — just
+/// like the C pointer.
+#[derive(Clone, Copy)]
+pub struct ParallelTableScanDesc {
+    /// Address of the in-DSM `ParallelBlockTableScanDescData` header.
+    desc: *const ParallelBlockTableScanDescData,
+    /// Address of the serialized-snapshot tail (`(char *) pscan +
+    /// phs_snapshot_off`).
+    snapshot: *const u8,
+    /// Length, in bytes, of the serialized-snapshot tail (0 when the scan uses
+    /// `SnapshotAny`).
+    snapshot_len: usize,
 }
 
-impl Default for ParallelBlockTableScanExt {
-    fn default() -> Self {
-        ParallelBlockTableScanExt {
-            phs_nblocks: 0,
-            phs_startblock: Mutex::new(InvalidBlockNumber),
-            phs_nallocated: AtomicU64::new(0),
+// SAFETY: the handle is a borrow of a shared DSM segment whose cross-process
+// synchronization is the embedded interior-mutable fields' responsibility
+// (mirrors `SharedRef: Send`/`Sync`).
+unsafe impl Send for ParallelTableScanDesc {}
+unsafe impl Sync for ParallelTableScanDesc {}
+
+impl ParallelTableScanDesc {
+    /// Build the handle from the leader's freshly-placed header [`SharedRef`]
+    /// plus the in-segment address and byte length of the serialized-snapshot
+    /// tail (`(char *) pscan + phs_snapshot_off`, `snapshot_len == 0` for
+    /// `SnapshotAny`). The DSM segment that backs both outlives the handle.
+    pub fn from_shared(
+        desc: SharedRef<'_, ParallelBlockTableScanDescData>,
+        snapshot_addr: usize,
+        snapshot_len: usize,
+    ) -> Self {
+        ParallelTableScanDesc {
+            desc: desc.get() as *const ParallelBlockTableScanDescData,
+            snapshot: snapshot_addr as *const u8,
+            snapshot_len,
         }
+    }
+
+    /// `(ParallelBlockTableScanDesc) pscan` — the shared `&` to the in-DSM
+    /// descriptor. All concurrent mutation goes through its interior-mutable
+    /// fields, so this shared reference is sound even while other processes
+    /// hold their own `&` to the same bytes.
+    #[inline]
+    pub fn desc(&self) -> &ParallelBlockTableScanDescData {
+        // SAFETY: `desc` is a real in-segment address of a leader-initialized
+        // `ParallelBlockTableScanDescData` live for the DSM segment (which
+        // outlives this handle); `SharedDsmObject` guarantees every
+        // concurrently-mutated field is interior-mutable.
+        unsafe { &*self.desc }
+    }
+
+    /// `(char *) pscan + pscan->phs_snapshot_off` — the serialized snapshot
+    /// bytes (empty when the scan uses `SnapshotAny`).
+    ///
+    /// The serialized snapshot is self-delimiting: its length is
+    /// `SERIALIZED_HEADER_LEN (24) + (xcnt + subxcnt) * 4`, computed from the
+    /// `xcnt`/`subxcnt` words in its own fixed header (`SerializeSnapshot`'s
+    /// layout). `RestoreSnapshot` reads exactly that many bytes and ignores any
+    /// trailing chunk padding, so the returned slice is the exact serialized
+    /// snapshot regardless of the chunk's total size — this is why a worker
+    /// never needs the chunk length to restore the snapshot.
+    #[inline]
+    pub fn snapshot_bytes(&self) -> &[u8] {
+        if self.snapshot_len == 0 || self.desc().phs_snapshot_any {
+            return &[];
+        }
+        // SAFETY: leader-written-once before the launch barrier, read-only
+        // thereafter; the bytes live for the DSM segment. The header (24 bytes)
+        // is always present for a serialized MVCC snapshot.
+        const SERIALIZED_HEADER_LEN: usize = 24;
+        let hdr = unsafe { core::slice::from_raw_parts(self.snapshot, SERIALIZED_HEADER_LEN) };
+        let xcnt = u32::from_le_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]) as usize;
+        let subxcnt = i32::from_le_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]).max(0) as usize;
+        let total = SERIALIZED_HEADER_LEN + (xcnt + subxcnt) * 4;
+        // SAFETY: as above; `total` is exactly the serialized length the leader
+        // wrote, never larger than the chunk's snapshot region.
+        unsafe { core::slice::from_raw_parts(self.snapshot, total) }
     }
 }
 

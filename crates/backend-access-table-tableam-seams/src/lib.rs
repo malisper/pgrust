@@ -249,7 +249,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`.
     pub fn table_parallelscan_reinitialize(
         rel: &Relation<'_>,
-        pscan: &mut types_tableam::relscan::ParallelTableScanDescData,
+        pscan: &types_tableam::relscan::ParallelBlockTableScanDescData,
     ) -> PgResult<()>
 );
 

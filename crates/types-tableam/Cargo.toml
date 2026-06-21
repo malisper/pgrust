@@ -18,4 +18,5 @@ types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }
 types-snapshot = { path = "../types-snapshot" }
 types-storage = { path = "../types-storage" }
+types-parallel = { path = "../types-parallel" }
 types-tidbitmap = { path = "../types-tidbitmap" }

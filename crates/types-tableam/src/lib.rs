@@ -28,8 +28,9 @@ pub use genam::{
     SharedIndexScanInstrumentation,
 };
 pub use relscan::{
-    IndexScanDesc, IndexScanDescData, ParallelBlockTableScanExt, ParallelBlockTableScanWorkerData,
-    ParallelIndexScanDescData, ParallelTableScanDescData, TableScanDesc, TableScanDescData,
+    IndexScanDesc, IndexScanDescData, ParallelBlockTableScanDescData,
+    ParallelBlockTableScanWorkerData, ParallelIndexScanDescData, ParallelTableScanDesc,
+    TableScanDesc, TableScanDescData,
     SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TEMP_SNAPSHOT, SO_TYPE_ANALYZE,
     SO_TYPE_BITMAPSCAN, SO_TYPE_SAMPLESCAN, SO_TYPE_SEQSCAN, SO_TYPE_TIDRANGESCAN, SO_TYPE_TIDSCAN,
 };

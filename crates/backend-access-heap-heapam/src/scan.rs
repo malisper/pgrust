@@ -54,7 +54,7 @@ use types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
 use types_storage::{Buffer, InvalidBuffer};
 use types_tableam::amopaque::{tags, AmOpaque, AmOpaqueTag, AmOpaqueType};
 use types_tableam::relscan::{
-    ParallelBlockTableScanWorkerData, ParallelTableScanDescData, TableScanDescData,
+    ParallelBlockTableScanWorkerData, ParallelTableScanDesc, TableScanDescData,
     SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TEMP_SNAPSHOT, SO_TYPE_BITMAPSCAN,
     SO_TYPE_SAMPLESCAN, SO_TYPE_SEQSCAN,
 };
@@ -215,7 +215,7 @@ fn initscan(
 
     let relid = sscan.rs_rd.rd_id;
     let flags = sscan.rs_flags;
-    let parallel = sscan.rs_parallel.clone();
+    let parallel = sscan.rs_parallel;
 
     // Determine the number of blocks we have to scan. Sufficient to do once at
     // scan start, since tuples added during the scan are invisible to my
@@ -223,10 +223,7 @@ fn initscan(
     let nblocks = if let Some(p) = parallel.as_ref() {
         // bpscan = (ParallelBlockTableScanDesc) rs_parallel; scan->rs_nblocks =
         // bpscan->phs_nblocks;
-        p.block
-            .as_ref()
-            .map(|b| b.phs_nblocks)
-            .expect("initscan: parallel scan descriptor not block-initialized")
+        p.desc().phs_nblocks
     } else {
         relation_get_number_of_blocks(&sscan.rs_rd)?
     };
@@ -267,7 +264,7 @@ fn initscan(
 
     if let Some(p) = parallel.as_ref() {
         // For parallel scan, believe whatever ParallelTableScanDesc says.
-        if p.phs_syncscan {
+        if p.desc().phs_syncscan {
             sscan.rs_flags |= SO_ALLOW_SYNC;
         } else {
             sscan.rs_flags &= !SO_ALLOW_SYNC;
@@ -582,10 +579,10 @@ fn heap_fetch_next_buffer(sscan: &mut TableScanDescData<'_>, dir: ScanDirection)
 /// parallel scan descriptor and store back the per-worker chunk state.
 fn parallel_next_block(sscan: &mut TableScanDescData<'_>) -> PgResult<BlockNumber> {
     debug_assert!(ScanDirectionIsForward(heap_scan(sscan).rs_dir));
-    let pscan: std::sync::Arc<ParallelTableScanDescData> = sscan
+    let pscan: ParallelTableScanDesc = sscan
         .rs_parallel
-        .clone()
         .expect("parallel_next_block: no parallel scan descriptor");
+    let pbscan = pscan.desc();
 
     let inited = heap_scan(sscan).rs_inited;
     if !inited {
@@ -594,7 +591,7 @@ fn parallel_next_block(sscan: &mut TableScanDescData<'_>) -> PgResult<BlockNumbe
             .as_deref()
             .copied()
             .unwrap_or_default();
-        tableam::table_block_parallelscan_startblock_init(&sscan.rs_rd, &mut worker, &pscan)?;
+        tableam::table_block_parallelscan_startblock_init(&sscan.rs_rd, &mut worker, pbscan)?;
         store_worker(heap_scan(sscan), worker);
     }
     let mut worker = heap_scan(sscan)
@@ -602,7 +599,7 @@ fn parallel_next_block(sscan: &mut TableScanDescData<'_>) -> PgResult<BlockNumbe
         .as_deref()
         .copied()
         .unwrap_or_default();
-    let next = tableam::table_block_parallelscan_nextpage(&sscan.rs_rd, &mut worker, &pscan)?;
+    let next = tableam::table_block_parallelscan_nextpage(&sscan.rs_rd, &mut worker, pbscan)?;
     store_worker(heap_scan(sscan), worker);
     Ok(next)
 }
@@ -1099,7 +1096,7 @@ pub fn heap_beginscan<'mcx>(
     snapshot: Option<SnapshotData>,
     nkeys: i32,
     key: PgVec<'mcx, ScanKeyData<'mcx>>,
-    parallel_scan: Option<std::sync::Arc<ParallelTableScanDescData>>,
+    parallel_scan: Option<ParallelTableScanDesc>,
     flags: u32,
 ) -> PgResult<std::boxed::Box<TableScanDescData<'mcx>>> {
     let relid = relation.rd_id;
