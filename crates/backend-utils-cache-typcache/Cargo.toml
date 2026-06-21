@@ -19,6 +19,7 @@ types-typcache = { path = "../types-typcache" }
 types-datum = { path = "../types-datum" }
 types-tuple = { path = "../types-tuple" }
 types-statistics = { path = "../types-statistics" }
+types-storage = { path = "../types-storage" }
 
 # inward seams installed by this crate
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }

@@ -22616,6 +22616,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-statistics",
+ "types-storage",
  "types-tuple",
  "types-typcache",
 ]

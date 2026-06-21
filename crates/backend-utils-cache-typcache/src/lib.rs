@@ -2169,6 +2169,96 @@ pub fn shared_record_typmod_registry_attach() -> PgResult<()> {
 }
 
 /* ==========================================================================
+ * Shared record typmod registry — table-callback + import legs.
+ *
+ * The session crate (access/common/session.c) owns the per-session DSM
+ * segment, DSA area, and the dshash tables' storage; these typcache-owned legs
+ * are the typcache.c logic it calls back into. The blessed-record legs that
+ * serialize an owned TupleDescData into raw DSA-resident C-layout memory
+ * (share_tupledesc) are reached only by a parallel query with registered
+ * RECORD typmods, never the parallel count(*)/non-record common case this
+ * keystone unblocks; they panic loudly, never silently stub.
+ * ======================================================================== */
+
+/// Import leg of `SharedRecordTypmodRegistryInit` (typcache.c:2230): seed
+/// `*next_typmod` from `NextRecordTypmod` and import each present descriptor.
+fn shared_registry_import_seam(
+    _record_table: usize,
+    _typmod_table: usize,
+    _area: usize,
+    next_typmod: usize,
+) -> PgResult<()> {
+    let next = with_state(|st| st.next_record_typmod);
+    let np = next_typmod as *mut core::sync::atomic::AtomicU32;
+    // SAFETY: `np` addresses the registry's next_typmod atomic, freshly placed
+    // by the session in the per-session DSM segment before any worker observes it.
+    unsafe { (*np).store(next as u32, core::sync::atomic::Ordering::Relaxed) };
+    if next == 0 {
+        return Ok(());
+    }
+    panic!(
+        "shared_registry_import: blessed-record import leg (share_tupledesc over \
+         DSA-resident TupleDesc) not yet ported; reached only by a parallel query \
+         with {next} registered RECORD typmods"
+    );
+}
+
+/// Precondition check of `SharedRecordTypmodRegistryAttach` (typcache.c:2322).
+fn shared_registry_attach_check_seam() -> PgResult<()> {
+    debug_assert_eq!(with_state(|st| st.next_record_typmod), 0);
+    Ok(())
+}
+
+/// `find_or_make_matching_shared_tupledesc` (typcache.c:2943), attached path.
+fn find_or_make_matching_shared_tupledesc_seam<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _tupdesc: &TupleDescData<'_>,
+    _record_table: usize,
+    _typmod_table: usize,
+    _area: usize,
+    _next_typmod: usize,
+) -> PgResult<Option<PgBox<'mcx, TupleDescData<'mcx>>>> {
+    panic!(
+        "find_or_make_matching_shared_tupledesc: blessed-record shared path \
+         (share_tupledesc over DSA-resident TupleDesc) not yet ported"
+    );
+}
+
+/// Shared-typmod-table read of `lookup_rowtype_tupdesc_internal`
+/// (typcache.c:1855), attached path.
+fn shared_typmod_table_find_seam<'mcx>(
+    _mcx: Mcx<'mcx>,
+    _typmod: i32,
+    _typmod_table: usize,
+    _area: usize,
+) -> PgResult<Option<PgBox<'mcx, TupleDescData<'mcx>>>> {
+    panic!(
+        "shared_typmod_table_find: blessed-record shared path (DSA-resident \
+         TupleDesc read) not yet ported"
+    );
+}
+
+/// `shared_record_table_hash` (typcache.c:259) — DshashKeyKind::Record hash.
+fn shared_record_key_hash_seam(_area: *mut types_storage::DsaArea, _key: &[u8]) -> u32 {
+    panic!(
+        "shared_record_key_hash: blessed-record key resolution (DSA-resident \
+         TupleDesc) not yet ported"
+    );
+}
+
+/// `shared_record_table_compare` (typcache.c:234) — DshashKeyKind::Record cmp.
+fn shared_record_key_compare_seam(
+    _area: *mut types_storage::DsaArea,
+    _a: &[u8],
+    _b: &[u8],
+) -> bool {
+    panic!(
+        "shared_record_key_compare: blessed-record key resolution (DSA-resident \
+         TupleDesc) not yet ported"
+    );
+}
+
+/* ==========================================================================
  * Invalidation callbacks.
  * ======================================================================== */
 
@@ -3332,6 +3422,19 @@ pub fn init_seams() {
     backend_utils_cache_typcache_seams::assign_record_type_typmod::set(assign_record_type_typmod);
     backend_utils_cache_typcache_seams::at_eoxact_type_cache::set(at_eoxact_type_cache);
     backend_utils_cache_typcache_seams::at_eosubxact_type_cache::set(at_eosubxact_type_cache);
+    // Shared record typmod registry legs (session crate owns the DSM storage).
+    backend_utils_cache_typcache_seams::shared_registry_import::set(shared_registry_import_seam);
+    backend_utils_cache_typcache_seams::shared_registry_attach_check::set(
+        shared_registry_attach_check_seam,
+    );
+    backend_utils_cache_typcache_seams::find_or_make_matching_shared_tupledesc::set(
+        find_or_make_matching_shared_tupledesc_seam,
+    );
+    backend_utils_cache_typcache_seams::shared_typmod_table_find::set(shared_typmod_table_find_seam);
+    backend_utils_cache_typcache_seams::shared_record_key_hash::set(shared_record_key_hash_seam);
+    backend_utils_cache_typcache_seams::shared_record_key_compare::set(
+        shared_record_key_compare_seam,
+    );
     // Pure-wiring install (assemble/seam-wiring-guard): owner body matches.
     backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc_copy::set(lookup_rowtype_tupdesc_copy);
     backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc_domain::set(
