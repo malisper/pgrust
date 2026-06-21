@@ -583,6 +583,18 @@ pub fn parse_sub_analyze<'mcx>(
         // level reads the true count and does not drop the CTE plan. Deeper
         // levels propagate as each frame's `parse_sub_analyze` returns.
         merge_cte_refcounts(parent_pstate, cloned_parent);
+        // An aggregate or GROUPING() written inside this subquery but referencing
+        // only outer-query vars belongs to an OUTER level: `check_agglevels_and_
+        // constraints` (parse_agg.c:353) walks up `parentParseState` `agglevelsup`
+        // levels and sets that ancestor's `p_hasAggs = true`. In the owned model
+        // those walked-up ancestors are clones in `src`'s `parentParseState` chain,
+        // so the flag landed on a clone and is lost when this frame frees it. The
+        // defining level later reads `qry->hasAggs = pstate->p_hasAggs` (analyze.c)
+        // and would see `false`, so the planner never builds the Agg path and the
+        // hoisted outer-level Aggref keeps `aggno = -1`. Merge the clone chain's
+        // `p_hasAggs` back into the live parent chain. (C needs none of this: the
+        // parent ParseState is a live back-pointer, so the set is seen directly.)
+        merge_uplevel_has_aggs(parent_pstate, cloned_parent);
     }
 
     backend_parser_small1::free_parsestate(pstate)?;
@@ -665,6 +677,27 @@ fn merge_cte_refcounts<'mcx>(dst: &mut ParseState<'mcx>, src: &ParseState<'mcx>)
         (dst.parentParseState.as_deref_mut(), src.parentParseState.as_deref())
     {
         merge_cte_refcounts(dst_parent, src_parent);
+    }
+}
+
+/// Merge the `p_hasAggs` flag set on a cloned parent `ParseState` chain (`src`,
+/// the child subquery's owned `parentParseState`) back into the live parent
+/// chain (`dst`). An outer-level aggregate/`GROUPING()` written inside the child
+/// subquery sets `p_hasAggs = true` `agglevelsup` levels up
+/// (`check_agglevels_and_constraints`, parse_agg.c:353); in the owned model that
+/// walked-up ancestor is a clone, so the flag must be OR'd back so the defining
+/// level's `qry->hasAggs` reflects it. Recurse down both chains in lockstep so a
+/// reference crossing more than one level (a deeply nested sublink) propagates to
+/// every live ancestor it set. Only ever sets `true` (the flag is monotone), so
+/// it never clobbers a flag the live parent already set for its own aggregates.
+fn merge_uplevel_has_aggs<'mcx>(dst: &mut ParseState<'mcx>, src: &ParseState<'mcx>) {
+    if src.p_hasAggs {
+        dst.p_hasAggs = true;
+    }
+    if let (Some(dst_parent), Some(src_parent)) =
+        (dst.parentParseState.as_deref_mut(), src.parentParseState.as_deref())
+    {
+        merge_uplevel_has_aggs(dst_parent, src_parent);
     }
 }
 
