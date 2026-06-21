@@ -2768,6 +2768,80 @@ fn find_domain_check_constraint(
     Ok(result)
 }
 
+/// Read the cooked `conbin` (`pg_node_tree`) text of a table CHECK constraint,
+/// the `SysCacheGetAttrNotNull(CONSTROID, contuple, Anum_pg_constraint_conbin)`
+/// + `TextDatumGetCString(val)` of `QueueCheckConstraintValidation`
+/// (tablecmds.c:13185-13187). Keyed by `(conrelid = relid, contypid = Invalid,
+/// conname = constr_name)` — the at-most-one matching row. Errors if the
+/// constraint does not exist or its `conbin` is NULL (the C `NotNull` getter
+/// `elog`s on NULL).
+pub fn get_check_constraint_conbin(
+    mcx: Mcx<'_>,
+    relid: Oid,
+    constr_name: &str,
+) -> PgResult<String> {
+    let con_ctx = MemoryContext::new("pg_constraint");
+    let conrel = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, AccessShareLock)?;
+
+    let skey = [
+        oid_key(Anum_pg_constraint_conrelid, relid)?,
+        oid_key(Anum_pg_constraint_contypid, InvalidOid)?,
+        name_key(mcx, Anum_pg_constraint_conname, constr_name)?,
+    ];
+
+    /*
+     * There can be at most one matching row. We re-implement the scan loop
+     * (rather than `systable_scan_foreach`) so the deformed `conbin` Datum
+     * survives long enough to detoast — the shared helper discards `values`.
+     */
+    let mut scan = genam_seams::systable_beginscan::call(
+        &conrel,
+        ConstraintRelidTypidNameIndexId,
+        true,
+        None,
+        &skey,
+    )?;
+    let scratch = MemoryContext::new("pg_constraint scan row");
+    let smcx = scratch.mcx();
+
+    let result = match genam_seams::systable_getnext::call(smcx, scan.desc_mut())? {
+        None => {
+            scan.end()?;
+            conrel.close(AccessShareLock)?;
+            return Err(PgError::error(format!(
+                "could not find tuple for constraint \"{constr_name}\""
+            )));
+        }
+        Some(tup) => {
+            let cols = heap_deform_tuple(smcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
+            let conbin_is_null = cols
+                .get(Anum_pg_constraint_conbin as usize - 1)
+                .map(|(_, n)| *n)
+                .unwrap_or(true);
+            if conbin_is_null {
+                scan.end()?;
+                conrel.close(AccessShareLock)?;
+                return Err(PgError::error(format!(
+                    "null conbin for constraint \"{constr_name}\""
+                )));
+            }
+            let mut values: PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(smcx, cols.len())?;
+            for (value, _null) in cols.iter() {
+                values.push(value.clone());
+            }
+            let conbin_datum = &values[Anum_pg_constraint_conbin as usize - 1];
+            varlena_seams::text_to_cstring_v::call(mcx, conbin_datum)?
+                .as_str()
+                .to_string()
+        }
+    };
+
+    scan.end()?;
+    conrel.close(AccessShareLock)?;
+
+    Ok(result)
+}
+
 /// `scan_domain_check_constraints` — the per-level `pg_constraint` CHECK scan of
 /// `load_domaintype_info` (typcache.c:1145-1167). Opens `pg_constraint`,
 /// `ScanKeyInit(Anum_pg_constraint_contypid == type_id)`,

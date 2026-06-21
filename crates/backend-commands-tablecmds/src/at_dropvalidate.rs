@@ -75,6 +75,10 @@ const RELKIND_PARTITIONED_TABLE: u8 = b'p';
 /// validate-queue uses.
 const CONSTR_FOREIGN_I32: i32 = types_nodes::ddlnodes::ConstrType::CONSTR_FOREIGN as i32;
 
+/// `NewConstraint.contype` for a CHECK validation entry (the value
+/// `run_at_rewrite_table_scan` filters on to evaluate the qual per row).
+const CONSTR_CHECK_I32: i32 = types_nodes::ddlnodes::ConstrType::CONSTR_CHECK as i32;
+
 fn unported(what: &str) -> ! {
     panic!(
         "{what} is not yet ported in backend-commands-tablecmds (faithful seam-and-panic)"
@@ -552,7 +556,9 @@ pub fn ATExecValidateConstraint<'mcx>(
                 mcx, wqueue, rel, conform.confrelid, conoid, &conform, constr_name, lockmode,
             )?;
         } else if conform.contype == CONSTRAINT_CHECK {
-            QueueCheckConstraintValidation(mcx, wqueue, constr_name, conoid, recursing, lockmode)?;
+            QueueCheckConstraintValidation(
+                mcx, wqueue, rel, constr_name, conoid, recursing, lockmode,
+            )?;
         } else {
             // CONSTRAINT_NOTNULL
             QueueNNConstraintValidation(mcx, wqueue, rel, conoid, recursing, lockmode)?;
@@ -622,24 +628,87 @@ fn QueueFKConstraintValidation<'mcx>(
 // QueueCheckConstraintValidation (tablecmds.c:13110)
 // ===========================================================================
 
-/// `QueueCheckConstraintValidation(...)` — queue a CHECK validation entry and
-/// flip `convalidated`. The cooked-expr (`conbin`) extraction and the
-/// inheritance-child recursion legs are faithfully seam-and-panicked.
+/// `QueueCheckConstraintValidation(...)` (tablecmds.c:13117) — queue a CHECK
+/// validation entry into phase 3 (`tab->constraints`, evaluated per-row by the
+/// `ATRewriteTable` scan), then flip `convalidated`. The qual is the cooked
+/// `conbin` parsed via `stringToNode` and run through
+/// `expand_generated_columns_in_expr`. The inheritance-child recursion leg is
+/// faithfully seam-and-panicked (matches the NOT NULL / FK legs' frontier).
 fn QueueCheckConstraintValidation<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    rel: &Relation<'mcx>,
     constr_name: &str,
     conoid: Oid,
-    _recursing: bool,
-    _lockmode: LOCKMODE,
+    recursing: bool,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
-    // The phase-3 CHECK revalidation requires the cooked-expr (conbin) of the
-    // constraint to be deparsed and evaluated over the existing rows in
-    // ATRewriteTable; that expression-eval phase-3 path is not yet ported (see
-    // ATRewriteTables). Faithfully seam-and-panic rather than silently mark the
-    // constraint valid without scanning.
-    let _ = (mcx, wqueue, constr_name, conoid);
-    unported("VALIDATE CONSTRAINT for a CHECK constraint (phase-3 CHECK revalidation scan)");
+    let con = backend_utils_cache_syscache_seams::search_constraint_form_by_oid::call(conoid)?
+        .ok_or_else(|| {
+            backend_utils_error::ereport(ERROR)
+                .errmsg_internal(format!("cache lookup failed for constraint {conoid}"))
+                .into_error()
+        })?;
+    debug_assert_eq!(con.form.contype, CONSTRAINT_CHECK);
+
+    // If we're recursing, the parent has already done this; also a NO INHERIT
+    // constraint isn't looked for in children. We recurse before validating on
+    // the parent (C tablecmds.c:13140-13175).
+    if !recursing && !con.form.connoinherit {
+        let (children, _) = find_all_inheritors(mcx, rel.rd_id, lockmode, false)?;
+        // children always contains the parent rel itself; >1 means real
+        // children. The C foreach re-opens each child and calls
+        // ATExecValidateConstraint recursively (and errors if !recurse).
+        if children.len() > 1 {
+            unported("VALIDATE CONSTRAINT for a CHECK constraint: recursion to inheritance children");
+        }
+    }
+
+    // Queue validation for phase 3: a NewConstraint of type CONSTR_CHECK whose
+    // qual is the cooked conbin, expanded for virtual generated columns. The
+    // ATRewriteTable scan (run_at_rewrite_table_scan) evaluates it per row.
+    //
+    // val = SysCacheGetAttrNotNull(CONSTROID, contuple, Anum_pg_constraint_conbin);
+    // conbin = TextDatumGetCString(val);
+    // newcon->qual = expand_generated_columns_in_expr(stringToNode(conbin), rel, 1);
+    let conbin = backend_catalog_pg_constraint::get_check_constraint_conbin(
+        mcx, rel.rd_id, constr_name,
+    )?;
+    let cnode = backend_nodes_read_seams::string_to_node::call(mcx, &conbin)?;
+    let cexpr = mcx::PgBox::into_inner(cnode).into_expr().ok_or_else(|| {
+        backend_utils_error::ereport(ERROR)
+            .errmsg_internal("CHECK constraint conbin did not parse to an Expr".to_string())
+            .into_error()
+    })?;
+    let expanded = backend_rewrite_rewritehandler_seams::expand_generated_columns_in_expr::call(
+        mcx,
+        Some(cexpr),
+        rel.rd_id,
+        1,
+    )?
+    .ok_or_else(|| {
+        backend_utils_error::ereport(ERROR)
+            .errmsg_internal("expand_generated_columns_in_expr returned None".to_string())
+            .into_error()
+    })?;
+    let qual_node = mcx::alloc_in(mcx, types_nodes::nodes::Node::mk_expr(mcx, expanded)?)?;
+
+    let newcon = NewConstraint {
+        name: Some(mcx::PgString::from_str_in(constr_name, mcx)?),
+        contype: CONSTR_CHECK_I32,
+        refrelid: InvalidOid,
+        refindid: InvalidOid,
+        conid: conoid,
+        qual: Some(qual_node),
+    };
+    let tab = ATGetQueueEntry(mcx, wqueue, rel)?;
+    wqueue[tab].constraints.push(newcon);
+
+    // Mark the pg_constraint row as validated (CatalogTupleUpdate +
+    // InvokeObjectPostAlterHook).
+    backend_catalog_pg_constraint::set_constraint_validated(mcx, conoid)?;
+
+    Ok(())
 }
 
 // ===========================================================================
@@ -667,6 +736,19 @@ fn QueueNNConstraintValidation<'mcx>(
                 .into_error()
         })?;
 
+    // attnum = extractNotNullColumn(contuple): the sole conkey member. The
+    // scalar `search_constraint_form_by_oid` projection does not carry the
+    // `conkey` array, so re-fetch the full tuple by OID and run the shared
+    // extractor (tablecmds.c:13235).
+    let con_tup =
+        backend_utils_cache_syscache_seams::search_constraint_tuple_by_oid::call(mcx, conoid)?
+            .ok_or_else(|| {
+                backend_utils_error::ereport(ERROR)
+                    .errmsg_internal(format!("cache lookup failed for constraint {conoid}"))
+                    .into_error()
+            })?;
+    let attnum: AttrNumber = backend_catalog_pg_constraint::extractNotNullColumn(&con_tup)?;
+
     if !recursing && !con.form.connoinherit {
         let (children, _) = find_all_inheritors(mcx, rel.rd_id, lockmode, false)?;
         // children always contains the parent rel itself; >1 means real children.
@@ -674,6 +756,10 @@ fn QueueNNConstraintValidation<'mcx>(
             unported("VALIDATE CONSTRAINT NOT NULL recursion to inheritance children");
         }
     }
+
+    // Set attnotnull appropriately without queueing another validation
+    // (set_attnotnull(NULL, rel, attnum, true, false), tablecmds.c:13292).
+    crate::create::set_attnotnull(mcx, rel, attnum, true, false)?;
 
     // Queue validation for phase 3: a full-table NOT NULL recheck.
     let tab = ATGetQueueEntry(mcx, wqueue, rel)?;
