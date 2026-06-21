@@ -2473,6 +2473,10 @@ fn oid_send_function_call_seam<'mcx>(
     val: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let (datum, ref_arg) = tuple_value_to_arg(val);
+    // Detoast a TOAST-pointer / inline-compressed stored value before the send
+    // function (C: `PG_GETARG_*_PP` detoasts); the send path bypasses the
+    // regular dispatch's `detoast_ref_arg_if_toasted`, so apply it here.
+    let ref_arg = detoast_ref_arg_if_toasted(mcx, ref_arg)?;
     let resolved = fmgr_info(mcx, function_id)?;
     let arg = match &ref_arg {
         Some(p) => FmgrArg::Ref(p),
@@ -2497,8 +2501,15 @@ fn oid_output_function_call_seam<'mcx>(
 ) -> PgResult<PgVec<'mcx, u8>> {
     // Header-ful everywhere: every by-ref value (string cores AND container I/O
     // cores) reads the same framed varlena image, so the argument crosses
-    // VERBATIM (no header strip).
+    // VERBATIM (no header strip). A stored attribute value reaching the output
+    // function may still be a TOAST pointer or inline-compressed varlena (C: the
+    // output function calls `PG_GETARG_*_PP`, which detoasts via
+    // `pg_detoast_datum_packed`). The regular function-call dispatch applies
+    // `detoast_ref_arg_if_toasted`; the output/send paths bypass that dispatch,
+    // so detoast the ref arg here to honor the `RefPayload::Varlena`
+    // already-detoasted contract.
     let (datum, ref_arg) = tuple_value_to_arg(val);
+    let ref_arg = detoast_ref_arg_if_toasted(mcx, ref_arg)?;
     let resolved = fmgr_info(mcx, function_id)?;
     let arg = match &ref_arg {
         Some(p) => FmgrArg::Ref(p),

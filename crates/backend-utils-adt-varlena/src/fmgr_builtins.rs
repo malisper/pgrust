@@ -907,7 +907,15 @@ fn cstring_lane(bytes: &[u8]) -> String {
         Some(0) => &bytes[..bytes.len() - 1],
         _ => bytes,
     };
-    String::from_utf8_lossy(body).into_owned()
+    // C output functions are byte-transparent: they return a raw `char *`, so an
+    // invalid/incomplete multibyte byte (e.g. a truncated UTF8 lead byte 0xc3)
+    // must pass through VERBATIM, not be rewritten to U+FFFD. `from_utf8_lossy`
+    // would corrupt such a value (0xc3 -> 0xEF 0xBF 0xBD), diverging from real PG
+    // which emits the raw byte. The cstring lane carries a `String`, so round-trip
+    // the exact bytes losslessly. Safety: the bytes are an opaque server-encoded
+    // value treated as raw bytes by every downstream consumer (COPY/printtup send
+    // them verbatim); we never rely on the `String`'s UTF8 invariant.
+    unsafe { String::from_utf8_unchecked(body.to_vec()) }
 }
 
 // ---------------------------------------------------------------------------

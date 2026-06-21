@@ -1031,6 +1031,16 @@ pub fn init_seams() {
     // when it picks the final path off the upper rel; install our real body.
     seams::get_cheapest_fractional_path::set(append::get_cheapest_fractional_path);
 
+    // allpaths.c's set_rel_consider_parallel (allpaths.c) calls
+    // get_rel_persistence (lsyscache.c) to reject temp tables for parallel
+    // workers. The real body lives in lsyscache; delegate the allpaths-local
+    // seam to the installed lsyscache seam, converting the persistence char
+    // (`PgResult<u8>` there) to the `i8` this crate's consumer compares.
+    seams::get_rel_persistence::set(|relid| {
+        backend_utils_cache_lsyscache_seams::get_rel_persistence::call(relid)
+            .unwrap_or_else(|e| panic!("get_rel_persistence: {e:?}")) as i8
+    });
+
     // allpaths' generate_orderedappend_paths consults
     // `partitions_are_ordered` (partbounds.c) to decide whether a partitioned
     // rel admits a plain Append. Every input it reads (boundinfo strategy /
