@@ -460,9 +460,14 @@ pub fn srf_arg_varlena_bytes<'mcx>(
 ) -> PgResult<mcx::PgVec<'mcx, u8>> {
     use types_nodes::fmgr::FmgrArgRef;
 
-    // C: PG_GETARG_TEXT_PP / PG_GETARG_JSONB_P detoast the by-reference arg.
-    // The owned lane already carries the detoasted, header-ful image in
-    // `ref_args[n]`; read it as a Varlena payload.
+    // C: PG_GETARG_TEXT_PP / PG_GETARG_JSONB_P detoast the by-reference arg via
+    // `pg_detoast_datum_packed`. Unlike the regular function-call dispatch
+    // (which applies `detoast_ref_arg_if_toasted` before invoking the callee),
+    // the SRF call frame in `ExecEvalFuncArgs` marshals the compiled argument's
+    // by-reference image verbatim — so a value stored compressed inline (a wide
+    // jsonb/text column past the toast threshold) or out-of-line external
+    // reaches here still toasted. Apply the `PG_GETARG_*_PP` detoast here, the
+    // SRF analog of those macros, so the worker reads a flat container.
     let image: &[u8] = match fcinfo.ref_arg(n) {
         Some(FmgrArgRef::Varlena(bytes)) => bytes.as_slice(),
         _ => panic!(
@@ -472,11 +477,12 @@ pub fn srf_arg_varlena_bytes<'mcx>(
         ),
     };
 
-    // Copy into an `mcx`-owned buffer (the C readers hand back a pointer into
-    // the detoasted copy; the owned model returns an arena-allocated `PgVec`).
-    let mut out = mcx::vec_with_capacity_in::<u8>(mcx, image.len())?;
-    out.extend_from_slice(image);
-    Ok(out)
+    // `pg_detoast_datum_packed` returns a plain (uncompressed, inline) value
+    // verbatim and only fetches/decompresses a compressed or external one — the
+    // exact `PG_DETOAST_DATUM_PACKED` contract. An SRF varlena arg is always a
+    // genuine varlena type (jsonb/text/array), never a fixed-length by-reference
+    // value, so this is unconditionally safe to apply.
+    backend_access_common_detoast_seams::pg_detoast_datum_packed::call(mcx, image)
 }
 
 /// `CStringGetTextDatum(s)` — build a `text *` Datum from a string in `mcx`

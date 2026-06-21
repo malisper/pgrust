@@ -51,6 +51,24 @@ use backend_utils_adt_jsonb_util::{JsonbToJsonbValue, JsonbValueToJsonb};
 use backend_utils_adt_jsonfuncs::getfield::jsonb_get_element;
 use backend_utils_adt_jsonfuncs::setops::jsonb_set_element;
 
+/// `DatumGetJsonbP(d)` (jsonb.h): `(Jsonb *) PG_DETOAST_DATUM(d)`. Read the
+/// by-reference jsonb varlena image off the canonical lane and detoast it via
+/// `pg_detoast_datum_packed` (the `PG_DETOAST_DATUM_PACKED` step every
+/// `PG_GETARG_JSONB_P` / `DatumGetJsonbP` applies): a value stored
+/// compressed-inline or out-of-line external arrives here still toasted (the
+/// subscripting executor reads `*op->resvalue` straight off the slot, which the
+/// central fmgr dispatch's per-arg detoast never touched). A plain value is
+/// returned verbatim.
+fn datum_get_jsonb_p<'mcx>(
+    mcx: Mcx<'mcx>,
+    container: &DatumV<'mcx>,
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    backend_access_common_detoast_seams::pg_detoast_datum_packed::call(
+        mcx,
+        container.as_ref_bytes(),
+    )
+}
+
 /// `jsonb_subscript_fetch` (jsonbsubs.c): evaluate a SubscriptingRef fetch for a
 /// jsonb element.
 ///
@@ -70,10 +88,11 @@ pub fn jsonb_subscript_fetch<'mcx>(
 ) -> PgResult<(DatumV<'mcx>, bool)> {
     // Assert(!(*op->resnull)); — guaranteed by fetch_strict; caller has read a
     // non-NULL container.
-    let jsonb_source = container.as_ref_bytes();
+    // jsonbSource = DatumGetJsonbP(*op->resvalue);
+    let jsonb_source = datum_get_jsonb_p(mcx, &container)?;
     let path_refs: Vec<&[u8]> = path.iter().map(|e| e.as_slice()).collect();
     // jsonb_get_element(..., as_text = false): None == *op->resnull = true.
-    match jsonb_get_element(mcx, jsonb_source, &path_refs, false)? {
+    match jsonb_get_element(mcx, &jsonb_source, &path_refs, false)? {
         Some(bytes) => Ok((DatumV::ByRef(bytes), false)),
         None => Ok((DatumV::null(), true)),
     }
@@ -110,7 +129,8 @@ pub fn jsonb_subscript_assign<'mcx>(
     } else {
         // JsonbToJsonbValue(DatumGetJsonbP(sbsrefstate->replacevalue), &replacevalue);
         let mut v = JsonbValue::null();
-        JsonbToJsonbValue(replacevalue.as_ref_bytes(), &mut v)?;
+        let replace_bytes = datum_get_jsonb_p(mcx, &replacevalue)?;
+        JsonbToJsonbValue(&replace_bytes, &mut v)?;
         v
     };
 
@@ -139,7 +159,7 @@ pub fn jsonb_subscript_assign<'mcx>(
         JsonbValueToJsonb(mcx, &new_source)?.as_slice().to_vec()
     } else {
         // jsonbSource = DatumGetJsonbP(*op->resvalue);
-        container.as_ref_bytes().to_vec()
+        datum_get_jsonb_p(mcx, &container)?.as_slice().to_vec()
     };
 
     // *op->resvalue = jsonb_set_element(jsonbSource, workspace->index,
@@ -173,9 +193,10 @@ pub fn jsonb_subscript_fetch_old<'mcx>(
         // whole jsonb is null, so any element is too
         return Ok((DatumV::null(), true));
     }
-    let jsonb_source = container.as_ref_bytes();
+    // Jsonb *jsonbSource = DatumGetJsonbP(*op->resvalue);
+    let jsonb_source = datum_get_jsonb_p(mcx, &container)?;
     let path_refs: Vec<&[u8]> = path.iter().map(|e| e.as_slice()).collect();
-    match jsonb_get_element(mcx, jsonb_source, &path_refs, false)? {
+    match jsonb_get_element(mcx, &jsonb_source, &path_refs, false)? {
         Some(bytes) => Ok((DatumV::ByRef(bytes), false)),
         None => Ok((DatumV::null(), true)),
     }

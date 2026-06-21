@@ -20051,6 +20051,7 @@ dependencies = [
 name = "backend-utils-adt-jsonbsubs"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-utils-adt-jsonb-util",
  "backend-utils-adt-jsonbsubs-seams",
  "backend-utils-adt-jsonfuncs",
@@ -22547,6 +22548,7 @@ name = "backend-utils-fmgr-funcapi"
 version = "0.0.0"
 dependencies = [
  "allocator-api2",
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
  "backend-access-common-relation-seams",
  "backend-access-common-toastdesc-seams",

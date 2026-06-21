@@ -17,3 +17,7 @@ types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 mcx = { path = "../mcx" }
+# DatumGetJsonbP detoasts its argument (PG_DETOAST_DATUM); apply the same
+# PG_DETOAST_DATUM_PACKED step before reading a (possibly toasted) jsonb
+# container/replace-value off the canonical by-reference lane.
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }

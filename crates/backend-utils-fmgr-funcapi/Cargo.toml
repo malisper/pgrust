@@ -47,3 +47,6 @@ backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" 
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
 backend-access-common-tupdesc-seams = { path = "../backend-access-common-tupdesc-seams" }
 backend-access-common-toastdesc-seams = { path = "../backend-access-common-toastdesc-seams" }
+# PG_GETARG_*_PP detoast (pg_detoast_datum_packed) applied by the SRF varlena
+# arg reader, mirroring the regular dispatch's detoast_ref_arg_if_toasted.
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
