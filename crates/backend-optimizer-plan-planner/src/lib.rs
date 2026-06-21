@@ -3717,6 +3717,253 @@ fn build_returning_list_for_leaf<'mcx>(
     Ok(ids)
 }
 
+/// Build the per-result-rel WITH CHECK OPTION list for one ModifyTable target
+/// rel, mirroring C planner.c:1979-1989 (the inherited branch) and the
+/// single-relation `withCheckOptionLists = list_make1(parse->withCheckOptions)`
+/// (planner.c:2090). Each `parse->withCheckOptions` element (a `WithCheckOption`
+/// node whose `qual` is the preprocessed constraint expr) is interned into the
+/// planner arena as a lifetime-free [`WithCheckOptionNode`]; for an inherited
+/// leaf that isn't the top target rel the `qual` is translated from the top
+/// target rel's attribute namespace down to the leaf's via
+/// `adjust_appendrel_attrs_multilevel`. `setrefs.c` later fixes up the Vars.
+fn build_wco_list_for_leaf<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    translate_rels: Option<(types_pathnodes::RelId, types_pathnodes::RelId)>,
+) -> PgResult<Vec<types_pathnodes::NodeId>> {
+    let mcx = run.mcx();
+    let n = run.resolve(root.parse).withCheckOptions.len();
+    let mut ids: Vec<types_pathnodes::NodeId> = Vec::with_capacity(n);
+    for i in 0..n {
+        let (kind, relname, polname, qual_expr, cascaded) = {
+            let wco = run.resolve(root.parse).withCheckOptions[i]
+                .as_withcheckoption()
+                .expect("grouping_planner: withCheckOptions element is not a WithCheckOption");
+            let qual_expr = match wco.qual.as_deref() {
+                None => None,
+                Some(node) => Some(
+                    node.as_expr()
+                        .expect("grouping_planner: WithCheckOption qual is not an Expr")
+                        .clone_in(mcx)?,
+                ),
+            };
+            (
+                wco.kind,
+                wco.relname.as_ref().map(|s| alloc::string::String::from(s.as_str())),
+                wco.polname.as_ref().map(|s| alloc::string::String::from(s.as_str())),
+                qual_expr,
+                wco.cascaded,
+            )
+        };
+        let qual_id = match qual_expr {
+            None => types_pathnodes::NodeId::default(),
+            Some(expr) => {
+                let expr_final = if let Some((this_rel, top_rel)) = translate_rels {
+                    backend_optimizer_util_appendinfo::adjust_appendrel_attrs_multilevel(
+                        root, expr, this_rel, top_rel,
+                    )?
+                } else {
+                    expr
+                };
+                root.alloc_node(expr_final)
+            }
+        };
+        let node = types_pathnodes::WithCheckOptionNode {
+            kind,
+            relname,
+            polname,
+            qual: qual_id,
+            cascaded,
+        };
+        ids.push(root.alloc_with_check_option(node));
+    }
+    Ok(ids)
+}
+
+/// Build the per-result-rel MERGE action list for one ModifyTable target rel,
+/// mirroring C planner.c:2004-2031 (the inherited branch's `copyObject(action)`
+/// + per-leaf translation) and the single-relation
+/// `mergeActionLists = list_make1(parse->mergeActionList)` (planner.c:2096).
+/// Each `parse->mergeActionList` MergeAction is interned into the planner arena
+/// as a lifetime-free [`MergeActionNode`] (its `qual` Expr and `targetList`
+/// TargetEntry exprs re-interned as their own arena handles); for an inherited
+/// leaf that isn't the top target rel the `qual`/`targetList` are translated via
+/// `adjust_appendrel_attrs_multilevel` and `updateColnos` via
+/// `adjust_inherited_attnums_multilevel`. `setrefs.c` later fixes up the Vars.
+fn build_merge_action_list_for_leaf<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    translate_rels: Option<(types_pathnodes::RelId, types_pathnodes::RelId)>,
+) -> PgResult<Vec<types_pathnodes::NodeId>> {
+    let mcx = run.mcx();
+    let n = run.resolve(root.parse).mergeActionList.len();
+    let mut ids: Vec<types_pathnodes::NodeId> = Vec::with_capacity(n);
+    for i in 0..n {
+        // Snapshot the action's fields (cloning the lifetime-bearing exprs into
+        // mcx) so we can translate + intern without holding a parse borrow.
+        let (match_kind, command_type, overriding, qual_expr, tl_exprs, update_colnos) = {
+            let action = run.resolve(root.parse).mergeActionList[i]
+                .as_mergeaction()
+                .expect("grouping_planner: mergeActionList element is not a MergeAction");
+            let qual_expr = match action.qual.as_deref() {
+                None => None,
+                Some(node) => Some(
+                    node.as_expr()
+                        .expect("grouping_planner: MergeAction qual is not an Expr")
+                        .clone_in(mcx)?,
+                ),
+            };
+            let mut tl_exprs: Vec<(
+                Expr,
+                types_core::primitive::AttrNumber,
+                Option<alloc::string::String>,
+                types_core::primitive::Index,
+                Oid,
+                types_core::primitive::AttrNumber,
+                bool,
+            )> = Vec::with_capacity(action.targetList.len());
+            for tle_node in action.targetList.iter() {
+                let tle = tle_node
+                    .as_targetentry()
+                    .expect("grouping_planner: MergeAction targetList entry is a TargetEntry");
+                let expr = tle
+                    .expr
+                    .as_deref()
+                    .expect("grouping_planner: MergeAction TargetEntry with NULL expr")
+                    .clone_in(mcx)?;
+                tl_exprs.push((
+                    expr,
+                    tle.resno,
+                    tle.resname.as_ref().map(|s| alloc::string::String::from(s.as_str())),
+                    tle.ressortgroupref,
+                    tle.resorigtbl,
+                    tle.resorigcol,
+                    tle.resjunk,
+                ));
+            }
+            let update_colnos: Vec<i32> = action.updateColnos.iter().copied().collect();
+            (
+                action.matchKind,
+                action.commandType,
+                action.r#override,
+                qual_expr,
+                tl_exprs,
+                update_colnos,
+            )
+        };
+
+        // qual: translate when an inherited non-top leaf.
+        let qual_id = match qual_expr {
+            None => types_pathnodes::NodeId::default(),
+            Some(expr) => {
+                let expr_final = if let Some((this_rel, top_rel)) = translate_rels {
+                    backend_optimizer_util_appendinfo::adjust_appendrel_attrs_multilevel(
+                        root, expr, this_rel, top_rel,
+                    )?
+                } else {
+                    expr
+                };
+                root.alloc_node(expr_final)
+            }
+        };
+
+        // targetList: translate each entry's expr, intern as a TargetEntry.
+        let mut tl_ids: Vec<types_pathnodes::NodeId> = Vec::with_capacity(tl_exprs.len());
+        for (expr, resno, resname, ressortgroupref, resorigtbl, resorigcol, resjunk) in tl_exprs {
+            let expr_final = if let Some((this_rel, top_rel)) = translate_rels {
+                backend_optimizer_util_appendinfo::adjust_appendrel_attrs_multilevel(
+                    root, expr, this_rel, top_rel,
+                )?
+            } else {
+                expr
+            };
+            let expr_id = root.alloc_node(expr_final);
+            let te = types_pathnodes::TargetEntryNode {
+                expr: expr_id,
+                resno,
+                resname,
+                ressortgroupref,
+                resorigtbl,
+                resorigcol,
+                resjunk,
+            };
+            tl_ids.push(root.alloc_targetentry(te));
+        }
+
+        // updateColnos: translate via adjust_inherited_attnums_multilevel when
+        // this is an inherited UPDATE action on a non-top leaf. The colnos are
+        // `int` (i32) in the parse node but the appendinfo translation works on
+        // `AttrNumber` (i16), so round-trip through i16.
+        let update_colnos_final: Vec<i32> = if command_type == CmdType::CMD_UPDATE {
+            if let Some((this_rel, top_rel)) = translate_rels {
+                let attnums: Vec<types_core::primitive::AttrNumber> =
+                    update_colnos.iter().map(|&c| c as types_core::primitive::AttrNumber).collect();
+                let (this_relid, top_relid) =
+                    (root.rel(this_rel).relid, root.rel(top_rel).relid);
+                let translated = backend_optimizer_util_appendinfo::adjust_inherited_attnums_multilevel(
+                    root,
+                    &attnums,
+                    this_relid,
+                    top_relid,
+                )?;
+                translated.into_iter().map(|a| a as i32).collect()
+            } else {
+                update_colnos
+            }
+        } else {
+            update_colnos
+        };
+
+        let node = types_pathnodes::MergeActionNode {
+            matchKind: match_kind,
+            commandType: command_type as u32,
+            overriding,
+            qual: qual_id,
+            targetList: tl_ids,
+            updateColnos: update_colnos_final,
+        };
+        ids.push(root.alloc_merge_action(node));
+    }
+    Ok(ids)
+}
+
+/// Build the per-result-rel MERGE join-condition entry for one ModifyTable
+/// target rel, mirroring C planner.c:2040-2048 / the single-relation
+/// `mergeJoinConditions = list_make1(parse->mergeJoinCondition)`. The
+/// `parse->mergeJoinCondition` is a single `Node` (an `Expr`) interned into the
+/// arena; for an inherited non-top leaf it is translated via
+/// `adjust_appendrel_attrs_multilevel`. A NULL join condition (no condition)
+/// yields the `NodeId(0)` NULL marker. The outer list always has one entry per
+/// result rel (even when the inner condition is NULL).
+fn build_merge_join_condition_for_leaf<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    translate_rels: Option<(types_pathnodes::RelId, types_pathnodes::RelId)>,
+) -> PgResult<Vec<types_pathnodes::NodeId>> {
+    let mcx = run.mcx();
+    let cond_expr: Option<Expr> = match run.resolve(root.parse).mergeJoinCondition.as_deref() {
+        None => None,
+        Some(expr) => Some(expr.clone_in(mcx)?),
+    };
+    let id = match cond_expr {
+        None => types_pathnodes::NodeId::default(),
+        Some(expr) => {
+            let expr_final = if let Some((this_rel, top_rel)) = translate_rels {
+                backend_optimizer_util_appendinfo::adjust_appendrel_attrs_multilevel(
+                    root, expr, this_rel, top_rel,
+                )?
+            } else {
+                expr
+            };
+            root.alloc_node(expr_final)
+        }
+    };
+    // One inner entry (the join condition handle, possibly the NULL marker).
+    let mut out: Vec<types_pathnodes::NodeId> = Vec::with_capacity(1);
+    out.push(id);
+    Ok(out)
+}
+
 /// `bms_membership(set) == BMS_MULTIPLE` (bitmapset.c) — true if the relid set
 /// has more than one member. Counts set bits over the planner `Relids` word
 /// storage (`None` == empty == not multiple).
@@ -3773,24 +4020,22 @@ fn add_modifytable_to_path<'mcx>(
     // (rootRelation, resultRelations, updateColnosLists, returningLists) and the
     // single-relation builders below are skipped.
     //
-    // The per-leaf WITH-CHECK-OPTION and MERGE-action/join-condition translation
-    // (createplan reads those parse-direct, which is only correct for a single
-    // target rel) is not yet carried per-leaf, so an inherited target that uses
-    // them errors faithfully rather than silently producing wrong results.
-    let inherited_lists: Option<(
+    // The per-leaf WITH-CHECK-OPTION (`withCheckOptionLists`) and
+    // MERGE-action/join-condition (`mergeActionLists`/`mergeJoinConditions`)
+    // lists are built per leaf here too (translated from the top target rel's
+    // namespace via adjust_appendrel_attrs_multilevel), interned into the
+    // planner arena, and carried on the path as NodeId handle lists.
+    type InheritedLists = (
         types_core::primitive::Index,
         Vec<i32>,
         Vec<Vec<types_core::primitive::AttrNumber>>,
         Vec<Vec<types_pathnodes::NodeId>>,
-    )> = if relids_is_multiple(&root.all_result_relids) {
-        if has_wco || has_merge_action {
-            return Err(types_error::PgError::error(
-                "grouping_planner: inherited UPDATE/DELETE/MERGE with \
-                 WITH CHECK OPTION or MERGE actions — per-leaf node-list \
-                 translation in createplan is not modeled yet",
-            ));
-        }
-
+        // withCheckOptionLists / mergeActionLists / mergeJoinConditions
+        Vec<Vec<types_pathnodes::NodeId>>,
+        Vec<Vec<types_pathnodes::NodeId>>,
+        Vec<Vec<types_pathnodes::NodeId>>,
+    );
+    let inherited_lists: Option<InheritedLists> = if relids_is_multiple(&root.all_result_relids) {
         // top_result_rel = find_base_rel(root, parse->resultRelation).
         let top_result_relid = result_relation as types_core::primitive::Index;
         let top_result_rel =
@@ -3806,6 +4051,9 @@ fn add_modifytable_to_path<'mcx>(
         let mut result_relations: Vec<i32> = Vec::new();
         let mut update_colnos_lists: Vec<Vec<types_core::primitive::AttrNumber>> = Vec::new();
         let mut returning_lists: Vec<Vec<types_pathnodes::NodeId>> = Vec::new();
+        let mut wco_lists: Vec<Vec<types_pathnodes::NodeId>> = Vec::new();
+        let mut merge_action_lists: Vec<Vec<types_pathnodes::NodeId>> = Vec::new();
+        let mut merge_join_conditions: Vec<Vec<types_pathnodes::NodeId>> = Vec::new();
 
         // Iterate leaf_result_relids (bms_next_member over the planner Relids word
         // storage), adding only non-dummy leaves to the ModifyTable.
@@ -3864,6 +4112,25 @@ fn add_modifytable_to_path<'mcx>(
                 let ids = build_returning_list_for_leaf(run, root, translate_rels)?;
                 returning_lists.push(ids);
             }
+
+            // Translation flag shared by WCO / MERGE-action / join-condition.
+            let translate_rels = if this_result_rel != top_result_rel {
+                Some((this_result_rel, top_result_rel))
+            } else {
+                None
+            };
+
+            if has_wco {
+                wco_lists.push(build_wco_list_for_leaf(run, root, translate_rels)?);
+            }
+            if has_merge_action {
+                merge_action_lists
+                    .push(build_merge_action_list_for_leaf(run, root, translate_rels)?);
+            }
+            if command_type == CmdType::CMD_MERGE {
+                merge_join_conditions
+                    .push(build_merge_join_condition_for_leaf(run, root, translate_rels)?);
+            }
         }
 
         // If we managed to exclude every child rel, generate a dummy one-relation
@@ -3879,6 +4146,16 @@ fn add_modifytable_to_path<'mcx>(
                 let ids = build_returning_list_for_leaf(run, root, None)?;
                 returning_lists.push(ids);
             }
+            if has_wco {
+                wco_lists.push(build_wco_list_for_leaf(run, root, None)?);
+            }
+            if has_merge_action {
+                merge_action_lists.push(build_merge_action_list_for_leaf(run, root, None)?);
+            }
+            if command_type == CmdType::CMD_MERGE {
+                merge_join_conditions
+                    .push(build_merge_join_condition_for_leaf(run, root, None)?);
+            }
         }
 
         Some((
@@ -3886,39 +4163,39 @@ fn add_modifytable_to_path<'mcx>(
             result_relations,
             update_colnos_lists,
             returning_lists,
+            wco_lists,
+            merge_action_lists,
+            merge_join_conditions,
         ))
     } else {
         None
     };
-    // Single-relation MERGE (planner.c:2094-2097): C aliases
-    // mergeActionLists = list_make1(parse->mergeActionList) and
-    // mergeJoinConditions = list_make1(parse->mergeJoinCondition) into the path.
-    // In this owned model those lists live on `parse` and are read directly by
-    // create_modifytable_plan / make_modifytable (the same parse-direct pattern
-    // used for ON CONFLICT). The path therefore carries only a presence signal:
-    // a one-element marker outer list so create_modifytable_plan's MERGE branch
-    // (`operation == CMD_MERGE`) fires. The actual MergeAction / join-condition
-    // resolution happens in createplan against `run.resolve(root.parse)`.
-    let _ = has_merge_action;
-    // withCheckOptionLists = list_make1(parse->withCheckOptions) for the single-
-    // relation case (planner.c:2090). Like ON CONFLICT / MERGE / RETURNING, the
-    // owned WithCheckOption list lives on `parse->withCheckOptions` and is read
-    // directly by create_modifytable_plan; the path/plan carrier needs only a
-    // presence signal (createplan materializes the per-rel WCO node list from
-    // parse). So the path carries an empty list and `has_wco` flows via parse.
-    let _ = has_wco;
-
-    // rootRelation / resultRelations / updateColnosLists / returningLists: from
-    // the inherited (BMS_MULTIPLE) computation above when that branch was taken,
-    // else the single-relation INSERT/UPDATE/DELETE case (C:2099-2112) with
-    // rootRelation = 0 (no separate root rel).
-    let (root_relation, result_relations, update_colnos_lists, returning_lists): (
+    // rootRelation / resultRelations / updateColnosLists / returningLists /
+    // withCheckOptionLists / mergeActionLists / mergeJoinConditions: from the
+    // inherited (BMS_MULTIPLE) computation above when that branch was taken,
+    // else the single-relation INSERT/UPDATE/DELETE/MERGE case (C:2099-2112)
+    // with rootRelation = 0 (no separate root rel). For the single-rel case the
+    // lists are `list_make1` of the parse-direct values, interned with no
+    // attribute-namespace translation (the target rel is the top rel itself).
+    #[allow(clippy::type_complexity)]
+    let (
+        root_relation,
+        result_relations,
+        update_colnos_lists,
+        returning_lists,
+        wco_lists,
+        merge_action_lists,
+        merge_join_conditions,
+    ): (
         types_core::primitive::Index,
         Vec<i32>,
         Vec<Vec<types_core::primitive::AttrNumber>>,
         Vec<Vec<types_pathnodes::NodeId>>,
-    ) = if let Some((rr, rels, ucl, rl)) = inherited_lists {
-        (rr, rels, ucl, rl)
+        Vec<Vec<types_pathnodes::NodeId>>,
+        Vec<Vec<types_pathnodes::NodeId>>,
+        Vec<Vec<types_pathnodes::NodeId>>,
+    ) = if let Some((rr, rels, ucl, rl, wcl, mal, mjc)) = inherited_lists {
+        (rr, rels, ucl, rl, wcl, mal, mjc)
     } else {
         let mut result_relations: Vec<i32> = Vec::with_capacity(1);
         result_relations.push(result_relation);
@@ -3936,7 +4213,30 @@ fn add_modifytable_to_path<'mcx>(
             let ids = build_returning_list_for_leaf(run, root, None)?;
             returning_lists.push(ids);
         }
-        (0, result_relations, update_colnos_lists, returning_lists)
+        // withCheckOptionLists = list_make1(parse->withCheckOptions).
+        let mut wco_lists: Vec<Vec<types_pathnodes::NodeId>> = Vec::new();
+        if has_wco {
+            wco_lists.push(build_wco_list_for_leaf(run, root, None)?);
+        }
+        // mergeActionLists = list_make1(parse->mergeActionList) and
+        // mergeJoinConditions = list_make1(parse->mergeJoinCondition).
+        let mut merge_action_lists: Vec<Vec<types_pathnodes::NodeId>> = Vec::new();
+        if has_merge_action {
+            merge_action_lists.push(build_merge_action_list_for_leaf(run, root, None)?);
+        }
+        let mut merge_join_conditions: Vec<Vec<types_pathnodes::NodeId>> = Vec::new();
+        if command_type == CmdType::CMD_MERGE {
+            merge_join_conditions.push(build_merge_join_condition_for_leaf(run, root, None)?);
+        }
+        (
+            0,
+            result_relations,
+            update_colnos_lists,
+            returning_lists,
+            wco_lists,
+            merge_action_lists,
+            merge_join_conditions,
+        )
     };
 
     // If there was a FOR [KEY] UPDATE/SHARE clause the LockRows node dealt with
@@ -3973,12 +4273,12 @@ fn add_modifytable_to_path<'mcx>(
         part_cols_updated,
         result_relations,
         update_colnos_lists,
-        Vec::new(), // withCheckOptionLists
+        wco_lists,
         returning_lists,
         row_marks,
         onconflict_marker,
-        Vec::new(), // mergeActionLists
-        Vec::new(), // mergeJoinConditions
+        merge_action_lists,
+        merge_join_conditions,
         epq_param,
     )
 }

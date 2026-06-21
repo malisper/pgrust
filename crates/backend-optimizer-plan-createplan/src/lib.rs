@@ -4497,6 +4497,13 @@ fn create_modifytable_plan<'mcx>(
     let onconflict = p.onconflict;
     let epq_param = p.epqParam;
     let returning_lists: Vec<Vec<NodeId>> = p.returningLists.clone();
+    // Per-result-rel WITH CHECK OPTION / MERGE action / MERGE join-condition
+    // lists, carried as planner-arena `NodeId` handle lists (the planner builds
+    // them per leaf, translated for inherited targets). createplan resolves the
+    // handles back into the executor-shaped node lists below.
+    let with_check_option_lists: Vec<Vec<NodeId>> = p.withCheckOptionLists.clone();
+    let merge_action_lists: Vec<Vec<NodeId>> = p.mergeActionLists.clone();
+    let merge_join_conditions: Vec<Vec<NodeId>> = p.mergeJoinConditions.clone();
 
     // Resolve the ON CONFLICT clause (carried as a presence marker in the path)
     // into the executor-shaped plan data. infer_arbiter_indexes needs &mut root,
@@ -4528,6 +4535,9 @@ fn create_modifytable_plan<'mcx>(
         result_relations,
         update_colnos_lists,
         returning_lists,
+        with_check_option_lists,
+        merge_action_lists,
+        merge_join_conditions,
         row_marks,
         onconflict_data,
         epq_param,
@@ -4555,6 +4565,9 @@ fn make_modifytable<'mcx>(
     result_relations: Vec<i32>,
     update_colnos_lists: Vec<Vec<AttrNumber>>,
     returning_lists: Vec<Vec<NodeId>>,
+    with_check_option_lists: Vec<Vec<NodeId>>,
+    merge_action_lists: Vec<Vec<NodeId>>,
+    merge_join_conditions: Vec<Vec<NodeId>>,
     row_marks: Vec<NodeId>,
     onconflict: Option<OnConflictPlanData<'mcx>>,
     epq_param: i32,
@@ -4628,29 +4641,26 @@ fn make_modifytable<'mcx>(
             Some(outer)
         };
 
-    // withCheckOptionLists = list_make1(parse->withCheckOptions) for the single-
-    // relation case (planner.c:2090). The owned WithCheckOption list lives on
-    // parse->withCheckOptions (the planner carries only a presence signal); deep-
-    // copy it into the plan arena as one per-result-rel sublist of WithCheckOption
-    // nodes (one entry, since this is the non-inherited single-rel ModifyTable
-    // path; the inherited BMS_MULTIPLE per-leaf case is panic-guarded earlier in
-    // grouping_planner). The executor ExecInitModifyTable compiles each node's
-    // qual into ri_WithCheckOptionExprs.
-    let with_check_option_lists_field: Option<PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>> = {
-        let n = run.resolve(root.parse).withCheckOptions.len();
-        if n == 0 {
+    // withCheckOptionLists: one per-result-rel sublist of WithCheckOption nodes,
+    // resolved from the planner-arena `NodeId` handle lists the planner built
+    // (per leaf for an inherited/partitioned target, translated to each leaf's
+    // attribute namespace; one entry for the single-rel case). The executor
+    // ExecInitModifyTable compiles each node's qual into ri_WithCheckOptionExprs.
+    let with_check_option_lists_field: Option<PgVec<'mcx, PgVec<'mcx, Node<'mcx>>>> =
+        if with_check_option_lists.is_empty() {
             None
         } else {
-            let mut inner: PgVec<'mcx, Node<'mcx>> = vec_with_capacity_in(mcx, n)?;
-            for i in 0..n {
-                let wco_node = &*run.resolve(root.parse).withCheckOptions[i];
-                inner.push(wco_node.clone_in(mcx)?);
+            let mut outer: PgVec<'mcx, PgVec<'mcx, Node<'mcx>>> =
+                vec_with_capacity_in(mcx, with_check_option_lists.len())?;
+            for sub in &with_check_option_lists {
+                let mut inner: PgVec<'mcx, Node<'mcx>> = vec_with_capacity_in(mcx, sub.len())?;
+                for &wco_id in sub {
+                    inner.push(resolve_wco_node(mcx, root, wco_id)?);
+                }
+                outer.push(inner);
             }
-            let mut outer: PgVec<'mcx, PgVec<'mcx, Node<'mcx>>> = vec_with_capacity_in(mcx, 1)?;
-            outer.push(inner);
             Some(outer)
-        }
-    };
+        };
 
     // returningOldAlias / returningNewAlias come off root->parse.
     let parse = run.resolve(root.parse);
@@ -4737,44 +4747,48 @@ fn make_modifytable<'mcx>(
         ),
     };
 
-    // MERGE: build mergeActionLists / mergeJoinConditions from parse->
-    // mergeActionList / parse->mergeJoinCondition (createplan.c:7253-7254, where
-    // they alias the path's list_make1 of the parse fields). Single result
-    // relation here, so each is a one-element outer list. The Var references are
-    // fixed up later by setrefs.c.
-    let (merge_action_lists_field, merge_join_conditions_field): (
-        Option<PgVec<'mcx, PgVec<'mcx, types_nodes::modifytable::MergeAction<'mcx>>>>,
-        Option<PgVec<'mcx, Option<PgVec<'mcx, Expr>>>>,
-    ) = if operation == types_pathnodes::CMD_MERGE {
-        let parse = run.resolve(root.parse);
-
-        // list_make1(parse->mergeActionList): one inner list of MergeActions.
-        let mut inner_actions = vec_with_capacity_in(mcx, parse.mergeActionList.len())?;
-        for action_node in parse.mergeActionList.iter() {
-            let src = action_node
-                .as_mergeaction()
-                .expect("make_modifytable: mergeActionList entry is a MergeAction");
-            inner_actions.push(convert_merge_action(mcx, src)?);
-        }
-        let mut outer_actions = vec_with_capacity_in(mcx, 1)?;
-        outer_actions.push(inner_actions);
-
-        // list_make1(parse->mergeJoinCondition): one inner join-condition list.
-        let join_cond: Option<PgVec<'mcx, Expr>> = match parse.mergeJoinCondition.as_deref() {
-            Some(expr) => {
-                let mut v = vec_with_capacity_in(mcx, 1)?;
-                v.push(expr.clone_in(mcx)?);
-                Some(v)
-            }
-            None => None,
-        };
-        let mut outer_conds = vec_with_capacity_in(mcx, 1)?;
-        outer_conds.push(join_cond);
-
-        (Some(outer_actions), Some(outer_conds))
+    // MERGE: resolve mergeActionLists / mergeJoinConditions from the planner-arena
+    // `NodeId` handle lists the planner built per result rel (createplan.c:7253-
+    // 7254; the planner translated each leaf to its attribute namespace for an
+    // inherited target, one entry for the single-rel case). The Var references
+    // are fixed up later by setrefs.c.
+    let merge_action_lists_field: Option<
+        PgVec<'mcx, PgVec<'mcx, types_nodes::modifytable::MergeAction<'mcx>>>,
+    > = if merge_action_lists.is_empty() {
+        None
     } else {
-        (None, None)
+        let mut outer = vec_with_capacity_in(mcx, merge_action_lists.len())?;
+        for sub in &merge_action_lists {
+            let mut inner = vec_with_capacity_in(mcx, sub.len())?;
+            for &action_id in sub {
+                inner.push(resolve_merge_action(mcx, root, action_id)?);
+            }
+            outer.push(inner);
+        }
+        Some(outer)
     };
+    // mergeJoinConditions: each outer entry is the per-result-rel join condition
+    // as a one-element Expr list (the arena stores a single `Expr` handle per
+    // leaf, or the NULL marker `NodeId(0)` for no condition → empty/None).
+    let merge_join_conditions_field: Option<PgVec<'mcx, Option<PgVec<'mcx, Expr>>>> =
+        if merge_join_conditions.is_empty() {
+            None
+        } else {
+            let mut outer = vec_with_capacity_in(mcx, merge_join_conditions.len())?;
+            for sub in &merge_join_conditions {
+                // The planner emits exactly one inner handle per result rel.
+                let cond_id = sub.first().copied().unwrap_or_default();
+                let join_cond: Option<PgVec<'mcx, Expr>> = if cond_id == NodeId::default() {
+                    None
+                } else {
+                    let mut v = vec_with_capacity_in(mcx, 1)?;
+                    v.push(root.node(cond_id).clone_in(mcx)?);
+                    Some(v)
+                };
+                outer.push(join_cond);
+            }
+            Some(outer)
+        };
 
     let node = ModifyTable {
         plan: plan_base,
@@ -4815,28 +4829,33 @@ fn make_modifytable<'mcx>(
 /// representations differ (rawnodes carries `Node *` handles for qual/targetList;
 /// the executor form carries the implicit-AND `Expr` list and owned
 /// `TargetEntry`s). `setrefs.c` later fixes up the Var references.
-fn convert_merge_action<'mcx>(
+fn resolve_merge_action<'mcx>(
     mcx: Mcx<'mcx>,
-    src: &types_nodes::rawnodes::MergeAction<'mcx>,
+    root: &PlannerInfo,
+    action_id: NodeId,
 ) -> PgResult<types_nodes::modifytable::MergeAction<'mcx>> {
     use types_nodes::modifytable::MergeAction as ExecMergeAction;
+    let src = root.merge_action(action_id);
 
-    // qual: `Node *` (implicit-AND `List` of `Expr`) -> Option<PgVec<Expr>>.
-    let qual: Option<PgVec<'mcx, Expr>> = match src.qual.as_deref() {
-        Some(node) => Some(node_to_expr_list(mcx, node)?),
-        None => None,
+    // qual: a single `Expr` arena handle (or NULL marker) -> the implicit-AND
+    // `Expr` list the executor consumes (`(List *) qual` fed to `ExecInitQual`).
+    let qual: Option<PgVec<'mcx, Expr>> = if src.qual == NodeId::default() {
+        None
+    } else {
+        let expr = root.node(src.qual).clone_in(mcx)?;
+        let mut v = vec_with_capacity_in(mcx, 1)?;
+        v.push(expr);
+        Some(v)
     };
 
-    // targetList: List of `TargetEntry` nodes -> Option<PgVec<TargetEntry>>.
+    // targetList: arena `TargetEntry` handles -> Option<PgVec<TargetEntry>>.
     let target_list: Option<PgVec<'mcx, TargetEntry<'mcx>>> = if src.targetList.is_empty() {
         None
     } else {
-        let mut v = vec_with_capacity_in(mcx, src.targetList.len())?;
-        for tle_node in src.targetList.iter() {
-            let tle = tle_node
-                .as_targetentry()
-                .expect("convert_merge_action: targetList entry is a TargetEntry");
-            v.push(tle.clone_in(mcx)?);
+        let owned = resolve_targetentry_list(mcx, root, &src.targetList)?;
+        let mut v = vec_with_capacity_in(mcx, owned.len())?;
+        for tle in owned {
+            v.push(tle);
         }
         Some(v)
     };
@@ -4854,29 +4873,46 @@ fn convert_merge_action<'mcx>(
 
     Ok(ExecMergeAction {
         matchKind: src.matchKind,
-        commandType: src.commandType,
-        overriding: src.r#override,
+        commandType: cmdtype_path_to_node(src.commandType),
+        overriding: src.overriding,
         qual,
         targetList: target_list,
         updateColnos: update_colnos,
     })
 }
 
-/// Cast a `Node *` qual into the implicit-AND `Expr` list the executor consumes
-/// (`(List *) qual` fed to `ExecInitQual`). The MERGE WHEN qual is carried by the
-/// parser as a single transformed bool `Expr` wrapped in a `Node` (an implicit
-/// one-clause AND list), so we yield a single-element `Expr` list.
-fn node_to_expr_list<'mcx>(
+/// Resolve a planner-arena [`WithCheckOptionNode`] handle into the executor-shaped
+/// `WithCheckOption` parse-tree node wrapped in a `Node` (the element type of
+/// `ModifyTable::withCheckOptionLists`). The `qual` is a single `Expr` arena
+/// handle (or the NULL marker `NodeId(0)`), cloned into the plan arena.
+fn resolve_wco_node<'mcx>(
     mcx: Mcx<'mcx>,
-    node: &Node<'mcx>,
-) -> PgResult<PgVec<'mcx, Expr>> {
-    let expr = node
-        .as_expr()
-        .expect("node_to_expr_list: qual node is an Expr")
-        .clone_in(mcx)?;
-    let mut v = vec_with_capacity_in(mcx, 1)?;
-    v.push(expr);
-    Ok(v)
+    root: &PlannerInfo,
+    wco_id: NodeId,
+) -> PgResult<Node<'mcx>> {
+    let src = root.with_check_option(wco_id);
+    let qual = if src.qual == NodeId::default() {
+        None
+    } else {
+        let expr = root.node(src.qual).clone_in(mcx)?;
+        Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr)?)?)
+    };
+    let relname = match &src.relname {
+        Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
+        None => None,
+    };
+    let polname = match &src.polname {
+        Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
+        None => None,
+    };
+    let wco = types_nodes::rawnodes::WithCheckOption {
+        kind: src.kind,
+        relname,
+        polname,
+        qual,
+        cascaded: src.cascaded,
+    };
+    Node::mk_with_check_option(mcx, wco)
 }
 
 /// Resolved, executor-shaped ON CONFLICT data, mirroring the

@@ -2580,6 +2580,19 @@ pub enum ArenaNode {
     /// partition/order `SortGroupClause` lists and start/end offset expressions
     /// re-interned as their own arena handles) when it builds a WindowAggPath.
     WindowClause(WindowClauseNode),
+    /// A `WithCheckOption` node — `ModifyTablePath::withCheckOptionLists` stores
+    /// these as `Node *` handles in the same id-space. The lifetime-bearing
+    /// parse-tree [`types_nodes::rawnodes::WithCheckOption`] cannot live in the
+    /// arena, so the planner interns this lifetime-free [`WithCheckOptionNode`]
+    /// (its `qual` re-interned as its own `Expr` arena handle) per result rel.
+    WithCheckOption(WithCheckOptionNode),
+    /// A `MergeAction` node — `ModifyTablePath::mergeActionLists` stores these as
+    /// `Node *` handles in the same id-space. The lifetime-bearing parse-tree
+    /// [`types_nodes::rawnodes::MergeAction`] cannot live in the arena, so the
+    /// planner interns this lifetime-free [`MergeActionNode`] (its `qual` and
+    /// each `targetList` entry re-interned as their own arena handles) per
+    /// result rel.
+    MergeAction(MergeActionNode),
 }
 
 /// `WindowClause` (nodes/parsenodes.h) as carried in `WindowAggPath::winclause`
@@ -2624,6 +2637,53 @@ pub struct WindowClauseNode {
     pub inRangeNullsFirst: bool,
     /// `Index winref` — ID referenced by window functions.
     pub winref: Index,
+}
+
+/// `WithCheckOption` (nodes/parsenodes.h) as carried per-result-rel in
+/// `ModifyTablePath::withCheckOptionLists` — the lifetime-free planner-arena
+/// form. The lifetime-bearing parse-tree
+/// [`types_nodes::rawnodes::WithCheckOption`] cannot live in the arena, so the
+/// planner interns this form (its `qual` re-interned as its own `Expr` arena
+/// handle) when building the per-leaf WCO lists for an inherited/partitioned
+/// target. Mirrors the C `WithCheckOption` field-for-field for the members
+/// createplan reads to rebuild the executor-shaped node.
+#[derive(Clone, Debug)]
+pub struct WithCheckOptionNode {
+    /// `WCOKind kind` — kind of WCO.
+    pub kind: types_nodes::rawnodes::WCOKind,
+    /// `char *relname` — name of relation that specified the WCO.
+    pub relname: Option<alloc::string::String>,
+    /// `char *polname` — name of RLS policy being checked.
+    pub polname: Option<alloc::string::String>,
+    /// `Node *qual` — constraint qual to check (an `Expr` arena handle, or NULL
+    /// marker `NodeId(0)`).
+    pub qual: NodeId,
+    /// `bool cascaded` — true for a cascaded WCO on a view.
+    pub cascaded: bool,
+}
+
+/// `MergeAction` (nodes/parsenodes.h) as carried per-result-rel in
+/// `ModifyTablePath::mergeActionLists` — the lifetime-free planner-arena form.
+/// The lifetime-bearing parse-tree [`types_nodes::rawnodes::MergeAction`] cannot
+/// live in the arena, so the planner interns this form (its `qual` and each
+/// `targetList` entry re-interned as their own arena handles) when building the
+/// per-leaf MERGE action lists. Mirrors the C `MergeAction` for the members
+/// createplan reads to rebuild the executor-shaped node.
+#[derive(Clone, Debug)]
+pub struct MergeActionNode {
+    /// `MergeMatchKind matchKind`.
+    pub matchKind: types_nodes::modifytable::MergeMatchKind,
+    /// `CmdType commandType`.
+    pub commandType: CmdType,
+    /// `OverridingKind override`.
+    pub overriding: types_nodes::modifytable::OverridingKind,
+    /// `Node *qual` — transformed WHEN condition (an `Expr` arena handle, or
+    /// NULL marker `NodeId(0)`).
+    pub qual: NodeId,
+    /// `List *targetList` — the target list (`TargetEntry` arena handles).
+    pub targetList: Vec<NodeId>,
+    /// `List *updateColnos` — target attribute numbers of an UPDATE.
+    pub updateColnos: Vec<i32>,
 }
 
 /// `NestLoopParam` (nodes/plannodes.h) as carried in `root->curOuterParams`
@@ -3005,6 +3065,34 @@ impl PlannerInfo {
         }
     }
 
+    /// Resolve a [`NodeId`] to its [`WithCheckOptionNode`] (a
+    /// `ModifyTablePath::withCheckOptionLists` handle). Panics if the handle
+    /// does not resolve to a `WithCheckOption`.
+    #[inline]
+    pub fn with_check_option(&self, id: NodeId) -> &WithCheckOptionNode {
+        match &self.node_arena[id.index()] {
+            ArenaNode::WithCheckOption(w) => w,
+            _ => panic!(
+                "PlannerInfo::with_check_option: NodeId {} does not resolve to a WithCheckOption",
+                id.0
+            ),
+        }
+    }
+
+    /// Resolve a [`NodeId`] to its [`MergeActionNode`] (a
+    /// `ModifyTablePath::mergeActionLists` handle). Panics if the handle does
+    /// not resolve to a `MergeAction`.
+    #[inline]
+    pub fn merge_action(&self, id: NodeId) -> &MergeActionNode {
+        match &self.node_arena[id.index()] {
+            ArenaNode::MergeAction(m) => m,
+            _ => panic!(
+                "PlannerInfo::merge_action: NodeId {} does not resolve to a MergeAction",
+                id.0
+            ),
+        }
+    }
+
     /// Resolve a [`NodeId`] to its [`RowIdentityVarInfo`] (a
     /// `root->row_identity_vars` element).
     #[inline]
@@ -3242,6 +3330,25 @@ impl PlannerInfo {
     pub fn alloc_windowclause(&mut self, wc: WindowClauseNode) -> NodeId {
         let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::WindowClause(wc));
+        id
+    }
+    /// Intern a [`WithCheckOptionNode`] into the node store, returning its
+    /// [`NodeId`] handle (a `ModifyTablePath::withCheckOptionLists` element).
+    /// Producer: `grouping_planner` when building the per-result-rel WCO lists.
+    #[inline]
+    pub fn alloc_with_check_option(&mut self, w: WithCheckOptionNode) -> NodeId {
+        let id = self.reserve_node_id();
+        self.node_arena.push(ArenaNode::WithCheckOption(w));
+        id
+    }
+    /// Intern a [`MergeActionNode`] into the node store, returning its
+    /// [`NodeId`] handle (a `ModifyTablePath::mergeActionLists` element).
+    /// Producer: `grouping_planner` when building the per-result-rel MERGE
+    /// action lists.
+    #[inline]
+    pub fn alloc_merge_action(&mut self, m: MergeActionNode) -> NodeId {
+        let id = self.reserve_node_id();
+        self.node_arena.push(ArenaNode::MergeAction(m));
         id
     }
     /// Intern a [`RowIdentityVarInfo`] into the node store, returning its
