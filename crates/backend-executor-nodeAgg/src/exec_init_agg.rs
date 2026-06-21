@@ -916,16 +916,31 @@ fn set_phase_grouped_cols_for_sets<'mcx>(
         node
     };
     let p = phase as usize;
-    // The C builds one grouped_cols bms per grouping set, sized by the set's
-    // gset_lengths[k]; the grpColIdx prefix of that length is the set's columns.
+    // The C builds one grouped_cols bms per grouping set. The set's length is
+    // `current_length = list_length(lfirst(l))` over `aggnode->groupingSets`
+    // (NOT a pre-filled gset_lengths, which the C populates from this loop);
+    // the grpColIdx prefix of that length is the set's columns. We also write
+    // the computed length back into gset_lengths[k] (C: gset_lengths[i] =
+    // current_length), since the retrieve path reads gset_lengths directly.
     let numsets = aggstate.phases.as_ref().unwrap()[p].numsets;
     let mut first_cols: Option<PgBox<'mcx, types_nodes::Bitmapset<'mcx>>> = None;
     for k in 0..numsets as usize {
-        let length = aggstate.phases.as_ref().unwrap()[p]
-            .gset_lengths
+        // current_length = list_length(lfirst(l)) over aggnode->groupingSets[k].
+        let length = aggnode
+            .grouping_sets
             .as_ref()
-            .map(|gl| gl[k])
+            .and_then(|gs| gs.get(k))
+            .map(|set| set.len() as i32)
             .unwrap_or(0);
+        // gset_lengths[i] = current_length;
+        {
+            let phases = aggstate.phases.as_mut().unwrap();
+            if let Some(gl) = phases[p].gset_lengths.as_mut() {
+                if let Some(slot) = gl.get_mut(k) {
+                    *slot = length;
+                }
+            }
+        }
         let cols = grouped_cols_bms(aggnode.grp_col_idx.as_ref(), length, mcx)?;
         let cols = match cols { Some(c) => c, None => alloc_in(mcx, types_nodes::Bitmapset::empty(mcx)?)? };
         if k == 0 {
