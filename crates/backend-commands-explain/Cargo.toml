@@ -48,6 +48,8 @@ backend-commands-explain-state = { path = "../backend-commands-explain-state" }
 backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
 backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }
 backend-executor-execTuples = { path = "../backend-executor-execTuples" }
+# tuplesort_method_name / tuplesort_space_type_name for show_incremental_sort_info.
+backend-utils-sort-tuplesort = { path = "../backend-utils-sort-tuplesort" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
 types-slot = { path = "../types-slot" }

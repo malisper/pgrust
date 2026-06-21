@@ -15,11 +15,17 @@ extern crate alloc;
 
 use alloc::format;
 
+use alloc::vec::Vec;
+
 use types_core::instrument::{Instrumentation, WalUsage};
 use types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
 
+use types_nodes::nodeincrementalsort::{IncrementalSortGroupInfo, IncrementalSortStateData};
+use types_nodes::nodesort::{TuplesortMethod, TuplesortSpaceType};
+
 use backend_commands_explain_format as fmt;
+use backend_utils_sort_tuplesort::{tuplesort_method_name, tuplesort_space_type_name};
 
 /// `BYTES_TO_KILOBYTES(b)` — `(b + 1023) / 1024` (memutils.h).
 fn bytes_to_kilobytes(b: i64) -> i64 {
@@ -205,5 +211,206 @@ pub fn show_instrumentation_count(
             fmt::ExplainPropertyFloat(qlabel, None, 0.0, 0, es)?;
         }
     }
+    Ok(())
+}
+
+/// `NUM_TUPLESORTMETHODS` (tuplesort.h) — number of single-bit `TuplesortMethod`
+/// values (top-N heapsort, quicksort, external sort, external merge).
+const NUM_TUPLESORTMETHODS: i32 = 4;
+
+/// `show_incremental_sort_group_info(groupInfo, groupLabel, indent, es)`
+/// (explain.c) — emit one group's sort-method list and average/peak space usage.
+pub fn show_incremental_sort_group_info(
+    group_info: &IncrementalSortGroupInfo,
+    group_label: &str,
+    indent: bool,
+    es: &mut ExplainState<'_>,
+) -> PgResult<()> {
+    // Generate a list of sort methods used across all groups.
+    //   for (bit = 0; bit < NUM_TUPLESORTMETHODS; bit++) { sortMethod = 1<<bit;
+    //       if (groupInfo->sortMethods & sortMethod)
+    //           methodNames = lappend(methodNames, tuplesort_method_name(...)); }
+    let mut method_names: Vec<&'static str> = Vec::new();
+    for bit in 0..NUM_TUPLESORTMETHODS {
+        let sort_method_bit: u32 = 1u32 << bit;
+        if group_info.sortMethods & sort_method_bit != 0 {
+            // (1 << bit) is one of the single-bit TuplesortMethod values.
+            let sort_method = match sort_method_bit {
+                x if x == TuplesortMethod::SORT_TYPE_TOP_N_HEAPSORT as u32 => {
+                    TuplesortMethod::SORT_TYPE_TOP_N_HEAPSORT
+                }
+                x if x == TuplesortMethod::SORT_TYPE_QUICKSORT as u32 => {
+                    TuplesortMethod::SORT_TYPE_QUICKSORT
+                }
+                x if x == TuplesortMethod::SORT_TYPE_EXTERNAL_SORT as u32 => {
+                    TuplesortMethod::SORT_TYPE_EXTERNAL_SORT
+                }
+                _ => TuplesortMethod::SORT_TYPE_EXTERNAL_MERGE,
+            };
+            method_names.push(tuplesort_method_name(sort_method));
+        }
+    }
+
+    if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+        // if (indent) appendStringInfoSpaces(es->str, es->indent * 2);
+        if indent {
+            for _ in 0..(es.indent * 2) {
+                es.str.try_push(' ')?;
+            }
+        }
+        // appendStringInfo(es->str, "%s Groups: %ld  Sort Method", groupLabel, groupCount);
+        es.str.try_push_str(group_label)?;
+        es.str.try_push_str(" Groups: ")?;
+        es.str.try_push_str(&format!("{}", group_info.groupCount))?;
+        es.str.try_push_str("  Sort Method")?;
+
+        // plural/singular based on methodNames size.
+        if method_names.len() > 1 {
+            es.str.try_push_str("s: ")?;
+        } else {
+            es.str.try_push_str(": ")?;
+        }
+        // foreach: comma-separated method names.
+        for (i, name) in method_names.iter().enumerate() {
+            es.str.try_push_str(name)?;
+            if i < method_names.len() - 1 {
+                es.str.try_push_str(", ")?;
+            }
+        }
+
+        if group_info.maxMemorySpaceUsed > 0 {
+            let avg_space = group_info.totalMemorySpaceUsed / group_info.groupCount;
+            let space_type_name =
+                tuplesort_space_type_name(TuplesortSpaceType::SORT_SPACE_TYPE_MEMORY);
+            es.str.try_push_str(&format!(
+                "  Average {space_type_name}: {avg_space}kB  Peak {space_type_name}: {}kB",
+                group_info.maxMemorySpaceUsed
+            ))?;
+        }
+
+        if group_info.maxDiskSpaceUsed > 0 {
+            let avg_space = group_info.totalDiskSpaceUsed / group_info.groupCount;
+            let space_type_name =
+                tuplesort_space_type_name(TuplesortSpaceType::SORT_SPACE_TYPE_DISK);
+            es.str.try_push_str(&format!(
+                "  Average {space_type_name}: {avg_space}kB  Peak {space_type_name}: {}kB",
+                group_info.maxDiskSpaceUsed
+            ))?;
+        }
+    } else {
+        // Non-text: structured group/property output.
+        let group_name = format!("{group_label} Groups");
+        fmt::ExplainOpenGroup("Incremental Sort Groups", Some(&group_name), true, es)?;
+        fmt::ExplainPropertyInteger("Group Count", None, group_info.groupCount, es)?;
+
+        fmt::ExplainPropertyList("Sort Methods Used", &method_names, es)?;
+
+        if group_info.maxMemorySpaceUsed > 0 {
+            let avg_space = group_info.totalMemorySpaceUsed / group_info.groupCount;
+            let space_type_name =
+                tuplesort_space_type_name(TuplesortSpaceType::SORT_SPACE_TYPE_MEMORY);
+            let memory_name = format!("Sort Space {space_type_name}");
+            fmt::ExplainOpenGroup("Sort Space", Some(&memory_name), true, es)?;
+            fmt::ExplainPropertyInteger("Average Sort Space Used", Some("kB"), avg_space, es)?;
+            fmt::ExplainPropertyInteger(
+                "Peak Sort Space Used",
+                Some("kB"),
+                group_info.maxMemorySpaceUsed,
+                es,
+            )?;
+            fmt::ExplainCloseGroup("Sort Space", Some(&memory_name), true, es)?;
+        }
+        if group_info.maxDiskSpaceUsed > 0 {
+            let avg_space = group_info.totalDiskSpaceUsed / group_info.groupCount;
+            let space_type_name =
+                tuplesort_space_type_name(TuplesortSpaceType::SORT_SPACE_TYPE_DISK);
+            let disk_name = format!("Sort Space {space_type_name}");
+            fmt::ExplainOpenGroup("Sort Space", Some(&disk_name), true, es)?;
+            fmt::ExplainPropertyInteger("Average Sort Space Used", Some("kB"), avg_space, es)?;
+            fmt::ExplainPropertyInteger(
+                "Peak Sort Space Used",
+                Some("kB"),
+                group_info.maxDiskSpaceUsed,
+                es,
+            )?;
+            fmt::ExplainCloseGroup("Sort Space", Some(&disk_name), true, es)?;
+        }
+
+        fmt::ExplainCloseGroup("Incremental Sort Groups", Some(&group_name), true, es)?;
+    }
+    Ok(())
+}
+
+/// `show_incremental_sort_info(incrsortstate, es)` (explain.c) — capture sort
+/// statistics for the incremental-sort node and emit the "Full-sort Groups:" /
+/// "Pre-sorted Groups:" detail lines under EXPLAIN ANALYZE.
+pub fn show_incremental_sort_info(
+    incrsortstate: &IncrementalSortStateData<'_>,
+    es: &mut ExplainState<'_>,
+) -> PgResult<()> {
+    let fullsort_group_info = &incrsortstate.incsort_info.fullsortGroupInfo;
+
+    if !es.analyze {
+        return Ok(());
+    }
+
+    // Since we never have any prefix groups unless we've first sorted a full
+    // group and transitioned modes, we don't need to do anything if there were 0
+    // full groups. We still continue after this block (workers may have done
+    // real work even if the leader didn't participate).
+    if fullsort_group_info.groupCount > 0 {
+        show_incremental_sort_group_info(fullsort_group_info, "Full-sort", true, es)?;
+        let prefixsort_group_info = &incrsortstate.incsort_info.prefixsortGroupInfo;
+        if prefixsort_group_info.groupCount > 0 {
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                es.str.try_push('\n')?;
+            }
+            show_incremental_sort_group_info(prefixsort_group_info, "Pre-sorted", true, es)?;
+        }
+        if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+            es.str.try_push('\n')?;
+        }
+    }
+
+    // Per-worker shared_info path: the merged IncrementalSortStateData.shared_info
+    // is an in-process PgBox<SharedIncrementalSortInfo> populated only on the
+    // worker-DSM round-trip, which is blocked (see nodeIncrementalSort
+    // ExecIncrementalSortInitializeDSM). Mirror C's loop over shared_info->sinfo.
+    if let Some(shared) = incrsortstate.shared_info.as_deref() {
+        for n in 0..shared.num_workers {
+            let incsort_info = match shared.sinfo.get(n as usize) {
+                Some(s) => s,
+                None => break,
+            };
+
+            // Exclude workers that processed no sort groups.
+            let worker_fullsort = &incsort_info.fullsortGroupInfo;
+            if worker_fullsort.groupCount == 0 {
+                continue;
+            }
+
+            // es->workers_state is unmodelled on the structural slice (the trimmed
+            // ExplainState carries no worker formatting state); the indent-first
+            // decision (workers_state == NULL || verbose) is thus always "true".
+            let indent_first_line = es.workers_state.is_none() || es.verbose;
+            show_incremental_sort_group_info(
+                worker_fullsort,
+                "Full-sort",
+                indent_first_line,
+                es,
+            )?;
+            let worker_prefixsort = &incsort_info.prefixsortGroupInfo;
+            if worker_prefixsort.groupCount > 0 {
+                if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                    es.str.try_push('\n')?;
+                }
+                show_incremental_sort_group_info(worker_prefixsort, "Pre-sorted", true, es)?;
+            }
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                es.str.try_push('\n')?;
+            }
+        }
+    }
+
     Ok(())
 }

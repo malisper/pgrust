@@ -7148,6 +7148,7 @@ dependencies = [
  "backend-utils-cache-lsyscache",
  "backend-utils-error",
  "backend-utils-misc-guc-tables",
+ "backend-utils-sort-tuplesort",
  "backend-utils-time-snapmgr-seams",
  "mcx",
  "portability-instr-time",

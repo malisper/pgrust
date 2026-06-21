@@ -1033,6 +1033,12 @@ pub fn ExplainNode<'es, 'p>(
                 Some(&s.sort.collations),
                 Some(&s.sort.nullsFirst),
             )?;
+            // show_incremental_sort_info(castNode(IncrementalSortState, planstate), es)
+            // — the ANALYZE-time "Full-sort Groups:" / "Pre-sorted Groups:" sort
+            // method + space (Memory/Disk) instrumentation lines (explain.c:2226).
+            if let PlanStateNode::IncrementalSort(incrsortstate) = planstate {
+                crate::details::show_incremental_sort_info(incrsortstate, es)?;
+            }
         }
         ntag::T_Agg => {
             // show_agg_keys (explain.c:2477): when numCols > 0 OR grouping sets
