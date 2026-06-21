@@ -1432,12 +1432,18 @@ fn index_condition_support(
         x if x == F_TEXTREGEXEQ_SUPPORT => PatternType::Regex,
         x if x == F_TEXTICREGEXEQ_SUPPORT => PatternType::RegexIc,
         x if x == F_TEXT_STARTS_WITH_SUPPORT => PatternType::Prefix,
-        // Not one of our supported pattern support functions (the seam dispatches
-        // all index-support functions by OID; an unrelated one is not ours).
-        _ => panic!(
-            "selfuncs: oid_function_call1_index_support has no ported support for prosupport \
-             {prosupport} — only the like_support.c pattern support functions are installed here"
-        ),
+        // Not a like_support.c pattern support function. The C
+        // `get_index_clause_from_support` (indxpath.c) sends a
+        // `SupportRequestIndexCondition` node to the function's prosupport via
+        // `OidFunctionCall1`; a support function that does not handle that request
+        // type (e.g. `range_contains_elem_support` / `elem_contained_by_range_support`,
+        // which only answer `SupportRequestSimplify`) simply returns NULL, so the
+        // derived-clause list is empty and the planner falls through to the
+        // ordinary operator-class match. Decline here the same way (empty list,
+        // not lossy) rather than aborting — this seam only knows the pattern
+        // operators; any other support function's IndexCondition leg is a no-op
+        // for our purposes.
+        _ => return (alloc::vec::Vec::new(), false),
     };
 
     // We only consider the indexkey-on-left case (no reverse pattern operators).

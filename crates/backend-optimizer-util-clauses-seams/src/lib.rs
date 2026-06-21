@@ -266,8 +266,13 @@ seam_core::seam!(
     /// support function `prosupport` to attempt a custom simplification.
     /// `Ok(None)` = no simplification. `Err` carries the support function's
     /// `ereport(ERROR)`. Owner: per-function support functions (no
-    /// PlannerInfo is threaded; the request carries a NULL root).
-    pub fn call_support_simplify(
+    /// PlannerInfo is threaded; the request carries a NULL root). The C
+    /// support function allocates its replacement clause in
+    /// `CurrentMemoryContext`; `mcx` is the const-folding mutator's context
+    /// (`eval_const_expressions_mutator`), into which the produced `Expr` is
+    /// materialized.
+    pub fn call_support_simplify<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         prosupport: Oid,
         funcid: Oid,
         result_type: Oid,

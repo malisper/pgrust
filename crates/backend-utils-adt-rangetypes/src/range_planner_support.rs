@@ -214,6 +214,51 @@ pub fn range_contains_elem_support<'mcx>(
     find_simplified_clause(mcx, root, leftop, rightop)
 }
 
+/// Registry adapter for `elem_contained_by_range_support` matching the
+/// `backend-optimizer-util-clauses` `SupportRequestSimplify` dispatch shape
+/// (`call_support_simplify` hands the decomposed `FuncExpr.args` plus the
+/// per-call result/collation scalars; the request carries a NULL root, so this
+/// passes `root = None` — `find_simplified_clause` then declines the
+/// both-bounds cost-check case exactly as C does for an unavailable root).
+#[allow(clippy::too_many_arguments)]
+pub fn elem_contained_by_range_support_simplify<'mcx>(
+    mcx: Mcx<'mcx>,
+    _funcid: Oid,
+    _result_type: Oid,
+    _result_collid: Oid,
+    _input_collid: Oid,
+    args: &[Expr],
+    _funcvariadic: bool,
+    _estimate: bool,
+) -> PgResult<Option<Expr>> {
+    // Assert(list_length(fexpr->args) == 2);
+    debug_assert_eq!(args.len(), 2);
+    let leftop = &args[0];
+    let rightop = &args[1];
+    // ret = find_simplified_clause(req->root, rightop, leftop);
+    find_simplified_clause(mcx, None, rightop, leftop)
+}
+
+/// Registry adapter for `range_contains_elem_support` (same dispatch shape).
+#[allow(clippy::too_many_arguments)]
+pub fn range_contains_elem_support_simplify<'mcx>(
+    mcx: Mcx<'mcx>,
+    _funcid: Oid,
+    _result_type: Oid,
+    _result_collid: Oid,
+    _input_collid: Oid,
+    args: &[Expr],
+    _funcvariadic: bool,
+    _estimate: bool,
+) -> PgResult<Option<Expr>> {
+    // Assert(list_length(fexpr->args) == 2);
+    debug_assert_eq!(args.len(), 2);
+    let leftop = &args[0];
+    let rightop = &args[1];
+    // ret = find_simplified_clause(req->root, leftop, rightop);
+    find_simplified_clause(mcx, None, leftop, rightop)
+}
+
 /// `find_simplified_clause(root, rangeExpr, elemExpr)` (rangetypes.c:2850):
 /// build `lower <= elem AND elem < upper` (per the range's inclusivity) when
 /// the range argument is a constant; else `NULL`.
@@ -233,11 +278,17 @@ pub fn find_simplified_clause<'mcx>(
     }
 
     // range = DatumGetRangeTypeP(((Const *) rangeExpr)->constvalue);
-    // The `Const.constvalue` is the canonical `types_tuple` `Datum` (a `ByVal`
-    // pointer-word into the range's varlena image for a varlena range); the
-    // range-deserialize seam takes the bare-word `types_datum::Datum`, so lift
-    // the pointer word across (DatumGetRangeTypeP detoasts it owner-side).
-    let constvalue = types_datum::datum::Datum::from_usize(range_const.constvalue.as_usize());
+    // The `Const.constvalue` is the canonical `types_tuple` `Datum`. A range type
+    // is a varlena, so the const value is carried as a `ByRef` byte image (or, if
+    // it came in as a bare pointer word, a `ByVal` word); `as_byref_word()` is the
+    // `DatumGetPointer(X)` view — it yields the scalar word for a `ByVal` arm and
+    // the address of the owned varlena image for a `ByRef` arm. `range_const` (and
+    // hence the `ByRef` bytes) stays borrowed for the whole call, so the pointer
+    // is valid until `DatumGetRangeTypeP` detoasts it owner-side. The
+    // range-deserialize seam takes the bare-word `types_datum::Datum`, so lift the
+    // pointer word across.
+    let constvalue =
+        types_datum::datum::Datum::from_usize(range_const.constvalue.as_byref_word());
     let range =
         backend_utils_adt_rangetypes_seams::datum_get_range_type_p::call(mcx, constvalue)?;
 

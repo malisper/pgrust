@@ -37,7 +37,8 @@ use types_nodes::primnodes::Expr;
 /// the result/collation context, mirroring what the support function reads off
 /// `req->fcall` in C. Returns the simplified clause (`Ok(Some)`) or a decline
 /// (`Ok(None)`); `Err` carries the support function's `ereport(ERROR)`.
-pub type SupportSimplifyFn = fn(
+pub type SupportSimplifyFn = for<'mcx> fn(
+    mcx: mcx::Mcx<'mcx>,
     funcid: Oid,
     result_type: Oid,
     result_collid: Oid,
@@ -68,7 +69,8 @@ pub fn register_support_simplify(prosupport: Oid, func: SupportSimplifyFn) -> Op
 /// declines (`Ok(None)`), the faithful counterpart of a support function that
 /// does not handle `SupportRequestSimplify` returning NULL in C.
 #[allow(clippy::too_many_arguments)]
-pub fn call_support_simplify(
+pub fn call_support_simplify<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     prosupport: Oid,
     funcid: Oid,
     result_type: Oid,
@@ -85,6 +87,7 @@ pub fn call_support_simplify(
         .copied();
     match func {
         Some(f) => f(
+            mcx,
             funcid,
             result_type,
             result_collid,
@@ -103,6 +106,7 @@ pub fn call_support_simplify(
 /// exists but has no simplify leg) rather than relying solely on the
 /// unregistered-OID default.
 pub fn decline_simplify(
+    _mcx: mcx::Mcx<'_>,
     _funcid: Oid,
     _result_type: Oid,
     _result_collid: Oid,

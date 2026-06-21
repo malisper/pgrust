@@ -211,4 +211,23 @@ fn install_range_planner_support_seams() {
             })?;
         backend_utils_cache_lsyscache::opclass::get_opclass_family(pg_range.rngsubopc)
     });
+
+    // Register the two range `SupportRequestSimplify` kernels into the
+    // `simplify_function` (clauses.c) prosupport dispatch table, keyed by the
+    // support functions' pg_proc OIDs (pg_proc.dat). `simplify_function` reaches
+    // these via the `call_support_simplify` boundary when const-folding a
+    // `range @> elem` (`range_contains_elem`, prosupport 6345) or
+    // `elem <@ range` (`elem_contained_by_range`, prosupport 6346) call with a
+    // constant range, rewriting it into the equivalent bound comparisons so the
+    // planner can use an index on the element column.
+    const F_RANGE_CONTAINS_ELEM_SUPPORT: types_core::primitive::Oid = 6345;
+    const F_ELEM_CONTAINED_BY_RANGE_SUPPORT: types_core::primitive::Oid = 6346;
+    backend_optimizer_util_clauses::support_simplify::register_support_simplify(
+        F_RANGE_CONTAINS_ELEM_SUPPORT,
+        rps::range_contains_elem_support_simplify,
+    );
+    backend_optimizer_util_clauses::support_simplify::register_support_simplify(
+        F_ELEM_CONTAINED_BY_RANGE_SUPPORT,
+        rps::elem_contained_by_range_support_simplify,
+    );
 }

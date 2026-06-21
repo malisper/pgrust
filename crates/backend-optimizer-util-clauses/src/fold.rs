@@ -1273,6 +1273,7 @@ fn simplify_function(
 
     if newexpr.is_none() && allow_non_const && form.prosupport != InvalidOid {
         newexpr = clauses_seam::call_support_simplify::call(
+            ctx.mcx,
             form.prosupport,
             funcid,
             result_type,
