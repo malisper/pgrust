@@ -162,6 +162,14 @@ pub fn spi_execsql_dynamic(
     if pushed {
         let _ = snapmgr::pop_active_snapshot::call();
     }
+    // `_SPI_error_callback` (spi.c): for the duration of _SPI_execute_plan, SPI
+    // installs an error-context callback that, on any error escaping the query,
+    // emits `errcontext("SQL statement \"%s\"", query)` (default parse mode — a
+    // dynamic EXECUTE string is a complete top-level statement). This is the
+    // attach-on-propagation analogue (docs/query-lifecycle-raii) of that
+    // callback, applied at the same boundary C pushed/popped it, innermost so
+    // it precedes the caller's PL/pgSQL-function context line.
+    let out = out.map_err(|e| e.add_context(format!("SQL statement \"{query}\"")));
     let result = out;
 
     let _ = plancache::DropCachedPlan(source);

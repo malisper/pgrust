@@ -825,6 +825,25 @@ pub fn define_relation<'mcx>(
     }
 
     /*
+     * In C, `rel` is a long-lived Relation pointer whose `rd_rel` is rebuilt in
+     * place by relcache invalidation when StorePartitionBound() updated pg_class
+     * (in particular flipping `relispartition` to true).  Our owned `rel` was
+     * snapshotted by relation_open() before StorePartitionBound ran, so it still
+     * carries the pre-partition pg_class image.  AddRelationNewConstraints below
+     * reads `rel->rd_rel->relispartition` to decide whether a merged CHECK
+     * constraint is non-local (conislocal = false); with a stale image it would
+     * wrongly keep it local.  Refresh the relation here (we already hold
+     * AccessExclusiveLock) so the constraint merge sees the post-partition
+     * catalog, matching C's in-place rebuild.
+     */
+    let rel = if stmt.partbound.is_some() {
+        rel.close(types_storage::lock::NoLock)?;
+        relation_open(mcx, relation_id, types_storage::lock::NoLock)?
+    } else {
+        rel
+    };
+
+    /*
      * Now add any newly specified CHECK constraints to the new relation.
      */
     let mut connames: Vec<String> = Vec::new();
