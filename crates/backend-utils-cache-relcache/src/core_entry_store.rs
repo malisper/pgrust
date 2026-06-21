@@ -768,6 +768,20 @@ pub(crate) fn set_partcheck(
     Ok(())
 }
 
+/// Discard the cached `rd_partcheck` for `relid` (C: the `rd_partcheckcxt`
+/// teardown in `RelationDestroyRelation` plus the rebuild dropping the stale
+/// partition-constraint tree, which both leave the rebuilt/cleared entry with
+/// `rd_partcheckvalid = false`). The partition constraint of a (default)
+/// partition depends on its siblings' bounds, so it MUST be recomputed after a
+/// relcache invalidation — the side-table is OID-keyed and would otherwise
+/// outlive the entry rebuild. Idempotent: a missing slot is a no-op.
+pub(crate) fn clear_partcheck(relid: Oid) {
+    with_state(|st| {
+        st.partcheck.remove(&relid);
+    });
+    let _ = with_relation_mut(relid, |rd| rd.rd_partcheckvalid = false);
+}
+
 /// `relation->rd_partcheck` read + `rd_partcheckvalid` — returns `(valid,
 /// copyObject(rd_partcheck))`. When the slot is absent the cache is stale
 /// (`valid = false`, empty list) and the caller rebuilds.

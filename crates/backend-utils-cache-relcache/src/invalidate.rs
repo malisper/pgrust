@@ -115,6 +115,20 @@ pub(crate) fn RelationInvalidateRelation(relation: Oid) -> PgResult<()> {
         rd.rd_amcache = None;
         rd.rd_isvalid = false;
     });
+
+    // Discard the cached partition CHECK constraint (C: `rd_partcheck` lives in
+    // `rd_partcheckcxt`, freed by `RelationDestroyRelation` on a full clear and
+    // *not* preserved by the rebuild swap, so the rebuilt/cleared entry always
+    // has `rd_partcheckvalid = false`). The owned port keeps `rd_partcheck` in
+    // an OID-keyed side-table that would otherwise outlive the entry, so clear
+    // it explicitly here — both clear (`RelationClearRelation`) and rebuild
+    // (`RelationRebuildRelation`) route through this function. A default
+    // partition's constraint depends on its siblings' bounds, so this is what
+    // forces `generate_partition_qual` to recompute after a partition is
+    // added/detached/dropped (plancache.sql default-partition prepared-stmt
+    // invalidation).
+    core_entry_store::clear_partcheck(relation);
+
     Ok(())
 }
 
