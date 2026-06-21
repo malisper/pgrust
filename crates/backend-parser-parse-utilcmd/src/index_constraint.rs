@@ -256,6 +256,7 @@ fn transformIndexConstraint<'mcx>(
     let relation = clone_relation(cxt)?;
     let columns = clone_vec(mcx, &cxt.columns)?;
     let inh_relations = clone_vec(mcx, &cxt.inhRelations)?;
+    let existing_nn = clone_vec(mcx, &cxt.nnconstraints)?;
     let (index, extra_nn) = sx::transformIndexConstraintCatalog::call(
         mcx,
         &cxt.pstate,
@@ -266,6 +267,7 @@ fn transformIndexConstraint<'mcx>(
         cxt.isalter,
         columns,
         inh_relations,
+        existing_nn,
     )?;
     cxt.nnconstraints.extend(extra_nn);
 
@@ -327,6 +329,7 @@ pub fn transform_index_constraint_catalog<'mcx>(
     isalter: bool,
     mut columns: PgVec<'mcx, NodePtr<'mcx>>,
     inh_relations: PgVec<'mcx, NodePtr<'mcx>>,
+    existing_nn: PgVec<'mcx, NodePtr<'mcx>>,
 ) -> PgResult<(NodePtr<'mcx>, PgVec<'mcx, NodePtr<'mcx>>)> {
     // PRIMARY-KEY-implied not-null constraints accumulate here and are returned
     // to the caller (which appends them to cxt->nnconstraints).
@@ -647,7 +650,12 @@ pub fn transform_index_constraint_catalog<'mcx>(
                     };
                     if is_not_null {
                         // Verify any existing not-null constraint isn't NO INHERIT.
-                        for nn in extra_nn.iter() {
+                        // C scans the whole cxt->nnconstraints list: both the
+                        // pre-existing constraints (existing_nn, which carries any
+                        // table-level `NOT NULL ... NO INHERIT`) and the
+                        // PRIMARY-KEY-implied ones added earlier in this loop
+                        // (extra_nn). Stop at the first match for this column.
+                        for nn in existing_nn.iter().chain(extra_nn.iter()) {
                             if let Some(nnc) = nn.as_constraint() {
                                 if nnc.keys.first().map(|k| str_val(k)) == Some(key) {
                                     if nnc.is_no_inherit {

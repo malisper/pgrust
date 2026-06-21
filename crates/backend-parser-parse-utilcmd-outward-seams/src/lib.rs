@@ -58,6 +58,7 @@ seam_core::seam!(
         isalter: bool,
         columns: PgVec<'mcx, NodeBox<'mcx>>,
         inh_relations: PgVec<'mcx, NodeBox<'mcx>>,
+        existing_nn: PgVec<'mcx, NodeBox<'mcx>>,
     ) -> PgResult<(NodeBox<'mcx>, PgVec<'mcx, NodeBox<'mcx>>)>
 );
 
