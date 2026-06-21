@@ -1135,6 +1135,21 @@ fn ret_interval_state(
     Datum::from_usize(0)
 }
 
+/// Restore an `internal` IntervalAggState into `args[0]` after a *final* function
+/// read it.  C's `PG_GETARG_POINTER(0)` does NOT consume the state: a finalfn
+/// only reads it, and the same live state must survive for the next sharing
+/// aggregate's finalfn (`sum(interval)` and `avg(interval)` share
+/// `interval_avg_accum`) and, in a moving window frame, for the next row's
+/// forward/inverse transition.  `take_interval_state` moved the box out to read
+/// it, so put it back here (mirrors numeric's `keep_internal`).
+#[inline]
+fn keep_interval_state(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    state: Box<crate::interval::IntervalAggState>,
+) {
+    fcinfo.set_ref_arg(0, types_fmgr::boundary::RefPayload::Internal(state));
+}
+
 /// `interval_avg_accum(internal, interval) -> internal` (oid 1843).
 fn fc_interval_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let mut state = take_interval_state(fcinfo, 0).unwrap_or_default();
@@ -1191,7 +1206,13 @@ fn fc_interval_avg_deserialize(fcinfo: &mut FunctionCallInfoBaseData) -> types_e
 /// `interval_avg(internal) -> interval` (oid 1844) — avg() final.
 fn fc_interval_avg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let state = take_interval_state(fcinfo, 0);
-    match crate::interval::interval_avg(state.as_deref()) {
+    let out = crate::interval::interval_avg(state.as_deref());
+    // C `PG_GETARG_POINTER(0)` does not consume the state; restore it so the
+    // sharing sum() finalfn and any moving-window inverse transition keep it.
+    if let Some(state) = state {
+        keep_interval_state(fcinfo, state);
+    }
+    match out {
         Ok(Some(iv)) => Ok(ret_interval(fcinfo, &iv)),
         Ok(None) => Ok(ret_null(fcinfo)),
         Err(e) => return Err(e),
@@ -1201,7 +1222,13 @@ fn fc_interval_avg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResu
 /// `interval_sum(internal) -> interval` (oid 6326) — sum() final.
 fn fc_interval_sum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let state = take_interval_state(fcinfo, 0);
-    match crate::interval::interval_sum(state.as_deref()) {
+    let out = crate::interval::interval_sum(state.as_deref());
+    // C `PG_GETARG_POINTER(0)` does not consume the state; restore it so the
+    // sharing avg() finalfn and any moving-window inverse transition keep it.
+    if let Some(state) = state {
+        keep_interval_state(fcinfo, state);
+    }
+    match out {
         Ok(Some(iv)) => Ok(ret_interval(fcinfo, &iv)),
         Ok(None) => Ok(ret_null(fcinfo)),
         Err(e) => return Err(e),
