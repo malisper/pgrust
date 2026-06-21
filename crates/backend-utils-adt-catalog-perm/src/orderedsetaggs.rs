@@ -164,13 +164,11 @@ pub(crate) fn end_sortstate(id: SortStateId) -> PgResult<()> {
 pub(crate) struct OSAPerQueryState {
     pub(crate) rescan_needed: bool,
     pub(crate) sort_col_type: Oid,
-    /// `int16 typLen` / `char typAlign` — kept (the C `OSAPerQueryState` fields)
-    /// for the shape-preserving `construct_md_array` multi path; the 1-D
-    /// `construct_array_builtin_v` used here does not consume them.
-    #[allow(dead_code)]
+    /// `int16 typLen` / `char typAlign` — the C `OSAPerQueryState` storage
+    /// attributes, consumed by the shape-preserving `construct_md_array` multi
+    /// finalfns (`percentile_disc_multi_final` / `percentile_cont_multi_final`).
     pub(crate) typ_len: i16,
     pub(crate) typ_by_val: bool,
-    #[allow(dead_code)]
     pub(crate) typ_align: i8,
     pub(crate) sort_operator: Oid,
     pub(crate) eq_operator: Oid,
