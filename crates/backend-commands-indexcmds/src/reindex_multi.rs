@@ -7,9 +7,8 @@
 //! These are faithful ports of indexcmds.c (PostgreSQL 18.3, lines
 //! 3107-3541). The non-concurrent dispatch reaches the already-installed
 //! `reindex_index` / `reindex_relation` catalog seams; the concurrent dispatch
-//! reaches `ReindexRelationConcurrently` once that leg lands (today it returns
-//! the precise "REINDEX CONCURRENTLY is not yet supported" error, exactly as
-//! the single-relation drivers do).
+//! reaches the fully-ported `ReindexRelationConcurrently`
+//! (see `reindex_concurrently.rs`), exactly as the single-relation drivers do.
 //!
 //! `error_context_stack` has no counterpart in this repo's RAII error model
 //! (see backend-utils-error docs), so `ReindexPartitions`'s
