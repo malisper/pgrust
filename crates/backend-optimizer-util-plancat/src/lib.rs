@@ -616,9 +616,14 @@ fn get_relation_foreign_keys<'mcx>(
                 conkey: cachedfk.conkey.clone(),
                 confkey: cachedfk.confkey.clone(),
                 conpfeqop: cachedfk.conpfeqop.clone(),
-                // zeroed by match_foreign_keys_to_quals:
+                // zeroed/NIL by palloc0; filled by match_foreign_keys_to_quals:
+                nmatched_ec: 0,
+                nconst_ec: 0,
+                nmatched_rcols: 0,
+                nmatched_ri: 0,
                 eclass: alloc::vec![None; nkeys as usize],
                 fk_eclass_member: alloc::vec![None; nkeys as usize],
+                rinfos: alloc::vec![alloc::vec::Vec::new(); nkeys as usize],
             };
             let nid = root.alloc_foreign_key(info);
             root.fkey_list.push(nid);

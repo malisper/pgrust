@@ -1936,9 +1936,10 @@ pub struct EquivalenceMemberIterator {
     pub current_list: Vec<EmId>,
 }
 
-/// `ForeignKeyOptInfo` (pathnodes.h) — per-foreign-key planner bookkeeping,
-/// trimmed to the fields `match_eclasses_to_foreign_key_col` reads/writes. The
-/// per-column EC match results are stored back into `eclass`/`fk_eclass_member`.
+/// `ForeignKeyOptInfo` (pathnodes.h) — per-foreign-key planner bookkeeping. The
+/// per-column EC match results are stored back into `eclass`/`fk_eclass_member`
+/// by `match_eclasses_to_foreign_key_col`; the per-FK match counters and
+/// `rinfos` lists are populated by `match_foreign_keys_to_quals` (initsplan.c).
 #[derive(Clone, Debug, Default)]
 pub struct ForeignKeyOptInfo {
     /// `Index con_relid` — RT index of the referencing (FK) table.
@@ -1953,10 +1954,21 @@ pub struct ForeignKeyOptInfo {
     pub confkey: Vec<AttrNumber>,
     /// `Oid conpfeqop[]` — PK = FK operator OIDs.
     pub conpfeqop: Vec<Oid>,
+    /// `int nmatched_ec` — # of FK cols matched by ECs.
+    pub nmatched_ec: i32,
+    /// `int nconst_ec` — # of those ECs that are `ec_has_const`.
+    pub nconst_ec: i32,
+    /// `int nmatched_rcols` — # of FK cols matched by non-EC rinfos.
+    pub nmatched_rcols: i32,
+    /// `int nmatched_ri` — total # of non-EC rinfos matched to the FK.
+    pub nmatched_ri: i32,
     /// `EquivalenceClass *eclass[]` — matching EC for each column (or `None`).
     pub eclass: Vec<Option<EcId>>,
     /// `EquivalenceMember *fk_eclass_member[]` — the FK-table EM within that EC.
     pub fk_eclass_member: Vec<Option<EmId>>,
+    /// `List *rinfos[]` — per-column list of non-EC RestrictInfos matching the
+    /// column's condition (arena `RinfoId` handles).
+    pub rinfos: Vec<Vec<RinfoId>>,
 }
 
 /// `StatisticExtInfo` (pathnodes.h) — extended statistics defined on a relation,
@@ -3025,6 +3037,19 @@ impl PlannerInfo {
             ArenaNode::ForeignKey(fk) => fk,
             _ => panic!(
                 "PlannerInfo::foreign_key: NodeId {} does not resolve to a ForeignKeyOptInfo",
+                id.0
+            ),
+        }
+    }
+    /// Resolve a [`NodeId`] to its [`ForeignKeyOptInfo`] for mutation
+    /// (`match_foreign_keys_to_quals` writes back the per-column EC/loose-qual
+    /// match results).
+    #[inline]
+    pub fn foreign_key_mut(&mut self, id: NodeId) -> &mut ForeignKeyOptInfo {
+        match &mut self.node_arena[id.index()] {
+            ArenaNode::ForeignKey(fk) => fk,
+            _ => panic!(
+                "PlannerInfo::foreign_key_mut: NodeId {} does not resolve to a ForeignKeyOptInfo",
                 id.0
             ),
         }

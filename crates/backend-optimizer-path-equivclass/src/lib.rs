@@ -183,6 +183,10 @@ pub fn init_seams() {
         };
         is_redundant_with_indexclauses(root, rinfo, &indexclauses)
     });
+    // `find_derived_clause_for_ec_member` (equivclass.c:2804) is owned here; its
+    // public seam is declared on costsize-seams (the
+    // `get_foreign_key_join_selectivity` consumer).
+    cz_seam::find_derived_clause_for_ec_member::set(find_derived_clause_for_ec_member);
 }
 
 // Wrapper signatures that the inward seams bind to (some inner ports take refs /

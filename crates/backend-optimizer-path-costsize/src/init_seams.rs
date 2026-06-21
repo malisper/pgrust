@@ -210,8 +210,9 @@ pub fn init_seams() {
  * function (slice vs trailing args), so the installed `fn` pointer matches.
  * ------------------------------------------------------------------------ */
 
-fn get_foreign_key_join_selectivity_seam(
-    root: &PlannerInfo,
+fn get_foreign_key_join_selectivity_seam<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     outer_rel: RelId,
     inner_rel: RelId,
     sjinfo: &types_pathnodes::SpecialJoinInfo,
@@ -220,6 +221,7 @@ fn get_foreign_key_join_selectivity_seam(
     let outer_relids = root.rel(outer_rel).relids.clone();
     let inner_relids = root.rel(inner_rel).relids.clone();
     crate::joins::get_foreign_key_join_selectivity(
+        run,
         root,
         &outer_relids,
         &inner_relids,

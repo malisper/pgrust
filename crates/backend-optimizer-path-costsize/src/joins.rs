@@ -1172,36 +1172,28 @@ pub fn get_parameterized_baserel_size<'mcx>(
 /// that connects a baserel on one side of this join to a baserel on the other;
 /// removes the FK-matched clauses from the restrictlist and multiplies in the
 /// FK-implied selectivity. Returns `(fkselec, remaining_clause_handles)`.
-///
-/// Carrier note: the fabled `ForeignKeyOptInfo` is trimmed to the columns
-/// `match_foreign_keys_to_quals` (initsplan.c, not yet ported) would fill. Until
-/// that pass lands, `eclass`/`fk_eclass_member` stay `None` for every FK, so the
-/// EC-derived clause-removal below never matches and every FK chickens out with
-/// `removedlist` empty — leaving `fkselec = 1.0` and the restrictlist unchanged,
-/// which is the correct faithful result for the un-matched state. The "loose
-/// clause" (`fkinfo->rinfos[i]`) match path and the `nconst_ec`/ec_has_const
-/// correction need carrier fields that don't exist yet; they panic loudly if a
-/// future `match_foreign_keys_to_quals` ever makes them reachable, rather than
-/// silently diverging.
-pub fn get_foreign_key_join_selectivity(
-    root: &PlannerInfo,
+pub fn get_foreign_key_join_selectivity<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
     outer_relids: &Relids,
     inner_relids: &Relids,
     sjinfo: &SpecialJoinInfo,
     restrictlist: &[RinfoId],
 ) -> (Selectivity, Vec<RinfoId>) {
+    use backend_optimizer_path_costsize_seams as ecz;
     use backend_optimizer_util_relnode_seams as bms;
 
     const BMS_SINGLETON: i32 = 1;
 
     let mut fkselec: Selectivity = 1.0;
     let jointype = sjinfo.jointype;
-    // worklist starts as the passed restrictlist; we only clone it on the first
-    // clause removal (mirroring C's `worklist == *restrictlist` shallow-copy
-    // guard). Track whether we've copied with `worklist_copied`.
+    // worklist starts as an owned copy of the passed restrictlist (the C
+    // shallow-copy-on-first-removal guard is implicit here).
     let mut worklist: Vec<RinfoId> = restrictlist.to_vec();
 
-    for &fk_nid in root.fkey_list.iter() {
+    // Consider each FK constraint that is known to match the query.
+    let fkey_list = root.fkey_list.clone();
+    for fk_nid in fkey_list {
         let fkinfo = root.foreign_key(fk_nid).clone();
 
         // This FK is relevant only if it connects a baserel on one side to a
@@ -1227,34 +1219,28 @@ pub fn get_foreign_key_join_selectivity(
             continue;
         }
 
-        // Modify the restrictlist by removing clauses that match the FK.
-        // `worklist` is already an owned copy of the passed restrictlist, so the
-        // C shallow-copy-on-first-removal guard is implicit here.
+        // Modify the restrictlist by removing clauses that match the FK (and
+        // putting them into removedlist instead).
         let mut removedlist: Vec<RinfoId> = Vec::new();
         let mut kept: Vec<RinfoId> = Vec::with_capacity(worklist.len());
         for &rid in worklist.iter() {
             let rinfo = root.rinfo(rid);
             let mut remove_it = false;
+            // Drop this clause if it matches any column of the FK.
             for i in 0..fkinfo.nkeys as usize {
                 if let Some(parent_ec) = rinfo.parent_ec {
-                    // EC-derived clauses can only match by EC.
+                    // EC-derived clauses can only match by EC. Any clause derived
+                    // from the same EC counts as matching the FK.
                     if fkinfo.eclass[i] == Some(parent_ec) {
                         remove_it = true;
                         break;
                     }
                 } else {
-                    // The "loose clause" path matches `rinfo` against
-                    // `fkinfo->rinfos[i]`, a per-column clause list that the
-                    // trimmed carrier does not model. It is only ever populated
-                    // by the unported `match_foreign_keys_to_quals`; reaching
-                    // here with that pass ported means the carrier must be
-                    // widened first.
-                    if !fkinfo.eclass.is_empty() && fkinfo.eclass[i].is_some() {
-                        panic!(
-                            "backend-optimizer-path-costsize::get_foreign_key_join_selectivity: \
-                             FK loose-clause matching needs ForeignKeyOptInfo.rinfos, which the \
-                             trimmed carrier does not model"
-                        );
+                    // Otherwise, see if rinfo was previously matched to the FK
+                    // as a "loose" clause (list_member_ptr over rinfos[i]).
+                    if fkinfo.rinfos[i].iter().any(|&r| r == rid) {
+                        remove_it = true;
+                        break;
                     }
                 }
             }
@@ -1266,23 +1252,70 @@ pub fn get_foreign_key_join_selectivity(
         }
         worklist = kept;
 
-        // If we failed to remove all expected matching clauses, chicken out and
-        // ignore this FK; put back any clauses we removed.
+        // If we failed to remove all the matching clauses we expected to find,
+        // chicken out and ignore this FK; put back any clauses we removed.
         //
-        // The expected count is `nmatched_ec - nconst_ec + nmatched_ri`, fields
-        // that `match_foreign_keys_to_quals` fills and the trimmed carrier omits.
-        // With that pass unported, `removedlist` is always empty here, so the
-        // first disjunct (`removedlist == NIL`) settles the check and we never
-        // need the count. If a removal ever happens, the count is required.
-        if removedlist.is_empty() {
-            // chicken out: nothing removed, worklist unchanged.
+        //  1. An ec_has_const EC won't have generated any join clauses; we
+        //     discount such ECs (nconst_ec) while checking for "all" clauses.
+        //  2. The clauses may have been matched to another FK earlier in this
+        //     loop and thus already removed from worklist. Applying both FKs'
+        //     selectivity independently risks underestimating; punt.
+        let expected = (fkinfo.nmatched_ec - fkinfo.nconst_ec + fkinfo.nmatched_ri) as usize;
+        if removedlist.is_empty() || removedlist.len() != expected {
+            // Put the removed clauses back and skip this FK.
+            worklist.extend(removedlist);
             continue;
+        }
+
+        // Estimate selectivity using the knowledge that each referencing row
+        // matches exactly one row in the referenced table.
+        if jointype == JOIN_SEMI || jointype == JOIN_ANTI {
+            // The referenced table is exactly the inside of the join; the join
+            // selectivity equals the selectivity of the table's restriction
+            // clauses, rows / tuples (guard against tuples == 0).
+            let ref_rel = root.simple_rel_array[fkinfo.ref_relid as usize]
+                .expect("get_foreign_key_join_selectivity: ref_relid has no RelOptInfo");
+            let ref_tuples = Max(root.rel(ref_rel).tuples, 1.0);
+            fkselec *= root.rel(ref_rel).rows / ref_tuples;
         } else {
-            panic!(
-                "backend-optimizer-path-costsize::get_foreign_key_join_selectivity: FK matched \
-                 clauses but the chicken-out count (nmatched_ec - nconst_ec + nmatched_ri) and \
-                 ec_has_const correction need ForeignKeyOptInfo fields the trimmed carrier omits"
-            );
+            // Otherwise, selectivity is exactly 1/referenced-table-size; use the
+            // raw table tuple count, guarding against tuples == 0.
+            let ref_rel = root.simple_rel_array[fkinfo.ref_relid as usize]
+                .expect("get_foreign_key_join_selectivity: ref_relid has no RelOptInfo");
+            let ref_tuples = Max(root.rel(ref_rel).tuples, 1.0);
+            fkselec *= 1.0 / ref_tuples;
+        }
+
+        // If any FK columns participated in ec_has_const ECs, equivclass.c will
+        // have generated "var = const" restrictions for each side, reducing both
+        // inputs. Divide out the referencing Var's restriction selectivity to
+        // avoid double-counting.
+        if fkinfo.nconst_ec > 0 {
+            for i in 0..fkinfo.nkeys as usize {
+                if let Some(ec_id) = fkinfo.eclass[i] {
+                    if root.ec(ec_id).ec_has_const {
+                        let em = fkinfo.fk_eclass_member[i].expect(
+                            "get_foreign_key_join_selectivity: ec_has_const column lacks \
+                             fk_eclass_member",
+                        );
+                        let rinfo = ecz::find_derived_clause_for_ec_member::call(root, ec_id, em);
+                        if let Some(rid) = rinfo {
+                            let clause = root.rinfo(rid).clause;
+                            let s0 = cz::clause_selectivity::call(
+                                run,
+                                root,
+                                clause,
+                                0,
+                                jointype as i32,
+                                Some(sjinfo),
+                            );
+                            if s0 > 0.0 {
+                                fkselec /= s0;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1365,8 +1398,14 @@ pub fn calc_joinrel_size_estimate<'mcx>(
 
     // FK matching: the ForeignKeyOptInfo structs are opaque in the fabled arena,
     // so the whole FK pass (and its clause-removal) is routed to the owner.
-    let (fkselec, worklist) =
-        cz::get_foreign_key_join_selectivity::call(root, outer_rel, inner_rel, sjinfo, restrictlist);
+    let (fkselec, worklist) = cz::get_foreign_key_join_selectivity::call(
+        run,
+        root,
+        outer_rel,
+        inner_rel,
+        sjinfo,
+        restrictlist,
+    );
 
     if is_outer_join(jointype) {
         let joinrel_relids = root.rel(joinrel).relids.clone();

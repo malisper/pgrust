@@ -523,8 +523,9 @@ seam_core::seam!(
     /// arena (no resolver), so the whole FK-matching pass — including the
     /// removal of FK-matched clauses from the restrictlist — is routed to the
     /// owner. Returns `(fkselec, remaining_clause_handles)`.
-    pub fn get_foreign_key_join_selectivity(
-        root: &PlannerInfo,
+    pub fn get_foreign_key_join_selectivity<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
         outer_rel: RelId,
         inner_rel: RelId,
         sjinfo: &SpecialJoinInfo,
@@ -537,6 +538,19 @@ seam_core::seam!(
     /// Used by the FK-EC-member identity recovery in
     /// `get_foreign_key_join_selectivity`.
     pub fn equal_nodes(root: &PlannerInfo, a: NodeId, b: NodeId) -> bool
+);
+
+seam_core::seam!(
+    /// `find_derived_clause_for_ec_member(root, ec, em)` (equivclass.c:2804).
+    /// Owned by equivclass.c (which installs the body); consumed by
+    /// `get_foreign_key_join_selectivity`'s `ec_has_const` double-count
+    /// correction. Returns the derived `var = const` RestrictInfo for `em`, if
+    /// one was generated.
+    pub fn find_derived_clause_for_ec_member(
+        root: &mut PlannerInfo,
+        ec: types_pathnodes::EcId,
+        em: types_pathnodes::EmId,
+    ) -> Option<RinfoId>
 );
 
 /// Re-exported so installers can name the carrier types without importing the
