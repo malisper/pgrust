@@ -30,6 +30,7 @@ types-selfuncs = { path = "../types-selfuncs" }
 types-statistics = { path = "../types-statistics" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+backend-statistics-core-seams = { path = "../backend-statistics-core-seams" }
 types-rel = { path = "../types-rel" }
 backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
 backend-utils-cache-catcache-seams = { path = "../backend-utils-cache-catcache-seams" }

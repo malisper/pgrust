@@ -308,13 +308,7 @@ pub fn statext_mcv_serialize<'mcx>(
 
         /* sort and deduplicate the data */
         let collation = st.attrcollid;
-        coll.sort_by(|a, b| {
-            match core_seam::mcv_compare_scalars_simple::call(a, b, lt_opr, collation) {
-                n if n < 0 => core::cmp::Ordering::Less,
-                0 => core::cmp::Ordering::Equal,
-                _ => core::cmp::Ordering::Greater,
-            }
-        });
+        sort_scalars(mcx, &mut coll, lt_opr, collation)?;
 
         /*
          * Walk through the array and eliminate duplicate values, but keep the
@@ -324,23 +318,14 @@ pub fn statext_mcv_serialize<'mcx>(
         let mut ndistinct = 1usize; /* number of distinct values */
         let mut i = 1usize;
         while i < coll.len() {
-            /* expect sorted array */
-            debug_assert!(
-                core_seam::mcv_compare_scalars_simple::call(
-                    &coll[i - 1],
-                    &coll[i],
-                    lt_opr,
-                    collation
-                ) <= 0
-            );
-
             /* if the value is the same as the previous one, we can skip it */
             if core_seam::mcv_compare_scalars_simple::call(
+                mcx,
                 &coll[i - 1],
                 &coll[i],
                 lt_opr,
                 collation,
-            ) == 0
+            )? == 0
             {
                 i += 1;
                 continue;
@@ -559,7 +544,7 @@ pub fn statext_mcv_serialize<'mcx>(
                     if !mcvitem.isnull[d] {
                         let (lt_opr, collation) = dim_cmp[d]
                             .expect("non-NULL dimension must have a prepared comparator");
-                        match bsearch_index(&mcvitem.values[d], &values[d], lt_opr, collation) {
+                        match bsearch_index(mcx, &mcvitem.values[d], &values[d], lt_opr, collation)? {
                             Some(k) => {
                                 /* check the index is within expected bounds */
                                 debug_assert!((k as i32) < info[d].nvalues);
@@ -594,22 +579,97 @@ pub fn statext_mcv_serialize<'mcx>(
 
 /// `bsearch_arg(&value, values[dim], nvalues, compare_scalars_simple, &ssup)`
 /// returning the element index within the deduplicated array.
-fn bsearch_index(value: &Datum, base: &[Datum], lt_opr: Oid, collation: Oid) -> Option<usize> {
+fn bsearch_index<'mcx>(
+    mcx: Mcx<'mcx>,
+    value: &Datum<'mcx>,
+    base: &[Datum<'mcx>],
+    lt_opr: Oid,
+    collation: Oid,
+) -> PgResult<Option<usize>> {
     let mut lo: isize = 0;
     let mut hi: isize = base.len() as isize - 1;
     while lo <= hi {
         let mid = lo + (hi - lo) / 2;
-        let cmp =
-            core_seam::mcv_compare_scalars_simple::call(value, &base[mid as usize], lt_opr, collation);
+        let cmp = core_seam::mcv_compare_scalars_simple::call(
+            mcx,
+            value,
+            &base[mid as usize],
+            lt_opr,
+            collation,
+        )?;
         if cmp == 0 {
-            return Some(mid as usize);
+            return Ok(Some(mid as usize));
         } else if cmp < 0 {
             hi = mid - 1;
         } else {
             lo = mid + 1;
         }
     }
-    None
+    Ok(None)
+}
+
+/// Fallible sort of a single dimension's value `Datum`s by
+/// `compare_scalars_simple` (the serialize-side dedup sort, mcv.c:692-696).
+/// Implemented as a bottom-up merge sort so the comparator's `Err` propagates.
+fn sort_scalars<'mcx>(
+    mcx: Mcx<'mcx>,
+    coll: &mut Vec<Datum<'mcx>>,
+    lt_opr: Oid,
+    collation: Oid,
+) -> PgResult<()> {
+    let n = coll.len();
+    let mut idx: Vec<usize> = (0..n).collect();
+    merge_scalars(mcx, coll, lt_opr, collation, &mut idx)?;
+    let sorted: Vec<Datum<'mcx>> = idx.iter().map(|&i| coll[i].clone()).collect();
+    *coll = sorted;
+    Ok(())
+}
+
+fn merge_scalars<'mcx>(
+    mcx: Mcx<'mcx>,
+    coll: &[Datum<'mcx>],
+    lt_opr: Oid,
+    collation: Oid,
+    idx: &mut Vec<usize>,
+) -> PgResult<()> {
+    let n = idx.len();
+    if n <= 1 {
+        return Ok(());
+    }
+    let mid = n / 2;
+    let mut left: Vec<usize> = idx[..mid].to_vec();
+    let mut right: Vec<usize> = idx[mid..].to_vec();
+    merge_scalars(mcx, coll, lt_opr, collation, &mut left)?;
+    merge_scalars(mcx, coll, lt_opr, collation, &mut right)?;
+    let (mut i, mut j, mut k) = (0usize, 0usize, 0usize);
+    while i < left.len() && j < right.len() {
+        let cmp = core_seam::mcv_compare_scalars_simple::call(
+            mcx,
+            &coll[left[i]],
+            &coll[right[j]],
+            lt_opr,
+            collation,
+        )?;
+        if cmp <= 0 {
+            idx[k] = left[i];
+            i += 1;
+        } else {
+            idx[k] = right[j];
+            j += 1;
+        }
+        k += 1;
+    }
+    while i < left.len() {
+        idx[k] = left[i];
+        i += 1;
+        k += 1;
+    }
+    while j < right.len() {
+        idx[k] = right[j];
+        j += 1;
+        k += 1;
+    }
+    Ok(())
 }
 
 /* ---------------------------------------------------------------------------

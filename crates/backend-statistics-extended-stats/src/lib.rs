@@ -361,12 +361,29 @@ pub fn build_relation_ext_statistics<'mcx>(
                 // (We always report — the autovacuum-suppression check is the
                 // only difference in C, and this build path is never run from an
                 // autovacuum worker here.)
+                // get_namespace_name(onerel->rd_rel->relnamespace) +
+                // RelationGetRelationName(onerel) — the relation is reported
+                // schema-qualified (extended_stats.c:175-178).
                 let relname = onerel.name();
+                let nmcx = vacattrstats[0]
+                    .anl_context
+                    .expect("anl_context must be set");
+                let relschema =
+                    backend_utils_cache_lsyscache_seams::get_namespace_name::call(
+                        nmcx,
+                        onerel.rd_rel.relnamespace,
+                    )?
+                    .ok_or_else(|| {
+                        PgError::error(format!(
+                            "get_namespace_name: namespace {} not found",
+                            onerel.rd_rel.relnamespace
+                        ))
+                    })?;
                 let schema = &stat.schema;
                 let name = &stat.name;
                 ereport(WARNING)
                     .errmsg(format!(
-                        "statistics object \"{schema}.{name}\" could not be computed for relation \"{relname}\""
+                        "statistics object \"{schema}.{name}\" could not be computed for relation \"{relschema}.{relname}\""
                     ))
                     .finish(here("build_relation_ext_statistics"))?;
                 continue;
@@ -433,16 +450,36 @@ pub fn build_relation_ext_statistics<'mcx>(
                     );
                 }
             } else if t == STATS_EXT_MCV {
-                // The MCV build kernel (statext_mcv_build: build_mss /
-                // build_distinct_groups / build_column_frequencies over the
-                // value-matrix) is not yet ported (its core seam has no owner).
-                let _ = &mut mcv_bytes;
-                return Err(PgError::error(
-                    "extended MCV statistics build is unported: statext_mcv_build \
-                     (build_mss / build_distinct_groups / build_column_frequencies) \
-                     is not yet ported (mcv.c build leg)"
-                        .to_string(),
-                ));
+                // mcvlist = statext_mcv_build(data, totalrows, stattarget);
+                // statext_store(... mcvlist ...)
+                let mcvlist = backend_statistics_mcv::statext_mcv_build(
+                    &data,
+                    totalrows,
+                    stattarget,
+                )?;
+                // serialized = statext_mcv_serialize(mcvlist, stats)  (C only when
+                // mcvlist != NULL; otherwise the column is left NULL).
+                if let Some(mcvlist) = mcvlist {
+                    // Per-dimension type metadata the serializer needs
+                    // (stats[dim]->attrtype->typlen/typbyval; attrtypid/attrcollid).
+                    let mut dimstats: Vec<backend_statistics_mcv::McvDimStats> =
+                        Vec::with_capacity(stats.len());
+                    for s in &stats {
+                        let (typlen, typbyval) =
+                            backend_utils_cache_lsyscache_seams::get_typlenbyval::call(
+                                s.attrtypid,
+                            )?;
+                        dimstats.push(backend_statistics_mcv::McvDimStats {
+                            attrtypid: s.attrtypid,
+                            attrcollid: s.attrcollid,
+                            typlen,
+                            typbyval,
+                        });
+                    }
+                    mcv_bytes = Some(backend_statistics_mcv::statext_mcv_serialize(
+                        mcx, &mcvlist, &dimstats,
+                    )?);
+                }
             }
             // STATS_EXT_EXPRESSIONS handled by the has_exprs guard above.
         }

@@ -911,6 +911,10 @@ pub fn init_seams() {
     backend_commands_functioncmds_seams::fetch_cast_func_form::set(
         projections::fetch_cast_func_form,
     );
+    backend_statistics_core_seams::statext_ndistinct_load_bytea::set(
+        projections::statext_ndistinct_load_bytea,
+    );
+    backend_statistics_core_seams::mcv_load_bytea::set(projections::mcv_load_bytea);
     backend_utils_cache_syscache_seams::lookup_enum_by_oid::set(projections::lookup_enum_by_oid);
     backend_utils_cache_syscache_seams::lookup_enum_by_typoid_name::set(
         projections::lookup_enum_by_typoid_name,

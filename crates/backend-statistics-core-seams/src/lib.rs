@@ -103,11 +103,12 @@ seam_core::seam!(
     /// SEAMED: needs `PrepareSortSupportFromOrderingOp` + the fmgr comparison
     /// dispatch over the by-value/by-ref `Datum`, all owner-side.
     pub fn mcv_compare_scalars_simple<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         a: &types_tuple::Datum<'mcx>,
         b: &types_tuple::Datum<'mcx>,
         lt_opr: types_core::Oid,
         collation: types_core::Oid,
-    ) -> i32
+    ) -> types_error::PgResult<i32>
 );
 
 seam_core::seam!(

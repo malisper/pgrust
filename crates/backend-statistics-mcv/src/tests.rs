@@ -27,10 +27,10 @@ fn install_byval_seams() {
         cs::mcv_lookup_lt_opr::set(|_typid| Ok(97 /* int8lt-ish, arbitrary non-zero */));
 
         // compare: treat the Datum word as a signed integer value.
-        cs::mcv_compare_scalars_simple::set(|a, b, _lt, _coll| {
+        cs::mcv_compare_scalars_simple::set(|_mcx, a, b, _lt, _coll| {
             let av = a.as_usize() as i64;
             let bv = b.as_usize() as i64;
-            av.cmp(&bv) as i32
+            Ok(av.cmp(&bv) as i32)
         });
 
         // value -> bytes: low `typlen` bytes of the Datum word (by-value path).

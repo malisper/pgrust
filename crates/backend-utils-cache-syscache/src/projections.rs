@@ -7070,3 +7070,76 @@ pub(crate) fn statext_data_built_kinds(
     ReleaseSysCache(tup);
     Ok(Some((stxdinherit, built)))
 }
+
+/// `statext_ndistinct_load` / `statext_mcv_load` / dependencies-load syscache
+/// half (mvdistinct.c:140 / mcv.c:557 / dependencies.c): read one kind's bytea
+/// body from the `STATEXTDATASTXOID` (`stxoid`, `inh`) tuple. Returns
+/// `Ok(Some(bytes))` with the detoasted varlena image (4-byte-header) for a
+/// present non-null value, `Ok(None)` when the column is SQL NULL (the kind was
+/// not built — the caller raises the kind-not-built message), and `Err` on a
+/// missing tuple (`cache lookup failed for statistics object %u`).
+fn statext_data_load_bytea<'mcx>(
+    mcx: Mcx<'mcx>,
+    stat_oid: Oid,
+    inh: bool,
+    attnum: i32,
+) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    let tuple = SearchSysCache2(
+        mcx,
+        STATEXTDATASTXOID,
+        SysCacheKey::Value(KeyDatum::from_oid(stat_oid)),
+        SysCacheKey::Value(KeyDatum::from_bool(inh)),
+    )?;
+    let Some(tup) = tuple else {
+        // elog(ERROR, "cache lookup failed for statistics object %u", mvoid)
+        return Err(PgError::error(format!(
+            "cache lookup failed for statistics object {stat_oid}"
+        )));
+    };
+
+    let (value, is_null) = SysCacheGetAttr(mcx, STATEXTDATASTXOID, &tup, attnum)?;
+    if is_null {
+        ReleaseSysCache(tup);
+        return Ok(None);
+    }
+
+    // DatumGetByteaPP(datum): detoast the (possibly compressed/short-header)
+    // bytea to a fully in-line varlena image.
+    let bytes = match &value {
+        Datum::ByRef(b) => detoast_seams::pg_detoast_datum_packed::call(mcx, &b[..])?,
+        _ => {
+            ReleaseSysCache(tup);
+            return Err(PgError::error(
+                "statext_data_load_bytea: statistics kind column is not by-reference",
+            ));
+        }
+    };
+
+    ReleaseSysCache(tup);
+    Ok(Some(bytes))
+}
+
+/// `statext_ndistinct_load_bytea` seam owner: read `stxdndistinct`.
+pub(crate) fn statext_ndistinct_load_bytea(
+    mvoid: Oid,
+    inh: bool,
+) -> PgResult<Option<std::vec::Vec<u8>>> {
+    let scratch = MemoryContext::new("syscache statext ndistinct load");
+    let mcx = scratch.mcx();
+    let bytes = statext_data_load_bytea(mcx, mvoid, inh, Anum_pg_statistic_ext_data_stxdndistinct_b2)?;
+    Ok(bytes.map(|b| b.as_slice().to_vec()))
+}
+
+/// `mcv_load_bytea` seam owner: read `stxdmcv`.
+pub(crate) fn mcv_load_bytea<'mcx>(
+    mcx: Mcx<'mcx>,
+    mvoid: Oid,
+    inh: bool,
+) -> PgResult<PgVec<'mcx, u8>> {
+    match statext_data_load_bytea(mcx, mvoid, inh, Anum_pg_statistic_ext_data_stxdmcv_b2)? {
+        Some(bytes) => Ok(bytes),
+        None => Err(PgError::error(format!(
+            "requested statistics kind \"m\" is not yet built for statistics object {mvoid}"
+        ))),
+    }
+}

@@ -22293,6 +22293,7 @@ dependencies = [
  "backend-optimizer-prep-prepagg-seams",
  "backend-optimizer-util-clauses-seams",
  "backend-parser-parse-agg-seams",
+ "backend-statistics-core-seams",
  "backend-storage-lmgr-lock-seams",
  "backend-utils-adt-amutils-seams",
  "backend-utils-adt-arrayfuncs-seams",
