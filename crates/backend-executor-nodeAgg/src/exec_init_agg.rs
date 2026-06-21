@@ -782,8 +782,13 @@ fn build_phases<'mcx>(
             phases[p].aggnode = Some(clone_phase_agg(node, phaseidx, mcx)?);
             phases[p].aggstrategy = aggstrategy;
             // sortnode = castNode(Sort, outerPlan(aggnode)) for chained aggs.
+            // C's castNode is null-safe: a chained Agg built for a hashed or
+            // first-sort rollup has a NULL outerPlan (no Sort), so sortnode
+            // stays NULL. Mirror that — only AGG_SORTED chained phases carry a
+            // Sort. (Assert(phase <= 1 || sortnode) still holds: phases beyond
+            // the first sorted phase always have a Sort.)
             if is_chained {
-                phases[p].sortnode = Some(clone_phase_sortnode(node, phaseidx, mcx)?);
+                phases[p].sortnode = clone_phase_sortnode(node, phaseidx, mcx)?;
             }
             let _ = agg_num_groups;
         }
@@ -821,20 +826,21 @@ fn clone_phase_sortnode<'mcx>(
     node: &Agg<'mcx>,
     phaseidx: i32,
     mcx: Mcx<'mcx>,
-) -> PgResult<PgBox<'mcx, Sort<'mcx>>> {
+) -> PgResult<Option<PgBox<'mcx, Sort<'mcx>>>> {
     debug_assert!(phaseidx > 0, "sortnode only for chained phases");
     let aggnode = &node.chain.as_ref().expect("chain present")[(phaseidx - 1) as usize];
-    // outerPlan(aggnode) is the chained Sort node.
-    let outer = aggnode
-        .plan
-        .lefttree
-        .as_ref()
-        .expect("chained Agg has an outer Sort plan");
+    // outerPlan(aggnode) is the chained Sort node — but is genuinely NULL for a
+    // chained Agg built over a hashed or first-sort rollup (create_groupingsets_plan
+    // passes sort_plan = NULL there). castNode(Sort, NULL) == NULL in C.
+    let outer = match aggnode.plan.lefttree.as_ref() {
+        Some(o) => o,
+        None => return Ok(None),
+    };
     let sort: &Sort<'mcx> = match outer.node_tag() {
         types_nodes::nodes::ntag::T_Sort => outer.expect_sort(),
         other => panic!("castNode(Sort, outerPlan(aggnode)) failed: {other:?}"),
     };
-    alloc_in(mcx, sort.clone_in(mcx)?)
+    Ok(Some(alloc_in(mcx, sort.clone_in(mcx)?)?))
 }
 
 /// Build a `Bitmapset` of `grpColIdx[0..numCols]` for an Agg node.

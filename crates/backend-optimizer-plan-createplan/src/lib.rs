@@ -5030,7 +5030,7 @@ fn make_agg<'mcx>(
     chain: Option<PgVec<'mcx, PgBox<'mcx, types_nodes::nodeagg::Agg<'mcx>>>>,
     d_num_groups: f64,
     transition_space: u64,
-    lefttree: Node<'mcx>,
+    lefttree: Option<Node<'mcx>>,
 ) -> PgResult<types_nodes::nodeagg::Agg<'mcx>> {
     // Reduce to long, but 'ware overflow! (clamp_cardinality_to_long).
     let num_groups = costsize::clamp_cardinality_to_long::call(d_num_groups);
@@ -5057,7 +5057,10 @@ fn make_agg<'mcx>(
         let plan: &mut Plan = &mut node.plan;
         plan.qual = qual;
         plan.targetlist = tlist;
-        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+        plan.lefttree = match lefttree {
+            Some(lt) => Some(mcx::alloc_in(mcx, lt)?),
+            None => None,
+        };
         plan.righttree = None;
     }
 
@@ -5180,7 +5183,7 @@ fn create_agg_plan<'mcx>(
         None, // chain = NIL
         num_groups,
         transition_space,
-        subplan,
+        Some(subplan),
     )?;
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
@@ -5333,18 +5336,20 @@ fn create_groupingsets_plan<'mcx>(
             };
             let gsets = gsets_to_field(mcx, &rollup.gsets)?;
 
-            // The C side-Agg lefttree is the Sort (or NULL). We give it the Sort
-            // (or a dummy placeholder), then immediately strip the Sort's
-            // tlist/lefttree, matching C's "Remove stuff we don't need to avoid
-            // bloating debug output".
+            // The C side-Agg lefttree is the Sort (or genuinely NULL for hashed
+            // and first-sort rollups). When present, immediately strip the
+            // Sort's tlist/lefttree, matching C's "Remove stuff we don't need to
+            // avoid bloating debug output". A NULL lefttree stays None — the
+            // executor's per-phase sortnode select (castNode(Sort,
+            // outerPlan(aggnode))) is null-safe in C and must be here too.
             let lefttree = match sort_plan {
                 Some(mut sp) => {
                     let p = sp.plan_head_mut();
                     p.targetlist = None;
                     p.lefttree = None;
-                    sp
+                    Some(sp)
                 }
-                None => dummy_plan(mcx)?,
+                None => None,
             };
 
             let agg_plan = make_agg(
@@ -5412,7 +5417,7 @@ fn create_groupingsets_plan<'mcx>(
         chain_field,
         rollup.numGroups,
         transition_space,
-        subplan,
+        Some(subplan),
     )?;
 
     copy_generic_path_info(&mut plan.plan, root.path(best_path).base());
@@ -7641,7 +7646,7 @@ fn create_unique_plan<'mcx>(
             None, // chain = NIL
             rows,
             0, // transitionSpace
-            subplan,
+            Some(subplan),
         )?;
         Node::mk_agg(mcx, agg)?
     } else {
