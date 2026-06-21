@@ -2428,10 +2428,11 @@ fn index_options_function_call_seam(
 /// `DatumGetInt32(OidFunctionCall1(typmodin, PointerGetDatum(arrtypmod)))`. The C
 /// wraps the call in a `setup_parser_errposition_callback`, so a typmodin failure
 /// that carries no cursor position of its own is tagged with the `TypeName`'s
-/// parse `location`. Only the fmgr owner can synthesize the `cstring[]` Datum
+/// already-converted parse `cursorpos` (the caller ran `parser_errposition`).
+/// Only the fmgr owner can synthesize the `cstring[]` Datum
 /// argument (a by-reference array varlena image, built via the arrayfuncs
 /// `construct_array_builtin(CSTRINGOID)` port) and dispatch the OID call.
-fn typmodin_seam(typmodin: Oid, cstrings: &[String], location: i32) -> PgResult<i32> {
+fn typmodin_seam(typmodin: Oid, cstrings: &[String], cursorpos: i32) -> PgResult<i32> {
     let ctx = MemoryContext::new("typmodin");
     let mcx = ctx.mcx();
     let resolved = fmgr_info(mcx, typmodin)?;
@@ -2453,13 +2454,15 @@ fn typmodin_seam(typmodin: Oid, cstrings: &[String], location: i32) -> PgResult<
         ref_args,
     );
 
-    // setup_parser_errposition_callback: tag a typmodin failure with the parse
-    // location iff it has no cursor position of its own.
+    // setup_parser_errposition_callback / pcb_error_callback: tag a typmodin
+    // failure with the parse cursor position iff it has no cursor position of
+    // its own. `cursorpos` is already the 1-based result of
+    // `parser_errposition` (0 = "no position").
     match result {
         Ok(d) => Ok(d.as_i32()),
         Err(e) => {
-            if location >= 0 && e.cursor_position().is_none() {
-                Err(e.with_cursor_position(location))
+            if cursorpos > 0 && e.cursor_position().is_none() {
+                Err(e.with_cursor_position(cursorpos))
             } else {
                 Err(e)
             }

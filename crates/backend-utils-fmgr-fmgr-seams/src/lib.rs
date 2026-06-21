@@ -1134,8 +1134,11 @@ seam_core::seam!(
     /// `DatumGetInt32(OidFunctionCall1(typmodin, PointerGetDatum(arrtypmod)))`
     /// (parse_type.c `typenameTypeMod`): apply a type's `typmodin` function to
     /// the cstring array distilled from a `TypeName`'s typmod expressions,
-    /// returning the resolved typmod. `location` is the parse location used to
-    /// tag a failure (the C `setup_parser_errposition_callback` around the
-    /// call). `Err` carries whatever the `typmodin` function raises.
-    pub fn typmodin(typmodin: Oid, cstrings: &[String], location: i32) -> PgResult<i32>
+    /// returning the resolved typmod. `cursorpos` is the already-converted
+    /// 1-based character cursor position (the result of `parser_errposition`)
+    /// used to tag a failure (the C `setup_parser_errposition_callback` +
+    /// `pcb_error_callback`, which runs `errposition(parser_errposition(...))`);
+    /// 0 means "no position". `Err` carries whatever the `typmodin` function
+    /// raises.
+    pub fn typmodin(typmodin: Oid, cstrings: &[String], cursorpos: i32) -> PgResult<i32>
 );

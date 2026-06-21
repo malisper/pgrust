@@ -453,9 +453,15 @@ fn typenameTypeMod(
     /*
      * construct_array_builtin(CSTRINGOID) + OidFunctionCall1(typmodin) live
      * behind the fmgr seam, which also tags a typmodin failure with the parse
-     * location (the C setup_parser_errposition_callback).
+     * cursor position (the C setup_parser_errposition_callback +
+     * pcb_error_callback, which runs `errposition(parser_errposition(pstate,
+     * location))`). The fmgr owner has no `pstate`/source text, so we convert
+     * the raw parse `location` (a 0-based byte offset) into the 1-based
+     * character cursor position here, where `pstate` is available; 0 means "no
+     * position".
      */
-    fmgr::typmodin::call(typmodin, &cstrings, typeName.location)
+    let cursorpos = parser_errposition(pstate, typeName.location)?;
+    fmgr::typmodin::call(typmodin, &cstrings, cursorpos)
 }
 
 /// `appendTypeNameToBuffer()` (parse_type.c:439, static): append a `TypeName`'s
