@@ -216,6 +216,64 @@ pub fn oidvectoreqfast(a: &[Oid], b: &[Oid]) -> bool {
     a == b
 }
 
+/// Canonicalize a by-reference key column's *deformed on-disk* `Datum::ByRef`
+/// image into the catcache key payload the fast hash/equality functions consume.
+///
+/// The fast functions for `text` work on the detoasted, header-LESS
+/// `VARDATA_ANY` payload (C's `hashtext`/`texteq` strip the varlena header), and
+/// a by-name *search* key already crosses as that bare payload
+/// (`SysCacheKey::Str(s)` -> `s.as_bytes()`, no varlena header). But a key column
+/// deformed out of a catalog tuple (`heap_deform_tuple`/`nocachegetattr`) is the
+/// FULL on-disk varlena image (4-byte/short header + payload). Caching or hashing
+/// that header-ful image directly makes its hash differ from the header-less
+/// search key's, so a positive entry never matches a search key (forcing a
+/// re-scan every time) and — worse — an inval request computed from an inserted
+/// tuple never matches the negative entry left by an earlier by-name miss, so the
+/// stale negative entry is never cleared (a by-name lookup keeps returning "not
+/// found" after the row is created in the same session).
+///
+/// This strips the varlena header for [`CCFastKind::Text`] (mirroring
+/// `VARDATA_ANY`), so the cached entry's keys and the inval-request hash use the
+/// same header-less payload the search key carries. `name` passes through
+/// verbatim (the fixed `NAMEDATALEN` buffer; [`name_significant_len`] truncates
+/// it at its NUL, matching the bare search key); `oidvector` and the scalar
+/// kinds are not header-framed.
+///
+/// External/compressed TOAST images never reach here: `build_fetched` flattens
+/// any out-of-line toasted column before key extraction, and a catalog key
+/// column is never stored compressed-in-line.
+pub fn canonicalize_byref_key(kind: CCFastKind, image: &[u8]) -> alloc::vec::Vec<u8> {
+    match kind {
+        CCFastKind::Text => vardata_any_image(image).to_vec(),
+        _ => image.to_vec(),
+    }
+}
+
+/// `VARDATA_ANY(image)` / `VARSIZE_ANY_EXHDR(image)` (`varatt.h`): the
+/// header-less payload slice of an inline varlena. Handles a 1-byte ("short")
+/// header and a 4-byte uncompressed header; external/compressed images do not
+/// reach this (the caller flattens TOAST first).
+#[inline]
+fn vardata_any_image(image: &[u8]) -> &[u8] {
+    if image.is_empty() {
+        return &[];
+    }
+    let header = image[0];
+    // VARATT_IS_1B (short inline) but not VARATT_IS_1B_E (external 0x01): the low
+    // bit is set and the byte is not exactly 0x01. The total length (incl. the
+    // 1-byte header) is `header >> 1`; payload is `[1..total]`.
+    if header != 0x01 && (header & 0x01) == 0x01 {
+        let total = ((header >> 1) & 0x7F) as usize;
+        let total = total.min(image.len()).max(1);
+        &image[1..total]
+    } else if image.len() >= 4 {
+        // VARATT_IS_4B_U: skip the 4-byte (`VARHDRSZ`) header.
+        &image[4..]
+    } else {
+        &[]
+    }
+}
+
 /// `oidvectorhashfast` — `hashoidvector` is `hash_any` over the contiguous
 /// `Oid` element bytes.
 pub fn oidvectorhashfast(v: &[Oid]) -> PgResult<u32> {

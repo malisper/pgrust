@@ -127,7 +127,15 @@ fn catalog_cache_compute_tuple_hash_value(
             // shape the search/build paths produce (`CatCacheCopyKeys`).
             v[i] = match &value {
                 Datum::ByVal(d) => CatKey::Scalar(ScalarWord::from_usize(*d)),
-                Datum::ByRef(b) => CatKey::ByRef(b.to_vec()),
+                // The deformed key column is the full on-disk varlena image; the
+                // hash core consumes the canonical header-LESS payload (the same
+                // bytes the search/build paths use and a by-name search key
+                // carries). Without this, a `text`-keyed inval request's hash
+                // never matches the negative entry left by an earlier by-name
+                // miss, so the stale negative entry is never cleared.
+                Datum::ByRef(b) => CatKey::ByRef(
+                    crate::core_compute::canonicalize_byref_key(probe.cc_fastkind[i], b),
+                ),
                 Datum::Cstring(_) | Datum::Composite(_) | Datum::Expanded(_) | Datum::Internal(_) => panic!(
                     "catcache::inval_support: a Cstring/Composite/Expanded/Internal key value \
                      is not a catcache key type (GetCCHashEqFuncs rejects them)"

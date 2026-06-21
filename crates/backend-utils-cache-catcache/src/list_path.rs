@@ -603,9 +603,9 @@ pub(crate) fn build_fetched(
     let t_tableoid = ntp.tuple.t_tableOid;
 
     // Extract the key datums via the cache's tupdesc + cc_keyno.
-    let (cache_id, cc_keyno, cc_nkeys) = with_arena(|arena| {
+    let (cache_id, cc_keyno, cc_nkeys, cc_fastkind) = with_arena(|arena| {
         let cache = &arena.caches[cache_idx.0];
-        (cache.id, cache.cc_keyno, cache.cc_nkeys)
+        (cache.id, cache.cc_keyno, cache.cc_nkeys, cache.cc_fastkind)
     });
 
     // `CatalogCacheCreateEntry` (catcache.c:2164): if the tuple has any
@@ -682,11 +682,20 @@ pub(crate) fn build_fetched(
                         // By-value key: the scalar word is the key Datum.
                         Datum::ByVal(d) => CatKey::Scalar(ScalarWord::from_usize(*d)),
                         // By-reference key (name/text/oidvector): own a copy of
-                        // the attribute's payload bytes. The fast hash/compare
-                        // functions resolve the significant payload from these
-                        // (name: NUL-truncated; text: VARDATA image; oidvector:
-                        // Oid element bytes), matching the search key bytes.
-                        Datum::ByRef(b) => CatKey::ByRef(b.to_vec()),
+                        // the attribute's *canonical* payload bytes. The deformed
+                        // image is the full on-disk varlena (for `text`); the fast
+                        // hash/compare functions consume the header-LESS
+                        // `VARDATA_ANY` payload (the same bare bytes a by-name
+                        // search key carries), so strip the varlena header for
+                        // `text` here. `name` (NUL-truncated by the fast fns) and
+                        // `oidvector` (Oid element bytes) pass through verbatim.
+                        Datum::ByRef(b) => {
+                            let kind = cc_fastkind[i]
+                                .expect("build_fetched: cc_fastkind set by phase-2 init");
+                            CatKey::ByRef(
+                                crate::core_compute::canonicalize_byref_key(kind, b),
+                            )
+                        }
                         // The non-flat payload kinds are not catcache key types
                         // (GetCCHashEqFuncs rejects them); a by-value placeholder
                         // is never read for them.
