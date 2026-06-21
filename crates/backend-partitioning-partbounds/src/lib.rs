@@ -1526,11 +1526,12 @@ pub fn init_seams() {
 /// implicit-AND qual `Node` list from a directly-supplied bound spec.
 fn get_qual_from_partbound_seam<'mcx>(
     mcx: Mcx<'mcx>,
+    parent_relid: Oid,
     key: &PartitionKeyData<'_>,
     spec: &PartitionBoundSpec<'_>,
     parent_partdesc: Option<&PartitionDescData<'_>>,
 ) -> PgResult<PgVec<'mcx, Node<'mcx>>> {
-    let exprs = qual::get_qual_from_partbound(mcx, key, spec, parent_partdesc)?;
+    let exprs = qual::get_qual_from_partbound(mcx, parent_relid, key, spec, parent_partdesc)?;
     let mut out: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
     for e in exprs {
         out.push(Node::mk_expr(mcx, e)?);

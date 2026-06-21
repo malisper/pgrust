@@ -135,6 +135,7 @@ seam_core::seam!(
     /// holds the parent relcache entry — supplies it for the default case.
     pub fn get_qual_from_partbound<'mcx>(
         mcx: Mcx<'mcx>,
+        parent_relid: Oid,
         key: &PartitionKeyData<'_>,
         spec: &PartitionBoundSpec<'_>,
         parent_partdesc: Option<&PartitionDescData<'_>>,

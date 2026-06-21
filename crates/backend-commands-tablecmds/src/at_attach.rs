@@ -340,6 +340,7 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     let part_bound_constraint =
         backend_partitioning_partbounds_seams::get_qual_from_partbound::call(
             mcx,
+            rel.rd_id,
             &key,
             bound,
             qual_partdesc.as_deref(),
@@ -1015,7 +1016,7 @@ fn QueuePartitionConstraintValidation<'mcx>(
 /// `PartConstraintImpliedByRelConstraint(scanrel, partConstraint)`
 /// (tablecmds.c:20059) — build the proven set from `scanrel`'s valid NOT NULL
 /// constraints, then defer to `ConstraintImpliedByRelConstraint`.
-fn PartConstraintImpliedByRelConstraint<'mcx>(
+pub(crate) fn PartConstraintImpliedByRelConstraint<'mcx>(
     mcx: Mcx<'mcx>,
     scanrel: &Relation<'mcx>,
     part_constraint: &[Node<'mcx>],

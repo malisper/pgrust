@@ -54,6 +54,13 @@ const BTGreaterStrategyNumber: u16 = 5;
 
 const BOOLOID: Oid = 16;
 const InvalidOid: Oid = 0;
+/// `INT4OID` (pg_type.dat).
+const INT4OID: Oid = 23;
+/// `OIDOID` (pg_type.dat).
+const OIDOID: Oid = 26;
+
+/// The unified `Datum` carrier `make_const` consumes (matches `makefuncs.rs`).
+use types_tuple::backend_access_common_heaptuple::Datum;
 
 /// `IsPolymorphicType(typid)` (pg_type.h) — true for the pseudo-types that
 /// accept any input type. Mirrors the macro's OID list.
@@ -303,18 +310,100 @@ fn get_range_nulltest<'mcx>(mcx: Mcx<'mcx>, key: &PartitionKeyData<'_>) -> PgRes
 /// remainder, key...)`. Building this needs the parent OID + the per-key
 /// fmgr-call argument expansion; it is reached only for HASH parents.
 fn get_qual_for_hash<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _key: &PartitionKeyData<'_>,
-    _spec: &PartitionBoundSpec<'_>,
+    mcx: Mcx<'mcx>,
+    parent_relid: Oid,
+    key: &PartitionKeyData<'_>,
+    spec: &PartitionBoundSpec<'_>,
 ) -> PgResult<Vec<Expr>> {
-    // satisfies_hash_partition() FuncExpr construction: the parent relation OID
-    // Const + per-column key Vars passed as variadic args. Not exercised by the
-    // RANGE/LIST paths that the current ATTACH/CREATE flows drive; faithfully
-    // surface a precise error rather than emit a wrong qual.
-    Err(elog(
-        "get_qual_for_hash (satisfies_hash_partition qual) is not yet ported \
-         in backend-partitioning-partbounds",
-    ))
+    // Fixed arguments: the parent relation OID, the modulus, and the remainder,
+    // all as immutable Const nodes.
+    //
+    // relidConst = makeConst(OIDOID, -1, InvalidOid, sizeof(Oid),
+    //                        ObjectIdGetDatum(RelationGetRelid(parent)),
+    //                        false, true);
+    let relid_const = make_const(
+        mcx,
+        OIDOID,
+        -1,
+        InvalidOid,
+        core::mem::size_of::<Oid>() as i32,
+        Datum::from_oid(parent_relid),
+        false,
+        true,
+    )?;
+
+    // modulusConst = makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+    //                          Int32GetDatum(spec->modulus), false, true);
+    let modulus_const = make_const(
+        mcx,
+        INT4OID,
+        -1,
+        InvalidOid,
+        core::mem::size_of::<i32>() as i32,
+        Datum::from_i32(spec.modulus),
+        false,
+        true,
+    )?;
+
+    // remainderConst = makeConst(INT4OID, -1, InvalidOid, sizeof(int32),
+    //                            Int32GetDatum(spec->remainder), false, true);
+    let remainder_const = make_const(
+        mcx,
+        INT4OID,
+        -1,
+        InvalidOid,
+        core::mem::size_of::<i32>() as i32,
+        Datum::from_i32(spec.remainder),
+        false,
+        true,
+    )?;
+
+    // args = list_make3(relidConst, modulusConst, remainderConst);
+    let mut args: Vec<Expr> = vec![
+        Expr::Const(relid_const),
+        Expr::Const(modulus_const),
+        Expr::Const(remainder_const),
+    ];
+
+    // Add an argument for each key column.
+    let mut partexprs_idx = 0usize;
+    for i in 0..(key.partnatts as usize) {
+        // Left operand: a Var for a plain attribute, else a copy of the partexpr.
+        let key_col = if key.partattrs[i] != 0 {
+            Expr::Var(make_var(
+                1,
+                key.partattrs[i],
+                key.parttypid[i],
+                key.parttypmod[i],
+                key.parttypcoll[i],
+                0,
+            ))
+        } else {
+            let e = key
+                .partexprs
+                .get(partexprs_idx)
+                .ok_or_else(|| elog("wrong number of partition key expressions"))?;
+            let cloned = e.clone_in(mcx)?;
+            partexprs_idx += 1;
+            cloned
+        };
+        args.push(key_col);
+    }
+
+    // fexpr = makeFuncExpr(F_SATISFIES_HASH_PARTITION, BOOLOID, args,
+    //                      InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+    const F_SATISFIES_HASH_PARTITION: Oid = 5028;
+    let fexpr = backend_nodes_core::makefuncs::make_func_expr(
+        F_SATISFIES_HASH_PARTITION,
+        BOOLOID,
+        args,
+        InvalidOid,
+        InvalidOid,
+        CoercionForm::COERCE_EXPLICIT_CALL,
+    );
+
+    // return list_make1(fexpr);
+    Ok(vec![fexpr])
 }
 
 /// `get_qual_for_list(parent, spec)` (partbounds.c:4066).
@@ -790,12 +879,13 @@ fn get_qual_for_range<'mcx>(
 /// Returns the implicit-AND list of `Expr` clauses.
 pub fn get_qual_from_partbound<'mcx>(
     mcx: Mcx<'mcx>,
+    parent_relid: Oid,
     key: &PartitionKeyData<'_>,
     spec: &PartitionBoundSpec<'_>,
     parent_partdesc: Option<&PartitionDescData<'_>>,
 ) -> PgResult<Vec<Expr>> {
     match key.strategy {
-        PartitionStrategy::Hash => get_qual_for_hash(mcx, key, spec),
+        PartitionStrategy::Hash => get_qual_for_hash(mcx, parent_relid, key, spec),
         PartitionStrategy::List => get_qual_for_list(mcx, key, spec, parent_partdesc),
         PartitionStrategy::Range => {
             get_qual_for_range(mcx, key, spec, false, parent_partdesc)
@@ -855,7 +945,7 @@ pub fn qual_from_partbound_seam<'mcx, 'p>(
         None
     };
 
-    let exprs = get_qual_from_partbound(mcx, &key, &bound, pdesc.as_deref())?;
+    let exprs = get_qual_from_partbound(mcx, parent.rd_id, &key, &bound, pdesc.as_deref())?;
     parent_rel.close(NoLock)?;
     for e in exprs {
         out.push(node(mcx, e)?);
