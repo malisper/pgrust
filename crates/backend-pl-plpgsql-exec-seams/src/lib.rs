@@ -568,3 +568,38 @@ seam_core::seam!(
     /// is layered below lsyscache; the handler installs it.
     pub fn type_is_rowtype(typid: Oid) -> PgResult<bool>
 );
+
+/// The composite Datum a whole-row ROW datum (`exec_eval_datum` DTYPE_ROW)
+/// flattens to: the verbatim `HeapTupleHeader` varlena image, plus the row's
+/// registered rowtype id/typmod (set by `BlessTupleDesc`).
+#[derive(Clone, Debug)]
+pub struct RowCompositeDatum {
+    /// The flat composite-Datum varlena image (`HeapTupleGetDatum`).
+    pub image: std::vec::Vec<u8>,
+    /// `row->rowtupdesc->tdtypeid` after `BlessTupleDesc` (RECORDOID for an
+    /// anonymous OUT-parameter row).
+    pub typeid: Oid,
+    /// `row->rowtupdesc->tdtypmod` after `BlessTupleDesc` (the registered
+    /// anonymous-record typmod).
+    pub typmod: int32,
+}
+
+seam_core::seam!(
+    /// `exec_eval_datum` DTYPE_ROW (pl_exec.c 5316) — `BlessTupleDesc` the row's
+    /// `rowtupdesc`, then `make_tuple_from_row` (`heap_form_tuple` over the
+    /// already-evaluated scalar field values) and `HeapTupleGetDatum`. The
+    /// executor (this unit) is layered below execTuples/heaptuple and the
+    /// compiler's `rowtupdesc_table`; the handler — which sits above all three —
+    /// installs it.
+    ///
+    /// `fields` carries each field's current value (already read by the executor
+    /// via `exec_eval_datum`), in row-field order; `rowtupdesc_handle` is the
+    /// compiled row's `rowtupdesc` handle (1-based; `0` is the C NULL, which is
+    /// "row variable has no tupdesc"). A field's `typeid` not matching the
+    /// descriptor's column type is C's `make_tuple_from_row` NULL return →
+    /// "row not compatible with its own tupdesc".
+    pub fn form_row_composite_datum(
+        fields: std::vec::Vec<ExecsqlColumn>,
+        rowtupdesc_handle: u64,
+    ) -> PgResult<RowCompositeDatum>
+);

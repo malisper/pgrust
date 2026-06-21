@@ -1016,6 +1016,105 @@ pub fn init_seams() {
         backend_utils_cache_lsyscache_seams::type_is_rowtype::call(typid)
     });
 
+    // `exec_eval_datum` DTYPE_ROW (pl_exec.c 5316): BlessTupleDesc the compiled
+    // row's rowtupdesc, then `make_tuple_from_row` (heap_form_tuple over the
+    // executor-evaluated field values) and `HeapTupleGetDatum`. The executor
+    // reads each field and hands them here; the handler — the top layer above
+    // execTuples (BlessTupleDesc), heaptuple (heap_form_tuple /
+    // HeapTupleGetDatum) and the compiler's backend-lifetime rowtupdesc table —
+    // forms the composite Datum image.
+    backend_pl_plpgsql_exec_seams::form_row_composite_datum::set(
+        |fields: Vec<backend_pl_plpgsql_exec_seams::ExecsqlColumn>, rowtupdesc_handle: u64| {
+            use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
+
+            let cxt = mcx::MemoryContext::new("PL/pgSQL make_tuple_from_row");
+            let mcx = cxt.mcx();
+
+            // BlessTupleDesc(row->rowtupdesc): for an anonymous RECORD descriptor
+            // (the OUT-parameter row), register a transient record type and stamp
+            // (tdtypeid=RECORDOID, tdtypmod=<assigned>) back into the live
+            // backend-lifetime descriptor. Then read its reported (typeid,
+            // typmod) and natts/attr typeids to mirror make_tuple_from_row.
+            //
+            // The descriptor lives in the compiler's rowtupdesc_table; borrow it
+            // mutably so the bless persists on the cached descriptor (as C blesses
+            // the long-lived row->rowtupdesc).
+            let formed = backend_pl_plpgsql_comp::rowtupdesc_table::with_rowtupdesc(
+                rowtupdesc_handle,
+                |td: &mut types_tuple::heaptuple::TupleDescData<'static>|
+                 -> PgResult<backend_pl_plpgsql_exec_seams::RowCompositeDatum> {
+                    // BlessTupleDesc's guard: only an anonymous RECORD descriptor
+                    // is registered; a named-composite descriptor keeps its id.
+                    // RECORDOID (2249) — an anonymous composite descriptor.
+                    if td.tdtypeid == 2249 && td.tdtypmod < 0 {
+                        backend_utils_cache_typcache_seams::assign_record_type_typmod::call(td)?;
+                    }
+                    let natts = td.natts as usize;
+                    // make_tuple_from_row: natts != row->nfields → NULL.
+                    if natts != fields.len() {
+                        return Err(types_error::PgError::error(
+                            "row not compatible with its own tupdesc",
+                        ));
+                    }
+                    let mut values: Vec<CanonDatum> = Vec::with_capacity(natts);
+                    let mut nulls: Vec<bool> = Vec::with_capacity(natts);
+                    for (i, f) in fields.iter().enumerate() {
+                        let att = &td.attrs[i];
+                        if att.attisdropped {
+                            // Dropped column → leave it NULL (the field's varno
+                            // was negative, so the executor passed isnull=true).
+                            values.push(CanonDatum::null());
+                            nulls.push(true);
+                            continue;
+                        }
+                        // fieldtypeid != atttypid → make_tuple_from_row NULL.
+                        if f.typeid != att.atttypid {
+                            return Err(types_error::PgError::error(
+                                "row not compatible with its own tupdesc",
+                            ));
+                        }
+                        if f.isnull {
+                            values.push(CanonDatum::null());
+                            nulls.push(true);
+                        } else if let Some(bytes) = &f.byref {
+                            values.push(CanonDatum::from_byref_bytes_in(mcx, bytes)?);
+                            nulls.push(false);
+                        } else {
+                            values.push(CanonDatum::from_usize(f.value));
+                            nulls.push(false);
+                        }
+                    }
+                    // heap_form_tuple(tupdesc, dvalues, nulls).
+                    let tuple = backend_access_common_heaptuple::heap_form_tuple(
+                        mcx, td, &values, &nulls,
+                    )
+                    .map_err(|e| {
+                        types_error::PgError::error(format!("heap_form_tuple failed: {e:?}"))
+                    })?;
+                    // HeapTupleGetDatum: set the composite-Datum header fields
+                    // (datum length / typeid / typmod) and serialize the flat
+                    // varlena image C points a composite Datum at.
+                    let composite =
+                        backend_access_common_heaptuple::heap_copy_tuple_as_datum(
+                            mcx, &tuple, td,
+                        )?;
+                    Ok(backend_pl_plpgsql_exec_seams::RowCompositeDatum {
+                        image: composite.to_datum_image(),
+                        typeid: td.tdtypeid,
+                        typmod: td.tdtypmod,
+                    })
+                },
+            );
+            match formed {
+                Some(res) => res,
+                // handle == 0 / out-of-range: C's "row variable has no tupdesc"
+                // (the executor already guards handle == 0 before calling, so an
+                // out-of-range handle is the only path here).
+                None => Err(types_error::PgError::error("row variable has no tupdesc")),
+            }
+        },
+    );
+
     // Install the `exec_stmt_block` EXCEPTION-leg subtransaction entry points
     // (pl_exec.c keystone #215). The executor unit is layered below xact; the
     // handler (top layer) bridges to the now-ported xact subxact engine. These

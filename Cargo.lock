@@ -14758,9 +14758,11 @@ name = "backend-pl-plpgsql-handler"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast-seams",
+ "backend-access-common-heaptuple",
  "backend-access-transam-xact",
  "backend-catalog-pg-proc-seams",
  "backend-commands-functioncmds-seams",
+ "backend-executor-execTuples",
  "backend-executor-spi",
  "backend-pl-plpgsql-comp",
  "backend-pl-plpgsql-exec",
@@ -14771,6 +14773,7 @@ dependencies = [
  "backend-utils-adt-varlena",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
+ "backend-utils-cache-typcache-seams",
  "backend-utils-error",
  "backend-utils-fmgr-core",
  "backend-utils-fmgr-dfmgr-seams",

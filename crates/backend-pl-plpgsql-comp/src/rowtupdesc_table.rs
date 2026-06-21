@@ -64,3 +64,21 @@ pub fn register(ctx: Box<MemoryContext>, desc: TupleDescData<'static>) -> u64 {
         t.len() as u64
     })
 }
+
+/// Run `f` against the live `TupleDescData` for `handle` (1-based; `0` = no
+/// descriptor, in which case `f` is not called and `None` is returned). The
+/// descriptor is borrowed mutably so the caller can `BlessTupleDesc` it in
+/// place (C blesses `row->rowtupdesc` on every `exec_eval_datum` ROW read; the
+/// registered type/typmod then persists on the backend-lifetime descriptor).
+pub fn with_rowtupdesc<R>(
+    handle: u64,
+    f: impl FnOnce(&mut TupleDescData<'static>) -> R,
+) -> Option<R> {
+    if handle == 0 {
+        return None;
+    }
+    ROWTUPDESC_TABLE.with(|cell| {
+        let mut t = cell.borrow_mut();
+        t.get_mut((handle - 1) as usize).map(|e| f(&mut e.desc))
+    })
+}

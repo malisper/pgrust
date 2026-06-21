@@ -1696,13 +1696,56 @@ fn exec_eval_datum_impl(
                 None => Ok((rec.rectypeid, -1, Datum::null(), true)),
             }
         }
-        PLpgSQL_datum::Row(_) => {
-            // A ROW datum's whole-row read (build a tuple from its fields) is the
-            // ROW-deconstruction substrate; not reached by the REC/trigger path.
-            panic!(
-                "seam not wired: exec_eval_datum ROW arm (pl_exec.c) — ROW \
-                 whole-row tuple build (row-deconstruction value substrate)"
-            );
+        PLpgSQL_datum::Row(row) => {
+            // exec_eval_datum DTYPE_ROW (pl_exec.c 5316): a whole-row read of a
+            // ROW variable (the implicit row of a multi-OUT-parameter function).
+            // BlessTupleDesc(row->rowtupdesc), make_tuple_from_row over the
+            // already-evaluated scalar field values, then HeapTupleGetDatum. The
+            // tuple-form + bless crosses the heaptuple/execTuples model and the
+            // compiler's backend-lifetime rowtupdesc table, so the field reads
+            // happen here (this unit owns exec_eval_datum) and the form/bless is
+            // delegated through the handler-installed seam.
+            let rowtupdesc_handle = row.rowtupdesc.as_ref().map(|t| t.0).unwrap_or(0);
+            if rowtupdesc_handle == 0 {
+                // C: elog(ERROR, "row variable has no tupdesc").
+                return Err(types_error::PgError::error("row variable has no tupdesc"));
+            }
+            let varnos = row.varnos.clone();
+            // make_tuple_from_row reads each field via exec_eval_datum; a dropped
+            // column (varno < 0) is a NULL placeholder.
+            let mut fields: Vec<exec_seams::ExecsqlColumn> = Vec::with_capacity(varnos.len());
+            for field_dno in varnos {
+                if field_dno < 0 {
+                    fields.push(exec_seams::ExecsqlColumn {
+                        value: 0,
+                        isnull: true,
+                        typeid: INVALID_OID,
+                        typmod: -1,
+                        name: std::string::String::new(),
+                        byref: None,
+                    });
+                    continue;
+                }
+                let field_datum = estate.datums[field_dno as usize].clone();
+                let (typeid, typmod, value, isnull) =
+                    exec_eval_datum_impl(estate, &field_datum)?;
+                let byref = estate.last_eval_byref.take();
+                fields.push(exec_seams::ExecsqlColumn {
+                    value: value.as_usize(),
+                    isnull,
+                    typeid,
+                    typmod,
+                    name: std::string::String::new(),
+                    byref,
+                });
+            }
+            // last_eval_byref was clobbered by the per-field reads above; clear it
+            // so the composite image below is the only out-of-band value.
+            estate.last_eval_byref = None;
+            let composite =
+                exec_seams::form_row_composite_datum::call(fields, rowtupdesc_handle)?;
+            estate.last_eval_byref = Some(composite.image);
+            Ok((composite.typeid, composite.typmod, Datum::from_usize(0), false))
         }
     }
 }
@@ -3633,8 +3676,26 @@ pub fn plpgsql_exec_function(
         // the upper executor context. The tuple/coercion path is the value
         // substrate; the VOID / matching-scalar fast path is real.
         if estate.retistuple {
-            seam::coerce_function_result_tuple(&mut estate);
+            // coerce_function_result_tuple (pl_exec.c 689): a composite RETURN.
+            // C's identity paths — `fn_rettype == rettype && != RECORDOID`
+            // (known-matching rowtype), and `TYPEFUNC_RECORD` (caller expects a
+            // generic rowtype) — copy the tuple out as-is (`SPI_datumTransfer`)
+            // with no column remapping. The composite the executor built rides
+            // out-of-band in `retval_byref` (a self-describing HeapTupleHeader
+            // varlena); forward it as the by-reference function result, exactly
+            // as the by-ref scalar path does.
+            //
+            // The genuine-coercion path (`TYPEFUNC_COMPOSITE` whose tupdesc needs
+            // position/dropped-column remapping vs the result) still requires the
+            // get_call_result_type + convert_tuples_by_position substrate; that
+            // remains the loud seam.
+            let needs_coercion = estate.fn_rettype != estate.rettype
+                && estate.fn_rettype != RECORDOID;
+            if needs_coercion {
+                seam::coerce_function_result_tuple(&mut estate);
+            }
             result.value = estate.retval;
+            result.byref = estate.retval_byref.take();
         } else if estate.fn_rettype == estate.rettype {
             // No coercion needed for an exact type match (the common scalar
             // RETURN, and the VOID-return hack rettype==VOIDOID==fn_rettype).

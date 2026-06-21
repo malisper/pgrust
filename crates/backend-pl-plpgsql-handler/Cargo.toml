@@ -77,3 +77,11 @@ types-catalog = { path = "../types-catalog" }
 # array iteration for exec_stmt_foreach_a (foreach_iterate_via_array).
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
+
+# exec_eval_datum DTYPE_ROW: make_tuple_from_row (heap_form_tuple) +
+# HeapTupleGetDatum (heap_copy_tuple_as_datum) and BlessTupleDesc, over the
+# compiler's backend-lifetime rowtupdesc table. The handler is the top layer
+# above all three; it installs form_row_composite_datum.
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
+backend-executor-execTuples = { path = "../backend-executor-execTuples" }
+backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
