@@ -25,9 +25,9 @@
 //!     `FEATURE_NOT_SUPPORTED`.
 //!   * The inherited-foreign-key detach legs (`ATDetachCheckNoForeignKeyRefs`,
 //!     the `RelationGetFKeyList` / `GetParentedForeignKeyRefs` action-trigger
-//!     rework, index detach via `IndexSetParentIndex`) raise a precise error when
-//!     the partition actually carries inherited FKs / partitioned indexes; with
-//!     none present they are genuine no-ops.
+//!     rework) raise a precise error when the partition actually carries inherited
+//!     FKs; with none present they are genuine no-ops. Partitioned-index detach
+//!     (`IndexSetParentIndex` / `ConstraintSetParentConstraint`) is fully ported.
 //!   * Identity-column drop (`ATExecDropIdentity`) raises a precise error when the
 //!     partition has an identity column (never in the common case).
 
@@ -429,21 +429,45 @@ fn DetachPartitionFinalize<'mcx>(
     // Unported; the FK-presence check above already gates the only way a
     // partition acquires such refs, so this is a no-op here.
 
-    // Detach indexes. RelationGetIndexList returns the partition's indexes; an
-    // index with a superclass (a partitioned-index child) must be detached. When
-    // none qualify (no partitioned indexes) this is a no-op.
+    // Now we can detach indexes (tablecmds.c:21309-21341). For each of the
+    // partition's indexes that is a child of a partitioned index, set its parent
+    // to InvalidOid; if it (and the parent index) carry constraints, detach those
+    // too.
     let indexes = backend_utils_cache_relcache::derived::RelationGetIndexList(partRel.rd_id)?;
     for &idxid in indexes.iter() {
-        if backend_catalog_pg_inherits::has_superclass(idxid)? {
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                .errmsg(
-                    "DETACH PARTITION with partitioned indexes is not yet supported \
-                     (IndexSetParentIndex detach unported)"
-                        .to_string(),
-                )
-                .into_error());
+        if !backend_catalog_pg_inherits::has_superclass(idxid)? {
+            continue;
         }
+
+        let parentidx =
+            backend_catalog_partition_seams::get_partition_parent::call(idxid, false)?;
+
+        let idx = backend_access_index_indexam_seams::index_open::call(
+            mcx,
+            idxid,
+            AccessExclusiveLock,
+        )?;
+        backend_commands_indexcmds::IndexSetParentIndex(mcx, &idx, types_core::primitive::InvalidOid)?;
+
+        // If there's a constraint associated with the index, detach it too.
+        // It is possible for a constraint index in a partition to be the child
+        // of a non-constraint index, so verify whether the parent index does
+        // actually have a constraint.
+        let constr_oid =
+            backend_catalog_pg_constraint::get_relation_idx_constraint_oid(partRel.rd_id, idxid)?;
+        let parent_constr_oid = backend_catalog_pg_constraint::get_relation_idx_constraint_oid(
+            rel.rd_id, parentidx,
+        )?;
+        if OidIsValid(parent_constr_oid) && OidIsValid(constr_oid) {
+            backend_catalog_pg_constraint::ConstraintSetParentConstraint(
+                mcx,
+                constr_oid,
+                types_core::primitive::InvalidOid,
+                types_core::primitive::InvalidOid,
+            )?;
+        }
+
+        idx.close(NoLock)?;
     }
 
     // Update pg_class tuple: clear relpartbound and reset relispartition.
