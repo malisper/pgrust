@@ -2275,6 +2275,13 @@ pub fn init_seams() {
     // vacuum.c's cost-delay accounting. `ParallelWorkerNumber` is this crate's
     // per-backend state, so install the vacuum-seams slot from here too.
     backend_commands_vacuum_seams::is_parallel_worker::set(|| Ok(is_parallel_worker()));
+
+    // `IsParallelWorker()` is also read by execUtils.c's
+    // `ExecGetRangeTableRelation`: a parallel worker takes its OWN local lock on
+    // the scan relation (`table_open(relid, rellockmode)`) rather than relying on
+    // the leader's lock (`NoLock` + a `CheckRelationLockedByMe` Assert). Install
+    // the execUtils-seams slot from here for the same reason as the planner slot.
+    backend_executor_execUtils_seams::is_parallel_worker::set(is_parallel_worker);
 }
 
 /// Install the worker-side restore-sequence and leader message-handling seams

@@ -49,6 +49,7 @@ backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predica
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-instrument = { path = "../backend-executor-instrument" }
 
 [dev-dependencies]

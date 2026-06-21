@@ -146,7 +146,11 @@ pub fn init_seams() {
     // `ExecOpenScanRelation(estate, scanrelid, eflags)` — the C / seam signature
     // has no parallel-worker flag; the non-parallel call path passes `false`.
     backend_executor_execUtils_seams::exec_open_scan_relation::set(|estate, scanrelid, eflags| {
-        ExecOpenScanRelation(estate, scanrelid, eflags, false)
+        // `IsParallelWorker()` (parallel.h): a parallel worker takes its own
+        // local lock on the scan rel; a normal backend relies on the lock the
+        // leader already holds. Resolved through the seam the parallel crate owns.
+        let is_parallel_worker = backend_executor_execUtils_seams::is_parallel_worker::call();
+        ExecOpenScanRelation(estate, scanrelid, eflags, is_parallel_worker)
     });
 
     // `exec_rt_fetch(scanrelid, estate)->rellockmode` (executor.h): pure array

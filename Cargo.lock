@@ -3249,6 +3249,7 @@ dependencies = [
  "backend-commands-variable-seams",
  "backend-executor-execParallel-seams",
  "backend-executor-execParallel-support-seams",
+ "backend-executor-execUtils-seams",
  "backend-executor-instrument",
  "backend-optimizer-plan-planner-seams",
  "backend-postmaster-bgworker-seams",

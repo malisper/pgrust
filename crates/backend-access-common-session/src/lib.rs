@@ -287,27 +287,34 @@ fn get_session_dsm_handle() -> PgResult<dsm_handle> {
     // restores the snapshot, deserializes the plan, reaches the executor, and now
     // gets PAST the dest layer — it crashes later, in `ProcArrayAdd` (below).
     //
-    // BUT the worker still cannot FINISH the query — TWO further downstream
-    // keystones remain (each crashes the worker → postmaster reinit), both of the
-    // fork-COW shared-memory class (the worker reads process-local copies of
-    // PGPROC fields the leader renumbered in real shmem):
-    //   1. `ProcArrayAdd` shift-loop `pgxactoff == index-1` debug_assert
-    //      (procarray/membership.rs:113): the worker reads a following PGPROC's
-    //      `pgxactoff` from fork-COW process-local memory, which does not reflect
-    //      the shared procarray renumber (observed `left:0, right:1`). This is the
-    //      CURRENT wall in dev builds (masked under release where asserts are off).
-    //      Fix = promote PGPROC.pgxactoff (and the dense ProcGlobal xids/subxid/
-    //      statusFlags arrays it renumbers) into genuine shmem, the same promotion
-    //      done for lockGroupLeader / xmin / databaseId / statusFlags.
-    //   2. `relation_open` `CheckRelationLockedByMe` assert: the worker scans the
-    //      base rel without the heavyweight lock the assert expects (lock-group
-    //      lock acquired by the leader is not reflected in the worker's local lock
-    //      view at the `relation_open` boundary).
-    // With a valid handle, parallel-eligible queries therefore still crash.
-    // Returning INVALID restores the known-good leader-only behavior (correct
-    // results, no crash). Delete this early return ONLY together with the
-    // procarray-pgxactoff + lock fork-COW fixes, gated on a crash-free parallel
-    // smoke. (The tqueue dest-bridge it formerly also waited on has LANDED.)
+    // The prior two crash walls are now CLEARED:
+    //   1. `ProcArrayAdd` `pgxactoff == index-1` debug_assert (procarray
+    //      membership.rs:113) — RESOLVED: PGPROC.pgxactoff + the dense ProcGlobal
+    //      xids/subxidStates/statusFlags arrays are promoted to genuine shmem
+    //      (proc_shmem.rs SHARED_PROC_PGXACTOFF / SHARED_PROC_XIDS / ...), so the
+    //      worker reads the leader's renumbered offsets, not a fork-COW copy.
+    //   2. `relation_open` `CheckRelationLockedByMe` assert — RESOLVED:
+    //      `ExecGetRangeTableRelation` now branches on `IsParallelWorker()` (the
+    //      `is_parallel_worker` execUtils-seam, installed from this parallel
+    //      crate), so a worker takes its OWN AccessShareLock on the scan rel
+    //      (`table_open(relid, rellockmode)`) instead of the leader's `NoLock`
+    //      path + assert. Verified: the worker forks, joins the lock group,
+    //      restores the snapshot, reconstructs the QueryDesc, passes ProcArrayAdd,
+    //      and opens the scan relation without crashing.
+    //
+    // BUT the worker still cannot FINISH the query — the NEXT wall is the
+    // worker-finish handshake (NOT a crash; a HANG): the parallel worker exits
+    // cleanly (bgworker exit code 0) without the leader ever observing it as
+    // finished, so `WaitForParallelWorkersToFinish` (parallel/lib.rs:1531, reached
+    // via ExecGather → gather_readnext → exec_shutdown_gather_workers →
+    // ExecParallelFinish) loops forever in `WaitLatch`. The worker exits too fast
+    // to have executed the 10k-row scan, so it is short-circuiting before running
+    // ParallelQueryMain's plan and/or its `parallel_worker_shutdown`
+    // (PROCSIG_PARALLEL_MESSAGE 'X' + leader-latch set) is not nulling the
+    // leader's `error_mqh`. This is the next keystone to port; until it lands,
+    // returning INVALID keeps the known-good leader-only behavior (correct
+    // results, no hang). (The tqueue dest-bridge it formerly also waited on has
+    // LANDED.)
     return Ok(DSM_HANDLE_INVALID);
 
     // If we already created a session-scope segment, return its handle.

@@ -142,6 +142,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `IsParallelWorker()` (access/parallel.h:60) — `ParallelWorkerNumber >= 0`.
+    /// `ExecGetRangeTableRelation` (execUtils.c:842) branches on this: a parallel
+    /// worker takes its OWN local lock on the scan relation (`table_open(relid,
+    /// rellockmode)`), while a normal backend relies on the lock the leader
+    /// already holds (`table_open(relid, NoLock)` + a `CheckRelationLockedByMe`
+    /// Assert). Owner is `backend-access-transam-parallel`; execUtils reads it
+    /// through this seam to avoid depending on the parallel crate. When unset
+    /// (e.g. `postgres --single`) it is treated as `false`, matching a non-worker
+    /// backend.
+    pub fn is_parallel_worker() -> bool
+);
+
+seam_core::seam!(
     /// `exec_rt_fetch(scanrelid, estate)->rellockmode` (execUtils.h): the lock
     /// mode the planner recorded for the range-table entry. Infallible (a pure
     /// array fetch).
