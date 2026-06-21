@@ -90,6 +90,12 @@ pub fn init_seams() {
     backend_optimizer_plan_init_subselect_ext_seams::exec_materializes_output::set(
         exec_materializes_output,
     );
+    // `ExecSupportsBackwardScan(plan)` — read by `standard_planner` on the
+    // scrollable-cursor (`CURSOR_OPT_SCROLL`) path to decide whether to wrap
+    // the top plan in a `Material`. The owner body lives here.
+    backend_optimizer_plan_init_subselect_ext_seams::exec_supports_backward_scan::set(
+        exec_supports_backward_scan,
+    );
     // The same classifier is also read by joinpath.c (`try_nestloop_path` /
     // `match_unsorted_outer`, deciding whether the inner path already
     // materializes) through joinpath-seams; install the owner body there too.

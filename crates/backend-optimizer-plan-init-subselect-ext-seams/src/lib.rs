@@ -224,6 +224,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecSupportsBackwardScan(plan)` (execAmi.c) — recursive walk of the
+    /// finished `Plan` tree answering whether it supports backward scanning.
+    /// Read by `standard_planner` (planner.c) on the scrollable-cursor
+    /// (`CURSOR_OPT_SCROLL`) path to decide whether the top plan must be wrapped
+    /// in a `Material` node. Owner body lives in execAmi.c; declared here so the
+    /// planner (which already depends on this seam crate for
+    /// `materialize_finished_plan`) can reach it without an executor dependency.
+    pub fn exec_supports_backward_scan(plan: Option<&Node<'_>>) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `(oprcanhash, oprcode)` of `pg_operator` row `opno`
     /// (`SearchSysCache1(OPEROID)` in `hash_ok_operator`). `OperRow` does not
     /// project `oprcanhash`, so this two-field projection is homed here.

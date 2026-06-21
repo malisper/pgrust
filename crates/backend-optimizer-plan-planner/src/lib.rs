@@ -314,17 +314,26 @@ fn standard_planner<'mcx>(
 
     let mut top_plan = backend_optimizer_plan_createplan::create_plan(mcx, &mut root, &run, best_path)?;
 
-    // Scrollable-cursor backwards-scan guard (C:447-451).
-    if (cursor_options & CURSOR_OPT_SCROLL) != 0 {
-        // ExecSupportsBackwardScan(top_plan) — owner executes the executor's
-        // node-amenability test (execAmi.c), which is not ported over the owned
-        // `Node` plan model. Mirror PG and panic on this scrollable-cursor path.
-        panic!(
-            "planner: scrollable cursor (CURSOR_OPT_SCROLL) requires \
-             ExecSupportsBackwardScan (execAmi.c) + materialize_finished_plan \
-             (createplan.c via init-subselect-ext-seams), neither reachable over \
-             the owned Node plan model yet"
-        );
+    // Scrollable-cursor backwards-scan guard (C:447-451):
+    //   if (cursorOptions & CURSOR_OPT_SCROLL)
+    //   {
+    //       if (!ExecSupportsBackwardScan(top_plan))
+    //           top_plan = materialize_finished_plan(top_plan);
+    //   }
+    // `ExecSupportsBackwardScan` recursively walks the finished `Plan` tree
+    // (execAmi.c); when the top node cannot scan backward we wrap it in a
+    // `Material` node so the executor can buffer the result and rewind it.
+    if (cursor_options & CURSOR_OPT_SCROLL) != 0
+        && !backend_optimizer_plan_init_subselect_ext_seams::exec_supports_backward_scan::call(
+            Some(&top_plan),
+        )?
+    {
+        top_plan =
+            backend_optimizer_plan_init_subselect_ext_seams::materialize_finished_plan::call(
+                mcx,
+                &mut root,
+                top_plan,
+            )?;
     }
 
     // Optionally add a Gather node for testing parallel-query infrastructure
