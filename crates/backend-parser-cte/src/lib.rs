@@ -721,6 +721,17 @@ fn analyzeCTE<'mcx>(
             mcx,
             types_nodes::nodes::Node::mk_cte_cycle_clause(mcx, cycle_clause)?,
         )?);
+
+        // In C the p_ctenamespace holds a pointer to this very CTE, so the
+        // cycle-mark typing just computed in place is immediately visible to
+        // the recursive self-reference resolved inside parse_sub_analyze
+        // (addRangeTableEntryForCTE reads cte->cycle_clause->cycle_mark_type to
+        // type the worktable's cycle-mark column).  The owned model holds a
+        // pre-analysis clone in p_ctenamespace, so we must refresh that slot now
+        // — before parse_sub_analyze runs — or a recursive term that references
+        // the cycle-mark column (e.g. `WHERE NOT is_cycle`) would see a type-0
+        // column and fail with "cache lookup failed for type 0".
+        refresh_ctenamespace_entry(mcx, pstate, cte)?;
     }
 
     // Now we can get on with analyzing the CTE's query
