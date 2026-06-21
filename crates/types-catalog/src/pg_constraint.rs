@@ -15,6 +15,8 @@ use types_core::primitive::Oid;
 pub const ConstraintOidIndexId: Oid = 2667;
 /// `ConstraintNameNspIndexId` — `pg_constraint_conname_nsp_index` (OID 2664).
 pub const ConstraintNameNspIndexId: Oid = 2664;
+/// `ConstraintParentIndexId` — `pg_constraint_conparentid_index` (OID 2579).
+pub const ConstraintParentIndexId: Oid = 2579;
 /// `ConstraintRelidTypidNameIndexId` —
 /// `pg_constraint_conrelid_contypid_conname_index` (OID 2665).
 pub const ConstraintRelidTypidNameIndexId: Oid = 2665;

@@ -3466,6 +3466,357 @@ fn role_switch_unported() -> PgError {
 }
 
 // ===========================================================================
+// AfterTriggerSetState (trigger.c:5767) — SET CONSTRAINTS.
+// ===========================================================================
+
+/// Inward seam for `AfterTriggerSetState(ConstraintsSetStmt *stmt)`
+/// (trigger.c:5767) — `SET CONSTRAINTS { ALL | name [, ...] } { DEFERRED |
+/// IMMEDIATE }`. The dispatcher hands the rich `ConstraintsSetStmt` node; this
+/// allocates the catalog-scan scratch in a private context (the bare seam
+/// carries no `mcx`, cf. `get_trigger_oid_impl`).
+fn after_trigger_set_state_seam<'mcx>(stmt: &types_nodes::nodes::Node<'mcx>) -> PgResult<()> {
+    let css = match stmt.as_constraintssetstmt() {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error(
+                "after_trigger_set_state_seam: statement is not a ConstraintsSetStmt",
+            ))
+        }
+    };
+    let ctx = mcx::MemoryContext::new("AfterTriggerSetState");
+    after_trigger_set_state(ctx.mcx(), css)
+}
+
+/// `AfterTriggerSetState(ConstraintsSetStmt *stmt)` (trigger.c:5767).
+fn after_trigger_set_state<'mcx, 'n>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::ddlnodes::ConstraintsSetStmt<'n>,
+) -> PgResult<()> {
+    use crate::queue::{
+        set_constraint_state_add_item, set_constraint_state_copy, set_constraint_state_create,
+    };
+
+    // int my_level = GetCurrentTransactionNestLevel();
+    let my_level = backend_access_transam_xact_seams::get_current_transaction_nest_level::call();
+
+    // If we haven't already done so, initialize our state; and, if in a
+    // subtransaction and we didn't save the current state already, save it so it
+    // can be restored on subtransaction abort.
+    with_after_triggers(|at| {
+        if at.state.is_none() {
+            at.state = Some(set_constraint_state_create(8));
+        }
+        if my_level > 1 {
+            let lvl = my_level as usize;
+            if lvl < at.trans_stack.len() && at.trans_stack[lvl].state.is_none() {
+                let copy = set_constraint_state_copy(at.state.as_ref().unwrap());
+                at.trans_stack[lvl].state = Some(copy);
+            }
+        }
+    });
+
+    if stmt.constraints.is_empty() {
+        // SET CONSTRAINTS ALL ...
+        with_after_triggers(|at| {
+            let state = at.state.as_mut().unwrap();
+            state.numstates = 0;
+            state.trigstates.clear();
+            state.all_isset = true;
+            state.all_isdeferred = stmt.deferred;
+        });
+    } else {
+        // SET CONSTRAINTS constraint-name [, ...]
+        let tgoidlist = resolve_constraint_trigger_oids(mcx, stmt)?;
+
+        // Set the trigger states of individual triggers for this xact.
+        with_after_triggers(|at| {
+            for &tgoid in &tgoidlist {
+                let state = at.state.as_mut().unwrap();
+                let mut found = false;
+                for i in 0..(state.numstates as usize) {
+                    if state.trigstates[i].sct_tgoid == tgoid {
+                        state.trigstates[i].sct_tgisdeferred = stmt.deferred;
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    set_constraint_state_add_item(
+                        at.state.as_mut().unwrap(),
+                        tgoid,
+                        stmt.deferred,
+                    );
+                }
+            }
+        });
+    }
+
+    // SQL99: setting a constraint to IMMEDIATE fires any of its now-immediate
+    // deferred events retroactively. A SET ... DEFERRED can't convert any unfired
+    // event to immediate, so nothing to do in that case.
+    if !stmt.deferred {
+        let has_events = with_after_triggers(|at| !at.events.events.is_empty());
+        if has_events {
+            // The retroactive firing cycle pushes the transaction snapshot and
+            // runs afterTriggerMarkEvents/afterTriggerInvokeEvents against a NULL
+            // EState. In this tree afterTriggerInvokeEvents requires an
+            // &mut EStateData and there is no reachable PushActiveSnapshot seam
+            // (identical boundary to AfterTriggerFireDeferred); keep it loud
+            // rather than silently dropping the now-immediate events. A SET
+            // CONSTRAINTS issued before any deferred event is queued (the common
+            // case) takes the empty-queue path above and returns cleanly.
+            return Err(PgError::error(
+                "AfterTriggerSetState (trigger.c:6027): retroactively firing now-immediate \
+                 deferred triggers needs PushActiveSnapshot(GetTransactionSnapshot()) + a \
+                 per-query EState for the afterTriggerInvokeEvents cycle, not yet ported"
+                    .to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// trigger.c:5802-6013 — resolve `stmt->constraints` (named constraints) to the
+/// list of deferrable trigger OIDs implementing them, including descendant
+/// constraints in partitions. Returns the `tgoidlist`.
+fn resolve_constraint_trigger_oids<'mcx, 'n>(
+    mcx: Mcx<'mcx>,
+    stmt: &types_nodes::ddlnodes::ConstraintsSetStmt<'n>,
+) -> PgResult<Vec<Oid>> {
+    use backend_access_common_scankey::ScanKeyInit;
+    use backend_access_index_genam_seams as genam_seams;
+    use types_catalog::pg_constraint as pc;
+    use types_catalog::pg_trigger as pt;
+    use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
+    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use types_storage::lock::AccessShareLock;
+    use types_tuple::backend_access_common_heaptuple::Datum as ScanDatum;
+
+    let mut conoidlist: Vec<Oid> = Vec::new();
+
+    // conrel = table_open(ConstraintRelationId, AccessShareLock);
+    let conrel = backend_access_table_table_seams::table_open::call(
+        mcx,
+        types_catalog::catalog::CONSTRAINT_RELATION_ID,
+        AccessShareLock,
+    )?;
+
+    for cnode in stmt.constraints.iter() {
+        let constraint = match cnode.as_rangevar() {
+            Some(rv) => rv,
+            None => {
+                conrel.close(AccessShareLock)?;
+                return Err(PgError::error(
+                    "SET CONSTRAINTS: constraint name element is not a RangeVar",
+                ));
+            }
+        };
+        let relname = constraint
+            .relname
+            .as_ref()
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+
+        // catalogname: only our own database is referenceable.
+        if let Some(cat) = constraint.catalogname.as_ref() {
+            let dbname = backend_commands_dbcommands_seams::get_database_name::call(
+                mcx,
+                backend_utils_init_small_seams::my_database_id::call(),
+            )?
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+            if cat.as_str() != dbname {
+                let schemaname = constraint
+                    .schemaname
+                    .as_ref()
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default();
+                conrel.close(AccessShareLock)?;
+                return Err(PgError::error(format!(
+                    "cross-database references are not implemented: \"{}.{}.{}\"",
+                    cat.as_str(),
+                    schemaname,
+                    relname
+                ))
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+            }
+        }
+
+        // namespacelist: explicit schema, else the active search path.
+        let namespacelist: Vec<Oid> = if let Some(sch) = constraint.schemaname.as_ref() {
+            let nsoid = backend_catalog_namespace_seams::lookup_explicit_namespace::call(
+                sch.as_str(),
+                false,
+            )?;
+            vec![nsoid]
+        } else {
+            backend_catalog_namespace_seams::fetch_search_path::call(mcx, true)?
+                .iter()
+                .copied()
+                .collect()
+        };
+
+        let mut found = false;
+        for &namespace_id in &namespacelist {
+            // ScanKeyInit conname = relname, connamespace = namespaceId.
+            let mut k0 = ScanKeyData::empty();
+            ScanKeyInit(
+                &mut k0,
+                pc::Anum_pg_constraint_conname,
+                BTEqualStrategyNumber,
+                F_NAMEEQ,
+                ScanDatum::ByRef(mcx::slice_in(mcx, relname.as_bytes())?),
+            )?;
+            let mut k1 = ScanKeyData::empty();
+            ScanKeyInit(
+                &mut k1,
+                pc::Anum_pg_constraint_connamespace,
+                BTEqualStrategyNumber,
+                F_OIDEQ,
+                ScanDatum::from_oid(namespace_id),
+            )?;
+            let keys = [k0, k1];
+
+            let mut conscan = genam_seams::systable_beginscan::call(
+                &conrel,
+                pc::ConstraintNameNspIndexId,
+                true,
+                None,
+                &keys,
+            )?;
+
+            while let Some(tup) =
+                genam_seams::systable_getnext::call(mcx, conscan.desc_mut())?
+            {
+                let cols = backend_access_common_heaptuple::heap_deform_tuple(
+                    mcx,
+                    &tup.tuple,
+                    &conrel.rd_att,
+                    &tup.data,
+                )?;
+                let condeferrable =
+                    cols[pc::Anum_pg_constraint_condeferrable as usize - 1].0.as_bool();
+                if condeferrable {
+                    let conoid = cols[pc::Anum_pg_constraint_oid as usize - 1].0.as_oid();
+                    conoidlist.push(conoid);
+                } else if stmt.deferred {
+                    let _ = conscan;
+                    conrel.close(AccessShareLock)?;
+                    return Err(PgError::error(format!(
+                        "constraint \"{relname}\" is not deferrable"
+                    ))
+                    .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE));
+                }
+                found = true;
+            }
+            let _ = conscan;
+
+            // Once a matching constraint is found, do not search later path parts.
+            if found {
+                break;
+            }
+        }
+
+        if !found {
+            conrel.close(AccessShareLock)?;
+            return Err(PgError::error(format!(
+                "constraint \"{relname}\" does not exist"
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_OBJECT));
+        }
+    }
+
+    // Scan for descendants of the constraints, appending to the same list we are
+    // scanning so further descendants are caught too.
+    let mut idx = 0;
+    while idx < conoidlist.len() {
+        let parent = conoidlist[idx];
+        idx += 1;
+
+        let mut key = ScanKeyData::empty();
+        ScanKeyInit(
+            &mut key,
+            pc::Anum_pg_constraint_conparentid,
+            BTEqualStrategyNumber,
+            F_OIDEQ,
+            ScanDatum::from_oid(parent),
+        )?;
+        let keys = [key];
+
+        let mut scan = genam_seams::systable_beginscan::call(
+            &conrel,
+            pc::ConstraintParentIndexId,
+            true,
+            None,
+            &keys,
+        )?;
+        while let Some(tup) = genam_seams::systable_getnext::call(mcx, scan.desc_mut())? {
+            let cols = backend_access_common_heaptuple::heap_deform_tuple(
+                mcx,
+                &tup.tuple,
+                &conrel.rd_att,
+                &tup.data,
+            )?;
+            let conoid = cols[pc::Anum_pg_constraint_oid as usize - 1].0.as_oid();
+            conoidlist.push(conoid);
+        }
+        let _ = scan;
+    }
+
+    conrel.close(AccessShareLock)?;
+
+    // Locate the deferrable trigger(s) implementing each constraint.
+    let mut tgoidlist: Vec<Oid> = Vec::new();
+    let tgrel = backend_access_table_table_seams::table_open::call(
+        mcx,
+        pt::TriggerRelationId,
+        AccessShareLock,
+    )?;
+
+    for &conoid in &conoidlist {
+        let mut skey = ScanKeyData::empty();
+        ScanKeyInit(
+            &mut skey,
+            pt::Anum_pg_trigger_tgconstraint,
+            BTEqualStrategyNumber,
+            F_OIDEQ,
+            ScanDatum::from_oid(conoid),
+        )?;
+        let keys = [skey];
+
+        let mut tgscan = genam_seams::systable_beginscan::call(
+            &tgrel,
+            pt::TriggerConstraintIndexId,
+            true,
+            None,
+            &keys,
+        )?;
+        while let Some(htup) = genam_seams::systable_getnext::call(mcx, tgscan.desc_mut())? {
+            let cols = backend_access_common_heaptuple::heap_deform_tuple(
+                mcx,
+                &htup.tuple,
+                &tgrel.rd_att,
+                &htup.data,
+            )?;
+            // Silently skip triggers marked non-deferrable in pg_trigger: a
+            // deferrable RI constraint may have some non-deferrable actions.
+            let tgdeferrable =
+                cols[pt::Anum_pg_trigger_tgdeferrable as usize - 1].0.as_bool();
+            if tgdeferrable {
+                let tgoid = cols[pt::Anum_pg_trigger_oid as usize - 1].0.as_oid();
+                tgoidlist.push(tgoid);
+            }
+        }
+        let _ = tgscan;
+    }
+
+    tgrel.close(AccessShareLock)?;
+
+    Ok(tgoidlist)
+}
+
+// ===========================================================================
 // init_seams — install every backend-commands-trigger-seams implementation.
 // ===========================================================================
 
@@ -3485,6 +3836,9 @@ pub fn init_seams() {
     s::after_trigger_end_xact::set(after_trigger_end_xact_impl);
     s::after_trigger_begin_sub_xact::set(after_trigger_begin_sub_xact_impl);
     s::after_trigger_end_sub_xact::set(after_trigger_end_sub_xact_impl);
+
+    // SET CONSTRAINTS (utility.c `T_ConstraintsSetStmt`).
+    backend_tcop_utility_out_seams::after_trigger_set_state::set(after_trigger_set_state_seam);
 
     // FK phase-3 validation scan (validateForeignKeyConstraint), called from
     // ALTER TABLE ADD/ALTER CONSTRAINT through tablecmds.
