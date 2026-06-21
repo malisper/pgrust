@@ -31,13 +31,16 @@ use types_catalog::pg_attribute::{
     AttributeRelationId,
 };
 use types_catalog::pg_class::{
-    Anum_pg_class_relacl, Anum_pg_class_relkind, Anum_pg_class_relname, Anum_pg_class_relnatts,
-    Anum_pg_class_relowner, RelationRelationId,
+    Anum_pg_class_oid, Anum_pg_class_relacl, Anum_pg_class_relkind, Anum_pg_class_relname,
+    Anum_pg_class_relnamespace, Anum_pg_class_relnatts, Anum_pg_class_relowner, RelationRelationId,
 };
 use types_catalog::pg_type::{
     Anum_pg_type_typelem, Anum_pg_type_typsubscript, Anum_pg_type_typtype, TypeRelationId,
 };
-use types_catalog::pg_proc::ProcedureRelationId;
+use types_catalog::pg_proc::{
+    Anum_pg_proc_oid, Anum_pg_proc_prokind, Anum_pg_proc_pronamespace, ProcedureRelationId,
+    PROKIND_PROCEDURE,
+};
 use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
 use types_core::primitive::{InvalidOid, Oid};
 use types_error::{
@@ -2141,9 +2144,7 @@ pub fn execute_grant_stmt(mcx: Mcx<'_>, stmt: &Node<'_>) -> PgResult<()> {
     let objects: PgVec<Oid> = match stmt.targtype {
         ACL_TARGET_OBJECT => object_names_to_oids(mcx, stmt.objtype, &stmt.objects, stmt.is_grant)?,
         ACL_TARGET_ALL_IN_SCHEMA => {
-            return Err(PgError::error(
-                "GRANT ... ALL IN SCHEMA not ported (schema-grant slice)",
-            ))
+            objects_in_schema_to_oids(mcx, stmt.objtype, &stmt.objects)?
         }
         other => {
             return Err(PgError::error(format!(
@@ -2326,6 +2327,195 @@ fn object_names_to_oids<'mcx>(
             Ok(objects)
         }
     }
+}
+
+/// `objectsInSchemaToOids(objtype, nspnames)` (aclchk.c) — find all objects of
+/// `objtype` in the named schemas and collect their OIDs. USAGE on the schemas
+/// is checked later (by the per-object grant path); there is no privilege
+/// checking on the individual objects here.
+fn objects_in_schema_to_oids<'mcx>(
+    mcx: Mcx<'mcx>,
+    objtype: ObjectType,
+    nspnames: &PgVec<'_, types_nodes::nodes::NodePtr<'_>>,
+) -> PgResult<PgVec<'mcx, Oid>> {
+    use types_catalog::catalog::{
+        RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
+        RELKIND_SEQUENCE, RELKIND_VIEW,
+    };
+
+    let mut objects: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+
+    for cell in nspnames.iter() {
+        // nspname = strVal(lfirst(cell)).
+        let Some(s) = (**cell).as_string() else {
+            return Err(PgError::error(
+                "objectsInSchemaToOids: schema name is not a String node",
+            ));
+        };
+        let namespace_id =
+            backend_catalog_namespace_seams::lookup_explicit_namespace::call(s.sval.as_str(), false)?;
+
+        match objtype {
+            ObjectType::Table => {
+                for relkind in [
+                    RELKIND_RELATION,
+                    RELKIND_VIEW,
+                    RELKIND_MATVIEW,
+                    RELKIND_FOREIGN_TABLE,
+                    RELKIND_PARTITIONED_TABLE,
+                ] {
+                    let mut objs = get_relations_in_namespace(mcx, namespace_id, relkind)?;
+                    objects
+                        .try_reserve(objs.len())
+                        .map_err(|_| mcx.oom(objs.len() * core::mem::size_of::<Oid>()))?;
+                    for oid in objs.drain(..) {
+                        objects.push(oid);
+                    }
+                }
+            }
+            ObjectType::Sequence => {
+                let mut objs = get_relations_in_namespace(mcx, namespace_id, RELKIND_SEQUENCE)?;
+                objects
+                    .try_reserve(objs.len())
+                    .map_err(|_| mcx.oom(objs.len() * core::mem::size_of::<Oid>()))?;
+                for oid in objs.drain(..) {
+                    objects.push(oid);
+                }
+            }
+            ObjectType::Function | ObjectType::Procedure | ObjectType::Routine => {
+                use backend_access_common_scankey::ScanKeyInit;
+                use backend_access_index_genam_seams as genam;
+                use types_core::fmgr::{F_CHAREQ, F_CHARNE, F_OIDEQ};
+                use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+
+                let rel = table_open(mcx, ProcedureRelationId, AccessShareLock)?;
+
+                let mut key0 = ScanKeyData::empty();
+                ScanKeyInit(
+                    &mut key0,
+                    Anum_pg_proc_pronamespace as i16,
+                    BTEqualStrategyNumber,
+                    F_OIDEQ,
+                    Datum::from_oid(namespace_id),
+                )?;
+
+                // OBJECT_FUNCTION includes aggregates and window functions
+                // (prokind != PROKIND_PROCEDURE); OBJECT_PROCEDURE filters to
+                // prokind == PROKIND_PROCEDURE; OBJECT_ROUTINE takes everything.
+                let mut keys: PgVec<ScanKeyData> = mcx::vec_with_capacity_in(mcx, 2)?;
+                keys.push(key0);
+                if objtype == ObjectType::Function || objtype == ObjectType::Procedure {
+                    let mut key1 = ScanKeyData::empty();
+                    ScanKeyInit(
+                        &mut key1,
+                        Anum_pg_proc_prokind as i16,
+                        BTEqualStrategyNumber,
+                        if objtype == ObjectType::Procedure {
+                            F_CHAREQ
+                        } else {
+                            F_CHARNE
+                        },
+                        Datum::from_char(PROKIND_PROCEDURE),
+                    )?;
+                    keys.push(key1);
+                }
+
+                // table_beginscan_catalog: heap scan with the keys applied
+                // (systable_beginscan with index_ok = false).
+                let mut scan =
+                    genam::systable_beginscan::call(&rel, ProcedureRelationId, false, None, &keys)?;
+                loop {
+                    let tuple = genam::systable_getnext::call(mcx, scan.desc_mut())?;
+                    let Some(tuple) = tuple else { break };
+                    let cols = backend_access_common_heaptuple::heap_deform_tuple(
+                        mcx,
+                        &tuple.tuple,
+                        &rel.rd_att,
+                        &tuple.data,
+                    )?;
+                    let oid = {
+                        let (v, n) = &cols[(Anum_pg_proc_oid - 1) as usize];
+                        debug_assert!(!*n);
+                        v.as_oid()
+                    };
+                    objects
+                        .try_reserve(1)
+                        .map_err(|_| mcx.oom(core::mem::size_of::<Oid>()))?;
+                    objects.push(oid);
+                }
+                scan.end()?;
+                rel.close(AccessShareLock)?;
+            }
+            other => {
+                return Err(PgError::error(format!(
+                    "unrecognized GrantStmt.objtype: {other:?}"
+                )));
+            }
+        }
+    }
+
+    Ok(objects)
+}
+
+/// `getRelationsInNamespace(namespaceId, relkind)` (aclchk.c) — Oid list of
+/// relations in the given namespace filtered by relation kind.
+fn get_relations_in_namespace<'mcx>(
+    mcx: Mcx<'mcx>,
+    namespace_id: Oid,
+    relkind: u8,
+) -> PgResult<PgVec<'mcx, Oid>> {
+    use backend_access_common_scankey::ScanKeyInit;
+    use backend_access_index_genam_seams as genam;
+    use types_core::fmgr::{F_CHAREQ, F_OIDEQ};
+    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+
+    let mut relations: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+
+    let mut key0 = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key0,
+        Anum_pg_class_relnamespace as i16,
+        BTEqualStrategyNumber,
+        F_OIDEQ,
+        Datum::from_oid(namespace_id),
+    )?;
+    let mut key1 = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key1,
+        Anum_pg_class_relkind as i16,
+        BTEqualStrategyNumber,
+        F_CHAREQ,
+        Datum::from_char(relkind as i8),
+    )?;
+    let keys = [key0, key1];
+
+    let rel = table_open(mcx, RelationRelationId, AccessShareLock)?;
+    // table_beginscan_catalog: heap scan with the keys applied (systable_beginscan
+    // with index_ok = false).
+    let mut scan = genam::systable_beginscan::call(&rel, RelationRelationId, false, None, &keys)?;
+    loop {
+        let tuple = genam::systable_getnext::call(mcx, scan.desc_mut())?;
+        let Some(tuple) = tuple else { break };
+        let cols = backend_access_common_heaptuple::heap_deform_tuple(
+            mcx,
+            &tuple.tuple,
+            &rel.rd_att,
+            &tuple.data,
+        )?;
+        let oid = {
+            let (v, n) = &cols[(Anum_pg_class_oid - 1) as usize];
+            debug_assert!(!*n);
+            v.as_oid()
+        };
+        relations
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<Oid>()))?;
+        relations.push(oid);
+    }
+    scan.end()?;
+    rel.close(AccessShareLock)?;
+
+    Ok(relations)
 }
 
 /// The objtype -> (all_privileges mask, errormsg) table from `ExecuteGrantStmt`,

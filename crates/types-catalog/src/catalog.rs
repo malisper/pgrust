@@ -49,9 +49,19 @@ pub const ACCESS_METHOD_PROCEDURE_RELATION_ID: Oid = 2603;
 /// (`pg_namespace_d.h`).
 pub const PG_CATALOG_NAMESPACE: Oid = 11;
 
+/// `RELKIND_RELATION` (`catalog/pg_class.h`) — ordinary table.
+pub const RELKIND_RELATION: u8 = b'r';
 /// `RELKIND_SEQUENCE` (`catalog/pg_class.h`) — `pg_class.relkind` for a
 /// sequence object.
 pub const RELKIND_SEQUENCE: u8 = b'S';
+/// `RELKIND_VIEW` (`catalog/pg_class.h`) — view.
+pub const RELKIND_VIEW: u8 = b'v';
+/// `RELKIND_MATVIEW` (`catalog/pg_class.h`) — materialized view.
+pub const RELKIND_MATVIEW: u8 = b'm';
+/// `RELKIND_FOREIGN_TABLE` (`catalog/pg_class.h`) — foreign table.
+pub const RELKIND_FOREIGN_TABLE: u8 = b'f';
+/// `RELKIND_PARTITIONED_TABLE` (`catalog/pg_class.h`) — partitioned table.
+pub const RELKIND_PARTITIONED_TABLE: u8 = b'p';
 /// `RELKIND_INDEX` (`catalog/pg_class.h`) — secondary index.
 pub const RELKIND_INDEX: u8 = b'i';
 /// `RELKIND_PARTITIONED_INDEX` (`catalog/pg_class.h`) — partitioned index.
