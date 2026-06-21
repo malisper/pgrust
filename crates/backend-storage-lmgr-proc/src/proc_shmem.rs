@@ -188,6 +188,42 @@ static SHARED_PROC_PGXACTOFF: AtomicPtr<i32> = AtomicPtr::new(core::ptr::null_mu
 /// Length of [`SHARED_PROC_PGXACTOFF`] (`total_procs`), for bounds checks.
 static SHARED_PROC_PGXACTOFF_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Base of the genuinely-shared dense `ProcGlobal->xids[]` array (one
+/// `TransactionId` per `pgxactoff` slot — the cache-dense mirror of every live
+/// backend's `PGPROC.xid` that `GetSnapshotData` scans). Set by
+/// [`InitProcGlobal`], NULL until then.
+///
+/// In C `ProcGlobal->xids` lives in the same `ShmemInitStruct` block as the
+/// PGPROC array, so it is genuinely shared. Crucially `ProcArrayAdd`/
+/// `ProcArrayRemove` `memmove` this array *cross-process* whenever any backend
+/// (including an autovacuum worker) joins/leaves the sorted array, renumbering
+/// every following proc's [`SHARED_PROC_PGXACTOFF`]. With the array
+/// fork-private in [`PROC_GLOBAL`], one backend's renumber+memmove is invisible
+/// to every other, so a later commit reads `xids[pgxactoff]` through the now
+/// genuinely-shared (and thus stale-relative-to-this-process) offset and finds
+/// `Invalid(0)` where its `PGPROC.xid` is set — firing the
+/// `ProcArrayEndTransactionInternal` assertion `xids[pgxactoff] == proc->xid`.
+/// So the dense array lives in genuine shmem, the same idiom as the pgxactoff
+/// words it is indexed by. Snapshots in other backends now also observe a
+/// concurrent backend's in-progress XID (the array `GetSnapshotData` scans is
+/// the real shared one), restoring cross-process MVCC visibility.
+static SHARED_PROC_XIDS: AtomicPtr<TransactionId> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of the dense ProcGlobal mirror arrays
+/// ([`SHARED_PROC_XIDS`]/[`SHARED_PROC_SUBXID_STATES`]/[`SHARED_PROC_STATUS_FLAGS`],
+/// all `total_procs`), for bounds checks.
+static SHARED_PROC_DENSE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared dense `ProcGlobal->subxidStates[]` array.
+/// Shared for the same reason as [`SHARED_PROC_XIDS`] (memmoved cross-process by
+/// `ProcArrayAdd`/`ProcArrayRemove`, scanned by `GetSnapshotData`).
+static SHARED_PROC_SUBXID_STATES: AtomicPtr<XidCacheStatus> =
+    AtomicPtr::new(core::ptr::null_mut());
+
+/// Base of the genuinely-shared dense `ProcGlobal->statusFlags[]` array.
+/// Shared for the same reason as [`SHARED_PROC_XIDS`].
+static SHARED_PROC_STATUS_FLAGS: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+
 /// Stable base of the per-process `allProcs` `PGPROC` array (the same buffer
 /// owned by `ProcGlobal->allProcs` in the [`PROC_GLOBAL`] `RefCell`), recorded
 /// by [`InitProcGlobal`] once the array is built. NULL until then.
@@ -816,6 +852,49 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
     SHARED_PROC_PGXACTOFF.store(off_ptr, AtomicOrdering::Relaxed);
     SHARED_PROC_PGXACTOFF_COUNT.store(total_procs, AtomicOrdering::Relaxed);
 
+    // Dense ProcGlobal mirror arrays (xids[] / subxidStates[] / statusFlags[]),
+    // one element per pgxactoff slot. In C these are part of the PGPROC
+    // `ShmemInitStruct` block and thus genuinely shared; `ProcArrayAdd`/
+    // `ProcArrayRemove` `memmove` them cross-process when the sorted array
+    // shifts, so a fork-private copy desyncs every other backend (see
+    // SHARED_PROC_XIDS docs). Promote them to real shmem, MemSet(0) on first
+    // create like the C PGPROC block.
+    let xids_size = mul_size(total_procs, size_of::<TransactionId>());
+    let (xids_ptr, xids_found) =
+        shmem::shmem_init_struct::call("PGPROC xids dense array", xids_size)?;
+    let xids_ptr = xids_ptr as *mut TransactionId;
+    if !xids_found {
+        // MemSet(0): InvalidTransactionId in every slot (no proc has joined the
+        // dense array yet; ProcArrayAdd seeds the real xid when a proc joins).
+        // SAFETY: `xids_ptr` addresses `xids_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(xids_ptr as *mut u8, 0, xids_size) };
+    }
+    SHARED_PROC_XIDS.store(xids_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_DENSE_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    let sub_size = mul_size(total_procs, size_of::<XidCacheStatus>());
+    let (sub_ptr, sub_found) =
+        shmem::shmem_init_struct::call("PGPROC subxidStates dense array", sub_size)?;
+    let sub_ptr = sub_ptr as *mut XidCacheStatus;
+    if !sub_found {
+        // MemSet(0) == XidCacheStatus { count: 0, overflowed: false }.
+        // SAFETY: `sub_ptr` addresses `sub_size` writable shmem bytes; the plain
+        // `XidCacheStatus { u8, bool }` is sound to zero-initialize.
+        unsafe { core::ptr::write_bytes(sub_ptr as *mut u8, 0, sub_size) };
+    }
+    SHARED_PROC_SUBXID_STATES.store(sub_ptr, AtomicOrdering::Relaxed);
+
+    let sf_size = mul_size(total_procs, size_of::<u8>());
+    let (sf_ptr, sf_found) =
+        shmem::shmem_init_struct::call("PGPROC statusFlags dense array", sf_size)?;
+    let sf_ptr = sf_ptr as *mut u8;
+    if !sf_found {
+        // MemSet(0): no status flags set.
+        // SAFETY: `sf_ptr` addresses `sf_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(sf_ptr, 0, sf_size) };
+    }
+    SHARED_PROC_STATUS_FLAGS.store(sf_ptr, AtomicOrdering::Relaxed);
+
     // ProcStructLock spinlock word
     let lock_size = size_of::<types_storage::storage::Spinlock>();
     let (lock_ptr, lock_found) = shmem::shmem_init_struct::call("ProcStructLock", lock_size)?;
@@ -1128,69 +1207,139 @@ pub(crate) fn set_startup_buffer_pin_wait_buf_id(bufid: i32) {
 
 /// `ProcGlobal->statusFlags[pgxactoff]`.
 pub(crate) fn status_flags(pgxactoff: i32) -> u8 {
-    with_proc_global(|pg| pg.statusFlags[pgxactoff as usize])
+    dense_read(SHARED_PROC_STATUS_FLAGS.load(AtomicOrdering::Relaxed), pgxactoff, "statusFlags")
 }
 
 // ---- dense ProcGlobal mirror arrays (procarray.c membership) ----
 //
-// `ProcGlobal->{xids,subxidStates,statusFlags}` are owned here; procarray's
-// membership family reads/writes them (under `ProcArrayLock`) through the
-// inward seams, which delegate to these helpers.
+// `ProcGlobal->{xids,subxidStates,statusFlags}` are GENUINELY SHARED here (see
+// the SHARED_PROC_XIDS doc-comment): procarray's membership family
+// `ProcArrayAdd`/`ProcArrayRemove` `memmove`s them cross-process and
+// `GetSnapshotData` in every backend scans them, so a fork-private copy
+// desyncs the dense array under cross-process renumbering. They live in real
+// shmem (`init_shared_pid_block`), reached here through the recorded base
+// pointers, exactly like the pgxactoff / latch / lwWait words. All reads/writes
+// happen under `ProcArrayLock` (membership.rs), matching C's plain access.
+
+/// Read `base[idx]` of a `total_procs`-length genuinely-shared dense array.
+#[inline]
+fn dense_read<T: Copy>(base: *mut T, idx: i32, name: &str) -> T {
+    let count = SHARED_PROC_DENSE_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "dense {name} array uninitialized (InitProcGlobal not run)"
+    );
+    let i = idx as usize;
+    assert!(i < count, "{name} index {i} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `T`s of genuine shmem; `i < count`.
+    // Accessed under `ProcArrayLock` (membership.rs), mirroring C's plain read.
+    unsafe { core::ptr::read(base.add(i)) }
+}
+
+/// Write `base[idx] = v` of a `total_procs`-length genuinely-shared dense array.
+#[inline]
+fn dense_write<T: Copy>(base: *mut T, idx: i32, v: T, name: &str) {
+    let count = SHARED_PROC_DENSE_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "dense {name} array uninitialized (InitProcGlobal not run)"
+    );
+    let i = idx as usize;
+    assert!(i < count, "{name} index {i} out of range (count {count})");
+    // SAFETY: see `dense_read`; written under `ProcArrayLock`.
+    unsafe { core::ptr::write(base.add(i), v) };
+}
+
+/// `memmove(&base[dst], &base[src], count)` over a genuinely-shared dense array.
+#[inline]
+fn dense_memmove<T>(base: *mut T, dst: i32, src: i32, count: i32, name: &str) {
+    if count <= 0 {
+        return;
+    }
+    let total = SHARED_PROC_DENSE_COUNT.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "dense {name} array uninitialized (InitProcGlobal not run)"
+    );
+    let (d, s, c) = (dst as usize, src as usize, count as usize);
+    assert!(
+        d + c <= total && s + c <= total,
+        "{name} memmove out of range (dst {d} src {s} count {c} total {total})"
+    );
+    // SAFETY: `base` addresses `total` `T`s of genuine shmem; both `[d, d+c)`
+    // and `[s, s+c)` are in range. `ptr::copy` is `memmove` (handles overlap).
+    // Done under `ProcArrayLock`, mirroring C's `memmove`.
+    unsafe { core::ptr::copy(base.add(s), base.add(d), c) };
+}
 
 /// `ProcGlobal->xids[idx]`.
 pub(crate) fn proc_array_xid(idx: i32) -> TransactionId {
-    with_proc_global(|pg| pg.xids[idx as usize])
+    dense_read(SHARED_PROC_XIDS.load(AtomicOrdering::Relaxed), idx, "xids")
 }
 
 /// `ProcGlobal->xids[idx] = xid`.
 pub(crate) fn set_proc_array_xid(idx: i32, xid: TransactionId) {
-    with_proc_global(|pg| pg.xids[idx as usize] = xid);
+    dense_write(SHARED_PROC_XIDS.load(AtomicOrdering::Relaxed), idx, xid, "xids");
 }
 
 /// `(ProcGlobal->subxidStates[idx].count, .overflowed)`.
 pub(crate) fn proc_array_subxid_state(idx: i32) -> (i32, bool) {
-    with_proc_global(|pg| {
-        let s = &pg.subxidStates[idx as usize];
-        (s.count as i32, s.overflowed)
-    })
+    let s = dense_read(
+        SHARED_PROC_SUBXID_STATES.load(AtomicOrdering::Relaxed),
+        idx,
+        "subxidStates",
+    );
+    (s.count as i32, s.overflowed)
 }
 
 /// `ProcGlobal->subxidStates[idx] = { count, overflowed }`.
 pub(crate) fn set_proc_array_subxid_state(idx: i32, count: i32, overflowed: bool) {
-    with_proc_global(|pg| {
-        let s = &mut pg.subxidStates[idx as usize];
-        s.count = count as u8;
-        s.overflowed = overflowed;
-    });
+    dense_write(
+        SHARED_PROC_SUBXID_STATES.load(AtomicOrdering::Relaxed),
+        idx,
+        XidCacheStatus {
+            count: count as u8,
+            overflowed,
+        },
+        "subxidStates",
+    );
 }
 
 /// `ProcGlobal->statusFlags[idx] = flags`.
 pub(crate) fn set_proc_array_status_flags(idx: i32, flags: u8) {
-    with_proc_global(|pg| pg.statusFlags[idx as usize] = flags);
+    dense_write(
+        SHARED_PROC_STATUS_FLAGS.load(AtomicOrdering::Relaxed),
+        idx,
+        flags,
+        "statusFlags",
+    );
 }
 
 /// `memmove(&ProcGlobal->xids[dst], &ProcGlobal->xids[src], count * sizeof)`.
 pub(crate) fn proc_array_xids_memmove(dst: i32, src: i32, count: i32) {
-    with_proc_global(|pg| {
-        pg.xids
-            .copy_within(src as usize..(src + count) as usize, dst as usize)
-    });
+    dense_memmove(SHARED_PROC_XIDS.load(AtomicOrdering::Relaxed), dst, src, count, "xids");
 }
 
 /// `memmove(&ProcGlobal->subxidStates[dst], ..[src], count * sizeof)`.
 pub(crate) fn proc_array_subxid_states_memmove(dst: i32, src: i32, count: i32) {
-    with_proc_global(|pg| {
-        pg.subxidStates
-            .copy_within(src as usize..(src + count) as usize, dst as usize)
-    });
+    dense_memmove(
+        SHARED_PROC_SUBXID_STATES.load(AtomicOrdering::Relaxed),
+        dst,
+        src,
+        count,
+        "subxidStates",
+    );
 }
 
 /// `memmove(&ProcGlobal->statusFlags[dst], ..[src], count * sizeof)`.
 pub(crate) fn proc_array_status_flags_memmove(dst: i32, src: i32, count: i32) {
-    with_proc_global(|pg| {
-        pg.statusFlags
-            .copy_within(src as usize..(src + count) as usize, dst as usize)
-    });
+    dense_memmove(
+        SHARED_PROC_STATUS_FLAGS.load(AtomicOrdering::Relaxed),
+        dst,
+        src,
+        count,
+        "statusFlags",
+    );
 }
 
 // ---- ProcGlobal->procArrayGroupFirst atomic (procarray.c group-clear) ----
@@ -1494,11 +1643,16 @@ pub fn InitProcGlobal() -> PgResult<()> {
     // XXX allProcCount isn't really all of them; it excludes prepared xacts.
     proc_global.allProcCount = (max_backends + NUM_AUXILIARY_PROCS) as u32;
 
-    // Allocate the dense ProcGlobal mirror arrays (xids/subxidStates/
-    // statusFlags), one element per PGPROC, zeroed like the C MemSet.
-    proc_global.xids = vec![0 as TransactionId; total_procs];
-    proc_global.subxidStates = vec![XidCacheStatus::default(); total_procs];
-    proc_global.statusFlags = vec![0u8; total_procs];
+    // The dense ProcGlobal mirror arrays (xids/subxidStates/statusFlags) are NOT
+    // allocated in the per-process PROC_GLOBAL value: they are genuinely shared
+    // SysV shmem (`init_shared_pid_block` → SHARED_PROC_XIDS/…), reached through
+    // the recorded base pointers, because `ProcArrayAdd`/`ProcArrayRemove`
+    // memmove them cross-process and `GetSnapshotData` scans them in every
+    // backend (see SHARED_PROC_XIDS docs). The PROC_HDR `Vec` fields stay empty
+    // placeholders (the dense accessors never touch them).
+    debug_assert!(proc_global.xids.is_empty());
+    debug_assert!(proc_global.subxidStates.is_empty());
+    debug_assert!(proc_global.statusFlags.is_empty());
 
     // ProcStructLock spinlock (C: ShmemInitStruct + SpinLockInit). The proc
     // spinlock is owned by the not-yet-ported s_lock primitive and is acquired
