@@ -44,7 +44,8 @@ use types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
 use types_core::primitive::{AttrNumber, InvalidAttrNumber};
 use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_COLUMN_REFERENCE,
-    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
+    ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TABLE_DEFINITION,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
 use types_nodes::ddlnodes::AlterTableType;
@@ -619,6 +620,240 @@ pub fn ATExecSetStatistics<'mcx>(
     drop(attrelation);
 
     Ok(address)
+}
+
+/// `ATPrepDropExpression(rel, cmd, recurse, recursing, lockmode)`
+/// (tablecmds.c:8756) — ALTER COLUMN DROP EXPRESSION, prep leg.
+pub fn ATPrepDropExpression<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    colName: Option<&str>,
+    recurse: bool,
+    recursing: bool,
+    lockmode: LOCKMODE,
+) -> PgResult<()> {
+    // Reject ONLY if there are child tables.
+    if !recurse
+        && !backend_catalog_pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?
+            .is_empty()
+    {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(
+                "ALTER TABLE / DROP EXPRESSION must be applied to child tables too".to_string(),
+            )
+            .finish(here("ATPrepDropExpression"));
+    }
+
+    // Cannot drop generation expression from inherited columns.
+    if !recursing {
+        let colname = colName.unwrap_or("");
+        let tuple = match SearchSysCacheAttName(mcx, rel.rd_id, colname)? {
+            Some(t) => t,
+            None => {
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_UNDEFINED_COLUMN)
+                    .errmsg(format!(
+                        "column \"{}\" of relation \"{}\" does not exist",
+                        colname,
+                        rel.name()
+                    ))
+                    .finish(here("ATPrepDropExpression"));
+            }
+        };
+        let attinhcount = att_field_i16(
+            mcx,
+            ATTNAME,
+            &tuple,
+            types_catalog::pg_attribute::Anum_pg_attribute_attinhcount,
+        )?;
+        if attinhcount > 0 {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
+                .errmsg("cannot drop generation expression from inherited column".to_string())
+                .finish(here("ATPrepDropExpression"));
+        }
+    }
+    Ok(())
+}
+
+/// `ATExecDropExpression(rel, colName, missing_ok, lockmode)`
+/// (tablecmds.c:8800) — ALTER COLUMN DROP EXPRESSION, exec leg. Return value is
+/// the address of the affected column.
+pub fn ATExecDropExpression<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    colName: Option<&str>,
+    missing_ok: bool,
+    _lockmode: LOCKMODE,
+) -> PgResult<ObjectAddress> {
+    let colname = colName.unwrap_or("");
+
+    // attrelation = table_open(AttributeRelationId, RowExclusiveLock);
+    let attrelation = relation_open(mcx, AttributeRelationId, RowExclusiveLock)?;
+
+    let tuple = match SearchSysCacheAttName(mcx, rel.rd_id, colname)? {
+        Some(t) => t,
+        None => {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_COLUMN)
+                .errmsg(format!(
+                    "column \"{}\" of relation \"{}\" does not exist",
+                    colname,
+                    rel.name()
+                ))
+                .finish(here("ATExecDropExpression"))
+                .map(|()| unreachable!());
+        }
+    };
+
+    let attnum = att_field_i16(mcx, ATTNAME, &tuple, Anum_pg_attribute_attnum)?;
+    let attgenerated = att_field_char(mcx, ATTNAME, &tuple, Anum_pg_attribute_attgenerated)?;
+
+    if attnum <= 0 {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("cannot alter system column \"{colname}\""))
+            .finish(here("ATExecDropExpression"))
+            .map(|()| unreachable!());
+    }
+
+    // A virtual generated column would need a table rewrite to materialize.
+    if attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(
+                "ALTER TABLE / DROP EXPRESSION is not supported for virtual generated columns"
+                    .to_string(),
+            )
+            .errdetail(format!(
+                "Column \"{}\" of relation \"{}\" is a virtual generated column.",
+                colname,
+                rel.name()
+            ))
+            .finish(here("ATExecDropExpression"))
+            .map(|()| unreachable!());
+    }
+
+    if attgenerated == 0 {
+        if !missing_ok {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg(format!(
+                    "column \"{}\" of relation \"{}\" is not a generated column",
+                    colname,
+                    rel.name()
+                ))
+                .finish(here("ATExecDropExpression"))
+                .map(|()| unreachable!());
+        } else {
+            backend_utils_error::ereport(types_error::error::NOTICE)
+                .errmsg(format!(
+                    "column \"{}\" of relation \"{}\" is not a generated column, skipping",
+                    colname,
+                    rel.name()
+                ))
+                .finish(here("ATExecDropExpression"))?;
+            // heap_freetuple(tuple); table_close(attrelation, ...); — RAII.
+            drop(attrelation);
+            return Ok(object_address_subset(
+                types_core::InvalidOid,
+                types_core::InvalidOid,
+                0,
+            ));
+        }
+    }
+
+    // Mark the column as no longer generated. (The atthasdef flag is cleared
+    // by RemoveAttrDefault.)
+    let row = PgAttributeUpdateRow {
+        attgenerated: Some(0),
+        ..Default::default()
+    };
+    indexing_seam::catalog_tuple_update_pg_attribute::call(mcx, &attrelation, &tuple, &row)?;
+
+    // InvokeObjectPostAlterHook(RelationRelationId, RelationGetRelid(rel), attnum);
+    objaccess_seam::invoke_object_post_alter_hook::call(RelationRelationId, rel.rd_id, attnum as i32)?;
+
+    // heap_freetuple(tuple); table_close(attrelation, RowExclusiveLock); — RAII.
+    drop(attrelation);
+
+    // Drop the dependency records of the GENERATED expression, in particular
+    // its INTERNAL dependency on the column.
+    let attrdefoid = backend_catalog_pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
+    if !types_core::primitive::OidIsValid(attrdefoid) {
+        return backend_utils_error::ereport(ERROR)
+            .errmsg(format!(
+                "could not find attrdef tuple for relation {} attnum {}",
+                rel.rd_id, attnum
+            ))
+            .finish(here("ATExecDropExpression"))
+            .map(|()| unreachable!());
+    }
+    backend_catalog_pg_depend_seams::deleteDependencyRecordsFor::call(
+        types_catalog::pg_attrdef::AttrDefaultRelationId,
+        attrdefoid,
+        false,
+    )?;
+
+    // Make above changes visible.
+    backend_access_transam_xact_seams::command_counter_increment::call()?;
+
+    // Get rid of the GENERATED expression itself. RESTRICT for safety.
+    RemoveAttrDefault(rel.rd_id, attnum, DROP_RESTRICT, false, false)?;
+
+    Ok(object_address_subset(RelationRelationId, rel.rd_id, attnum as i32))
+}
+
+/// `ATExecDropOf(rel, lockmode)` (tablecmds.c:18358) — ALTER TABLE ... NOT OF.
+/// Detaches a typed table from its composite type: drops the parent dependency
+/// and clears `pg_class.reloftype`.
+pub fn ATExecDropOf<'mcx>(
+    _mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    _lockmode: LOCKMODE,
+) -> PgResult<()> {
+    let relid = rel.rd_id;
+    // rel->rd_rel->reloftype (read via the syscache RELOID projection).
+    let reloftype = backend_utils_cache_syscache_seams::search_relation_reloftype::call(relid)?
+        .unwrap_or(types_core::InvalidOid);
+
+    if !types_core::primitive::OidIsValid(reloftype) {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("\"{}\" is not a typed table", rel.name()))
+            .finish(here("ATExecDropOf"))
+            .map(|()| unreachable!());
+    }
+
+    // We don't bother to check ownership of the type — ownership of the table
+    // is presumed enough rights. No lock required on the type, either.
+    //
+    // drop_parent_dependency(relid, TypeRelationId, reloftype,
+    //                        DEPENDENCY_NORMAL): remove the relation's NORMAL
+    // dependency on its OF-type (depender = (pg_class, relid, 0)). The
+    // documented general equivalent is deleteDependencyRecordsForSpecific.
+    backend_catalog_pg_depend_seams::deleteDependencyRecordsForSpecific::call(
+        RelationRelationId,
+        relid,
+        types_catalog::catalog_dependency::DEPENDENCY_NORMAL.as_char(),
+        types_catalog::pg_type::TypeRelationId,
+        reloftype,
+    )?;
+
+    // Clear pg_class.reloftype.
+    let valid = indexing_seam::set_pg_class_reloftype::call(relid, types_core::InvalidOid)?;
+    if !valid {
+        return backend_utils_error::ereport(ERROR)
+            .errmsg(format!("cache lookup failed for relation {relid}"))
+            .finish(here("ATExecDropOf"))
+            .map(|()| unreachable!());
+    }
+
+    // InvokeObjectPostAlterHook(RelationRelationId, relid, 0);
+    objaccess_seam::invoke_object_post_alter_hook::call(RelationRelationId, relid, 0)?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

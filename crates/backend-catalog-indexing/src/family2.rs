@@ -79,6 +79,8 @@ const NATTS_PG_NAMESPACE: usize = 4;
 
 // pg_class field positions (catalog/pg_class.h).
 const ANUM_PG_CLASS_OID: i16 = 1;
+const ANUM_PG_CLASS_RELOFTYPE: i16 = 5;
+const ANUM_PG_CLASS_RELAM: i16 = 7;
 const ANUM_PG_CLASS_RELPAGES: i16 = 10;
 const ANUM_PG_CLASS_RELTUPLES: i16 = 11;
 const ANUM_PG_CLASS_RELALLVISIBLE: i16 = 12;
@@ -1469,6 +1471,65 @@ fn set_pg_class_relrewrite(relid: Oid, relrewrite: Oid) -> PgResult<bool> {
         &mut replaces,
         ANUM_PG_CLASS_RELREWRITE,
         Datum::from_oid(relrewrite),
+    );
+    modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
+    pg_class.close(RowExclusiveLock)?;
+    Ok(true)
+}
+
+/// `ATExecSetAccessMethodNoStorage`'s pg_class write (tablecmds.c:16525):
+/// `tuple = SearchSysCacheCopy1(RELOID, reloid)` → poke `relam = newam` →
+/// `CatalogTupleUpdate`. Returns `(found, changed)`: `found == false` mirrors
+/// `!HeapTupleIsValid(tuple)` (the caller raises `cache lookup failed for
+/// relation %u`); `changed == false` mirrors the no-op early-out when the AM
+/// already matches (the caller skips its post-update bookkeeping).
+fn set_pg_class_relam(relid: Oid, newam: Oid) -> PgResult<Option<Oid>> {
+    let ctx = MemoryContext::new("set_pg_class_relam");
+    let mcx = ctx.mcx();
+    let pg_class = table_open(mcx, cat::catalog::RELATION_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_class, ANUM_PG_CLASS_OID, relid)? else {
+        pg_class.close(RowExclusiveLock)?;
+        return Ok(None);
+    };
+    let (mut values, mut nulls) = deform(mcx, &pg_class, &oldtup)?;
+    let old_relam = values[(ANUM_PG_CLASS_RELAM - 1) as usize].as_oid();
+    if old_relam == newam {
+        pg_class.close(RowExclusiveLock)?;
+        return Ok(Some(old_relam));
+    }
+    let mut replaces = vec![false; values.len()];
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        ANUM_PG_CLASS_RELAM,
+        Datum::from_oid(newam),
+    );
+    modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
+    pg_class.close(RowExclusiveLock)?;
+    Ok(Some(old_relam))
+}
+
+/// `ATExecDropOf`'s pg_class write (tablecmds.c:18383): `tuple =
+/// SearchSysCacheCopy1(RELOID, relid)` → poke `reloftype = InvalidOid` →
+/// `CatalogTupleUpdate`. Returns `false` when the relation row is gone
+/// (`!HeapTupleIsValid(tuple)` ⇒ caller raises `cache lookup failed`).
+fn set_pg_class_reloftype(relid: Oid, reloftype: Oid) -> PgResult<bool> {
+    let ctx = MemoryContext::new("set_pg_class_reloftype");
+    let mcx = ctx.mcx();
+    let pg_class = table_open(mcx, cat::catalog::RELATION_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_class, ANUM_PG_CLASS_OID, relid)? else {
+        pg_class.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+    let (mut values, mut nulls) = deform(mcx, &pg_class, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        ANUM_PG_CLASS_RELOFTYPE,
+        Datum::from_oid(reloftype),
     );
     modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
     pg_class.close(RowExclusiveLock)?;
@@ -3231,6 +3292,8 @@ pub fn install() {
     s::set_pg_class_relhastriggers::set(set_pg_class_relhastriggers);
     s::set_pg_class_relreplident::set(set_pg_class_relreplident);
     s::set_pg_class_relrewrite::set(set_pg_class_relrewrite);
+    s::set_pg_class_relam::set(set_pg_class_relam);
+    s::set_pg_class_reloftype::set(set_pg_class_reloftype);
     s::set_index_isreplident::set(set_index_isreplident);
 
     // matview.c's SetMatViewPopulatedState pg_class write (cross-crate install:

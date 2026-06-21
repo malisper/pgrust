@@ -199,3 +199,108 @@ pub fn ATExecSetTableSpaceNoStorage<'mcx>(
     CommandCounterIncrement()?;
     Ok(())
 }
+
+/// `ATPrepSetAccessMethod(tab, rel, amname)` (tablecmds.c:16491) — phase-1 prep
+/// for `ALTER TABLE ... SET ACCESS METHOD`. Looks up the AM name, and — if it
+/// differs from the table's current AM — records the change for phase 3.
+pub fn ATPrepSetAccessMethod<'mcx>(
+    mcx: Mcx<'mcx>,
+    tab: &mut crate::at_phase::AlteredTableInfo<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    amname: Option<&str>,
+) -> PgResult<()> {
+    // Look up the access method name and check that it differs from the table's
+    // current AM. If DEFAULT was specified for a partitioned table (amname is
+    // NULL), set it to InvalidOid to reset the catalogued AM.
+    let amoid = if let Some(name) = amname {
+        backend_commands_tablecmds_seams::get_table_am_oid::call(name, false)?
+    } else if rel.rd_rel.relkind == types_catalog::catalog::RELKIND_PARTITIONED_TABLE {
+        InvalidOid
+    } else {
+        let default_am = backend_commands_tablecmds_seams::default_table_access_method::call(mcx)?;
+        backend_commands_tablecmds_seams::get_table_am_oid::call(default_am.as_str(), false)?
+    };
+
+    // if it's a match, phase 3 doesn't need to do anything
+    if rel.rd_rel.relam == amoid {
+        return Ok(());
+    }
+
+    // Save info for Phase 3 to do the real work.
+    tab.rewrite |= crate::at_phase::AT_REWRITE_ACCESS_METHOD;
+    tab.newAccessMethod = amoid;
+    tab.chgAccessMethod = true;
+    Ok(())
+}
+
+/// `ATExecSetAccessMethodNoStorage(rel, newAccessMethodId)` (tablecmds.c:16525)
+/// — special handling of `SET ACCESS METHOD` for relations with no storage
+/// (e.g. partitioned tables); a catalog-only update of `pg_class.relam`.
+pub fn ATExecSetAccessMethodNoStorage<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    new_access_method_id: Oid,
+) -> PgResult<()> {
+    use types_core::primitive::OidIsValid;
+    let reloid = rel.rd_id;
+
+    // pg_class open + SearchSysCacheCopy1(RELOID, reloid); oldAccessMethodId =
+    // rd_rel->relam; rd_rel->relam = newAccessMethodId; if unchanged, leave;
+    // else CatalogTupleUpdate. The seam returns the prior relam.
+    let old_access_method_id =
+        match backend_catalog_indexing_seams::set_pg_class_relam::call(reloid, new_access_method_id)? {
+            Some(old) => old,
+            None => {
+                return ereport(ERROR)
+                    .errmsg(format!("cache lookup failed for relation {reloid}"))
+                    .finish(here("ATExecSetAccessMethodNoStorage"));
+            }
+        };
+
+    // Leave if no update required.
+    if old_access_method_id == new_access_method_id {
+        return Ok(());
+    }
+
+    // Update the dependency on the new access method. No dependency is added if
+    // the new access method is InvalidOid (default case).
+    let relobj = crate::helpers::object_address_set(RelationRelationId, reloid);
+    if !OidIsValid(old_access_method_id) && OidIsValid(new_access_method_id) {
+        // New AM is defined and there was no dependency previously: record one.
+        let referenced = crate::helpers::object_address_set(
+            types_catalog::opclasscmds_catalog::AccessMethodRelationId,
+            new_access_method_id,
+        );
+        backend_catalog_pg_depend_seams::recordDependencyOn::call(
+            mcx,
+            &relobj,
+            &referenced,
+            types_catalog::catalog_dependency::DEPENDENCY_NORMAL,
+        )?;
+    } else if OidIsValid(old_access_method_id) && !OidIsValid(new_access_method_id) {
+        // There was an AM defined and no new one: remove the existing dependency.
+        backend_catalog_pg_depend_seams::deleteDependencyRecordsForClass::call(
+            RelationRelationId,
+            reloid,
+            types_catalog::opclasscmds_catalog::AccessMethodRelationId,
+            types_catalog::catalog_dependency::DEPENDENCY_NORMAL.as_char(),
+        )?;
+    } else {
+        // Both valid: update the dependency.
+        backend_catalog_pg_depend_seams::changeDependencyFor::call(
+            mcx,
+            RelationRelationId,
+            reloid,
+            types_catalog::opclasscmds_catalog::AccessMethodRelationId,
+            old_access_method_id,
+            new_access_method_id,
+        )?;
+    }
+
+    // InvokeObjectPostAlterHook(RelationRelationId, RelationGetRelid(rel), 0);
+    objaccess_seam::invoke_object_post_alter_hook::call(RelationRelationId, reloid, 0)?;
+
+    // CommandCounterIncrement() — make changes visible.
+    CommandCounterIncrement()?;
+    Ok(())
+}

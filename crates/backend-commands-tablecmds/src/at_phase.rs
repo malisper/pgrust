@@ -847,7 +847,15 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
             )?;
             ATSimpleRecursion(mcx, wqueue, rel, &cmd, recurse, lockmode, context)?;
-            unported("ALTER COLUMN DROP EXPRESSION (ATPrepDropExpression)");
+            crate::at_column::ATPrepDropExpression(
+                mcx,
+                rel,
+                cmd.name.as_ref().map(|s| s.as_str()),
+                recurse,
+                recursing,
+                lockmode,
+            )?;
+            pass = AT_PASS_DROP;
         }
         AT_SetStatistics => {
             ATSimplePermissions(
@@ -1004,7 +1012,9 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
             )?;
-            unported("SET WITHOUT OIDS");
+            // SET WITHOUT OIDS: nothing else to prepare. OID columns no longer
+            // exist, so phase 2/3 do nothing (tablecmds.c:5157).
+            pass = AT_PASS_DROP;
         }
         AT_SetAccessMethod => {
             ATSimplePermissions(
@@ -1012,7 +1022,20 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_MATVIEW,
             )?;
-            unported("SET ACCESS METHOD (ATPrepSetAccessMethod)");
+            // check if another access method change was already requested
+            if wqueue[tab_idx].chgAccessMethod {
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg("cannot have multiple SET ACCESS METHOD subcommands".to_string())
+                    .finish(here("ATPrepCmd"));
+            }
+            crate::at_tablespace::ATPrepSetAccessMethod(
+                mcx,
+                &mut wqueue[tab_idx],
+                rel,
+                cmd.name.as_ref().map(|s| s.as_str()),
+            )?;
+            pass = AT_PASS_MISC; // does not matter; no work in Phase 2
         }
         AT_SetTableSpace => {
             ATSimplePermissions(
@@ -1151,7 +1174,8 @@ pub(crate) fn ATPrepCmd<'mcx>(
         }
         AT_AddOf | AT_DropOf => {
             ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_PARTITIONED_TABLE)?;
-            unported("OF / NOT OF variants");
+            // These commands never recurse; no command-specific prep needed.
+            pass = AT_PASS_MISC;
         }
         AT_GenericOptions => {
             ATSimplePermissions(cmd.subtype, rel, ATT_FOREIGN_TABLE)?;
@@ -1612,7 +1636,16 @@ fn ATExecCmd<'mcx>(
             )?;
             drop(owned_rel);
         }
-        AT_DropExpression => unported("DROP EXPRESSION (ATExecDropExpression)"),
+        AT_DropExpression => {
+            // ATExecDropExpression(rel, cmd->name, cmd->missing_ok, lockmode).
+            _address = crate::at_column::ATExecDropExpression(
+                mcx,
+                rel,
+                cmd.name.as_ref().map(|s| s.as_str()),
+                cmd.missing_ok,
+                lockmode,
+            )?;
+        }
         AT_SetCompression => {
             let colname = cmd
                 .name
@@ -1845,7 +1878,19 @@ fn ATExecCmd<'mcx>(
             // (the make_new_heap + finish_heap_swap rewrite, set up by
             // ATPrepChangePersistence in phase 1).
         }
-        AT_SetAccessMethod => unported("SET ACCESS METHOD"),
+        AT_SetAccessMethod => {
+            // SET ACCESS METHOD. Only do this for partitioned tables, for which
+            // this is just a catalog change. Tables with storage are handled by
+            // Phase 3 (tablecmds.c:5531).
+            if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE && wqueue[ti].chgAccessMethod {
+                let new_access_method = wqueue[ti].newAccessMethod;
+                let rel = wqueue[ti]
+                    .rel
+                    .as_ref()
+                    .expect("ATExecCmd: tab->rel is open during phase 2");
+                crate::at_tablespace::ATExecSetAccessMethodNoStorage(mcx, rel, new_access_method)?;
+            }
+        }
         AT_SetTableSpace => {
             // SET TABLESPACE. Only do this for partitioned tables and indexes,
             // for which this is just a catalog change. Other relation types
@@ -1860,7 +1905,10 @@ fn ATExecCmd<'mcx>(
                 crate::at_tablespace::ATExecSetTableSpaceNoStorage(mcx, rel, new_table_space)?;
             }
         }
-        AT_DropOids => unported("SET WITHOUT OIDS"),
+        AT_DropOids => {
+            // SET WITHOUT OIDS: nothing to do here, oid columns don't exist
+            // anymore (tablecmds.c:5528).
+        }
         AT_AddInherit => {
             // ATExecAddInherit(rel, (RangeVar *) cmd->def, lockmode).
             let def = cmd
@@ -1884,7 +1932,10 @@ fn ATExecCmd<'mcx>(
             _address = crate::at_detach::ATExecDropInherit(mcx, rel, parent, lockmode)?;
         }
         AT_AddOf => unported("OF (ATExecAddOf)"),
-        AT_DropOf => unported("NOT OF (ATExecDropOf)"),
+        AT_DropOf => {
+            // ATExecDropOf(rel, lockmode).
+            crate::at_column::ATExecDropOf(mcx, rel, lockmode)?;
+        }
         AT_ReplicaIdentity => {
             // ATExecReplicaIdentity(rel, (ReplicaIdentityStmt *) cmd->def, lockmode).
             let stmt = cmd
@@ -2453,6 +2504,10 @@ fn run_at_rewrite_table_scan<'mcx>(
 /// `AT_REWRITE_ALTER_PERSISTENCE` (event_trigger.h) — the persistence-change
 /// rewrite reason bit ORed into `tab->rewrite`.
 const AT_REWRITE_ALTER_PERSISTENCE: i32 = 0x01;
+
+/// `AT_REWRITE_ACCESS_METHOD` (event_trigger.h) — the access-method-change
+/// rewrite reason bit ORed into `tab->rewrite`.
+pub const AT_REWRITE_ACCESS_METHOD: i32 = 0x08;
 
 /// `ATPrepChangePersistence(tab, rel, toLogged)` (tablecmds.c:18820) — phase-1
 /// prep for `ALTER TABLE ... SET LOGGED/UNLOGGED`. Rejects temp tables, the

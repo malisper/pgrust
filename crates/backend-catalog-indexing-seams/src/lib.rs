@@ -135,6 +135,27 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ATExecSetAccessMethodNoStorage`'s pg_class write (tablecmds.c:16525):
+    /// open pg_class RowExclusiveLock, `SearchSysCacheCopy1(RELOID, reloid)`,
+    /// poke `relam = newam` and `CatalogTupleUpdate`. Returns `Some(old_relam)`
+    /// where `old_relam` is the pre-update `relam` (so the caller can fix up the
+    /// pg_am dependency); `None` ⇒ `!HeapTupleIsValid(tuple)`, caller raises
+    /// `cache lookup failed for relation %u`. When `old_relam == newam` no write
+    /// is performed (the no-op early-out), but `Some(old_relam)` is still
+    /// returned.
+    pub fn set_pg_class_relam(relid: Oid, newam: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// `ATExecDropOf`'s pg_class write (tablecmds.c:18383): open pg_class
+    /// RowExclusiveLock, `SearchSysCacheCopy1(RELOID, relid)`, poke `reloftype
+    /// = reloftype` and `CatalogTupleUpdate`. The boolean result is
+    /// `HeapTupleIsValid(tuple)`; the caller raises `cache lookup failed for
+    /// relation %u` when it is `false`.
+    pub fn set_pg_class_reloftype(relid: Oid, reloftype: Oid) -> PgResult<bool>
+);
+
+seam_core::seam!(
     /// `relation_mark_replica_identity`'s per-index pg_index leg
     /// (tablecmds.c:18435-18481): open pg_index RowExclusiveLock,
     /// `SearchSysCacheCopy1(INDEXRELID, index_oid)`, and — only if
