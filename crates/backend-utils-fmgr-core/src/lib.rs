@@ -2910,6 +2910,94 @@ fn oid_receive_function_call_seam<'mcx>(
     }
 }
 
+/// `OidInputFunctionCall(typinput, str, typioparam, typmod)` seam for the
+/// fastpath text-format argument path (`tcop/fastpath.c`
+/// `parse_fcall_arguments`). `str_ == None` is C's `pstring == NULL`
+/// (`argsize == -1`, a NULL argument); the input function is still called to
+/// support domains, exactly as `oid_input_function_call_out`'s `Option<&str>`
+/// arm does. The result classifies into the canonical `Datum<'mcx>` so a
+/// by-reference value (the `text` arg of `lo_import`) survives into the
+/// function-call frame.
+fn fastpath_input_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    typinput: Oid,
+    str_: Option<&str>,
+    typioparam: Oid,
+    typmod: i32,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    let out = oid_input_function_call_out(mcx, typinput, str_, typioparam, typmod)?;
+    fmgr_out_to_canon(mcx, out)
+}
+
+/// `OidReceiveFunctionCall(typreceive, buf, typioparam, typmod)` seam for the
+/// fastpath binary-format argument path. `buf == None` is C's NULL `bufptr`
+/// (`argsize == -1`, a strict-NULL argument). The result classifies into the
+/// canonical `Datum<'mcx>`. The C `buf->cursor != buf->len` whole-buffer check
+/// is enforced inside the typed receive helper (the receive function reads the
+/// supplied slice through its `StringInfo`), matching the `record_recv`
+/// precedent — the helper does not surface a bytes-consumed count.
+fn fastpath_receive_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    typreceive: Oid,
+    buf: Option<&[u8]>,
+    typioparam: Oid,
+    typmod: i32,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> {
+    let resolved = fmgr_info(mcx, typreceive)?;
+    let out = receive_function_call_typed(
+        mcx,
+        &resolved.resolution,
+        resolved.finfo,
+        buf,
+        typioparam,
+        typmod,
+    )?;
+    fmgr_out_to_canon(mcx, out)
+}
+
+/// `OidOutputFunctionCall(typoutput, retval)` seam for the fastpath text-format
+/// result path (`SendFunctionResult`, `format == 0`): one-shot lookup + call of
+/// the type's text output function on the canonical result `Datum`, returning
+/// the rendered cstring's bytes (no NUL) in `mcx`. Delegates to the canonical
+/// `oid_output_function_call_seam` (which detoasts a stored by-ref value).
+fn fastpath_output_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    typoutput: Oid,
+    retval: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    oid_output_function_call_seam(mcx, typoutput, retval)
+}
+
+/// `OidSendFunctionCall(typsend, retval)` seam for the fastpath binary-format
+/// result path (`SendFunctionResult`, `format == 1`): one-shot lookup + call of
+/// the type's binary send function on the canonical result `Datum`, returning
+/// the `bytea` payload with the varlena header already stripped (`VARDATA`,
+/// `VARSIZE - VARHDRSZ`) in `mcx`. Delegates to the canonical
+/// `oid_send_function_call_seam`.
+fn fastpath_send_function_call_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    typsend: Oid,
+    retval: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    oid_send_function_call_seam(mcx, typsend, retval)
+}
+
+/// `FunctionCallInvoke(fcinfo)` seam for the fastpath call path
+/// (`HandleFunctionRequest`): invoke `fn_oid` on the canonical `args` under
+/// `collation` (fastpath passes `InvalidOid`). fastpath has already applied the
+/// strict-null short-circuit, and supplies no `fn_expr` (a fastpath call is not
+/// a polymorphic-resolved call node). Returns the canonical result `Datum` and
+/// the callee's `fcinfo->isnull`.
+fn fastpath_function_call_invoke_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    fn_oid: Oid,
+    collation: Oid,
+    args: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+    args_null: &[bool],
+) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
+    function_call_invoke_datum_seam(mcx, fn_oid, collation, args, args_null, None)
+}
+
 /// `InputFunctionCall(&flinfo, str, typioparam, typmod)` seam over a
 /// caller-cached `FmgrInfo` (`BuildTupleFromCStrings`), returning the result
 /// classified as a [`Datum`] for `heap_form_tuple`. The owned `FmgrInfo`
@@ -4397,7 +4485,23 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::input_is_valid_by_type::set(input_is_valid_by_type_seam);
     backend_utils_fmgr_fmgr_seams::oid_function_call0::set(oid_function_call0_seam);
     backend_utils_fmgr_fmgr_seams::function_call_invoke::set(function_call_invoke_seam);
-    backend_utils_fmgr_fmgr_seams::fastpath_function_call_invoke::set(function_call_invoke_seam);
+    // tcop/fastpath.c (server side of PQfn): the text/binary argument I/O, result
+    // I/O, and the raw FunctionCallInvoke over the canonical `Datum` lane.
+    backend_utils_fmgr_fmgr_seams::fastpath_input_function_call::set(
+        fastpath_input_function_call_seam,
+    );
+    backend_utils_fmgr_fmgr_seams::fastpath_receive_function_call::set(
+        fastpath_receive_function_call_seam,
+    );
+    backend_utils_fmgr_fmgr_seams::fastpath_output_function_call::set(
+        fastpath_output_function_call_seam,
+    );
+    backend_utils_fmgr_fmgr_seams::fastpath_send_function_call::set(
+        fastpath_send_function_call_seam,
+    );
+    backend_utils_fmgr_fmgr_seams::fastpath_function_call_invoke::set(
+        fastpath_function_call_invoke_seam,
+    );
     backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::set(function_call_invoke_datum_seam);
     backend_utils_fmgr_fmgr_seams::function_call_invoke_datum_owned::set(
         function_call_invoke_datum_owned_seam,

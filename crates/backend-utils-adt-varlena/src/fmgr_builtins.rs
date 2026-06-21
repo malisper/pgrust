@@ -445,6 +445,23 @@ fn fc_byteasend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<
     let bytes = (crate::bytea::byteasend(m.mcx(), arg_bytes(fcinfo, 0)))?.to_vec();
     Ok(ret_varlena(fcinfo, bytes))
 }
+fn fc_bytearecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    // C: `bytearecv` reads the remaining wire-buffer bytes
+    // (`nbytes = buf->len - buf->cursor`, `pq_copymsgbytes`) into a fresh `bytea`.
+    // The receive `StringInfo` crosses the fmgr by-ref lane as its RAW message
+    // payload (a `RefPayload::Varlena` over the wire bytes, NOT a varlena-framed
+    // image), so read it VERBATIM — running it through `vardata_any_slice` would
+    // misread the first wire byte as a varlena header. `bytearecv` copies the
+    // whole slice, so it consumes the entire buffer (C's trailing whole-buffer
+    // check passes).
+    let buf = fcinfo
+        .ref_arg(0)
+        .and_then(|p| p.as_varlena())
+        .expect("bytearecv: receive buffer missing from by-ref lane");
+    let m = scratch_mcx();
+    let bytes = (crate::bytea::bytearecv(m.mcx(), buf))?.to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
+}
 
 // --- name <-> text casts (wire_io.rs) ---
 
@@ -1401,6 +1418,7 @@ pub fn register_varlena_more_builtins() {
         builtin(2415, "textsend", 1, fc_textsend),
         builtin(1244, "byteain", 1, fc_byteain),
         builtin(31, "byteaout", 1, fc_byteaout),
+        builtin(2412, "bytearecv", 1, fc_bytearecv),
         builtin(2413, "byteasend", 1, fc_byteasend),
         // ---- name <-> text casts ----
         builtin(406, "name_text", 1, fc_name_text),

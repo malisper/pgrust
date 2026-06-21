@@ -18367,6 +18367,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-stringinfo",
+ "types-tuple",
 ]
 
 [[package]]

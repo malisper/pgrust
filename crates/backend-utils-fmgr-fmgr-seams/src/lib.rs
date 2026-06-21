@@ -930,75 +930,88 @@ seam_core::seam!(
     /// `OidInputFunctionCall(typinput, str, typioparam, typmod)` (fmgr.c) for
     /// the fastpath text-format argument path. `str_` is `None` for a NULL
     /// argument (C's `pstring == NULL`, where `argsize == -1`); the call still
-    /// happens to support domains, exactly as C does. Returns the raw result
-    /// `Datum`. `Err` carries invalid-input-syntax, cache-lookup failure, and
-    /// OOM.
-    pub fn fastpath_input_function_call(
+    /// happens to support domains, exactly as C does. Returns the result as the
+    /// canonical `Datum<'mcx>` (a by-value scalar is `ByVal`; a by-reference
+    /// result is an owned `ByRef` over the input function's flattened payload in
+    /// `mcx`, C's `PointerGetDatum(palloc'd result)`) so a by-reference argument
+    /// (the `text` arg of `lo_import` etc.) survives across the seam into the
+    /// function-call frame. `Err` carries invalid-input-syntax, cache-lookup
+    /// failure, and OOM.
+    pub fn fastpath_input_function_call<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         typinput: Oid,
         str_: Option<&str>,
         typioparam: Oid,
         typmod: i32,
-    ) -> PgResult<DatumWord>
+    ) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>
 );
 
 seam_core::seam!(
     /// `OidReceiveFunctionCall(typreceive, buf, typioparam, typmod)` (fmgr.c)
     /// for the fastpath binary-format argument path. `buf` is the argument's
     /// raw payload bytes, or `None` for a NULL argument (C's `bufptr == NULL`,
-    /// where `argsize == -1`). Returns the raw result `Datum` together with the
-    /// number of bytes the receive function consumed from `buf`, so the caller
-    /// can reproduce C's `buf->cursor != buf->len` "incorrect binary data
-    /// format" check. `Err` carries the receive function's `ereport(ERROR)`s.
+    /// where `argsize == -1`). Returns the result as the canonical `Datum<'mcx>`
+    /// (by-value `ByVal`; by-reference result materialized into `mcx` as
+    /// `ByRef`). C's `buf->cursor != buf->len` "incorrect binary data format"
+    /// whole-buffer check is enforced inside the typed receive helper (the
+    /// receive function reads the supplied slice through its `StringInfo` and a
+    /// trailing `pq_getmsgend`), matching the `record_recv` precedent. `Err`
+    /// carries the receive function's `ereport(ERROR)`s.
     pub fn fastpath_receive_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         typreceive: Oid,
         buf: Option<&[u8]>,
         typioparam: Oid,
         typmod: i32,
-    ) -> PgResult<(DatumWord, usize)>
+    ) -> PgResult<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>
 );
 
 seam_core::seam!(
     /// `OidOutputFunctionCall(typoutput, retval)` (fmgr.c) for the fastpath
     /// text-format result path: one-shot lookup + call of a type's text output
-    /// function on the raw result `Datum`. The C `char *` result crosses as its
-    /// NUL-excluded bytes allocated in `mcx`. `Err` carries the lookup failure,
-    /// the strict-null `elog`, and whatever the output function raises.
+    /// function on the canonical result `Datum` (a by-value scalar or a
+    /// by-reference value). The C `char *` result crosses as its NUL-excluded
+    /// bytes allocated in `mcx`. `Err` carries the lookup failure, the
+    /// strict-null `elog`, and whatever the output function raises.
     pub fn fastpath_output_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         typoutput: Oid,
-        retval: DatumWord,
+        retval: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
     /// `OidSendFunctionCall(typsend, retval)` (fmgr.c) for the fastpath
     /// binary-format result path: one-shot lookup + call of a type's binary
-    /// send function on the raw result `Datum`. The C `bytea *` result crosses
-    /// as its payload bytes with the varlena header already stripped
-    /// (`VARDATA`, `VARSIZE - VARHDRSZ` bytes), allocated in `mcx`. `Err`
-    /// carries the lookup failure, the strict-null `elog`, and whatever the
-    /// send function raises.
+    /// send function on the canonical result `Datum` (a by-value scalar or a
+    /// by-reference value). The C `bytea *` result crosses as its payload bytes
+    /// with the varlena header already stripped (`VARDATA`, `VARSIZE - VARHDRSZ`
+    /// bytes), allocated in `mcx`. `Err` carries the lookup failure, the
+    /// strict-null `elog`, and whatever the send function raises.
     pub fn fastpath_send_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         typsend: Oid,
-        retval: DatumWord,
+        retval: &types_tuple::backend_access_common_heaptuple::Datum<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
     /// `FunctionCallInvoke(fcinfo)` (fmgr.h) for the fastpath call path: invoke
     /// the function identified by `fn_oid` (its resolved `FmgrInfo` cannot
-    /// cross, so the owner re-resolves by OID) on the raw `args` under
-    /// `collation` (fastpath passes `InvalidOid`). Returns the raw result
-    /// `Datum` and the callee's `fcinfo->isnull` flag. fastpath has already
+    /// cross, so the owner re-resolves by OID) on the canonical `args` under
+    /// `collation` (fastpath passes `InvalidOid`). `args_null[i]` carries
+    /// `fcinfo->args[i].isnull` explicitly — the canonical `Datum::ByVal(0)` word
+    /// cannot encode SQL NULL on its own. Returns the result as a canonical
+    /// `Datum<'mcx>` and the callee's `fcinfo->isnull` flag. fastpath has already
     /// applied the strict-null short-circuit, so this is only called when the
     /// function is to run. `Err` carries whatever the called function raises.
-    pub fn fastpath_function_call_invoke(
+    pub fn fastpath_function_call_invoke<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         fn_oid: Oid,
         collation: Oid,
-        args: &[types_datum::NullableDatum],
-    ) -> PgResult<(DatumWord, bool)>
+        args: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+        args_null: &[bool],
+    ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)>
 );
 
 seam_core::seam!(

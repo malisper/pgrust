@@ -38,7 +38,7 @@ use mcx::Mcx;
 use types_acl::acl::{AclResult, ACLCHECK_OK, ACL_EXECUTE, ACL_USAGE};
 use types_core::catalog::{NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID};
 use types_core::primitive::{InvalidOid, Oid, FUNC_MAX_ARGS};
-use types_datum::{Datum, NullableDatum};
+use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_IN_FAILED_SQL_TRANSACTION, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OUT_OF_MEMORY,
@@ -118,7 +118,7 @@ impl FpInfo {
 /// the requested wire `format`.
 pub fn send_function_result<'mcx>(
     mcx: Mcx<'mcx>,
-    retval: Datum,
+    retval: &CanonDatum<'_>,
     isnull: bool,
     rettype: Oid,
     format: i16,
@@ -257,7 +257,7 @@ pub fn handle_function_request<'mcx>(
     let fid: Oid;
     let aclresult: AclResult;
     let rformat: i16;
-    let retval: Datum;
+    let retval: CanonDatum<'mcx>;
     // struct fp_info my_fp;  struct fp_info *fip;
     let mut fip = FpInfo::zeroed();
     let callit: bool;
@@ -365,11 +365,15 @@ pub fn handle_function_request<'mcx>(
      */
     // InitFunctionCallInfoData(*fcinfo, &fip->flinfo, 0, InvalidOid, NULL, NULL);
     // The owned arg vector and its null flags are populated by
-    // parse_fcall_arguments; nargs is established there.
-    let mut args: Vec<NullableDatum> = Vec::new();
+    // parse_fcall_arguments; nargs is established there. Values cross the fmgr
+    // boundary as the canonical `Datum<'mcx>` (a by-reference argument — the
+    // `text` arg of `lo_import` — survives as `ByRef`); `args_null[i]` carries
+    // `fcinfo->args[i].isnull` alongside.
+    let mut args: Vec<CanonDatum<'mcx>> = Vec::new();
+    let mut args_null: Vec<bool> = Vec::new();
 
     // rformat = parse_fcall_arguments(msgBuf, fip, fcinfo);
-    rformat = parse_fcall_arguments(mcx, msg_buf, &fip, &mut args)?;
+    rformat = parse_fcall_arguments(mcx, msg_buf, &fip, &mut args, &mut args_null)?;
 
     // /* Verify we reached the end of the message where expected. */
     // pq_getmsgend(msgBuf);
@@ -384,9 +388,9 @@ pub fn handle_function_request<'mcx>(
         // if (fip->flinfo.fn_strict)
         if fip.flinfo.fn_strict {
             // for (i = 0; i < fcinfo->nargs; i++)
-            for arg in &args {
+            for &arg_null in &args_null {
                 // if (fcinfo->args[i].isnull) { callit = false; break; }
-                if arg.isnull {
+                if arg_null {
                     call = false;
                     break;
                 }
@@ -399,15 +403,20 @@ pub fn handle_function_request<'mcx>(
     if callit {
         // /* Okay, do it ... */
         // retval = FunctionCallInvoke(fcinfo);
-        let (v, callee_isnull) =
-            fmgr_seam::fastpath_function_call_invoke::call(fip.funcid, InvalidOid, &args)?;
+        let (v, callee_isnull) = fmgr_seam::fastpath_function_call_invoke::call(
+            mcx,
+            fip.funcid,
+            InvalidOid,
+            &args,
+            &args_null,
+        )?;
         retval = v;
         isnull = callee_isnull;
     } else {
         // fcinfo->isnull = true;
         isnull = true;
         // retval = (Datum) 0;
-        retval = Datum::null();
+        retval = CanonDatum::ByVal(0);
     }
 
     // /* ensure we do at least one CHECK_FOR_INTERRUPTS per function call */
@@ -415,7 +424,7 @@ pub fn handle_function_request<'mcx>(
     tcop_seam::check_for_interrupts::call()?;
 
     // SendFunctionResult(retval, fcinfo->isnull, fip->rettype, rformat);
-    send_function_result(mcx, retval, isnull, fip.rettype, rformat)?;
+    send_function_result(mcx, &retval, isnull, fip.rettype, rformat)?;
 
     // /* We no longer need the snapshot */
     // PopActiveSnapshot();
@@ -457,7 +466,8 @@ pub fn parse_fcall_arguments<'mcx>(
     mcx: Mcx<'mcx>,
     msg_buf: &mut StringInfo<'mcx>,
     fip: &FpInfo,
-    args: &mut Vec<NullableDatum>,
+    args: &mut Vec<CanonDatum<'mcx>>,
+    args_null: &mut Vec<bool>,
 ) -> PgResult<i16> {
     let nargs: i32;
     let numAFormats: i32;
@@ -504,12 +514,18 @@ pub fn parse_fcall_arguments<'mcx>(
             .into_error());
     }
 
-    // fcinfo->nargs = nargs;  — the owned arg vector is sized to nargs.
+    // fcinfo->nargs = nargs;  — the owned arg vector is sized to nargs. Each
+    // slot is the canonical `Datum<'mcx>` plus its `fcinfo->args[i].isnull`.
     args.try_reserve(nargs as usize)
         .map_err(|_| out_of_memory("function call arguments"))?;
+    args_null
+        .try_reserve(nargs as usize)
+        .map_err(|_| out_of_memory("function call arguments"))?;
     args.clear();
+    args_null.clear();
     for _ in 0..nargs {
-        args.push(NullableDatum::null());
+        args.push(CanonDatum::ByVal(0));
+        args_null.push(false);
     }
 
     // if (numAFormats > 1 && numAFormats != nargs)
@@ -540,10 +556,10 @@ pub fn parse_fcall_arguments<'mcx>(
         // if (argsize == -1)
         if argsize == -1 {
             // fcinfo->args[i].isnull = true;
-            args[i].isnull = true;
+            args_null[i] = true;
         } else {
             // fcinfo->args[i].isnull = false;
-            args[i].isnull = false;
+            args_null[i] = false;
             // if (argsize < 0)
             if argsize < 0 {
                 // ereport(ERROR, (errcode(ERRCODE_PROTOCOL_VIOLATION),
@@ -616,8 +632,8 @@ pub fn parse_fcall_arguments<'mcx>(
 
             // fcinfo->args[i].value =
             //   OidInputFunctionCall(typinput, pstring, typioparam, -1);
-            args[i].value =
-                fmgr_seam::fastpath_input_function_call::call(typinput, pstring, typioparam, -1)?;
+            args[i] =
+                fmgr_seam::fastpath_input_function_call::call(mcx, typinput, pstring, typioparam, -1)?;
             // /* Free result of encoding conversion, if any */ — owned buffer
             // dropped at end of iteration.
         } else if aformat == 1 {
@@ -629,9 +645,14 @@ pub fn parse_fcall_arguments<'mcx>(
             // fcinfo->args[i].value =
             //   OidReceiveFunctionCall(typreceive, bufptr, typioparam, -1);
             //
-            // The seam returns (value, consumed) so we can reproduce C's
-            // buf->cursor != buf->len whole-buffer check below.
-            let (value, consumed) = if argsize == -1 {
+            // C's "Trouble if it didn't eat the whole buffer" check
+            // (`abuf.cursor != abuf.len` → ERRCODE_INVALID_BINARY_REPRESENTATION
+            // "incorrect binary data format in function argument %d") is enforced
+            // inside the typed receive helper: the receive function reads the
+            // supplied slice through its `StringInfo` and a trailing
+            // `pq_getmsgend` fails if bytes remain — the same model `record_recv`
+            // uses (the helper does not surface a separate bytes-consumed count).
+            let value = if argsize == -1 {
                 fmgr_seam::fastpath_receive_function_call::call(mcx, typreceive, None, typioparam, -1)?
             } else {
                 fmgr_seam::fastpath_receive_function_call::call(
@@ -642,22 +663,7 @@ pub fn parse_fcall_arguments<'mcx>(
                     -1,
                 )?
             };
-            args[i].value = value;
-
-            // /* Trouble if it didn't eat the whole buffer */
-            // if (argsize != -1 && abuf.cursor != abuf.len)
-            if argsize != -1 && consumed != abuf.len() {
-                // ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
-                //   errmsg("incorrect binary data format in function argument %d",
-                //          i + 1)));
-                let argno = i + 1;
-                return Err(ereport(ERROR)
-                    .errcode(ERRCODE_INVALID_BINARY_REPRESENTATION)
-                    .errmsg(format!(
-                        "incorrect binary data format in function argument {argno}"
-                    ))
-                    .into_error());
-            }
+            args[i] = value;
         } else {
             // ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
             //   errmsg("unsupported format code: %d", aformat)));
