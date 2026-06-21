@@ -2521,7 +2521,14 @@ fn perform_pullup_replace_vars<'mcx>(
         }
     }
 
-    // joinaliasvars of join RTEs / groupexprs of group RTE.
+    // joinaliasvars of join RTEs / groupexprs of group RTE, plus the
+    // securityQuals of every RTE. In C this rides range_table_mutator_impl
+    // (nodeFuncs.c:3893/3917/3927): joinaliasvars and groupexprs are mutated
+    // per-kind, but `MUTATE(newrte->securityQuals, ...)` runs unconditionally
+    // for *every* RTE after the kind switch. RLS USING quals live in
+    // securityQuals, so skipping them leaves virtual-generated-column Vars in
+    // RLS policies unexpanded (rowsecurity: "trying to fetch a virtual
+    // generated column").
     {
         let n = parse.rtable.len();
         for i in 0..n {
@@ -2538,6 +2545,16 @@ fn perform_pullup_replace_vars<'mcx>(
                     core::mem::replace(&mut parse.rtable[i].groupexprs, PgVec::new_in(mcx));
                 pullup_replace_vars_nodelist(mcx, root, &mut list, rvcontext, outer_has_sublinks)?;
                 parse.rtable[i].groupexprs = list;
+            }
+
+            // securityQuals — walked for every RTE kind (nodeFuncs.c:3927).
+            if !parse.rtable[i].securityQuals.is_empty() {
+                let mut list = core::mem::replace(
+                    &mut parse.rtable[i].securityQuals,
+                    PgVec::new_in(mcx),
+                );
+                pullup_replace_vars_nodelist(mcx, root, &mut list, rvcontext, outer_has_sublinks)?;
+                parse.rtable[i].securityQuals = list;
             }
         }
     }
