@@ -16,7 +16,7 @@ use mcx::{Mcx, PgVec};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_catalog::pg_constraint::{CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL};
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
+use types_error::{PgError, PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use types_nodes::ddlnodes::ATAlterConstraint;
 use types_rel::Relation;
 use types_storage::lock::{LOCKMODE, NoLock, RowExclusiveLock};
@@ -284,7 +284,7 @@ fn ATExecAlterConstraintInternal<'mcx>(
     }
 
     if cmdcon.alterInheritability
-        && ATExecAlterConstrInheritability(mcx, cmdcon, rel, con, lockmode)?
+        && ATExecAlterConstrInheritability(mcx, wqueue, cmdcon, rel, con, lockmode)?
     {
         changed = true;
     }
@@ -610,16 +610,123 @@ fn AlterConstrEnforceabilityRecurse<'mcx>(
     Ok(())
 }
 
-/// `ATExecAlterConstrInheritability(...)` (tablecmds.c:12617). Faithfully
-/// seam-and-panicked: the NOT NULL `connoinherit` child propagation
-/// (coninhcount decrement / ATExecSetNotNull on children) is a complete but
-/// separate branch not exercised by ALTER CONSTRAINT on foreign keys.
+/// `ATExecAlterConstrInheritability(...)` (tablecmds.c:12617). Applies a
+/// `[NO] INHERIT` change to a NOT NULL constraint: updates the constraint's
+/// own `connoinherit` flag and propagates the change to the immediate child
+/// level. For `NO INHERIT`, each child's matching not-null constraint has its
+/// `coninhcount` decremented and `conislocal` set true; for `INHERIT`, each
+/// child gets the not-null constraint added (validated) via `ATExecSetNotNull`.
 fn ATExecAlterConstrInheritability<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _cmdcon: &ATAlterConstraint<'mcx>,
-    _rel: &Relation<'mcx>,
-    _con: &types_catalog::pg_constraint::ConstraintFormCopy,
-    _lockmode: LOCKMODE,
+    mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    cmdcon: &ATAlterConstraint<'mcx>,
+    rel: &Relation<'mcx>,
+    con: &types_catalog::pg_constraint::ConstraintFormCopy,
+    lockmode: LOCKMODE,
 ) -> PgResult<bool> {
-    unported("ALTER CONSTRAINT [NO] INHERIT (ATExecAlterConstrInheritability — NOT NULL connoinherit child propagation)");
+    let currcon = con.form;
+    debug_assert!(cmdcon.alterInheritability);
+    // The current implementation only works for NOT NULL constraints.
+    debug_assert_eq!(currcon.contype, CONSTRAINT_NOTNULL);
+
+    // If called to modify a constraint that's already in the desired state,
+    // silently do nothing.
+    if cmdcon.noinherit == currcon.connoinherit {
+        return Ok(false);
+    }
+
+    let flags = AlterConstrFlags {
+        alter_enforceability: false,
+        is_enforced: currcon.conenforced,
+        alter_deferrability: false,
+        deferrable: currcon.condeferrable,
+        initdeferred: currcon.condeferred,
+        alter_inheritability: true,
+        noinherit: cmdcon.noinherit,
+    };
+    let conrelid = AlterConstrUpdateConstraintEntry(mcx, currcon.oid, &flags)?;
+    backend_utils_cache_inval::cache_invalidate::CacheInvalidateRelcacheByRelid(conrelid)?;
+    backend_access_transam_xact::CommandCounterIncrement()?;
+
+    // Fetch the column number and name. The scalar form copy does not carry the
+    // conkey array, so re-fetch the full constraint tuple by OID and run the
+    // shared extractor (extractNotNullColumn, which reads conkey via the
+    // syscache and validates the 1-D smallint[1] shape).
+    let con_tup =
+        backend_utils_cache_syscache_seams::search_constraint_tuple_by_oid::call(mcx, currcon.oid)?
+            .ok_or_else(|| {
+                PgError::error(format!("cache lookup failed for constraint {}", currcon.oid))
+            })?;
+    let col_num: types_core::AttrNumber =
+        backend_catalog_pg_constraint::extractNotNullColumn(&con_tup)?;
+    let col_name = lsyscache_seams::get_attname::call(mcx, currcon.conrelid, col_num, false)?
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+
+    // Propagate the change to children. For this subcommand type we don't
+    // recursively affect children, just the immediate level.
+    let children = backend_catalog_pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?;
+    for childoid in children {
+        if cmdcon.noinherit {
+            let childtup = backend_catalog_pg_constraint::findNotNullConstraint(
+                mcx, childoid, &col_name,
+            )?;
+            let childtup = match childtup {
+                Some(t) => t,
+                None => {
+                    return Err(PgError::error(format!(
+                        "cache lookup failed for not-null constraint on column \"{col_name}\" of relation {childoid}"
+                    )));
+                }
+            };
+            let mut childcon =
+                backend_utils_cache_syscache_seams::read_constraint_form::call(&childtup)?;
+            debug_assert!(childcon.coninhcount > 0);
+            childcon.coninhcount -= 1;
+            childcon.conislocal = true;
+
+            let constr_rel = relation_open(
+                mcx,
+                ConstraintRelationId,
+                types_storage::lock::RowExclusiveLock,
+            )?;
+            let fields = types_catalog::pg_constraint::ConstraintFieldUpdate {
+                conname: childcon.conname,
+                connamespace: childcon.connamespace,
+                conislocal: childcon.conislocal,
+                coninhcount: childcon.coninhcount,
+                conparentid: childcon.conparentid,
+                convalidated: childcon.convalidated,
+                connoinherit: childcon.connoinherit,
+                conenforced: childcon.conenforced,
+                condeferrable: childcon.condeferrable,
+                condeferred: childcon.condeferred,
+                conindid: childcon.conindid,
+            };
+            backend_catalog_indexing_seams::catalog_tuple_update_pg_constraint::call(
+                &constr_rel,
+                childtup.tuple.t_self,
+                &fields,
+            )?;
+            constr_rel.close(types_storage::lock::RowExclusiveLock)?;
+        } else {
+            let childrel = relation_open(mcx, childoid, NoLock)?;
+            let addr = crate::at_constraint::ATExecSetNotNull(
+                mcx,
+                wqueue,
+                &childrel,
+                Some(name_str(&currcon.conname)),
+                &col_name,
+                true,
+                true,
+                lockmode,
+            )?;
+            if OidIsValid(addr.objectId) {
+                backend_access_transam_xact::CommandCounterIncrement()?;
+            }
+            childrel.close(NoLock)?;
+        }
+    }
+
+    Ok(true)
 }
