@@ -637,6 +637,14 @@ seam_core::seam!(
     pub fn swap_relfilelocator_subids(r1: types_core::Oid, r2: types_core::Oid) -> types_error::PgResult<()>
 );
 seam_core::seam!(
+    /// `RelationAssumeNewRelfilelocator(relation)` (relcache.c): record that the
+    /// relation took a new relfilenumber this (sub)transaction and flag it for
+    /// end-of-xact cleanup. The Relation-keyed standalone form (as called by
+    /// `ATExecSetTableSpace`, tablecmds.c). The relcache owns the entry, so only
+    /// the relation OID crosses.
+    pub fn relation_assume_new_relfilelocator(relid: types_core::Oid) -> types_error::PgResult<()>
+);
+seam_core::seam!(
     /// `CreateFakeRelcacheEntry(rlocator)` (xlogutils.c, but allocating a
     /// relcache `RelationData` + non-pinned `SMgrRelation`, which is relcache
     /// substrate). The C `palloc0`s a `FakeRelCacheEntryData`, fills the

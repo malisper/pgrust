@@ -409,6 +409,73 @@ pub fn create_and_copy_relation_data(
     Ok(())
 }
 
+/// The storage body shared by `index_copy_data` (tablecmds.c:17147) and
+/// `heapam_relation_copy_data` (heapam_handler.c): create the destination
+/// storage, copy every existing fork block-by-block, schedule the old files for
+/// unlink at commit, and close the destination handle. The caller has already
+/// run `FlushRelationBuffers(rel)`.
+pub fn copy_relation_data_to_new_locator<'mcx>(
+    mcx: Mcx<'mcx>,
+    src_rlocator: RelFileLocator,
+    src_backend: ProcNumber,
+    dst_rlocator: RelFileLocator,
+    relpersistence: i8,
+    is_permanent: bool,
+) -> PgResult<()> {
+    let src_key = RelFileLocatorBackend {
+        locator: src_rlocator,
+        backend: src_backend,
+    };
+
+    // RelationGetSmgr(rel): ensure the source relation's smgr handle is open
+    // before reading its forks (smgrnblocks / smgrread / smgrexists).
+    smgr::smgropen(src_rlocator, src_backend)?;
+
+    // Create and copy all forks of the relation, and schedule unlinking of
+    // old physical files.
+    //
+    // NOTE: any conflict in relfilenumber value will be caught in
+    // RelationCreateStorage().
+    // dstrel = RelationCreateStorage(newrlocator, rel->rd_rel->relpersistence, true);
+    let dst_key = RelationCreateStorage(dst_rlocator, relpersistence, true)?;
+
+    // copy main fork
+    RelationCopyStorage(mcx, src_key, dst_key, MAIN_FORKNUM, relpersistence)?;
+
+    // copy those extra forks that exist
+    // (for forkNum = MAIN_FORKNUM + 1; forkNum <= MAX_FORKNUM; forkNum++)
+    for fork_num in [FSM_FORKNUM, VISIBILITYMAP_FORKNUM, INIT_FORKNUM] {
+        if smgr::smgrexists(src_key, fork_num)? {
+            smgr::smgrcreate(dst_key, fork_num, false)?;
+
+            // WAL log creation if the relation is persistent, or this is the
+            // init fork of an unlogged relation.
+            if is_permanent
+                || (relpersistence == RELPERSISTENCE_UNLOGGED && fork_num == INIT_FORKNUM)
+            {
+                log_smgrcreate(dst_rlocator, fork_num)?;
+            }
+            RelationCopyStorage(mcx, src_key, dst_key, fork_num, relpersistence)?;
+        }
+    }
+
+    // drop old relation, and close new one
+    // RelationDropStorage(rel); smgrclose(dstrel);
+    relation_drop_storage(src_rlocator, src_backend)?;
+    smgr::smgrclose(dst_key)?;
+
+    Ok(())
+}
+
+/// `RelationDropStorage(rel)` + `RelationAssumeNewRelfilelocator(rel)`
+/// (catalog/storage.c + relcache.c) as a pair, the form `reindex_index`'s SET
+/// TABLESPACE leg performs on the same open index relation (index.c:4023).
+fn drop_storage_assume_new_relfilelocator(rel: &types_rel::Relation<'_>) -> PgResult<()> {
+    relation_drop_storage(rel.rd_locator, rel.rd_backend)?;
+    relcache_seam::relation_assume_new_relfilelocator::call(rel.rd_id)?;
+    Ok(())
+}
+
 /* ---------------------------------------------------------------------------
  * RelationDropStorage (storage.c:207)
  * ------------------------------------------------------------------------- */
@@ -1375,6 +1442,8 @@ pub fn init_seams() {
     storage_seam::smgr_redo::set(smgr_redo);
     index_seam::build_index_init_fork_if_needed::set(build_index_init_fork_if_needed);
     storage_seam::create_and_copy_relation_data::set(create_and_copy_relation_data);
+    storage_seam::copy_relation_data_to_new_locator::set(copy_relation_data_to_new_locator);
+    index_seam::drop_storage_assume_new_relfilelocator::set(drop_storage_assume_new_relfilelocator);
     storage_seam::rel_file_locator_skipping_wal::set(rel_file_locator_skipping_wal);
     storage_seam::smgr_do_pending_syncs::set(smgr_do_pending_syncs);
     storage_seam::smgr_do_pending_deletes::set(smgr_do_pending_deletes);

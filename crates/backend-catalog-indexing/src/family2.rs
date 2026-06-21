@@ -626,6 +626,90 @@ fn update_relispartition_catalog(relation_id: Oid, newval: bool) -> PgResult<boo
     Ok(true)
 }
 
+/// `pg_class.relfilenode` / `pg_class.reltablespace` columns (`pg_class.h`):
+/// oid=1, relname=2, relnamespace=3, reltype=4, reloftype=5, relowner=6,
+/// relam=7, relfilenode=8, reltablespace=9.
+const ANUM_PG_CLASS_RELFILENODE: i16 = 8;
+const ANUM_PG_CLASS_RELTABLESPACE: i16 = 9;
+
+/// `RELKIND_SEQUENCE` (pg_class.h: 'S').
+const RELKIND_SEQUENCE: u8 = b'S';
+
+/// `RELKIND_HAS_STORAGE(relkind)` (pg_class.h).
+fn relkind_has_storage(relkind: u8) -> bool {
+    relkind == RELKIND_RELATION
+        || relkind == RELKIND_INDEX
+        || relkind == RELKIND_SEQUENCE
+        || relkind == RELKIND_TOASTVALUE
+        || relkind == RELKIND_MATVIEW
+}
+
+/// The catalog-write body of `SetRelationTableSpace` (tablecmds.c:3750):
+/// `table_open(pg_class, RowExclusiveLock)`, `SearchSysCacheLockedCopy1(RELOID)`,
+/// set `reltablespace` (`InvalidOid` when it matches `MyDatabaseTableSpace`) and
+/// `relfilenode` (when valid), `CatalogTupleUpdate`, and — for storageless
+/// relkinds — `changeDependencyOnTablespace`. Returns `HeapTupleIsValid(tuple)`.
+fn set_relation_tablespace_catalog(
+    reloid: Oid,
+    relkind: u8,
+    new_tablespace_id: Oid,
+    new_relfilenumber: Oid,
+) -> PgResult<bool> {
+    let ctx = MemoryContext::new("set_relation_tablespace_catalog");
+    let mcx = ctx.mcx();
+    let pg_class = table_open(mcx, cat::catalog::RELATION_RELATION_ID, RowExclusiveLock)?;
+    let Some(oldtup) = fetch_by_oid(mcx, &pg_class, ANUM_PG_CLASS_OID, reloid)? else {
+        pg_class.close(RowExclusiveLock)?;
+        return Ok(false);
+    };
+    let (values, nulls) = deform(mcx, &pg_class, &oldtup)?;
+    let mut values = values;
+    let mut nulls = nulls;
+    let mut replaces = vec![false; values.len()];
+
+    // reltablespace = (newTableSpaceId == MyDatabaseTableSpace) ? InvalidOid :
+    //   newTableSpaceId;
+    let my_db_tablespace = backend_utils_init_small_seams::my_database_table_space::call();
+    let stored_tablespace = if new_tablespace_id == my_db_tablespace {
+        InvalidOid
+    } else {
+        new_tablespace_id
+    };
+    set_col(
+        &mut values,
+        &mut nulls,
+        &mut replaces,
+        ANUM_PG_CLASS_RELTABLESPACE,
+        Datum::from_oid(stored_tablespace),
+    );
+
+    // if (RelFileNumberIsValid(newRelFilenumber)) rd_rel->relfilenode = ...;
+    if new_relfilenumber != InvalidOid {
+        set_col(
+            &mut values,
+            &mut nulls,
+            &mut replaces,
+            ANUM_PG_CLASS_RELFILENODE,
+            Datum::from_oid(new_relfilenumber),
+        );
+    }
+
+    modify_and_update(mcx, &pg_class, &oldtup, &values, &nulls, &replaces)?;
+    pg_class.close(RowExclusiveLock)?;
+
+    // Record dependency on tablespace.  This is only required for relations that
+    // have no physical storage.
+    if !relkind_has_storage(relkind) {
+        backend_catalog_pg_shdepend_seams::changeDependencyOnTablespace::call(
+            cat::catalog::RELATION_RELATION_ID,
+            reloid,
+            stored_tablespace,
+        )?;
+    }
+
+    Ok(true)
+}
+
 /// `pg_partitioned_table.partdefid` column (`pg_partitioned_table.h`):
 /// partrelid=1, partstrat=2, partnatts=3, partdefid=4.
 const ANUM_PG_PARTITIONED_TABLE_PARTRELID: i16 = 1;
@@ -3270,6 +3354,24 @@ pub fn install() {
         }
         Ok(())
     });
+
+    // set_relation_tablespace catalog body (tablecmds.c SetRelationTableSpace):
+    // the pg_class reltablespace/relfilenode write of ALTER TABLE SET TABLESPACE.
+    backend_commands_tablecmds_seams::set_relation_tablespace_catalog::set(
+        |reloid, relkind, new_tablespace_id, new_relfilenumber| {
+            if !set_relation_tablespace_catalog(
+                reloid,
+                relkind,
+                new_tablespace_id,
+                new_relfilenumber,
+            )? {
+                return Err(PgError::error(format!(
+                    "cache lookup failed for relation {reloid}"
+                )));
+            }
+            Ok(())
+        },
+    );
 
     // index_mark_invalid catalog body (indexcmds.c): the pg_index `indisvalid`
     // clear of DefineIndex's partitioned-recursion invalidate_parent path.

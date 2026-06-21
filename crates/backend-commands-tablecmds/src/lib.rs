@@ -41,6 +41,7 @@ mod at_fk;
 mod at_identity;
 mod at_owner;
 mod at_phase;
+mod at_tablespace;
 mod create;
 mod domain_validate;
 mod drop;

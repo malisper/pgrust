@@ -109,6 +109,7 @@ pub fn init_seams() {
     sx::relation_get_number_of_blocks::set(relation_get_number_of_blocks);
     sx::set_rd_toastoid::set(set_rd_toastoid);
     sx::swap_relfilelocator_subids::set(swap_relfilelocator_subids);
+    sx::relation_assume_new_relfilelocator::set(assume_new_relfilelocator);
 
     // --- sortsupport index field reads ---
     sx::rd_opfamily::set(rd_opfamily);

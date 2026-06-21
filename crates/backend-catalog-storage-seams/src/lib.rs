@@ -62,6 +62,29 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The storage body shared by `index_copy_data` (tablecmds.c) and
+    /// `heapam_relation_copy_data` (heapam_handler.c), reached when ALTER TABLE
+    /// SET TABLESPACE moves a relation's physical files: create the destination
+    /// storage with `register_delete = true` (`RelationCreateStorage`), copy the
+    /// main fork and every other fork that exists block-by-block
+    /// (`RelationCopyStorage` per fork, with `smgrcreate` + `log_smgrcreate` for
+    /// the extra forks), schedule the source files for unlink at commit
+    /// (`RelationDropStorage`), and close the destination smgr handle
+    /// (`smgrclose`). The caller flushes the source's shared buffers first
+    /// (`FlushRelationBuffers`, the bufmgr's). `is_permanent` is
+    /// `RelationIsPermanent(rel)`; `relpersistence` is `rel->rd_rel->relpersistence`.
+    /// Owned by storage.c. Can `ereport(ERROR)`.
+    pub fn copy_relation_data_to_new_locator<'mcx>(
+        mcx: Mcx<'mcx>,
+        src_rlocator: RelFileLocator,
+        src_backend: ProcNumber,
+        dst_rlocator: RelFileLocator,
+        relpersistence: i8,
+        is_permanent: bool,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `smgr_redo(record)` (storage.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
     pub fn smgr_redo(record: &mut types_wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>

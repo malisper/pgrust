@@ -173,6 +173,12 @@ pub fn init_seams() {
     seams::in_recovery::set(orchestrator::in_recovery_flag);
     seams::end_recovery::set(orchestrator::end_recovery);
 
+    // The tablespace command layer (commands/tablespace.c) reads the same
+    // `InRecovery` global through its ambient-globals seam bundle.
+    backend_commands_tablespace_globals_seams::InRecovery::set(|| {
+        Ok(orchestrator::in_recovery_flag())
+    });
+
     // `ArchiveRecoveryRequested` / `recoveryTargetTLI` (xlogrecovery.c globals),
     // read by the WAL-startup driver (xlog.c `StartupXLOG`). Backed by the
     // startup process's per-backend recovery state.

@@ -1019,7 +1019,20 @@ pub(crate) fn ATPrepCmd<'mcx>(
                     | ATT_INDEX
                     | ATT_PARTITIONED_INDEX,
             )?;
-            unported("SET TABLESPACE (ATPrepSetTableSpace)");
+            // ATPrepSetTableSpace(tab, rel, cmd->name, lockmode).
+            let tablespacename = cmd
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("AT_SetTableSpace: cmd.name (tablespace name) is NULL");
+            crate::at_tablespace::ATPrepSetTableSpace(
+                &mut wqueue[tab_idx].newTableSpace,
+                tablespacename,
+            )?;
+            // After ATPrepCmd the dispatcher in C does not append a subcommand
+            // for SET TABLESPACE; the work is driven entirely off
+            // tab->newTableSpace in phase 2/3.
+            pass = AT_PASS_MISC;
         }
         AT_SetRelOptions | AT_ResetRelOptions | AT_ReplaceRelOptions => {
             ATSimplePermissions(
@@ -1828,7 +1841,20 @@ fn ATExecCmd<'mcx>(
             // ATPrepChangePersistence in phase 1).
         }
         AT_SetAccessMethod => unported("SET ACCESS METHOD"),
-        AT_SetTableSpace => unported("SET TABLESPACE (ATExecSetTableSpace)"),
+        AT_SetTableSpace => {
+            // SET TABLESPACE. Only do this for partitioned tables and indexes,
+            // for which this is just a catalog change. Other relation types
+            // which have storage are handled by Phase 3.
+            let relkind = rel.rd_rel.relkind;
+            if relkind == RELKIND_PARTITIONED_TABLE || relkind == RELKIND_PARTITIONED_INDEX {
+                let new_table_space = wqueue[ti].newTableSpace;
+                let rel = wqueue[ti]
+                    .rel
+                    .as_ref()
+                    .expect("ATExecCmd: tab->rel is open during phase 2");
+                crate::at_tablespace::ATExecSetTableSpaceNoStorage(mcx, rel, new_table_space)?;
+            }
+        }
         AT_DropOids => unported("SET WITHOUT OIDS"),
         AT_AddInherit => {
             // ATExecAddInherit(rel, (RangeVar *) cmd->def, lockmode).
@@ -2214,9 +2240,18 @@ fn ATRewriteTables<'mcx>(
                 run_at_rewrite_table_scan(mcx, &wqueue[ti], InvalidOid)?;
             }
 
-            // SET TABLESPACE with no reason to reconstruct tuples → block copy.
+            // If we had SET TABLESPACE but no reason to reconstruct tuples, just
+            // do a block-by-block copy.
+            // ATExecSetTableSpace(tab->relid, tab->newTableSpace, lockmode).
             if OidIsValid(wqueue[ti].newTableSpace) {
-                unported("ATRewriteTables: ATExecSetTableSpace (block-by-block copy)");
+                let relid = wqueue[ti].relid;
+                let new_table_space = wqueue[ti].newTableSpace;
+                crate::at_tablespace::ATExecSetTableSpace(
+                    mcx,
+                    relid,
+                    new_table_space,
+                    _lockmode,
+                )?;
             }
         }
 
