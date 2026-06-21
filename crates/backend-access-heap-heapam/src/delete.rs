@@ -448,11 +448,14 @@ pub fn heap_delete<'mcx>(
             let mut page = PageMut::new(page_bytes)?;
             PageSetPrunable(&mut page, xid);
         }
+        // Mirror C heap_delete: test PageIsAllVisible *before* clearing it, and
+        // record that decision so the matching visibilitymap_clear fires below.
         let cleared = {
             let page = PageRef::new(page_bytes)?;
             PageIsAllVisible(&page)
         };
         if cleared {
+            all_visible_cleared = true;
             let mut page = PageMut::new(page_bytes)?;
             PageClearAllVisible(&mut page);
         }
@@ -464,8 +467,7 @@ pub fn heap_delete<'mcx>(
         Ok(())
     })?;
 
-    if page_is_all_visible(buffer)? {
-        all_visible_cleared = true;
+    if all_visible_cleared {
         // The PageClearAllVisible above already cleared the page flag; clear the
         // visibility-map bit too.
         page_seam::visibilitymap_clear::call(
