@@ -108,8 +108,11 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `adjust_appendrel_attrs(root, (Node *) node, nappinfos, appinfos)`
-    /// (appendinfo.c) — single-level parent→child Var translation.
-    pub fn adjust_appendrel_attrs(
+    /// (appendinfo.c) — single-level parent→child Var translation. `run` is
+    /// threaded so the UNION-ALL whole-row→`RowExpr` branch can fetch the parent
+    /// RTE's `eref->colnames` via `planner_rt_fetch(run, root, parent_relid)`.
+    pub fn adjust_appendrel_attrs<'mcx>(
+        run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         node: Expr,
         appinfos: Vec<RelId>,

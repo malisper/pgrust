@@ -6734,8 +6734,8 @@ fn apply_scanjoin_target_to_paths<'mcx>(
                     Vec::with_capacity(t.exprs.len());
                 for &expr_id in t.exprs.iter() {
                     let expr = root.node(expr_id).clone();
-                    let adjusted = backend_optimizer_util_appendinfo::adjust_appendrel_attrs(
-                        root, expr, &appinfos,
+                    let adjusted = backend_optimizer_util_appendinfo::adjust_appendrel_attrs_run(
+                        Some(run), root, expr, &appinfos,
                     )?;
                     new_exprs.push(root.alloc_node(adjusted));
                 }

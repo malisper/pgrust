@@ -125,6 +125,7 @@ pub fn set_append_rel_size<'mcx>(
             // seam (the derived `Expr::clone` panics on an owned-subtree child).
             let parent_expr = root.node(*nid).clone_in(mcx)?;
             let translated = backend_optimizer_path_equivclass_ext_seams::adjust_appendrel_attrs::call(
+                run,
                 root,
                 parent_expr,
                 alloc::vec![childrel],

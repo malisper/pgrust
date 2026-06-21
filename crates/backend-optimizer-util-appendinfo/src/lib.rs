@@ -81,16 +81,24 @@ type Relation<'mcx> = types_rel::RelationData<'mcx>;
 /// `adjust_appendrel_attrs_context` (appendinfo.c). Carries the appinfo array and
 /// (because the mutator can `elog(ERROR)`) a sticky error slot, mirroring the
 /// owned-tree mutator convention.
-struct AdjustContext<'a> {
+struct AdjustContext<'a, 'mcx> {
     root: &'a PlannerInfo,
     appinfos: &'a [AppendRelInfo],
+    /// `context->root->parse->rtable` access. The UNION-ALL whole-row→`RowExpr`
+    /// branch needs the parent RTE's `eref->colnames`, fetched via
+    /// `planner_rt_fetch(run, root, parent_relid)`. Callers on the inheritance /
+    /// equivclass / partitioning paths cannot reach that branch (per the C
+    /// comment in appendinfo.c:341), so they pass `None`; the targetlist /
+    /// scan-join target translation path (which can carry a UNION-ALL whole-row
+    /// Var) threads the live run.
+    run: Option<&'a PlannerRun<'mcx>>,
     /// First error raised inside the mutator (the C `elog(ERROR)` longjmp).
     err: Option<PgError>,
     /// Fresh nodes to intern after the walk (the mutator needs `&PlannerInfo`
     /// for `translated_vars`/`row_identity_vars` resolution, so it cannot also
     /// hold the `&mut` needed to `alloc_node`; deferred allocations are applied
     /// by the driver).
-    _phantom: core::marker::PhantomData<&'a ()>,
+    _phantom: core::marker::PhantomData<&'a &'mcx ()>,
 }
 
 /* ==========================================================================
@@ -262,12 +270,28 @@ pub fn adjust_appendrel_attrs(
     node: Expr,
     appinfos: &[AppendRelInfo],
 ) -> PgResult<Expr> {
+    adjust_appendrel_attrs_run(None, root, node, appinfos)
+}
+
+/// `adjust_appendrel_attrs` with the live [`PlannerRun`] threaded so the
+/// UNION-ALL whole-row→`RowExpr` branch can fetch the parent RTE's
+/// `eref->colnames` (`planner_rt_fetch(run, root, parent_relid)`). The plain
+/// [`adjust_appendrel_attrs`] entry forwards here with `run == None` (the
+/// inheritance / equivclass / partitioning callers cannot reach the whole-row
+/// branch). The scan-join / targetlist target translation path passes the run.
+pub fn adjust_appendrel_attrs_run<'mcx>(
+    run: Option<&PlannerRun<'mcx>>,
+    root: &mut PlannerInfo,
+    node: Expr,
+    appinfos: &[AppendRelInfo],
+) -> PgResult<Expr> {
     debug_assert!(!appinfos.is_empty());
     let mut pending: Vec<Expr> = Vec::new();
     let result = {
         let mut ctx = AdjustContext {
             root,
             appinfos,
+            run,
             err: None,
             _phantom: core::marker::PhantomData,
         };
@@ -290,7 +314,7 @@ pub fn adjust_appendrel_attrs(
 /// returns the partially-built node (the driver surfaces the error).
 fn adjust_appendrel_attrs_mutator(
     node: Expr,
-    context: &mut AdjustContext,
+    context: &mut AdjustContext<'_, '_>,
     pending: &mut Vec<Expr>,
 ) -> Expr {
     let appinfos = context.appinfos;
@@ -371,16 +395,84 @@ fn adjust_appendrel_attrs_mutator(
                         }
                         // parent_reltype == child_reltype: fall through, Var kept.
                     } else {
-                        // UNION-ALL whole-row: build a RowExpr from translated_vars
-                        // using the parent RTE's colnames. This needs
-                        // root->parse->rtable (the opaque QueryId), which the
-                        // adjust_appendrel_attrs seam contract drops.
-                        context.err = Some(PgError::error(
-                            "adjust_appendrel_attrs: UNION-ALL whole-row Var → RowExpr \
-                             needs root->parse->rtable colnames (dropped-run keystone; \
-                             unreachable for inheritance/non-inherited queries)",
-                        ));
-                        return Expr::Var(var);
+                        // Build a RowExpr containing the translated variables.
+                        //
+                        // In practice var->vartype will always be RECORDOID here,
+                        // so we need to come up with some suitable column names.
+                        // We use the parent RTE's column names.
+                        //
+                        // Note: we can't get here for inheritance cases, so there
+                        // is no need to worry that translated_vars might contain
+                        // some dummy NULLs.
+                        //
+                        // This needs `root->parse->rtable` (the parent RTE's
+                        // `eref->colnames`), reached via `planner_rt_fetch`; the
+                        // run is threaded only on the targetlist/scan-join target
+                        // translation path that can carry a UNION-ALL whole-row
+                        // Var (the inheritance/equivclass callers pass `None` and
+                        // never reach this branch).
+                        let run = match context.run {
+                            Some(run) => run,
+                            None => {
+                                context.err = Some(PgError::error(
+                                    "adjust_appendrel_attrs: UNION-ALL whole-row Var \
+                                     reached without a threaded PlannerRun (root->parse->rtable)",
+                                ));
+                                return Expr::Var(var);
+                            }
+                        };
+
+                        // fields = copyObject(appinfo->translated_vars);
+                        let mut fields: Vec<Expr> = Vec::with_capacity(appinfo.translated_vars.len());
+                        for &handle in appinfo.translated_vars.iter() {
+                            // Per the C comment, inheritance dummy NULLs cannot
+                            // occur here; a NULL handle would be a planner bug.
+                            fields.push(context.root.node(handle).clone());
+                        }
+
+                        // rte = rt_fetch(appinfo->parent_relid, parse->rtable);
+                        // rowexpr->colnames = copyObject(rte->eref->colnames);
+                        let rte = types_pathnodes::planner_run::planner_rt_fetch(
+                            run,
+                            context.root,
+                            appinfo.parent_relid,
+                        );
+                        let colnames: Vec<String> = rte
+                            .eref
+                            .as_ref()
+                            .map(|eref| {
+                                eref.colnames
+                                    .iter()
+                                    .map(|n| match n.as_string() {
+                                        Some(s) => s.sval.as_str().to_string(),
+                                        // Dropped columns are an empty String node.
+                                        None => String::new(),
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+
+                        if var.varreturningtype != VarReturningType::VAR_RETURNING_DEFAULT {
+                            context.err = Some(PgError::error(
+                                "failed to apply returningtype to a non-Var",
+                            ));
+                            return Expr::Var(var);
+                        }
+                        if !var.varnullingrels.words.is_empty() {
+                            context.err = Some(PgError::error(
+                                "failed to apply nullingrels to a non-Var",
+                            ));
+                            return Expr::Var(var);
+                        }
+
+                        let rowexpr = types_nodes::primnodes::RowExpr {
+                            args: fields,
+                            row_typeid: var.vartype,
+                            row_format: CoercionForm::COERCE_IMPLICIT_CAST,
+                            colnames,
+                            location: -1,
+                        };
+                        return Expr::RowExpr(rowexpr);
                     }
                 }
                 // system attributes don't need any other translation
@@ -1351,6 +1443,7 @@ pub fn init_seams() {
 /// single-expression equivclass/allpaths consumer. The seam carries the child
 /// rels as `Vec<RelId>`; resolve their AppendRelInfos and translate.
 fn seam_adjust_appendrel_attrs(
+    run: &PlannerRun<'_>,
     root: &mut PlannerInfo,
     node: Expr,
     child_rels: Vec<RelId>,
@@ -1360,7 +1453,7 @@ fn seam_adjust_appendrel_attrs(
         let relids = root.rel(cr).relids.clone();
         appinfos.extend(find_appinfos_by_relids(root, &relids)?);
     }
-    adjust_appendrel_attrs(root, node, &appinfos)
+    adjust_appendrel_attrs_run(Some(run), root, node, &appinfos)
 }
 
 /// `(List *) adjust_appendrel_attrs(root, restrictlist, nappinfos, appinfos)` —

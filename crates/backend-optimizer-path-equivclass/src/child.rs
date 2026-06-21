@@ -77,7 +77,7 @@ pub fn add_child_rel_equivalences<'mcx>(
                 /* generate the transformed child version */
                 let parent_expr = em_expr_owned(root, run, cur_em)?;
                 let child_expr = if parent_is_baserel {
-                    ec_seam::adjust_appendrel_attrs::call(root, parent_expr, alloc::vec![appinfo])?
+                    ec_seam::adjust_appendrel_attrs::call(run, root, parent_expr, alloc::vec![appinfo])?
                 } else {
                     ec_seam::adjust_appendrel_attrs_multilevel::call(
                         root,
@@ -161,7 +161,7 @@ pub fn add_child_join_rel_equivalences<'mcx>(
             if bms::relids_overlap::call(&em_relids, &top_parent_relids) {
                 let parent_expr = em_expr_owned(root, run, cur_em)?;
                 let child_expr = if parent_is_joinrel {
-                    ec_seam::adjust_appendrel_attrs::call(root, parent_expr, appinfos.clone())?
+                    ec_seam::adjust_appendrel_attrs::call(run, root, parent_expr, appinfos.clone())?
                 } else {
                     debug_assert!(
                         root.rel(parent_joinrel).reloptkind == RELOPT_OTHER_JOINREL
