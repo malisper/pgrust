@@ -48,8 +48,8 @@ const ClanguageId: Oid = 13;
 const SQLlanguageId: Oid = 14;
 /// `INTERNALOID` (`catalog/pg_type.h`).
 const INTERNALOID: Oid = 2281;
-/// `GUC_LIST_QUOTE` (`utils/guc.h`).
-const GUC_LIST_QUOTE: i32 = 0x0004;
+/// `GUC_LIST_QUOTE` (`utils/guc.h`): `0x000002`, "double-quote list elements".
+const GUC_LIST_QUOTE: i32 = 0x0002;
 
 /// `pg_get_functiondef(funcid)` (ruleutils.c 2926-3170). Returns the full
 /// `CREATE OR REPLACE FUNCTION|PROCEDURE` text, or `Ok(None)` when the function
