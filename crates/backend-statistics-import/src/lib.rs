@@ -438,10 +438,13 @@ fn extract_variadic_args<'mcx>(
                 if is_null {
                     Datum::null()
                 } else if let Some(s) = fcinfo.ref_arg(i).and_then(|p| p.as_cstring()) {
-                    // CStringGetTextDatum(PG_GETARG_POINTER(i)): the text lane
-                    // carries the payload header-stripped, i.e. the cstring
-                    // bytes themselves.
-                    Datum::ByRef(mcx::slice_in(mcx, s.as_bytes())?)
+                    // CStringGetTextDatum(PG_GETARG_POINTER(i)): build a real
+                    // header-ful `text` varlena image (the canonical by-ref
+                    // `text` Datum representation), matching the header-ful
+                    // elements that `extract_variadic_array` hands back for a
+                    // genuine `text` array. `text_datum_to_string` strips the
+                    // header (VARDATA_ANY) on the way out.
+                    backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, s)?
                 } else {
                     Datum::null()
                 }
@@ -1683,14 +1686,17 @@ fn lookup_relation(mcx: Mcx<'_>, nspname: &str, relname: &str) -> PgResult<Oid> 
     RangeVarGetRelidExtended(mcx, &rv, ShareUpdateExclusiveLock, 0, cb)
 }
 
-/// `TextDatumGetCString(d)` — the text payload as a UTF-8 `String`. On the fmgr
-/// by-reference lane `text` is delivered header-stripped (`VARDATA_ANY`), so the
-/// `ByRef` bytes are the payload directly; a `Cstring` carries the bytes as-is.
+/// `TextDatumGetCString(d)` = `text_to_cstring(DatumGetTextPP(d))` — the text
+/// payload as a UTF-8 `String`. The canonical by-reference `text` Datum is a
+/// header-ful varlena image (both the genuine `text` array elements that
+/// `extract_variadic_array`/`deconstruct_array` return AND the
+/// `CStringGetTextDatum`-converted `unknown` literals), so its `VARHDRSZ`/short
+/// header must be skipped (`VARDATA_ANY`). A `Cstring` carries the bytes as-is.
 fn text_datum_to_string(d: &Datum) -> PgResult<String> {
     match d {
         Datum::Cstring(s) => Ok(s.clone()),
         _ => {
-            let payload = d.as_ref_bytes();
+            let payload = backend_utils_adt_varlena::vardata_any_slice(d.as_ref_bytes());
             Ok(String::from_utf8_lossy(payload).into_owned())
         }
     }
@@ -1713,16 +1719,15 @@ fn direct_text_datum_to_string(d: &Datum) -> PgResult<String> {
     }
 }
 
-/// Re-wrap a direct (header-ful) `text` argument as a header-stripped
-/// `Datum::ByRef`, matching the variadic-array text representation that
-/// `text_datum_to_string` consumes. A `Cstring` is already header-free.
+/// Normalize a direct (header-ful) `text` argument into the canonical
+/// header-ful `Datum::ByRef` `text` representation that `text_datum_to_string`
+/// consumes (it strips the header via `VARDATA_ANY`). A header-ful varlena
+/// passes through verbatim; a `Cstring` is promoted to a real `text` image via
+/// `CStringGetTextDatum`.
 fn strip_direct_text<'mcx>(mcx: Mcx<'mcx>, d: &Datum<'mcx>) -> PgResult<Datum<'mcx>> {
     match d {
-        Datum::Cstring(s) => Ok(Datum::ByRef(mcx::slice_in(mcx, s.as_bytes())?)),
-        _ => {
-            let payload = backend_utils_adt_varlena::vardata_any_slice(d.as_ref_bytes());
-            Ok(Datum::ByRef(mcx::slice_in(mcx, payload)?))
-        }
+        Datum::Cstring(s) => backend_utils_adt_varlena_seams::cstring_to_text_v::call(mcx, s),
+        _ => Ok(Datum::ByRef(mcx::slice_in(mcx, d.as_ref_bytes())?)),
     }
 }
 

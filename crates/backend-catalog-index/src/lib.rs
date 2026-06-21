@@ -1254,7 +1254,14 @@ pub fn index_create<'mcx>(
     let relowner = relcache::rd_rel_relowner::call(heap_relation)?;
     let write = heap::PgClassWriteFields {
         relpages: 0,
-        reltuples: -1.0,
+        // C: `InsertPgClassTuple` stores `new_rel_desc->rd_rel->reltuples`,
+        // which `RelationBuildLocalRelation` left at the `palloc0` zero for a
+        // freshly created index (it is NOT the `AddNewRelationTuple` -1 used for
+        // heaps/toast/matviews). Keeping this 0 (not -1) is what lets
+        // `index_update_stats(indexRelation, false, 0)` see `rd_rel->reltuples
+        // >= 0`, skip the "empty table reltuples==-1" hack, and write the
+        // freshly built index's relpages=1/reltuples=0 — matching upstream.
+        reltuples: 0.0,
         relallvisible: 0,
         relallfrozen: 0,
         relfrozenxid: heap_create_result.xids.relfrozenxid,

@@ -47,6 +47,7 @@ backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-s
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-utils-adt-jsonb-seams = { path = "../backend-utils-adt-jsonb-seams" }
 backend-utils-adt-varlena = { path = "../backend-utils-adt-varlena" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-storage-lmgr-lmgr-seams = { path = "../backend-storage-lmgr-lmgr-seams" }
 backend-utils-adt-format-type = { path = "../backend-utils-adt-format-type" }
 

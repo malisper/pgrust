@@ -16916,6 +16916,7 @@ dependencies = [
  "backend-utils-adt-format-type",
  "backend-utils-adt-jsonb-seams",
  "backend-utils-adt-varlena",
+ "backend-utils-adt-varlena-seams",
  "backend-utils-cache-lsyscache",
  "backend-utils-cache-relcache-seams",
  "backend-utils-cache-syscache",
