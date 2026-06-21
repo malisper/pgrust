@@ -103,15 +103,24 @@ fn with_phase_eqfunction<'mcx, R>(
     r
 }
 
-/// `ResetTupleHashIterator(htable, iter)` (executor/execGrouping.c): reset the
-/// hash iterator to the start of the table. Owned by
-/// `backend-executor-execGrouping`; not yet wired through a seam.
+/// `ResetTupleHashIterator(htable, iter)` (executor/execGrouping.c, execnodes.h
+/// macro = `InitTupleHashIterator(htable, iter)` = `tuplehash_start_iterate`):
+/// reset `perhash[perhash_idx].hashiter` to the start of the table. Delegates to
+/// the `backend-executor-execGrouping` owner via its seam.
 #[inline]
-fn reset_tuple_hash_iterator(_perhash_idx: usize) -> PgResult<()> {
-    panic!(
-        "ResetTupleHashIterator (executor/execGrouping.c) is not yet wired: \
-         backend-executor-execGrouping owns it"
-    )
+fn reset_tuple_hash_iterator(
+    aggstate: &mut AggStateData<'_>,
+    perhash_idx: usize,
+) -> PgResult<()> {
+    let iter = {
+        let table = aggstate.perhash.as_mut().expect("perhash")[perhash_idx]
+            .hashtable
+            .as_mut()
+            .expect("perhash->hashtable");
+        backend_executor_execGrouping_seams::init_tuple_hash_iterator::call(&mut **table)
+    };
+    aggstate.perhash.as_mut().expect("perhash")[perhash_idx].hashiter = iter;
+    Ok(())
 }
 
 /// `agg_retrieve_direct(aggstate)` — the plain/sorted-grouping driver: read
@@ -202,7 +211,7 @@ pub fn agg_retrieve_direct<'mcx>(
                 aggstate.table_filled = true;
                 // ResetTupleHashIterator(aggstate->perhash[0].hashtable,
                 //                        &aggstate->perhash[0].hashiter);
-                reset_tuple_hash_iterator(0)?;
+                reset_tuple_hash_iterator(aggstate, 0)?;
                 crate::node_lifecycle::select_current_set(aggstate, 0, true);
                 return crate::hash_grouping::agg_retrieve_hash_table(aggstate, estate);
             } else {
