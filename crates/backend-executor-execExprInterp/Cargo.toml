@@ -25,6 +25,11 @@ backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-s
 # external/by-ref fields are detoasted). A leaf access unit (types-* deps only),
 # so the edge is acyclic.
 backend-access-heap-heaptoast = { path = "../backend-access-heap-heaptoast" }
+# detoast_attr (PG_DETOAST_DATUM) for DatumGetHeapTupleHeader: a composite Datum
+# stored into a table column can itself be TOASTed (external/compressed) when the
+# whole row image exceeds the toast threshold; the composite-Datum bridge must
+# detoast it before decoding the flat HeapTupleHeader image. Leaf seam crate.
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 # convert_tuples_by_name + execute_attr_map_tuple for EEOP_CONVERT_ROWTYPE; a
 # leaf seam-declaration crate, so no dependency cycle.
 backend-access-common-next-seams = { path = "../backend-access-common-next-seams" }

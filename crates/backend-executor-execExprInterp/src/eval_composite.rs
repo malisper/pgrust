@@ -83,6 +83,49 @@ fn store_result<'mcx>(state: &mut ExprState<'mcx>, op: usize, value: Datum<'mcx>
     }
 }
 
+/// `DatumGetHeapTupleHeader(value)` (htup_details.h):
+/// `((HeapTupleHeader) PG_DETOAST_DATUM(value))` — decode a composite/record
+/// `Datum` into a [`FormedTuple`]. A composite value stored into a table column
+/// can itself be TOASTed (stored out-of-line / compressed) when the whole row
+/// image exceeds the toast threshold; like every by-reference `Datum` consumer,
+/// the composite-Datum bridge must `PG_DETOAST_DATUM` the value before
+/// reinterpreting its bytes as a `HeapTupleHeader`. A `Datum::Composite` is
+/// already a live, never-toasted tuple, so it re-homes directly. A
+/// `Datum::ByRef` flat image is detoasted iff `VARATT_IS_EXTENDED` (a 1-byte /
+/// external / compressed header) before decoding the flat header image;
+/// a plain 4-byte uncompressed image (what `to_datum_image` mints) is decoded
+/// verbatim, matching C's `PG_DETOAST_DATUM` fall-through.
+fn datum_get_heap_tuple_header<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    value: &Datum<'_>,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>> {
+    match value {
+        Datum::Composite(t) => t.clone_in(mcx),
+        Datum::ByRef(image) => {
+            let bytes = image.as_slice();
+            // VARATT_IS_EXTENDED(PTR): NOT a plain 4-byte uncompressed datum
+            // (low two bits of the leading header byte != 0b00). Such a value is
+            // an external TOAST pointer, a compressed, or a short-header varlena
+            // and must be fetched/decompressed before the flat header decode.
+            let extended = bytes.first().is_some_and(|b| (b & 0x03) != 0x00);
+            if extended {
+                let flat = backend_access_common_detoast_seams::detoast_attr::call(mcx, bytes)?;
+                types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
+                    mcx,
+                    flat.as_slice(),
+                )
+            } else {
+                types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
+                    mcx, bytes,
+                )
+            }
+        }
+        other => unreachable!(
+            "DatumGetHeapTupleHeader: composite input Datum is neither Composite nor ByRef: {other:?}"
+        ),
+    }
+}
+
 /// `ExecEvalRowNull(ExprState *state, ExprEvalStep *op, ExprContext *econtext)`
 /// — `IS NULL` test on a row value.
 pub fn ExecEvalRowNull<'mcx>(
@@ -150,18 +193,7 @@ pub fn ExecEvalRowNullInt<'mcx>(
     // Decode the composite Datum (Composite or a flat by-ref HeapTupleHeader
     // image) into a FormedTuple, then look up its rowtype descriptor (the
     // internally-cached typcache lookup stands in for the C void* rowcache).
-    let tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx> = match &value {
-        Datum::Composite(t) => t.clone_in(mcx)?,
-        Datum::ByRef(image) => {
-            types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
-                mcx,
-                image.as_slice(),
-            )?
-        }
-        other => unreachable!(
-            "ExecEvalRowNullInt: composite input Datum is neither Composite nor ByRef: {other:?}"
-        ),
-    };
+    let tuple = datum_get_heap_tuple_header(mcx, &value)?;
     let header = tuple
         .tuple
         .t_data
@@ -459,18 +491,7 @@ pub fn ExecEvalFieldSelect<'mcx>(
     // tuple — as a flat `Datum::ByRef` HeapTupleHeader image; decode either into a
     // FormedTuple.
     let mcx = estate.es_query_cxt;
-    let tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx> = match &tup_datum {
-        Datum::Composite(t) => t.clone_in(mcx)?,
-        Datum::ByRef(image) => {
-            types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
-                mcx,
-                image.as_slice(),
-            )?
-        }
-        other => unreachable!(
-            "ExecEvalFieldSelect: composite input Datum is neither Composite nor ByRef: {other:?}"
-        ),
-    };
+    let tuple = datum_get_heap_tuple_header(mcx, &tup_datum)?;
 
     let header = tuple
         .tuple
@@ -609,18 +630,7 @@ pub fn ExecEvalFieldStoreDeForm<'mcx>(
     // Decode the input composite Datum (Composite or a flat by-ref
     // HeapTupleHeader image) into a FormedTuple — the owned stand-in for
     // DatumGetHeapTupleHeader / building the bare `tmptup`.
-    let tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx> = match &tup_datum {
-        Datum::Composite(t) => t.clone_in(mcx)?,
-        Datum::ByRef(image) => {
-            types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
-                mcx,
-                image.as_slice(),
-            )?
-        }
-        other => unreachable!(
-            "ExecEvalFieldStoreDeForm: composite input Datum is neither Composite nor ByRef: {other:?}"
-        ),
-    };
+    let tuple = datum_get_heap_tuple_header(mcx, &tup_datum)?;
 
     // tupDesc = get_cached_rowtype(op->d.fieldstore.fstore->resulttype, -1, rowcache, NULL);
     //
@@ -759,18 +769,7 @@ pub fn ExecEvalConvertRowtype<'mcx>(
     // ExecEvalRow / ExecEvalWholeRowVar / record_in) or as a flat by-ref
     // HeapTupleHeader image (a composite column deformed out of a heap tuple);
     // decode either into a FormedTuple.
-    let in_tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx> = match &tup_datum {
-        Datum::Composite(t) => t.clone_in(mcx)?,
-        Datum::ByRef(image) => {
-            types_tuple::backend_access_common_heaptuple::FormedTuple::from_datum_image(
-                mcx,
-                image.as_slice(),
-            )?
-        }
-        other => unreachable!(
-            "ExecEvalConvertRowtype: composite input Datum is neither Composite nor ByRef: {other:?}"
-        ),
-    };
+    let in_tuple = datum_get_heap_tuple_header(mcx, &tup_datum)?;
 
     // indesc  = get_cached_rowtype(op->d.convert_rowtype.inputtype,  -1, incache,  &changed);
     // outdesc = get_cached_rowtype(op->d.convert_rowtype.outputtype, -1, outcache, &changed);
