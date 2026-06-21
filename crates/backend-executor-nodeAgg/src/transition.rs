@@ -853,7 +853,27 @@ pub fn process_ordered_aggregate_single<'mcx>(
     // pertrans->sortstates[aggstate->current_set] = NULL; (already taken out)
     backend_utils_sort_tuplesort_seams::tuplesort_end::call(state)?;
 
+    // The `args[1].value` mirror (`distinct_value`) is left holding the last
+    // fetched-from-sort datum, whose memory the per-query/aggregate context owns
+    // (C never frees `args[1]`). Clear it (forgetting the non-owning word) so the
+    // owned-model `Datum::Drop` does not later uncharge a context torn down with
+    // the sort — see `store_distinct_value`.
+    clear_distinct_value(pertrans);
+
     Ok(())
+}
+
+/// Reset the `args[1].value` mirror to NULL, `forget`ting the prior non-owning
+/// word so its `Drop` (which would uncharge a context the per-query/aggregate
+/// memory owns and may already have torn down) never runs. See
+/// [`store_distinct_value`].
+#[inline]
+fn clear_distinct_value(pertrans: &mut AggStatePerTransData<'_>) {
+    store_distinct_value(
+        &mut pertrans.distinct_value,
+        types_tuple::backend_access_common_heaptuple::Datum::null(),
+    );
+    pertrans.distinct_value_isnull = true;
 }
 
 /// `process_ordered_aggregate_multi(aggstate, pertrans, pergroupstate)` — the
@@ -1260,8 +1280,30 @@ fn fcinfo_set_arg<'mcx>(
         i, 1,
         "fcinfo_set_arg: only the single-column ordered/distinct args[1] store is modeled"
     );
-    pertrans.distinct_value = value;
+    store_distinct_value(&mut pertrans.distinct_value, value);
     pertrans.distinct_value_isnull = isnull;
+}
+
+/// Store a fetched DISTINCT/ORDER-BY input into the `args[1].value` slot
+/// (`pertrans->distinct_value`).
+///
+/// C's `fcinfo->args[1].value` is a bare `Datum` *word*: overwriting it never
+/// frees the prior value (the datum's memory is owned by the per-query / aggregate
+/// context and reclaimed only at context teardown — `tuplesort_getdatum` returns
+/// values palloc'd in the per-query context, and the `process_ordered_aggregate`
+/// loop resets `tmpcontext` each iteration). The owned-model `Datum` is an RAII
+/// type whose `Drop` *uncharges* its backing context, so a plain `slot = value`
+/// runs `Drop` on the previous by-ref datum and dereferences a context that the
+/// loop's `tmpcontext` reset already tore down — a use-after-free (EXC_BAD_ACCESS
+/// in `mcx::uncharge`). Mirror C: replace the word and `forget` the old datum so
+/// the context owns the lifetime, exactly as C never frees `args[1]` here.
+#[inline]
+fn store_distinct_value<'mcx>(
+    slot: &mut types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+    value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
+) {
+    let old = core::mem::replace(slot, value);
+    core::mem::forget(old);
 }
 
 /// `pertrans->transfn_fcinfo->args[n] = { value, isnull }` — the interpreter's
@@ -1293,7 +1335,7 @@ pub fn set_transfn_arg<'mcx>(
         .pertrans
         .as_mut()
         .expect("set_transfn_arg: aggstate->pertrans not built")[transno];
-    pertrans.distinct_value = value;
+    store_distinct_value(&mut pertrans.distinct_value, value);
     pertrans.distinct_value_isnull = isnull;
 }
 
