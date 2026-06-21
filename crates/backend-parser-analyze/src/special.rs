@@ -209,6 +209,7 @@ pub fn transformCallStmt<'mcx>(
     let proc = backend_optimizer_util_clauses_seams::get_func_form::call(fexpr.funcid)?;
 
     fexpr.args = backend_optimizer_util_clauses::expand_function_arguments(
+        mcx,
         core::mem::take(&mut fexpr.args),
         true, /* include_out_arguments */
         fexpr.funcresulttype,

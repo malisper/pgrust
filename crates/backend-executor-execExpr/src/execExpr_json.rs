@@ -44,7 +44,7 @@ fn new_json_state<'mcx>(
 /// push the steps to evaluate a `JsonExpr` and its subsidiary expressions.
 pub(crate) fn exec_init_json_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    jsexpr: &JsonExpr,
+    jsexpr: &JsonExpr<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: ResultCellId,
 ) -> PgResult<()> {
@@ -495,7 +495,7 @@ fn is_coerce_to_domain(expr: &Expr) -> bool {
 /// result cell, and the step carries the cell ids the evaluator reads.
 pub(crate) fn exec_init_xml_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    xexpr: &XmlExpr,
+    xexpr: &XmlExpr<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: ResultCellId,
 ) -> PgResult<()> {
@@ -554,7 +554,7 @@ pub(crate) fn exec_init_xml_expr<'mcx>(
 /// the one left in `resv`).
 pub(crate) fn exec_init_json_value_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    jve: &types_nodes::primnodes::JsonValueExpr,
+    jve: &types_nodes::primnodes::JsonValueExpr<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: ResultCellId,
 ) -> PgResult<()> {
@@ -579,7 +579,7 @@ pub(crate) fn exec_init_json_value_expr<'mcx>(
 /// innermost caseval pointed at `resv`).
 pub(crate) fn exec_init_json_constructor<'mcx>(
     mcx: Mcx<'mcx>,
-    ctor: &types_nodes::primnodes::JsonConstructorExpr,
+    ctor: &types_nodes::primnodes::JsonConstructorExpr<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: ResultCellId,
 ) -> PgResult<()> {
@@ -699,7 +699,7 @@ pub(crate) fn exec_init_json_constructor<'mcx>(
 /// `exprType(pred->expr)`).
 pub(crate) fn exec_init_json_is_predicate<'mcx>(
     mcx: Mcx<'mcx>,
-    pred: &types_nodes::primnodes::JsonIsPredicate,
+    pred: &types_nodes::primnodes::JsonIsPredicate<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: ResultCellId,
 ) -> PgResult<()> {

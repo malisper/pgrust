@@ -22,7 +22,7 @@ seam_core::seam!(
     /// two arbitrary nodes (used by `transformWindowFuncCall` to de-duplicate
     /// WINDOW definitions: PARTITION BY / ORDER BY clause lists and frame
     /// offset expressions are general nodes, not bare `Expr`s).
-    pub fn equal_node<'mcx>(a: &types_nodes::nodes::Node<'mcx>, b: &types_nodes::nodes::Node<'mcx>) -> bool
+    pub fn equal_node<'a, 'b>(a: &types_nodes::nodes::Node<'a>, b: &types_nodes::nodes::Node<'b>) -> bool
 );
 
 seam_core::seam!(

@@ -55,7 +55,7 @@ seam_core::seam!(
     pub fn index_expressions<'mcx>(
         mcx: Mcx<'mcx>,
         index_relid: Oid,
-    ) -> PgResult<Option<PgVec<'mcx, Expr>>>
+    ) -> PgResult<Option<PgVec<'static, Expr<'static>>>>
 );
 
 seam_core::seam!(
@@ -69,7 +69,7 @@ seam_core::seam!(
     pub fn index_predicate<'mcx>(
         mcx: Mcx<'mcx>,
         index_relid: Oid,
-    ) -> PgResult<Option<PgVec<'mcx, Expr>>>
+    ) -> PgResult<Option<PgVec<'static, Expr<'static>>>>
 );
 
 seam_core::seam!(
@@ -84,7 +84,7 @@ seam_core::seam!(
     pub fn index_raw_expressions<'mcx>(
         mcx: Mcx<'mcx>,
         index_relid: Oid,
-    ) -> PgResult<Option<PgVec<'mcx, Expr>>>
+    ) -> PgResult<Option<PgVec<'static, Expr<'static>>>>
 );
 
 seam_core::seam!(
@@ -99,7 +99,7 @@ seam_core::seam!(
     pub fn index_raw_predicate<'mcx>(
         mcx: Mcx<'mcx>,
         index_relid: Oid,
-    ) -> PgResult<Option<PgVec<'mcx, Expr>>>
+    ) -> PgResult<Option<PgVec<'static, Expr<'static>>>>
 );
 
 seam_core::seam!(
@@ -114,7 +114,7 @@ seam_core::seam!(
     pub fn dummy_index_expressions<'mcx>(
         mcx: Mcx<'mcx>,
         index_relid: Oid,
-    ) -> PgResult<Option<PgVec<'mcx, Expr>>>
+    ) -> PgResult<Option<PgVec<'static, Expr<'static>>>>
 );
 
 seam_core::seam!(

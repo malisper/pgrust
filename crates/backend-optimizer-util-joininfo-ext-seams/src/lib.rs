@@ -27,18 +27,22 @@ use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerInfo, RelId, Relids};
 
 seam_core::seam!(
-    /// `pull_varnos(root, (Node *) expr)` (var.c) over an arena `&Expr`.
-    pub fn pull_varnos_expr(root: &PlannerInfo, expr: &Expr<'static>) -> Relids
+    /// `pull_varnos(root, (Node *) expr)` (var.c) over an arena `&Expr`. The
+    /// input is only read, so its lifetime is independent (it may be a
+    /// planner-run `'mcx` jointree node, not the `'static` arena).
+    pub fn pull_varnos_expr<'a>(root: &PlannerInfo, expr: &Expr<'a>) -> Relids
 );
 seam_core::seam!(
     /// `pull_var_clause((Node *) expr, flags)` (var.c) over an arena `&Expr`,
     /// returning the collected Var/PlaceHolderVar/Aggref/etc. nodes as owned
-    /// `Expr` values.
-    pub fn pull_var_clause_expr(expr: &Expr<'static>, flags: i32) -> Vec<Expr<'static>>
+    /// `Expr` values interned into the result context (`'static`). The input is
+    /// only read, so its lifetime is independent of the returned values'.
+    pub fn pull_var_clause_expr<'a>(expr: &Expr<'a>, flags: i32) -> Vec<Expr<'static>>
 );
 seam_core::seam!(
-    /// `contain_leaked_vars((Node *) clause)` (clauses.c).
-    pub fn contain_leaked_vars(clause: &Expr<'static>) -> PgResult<bool>
+    /// `contain_leaked_vars((Node *) clause)` (clauses.c). Read-only: the input
+    /// lifetime is independent.
+    pub fn contain_leaked_vars<'a>(clause: &Expr<'a>) -> PgResult<bool>
 );
 seam_core::seam!(
     /// `exprType((Node *) expr)` (nodeFuncs.c) over an arena `&Expr`.
@@ -51,7 +55,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `cost_qual_eval_node(&cost, (Node *) expr, root)` (costsize.c) for a
     /// single expression; returns `(startup, per_tuple)`.
-    pub fn cost_qual_eval_node_expr(root: &PlannerInfo, expr: &Expr<'static>) -> (f64, f64)
+    pub fn cost_qual_eval_node_expr<'a>(root: &PlannerInfo, expr: &Expr<'a>) -> (f64, f64)
 );
 seam_core::seam!(
     /// `clamp_width_est(tuple_width)` (costsize.c): clamp a 64-bit width estimate

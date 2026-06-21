@@ -420,12 +420,12 @@ pub fn transformContainerType(
 pub fn transformContainerSubscripts<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    container_base: Expr,
+    container_base: Expr<'mcx>,
     mut container_type: Oid,
     mut container_typmod: i32,
     indirection: &[A_Indices<'mcx>],
     is_assignment: bool,
-) -> PgResult<SubscriptingRef> {
+) -> PgResult<SubscriptingRef<'mcx>> {
     // Determine the actual container type, smashing any domain. In the
     // assignment case the caller already did this.
     if !is_assignment {
@@ -524,7 +524,7 @@ pub fn make_const<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'_>,
     aconst: &A_Const<'_>,
-) -> PgResult<Const> {
+) -> PgResult<Const<'mcx>> {
     // `setup_parser_errposition_callback(&pcbstate, pstate, aconst->location)`
     // arranges to report the literal's source location if the type's input
     // function (`numeric_in` / `bit_in`) raises an error. The ambient

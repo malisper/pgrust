@@ -6835,12 +6835,12 @@ fn jsonb_subscript_transform<'mcx>(
 /// transform method body.
 fn subscripting_transform_impl<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    sbsref: SubscriptingRef,
+    sbsref: SubscriptingRef<'mcx>,
     indirection: &[A_Indices<'mcx>],
     pstate: &mut ParseState<'mcx>,
     is_slice: bool,
     _is_assignment: bool,
-) -> PgResult<SubscriptingRef> {
+) -> PgResult<SubscriptingRef<'mcx>> {
     use types_nodes::execexpr::SubscriptHandler;
     let routines = lsyscache::get_subscripting_routines::call(sbsref.refcontainertype)?
         .expect("subscripting_transform: refcontainertype is not subscriptable");

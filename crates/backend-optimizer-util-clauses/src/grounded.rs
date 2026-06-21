@@ -141,20 +141,20 @@ fn contain_windowfuncs(node: Option<&Expr>) -> PgResult<bool> {
 }
 
 /// `WindowFuncLists` (clauses.h) — `WindowFunc` nodes organized by winref.
-pub struct WindowFuncLists {
+pub struct WindowFuncLists<'mcx> {
     pub num_window_funcs: i32,
     pub max_win_ref: u32,
     /// `windowFuncs[winref]` — the `WindowFunc` expressions found, by winref.
-    pub window_funcs: Vec<Vec<Expr>>,
+    pub window_funcs: Vec<Vec<Expr<'mcx>>>,
 }
 
 /// `find_window_functions(clause, maxWinRef)` (clauses.c:228).
 pub fn find_window_functions<'b>(
     mcx: Mcx<'b>,
-    clause: Option<&Expr>,
+    clause: Option<&Expr<'_>>,
     max_win_ref: u32,
-) -> PgResult<WindowFuncLists> {
-    let mut window_funcs: Vec<Vec<Expr>> = Vec::with_capacity((max_win_ref as usize) + 1);
+) -> PgResult<WindowFuncLists<'b>> {
+    let mut window_funcs: Vec<Vec<Expr<'b>>> = Vec::with_capacity((max_win_ref as usize) + 1);
     for _ in 0..=(max_win_ref as usize) {
         window_funcs.push(Vec::new());
     }
@@ -179,10 +179,10 @@ pub fn find_window_functions<'b>(
 /// passes the slice.
 pub fn find_window_functions_in_exprs<'b>(
     mcx: Mcx<'b>,
-    exprs: &[&Expr],
+    exprs: &[&Expr<'_>],
     max_win_ref: u32,
-) -> PgResult<WindowFuncLists> {
-    let mut window_funcs: Vec<Vec<Expr>> = Vec::with_capacity((max_win_ref as usize) + 1);
+) -> PgResult<WindowFuncLists<'b>> {
+    let mut window_funcs: Vec<Vec<Expr<'b>>> = Vec::with_capacity((max_win_ref as usize) + 1);
     for _ in 0..=(max_win_ref as usize) {
         window_funcs.push(Vec::new());
     }
@@ -206,8 +206,8 @@ pub fn find_window_functions_in_exprs<'b>(
 
 fn find_window_functions_walker<'b>(
     mcx: Mcx<'b>,
-    node: Option<&Expr>,
-    lists: &mut WindowFuncLists,
+    node: Option<&Expr<'_>>,
+    lists: &mut WindowFuncLists<'b>,
     err: &mut Option<PgError>,
 ) -> bool {
     let Some(node) = node else { return false };
@@ -1347,7 +1347,7 @@ fn find_forced_null_vars_list<'mcx>(
 
 /// `find_forced_null_var(node)` (clauses.c:1978) — the Var forced null by the
 /// given clause, or `None` if not an `IS NULL`-type clause.
-pub fn find_forced_null_var(node: Option<&Expr>) -> Option<&Expr> {
+pub fn find_forced_null_var<'a, 'mcx>(node: Option<&'a Expr<'mcx>>) -> Option<&'a Expr<'mcx>> {
     let node = node?;
     if let Some(expr) = node.as_nulltest() {
         // check for var IS NULL
@@ -1494,7 +1494,7 @@ pub fn CommuteOpExpr(clause: &mut OpExpr) -> PgResult<()> {
 /// `node` for `ScalarArrayOpExpr`s and fill in the hash function for any that
 /// would be useful to evaluate using a hash table. Destructively modifies
 /// `node` in place.
-pub fn convert_saop_to_hashed_saop<'mcx>(mcx: Mcx<'mcx>, node: &mut Expr) -> PgResult<()> {
+pub fn convert_saop_to_hashed_saop<'mcx>(mcx: Mcx<'mcx>, node: &mut Expr<'mcx>) -> PgResult<()> {
     // The Expr model exposes only the consume/rebuild `expression_tree_mutator`
     // for in-place rewrites; take the node out, transform it, and put it back.
     let taken = core::mem::replace(node, Expr::Const(types_nodes::primnodes::Const::default()));
@@ -1511,9 +1511,9 @@ pub fn convert_saop_to_hashed_saop<'mcx>(mcx: Mcx<'mcx>, node: &mut Expr) -> PgR
 /// (possibly modified) node.
 fn convert_saop_to_hashed_saop_walker<'mcx>(
     mcx: Mcx<'mcx>,
-    mut node: Expr,
+    mut node: Expr<'mcx>,
     err: &mut Option<PgError>,
-) -> Expr {
+) -> Expr<'mcx> {
     if err.is_some() {
         return node;
     }

@@ -81,7 +81,7 @@ seam_core::seam!(
     /// like any other node. A pure structural predicate, so infallible.
     ///
     /// INWARD: installed by `backend-optimizer-util-clauses::init_seams`.
-    pub fn contain_subplans(clause: &[types_nodes::primnodes::Expr<'static>]) -> bool
+    pub fn contain_subplans<'mcx>(clause: &[types_nodes::primnodes::Expr<'mcx>]) -> bool
 );
 
 // ===========================================================================
@@ -112,7 +112,7 @@ seam_core::seam!(
         inputcollid: Oid,
         args: alloc::vec::Vec<(Datum<'mcx>, bool, Oid)>,
         rettype: Oid,
-        fn_expr: Option<&Expr<'static>>,
+        fn_expr: Option<&Expr<'mcx>>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );
 
@@ -158,10 +158,10 @@ seam_core::seam!(
         result_type: Oid,
         result_collid: Oid,
         input_collid: Oid,
-        args: &[Expr<'static>],
+        args: &[Expr<'mcx>],
         funcvariadic: bool,
         estimate: bool,
-    ) -> PgResult<Option<Expr<'static>>>
+    ) -> PgResult<Option<Expr<'mcx>>>
 );
 
 seam_core::seam!(
@@ -278,17 +278,17 @@ seam_core::seam!(
         result_type: Oid,
         result_collid: Oid,
         input_collid: Oid,
-        args: &[Expr<'static>],
+        args: &[Expr<'mcx>],
         funcvariadic: bool,
         estimate: bool,
-    ) -> PgResult<Option<Expr<'static>>>
+    ) -> PgResult<Option<Expr<'mcx>>>
 );
 
 seam_core::seam!(
     /// `fetch_function_defaults(funcid)` (clauses.c): read and parse the
     /// `pg_proc.proargdefaults` default-expression list. `Err` carries the
     /// catalog/parse `ereport(ERROR)`. Owner: pg_proc / parser.
-    pub fn fetch_function_defaults(funcid: Oid) -> PgResult<alloc::vec::Vec<Expr<'static>>>
+    pub fn fetch_function_defaults<'mcx>(mcx: mcx::Mcx<'mcx>, funcid: Oid) -> PgResult<alloc::vec::Vec<Expr<'mcx>>>
 );
 
 seam_core::seam!(
@@ -298,12 +298,12 @@ seam_core::seam!(
     /// `proargtypes` / `prorettype` come from the pg_proc row. Returns the
     /// possibly-cast argument list. `Err` carries the type-resolution
     /// `ereport(ERROR)`. Owner: parser (parse_coerce).
-    pub fn recheck_cast_function_args(
-        args: alloc::vec::Vec<Expr<'static>>,
+    pub fn recheck_cast_function_args<'mcx>(
+        args: alloc::vec::Vec<Expr<'mcx>>,
         result_type: Oid,
         proargtypes: alloc::vec::Vec<Oid>,
         prorettype: Oid,
-    ) -> PgResult<alloc::vec::Vec<Expr<'static>>>
+    ) -> PgResult<alloc::vec::Vec<Expr<'mcx>>>
 );
 
 seam_core::seam!(
@@ -334,7 +334,7 @@ seam_core::seam!(
     /// `pg_proc.prorows` / a support function. Used by
     /// `expression_returns_set_rows`. `Err` carries the catalog/support
     /// `ereport(ERROR)`. Owner: selfuncs / per-function support.
-    pub fn get_function_rows(funcid: Oid, node: &Expr<'static>) -> PgResult<f64>
+    pub fn get_function_rows<'mcx>(funcid: Oid, node: &Expr<'mcx>) -> PgResult<f64>
 );
 
 seam_core::seam!(
@@ -367,7 +367,7 @@ seam_core::seam!(
     /// jsonpath in a `JsonExpr` mutable (references `@`-vars / non-immutable
     /// items)? Used by `contain_mutable_functions`' `JsonExpr` arm. `Err`
     /// carries the catalog `ereport(ERROR)`. Owner: jsonpath adt.
-    pub fn jsp_is_mutable(jsonexpr: &Expr<'static>) -> PgResult<bool>
+    pub fn jsp_is_mutable<'mcx>(jsonexpr: &Expr<'mcx>) -> PgResult<bool>
 );
 
 seam_core::seam!(

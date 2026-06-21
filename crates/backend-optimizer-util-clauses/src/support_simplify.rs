@@ -43,10 +43,10 @@ pub type SupportSimplifyFn = for<'mcx> fn(
     result_type: Oid,
     result_collid: Oid,
     input_collid: Oid,
-    args: &[Expr],
+    args: &[Expr<'mcx>],
     funcvariadic: bool,
     estimate: bool,
-) -> PgResult<Option<Expr>>;
+) -> PgResult<Option<Expr<'mcx>>>;
 
 fn table() -> &'static Mutex<HashMap<Oid, SupportSimplifyFn>> {
     static SUPPORT_SIMPLIFY_TABLE: OnceLock<Mutex<HashMap<Oid, SupportSimplifyFn>>> =
@@ -76,10 +76,10 @@ pub fn call_support_simplify<'mcx>(
     result_type: Oid,
     result_collid: Oid,
     input_collid: Oid,
-    args: &[Expr],
+    args: &[Expr<'mcx>],
     funcvariadic: bool,
     estimate: bool,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     let func = table()
         .lock()
         .expect("support-simplify table lock")
@@ -105,15 +105,15 @@ pub fn call_support_simplify<'mcx>(
 /// such crates register an explicit decline (documenting the support function
 /// exists but has no simplify leg) rather than relying solely on the
 /// unregistered-OID default.
-pub fn decline_simplify(
-    _mcx: mcx::Mcx<'_>,
+pub fn decline_simplify<'mcx>(
+    _mcx: mcx::Mcx<'mcx>,
     _funcid: Oid,
     _result_type: Oid,
     _result_collid: Oid,
     _input_collid: Oid,
-    _args: &[Expr],
+    _args: &[Expr<'mcx>],
     _funcvariadic: bool,
     _estimate: bool,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     Ok(None)
 }

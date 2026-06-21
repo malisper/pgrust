@@ -399,8 +399,8 @@ pub(crate) fn is_assignment_indirection_expr(expr: Option<&Expr>) -> bool {
 pub(crate) fn exec_init_func<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
-    node: &Expr,
-    args: &[Expr],
+    node: &Expr<'mcx>,
+    args: &[Expr<'mcx>],
     funcid: types_core::Oid,
     inputcollid: types_core::Oid,
     state: &mut ExprState<'mcx>,
@@ -611,7 +611,7 @@ pub(crate) fn exec_init_func<'mcx>(
 pub(crate) fn exec_init_scalar_array_op<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
-    opexpr: &types_nodes::primnodes::ScalarArrayOpExpr,
+    opexpr: &types_nodes::primnodes::ScalarArrayOpExpr<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: types_nodes::execexpr::ResultCellId,
 ) -> PgResult<()> {
@@ -961,7 +961,7 @@ pub(crate) fn exec_init_whole_row_var<'mcx>(
 pub(crate) fn exec_init_subscripting_ref<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     scratch: &mut types_nodes::execexpr::ExprEvalStep<'mcx>,
-    sbsref: &types_nodes::primnodes::SubscriptingRef,
+    sbsref: &types_nodes::primnodes::SubscriptingRef<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: types_nodes::execexpr::ResultCellId,
 ) -> PgResult<()> {
@@ -1381,7 +1381,7 @@ fn clone_state_inner<'mcx>(
 /// would be reached at their owners.
 fn subscript_exec_setup<'mcx>(
     routines: &types_nodes::execexpr::SubscriptRoutines,
-    sbsref: &types_nodes::primnodes::SubscriptingRef,
+    sbsref: &types_nodes::primnodes::SubscriptingRef<'mcx>,
     sbsrefstate: &mut types_nodes::execexpr::SubscriptingRefState<'mcx>,
     methods: &mut types_nodes::execexpr::SubscriptExecSteps,
 ) -> PgResult<()> {
@@ -1399,7 +1399,7 @@ fn subscript_exec_setup<'mcx>(
 /// no limit on the number of subscripts (jsonb has no nesting limit) and no
 /// slice support (the transform errored on slices).
 fn jsonb_exec_setup<'mcx>(
-    sbsref: &types_nodes::primnodes::SubscriptingRef,
+    sbsref: &types_nodes::primnodes::SubscriptingRef<'mcx>,
     sbsrefstate: &mut types_nodes::execexpr::SubscriptingRefState<'mcx>,
     methods: &mut types_nodes::execexpr::SubscriptExecSteps,
 ) -> PgResult<()> {
@@ -1447,7 +1447,7 @@ fn jsonb_exec_setup<'mcx>(
 /// `array_exec_setup(sbsref, sbsrefstate, methods)` (arraysubs.c) — set up the
 /// array subscript workspace and method discriminants.
 fn array_exec_setup<'mcx>(
-    sbsref: &types_nodes::primnodes::SubscriptingRef,
+    sbsref: &types_nodes::primnodes::SubscriptingRef<'mcx>,
     sbsrefstate: &mut types_nodes::execexpr::SubscriptingRefState<'mcx>,
     methods: &mut types_nodes::execexpr::SubscriptExecSteps,
 ) -> PgResult<()> {

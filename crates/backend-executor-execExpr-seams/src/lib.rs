@@ -249,8 +249,8 @@ seam_core::seam!(
     /// context. The owned model lends the `parent` plan-state (for slot
     /// descriptors / param context) and the estate. Fallible on OOM and on
     /// unsupported expression shapes (`ereport(ERROR)`).
-    pub fn exec_init_expr<'mcx>(
-        node: &types_nodes::primnodes::Expr,
+    pub fn exec_init_expr<'mcx, 'e>(
+        node: &types_nodes::primnodes::Expr<'e>,
         parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>
@@ -264,8 +264,8 @@ seam_core::seam!(
     /// owner reads `ecxt_param_list_info` off it; the compiled `ExprState` is
     /// allocated in the per-query context. Fallible on OOM and on unsupported
     /// expression shapes (`ereport(ERROR)`).
-    pub fn exec_init_expr_with_params<'mcx>(
-        node: &types_nodes::primnodes::Expr,
+    pub fn exec_init_expr_with_params<'mcx, 'e>(
+        node: &types_nodes::primnodes::Expr<'e>,
         econtext: types_nodes::EcxtId,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>
@@ -277,7 +277,7 @@ seam_core::seam!(
     /// compiles to `None` (the C `NULL` ExprState, treated as always-true).
     /// Allocated in the per-query context; fallible on OOM / `ereport(ERROR)`.
     pub fn exec_init_qual<'mcx>(
-        qual: Option<&[types_nodes::primnodes::Expr]>,
+        qual: Option<&[types_nodes::primnodes::Expr<'mcx>]>,
         parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>>
@@ -294,7 +294,7 @@ seam_core::seam!(
     /// `NULL` ExprState). Allocated in `es_query_cxt`; fallible on OOM /
     /// `ereport(ERROR)`.
     pub fn exec_init_qual_no_parent<'mcx>(
-        qual: Option<&[types_nodes::primnodes::Expr]>,
+        qual: Option<&[types_nodes::primnodes::Expr<'mcx>]>,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>>
 );
@@ -313,7 +313,7 @@ seam_core::seam!(
     /// partial-index predicate). Allocated in `es_query_cxt`; fallible on OOM /
     /// `ereport(ERROR)`.
     pub fn exec_prepare_qual<'mcx>(
-        qual: Option<&[types_nodes::primnodes::Expr]>,
+        qual: Option<&[types_nodes::primnodes::Expr<'mcx>]>,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>>
 );
@@ -325,7 +325,7 @@ seam_core::seam!(
     /// C NULL `ExprState *`), preserving positional correspondence. Allocated
     /// in the per-query context; fallible on OOM / `ereport(ERROR)`.
     pub fn exec_init_expr_list<'mcx>(
-        nodes: &[Option<&types_nodes::primnodes::Expr>],
+        nodes: &[Option<&types_nodes::primnodes::Expr<'mcx>>],
         parent: &mut types_nodes::execnodes::PlanStateData<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<mcx::PgVec<'mcx, Option<types_nodes::execexpr::ExprState<'mcx>>>>
@@ -340,7 +340,7 @@ seam_core::seam!(
     /// `None` cell, preserving positional correspondence. Allocated in the
     /// per-query context; fallible on OOM / `ereport(ERROR)`.
     pub fn exec_init_expr_list_no_parent<'mcx>(
-        nodes: &[Option<&types_nodes::primnodes::Expr>],
+        nodes: &[Option<&types_nodes::primnodes::Expr<'mcx>>],
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<mcx::PgVec<'mcx, Option<types_nodes::execexpr::ExprState<'mcx>>>>
 );
@@ -387,7 +387,7 @@ seam_core::seam!(
     /// allocated in the EState's per-query context. Fallible on OOM and on
     /// unsupported expression shapes (`ereport(ERROR)`).
     pub fn exec_prepare_expr_list<'mcx>(
-        expr_list: &[types_nodes::primnodes::Expr],
+        expr_list: &[types_nodes::primnodes::Expr<'mcx>],
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<
         mcx::PgVec<'mcx, mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>,
@@ -520,7 +520,7 @@ seam_core::seam!(
     pub fn exec_init_merge_when_qual<'mcx>(
         mtstate: &mut types_nodes::ModifyTableState<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
-        qual: Option<&[types_nodes::primnodes::Expr]>,
+        qual: Option<&[types_nodes::primnodes::Expr<'mcx>]>,
     ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>>
 );
 
@@ -575,7 +575,7 @@ seam_core::seam!(
         mtstate: &mut types_nodes::ModifyTableState<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
         result_rel_info: types_nodes::RriId,
-        join_condition: Option<&[types_nodes::primnodes::Expr]>,
+        join_condition: Option<&[types_nodes::primnodes::Expr<'mcx>]>,
     ) -> types_error::PgResult<()>
 );
 
@@ -677,7 +677,7 @@ seam_core::seam!(
         first_varno: types_core::primitive::Index,
         on_conflict_set: &[types_nodes::primnodes::TargetEntry<'mcx>],
         on_conflict_cols: &[i32],
-        on_conflict_where: Option<&[types_nodes::primnodes::Expr]>,
+        on_conflict_where: Option<&[types_nodes::primnodes::Expr<'mcx>]>,
     ) -> types_error::PgResult<()>
 );
 
@@ -705,7 +705,7 @@ seam_core::seam!(
         first_result_rel: types_nodes::RriId,
         first_varno: types_core::primitive::Index,
         econtext: types_nodes::EcxtId,
-        ref_join_condition: Option<&[types_nodes::primnodes::Expr]>,
+        ref_join_condition: Option<&[types_nodes::primnodes::Expr<'mcx>]>,
         ref_merge_action_list: &[types_nodes::modifytable::MergeAction<'mcx>],
     ) -> types_error::PgResult<()>
 );
@@ -739,7 +739,7 @@ seam_core::seam!(
     /// stored-generated-column generation expressions. Allocated in the
     /// per-query context; fallible on OOM / `ereport(ERROR)`.
     pub fn exec_prepare_expr<'mcx>(
-        node: &types_nodes::primnodes::Expr,
+        node: &types_nodes::primnodes::Expr<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>
 );
@@ -843,7 +843,7 @@ seam_core::seam!(
     pub fn exec_init_on_conflict_where<'mcx>(
         mtstate: &mut types_nodes::ModifyTableState<'mcx>,
         estate: &mut types_nodes::EStateData<'mcx>,
-        on_conflict_where: Option<&[types_nodes::primnodes::Expr]>,
+        on_conflict_where: Option<&[types_nodes::primnodes::Expr<'mcx>]>,
     ) -> types_error::PgResult<Option<types_nodes::execexpr::ExprState<'mcx>>>
 );
 
@@ -883,7 +883,7 @@ seam_core::seam!(
         rops: types_nodes::TupleSlotKind,
         eqfunctions: &[types_core::Oid],
         collations: &[types_core::Oid],
-        param_exprs: &[types_nodes::primnodes::Expr],
+        param_exprs: &[types_nodes::primnodes::Expr<'mcx>],
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>
 );
 
@@ -911,7 +911,7 @@ seam_core::seam!(
         ops: types_nodes::TupleSlotKind,
         hashfunc_oids: &[types_core::Oid],
         collations: &[types_core::Oid],
-        hash_exprs: &[types_nodes::primnodes::Expr],
+        hash_exprs: &[types_nodes::primnodes::Expr<'mcx>],
         opstrict: &[bool],
         init_value: u32,
         keep_nulls: bool,

@@ -82,7 +82,7 @@ fn oid_is_valid(oid: Oid) -> bool {
 /// Deep-copy an AND/OR component list into `mcx`. The derived `Expr::clone`
 /// panics on an owned-subtree child (a SubPlan/AlternativeSubPlan in an
 /// EXISTS-or qual), so each element is routed through `Expr::clone_in`.
-fn clone_exprs_in<'mcx>(args: Option<&[Expr]>, mcx: Mcx<'mcx>) -> PgResult<Vec<Expr>> {
+fn clone_exprs_in<'mcx>(args: Option<&[Expr<'_>]>, mcx: Mcx<'mcx>) -> PgResult<Vec<Expr<'mcx>>> {
     let Some(args) = args else {
         return Ok(Vec::new());
     };
@@ -138,14 +138,14 @@ enum PredIterKind {
     ArrayExpr,
 }
 
-struct PredIterInfo {
+struct PredIterInfo<'mcx> {
     kind: PredIterKind,
     /// For the `List` kind, the BoolExpr/list args to iterate; for the SAOP
     /// kinds, unused (the components are rebuilt from the clause).
-    list: Vec<Expr>,
+    list: Vec<Expr<'mcx>>,
 }
 
-impl PredIterInfo {
+impl<'mcx> PredIterInfo<'mcx> {
     fn atom() -> Self {
         PredIterInfo {
             kind: PredIterKind::Atom,
@@ -154,12 +154,12 @@ impl PredIterInfo {
     }
 
     /// Materialise the component nodes of `clause` per the recorded `kind`.
-    fn components<'mcx>(&self, mcx: Mcx<'mcx>, clause: &Expr) -> PgResult<Vec<Expr>> {
+    fn components<'a>(&self, mcx: Mcx<'a>, clause: &Expr<'_>) -> PgResult<Vec<Expr<'a>>> {
         match self.kind {
             PredIterKind::Atom => Ok(Vec::new()),
             PredIterKind::List => clone_exprs_in(Some(self.list.as_slice()), mcx),
             PredIterKind::ArrayConst => arrayconst_components(mcx, clause),
-            PredIterKind::ArrayExpr => arrayexpr_components(clause),
+            PredIterKind::ArrayExpr => arrayexpr_components(mcx, clause),
         }
     }
 }
@@ -172,7 +172,7 @@ impl PredIterInfo {
  * `scalar saop_op element_const` for each element.  We build the whole list up
  * front, exactly as the C iterator would have produced them in order.
  */
-fn arrayconst_components<'mcx>(mcx: Mcx<'mcx>, saop_node: &Expr) -> PgResult<Vec<Expr>> {
+fn arrayconst_components<'mcx>(mcx: Mcx<'mcx>, saop_node: &Expr<'_>) -> PgResult<Vec<Expr<'mcx>>> {
     let s = match saop_node.as_scalararrayopexpr() {
         Some(s) => s,
         _ => return Ok(Vec::new()),
@@ -231,13 +231,13 @@ fn arrayconst_components<'mcx>(mcx: Mcx<'mcx>, saop_node: &Expr) -> PgResult<Vec
  * The C `arrayexpr_*_fn` yields, for each element of the `ArrayExpr`, a dummy
  * `OpExpr` of the form `scalar saop_op element`.
  */
-fn arrayexpr_components(saop_node: &Expr) -> PgResult<Vec<Expr>> {
+fn arrayexpr_components<'mcx>(mcx: Mcx<'mcx>, saop_node: &Expr<'_>) -> PgResult<Vec<Expr<'mcx>>> {
     let s = match saop_node.as_scalararrayopexpr() {
         Some(s) => s,
         _ => return Ok(Vec::new()),
     };
     let scalar = &s.args[0];
-    let elements: &[Expr] = match s.args[1].as_arrayexpr() {
+    let elements: &[Expr<'_>] = match s.args[1].as_arrayexpr() {
         Some(a) => &a.elements,
         _ => return Ok(Vec::new()),
     };
@@ -245,8 +245,15 @@ fn arrayexpr_components(saop_node: &Expr) -> PgResult<Vec<Expr>> {
     let mut out = Vec::new();
     out.try_reserve(elements.len())
         .map_err(|_| oom("arrayexpr components"))?;
+    // The dummy `scalar saop_op elem` OpExprs are interned into `mcx` (the proof
+    // context) via `clone_in`, mirroring C's transient per-element nodes; this
+    // makes the result lifetime independent of the borrowed input clause.
     for elem in elements {
-        out.push(make_dummy_saop_opexpr(s, scalar.clone(), elem.clone()));
+        out.push(make_dummy_saop_opexpr(
+            s,
+            scalar.clone_in(mcx)?,
+            elem.clone_in(mcx)?,
+        ));
     }
     Ok(out)
 }
@@ -260,13 +267,13 @@ fn arrayexpr_components(saop_node: &Expr) -> PgResult<Vec<Expr>> {
 ///   const_expr.constbyval = elmbyval;
 ///   const_expr.constvalue = elem_values[i];
 ///   const_expr.constisnull = elem_nulls[i];
-fn make_dummy_const<'mcx>(
-    arrayconst: &Const,
+fn make_dummy_const<'mcx, 'out>(
+    arrayconst: &Const<'_>,
     elemtype: Oid,
     lbva: lsyscache::TypLenByValAlign,
     value: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
     isnull: bool,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'out>> {
     /*
      * The per-element value comes back from `deconstruct_array_values_bytes` as
      * a canonical `Datum`; carry it verbatim (a by-reference element keeps its
@@ -302,11 +309,11 @@ fn make_dummy_const<'mcx>(
 
 /// Build the dummy `scalar saop_op elem` `OpExpr` (mirrors the reusable `OpExpr`
 /// the C SAOP iterators stamp `leftop`/`rightop` into).
-fn make_dummy_saop_opexpr(
-    s: &types_nodes::primnodes::ScalarArrayOpExpr,
-    leftop: Expr,
-    rightop: Expr,
-) -> Expr {
+fn make_dummy_saop_opexpr<'mcx>(
+    s: &types_nodes::primnodes::ScalarArrayOpExpr<'_>,
+    leftop: Expr<'mcx>,
+    rightop: Expr<'mcx>,
+) -> Expr<'mcx> {
     Expr::OpExpr(OpExpr {
         opno: s.opno,
         opfuncid: s.opfuncid,
@@ -346,7 +353,7 @@ fn is_funcclause(n: &Expr) -> bool {
 
 /// `get_notclausearg(notclause)` — `linitial(((BoolExpr *) notclause)->args)`.
 #[inline]
-fn get_notclausearg(notclause: &Expr) -> Option<&Expr> {
+fn get_notclausearg<'a, 'b>(notclause: &'a Expr<'b>) -> Option<&'a Expr<'b>> {
     notclause.as_boolexpr().and_then(|b| b.args.first())
 }
 
@@ -384,7 +391,7 @@ pub fn predicate_implied_by(
 
 /// Resolve a list of arena handles to owned `Expr` values (the proof engine
 /// reads them; cloning matches the consumer, which already clones `indpred`).
-fn resolve_nodes(mcx: Mcx<'_>, root: &PlannerInfo, ids: &[NodeId]) -> PgResult<Vec<Expr>> {
+fn resolve_nodes<'mcx>(mcx: Mcx<'mcx>, root: &PlannerInfo, ids: &[NodeId]) -> PgResult<Vec<Expr<'mcx>>> {
     // Deep-copy via `clone_in` — the derived `Expr::clone` panics on an
     // owned-subtree child (e.g. a qual carrying a SubLink/Aggref/SubPlan). The
     // owned copies live only as long as the transient proof context.
@@ -396,8 +403,8 @@ fn resolve_nodes(mcx: Mcx<'_>, root: &PlannerInfo, ids: &[NodeId]) -> PgResult<V
 /// (tablecmds.c) form. Install body for the `predicate_implied_by_exprs` seam.
 pub fn predicate_implied_by_exprs<'mcx>(
     mcx: Mcx<'mcx>,
-    predicate: &[Expr],
-    clause: &[Expr],
+    predicate: &[Expr<'mcx>],
+    clause: &[Expr<'mcx>],
     weak: bool,
 ) -> PgResult<bool> {
     predicate_implied_by_impl(mcx, predicate, clause, weak)
@@ -409,8 +416,8 @@ pub fn predicate_implied_by_exprs<'mcx>(
 /// `predicate_refuted_by_exprs` seam.
 pub fn predicate_refuted_by_exprs<'mcx>(
     mcx: Mcx<'mcx>,
-    predicate: &[Expr],
-    clause: &[Expr],
+    predicate: &[Expr<'mcx>],
+    clause: &[Expr<'mcx>],
     weak: bool,
 ) -> PgResult<bool> {
     predicate_refuted_by_impl(mcx, predicate, clause, weak)
@@ -420,8 +427,8 @@ pub fn predicate_refuted_by_exprs<'mcx>(
 /// and `Mcx`-threaded (the catalog lookups allocate).
 pub(crate) fn predicate_implied_by_impl<'mcx>(
     mcx: Mcx<'mcx>,
-    predicate_list: &[Expr],
-    clause_list: &[Expr],
+    predicate_list: &[Expr<'mcx>],
+    clause_list: &[Expr<'mcx>],
     weak: bool,
 ) -> PgResult<bool> {
     if predicate_list.is_empty() {
@@ -435,15 +442,15 @@ pub(crate) fn predicate_implied_by_impl<'mcx>(
      * If either input is a single-element list, replace it with its lone
      * member; this avoids one useless level of AND-recursion.
      */
-    let p_holder: Expr;
-    let p: &Expr = if predicate_list.len() == 1 {
+    let p_holder: Expr<'mcx>;
+    let p: &Expr<'mcx> = if predicate_list.len() == 1 {
         &predicate_list[0]
     } else {
         p_holder = wrap_list(predicate_list)?;
         &p_holder
     };
-    let c_holder: Expr;
-    let c: &Expr = if clause_list.len() == 1 {
+    let c_holder: Expr<'mcx>;
+    let c: &Expr<'mcx> = if clause_list.len() == 1 {
         &clause_list[0]
     } else {
         c_holder = wrap_list(clause_list)?;
@@ -481,8 +488,8 @@ pub fn predicate_refuted_by(
 /// `predicate_refuted_by` over already-resolved owned `Expr` lists.
 pub(crate) fn predicate_refuted_by_impl<'mcx>(
     mcx: Mcx<'mcx>,
-    predicate_list: &[Expr],
-    clause_list: &[Expr],
+    predicate_list: &[Expr<'mcx>],
+    clause_list: &[Expr<'mcx>],
     weak: bool,
 ) -> PgResult<bool> {
     if predicate_list.is_empty() {
@@ -492,15 +499,15 @@ pub(crate) fn predicate_refuted_by_impl<'mcx>(
         return Ok(false); /* no restriction: refutation must fail */
     }
 
-    let p_holder: Expr;
-    let p: &Expr = if predicate_list.len() == 1 {
+    let p_holder: Expr<'mcx>;
+    let p: &Expr<'mcx> = if predicate_list.len() == 1 {
         &predicate_list[0]
     } else {
         p_holder = wrap_list(predicate_list)?;
         &p_holder
     };
-    let c_holder: Expr;
-    let c: &Expr = if clause_list.len() == 1 {
+    let c_holder: Expr<'mcx>;
+    let c: &Expr<'mcx> = if clause_list.len() == 1 {
         &clause_list[0]
     } else {
         c_holder = wrap_list(clause_list)?;
@@ -518,7 +525,7 @@ pub(crate) fn predicate_refuted_by_impl<'mcx>(
 /// implicit-AND list and an explicit AND `BoolExpr` classify identically and
 /// iterate the same component set, so we model the list as an AND `BoolExpr` —
 /// observationally identical for the proof engine.
-fn wrap_list(items: &[Expr]) -> PgResult<Expr> {
+fn wrap_list<'mcx>(items: &[Expr<'mcx>]) -> PgResult<Expr<'mcx>> {
     let mut args = Vec::new();
     args.try_reserve(items.len()).map_err(|_| oom("wrap_list"))?;
     for e in items {
@@ -545,8 +552,8 @@ fn wrap_list(items: &[Expr]) -> PgResult<Expr> {
  */
 fn predicate_implied_by_recurse<'mcx>(
     mcx: Mcx<'mcx>,
-    clause: &Expr,
-    predicate: &Expr,
+    clause: &Expr<'mcx>,
+    predicate: &Expr<'mcx>,
     weak: bool,
 ) -> PgResult<bool> {
     let mut result: bool;
@@ -690,11 +697,11 @@ fn predicate_implied_by_recurse<'mcx>(
  */
 fn predicate_refuted_by_recurse<'mcx>(
     mcx: Mcx<'mcx>,
-    clause: &Expr,
-    predicate: &Expr,
+    clause: &Expr<'mcx>,
+    predicate: &Expr<'mcx>,
     weak: bool,
 ) -> PgResult<bool> {
-    let mut not_arg: Option<&Expr>;
+    let mut not_arg: Option<&Expr<'mcx>>;
     let mut result: bool;
 
     let mut pred_info = PredIterInfo::atom();
@@ -887,8 +894,8 @@ fn predicate_refuted_by_recurse<'mcx>(
  */
 fn predicate_classify<'mcx>(
     mcx: Mcx<'mcx>,
-    clause: &Expr,
-    info: &mut PredIterInfo,
+    clause: &Expr<'_>,
+    info: &mut PredIterInfo<'mcx>,
 ) -> PgResult<PredClass> {
     /* Handle normal AND and OR boolean clauses */
     if is_andclause(clause) {
@@ -1042,8 +1049,8 @@ fn predicate_implied_by_simple_clause<'mcx>(
  */
 fn predicate_refuted_by_simple_clause<'mcx>(
     mcx: Mcx<'mcx>,
-    predicate: &Expr,
-    clause: &Expr,
+    predicate: &Expr<'mcx>,
+    clause: &Expr<'mcx>,
     weak: bool,
 ) -> PgResult<bool> {
     /* Allow interrupting long proof attempts */
@@ -1160,7 +1167,7 @@ fn equal_opt(a: Option<&Expr>, b: Option<&Expr>) -> bool {
  * If clause asserts the non-truth of a subclause, return that subclause;
  * otherwise return None.
  */
-fn extract_not_arg(clause: &Expr) -> Option<&Expr> {
+fn extract_not_arg<'a, 'b>(clause: &'a Expr<'b>) -> Option<&'a Expr<'b>> {
     if let Some(b) = clause.as_boolexpr() {
         if b.boolop == BoolExprType::NOT_EXPR {
             return b.args.first();
@@ -1180,7 +1187,7 @@ fn extract_not_arg(clause: &Expr) -> Option<&Expr> {
  * If clause asserts the falsity of a subclause, return that subclause;
  * otherwise return None.
  */
-fn extract_strong_not_arg(clause: &Expr) -> Option<&Expr> {
+fn extract_strong_not_arg<'a, 'b>(clause: &'a Expr<'b>) -> Option<&'a Expr<'b>> {
     if let Some(b) = clause.as_boolexpr() {
         if b.boolop == BoolExprType::NOT_EXPR {
             return b.args.first();

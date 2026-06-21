@@ -142,7 +142,7 @@ fn ValuesNext<'mcx>(
                 // only for the seam call. The compiled states are allocated in
                 // the per-query context by the seam.
                 let exprs = &node.exprlists[row];
-                let mut refs: mcx::PgVec<'mcx, Option<&types_nodes::primnodes::Expr>> =
+                let mut refs: mcx::PgVec<'mcx, Option<&types_nodes::primnodes::Expr<'mcx>>> =
                     mcx::vec_with_capacity_in(mcx, exprs.len())?;
                 for e in exprs.iter() {
                     refs.push(Some(e));
@@ -351,7 +351,7 @@ pub fn ExecInitValuesScan<'mcx>(
     //   tupdesc = ExecTypeFromExprList((List *) linitial(node->values_lists));
     //   ExecInitScanTupleSlot(estate, &scanstate->ss, tupdesc, &TTSOpsVirtual);
     let tupdesc = {
-        let first: &[types_nodes::primnodes::Expr] = plan
+        let first: &[types_nodes::primnodes::Expr<'mcx>] = plan
             .values_lists
             .first()
             .map(|l| l.as_slice())
@@ -400,7 +400,7 @@ pub fn ExecInitValuesScan<'mcx>(
             // owned by the node in the per-query context — the plan tree is
             // read-only)
             let src = &plan.values_lists[i];
-            let mut row: mcx::PgVec<'mcx, types_nodes::primnodes::Expr> =
+            let mut row: mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>> =
                 mcx::vec_with_capacity_in(mcx, src.len())?;
             for e in src.iter() {
                 // C aliases the plan's expr list (`exprlists[i] = exprs`); here
@@ -448,7 +448,7 @@ pub fn ExecInitValuesScan<'mcx>(
                 ..
             } = &mut *scanstate;
             let exprs = &exprlists[i];
-            let mut refs: mcx::PgVec<'mcx, Option<&types_nodes::primnodes::Expr>> =
+            let mut refs: mcx::PgVec<'mcx, Option<&types_nodes::primnodes::Expr<'mcx>>> =
                 mcx::vec_with_capacity_in(mcx, exprs.len())?;
             for e in exprs.iter() {
                 refs.push(Some(e));

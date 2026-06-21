@@ -58,12 +58,12 @@ seam_core::seam!(
     /// `ParseState *`.
     pub fn subscripting_transform<'mcx>(
         mcx: Mcx<'mcx>,
-        sbsref: SubscriptingRef<'static>,
+        sbsref: SubscriptingRef<'mcx>,
         indirection: &[A_Indices<'mcx>],
         pstate: &mut ParseState<'mcx>,
         is_slice: bool,
         is_assignment: bool,
-    ) -> PgResult<SubscriptingRef<'static>>
+    ) -> PgResult<SubscriptingRef<'mcx>>
 );
 
 seam_core::seam!(

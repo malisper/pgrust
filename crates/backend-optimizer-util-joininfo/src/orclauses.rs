@@ -88,13 +88,13 @@ fn is_safe_restriction_clause_for(root: &PlannerInfo, rinfo: RinfoId, rel: RelId
 /// Try to extract a restriction clause mentioning only "rel" from the given join
 /// OR-clause. Returns an OR clause (not a RestrictInfo!) pertaining to rel, or
 /// `None` if no OR clause could be extracted.
-fn extract_or_clause(
-    mcx: Mcx<'_>,
+fn extract_or_clause<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     or_rinfo: RinfoId,
     rel: RelId,
-) -> PgResult<Option<Expr>> {
-    let mut clauselist: Vec<Expr> = Vec::new();
+) -> PgResult<Option<Expr<'mcx>>> {
+    let mut clauselist: Vec<Expr<'mcx>> = Vec::new();
 
     // Scan each arm of the input OR clause.  We descend into or_rinfo->orclause,
     // which has RestrictInfo nodes embedded below the toplevel OR/AND structure.
@@ -113,7 +113,7 @@ fn extract_or_clause(
     };
 
     for orarg in or_args {
-        let mut subclauses: Vec<Expr> = Vec::new();
+        let mut subclauses: Vec<Expr<'mcx>> = Vec::new();
 
         // OR arguments should be ANDs or sub-RestrictInfos.
         if is_andclause(orarg) {
@@ -181,7 +181,7 @@ fn consider_new_or_clause<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
-    orclause: Expr,
+    orclause: Expr<'mcx>,
     join_or_rinfo: RinfoId,
 ) -> PgResult<()> {
     // Build a RestrictInfo from the new OR clause.  We can assume it's valid as a

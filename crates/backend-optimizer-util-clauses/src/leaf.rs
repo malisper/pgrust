@@ -67,7 +67,7 @@ pub fn estimate_array_length<'mcx>(
 
 /// `strip_array_coercion(node)` (selfuncs.c, static) — strip binary-compatible
 /// relabeling from an array node.
-fn strip_array_coercion(node: &Expr) -> &Expr {
+fn strip_array_coercion<'a, 'mcx>(node: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     let mut node = node;
     loop {
         if let Some(acoerce) = node.as_arraycoerceexpr() {

@@ -2805,17 +2805,18 @@ pub(crate) fn get_func_sql_body<'mcx>(
 /// `pg_proc.proargdefaults` `pg_node_tree` column of `funcid` and parse it into
 /// the default-argument expression list (`castNode(List, stringToNode(str))`).
 ///
-/// The clauses seam threads no `MemoryContext`, so we deserialize into a private
-/// scratch context and move the (lifetime-free) `Expr` nodes out into an owned
-/// `Vec`. Each list element is an `Expr`-deriving node; a non-`Expr` element is
-/// an error (the column is only ever a list of expressions). The C call site
-/// only reaches this with a non-null column (`SysCacheGetAttrNotNull`), so a
-/// SQL-null column or a cache miss is an `Err`.
-pub(crate) fn fetch_function_defaults(funcid: Oid) -> PgResult<std::vec::Vec<Expr>> {
-    let scratch = MemoryContext::new("syscache fetch_function_defaults projection");
-    let mcx = scratch.mcx();
+/// The `Expr` nodes are deserialized into the caller's `mcx` (C parses the
+/// `proargdefaults` `pg_node_tree` into `CurrentMemoryContext`), so the returned
+/// `Vec<Expr<'mcx>>` is tied to that arena. Each list element is an `Expr`-deriving
+/// node; a non-`Expr` element is an error (the column is only ever a list of
+/// expressions). The C call site only reaches this with a non-null column
+/// (`SysCacheGetAttrNotNull`), so a SQL-null column or a cache miss is an `Err`.
+pub(crate) fn fetch_function_defaults<'mcx>(
+    mcx: Mcx<'mcx>,
+    funcid: Oid,
+) -> PgResult<std::vec::Vec<Expr<'mcx>>> {
     let nodes = proc_argdefaults(mcx, funcid)?;
-    let mut out: std::vec::Vec<Expr> = std::vec::Vec::with_capacity(nodes.len());
+    let mut out: std::vec::Vec<Expr<'mcx>> = std::vec::Vec::with_capacity(nodes.len());
     for node in nodes {
         let expr = mcx::PgBox::into_inner(node).into_expr().ok_or_else(|| {
             PgError::error("fetch_function_defaults: proargdefaults element is not an expression")

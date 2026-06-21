@@ -120,7 +120,7 @@ seam_core::seam!(
     /// (`fold::eval_const_expressions`) threads only an `Mcx` (the C `root` is used
     /// solely for `boundParams`, not modeled by the port), so the seam carries the
     /// planner-run `Mcx<'mcx>` rather than `&mut PlannerInfo`.
-    pub fn eval_const_expressions_expr<'mcx>(mcx: mcx::Mcx<'mcx>, node: Expr<'static>) -> PgResult<Expr<'static>>
+    pub fn eval_const_expressions_expr<'mcx>(mcx: mcx::Mcx<'mcx>, node: Expr<'mcx>) -> PgResult<Expr<'mcx>>
 );
 
 seam_core::seam!(

@@ -274,7 +274,9 @@ pub fn init_seams() {
         // Deep-clone into the planner-run context via `clone_in` (NOT the
         // derived `.clone()`): the qual may carry context-allocated children
         // such as SubPlan/AlternativeSubPlan whose derived `Clone` panics.
-        fold::estimate_expression_value(run.mcx(), node.clone_in(run.mcx())?)
+        // The folded estimate is interned into the planner-run context; erase to
+        // the planner arena's notional `'static` (the seam's arena-intern boundary).
+        Ok(fold::estimate_expression_value(run.mcx(), node.clone_in(run.mcx())?)?.erase_lifetime())
     });
     backend_optimizer_path_small_seams::is_pseudo_constant_clause_relids::set(|clause, relids| {
         // C: `if (bms_is_empty(relids) && !contain_volatile_functions(clause))

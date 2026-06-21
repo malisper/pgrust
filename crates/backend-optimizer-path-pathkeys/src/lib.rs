@@ -1189,7 +1189,7 @@ pub fn find_var_for_subquery_tle(
     root: &PlannerInfo,
     rel: RelId,
     tle: NodeId,
-) -> Option<types_nodes::primnodes::Expr> {
+) -> Option<types_nodes::primnodes::Expr<'static>> {
     let tle_info = nf::targetentry_info::call(root, tle);
     // If the TLE is resjunk, it's certainly not visible to the outer query.
     if tle_info.resjunk {
@@ -1975,10 +1975,14 @@ fn mcx_collect(
 /// already-freed context (use-after-free / segfault in `Mcx::deallocate`). The
 /// planner arena outlives the whole planner run, satisfying the `clone_in`
 /// `'static`-erasure invariant.
-fn clone_sortkey_expr(
-    mcx: mcx::Mcx<'_>,
+fn clone_sortkey_expr<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     expr: &types_nodes::primnodes::Expr,
-) -> types_nodes::primnodes::Expr {
+) -> types_nodes::primnodes::Expr<'static> {
+    // The clone is interned into the planner arena (carried by `mcx`), which
+    // outlives the whole planner run; `erase_lifetime` is the sanctioned
+    // arena-intern boundary that ties the result to that long-lived context.
     expr.clone_in(mcx)
         .unwrap_or_else(|e| panic!("clone_sortkey_expr: {e:?}"))
+        .erase_lifetime()
 }

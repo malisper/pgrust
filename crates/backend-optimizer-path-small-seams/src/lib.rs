@@ -126,10 +126,10 @@ seam_core::seam!(
     /// (it asks `clause_selectivity` to estimate the raw boolean argument). The
     /// owning crate (`backend-optimizer-path-small`) installs it from its
     /// `init_seams()` (running `clause_selectivity_ext` with a `ClauseRef::Bare`).
-    pub fn clause_selectivity_node<'mcx>(
+    pub fn clause_selectivity_node<'mcx, 'a>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        clause: &Expr<'static>,
+        clause: &Expr<'a>,
         var_relid: i32,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
@@ -167,11 +167,11 @@ seam_core::seam!(
 seam_core::seam!(
     /// `restriction_selectivity(root, operatorid, args, inputcollid, varRelid)`
     /// (plancat.c): dispatch to the operator's restriction estimator.
-    pub fn restriction_selectivity<'mcx>(
+    pub fn restriction_selectivity<'mcx, 'a>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         operatorid: Oid,
-        args: &[Expr<'static>],
+        args: &[Expr<'a>],
         inputcollid: Oid,
         var_relid: i32,
     ) -> PgResult<f64>
@@ -179,11 +179,11 @@ seam_core::seam!(
 seam_core::seam!(
     /// `join_selectivity(root, operatorid, args, inputcollid, jointype, sjinfo)`
     /// (plancat.c): dispatch to the operator's join estimator.
-    pub fn join_selectivity<'mcx>(
+    pub fn join_selectivity<'mcx, 'a>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         operatorid: Oid,
-        args: &[Expr<'static>],
+        args: &[Expr<'a>],
         inputcollid: Oid,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
@@ -192,11 +192,11 @@ seam_core::seam!(
 seam_core::seam!(
     /// `function_selectivity(root, funcid, args, inputcollid, is_join,
     /// varRelid, jointype, sjinfo)` (plancat.c): support-function estimate.
-    pub fn function_selectivity<'mcx>(
+    pub fn function_selectivity<'mcx, 'a>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         funcid: Oid,
-        args: &[Expr<'static>],
+        args: &[Expr<'a>],
         inputcollid: Oid,
         is_join: bool,
         var_relid: i32,
@@ -207,10 +207,10 @@ seam_core::seam!(
 seam_core::seam!(
     /// `scalararraysel(root, clause, is_join_clause, varRelid, jointype, sjinfo)`
     /// (selfuncs.c).
-    pub fn scalararraysel<'mcx>(
+    pub fn scalararraysel<'mcx, 'a>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        clause: &Expr<'static>,
+        clause: &Expr<'a>,
         is_join_clause: bool,
         var_relid: i32,
         jointype: JoinType,
@@ -219,10 +219,10 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `rowcomparesel(root, clause, varRelid, jointype, sjinfo)` (selfuncs.c).
-    pub fn rowcomparesel<'mcx>(
+    pub fn rowcomparesel<'mcx, 'a>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        clause: &Expr<'static>,
+        clause: &Expr<'a>,
         var_relid: i32,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
@@ -231,11 +231,11 @@ seam_core::seam!(
 seam_core::seam!(
     /// `nulltestsel(root, nulltesttype, arg, varRelid, jointype, sjinfo)`
     /// (selfuncs.c). `arg` is the tested expression by value.
-    pub fn nulltestsel<'mcx>(
+    pub fn nulltestsel<'mcx, 'a>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         nulltesttype: i32,
-        arg: &Expr<'static>,
+        arg: &Expr<'a>,
         var_relid: i32,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
@@ -245,11 +245,11 @@ seam_core::seam!(
     /// `nulltestsel(root, IS_NULL, var, varRelid, jointype, sjinfo)` form used
     /// by `clauselist_selectivity` for the range-pair null adjustment, where the
     /// tested `var` is the common range variable (an `&Expr`).
-    pub fn nulltestsel_var<'mcx>(
+    pub fn nulltestsel_var<'mcx, 'a>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         nulltesttype: i32,
-        var: &Expr<'static>,
+        var: &Expr<'a>,
         var_relid: i32,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
@@ -258,11 +258,11 @@ seam_core::seam!(
 seam_core::seam!(
     /// `booltestsel(root, booltesttype, arg, varRelid, jointype, sjinfo)`
     /// (selfuncs.c).
-    pub fn booltestsel<'mcx>(
+    pub fn booltestsel<'mcx, 'a>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         booltesttype: i32,
-        arg: &Expr<'static>,
+        arg: &Expr<'a>,
         var_relid: i32,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
@@ -271,10 +271,10 @@ seam_core::seam!(
 seam_core::seam!(
     /// `boolvarsel(root, arg, varRelid)` (selfuncs.c): selectivity of a boolean
     /// expression treated as a variable.
-    pub fn boolvarsel<'mcx>(
+    pub fn boolvarsel<'mcx, 'a>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        arg: &Expr<'static>,
+        arg: &Expr<'a>,
         var_relid: i32,
     ) -> PgResult<f64>
 );
@@ -285,23 +285,23 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `NumRelids(root, clause)` (clauses.c): count of distinct rels in `clause`.
-    pub fn num_relids(root: &mut PlannerInfo, clause: &Expr<'static>) -> PgResult<i32>
+    pub fn num_relids<'a>(root: &mut PlannerInfo, clause: &Expr<'a>) -> PgResult<i32>
 );
 seam_core::seam!(
     /// `is_pseudo_constant_clause(clause)` (clauses.c).
-    pub fn is_pseudo_constant_clause(clause: &Expr<'static>) -> PgResult<bool>
+    pub fn is_pseudo_constant_clause<'a>(clause: &Expr<'a>) -> PgResult<bool>
 );
 seam_core::seam!(
     /// `is_pseudo_constant_clause_relids(clause, relids)` (clauses.c).
-    pub fn is_pseudo_constant_clause_relids(clause: &Expr<'static>, relids: &Relids) -> PgResult<bool>
+    pub fn is_pseudo_constant_clause_relids<'a>(clause: &Expr<'a>, relids: &Relids) -> PgResult<bool>
 );
 seam_core::seam!(
     /// `estimate_expression_value(root, node)` (clauses.c): fold a node to a
     /// `Const` if possible. Returns the (possibly-rewritten) expression by value.
-    pub fn estimate_expression_value<'mcx>(
+    pub fn estimate_expression_value<'mcx, 'a>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        node: &Expr<'static>,
+        node: &Expr<'a>,
     ) -> PgResult<Expr<'static>>
 );
 
@@ -366,10 +366,10 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `pull_varnos(root, (Node *) expr)` (var.c) for an inline `&Expr` operand.
-    pub fn pull_varnos_expr(root: &mut PlannerInfo, expr: &Expr<'static>) -> Relids
+    pub fn pull_varnos_expr<'a>(root: &mut PlannerInfo, expr: &Expr<'a>) -> Relids
 );
 seam_core::seam!(
     /// `contain_volatile_functions((Node *) expr)` (clauses.c) for an inline
     /// `&Expr` operand.
-    pub fn contain_volatile_functions_expr(expr: &Expr<'static>) -> bool
+    pub fn contain_volatile_functions_expr<'mcx>(expr: &Expr<'mcx>) -> bool
 );

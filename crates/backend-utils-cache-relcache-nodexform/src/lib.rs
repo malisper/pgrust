@@ -360,7 +360,15 @@ fn publication_desc(relid: Oid) -> PgResult<()> {
 /// list, `indpred` the implicit-AND predicate list); `stringToNode` yields a
 /// `Node::List` of `Expr` (defensively, a bare `Expr` is treated as a 1-element
 /// list). Each element is owned out of the decoded tree.
-fn decode_node_text_to_exprs<'mcx>(mcx: Mcx<'mcx>, text: &str) -> PgResult<alloc::vec::Vec<Expr>> {
+fn decode_node_text_to_exprs(text: &str) -> PgResult<alloc::vec::Vec<Expr<'static>>> {
+    // C's `RelationGetIndexExpressions`/`...Predicate` decode the catalog
+    // `pg_node_tree` into a context that persists for the query's use of the
+    // resulting trees (and re-derive per call). The owned model decodes into a
+    // process-/thread-lifetime context (reclaimed at backend exit) so the returned
+    // `Expr<'static>` honestly outlive every consumer — decoding into a caller's
+    // transient `mcx` and erasing to `'static` would be a lie the borrow checker
+    // now (correctly) rejects. Mirrors `pull_var_clause`'s result-context idiom.
+    let mcx = nodexform_result_mcx();
     let node = read_seam::string_to_node::call(mcx, text)?;
     let node = mcx::PgBox::into_inner(node);
     let mut out = alloc::vec::Vec::new();
@@ -375,7 +383,7 @@ fn decode_node_text_to_exprs<'mcx>(mcx: Mcx<'mcx>, text: &str) -> PgResult<alloc
         }
         None => {
             // A bare expression node (not wrapped in a List).
-            if let Some(e) = node_into_expr_fallback(text, mcx)? {
+            if let Some(e) = node_into_expr_fallback(text)? {
                 out.push(e);
             }
         }
@@ -386,9 +394,31 @@ fn decode_node_text_to_exprs<'mcx>(mcx: Mcx<'mcx>, text: &str) -> PgResult<alloc
 /// Re-decode and unwrap a bare `Expr` from a `pg_node_tree` text (used only on
 /// the defensive non-`List` path of [`decode_node_text_to_exprs`], where the
 /// first decode was consumed by the `into_list` test).
-fn node_into_expr_fallback<'mcx>(text: &str, mcx: Mcx<'mcx>) -> PgResult<Option<Expr>> {
-    let node = read_seam::string_to_node::call(mcx, text)?;
+fn node_into_expr_fallback(text: &str) -> PgResult<Option<Expr<'static>>> {
+    let node = read_seam::string_to_node::call(nodexform_result_mcx(), text)?;
     Ok(mcx::PgBox::into_inner(node).into_expr())
+}
+
+/// Process-/thread-lifetime context for decoded `pg_index.indexprs`/`indpred`
+/// trees (and their const-folded forms). C keeps these in a query-lifetime
+/// context; the faithful stand-in is a leaked per-thread `MemoryContext` whose
+/// contents are reclaimed at backend exit, so the returned `Expr<'static>` (and
+/// their by-reference children) never dangle.
+fn nodexform_result_mcx() -> Mcx<'static> {
+    use core::cell::Cell;
+    thread_local! {
+        static CTX: Cell<Option<&'static MemoryContext>> = const { Cell::new(None) };
+    }
+    CTX.with(|c| match c.get() {
+        Some(ctx) => ctx.mcx(),
+        None => {
+            let ctx: &'static MemoryContext = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+                MemoryContext::new("relcache index nodexform result"),
+            ));
+            c.set(Some(ctx));
+            ctx.mcx()
+        }
+    })
 }
 
 /// `RelationGetIndexExpressions(relation)` (relcache.c:5097): decode the raw
@@ -400,7 +430,7 @@ fn node_into_expr_fallback<'mcx>(text: &str, mcx: Mcx<'mcx>) -> PgResult<Option<
 fn index_expressions<'mcx>(
     mcx: Mcx<'mcx>,
     index_relid: Oid,
-) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+) -> PgResult<Option<PgVec<'static, Expr<'static>>>> {
     // heap_attisnull(rd_indextuple, Anum_pg_index_indexprs): the raw indexprs
     // text is read by OID through the syscache owner (the C `rd_indextuple`
     // analogue). NULL == no expression columns == NIL.
@@ -408,11 +438,12 @@ fn index_expressions<'mcx>(
         return Ok(None);
     };
 
-    let raw = decode_node_text_to_exprs(mcx, &text)?;
-    let mut result: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    let raw = decode_node_text_to_exprs(&text)?;
+    let mut result: PgVec<'static, Expr<'static>> = PgVec::new_in(nodexform_result_mcx());
     for e in raw {
         // eval_const_expressions(NULL, expr) — const-fold, no canonicalize.
-        let mut e = clauses_seam::eval_const_expressions_expr::call(mcx, e)?;
+        // Fold into the same query-lifetime result context as the decoded trees.
+        let mut e = clauses_seam::eval_const_expressions_expr::call(nodexform_result_mcx(), e)?;
         // fix_opfuncids((Node *) result).
         backend_nodes_core::nodefuncs::fix_opfuncids(&mut e)?;
         result.push(e);
@@ -428,7 +459,7 @@ fn index_expressions<'mcx>(
 fn index_predicate<'mcx>(
     mcx: Mcx<'mcx>,
     index_relid: Oid,
-) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+) -> PgResult<Option<PgVec<'static, Expr<'static>>>> {
     // heap_attisnull(rd_indextuple, Anum_pg_index_indpred): NULL == not partial
     // == NIL.
     let Some(text) = syscache_seam::pg_index_pred_text::call(index_relid)? else {
@@ -438,17 +469,20 @@ fn index_predicate<'mcx>(
     // The stored predicate is an implicit-AND `List*`; rebuild the single
     // boolean clause (`make_ands_explicit`) so the qual transforms (which work
     // over one `Expr`) match the C's `(Expr *) result` cast over the list.
-    let clauses = decode_node_text_to_exprs(mcx, &text)?;
+    let clauses = decode_node_text_to_exprs(&text)?;
     let pred_expr = backend_nodes_core::makefuncs::make_ands_explicit(clauses);
 
     // result = eval_const_expressions(NULL, (Node *) result);
-    let folded = clauses_seam::eval_const_expressions_expr::call(mcx, pred_expr)?;
+    // Const-fold/canonicalize into the same query-lifetime result context as the
+    // decoded trees (C keeps the whole predicate in one query context).
+    let rmcx = nodexform_result_mcx();
+    let folded = clauses_seam::eval_const_expressions_expr::call(rmcx, pred_expr)?;
     // result = canonicalize_qual((Expr *) result, false);
-    let canon = prepqual_seam::canonicalize_qual::call(mcx, Some(folded), false)?;
+    let canon = prepqual_seam::canonicalize_qual::call(rmcx, Some(folded), false)?;
     // result = make_ands_implicit((Expr *) result);
     let implicit = backend_nodes_core::makefuncs::make_ands_implicit(canon);
 
-    let mut result: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    let mut result: PgVec<'static, Expr<'static>> = PgVec::new_in(nodexform_result_mcx());
     for mut e in implicit {
         // fix_opfuncids((Node *) result).
         backend_nodes_core::nodefuncs::fix_opfuncids(&mut e)?;
@@ -465,12 +499,12 @@ fn index_predicate<'mcx>(
 fn index_raw_expressions<'mcx>(
     mcx: Mcx<'mcx>,
     index_relid: Oid,
-) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+) -> PgResult<Option<PgVec<'static, Expr<'static>>>> {
     let Some(text) = syscache_seam::pg_index_exprs_text::call(index_relid)? else {
         return Ok(None);
     };
-    let raw = decode_node_text_to_exprs(mcx, &text)?;
-    let mut result: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    let raw = decode_node_text_to_exprs(&text)?;
+    let mut result: PgVec<'static, Expr<'static>> = PgVec::new_in(nodexform_result_mcx());
     for e in raw {
         result.push(e);
     }
@@ -486,14 +520,14 @@ fn index_raw_expressions<'mcx>(
 fn index_raw_predicate<'mcx>(
     mcx: Mcx<'mcx>,
     index_relid: Oid,
-) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+) -> PgResult<Option<PgVec<'static, Expr<'static>>>> {
     let Some(text) = syscache_seam::pg_index_pred_text::call(index_relid)? else {
         return Ok(None);
     };
-    let clauses = decode_node_text_to_exprs(mcx, &text)?;
+    let clauses = decode_node_text_to_exprs(&text)?;
     let pred_expr = backend_nodes_core::makefuncs::make_ands_explicit(clauses);
     let implicit = backend_nodes_core::makefuncs::make_ands_implicit(Some(pred_expr));
-    let mut result: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    let mut result: PgVec<'static, Expr<'static>> = PgVec::new_in(nodexform_result_mcx());
     for e in implicit {
         result.push(e);
     }
@@ -511,7 +545,7 @@ fn index_raw_predicate<'mcx>(
 fn dummy_index_expressions<'mcx>(
     mcx: Mcx<'mcx>,
     index_relid: Oid,
-) -> PgResult<Option<PgVec<'mcx, Expr>>> {
+) -> PgResult<Option<PgVec<'static, Expr<'static>>>> {
     // heap_attisnull(rd_indextuple, Anum_pg_index_indexprs): the raw indexprs
     // text is read by OID through the syscache owner (the C `rd_indextuple`
     // analogue). NULL == no expression columns == NIL.
@@ -519,8 +553,8 @@ fn dummy_index_expressions<'mcx>(
         return Ok(None);
     };
 
-    let raw = decode_node_text_to_exprs(mcx, &text)?;
-    let mut result: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    let raw = decode_node_text_to_exprs(&text)?;
+    let mut result: PgVec<'static, Expr<'static>> = PgVec::new_in(nodexform_result_mcx());
     for rawexpr in &raw {
         // makeConst(exprType, exprTypmod, exprCollation, 1, (Datum) 0, true, true)
         // — a null Const of the same type/typmod/collation as the real expr. The
@@ -530,7 +564,7 @@ fn dummy_index_expressions<'mcx>(
         let consttypmod = backend_nodes_core::nodefuncs::expr_typmod(Some(rawexpr))?;
         let constcollid = backend_nodes_core::nodefuncs::expr_collation(Some(rawexpr))?;
         let cons = backend_nodes_core::makefuncs::make_const(
-            mcx,
+            nodexform_result_mcx(),
             consttype,
             consttypmod,
             constcollid,

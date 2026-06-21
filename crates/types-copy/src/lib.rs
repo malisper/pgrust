@@ -402,7 +402,7 @@ pub struct CopyParseState<'mcx> {
     /// (empty ⇒ the C `whereClause == NULL`, i.e. no WHERE). `CopyFrom` compiles
     /// this into [`qualexpr`](Self::qualexpr) via `ExecInitQual` and evaluates it
     /// per row.
-    pub where_clause: PgVec<'mcx, Expr>,
+    pub where_clause: PgVec<'mcx, Expr<'mcx>>,
     /// `ExprState *qualexpr` — the compiled WHERE qual (`None` ⇒ no WHERE),
     /// produced by `ExecInitQual(whereClause, ...)` at the top of `CopyFrom` and
     /// evaluated per row with `ExecQual` against the scan slot.

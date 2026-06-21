@@ -66,7 +66,7 @@ use crate::execExpr_core;
 pub fn exec_init_merge_when_qual<'mcx>(
     mtstate: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    qual: Option<&[Expr]>,
+    qual: Option<&[Expr<'mcx>]>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     execExpr_core::exec_init_qual(qual, &mut mtstate.ps, estate)
 }
@@ -162,7 +162,7 @@ pub fn exec_init_merge_join_condition<'mcx>(
     mtstate: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
     result_rel_info: RriId,
-    join_condition: Option<&[Expr]>,
+    join_condition: Option<&[Expr<'mcx>]>,
 ) -> PgResult<()> {
     // resultRelInfo->ri_MergeJoinCondition =
     //     ExecInitQual((List *) joinCondition, &mtstate->ps);
@@ -284,7 +284,7 @@ pub fn partition_init_on_conflict_update<'mcx>(
     _first_varno: Index,
     _on_conflict_set: &[TargetEntry<'mcx>],
     _on_conflict_cols: &[i32],
-    _on_conflict_where: Option<&[Expr]>,
+    _on_conflict_where: Option<&[Expr<'mcx>]>,
 ) -> PgResult<()> {
     panic!(
         "execExpr-modify::partition_init_on_conflict_update: OnConflictSetState build routes to \
@@ -317,7 +317,7 @@ pub fn partition_init_merge_actions<'mcx>(
     _first_result_rel: RriId,
     _first_varno: Index,
     _econtext: EcxtId,
-    _ref_join_condition: Option<&[Expr]>,
+    _ref_join_condition: Option<&[Expr<'mcx>]>,
     _ref_merge_action_list: &[MergeAction<'mcx>],
 ) -> PgResult<()> {
     panic!(
@@ -581,7 +581,7 @@ pub fn exec_build_on_conflict_set_projection<'mcx>(
 pub fn exec_init_on_conflict_where<'mcx>(
     mtstate: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    on_conflict_where: Option<&[Expr]>,
+    on_conflict_where: Option<&[Expr<'mcx>]>,
 ) -> PgResult<Option<ExprState<'mcx>>> {
     let compiled = execExpr_core::exec_init_qual(on_conflict_where, &mut mtstate.ps, estate)?;
     Ok(compiled.map(PgBox::into_inner))

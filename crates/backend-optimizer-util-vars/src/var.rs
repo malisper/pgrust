@@ -681,7 +681,7 @@ pub const PVC_RECURSE_PLACEHOLDERS: i32 = 0x0020;
 
 /// `pull_var_clause_context` (var.c:58-62).
 struct PullVarClauseContext<'mcx> {
-    varlist: Vec<Expr>,
+    varlist: Vec<Expr<'mcx>>,
     flags: i32,
     /// Memory context for deep-copying collected nodes (`Aggref`/`WindowFunc`/
     /// `GroupingFunc` carry context-allocated children that a plain `.clone()`
@@ -697,7 +697,11 @@ struct PullVarClauseContext<'mcx> {
 /// per the `PVC_*` flag bits; `GroupingFunc` is treated like `Aggref`;
 /// `CurrentOfExpr` is ignored. Upper-level vars/aggrefs/PHVs should not be seen.
 /// Returns a list of the (cloned) nodes found. Does not examine subqueries.
-pub fn pull_var_clause<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node, flags: i32) -> PgResult<Vec<Expr>> {
+pub fn pull_var_clause<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    node: &Node,
+    flags: i32,
+) -> PgResult<Vec<Expr<'mcx>>> {
     // Assert that caller has not specified inconsistent flags.
     debug_assert_ne!(
         flags & (PVC_INCLUDE_AGGREGATES | PVC_RECURSE_AGGREGATES),
@@ -726,7 +730,7 @@ pub fn pull_var_clause<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node, flags: i32) -> Pg
 }
 
 /// `pull_var_clause_walker` (var.c:672).
-fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bool {
+fn pull_var_clause_walker<'mcx>(node: &Node, context: &mut PullVarClauseContext<'mcx>) -> bool {
     if context.err.is_some() {
         return true;
     }
@@ -817,7 +821,7 @@ fn pull_var_clause_walker(node: &Node, context: &mut PullVarClauseContext) -> bo
 /// on arms known to be `Node::Expr`. Uses `Expr::clone_in` (not a plain
 /// `.clone()`) because `Aggref`/`WindowFunc`/`GroupingFunc` carry
 /// context-allocated children whose derived `.clone()` panics.
-fn node_expr_clone<'mcx>(node: &Node, mcx: mcx::Mcx<'mcx>) -> PgResult<Expr> {
+fn node_expr_clone<'mcx>(node: &Node, mcx: mcx::Mcx<'mcx>) -> PgResult<Expr<'mcx>> {
     match node.as_expr() {
         Some(e) => e.clone_in(mcx),
         None => unreachable!("node_expr_clone on non-Expr node"),

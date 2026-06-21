@@ -18,9 +18,9 @@ seam_core::seam!(
     /// `x <> y`). Consumes the owned clause and returns the negated tree.
     /// `Err` carries the catalog-lookup `ereport(ERROR)` surface (the negator
     /// resolution reads `pg_operator`).
-    pub fn negate_clause(
-        node: types_nodes::primnodes::Expr<'static>,
-    ) -> types_error::PgResult<types_nodes::primnodes::Expr<'static>>
+    pub fn negate_clause<'mcx>(
+        node: types_nodes::primnodes::Expr<'mcx>,
+    ) -> types_error::PgResult<types_nodes::primnodes::Expr<'mcx>>
 );
 
 seam_core::seam!(
@@ -30,7 +30,7 @@ seam_core::seam!(
     /// the catalog-lookup `ereport(ERROR)` surface.
     pub fn canonicalize_qual<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        qual: Option<types_nodes::primnodes::Expr<'static>>,
+        qual: Option<types_nodes::primnodes::Expr<'mcx>>,
         is_check: bool,
-    ) -> types_error::PgResult<Option<types_nodes::primnodes::Expr<'static>>>
+    ) -> types_error::PgResult<Option<types_nodes::primnodes::Expr<'mcx>>>
 );
