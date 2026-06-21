@@ -254,16 +254,6 @@ seam_core::seam!(
     ) -> Option<i32>
 );
 
-seam_core::seam!(
-    /// `find_base_rel(root, scanrelid)->subroot->outer_params` (relnode.c +
-    /// pathnodes.h) — for `finalize_plan`'s `T_SubqueryScan` arm: the
-    /// sub-`PlannerInfo`'s `outer_params` set and a clone usable to recurse
-    /// into the subplan with the sub-root. Returns the [`PlanId`]-keyed subroot
-    /// plus its `outer_params` `Relids`. relnode.c is ported but does not yet
-    /// expose `subroot` retrieval over this model.
-    pub fn base_rel_subroot_outer_params(root: &PlannerInfo, scanrelid: i32) -> Relids
-);
-
 /// The triple a planned SubLink/CTE sub-`Query` yields from
 /// [`plan_sublink_subquery`] — the analogue of C's
 /// `subroot = subquery_planner(...); best_path = ...; plan = create_plan(...)`.

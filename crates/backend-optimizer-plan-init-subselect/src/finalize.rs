@@ -43,6 +43,18 @@ fn elog_error(msg: impl Into<alloc::string::String>) -> PgError {
 /// `types_nodes::Bitmapset<'mcx>` — both are word-vectors of param ids; the
 /// boundary between the `outer_params` set (Relids) and the `Plan.extParam`
 /// model (types_nodes) needs this bridge.
+/// `find_base_rel(root, relid)` (relnode.c) — a base/otherrel entry that must
+/// already exist. Mirrored locally (a plain `simple_rel_array` lookup) to avoid
+/// a relnode dependency cycle; `relnode::find_base_rel` is the same body.
+fn find_base_rel(root: &PlannerInfo, relid: i32) -> RelId {
+    if (relid as u32) < (root.simple_rel_array_size as u32) {
+        if let Some(rel) = root.simple_rel_array[relid as usize] {
+            return rel;
+        }
+    }
+    panic!("no relation entry for relid {}", relid);
+}
+
 fn relids_to_bms<'mcx>(
     mcx: Mcx<'mcx>,
     r: &types_pathnodes::Relids,
@@ -395,20 +407,24 @@ fn finalize_node_specific<'mcx>(
         }
         types_nodes::nodes::ntag::T_SubqueryScan => {
             let sscan = plan.as_subqueryscan_mut().unwrap();
-            // Recurse finalize_plan on the subquery with its subroot's
-            // outer_params. The subroot PlannerInfo is not readily reachable per
-            // SubqueryScan in this model; the subquery_params come from the
-            // ported `base_rel_subroot_outer_params` seam, and the recursive
-            // finalize of the sub-plan needs the subroot as `root` — which this
-            // model cannot hand back through the seam. We recurse finalize on the
-            // sub-plan tree with the SAME root and the subquery_params (this is
-            // exact for param-id bookkeeping: finalize_plan only consults `root`
-            // for `planner_subplan_get_plan` of SubPlan/initPlan children, which
-            // address the shared `glob->subplans`).
+            // C (subselect.c finalize_plan):
+            //   rel = find_base_rel(root, sscan->scan.scanrelid);
+            //   subquery_params = rel->subroot->outer_params;
+            //   finalize_plan(rel->subroot, sscan->subplan, ...);
+            // The recursion MUST run against the subquery's OWN subroot, not the
+            // parent root — the sub-plan's relids index the subroot's
+            // simple_rel_array. Recursing with the parent root panics
+            // `find_base_rel` (e.g. a WindowAgg sub-plan that re-derives a base
+            // relid during finalize). The subroot is owned by the parent's
+            // RelOptInfo (`Subroot(Box<PlannerInfo>)`), reachable here directly.
             let scanrelid = sscan.scan.scanrelid as i32;
-            let subquery_params_relids =
-                initext::base_rel_subroot_outer_params::call(root, scanrelid);
-            let mut subquery_params = relids_to_bms(mcx, &subquery_params_relids)?;
+            let rel_id = find_base_rel(root, scanrelid);
+            let subroot = root
+                .rel(rel_id)
+                .subroot
+                .as_deref()
+                .expect("SubqueryScan base rel has no subroot");
+            let mut subquery_params = relids_to_bms(mcx, &subroot.outer_params)?;
             if *gather_param >= 0 {
                 subquery_params =
                     Some(bms::bms_add_member(mcx, subquery_params, *gather_param)?);
@@ -416,7 +432,7 @@ fn finalize_node_specific<'mcx>(
             if let Some(subplan) = sscan.subplan.as_deref_mut() {
                 finalize_plan(
                     mcx,
-                    root,
+                    subroot,
                     run,
                     Some(subplan),
                     *gather_param,
@@ -471,11 +487,14 @@ fn finalize_node_specific<'mcx>(
             let cte = plan.as_ctescan_mut().unwrap();
             // Find the referenced CTE plan and incorporate its external paramids.
             let plan_id = cte.ctePlanId;
-            let glob = root
-                .glob
-                .as_ref()
-                .expect("finalize_plan CteScan: root->glob is NULL");
-            if plan_id < 1 || (plan_id as usize) > glob.subplans.len() {
+            // `glob->subplans` is parallel to the run's shared subplan store; a
+            // stashed subquery subroot has `glob == None` (the glob lives on the
+            // top root), so fall back to the run's subplan count for the bound.
+            let nsubplans = match root.glob.as_ref() {
+                Some(glob) => glob.subplans.len(),
+                None => run.subplan_len(),
+            };
+            if plan_id < 1 || (plan_id as usize) > nsubplans {
                 return Err(elog_error(alloc::format!(
                     "could not find plan for CteScan referencing plan ID {plan_id}"
                 )));

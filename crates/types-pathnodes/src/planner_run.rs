@@ -556,12 +556,22 @@ pub fn planner_subplan_get_plan<'a, 'mcx>(
     root: &PlannerInfo,
     plan_id: i32,
 ) -> &'a Node<'mcx> {
-    let glob = root
-        .glob
-        .as_ref()
-        .expect("planner_subplan_get_plan: root->glob is NULL");
-    let id = glob.subplans[(plan_id as usize) - 1];
-    run.resolve_subplan(id)
+    // `glob->subplans` is a shared, append-only list parallel to the run's
+    // subplan store: `intern_subplan` returns `PlanId(len)` and the same handle
+    // is pushed onto `glob.subplans`, so `glob.subplans[plan_id - 1] ==
+    // PlanId(plan_id - 1)`. C shares one `glob` across the parent root and every
+    // subroot; this owned model moves the glob onto the top root only (a stashed
+    // subquery subroot has `glob == None`). When `finalize_plan` recurses into a
+    // SubqueryScan with its subroot (C: `finalize_plan(rel->subroot, ...)`), the
+    // subroot has no glob — resolve directly against the run, which holds the
+    // same shared subplan store. Equivalent for any root.
+    match root.glob.as_ref() {
+        Some(glob) => {
+            let id = glob.subplans[(plan_id as usize) - 1];
+            run.resolve_subplan(id)
+        }
+        None => run.resolve_subplan(PlanId((plan_id - 1) as u32)),
+    }
 }
 
 #[cfg(test)]
