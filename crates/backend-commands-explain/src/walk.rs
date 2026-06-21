@@ -1453,6 +1453,41 @@ fn explain_scan_target_switch<'es, 'p>(
             plan_node,
             plan_node.expect_modifytable().nominalRelation,
         ),
+        ntag::T_NestLoop | ntag::T_MergeJoin | ntag::T_HashJoin => {
+            // explain.c:1716 — interpolate the join type into the node name.
+            use types_nodes::jointype::JoinType;
+            let tag = plan_node.node_tag();
+            let jointype = match tag {
+                ntag::T_NestLoop => plan_node.expect_nestloop().join.jointype,
+                ntag::T_MergeJoin => plan_node.expect_mergejoin().join.jointype,
+                _ => plan_node.expect_hashjoin().join.jointype,
+            };
+            let jointype_str = match jointype {
+                JoinType::JOIN_INNER => "Inner",
+                JoinType::JOIN_LEFT => "Left",
+                JoinType::JOIN_FULL => "Full",
+                JoinType::JOIN_RIGHT => "Right",
+                JoinType::JOIN_SEMI => "Semi",
+                JoinType::JOIN_ANTI => "Anti",
+                JoinType::JOIN_RIGHT_SEMI => "Right Semi",
+                JoinType::JOIN_RIGHT_ANTI => "Right Anti",
+                _ => "???",
+            };
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                // For historical reasons, the join type is interpolated into the
+                // node type name in TEXT format.
+                if jointype != JoinType::JOIN_INNER {
+                    es.str.try_push_str(" ")?;
+                    es.str.try_push_str(jointype_str)?;
+                    es.str.try_push_str(" Join")?;
+                } else if tag != ntag::T_NestLoop {
+                    es.str.try_push_str(" Join")?;
+                }
+                Ok(())
+            } else {
+                fmt::ExplainPropertyText("Join Type", jointype_str, es)
+            }
+        }
         _ => Ok(()),
     }
 }
