@@ -3621,11 +3621,16 @@ fn build_final_paths<'mcx>(
 fn build_returning_list_for_leaf<'mcx>(
     run: &mut PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    this_result_rel: types_pathnodes::RelId,
-    top_result_rel: types_pathnodes::RelId,
+    // `Some((this, top))` requests attribute-namespace translation of the
+    // RETURNING expressions from `top` down to `this` (the inherited leaf case).
+    // `None` is the single-relation case (C: `returningLists =
+    // list_make1(parse->returningList)`), which copies the list verbatim and
+    // must NOT touch the planner RelOptInfo array — the single-relation target
+    // rel of an INSERT/UPDATE/DELETE has no base RelOptInfo, so calling
+    // find_base_rel on it would panic.
+    translate_rels: Option<(types_pathnodes::RelId, types_pathnodes::RelId)>,
 ) -> PgResult<Vec<types_pathnodes::NodeId>> {
     let mcx = run.mcx();
-    let translate = this_result_rel != top_result_rel;
     let n = run.resolve(root.parse).returningList.len();
     let mut ids: Vec<types_pathnodes::NodeId> = Vec::with_capacity(n);
     for i in 0..n {
@@ -3645,7 +3650,7 @@ fn build_returning_list_for_leaf<'mcx>(
                 tle.resjunk,
             )
         };
-        let expr_final = if translate {
+        let expr_final = if let Some((this_result_rel, top_result_rel)) = translate_rels {
             backend_optimizer_util_appendinfo::adjust_appendrel_attrs_multilevel(
                 root,
                 expr_clone,
@@ -3807,12 +3812,14 @@ fn add_modifytable_to_path<'mcx>(
             if has_returning {
                 // returningList = parse->returningList, translated to this leaf's
                 // attribute namespace when it isn't the top target rel.
-                let ids = build_returning_list_for_leaf(
-                run,
-                    root,
-                    this_result_rel,
-                    top_result_rel,
-                )?;
+                // Translate only when this leaf isn't the top target rel
+                // (C: adjust_appendrel_attrs_multilevel for non-top leaves).
+                let translate_rels = if this_result_rel != top_result_rel {
+                    Some((this_result_rel, top_result_rel))
+                } else {
+                    None
+                };
+                let ids = build_returning_list_for_leaf(run, root, translate_rels)?;
                 returning_lists.push(ids);
             }
         }
@@ -3825,12 +3832,9 @@ fn add_modifytable_to_path<'mcx>(
                 update_colnos_lists.push(root.update_colnos.clone());
             }
             if has_returning {
-                let ids = build_returning_list_for_leaf(
-                run,
-                    root,
-                    top_result_rel,
-                    top_result_rel,
-                )?;
+                // Dummy single-rel fallback for the top target rel: no
+                // translation (top == top).
+                let ids = build_returning_list_for_leaf(run, root, None)?;
                 returning_lists.push(ids);
             }
         }
@@ -3883,14 +3887,11 @@ fn add_modifytable_to_path<'mcx>(
         // returningLists = list_make1(parse->returningList).
         let mut returning_lists: Vec<Vec<types_pathnodes::NodeId>> = Vec::new();
         if has_returning {
-            let top_result_rel =
-                backend_optimizer_util_relnode::find_base_rel(root, result_relation);
-            let ids = build_returning_list_for_leaf(
-                run,
-                root,
-                top_result_rel,
-                top_result_rel,
-            )?;
+            // Single-relation case (C: `returningLists =
+            // list_make1(parse->returningList)`): no translation, and crucially
+            // no find_base_rel on the result relation — it has no base
+            // RelOptInfo for a non-inherited INSERT/UPDATE/DELETE.
+            let ids = build_returning_list_for_leaf(run, root, None)?;
             returning_lists.push(ids);
         }
         (0, result_relations, update_colnos_lists, returning_lists)
