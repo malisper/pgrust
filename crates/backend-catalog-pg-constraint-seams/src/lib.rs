@@ -194,9 +194,14 @@ pub struct CreateConstraintEntryArgs<'a> {
     pub parent_constr_id: Oid,
     /// `Oid relId` — `RelationGetRelid(heapRelation)`.
     pub rel_id: Oid,
-    /// `const int16 *constraintKey` — `indexInfo->ii_IndexAttrNumbers`,
-    /// `constraintNKeys = ii_NumIndexKeyAttrs` elements.
+    /// `const int16 *constraintKey` — `indexInfo->ii_IndexAttrNumbers`, the FULL
+    /// `constraintNTotalKeys` (= `ii_NumIndexAttrs`) elements (key + INCLUDE
+    /// columns). The first `constraint_n_keys` form `conkey`; all
+    /// `constraint_n_total_keys` are walked for the column dependencies.
     pub constraint_key: &'a [i16],
+    /// `int constraintNKeys` — `indexInfo->ii_NumIndexKeyAttrs` (the key columns
+    /// only; drives `conkey`/`conexclop`).
+    pub constraint_n_keys: i32,
     /// `int constraintNTotalKeys` — `indexInfo->ii_NumIndexAttrs`.
     pub constraint_n_total_keys: i32,
     /// `Oid indexRelId`.

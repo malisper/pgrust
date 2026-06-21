@@ -1692,8 +1692,14 @@ pub fn index_constraint_create<'mcx>(
      * Construct a pg_constraint entry. The constraint key is the index's key
      * attribute numbers; the exclusion operators (if any) ride along.
      */
+    // C passes the FULL index-attribute array (key + INCLUDE columns,
+    // `ii_NumIndexAttrs` entries) as `constraintKey`; CreateConstraintEntry uses
+    // only the first `constraintNKeys` for `conkey` but walks all
+    // `constraintNTotalKeys` of them when registering the constraint→column
+    // dependencies. Slicing to the key columns only leaves the dependency loop
+    // indexing past the end (index.c:1966-1968).
     let constraint_key: alloc::vec::Vec<i16> =
-        index_info.ii_IndexAttrNumbers[..index_info.ii_NumIndexKeyAttrs as usize].to_vec();
+        index_info.ii_IndexAttrNumbers[..index_info.ii_NumIndexAttrs as usize].to_vec();
     let excl_op_vec: Option<alloc::vec::Vec<Oid>> =
         index_info.ii_ExclusionOps.as_ref().map(|v| v.iter().copied().collect());
 
@@ -1708,6 +1714,7 @@ pub fn index_constraint_create<'mcx>(
             parent_constr_id: parent_constraint_id,
             rel_id: heap_relation_id,
             constraint_key: &constraint_key,
+            constraint_n_keys: index_info.ii_NumIndexKeyAttrs,
             constraint_n_total_keys: index_info.ii_NumIndexAttrs,
             index_rel_id: index_relation_id,
             excl_op: excl_op_vec.as_deref(),

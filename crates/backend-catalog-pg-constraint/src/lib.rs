@@ -3073,7 +3073,7 @@ pub fn init_seams() {
             args.parent_constr_id,
             args.rel_id,
             args.constraint_key,
-            args.constraint_key.len() as i32, /* constraintNKeys */
+            args.constraint_n_keys, /* constraintNKeys */
             args.constraint_n_total_keys,
             InvalidOid, /* domainId — no domain */
             args.index_rel_id,
