@@ -484,6 +484,12 @@ fn gistScanPage<'mcx>(
         let so = gist(scan);
         so.nPageData = 0;
         so.curPageData = 0;
+        // C indexes a fixed `pageData[]` array by `nPageData`, so resetting the
+        // counter to 0 logically empties it. The owned model backs `pageData`
+        // with a `Vec` that is appended to, so it must be cleared here or the
+        // previous page's entries alias the new page's (wrong/non-deterministic
+        // results). This is the `if (so->pageDataCxt) MemoryContextReset(...)`.
+        so.pageData.clear();
     }
     scan.xs_hitup = None; // might point into pageDataCxt
                           // (pageDataCxt reset is subsumed by ownership)
@@ -800,6 +806,7 @@ pub fn gistgettuple<'mcx>(
             so.firstCall = false;
             so.curPageData = 0;
             so.nPageData = 0;
+            so.pageData.clear();
         }
         scan.xs_hitup = None;
 
@@ -930,6 +937,7 @@ pub fn gistgetbitmap<'mcx>(
         let so = gist(scan);
         so.curPageData = 0;
         so.nPageData = 0;
+        so.pageData.clear();
     }
     scan.xs_hitup = None;
 
