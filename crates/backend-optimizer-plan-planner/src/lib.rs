@@ -1003,13 +1003,13 @@ fn pqe_window_clause<'mcx>(
     let n_wc = run.resolve(root.parse).windowClause.len();
     for i in 0..n_wc {
         // wc->startOffset = preprocess_expression(startOffset, EXPRKIND_LIMIT).
-        let start = extract_windowclause_offset(run, &root, i, true);
+        let start = extract_windowclause_offset(mcx, run, &root, i, true)?;
         let processed =
             preprocess_expression(mcx, &mut *root, run, outer_query_ref, start, EXPRKIND_LIMIT)?;
         set_windowclause_offset(mcx, run, &root, i, true, processed)?;
 
         // wc->endOffset = preprocess_expression(endOffset, EXPRKIND_LIMIT).
-        let end = extract_windowclause_offset(run, &root, i, false);
+        let end = extract_windowclause_offset(mcx, run, &root, i, false)?;
         let processed =
             preprocess_expression(mcx, &mut *root, run, outer_query_ref, end, EXPRKIND_LIMIT)?;
         set_windowclause_offset(mcx, run, &root, i, false, processed)?;
@@ -9026,11 +9026,12 @@ fn datum_get_int64(c: &types_nodes::primnodes::Const) -> i64 {
 /// `Node::Expr`). Leaves the field in place; the preprocessed value is written
 /// back by [`set_windowclause_offset`].
 fn extract_windowclause_offset<'mcx>(
+    mcx: Mcx<'mcx>,
     run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     i: usize,
     start: bool,
-) -> Option<Expr> {
+) -> PgResult<Option<Expr>> {
     let wc_node = &*run.resolve(root.parse).windowClause[i];
     let wc = match wc_node.node_tag() {
         ntag::T_WindowClause => wc_node.expect_windowclause(),
@@ -9040,13 +9041,16 @@ fn extract_windowclause_offset<'mcx>(
         ),
     };
     let offset = if start { &wc.startOffset } else { &wc.endOffset };
-    offset.as_ref().map(|np| match np.as_expr() {
-        Some(e) => e.clone(),
-        None => panic!(
-            "WindowClause offset is not an Expr (got {:?})",
-            np.tag()
-        ),
-    })
+    match offset.as_ref() {
+        None => Ok(None),
+        Some(np) => match np.as_expr() {
+            Some(e) => Ok(Some(e.clone_in(mcx)?)),
+            None => panic!(
+                "WindowClause offset is not an Expr (got {:?})",
+                np.tag()
+            ),
+        },
+    }
 }
 
 /// Write `processed` back into `wc->startOffset`/`wc->endOffset` of the `i`th
