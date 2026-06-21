@@ -363,6 +363,21 @@ fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
         .expect("hash fn: by-reference argument missing from the by-ref lane")
 }
 
+/// `NameStr(*PG_GETARG_NAME(i))` length-trimmed bytes: a `name` value crosses
+/// the by-reference lane as its fixed `NAMEDATALEN`-byte image, NUL-padded to
+/// the full width. C's `hashname`/`hashnameextended` hash exactly
+/// `strlen(NameStr(name))` bytes — the significant prefix up to (not including)
+/// the first NUL — so the padding must be dropped before hashing. (Without this
+/// the trailing NUL padding is mixed in and the result no longer matches
+/// `hashtext` for the same string, breaking the cross-type text/name hash
+/// opfamily 1995 invariant that hashed IN/ANY SubPlans rely on.)
+#[inline]
+fn arg_name_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    let image = arg_bytes(fcinfo, i);
+    let len = image.iter().position(|&b| b == 0).unwrap_or(image.len());
+    &image[..len]
+}
+
 /// `VARDATA_ANY` of a header-ful text/bytea varlena argument: skip the 4-byte
 /// length header so the core hashes `VARSIZE_ANY_EXHDR` payload bytes.
 #[inline]
@@ -449,11 +464,11 @@ fn fc_hashoidvectorextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<D
     Ok(ret_u64(hashoidvectorextended(arg_bytes(fcinfo, 0), seed)?))
 }
 fn fc_hashname(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    Ok(ret_u32(hashname(arg_bytes(fcinfo, 0))))
+    Ok(ret_u32(hashname(arg_name_str(fcinfo, 0))))
 }
 fn fc_hashnameextended(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let seed = arg_word(fcinfo, 1) as u64;
-    Ok(ret_u64(hashnameextended(arg_bytes(fcinfo, 0), seed)))
+    Ok(ret_u64(hashnameextended(arg_name_str(fcinfo, 0), seed)))
 }
 fn fc_hashtext(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let collid = fcinfo.fncollation;
