@@ -578,11 +578,10 @@ fn out_agg(buf: &mut String, n: &types_nodes::nodeagg::Agg<'_>, wl: bool) {
 fn out_nestloopparam(buf: &mut String, p: &types_nodes::nodenestloop::NestLoopParam, wl: bool) {
     buf.push_str("NESTLOOPPARAM");
     write_int_field(buf, "paramno", p.paramno);
-    // WRITE_NODE_FIELD(paramval): a `Var *` (always non-null in C).
+    // WRITE_NODE_FIELD(paramval): typed `Var *` but may transiently hold a
+    // PlaceHolderVar during plan creation, so emit the generic node form.
     buf.push_str(" :paramval ");
-    buf.push('{');
-    crate::out_var(buf, &p.paramval, wl);
-    buf.push('}');
+    crate::out_expr(buf, &p.paramval, wl);
 }
 
 fn out_nestloop(buf: &mut String, n: &types_nodes::nodenestloop::NestLoop<'_>, wl: bool) {

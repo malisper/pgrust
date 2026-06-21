@@ -157,11 +157,14 @@ pub fn ExecNestLoop<'mcx>(
                         // Assert(IsA(nlp->paramval, Var));
                         // Assert(nlp->paramval->varno == OUTER_VAR);
                         // Assert(nlp->paramval->varattno > 0);
-                        debug_assert!(
-                            nlp.paramval.varattno > 0,
-                            "nlp->paramval->varattno > 0"
-                        );
-                        (nlp.paramno, nlp.paramval.varattno)
+                        // By execution time set_join_references has reduced
+                        // paramval to a simple OUTER_VAR Var.
+                        let var = match &nlp.paramval {
+                            types_nodes::primnodes::Expr::Var(v) => v,
+                            _ => panic!("NestLoopParam paramval is not a Var at execution"),
+                        };
+                        debug_assert!(var.varattno > 0, "nlp->paramval->varattno > 0");
+                        (nlp.paramno, var.varattno)
                     })
                     .collect()
             };

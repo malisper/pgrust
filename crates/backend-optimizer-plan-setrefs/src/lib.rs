@@ -2564,11 +2564,14 @@ fn set_join_references<'mcx>(
         ntag::T_NestLoop => {
             let nl = plan.as_nestloop_mut().unwrap();
             for nlp in nl.nestParams.iter_mut() {
-                let pv = core::mem::take(&mut nlp.paramval);
+                // paramval may be a Var or (for lateral-PHV nestloops) a
+                // PlaceHolderVar at this point; fix_upper_expr resolves either
+                // against the outer subplan tlist down to an OUTER_VAR Var.
+                let pv = core::mem::replace(&mut nlp.paramval, Expr::Const(Const::default()));
                 let fixed = fix_upper_expr(
                     mcx,
                     root,
-                    Expr::Var(pv),
+                    pv,
                     &FixUpperCtx {
                         subplan_itlist: &outer_itlist,
                         newvarno: OUTER_VAR,
@@ -2578,7 +2581,7 @@ fn set_join_references<'mcx>(
                     },
                 )?;
                 match fixed {
-                    Expr::Var(v) if v.varno == OUTER_VAR => nlp.paramval = v,
+                    Expr::Var(v) if v.varno == OUTER_VAR => nlp.paramval = Expr::Var(v),
                     _ => {
                         return Err(PgError::error(
                             "NestLoopParam was not reduced to a simple Var",

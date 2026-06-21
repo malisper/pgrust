@@ -1135,27 +1135,32 @@ fn read_windowagg<'mcx>(
 /// consumed by the caller). `NestLoopParam` is a typed struct, not a `Node`
 /// arm, so it is read directly here (mirroring the OUT side's hand-emitted
 /// framed list element).
-fn read_nestloopparam_body() -> PgResult<types_nodes::nodenestloop::NestLoopParam> {
+fn read_nestloopparam_body<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_nodes::nodenestloop::NestLoopParam> {
     let paramno = read_int_field()?;
-    // READ_NODE_FIELD(paramval): a `Var *` carried as a framed `{VAR ...}`.
+    // READ_NODE_FIELD(paramval): typed `Var *` but may be a framed `{VAR ...}`
+    // or, for lateral-PHV nestloops, a `{PLACEHOLDERVAR ...}`. Read the generic
+    // node and accept either as an `Expr` (the value model is lifetime-free).
     let _label = next_tok()?; // skip :paramval
-    let open = next_tok()?;
-    if open.bytes != b"{" {
-        return Err(elog_error(
-            "readNestLoopParam: expected '{' before paramval Var",
-        ));
-    }
-    let label = next_tok()?;
-    if label.bytes != b"VAR" {
-        return Err(elog_error("readNestLoopParam: paramval is not a VAR node"));
-    }
-    let paramval = crate::read_var()?;
-    let close = next_tok()?;
-    if close.bytes != b"}" {
-        return Err(elog_error(
-            "readNestLoopParam: expected '}' after paramval Var",
-        ));
-    }
+    let paramval = match read::node_read(mcx, None)? {
+        Some(n) => {
+            let __n = PgBox::into_inner(n);
+            let __tag = __n.node_tag();
+            match __n.into_expr() {
+                Some(e) => e,
+                None => {
+                    return Err(elog_error(alloc::format!(
+                        "readNestLoopParam: paramval is not an Expr node, got {:?}",
+                        __tag
+                    )))
+                }
+            }
+        }
+        None => {
+            return Err(elog_error("readNestLoopParam: paramval is NULL"));
+        }
+    };
     Ok(types_nodes::nodenestloop::NestLoopParam { paramno, paramval })
 }
 
@@ -1191,7 +1196,7 @@ fn read_nestloop<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::nodenestloop::Ne
                     "readNestLoop: nestParams element is not a NESTLOOPPARAM node",
                 ));
             }
-            let p = read_nestloopparam_body()?;
+            let p = read_nestloopparam_body(mcx)?;
             let close = next_tok()?;
             if close.bytes != b"}" {
                 return Err(elog_error(
@@ -1820,11 +1825,11 @@ mod tests {
         nl.nestParams = std::vec![
             types_nodes::nodenestloop::NestLoopParam {
                 paramno: 0,
-                paramval: v1,
+                paramval: types_nodes::primnodes::Expr::Var(v1),
             },
             types_nodes::nodenestloop::NestLoopParam {
                 paramno: 1,
-                paramval: v2,
+                paramval: types_nodes::primnodes::Expr::Var(v2),
             },
         ];
         let text = assert_framed_round_trip(&Node::mk_nest_loop(mcx, nl)?);
@@ -1844,9 +1849,17 @@ mod tests {
                 Some(nl) => {
                 assert_eq!(nl.nestParams.len(), 2);
                 assert_eq!(nl.nestParams[0].paramno, 0);
-                assert_eq!(nl.nestParams[0].paramval.varattno, 2);
                 assert_eq!(nl.nestParams[1].paramno, 1);
-                assert_eq!(nl.nestParams[1].paramval.vartype, 25);
+                let pv0 = match &nl.nestParams[0].paramval {
+                    types_nodes::primnodes::Expr::Var(v) => v,
+                    _ => panic!("expected Var paramval"),
+                };
+                assert_eq!(pv0.varattno, 2);
+                let pv1 = match &nl.nestParams[1].paramval {
+                    types_nodes::primnodes::Expr::Var(v) => v,
+                    _ => panic!("expected Var paramval"),
+                };
+                assert_eq!(pv1.vartype, 25);
             },
                 None => panic!("expected NestLoop, got {:?}", __tag),
             }

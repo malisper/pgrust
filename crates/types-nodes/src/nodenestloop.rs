@@ -14,7 +14,7 @@ use types_error::PgResult;
 use crate::execnodes::SlotId;
 use crate::jointype::{Join, JoinStateData};
 use crate::nodes::NodeTag;
-use crate::primnodes::Var;
+use crate::primnodes::Expr;
 
 /// `T_NestLoop` (nodes/nodetags.h) — the plan-node tag for a NestLoop.
 pub const T_NestLoop: NodeTag = NodeTag(356);
@@ -31,12 +31,21 @@ pub const T_NestLoopState: NodeTag = NodeTag(421);
 ///     Var        *paramval;       /* outer-relation Var to assign to Param */
 /// } NestLoopParam;
 /// ```
-#[derive(Clone, Debug, Default)]
+///
+/// CARRIER (`paramval`): the C field is declared `Var *` but plannodes.h
+/// documents that "during plan creation, the paramval can actually be a
+/// PlaceHolderVar expression; but it must be a Var with varno OUTER_VAR by the
+/// time it gets to the executor." `create_nestloop_plan` stores the PHV here for
+/// lateral-PHV nestloops, and `set_join_references` reduces it back to an
+/// `OUTER_VAR` Var via `fix_upper_expr`. We mirror that by widening the field to
+/// [`Expr`]; by execution it always holds an `Expr::Var(OUTER_VAR)`.
+#[derive(Clone, Debug)]
 pub struct NestLoopParam {
     /// `int paramno` — number of the PARAM_EXEC Param to set.
     pub paramno: i32,
-    /// `Var *paramval` — outer-relation Var to assign to Param.
-    pub paramval: Var,
+    /// `Var *paramval` — outer-relation Var (or, transiently during plan
+    /// creation, a PlaceHolderVar) to assign to Param.
+    pub paramval: Expr,
 }
 
 /// `NestLoop` plan node (nodes/plannodes.h):

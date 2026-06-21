@@ -2233,8 +2233,9 @@ fn find_param_referent<'mcx>(
                     for nlp in nl.nestParams.iter() {
                         if nlp.paramno == param.paramid {
                             // return (Node *) nlp->paramval; attention stays on
-                            // this ancestor (idx).
-                            return Ok(Some((Expr::Var(nlp.paramval.clone()), idx)));
+                            // this ancestor (idx). paramval is an Expr (Var or,
+                            // transiently, a PlaceHolderVar).
+                            return Ok(Some((nlp.paramval.clone(), idx)));
                         }
                     }
                 }

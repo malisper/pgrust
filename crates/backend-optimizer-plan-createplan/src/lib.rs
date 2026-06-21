@@ -5815,6 +5815,25 @@ fn jointype_path_to_node(j: types_pathnodes::JoinType) -> NodeJoinType {
 /// (createplan.c ~2080) — if the top plan node can't project and its existing
 /// tlist isn't already what we need, inject a `Result` node; otherwise just
 /// replace the plan node's tlist.
+/// `makeTargetEntry((Expr *) copyObject(phv), resno, NULL, true)` — the junk TLE
+/// `create_nestloop_plan` appends to the outer plan's tlist for a PHV nestloop
+/// parameter. `expr` is the (already-cloned) PHV to carry.
+fn make_nestparam_target_entry<'mcx>(
+    mcx: Mcx<'mcx>,
+    expr: Expr,
+    resno: AttrNumber,
+) -> PgResult<TargetEntry<'mcx>> {
+    Ok(TargetEntry {
+        expr: Some(mcx::alloc_in(mcx, expr)?),
+        resno,
+        resname: None,
+        ressortgroupref: 0,
+        resorigtbl: Oid::default(),
+        resorigcol: 0,
+        resjunk: true,
+    })
+}
+
 fn change_plan_targetlist<'mcx>(
     mcx: Mcx<'mcx>,
     subplan: Node<'mcx>,
@@ -6097,35 +6116,82 @@ fn create_nestloop_plan<'mcx>(
     let nest_param_ids =
         paramassign::identify_current_nestloop_params::call(mcx, root, run, &outerrelids, &path_req_outer)?;
 
-    // PHV-tlist fixup loop (createplan.c:4435). For simple Vars there is nothing
-    // to do; PHV params may need to be added to the outer plan's tlist. Build the
-    // executor-side NestLoopParam list as we go.
+    // PHV-tlist fixup loop (createplan.c:4434). For simple Vars there is nothing
+    // to do (they're already available from the outer plan). PHV params may need
+    // to be added to the outer plan's tlist, since the executor's NestLoopParam
+    // machinery requires the params to be simple outer-Var references to that
+    // tlist; set_join_references later reduces paramval back to an OUTER_VAR.
+    // Build the executor-side NestLoopParam list (paramval is an `Expr` carrier)
+    // as we go.
     let mut outer_plan = outer_plan;
     let mut nest_params: Vec<NestLoopParam> = Vec::with_capacity(nest_param_ids.len());
-    let mut outer_tlist_extra: Vec<TargetEntry<'mcx>> = Vec::new();
-    let mut outer_tlist_changed = false;
+    // Lazily build a mutable copy of the outer tlist only when we add a PHV.
+    let mut outer_tlist: Option<Vec<TargetEntry<'mcx>>> = None;
     let mut outer_parallel_safe = outer_plan.plan_head().parallel_safe;
     for &nlp_id in &nest_param_ids {
         let paramno = root.nestloop_param(nlp_id).paramno;
         let paramval = root.nestloop_param(nlp_id).paramval.clone();
         match paramval {
-            Expr::Var(var) => {
+            Expr::Var(_) => {
                 // Nothing to do for simple Vars — already available from outer.
-                nest_params.push(NestLoopParam { paramno, paramval: var });
+                nest_params.push(NestLoopParam { paramno, paramval });
             }
-            Expr::PlaceHolderVar(_) => {
-                // A PHV nestloop param. The executor-side NestLoopParam carrier
-                // keeps a strict `Var` paramval, so this faithful path cannot be
-                // expressed without widening that carrier (the planner-working
-                // NestLoopParamNode widens paramval to Expr, but the plan node
-                // does not). This only arises for lateral-PHV nestloops; the
-                // common equijoin case never reaches here.
-                let _ = (&mut outer_tlist_extra, &mut outer_tlist_changed, &mut outer_parallel_safe);
-                return Err(PgError::error(
-                    "create_nestloop_plan: PlaceHolderVar nestloop parameter is not supported \
-                     — types_nodes NestLoopParam.paramval is a strict Var; widening the \
-                     executor-side carrier is out of this lane (lateral-PHV nestloop)",
-                ));
+            Expr::PlaceHolderVar(mut phv) => {
+                // It must be a PHV. If it's already present in the outer tlist
+                // (as an entry equal() would match), there's nothing to add.
+                let cur_tlist: &[TargetEntry<'mcx>] = match &outer_tlist {
+                    Some(v) => v.as_slice(),
+                    None => outer_plan.plan_head().targetlist.as_deref().unwrap_or(&[]),
+                };
+                let phv_expr = Expr::PlaceHolderVar(phv.clone());
+                if backend_optimizer_util_vars::tlist::tlist_member(&phv_expr, cur_tlist).is_some() {
+                    nest_params.push(NestLoopParam { paramno, paramval: phv_expr });
+                    continue;
+                }
+
+                // It's possible that the PHV's phexpr references surviving
+                // curOuterParams items (values supplied by a higher-level
+                // nestloop); those must be converted to Params now. equal()
+                // ignores phexpr, so doing this after the tlist_member check is
+                // safe. (createplan.c:4451)
+                if let Some(phexpr) = phv.phexpr.take() {
+                    let phexpr_node = root.alloc_node((*phexpr).clone());
+                    let fixed_id = replace_nestloop_params(mcx, root, phexpr_node)?;
+                    let fixed = root.node(fixed_id).clone_in(mcx)?;
+                    phv.phexpr = Some(alloc::boxed::Box::new(fixed));
+                }
+                let phv_for_tle = Expr::PlaceHolderVar(phv.clone());
+
+                // Make a (shallow) copy of the outer tlist if we haven't yet, and
+                // append a junk TLE carrying the PHV. (createplan.c:4462)
+                let tlist_vec = match &mut outer_tlist {
+                    Some(v) => v,
+                    None => {
+                        let mut v: Vec<TargetEntry<'mcx>> = Vec::new();
+                        for tle in outer_plan.plan_head().targetlist.as_deref().unwrap_or(&[]) {
+                            v.push(tle.clone_in(mcx)?);
+                        }
+                        outer_tlist = Some(v);
+                        outer_tlist.as_mut().unwrap()
+                    }
+                };
+                let resno = (tlist_vec.len() + 1) as i16;
+                let tle = make_nestparam_target_entry(mcx, phv_for_tle.clone(), resno)?;
+                tlist_vec.push(tle);
+
+                // Track whether the tlist is still parallel-safe.
+                if outer_parallel_safe {
+                    outer_parallel_safe =
+                        backend_optimizer_path_equivclass_ext_seams::is_parallel_safe::call(
+                            root, &phv_for_tle,
+                        );
+                }
+
+                // Store the (possibly phexpr-fixed) PHV as the executor paramval.
+                nest_params.push(NestLoopParam {
+                    paramno,
+                    paramval: Expr::PlaceHolderVar(phv),
+                });
             }
             _ => {
                 return Err(PgError::error(
@@ -6134,12 +6200,12 @@ fn create_nestloop_plan<'mcx>(
             }
         }
     }
-    // (No outer-tlist change for the supported Var-only subset.)
-    let _ = outer_tlist_extra;
-    if outer_tlist_changed {
-        // Unreachable for the Var-only subset; left as the faithful shape.
-        let new_tlist = clone_plan_tlist(mcx, &outer_plan)?.expect("outer tlist");
-        outer_plan = change_plan_targetlist(mcx, outer_plan, new_tlist, outer_parallel_safe)?;
+    if let Some(v) = outer_tlist {
+        let mut pgv = vec_with_capacity_in(mcx, v.len())?;
+        for tle in v {
+            pgv.push(tle);
+        }
+        outer_plan = change_plan_targetlist(mcx, outer_plan, pgv, outer_parallel_safe)?;
     }
 
     let tlist = tlist_to_plan_field(mcx, tlist)?;
