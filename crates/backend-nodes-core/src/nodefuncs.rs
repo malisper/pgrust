@@ -1373,6 +1373,12 @@ where
         Expr::CoerceToDomain(c) => walk_opt!(c.arg.as_deref()),
         Expr::InferenceElem(n) => walk_opt!(n.expr.as_deref()),
         Expr::ReturningExpr(r) => walk_opt!(r.retexpr.as_deref()),
+        Expr::PlaceHolderVar(phv) => {
+            // C (expression_tree_walker, T_PlaceHolderVar):
+            //   return WALK(((PlaceHolderVar *) node)->phexpr);
+            // The relids bitmapsets (phrels/phnullingrels) carry no Exprs.
+            walk_opt!(phv.phexpr.as_deref())
+        }
         // #[non_exhaustive]: an unmodeled future variant has no walkable
         // children to descend (the C default elog is unreachable for trees the
         // model can construct).
@@ -1617,15 +1623,38 @@ where
         }
         Expr::JsonIsPredicate(j) => mut_box!(j.expr),
         Expr::JsonExpr(jexpr) => {
+            // C (expression_tree_mutator, T_JsonExpr):
+            //   MUTATE(newnode->formatted_expr, ...);
+            //   MUTATE(newnode->path_spec, ...);
+            //   MUTATE(newnode->passing_values, ...);
+            //   MUTATE(newnode->on_empty, jexpr->on_empty, JsonBehavior *);
+            //   MUTATE(newnode->on_error, jexpr->on_error, JsonBehavior *);
+            // C T_JsonBehavior FLATCOPYs the behavior and MUTATEs its `expr`;
+            // here the JsonBehavior box is reused and only its `expr` mutated.
             mut_box!(jexpr.formatted_expr);
             mut_box!(jexpr.path_spec);
             mut_vec!(jexpr.passing_values);
+            if let Some(b) = jexpr.on_empty.as_mut() {
+                mut_box!(b.expr);
+            }
+            if let Some(b) = jexpr.on_error.as_mut() {
+                mut_box!(b.expr);
+            }
         }
         Expr::NullTest(n) => mut_box!(n.arg),
         Expr::BooleanTest(b) => mut_box!(b.arg),
         Expr::CoerceToDomain(c) => mut_box!(c.arg),
         Expr::InferenceElem(n) => mut_box!(n.expr),
         Expr::ReturningExpr(r) => mut_box!(r.retexpr),
+        Expr::PlaceHolderVar(phv) => {
+            // C (expression_tree_mutator, T_PlaceHolderVar):
+            //   FLATCOPY(newnode, phv, PlaceHolderVar);
+            //   MUTATE(newnode->phexpr, phv->phexpr, Expr *);
+            //   /* Assume we need not copy the relids bitmapsets */
+            // The FLATCOPY preserves phrels/phnullingrels/phid/phlevelsup
+            // verbatim (handled by mutating in place); only phexpr is mutated.
+            mut_box!(phv.phexpr);
+        }
         // #[non_exhaustive]: an unmodeled future variant is copied verbatim.
         _ => {}
     }
@@ -1749,12 +1778,19 @@ where
             on_box!(jexpr.formatted_expr);
             on_box!(jexpr.path_spec);
             on_vec!(jexpr.passing_values);
+            if let Some(b) = jexpr.on_empty.as_mut() {
+                on_box!(b.expr);
+            }
+            if let Some(b) = jexpr.on_error.as_mut() {
+                on_box!(b.expr);
+            }
         }
         Expr::NullTest(n) => on_box!(n.arg),
         Expr::BooleanTest(b) => on_box!(b.arg),
         Expr::CoerceToDomain(c) => on_box!(c.arg),
         Expr::InferenceElem(n) => on_box!(n.expr),
         Expr::ReturningExpr(r) => on_box!(r.retexpr),
+        Expr::PlaceHolderVar(phv) => on_box!(phv.phexpr),
         // primitive / context-allocated / TargetEntry-bearing: no in-tree
         // Box/Vec<Expr> children to descend
         _ => {}
