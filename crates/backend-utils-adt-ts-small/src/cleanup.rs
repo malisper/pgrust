@@ -479,7 +479,7 @@ fn clean_stopword_intree<'mcx>(
             if isphrase {
                 /* operator's own distance must propagate to right */
                 *ladd = lladd;
-                *radd = lladd + ndistance + rradd;
+                *radd = lradd + ndistance + rradd;
             } else {
                 /* at non-phrase op, just forget the right subnode entirely */
                 *ladd = lladd;
