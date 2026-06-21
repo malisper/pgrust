@@ -719,11 +719,27 @@ pub fn init_seams() {
             let datum = match byref {
                 Some(image) if typisvarlena => CanonDatum::ByRef(mcx::slice_in(mcx, &image)?),
                 Some(image) => {
-                    // A pass-by-reference but non-varlena output type (e.g. a
-                    // cstring-domain) renders its image as a cstring referent.
-                    match std::str::from_utf8(&image) {
-                        Ok(s) => CanonDatum::Cstring(s.to_string()),
-                        Err(_) => CanonDatum::ByRef(mcx::slice_in(mcx, &image)?),
+                    // A pass-by-reference but non-varlena type. Two sub-cases,
+                    // distinguished by typlen (C: the Datum is just the pointer,
+                    // and the output function knows its own typlen):
+                    //   typlen == -2  => `cstring`: the image is a NUL-terminated
+                    //                    C string; cross the `Cstring` lane.
+                    //   typlen  >  0  => fixed-length by-ref (e.g. `name`,
+                    //                    NAMEDATALEN=64): the image is the raw
+                    //                    NUL-padded buffer, which crosses the
+                    //                    by-ref lane VERBATIM as `ByRef` (the
+                    //                    raw-buffer convention `arg_name` reads via
+                    //                    `as_varlena`). Routing it through the
+                    //                    `Cstring` lane is the
+                    //                    "name arg missing from by-ref lane" bug.
+                    let typlen = backend_utils_cache_lsyscache_seams::get_typlen::call(valtype)?;
+                    if typlen == -2 {
+                        match std::str::from_utf8(&image) {
+                            Ok(s) => CanonDatum::Cstring(s.to_string()),
+                            Err(_) => CanonDatum::ByRef(mcx::slice_in(mcx, &image)?),
+                        }
+                    } else {
+                        CanonDatum::ByRef(mcx::slice_in(mcx, &image)?)
                     }
                 }
                 None => CanonDatum::from_usize(value),
