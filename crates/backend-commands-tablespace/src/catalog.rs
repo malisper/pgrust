@@ -15,7 +15,7 @@ use mcx::{Mcx, MemoryContext, PgString};
 use types_core::primitive::Oid;
 use backend_utils_error::ereport;
 use types_error::{ERROR, PgError, PgResult};
-use types_error::ERRCODE_INVALID_PARAMETER_VALUE;
+use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR};
 use types_catalog::catalog::TABLE_SPACE_RELATION_ID;
 use types_nodes::ddlnodes::DefElem;
 use types_nodes::nodes::ntag;
@@ -464,8 +464,18 @@ fn transform_options_bytes<'mcx, 'a>(
     }
 
     // Apply the def_list: on reset, options are only removed (already skipped
-    // above); otherwise add "name=value".
-    if !is_reset {
+    // above); otherwise add "name=value".  If RESET, just check that the user
+    // didn't say RESET (option=val) — the grammar doesn't enforce it.
+    if is_reset {
+        for def in def_list {
+            if def.arg.is_some() {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg("RESET must not include values for parameters")
+                    .into_error());
+            }
+        }
+    } else {
         for def in def_list {
             // namspace == NULL: a qualified option belongs to another pass.
             if def.defnamespace.is_some() {
