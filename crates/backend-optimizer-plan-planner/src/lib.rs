@@ -829,6 +829,7 @@ fn subquery_planner_for_setop_impl<'mcx>(
     recursion_carry: Option<(i32, f64)>,
     has_recursion: bool,
     tuple_fraction: f64,
+    setop_op: Option<&'mcx types_nodes::rawnodes::SetOperationStmt<'mcx>>,
 ) -> PgResult<PlannerInfo> {
     subquery_planner_carried(
         mcx,
@@ -839,7 +840,7 @@ fn subquery_planner_for_setop_impl<'mcx>(
         recursion_carry,
         has_recursion,
         tuple_fraction,
-        None,
+        setop_op,
     )
 }
 
@@ -887,7 +888,7 @@ fn subquery_planner<'mcx>(
     parent_root: Option<PlannerInfo>,
     has_recursion: bool,
     tuple_fraction: f64,
-    setops: Option<()>,
+    setops: Option<&'mcx types_nodes::rawnodes::SetOperationStmt<'mcx>>,
 ) -> PgResult<PlannerInfo> {
     subquery_planner_carried(
         mcx, run, glob, parse_id, parent_root, None, has_recursion,
@@ -2067,7 +2068,7 @@ fn subquery_planner_carried<'mcx>(
     recursion_carry: Option<(i32, f64)>,
     has_recursion: bool,
     tuple_fraction: f64,
-    setops: Option<()>,
+    setops: Option<&'mcx types_nodes::rawnodes::SetOperationStmt<'mcx>>,
 ) -> PgResult<PlannerInfo> {
     // root = makeNode(PlannerInfo); + field init (C:664-703).
     let mut root = PlannerInfo::default();
@@ -2896,7 +2897,7 @@ fn grouping_planner<'mcx>(
     run: &mut PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     mut tuple_fraction: f64,
-    setops: Option<()>,
+    setops: Option<&'mcx types_nodes::rawnodes::SetOperationStmt<'mcx>>,
 ) -> PgResult<()> {
     let mut offset_est: i64 = 0;
     let mut count_est: i64 = 0;
@@ -3141,9 +3142,8 @@ fn grouping_planner<'mcx>(
     }
 
     // Set up standard_qp_extra (C:1637-1645): activeWindows = NIL,
-    // gset_data = NULL, setop = setops. On the regular non-setop SELECT path
-    // these are all empty/none.
-    let _ = setops;
+    // gset_data = NULL, setop = setops. `setops` (the parent SetOperationStmt for
+    // a set-op child) is bridged into the qp_callback below as `setop_child`.
 
     // query_planner(root, standard_qp_callback, &qp_extra) (C:1654).
     //
@@ -3199,6 +3199,24 @@ fn grouping_planner<'mcx>(
             .map(|r| r.groupClause.clone())
             .unwrap_or_default()
     });
+    // setting setop_pathkeys might be useful to the union planner (C:3589). Bridge
+    // the parent SetOperationStmt's groupClauses (interned) + colTypes so the
+    // qp_callback (which can't reach `run`) can compute root->setop_pathkeys.
+    let setop_child: Option<(Vec<types_pathnodes::NodeId>, Vec<Oid>)> = match setops {
+        Some(op) => {
+            let group_clause_ids: Vec<types_pathnodes::NodeId> = op
+                .groupClauses
+                .iter()
+                .map(|np| {
+                    let sgc = sortgroupclause_from_node(np)?;
+                    Ok(root.alloc_sortgroupclause(sgc))
+                })
+                .collect::<PgResult<Vec<_>>>()?;
+            let col_types: Vec<Oid> = op.colTypes.iter().copied().collect();
+            Some((group_clause_ids, col_types))
+        }
+        None => None,
+    };
     let mut qp_callback = move |root: &mut PlannerInfo| -> PgResult<()> {
         standard_qp_callback(
             root,
@@ -3207,6 +3225,7 @@ fn grouping_planner<'mcx>(
             &distinct_clause_ids,
             first_active_window,
             gset_group_clause.as_deref(),
+            setop_child.as_ref().map(|(g, c)| (g.as_slice(), c.as_slice())),
         )
     };
     let mut current_rel =
@@ -8641,6 +8660,68 @@ fn intern_aggref_sort_inputs(
     (sortlist_ids, args_ids)
 }
 
+/// `generate_setop_child_grouplist(op, targetlist)` (planner.c:8295). Pair each
+/// non-resjunk target with the parent op's groupClause (`group_clause_ids`, an
+/// arena copy of `op->groupClauses`) and colType, reject on any type mismatch
+/// (returns `None` -> NIL), and assign each SortGroupClause a `tleSortGroupRef`
+/// matching the target. Mutates `root.processed_tlist` (assignSortGroupRef).
+fn generate_setop_child_grouplist(
+    root: &mut PlannerInfo,
+    group_clause_ids: &[types_pathnodes::NodeId],
+    col_types: &[Oid],
+    targetlist: &[types_pathnodes::NodeId],
+) -> Option<Vec<types_pathnodes::NodeId>> {
+    let mut out: Vec<types_pathnodes::NodeId> = Vec::with_capacity(group_clause_ids.len());
+    let mut lg = 0usize;
+    let mut ct = 0usize;
+    for &tnode in targetlist {
+        if root.targetentry(tnode).resjunk {
+            continue;
+        }
+        debug_assert!(lg < group_clause_ids.len());
+        debug_assert!(ct < col_types.len());
+        let coltype = col_types[ct];
+        let te_expr = root.targetentry(tnode).expr;
+        let exprtype =
+            backend_nodes_core::nodefuncs::expr_type(Some(root.node(te_expr))).unwrap_or(0);
+        if coltype != exprtype {
+            return None;
+        }
+        let sortgroupref = assign_setop_sort_group_ref(root, tnode, targetlist);
+        let mut sgc = *root.sortgroupclause(group_clause_ids[lg]);
+        sgc.tleSortGroupRef = sortgroupref;
+        out.push(root.alloc_sortgroupclause(sgc));
+        lg += 1;
+        ct += 1;
+    }
+    debug_assert!(lg == group_clause_ids.len());
+    debug_assert!(ct == col_types.len());
+    Some(out)
+}
+
+/// `assignSortGroupRef(tle, tlist)` over the arena targetlist: ensure `tnode` has
+/// a `ressortgroupref`, picking max-used+1 if unset, and return it.
+fn assign_setop_sort_group_ref(
+    root: &mut PlannerInfo,
+    tnode: types_pathnodes::NodeId,
+    tlist: &[types_pathnodes::NodeId],
+) -> types_core::Index {
+    let cur = root.targetentry(tnode).ressortgroupref;
+    if cur != 0 {
+        return cur;
+    }
+    let mut max_ref: types_core::Index = 0;
+    for &t in tlist {
+        let r = root.targetentry(t).ressortgroupref;
+        if r > max_ref {
+            max_ref = r;
+        }
+    }
+    let new_ref = max_ref + 1;
+    root.targetentry_mut(tnode).ressortgroupref = new_ref;
+    new_ref
+}
+
 /// `standard_qp_callback(root, extra)` (planner.c:3453) — the
 /// `query_pathkeys_callback` upcall, computing the grouping/ordering pathkeys
 /// once EquivalenceClasses are canonical.
@@ -8665,6 +8746,7 @@ fn standard_qp_callback(
     distinct_clause_ids: &[types_pathnodes::NodeId],
     first_active_window: Option<types_pathnodes::NodeId>,
     gset_group_clause: Option<&[types_pathnodes::NodeId]>,
+    setop_child: Option<(&[types_pathnodes::NodeId], &[Oid])>,
 ) -> PgResult<()> {
     // tlist = root->processed_tlist (C:3457).
     let tlist = root.processed_tlist.clone();
@@ -8764,7 +8846,30 @@ fn standard_qp_callback(
     }
 
     // set-op pathkeys: NIL on this path (set operations gated out upstream).
-    root.setop_pathkeys = Vec::new();
+    root.setop_pathkeys = match setop_child {
+        Some((group_clause_ids, col_types)) => {
+            match generate_setop_child_grouplist(root, group_clause_ids, col_types, &tlist) {
+                Some(mut group_clauses) => {
+                    let (pathkeys, sortable) =
+                        backend_optimizer_path_pathkeys::make_pathkeys_for_sortclauses_extended(
+                            root, mcx, &mut group_clauses, &tlist, false, false, false,
+                        );
+                    // A volatile sort key's EquivalenceClass identifies its target
+                    // entry only by ec_sortref, which a setop child's projected plan
+                    // targetlist does not carry through our arena rebuild; such a key
+                    // can't serve as a useful presort for the parent set-op's merge
+                    // anyway, so don't advertise setop_pathkeys when any is volatile
+                    // (PG plans these via Sort-over-Append regardless).
+                    let any_volatile = pathkeys
+                        .iter()
+                        .any(|pk| pk.pk_eclass.is_some_and(|ec| root.ec(ec).ec_has_volatile));
+                    if sortable && !any_volatile { pathkeys } else { Vec::new() }
+                }
+                None => Vec::new(),
+            }
+        }
+        None => Vec::new(),
+    };
 
     // root->sort_pathkeys =
     //   make_pathkeys_for_sortclauses(root, parse->sortClause, tlist) (C:3583).

@@ -2236,6 +2236,27 @@ fn explain_scan_target_switch<'es, 'p>(
                 fmt::ExplainPropertyText("Join Type", jointype_str, es)
             }
         }
+        ntag::T_SetOp => {
+            // explain.c:1763 — interpolate the set-operation command into the
+            // node name (TEXT) or emit it as a "Command" property.
+            use types_nodes::nodesetop::{
+                SETOPCMD_EXCEPT, SETOPCMD_EXCEPT_ALL, SETOPCMD_INTERSECT, SETOPCMD_INTERSECT_ALL,
+            };
+            let setopcmd = match plan_node.expect_setop().cmd {
+                SETOPCMD_INTERSECT => "Intersect",
+                SETOPCMD_INTERSECT_ALL => "Intersect All",
+                SETOPCMD_EXCEPT => "Except",
+                SETOPCMD_EXCEPT_ALL => "Except All",
+                _ => "???",
+            };
+            if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+                es.str.try_push_str(" ")?;
+                es.str.try_push_str(setopcmd)?;
+                Ok(())
+            } else {
+                fmt::ExplainPropertyText("Command", setopcmd, es)
+            }
+        }
         _ => Ok(()),
     }
 }

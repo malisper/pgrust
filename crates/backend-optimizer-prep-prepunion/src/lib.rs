@@ -262,7 +262,7 @@ fn recurse_set_operations<'mcx>(
             let rel = relnode::build_simple_rel(run, root, rtindex, None)?;
 
             // Plan the subquery, threading the shared glob through subroot.
-            let subroot = plan_leaf_subquery(mcx, run, root, rtindex)?;
+            let subroot = plan_leaf_subquery(mcx, run, root, rtindex, parent_op)?;
 
             // Figure out the appropriate target list (C:257).
             let mut trivial_tlist = true;
@@ -374,6 +374,7 @@ fn plan_leaf_subquery<'mcx>(
     run: &mut PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     rtindex: i32,
+    parent_op: Option<&SetOperationStmt<'mcx>>,
 ) -> PgResult<PlannerInfo> {
     // Intern the leaf subquery Query into the run.
     let subquery_id = {
@@ -408,6 +409,15 @@ fn plan_leaf_subquery<'mcx>(
         };
 
     let tuple_fraction = root.tuple_fraction;
+    // qp_extra->setop = the parent SetOperationStmt (planner.c). The leaf's
+    // standard_qp_callback uses it to compute setop_pathkeys, letting a presorted
+    // (e.g. index) child path be reused by the parent SetOp without a Sort. The
+    // parent op is borrowed from the caller's stack; leak an mcx-lifetime copy so
+    // it can cross the planner seam boundary.
+    let setop_op: Option<&'mcx SetOperationStmt<'mcx>> = match parent_op {
+        Some(op) => Some(&*mcx::leak_in(mcx::alloc_in(mcx, op.clone_in(mcx)?)?)),
+        None => None,
+    };
     // C passes the recursion-planning `root` as the leaf's `parent_root`. Move it
     // in by value and recover it from `subroot.parent_root` afterwards.
     let parent_root = core::mem::take(root);
@@ -420,6 +430,7 @@ fn plan_leaf_subquery<'mcx>(
         recursion_carry,
         false,
         tuple_fraction,
+        setop_op,
     )?;
     *root = *subroot
         .parent_root
@@ -465,26 +476,42 @@ fn generate_union_paths<'mcx>(
     )?;
     *p_target_list = tlist.clone();
 
-    // For UNIONs (not ALL), identify grouping semantics (C:724-738).
+    // For UNIONs (not ALL), try sorting if sorting is possible (C:723-738).
     let mut group_list: Vec<NodeId> = Vec::new();
+    let mut try_sorted = false;
+    let mut union_pathkeys: Vec<types_pathnodes::PathKey> = Vec::new();
     if !op.all {
+        // Identify the grouping semantics (C:727).
         group_list = generate_setop_grouplist(mcx, root, op, &tlist)?;
-        // Sorting feasibility checked below via grouping_is_sortable.
+
+        let mut group_clauses_owned: Vec<SortGroupClause> =
+            Vec::with_capacity(op.groupClauses.len());
+        for n in op.groupClauses.iter() {
+            if (&**n).node_tag() == ntag::T_SortGroupClause {
+                group_clauses_owned.push(*(&**n).expect_sortgroupclause());
+            }
+        }
+        if tlist::grouping_is_sortable(&group_clauses_owned) {
+            try_sorted = true;
+            // Determine the pathkeys for sorting by the whole target list (C:733).
+            union_pathkeys = pathkeys::make_pathkeys_for_sortclauses(root, mcx, &group_list, &tlist);
+            root.query_pathkeys = union_pathkeys.clone();
+        }
     }
 
-    // Build the union child paths (C:744-754). We pass union_pathkeys = NIL
-    // (cheapest-path-only leg; the per-child sorted-path leg is the
-    // interesting_pathkeys != NIL branch, not on this first cut).
+    // Build the union child paths (C:744-754), passing union_pathkeys so each
+    // RTE_SUBQUERY child also produces a presorted path when one is available.
     for (i, &rel) in rellist.iter().enumerate() {
         let trivial = trivial_tlist_list[i];
         let child_tlist = tlist_list[i].clone();
         if root.rel(rel).rtekind == RTE_SUBQUERY {
-            build_setop_child_paths(mcx, run, root, rel, trivial, &child_tlist, &[], None)?;
+            build_setop_child_paths(mcx, run, root, rel, trivial, &child_tlist, &union_pathkeys, None)?;
         }
     }
 
     // Build path lists and relid set (C:757-802).
     let mut cheapest_pathlist: Vec<PathId> = Vec::with_capacity(rellist.len());
+    let mut ordered_pathlist: Vec<PathId> = Vec::with_capacity(rellist.len());
     let mut relids: Relids = None;
     for &rel in rellist.iter() {
         let cheapest = root
@@ -492,6 +519,21 @@ fn generate_union_paths<'mcx>(
             .cheapest_total_path
             .expect("generate_union_paths: union child has no cheapest_total_path");
         cheapest_pathlist.push(cheapest);
+
+        if try_sorted {
+            // Find a child path already sorted on union_pathkeys (C:767-784).
+            let pathlist = root.rel(rel).pathlist.clone();
+            match pathkeys::get_cheapest_path_for_pathkeys(
+                root, &pathlist, &union_pathkeys, &None, TOTAL_COST, false,
+            ) {
+                Some(p) => ordered_pathlist.push(p),
+                // If we can't find a sorted path, give up on the MergeAppend leg.
+                // This can happen when type coercion was added to the targetlist
+                // due to mismatching child types (C:776-784).
+                None => try_sorted = false,
+            }
+        }
+
         relids = bms::relids_union::call(&relids, &root.rel(rel).relids);
     }
 
@@ -555,6 +597,24 @@ fn generate_union_paths<'mcx>(
             let num_cols = root.path(path).base().pathkeys.len() as i32;
             let path =
                 pathnode::create::create_upper_unique_path(root, result_rel, path, num_cols, d_num_groups)?;
+            pathnode::add_path(root, result_rel, path)?;
+        }
+
+        // Try a MergeAppend path if we found a presorted path in each union
+        // child (C:962-980). MergeAppend merges the already-sorted children, then
+        // an upper Unique de-duplicates — avoiding a full Sort over the Append.
+        if try_sorted && !group_list.is_empty() {
+            let path = pathnode::create::create_merge_append_path(
+                root,
+                result_rel,
+                ordered_pathlist.clone(),
+                union_pathkeys.clone(),
+                &None,
+            )?;
+            let num_cols = tlist.len() as i32;
+            let path = pathnode::create::create_upper_unique_path(
+                root, result_rel, path, num_cols, d_num_groups,
+            )?;
             pathnode::add_path(root, result_rel, path)?;
         }
 
