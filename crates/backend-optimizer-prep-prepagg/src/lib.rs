@@ -228,32 +228,126 @@ pub fn mark_aggrefs_presorted(node: &mut Expr, aggnos: &[i32]) {
 /// own args/filter, so `Aggref` is handled by the caller and not descended.)
 fn expr_children_mut<'a>(node: &'a mut Expr) -> alloc::vec::Vec<&'a mut Expr> {
     let mut out: alloc::vec::Vec<&'a mut Expr> = alloc::vec::Vec::new();
+    // The child-recursion arms of `expression_tree_walker` (nodeFuncs.c), one per
+    // node type the walker descends into. Mechanically transcribed from
+    // expression_tree_walker_impl; childless leaf types (Var/Const/Param/
+    // CaseTestExpr/SQLValueFunction/CoerceToDomainValue/SetToDefault/CurrentOfExpr/
+    // NextValueExpr/MergeSupportFunc) fall through to the no-op arm. Missing an arm
+    // silently strands `Aggref`s nested under that node with `aggno = -1`, which the
+    // executor then indexes as `peraggs[usize::MAX]`.
     match node {
-        Expr::FuncExpr(f) => out.extend(f.args.iter_mut()),
-        Expr::OpExpr(o) | Expr::DistinctExpr(o) | Expr::NullIfExpr(o) => {
-            out.extend(o.args.iter_mut())
+        // Aggref: the caller (`preprocess_aggrefs_walker`/`mark_aggrefs_presorted`)
+        // numbers it and stops before this is reached, so this arm is normally
+        // dead; kept faithful for any other walker use. `expression_tree_walker`
+        // descends aggdirectargs/args/aggfilter; aggorder/aggdistinct hold
+        // SortGroupClause leaves (no Expr children).
+        Expr::Aggref(a) => {
+            out.extend(a.aggdirectargs.iter_mut());
+            out.extend(a.args.iter_mut().filter_map(|te| te.expr.as_deref_mut()));
+            if let Some(f) = a.aggfilter.as_deref_mut() {
+                out.push(f);
+            }
         }
-        Expr::ScalarArrayOpExpr(s) => out.extend(s.args.iter_mut()),
+        Expr::GroupingFunc(g) => out.extend(g.args.iter_mut()),
         // A WindowFunc's argument (and FILTER) may carry a plain Aggref, as in
         // `SUM(SUM(x)) OVER (...)`: the inner `SUM(x)` is an ordinary aggregate
         // computed by the Agg node feeding the WindowAgg, and it must be numbered
         // here (else `aggno` stays -1 and `ExecInitAgg` indexes `peraggs[-1]`).
-        // `expression_tree_walker` descends into `WindowFunc.args`/`aggfilter`.
         Expr::WindowFunc(w) => {
             out.extend(w.args.iter_mut());
             if let Some(f) = w.aggfilter.as_deref_mut() {
                 out.push(f);
             }
+            out.extend(w.runCondition.iter_mut());
         }
+        Expr::SubscriptingRef(s) => {
+            out.extend(s.refupperindexpr.iter_mut().filter_map(|e| e.as_mut()));
+            out.extend(s.reflowerindexpr.iter_mut().filter_map(|e| e.as_mut()));
+            if let Some(e) = s.refexpr.as_deref_mut() {
+                out.push(e);
+            }
+            if let Some(e) = s.refassgnexpr.as_deref_mut() {
+                out.push(e);
+            }
+        }
+        Expr::FuncExpr(f) => out.extend(f.args.iter_mut()),
+        Expr::NamedArgExpr(n) => {
+            if let Some(arg) = n.arg.as_deref_mut() {
+                out.push(arg);
+            }
+        }
+        Expr::OpExpr(o) | Expr::DistinctExpr(o) | Expr::NullIfExpr(o) => {
+            out.extend(o.args.iter_mut())
+        }
+        Expr::ScalarArrayOpExpr(s) => out.extend(s.args.iter_mut()),
         Expr::BoolExpr(b) => out.extend(b.args.iter_mut()),
-        Expr::CoalesceExpr(c) => out.extend(c.args.iter_mut()),
-        Expr::MinMaxExpr(m) => out.extend(m.args.iter_mut()),
+        // `expression_tree_walker` descends into a SubLink's `testexpr` (which is
+        // this query level's expression tree and may carry an Aggref, e.g.
+        // `agg(x) = ANY (SELECT ...)`); the `subselect` Query is not descended (our
+        // walker has no Query arm, matching C's no-op Query case here).
+        Expr::SubLink(sl) => {
+            if let Some(t) = sl.testexpr.as_deref_mut() {
+                out.push(t);
+            }
+        }
+        // SubPlan/AlternativeSubPlan do not occur in a tlist at preprocess_aggrefs
+        // time (sublinks become subplans during path/plan generation), but the
+        // walker covers them for completeness: testexpr + args, never the Plan.
+        Expr::SubPlan(sp) => {
+            let sp = &mut *sp.0;
+            if let Some(t) = sp.testexpr.as_deref_mut() {
+                out.push(t);
+            }
+            for a in sp.args.iter_mut() {
+                out.push(&mut **a);
+            }
+        }
+        Expr::AlternativeSubPlan(asp) => {
+            for sp in asp.0.subplans.iter_mut() {
+                let sp = &mut **sp;
+                if let Some(t) = sp.testexpr.as_deref_mut() {
+                    out.push(t);
+                }
+                for a in sp.args.iter_mut() {
+                    out.push(&mut **a);
+                }
+            }
+        }
+        Expr::FieldSelect(f) => {
+            if let Some(arg) = f.arg.as_deref_mut() {
+                out.push(arg);
+            }
+        }
+        Expr::FieldStore(f) => {
+            if let Some(arg) = f.arg.as_deref_mut() {
+                out.push(arg);
+            }
+            out.extend(f.newvals.iter_mut());
+        }
         Expr::RelabelType(r) => {
             if let Some(arg) = r.arg.as_deref_mut() {
                 out.push(arg);
             }
         }
         Expr::CoerceViaIO(c) => {
+            if let Some(arg) = c.arg.as_deref_mut() {
+                out.push(arg);
+            }
+        }
+        Expr::ArrayCoerceExpr(a) => {
+            if let Some(arg) = a.arg.as_deref_mut() {
+                out.push(arg);
+            }
+            if let Some(e) = a.elemexpr.as_deref_mut() {
+                out.push(e);
+            }
+        }
+        Expr::ConvertRowtypeExpr(c) => {
+            if let Some(arg) = c.arg.as_deref_mut() {
+                out.push(arg);
+            }
+        }
+        Expr::CollateExpr(c) => {
             if let Some(arg) = c.arg.as_deref_mut() {
                 out.push(arg);
             }
@@ -274,11 +368,30 @@ fn expr_children_mut<'a>(node: &'a mut Expr) -> alloc::vec::Vec<&'a mut Expr> {
                 out.push(d);
             }
         }
+        Expr::ArrayExpr(a) => out.extend(a.elements.iter_mut()),
+        Expr::RowExpr(r) => out.extend(r.args.iter_mut()),
+        Expr::RowCompareExpr(r) => {
+            out.extend(r.largs.iter_mut());
+            out.extend(r.rargs.iter_mut());
+        }
+        Expr::CoalesceExpr(c) => out.extend(c.args.iter_mut()),
+        Expr::MinMaxExpr(m) => out.extend(m.args.iter_mut()),
+        Expr::XmlExpr(x) => {
+            out.extend(x.named_args.iter_mut());
+            out.extend(x.args.iter_mut());
+        }
+        Expr::JsonValueExpr(jve) => {
+            if let Some(r) = jve.raw_expr.as_deref_mut() {
+                out.push(r);
+            }
+            if let Some(f) = jve.formatted_expr.as_deref_mut() {
+                out.push(f);
+            }
+        }
         // SQL/JSON constructor (`JSON_OBJECT`/`JSON_ARRAY`/`JSON_OBJECTAGG`/
-        // `JSON_ARRAYAGG`/…): `expression_tree_walker` descends into `args`,
-        // `func`, and `coercion`. For the AGG constructor forms the underlying
-        // `Aggref` rides `func`, so this arm is what lets `preprocess_aggref`
-        // number that nested aggregate (without it, `aggno` stays -1).
+        // `JSON_ARRAYAGG`/…): for the AGG constructor forms the underlying `Aggref`
+        // rides `func`, so this arm is what lets `preprocess_aggref` number that
+        // nested aggregate.
         Expr::JsonConstructorExpr(ctor) => {
             out.extend(ctor.args.iter_mut());
             if let Some(f) = ctor.func.as_deref_mut() {
@@ -288,12 +401,48 @@ fn expr_children_mut<'a>(node: &'a mut Expr) -> alloc::vec::Vec<&'a mut Expr> {
                 out.push(co);
             }
         }
-        Expr::JsonValueExpr(jve) => {
-            if let Some(r) = jve.raw_expr.as_deref_mut() {
-                out.push(r);
+        Expr::JsonIsPredicate(j) => {
+            if let Some(e) = j.expr.as_deref_mut() {
+                out.push(e);
             }
-            if let Some(f) = jve.formatted_expr.as_deref_mut() {
-                out.push(f);
+        }
+        Expr::JsonExpr(j) => {
+            if let Some(e) = j.formatted_expr.as_deref_mut() {
+                out.push(e);
+            }
+            if let Some(p) = j.path_spec.as_deref_mut() {
+                out.push(p);
+            }
+            out.extend(j.passing_values.iter_mut());
+            if let Some(b) = j.on_empty.as_deref_mut() {
+                if let Some(e) = b.expr.as_deref_mut() {
+                    out.push(e);
+                }
+            }
+            if let Some(b) = j.on_error.as_deref_mut() {
+                if let Some(e) = b.expr.as_deref_mut() {
+                    out.push(e);
+                }
+            }
+        }
+        Expr::NullTest(n) => {
+            if let Some(arg) = n.arg.as_deref_mut() {
+                out.push(arg);
+            }
+        }
+        Expr::BooleanTest(b) => {
+            if let Some(arg) = b.arg.as_deref_mut() {
+                out.push(arg);
+            }
+        }
+        Expr::CoerceToDomain(c) => {
+            if let Some(arg) = c.arg.as_deref_mut() {
+                out.push(arg);
+            }
+        }
+        Expr::ReturningExpr(r) => {
+            if let Some(e) = r.retexpr.as_deref_mut() {
+                out.push(e);
             }
         }
         _ => {}
