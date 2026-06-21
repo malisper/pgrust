@@ -949,7 +949,7 @@ const INDEX_CONSTR_CREATE_DEFERRABLE: u16 = 1 << 1;
 const INDEX_CONSTR_CREATE_INIT_DEFERRED: u16 = 1 << 2;
 const INDEX_CONSTR_CREATE_UPDATE_INDEX: u16 = 1 << 3;
 const INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS: u16 = 1 << 4;
-const INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS: u16 = 1 << 6;
+const INDEX_CONSTR_CREATE_WITHOUT_OVERLAPS: u16 = 1 << 5;
 
 /* `catalog/pg_constraint.h` constraint-type codes. */
 const CONSTRAINT_PRIMARY: i8 = b'p' as i8;

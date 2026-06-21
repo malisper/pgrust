@@ -299,6 +299,20 @@ pub fn IndexAmTranslateCompareType(
     let amroutine = GetIndexAmRoutineByAmId(amoid)?;
     let result = match amroutine.amtranslatecmptype {
         Some(f) => f(cmptype, opfamily),
+        // GiST's `amtranslatecmptype` (gisttranslatecmptype) cannot ride the
+        // infallible fn-ptr vtable slot: it dispatches an opclass support
+        // function through fmgr, so it returns `PgResult` and allocates (the
+        // same reason `amvalidate`/`amadjustmembers` are reached by name). The
+        // unified vtable stamps `amtranslatecmptype: None` for GiST; resolve it
+        // here by name, matching the C `amroutine->amtranslatecmptype(cmptype,
+        // opfamily)` dispatch for the GiST handler. The support function is the
+        // trivial `gist_translate_cmptype_common` strategy switch (no result
+        // allocation), so a transient context for the fmgr call suffices and
+        // keeps this signature infallible-of-Mcx for its many callers.
+        None if amoid == GIST_AM_OID => {
+            let tmp = mcx::MemoryContext::new("amapi:gisttranslatecmptype");
+            backend_access_gist_core::gisttranslatecmptype(tmp.mcx(), cmpval, opfamily)?
+        }
         None => InvalidStrategy,
     };
 

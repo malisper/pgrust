@@ -15,7 +15,7 @@ use mcx::{Mcx, PgString, PgVec};
 use backend_nodes_equalfuncs::equal_node;
 use backend_utils_error::ereport;
 use types_error::{
-    PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
+    PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
@@ -724,25 +724,58 @@ pub fn transform_index_constraint_catalog<'mcx>(
             }
 
             // WITHOUT OVERLAPS: the last key must be a range/multirange type.
-            // C resolves the column type OID (typenameTypeId on the new
-            // column's TypeName, or atttypid from an existing/inherited table)
-            // and asserts type_is_range || type_is_multirange. That needs the
-            // type-cache / catalog by-OID reads (typenameTypeId, type_is_range,
-            // type_is_multirange) not reachable here. Stop loudly and
-            // recoverably rather than crash.
             if con.without_overlaps && kidx == n_keys - 1 {
+                if !found && isalter {
+                    // Look up the column type on the existing table. If we can't
+                    // find it, let things fail in DefineIndex. (The ALTER already
+                    // holds a lock on the heap; NoLock just gets the relcache
+                    // reference.)
+                    let rel = relation_open(mcx, rel_oid, NoLock)?;
+                    let natts = rel.rd_att.natts as usize;
+                    for i in 0..natts {
+                        let attr = rel.rd_att.attr(i);
+                        // C breaks (not continues) on the first dropped column.
+                        if attr.attisdropped {
+                            break;
+                        }
+                        if attr.attname.name_str() == key.as_bytes() {
+                            found = true;
+                            key_typid = attr.atttypid;
+                            break;
+                        }
+                    }
+                    rel.close(NoLock)?;
+                }
                 if found {
-                    // `key_typid` (captured from an inherited parent's
-                    // attribute above, or from the new column's TypeName via
-                    // typenameTypeId) is what C feeds to type_is_range /
-                    // type_is_multirange here; that type-cache check is not yet
-                    // reachable, so stop loudly.
-                    let _ = key_typid;
-                    return Err(ereport(ERROR)
-                        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                        .errmsg("WITHOUT OVERLAPS constraints are not yet supported")
-                        .errposition(parser_errposition(pstate, con.location))
-                        .into_error());
+                    // typid may already be set from an inherited parent's
+                    // attribute (or the ALTER scan above). Otherwise resolve the
+                    // new column's declared TypeName: typenameTypeId(NULL, ...).
+                    if !OidIsValid(key_typid) {
+                        if let Some(ci) = col_idx {
+                            if let Some(col) = columns[ci].as_columndef() {
+                                if let Some(type_name) = col.typeName.as_deref() {
+                                    let tn = crate::coltype::raw_typename_to_parse(type_name)?;
+                                    key_typid =
+                                        backend_parser_parse_type::typenameTypeId(mcx, None, &tn)?;
+                                }
+                            }
+                        }
+                    }
+
+                    let is_range = OidIsValid(key_typid)
+                        && backend_utils_cache_lsyscache::type_::type_is_range(key_typid)?;
+                    let is_multirange = OidIsValid(key_typid)
+                        && backend_utils_cache_lsyscache::type_::type_is_multirange(key_typid)?;
+                    if !OidIsValid(key_typid) || !(is_range || is_multirange) {
+                        return Err(ereport(ERROR)
+                            .errcode(ERRCODE_DATATYPE_MISMATCH)
+                            .errmsg(alloc::format!(
+                                "column \"{}\" in WITHOUT OVERLAPS is not a range or multirange type",
+                                key
+                            ))
+                            .errposition(parser_errposition(pstate, con.location))
+                            .into_error());
+                    }
                 }
             }
 

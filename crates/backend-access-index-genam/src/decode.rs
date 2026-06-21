@@ -81,10 +81,10 @@ use types_catalog::pg_constraint::{
     Anum_pg_constraint_confkey, Anum_pg_constraint_confrelid,
     Anum_pg_constraint_conindid, Anum_pg_constraint_conkey, Anum_pg_constraint_conname,
     Anum_pg_constraint_connoinherit, Anum_pg_constraint_conparentid,
-    Anum_pg_constraint_conpfeqop, Anum_pg_constraint_conrelid,
+    Anum_pg_constraint_conperiod, Anum_pg_constraint_conpfeqop, Anum_pg_constraint_conrelid,
     Anum_pg_constraint_contype, Anum_pg_constraint_convalidated,
     Anum_pg_constraint_oid, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION,
-    CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
+    CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE,
 };
 use types_catalog::pg_index::{
     IndexIndrelidIndexId, IndexRelationId, Anum_pg_index_indcheckxmin,
@@ -1301,23 +1301,34 @@ fn relcache_exclusion_info(
         &skey,
     )?;
 
-    // Walk the matching constraints; keep the exclusion constraint whose
-    // conindid is this index, decode its conexclop, then stop.
+    // Walk the matching constraints; keep the constraint owning this index whose
+    // conexclop carries the exclusion operators, then decode it. The owning
+    // constraint is either a real EXCLUDE constraint, or a temporal
+    // (`conperiod`) PRIMARY KEY / UNIQUE constraint — WITHOUT OVERLAPS PKs/UNIQUE
+    // constraints are backed by a GiST exclusion-style index and store their
+    // overlap/equality operators in conexclop just like an EXCLUDE constraint.
     let mut found_ops: Option<Vec<Oid>> = None;
     while let Some(ntp) = systable_getnext(smcx, scandesc.desc_mut())? {
         let row = heap_deform_tuple(smcx, &ntp.tuple, &conrel.rd_att, &ntp.data)?;
-        // We're only interested in exclusion constraints.
-        if col(&row, Anum_pg_constraint_contype, "contype")?.as_char() != CONSTRAINT_EXCLUSION {
+        let contype = col(&row, Anum_pg_constraint_contype, "contype")?.as_char();
+        let conperiod = col(&row, Anum_pg_constraint_conperiod, "conperiod")?.as_bool();
+        // We want the exclusion constraint owning the index.
+        if (contype != CONSTRAINT_EXCLUSION
+            && !(conperiod
+                && (contype == CONSTRAINT_PRIMARY || contype == CONSTRAINT_UNIQUE)))
+            || col(&row, Anum_pg_constraint_conindid, "conindid")?.as_oid() != index_relid
+        {
             continue;
         }
-        // The constraint should have the same index OID.
-        if col(&row, Anum_pg_constraint_conindid, "conindid")?.as_oid() != index_relid {
-            continue;
+        // There should be only one.
+        if found_ops.is_some() {
+            return Err(PgError::error(format!(
+                "unexpected exclusion constraint record found for rel {index_relid}"
+            )));
         }
         // Extract the conexclop array.
         let val = col(&row, Anum_pg_constraint_conexclop, "conexclop")?;
         found_ops = Some(oid_array_elems(val.as_ref_bytes())?);
-        break;
     }
 
     scandesc.end()?;
