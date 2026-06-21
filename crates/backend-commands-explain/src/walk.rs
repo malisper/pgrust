@@ -912,6 +912,7 @@ pub fn ExplainNode<'es, 'p>(
                 ancestors,
                 "Sort Key",
                 s.numCols,
+                0,
                 &s.sortColIdx,
                 Some(&s.sortOperators),
                 Some(&s.collations),
@@ -919,10 +920,8 @@ pub fn ExplainNode<'es, 'p>(
             )?;
         }
         ntag::T_IncrementalSort => {
-            // show_incremental_sort_keys: same as Sort Key. The trimmed
-            // IncrementalSort carries the Sort base plus nPresortedCols, but the
-            // "Presorted Key" list is verbose-only detail we don't reach in the
-            // structural slice; emit the full Sort Key here.
+            // show_incremental_sort_keys (explain.c:2583): the full "Sort Key"
+            // list plus a "Presorted Key" list of the first nPresortedCols keys.
             let s = plan_node.expect_incrementalsort();
             show_sort_group_keys(
                 es,
@@ -932,6 +931,7 @@ pub fn ExplainNode<'es, 'p>(
                 ancestors,
                 "Sort Key",
                 s.sort.numCols,
+                s.nPresortedCols,
                 &s.sort.sortColIdx,
                 Some(&s.sort.sortOperators),
                 Some(&s.sort.collations),
@@ -967,6 +967,7 @@ pub fn ExplainNode<'es, 'p>(
                     ancestors,
                     "Group Key",
                     agg.num_cols,
+                    0,
                     grp,
                     None,
                     None,
@@ -991,6 +992,7 @@ pub fn ExplainNode<'es, 'p>(
                 ancestors,
                 "Group Key",
                 g.numCols,
+                0,
                 &g.grpColIdx,
                 None,
                 None,
@@ -1613,6 +1615,7 @@ fn show_sort_group_keys<'es, 'p>(
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
     qlabel: &str,
     nkeys: i32,
+    n_presorted_keys: i32,
     keycols: &PgVec<'p, AttrNumber>,
     sort_operators: Option<&PgVec<'p, Oid>>,
     collations: Option<&PgVec<'p, Oid>>,
@@ -1639,6 +1642,8 @@ fn show_sort_group_keys<'es, 'p>(
     let es_pstmt: PgBox<'es, PlannedStmt<'es>> = mcx::alloc_in(mcx, es_pstmt)?;
 
     let mut result: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    // resultPresorted: the first nPresortedKeys keys (Incremental Sort).
+    let mut result_presorted: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
 
     for keyno in 0..nkeys as usize {
         // AttrNumber keyresno = keycols[keyno];
@@ -1679,11 +1684,21 @@ fn show_sort_group_keys<'es, 'p>(
             )?;
         }
 
+        // if (keyno < nPresortedKeys) resultPresorted = lappend(...).
+        if (keyno as i32) < n_presorted_keys {
+            result_presorted.push(sortkeybuf.clone());
+        }
         result.push(sortkeybuf);
     }
 
     let view: alloc::vec::Vec<&str> = result.iter().map(|s| s.as_str()).collect();
     fmt::ExplainPropertyList(qlabel, &view, es)?;
+    // if (nPresortedKeys > 0) ExplainPropertyList("Presorted Key", ...).
+    if n_presorted_keys > 0 {
+        let pview: alloc::vec::Vec<&str> =
+            result_presorted.iter().map(|s| s.as_str()).collect();
+        fmt::ExplainPropertyList("Presorted Key", &pview, es)?;
+    }
     Ok(())
 }
 
