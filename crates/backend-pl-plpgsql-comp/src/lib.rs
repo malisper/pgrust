@@ -30,8 +30,9 @@ use types_core::Oid;
 use types_datum::Datum;
 pub use types_error::ERRCODE_UNDEFINED_COLUMN;
 use types_error::{
-    PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_FUNCTION_DEFINITION,
-    ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE,
+    PgError, PgResult, SqlState, ERRCODE_ERROR_IN_ASSIGNMENT, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INVALID_FUNCTION_DEFINITION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_TABLE,
+    ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_plpgsql::*;
 
@@ -168,6 +169,16 @@ pub fn plpgsql_error_funcname() -> Option<String> {
     PLPGSQL_ERROR_FUNCNAME.with(|f| f.borrow().clone())
 }
 
+/// `ereport(ERROR, (errcode(code), errmsg(msg)))` — raise a structured error
+/// from a compiler path that has a `()` return.  The SQLSTATE rides the
+/// `PgError.sqlstate` field (shown only at verbose verbosity), exactly as the C
+/// `errcode()`; it must never be concatenated into the message text.  Dispatched
+/// over the `panic_any(PgError)` channel the handler's `catch_unwind` catches,
+/// mirroring C's ereport longjmp.
+fn ereport_error(code: SqlState, msg: String) -> ! {
+    std::panic::panic_any(PgError::error(msg).with_sqlstate(code));
+}
+
 // ===========================================================================
 // add_parameter_name + add_dummy_return
 // ===========================================================================
@@ -179,7 +190,10 @@ fn add_parameter_name(itemtype: PLpgSQL_nsitem_type, itemno: i32, name: &str) {
         .map(|top| funcs::plpgsql_ns_lookup(&top, true, name, None, None, None).is_some())
         .unwrap_or(false);
     if dup {
-        panic!("parameter name \"{name}\" used more than once (SQLSTATE 42P13)");
+        ereport_error(
+            ERRCODE_INVALID_FUNCTION_DEFINITION,
+            format!("parameter name \"{name}\" used more than once"),
+        );
     }
     funcs::plpgsql_ns_additem(itemtype, itemno, name);
 }
@@ -517,9 +531,12 @@ pub fn plpgsql_build_variable(
             }
         }
         PLpgSQL_type_type::PLPGSQL_TTYPE_PSEUDO => {
-            panic!(
-                "variable \"{refname}\" has pseudo-type {} (SQLSTATE 42P16)",
-                seam::format_type_be(dtype.typoid)
+            ereport_error(
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "variable \"{refname}\" has pseudo-type {}",
+                    seam::format_type_be(dtype.typoid)
+                ),
             );
         }
     }
@@ -672,9 +689,9 @@ fn build_datatype(
     origtypname: Option<TypeName>,
 ) -> Box<PLpgSQL_type> {
     if !form.typisdefined {
-        panic!(
-            "type \"{}\" is only a shell (SQLSTATE 42704)",
-            seam::typname_string(form)
+        ereport_error(
+            ERRCODE_UNDEFINED_OBJECT,
+            format!("type \"{}\" is only a shell", seam::typname_string(form)),
         );
     }
 
@@ -1140,8 +1157,16 @@ pub fn check_assignable(dno: i32, location: i32) {
                 }
             });
             if isconst {
-                panic!(
-                    "variable \"{refname}\" is declared CONSTANT (SQLSTATE 22005, at offset {location})"
+                // C `parser_errposition(location)` rides the separate
+                // position field (shown only at verbose verbosity), never the
+                // message text. The scanner needed to translate `location` to a
+                // byte position is not threaded into this path, so the position
+                // hint is omitted; the message text is what the regress diff
+                // checks.
+                let _ = location;
+                ereport_error(
+                    ERRCODE_ERROR_IN_ASSIGNMENT,
+                    format!("variable \"{refname}\" is declared CONSTANT"),
                 );
             }
         }
@@ -1279,7 +1304,13 @@ fn compile_dml_trigger_setup(pronargs: i32) {
     });
 
     if pronargs != 0 {
-        panic!("trigger functions cannot have declared arguments (SQLSTATE 42P13)");
+        std::panic::panic_any(
+            PgError::error("trigger functions cannot have declared arguments")
+                .with_sqlstate(ERRCODE_INVALID_FUNCTION_DEFINITION)
+                .with_hint(
+                    "The arguments of the trigger can be accessed through TG_NARGS and TG_ARGV instead.",
+                ),
+        );
     }
 
     let rec = plpgsql_build_record("new", 0, None, RECORDOID, true);
@@ -1314,7 +1345,10 @@ fn compile_event_trigger_setup(pronargs: i32) {
     });
 
     if pronargs != 0 {
-        panic!("event trigger functions cannot have declared arguments (SQLSTATE 42P13)");
+        ereport_error(
+            ERRCODE_INVALID_FUNCTION_DEFINITION,
+            "event trigger functions cannot have declared arguments".to_string(),
+        );
     }
 
     let coll = curr_compile_field(|f| f.fn_input_collation);
@@ -1818,18 +1852,24 @@ fn plpgsql_resolve_polymorphic_argtypes(facts: &ProcCompileFacts, argtypes: &mut
         let needs_resolution = argtypes.iter().any(|&t| is_polymorphic_type(t));
         if needs_resolution {
             if facts.resolved_argtypes.len() != argtypes.len() {
-                panic!(
-                    "could not determine actual argument type for polymorphic function \"{}\" (SQLSTATE 0A000)",
-                    plpgsql_error_funcname().unwrap_or_default()
+                ereport_error(
+                    ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!(
+                        "could not determine actual argument type for polymorphic function \"{}\"",
+                        plpgsql_error_funcname().unwrap_or_default()
+                    ),
                 );
             }
             for (i, dst) in argtypes.iter_mut().enumerate() {
                 if is_polymorphic_type(*dst) {
                     let concrete = facts.resolved_argtypes[i];
                     if !oid_is_valid(concrete) {
-                        panic!(
-                            "could not determine actual argument type for polymorphic function \"{}\" (SQLSTATE 0A000)",
-                            plpgsql_error_funcname().unwrap_or_default()
+                        ereport_error(
+                            ERRCODE_FEATURE_NOT_SUPPORTED,
+                            format!(
+                                "could not determine actual argument type for polymorphic function \"{}\"",
+                                plpgsql_error_funcname().unwrap_or_default()
+                            ),
                         );
                     }
                     *dst = concrete;
@@ -1902,9 +1942,12 @@ fn compile_scalar_function_setup(
             None,
         );
         if argdtype.ttype == PLpgSQL_type_type::PLPGSQL_TTYPE_PSEUDO {
-            panic!(
-                "PL/pgSQL functions cannot accept type {} (SQLSTATE 42P13)",
-                seam::format_type_be(argtypeid)
+            ereport_error(
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "PL/pgSQL functions cannot accept type {}",
+                    seam::format_type_be(argtypeid)
+                ),
             );
         }
 
@@ -1972,9 +2015,12 @@ fn compile_scalar_function_setup(
             // expression by the integration layer and passed in `resolved_rettype`.
             rettypeid = facts.resolved_rettype;
             if !oid_is_valid(rettypeid) {
-                panic!(
-                    "could not determine actual return type for polymorphic function \"{}\" (SQLSTATE 0A000)",
-                    plpgsql_error_funcname().unwrap_or_default()
+                ereport_error(
+                    ERRCODE_FEATURE_NOT_SUPPORTED,
+                    format!(
+                        "could not determine actual return type for polymorphic function \"{}\"",
+                        plpgsql_error_funcname().unwrap_or_default()
+                    ),
                 );
             }
         }
@@ -1991,11 +2037,17 @@ fn compile_scalar_function_setup(
         if rettypeid == VOIDOID || rettypeid == RECORDOID {
             // okay
         } else if rettypeid == TRIGGEROID || rettypeid == EVENT_TRIGGEROID {
-            panic!("trigger functions can only be called as triggers (SQLSTATE 0A000)");
+            ereport_error(
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+                "trigger functions can only be called as triggers".to_string(),
+            );
         } else {
-            panic!(
-                "PL/pgSQL functions cannot return type {} (SQLSTATE 0A000)",
-                seam::format_type_be(rettypeid)
+            ereport_error(
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+                format!(
+                    "PL/pgSQL functions cannot return type {}",
+                    seam::format_type_be(rettypeid)
+                ),
             );
         }
     }
