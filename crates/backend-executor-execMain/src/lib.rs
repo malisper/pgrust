@@ -1538,6 +1538,111 @@ fn InitResultRelInfo<'mcx>(
     Ok(())
 }
 
+/// `ExecGetAncestorResultRels(estate, resultRelInfo)` (execMain.c) — return the
+/// ancestor result relations of a leaf-partition result rel, up to and including
+/// the query's root target relation, lazily opening/initializing them and
+/// caching the chain on `ri_ancestorResultRels`. The chain is
+/// `[ancestor…, rootRelInfo]` (root-inclusive); the root ancestor itself is
+/// skipped in the loop and `ri_RootResultRelInfo` is appended for it. These
+/// relations are closed by `ExecCloseResultRelations`.
+#[allow(non_snake_case)]
+fn ExecGetAncestorResultRels<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    estate: &mut types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+) -> PgResult<mcx::PgVec<'mcx, types_nodes::RriId>> {
+    const NoLock: i32 = 0;
+
+    let root_rel_info = estate
+        .result_rel(result_rel_info)
+        .ri_RootResultRelInfo
+        .expect("ExecGetAncestorResultRels: ResultRelInfo has no root");
+
+    let part_rel = estate
+        .result_rel(result_rel_info)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecGetAncestorResultRels: ResultRelInfo has no relation")
+        .alias();
+
+    // if (!partRel->rd_rel->relispartition) elog(ERROR, ...)
+    if !part_rel.rd_rel.relispartition {
+        return Err(types_error::PgError::error(
+            "cannot find ancestors of a non-partition result relation",
+        ));
+    }
+
+    // rootRelOid = RelationGetRelid(rootRelInfo->ri_RelationDesc);
+    let root_rel_oid = estate
+        .result_rel(root_rel_info)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecGetAncestorResultRels: root ResultRelInfo has no relation")
+        .rd_id;
+    let part_relid = part_rel.rd_id;
+
+    // if (resultRelInfo->ri_ancestorResultRels == NIL) { ... compute ... }
+    if estate
+        .result_rel(result_rel_info)
+        .ri_ancestorResultRels
+        .is_none()
+    {
+        // oids = get_partition_ancestors(RelationGetRelid(partRel));
+        let oids =
+            backend_catalog_partition_seams::get_partition_ancestors::call(mcx, part_relid)?;
+
+        let mut anc_result_rels: mcx::PgVec<'mcx, types_nodes::RriId> = mcx::PgVec::new_in(mcx);
+
+        for anc_oid in oids.iter().copied() {
+            // Ignore the root ancestor here (ri_RootResultRelInfo is appended
+            // below), and stop climbing once we reach the query's root target.
+            if anc_oid == root_rel_oid {
+                break;
+            }
+
+            // All ancestors up to the root target relation are already locked
+            // by the planner / AcquireExecutorLocks(), so open with NoLock.
+            let anc_rel = backend_access_common_relation::relation_open(mcx, anc_oid, NoLock)?;
+
+            // rInfo = makeNode(ResultRelInfo);
+            // InitResultRelInfo(rInfo, ancRel, 0 /*dummy RTI*/, NULL, es_instrument);
+            let mut r_info = types_nodes::ResultRelInfo::default();
+            let instrument = estate.es_instrument;
+            InitResultRelInfo(mcx, &mut r_info, anc_rel, 0, None, instrument)?;
+            let id = estate.add_result_rel(r_info)?;
+
+            anc_result_rels
+                .try_reserve(1)
+                .map_err(|_| mcx.oom(core::mem::size_of::<types_nodes::RriId>()))?;
+            anc_result_rels.push(id);
+        }
+
+        // ancResultRels = lappend(ancResultRels, rootRelInfo);
+        anc_result_rels
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<types_nodes::RriId>()))?;
+        anc_result_rels.push(root_rel_info);
+
+        estate.result_rel_mut(result_rel_info).ri_ancestorResultRels = Some(anc_result_rels);
+    }
+
+    // We must have found some ancestor; return a copy of the cached chain.
+    let cached = estate
+        .result_rel(result_rel_info)
+        .ri_ancestorResultRels
+        .as_ref()
+        .expect("ExecGetAncestorResultRels: ancestor chain not set");
+    debug_assert!(!cached.is_empty());
+
+    let mut out: mcx::PgVec<'mcx, types_nodes::RriId> = mcx::PgVec::new_in(mcx);
+    out.try_reserve(cached.len())
+        .map_err(|_| mcx.oom(cached.len() * core::mem::size_of::<types_nodes::RriId>()))?;
+    for id in cached.iter().copied() {
+        out.push(id);
+    }
+    Ok(out)
+}
+
 /// `CheckValidResultRel(resultRelInfo, operation, onConflictAction,
 /// mergeActions)` (execMain.c) — verify the result relation is a valid target
 /// for the command.
@@ -3568,6 +3673,7 @@ pub fn init_seams() {
     seams::exec_with_check_options::set(ExecWithCheckOptions);
     seams::init_result_rel_info::set(InitResultRelInfo);
     seams::check_valid_result_rel::set(CheckValidResultRel);
+    seams::exec_get_ancestor_result_rels::set(ExecGetAncestorResultRels);
     seams::eval_plan_qual_init::set(EvalPlanQualInit);
     seams::eval_plan_qual_set_plan_with_row_marks::set(eval_plan_qual_set_plan_with_row_marks);
     seams::link_subplan_planstate::set(link_subplan_planstate);

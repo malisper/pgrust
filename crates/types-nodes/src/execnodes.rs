@@ -516,6 +516,11 @@ pub struct ResultRelInfo<'mcx> {
     /// `struct ResultRelInfo *ri_RootResultRelInfo` — the root target
     /// relation, when this is a child (partition routing / inheritance).
     pub ri_RootResultRelInfo: Option<RriId>,
+    /// `List *ri_ancestorResultRels` — for a partition leaf result rel, the
+    /// chain of ancestor `ResultRelInfo`s up to and including the query's root
+    /// target, lazily computed by `ExecGetAncestorResultRels`. `None` is the C
+    /// `NIL` (not yet computed).
+    pub ri_ancestorResultRels: Option<PgVec<'mcx, RriId>>,
     /// `TupleConversionMap *ri_ChildToRootMap` (+ its computed flag).
     pub ri_ChildToRootMap: Option<PgBox<'mcx, TupleConversionMap<'mcx>>>,
     pub ri_ChildToRootMapValid: bool,

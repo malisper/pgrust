@@ -67,18 +67,6 @@ seam_core::seam!(
  * ------------------------------------------------------------------------- */
 
 seam_core::seam!(
-    /// `format_procedure_extended(procedure_oid, flags)` (regproc.c): the
-    /// `pro_name(args)` rendering of a procedure OID. `Ok(None)` is the C
-    /// `NULL` (only with `FORMAT_PROC_INVALID_AS_NULL` set). `flags` is the
-    /// `bits16` `FORMAT_PROC_*` mask. Allocated in `mcx`.
-    pub fn format_procedure_extended<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        procedure_oid: types_core::Oid,
-        flags: u16,
-    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
-);
-
-seam_core::seam!(
     /// `format_procedure_parts(procedure_oid, &objname, &objargs, missing_ok)`
     /// (regproc.c): the `(objname, objargs)` C-string lists feeding
     /// `get_object_address`. `Ok(None)` is the `missing_ok` "didn't exist"
@@ -88,18 +76,6 @@ seam_core::seam!(
         procedure_oid: types_core::Oid,
         missing_ok: bool,
     ) -> types_error::PgResult<Option<(mcx::PgVec<'mcx, mcx::PgString<'mcx>>, mcx::PgVec<'mcx, mcx::PgString<'mcx>>)>>
-);
-
-seam_core::seam!(
-    /// `format_operator_extended(operator_oid, flags)` (regproc.c): the
-    /// `oprname(left,right)` rendering of an operator OID. `Ok(None)` is the C
-    /// `NULL` (only with `FORMAT_OPERATOR_INVALID_AS_NULL` set). `flags` is the
-    /// `bits16` `FORMAT_OPERATOR_*` mask. Allocated in `mcx`.
-    pub fn format_operator_extended<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        operator_oid: types_core::Oid,
-        flags: u16,
-    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
 
 seam_core::seam!(

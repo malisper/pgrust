@@ -21,6 +21,7 @@ use crate::consts::*;
 // --- cross-unit seam aliases (mirror-and-panic until each owner lands) ---
 use backend_utils_adt_format_type_seams as format_type;
 use backend_utils_adt_misc2_seams as regproc;
+use backend_utils_adt_regproc_seams as regproc_ext;
 use backend_utils_adt_ruleutils_seams as ruleutils;
 use backend_utils_cache_lsyscache_seams as lsyscache;
 use backend_utils_cache_syscache_seams as syscache;
@@ -133,7 +134,7 @@ fn get_object_identity_parts_inner<'mcx>(
         }
     } else if class_id == ProcedureRelationId {
         let flags = regproc_proc_force_qualify() | regproc_proc_invalid_as_null();
-        let proname = regproc::format_procedure_extended::call(mcx, object.objectId, flags)?;
+        let proname = regproc_ext::format_procedure_extended::call(mcx, object.objectId, flags)?;
         match proname {
             None => return finish(mcx, buffer, want_parts, parts, missing_ok, class_id),
             Some(proname) => {
@@ -334,7 +335,7 @@ fn get_object_identity_parts_inner<'mcx>(
         }
     } else if class_id == OperatorRelationId {
         let flags = regproc_operator_force_qualify() | regproc_operator_invalid_as_null();
-        let oprname = regproc::format_operator_extended::call(mcx, object.objectId, flags)?;
+        let oprname = regproc_ext::format_operator_extended::call(mcx, object.objectId, flags)?;
         match oprname {
             None => return finish(mcx, buffer, want_parts, parts, missing_ok, class_id),
             Some(oprname) => {

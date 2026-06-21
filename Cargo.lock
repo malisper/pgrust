@@ -9518,6 +9518,7 @@ dependencies = [
  "backend-catalog-aclchk-seams",
  "backend-catalog-catalog",
  "backend-catalog-objectaddress-seams",
+ "backend-catalog-partition-seams",
  "backend-commands-trigger-seams",
  "backend-executor-execAmi",
  "backend-executor-execAmi-seams",
