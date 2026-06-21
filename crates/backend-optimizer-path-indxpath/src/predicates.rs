@@ -152,7 +152,7 @@ pub fn check_index_predicates<'mcx>(
     //         get_plan_rowmark(root->rowMarks, rel->relid) != NULL.
     let relid_idx = root.rel(rel).relid;
     let is_target_rel = crate::util::relids_is_member(relid_idx as i32, &root.all_result_relids)
-        || restrictinfo::has_plan_rowmark::call(root, relid_idx);
+        || restrictinfo::has_plan_rowmark::call(run, root, relid_idx);
 
     // Now try to prove each index predicate true.
     let nindexes = root.rel(rel).indexlist.len();

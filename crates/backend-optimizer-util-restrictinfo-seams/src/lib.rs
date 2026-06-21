@@ -89,5 +89,13 @@ seam_core::seam!(
     /// `get_plan_rowmark(rowmarks, rtindex) != NULL` (preptlist.c /
     /// plancat.c) — does the query carry a PlanRowMark for `rtindex`? Used by
     /// `check_index_predicates` to detect a FOR-UPDATE/target relation.
-    pub fn has_plan_rowmark(root: &PlannerInfo, rtindex: u32) -> bool
+    ///
+    /// Threads `&PlannerRun` so the lookup can resolve each `root.rowMarks`
+    /// `PlanRowMarkId` handle to its `PlanRowMark.rti` in the run's store
+    /// (`root.rowMarks` carries handles, not values).
+    pub fn has_plan_rowmark<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rtindex: u32
+    ) -> bool
 );

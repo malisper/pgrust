@@ -100,10 +100,32 @@ fn empty_select_targetlist_yields_empty_processed_tlist() {
 }
 
 #[test]
-fn get_plan_rowmark_empty_is_none() {
-    // SELECT path: rowMarks is empty, so the lookup finds nothing.
+fn get_plan_rowmark_resolves_rti() {
+    let cx = MemoryContext::new("preptlist-test");
+    let mcx = cx.mcx();
+    let mut run = types_pathnodes::planner_run::PlannerRun::new(mcx);
+
+    // Empty rowMarks (the plain SELECT path) finds nothing.
     let empty: alloc::vec::Vec<types_pathnodes::PlanRowMarkId> = alloc::vec::Vec::new();
-    assert!(get_plan_rowmark(&empty, 1).is_none());
+    assert!(get_plan_rowmark(&run, &empty, 1).is_none());
+
+    // A FOR-UPDATE/SHARE rowmark for rti=3 is interned as a handle in
+    // root.rowMarks; the lookup resolves the handle to compare rc->rti.
+    let mk = |rti: u32| types_nodes::nodelockrows::PlanRowMark {
+        type_: types_nodes::nodelockrows::T_PlanRowMark,
+        rti: rti as types_core::Index,
+        prti: rti as types_core::Index,
+        rowmarkId: rti,
+        markType: types_nodes::nodelockrows::ROW_MARK_REFERENCE,
+        allMarkTypes: 1 << types_nodes::nodelockrows::ROW_MARK_REFERENCE,
+        strength: types_nodes::rawnodes::LockClauseStrength::LCS_NONE as u32 as i32,
+        waitPolicy: types_nodes::rawnodes::LockWaitPolicy::LockWaitBlock as u32 as i32,
+        isParent: false,
+    };
+    let marks = alloc::vec![run.intern_rowmark(mk(3)), run.intern_rowmark(mk(5))];
+    assert_eq!(get_plan_rowmark(&run, &marks, 3), Some(marks[0]));
+    assert_eq!(get_plan_rowmark(&run, &marks, 5), Some(marks[1]));
+    assert!(get_plan_rowmark(&run, &marks, 2).is_none());
 }
 
 #[test]

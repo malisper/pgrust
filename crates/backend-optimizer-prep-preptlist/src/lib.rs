@@ -859,38 +859,22 @@ fn extract_update_targetlist_colnos_owned<'mcx>(
 /// `get_plan_rowmark(rowmarks, rtindex)` (preptlist.c:525) — locate the
 /// `PlanRowMark` for the given RT index, or `None` if none.
 ///
-/// In C, `rowmarks` is a `List *` of `PlanRowMark *` and the function scans for
-/// `rc->rti == rtindex`. Here `rowmarks` is a `Vec<NodeId>` of opaque handles
-/// with no backing store (`PlanRowMark`s come from the unported
-/// `preprocess_rowmarks`); the list is empty on every reachable path, so the
-/// scan finds nothing and returns `None`. A non-empty list means a DML/locking
-/// path that needs the PlanRowMark-carrier keystone to resolve `rc->rti` — we
-/// seam-and-panic there rather than silently return `None` (which would
-/// mis-report "no rowmark" and skip required junk-column / locking logic).
-///
-/// Returns the matching [`PlanRowMarkId`] handle or `None`. The only consumer in
-/// the current tree is `check_index_predicates` (indxpath), which only needs the
-/// not-NULL test — see [`has_plan_rowmark`].
-///
-/// The PlanRowMark-carrier keystone landed the [`PlanRowMarkId`] store on
-/// `PlannerRun`, so `rowMarks` now carries resolvable handles; but resolving
-/// `rc->rti` to compare against `rtindex` needs the `&PlannerRun` value, which
-/// this lookup is not yet threaded (its only caller, `seam_has_plan_rowmark`,
-/// receives only `&PlannerInfo`). On every reachable SELECT path `root.rowMarks`
-/// is empty (it is filled by the still-unported `preprocess_rowmarks`), so the
-/// list-walk is a no-op; a non-empty list is unreachable until the DML/locking
-/// analyze family threads the run, so we seam-and-panic rather than silently
-/// return `None`.
-pub fn get_plan_rowmark(rowmarks: &[PlanRowMarkId], _rtindex: u32) -> Option<PlanRowMarkId> {
-    if rowmarks.is_empty() {
-        return None;
+/// In C, `rowmarks` is a `List *` of `PlanRowMark *` scanned for `rc->rti ==
+/// rtindex`. Here `root.rowMarks` carries [`PlanRowMarkId`] handles into the
+/// run's PlanRowMark store (`preprocess_rowmarks` interns the marks there), so
+/// each handle is resolved through `run.resolve_rowmark(id)` to read its `rti`.
+pub fn get_plan_rowmark<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+    rowmarks: &[PlanRowMarkId],
+    rtindex: u32,
+) -> Option<PlanRowMarkId> {
+    // foreach(l, rowmarks) { rc = lfirst(l); if (rc->rti == rtindex) return rc; }
+    for &id in rowmarks {
+        if run.resolve_rowmark(id).rti as u32 == rtindex {
+            return Some(id);
+        }
     }
-    panic!(
-        "get_plan_rowmark: PlanRowMark lookup not yet threaded the `&PlannerRun` run context \
-         needed to resolve `rc->rti` — `rowMarks` now carries `PlanRowMarkId` handles into the \
-         run's rowmark store, but `seam_has_plan_rowmark` receives only `&PlannerInfo`; needs the \
-         DML/locking analyze family to thread the run (`preprocess_rowmarks` owner)"
-    );
+    None
 }
 
 /// Backs `backend_optimizer_util_restrictinfo_seams::has_plan_rowmark`: does the
@@ -898,10 +882,15 @@ pub fn get_plan_rowmark(rowmarks: &[PlanRowMarkId], _rtindex: u32) -> Option<Pla
 ///
 /// C site: `check_index_predicates` (indxpath.c:4029) ORs this with
 /// `bms_is_member(rel->relid, root->all_result_relids)` to detect a
-/// FOR-UPDATE/target relation. On the SELECT path `root.rowMarks` is empty so
-/// this is `false`; the DML/locking path panics inside `get_plan_rowmark`.
-fn seam_has_plan_rowmark(root: &PlannerInfo, rtindex: u32) -> bool {
-    get_plan_rowmark(&root.rowMarks, rtindex).is_some()
+/// FOR-UPDATE/target relation. The `&PlannerRun` resolves the rowmark handles
+/// so a `SELECT ... FOR UPDATE/SHARE` over a relation with partial indexes sees
+/// its rowmark and treats the rel as a target relation.
+fn seam_has_plan_rowmark<'mcx>(
+    run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    rtindex: u32,
+) -> bool {
+    get_plan_rowmark(run, &root.rowMarks, rtindex).is_some()
 }
 
 // ===========================================================================
