@@ -616,36 +616,46 @@ pub fn ExecEvalAggOrderedTransTuple<'mcx>(
     tuplesort_puttupleslot::call(sortstate, slot_ref)
 }
 
-/// Resolve `op->d.agg_trans.pertrans` (a nodeAgg-parked opaque address) to the
-/// real `AggStatePerTransData`. The AGG_ORDERED_TRANS steps carry the pertrans
-/// as an opaque address word; mapping it to the live nodeAgg pertrans slice
-/// entry is nodeAgg's wiring (the interpreter reaches the AggState through
-/// `state->parent`, which the F0 cut does not yet thread to this crate).
+/// Resolve `op->d.agg_trans.pertrans` to the live `AggStatePerTransData`.
+///
+/// C: `AggStatePerTrans pertrans = op->d.agg_trans.pertrans;` — a direct
+/// pointer into `aggstate->pertrans[]`. The owned model carries that pointer as
+/// the pertrans slice index, and reaches the AggState through `state->parent`
+/// (`castNode(AggState, state->parent)`, same channel the plain-trans steps
+/// use), then indexes its `pertrans` vector.
 fn ordered_pertrans<'a, 'mcx>(
-    _state: &'a ExprState<'mcx>,
-    _pertrans: usize,
+    state: &'a ExprState<'mcx>,
+    pertrans: usize,
 ) -> PgResult<&'a AggStatePerTransData<'mcx>> {
-    panic!(
-        "backend-executor-execExprInterp::eval_agg: resolving op->d.agg_trans.pertrans (an \
-         opaque address) to the live AggStatePerTransData via state->parent (the AggState) is \
-         nodeAgg's wiring; state->parent is not yet threaded to this crate"
-    );
+    let aggstate = crate::interp_loop::agg_parent_mut(state);
+    let pt = &aggstate
+        .pertrans
+        .as_ref()
+        .expect("ordered_pertrans: aggstate->pertrans not built by ExecInitAgg")[pertrans];
+    Ok(pt)
 }
 
 /// `pertrans->sortstates[setno]` — the per-grouping-set `Tuplesortstate` the
-/// ordered-aggregate input is fed into. Resolving `op->d.agg_trans.pertrans` to
-/// the live nodeAgg pertrans (and thus its `sortstates` array) requires
-/// `state->parent`, which the F0 cut does not yet thread to this crate.
+/// ordered-aggregate input is fed into. Reaches the live nodeAgg pertrans (and
+/// thus its `sortstates` array) through `state->parent`.
 fn ordered_sortstate<'a, 'mcx>(
-    _state: &'a mut ExprState<'mcx>,
-    _pertrans: usize,
-    _setno: i32,
+    state: &'a mut ExprState<'mcx>,
+    pertrans: usize,
+    setno: i32,
 ) -> PgResult<&'a mut types_nodes::Tuplesortstate<'mcx>> {
-    panic!(
-        "backend-executor-execExprInterp::eval_agg: reaching pertrans->sortstates[setno] needs \
-         op->d.agg_trans.pertrans resolved against state->parent (the AggState); state->parent \
-         is not yet threaded to this crate"
-    );
+    let aggstate = crate::interp_loop::agg_parent_mut(state);
+    let pt = &mut aggstate
+        .pertrans
+        .as_mut()
+        .expect("ordered_sortstate: aggstate->pertrans not built by ExecInitAgg")[pertrans];
+    let sortstate = pt
+        .sortstates
+        .as_mut()
+        .expect("ordered_sortstate: pertrans->sortstates not allocated (ORDER BY/DISTINCT agg)")
+        [setno as usize]
+        .as_mut()
+        .expect("ordered_sortstate: pertrans->sortstates[setno] is NULL");
+    Ok(&mut *sortstate)
 }
 
 /// `ExecAggPlainTransByVal(AggState *aggstate, AggStatePerTrans pertrans,

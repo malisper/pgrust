@@ -120,7 +120,7 @@ pub(crate) fn write_cell<'mcx>(
 /// state, disjoint from the `ExprState`'s step program, so the aliasing is sound
 /// (the same discipline `ExecEvalGroupingFunc` uses, here for `&mut`).
 #[inline]
-fn agg_parent_mut<'a, 'mcx>(
+pub(crate) fn agg_parent_mut<'a, 'mcx>(
     state: &ExprState<'mcx>,
 ) -> &'a mut backend_executor_nodeAgg::AggStateData<'mcx> {
     let mut link = state
