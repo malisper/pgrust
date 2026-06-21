@@ -705,61 +705,27 @@ fn register_opclass_support_builtins() {
         b(bloom::F_BRIN_BLOOM_ADD_VALUE, "brin_bloom_add_value", 4, true),
         b(bloom::F_BRIN_BLOOM_CONSISTENT, "brin_bloom_consistent", 4, true),
         b(bloom::F_BRIN_BLOOM_UNION, "brin_bloom_union", 3, true),
-        b(bloom::F_BRIN_BLOOM_OPTIONS, "brin_bloom_options", 1, false),
         // minmax-multi (pg_proc.dat oids 4616-4620).
         b(mmm::F_BRIN_MINMAX_MULTI_OPCINFO, "brin_minmax_multi_opcinfo", 1, true),
         b(mmm::F_BRIN_MINMAX_MULTI_ADD_VALUE, "brin_minmax_multi_add_value", 4, true),
         b(mmm::F_BRIN_MINMAX_MULTI_CONSISTENT, "brin_minmax_multi_consistent", 4, true),
         b(mmm::F_BRIN_MINMAX_MULTI_UNION, "brin_minmax_multi_union", 3, true),
-        b(mmm::F_BRIN_MINMAX_MULTI_OPTIONS, "brin_minmax_multi_options", 1, false),
     ]);
-}
 
-/// `index_opclass_options`' `local_relopts` leg (indexam.c): C runs
-/// `init_local_reloptions(&relopts, 0); FunctionCall1(procinfo,
-/// PointerGetDatum(&relopts)); build_local_reloptions(&relopts, attoptions,
-/// validate)`. The middle `FunctionCall1` invokes the opclass's options-parsing
-/// support procedure through fmgr, passing a *pointer* to the stack
-/// `local_relopts` as an `internal` Datum that the proc mutates in place. The
-/// owned bare-word Datum model has no `internal`-pointer lane, so instead of
-/// the fmgr round-trip we dispatch by the proc's OID directly to the Rust
-/// builder that fills the `LocalRelOpts` (the body of `brin_bloom_options` /
-/// `brin_minmax_multi_options`), then run `build_local_reloptions`.
-fn index_build_local_reloptions<'mcx>(
-    procinfo: types_core::fmgr::FmgrInfo,
-    attoptions: types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
-    validate: bool,
-) -> PgResult<Option<alloc::vec::Vec<u8>>> {
-    use backend_access_common_reloptions::{build_local_reloptions, LocalRelOpts};
-
-    let mut relopts = LocalRelOpts::default();
-    match procinfo.fn_oid {
-        bloom::F_BRIN_BLOOM_OPTIONS => bloom::brin_bloom_fill_local_reloptions(&mut relopts),
-        mmm::F_BRIN_MINMAX_MULTI_OPTIONS => {
-            mmm::brin_minmax_multi_fill_local_reloptions(&mut relopts)
-        }
-        other => {
-            // No other built-in opclass defines an options support procedure;
-            // an unexpected OID is a dispatch/catalog bug.
-            return Err(ereport(ERROR)
-                .errcode(ERRCODE_INTERNAL_ERROR)
-                .errmsg_internal(alloc::format!(
-                    "no built-in BRIN opclass-options builder for procedure {other}"
-                ))
-                .into_error());
-        }
-    }
-
-    // C: `build_local_reloptions(&relopts, attoptions, validate)`. The
-    // `attoptions` text[] image rides the by-reference Datum lane; a SQL-NULL /
-    // `(Datum) 0` (no options specified) is the by-value zero word.
-    let ctx = mcx::MemoryContext::new("index_build_local_reloptions");
-    let options_bytes: Option<&[u8]> = match &attoptions {
-        types_tuple::backend_access_common_heaptuple::Datum::ByRef(b) => Some(b.as_slice()),
-        _ => None,
-    };
-    let bytes = build_local_reloptions(ctx.mcx(), &relopts, options_bytes, validate)?;
-    Ok(Some(bytes))
+    // The two BRIN opclass-options support procedures are real fmgr builtins:
+    // `index_opclass_options` resolves them by OID and invokes them through
+    // fmgr, passing the `local_relopts` on the `internal` lane. Registering them
+    // as Result-native bodies routes the dispatch to the proc directly.
+    backend_utils_fmgr_core::register_builtins_native([
+        (
+            b(bloom::F_BRIN_BLOOM_OPTIONS, "brin_bloom_options", 1, false),
+            bloom::fc_brin_bloom_options as types_fmgr::PgFnNative,
+        ),
+        (
+            b(mmm::F_BRIN_MINMAX_MULTI_OPTIONS, "brin_minmax_multi_options", 1, false),
+            mmm::fc_brin_minmax_multi_options as types_fmgr::PgFnNative,
+        ),
+    ]);
 }
 
 /// Install the BRIN opclass-dispatch seams owned by the built-in opclasses.
@@ -782,14 +748,6 @@ pub fn init_seams() {
     opclass::brin_consistent_single::set(dispatch_consistent_single);
     opclass::brin_consistent_multi::set(dispatch_consistent_multi);
     opclass::brin_serialize::set(dispatch_serialize);
-
-    // Install the opclass-options leg of `index_opclass_options` (indexam.c).
-    // The bloom and minmax-multi opclasses are the only built-in BRIN opclasses
-    // that define an options support procedure; this dispatcher fills the
-    // `LocalRelOpts` by OID and runs `build_local_reloptions`.
-    backend_access_common_reloptions_seams::index_build_local_reloptions::set(
-        index_build_local_reloptions,
-    );
 }
 
 #[cfg(test)]

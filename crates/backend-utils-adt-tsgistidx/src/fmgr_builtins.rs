@@ -12,11 +12,13 @@
 //! text of a `gtsvector` errors `internal function "gtsvectorout" is not in
 //! internal lookup table`.
 //!
-//! The remaining `tsgistidx.c` entry points (`gtsvector_compress` /
+//! The `gtsvector_options` (oid 3434) GiST opclass-options support procedure IS
+//! registered here: `index_opclass_options` resolves it by OID and invokes it
+//! through fmgr, passing the `local_relopts` on the `internal` lane. The
+//! remaining `tsgistidx.c` opclass support procedures (`gtsvector_compress` /
 //! `_decompress` / `_consistent` / `_union` / `_same` / `_penalty` /
-//! `_picksplit` / `_options`) are GiST opclass support procedures dispatched by
-//! the GiST AM through the typed by-OID opclass dispatch, not the fmgr frame;
-//! they are not registered here.
+//! `_picksplit`) are dispatched by the GiST AM through the typed by-OID opclass
+//! dispatch, not the fmgr frame; they are not registered here.
 
 use types_datum::Datum;
 use types_error::PgResult;
@@ -61,15 +63,32 @@ fn fc_gtsvectorout(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     Ok(Datum::from_usize(0))
 }
 
-fn builtin(foid: u32, name: &str, nargs: i16, native: PgFnNative) -> (BuiltinFunction, PgFnNative) {
+/// `gtsvector_options(internal) -> void` (tsgistidx.c:799, oid 3434) — the GiST
+/// `tsvector_ops` opclass-options support procedure: register the `siglen`
+/// opclass option on the `local_relopts` it receives on the fmgr `internal`
+/// lane. `PG_RETURN_VOID()`.
+fn fc_gtsvector_options(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let relopts = fcinfo
+        .ref_arg_mut(0)
+        .and_then(|p| p.as_internal_mut::<types_reloptions::local_relopts>())
+        .expect("gtsvector_options: args[0] is not a local_relopts internal arg");
+    crate::gtsvector_options(relopts);
+    Ok(Datum::null())
+}
+
+fn builtin(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    strict: bool,
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
     (
         BuiltinFunction {
             foid,
             name: name.to_string(),
             nargs,
-            // Both `gtsvectorin`/`gtsvectorout` are `proisstrict => 't'` (the
-            // default) and not proretset in pg_proc.dat.
-            strict: true,
+            strict,
             retset: false,
             func: None,
         },
@@ -77,12 +96,16 @@ fn builtin(foid: u32, name: &str, nargs: i16, native: PgFnNative) -> (BuiltinFun
     )
 }
 
-/// Register the SQL-callable `tsgistidx.c` I/O builtins (C: their
+/// Register the SQL-callable `tsgistidx.c` I/O builtins plus the
+/// `gtsvector_options` opclass-options support procedure (C: their
 /// `fmgr_builtins[]` rows). Called from this crate's `init_seams()`. OIDs /
 /// nargs / strict / retset transcribed exactly from `pg_proc.dat`.
 pub fn register_tsgistidx_builtins() {
     backend_utils_fmgr_core::register_builtins_native([
-        builtin(3646, "gtsvectorin", 1, fc_gtsvectorin),
-        builtin(3647, "gtsvectorout", 1, fc_gtsvectorout),
+        // `gtsvectorin`/`gtsvectorout` are `proisstrict => 't'` (the default).
+        builtin(3646, "gtsvectorin", 1, true, fc_gtsvectorin),
+        builtin(3647, "gtsvectorout", 1, true, fc_gtsvectorout),
+        // `gtsvector_options` is `proisstrict => 'f'`.
+        builtin(3434, "gtsvector_options", 1, false, fc_gtsvector_options),
     ]);
 }

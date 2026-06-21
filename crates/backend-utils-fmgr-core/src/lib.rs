@@ -2378,6 +2378,51 @@ fn oid_function_call_1_deflist(
     null_check(&fcinfo, result, &oid.to_string())
 }
 
+/// `FunctionCall1(procinfo, PointerGetDatum(&relopts))` (indexam.c
+/// `index_opclass_options`): invoke an opclass's options-parsing support
+/// procedure, passing a pointer to the caller's `local_relopts` as the lone
+/// `internal` argument the procedure mutates in place (registering its local
+/// reloptions) and returns void from. The C `FmgrInfo` cannot cross the seam,
+/// so re-resolve `proc_oid` by OID; the `local_relopts` rides the fmgr
+/// `internal` lane (`RefPayload::Internal`) — moved in, mutated in place by the
+/// proc through `ref_arg_mut`, and taken back out after the call. The proc
+/// returns void, so the by-value result word is ignored.
+fn index_options_function_call_seam(
+    proc_oid: Oid,
+    relopts: types_reloptions::local_relopts,
+) -> PgResult<types_reloptions::local_relopts> {
+    let ctx = MemoryContext::new("index_options_function_call");
+    let mcx = ctx.mcx();
+    let resolved = fmgr_info(mcx, proc_oid)?;
+
+    // C: `args[0] = PointerGetDatum(&relopts)`. The owned model carries the
+    // `local_relopts` in the `internal` ref lane; the bare `args[0]` word is a
+    // placeholder the proc never reads.
+    let mut fcinfo = init_fcinfo(
+        Some(resolved.finfo),
+        InvalidOid,
+        vec![NullableDatum::value(Datum::null())],
+    );
+    fcinfo.set_ref_arg(0, RefPayload::Internal(Box::new(relopts)));
+
+    // C: `(void) FunctionCall1(procinfo, ...)` — the result is void; only the
+    // in-place mutation of `*relopts` matters.
+    let _ = function_call_invoke(mcx, &resolved.resolution, &mut fcinfo)?;
+
+    // Recover the (now filled-in) `local_relopts` the proc mutated in place.
+    match fcinfo.take_ref_arg(0) {
+        Some(RefPayload::Internal(b)) => Ok(*b
+            .downcast::<types_reloptions::local_relopts>()
+            .unwrap_or_else(|_| {
+                panic!("index_options_function_call: args[0] internal is not a local_relopts")
+            })),
+        other => panic!(
+            "index_options_function_call: proc {proc_oid} did not return the local_relopts \
+             internal arg (got {other:?})"
+        ),
+    }
+}
+
 /// `typenameTypeMod`'s typmod-resolution tail (parse_type.c): build the
 /// `cstring[]` array from the raw typmod expressions distilled to strings, then
 /// `DatumGetInt32(OidFunctionCall1(typmodin, PointerGetDatum(arrtypmod)))`. The C
@@ -4325,6 +4370,9 @@ pub fn init_seams() {
     backend_utils_fmgr_fmgr_seams::get_fn_expr_argtype::set(get_fn_expr_argtype_seam);
     backend_utils_fmgr_fmgr_seams::get_fn_expr_rettype::set(get_fn_expr_rettype_seam);
     backend_utils_fmgr_fmgr_seams::oid_function_call_1_deflist::set(oid_function_call_1_deflist);
+    backend_utils_fmgr_fmgr_seams::index_options_function_call::set(
+        index_options_function_call_seam,
+    );
     backend_utils_fmgr_fmgr_seams::typmodin::set(typmodin_seam);
     backend_utils_fmgr_fmgr_seams::oid_send_function_call::set(oid_send_function_call_seam);
     backend_utils_fmgr_fmgr_seams::oid_output_function_call::set(oid_output_function_call_seam);

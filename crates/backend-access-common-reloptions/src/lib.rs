@@ -1901,6 +1901,136 @@ fn add_local_int_reloption_seam(
     });
 }
 
+/// Rebuild the crate-internal [`LocalRelOpts`] from the shared
+/// `types_reloptions::local_relopts` an opclass `options` support procedure
+/// filled. The shared vocabulary is what crosses the fmgr `internal` lane (the
+/// `init_local_reloptions` / `add_local_*_reloption` seams operate on it); this
+/// reconstructs the typed-option list `build_local_reloptions` consumes.
+fn local_relopts_from_shared(shared: &types_reloptions::local_relopts) -> LocalRelOpts {
+    use types_reloptions::{relopt_type as ST, relopt_typed};
+    let mut out = LocalRelOpts {
+        options: Vec::with_capacity(shared.options.len()),
+        validators: Vec::new(),
+        relopt_struct_size: shared.relopt_struct_size,
+    };
+    for opt in &shared.options {
+        let gen = opt.option.as_ref().expect("local_relopt without a definition");
+        let name = gen.name.clone().unwrap_or_default();
+        let data = match &gen.data {
+            relopt_typed::Bool { default_val } => RelOptData::Bool { default_val: *default_val },
+            relopt_typed::Int { default_val, min, max } => {
+                RelOptData::Int { default_val: *default_val, min: *min, max: *max }
+            }
+            relopt_typed::Real { default_val, min, max } => {
+                RelOptData::Real { default_val: *default_val, min: *min, max: *max }
+            }
+            relopt_typed::Enum { default_val } => RelOptData::Enum {
+                members: Vec::new(),
+                default_val: *default_val,
+                detailmsg: None,
+            },
+            relopt_typed::Str { default_val, default_isnull } => RelOptData::Str {
+                default_val: default_val.clone(),
+                default_len: default_val.as_ref().map_or(0, |s| s.len() as i32),
+                default_isnull: *default_isnull,
+                validate_cb: None,
+                fill_cb: None,
+            },
+        };
+        let opttype = match gen.type_ {
+            ST::RELOPT_TYPE_BOOL => RELOPT_TYPE_BOOL,
+            ST::RELOPT_TYPE_INT => RELOPT_TYPE_INT,
+            ST::RELOPT_TYPE_REAL => RELOPT_TYPE_REAL,
+            ST::RELOPT_TYPE_ENUM => RELOPT_TYPE_ENUM,
+            ST::RELOPT_TYPE_STRING => RELOPT_TYPE_STRING,
+        };
+        let newoption = RelOptGen {
+            name,
+            desc: gen.desc.clone(),
+            kinds: gen.kinds,
+            lockmode: gen.lockmode,
+            namelen: gen.namelen,
+            opttype,
+            data,
+        };
+        out.options.push(LocalRelOpt { option: Rc::new(newoption), offset: opt.offset });
+    }
+    out
+}
+
+/// Seam target for `index_build_local_reloptions(procinfo, attoptions,
+/// validate)` — the `local_relopts` tail of `index_opclass_options`
+/// (indexam.c): `init_local_reloptions(&relopts, 0);
+/// FunctionCall1(procinfo, PointerGetDatum(&relopts));
+/// build_local_reloptions(&relopts, attoptions, validate)`.
+///
+/// The middle `FunctionCall1` dispatches the opclass's options-parsing support
+/// procedure **by OID through fmgr** (no per-AM match): the proc receives the
+/// `local_relopts` as the lone `internal` argument, registers its local
+/// reloptions on it, and returns void. Each AM/opclass registers its own
+/// options proc as an ordinary fmgr builtin, so this dispatcher carries no
+/// AM-specific knowledge.
+fn index_build_local_reloptions_seam<'mcx>(
+    procinfo: types_core::fmgr::FmgrInfo,
+    attoptions: types_tuple::Datum<'mcx>,
+    validate: bool,
+) -> PgResult<Option<Vec<u8>>> {
+    // init_local_reloptions(&relopts, 0).
+    let mut shared = types_reloptions::local_relopts::default();
+    backend_access_common_reloptions_seams::init_local_reloptions::call(&mut shared, 0);
+
+    // (void) FunctionCall1(procinfo, PointerGetDatum(&relopts)) — the opclass's
+    // options proc, resolved and invoked by OID through fmgr; it fills `shared`.
+    let shared = backend_utils_fmgr_fmgr_seams::index_options_function_call::call(
+        procinfo.fn_oid,
+        shared,
+    )?;
+
+    // build_local_reloptions(&relopts, attoptions, validate). The `attoptions`
+    // text[] image rides the by-reference Datum lane; a SQL-NULL / `(Datum) 0`
+    // (no options specified) is the by-value zero word.
+    let relopts = local_relopts_from_shared(&shared);
+    let options_bytes: Option<&[u8]> = match &attoptions {
+        types_tuple::Datum::ByRef(b) => Some(b.as_slice()),
+        _ => None,
+    };
+    let ctx = mcx::MemoryContext::new("index_build_local_reloptions");
+    let bytes = build_local_reloptions(ctx.mcx(), &relopts, options_bytes, validate)?;
+    Ok(Some(bytes))
+}
+
+/// Seam target for `add_local_real_reloption(relopts, name, desc, default, min,
+/// max, offset)`, operating on the shared `types_reloptions::local_relopts`
+/// (mirrors [`add_local_int_reloption_seam`] for the REAL type).
+fn add_local_real_reloption_seam(
+    relopts: &mut types_reloptions::local_relopts,
+    name: &str,
+    desc: Option<&str>,
+    default_val: f64,
+    min_val: f64,
+    max_val: f64,
+    offset: i32,
+) {
+    let newoption = types_reloptions::relopt_gen {
+        name: Some(name.to_string()),
+        desc: desc.map(|d| d.to_string()),
+        kinds: RELOPT_KIND_LOCAL as types_reloptions::bits32,
+        lockmode: 0,
+        namelen: name.len() as i32,
+        type_: types_reloptions::relopt_type::RELOPT_TYPE_REAL,
+        data: types_reloptions::relopt_typed::Real {
+            default_val,
+            min: min_val,
+            max: max_val,
+        },
+    };
+    debug_assert!((offset as usize) < relopts.relopt_struct_size);
+    relopts.options.push(types_reloptions::local_relopt {
+        option: Some(Box::new(newoption)),
+        offset,
+    });
+}
+
 /// Install every seam this crate owns.
 pub fn init_seams() {
     backend_access_common_reloptions_seams::extract_rel_options::set(extract_rel_options_seam);
@@ -1910,6 +2040,9 @@ pub fn init_seams() {
     backend_access_common_reloptions_seams::add_local_int_reloption::set(
         add_local_int_reloption_seam,
     );
+    backend_access_common_reloptions_seams::add_local_real_reloption::set(
+        add_local_real_reloption_seam,
+    );
     backend_access_common_reloptions_seams::build_reloptions_btree::set(build_reloptions_btree_seam);
     backend_access_common_reloptions_seams::build_reloptions_hash::set(build_reloptions_hash_seam);
     backend_access_common_reloptions_seams::build_reloptions_spgist::set(
@@ -1917,4 +2050,7 @@ pub fn init_seams() {
     );
     backend_access_common_reloptions_seams::build_reloptions_gist::set(build_reloptions_gist_seam);
     backend_access_common_reloptions_seams::build_reloptions_brin::set(build_reloptions_brin_seam);
+    backend_access_common_reloptions_seams::index_build_local_reloptions::set(
+        index_build_local_reloptions_seam,
+    );
 }

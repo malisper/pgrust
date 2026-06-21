@@ -14,6 +14,7 @@ use types_datum::varlena::Bytea;
 use types_error::PgResult;
 use types_array::ArrayElementDatum;
 use types_nodes::fmgr::FunctionCallInfoBaseData;
+use types_reloptions::local_relopts;
 // Migration target: the canonical per-attribute value enum. The former
 // transitional `Datum<'mcx>` alias resolved to this exact type, so every
 // seam that carried a typed per-attribute value (the deformed-slot/`Datum`
@@ -386,6 +387,23 @@ seam_core::seam!(
         function_id: Oid,
         options: &[DefElemString<'_>],
     ) -> PgResult<DatumWord>
+);
+
+seam_core::seam!(
+    /// `FunctionCall1(procinfo, PointerGetDatum(&relopts))`
+    /// (`index_opclass_options`, indexam.c): invoke an opclass's
+    /// options-parsing support procedure, passing a *pointer* to the
+    /// caller's stack `local_relopts` as the lone `internal` argument that the
+    /// proc mutates in place (it registers its local reloptions on it and
+    /// returns void). The C `FmgrInfo` cannot cross a seam, so the owner
+    /// re-resolves `proc_oid` via `fmgr_info`; the `local_relopts` rides the
+    /// fmgr `internal` lane (`Box<dyn Any>`) by value in and back out, modeling
+    /// the in-place mutation through the pointer. `Err` carries the resolution
+    /// failure and whatever the options procedure raises.
+    pub fn index_options_function_call(
+        proc_oid: Oid,
+        relopts: local_relopts,
+    ) -> PgResult<local_relopts>
 );
 
 seam_core::seam!(

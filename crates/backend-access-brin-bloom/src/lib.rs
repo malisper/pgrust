@@ -697,17 +697,15 @@ const BLOOM_OPTIONS_STRUCT_SIZE: usize = 24;
 const BLOOM_OFFSET_NDISTINCT: i32 = 8;
 const BLOOM_OFFSET_FPR: i32 = 16;
 
-/// The body of `brin_bloom_options` (brin_bloom.c:745) operating directly on a
-/// `LocalRelOpts`: register the two real reloptions with their C bounds and
-/// struct offsets. The opclass-options support proc is invoked by
-/// `index_opclass_options` with a pointer to the stack `local_relopts`; the
-/// owned model dispatches by the proc's OID to this builder instead of crossing
-/// an `internal`-pointer Datum through fmgr.
-pub fn brin_bloom_fill_local_reloptions(
-    relopts: &mut backend_access_common_reloptions::LocalRelOpts,
-) {
-    backend_access_common_reloptions::init_local_reloptions(relopts, BLOOM_OPTIONS_STRUCT_SIZE);
-    backend_access_common_reloptions::add_local_real_reloption(
+/// The body of `brin_bloom_options` (brin_bloom.c:745) operating on the shared
+/// `types_reloptions::local_relopts`: register the two real reloptions with
+/// their C bounds and struct offsets. The opclass-options support proc is
+/// invoked by `index_opclass_options` with a pointer to the stack
+/// `local_relopts` it mutates in place.
+pub fn brin_bloom_fill_local_reloptions(relopts: &mut types_reloptions::local_relopts) {
+    use backend_access_common_reloptions_seams as relopts_seams;
+    relopts_seams::init_local_reloptions::call(relopts, BLOOM_OPTIONS_STRUCT_SIZE);
+    relopts_seams::add_local_real_reloption::call(
         relopts,
         "n_distinct_per_range",
         Some("number of distinct items expected in a BRIN page range"),
@@ -716,7 +714,7 @@ pub fn brin_bloom_fill_local_reloptions(
         i32::MAX as f64,
         BLOOM_OFFSET_NDISTINCT,
     );
-    backend_access_common_reloptions::add_local_real_reloption(
+    relopts_seams::add_local_real_reloption::call(
         relopts,
         "false_positive_rate",
         Some("desired false-positive rate for the bloom filters"),
@@ -725,6 +723,21 @@ pub fn brin_bloom_fill_local_reloptions(
         BLOOM_MAX_FALSE_POSITIVE_RATE,
         BLOOM_OFFSET_FPR,
     );
+}
+
+/// `brin_bloom_options(PG_FUNCTION_ARGS)` (brin_bloom.c:745) — the fmgr builtin
+/// (OID 4595): `local_relopts *relopts = PG_GETARG_POINTER(0); ...
+/// PG_RETURN_VOID()`. The `local_relopts` rides the fmgr `internal` lane; fill
+/// it in place and return void.
+pub fn fc_brin_bloom_options(
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<types_datum::Datum> {
+    let relopts = fcinfo
+        .ref_arg_mut(0)
+        .and_then(|p| p.as_internal_mut::<types_reloptions::local_relopts>())
+        .expect("brin_bloom_options: args[0] is not a local_relopts internal arg");
+    brin_bloom_fill_local_reloptions(relopts);
+    Ok(types_datum::Datum::null())
 }
 
 /// `brin_bloom_summary_in` (brin_bloom.c:775): input is disallowed.

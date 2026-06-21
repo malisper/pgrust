@@ -681,18 +681,14 @@ const MINMAX_MULTI_OPTIONS_STRUCT_SIZE: usize = 8;
 const MINMAX_MULTI_OFFSET_VALUES_PER_RANGE: i32 = 4;
 
 /// The body of `brin_minmax_multi_options` (brin_minmax_multi.c:2954) operating
-/// directly on a `LocalRelOpts`: register the `values_per_range` int reloption
-/// with its C bounds (`8 .. 256`) and struct offset. See
-/// `brin_bloom_fill_local_reloptions` for why the owned model dispatches by OID
-/// to this builder rather than crossing an `internal`-pointer Datum.
-pub fn brin_minmax_multi_fill_local_reloptions(
-    relopts: &mut backend_access_common_reloptions::LocalRelOpts,
-) {
-    backend_access_common_reloptions::init_local_reloptions(
-        relopts,
-        MINMAX_MULTI_OPTIONS_STRUCT_SIZE,
-    );
-    backend_access_common_reloptions::add_local_int_reloption(
+/// on the shared `types_reloptions::local_relopts`: register the
+/// `values_per_range` int reloption with its C bounds (`8 .. 256`) and struct
+/// offset. The proc is invoked by `index_opclass_options` with a pointer to the
+/// stack `local_relopts` it mutates in place.
+pub fn brin_minmax_multi_fill_local_reloptions(relopts: &mut types_reloptions::local_relopts) {
+    use backend_access_common_reloptions_seams as relopts_seams;
+    relopts_seams::init_local_reloptions::call(relopts, MINMAX_MULTI_OPTIONS_STRUCT_SIZE);
+    relopts_seams::add_local_int_reloption::call(
         relopts,
         "values_per_range",
         Some("number of values stored in a BRIN page range"),
@@ -701,6 +697,21 @@ pub fn brin_minmax_multi_fill_local_reloptions(
         256,
         MINMAX_MULTI_OFFSET_VALUES_PER_RANGE,
     );
+}
+
+/// `brin_minmax_multi_options(PG_FUNCTION_ARGS)` (brin_minmax_multi.c:2954) —
+/// the fmgr builtin (OID 4620): `local_relopts *relopts = PG_GETARG_POINTER(0);
+/// ... PG_RETURN_VOID()`. The `local_relopts` rides the fmgr `internal` lane;
+/// fill it in place and return void.
+pub fn fc_brin_minmax_multi_options(
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<types_datum::Datum> {
+    let relopts = fcinfo
+        .ref_arg_mut(0)
+        .and_then(|p| p.as_internal_mut::<types_reloptions::local_relopts>())
+        .expect("brin_minmax_multi_options: args[0] is not a local_relopts internal arg");
+    brin_minmax_multi_fill_local_reloptions(relopts);
+    Ok(types_datum::Datum::null())
 }
 
 /// `brin_minmax_multi_summary_in` (brin_minmax_multi.c:2976): input is

@@ -65,6 +65,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `add_local_real_reloption(relopts, name, desc, default, min, max, offset)`
+    /// (reloptions.c) — register a floating-point local reloption.
+    pub fn add_local_real_reloption(
+        relopts: &mut local_relopts,
+        name: &str,
+        desc: Option<&str>,
+        default_val: f64,
+        min_val: f64,
+        max_val: f64,
+        offset: i32,
+    )
+);
+
+seam_core::seam!(
     /// The `local_relopts` tail of `index_opclass_options` (indexam.c),
     /// batched: `init_local_reloptions(&relopts, 0)` +
     /// `FunctionCall1(procinfo, PointerGetDatum(&relopts))` (the opclass's

@@ -18,6 +18,9 @@ types-rel = { path = "../types-rel" }
 types-scan = { path = "../types-scan" }
 types-tuple = { path = "../types-tuple" }
 types-datum = { path = "../types-datum" }
+backend-access-common-reloptions-seams = { path = "../backend-access-common-reloptions-seams" }
+types-reloptions = { path = "../types-reloptions" }
+types-fmgr = { path = "../types-fmgr" }
 types-storage = { path = "../types-storage" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }

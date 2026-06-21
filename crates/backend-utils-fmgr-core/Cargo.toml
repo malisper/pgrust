@@ -14,6 +14,7 @@ backend-catalog-pg-proc-seams = { path = "../backend-catalog-pg-proc-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 types-core = { path = "../types-core" }
 types-datum = { path = "../types-datum" }
+types-reloptions = { path = "../types-reloptions" }
 types-tuple = { path = "../types-tuple" }
 types-error = { path = "../types-error" }
 types-guc = { path = "../types-guc" }

@@ -36,6 +36,7 @@ name = "backend-access-brin-bloom"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-reloptions",
+ "backend-access-common-reloptions-seams",
  "backend-access-index-indexam-seams",
  "backend-utils-cache-typcache-seams",
  "backend-utils-error",
@@ -47,7 +48,9 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
  "types-rel",
+ "types-reloptions",
  "types-scan",
  "types-storage",
  "types-tuple",
@@ -178,6 +181,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-brin-entry-seams",
  "backend-access-common-reloptions",
+ "backend-access-common-reloptions-seams",
  "backend-access-index-indexam-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-numeric-seams",
@@ -195,6 +199,7 @@ dependencies = [
  "types-fmgr",
  "types-rel",
  "types-relcache-entry",
+ "types-reloptions",
  "types-scan",
  "types-storage",
  "types-tuple",
@@ -523,6 +528,7 @@ dependencies = [
  "backend-access-index-amapi-seams",
  "backend-commands-define-seams",
  "backend-utils-adt-arrayfuncs-seams",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-misc-guc-seams",
  "mcx",
  "types-core",
@@ -22524,6 +22530,7 @@ dependencies = [
  "types-fmgr",
  "types-guc",
  "types-nodes",
+ "types-reloptions",
  "types-tuple",
 ]
 
@@ -22573,6 +22580,7 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-nodes",
+ "types-reloptions",
  "types-ri-triggers",
  "types-tuple",
 ]
