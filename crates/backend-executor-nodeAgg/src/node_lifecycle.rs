@@ -1480,7 +1480,8 @@ pub fn ExecReScanAgg<'mcx>(
         node.table_filled = false;
         // iterator will be reset when the table is filled
 
-        crate::hash_grouping::hashagg_recompile_expressions(node, false, false, estate)?;
+        let mcx = estate.es_query_cxt;
+        crate::hash_grouping::hashagg_recompile_expressions(node, false, false, estate, mcx)?;
     }
 
     if node.aggstrategy != AGG_HASHED {

@@ -272,6 +272,7 @@ pub fn hashagg_recompile_expressions<'mcx>(
     minslot: bool,
     nullcheck: bool,
     estate: &mut EStateData<'mcx>,
+    mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
     // int i = minslot ? 1 : 0;  int j = nullcheck ? 1 : 0;
     let i = if minslot { 1usize } else { 0usize };
@@ -295,26 +296,29 @@ pub fn hashagg_recompile_expressions<'mcx>(
 
     if cache_empty {
         // dohash = true; dosort = (AGG_MIXED && !minslot);
-        let _dohash = true;
-        let _dosort = aggstate.aggstrategy == AggStrategy::AggMixed && !minslot;
+        let dohash = true;
+        let dosort = aggstate.aggstrategy == AggStrategy::AggMixed && !minslot;
 
-        // Builds a fresh aggregate-transition expression via ExecBuildAggTrans(),
-        // temporarily swapping ss.ps.outerops to &TTSOpsMinimalTuple when
-        // minslot. ExecBuildAggTrans IS ported (execExpr_domain_agg::
-        // exec_build_agg_trans), but it takes `&mut AggStateData<'mcx>` — and
-        // AggStateData lives in this nodeAgg crate, ABOVE types-nodes, so the
-        // backend-executor-execExpr-seams crate (which nodeAgg depends on) cannot
-        // name it without re-introducing the cycle the seam breaks. The
-        // type-erased bridge (`PlanStateNode::as_agg_state`) is also unavailable:
-        // there is no `PlanStateNode::Agg` variant yet (planstate.rs returns None
-        // — the T_Agg keystone). So the owner body exists but is unreachable from
-        // here. Blocked on the same T_Agg/PlanStateNode::Agg carrier keystone.
-        let _ = estate;
-        panic!(
-            "backend-executor-execExpr::ExecBuildAggTrans: owner is ported but unreachable — \
-             takes &mut AggStateData (above types-nodes, can't cross execExpr-seams) and \
-             PlanStateNode has no Agg variant (T_Agg keystone). (hashagg_recompile_expressions)"
-        );
+        // C temporarily swaps `ss.ps.outerops` to `&TTSOpsMinimalTuple` (and sets
+        // `outeropsfixed`) while compiling, so the EEOP_OUTER_FETCHSOME deform
+        // step is specialized to a minimal-tuple slot when reading a spilled
+        // batch. The owned model carries no `outerops`/`outeropsfixed` field on
+        // PlanState: the FETCHSOME deform step is left non-fixed (see
+        // `push_setup_steps` in execExpr_domain_agg) and resolves the slot type
+        // dynamically at runtime, so a single compiled program works for both the
+        // outer-plan heap slot and the minimal-tuple tape slot. The swap is
+        // therefore a no-op here and `minslot` only selects the cache slot `i`.
+        //
+        // ExecBuildAggTrans(aggstate, phase, dosort, dohash, nullcheck) is reached
+        // through the execExpr seam (the same path build_phase_eval_trans uses for
+        // the initial compile); it returns the freshly built ExprState which we
+        // cache in evaltrans_cache[i][j].
+        let phaseno = phase_idx as i32;
+        let evaltrans = backend_executor_execExpr_seams::exec_build_agg_trans::call(
+            mcx, aggstate, phaseno, dosort, dohash, nullcheck, estate,
+        )?;
+        aggstate.phases.as_mut().expect("phases")[phase_idx].evaltrans_cache[i][j] =
+            Some(evaltrans);
     }
 
     // phase->evaltrans = phase->evaltrans_cache[i][j];
@@ -800,7 +804,8 @@ pub fn agg_refill_hash_table<'mcx>(
 
     // perhash = &aggstate->perhash[aggstate->current_set];
     // hashagg_recompile_expressions(aggstate, true, true);
-    hashagg_recompile_expressions(aggstate, true, true, estate)?;
+    let mcx = estate.es_query_cxt;
+    hashagg_recompile_expressions(aggstate, true, true, estate, mcx)?;
 
     // The per-tuple refill loop reads spilled MinimalTuples
     // (hashagg_batch_read), stores them with ExecStoreMinimalTuple, prepares

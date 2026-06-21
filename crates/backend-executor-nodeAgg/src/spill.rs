@@ -142,6 +142,7 @@ pub fn hash_agg_enter_spill_mode<'mcx>(
         aggstate.table_filled,
         true,
         estate,
+        mcx,
     )?;
 
     if !aggstate.hash_ever_spilled {
