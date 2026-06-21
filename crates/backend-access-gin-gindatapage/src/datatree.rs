@@ -86,7 +86,7 @@ const MIN_TUPLES_PER_SEGMENT: usize = (GIN_POSTING_LIST_SEGMENT_MAX_SIZE - 2) / 
 /// `RM_GIN_ID` (rmgrlist.h) — GIN resource-manager id.
 const RM_GIN_ID: types_core::RmgrId = 13;
 /// `XLOG_GIN_CREATE_PTREE` (ginxlog.h).
-const XLOG_GIN_CREATE_PTREE: u8 = 0x30;
+const XLOG_GIN_CREATE_PTREE: u8 = 0x10;
 /// `REGBUF_WILL_INIT` (xloginsert.h).
 const REGBUF_WILL_INIT: u8 = 0x02;
 /// `REGBUF_STANDARD` (xloginsert.h).

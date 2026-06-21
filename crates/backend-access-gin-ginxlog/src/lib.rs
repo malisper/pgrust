@@ -135,9 +135,9 @@ const GIN_SEGMENT_INSERT: u8 = 2;
 const GIN_SEGMENT_REPLACE: u8 = 3;
 const GIN_SEGMENT_ADDITEMS: u8 = 4;
 
-/// `XLR_INFO_MASK` (xlogrecord.h): the top four bits of the info byte, masked
-/// off before dispatch.
-const XLR_INFO_MASK: u8 = 0xF0;
+/// `XLR_INFO_MASK` (xlogrecord.h): the low four bits of the info byte, masked
+/// off before dispatch so the rmgr's opcode (high nibble) remains.
+const XLR_INFO_MASK: u8 = 0x0F;
 
 /// `InvalidBlockNumber` (storage/block.h).
 const InvalidBlockNumber: BlockNumber = 0xFFFF_FFFF;
