@@ -120,7 +120,20 @@ impl QuitSignalReason {
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32};
 
-/// In-crate placement of `struct PMSignalData`.
+/// `struct PMSignalData` — the fixed header of pmsignal.c's shared region, laid
+/// out `#[repr(C)]` and resident in the *real* process-shared memory segment
+/// (`ShmemInitStruct("PMSignalState", …)`). The flexible `PMChildFlags[]` array
+/// immediately follows this header in the same shared allocation.
+///
+/// This MUST be in genuine shared memory (not a process-local `OnceLock`): a
+/// child backend calls `SendPostmasterSignal`, which sets `pm_signal_flags[r]`,
+/// and the postmaster reads it via `CheckPostmasterSignal`. With process-local
+/// storage every forked child gets a private COW copy, so the postmaster never
+/// observes a child's writes — which silently breaks every postmaster signal
+/// (dynamic bgworker registration, recovery handoff, …). Every process maps the
+/// same `MAP_SHARED` bytes; `AtomicBool`/`AtomicI32`/`AtomicU32` provide the
+/// async-signal-safe `sig_atomic_t` semantics the C uses.
+#[repr(C)]
 struct PMSignalState {
     /// `sig_atomic_t PMSignalFlags[NUM_PMSIGNALS]` — per-reason signal flags.
     pm_signal_flags: [AtomicBool; NUM_PMSIGNALS],
@@ -128,15 +141,41 @@ struct PMSignalState {
     sigquit_reason: AtomicU32,
     /// `int num_child_flags` — number of entries in `PMChildFlags[]`.
     num_child_flags: AtomicI32,
-    /// `sig_atomic_t PMChildFlags[FLEXIBLE_ARRAY_MEMBER]` — per-child slots.
-    pm_child_flags: Box<[AtomicI32]>,
+    // `sig_atomic_t PMChildFlags[FLEXIBLE_ARRAY_MEMBER]` follows immediately
+    // after this header in the shared allocation; accessed via `child_flag()`.
 }
 
-/// `NON_EXEC_STATIC volatile PMSignalData *PMSignalState = NULL;` — valid in
-/// both the postmaster and child processes once `PMSignalShmemInit` ran.
-static PM_SIGNAL_STATE: OnceLock<PMSignalState> = OnceLock::new();
+impl PMSignalState {
+    /// `&PMSignalState->PMChildFlags[idx]` — the flexible array element, resident
+    /// just past the header in the same shared allocation.
+    #[inline]
+    fn child_flag(&self, idx: usize) -> &AtomicI32 {
+        debug_assert!((idx as i32) < self.num_child_flags.load(SeqCst));
+        // SAFETY: `self` is the start of the shared region; `PMChildFlags`
+        // begins at `offsetof(PMSignalData, PMChildFlags)` and holds
+        // `num_child_flags` elements (see `PMSignalShmemSize`/`PMSignalShmemInit`).
+        unsafe {
+            let base = (self as *const PMSignalState as *const u8).add(PM_CHILD_FLAGS_OFFSET)
+                as *const AtomicI32;
+            &*base.add(idx)
+        }
+    }
+}
 
-use std::sync::OnceLock;
+/// `offsetof(PMSignalData, PMChildFlags)`. The flexible array of `AtomicI32`
+/// needs 4-byte alignment, and the header ends on a 4-byte boundary
+/// (`AtomicBool[NUM_PMSIGNALS]` packed + `AtomicU32` + `AtomicI32`), so the
+/// offset is the Rust `size_of` of the header. Statically tie the access offset
+/// to the real layout so it cannot diverge from `PMSignalShmemSize`.
+const PM_CHILD_FLAGS_OFFSET: usize = core::mem::size_of::<PMSignalState>();
+
+/// `NON_EXEC_STATIC volatile PMSignalData *PMSignalState = NULL;` — the base of
+/// the shared region, valid in both the postmaster and child processes once
+/// `PMSignalShmemInit` ran. Stored as a raw `usize` (shared address); forked
+/// children inherit the same pointer value (identical `MAP_SHARED` address).
+static PM_SIGNAL_STATE: AtomicUsize = AtomicUsize::new(0);
+
+use std::sync::atomic::AtomicUsize;
 
 /// `volatile sig_atomic_t postmaster_possibly_dead = false;` — set by the
 /// postmaster-death signal handler. `AtomicBool` models the async-signal-safe
@@ -148,9 +187,15 @@ static POSTMASTER_POSSIBLY_DEAD: AtomicBool = AtomicBool::new(false);
 /// callers — `GetQuitSignalReason` — guard against this separately, matching
 /// the C `PMSignalState == NULL` paranoia.)
 fn state() -> &'static PMSignalState {
-    PM_SIGNAL_STATE
-        .get()
-        .expect("PMSignalState shared memory not initialized (PMSignalShmemInit not called)")
+    let p = PM_SIGNAL_STATE.load(SeqCst);
+    assert!(
+        p != 0,
+        "PMSignalState shared memory not initialized (PMSignalShmemInit not called)"
+    );
+    // SAFETY: `p` is the base of the live, process-shared PMSignalState region,
+    // which outlives every process; the layout is `#[repr(C)]` and identical on
+    // both sides of `fork()`.
+    unsafe { &*(p as *const PMSignalState) }
 }
 
 /// `MaxLivePostmasterChildren()` (pmchild.c) — the length of `PMChildFlags[]`.
@@ -178,14 +223,19 @@ fn max_live_postmaster_children() -> i32 {
 /// its `add_size`/`mul_size` raise on overflow; we surface that as the
 /// `PgResult` error the shmem allocator path expects.
 pub fn PMSignalShmemSize() -> PgResult<usize> {
-    // offsetof(PMSignalData, PMChildFlags): NUM_PMSIGNALS flags +
-    // sigquit_reason + num_child_flags, each sizeof(sig_atomic_t)/4.
-    let header = (NUM_PMSIGNALS + 2) * core::mem::size_of::<sig_atomic_t>();
+    // offsetof(PMSignalData, PMChildFlags). The region is accessed through real
+    // Rust `#[repr(C)]` pointer arithmetic, so the header size must be the actual
+    // Rust offset of the flexible array (`PM_CHILD_FLAGS_OFFSET`), not a
+    // hand-summed C value, or the access could run past the allocation. (This is
+    // >= the C `(NUM_PMSIGNALS + 2) * sizeof(sig_atomic_t)` since AtomicBool
+    // flags pack tighter than the C `sig_atomic_t` flags; over-allocation is
+    // harmless and the trailing `PMChildFlags[]` stride matches `AtomicI32`.)
+    let header = PM_CHILD_FLAGS_OFFSET;
     let size = add_size(
         header,
         mul_size(
             max_live_postmaster_children() as usize,
-            core::mem::size_of::<sig_atomic_t>(),
+            core::mem::size_of::<AtomicI32>(),
         )?,
     )?;
     Ok(size)
@@ -208,19 +258,33 @@ pub fn PMSignalShmemSize() -> PgResult<usize> {
 /// analogue for the host allocation backing the `OnceLock`, so this returns
 /// `Ok` today.
 pub fn PMSignalShmemInit() -> PgResult<()> {
-    PM_SIGNAL_STATE.get_or_init(|| {
+    // PMSignalState = ShmemInitStruct("PMSignalState", PMSignalShmemSize(), &found);
+    let size = PMSignalShmemSize()?;
+    debug_assert!(PM_CHILD_FLAGS_OFFSET >= core::mem::size_of::<PMSignalState>());
+    debug_assert!(PM_CHILD_FLAGS_OFFSET % core::mem::align_of::<AtomicI32>() == 0);
+    let (addr, found) =
+        backend_storage_ipc_shmem_seams::shmem_init_struct::call("PMSignalState", size)?;
+
+    // Publish the shared base so `state()` resolves it; every forked child
+    // inherits the same pointer value (identical MAP_SHARED address).
+    PM_SIGNAL_STATE.store(addr as usize, SeqCst);
+
+    if !found {
+        // C: MemSet(unvolatize(PMSignalData *, PMSignalState), 0, size);
+        // SAFETY: `addr` addresses `size` writable bytes of the fresh region.
+        unsafe {
+            core::ptr::write_bytes(addr, 0, size);
+        }
         let n = max_live_postmaster_children();
-        let mut child_flags = Vec::with_capacity(n.max(0) as usize);
-        for _ in 0..n.max(0) {
-            child_flags.push(AtomicI32::new(PM_CHILD_UNUSED));
-        }
-        PMSignalState {
-            pm_signal_flags: std::array::from_fn(|_| AtomicBool::new(false)),
-            sigquit_reason: AtomicU32::new(QuitSignalReason::PMQUIT_NOT_SENT as u32),
-            num_child_flags: AtomicI32::new(n),
-            pm_child_flags: child_flags.into_boxed_slice(),
-        }
-    });
+        // SAFETY: header is at the region base; `AtomicI32::new(0)` == zeroed.
+        // num_child_flags = MaxLivePostmasterChildren().
+        let s = state();
+        s.num_child_flags.store(n, SeqCst);
+        // PM_CHILD_UNUSED is the zero state (set by the MemSet above);
+        // sigquit_reason PMQUIT_NOT_SENT and all flags false likewise zeroed.
+        debug_assert_eq!(PM_CHILD_UNUSED, 0);
+        debug_assert_eq!(QuitSignalReason::PMQUIT_NOT_SENT as u32, 0);
+    }
     Ok(())
 }
 
@@ -336,10 +400,13 @@ pub fn GetQuitSignalReason() -> QuitSignalReason {
     if !backend_utils_init_small_seams::is_under_postmaster::call() {
         return QuitSignalReason::PMQUIT_NOT_SENT;
     }
-    match PM_SIGNAL_STATE.get() {
-        None => QuitSignalReason::PMQUIT_NOT_SENT,
-        Some(s) => QuitSignalReason::from_u32(s.sigquit_reason.load(SeqCst)),
+    let p = PM_SIGNAL_STATE.load(SeqCst);
+    if p == 0 {
+        return QuitSignalReason::PMQUIT_NOT_SENT;
     }
+    // SAFETY: `p` is the live shared PMSignalState base (see `state()`).
+    let s = unsafe { &*(p as *const PMSignalState) };
+    QuitSignalReason::from_u32(s.sigquit_reason.load(SeqCst))
 }
 
 // ---------------------------------------------------------------------------
@@ -360,11 +427,11 @@ pub fn MarkPostmasterChildSlotAssigned(slot: i32) -> PgResult<()> {
     debug_assert!(slot > 0 && slot <= max_live_postmaster_children());
     let slot = (slot - 1) as usize;
 
-    if state().pm_child_flags[slot].load(SeqCst) != PM_CHILD_UNUSED {
+    if state().child_flag(slot).load(SeqCst) != PM_CHILD_UNUSED {
         return elog_internal(FATAL, "postmaster child slot is already in use", 236);
     }
 
-    state().pm_child_flags[slot].store(PM_CHILD_ASSIGNED, SeqCst);
+    state().child_flag(slot).store(PM_CHILD_ASSIGNED, SeqCst);
     Ok(())
 }
 
@@ -386,8 +453,8 @@ pub fn MarkPostmasterChildSlotUnassigned(slot: i32) -> bool {
     debug_assert!(slot > 0 && slot <= max_live_postmaster_children());
     let slot = (slot - 1) as usize;
 
-    let result = state().pm_child_flags[slot].load(SeqCst) == PM_CHILD_ASSIGNED;
-    state().pm_child_flags[slot].store(PM_CHILD_UNUSED, SeqCst);
+    let result = state().child_flag(slot).load(SeqCst) == PM_CHILD_ASSIGNED;
+    state().child_flag(slot).store(PM_CHILD_UNUSED, SeqCst);
     result
 }
 
@@ -403,7 +470,7 @@ pub fn IsPostmasterChildWalSender(slot: i32) -> bool {
     debug_assert!(slot > 0 && slot <= max_live_postmaster_children());
     let slot = (slot - 1) as usize;
 
-    state().pm_child_flags[slot].load(SeqCst) == PM_CHILD_WALSENDER
+    state().child_flag(slot).load(SeqCst) == PM_CHILD_WALSENDER
 }
 
 /// `RegisterPostmasterChildActive` — mark the current child about to begin
@@ -422,8 +489,8 @@ pub fn RegisterPostmasterChildActive() -> PgResult<()> {
     let slot = backend_utils_init_small_seams::my_pm_child_slot::call();
     debug_assert!(slot > 0 && slot <= state().num_child_flags.load(SeqCst));
     let idx = (slot - 1) as usize;
-    debug_assert_eq!(state().pm_child_flags[idx].load(SeqCst), PM_CHILD_ASSIGNED);
-    state().pm_child_flags[idx].store(PM_CHILD_ACTIVE, SeqCst);
+    debug_assert_eq!(state().child_flag(idx).load(SeqCst), PM_CHILD_ASSIGNED);
+    state().child_flag(idx).store(PM_CHILD_ACTIVE, SeqCst);
 
     // Arrange to clean up at exit.
     backend_storage_ipc_dsm_core_seams::on_shmem_exit::call(
@@ -455,8 +522,8 @@ pub fn MarkPostmasterChildWalSender() {
     let slot = backend_utils_init_small_seams::my_pm_child_slot::call();
     debug_assert!(slot > 0 && slot <= state().num_child_flags.load(SeqCst));
     let idx = (slot - 1) as usize;
-    debug_assert_eq!(state().pm_child_flags[idx].load(SeqCst), PM_CHILD_ACTIVE);
-    state().pm_child_flags[idx].store(PM_CHILD_WALSENDER, SeqCst);
+    debug_assert_eq!(state().child_flag(idx).load(SeqCst), PM_CHILD_ACTIVE);
+    state().child_flag(idx).store(PM_CHILD_WALSENDER, SeqCst);
 }
 
 /// `MarkPostmasterChildInactive` — mark the current child as done using shared
@@ -483,10 +550,10 @@ pub fn MarkPostmasterChildInactive() -> PgResult<()> {
     debug_assert!(slot > 0 && slot <= state().num_child_flags.load(SeqCst));
     let idx = (slot - 1) as usize;
     debug_assert!(
-        state().pm_child_flags[idx].load(SeqCst) == PM_CHILD_ACTIVE
-            || state().pm_child_flags[idx].load(SeqCst) == PM_CHILD_WALSENDER
+        state().child_flag(idx).load(SeqCst) == PM_CHILD_ACTIVE
+            || state().child_flag(idx).load(SeqCst) == PM_CHILD_WALSENDER
     );
-    state().pm_child_flags[idx].store(PM_CHILD_ASSIGNED, SeqCst);
+    state().child_flag(idx).store(PM_CHILD_ASSIGNED, SeqCst);
     Ok(())
 }
 

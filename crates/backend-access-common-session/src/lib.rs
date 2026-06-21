@@ -255,20 +255,21 @@ fn initialize_session() -> PgResult<()> {
 /// imports this backend's local `RecordCacheArray`.
 #[allow(unreachable_code)]
 fn get_session_dsm_handle() -> PgResult<dsm_handle> {
-    // TEMPORARY (2026-06-21): force the leader-only path by returning INVALID.
+    // TEMPORARY: force the leader-only path by returning INVALID.
     //
-    // The session-DSM substrate below (segment + shm_toc + DSA + shared
-    // record-typmod registry) is complete and correct, BUT the parallel
-    // WORKER-LAUNCH / TEARDOWN path is not yet finished: with a valid handle,
-    // `InitializeParallelDSM` proceeds past the `nworkers=0` fallback, registers
-    // dynamic bgworkers that either never fork or never exit cleanly, and the
-    // leader then HANGS in parallel-worker teardown (`WaitForParallelWorkersToExit`)
-    // — even after a statement_timeout cancel. That wedges every parallel-eligible
-    // query (verified: a forced parallel count/hash-join leaves 5 stuck backends
-    // and never returns). Returning INVALID restores the known-good leader-only
-    // behavior (correct results, no hang). Re-enable (delete this early return)
-    // ONLY together with the worker fork+teardown port, gated on a hang-free
-    // parallel smoke test. See memory: session-progress parallel section.
+    // The session-DSM substrate below is complete, the bgworker fork/launch path
+    // now works end-to-end (PMSignalState + BackgroundWorkerData moved into REAL
+    // shared memory; PostmasterPid is set — workers fork, run, and exit cleanly,
+    // confirmed in logs), BUT the leader still HANGS in `ExecParallelFinish` ->
+    // `WaitForParallelWorkersToFinish`: after the workers exit (exit code 0), the
+    // leader never observes their completion (the cross-process `shm_mq`
+    // detach/terminate signaling + `error_mqh` teardown is not yet wired through),
+    // so it waits forever on its latch. With a valid handle every parallel-eligible
+    // query would wedge (verified: forced-parallel count(*) hangs ~109s until an
+    // outer watchdog kills the cluster). Returning INVALID restores the known-good
+    // leader-only behavior (correct results, no hang). Delete this early return
+    // ONLY together with the `WaitForParallelWorkersToFinish` completion-detection
+    // fix, gated on a hang-free parallel smoke test.
     return Ok(DSM_HANDLE_INVALID);
 
     // If we already created a session-scope segment, return its handle.

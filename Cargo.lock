@@ -3247,11 +3247,13 @@ dependencies = [
  "backend-commands-user-seams",
  "backend-commands-vacuum-seams",
  "backend-commands-variable-seams",
+ "backend-executor-execParallel-seams",
  "backend-executor-execParallel-support-seams",
  "backend-executor-instrument",
  "backend-optimizer-plan-planner-seams",
  "backend-postmaster-bgworker-seams",
  "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-shm-mq",
  "backend-storage-ipc-shm-mq-seams",
@@ -3265,12 +3267,15 @@ dependencies = [
  "backend-utils-init-small-seams",
  "backend-utils-mmgr-freepage",
  "backend-utils-mmgr-mcxt-seams",
+ "interfaces-libpq-legacy-pqsignal",
+ "libc",
  "mcx",
  "types-core",
  "types-error",
  "types-execparallel",
  "types-nodes",
  "types-parallel",
+ "types-signal",
  "types-storage",
  "types-tuple",
 ]
@@ -15018,6 +15023,7 @@ dependencies = [
 name = "backend-postmaster-bgworker"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-parallel",
  "backend-access-transam-parallel-rt-seams",
  "backend-libpq-pqsignal-seams",
  "backend-postmaster-bgworker-seams",
@@ -15052,6 +15058,7 @@ dependencies = [
  "types-signal",
  "types-startup",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]
@@ -17585,6 +17592,7 @@ dependencies = [
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-pmsignal-seams",
  "backend-storage-ipc-procarray-seams",
+ "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-condition-variable-seams",
  "backend-storage-lmgr-s-lock",
  "backend-tcop-postgres-seams",

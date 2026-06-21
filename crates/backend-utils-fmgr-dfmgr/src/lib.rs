@@ -973,6 +973,38 @@ pub fn init_seams() {
             let buf = unsafe { core::slice::from_raw_parts(space as *const u8, total) };
             restore_library_state(buf)
         });
+
+        // LookupParallelWorkerFunction's external-library branch (parallel.c:1672):
+        //   return (parallel_worker_main_type)
+        //       load_external_function(libraryname, funcname, true, NULL);
+        // Reached only for a non-"postgres" library (the in-core parallel plans
+        // all use "postgres"/ParallelQueryMain). `load_external_function` with
+        // signal_not_found=true loads the library and raises the C
+        // ERRCODE_UNDEFINED_FUNCTION "could not find function" error if the
+        // symbol is absent — exactly mirroring `signalNotFound=true`.
+        //
+        // In this tree the loader does not carry a callable function-pointer
+        // address across `function_exists` (port_dynloader_seams: "The resolved
+        // symbol address itself is not returned here"), and `invoke_entrypoint`
+        // dispatches only the in-core `ParallelQueryMain` token, so a resolved
+        // external symbol still cannot be turned into an invokable
+        // `parallel_worker_main_type`. The faithful, non-fabricated outcome for
+        // such an external entry point is therefore the same lookup-miss error.
+        rt::load_external_function::set(|libraryname, funcname| {
+            let ctx = mcx::MemoryContext::new("load_external_function");
+            // C: load_external_function(libraryname, funcname, true, NULL).
+            // Loads the library; raises ERRCODE_UNDEFINED_FUNCTION on a missing
+            // symbol (signal_not_found=true). On a missing library it raises the
+            // library-load error regardless, as in C.
+            let _handle = load_external_function(ctx.mcx(), libraryname, funcname, true)?;
+            // The symbol resolved, but no invokable parallel-worker entry point
+            // can be produced for an external library in this build (no C
+            // function-pointer dispatch). Raise the identical lookup-miss error.
+            Err(PgError::error(format!(
+                "could not find function \"{funcname}\" in file \"{libraryname}\""
+            ))
+            .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION))
+        });
     }
 
     // `char *Dynamic_library_path;` (`dfmgr.c`) is this unit's own GUC string

@@ -93,6 +93,17 @@ const BACKGROUND_WORKER_SLOT_SIZE: Size = {
     16 + worker
 };
 
+/// The `BackgroundWorkerArray` is now resident in real shared memory and is
+/// addressed through `#[repr(C)]` Rust pointer arithmetic (header + slot stride
+/// = `size_of::<BackgroundWorkerSlot>()`). Statically assert that the actual
+/// Rust slot size matches the C `sizeof(BackgroundWorkerSlot)` computed above,
+/// so the in-place layout stays faithful to the C original and the shmem size
+/// (which now uses `size_of`) cannot diverge from the access stride.
+const _: () = assert!(
+    core::mem::size_of::<BackgroundWorkerSlot>() == BACKGROUND_WORKER_SLOT_SIZE,
+    "BackgroundWorkerSlot size diverged from C sizeof"
+);
+
 // ---------------------------------------------------------------------------
 // BackgroundWorkerList — the postmaster's process-local registration list.
 // C: `dlist_head BackgroundWorkerList = DLIST_STATIC_INIT(...)`.
@@ -109,7 +120,14 @@ thread_local! {
 // ---------------------------------------------------------------------------
 
 /// `BackgroundWorkerSlot` (`bgworker.c`).
+///
+/// `#[repr(C)]` because the whole `BackgroundWorkerArray` lives in the
+/// process-shared memory segment (allocated by `ShmemInitStruct`): the
+/// postmaster and every backend map the same `MAP_SHARED` region, so the slot
+/// layout must be stable and identical on both sides of `fork()`. (`BackgroundWorker`
+/// is itself a fixed-layout record the C postmaster copies verbatim into shmem.)
 #[derive(Clone, Copy)]
+#[repr(C)]
 struct BackgroundWorkerSlot {
     in_use: bool,
     terminate: bool,
@@ -132,17 +150,93 @@ impl BackgroundWorkerSlot {
     }
 }
 
-/// `BackgroundWorkerArray` (`bgworker.c`): header counters plus the slot array.
-struct BackgroundWorkerArray {
+/// `BackgroundWorkerArray` (`bgworker.c`): header counters plus the slot array,
+/// resident in the main shared-memory segment. C lays this out as
+/// `struct { int total_slots; uint32 parallel_register_count;
+/// uint32 parallel_terminate_count; BackgroundWorkerSlot slot[FLEXIBLE]; }` and
+/// every process accesses the *same* `MAP_SHARED` bytes; mutual exclusion is the
+/// real cross-process `BackgroundWorkerLock` LWLock (offset 32), held by the
+/// register / state-change / report paths.
+///
+/// We model that exactly: this is a thin handle carrying the shared base
+/// pointer; the header counters and the trailing `slot[]` array are read and
+/// written *through* that pointer (`#[repr(C)]` header + slot array), so writes
+/// by the leader are visible to the postmaster across `fork()`. The `Mutex`
+/// below only serializes the handle's own `Option` (initialization), not the
+/// shared data.
+#[repr(C)]
+struct BgwArrayHeader {
     total_slots: i32,
     parallel_register_count: uint32,
     parallel_terminate_count: uint32,
-    slot: Vec<BackgroundWorkerSlot>,
 }
 
-/// `static BackgroundWorkerArray *BackgroundWorkerData;` — the shared array,
-/// `None` until `BackgroundWorkerShmemInit` runs. The `Mutex` is the
-/// `BackgroundWorkerLock` serialization (the data is genuinely cross-thread).
+#[derive(Clone, Copy)]
+struct BackgroundWorkerArray {
+    /// Base of the `ShmemInitStruct("Background Worker Data", ...)` region: a
+    /// `BgwArrayHeader` immediately followed by `total_slots` `BackgroundWorkerSlot`s.
+    base: *mut u8,
+    total_slots: i32,
+}
+
+// SAFETY: the pointer addresses a process-shared `MAP_SHARED` segment that
+// outlives every backend; the handle is only dereferenced while the
+// `BackgroundWorkerLock` LWLock is held (cross-process mutual exclusion).
+unsafe impl Send for BackgroundWorkerArray {}
+
+impl BackgroundWorkerArray {
+    #[inline]
+    fn header(&self) -> &BgwArrayHeader {
+        // SAFETY: `base` is the start of the shared region, sized to hold the
+        // header (see `BackgroundWorkerShmemSize`).
+        unsafe { &*(self.base as *const BgwArrayHeader) }
+    }
+    #[inline]
+    fn header_mut(&mut self) -> &mut BgwArrayHeader {
+        // SAFETY: as above; caller holds BackgroundWorkerLock.
+        unsafe { &mut *(self.base as *mut BgwArrayHeader) }
+    }
+    #[inline]
+    fn slots_ptr(&self) -> *mut BackgroundWorkerSlot {
+        // C: offsetof(BackgroundWorkerArray, slot). `BGW_ARRAY_HEADER_SIZE`
+        // accounts for the header + alignment padding before slot[0].
+        // SAFETY: stays within the region sized by `BackgroundWorkerShmemSize`.
+        unsafe { self.base.add(BGW_ARRAY_HEADER_SIZE) as *mut BackgroundWorkerSlot }
+    }
+    #[inline]
+    fn slot(&self, i: usize) -> &BackgroundWorkerSlot {
+        debug_assert!((i as i32) < self.total_slots);
+        // SAFETY: bounds-checked against total_slots; region holds total_slots slots.
+        unsafe { &*self.slots_ptr().add(i) }
+    }
+    #[inline]
+    fn slot_mut(&mut self, i: usize) -> &mut BackgroundWorkerSlot {
+        debug_assert!((i as i32) < self.total_slots);
+        // SAFETY: as above; caller holds BackgroundWorkerLock.
+        unsafe { &mut *self.slots_ptr().add(i) }
+    }
+    #[inline]
+    fn parallel_register_count(&self) -> uint32 {
+        self.header().parallel_register_count
+    }
+    #[inline]
+    fn parallel_terminate_count(&self) -> uint32 {
+        self.header().parallel_terminate_count
+    }
+    #[inline]
+    fn set_parallel_register_count(&mut self, v: uint32) {
+        self.header_mut().parallel_register_count = v;
+    }
+    #[inline]
+    fn set_parallel_terminate_count(&mut self, v: uint32) {
+        self.header_mut().parallel_terminate_count = v;
+    }
+}
+
+/// `static BackgroundWorkerArray *BackgroundWorkerData;` — the handle to the
+/// shared array, `None` until `BackgroundWorkerShmemInit` runs. The `Mutex` only
+/// guards the `Option` (init/attach); the underlying data is genuinely shared
+/// memory protected by `BackgroundWorkerLock`.
 static BACKGROUND_WORKER_DATA: Mutex<Option<BackgroundWorkerArray>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
@@ -170,8 +264,15 @@ pub fn BackgroundWorkerShmemSize() -> Size {
     // size = offsetof(BackgroundWorkerArray, slot);
     // size = add_size(size, mul_size(max_worker_processes,
     //                                sizeof(BackgroundWorkerSlot)));
+    // The region is accessed through real Rust pointer arithmetic
+    // (`base + BGW_ARRAY_HEADER_SIZE + i*size_of::<BackgroundWorkerSlot>()`), so
+    // it must be sized with the SAME `size_of` stride, not a hand-summed value,
+    // or the access could run past the allocation.
     let max_worker_processes = backend_utils_init_small_seams::max_worker_processes::call();
-    BGW_ARRAY_HEADER_SIZE + (max_worker_processes as Size) * BACKGROUND_WORKER_SLOT_SIZE
+    debug_assert!(BGW_ARRAY_HEADER_SIZE >= core::mem::size_of::<BgwArrayHeader>());
+    debug_assert!(BGW_ARRAY_HEADER_SIZE % core::mem::align_of::<BackgroundWorkerSlot>() == 0);
+    BGW_ARRAY_HEADER_SIZE
+        + (max_worker_processes as Size) * core::mem::size_of::<BackgroundWorkerSlot>()
 }
 
 /// `BackgroundWorkerShmemInit(void)` — allocate and initialize our shared
@@ -181,14 +282,29 @@ pub fn BackgroundWorkerShmemInit() -> PgResult<()> {
     // BackgroundWorkerData = ShmemInitStruct("Background Worker Data",
     //                                        BackgroundWorkerShmemSize(), &found);
     let size = BackgroundWorkerShmemSize();
-    let (_addr, _found) =
+    let (addr, _found) =
         backend_storage_ipc_shmem_seams::shmem_init_struct::call("Background Worker Data", size)?;
 
     let max_worker_processes = backend_utils_init_small_seams::max_worker_processes::call();
 
+    // The handle wraps the *shared* base; every process maps the same
+    // MAP_SHARED bytes, and forked backends inherit this handle (identical
+    // pointer value), so a leader's slot writes are seen by the postmaster.
+    let mut bwa = BackgroundWorkerArray {
+        base: addr,
+        total_slots: max_worker_processes,
+    };
+
     if !backend_utils_init_small_seams::is_under_postmaster::call() {
-        let mut slots: Vec<BackgroundWorkerSlot> =
-            vec![BackgroundWorkerSlot::empty(); max_worker_processes as usize];
+        // Postmaster: initialize the header and zero the slot array in place.
+        *bwa.header_mut() = BgwArrayHeader {
+            total_slots: max_worker_processes,
+            parallel_register_count: 0,
+            parallel_terminate_count: 0,
+        };
+        for slotno in 0..max_worker_processes as usize {
+            *bwa.slot_mut(slotno) = BackgroundWorkerSlot::empty();
+        }
 
         BACKGROUND_WORKER_LIST.with(|list| {
             let mut list = list.borrow_mut();
@@ -196,28 +312,25 @@ pub fn BackgroundWorkerShmemInit() -> PgResult<()> {
             // shared slot assigned to each worker (1-to-1 correspondence).
             for (slotno, rw) in list.iter_mut().enumerate() {
                 debug_assert!((slotno as i32) < max_worker_processes);
-                let slot = &mut slots[slotno];
+                let rw_worker = rw.rw_worker;
+                let slot = bwa.slot_mut(slotno);
                 slot.in_use = true;
                 slot.terminate = false;
                 slot.pid = INVALID_PID;
                 slot.generation = 0;
                 rw.rw_shmem_slot = slotno as i32;
                 rw.rw_worker.bgw_notify_pid = 0; // might be reinit after crash
-                slot.worker = rw.rw_worker;
+                slot.worker = rw_worker;
+                slot.worker.bgw_notify_pid = 0;
             }
             // Remaining slots already constructed as not in use.
-        });
-
-        *BACKGROUND_WORKER_DATA.lock().unwrap() = Some(BackgroundWorkerArray {
-            total_slots: max_worker_processes,
-            parallel_register_count: 0,
-            parallel_terminate_count: 0,
-            slot: slots,
         });
     } else {
         // Under postmaster: the array already exists (Assert(found)).
         debug_assert!(_found);
     }
+
+    *BACKGROUND_WORKER_DATA.lock().unwrap() = Some(bwa);
 
     Ok(())
 }
@@ -275,7 +388,7 @@ pub fn BackgroundWorkerStateChange(allow_new_workers: bool) -> PgResult<()> {
     while slotno < max_worker_processes {
         let in_use = {
             let data = BACKGROUND_WORKER_DATA.lock().unwrap();
-            data.as_ref().unwrap().slot[slotno as usize].in_use
+            data.as_ref().unwrap().slot(slotno as usize).in_use
         };
         if !in_use {
             slotno += 1;
@@ -293,7 +406,7 @@ pub fn BackgroundWorkerStateChange(allow_new_workers: bool) -> PgResult<()> {
             // Someone can set the terminate flag.
             let (slot_terminate, rw_terminate) = {
                 let data = BACKGROUND_WORKER_DATA.lock().unwrap();
-                let st = data.as_ref().unwrap().slot[slotno as usize].terminate;
+                let st = data.as_ref().unwrap().slot(slotno as usize).terminate;
                 let rt = BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].rw_terminate);
                 (st, rt)
             };
@@ -318,26 +431,26 @@ pub fn BackgroundWorkerStateChange(allow_new_workers: bool) -> PgResult<()> {
         // stanza cleans it up and wakes anyone waiting.
         if !allow_new_workers {
             let mut data = BACKGROUND_WORKER_DATA.lock().unwrap();
-            data.as_mut().unwrap().slot[slotno as usize].terminate = true;
+            data.as_mut().unwrap().slot_mut(slotno as usize).terminate = true;
         }
 
         // Found a slot without a corresponding RegisteredBgWorker.
         let slot_terminate = {
             let data = BACKGROUND_WORKER_DATA.lock().unwrap();
-            data.as_ref().unwrap().slot[slotno as usize].terminate
+            data.as_ref().unwrap().slot(slotno as usize).terminate
         };
         if slot_terminate {
             // Slot already terminating: free it and notify the registrant.
             let notify_pid = {
                 let mut data = BACKGROUND_WORKER_DATA.lock().unwrap();
                 let d = data.as_mut().unwrap();
-                let notify_pid = d.slot[slotno as usize].worker.bgw_notify_pid;
-                if (d.slot[slotno as usize].worker.bgw_flags & BGWORKER_CLASS_PARALLEL) != 0 {
-                    d.parallel_terminate_count = d.parallel_terminate_count.wrapping_add(1);
+                let notify_pid = d.slot(slotno as usize).worker.bgw_notify_pid;
+                if (d.slot(slotno as usize).worker.bgw_flags & BGWORKER_CLASS_PARALLEL) != 0 {
+                    d.set_parallel_terminate_count(d.parallel_terminate_count().wrapping_add(1));
                 }
-                d.slot[slotno as usize].pid = 0;
+                d.slot_mut(slotno as usize).pid = 0;
                 // pg_memory_barrier(): the Mutex release/acquire is the barrier.
-                d.slot[slotno as usize].in_use = false;
+                d.slot_mut(slotno as usize).in_use = false;
                 notify_pid
             };
             if notify_pid != 0 {
@@ -371,7 +484,7 @@ pub fn BackgroundWorkerStateChange(allow_new_workers: bool) -> PgResult<()> {
 
         let slot_worker = {
             let data = BACKGROUND_WORKER_DATA.lock().unwrap();
-            data.as_ref().unwrap().slot[slotno as usize].worker
+            data.as_ref().unwrap().slot(slotno as usize).worker
         };
 
         // Copy strings in a paranoid way (shared memory might be corrupted and
@@ -456,13 +569,13 @@ pub fn ForgetBackgroundWorker(rw_index: usize) -> PgResult<()> {
     {
         let mut data = BACKGROUND_WORKER_DATA.lock().unwrap();
         let d = data.as_mut().unwrap();
-        debug_assert!(d.slot[slotno as usize].in_use);
+        debug_assert!(d.slot(slotno as usize).in_use);
         // Update of parallel_terminate_count completes before the store to
         // in_use (the Mutex release is the memory barrier).
         if parallel {
-            d.parallel_terminate_count = d.parallel_terminate_count.wrapping_add(1);
+            d.set_parallel_terminate_count(d.parallel_terminate_count().wrapping_add(1));
         }
-        d.slot[slotno as usize].in_use = false;
+        d.slot_mut(slotno as usize).in_use = false;
     }
 
     ereport::call(
@@ -610,7 +723,7 @@ pub fn ReportBackgroundWorkerPID(rw_index: usize) {
 
     {
         let mut data = BACKGROUND_WORKER_DATA.lock().unwrap();
-        data.as_mut().unwrap().slot[slotno as usize].pid = rw_pid;
+        data.as_mut().unwrap().slot_mut(slotno as usize).pid = rw_pid;
     }
 
     if notify_pid != 0 {
@@ -640,7 +753,7 @@ pub fn ReportBackgroundWorkerExit(rw_index: usize) -> PgResult<()> {
 
     {
         let mut data = BACKGROUND_WORKER_DATA.lock().unwrap();
-        data.as_mut().unwrap().slot[slotno as usize].pid = rw_pid;
+        data.as_mut().unwrap().slot_mut(slotno as usize).pid = rw_pid;
     }
 
     // If this worker is slated for deregistration, do that before notifying the
@@ -695,7 +808,7 @@ pub fn ForgetUnstartedBackgroundWorkers() -> PgResult<()> {
 
         let slot_pid = {
             let data = BACKGROUND_WORKER_DATA.lock().unwrap();
-            data.as_ref().unwrap().slot[slotno as usize].pid
+            data.as_ref().unwrap().slot(slotno as usize).pid
         };
 
         // If it's not yet started, and there's someone waiting ...
@@ -1335,11 +1448,11 @@ pub fn RegisterDynamicBackgroundWorker(
         // Too many parallel workers already? Our view of
         // parallel_terminate_count may be slightly stale; that's fine.
         if parallel
-            && d.parallel_register_count.wrapping_sub(d.parallel_terminate_count)
+            && d.parallel_register_count().wrapping_sub(d.parallel_terminate_count())
                 >= backend_utils_init_small_seams::max_parallel_workers::call() as uint32
         {
             debug_assert!(
-                d.parallel_register_count.wrapping_sub(d.parallel_terminate_count)
+                d.parallel_register_count().wrapping_sub(d.parallel_terminate_count())
                     <= types_bgworker::MAX_PARALLEL_WORKER_LIMIT as uint32
             );
             drop(data);
@@ -1349,20 +1462,20 @@ pub fn RegisterDynamicBackgroundWorker(
 
         // Look for an unused slot. If we find one, grab it.
         while slotno < d.total_slots {
-            if !d.slot[slotno as usize].in_use {
-                d.slot[slotno as usize].worker = worker;
-                d.slot[slotno as usize].pid = INVALID_PID; // not started yet
-                d.slot[slotno as usize].generation =
-                    d.slot[slotno as usize].generation.wrapping_add(1);
-                d.slot[slotno as usize].terminate = false;
-                generation = d.slot[slotno as usize].generation;
+            if !d.slot(slotno as usize).in_use {
+                let s = d.slot_mut(slotno as usize);
+                s.worker = worker;
+                s.pid = INVALID_PID; // not started yet
+                s.generation = s.generation.wrapping_add(1);
+                s.terminate = false;
+                generation = s.generation;
                 if parallel {
-                    d.parallel_register_count = d.parallel_register_count.wrapping_add(1);
+                    d.set_parallel_register_count(d.parallel_register_count().wrapping_add(1));
                 }
                 // pg_write_barrier(): the in_use store is the last write, and
                 // the Mutex release publishes the new contents before in_use is
                 // observed (postmaster reads under the same Mutex).
-                d.slot[slotno as usize].in_use = true;
+                d.slot_mut(slotno as usize).in_use = true;
                 success = true;
                 break;
             }
@@ -1414,7 +1527,7 @@ pub fn GetBackgroundWorkerPid(handle: &BackgroundWorkerHandle) -> (BgwHandleStat
 
     let pid = {
         let data = BACKGROUND_WORKER_DATA.lock().unwrap();
-        let slot = &data.as_ref().unwrap().slot[slotno as usize];
+        let slot = data.as_ref().unwrap().slot(slotno as usize);
         // generation can't change under the lock; pid (postmaster-updated)
         // may be stale but won't be garbage.
         if handle.generation != slot.generation || !slot.in_use {
@@ -1535,7 +1648,7 @@ pub fn TerminateBackgroundWorker(handle: &BackgroundWorkerHandle) -> PgResult<()
     // Only act if the generation matches (guards against slot reuse).
     {
         let mut data = BACKGROUND_WORKER_DATA.lock().unwrap();
-        let slot = &mut data.as_mut().unwrap().slot[slotno as usize];
+        let slot = data.as_mut().unwrap().slot_mut(slotno as usize);
         if handle.generation == slot.generation {
             slot.terminate = true;
             signal_postmaster = true;
@@ -1597,6 +1710,17 @@ fn call_bgworker_entrypoint(
     debug_assert!(cstr_eq(&worker.bgw_library_name, b"postgres"));
     let fname = cstr_str(&worker.bgw_function_name);
     match fname {
+        // ParallelWorkerMain(Datum) — the parallel-query worker entry point
+        // (parallel.c). `main_arg = UInt32GetDatum(dsm_segment_handle(seg))`.
+        // The bgworker loader carries the arg as the bare-word `types_datum::Datum`;
+        // `parallel_worker_main` takes the executor `types_tuple::Datum<'static>`
+        // carrier. Both are the same machine word (the DSM-handle u32); rebuild
+        // the `'static` ByVal carrier from the word.
+        "ParallelWorkerMain" => {
+            backend_access_transam_parallel::parallel_worker_main(
+                types_tuple::Datum::from_usize(main_arg.as_usize()),
+            )
+        }
         // ApplyLauncherMain(Datum) — the logical-replication launcher.
         "ApplyLauncherMain" => {
             backend_replication_logical_launcher::ApplyLauncherMain(main_arg)
@@ -1643,7 +1767,7 @@ pub fn GetBackgroundWorkerTypeByPid(pid: pid_t) -> Option<String> {
         let d = data.as_ref().unwrap();
         let mut slotno = 0;
         while slotno < d.total_slots {
-            let slot = &d.slot[slotno as usize];
+            let slot = d.slot(slotno as usize);
             if slot.pid > 0 && slot.pid == pid {
                 result = Some(cstr_lossy(&slot.worker.bgw_type));
                 break;

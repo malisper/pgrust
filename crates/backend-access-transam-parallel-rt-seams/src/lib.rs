@@ -24,7 +24,7 @@ use types_error::PgResult;
 use types_bgworker::BackgroundWorkerHandle;
 use types_parallel::{
     dsm_handle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState,
-    ParallelWorkerMainFn, ParsedErrorNotice, ShmMqHandleHandle,
+    ParallelWorkerMainFn, ShmMqHandleHandle,
 };
 
 // --- memory contexts (utils/mmgr) ------------------------------------------
@@ -200,8 +200,19 @@ seam_core::seam!(pub fn xact_last_rec_end() -> PgResult<XLogRecPtr>);
 seam_core::seam!(pub fn set_xact_last_rec_end(value: XLogRecPtr) -> PgResult<()>);
 
 // --- libpq message parsing / pgstat / notify -------------------------------
-seam_core::seam!(pub fn pq_parse_errornotice(msg: &[u8]) -> PgResult<ParsedErrorNotice>);
-seam_core::seam!(pub fn throw_parallel_error_data(elevel: i32, context: Option<&str>, pcxt_error_context_stack: usize) -> PgResult<()>);
+// `throw_parallel_error_data` performs the whole ErrorResponse/NoticeResponse
+// arm of `ProcessParallelMessage` (parallel.c:1159-1202): `pq_parse_errornotice`
+// rebuilds the worker's full `ErrorData` from `msg` (the raw message body, type
+// byte already stripped by the leader), `edata.elevel = Min(edata.elevel, ERROR)`
+// caps the level, the "parallel worker" context line is appended when
+// `append_parallel_worker_context` is set (the leader computes this from
+// `debug_parallel_query != DEBUG_PARALLEL_REGRESS`), and `ThrowErrorData(&edata)`
+// re-raises (elevel >= ERROR) or logs (NOTICE/WARNING) the worker's error with
+// its original message, SQLSTATE and every diagnostic field preserved. The owner
+// (`libpq/pqmq.c`) keeps the `ErrorData` local — it is never lossily projected
+// across the seam. `pcxt_error_context_stack` is the leader's saved
+// `error_context_stack` (a retired global in this tree; passed through, unused).
+seam_core::seam!(pub fn throw_parallel_error_data(msg: &[u8], append_parallel_worker_context: bool, pcxt_error_context_stack: usize) -> PgResult<()>);
 seam_core::seam!(pub fn notify_my_front_end(channel: &str, payload: &str, pid: i32) -> PgResult<()>);
 seam_core::seam!(pub fn pgstat_progress_incr_param(index: i32, incr: i64) -> PgResult<()>);
 seam_core::seam!(pub fn parse_notification_response(msg: &[u8]) -> PgResult<(i32, String, String)>);

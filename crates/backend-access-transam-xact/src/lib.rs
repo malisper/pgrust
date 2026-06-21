@@ -1772,6 +1772,7 @@ pub fn init_seams() {
     seams::start_transaction_command::set(StartTransactionCommand);
     seams::commit_transaction_command::set(CommitTransactionCommand);
     seams::abort_out_of_any_transaction::set(AbortOutOfAnyTransaction);
+
     seams::xact_last_rec_end::set(seam_xact_last_rec_end);
     seams::is_transaction_or_transaction_block::set(IsTransactionOrTransactionBlock);
     seams::get_top_transaction_id_if_any::set(GetTopTransactionIdIfAny);
@@ -1814,6 +1815,16 @@ pub fn init_seams() {
     );
     backend_access_transam_parallel_rt_seams::commit_transaction_command::set(
         CommitTransactionCommand,
+    );
+    // `SetParallelStartTimestamps(xact_ts, stmt_ts)` (xact.c:859) — the worker
+    // restores the leader's xact/stmt start timestamps before starting its
+    // transaction (else asserts in xact.c fire). Owner body is infallible; the
+    // rt-seam mirrors the fallible restore surface, so wrap in Ok.
+    backend_access_transam_parallel_rt_seams::set_parallel_start_timestamps::set(
+        |xact_ts, stmt_ts| {
+            SetParallelStartTimestamps(xact_ts, stmt_ts);
+            Ok(())
+        },
     );
     seams::set_current_statement_start_timestamp::set(SetCurrentStatementStartTimestamp);
     // `PreventInTransactionBlock(isTopLevel, stmtType)` — signature matches the

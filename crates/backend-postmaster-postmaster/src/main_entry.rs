@@ -299,6 +299,14 @@ pub fn PostmasterMain(argv: &[&str]) -> ! {
      * postmaster environment).
      */
     let _ = backend_utils_init_small::InitProcessGlobals();
+    // C (postmaster.c): `PostmasterPid = MyProcPid;` — remember the postmaster's
+    // own pid so that `SendPostmasterSignal` (kill(PostmasterPid, SIGUSR1)) from a
+    // backend reaches us. Inherited by every forked child. Without this it stays 0
+    // and `kill(0, …)` signals the caller's process group instead of the
+    // postmaster, so dynamic-bgworker registration never wakes the postmaster.
+    backend_utils_init_small::globals::SetPostmasterPid(
+        backend_utils_init_small::globals::MyProcPid(),
+    );
     backend_utils_init_small::globals::SetIsPostmasterEnvironment(true);
 
     /*

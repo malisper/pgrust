@@ -65,8 +65,8 @@ use types_execparallel::{
     ShmMqAttachHandle, ShmTocEstimatorHandle, ShmTocHandle as ExecShmToc,
 };
 use types_parallel::{
-    dsm_handle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState, ShmMqHandleHandle,
-    ShmMqResult,
+    dsm_handle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState, ParallelWorkerMainFn,
+    ShmMqHandleHandle, ShmMqResult,
 };
 
 use backend_storage_ipc_shm_mq_seams as shmmq;
@@ -132,9 +132,6 @@ const PqMsg_NoticeResponse: u8 = b'N';
 const PqMsg_NotificationResponse: u8 = b'A';
 const PqMsg_Progress: u8 = b'P';
 const PqMsg_Terminate: u8 = b'X';
-
-/// `ERROR` elevel as a raw int, for `Min(edata.elevel, ERROR)` (elog.h: 21).
-const ERROR_ELEVEL: i32 = 21;
 
 /// Names of the internal parallel-worker entry points, in C order
 /// (parallel.c:136-158 `InternalParallelWorkers`).
@@ -1813,26 +1810,28 @@ fn process_parallel_message(pcxt: ParallelContextHandle, i: i32, msg: &[u8]) -> 
 
     match msgtype {
         m if m == PqMsg_ErrorResponse || m == PqMsg_NoticeResponse => {
-            // Parse ErrorResponse or NoticeResponse.
-            let edata = rt::pq_parse_errornotice::call(body)?;
-
-            // Death of a worker isn't enough justification for suicide.
-            let elevel = edata.elevel.min(ERROR_ELEVEL);
-
-            // Add a context line to show this is from a parallel worker (skip in
-            // DEBUG_PARALLEL_REGRESS for test stability).
-            let mut context = edata.context;
-            if rt::debug_parallel_query::call() != DEBUG_PARALLEL_REGRESS {
-                context = Some(match context {
-                    Some(ctx) => format!("{ctx}\nparallel worker"),
-                    None => "parallel worker".to_string(),
-                });
-            }
+            // Parse the ErrorResponse/NoticeResponse, cap elevel at ERROR (death
+            // of a worker isn't enough justification for suicide), optionally add
+            // a "parallel worker" context line, and rethrow the error / print the
+            // notice — preserving the worker's full ErrorData (message, SQLSTATE,
+            // detail, …). The owner (`libpq/pqmq.c`) keeps the rebuilt `ErrorData`
+            // local and never projects it lossily across the seam.
+            //
+            // The "parallel worker" context line is skipped in
+            // DEBUG_PARALLEL_REGRESS mode (it causes test-result instability
+            // depending on whether a worker is actually used); we own
+            // `debug_parallel_query`, so we compute that decision here.
+            let append_parallel_worker_context =
+                rt::debug_parallel_query::call() != DEBUG_PARALLEL_REGRESS;
 
             // Context beyond that should use the error context callbacks in
             // effect when the ParallelContext was created.
             let pcxt_stack = with_globals(|g| g.get(pcxt).error_context_stack);
-            rt::throw_parallel_error_data::call(elevel, context.as_deref(), pcxt_stack)?;
+            rt::throw_parallel_error_data::call(
+                body,
+                append_parallel_worker_context,
+                pcxt_stack,
+            )?;
         }
 
         m if m == PqMsg_NotificationResponse => {
@@ -2246,6 +2245,7 @@ pub fn init_seams() {
     install_fps_driver_seams();
     install_execparallel_support_pcxt_seams();
     install_mmgr_context_seams();
+    install_worker_state_seams();
 
     // planner.c:373 reads `IsParallelWorker()` in the cheap-test gate for
     // `glob->parallelModeOK`; expose this crate's `is_parallel_worker()` to the
@@ -2258,6 +2258,132 @@ pub fn init_seams() {
     // per-backend state, so install the vacuum-seams slot from here too.
     backend_commands_vacuum_seams::is_parallel_worker::set(|| Ok(is_parallel_worker()));
 }
+
+/// Install the worker-side restore-sequence and leader message-handling seams
+/// `ParallelWorkerMain` / `ProcessParallelMessages` (parallel.c) drive. Most of
+/// these address this crate's own per-backend parallel state (the worker number,
+/// the `InitializingParallelWorker` flag, the `MyFixedParallelState` base); the
+/// rest delegate to the owner subsystem that owns the body (init/interrupts,
+/// mmgr, dfmgr, ipc shmem-exit, the execParallel worker entry point).
+fn install_worker_state_seams() {
+    // --- leader: ProcessParallelMessages private memory context ------------
+    // C: oldcontext = MemoryContextSwitchTo(hpm_context) over a reset-per-call
+    // private `AllocSetContext`. There is no ambient `CurrentMemoryContext` in
+    // this tree's mcx model (docs/mctx-design.md), so — exactly like
+    // `switch_to_top_transaction_context` above — the switch has no observable
+    // effect: return a nominal saved handle, and the restore (which in C also
+    // resets the context) is a no-op (the port uses owned `Vec`s freed on drop).
+    rt::enter_hpm_context::set(|| Ok(0));
+    rt::leave_hpm_context::set(|_saved| Ok(()));
+
+    // C: `pfree(msg.data)` after each ProcessParallelMessage. The port frees the
+    // message buffer natively (owned `Vec` dropped); nothing to free here.
+    rt::pfree::set(|_ptr| Ok(()));
+
+    // --- leader: HandleParallelMessageInterrupt sets InterruptPending -------
+    // C macro `InterruptPending = true;`. globals.c owns the flag; delegate to
+    // the init-small accessor seam.
+    rt::set_interrupt_pending::set(|| {
+        backend_utils_init_small_seams::set_interrupt_pending::call(true);
+        Ok(())
+    });
+
+    // NOTE: `throw_parallel_error_data` (rethrow a worker's ErrorResponse /
+    // print its NoticeResponse via `ThrowErrorData`) is installed by the error
+    // subsystem owner (`backend-libpq-pqmq`, which owns `pq_parse_errornotice`
+    // and the full `ErrorData` the rethrow needs); it is not this crate's body.
+
+    // --- worker: InitializingParallelWorker flag (miscadmin-style global) ---
+    // C: `InitializingParallelWorker = value;`. This crate owns the flag.
+    rt::set_initializing_parallel_worker::set(|value| {
+        with_globals(|g| g.initializing_parallel_worker = value);
+        Ok(())
+    });
+
+    // --- worker: establish signal handlers ---------------------------------
+    // C: `pqsignal(SIGTERM, die); BackgroundWorkerUnblockSignals();`.
+    rt::worker_install_signal_handlers::set(|| {
+        interfaces_libpq_legacy_pqsignal::pqsignal(
+            libc::SIGTERM,
+            types_signal::SigHandler::Handler(
+                backend_tcop_postgres_seams::die_signal_handler::call(),
+            ),
+        );
+        backend_postmaster_bgworker_seams::background_worker_unblock_signals::call();
+        Ok(())
+    });
+
+    // --- worker: private "Parallel worker" memory context ------------------
+    // C: `CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
+    // "Parallel worker", ...)` — set up a working context "just for cleanliness".
+    // No ambient `CurrentMemoryContext` exists in this tree's mcx model (every
+    // allocation threads an owned `Mcx`), so there is nothing to flip; no-op.
+    rt::worker_create_memory_context::set(|| Ok(()));
+
+    // --- worker: MyFixedParallelState base ---------------------------------
+    // C: `MyFixedParallelState = fps;` — the in-segment base of the fixed state.
+    rt::set_my_fixed_parallel_state::set(|base| {
+        with_globals(|g| g.my_fixed_parallel_state = base);
+        Ok(())
+    });
+
+    // --- worker: before_shmem_exit(ParallelWorkerShutdown, PointerGetDatum(seg)) -
+    // Arrange to signal the leader (one last error-queue read) and detach the DSM
+    // segment at process exit. The `arg` Datum carries the segment handle word
+    // (PointerGetDatum(seg)); `dsm_segment_from_datum` recovers it on the way out.
+    rt::register_parallel_worker_shutdown::set(|seg| {
+        backend_storage_ipc_dsm_core_seams::before_shmem_exit::call(
+            parallel_worker_shutdown,
+            Datum::from_usize(seg.0),
+        )
+    });
+
+    // --- worker: invoke the resolved entry point ---------------------------
+    // C: `entrypt(seg, toc);`. `LookupParallelWorkerFunction` resolved a function
+    // pointer; this tree carries it as a small `ParallelWorkerMainFn` token
+    // (`resolve_internal_parallel_worker` below assigns the tokens). Dispatch the
+    // token to the real entry-point seam over the worker's real in-segment toc.
+    rt::invoke_entrypoint::set(|entrypt, seg, toc| {
+        match entrypt {
+            ENTRYPT_PARALLEL_QUERY_MAIN => {
+                let mcx = backend_utils_mmgr_mcxt_seams::top_memory_context::call();
+                backend_executor_execParallel_seams::ParallelQueryMain::call(
+                    mcx,
+                    types_execparallel::DsmSegmentHandle(seg.0),
+                    types_execparallel::ShmTocHandle(toc),
+                )
+            }
+            other => Err(ereport(ERROR)
+                .errmsg(format!(
+                    "unrecognized internal parallel worker entry point token: {other}"
+                ))
+                .into_error()),
+        }
+    });
+
+    // --- worker: resolve an internal entry point to its token --------------
+    // C: searches the `InternalParallelWorkers[]` table and returns the function
+    // pointer. Here each internal name maps to a stable token `invoke_entrypoint`
+    // dispatches. `ParallelQueryMain` is the only entry point compiled into this
+    // build (the executor's parallel-query worker main).
+    rt::resolve_internal_parallel_worker::set(|funcname| match funcname {
+        "ParallelQueryMain" => Ok(ENTRYPT_PARALLEL_QUERY_MAIN),
+        other => Err(ereport(ERROR)
+            .errmsg(format!("internal function \"{other}\" not found"))
+            .into_error()),
+    });
+
+    // NOTE: `load_external_function` (resolve a non-"postgres" library's parallel
+    // worker entry point) is installed by its owner, `backend-utils-fmgr-dfmgr`,
+    // which owns the dynamic loader. No in-core parallel plan loads an external
+    // library, so this path is exercised only by extension parallel workers.
+}
+
+/// Stable token for the in-core `ParallelQueryMain` entry point (execParallel.c),
+/// assigned by `resolve_internal_parallel_worker` and dispatched by
+/// `invoke_entrypoint`. (The C `parallel_worker_main_type` function pointer has no
+/// portable token here, so we enumerate the internal entry points.)
+const ENTRYPT_PARALLEL_QUERY_MAIN: ParallelWorkerMainFn = 1;
 
 /// Install the `MemoryContextSwitchTo(TopTransactionContext)` / restore pair
 /// that `CreateParallelContext` (parallel.c:172-203) brackets its `palloc0` of

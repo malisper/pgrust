@@ -34,17 +34,18 @@ use backend_libpq_pqcomm::{
     set_pq_comm_methods, PQcommMethods, EOF, PQ_COMM_SOCKET_METHODS,
 };
 use backend_storage_ipc_dsm_core::dsm::{on_dsm_detach, DsmSegmentId};
-use backend_utils_error::PgError;
+use backend_utils_error::{PgError, ThrowErrorData};
 use types_core::{pid_t, ProcNumber, INVALID_PROC_NUMBER};
 use types_datum::Datum;
 use types_dest::CommandDest;
 use types_error::{
-    PgResult, ERRCODE_PROTOCOL_VIOLATION, PANIC, PG_DIAG_COLUMN_NAME, PG_DIAG_CONSTRAINT_NAME,
-    PG_DIAG_CONTEXT, PG_DIAG_DATATYPE_NAME, PG_DIAG_INTERNAL_POSITION, PG_DIAG_INTERNAL_QUERY,
-    PG_DIAG_MESSAGE_DETAIL, PG_DIAG_MESSAGE_HINT, PG_DIAG_MESSAGE_PRIMARY, PG_DIAG_SCHEMA_NAME,
-    PG_DIAG_SEVERITY, PG_DIAG_SEVERITY_NONLOCALIZED, PG_DIAG_SOURCE_FILE, PG_DIAG_SOURCE_FUNCTION,
-    PG_DIAG_SOURCE_LINE, PG_DIAG_SQLSTATE, PG_DIAG_STATEMENT_POSITION, PG_DIAG_TABLE_NAME, DEBUG1,
-    ERROR, FATAL, INFO, LOG, NOTICE, WARNING,
+    ErrorLevel, ErrorLocation, PgResult, SqlState, ERRCODE_PROTOCOL_VIOLATION, PANIC,
+    PG_DIAG_COLUMN_NAME, PG_DIAG_CONSTRAINT_NAME, PG_DIAG_CONTEXT, PG_DIAG_DATATYPE_NAME,
+    PG_DIAG_INTERNAL_POSITION, PG_DIAG_INTERNAL_QUERY, PG_DIAG_MESSAGE_DETAIL, PG_DIAG_MESSAGE_HINT,
+    PG_DIAG_MESSAGE_PRIMARY, PG_DIAG_SCHEMA_NAME, PG_DIAG_SEVERITY, PG_DIAG_SEVERITY_NONLOCALIZED,
+    PG_DIAG_SOURCE_FILE, PG_DIAG_SOURCE_FUNCTION, PG_DIAG_SOURCE_LINE, PG_DIAG_SQLSTATE,
+    PG_DIAG_STATEMENT_POSITION, PG_DIAG_TABLE_NAME, DEBUG1, ERROR, FATAL, INFO, LOG, NOTICE,
+    WARNING,
 };
 use types_execparallel::ShmMqAttachHandle;
 use types_parallel::{DsmSegmentHandle, ShmMqHandleHandle};
@@ -314,6 +315,31 @@ impl<'a> MsgCursor<'a> {
         Ok(b)
     }
 
+    /// `pq_copymsgbytes` — copy `n` bytes out of the message buffer, raising the
+    /// "insufficient data" protocol violation if fewer than `n` remain.
+    fn copymsgbytes(&mut self, n: usize) -> PgResult<&'a [u8]> {
+        if self.data.len() - self.cursor < n {
+            return Err(protocol_violation("insufficient data left in message"));
+        }
+        let s = &self.data[self.cursor..self.cursor + n];
+        self.cursor += n;
+        Ok(s)
+    }
+
+    /// `pq_getmsgint(msg, 4)` — get a 32-bit integer in network byte order.
+    fn getmsgint32(&mut self) -> PgResult<i32> {
+        let bytes = self.copymsgbytes(4)?;
+        Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    /// `pq_getmsgint64(msg)` — get a 64-bit integer in network byte order.
+    fn getmsgint64(&mut self) -> PgResult<i64> {
+        let bytes = self.copymsgbytes(8)?;
+        Ok(i64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
     /// `pq_getmsgrawstring` — get a null-terminated string from the message
     /// buffer (no encoding conversion). Returns the bytes before the NUL.
     fn getmsgrawstring(&mut self) -> PgResult<&'a [u8]> {
@@ -448,27 +474,47 @@ fn parse_errornotice(msg: &[u8]) -> PgResult<ErrorData> {
         // no default arm).
     }
 
-    // Silence dead-field warnings: these are reconstructed faithfully but only
-    // `elevel`/`context` cross the seams today.
-    let _ = (
-        edata.sqlerrcode,
-        &edata.message,
-        &edata.detail,
-        &edata.hint,
-        edata.cursorpos,
-        edata.internalpos,
-        &edata.internalquery,
-        &edata.schema_name,
-        &edata.table_name,
-        &edata.column_name,
-        &edata.datatype_name,
-        &edata.constraint_name,
-        &edata.filename,
-        edata.lineno,
-        &edata.funcname,
-    );
-
     Ok(edata)
+}
+
+/// `MAKE_SQLSTATE`-decoded `ErrorData` → owned [`PgError`], reproducing the field
+/// copy `ThrowErrorData` performs out of the C stack `ErrorData edata`. Every
+/// diagnostic field `pq_parse_errornotice` rebuilt is carried through, so the
+/// leader re-raises the worker's error with its original message, SQLSTATE,
+/// detail/hint/context, the column/table/schema/datatype/constraint names, the
+/// statement/internal positions and internal query, and the source location —
+/// nothing is lost to a thin cross-seam projection.
+fn error_data_to_pg_error(edata: ErrorData) -> PgError {
+    let mut e = PgError::new(ErrorLevel(edata.elevel), edata.message.unwrap_or_default());
+    // C: `if (edata->sqlerrcode) edata->sqlerrcode` is always set by errstart;
+    // `pq_parse_errornotice` leaves it 0 only if the worker omitted SQLSTATE, in
+    // which case ThrowErrorData keeps the errstart default. Mirror that: only
+    // override when the worker supplied a code.
+    if edata.sqlerrcode != 0 {
+        e.sqlstate = SqlState(edata.sqlerrcode);
+    }
+    e.detail = edata.detail;
+    e.hint = edata.hint;
+    e.context = edata.context;
+    e.internal_query = edata.internalquery;
+    e.schema_name = edata.schema_name;
+    e.table_name = edata.table_name;
+    e.column_name = edata.column_name;
+    e.datatype_name = edata.datatype_name;
+    e.constraint_name = edata.constraint_name;
+    // C `ErrorData` carries these as plain ints with 0 meaning "unset".
+    e.cursor_position = (edata.cursorpos != 0).then_some(edata.cursorpos);
+    e.internal_position = (edata.internalpos != 0).then_some(edata.internalpos);
+    // `errfinish` reports at edata.filename:lineno (funcname). Only present when
+    // the worker sent the SOURCE_FILE/LINE/FUNCTION fields.
+    if edata.filename.is_some() || edata.lineno != 0 || edata.funcname.is_some() {
+        e.location = Some(ErrorLocation {
+            filename: edata.filename,
+            lineno: edata.lineno,
+            funcname: edata.funcname,
+        });
+    }
+    e
 }
 
 /// Seam body for `backend-libpq-pqmq-seams::pq_parse_errornotice` (the
@@ -480,14 +526,73 @@ fn pq_parse_errornotice_apply(
     Ok(types_applyparallel::ParsedErrorNotice { context: edata.context })
 }
 
-/// Seam body for `backend-access-transam-parallel-rt-seams::pq_parse_errornotice`
-/// (the parallel-query leader, which reads `elevel` and `context`).
-fn pq_parse_errornotice_rt(msg: &[u8]) -> PgResult<types_parallel::ParsedErrorNotice> {
-    let edata = parse_errornotice(msg)?;
-    Ok(types_parallel::ParsedErrorNotice {
-        elevel: edata.elevel,
-        context: edata.context,
-    })
+/// Seam body for `backend-access-transam-parallel-rt-seams::throw_parallel_error_data`
+/// — the ErrorResponse/NoticeResponse arm of `ProcessParallelMessage`
+/// (parallel.c:1159-1202). `msg` is the raw message body (the 1-byte type already
+/// stripped by the leader). We rebuild the worker's full `ErrorData`
+/// (`pq_parse_errornotice`), cap `elevel` at `ERROR` (death of a worker isn't
+/// enough justification for suicide), optionally append the "parallel worker"
+/// context line, and `ThrowErrorData(&edata)` — re-raising (elevel >= ERROR) or
+/// logging (NOTICE/WARNING) with the worker's original message, SQLSTATE and
+/// every diagnostic field intact. The `ErrorData` is kept local: it is never
+/// projected lossily across a seam.
+///
+/// `_pcxt_error_context_stack` is the leader's saved `error_context_stack` C swaps
+/// in around the `ThrowErrorData` call (`error_context_stack = pcxt->
+/// error_context_stack`). That global is retired in this tree (context attaches
+/// on propagation, not via a saved chain pointer — docs/query-lifecycle-raii.md),
+/// so there is nothing to swap; the handle is accepted and ignored.
+fn throw_parallel_error_data(
+    msg: &[u8],
+    append_parallel_worker_context: bool,
+    _pcxt_error_context_stack: usize,
+) -> PgResult<()> {
+    // Parse ErrorResponse or NoticeResponse into the full ErrorData.
+    let mut edata = parse_errornotice(msg)?;
+
+    // Death of a worker isn't enough justification for suicide.
+    edata.elevel = edata.elevel.min(ERROR.0);
+
+    // If desired, add a context line to show that this is a message propagated
+    // from a parallel worker. (Skipped in DEBUG_PARALLEL_REGRESS mode, which the
+    // leader signals via `append_parallel_worker_context = false`.)
+    if append_parallel_worker_context {
+        edata.context = Some(match edata.context.take() {
+            Some(ctx) => format!("{ctx}\nparallel worker"),
+            None => String::from("parallel worker"),
+        });
+    }
+
+    // Rethrow error or print notice.
+    ThrowErrorData(error_data_to_pg_error(edata))
+}
+
+/// Seam body for `backend-access-transam-parallel-rt-seams::parse_notification_response`
+/// — the `PqMsg_NotificationResponse` arm of `ProcessParallelMessage`
+/// (parallel.c:1205-1219). The leader strips the 1-byte message type before the
+/// call, so `msg` is the body: `int32 pid`, `string channel`, `string payload`.
+/// Returns `(pid, channel, payload)` for `NotifyMyFrontEnd`. C uses
+/// `pq_endmessage` here (which frees rather than verifying full consumption), so
+/// no `getmsgend` is performed.
+fn parse_notification_response(msg: &[u8]) -> PgResult<(i32, String, String)> {
+    let mut cur = MsgCursor::new(msg);
+    let pid = cur.getmsgint32()?;
+    let channel = raw_to_string(cur.getmsgrawstring()?);
+    let payload = raw_to_string(cur.getmsgrawstring()?);
+    Ok((pid, channel, payload))
+}
+
+/// Seam body for `backend-access-transam-parallel-rt-seams::parse_progress` —
+/// the `PqMsg_Progress` arm of `ProcessParallelMessage` (parallel.c:1222-1237).
+/// `msg` is the body (type byte stripped): `int32 index`, `int64 incr`. Only
+/// incremental progress reporting is supported; `pq_getmsgend` verifies the
+/// message was fully consumed.
+fn parse_progress(msg: &[u8]) -> PgResult<(i32, i64)> {
+    let mut cur = MsgCursor::new(msg);
+    let index = cur.getmsgint32()?;
+    let incr = cur.getmsgint64()?;
+    cur.getmsgend()?;
+    Ok((index, incr))
 }
 
 // ---------------------------------------------------------------------------
@@ -502,5 +607,7 @@ pub fn init_seams() {
     backend_libpq_pqmq_seams::pq_parse_errornotice::set(pq_parse_errornotice_apply);
     rt::pq_redirect_to_shm_mq::set(pq_redirect_to_shm_mq);
     rt::pq_set_parallel_leader::set(pq_set_parallel_leader);
-    rt::pq_parse_errornotice::set(pq_parse_errornotice_rt);
+    rt::throw_parallel_error_data::set(throw_parallel_error_data);
+    rt::parse_notification_response::set(parse_notification_response);
+    rt::parse_progress::set(parse_progress);
 }
