@@ -1804,9 +1804,16 @@ pub fn init_seams() {
     seams::transaction_block_status_code::set(TransactionBlockStatusCode);
     seams::isolation_uses_xact_snapshot::set(IsolationUsesXactSnapshot);
     // The parallel runtime (InitializeParallelDSM / ParallelWorkerMain) reads
-    // IsolationUsesXactSnapshot through its own rt-seam; xact.c owns the value.
+    // IsolationUsesXactSnapshot + drives the worker transaction through its own
+    // rt-seams; xact.c owns these. Delegate to the same xact functions.
     backend_access_transam_parallel_rt_seams::isolation_uses_xact_snapshot::set(
         IsolationUsesXactSnapshot,
+    );
+    backend_access_transam_parallel_rt_seams::start_transaction_command::set(
+        StartTransactionCommand,
+    );
+    backend_access_transam_parallel_rt_seams::commit_transaction_command::set(
+        CommitTransactionCommand,
     );
     seams::set_current_statement_start_timestamp::set(SetCurrentStatementStartTimestamp);
     // `PreventInTransactionBlock(isTopLevel, stmtType)` — signature matches the

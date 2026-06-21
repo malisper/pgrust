@@ -112,6 +112,13 @@ pub fn init_seams() {
     // seam carries it as the raw machine word (NULL == 0 == invalid handle).
     seams::share_serializable_xact::set(|| engine::ShareSerializableXact() as usize);
 
+    // `AttachSerializableXact(handle)` — the worker side of ShareSerializableXact;
+    // ParallelWorkerMain calls it through its own rt-seam carrying the handle as
+    // the raw machine word (0 == NULL == invalid). predicate.c owns it.
+    backend_access_transam_parallel_rt_seams::attach_serializable_xact::set(|handle: usize| {
+        engine::AttachSerializableXact(handle as engine::SerializableXactHandle)
+    });
+
     seams::predicate_lock_page::set(|relation, blkno, snapshot| {
         // The page-lock seam carries a real Relation; read its fields directly.
         let (db, rd_id, ult) = relation_fields_from_handle(&relation)?;

@@ -9,6 +9,7 @@ name = "backend_utils_cache_inval"
 path = "src/lib.rs"
 
 [dependencies]
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 mcx = { path = "../mcx" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 types-cache = { path = "../types-cache" }
