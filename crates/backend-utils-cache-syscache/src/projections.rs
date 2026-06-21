@@ -818,6 +818,53 @@ pub(crate) fn fetch_cast_func_form(
     }))
 }
 
+/// `SearchSysCache1(PROCOID, funcid)` + `GETSTRUCT` of the pg_proc form fields
+/// `CreateTransform`/`check_transform_function` read (functioncmds.c). The
+/// transform function takes a single `internal` argument, so only the first
+/// `proargtypes` element is projected. `Ok(None)` on a cache miss.
+pub(crate) fn fetch_transform_func_form(
+    func_id: Oid,
+) -> PgResult<Option<backend_commands_functioncmds_seams::TransformFuncForm>> {
+    let scratch = MemoryContext::new("syscache fetch_transform_func_form projection");
+    let mcx = scratch.mcx();
+    let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(func_id)))?;
+    let Some(tup) = tuple else { return Ok(None) };
+
+    let provolatile = getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_provolatile)?;
+    let prokind = getattr_char(mcx, PROCOID, &tup, Anum_pg_proc_prokind)?;
+    let proretset = getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?;
+    let pronargs = getattr_i16(mcx, PROCOID, &tup, Anum_pg_proc_pronargs)?;
+    let prorettype = getattr_oid(mcx, PROCOID, &tup, Anum_pg_proc_prorettype)?;
+
+    // proargtypes is an oidvector (BKI_FORCE_NOT_NULL); read element OIDs off the
+    // on-disk image (== C's proc->proargtypes.values[0]).
+    let proargtypes_datum = SysCacheGetAttrNotNull(mcx, PROCOID, &tup, Anum_pg_proc_proargtypes)?;
+    let bytes = match &proargtypes_datum {
+        Datum::ByRef(b) => &b[..],
+        Datum::ByVal(_)
+        | Datum::Cstring(_)
+        | Datum::Composite(_)
+        | Datum::Expanded(_)
+        | Datum::Internal(_) => {
+            return Err(PgError::error(
+                "syscache fetch_transform_func_form: proargtypes attribute is by-value",
+            ))
+        }
+    };
+    let proargtypes_vec = arrayfuncs_seams::oidvector_to_oids_bytes::call(mcx, bytes)?;
+    let proargtype0 = proargtypes_vec.first().copied().unwrap_or(crate::InvalidOid);
+
+    ReleaseSysCache(tup);
+    Ok(Some(backend_commands_functioncmds_seams::TransformFuncForm {
+        provolatile,
+        prokind,
+        proretset,
+        pronargs,
+        proargtype0,
+        prorettype,
+    }))
+}
+
 /// `SearchSysCache1(PROCOID, funcid)` + `GETSTRUCT->proisstrict` (`func_strict`,
 /// lsyscache.c). `Ok(None)` on a cache miss.
 pub(crate) fn proc_isstrict(funcid: Oid) -> PgResult<Option<bool>> {

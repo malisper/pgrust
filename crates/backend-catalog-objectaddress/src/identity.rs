@@ -873,7 +873,10 @@ fn get_object_identity_parts_inner<'mcx>(
             }
         }
     } else if class_id == PolicyRelationId {
-        match syscache::policy_name_relid::call(mcx, object.objectId)? {
+        // objectaddress.c owns pg_policy's by-oid projection (there is no
+        // POLICYOID syscache); call the in-crate `policy_relid_name` directly
+        // (it returns `(polrelid, polname)`).
+        match crate::policy_lookup::policy_relid_name(mcx, object.objectId)? {
             None => {
                 if !missing_ok {
                     return Err(elog_error(format!(
@@ -883,7 +886,7 @@ fn get_object_identity_parts_inner<'mcx>(
                 }
                 return finish(mcx, buffer, want_parts, parts, missing_ok, class_id);
             }
-            Some((polname, polrelid)) => {
+            Some((polrelid, polname)) => {
                 let q = ruleutils::quote_identifier::call(mcx, polname.as_str())?;
                 buffer.push_str(&format!("{} on ", q.as_str()));
                 get_relation_identity(mcx, &mut buffer, polrelid, want_parts, &mut parts, false)?;

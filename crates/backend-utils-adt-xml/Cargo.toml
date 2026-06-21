@@ -38,5 +38,8 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 # (the `xml.c` consumer is the only crate that deps the libxml-seams contract,
 # so it is the natural wiring point; verified no dependency cycle).
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-access-table-table = { path = "../backend-access-table-table" }
+types-storage = { path = "../types-storage" }
 backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }

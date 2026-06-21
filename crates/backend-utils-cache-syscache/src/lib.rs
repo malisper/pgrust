@@ -911,6 +911,11 @@ pub fn init_seams() {
     backend_commands_functioncmds_seams::fetch_cast_func_form::set(
         projections::fetch_cast_func_form,
     );
+    // CreateTransform's PROCOID read of the transform function's pg_proc form
+    // (functioncmds.c); syscache.c is its owner.
+    backend_commands_functioncmds_seams::fetch_transform_func_form::set(
+        projections::fetch_transform_func_form,
+    );
     backend_statistics_core_seams::statext_ndistinct_load_bytea::set(
         projections::statext_ndistinct_load_bytea,
     );

@@ -51,6 +51,36 @@ pub fn init_seams() {
     backend_commands_functioncmds_seams::get_transform_oid::set(
         cast_transform_do::get_transform_oid,
     );
+    // `recordDependencyOn(&address, &referenced, DEPENDENCY_NORMAL)`
+    // (functioncmds.c, AlterFunction's "add dependency on support function").
+    // Thin marshal: build the two ProcedureRelationId ObjectAddress carriers and
+    // forward to the ported recordDependencyOn (pg_depend). recordDependencyOn
+    // allocates its row batch in the passed context; the C reaches it via
+    // CurrentMemoryContext, so a private scratch context is faithful.
+    backend_commands_functioncmds_seams::record_support_dependency::set(
+        |func_oid, new_support| {
+            use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+            use types_catalog::pg_proc::ProcedureRelationId;
+            let depender = ObjectAddress {
+                classId: ProcedureRelationId,
+                objectId: func_oid,
+                objectSubId: 0,
+            };
+            let referenced = ObjectAddress {
+                classId: ProcedureRelationId,
+                objectId: new_support,
+                objectSubId: 0,
+            };
+            let scratch = mcx::MemoryContext::new("record_support_dependency");
+            backend_catalog_pg_depend::recordDependencyOn(
+                scratch.mcx(),
+                &depender,
+                &referenced,
+                DEPENDENCY_NORMAL,
+            )
+        },
+    );
+
     // `ExecuteDoStmt` (DO) — reached by standard_ProcessUtility's T_DoStmt arm
     // through the `backend_tcop_utility_out_seams::execute_do_stmt` inward seam.
     backend_tcop_utility_out_seams::execute_do_stmt::set(cast_transform_do::execute_do_stmt_seam);

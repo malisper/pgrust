@@ -14,6 +14,7 @@ seam-core = { path = "../seam-core" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-utils-cache-syscache = { path = "../backend-utils-cache-syscache" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }

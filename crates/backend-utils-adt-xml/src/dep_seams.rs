@@ -84,6 +84,49 @@ pub fn install() {
         Ok(typtype == TYPTYPE_DOMAIN)
     });
 
+    // C: `SearchSysCache1(TYPEOID, typeoid)` + GETSTRUCT(Form_pg_type) read of
+    // (typname, typnamespace, typtype) for `map_sql_type_to_xml_name`. A cache
+    // miss is the C `elog(ERROR, "cache lookup failed for type %u")`.
+    seam::type_info::set(|typeoid: Oid| -> PgResult<types_xml::TypeInfo> {
+        match backend_utils_cache_syscache_seams::pg_type_form::call(typeoid)? {
+            Some(form) => Ok(types_xml::TypeInfo {
+                typname: String::from_utf8_lossy(form.typname.name_str()).into_owned(),
+                typnamespace: form.typnamespace,
+                is_domain: form.typtype as u8 == TYPTYPE_DOMAIN,
+            }),
+            None => Err(PgError::error(alloc::format!(
+                "cache lookup failed for type {typeoid}"
+            ))),
+        }
+    });
+
+    // C: `rel = table_open(relid, AccessShareLock)`; iterate the tuple
+    // descriptor reading (attname, atttypid, attisdropped) for every column
+    // (dropped columns included; `map_sql_*` filters on `is_dropped`);
+    // `table_close(rel, NoLock)`.
+    seam::relation_columns::set(|relid: Oid| -> PgResult<Vec<types_xml::RelationColumn>> {
+        use types_storage::lock::{AccessShareLock, NoLock};
+        with_scratch(|mcx| {
+            let rel = backend_access_table_table::table_open(mcx, relid, AccessShareLock)?;
+            let cols = {
+                let tupdesc = &*rel.rd_att;
+                let natts = tupdesc.natts as usize;
+                let mut cols: Vec<types_xml::RelationColumn> = Vec::with_capacity(natts);
+                for i in 0..natts {
+                    let att = tupdesc.attr(i);
+                    cols.push(types_xml::RelationColumn {
+                        attname: String::from_utf8_lossy(att.attname.name_str()).into_owned(),
+                        atttypid: att.atttypid,
+                        is_dropped: att.attisdropped,
+                    });
+                }
+                cols
+            };
+            backend_access_table_table::table_close(rel, NoLock)?;
+            Ok(cols)
+        })
+    });
+
     // --- namespace ---
 
     // C: `LookupExplicitNamespace(name, false)`.

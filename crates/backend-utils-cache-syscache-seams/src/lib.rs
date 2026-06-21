@@ -2379,15 +2379,6 @@ seam_core::seam!(
     pub fn transform_type_lang(transformid: Oid) -> PgResult<Option<(Oid, Oid)>>
 );
 
-seam_core::seam!(
-    /// `get_catalog_object_by_oid(pg_policy, Anum_pg_policy_oid, polid)` +
-    /// `GETSTRUCT` projected to `(polname, polrelid)` (`Form_pg_policy`).
-    /// `Ok(None)` on a scan miss.
-    pub fn policy_name_relid<'mcx>(
-        mcx: Mcx<'mcx>,
-        polid: Oid,
-    ) -> PgResult<Option<(PgString<'mcx>, Oid)>>
-);
 
 seam_core::seam!(
     /// `SearchSysCache1(EVENTTRIGGEROID, evtid)` +
