@@ -106,8 +106,8 @@ mod tests;
 /// `GIN_METAPAGE_BLKNO` (ginblock.h:52) — re-exported from the carrier crate.
 pub use types_gin::GIN_METAPAGE_BLKNO;
 
-/// `VACUUM_OPTION_PARALLEL_BULKDEL` (commands/vacuum.h): `1 << 1`.
-const VACUUM_OPTION_PARALLEL_BULKDEL: u8 = 1 << 1;
+/// `VACUUM_OPTION_PARALLEL_BULKDEL` (commands/vacuum.h): `1 << 0`.
+const VACUUM_OPTION_PARALLEL_BULKDEL: u8 = 1 << 0;
 /// `VACUUM_OPTION_PARALLEL_CLEANUP` (commands/vacuum.h): `1 << 2`.
 const VACUUM_OPTION_PARALLEL_CLEANUP: u8 = 1 << 2;
 
