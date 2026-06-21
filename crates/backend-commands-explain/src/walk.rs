@@ -1106,6 +1106,33 @@ pub fn ExplainNode<'es, 'p>(
         _ => {}
     }
 
+    // If partition pruning was done during executor initialization, the number
+    // of child plans we'll display below will be less than the number of
+    // subplans specified in the plan. Emit "Subplans Removed" to make that less
+    // mysterious. This field is a property of the parent node and *cannot* be
+    // emitted within the Plans sub-node opened below. (explain.c:2330-2344)
+    match plan_node.node_tag() {
+        ntag::T_Append => {
+            if let PlanStateNode::Append(a) = planstate {
+                ExplainMissingMembers(
+                    a.as_nplans,
+                    plan_node.expect_append().appendplans.len() as i32,
+                    es,
+                )?;
+            }
+        }
+        ntag::T_MergeAppend => {
+            if let PlanStateNode::MergeAppend(m) = planstate {
+                ExplainMissingMembers(
+                    m.ms_nplans,
+                    plan_node.expect_mergeappend().mergeplans.len() as i32,
+                    es,
+                )?;
+            }
+        }
+        _ => {}
+    }
+
     // Children. haschildren over initPlan / outer / inner / member nodes /
     // subPlan. The trimmed PlanState carries initPlan/subPlan as Option<PgVec>;
     // member-node nodes (Append/BitmapAnd/...) recurse through their own state.
@@ -1617,6 +1644,20 @@ fn show_expression<'es, 'p>(
         false,
     )?;
     fmt::ExplainPropertyText(qlabel, exprstr.as_str(), es)?;
+    Ok(())
+}
+
+/// `ExplainMissingMembers(nplans, nchildren, es)` (explain.c:4783) — report on
+/// any subplans removed by run-time partition pruning. `nplans` is the number
+/// of live subplans, `nchildren` the original number specified in the plan;
+/// some of the latter may have been pruned during executor initialization. Only
+/// emitted in text format when something was actually removed, but always in
+/// the structured formats.
+#[allow(non_snake_case)]
+fn ExplainMissingMembers(nplans: i32, nchildren: i32, es: &mut ExplainState<'_>) -> PgResult<()> {
+    if nplans < nchildren || es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT {
+        fmt::ExplainPropertyInteger("Subplans Removed", None, (nchildren - nplans) as i64, es)?;
+    }
     Ok(())
 }
 

@@ -137,8 +137,14 @@ pub fn exec_proc_node_instr<'mcx>(
     let result = cb(node, estate)?;
 
     // InstrStopNode(node->instrument, TupIsNull(result) ? 0.0 : 1.0);
+    // TupIsNull tests the slot's emptiness, not the pointer: a node at EOF
+    // returns its (non-NULL) result slot marked empty, which counts as 0 tuples.
     {
-        let n_tuples = if result.is_none() { 0.0 } else { 1.0 };
+        let is_null = match result {
+            None => true,
+            Some(id) => estate.slot(id).is_empty(),
+        };
+        let n_tuples = if is_null { 0.0 } else { 1.0 };
         let instr = node
             .ps_head_mut()
             .instrument
