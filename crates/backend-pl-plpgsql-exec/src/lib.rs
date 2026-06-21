@@ -602,6 +602,79 @@ pub(crate) fn attach_plpgsql_context(
     e
 }
 
+// ===========================================================================
+// Active error-context stack (`error_context_stack` analogue)
+//
+// C pushes a `plpgsql_exec_error_callback` entry onto the global
+// `error_context_stack` for the lifetime of every active exec invocation, and
+// `GetErrorContextStack()` (elog.c) walks that list innermost→outermost,
+// invoking each callback to collect the context lines. The owned model attaches
+// the innermost frame's line lazily on error *propagation*, which is enough for
+// reported errors — but `GET CURRENT DIAGNOSTICS x = PG_CONTEXT` (pl_exec.c
+// PLPGSQL_GETDIAG_CONTEXT, no live error) needs the *full* live stack of active
+// frames. We model that with a thread-local stack of raw pointers to the active
+// `PLpgSQL_execstate`s. Each exec entry pushes its estate while its body runs
+// (the estate is a stack local of the entry frame, so the pointer stays valid
+// for the duration of any nested call), and `current_error_context_stack`
+// reproduces `GetErrorContextStack()` by running `plpgsql_exec_error_context`
+// over each frame.
+// ===========================================================================
+
+thread_local! {
+    static ACTIVE_EXEC_FRAMES: std::cell::RefCell<Vec<*const PLpgSQL_execstate>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// RAII guard that keeps `estate` on the thread-local active-frame stack while
+/// the body executes. The pointer is removed on drop (PG_TRY/PG_FINALLY pop).
+pub(crate) struct ExecFrameGuard;
+
+impl ExecFrameGuard {
+    /// SAFETY: `estate` must outlive the returned guard. The exec entry points
+    /// hold the estate as a stack local that lives across the entire body run
+    /// (including nested calls), satisfying this.
+    pub(crate) fn push(estate: &PLpgSQL_execstate) -> Self {
+        let p = estate as *const PLpgSQL_execstate;
+        ACTIVE_EXEC_FRAMES.with(|s| s.borrow_mut().push(p));
+        ExecFrameGuard
+    }
+}
+
+impl Drop for ExecFrameGuard {
+    fn drop(&mut self) {
+        ACTIVE_EXEC_FRAMES.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+}
+
+/// `GetErrorContextStack()` for the PL/pgSQL portion: walk the live active-frame
+/// stack innermost→outermost and concatenate each frame's context line with
+/// newline separators (matching `errcontext()`'s accumulation order).
+///
+/// `inner` is the currently-executing (innermost) estate, passed live so we
+/// never deref the raw pointer that aliases the caller's `&mut estate`. The
+/// thread-local stack supplies the *outer* (suspended) frames, whose estates are
+/// not currently mutably borrowed — those are read through the stored pointers.
+pub(crate) fn current_error_context_stack(inner: &PLpgSQL_execstate) -> String {
+    let mut lines: Vec<String> =
+        vec![plpgsql_exec_error_context(inner, &inner.fn_signature)];
+    ACTIVE_EXEC_FRAMES.with(|s| {
+        let frames = s.borrow();
+        // The stack holds innermost-first only if pushed innermost-last; we push
+        // on entry (outermost first), so the live `inner` is the LAST entry. Skip
+        // it (already emitted via `inner`) and walk the rest innermost→outermost.
+        for &p in frames.iter().rev().skip(1) {
+            // SAFETY: each remaining pointer is an outer, suspended exec frame
+            // (its entry function is blocked in a nested call and holds no live
+            // `&mut`). The estate outlives the guard that registered it.
+            let estate: &PLpgSQL_execstate = unsafe { &*p };
+            lines.push(plpgsql_exec_error_context(estate, &estate.fn_signature));
+        }
+    });
+    lines.join("\n")
+}
+
 pub(crate) fn plpgsql_exec_error_context(
     estate: &PLpgSQL_execstate,
     fn_signature: &str,
@@ -2364,10 +2437,11 @@ fn exec_stmt_getdiag(
                     }
                 } else {
                     // CURRENT diagnostics: only PG_CONTEXT is defined for the
-                    // current area; the per-statement error-context stack is not
-                    // modeled in the owned execstate yet.
+                    // current area. C: `contextstackstr = GetErrorContextStack()`
+                    // — walk the live error_context_stack (each active PL/pgSQL
+                    // exec frame's callback) and collect its lines.
                     match other {
-                        K::PLPGSQL_GETDIAG_CONTEXT => String::new(),
+                        K::PLPGSQL_GETDIAG_CONTEXT => current_error_context_stack(estate),
                         _ => {
                             return Err(types_error::PgError::error(format!(
                                 "GET CURRENT DIAGNOSTICS item {:?} not available outside \
@@ -4015,6 +4089,12 @@ pub fn plpgsql_exec_function(
     estate.procedure_resowner = procedure_resowner;
     estate.atomic = atomic;
 
+    // Push this frame onto the live error_context_stack (C installs
+    // plpgsql_exec_error_callback on error_context_stack for the body's
+    // duration). The guard pops on scope exit (PG_TRY/PG_FINALLY), so
+    // GET CURRENT DIAGNOSTICS ... = PG_CONTEXT sees the full active call stack.
+    let _frame_guard = ExecFrameGuard::push(&estate);
+
     // Run the body under an error-context attach boundary: any error that
     // propagates out gets the `plpgsql_exec_error_callback` context line, built
     // from the estate's err_var/err_stmt/err_text at the moment of failure
@@ -4291,6 +4371,10 @@ pub fn plpgsql_exec_event_trigger(
     // estate.evtrigdata = trigdata (the current-event-trigger marker; the rich
     // event/tag rides commands/event_trigger.c's CURRENT_EVENT_TRIGGER side-channel).
     estate.evtrigdata = Some(types_plpgsql::EventTriggerData(0));
+
+    // Push this frame onto the live error_context_stack (see
+    // plpgsql_exec_function); pops on scope exit.
+    let _frame_guard = ExecFrameGuard::push(&estate);
 
     // Run the body under the error-context attach boundary (see
     // plpgsql_exec_function): any propagating error gets the PL/pgSQL context

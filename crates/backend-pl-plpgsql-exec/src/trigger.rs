@@ -395,6 +395,10 @@ pub fn plpgsql_exec_trigger_impl(
     // estate.trigdata = trigdata (the current-trigger marker).
     estate.trigdata = Some(types_plpgsql::TriggerData(0));
 
+    // Push this frame onto the live error_context_stack (see
+    // plpgsql_exec_function); pops on scope exit.
+    let _frame_guard = crate::ExecFrameGuard::push(&estate);
+
     // Make local execution copies of all the datums.
     estate.err_text = Some(crate::mem::sdup("during initialization of execution state"));
     crate::copy_plpgsql_datums(&mut estate, func);
