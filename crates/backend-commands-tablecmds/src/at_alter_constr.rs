@@ -19,8 +19,12 @@ use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use types_nodes::ddlnodes::ATAlterConstraint;
 use types_rel::Relation;
-use types_storage::lock::{LOCKMODE, NoLock};
+use types_storage::lock::{LOCKMODE, NoLock, RowExclusiveLock};
 use types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
+
+use backend_access_common_heaptuple::heap_deform_tuple;
+use backend_access_common_scankey::ScanKeyInit;
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 use backend_access_common_relation::relation_open;
 use backend_catalog_objectaddress::consts::ConstraintRelationId;
@@ -248,7 +252,22 @@ fn ATExecAlterConstraintInternal<'mcx>(
     let mut changed = false;
 
     if cmdcon.alterEnforceability {
-        if ATExecAlterConstrEnforceability(mcx, wqueue, cmdcon, rel, con, lockmode)? {
+        // Top-level call: the root FK / PK relids are the constraint's own
+        // conrelid / confrelid; no parent triggers yet (InvalidOid).
+        if ATExecAlterConstrEnforceability(
+            mcx,
+            wqueue,
+            cmdcon,
+            rel,
+            con,
+            con.form.conrelid,
+            con.form.confrelid,
+            lockmode,
+            InvalidOid,
+            InvalidOid,
+            InvalidOid,
+            InvalidOid,
+        )? {
             changed = true;
         }
     } else if cmdcon.alterDeferrability {
@@ -340,23 +359,30 @@ fn ATExecAlterConstrDeferrability<'mcx>(
 /// `DropForeignKeyConstraintTriggers` and the partition-recursion
 /// (`AlterConstrEnforceabilityRecurse`) are distinct unported functions and
 /// faithfully seam-and-panic.
+#[allow(clippy::too_many_arguments)]
 fn ATExecAlterConstrEnforceability<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     cmdcon: &ATAlterConstraint<'mcx>,
     rel: &Relation<'mcx>,
     con: &types_catalog::pg_constraint::ConstraintFormCopy,
+    fkrelid: Oid,
+    pkrelid: Oid,
     lockmode: LOCKMODE,
+    referenced_parent_del_trigger: Oid,
+    referenced_parent_upd_trigger: Oid,
+    referencing_parent_ins_trigger: Oid,
+    referencing_parent_upd_trigger: Oid,
 ) -> PgResult<bool> {
+    // Since this function recurses, it could be driven to stack overflow.
+    backend_utils_misc_stack_depth::check_stack_depth()?;
+
     let currcon = con.form;
     let conoid = currcon.oid;
     debug_assert_eq!(currcon.contype, CONSTRAINT_FOREIGN);
 
-    // For the top-level (non-recursing) call, the root FK / PK relids are the
-    // constraint's own conrelid / confrelid (C passes these as fkrelid/pkrelid;
-    // recursion preserves the root, which is the partitioned leg below).
-    let fkrelid = currcon.conrelid;
-    let pkrelid = currcon.confrelid;
+    // fkrelid / pkrelid are the root FK / PK relids threaded down the recursion
+    // (the top-level driver passes the constraint's own conrelid / confrelid).
 
     // rel = table_open(currcon->conrelid, lockmode). The caller already holds the
     // relation as `rel` (= conrelid for a top-level alter); reuse it.
@@ -405,34 +431,43 @@ fn ATExecAlterConstrEnforceability<'mcx>(
                 currcon.confdeltype,
             )?;
 
+            let mut referenced_del_trigger_oid = InvalidOid;
+            let mut referenced_upd_trigger_oid = InvalidOid;
+            let mut referencing_ins_trigger_oid = InvalidOid;
+            let mut referencing_upd_trigger_oid = InvalidOid;
+
             // Create referenced (action) triggers when this row is the FK row of
             // the root pair.
             if currcon.conrelid == fkrelid {
-                crate::at_fk::createForeignKeyActionTriggers(
+                let (del, upd) = crate::at_fk::createForeignKeyActionTriggers(
                     mcx,
                     currcon.conrelid,
                     currcon.confrelid,
                     &fkconstraint,
                     conoid,
                     currcon.conindid,
-                    InvalidOid,
-                    InvalidOid,
+                    referenced_parent_del_trigger,
+                    referenced_parent_upd_trigger,
                 )?;
+                referenced_del_trigger_oid = del;
+                referenced_upd_trigger_oid = upd;
             }
 
             // Create referencing (check) triggers when this row points at the
             // root PK.
             if currcon.confrelid == pkrelid {
-                crate::at_fk::createForeignKeyCheckTriggers(
+                let (ins, upd) = crate::at_fk::createForeignKeyCheckTriggers(
                     mcx,
                     currcon.conrelid,
                     pkrelid,
                     &fkconstraint,
                     conoid,
                     currcon.conindid,
-                    InvalidOid,
-                    InvalidOid,
+                    referencing_parent_ins_trigger,
+                    referencing_parent_upd_trigger,
                 )?;
+                referencing_ins_trigger_oid = ins;
+                referencing_upd_trigger_oid = upd;
             }
 
             // Tell Phase 3 to check that the constraint is satisfied by existing
@@ -453,12 +488,27 @@ fn ATExecAlterConstrEnforceability<'mcx>(
                 wqueue[tab].constraints.push(newcon);
             }
 
-            // Partition recursion.
+            // If the table at either end of the constraint is partitioned, we
+            // need to recurse and create triggers for each constraint that is a
+            // child of this one, threading the just-created trigger OIDs as the
+            // children's tgparentid.
             if crel_relkind == RELKIND_PARTITIONED_TABLE
                 || lsyscache_seams::get_rel_relkind::call(currcon.confrelid)?
                     == RELKIND_PARTITIONED_TABLE
             {
-                unported("ALTER CONSTRAINT ENFORCED partition-child recursion (AlterConstrEnforceabilityRecurse)");
+                AlterConstrEnforceabilityRecurse(
+                    mcx,
+                    wqueue,
+                    cmdcon,
+                    conoid,
+                    fkrelid,
+                    pkrelid,
+                    lockmode,
+                    referenced_del_trigger_oid,
+                    referenced_upd_trigger_oid,
+                    referencing_ins_trigger_oid,
+                    referencing_upd_trigger_oid,
+                )?;
             }
         }
 
@@ -468,6 +518,96 @@ fn ATExecAlterConstrEnforceability<'mcx>(
     // table_close(rel, NoLock).
     crel.close(NoLock)?;
     result
+}
+
+/// `AlterConstrEnforceabilityRecurse(...)` (tablecmds.c:12763) — scan
+/// `pg_constraint` for every row whose `conparentid` equals `conoid` (the
+/// children of this constraint) and recursively apply the enforceability change,
+/// preserving the root `fkrelid`/`pkrelid` and threading the parent trigger OIDs
+/// so each child trigger gets the correct `tgparentid`.
+#[allow(clippy::too_many_arguments)]
+fn AlterConstrEnforceabilityRecurse<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    cmdcon: &ATAlterConstraint<'mcx>,
+    conoid: Oid,
+    fkrelid: Oid,
+    pkrelid: Oid,
+    lockmode: LOCKMODE,
+    referenced_parent_del_trigger: Oid,
+    referenced_parent_upd_trigger: Oid,
+    referencing_parent_ins_trigger: Oid,
+    referencing_parent_upd_trigger: Oid,
+) -> PgResult<()> {
+    let conrel = backend_access_table_table_seams::table_open::call(
+        mcx,
+        ConstraintRelationId,
+        RowExclusiveLock,
+    )?;
+
+    let mut key = ScanKeyData::empty();
+    ScanKeyInit(
+        &mut key,
+        types_catalog::pg_constraint::Anum_pg_constraint_conparentid,
+        BTEqualStrategyNumber,
+        types_core::fmgr::F_OIDEQ,
+        types_tuple::backend_access_common_heaptuple::Datum::from_oid(conoid),
+    )?;
+    let keys = [key];
+
+    let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+        &conrel,
+        types_catalog::pg_constraint::ConstraintParentIndexId,
+        true,
+        None,
+        &keys,
+    )?;
+
+    // Collect the child constraint OIDs first; recursion below re-opens
+    // pg_constraint (for its own trigger creation), so we don't hold the scan
+    // across the recursive calls.
+    let mut child_oids: Vec<Oid> = Vec::new();
+    while let Some(tup) =
+        backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?
+    {
+        let cols = heap_deform_tuple(mcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
+        let child_oid =
+            cols[types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1].0.as_oid();
+        child_oids.push(child_oid);
+    }
+    drop(scan);
+    conrel.close(NoLock)?;
+
+    for child_oid in child_oids {
+        let childcon =
+            backend_utils_cache_syscache_seams::search_constraint_form_by_oid::call(child_oid)?
+                .ok_or_else(|| {
+                    backend_utils_error::ereport(ERROR)
+                        .errmsg_internal(format!(
+                            "could not find tuple for constraint {child_oid}"
+                        ))
+                        .into_error()
+                })?;
+        let crel = relation_open(mcx, childcon.form.conrelid, lockmode)?;
+        let res = ATExecAlterConstrEnforceability(
+            mcx,
+            wqueue,
+            cmdcon,
+            &crel,
+            &childcon,
+            fkrelid,
+            pkrelid,
+            lockmode,
+            referenced_parent_del_trigger,
+            referenced_parent_upd_trigger,
+            referencing_parent_ins_trigger,
+            referencing_parent_upd_trigger,
+        );
+        crel.close(NoLock)?;
+        res?;
+    }
+
+    Ok(())
 }
 
 /// `ATExecAlterConstrInheritability(...)` (tablecmds.c:12617). Faithfully
