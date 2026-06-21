@@ -268,13 +268,13 @@ pub fn CreateTriggerFiringOn<'mcx>(
         }
     }
 
-    // REFERENCING transition tables: not yet ported (no TriggerTransition node).
-    if !stmt.transitionRels.is_empty() {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("REFERENCING transition tables are not yet supported")
-            .into_error());
-    }
+    // REFERENCING transition tables (CreateTriggerFiringOn, trigger.c:464-557).
+    //
+    // Validate each `TriggerTransition` clause and collect the OLD/NEW table
+    // names that get written into pg_trigger.tgoldtable/tgnewtable. Faithful
+    // 1:1 with the C loop, including every ereport.
+    let (oldtablename, newtablename) =
+        transform_trigger_transitions(&rel, stmt, relkind, tgtype)?;
 
     // Parse the WHEN clause, if any. As a side effect this fills when_rtable
     // (the OLD/NEW pseudo-relation RTEs), which we'll need below for
@@ -426,8 +426,8 @@ pub fn CreateTriggerFiringOn<'mcx>(
         tgattr: columns.clone(),
         tgargs,
         tgqual: when.qual.clone(),
-        tgoldtable: None,
-        tgnewtable: None,
+        tgoldtable: oldtablename.clone(),
+        tgnewtable: newtablename.clone(),
     };
     trigoid = indexing::catalog_tuple_insert_pg_trigger::call(mcx, &tgrel, &row)?;
 
@@ -559,6 +559,176 @@ fn make_old_new_alias<'mcx>(
 /// `TRIGGER_FOR_BEFORE(type)` — `(type) & TRIGGER_TYPE_BEFORE` (pg_trigger.h).
 fn trigger_for_before(tgtype: i16) -> bool {
     (tgtype & pt::TRIGGER_TYPE_BEFORE) != 0
+}
+
+/// `CreateTriggerFiringOn` REFERENCING handling (trigger.c:464-557).
+///
+/// Validates each `TriggerTransition` clause of a `REFERENCING [OLD|NEW] TABLE
+/// AS name` and returns the `(oldtablename, newtablename)` to write into
+/// `pg_trigger.tgoldtable`/`tgnewtable`. The C body is a `foreach` over
+/// `stmt->transitionRels`; every `ereport` is reproduced 1:1.
+fn transform_trigger_transitions<'mcx>(
+    rel: &types_rel::RelationData<'mcx>,
+    stmt: &CreateTrigStmt<'mcx>,
+    relkind: u8,
+    tgtype: i16,
+) -> PgResult<(Option<String>, Option<String>)> {
+    let mut oldtablename: Option<String> = None;
+    let mut newtablename: Option<String> = None;
+
+    if stmt.transitionRels.is_empty() {
+        return Ok((None, None));
+    }
+
+    // C iterates the List; each element is a TriggerTransition.
+    for node in stmt.transitionRels.iter() {
+        let tt = (**node).as_triggertransition().ok_or_else(|| {
+            ereport(ERROR)
+                .errmsg_internal("CreateTrigger: transitionRels element is not a TriggerTransition")
+                .into_error()
+        })?;
+
+        // if (!(tt->isTable))
+        if !tt.isTable {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("ROW variable naming in the REFERENCING clause is not supported")
+                .errhint("Use OLD TABLE or NEW TABLE for naming transition tables.")
+                .into_error());
+        }
+
+        // Because of the above test, we omit further ROW-related testing
+        // below. If we later allow naming OLD/NEW row variables, adjust this.
+
+        // if (stmt->timing != TRIGGER_TYPE_AFTER)
+        if stmt.timing != pt::TRIGGER_TYPE_AFTER {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                .errmsg("transition table name can only be specified for an AFTER trigger")
+                .into_error());
+        }
+
+        // if (TRIGGER_FOR_TRUNCATE(tgtype))
+        if (tgtype & pt::TRIGGER_TYPE_TRUNCATE) != 0 {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("TRUNCATE triggers with transition tables are not supported")
+                .into_error());
+        }
+
+        // We currently don't allow multi-event triggers ("INSERT OR UPDATE")
+        // with transition tables, because it's not clear how to handle the
+        // distinct event types' transition tables.
+        // (tgtype event bits = TRIGGER_TYPE_INSERT|UPDATE|DELETE) — must be a
+        // single one. C: `if (stmt->events != TRIGGER_TYPE_INSERT && ... )`
+        // collapses to "exactly one event bit set".
+        let event_bits = stmt.events
+            & (pt::TRIGGER_TYPE_INSERT | pt::TRIGGER_TYPE_UPDATE | pt::TRIGGER_TYPE_DELETE);
+        let single_event = event_bits == pt::TRIGGER_TYPE_INSERT
+            || event_bits == pt::TRIGGER_TYPE_UPDATE
+            || event_bits == pt::TRIGGER_TYPE_DELETE;
+        if !single_event {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("transition tables cannot be specified for triggers with more than one event")
+                .into_error());
+        }
+
+        // We currently don't allow column-specific triggers with transition
+        // tables for the same reason.
+        if !stmt.columns.is_empty() {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("transition tables cannot be specified for triggers with column lists")
+                .into_error());
+        }
+
+        // We disallow transition tables on foreign tables and views.
+        if relkind == RELKIND_FOREIGN_TABLE {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg("transition tables cannot be specified for triggers on foreign tables")
+                .into_error());
+        }
+        if relkind == RELKIND_VIEW {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg("transition tables cannot be specified for triggers on views")
+                .into_error());
+        }
+
+        // We disallow transition tables on partitions/inheritance children, as
+        // there is no way to access the row in the inheritance parent's format.
+        // (C: `rel->rd_rel->relispartition` and `has_superclass(relid)`.)
+        if rel.rd_rel.relispartition {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg("transition tables cannot be specified for triggers on partitions")
+                .into_error());
+        }
+        if relkind == RELKIND_RELATION
+            && backend_catalog_pg_inherits::has_superclass(rel.rd_id)?
+        {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+                .errmsg(
+                    "transition tables cannot be specified for triggers on inheritance children",
+                )
+                .into_error());
+        }
+
+        let name = tt.name.as_deref().unwrap_or("").to_string();
+
+        // if (tt->isNew) { ... NEW TABLE ... } else { ... OLD TABLE ... }
+        if tt.isNew {
+            // if (!(TRIGGER_FOR_INSERT(tgtype) || TRIGGER_FOR_UPDATE(tgtype)))
+            let for_insert = (tgtype & pt::TRIGGER_TYPE_INSERT) != 0;
+            let for_update = (tgtype & pt::TRIGGER_TYPE_UPDATE) != 0;
+            if !(for_insert || for_update) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errmsg("NEW TABLE can only be specified for an INSERT or UPDATE trigger")
+                    .into_error());
+            }
+            // if (newtablename != NULL) — duplicate.
+            if newtablename.is_some() {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errmsg("NEW TABLE cannot be specified multiple times")
+                    .into_error());
+            }
+            newtablename = Some(name);
+        } else {
+            // if (!(TRIGGER_FOR_DELETE(tgtype) || TRIGGER_FOR_UPDATE(tgtype)))
+            let for_delete = (tgtype & pt::TRIGGER_TYPE_DELETE) != 0;
+            let for_update = (tgtype & pt::TRIGGER_TYPE_UPDATE) != 0;
+            if !(for_delete || for_update) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errmsg("OLD TABLE can only be specified for a DELETE or UPDATE trigger")
+                    .into_error());
+            }
+            if oldtablename.is_some() {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errmsg("OLD TABLE cannot be specified multiple times")
+                    .into_error());
+            }
+            oldtablename = Some(name);
+        }
+    }
+
+    // if (newtablename != NULL && oldtablename != NULL && strcmp(...) == 0)
+    if let (Some(n), Some(o)) = (newtablename.as_deref(), oldtablename.as_deref()) {
+        if n == o {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+                .errmsg("OLD TABLE name and NEW TABLE name cannot be the same")
+                .into_error());
+        }
+    }
+
+    Ok((oldtablename, newtablename))
 }
 
 /// Parse + validate a trigger WHEN clause and render it as a `tgqual` image
