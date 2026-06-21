@@ -11690,6 +11690,7 @@ version = "0.0.0"
 dependencies = [
  "backend-lib-dshash-seams",
  "backend-storage-lmgr-lwlock-seams",
+ "backend-utils-cache-typcache-seams",
  "backend-utils-init-small-seams",
  "backend-utils-mmgr-dsa-seams",
  "common-hashfn-seams",
@@ -22620,6 +22621,7 @@ dependencies = [
  "types-error",
  "types-rel",
  "types-statistics",
+ "types-storage",
  "types-tuple",
  "types-typcache",
 ]

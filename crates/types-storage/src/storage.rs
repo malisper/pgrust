@@ -488,6 +488,18 @@ pub enum DshashKeyKind {
     /// raw bytes). Used e.g. by the logical-replication launcher's
     /// `last_start_times` table keyed by `sizeof(Oid)`.
     Binary,
+    /// `shared_record_table_compare` / `shared_record_table_hash` /
+    /// `dshash_memcpy` — the record-typmod registry's TupleDesc table keyed by
+    /// a `SharedRecordTableKey` (typcache.c). The C `dshash_create` for this
+    /// table passes `arg = area`, and the compare/hash callbacks resolve a
+    /// `dsa_pointer` to a shared `TupleDesc` via `dsa_get_address(area, ...)`
+    /// (or read a backend-local `TupleDesc *` directly) and run
+    /// `equalRowTypes`/`hashRowType`. That logic is owned by typcache, so the
+    /// dshash substrate dispatches the compare/hash through the
+    /// `shared_record_key_*` seams; the dshash table already holds `area`, so
+    /// no foreign function pointer crosses the seam. Copy uses `dshash_memcpy`
+    /// (the key bytes — a `SharedRecordTableKey` — are copied verbatim).
+    Record,
 }
 
 /// `dshash_parameters` (`lib/dshash.h`) — the parameters to create or attach a

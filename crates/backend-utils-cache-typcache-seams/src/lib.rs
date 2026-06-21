@@ -5,6 +5,38 @@
 //! then a call panics loudly.
 
 // ---------------------------------------------------------------------------
+// Record-typmod registry dshash key callbacks (`DshashKeyKind::Record`).
+//
+// The shared record-typmod registry's TupleDesc table (typcache.c) is a dshash
+// keyed by a `SharedRecordTableKey`, with custom compare/hash callbacks
+// (`shared_record_table_compare`/`shared_record_table_hash`) that resolve the
+// key to a `TupleDesc` — a shared `dsa_pointer` via `dsa_get_address(area,..)`
+// or a backend-local `TupleDesc *` — and run `equalRowTypes`/`hashRowType`.
+// The dshash substrate dispatches its `DshashKeyKind::Record` arm through these
+// seams (it holds `area`); the owning logic lives here in typcache.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// `shared_record_table_hash(const void *a, size_t size, void *arg)`
+    /// (typcache.c). `area` is the table's `arg` (the session DSA area); `key`
+    /// is the `SharedRecordTableKey` bytes. Resolves the key to a `TupleDesc`
+    /// and returns `hashRowType(tupdesc)`.
+    pub fn shared_record_key_hash(area: *mut types_storage::DsaArea, key: &[u8]) -> u32
+);
+
+seam_core::seam!(
+    /// `shared_record_table_compare(const void *a, const void *b, size_t size,
+    /// void *arg)` (typcache.c). `area` is the table's `arg`; `a`/`b` are
+    /// `SharedRecordTableKey` bytes. Resolves each to a `TupleDesc` and returns
+    /// `equalRowTypes(t1, t2)`.
+    pub fn shared_record_key_compare(
+        area: *mut types_storage::DsaArea,
+        a: &[u8],
+        b: &[u8],
+    ) -> bool
+);
+
+// ---------------------------------------------------------------------------
 // Extensions for the `backend-utils-adt-array-typanalyze` unit
 // (`utils/adt/array_typanalyze.c`).
 //

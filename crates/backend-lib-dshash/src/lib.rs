@@ -1063,6 +1063,12 @@ fn hash_key(t: &DshashTableState, key: &[u8]) -> dshash_hash {
     match t.params.key_kind {
         DshashKeyKind::String => dshash_strhash(key, t.params.key_size),
         DshashKeyKind::Binary => dshash_memhash(key, t.params.key_size),
+        // The record table's `arg` is the table's DSA area (typcache.c
+        // `srtr_record_table_params` passes `area`); the owner resolves the
+        // `SharedRecordTableKey` to a TupleDesc and runs `hashRowType`.
+        DshashKeyKind::Record => {
+            backend_utils_cache_typcache_seams::shared_record_key_hash::call(t.area, key)
+        }
     }
 }
 
@@ -1076,6 +1082,12 @@ fn equal_keys(t: &DshashTableState, a: &[u8], b: *mut u8) -> bool {
     match t.params.key_kind {
         DshashKeyKind::String => dshash_strcmp(a, b, key_size) == 0,
         DshashKeyKind::Binary => dshash_memcmp(a, b, key_size) == 0,
+        // `arg = area`; the owner resolves each `SharedRecordTableKey` to a
+        // TupleDesc and runs `equalRowTypes`. C returns 0 on equal, so we
+        // compare the owner's bool directly.
+        DshashKeyKind::Record => {
+            backend_utils_cache_typcache_seams::shared_record_key_compare::call(t.area, a, b)
+        }
     }
 }
 
@@ -1089,6 +1101,10 @@ fn copy_key(t: &DshashTableState, dest: *mut u8, src: &[u8]) {
     match t.params.key_kind {
         DshashKeyKind::String => dshash_strcpy(dest, src, key_size),
         DshashKeyKind::Binary => dshash_memcpy(dest, src, key_size),
+        // The record table's copy_function is `dshash_memcpy` (typcache.c
+        // `srtr_record_table_params`): the `SharedRecordTableKey` bytes are
+        // copied verbatim into the new entry.
+        DshashKeyKind::Record => dshash_memcpy(dest, src, key_size),
     }
 }
 
