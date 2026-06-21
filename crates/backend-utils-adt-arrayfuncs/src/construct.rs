@@ -3512,6 +3512,110 @@ pub fn construct_int2_array_bytes(elems: &[i16]) -> PgResult<alloc::vec::Vec<u8>
     Ok(buf.as_slice().to_vec())
 }
 
+/// Seam `deconstruct_text_array_with_dims` — `deconstruct_array_builtin(arr,
+/// TEXTOID, &elems, &nulls, &nelems)` (arrayfuncs.c) keeping the array's shape
+/// header. Detoast a `text[]` image, then return `(ARR_NDIM, ARR_DIMS,
+/// elements)`, each element `Some(VARDATA_ANY payload)` or `None` for a NULL.
+/// The dims vector carries the `xpath_internal` namespace-mapping shape check
+/// (`ndim != 2 || dims[1] != 2`) the deconstruction itself omits.
+pub fn deconstruct_text_array_with_dims_seam(
+    arr: &[u8],
+) -> PgResult<(i32, alloc::vec::Vec<i32>, alloc::vec::Vec<Option<alloc::vec::Vec<u8>>>)> {
+    let cx = mcx::MemoryContext::new("xpath deconstruct_text_array_with_dims");
+    let mcx = cx.mcx();
+
+    // DatumGetArrayTypeP(arr) — detoast the array varlena image.
+    let array = detoast_seam::detoast_attr::call(mcx, arr)?;
+
+    let ndim = foundation::arr_ndim(&array);
+    let dims_v = foundation::arr_dims(mcx, &array)?;
+    let dims_owned: alloc::vec::Vec<i32> = dims_v.iter().copied().collect();
+    let nelems = arrayutils_seam::array_get_n_items::call(ndim, &dims_v)?;
+
+    let mut out: alloc::vec::Vec<Option<alloc::vec::Vec<u8>>> =
+        alloc::vec::Vec::with_capacity(nelems as usize);
+
+    // p = ARR_DATA_PTR(array); bitmap = ARR_NULLBITMAP(array); bitmask = 1.
+    // (TEXT: typlen == -1, typbyval == false, typalign == 'i'.)
+    let mut p = foundation::arr_data_ptr_off(&array);
+    let bitmap = foundation::arr_nullbitmap_off(&array);
+    let mut bitmap_byte = bitmap;
+    let mut bitmask: i32 = 1;
+
+    for _ in 0..nelems {
+        let is_null_here = match bitmap_byte {
+            Some(b) => (array[b] as i32 & bitmask) == 0,
+            None => false,
+        };
+        if is_null_here {
+            out.push(None);
+        } else {
+            let (data_off, data_len) = text_element_payload_span(&array, p)?;
+            let payload = array.get(data_off..data_off + data_len).ok_or_else(|| {
+                PgError::error("malformed array (truncated element data)")
+                    .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+            })?;
+            out.push(Some(payload.to_vec()));
+            p = foundation::att_addlength_pointer(p, -1, &array, p);
+            p = foundation::att_align_nominal(p, TYPALIGN_INT);
+        }
+
+        if let Some(b) = bitmap_byte.as_mut() {
+            bitmask <<= 1;
+            if bitmask == 0x100 {
+                *b += 1;
+                bitmask = 1;
+            }
+        }
+    }
+    Ok((ndim, dims_owned, out))
+}
+
+/// Seam `construct_xml_array_bytes` — `initArrayResult(XMLOID, ...)` /
+/// `accumArrayResult` / `makeArrayResult` over `XMLOID` (the
+/// `xml_xpathobjtoxmlarray` accumulation, xml.c:4243). Build a 1-D, no-NULL
+/// `xml[]` byte image from per-element raw `xml` payload bytes; each element is
+/// a `cstring_to_xmltype` header-ful varlena (binary-compatible with `text`:
+/// `elmlen = -1`, `elmbyval = false`, `elmalign = 'i'`). An empty input yields
+/// `construct_empty_array(XMLOID)`. Returns the owned flat array varlena image.
+pub fn construct_xml_array_bytes(
+    elems: &[alloc::vec::Vec<u8>],
+) -> PgResult<alloc::vec::Vec<u8>> {
+    use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
+
+    let cx = mcx::MemoryContext::new("xpath construct_xml_array");
+    let mcx = cx.mcx();
+
+    if elems.is_empty() {
+        // makeArrayResult of an empty ArrayBuildState == construct_empty_array.
+        let buf = construct_empty_array(mcx, types_tuple::heaptuple::XMLOID)?;
+        return Ok(buf.as_slice().to_vec());
+    }
+
+    // Each element is cstring_to_xmltype(bytes): a header-ful varlena (4-byte
+    // natural header + payload) carried as a ByRef value, identical framing to
+    // a text element since `xml` is binary-compatible with `text`.
+    let mut values: alloc::vec::Vec<TDatum> = alloc::vec::Vec::with_capacity(elems.len());
+    for e in elems {
+        values.push(TDatum::ByRef(text_varlena_pgvec(mcx, e)?));
+    }
+    let nulls = alloc::vec![false; elems.len()];
+
+    // XMLOID storage attributes: elmlen = -1, elmbyval = false, elmalign = 'i'
+    // (xml is a varlena type, binary-compatible with text).
+    let buf = construct_array_expr(
+        mcx,
+        &values,
+        &nulls,
+        types_tuple::heaptuple::XMLOID,
+        -1,
+        false,
+        TYPALIGN_INT,
+        false,
+    )?;
+    Ok(buf.as_slice().to_vec())
+}
+
 /// `VARDATA_ANY` / `VARSIZE_ANY_EXHDR` over an inline `text` element at offset
 /// `off`: return its `(payload_offset, payload_len)` span (the natural short /
 /// 4-byte header form; array text elements are never externally toasted).

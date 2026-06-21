@@ -222,6 +222,45 @@ fn fc_xmlexists(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     Ok(ret_bool_w(crate::xmlexists(xpath, data)?))
 }
 
+/// A `text[]` / array arg's full detoasted varlena image on the by-ref lane
+/// (C: `PG_GETARG_ARRAYTYPE_P(i)` — the whole `ArrayType` varlena, header
+/// included, which the array deconstruct re-parses). `None` when the arg is
+/// SQL NULL (a non-strict caller); else the array bytes.
+#[inline]
+fn arg_array_bytes_opt<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> Option<&'a [u8]> {
+    if fcinfo.args.get(i).map(|a| a.isnull).unwrap_or(true) {
+        return None;
+    }
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .or(Some(&[]))
+}
+
+/// `xpath(text, xml, text[]) -> xml[]` (OID 2931). Evaluate the XPath expression
+/// over the document with the namespace mappings, and marshal the matched
+/// nodeset into an `xml[]` array result.
+fn fc_xpath(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let xpath_expr = arg_text_bytes(fcinfo, 0);
+    let data = arg_text_bytes(fcinfo, 1);
+    let namespaces = arg_array_bytes_opt(fcinfo, 2);
+    // crate::xpath_fmgr returns one serialized xmltype payload per match;
+    // build the XMLOID array image and lower it onto the by-ref lane.
+    let items = crate::xpath_fmgr(xpath_expr, data, namespaces)?;
+    let image =
+        backend_utils_adt_arrayfuncs_seams::construct_xml_array_bytes::call(&items)?;
+    fcinfo.set_ref_result(types_fmgr::RefPayload::Varlena(image));
+    Ok(Datum::from_usize(0))
+}
+
+/// `xpath_exists(text, xml, text[]) -> bool` (OID 3049).
+fn fc_xpath_exists(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let xpath_expr = arg_text_bytes(fcinfo, 0);
+    let data = arg_text_bytes(fcinfo, 1);
+    let namespaces = arg_array_bytes_opt(fcinfo, 2);
+    Ok(ret_bool_w(crate::xpath_exists_fmgr(xpath_expr, data, namespaces)?))
+}
+
 /// `xmlvalidate(xml, text) -> bool` (OID 2897). The core is the removed-feature
 /// stub: it ignores both args and always errors.
 fn fc_xmlvalidate(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
@@ -458,6 +497,8 @@ pub fn register_xml_builtins() {
         builtin(2922, "xmltotext", 1, true, false, fc_xmltotext),
         // xml predicates / constructors / send.
         builtin(2614, "xmlexists", 2, true, false, fc_xmlexists),
+        builtin(2931, "xpath", 3, true, false, fc_xpath),
+        builtin(3049, "xpath_exists", 3, true, false, fc_xpath_exists),
         builtin(2897, "xmlvalidate", 2, true, false, fc_xmlvalidate),
         builtin(2899, "xml_send", 1, true, false, fc_xml_send),
         builtin(2900, "xmlconcat2", 2, false, false, fc_xmlconcat2),

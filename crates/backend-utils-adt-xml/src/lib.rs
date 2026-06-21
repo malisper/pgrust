@@ -49,7 +49,8 @@ use types_error::{
     ERRCODE_DATA_EXCEPTION, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_ARGUMENT_FOR_XQUERY,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_XML_COMMENT,
-    ERRCODE_INVALID_XML_PROCESSING_INSTRUCTION, PgError, PgResult, SoftErrorContext, ereturn,
+    ERRCODE_INVALID_XML_PROCESSING_INSTRUCTION, ERRCODE_NULL_VALUE_NOT_ALLOWED, PgError, PgResult,
+    SoftErrorContext, ereturn,
 };
 use types_tuple::heaptuple::{
     BOOLOID, BPCHAROID, BYTEAOID, DATEOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID,
@@ -2604,6 +2605,94 @@ pub fn SPI_sql_row_to_xmlelement(
 // ===========================================================================
 // XPath support
 // ===========================================================================
+
+/// C `xpath_internal`'s namespace-mapping block (xml.c:4347-4382): validate and
+/// deconstruct the `text[]` namespace-mapping array into `(name, uri)` pairs.
+///
+/// `namespaces` is the raw (detoasted) `text[]` array varlena image, or `None`
+/// for the SQL NULL / absent argument. An empty array (`ndim == 0`) means "no
+/// namespace mappings". A non-empty array must be two-dimensional with the
+/// length of its second axis equal to 2 (each subarray is a `[name, uri]`
+/// pair); otherwise `ERRCODE_DATA_EXCEPTION` "invalid array for XML namespace
+/// mapping". No element of a pair may be NULL (`ERRCODE_NULL_VALUE_NOT_ALLOWED`).
+fn deconstruct_xml_namespaces(
+    namespaces: Option<&[u8]>,
+) -> PgResult<Vec<(String, String)>> {
+    let Some(arr) = namespaces else {
+        // C: ndim = namespaces ? ARR_NDIM(namespaces) : 0 == 0 -> no mappings.
+        return Ok(Vec::new());
+    };
+
+    let (ndim, dims, elems) =
+        backend_utils_adt_arrayfuncs_seams::deconstruct_text_array_with_dims::call(arr)?;
+
+    if ndim == 0 {
+        // 0-dimensional array: no namespace mappings.
+        return Ok(Vec::new());
+    }
+
+    if ndim != 2 || dims.get(1).copied() != Some(2) {
+        return Err(PgError::error("invalid array for XML namespace mapping")
+            .with_sqlstate(ERRCODE_DATA_EXCEPTION)
+            .with_detail(
+                "The array must be two-dimensional with length of the second axis equal to 2.",
+            ));
+    }
+
+    // ns_count = nelems / 2 (checked: dims[1] == 2 so nelems is even).
+    let ns_count = elems.len() / 2;
+    let mut out: Vec<(String, String)> = Vec::with_capacity(ns_count);
+    for i in 0..ns_count {
+        // if (ns_names_uris_nulls[i*2] || ns_names_uris_nulls[i*2+1]) ereport.
+        let name = elems[i * 2].as_ref();
+        let uri = elems[i * 2 + 1].as_ref();
+        let (name, uri) = match (name, uri) {
+            (Some(n), Some(u)) => (n, u),
+            _ => {
+                return Err(PgError::error("neither namespace name nor URI may be null")
+                    .with_sqlstate(ERRCODE_NULL_VALUE_NOT_ALLOWED));
+            }
+        };
+        // TextDatumGetCString(ns_names_uris[..]): the element payload as a
+        // C string (the libxml provider re-encodes it for xmlXPathRegisterNs).
+        out.push((
+            String::from_utf8_lossy(name).into_owned(),
+            String::from_utf8_lossy(uri).into_owned(),
+        ));
+    }
+    Ok(out)
+}
+
+/// C `xpath` (xml.c:4519) — `xpath(text, xml [, text[]])`. The fmgr-boundary
+/// entry: validate/deconstruct the raw `text[]` namespace array, then evaluate.
+/// Returns the matched values as serialized `xmltype` byte images (one per
+/// array element).
+pub fn xpath_fmgr(
+    xpath_expr: &[u8],
+    data: &[u8],
+    namespaces: Option<&[u8]>,
+) -> PgResult<Vec<Vec<u8>>> {
+    if !seam::have_libxml::call() {
+        return Err(no_xml_support());
+    }
+    let ns = deconstruct_xml_namespaces(namespaces)?;
+    xpath_internal(xpath_expr, data, &ns, false)
+}
+
+/// C `xpath_exists` (xml.c:4565) — the fmgr-boundary entry: validate/deconstruct
+/// the raw `text[]` namespace array, then evaluate for existence.
+pub fn xpath_exists_fmgr(
+    xpath_expr: &[u8],
+    data: &[u8],
+    namespaces: Option<&[u8]>,
+) -> PgResult<bool> {
+    if !seam::have_libxml::call() {
+        return Err(no_xml_support());
+    }
+    let ns = deconstruct_xml_namespaces(namespaces)?;
+    let items = xpath_internal(xpath_expr, data, &ns, true)?;
+    Ok(!items.is_empty())
+}
 
 /// C `xpath` (xml.c:4519) — `xpath(text, xml [, text[]])`. Returns the matched
 /// values as serialized `xmltype` byte images (one per array element).

@@ -816,3 +816,34 @@ seam_core::seam!(
         multidims: bool,
     ) -> PgResult<PgVec<'mcx, u8>>
 );
+
+seam_core::seam!(
+    /// `deconstruct_array_builtin(DatumGetArrayTypeP(array), TEXTOID, ...)`
+    /// (arrayfuncs.c) preserving the array's shape header: split a detoasted
+    /// `text[]` varlena image into `(ARR_NDIM, ARR_DIMS, elements)`, where each
+    /// element is `Some(payload)` (a non-null `text` element's raw payload
+    /// bytes, `VARDATA_ANY`) or `None` (the C `nulls[i] == true`), in row-major
+    /// order. The dimension vector lets a caller apply the C
+    /// `xpath_internal`-style `ndim != 2 || dims[1] != 2` namespace-mapping
+    /// validation that the array deconstruction itself does not. Detoasts the
+    /// on-disk image (`DatumGetArrayTypeP`). Fallible on detoast / malformed
+    /// array.
+    pub fn deconstruct_text_array_with_dims(
+        array: &[u8],
+    ) -> PgResult<(i32, Vec<i32>, Vec<Option<Vec<u8>>>)>
+);
+
+seam_core::seam!(
+    /// `initArrayResult(XMLOID, ...)` / `accumArrayResult` / `makeArrayResult`
+    /// over `XMLOID` (the `xml_xpathobjtoxmlarray` accumulation, xml.c:4243):
+    /// build a 1-D, no-NULL `xml[]` array varlena image from per-element raw
+    /// `xml` payload bytes (each is wrapped as `cstring_to_xmltype`, a header-ful
+    /// `xml`/text-compatible varlena: `elmlen = -1`, `elmbyval = false`,
+    /// `elmalign = 'i'`). An empty input yields the `construct_empty_array(XMLOID)`
+    /// image. Returns the flat array byte image (the bytes a `RefPayload::Varlena`
+    /// carries on the fmgr by-ref lane). Allocated in a private transient context
+    /// internally; the returned `Vec` is owned. Fallible on OOM / size overflow.
+    pub fn construct_xml_array_bytes(
+        elems: &[Vec<u8>],
+    ) -> PgResult<Vec<u8>>
+);

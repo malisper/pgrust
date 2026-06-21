@@ -157,6 +157,8 @@ pub fn init_seams() {
     seams::oidvector_to_oids_bytes::set(construct::oidvector_to_oids_bytes);
     seams::int2vector_to_i16s_bytes::set(construct::int2vector_to_i16s_bytes);
     seams::text_array_to_strings_bytes::set(construct::text_array_to_strings_bytes);
+    seams::deconstruct_text_array_with_dims::set(construct::deconstruct_text_array_with_dims_seam);
+    seams::construct_xml_array_bytes::set(construct::construct_xml_array_bytes);
 
     // The `array-more` array<->element bridges driven by tsvector_op.c / jsonb:
     // deconstruct_array_builtin / construct_array_builtin over text[]/"char"[]/
