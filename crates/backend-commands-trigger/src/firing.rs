@@ -640,11 +640,44 @@ pub fn after_trigger_execute<'mcx>(
         }
     }
 
-    // Transition tables (ats_table) and a non-current queued role are firing
-    // substrate; the reachable queue never sets them, so a present value is a
-    // genuine unported boundary.
-    if evtshared.ats_has_table {
-        return Err(transition_table_unported());
+    // Set up the tuplestore information to let the trigger access transition
+    // tables (trigger.c:4509-4530).  When a transition table is first made
+    // available to a trigger, mark it "closed" so it can't change anymore;
+    // additional events of the same type at this query level then go into new
+    // transition tables.
+    //
+    // `tg_oldtable`/`tg_newtable` themselves are consumed by the trigger
+    // function's language handler (plpgsql/SPI), which registers them as
+    // Ephemeral Named Relations in a QueryEnvironment — that read-back path is a
+    // separate, still-unported campaign.  Here we faithfully perform the
+    // observable trigger.c side effect (marking the table-data closed) so the
+    // capture machinery's lifecycle is correct; the stores remain owned by the
+    // thread-local table-data.
+    let mut uses_old_table = false;
+    let mut uses_new_table = false;
+    if let Some(tref) = evtshared.ats_table {
+        let tgoldtable = rel.triggers[tgindx].tgoldtable.is_some();
+        let tgnewtable = rel.triggers[tgindx].tgnewtable.is_some();
+        if tgoldtable {
+            uses_old_table = true;
+            crate::queue::with_after_triggers(|at| {
+                let qd = tref.query_depth as usize;
+                at.query_stack[qd].tables[tref.index].closed = true;
+            });
+        }
+        if tgnewtable {
+            uses_new_table = true;
+            crate::queue::with_after_triggers(|at| {
+                let qd = tref.query_depth as usize;
+                at.query_stack[qd].tables[tref.index].closed = true;
+            });
+        }
+    }
+    if uses_old_table || uses_new_table {
+        // The trigger function will try to read the transition table via the
+        // ENR/QueryEnvironment path, which is not yet wired — fail loudly rather
+        // than run the trigger against an absent transition relation.
+        return Err(transition_table_read_unported());
     }
     // GetUserIdAndSecContext(&save_rolid, ...); if (save_rolid != ats_rolid)
     // SetUserIdAndSecContext(...). The event was queued with ats_rolid =
@@ -1410,44 +1443,53 @@ fn fire_statement_trigger(
 fn exec_as_insert_triggers_impl(
     estate: &mut EStateData<'_>,
     relinfo: types_nodes::RriId,
-    _tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
+    tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     // if (trigdesc && trig_insert_after_statement) AfterTriggerSaveEvent(...);
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_insert_after_statement) {
         return Ok(());
     }
-    if _tc.is_some() {
-        return Err(transition_table_unported());
-    }
     // AfterTriggerSaveEvent(estate, relinfo, NULL, NULL, TRIGGER_EVENT_INSERT,
     //                       false, NULL, NULL, NIL, NULL, transition_capture, false);
-    after_trigger_save_event_stmt(estate, relinfo, TRIGGER_EVENT_INSERT, crate::queue::CmdType::Insert)
+    after_trigger_save_event_stmt(
+        estate,
+        relinfo,
+        TRIGGER_EVENT_INSERT,
+        crate::queue::CmdType::Insert,
+        tc.as_deref(),
+    )
 }
 fn exec_as_update_triggers_impl(
     estate: &mut EStateData<'_>,
     relinfo: types_nodes::RriId,
-    _tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
+    tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_update_after_statement) {
         return Ok(());
     }
-    if _tc.is_some() {
-        return Err(transition_table_unported());
-    }
-    after_trigger_save_event_stmt(estate, relinfo, TRIGGER_EVENT_UPDATE, crate::queue::CmdType::Update)
+    after_trigger_save_event_stmt(
+        estate,
+        relinfo,
+        TRIGGER_EVENT_UPDATE,
+        crate::queue::CmdType::Update,
+        tc.as_deref(),
+    )
 }
 fn exec_as_delete_triggers_impl(
     estate: &mut EStateData<'_>,
     relinfo: types_nodes::RriId,
-    _tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
+    tc: Option<&mut types_nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_delete_after_statement) {
         return Ok(());
     }
-    if _tc.is_some() {
-        return Err(transition_table_unported());
-    }
-    after_trigger_save_event_stmt(estate, relinfo, TRIGGER_EVENT_DELETE, crate::queue::CmdType::Delete)
+    after_trigger_save_event_stmt(
+        estate,
+        relinfo,
+        TRIGGER_EVENT_DELETE,
+        crate::queue::CmdType::Delete,
+        tc.as_deref(),
+    )
 }
 
 // ---- TRUNCATE STATEMENT (tablecmds.c ExecuteTruncateGuts + trigger.c) ----
@@ -2226,14 +2268,14 @@ fn exec_ar_insert_triggers_impl<'mcx>(
     if !has_ar_row && !tc_new_table {
         return Ok(());
     }
-    // Transition tables are firing substrate (GetAfterTriggersTransitionTable /
-    // TransitionTableAddTuple); a present transition_capture means the
-    // transition-table leg is needed, which is not ported.
-    if tc.is_some() {
-        return Err(transition_table_unported());
+    // Capture the NEW tuple into the INSERT transition table (the head of
+    // AfterTriggerSaveEvent), then queue the event(s).  `tc` reborrowed shared.
+    let tc_ref: Option<&types_nodes::modifytable::TransitionCaptureState> = tc.as_deref();
+    if let Some(tcs) = tc_ref {
+        capture_transition_tuples(estate, relinfo, TRIGGER_EVENT_INSERT, None, Some(slot), tcs)?;
     }
     // AfterTriggerSaveEvent(estate, relinfo, NULL, NULL, TRIGGER_EVENT_INSERT,
-    //                       true, NULL, slot, recheckIndexes, NULL, NULL, false);
+    //                       true, NULL, slot, recheckIndexes, NULL, transition_capture, false);
     after_trigger_save_event(
         estate,
         relinfo,
@@ -2242,17 +2284,227 @@ fn exec_ar_insert_triggers_impl<'mcx>(
         /* old_ctid */ None,
         /* newslot */ Some(slot),
         recheck_indexes,
+        tc.as_deref(),
     )
+}
+
+// ===========================================================================
+// Transition-table capture (trigger.c:5535-5633).
+//
+// GetAfterTriggersTransitionTable selects the tuplestore for a given event and
+// OLD/NEW direction; TransitionTableAddTuple spools the real EState slot into it
+// (applying the child→root conversion map when the event originates on a child
+// partition, which is loud-guarded pending the map-returning seam).
+// ===========================================================================
+
+/// Which transition tuplestore a captured tuple belongs in: the
+/// [`TableRef`](crate::queue::TableRef) of the owning `AfterTriggersTableData`
+/// plus whether it is the OLD or the NEW store.
+#[derive(Clone, Copy)]
+struct TransitionTarget {
+    table: crate::queue::TableRef,
+    is_old: bool,
+}
+
+/// `GetAfterTriggersTransitionTable(event, oldslot, newslot, transition_capture)`
+/// (trigger.c:5535) — pick the OLD or NEW transition tuplestore for this event
+/// and tuple direction.  `has_old`/`has_new` are `!TupIsNull(oldslot/newslot)`;
+/// exactly one is set per call (the caller spools OLD and NEW separately).
+fn get_after_triggers_transition_table(
+    event: u32,
+    has_old: bool,
+    has_new: bool,
+    tc: &types_nodes::modifytable::TransitionCaptureState,
+) -> Option<TransitionTarget> {
+    const TRIGGER_EVENT_DELETE: u32 = 1;
+    const TRIGGER_EVENT_UPDATE: u32 = 2;
+    let delete_old_table = tc.tcs_delete_old_table;
+    let update_old_table = tc.tcs_update_old_table;
+    let update_new_table = tc.tcs_update_new_table;
+    let insert_new_table = tc.tcs_insert_new_table;
+
+    if has_old {
+        // For an OLD tuple (DELETE old / UPDATE old).
+        if event == TRIGGER_EVENT_DELETE && delete_old_table {
+            return tc
+                .tcs_delete_private
+                .map(|index| TransitionTarget { table: table_ref(index), is_old: true });
+        } else if event == TRIGGER_EVENT_UPDATE && update_old_table {
+            return tc
+                .tcs_update_private
+                .map(|index| TransitionTarget { table: table_ref(index), is_old: true });
+        }
+    } else if has_new {
+        // For a NEW tuple (INSERT new / UPDATE new).
+        if event == TRIGGER_EVENT_INSERT && insert_new_table {
+            return tc
+                .tcs_insert_private
+                .map(|index| TransitionTarget { table: table_ref(index), is_old: false });
+        } else if event == TRIGGER_EVENT_UPDATE && update_new_table {
+            return tc
+                .tcs_update_private
+                .map(|index| TransitionTarget { table: table_ref(index), is_old: false });
+        }
+    }
+    None
+}
+
+/// Build a [`TableRef`](crate::queue::TableRef) for `index` at the current
+/// after-trigger query depth (the depth the table-data was created at — the same
+/// `MakeTransitionCaptureState`/save-event query level, since transition tables
+/// are non-deferrable and fire within the query).
+fn table_ref(index: usize) -> crate::queue::TableRef {
+    let query_depth = crate::queue::with_after_triggers(|at| at.query_depth);
+    crate::queue::TableRef { query_depth, index }
+}
+
+/// `TransitionTableAddTuple(estate, event, transition_capture, relinfo, slot,
+/// original_insert_tuple, tuplestore)` (trigger.c:5586) — add the real EState
+/// `slot` to the selected transition tuplestore, applying the child→root
+/// conversion map if the event originates on a child partition.
+///
+/// `target` is `None` when no tuplestore applies (the C `tuplestore == NULL`
+/// early return).  The `original_insert_tuple` fast path (a parent-format slot
+/// supplied to bypass conversion) and the no-map common case both spool the slot
+/// directly; the map branch (child→root conversion via a `storeslot`) is
+/// loud-guarded because the map-returning seam is not yet widened.
+fn transition_table_add_tuple<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    slot: types_nodes::SlotId,
+    original_insert_tuple: Option<types_nodes::SlotId>,
+    target: Option<TransitionTarget>,
+) -> PgResult<()> {
+    let target = match target {
+        Some(t) => t,
+        None => return Ok(()),
+    };
+
+    // if (original_insert_tuple) tuplestore_puttupleslot(tuplestore, original_insert_tuple);
+    if let Some(orig) = original_insert_tuple {
+        return put_into_transition_store(estate, target, orig);
+    }
+
+    // else if ((map = ExecGetChildToRootMap(relinfo)) != NULL) { convert + store }
+    // The child→root conversion (a tuple captured on a child partition, stored in
+    // the root-table format) needs the map plus a per-table storeslot in the
+    // tuplestore's tupdesc.  The map-returning seam is not yet widened (the
+    // existing `exec_get_child_to_root_map` returns only a bool), so this leg is
+    // loud-guarded; the common direct-trigger / root-table case (map == NULL)
+    // takes the else branch below.
+    let has_map = backend_executor_execMain_seams::exec_get_child_to_root_map::call(estate, relinfo)?;
+    if has_map {
+        return Err(child_to_root_transition_unported());
+    }
+
+    // else tuplestore_puttupleslot(tuplestore, slot);
+    put_into_transition_store(estate, target, slot)
+}
+
+/// Spool `slot` (a real EState slot) into the transition tuplestore named by
+/// `target`, which lives in the thread-local `afterTriggers` query stack.  The
+/// store's `tuplestore_puttupleslot` copies the slot's minimal tuple into the
+/// store's own self-owned arena, so nothing borrows from `estate` past the call.
+fn put_into_transition_store<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    target: TransitionTarget,
+    slot: types_nodes::SlotId,
+) -> PgResult<()> {
+    // Form the minimal tuple from the slot in the query context first (an
+    // immutable view of the store is not needed for that); then move the flat
+    // blob into the store under the thread-local borrow.  `tuplestore_puttupleslot`
+    // does both, but it needs `&mut Tuplestorestate` and `&mut estate` at once,
+    // and the store lives behind the `with_after_triggers` borrow — so take the
+    // store out, spool, and put it back (the C aliases a raw pointer; the owned
+    // model moves the self-owned carrier in and out, which is cheap and sound).
+    let store = take_transition_store(target);
+    let mut store = match store {
+        Some(s) => s,
+        // C: tuplestore == NULL → nothing to do (already filtered, but be safe).
+        None => return Ok(()),
+    };
+    // `tuplestore_puttupleslot` unifies the carrier's lifetime with `estate`'s
+    // `'mcx`; the carrier here is `'static` (self-owned hold store). The call
+    // copies the slot's minimal tuple into the store's *own* arena and keeps no
+    // reference to `estate`'s memory, so re-shortening the `'static` carrier to a
+    // `'mcx` reborrow for the duration of the call is sound. SAFETY: the reborrow
+    // does not outlive the call; nothing `'mcx`-borrowed is stored into the
+    // `'static` carrier.
+    let result = {
+        let store_ref: &mut types_nodes::Tuplestorestate<'mcx> =
+            unsafe { core::mem::transmute(&mut store) };
+        backend_utils_sort_storage::tuplestore::tuplestore_puttupleslot(store_ref, slot, estate)
+    };
+    restore_transition_store(target, store);
+    result
+}
+
+/// Move the OLD/NEW `Tuplestorestate` named by `target` out of the thread-local
+/// table-data (leaving `None`), so it can be borrowed mutably without holding the
+/// `afterTriggers` `RefCell` across the spool.
+fn take_transition_store(
+    target: TransitionTarget,
+) -> Option<types_nodes::Tuplestorestate<'static>> {
+    crate::queue::with_after_triggers(|at| {
+        let qd = target.table.query_depth as usize;
+        let td = &mut at.query_stack[qd].tables[target.table.index];
+        if target.is_old {
+            td.old_tuplestore.take()
+        } else {
+            td.new_tuplestore.take()
+        }
+    })
+}
+
+/// Put the `Tuplestorestate` (moved out by [`take_transition_store`]) back into
+/// its table-data slot after spooling.
+fn restore_transition_store(target: TransitionTarget, store: types_nodes::Tuplestorestate<'static>) {
+    crate::queue::with_after_triggers(|at| {
+        let qd = target.table.query_depth as usize;
+        let td = &mut at.query_stack[qd].tables[target.table.index];
+        if target.is_old {
+            td.old_tuplestore = Some(store);
+        } else {
+            td.new_tuplestore = Some(store);
+        }
+    });
+}
+
+/// Capture the OLD and/or NEW tuple(s) of one row event into the transition
+/// tuplestores — the head of C `AfterTriggerSaveEvent` (trigger.c:6204-6238).
+/// `oldslot`/`newslot` are real EState slots (or `None`).
+fn capture_transition_tuples<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    event: u32,
+    oldslot: Option<types_nodes::SlotId>,
+    newslot: Option<types_nodes::SlotId>,
+    tc: &types_nodes::modifytable::TransitionCaptureState,
+) -> PgResult<()> {
+    let original_insert_tuple = tc.tcs_original_insert_tuple;
+
+    // Capture the OLD tuple in the appropriate transition table.
+    if let Some(os) = oldslot {
+        let target = get_after_triggers_transition_table(event, true, false, tc);
+        transition_table_add_tuple(estate, relinfo, os, None, target)?;
+    }
+
+    // Capture the NEW tuple in the appropriate transition table.
+    if let Some(ns) = newslot {
+        let target = get_after_triggers_transition_table(event, false, true, tc);
+        transition_table_add_tuple(estate, relinfo, ns, original_insert_tuple, target)?;
+    }
+
+    Ok(())
 }
 
 // ===========================================================================
 // AfterTriggerSaveEvent (trigger.c:4925) — queue the after-trigger events.
 //
 // Ported for the reachable INSERT/DELETE/UPDATE *row* path on a regular
-// (non-FDW, non-partitioned) table with no transition tables. The
-// transition-capture, FDW-tuplestore, cross-partition root-conversion, and
-// statement-level (cancel_prior_stmt_triggers) legs are firing substrate and
-// loud-guarded by the callers / below.
+// (non-FDW, non-partitioned) table. The transition-capture head is handled by
+// the ExecAR* drivers (which hold the real OLD/NEW slots); the FDW-tuplestore
+// and cross-partition root-conversion legs are loud-guarded.
 // ===========================================================================
 
 /// `AfterTriggerSaveEvent(...)` (trigger.c:4925) for the regular-table row path.
@@ -2270,6 +2522,7 @@ fn after_trigger_save_event<'mcx>(
     old_ctid: Option<ItemPointerData>,
     newslot: Option<types_nodes::SlotId>,
     recheck_indexes: &[Oid],
+    tc: Option<&types_nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     use types_catalog::pg_trigger::{
         TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_MATCHES,
@@ -2322,6 +2575,23 @@ fn after_trigger_save_event<'mcx>(
     // table is the path here.
     if relkind as i8 == RELKIND_PARTITIONED_TABLE {
         return Err(cross_partition_update_unported());
+    }
+
+    // If transition tables are the only reason we're here, return (trigger.c:6247).
+    // The transition-capture head ran in the ExecAR* driver; if there is no AFTER
+    // ROW trigger for this event on this relation, there's nothing to queue.  The
+    // cross-partition UPDATE OLD/NEW-split leg (TupIsNull(oldslot) ^ TupIsNull(newslot))
+    // is excluded above (loud-guarded), so it is not retested here.
+    {
+        let rri = estate.result_rel(relinfo);
+        let has_after_row = rri.ri_TrigDesc.as_ref().is_some_and(|td| match event {
+            TRIGGER_EVENT_DELETE => td.trig_delete_after_row,
+            TRIGGER_EVENT_UPDATE => td.trig_update_after_row,
+            _ => td.trig_insert_after_row,
+        });
+        if !has_after_row {
+            return Ok(());
+        }
     }
 
     // Validate the event code, collect the tuple CTID(s), and pick the event
@@ -2385,7 +2655,7 @@ fn after_trigger_save_event<'mcx>(
     // for (i = 0; i < trigdesc->numtriggers; i++) { ... afterTriggerAddEvent }
     // Collect the matching triggers first (immutable borrow of estate), then add
     // events into the query-level list.
-    let trigs: Vec<(Oid, bool, bool, Oid, Oid)> = {
+    let trigs: Vec<(Oid, bool, bool, Oid, Oid, bool)> = {
         let rri = estate.result_rel(relinfo);
         let trigdesc = rri
             .ri_TrigDesc
@@ -2423,19 +2693,32 @@ fn after_trigger_save_event<'mcx>(
             {
                 continue;
             }
+            // Whether this trigger uses a transition table (tgoldtable/tgnewtable);
+            // the shared record's ats_table is only set for such a trigger.
+            let uses_transition = trig.tgoldtable.is_some() || trig.tgnewtable.is_some();
             out.push((
                 trig.tgoid,
                 trig.tgdeferrable,
                 trig.tginitdeferred,
                 trig.tgconstrindid,
                 trig.tgfoid,
+                uses_transition,
             ));
         }
         out
     };
 
     let qd = query_depth as usize;
-    for (tgoid, tgdeferrable, tginitdeferred, _tgconstrindid, _tgfoid) in trigs {
+    for (tgoid, tgdeferrable, tginitdeferred, _tgconstrindid, _tgfoid, uses_transition) in trigs {
+        // ats_table: set only when the trigger uses transition tables AND a
+        // transition_capture is active (trigger.c:6537), to the per-event private
+        // table-data; NULL otherwise (improves event-sharability).
+        let ats_table = if uses_transition {
+            tc.and_then(|t| private_table_for_event(event, t))
+                .map(table_ref)
+        } else {
+            None
+        };
         let new_shared = SharedRecord {
             ats_event: (event & TRIGGER_EVENT_OPMASK)
                 | (if row_trigger { TRIGGER_EVENT_ROW } else { 0 })
@@ -2446,7 +2729,7 @@ fn after_trigger_save_event<'mcx>(
             ats_rolid: user_id,
             ats_firing_id: 0,
             ats_modifiedcols: None,
-            ats_has_table: false,
+            ats_table,
         };
         with_after_triggers(|at| {
             crate::queue::after_trigger_add_event(
@@ -2458,6 +2741,23 @@ fn after_trigger_save_event<'mcx>(
     }
     let _ = &mut new_event;
     Ok(())
+}
+
+/// The private [`AfterTriggersTableData`](crate::queue::TableData) index for an
+/// event, picked from the [`TransitionCaptureState`](types_nodes::modifytable::TransitionCaptureState)
+/// (trigger.c:6540-6555: `ats_table = tcs_{insert,update,delete}_private`).
+fn private_table_for_event(
+    event: u32,
+    tc: &types_nodes::modifytable::TransitionCaptureState,
+) -> Option<usize> {
+    const TRIGGER_EVENT_DELETE: u32 = 1;
+    const TRIGGER_EVENT_UPDATE: u32 = 2;
+    match event {
+        TRIGGER_EVENT_INSERT => tc.tcs_insert_private,
+        TRIGGER_EVENT_UPDATE => tc.tcs_update_private,
+        TRIGGER_EVENT_DELETE => tc.tcs_delete_private,
+        _ => None,
+    }
 }
 
 /// `AfterTriggerSaveEvent(...)` (trigger.c:6169) for the STATEMENT-level
@@ -2473,6 +2773,7 @@ fn after_trigger_save_event_stmt(
     relinfo: types_nodes::RriId,
     event: u32,
     cmd_type: crate::queue::CmdType,
+    tc: Option<&types_nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     use types_catalog::pg_trigger::{
         TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_MATCHES,
@@ -2525,7 +2826,7 @@ fn after_trigger_save_event_stmt(
     let user_id = backend_utils_init_miscinit::GetUserId();
 
     // for (i = 0; i < trigdesc->numtriggers; i++) — match STATEMENT/AFTER/<op>.
-    let trigs: Vec<(Oid, bool, bool)> = {
+    let trigs: Vec<(Oid, bool, bool, bool)> = {
         let rri = estate.result_rel(relinfo);
         let trigdesc = rri
             .ri_TrigDesc
@@ -2542,13 +2843,22 @@ fn after_trigger_save_event_stmt(
             if !trigger_enabled_no_qual(trig.tgenabled) {
                 continue;
             }
-            out.push((trig.tgoid, trig.tgdeferrable, trig.tginitdeferred));
+            let uses_transition = trig.tgoldtable.is_some() || trig.tgnewtable.is_some();
+            out.push((trig.tgoid, trig.tgdeferrable, trig.tginitdeferred, uses_transition));
         }
         out
     };
 
     let qd = query_depth as usize;
-    for (tgoid, tgdeferrable, tginitdeferred) in trigs {
+    for (tgoid, tgdeferrable, tginitdeferred, uses_transition) in trigs {
+        // ats_table: as in the row path (trigger.c:6537), the statement trigger's
+        // transition table is the per-event private table-data.
+        let ats_table = if uses_transition {
+            tc.and_then(|t| private_table_for_event(event, t))
+                .map(table_ref)
+        } else {
+            None
+        };
         let new_shared = SharedRecord {
             // row_trigger == false: no TRIGGER_EVENT_ROW bit.
             ats_event: (event & TRIGGER_EVENT_OPMASK)
@@ -2559,7 +2869,7 @@ fn after_trigger_save_event_stmt(
             ats_rolid: user_id,
             ats_firing_id: 0,
             ats_modifiedcols: None,
-            ats_has_table: false,
+            ats_table,
         };
         with_after_triggers(|at| {
             crate::queue::after_trigger_add_event(
@@ -2754,10 +3064,6 @@ fn exec_ar_delete_triggers_impl<'mcx>(
         return Ok(());
     }
 
-    // Transition tables need the tuplestore firing substrate (not ported).
-    if cap_old || tc.is_some() {
-        return Err(transition_table_unported());
-    }
     // The FDW-supplied tuple leg (ExecForceStoreHeapTuple) is only reached for a
     // foreign table; the on-disk delete passes the `tupleid` (the OLD slot's tid
     // after GetTupleForTrigger).  AFTER firing re-fetches that ctid by SnapshotAny.
@@ -2768,6 +3074,45 @@ fn exec_ar_delete_triggers_impl<'mcx>(
     const TRIGGER_EVENT_DELETE: u32 = 1;
     let old_ctid =
         tupleid.copied().expect("ExecARDeleteTriggers: a non-FDW delete needs a tupleid");
+
+    // C: TupleTableSlot *slot = ExecGetTriggerOldSlot(estate, relinfo);
+    //    GetTupleForTrigger(... tupleid ... slot ...);   (fetches the OLD tuple)
+    //    AfterTriggerSaveEvent(... slot, transition_capture ...);
+    // The OLD slot is only needed for the transition-table capture; the queued
+    // event records the OLD ctid (re-fetched at fire time).  So when a delete
+    // transition table is active, fetch the OLD tuple into the OLD slot and spool
+    // it.  We use the SnapshotAny fetch (`fetch_trigger_tuple`) — the same view
+    // AFTER triggers use — and force-store it into the OLD slot, avoiding the
+    // EPQ-recheck machinery (an AFTER-ROW delete does not re-lock).
+    if cap_old {
+        let mcx = estate.es_query_cxt;
+        let rel_oid = estate
+            .result_rel(relinfo)
+            .ri_RelationDesc
+            .as_ref()
+            .map(|r| r.rd_id)
+            .expect("ExecARDeleteTriggers: ResultRelInfo has no relation");
+        let oldslot =
+            backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
+        let formed = fetch_trigger_tuple(mcx, rel_oid, &old_ctid)?;
+        let formed_mcx = formed.clone_in(mcx)?;
+        backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+            estate,
+            oldslot,
+            formed_mcx,
+            false,
+        )?;
+        let tcs = tc.expect("cap_old implies transition_capture is present");
+        capture_transition_tuples(
+            estate,
+            relinfo,
+            TRIGGER_EVENT_DELETE,
+            Some(oldslot),
+            None,
+            tcs,
+        )?;
+    }
+
     // AfterTriggerSaveEvent(estate, relinfo, NULL, NULL, TRIGGER_EVENT_DELETE,
     //                       true, slot, NULL, NIL, NULL, transition_capture, false);
     after_trigger_save_event(
@@ -2778,6 +3123,7 @@ fn exec_ar_delete_triggers_impl<'mcx>(
         /* old_ctid */ Some(old_ctid),
         /* newslot */ None,
         &[],
+        tc,
     )
 }
 fn exec_ir_delete_triggers_impl<'mcx>(
@@ -3143,11 +3489,9 @@ fn exec_ar_update_triggers_impl<'mcx>(
         return Ok(());
     }
 
-    // Transition tables / cross-partition routing need the firing substrate
-    // (tuplestore + root-format conversion) — not ported.
-    if cap_old || cap_new || tc.is_some() {
-        return Err(transition_table_unported());
-    }
+    // Cross-partition update routing (UPDATE row movement across partitions)
+    // queues the root event with src/dst partitions + the partition-format
+    // conversion — that leg is still loud-guarded.
     if is_crosspart_update || src_partinfo.is_some() {
         return Err(cross_partition_update_unported());
     }
@@ -3164,6 +3508,44 @@ fn exec_ar_update_triggers_impl<'mcx>(
         None => return Err(cross_partition_update_unported()),
     };
     let ns = newslot.expect("ExecARUpdateTriggers: a non-FDW update needs a newslot");
+
+    // Capture the OLD (fetched into the OLD slot) and NEW transition tuples for
+    // an UPDATE.  C fetches the OLD slot via GetTupleForTrigger; we fetch by ctid
+    // under SnapshotAny (the AFTER-trigger view) and force-store it.
+    if cap_old || cap_new {
+        // Build the OLD slot only when the update-old transition table is wanted.
+        let oldslot = if cap_old {
+            let mcx = estate.es_query_cxt;
+            let rel_oid = estate
+                .result_rel(relinfo)
+                .ri_RelationDesc
+                .as_ref()
+                .map(|r| r.rd_id)
+                .expect("ExecARUpdateTriggers: ResultRelInfo has no relation");
+            let octid = old_ctid.expect("cap_old UPDATE needs the old ctid");
+            let slot =
+                backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
+            let formed = fetch_trigger_tuple(mcx, rel_oid, &octid)?;
+            let formed_mcx = formed.clone_in(mcx)?;
+            backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+                estate, slot, formed_mcx, false,
+            )?;
+            Some(slot)
+        } else {
+            None
+        };
+        let newslot_cap = if cap_new { Some(ns) } else { None };
+        let tcs = tc.as_deref().expect("cap_old/cap_new implies transition_capture present");
+        capture_transition_tuples(
+            estate,
+            relinfo,
+            TRIGGER_EVENT_UPDATE,
+            oldslot,
+            newslot_cap,
+            tcs,
+        )?;
+    }
+
     // AfterTriggerSaveEvent(estate, relinfo, src_partinfo, dst_partinfo,
     //                       TRIGGER_EVENT_UPDATE, true, oldslot, newslot,
     //                       recheckIndexes, ExecGetAllUpdatedCols(...),
@@ -3176,6 +3558,7 @@ fn exec_ar_update_triggers_impl<'mcx>(
         /* old_ctid */ old_ctid,
         /* newslot */ Some(ns),
         recheck_indexes,
+        tc.as_deref(),
     )
 }
 
@@ -3222,11 +3605,105 @@ fn make_transition_capture_state_impl<'mcx>(
         return Ok(None);
     }
 
-    // A relation with transition-table triggers needs the after-trigger
-    // query-state / tuplestore substrate (afterTriggers.query_depth,
-    // AfterTriggersTableData, the (sub)transaction resource owner). That
-    // firing-front substrate is not yet ported.
-    front_half("MakeTransitionCaptureState (transition-table allocation)", 4958)
+    // The C function keys the per-(relation, command) table-data on `relid`; in
+    // the owned model the caller passes the ResultRelInfo, from which we read it.
+    let relid = estate
+        .result_rel(relinfo)
+        .ri_RelationDesc
+        .as_ref()
+        .map(|r| r.rd_id)
+        .expect("MakeTransitionCaptureState: ResultRelInfo has no relation");
+
+    // Check state, like AfterTriggerSaveEvent.
+    // if (afterTriggers.query_depth < 0)
+    //     elog(ERROR, "MakeTransitionCaptureState() called outside of query");
+    let query_depth = crate::queue::with_after_triggers(|at| at.query_depth);
+    if query_depth < 0 {
+        return Err(PgError::error(
+            "MakeTransitionCaptureState() called outside of query".to_string(),
+        ));
+    }
+
+    // Find or create AfterTriggersTableData struct(s) to hold the tuplestore(s),
+    // and create the required tuplestore(s) if not already present.  C allocates
+    // them in CurTransactionContext under CurTransactionResourceOwner; the owned
+    // model's `tuplestore_begin_heap_hold` builds a self-owned (`'static`) store
+    // with the same end-of-query lifespan.  All of this runs under one
+    // `with_after_triggers` borrow.
+    //
+    // Note: MERGE uses the same table-data as INSERT/UPDATE/DELETE so MERGE'd
+    // tuples land in the same tuplestores.
+    let (ins_idx, upd_idx, del_idx) = crate::queue::with_after_triggers(|at| {
+        // Be sure we have enough space to record events at this query depth.
+        crate::queue::after_trigger_enlarge_query_state(at);
+
+        let ins_idx = if need_new_ins {
+            Some(crate::queue::get_after_triggers_table_data(
+                at,
+                relid,
+                crate::queue::CmdType::Insert,
+            ))
+        } else {
+            None
+        };
+        let upd_idx = if need_old_upd || need_new_upd {
+            Some(crate::queue::get_after_triggers_table_data(
+                at,
+                relid,
+                crate::queue::CmdType::Update,
+            ))
+        } else {
+            None
+        };
+        let del_idx = if need_old_del {
+            Some(crate::queue::get_after_triggers_table_data(
+                at,
+                relid,
+                crate::queue::CmdType::Delete,
+            ))
+        } else {
+            None
+        };
+
+        // Now create required tuplestore(s), if we don't have them already.
+        let qd = at.query_depth as usize;
+        let make = || -> PgResult<types_nodes::Tuplestorestate<'static>> {
+            backend_utils_sort_storage::tuplestore::tuplestore_begin_heap_hold(false)
+        };
+        if let Some(i) = upd_idx {
+            if need_old_upd && at.query_stack[qd].tables[i].old_tuplestore.is_none() {
+                at.query_stack[qd].tables[i].old_tuplestore = Some(make()?);
+            }
+            if need_new_upd && at.query_stack[qd].tables[i].new_tuplestore.is_none() {
+                at.query_stack[qd].tables[i].new_tuplestore = Some(make()?);
+            }
+        }
+        if let Some(i) = del_idx {
+            if need_old_del && at.query_stack[qd].tables[i].old_tuplestore.is_none() {
+                at.query_stack[qd].tables[i].old_tuplestore = Some(make()?);
+            }
+        }
+        if let Some(i) = ins_idx {
+            if need_new_ins && at.query_stack[qd].tables[i].new_tuplestore.is_none() {
+                at.query_stack[qd].tables[i].new_tuplestore = Some(make()?);
+            }
+        }
+
+        Ok::<_, types_error::PgError>((ins_idx, upd_idx, del_idx))
+    })?;
+
+    // Now build the TransitionCaptureState struct, in caller's context.
+    let state = types_nodes::modifytable::TransitionCaptureState {
+        tcs_delete_old_table: need_old_del,
+        tcs_update_old_table: need_old_upd,
+        tcs_update_new_table: need_new_upd,
+        tcs_insert_new_table: need_new_ins,
+        tcs_original_insert_tuple: None,
+        tcs_insert_private: ins_idx,
+        tcs_update_private: upd_idx,
+        tcs_delete_private: del_idx,
+    };
+    Ok(Some(mcx::PgBox::try_new_in(state, _mcx).map_err(|_| _mcx.oom(0))?))
 }
 
 fn has_noncloned_pk_fkey_trigger_impl<'mcx>(
@@ -3447,10 +3924,28 @@ fn cross_partition_update_unported() -> PgError {
 
 #[cold]
 #[inline(never)]
-fn transition_table_unported() -> PgError {
+#[cold]
+#[inline(never)]
+fn transition_table_read_unported() -> PgError {
     PgError::error(
-        "AfterTriggerExecute: transition-table (ats_table tuplestore) access is \
-         transition-capture substrate not ported"
+        "AfterTriggerExecute: an AFTER trigger reading a transition table (OLD/NEW \
+         TABLE) requires the QueryEnvironment / Ephemeral-Named-Relation read-back \
+         in the trigger function's language handler (plpgsql/SPI), which is not yet \
+         ported; the transition-tuplestore capture (MakeTransitionCaptureState + \
+         ExecAR*Triggers spooling) runs end-to-end"
+            .to_string(),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn child_to_root_transition_unported() -> PgError {
+    PgError::error(
+        "TransitionTableAddTuple: capturing a transition tuple from a child \
+         partition into the root-table format needs the child→root TupleConversionMap \
+         (ExecGetChildToRootMap) returned through its seam plus the per-table \
+         storeslot; that map-returning seam is not yet widened. The direct-trigger / \
+         root-table capture path runs end-to-end"
             .to_string(),
     )
 }

@@ -55,9 +55,23 @@ pub struct SharedRecord {
     pub ats_firing_id: CommandId,
     /// `Bitmapset *ats_modifiedcols` — modified columns, as a sorted member set.
     pub ats_modifiedcols: Option<Vec<i32>>,
-    /// `true` iff this event references transition-table state (the C
-    /// `ats_table != NULL`).  Firing-gated; never set by the reachable queue.
-    pub ats_has_table: bool,
+    /// `struct AfterTriggersTableData *ats_table` — transition-table access. In
+    /// the owned model the table-data lives in the after-trigger query level's
+    /// `tables` list, addressed by its `(query_depth, index)`; `None` when this
+    /// trigger doesn't use transition tables (C sets `ats_table = NULL`, both to
+    /// match the dedup `bms`/pointer compare and for sharability).
+    pub ats_table: Option<TableRef>,
+}
+
+/// Address of an [`AfterTriggersTableData`](TableData) within the after-trigger
+/// query stack: the query level (depth) and the index into that level's `tables`
+/// list. The owned-model analogue of the C `AfterTriggersTableData *` pointer.
+/// Transition tables are non-deferrable, so the referenced table-data outlives
+/// the event until `AfterTriggerEndQuery` at the same query depth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableRef {
+    pub query_depth: i32,
+    pub index: usize,
 }
 
 /// Owned replacement for the C `AfterTriggerEventList` chunk-arena.
@@ -122,7 +136,10 @@ pub enum CmdType {
 /// (saved events-list head/tail) is realized in the owned model as the saved
 /// *length* of the query level's events Vec at the point statement triggers were
 /// last queued — the insertion point `cancel_prior_stmt_triggers` rescans from.
-#[derive(Clone, Debug)]
+///
+/// Not `Clone`: it owns the transition-table tuplestores (a live store has no
+/// copy counterpart in C).
+#[derive(Debug)]
 pub struct TableData {
     /// `Oid relid` — the relation this table-data is for.
     pub relid: Oid,
@@ -139,6 +156,17 @@ pub struct TableData {
     /// `after_trig_events` head/tail). `cancel_prior_stmt_triggers` rescans from
     /// here to mark the prior statement's AS events DONE.
     pub after_trig_events_len: usize,
+    /// `Tuplestorestate *old_tuplestore` — "old" transition table for
+    /// UPDATE/DELETE, or `None`. Self-owned (`'static`) so it can live in the
+    /// thread-local; the C store lives in `CurTransactionContext` under the
+    /// (sub)transaction resource owner with the same end-of-query lifespan.
+    pub old_tuplestore: Option<types_nodes::Tuplestorestate<'static>>,
+    /// `Tuplestorestate *new_tuplestore` — "new" transition table for
+    /// INSERT/UPDATE, or `None`.
+    pub new_tuplestore: Option<types_nodes::Tuplestorestate<'static>>,
+    /// `TupleTableSlot *storeslot` — slot for converting a child-partition tuple
+    /// to the tuplestore's (root) format (`GetAfterTriggersStoreSlot`), or `None`.
+    pub storeslot: Option<types_nodes::SlotId>,
 }
 
 /// `AfterTriggersQueryData` (`commands/trigger.c`) — per-query-level data.
@@ -147,7 +175,7 @@ pub struct TableData {
 /// releases) is firing-substrate; the reachable queue never fills it, but
 /// `closed`-style teardown is a no-op `Drop` here.  `tables` holds the
 /// statement-trigger dedup state (`AfterTriggersTableData` list).
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct QueryLevel {
     /// `AfterTriggerEventList events` — events queued by this query level.
     pub events: EventList,
@@ -180,7 +208,11 @@ pub struct SavedAfterTriggerState {
 
 /// `AfterTriggersData` (`commands/trigger.c`) — per-transaction AFTER-trigger
 /// state, owned-tree.
-#[derive(Clone, Debug, Default)]
+///
+/// Not `Clone`/`Default`: it owns the transition-table tuplestores (a live
+/// `Tuplestorestate` has no copy semantics — the C never clones a store), and the
+/// thread-local is constructed explicitly.
+#[derive(Debug)]
 pub struct AfterTriggers {
     /// `CommandId firing_counter` — next firing-cycle ID (mustn't be 0).
     pub firing_counter: CommandId,
@@ -262,7 +294,7 @@ pub fn after_trigger_add_event(
         if newshared.ats_tgoid == evtshared.ats_tgoid
             && newshared.ats_event == evtshared.ats_event
             && newshared.ats_firing_id == 0
-            && newshared.ats_has_table == evtshared.ats_has_table
+            && newshared.ats_table == evtshared.ats_table
             && newshared.ats_relid == evtshared.ats_relid
             && newshared.ats_rolid == evtshared.ats_rolid
             && newshared.ats_modifiedcols == evtshared.ats_modifiedcols
@@ -306,7 +338,11 @@ pub fn after_trigger_add_event(
 /// entry (its transition tables already handed off) forces a fresh one so a new
 /// batch of statement triggers can be queued.  The transition-table fields are
 /// firing substrate and unused here.
-fn get_after_triggers_table_data(at: &mut AfterTriggers, relid: Oid, cmd_type: CmdType) -> usize {
+pub(crate) fn get_after_triggers_table_data(
+    at: &mut AfterTriggers,
+    relid: Oid,
+    cmd_type: CmdType,
+) -> usize {
     let qd = at.query_depth as usize;
     let tables = &at.query_stack[qd].tables;
     for (i, t) in tables.iter().enumerate() {
@@ -321,6 +357,9 @@ fn get_after_triggers_table_data(at: &mut AfterTriggers, relid: Oid, cmd_type: C
         before_trig_done: false,
         after_trig_done: false,
         after_trig_events_len: 0,
+        old_tuplestore: None,
+        new_tuplestore: None,
+        storeslot: None,
     });
     at.query_stack[qd].tables.len() - 1
 }

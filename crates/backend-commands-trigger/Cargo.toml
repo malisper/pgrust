@@ -89,3 +89,7 @@ backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-error = { path = "../backend-utils-error" }
+# Transition-table tuplestores (MakeTransitionCaptureState / TransitionTableAddTuple).
+backend-utils-sort-storage = { path = "../backend-utils-sort-storage" }
+# ExecGetChildToRootMap (TransitionTableAddTuple child→root conversion gate).
+backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }

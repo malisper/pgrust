@@ -465,6 +465,19 @@ pub struct TransitionCaptureState {
     pub tcs_insert_new_table: bool,
     /// `TupleTableSlot *tcs_original_insert_tuple`.
     pub tcs_original_insert_tuple: Option<SlotId>,
+    /// `struct AfterTriggersTableData *tcs_insert_private` — in the owned model,
+    /// the index of the per-(relation, INSERT) `AfterTriggersTableData` within
+    /// the current after-trigger query level's `tables` list (owned by trigger.c
+    /// via the `afterTriggers` thread-local); `None` if no INSERT table is needed.
+    /// Transition tables are non-deferrable and fire within the same query level,
+    /// so this index stays valid until `AfterTriggerEndQuery`.
+    pub tcs_insert_private: Option<usize>,
+    /// `struct AfterTriggersTableData *tcs_update_private` — index of the
+    /// per-(relation, UPDATE) table-data, or `None`.
+    pub tcs_update_private: Option<usize>,
+    /// `struct AfterTriggersTableData *tcs_delete_private` — index of the
+    /// per-(relation, DELETE) table-data, or `None`.
+    pub tcs_delete_private: Option<usize>,
 }
 
 /// `PartitionDispatchData` (executor/execPartition.c, private): per-partitioned-
