@@ -866,9 +866,12 @@ pub enum ExprEvalStepData<'mcx> {
         slow: bool,
         /// descriptor for resulting tuples
         tupdesc: Option<PgBox<'mcx, TupleDescData<'mcx>>>,
-        /// `JunkFilter *junkFilter` — parked (unported owner) until execJunk
-        /// lands; carried as an address.
-        junk_filter: usize,
+        /// `JunkFilter *junkFilter` — for a SubqueryScan/CteScan parent whose
+        /// subplan emits resjunk columns (GROUP BY / ORDER BY), the filter that
+        /// strips those columns from the whole-row result. `None` (C `NULL`)
+        /// otherwise. Built by `ExecInitWholeRowVar`, applied by
+        /// `ExecEvalWholeRowVar` via `ExecFilterJunk`.
+        junk_filter: Option<PgBox<'mcx, crate::execnodes::JunkFilter<'mcx>>>,
     },
     /// `assign_var` — for EEOP_ASSIGN_*_VAR.
     AssignVar {

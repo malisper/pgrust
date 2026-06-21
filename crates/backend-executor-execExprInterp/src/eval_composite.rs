@@ -830,7 +830,7 @@ pub fn ExecEvalWholeRowVar<'mcx>(
     // fields up front; the step is re-borrowed mutably below to update `first` /
     // `slow` / `tupdesc`.
     let steps = state.steps.as_ref().expect("eval_composite: steps not ready");
-    let (varno, varreturningtype, vartype, var_typmod, first, slow, junk_filter) =
+    let (varno, varreturningtype, vartype, var_typmod, first, slow, has_junk_filter) =
         match &steps[op].d {
             ExprEvalStepData::WholeRow {
                 var,
@@ -853,7 +853,7 @@ pub fn ExecEvalWholeRowVar<'mcx>(
                     var.vartypmod,
                     *first,
                     *slow,
-                    *junk_filter,
+                    junk_filter.is_some(),
                 )
             }
             other => unreachable!("ExecEvalWholeRowVar: step.d is not WholeRow: {other:?}"),
@@ -900,17 +900,22 @@ pub fn ExecEvalWholeRowVar<'mcx>(
     };
 
     // Apply the junkfilter if any.
-    //
-    // The junk filter is parked as an opaque address (the execJunk owner is not
-    // wired here); a non-zero value means a junk filter is present and the slot
-    // selection above would need rerouting through ExecFilterJunk. None of the
-    // wholerow paths the executor reaches today install one.
-    if junk_filter != 0 {
-        return Err(types_error::PgError::error(
-            "ExecEvalWholeRowVar: a junk filter is attached to this whole-row Var, \
-             but execJunk's ExecFilterJunk is not wired into this crate yet",
-        ));
-    }
+    //   if (op->d.wholerow.junkFilter != NULL)
+    //       slot = ExecFilterJunk(op->d.wholerow.junkFilter, slot);
+    // For a SubqueryScan whose subplan emits resjunk (ORDER BY/GROUP BY) columns,
+    // this strips them so the whole-row result has only the real output columns.
+    let slot_id = if has_junk_filter {
+        let steps = state.steps.as_ref().expect("eval_composite: steps not ready");
+        let jf = match &steps[op].d {
+            ExprEvalStepData::WholeRow { junk_filter, .. } => junk_filter
+                .as_ref()
+                .expect("ExecEvalWholeRowVar: junk_filter present (checked above)"),
+            _ => unreachable!(),
+        };
+        backend_executor_execJunk::ExecFilterJunk(estate, jf, slot_id)?
+    } else {
+        slot_id
+    };
 
     // If first time through, obtain the output tuple descriptor and check
     // compatibility, then bless it and cache it on the step.

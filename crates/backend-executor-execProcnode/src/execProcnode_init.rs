@@ -499,6 +499,15 @@ fn exec_init_node_finish<'mcx>(
     // recovers it from the qual/proj `parent`).
     stamp_agg_evaltrans_parents(&mut result);
 
+    // ExecInitWholeRowVar (execExpr.c) builds the EEOP_WHOLEROW junk filter from
+    // the SubqueryScan/CteScan subplan targetlist when that subplan emits resjunk
+    // (ORDER BY/GROUP BY) columns, so the whole-row result keeps only the real
+    // output columns. C does this during the per-expression compile because it
+    // has the address-stable `state->parent` there; in the owned tree the
+    // enclosing `PlanStateNode` enum is only stable here, so the deferred build
+    // is done now (mirrors `stamp_expr_parents`'s parent back-fill rationale).
+    exec_init_subqueryscan_wholerow_junk(mcx, &mut result, estate)?;
+
     // ExecSetExecProcNode(result, result->ExecProcNode);
     //
     // The owning `ExecInit*` routine has already stored the node's real
@@ -625,6 +634,135 @@ fn stamp_agg_evaltrans_parents<'mcx>(result: &mut PlanStateNode<'mcx>) {
             }
         }
     }
+}
+
+/// Deferred half of `ExecInitWholeRowVar` (execExpr.c): for a `SubqueryScan`
+/// (or `CteScan`) node whose subplan emits resjunk columns, build a `JunkFilter`
+/// from the subplan's targetlist and attach it to every `EEOP_WHOLEROW` step in
+/// the node's own projection and qual ExprStates. The C builds this inside the
+/// expression compile (it has `state->parent` there); the owned tree defers it
+/// to here, where the enclosing `PlanStateNode` enum is address-stable, so the
+/// subplan child and the node's compiled steps are both reachable.
+fn exec_init_subqueryscan_wholerow_junk<'mcx>(
+    mcx: Mcx<'mcx>,
+    result: &mut PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    use types_nodes::execexpr::{ExprEvalOp, ExprEvalStepData};
+
+    // C: switch (nodeTag(parent)) { case T_SubqueryScanState: subplan = ...->subplan;
+    //                               case T_CteScanState: subplan = ...->cteplanstate; }
+    // A CteScan's subplan lives only as the `ctePlanId` identity into
+    // es_subplanstates (no owned child node), so `subquery_subplan_state`
+    // yields the subplan PlanState only for a SubqueryScan — matching the C
+    // `default:` NULL for a CteScan parent here.
+    let Some(subplan) = result.subquery_subplan_state() else {
+        return Ok(());
+    };
+
+    // C: foreach(tlist, subplan->plan->targetlist) if (tle->resjunk) needed=true;
+    let Some(src_tlist) = subplan
+        .ps_head()
+        .plan
+        .and_then(|n| n.plan_head().targetlist.as_ref())
+    else {
+        return Ok(());
+    };
+    if !src_tlist.iter().any(|tle| tle.resjunk) {
+        return Ok(());
+    }
+
+    // The node's own ExprStates only carry an EEOP_WHOLEROW step if a whole-row
+    // Var over this subquery RTE was compiled into them. Detect that before
+    // building the (slot-allocating) junk filter, so we don't allocate for a
+    // SubqueryScan that has no whole-row reference.
+    let has_wholerow = {
+        let head = result.ps_head();
+        let in_state = |st: Option<&types_nodes::execexpr::ExprState<'mcx>>| {
+            st.and_then(|s| s.steps.as_ref())
+                .map(|steps| {
+                    steps
+                        .iter()
+                        .any(|s| s.opcode == ExprEvalOp::EEOP_WHOLEROW)
+                })
+                .unwrap_or(false)
+        };
+        in_state(head.ps_ProjInfo.as_ref().map(|p| &p.pi_state))
+            || in_state(head.qual.as_deref())
+    };
+    if !has_wholerow {
+        return Ok(());
+    }
+
+    // Snapshot the subplan targetlist (clone_in) so the &mut estate borrow used
+    // to build the filter below does not alias the borrowed subplan PlanState.
+    let mut src_tlist_snap = mcx::vec_with_capacity_in(mcx, src_tlist.len())?;
+    for tle in src_tlist.iter() {
+        src_tlist_snap.push(tle.clone_in(mcx)?);
+    }
+
+    // For every EEOP_WHOLEROW step that has no filter yet, build a fresh
+    // JunkFilter (one fresh virtual result slot apiece, exactly as a per-step C
+    // ExecInitWholeRowVar would) and attach it. C:
+    //   scratch->d.wholerow.junkFilter =
+    //       ExecInitJunkFilter(subplan->plan->targetlist,
+    //                          ExecInitExtraTupleSlot(..., &TTSOpsVirtual));
+    // ExecInitJunkFilter with slot=None allocates the equivalent virtual slot.
+    //
+    // Build the filters up front (needs &mut estate) into a queue, then drain the
+    // queue while installing (needs &mut result), avoiding overlapping borrows.
+    let n_wholerow = {
+        let head = result.ps_head();
+        let count = |st: Option<&types_nodes::execexpr::ExprState<'mcx>>| -> usize {
+            st.and_then(|s| s.steps.as_ref())
+                .map(|steps| {
+                    steps
+                        .iter()
+                        .filter(|s| {
+                            s.opcode == ExprEvalOp::EEOP_WHOLEROW
+                                && matches!(
+                                    &s.d,
+                                    ExprEvalStepData::WholeRow { junk_filter, .. }
+                                        if junk_filter.is_none()
+                                )
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        count(head.ps_ProjInfo.as_ref().map(|p| &p.pi_state))
+            + count(head.qual.as_deref())
+    };
+
+    let mut filters: Vec<PgBox<'mcx, types_nodes::execnodes::JunkFilter<'mcx>>> =
+        Vec::with_capacity(n_wholerow);
+    for _ in 0..n_wholerow {
+        let mut tlist = mcx::vec_with_capacity_in(mcx, src_tlist_snap.len())?;
+        for tle in src_tlist_snap.iter() {
+            tlist.push(tle.clone_in(mcx)?);
+        }
+        let jf = backend_executor_execJunk::ExecInitJunkFilter(estate, tlist, None)?;
+        filters.push(alloc_in(mcx, jf)?);
+    }
+
+    let head = result.ps_head_mut();
+    let mut filters = filters.into_iter();
+    let mut install = |st: Option<&mut types_nodes::execexpr::ExprState<'mcx>>| {
+        if let Some(steps) = st.and_then(|s| s.steps.as_mut()) {
+            for step in steps.iter_mut() {
+                if step.opcode == ExprEvalOp::EEOP_WHOLEROW {
+                    if let ExprEvalStepData::WholeRow { junk_filter, .. } = &mut step.d {
+                        if junk_filter.is_none() {
+                            *junk_filter = filters.next();
+                        }
+                    }
+                }
+            }
+        }
+    };
+    install(head.ps_ProjInfo.as_mut().map(|p| &mut p.pi_state));
+    install(head.qual.as_deref_mut());
+    Ok(())
 }
 
 fn unrecognized_node_type(node: &Node<'_>) -> PgError {

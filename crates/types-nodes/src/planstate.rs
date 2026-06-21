@@ -577,11 +577,16 @@ impl<'mcx> PlanStateNode<'mcx> {
         }
     }
 
-    /// `((SubqueryScanState *) node)->subplan` — the SubqueryScan's child plan
-    /// state (kept separately from `lefttree`). `None` until the
-    /// `SubqueryScanState` variant lands.
+    /// `((SubqueryScanState *) node)->subplan` (C: nodeTag==T_SubqueryScanState)
+    /// or `((CteScanState *) node)->cteplanstate` (C: nodeTag==T_CteScanState) —
+    /// the subquery/CTE sub-plan's `PlanState`, used by `ExecInitWholeRowVar` to
+    /// reach the subplan targetlist for resjunk detection. `CteScanState` carries
+    /// its sub-plan only as the 1-based `ctePlanId` identity into
+    /// `es_subplanstates` (no owned child node), so a CteScan parent yields the
+    /// C `default:` NULL outcome here; only a SubqueryScan exposes the child node.
     pub fn subquery_subplan_state(&self) -> Option<&PlanStateNode<'mcx>> {
         match self {
+            PlanStateNode::SubqueryScan(s) => s.subplan.as_deref(),
             _ => None,
         }
     }

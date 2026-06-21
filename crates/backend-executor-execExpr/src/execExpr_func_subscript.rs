@@ -894,7 +894,7 @@ pub(crate) fn exec_init_whole_row_var<'mcx>(
         first: true,
         slow: false,
         tupdesc: None,
-        junk_filter: 0,
+        junk_filter: None,
     };
 
     // C: if (variable->varreturningtype == VAR_RETURNING_OLD)
@@ -935,42 +935,19 @@ pub(crate) fn exec_init_whole_row_var<'mcx>(
     // accessor and returns `None` for every current variant), so the owned model
     // can faithfully realize the `default:` arm for every parent that can reach
     // here: `subplan` is `None`, and the junk-filter block is correctly skipped.
-    if let Some(parent) = state.parent.map(|l| l.get()) {
-        use types_nodes::nodes::T_SubqueryScanState;
-
-        let subplan = match parent.tag() {
-            // C: case T_SubqueryScanState: subplan = ...->subplan;
-            //    case T_CteScanState: subplan = ...->cteplanstate;
-            // Reached via the modeled SubqueryScan/CteScan child-plan accessor.
-            // `CteScanState` has no node tag landed yet; a CteScan parent cannot
-            // exist as a `PlanStateNode` variant, so only the SubqueryScan tag is
-            // matchable today (both share the `default: break` -> NULL outcome
-            // until their variants land).
-            t if t == T_SubqueryScanState => parent.subquery_subplan_state(),
-            // C: default: break; — subplan stays NULL.
-            _ => None,
-        };
-
-        if let Some(subplan) = subplan {
-            // C: foreach(tlist, subplan->plan->targetlist)
-            //        if (tle->resjunk) { junk_filter_needed = true; break; }
-            //    if (junk_filter_needed)
-            //        scratch->d.wholerow.junkFilter = ExecInitJunkFilter(...);
-            //
-            // The subplan-targetlist resjunk scan plus ExecInitJunkFilter /
-            // ExecInitExtraTupleSlot (execJunk / execTuples owners) build the
-            // JunkFilter the step parks; route loudly only when a real
-            // SubqueryScan/CteScan parent is threaded (impossible today — neither
-            // variant has landed, so this arm is unreachable for current parents).
-            let _ = subplan;
-            panic!(
-                "execExpr-func-subscript: ExecInitWholeRowVar — a SubqueryScan/CteScan parent \
-                 needs the subplan-targetlist resjunk scan + ExecInitJunkFilter / \
-                 ExecInitExtraTupleSlot (execJunk / execTuples owner seams) to build the \
-                 whole-row JunkFilter"
-            );
-        }
-    }
+    // C: if (parent) { switch (nodeTag(parent)) { case T_SubqueryScanState / ... }
+    //        ... build scratch->d.wholerow.junkFilter from the subplan targetlist }
+    //
+    // In the owned tree the enclosing `PlanStateNode` enum is only address-stable
+    // *after* the node is boxed, so `state.parent` is still unset at this compile
+    // point (it is back-filled by `stamp_expr_parents`). The C reads `parent`
+    // here only to reach the SubqueryScan/CteScan subplan targetlist and build a
+    // JunkFilter to strip the subquery's resjunk (ORDER BY/GROUP BY) columns out
+    // of the whole-row result — work that has no address dependency. It is done
+    // once the node's enum is stable, in `exec_init_subqueryscan_wholerow_junk`
+    // (execProcnode_init's `exec_init_node_finish`), which installs the filter
+    // onto this very EEOP_WHOLEROW step. `junk_filter` is left `None` here.
+    let _ = mcx;
 
     Ok(())
 }

@@ -50,6 +50,9 @@ backend-executor-nodeBitmapAnd = { path = "../backend-executor-nodeBitmapAnd" }
 backend-executor-nodeIndexscan = { path = "../backend-executor-nodeIndexscan" }
 backend-executor-nodeBitmapIndexscan = { path = "../backend-executor-nodeBitmapIndexscan" }
 backend-executor-nodeSubqueryscan = { path = "../backend-executor-nodeSubqueryscan" }
+# ExecInitJunkFilter — strips a SubqueryScan subplan's resjunk columns out of a
+# whole-row Var result (deferred ExecInitWholeRowVar junk-filter build).
+backend-executor-execJunk = { path = "../backend-executor-execJunk" }
 backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" }
 backend-executor-nodeCtescan = { path = "../backend-executor-nodeCtescan" }
 backend-executor-nodeNamedtuplestorescan = { path = "../backend-executor-nodeNamedtuplestorescan" }
