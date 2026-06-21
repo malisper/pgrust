@@ -1364,7 +1364,16 @@ pub fn ExplainNode<'es, 'p>(
         .map(|v| !v.is_empty())
         .unwrap_or(false)
         || head.initPlan.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
-    let has_sub = head.subPlan.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+    // Owned model: expression SubPlans of this node are recorded as 1-based
+    // `plan_id`s on `head.sub_plan_ids` (the split of C's `PlanState.subPlan`);
+    // the display-only `SubPlanState` for each lives in `EState.es_initplan`
+    // (keyed by plan_id) and its child plan-state tree in `es_subplanstates`.
+    let has_sub = head
+        .sub_plan_ids
+        .as_ref()
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+        || head.subPlan.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
     let has_outer = planstate.outer_plan_state().is_some();
     let has_inner = head.righttree.is_some();
     // Member-node children: Append/MergeAppend appendplans/mergeplans,
@@ -1443,9 +1452,14 @@ pub fn ExplainNode<'es, 'p>(
         }
     }
 
-    // subPlan-s.
+    // subPlan-s. Owned model: resolve each expression SubPlan's display-only
+    // `SubPlanState` from `EState.es_initplan` by the `plan_id`s recorded on
+    // `head.sub_plan_ids` (mirroring the InitPlan path above). The fallback to
+    // `head.subPlan` covers any direct-list case.
     if has_sub {
-        if let Some(subplans) = head.subPlan.as_ref() {
+        if let Some(ids) = head.sub_plan_ids.as_ref() {
+            ExplainSubPlansByInitPlanIds(es, mcx, ids, &child_ancestors, "SubPlan")?;
+        } else if let Some(subplans) = head.subPlan.as_ref() {
             ExplainSubPlans(es, mcx, subplans, &child_ancestors, "SubPlan")?;
         }
     }
