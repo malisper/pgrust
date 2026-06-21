@@ -1272,9 +1272,13 @@ mod install {
             }
         });
 
-        // -------- timestamp.c (unported: todo) --------
-        own::interval_in_for_timezone::set(|_val| {
-            panic!("interval_in (timestamp.c) not yet ported")
+        // -------- timestamp.c interval_in — delegate --------
+        own::interval_in_for_timezone::set(|val| {
+            // DirectFunctionCall3(interval_in, val, InvalidOid, -1): parse the
+            // string as an `interval` with no typmod restriction. An invalid
+            // format ereport(ERROR)s, surfaced here as the propagated PgError.
+            let interval = backend_utils_adt_datetime::interval::interval_in(&val, -1)?;
+            Ok((interval.month, interval.day, interval.time))
         });
 
         // -------- pgtz.c / localtime.c / state-pgtz (ported) — delegate --------
