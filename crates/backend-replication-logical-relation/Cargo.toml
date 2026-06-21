@@ -39,5 +39,5 @@ backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-s
 backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-seams" }
 backend-access-index-amapi-seams = { path = "../backend-access-index-amapi-seams" }
 backend-utils-cache-inval-seams = { path = "../backend-utils-cache-inval-seams" }
-backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 backend-replication-logical-worker-seams = { path = "../backend-replication-logical-worker-seams" }

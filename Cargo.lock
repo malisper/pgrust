@@ -568,6 +568,7 @@ dependencies = [
  "backend-access-common-session-seams",
  "mcx",
  "types-error",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -578,6 +579,7 @@ dependencies = [
  "mcx",
  "seam-core",
  "types-error",
+ "types-storage",
  "types-tuple",
 ]
 
@@ -3208,9 +3210,15 @@ dependencies = [
 name = "backend-access-transam-parallel"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-session-seams",
  "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-parallel-seams",
  "backend-access-transam-xact-seams",
+ "backend-catalog-namespace-seams",
+ "backend-commands-matview-deps-seams",
+ "backend-commands-user-seams",
+ "backend-commands-vacuum-seams",
+ "backend-commands-variable-seams",
  "backend-executor-execParallel-support-seams",
  "backend-executor-instrument",
  "backend-optimizer-plan-planner-seams",
@@ -3221,6 +3229,7 @@ dependencies = [
  "backend-storage-ipc-shm-mq-seams",
  "backend-storage-ipc-shm-toc",
  "backend-storage-lmgr-lwlock",
+ "backend-storage-lmgr-predicate-seams",
  "backend-storage-lmgr-proc-seams",
  "backend-storage-lmgr-s-lock",
  "backend-tcop-postgres-seams",
@@ -15840,7 +15849,6 @@ dependencies = [
  "backend-access-index-amapi-seams",
  "backend-access-index-indexam",
  "backend-access-table-table",
- "backend-access-transam-parallel-rt-seams",
  "backend-catalog-namespace-seams",
  "backend-catalog-pg-subscription-seams",
  "backend-nodes-core",
@@ -15851,6 +15859,7 @@ dependencies = [
  "backend-utils-cache-relcache",
  "backend-utils-cache-syscache-seams",
  "backend-utils-cache-typcache-seams",
+ "backend-utils-mmgr-mcxt-seams",
  "mcx",
  "seam-core",
  "types-cache",

@@ -8,6 +8,7 @@
 
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
+use types_storage::storage::dsm_handle;
 use types_tuple::heaptuple::TupleDescData;
 
 seam_core::seam!(
@@ -66,4 +67,14 @@ seam_core::seam!(
     /// state (the per-session DSM/typmod registry). `Err` carries its
     /// `ereport` surface.
     pub fn initialize_session() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `GetSessionDsmHandle()` (session.c:70): initialize the per-session DSM
+    /// segment if not already done, and return its handle so worker processes
+    /// can attach. Returns `DSM_HANDLE_INVALID` if a segment can't be allocated
+    /// due to lack of resources — a sanctioned outcome that makes the parallel
+    /// leader fall back to a leader-only, no-worker run. `Err` carries the
+    /// `ereport` surface of the allocation/registry-init path.
+    pub fn get_session_dsm_handle() -> PgResult<dsm_handle>
 );

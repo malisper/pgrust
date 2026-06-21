@@ -64,7 +64,7 @@ use backend_utils_cache_syscache_seams as syscache_sx;
 use backend_utils_cache_typcache_seams as typcache_sx;
 use backend_access_index_amapi_seams as amapi_sx;
 use backend_utils_cache_inval_seams as inval_sx;
-use backend_access_transam_parallel_rt_seams as cachectx_sx;
+use backend_utils_mmgr_mcxt_seams as cachectx_sx;
 use backend_replication_logical_worker_seams as worker_sx;
 
 // ---------------------------------------------------------------------------

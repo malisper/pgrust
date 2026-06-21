@@ -108,6 +108,10 @@ pub fn init_seams() {
             .install(check_serial_buffers_hook);
     }
 
+    // `ShareSerializableXact()` returns the `SERIALIZABLEXACT *` handle; the
+    // seam carries it as the raw machine word (NULL == 0 == invalid handle).
+    seams::share_serializable_xact::set(|| engine::ShareSerializableXact() as usize);
+
     seams::predicate_lock_page::set(|relation, blkno, snapshot| {
         // The page-lock seam carries a real Relation; read its fields directly.
         let (db, rd_id, ult) = relation_fields_from_handle(&relation)?;

@@ -59,6 +59,7 @@ use std::cell::RefCell;
 
 use mcx::{Mcx, MemoryContext, PgBox};
 use types_error::PgResult;
+use types_storage::storage::{dsm_handle, DSM_HANDLE_INVALID};
 use types_tuple::heaptuple::TupleDescData;
 
 /// `dshash_table *` — the opaque backend-local handle to a shared hash table.
@@ -164,6 +165,37 @@ fn initialize_session() -> PgResult<()> {
     Ok(())
 }
 
+/// `GetSessionDsmHandle(void)` (session.c:70).
+///
+/// Initialize the per-session DSM segment if it isn't already initialized, and
+/// return its handle so that worker processes can attach to it. The segment is
+/// reused for the rest of this backend's lifetime.
+///
+/// C's contract (session.c:66-67): "Return `DSM_HANDLE_INVALID` if a segment
+/// can't be allocated due to lack of resources." When INVALID is returned, the
+/// parallel leader (`InitializeParallelDSM`) sets `nworkers = 0` and runs the
+/// whole operation itself in backend-private memory — the leader-only path.
+///
+/// In a single backend `CurrentSession->segment` is always NULL (no segment was
+/// ever created), so the early-return is never taken. Setting up a working
+/// segment requires populating it with a `SharedRecordTypmodRegistry` whose
+/// record/typmod tables are dshash tables keyed by caller-supplied
+/// compare/hash callbacks over the session DSA area — the keystone-blocked path
+/// documented in `SharedRecordTypmodRegistryInit` / `shared_registry_init`
+/// (the dshash substrate has no custom-callback key kind yet). Because that
+/// state cannot be constructed, no usable session segment can be created here:
+/// the faithful outcome is C's sanctioned "lack of resources" return,
+/// `DSM_HANDLE_INVALID`, which the leader handles by falling back to a
+/// leader-only run. When the dshash custom-callback keystone lands, this body
+/// gains the real `dsm_create` + `SharedRecordTypmodRegistryInit` segment-setup
+/// leg (session.c:90-148) and starts returning a live handle.
+fn get_session_dsm_handle() -> PgResult<dsm_handle> {
+    // CurrentSession->segment is always NULL in a single backend; the segment
+    // setup leg (which requires the keystone-blocked shared typmod registry)
+    // can't produce a usable segment, so report lack of resources.
+    Ok(DSM_HANDLE_INVALID)
+}
+
 /// `SharedRecordTypmodRegistryEstimate(void)` (typcache.c:2174).
 ///
 /// `return sizeof(SharedRecordTypmodRegistry);`
@@ -225,6 +257,7 @@ fn find_or_make_matching_shared_tupledesc<'mcx>(
 /// their loud default-panic rather than a silent stub.
 pub fn init_seams() {
     backend_access_common_session_seams::initialize_session::set(initialize_session);
+    backend_access_common_session_seams::get_session_dsm_handle::set(get_session_dsm_handle);
     backend_access_common_session_seams::shared_registry_estimate::set(shared_registry_estimate);
     backend_access_common_session_seams::shared_registry_attached::set(shared_registry_attached);
     backend_access_common_session_seams::find_or_make_matching_shared_tupledesc::set(

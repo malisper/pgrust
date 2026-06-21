@@ -954,7 +954,7 @@ fn establish_parallel_segment(
 ) -> PgResult<()> {
     // dsm_create allocates its descriptor in TopMemoryContext (the C global);
     // the descriptor outlives this (possibly short-lived) caller context.
-    let top = rt::top_memory_context::call();
+    let top = backend_utils_mmgr_mcxt_seams::top_memory_context::call();
 
     let seg: Option<DsmSegment> = if pcxt_nworkers(pcxt) > 0 {
         dsm_create(segsize, DSM_CREATE_NULL_IF_MAXSEGMENTS, top)?
@@ -1012,6 +1012,42 @@ fn establish_parallel_segment(
     Ok(())
 }
 
+/// Collect the leader's session state for the DSM `FixedParallelState`
+/// (`InitializeParallelDSM`, parallel.c:343-358). Every field a worker restores
+/// in `ParallelWorkerMain` (`RestoreFixedParallelState`'s reads) is gathered
+/// here off the leader's backend globals, each through its owning subsystem's
+/// accessor seam. `parallel_leader_pgproc` is a process-local pointer with no
+/// cross-process meaning in this repo, so it stays 0 (parallel.c uses
+/// `MyProc`); the leader's identity travels in `parallel_leader_proc_number`.
+/// `last_xlog_end` and the spinlock are initialized by `fps_init`, not here.
+fn collect_fixed_parallel_state() -> PgResult<FixedParallelState> {
+    let (current_user_id, sec_context) =
+        backend_commands_matview_deps_seams::get_user_id_and_sec_context::call()?;
+    let (temp_namespace_id, temp_toast_namespace_id) =
+        backend_catalog_namespace_seams::get_temp_namespace_state::call();
+    Ok(FixedParallelState {
+        database_id: backend_utils_init_small_seams::my_database_id::call(),
+        authenticated_user_id: backend_commands_variable_seams::get_authenticated_user_id::call(),
+        session_user_id: backend_commands_user_seams::get_session_user_id::call()?,
+        outer_user_id: backend_commands_variable_seams::get_current_role_id::call(),
+        current_user_id,
+        temp_namespace_id,
+        temp_toast_namespace_id,
+        sec_context,
+        session_user_is_superuser:
+            backend_commands_variable_seams::get_session_user_is_superuser::call(),
+        role_is_superuser: backend_commands_variable_seams::current_role_is_superuser::call(),
+        parallel_leader_pgproc: 0,
+        parallel_leader_pid: backend_utils_init_small_seams::my_proc_pid::call(),
+        parallel_leader_proc_number: backend_storage_lmgr_proc_seams::my_proc_number::call(),
+        xact_ts: backend_access_transam_xact_seams::get_current_transaction_start_timestamp::call(),
+        stmt_ts: backend_access_transam_xact_seams::get_current_statement_start_timestamp::call(),
+        serializable_xact_handle:
+            backend_storage_lmgr_predicate_seams::share_serializable_xact::call(),
+        last_xlog_end: 0,
+    })
+}
+
 /// Establish the dynamic shared memory segment for a parallel context and copy
 /// state needed by parallel workers into it.
 pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle) -> PgResult<()> {
@@ -1048,7 +1084,7 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
 
     // Normally the user requested at least one worker.
     if pcxt_nworkers(pcxt) > 0 {
-        session_dsm_handle = rt::get_session_dsm_handle::call()?;
+        session_dsm_handle = backend_access_common_session_seams::get_session_dsm_handle::call()?;
         if session_dsm_handle == DSM_HANDLE_INVALID {
             with_globals(|g| g.get_mut(pcxt).nworkers = 0);
         }
@@ -1109,7 +1145,7 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
     // Initialize fixed-size state in shared memory.
     let fps = shm_toc_allocate(toc, core::mem::size_of::<FixedParallelState>());
     {
-        let init = rt::collect_fixed_parallel_state::call()?;
+        let init = collect_fixed_parallel_state()?;
         rt::fps_init::call(fps.0, init)?;
     }
     shm_toc_insert(toc, PARALLEL_KEY_FIXED, fps);
@@ -1662,7 +1698,7 @@ pub fn destroy_parallel_context(pcxt: ParallelContextHandle) -> PgResult<()> {
         c.private_memory.take()
     });
     if let Some(pm) = private_memory {
-        let top = rt::top_memory_context::call();
+        let top = backend_utils_mmgr_mcxt_seams::top_memory_context::call();
         // SAFETY: `pm.ptr`/`pm.layout` are exactly the allocation made from this
         // same TopMemoryContext in `establish_parallel_segment`, freed once.
         unsafe { top.deallocate(pm.ptr, pm.layout) };
@@ -2106,7 +2142,7 @@ pub fn parallel_worker_main(main_arg: Datum<'static>) -> PgResult<()> {
 /// The descriptor is allocated in `TopMemoryContext` (C global), matching the
 /// leader's `dsm_create` so the mapping outlives the (short-lived) caller.
 fn worker_attach_segment(handle: dsm_handle) -> PgResult<Option<DsmSegment>> {
-    let top = rt::top_memory_context::call();
+    let top = backend_utils_mmgr_mcxt_seams::top_memory_context::call();
     backend_storage_ipc_dsm_core::dsm::dsm_attach(handle, top)
 }
 
@@ -2215,6 +2251,12 @@ pub fn init_seams() {
     // `glob->parallelModeOK`; expose this crate's `is_parallel_worker()` to the
     // planner through the planner seam (avoids a planner→parallel-executor dep).
     backend_optimizer_plan_planner_seams::is_parallel_worker::set(is_parallel_worker);
+
+    // `IsParallelWorker()` (access/parallel.h) is also read by parallel_vacuum.c
+    // (`parallel_vacuum_*` assert `!IsParallelWorker()` on the leader) and by
+    // vacuum.c's cost-delay accounting. `ParallelWorkerNumber` is this crate's
+    // per-backend state, so install the vacuum-seams slot from here too.
+    backend_commands_vacuum_seams::is_parallel_worker::set(|| Ok(is_parallel_worker()));
 }
 
 /// Install the `MemoryContextSwitchTo(TopTransactionContext)` / restore pair
@@ -2411,7 +2453,8 @@ mod dsm_substrate_tests {
     /// Install the `top_memory_context` seam once for the whole test process
     /// (seam slots are process-global; a second `set` panics "installed twice").
     fn install_top_mcx_once() {
-        INSTALL_TOP_MCX.call_once(|| rt::top_memory_context::set(test_top_mcx));
+        INSTALL_TOP_MCX
+            .call_once(|| backend_utils_mmgr_mcxt_seams::top_memory_context::set(test_top_mcx));
     }
 
     /// Push a bare context into the registry directly (the seam-driven
@@ -2915,8 +2958,8 @@ mod dsm_substrate_tests {
             backend_storage_ipc_shm_mq::init_seams();
 
             // shm_mq allocates the handle + on_dsm_detach record in the
-            // TopMemoryContext; reuse the bring-up's thread-local stand-in.
-            backend_utils_mmgr_mcxt_seams::top_memory_context::set(test_top_mcx);
+            // TopMemoryContext; the bring-up's thread-local stand-in is installed
+            // by `install_top_mcx_once`, which every caller of this also calls.
 
             // Process-latch machinery (single-process cooperating stand-ins).
             backend_storage_lmgr_proc_seams::proc_latch::set(|procno| {

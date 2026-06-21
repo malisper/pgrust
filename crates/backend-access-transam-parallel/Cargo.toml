@@ -32,6 +32,15 @@ backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-ipc-shm-mq-seams = { path = "../backend-storage-ipc-shm-mq-seams" }
 backend-access-transam-parallel-seams = { path = "../backend-access-transam-parallel-seams" }
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
+backend-access-common-session-seams = { path = "../backend-access-common-session-seams" }
+backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
+backend-commands-matview-deps-seams = { path = "../backend-commands-matview-deps-seams" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
+backend-commands-variable-seams = { path = "../backend-commands-variable-seams" }
+backend-commands-user-seams = { path = "../backend-commands-user-seams" }
+backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-commands-vacuum-seams = { path = "../backend-commands-vacuum-seams" }
 backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
 backend-executor-instrument = { path = "../backend-executor-instrument" }
 
@@ -41,8 +50,6 @@ backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-utils-mmgr-freepage = { path = "../backend-utils-mmgr-freepage" }
 backend-storage-ipc-shm-mq = { path = "../backend-storage-ipc-shm-mq" }
 backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
-backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-postmaster-bgworker-seams = { path = "../backend-postmaster-bgworker-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
-backend-utils-mmgr-mcxt-seams = { path = "../backend-utils-mmgr-mcxt-seams" }
 types-storage = { path = "../types-storage" }

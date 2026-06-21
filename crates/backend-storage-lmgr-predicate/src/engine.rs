@@ -108,6 +108,7 @@ fn MySerializableXact() -> *mut SERIALIZABLEXACT {
 fn set_MySerializableXact(v: *mut SERIALIZABLEXACT) {
     MY_SERIALIZABLE_XACT.with(|c| c.set(v));
 }
+
 #[inline]
 fn MyXactDidWrite() -> bool {
     MY_XACT_DID_WRITE.with(|c| c.get())

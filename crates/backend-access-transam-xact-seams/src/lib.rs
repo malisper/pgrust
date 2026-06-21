@@ -23,6 +23,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `GetCurrentTransactionStartTimestamp()` (xact.c:870): the timestamp the
+    /// current transaction started. Pure read of backend-local transaction
+    /// state.
+    pub fn get_current_transaction_start_timestamp() -> types_core::TimestampTz
+);
+
+seam_core::seam!(
     /// `GetCurrentTransactionStopTimestamp()` (xact.c:891): the timestamp the
     /// current transaction stopped, setting it to the current time on first
     /// call if still unset. Read by `pgstat_relation_flush_cb` to stamp the

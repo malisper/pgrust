@@ -3,6 +3,15 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 seam_core::seam!(
+    /// `ShareSerializableXact(void)` (predicate.c:5046): return
+    /// `MySerializableXact`, the backend's `SERIALIZABLEXACT *` handle, so a
+    /// parallel leader can share it with its workers. Carried as the raw machine
+    /// word (`usize`); `InvalidSerializableXact` (NULL) is `0`, the value outside
+    /// a serializable transaction. Pure read of backend-local predicate state.
+    pub fn share_serializable_xact() -> usize
+);
+
+seam_core::seam!(
     /// `PredicateLockPage(relation, blkno, snapshot)` (predicate.c): acquire a
     /// page-level predicate (SIREAD) lock, as an index-only scan must when it
     /// returns a tuple without visiting the heap. The snapshot is the

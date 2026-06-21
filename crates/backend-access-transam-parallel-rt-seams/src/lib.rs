@@ -30,14 +30,13 @@ use types_parallel::{
 // --- memory contexts (utils/mmgr) ------------------------------------------
 seam_core::seam!(pub fn switch_to_top_transaction_context() -> PgResult<usize>);
 seam_core::seam!(pub fn memory_context_switch_back(saved: usize) -> PgResult<()>);
-/// `TopMemoryContext` (`utils/mmgr/mcxt.c`) — the long-lived backend context
-/// the DSM descriptors that `dsm_create`/`dsm_attach` allocate must live in
-/// (C: the global `TopMemoryContext`; those allocations need `'static`
-/// lifetime, longer than any caller's short-lived `Mcx`).
-seam_core::seam!(pub fn top_memory_context() -> mcx::Mcx<'static>);
-// NOTE: the retired `top_memory_context_alloc(size) -> usize` seam is gone; the
-// no-worker fallback now allocates its private buffer directly in
-// `top_memory_context()` (family `dsm-substrate-convert`).
+// NOTE: `top_memory_context()` is no longer declared here — its real owner
+// (`utils/mmgr/mcxt.c`, installed by `backend-utils-mmgr-portalmem` into
+// `backend-utils-mmgr-mcxt-seams`) supplies the long-lived `Mcx<'static>` the
+// DSM descriptors need; the parallel crate calls that seam directly. The
+// retired `top_memory_context_alloc(size) -> usize` seam is also gone; the
+// no-worker fallback allocates its private buffer directly in that context
+// (family `dsm-substrate-convert`).
 seam_core::seam!(pub fn pfree(ptr: usize) -> PgResult<()>);
 seam_core::seam!(pub fn enter_hpm_context() -> PgResult<usize>);
 seam_core::seam!(pub fn leave_hpm_context(saved: usize) -> PgResult<()>);
@@ -55,7 +54,10 @@ seam_core::seam!(pub fn resume_interrupts() -> PgResult<()>);
 seam_core::seam!(pub fn set_interrupt_pending() -> PgResult<()>);
 
 // --- DSM (storage/ipc/dsm.c) ------------------------------------------------
-seam_core::seam!(pub fn get_session_dsm_handle() -> PgResult<dsm_handle>);
+// NOTE: `GetSessionDsmHandle` is no longer declared here — its owner
+// (`access/common/session.c`, the `backend-access-common-session` crate) has
+// landed and reclaimed the decl into `backend-access-common-session-seams`,
+// where it installs the real body (family `session-dsm`).
 // NOTE: `dsm_create` for the leader's segment is no longer a seam — the merged
 // `dsm-core` `dsm_create` is called directly (family `dsm-substrate-convert`).
 // `top_memory_context()` (above) supplies the `Mcx<'static>` its descriptor
@@ -136,7 +138,10 @@ seam_core::seam!(pub fn fps_read(base: usize) -> PgResult<FixedParallelState>);
 seam_core::seam!(pub fn fps_reset_last_xlog_end(base: usize) -> PgResult<()>);
 seam_core::seam!(pub fn fps_get_last_xlog_end(base: usize) -> PgResult<XLogRecPtr>);
 seam_core::seam!(pub fn fps_report_last_rec_end(base: usize, last_xlog_end: XLogRecPtr) -> PgResult<()>);
-seam_core::seam!(pub fn collect_fixed_parallel_state() -> PgResult<FixedParallelState>);
+// NOTE: `collect_fixed_parallel_state` is no longer a seam — it is the leader
+// side of `InitializeParallelDSM` (parallel.c), owned by the parallel crate
+// itself, which reads each session global through its owning subsystem's
+// accessor seam directly. A crate does not seam-call its own logic.
 
 // --- state estimate/serialize/restore (the dozen serializers) --------------
 seam_core::seam!(pub fn estimate_library_state_space() -> PgResult<Size>);

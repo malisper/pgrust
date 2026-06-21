@@ -242,6 +242,7 @@ pub fn init_seams() {
         crate::SetTempNamespaceState(ns, toast_ns);
         Ok(())
     });
+    backend_catalog_namespace_seams::get_temp_namespace_state::set(crate::GetTempNamespaceState);
 
     // `search_path` GUC check/assign hooks (namespace.c). Installed here so
     // set_config_option("search_path", ...) — e.g. RestrictSearchPath during

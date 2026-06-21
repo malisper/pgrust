@@ -421,3 +421,12 @@ seam_core::seam!(
     /// on `Err`.
     pub fn check_set_namespace(old_nsp_oid: Oid, nsp_oid: Oid) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `GetTempNamespaceState(&tempNamespaceId, &tempToastNamespaceId)`
+    /// (catalog/namespace.c): returns `(myTempNamespace, myTempToastNamespace)`
+    /// — the session's temp namespace OIDs, or `(0, 0)` if none was created.
+    /// Pure read of backend-local namespace state. Consumed by the parallel
+    /// leader's `InitializeParallelDSM` fixed-state collection.
+    pub fn get_temp_namespace_state() -> (Oid, Oid)
+);
