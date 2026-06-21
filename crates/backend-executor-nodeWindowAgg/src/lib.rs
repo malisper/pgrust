@@ -900,7 +900,16 @@ fn eval_windowfunction<'mcx>(
     // we dispatch straight to the ported body (each returns `(Datum, isnull)`,
     // mirroring `*result` / `fcinfo->isnull`). The leadlag family is folded onto
     // `leadlag_common` exactly as C's six `window_lag*`/`window_lead*` thunks do.
-    let (result, isnull): (Datum<'mcx>, bool) = match winfnoid {
+    //
+    // C resolves `wfunc->winfnoid` through `fmgr_info`, which for a
+    // `LANGUAGE internal` function maps `prosrc` to the actual C entry point —
+    // so a *user-defined* window function (`CREATE FUNCTION ... LANGUAGE internal
+    // AS 'window_nth_value'`, OID != 3100-3114) still reaches the same body as
+    // the built-in. We mirror that: resolve `winfnoid` to its canonical built-in
+    // window-function OID via `prosrc` before dispatching. The built-in OIDs
+    // resolve to themselves (their own `prosrc` names the matching entry).
+    let builtin_oid = resolve_window_builtin_oid(estate.es_query_cxt, winfnoid)?;
+    let (result, isnull): (Datum<'mcx>, bool) = match builtin_oid {
         // window_row_number (windowfuncs.c): increment up from 1.
         3100 => (Datum::from_i64(window_row_number(winstate, perfuncno, estate)?), false),
         // window_rank (windowfuncs.c).
@@ -953,6 +962,63 @@ fn eval_windowfunction<'mcx>(
     }
 
     Ok((result, isnull))
+}
+
+/// Resolve a window function's `winfnoid` to the canonical built-in
+/// `windowfuncs.c` OID that names the body to run (3100-3114).
+///
+/// C's `fmgr_info(wfunc->winfnoid, ...)` resolves a `LANGUAGE internal` function
+/// through its `prosrc` to the actual C entry point, so a user-defined window
+/// function created as `CREATE FUNCTION foo(...) LANGUAGE internal AS
+/// 'window_nth_value'` runs the very same body as the built-in `nth_value`
+/// (OID 3114). The owned port dispatches window functions by OID directly out of
+/// `eval_windowfunction` (the bodies need executor state the bare fmgr frame
+/// cannot thread), so we must perform the same `prosrc` resolution here: read the
+/// function's `prosrc` from `pg_proc` and map the internal name back to the
+/// canonical built-in OID. A built-in (3100-3114) resolves to itself (`prosrc`
+/// names its own entry); any other OID is resolved via its `prosrc` text.
+fn resolve_window_builtin_oid<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    winfnoid: types_core::Oid,
+) -> PgResult<types_core::Oid> {
+    // Fast path: the canonical built-in OIDs dispatch to themselves.
+    if (3100..=3114).contains(&winfnoid) {
+        return Ok(winfnoid);
+    }
+
+    // Otherwise read prosrc and map the internal entry name to its built-in OID.
+    // C: fmgr_lookupByName(prosrc) -> fbp->foid (fmgr_internal_function).
+    let row = backend_utils_cache_syscache_seams::proc_compile_row::call(mcx, winfnoid)?
+        .ok_or_else(|| {
+            PgResult::<()>::Err(types_error::PgError::error(format!(
+                "cache lookup failed for function {winfnoid}"
+            )))
+            .unwrap_err()
+        })?;
+    let prosrc = row.prosrc.as_str();
+    let foid = match prosrc {
+        "window_row_number" => 3100,
+        "window_rank" => 3101,
+        "window_dense_rank" => 3102,
+        "window_percent_rank" => 3103,
+        "window_cume_dist" => 3104,
+        "window_ntile" => 3105,
+        "window_lag" => 3106,
+        "window_lag_with_offset" => 3107,
+        "window_lag_with_offset_and_default" => 3108,
+        "window_lead" => 3109,
+        "window_lead_with_offset" => 3110,
+        "window_lead_with_offset_and_default" => 3111,
+        "window_first_value" => 3112,
+        "window_last_value" => 3113,
+        "window_nth_value" => 3114,
+        other => {
+            return Err(types_error::PgError::error(format!(
+                "there is no built-in window function named \"{other}\""
+            )));
+        }
+    };
+    Ok(foid)
 }
 
 /// `window_row_number(fcinfo)` (windowfuncs.c) — just increment up from 1 until

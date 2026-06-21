@@ -10,13 +10,20 @@
 //! the `fmgr_isbuiltin` fast path) resolves them. OIDs / nargs / strict /
 //! retset are transcribed exactly from `pg_proc.dat`.
 //!
-//! NOT registered here (genuinely not expressible at the current boundary, so
-//! skipped per the discipline rather than hollow-stubbed):
-//! * the `windowfuncs.c` window functions (`row_number`/`rank`/`dense_rank`/
-//!   `percent_rank`/`cume_dist`/`ntile`) — their argument source is the SRF-only
-//!   `WindowObject` (`PG_WINDOW_OBJECT()`/`windowapi.h`), which is not carried on
-//!   the `FunctionCallInfoBaseData` frame; the value cores call the unported
-//!   `windowapi` context stubs.
+//! The `windowfuncs.c` window functions (`row_number`/`rank`/`dense_rank`/
+//! `percent_rank`/`cume_dist`/`ntile`/`lag`/`lead`/`first_value`/`last_value`/
+//! `nth_value`, OIDs 3100-3114) are registered here as **metadata-only** rows
+//! (name + OID + nargs, `func: None`, no native callable). Their argument source
+//! is the `WindowObject` (`PG_WINDOW_OBJECT()`/`windowapi.h`), which is not
+//! carried on the `FunctionCallInfoBaseData` frame, so they are *never*
+//! dispatched through the bare-Datum fmgr path — `backend-executor-nodeWindowAgg`
+//! dispatches every window function straight to its ported body by `winfnoid`
+//! (see that crate's `eval_windowfunction`). But C's `fmgr_builtins[]` table
+//! *does* contain these names, and `fmgr_internal_function()` /
+//! `fmgr_lookupByName()` (used by `CREATE FUNCTION ... LANGUAGE internal AS
+//! 'window_nth_value'` validation in `pg_proc.c`) only need the name→OID row to
+//! be present. Registering the metadata makes that validation succeed, matching
+//! C, without inventing an fmgr callable that could not legitimately run.
 
 use std::string::{String, ToString};
 use std::vec::Vec;
@@ -1516,6 +1523,53 @@ pub fn register_misc2_builtins() {
         builtin(2233, "hashtid", 1, true, false, fc_hashtid),
         builtin(2234, "hashtidextended", 2, true, false, fc_hashtidextended),
     ]);
+
+    // ---- windowfuncs.c: window functions (OIDs 3100-3114) ----
+    //
+    // Metadata-only rows (no fmgr callable). These never dispatch through the
+    // bare-Datum fmgr frame — `backend-executor-nodeWindowAgg::eval_windowfunction`
+    // dispatches each one straight to its ported body by `winfnoid`. C's
+    // `fmgr_builtins[]` table nonetheless carries every one of these names, so
+    // `fmgr_internal_function()` / `fmgr_lookupByName()` resolve them (required by
+    // `CREATE FUNCTION ... LANGUAGE internal AS 'window_nth_value'` validation in
+    // pg_proc.c). nargs = count of `proargtypes`. The rank-family functions
+    // (3100-3104) are explicitly `proisstrict => 'f'`; the value-fetching family
+    // (3105-3114) defaults to strict.
+    backend_utils_fmgr_core::register_builtins([
+        window_meta(3100, "window_row_number", 0, false),
+        window_meta(3101, "window_rank", 0, false),
+        window_meta(3102, "window_dense_rank", 0, false),
+        window_meta(3103, "window_percent_rank", 0, false),
+        window_meta(3104, "window_cume_dist", 0, false),
+        window_meta(3105, "window_ntile", 1, true),
+        window_meta(3106, "window_lag", 1, true),
+        window_meta(3107, "window_lag_with_offset", 2, true),
+        window_meta(3108, "window_lag_with_offset_and_default", 3, true),
+        window_meta(3109, "window_lead", 1, true),
+        window_meta(3110, "window_lead_with_offset", 2, true),
+        window_meta(3111, "window_lead_with_offset_and_default", 3, true),
+        window_meta(3112, "window_first_value", 1, true),
+        window_meta(3113, "window_last_value", 1, true),
+        window_meta(3114, "window_nth_value", 2, true),
+    ]);
+}
+
+/// A metadata-only `fmgr_builtins[]` row for a `windowfuncs.c` window function:
+/// `func: None` and (after `register_builtins`) no `NATIVE` overlay, so the row
+/// exists for name/OID resolution but has no fmgr-frame callable. Window
+/// functions are always dispatched by `winfnoid` in nodeWindowAgg, never through
+/// the fmgr frame. No window function is set-returning; `strict` follows
+/// `pg_proc.dat` (the rank family is non-strict, the value-fetching family is
+/// strict).
+fn window_meta(foid: u32, name: &str, nargs: i16, strict: bool) -> BuiltinFunction {
+    BuiltinFunction {
+        foid,
+        name: name.to_string(),
+        nargs,
+        strict,
+        retset: false,
+        func: None,
+    }
 }
 
 // ===========================================================================
