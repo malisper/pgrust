@@ -641,6 +641,48 @@ fn walk_expr_children_mut<'mcx>(
             *child = nc;
         }
     });
+    if aborted {
+        return true;
+    }
+
+    // C `expression_tree_walker` T_SubLink (nodeFuncs.c:2231): after
+    // `WALK(sublink->testexpr)` it does `return WALK(sublink->subselect)` — i.e.
+    // it invokes the walker on the sublink's sub-`Query` so the callback can
+    // recurse into the sub-query. `for_each_expr_child_mut` above only enumerates
+    // the `&mut Expr` children (testexpr), so the `subselect` (a `Query`, not an
+    // `Expr`) is *not* reached there; we descend into it here. This mirrors the
+    // read-only `walk_expr_children` (which clones the subselect for the
+    // `&Node` callback) but mutates in place: move the owned sub-`Query` out,
+    // wrap it as a `Node::Query`, run the mutating walker, then move the result
+    // back. Without this, in-place mutators (`OffsetVarNodes`,
+    // `IncrementVarSublevelsUp`) never touch the Vars inside a correlated
+    // SubLink's subselect — leaving stale varno/varlevelsup that crash the
+    // planner (`no relation entry for relid N`) when a FROM-subquery containing a
+    // correlated SubLink is pulled up.
+    if let Expr::SubLink(sublink) = e {
+        if let Some(sub_boxed) = sublink.subselect.take() {
+            // The carrier slot is notionally `'static`; the data actually lives
+            // in `mcx` (which outlives this walk). Re-tie the box to `'mcx` so
+            // the mutating walk and the re-box stay within a single lifetime.
+            let sub_boxed: mcx::PgBox<'mcx, types_nodes::copy_query::Query<'mcx>> =
+                unsafe { core::mem::transmute(sub_boxed) };
+            let q = mcx::PgBox::into_inner(sub_boxed);
+            let mut sub_node = Node::mk_query(mcx, q)
+                .expect("walk_expr_children_mut: opaque Node alloc failed (OOM)");
+            let sub_aborted = walker(&mut sub_node);
+            let new_q = sub_node
+                .into_query()
+                .expect("walk_expr_children_mut: SubLink subselect walker returned a non-Query");
+            // Re-box the (possibly mutated) sub-Query back into the SubLink's
+            // `'static` carrier slot (the owned-Query carrier convention).
+            let reboxed = mcx::alloc_in(mcx, new_q)
+                .expect("walk_expr_children_mut: re-box of SubLink subselect failed (OOM)");
+            sublink.subselect = Some(unsafe { core::mem::transmute(reboxed) });
+            if sub_aborted {
+                return true;
+            }
+        }
+    }
     aborted
 }
 
