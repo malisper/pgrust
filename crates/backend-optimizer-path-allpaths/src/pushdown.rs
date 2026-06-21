@@ -205,10 +205,10 @@ fn sortgroupclause_list<'mcx>(
 /// `top` is the top-level subquery (used to look up setop component RTEs and
 /// the top setop's `colTypes`); at the top level `subquery` and `top` are the
 /// same Query.
-pub(crate) fn subquery_is_pushdown_safe(
-    mcx: Mcx<'_>,
-    subquery: &Query<'_>,
-    top: &Query<'_>,
+pub(crate) fn subquery_is_pushdown_safe<'mcx>(
+    mcx: Mcx<'mcx>,
+    subquery: &Query<'mcx>,
+    top: &Query<'mcx>,
     safety_info: &mut PushdownSafetyInfo,
 ) -> PgResult<bool> {
     // Check point 1: LIMIT/OFFSET.
@@ -257,10 +257,10 @@ pub(crate) fn subquery_is_pushdown_safe(
 }
 
 /// `recurse_pushdown_safe(setOp, topquery, safetyInfo)` (allpaths.c:3684).
-fn recurse_pushdown_safe(
-    mcx: Mcx<'_>,
+fn recurse_pushdown_safe<'mcx>(
+    mcx: Mcx<'mcx>,
     set_op: &Node<'_>,
-    top: &Query<'_>,
+    top: &Query<'mcx>,
     safety_info: &mut PushdownSafetyInfo,
 ) -> PgResult<bool> {
     match set_op.node_tag() {
@@ -302,37 +302,59 @@ fn recurse_pushdown_safe(
 }
 
 /// `check_output_expressions(subquery, safetyInfo)` (allpaths.c:3753).
-fn check_output_expressions(
-    mcx: Mcx<'_>,
-    subquery: &Query<'_>,
+fn check_output_expressions<'mcx>(
+    mcx: Mcx<'mcx>,
+    subquery: &Query<'mcx>,
     safety_info: &mut PushdownSafetyInfo,
 ) -> PgResult<()> {
-    // Expand grouping Vars to underlying expressions when the subquery has a
-    // group RTE; otherwise use the tlist as-is.
+    // We must be careful with grouping Vars in the subquery's outputs, as they
+    // hide the underlying expressions. We expand grouping Vars to their
+    // underlying grouping clauses (which might be volatile or set-returning) via
+    // `flatten_group_exprs`; we do not need to expand join alias Vars. We do not
+    // need to recursively examine the Vars contained in the underlying
+    // expressions: subqueries containing volatile/SRF functions in their
+    // targetlists are never pulled up, so lower-level references cannot expand
+    // to volatile/SRF functions.
     //
-    // The `hasGroupRTE` leg (`flatten_group_exprs(NULL, subquery, targetList)`)
-    // requires the var.c flattener over a `List*`-shaped targetlist; the owned
-    // `PgVec<TargetEntry>` carrier does not project to that `List*` node and the
-    // flattener owner takes a `&mut PlannerInfo` we do not have here. Mirror the
-    // ruleutils seam boundary: a precise panic on the GROUP-RTE leg. It is only
-    // reached for a subquery that itself went through grouping-set planning AND
-    // is pushdown-eligible — never on the plain-subquery SELECT path.
-    if subquery.hasGroupRTE {
-        let _ = mcx;
-        return Err(PgError::error(
-            "check_output_expressions: flatten_group_exprs over a GROUP-RTE subquery \
-             targetList is not yet expressible (List*-shaped targetlist + root-less \
-             flattener); reached only for a pushdown-eligible grouping-set subquery",
-        ));
-    }
+    // `flatten_group_exprs(NULL, subquery, (Node*) subquery->targetList)`
+    // (allpaths.c:3778). The owned model carries the target list as
+    // `PgVec<TargetEntry>`; the flattener only rewrites the Vars inside each
+    // `TargetEntry.expr` (never replaces a whole `TargetEntry` node), so
+    // flattening each `expr` individually is behavior-equivalent to flattening
+    // the whole `List*`. With `root == NULL`, varnullingrels are not preserved
+    // (the caller uses the expansions solely to check for volatile/SRF
+    // functions, which is independent of nullingrels). `resno`/`resjunk`/
+    // `ressortgroupref` are untouched by the flattener, so the DISTINCT-ON and
+    // window checks below correctly use the original TargetEntry.
     let tlist: &[types_nodes::primnodes::TargetEntry<'_>] = &subquery.targetList;
+    let mut flattened_exprs: Vec<Option<Expr>> = Vec::with_capacity(tlist.len());
+    if subquery.hasGroupRTE {
+        for tle in tlist.iter() {
+            match tle.expr.as_deref() {
+                Some(e) => {
+                    let node = Node::mk_expr(mcx, e.clone_in(mcx)?)?;
+                    let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
+                        mcx, None, subquery, node,
+                    )?;
+                    flattened_exprs.push(flattened.into_expr());
+                }
+                None => flattened_exprs.push(None),
+            }
+        }
+    }
 
-    for tle in tlist.iter() {
+    for (idx, tle) in tlist.iter().enumerate() {
         if tle.resjunk {
             continue; // ignore resjunk columns
         }
         let resno = tle.resno as usize;
-        let texpr = tle.expr.as_deref();
+        // After flatten_group_exprs, the per-column expression to inspect for
+        // volatile/SRF functions is the flattened expr; otherwise the original.
+        let texpr: Option<&Expr> = if subquery.hasGroupRTE {
+            flattened_exprs[idx].as_ref()
+        } else {
+            tle.expr.as_deref()
+        };
 
         // Functions returning sets are unsafe (point 1).
         if subquery.hasTargetSRFs
