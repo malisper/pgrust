@@ -754,12 +754,21 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
         // (InvalidOid). In all other cases — including non-SELECT rules on a
         // security-invoker view — they are performed as the relation owner.
         //
-        // The view "security_invoker" reloption is not carried on the owned
-        // RelationData entry built here, so the security-invoker SELECT-view
-        // branch (check_as_user = InvalidOid) is not yet expressible; the
-        // owner branch is faithful for every non-security-invoker view, which
-        // is the default and the common spine.
-        let check_as_user = relation.rd_rel.relowner;
+        // RelationHasSecurityInvoker reads the parsed ViewOptions out of
+        // rd_options (set by RelationParseRelOptions for RELKIND_VIEW).
+        let security_invoker = relation
+            .rd_options
+            .as_ref()
+            .and_then(|o| o.view())
+            .is_some_and(|v| v.security_invoker);
+        let check_as_user = if event == CmdType::CMD_SELECT
+            && relation.rd_rel.relkind as u8 == types_tuple::RELKIND_VIEW
+            && security_invoker
+        {
+            InvalidOid
+        } else {
+            relation.rd_rel.relowner
+        };
 
         // Scan through the rule's actions and the qual, setting the
         // checkAsUser field on all RTEPermissionInfos. Doing this at rule load

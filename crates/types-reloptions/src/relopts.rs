@@ -127,6 +127,16 @@ impl RdOptions {
         }
     }
 
+    /// Return the parsed `ViewOptions` if this slot holds one, else `None`.
+    /// Used by the `RelationHasSecurityInvoker`/`RelationIsSecurityView`/
+    /// `RelationHasCheckOption` view-option predicates (`utils/rel.h`).
+    pub fn view(&self) -> Option<&ViewOptions> {
+        match self {
+            RdOptions::View(v) => Some(v),
+            _ => None,
+        }
+    }
+
     /// Return the opaque AM-defined option bytes if this slot holds them.
     pub fn bytea(&self) -> Option<&[u8]> {
         match self {
