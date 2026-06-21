@@ -438,9 +438,20 @@ fn proc_all_proc_count() -> u32 {
 }
 
 fn proc_subxids(procno: ProcNumber) -> (i32, Vec<TransactionId>) {
+    // Mirror C's `GetRunningTransactionData`: it reads the subxid count from the
+    // dense `ProcGlobal->subxidStates[index].count` array (the caller's `nsubxids`)
+    // and `memcpy`s that many entries directly out of `proc->subxids.xids`, the
+    // fixed 64-slot per-PGPROC array — it never re-reads `proc->subxids.count`,
+    // and there is no `nxids >= nsubxids` assertion. The dense count and the
+    // per-proc `subxidStatus.count` are updated at slightly different moments
+    // under concurrency, so the per-proc count can lag the dense one; copying by
+    // the dense count out of the always-valid fixed array is what C relies on.
+    // Return the full fixed array (and the per-proc advertised count, retained
+    // for callers that still want it) so the caller can copy exactly its own
+    // `nsubxids` without tripping over a transient count skew.
     with_proc_by_number(procno, |p| {
         let count = p.subxidStatus.count as i32;
-        (count, p.subxids.xids[..count as usize].to_vec())
+        (count, p.subxids.xids.to_vec())
     })
 }
 

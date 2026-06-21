@@ -189,8 +189,13 @@ pub fn GetSnapshotData() -> PgResult<SnapshotData> {
                         PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().pgprocnos()[pgxactoff as usize]);
                     // pg_read_barrier() pairs with GetNewTransactionId; the seam
                     // copies the proc's cached subxids.
-                    let (proc_n, proc_subxids) = proc::proc_subxids::call(pgprocno);
-                    debug_assert!(proc_n >= nsubxids);
+                    // C reads `nsubxids` from the dense `subxidStates` array and
+                    // `memcpy`s exactly that many entries from the fixed-size
+                    // `proc->subxids.xids` array, without re-reading the per-proc
+                    // count (which can transiently lag the dense one) and with no
+                    // `nxids >= nsubxids` assertion. The fixed array always has all
+                    // 64 slots valid, so copying `nsubxids` of them is safe.
+                    let (_proc_n, proc_subxids) = proc::proc_subxids::call(pgprocno);
                     subxip[subcount as usize..(subcount as usize + nsubxids as usize)]
                         .copy_from_slice(&proc_subxids[..nsubxids as usize]);
                     subcount += nsubxids;
@@ -577,8 +582,15 @@ fn get_running_transaction_data_locked<'mcx>(
             let nsubxids = proc::proc_array_subxid_state::call(index).0;
             if nsubxids > 0 {
                 // barrier not really required, as XidGenLock is held, but ...
-                let (proc_n, proc_subxids) = proc::proc_subxids::call(pgprocno);
-                debug_assert!(proc_n >= nsubxids);
+                //
+                // C reads `nsubxids` from the dense `ProcGlobal->subxidStates`
+                // array, then `memcpy`s exactly that many entries out of the
+                // fixed-size `proc->subxids.xids` array. It does NOT re-read the
+                // per-proc `subxids.count`, because that field and the dense
+                // count are updated at slightly different times and the per-proc
+                // value can transiently lag. The fixed array always has the full
+                // 64 slots valid, so copying `nsubxids` of them is safe.
+                let (_proc_n, proc_subxids) = proc::proc_subxids::call(pgprocno);
                 for &sx in &proc_subxids[..nsubxids as usize] {
                     xids.push(sx);
                 }
