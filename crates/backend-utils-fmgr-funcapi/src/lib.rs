@@ -110,4 +110,14 @@ pub fn init_seams() {
     backend_utils_fmgr_funcapi_seams::get_expr_result_type::set(
         result_type::get_expr_result_type,
     );
+    // pg_proc.c:484-523 CREATE OR REPLACE FUNCTION input-parameter-name change
+    // check. The body is funcapi's get_func_input_arg_names mode-filter over the
+    // already-decoded old/new name+mode arrays; install into pg-proc-seams.
+    backend_catalog_pg_proc_seams::check_input_param_names_unchanged::set(
+        proc_info::check_input_param_names_unchanged,
+    );
+    // pg_proc.c:455-477 CREATE OR REPLACE FUNCTION RETURNS RECORD compatibility
+    // check: old (by-OID) vs new (decoded OUT arrays) result-row tupdesc compared
+    // by equalRowTypes. funcapi owns build_function_result_tupdesc_t/_d.
+    backend_catalog_pg_proc_seams::record_type_change::set(proc_info::record_type_change);
 }

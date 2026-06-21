@@ -15,7 +15,7 @@
 //! (mode filtering, column naming, the OUT-arg count rules) stay here, 1:1 with
 //! the C.
 
-use mcx::{Mcx, PgString, PgVec};
+use mcx::{Mcx, MemoryContext, PgString, PgVec};
 use types_core::primitive::AttrNumber;
 use types_core::Oid;
 // Bare-word machine-word `Datum` (`types_datum::Datum`), aliased `ScalarWord`.
@@ -291,6 +291,190 @@ pub fn get_func_input_arg_names<'mcx>(
 
     // C: *arg_names = inargnames; return numinargs;
     Ok(inargnames)
+}
+
+/// `get_func_input_arg_names` (funcapi.c:1670) over already-decoded argument
+/// arrays: the subset of parameter names whose mode is IN/INOUT/VARIADIC (or
+/// when no modes array is given, all of them). An empty name yields `None`,
+/// matching the C `pname[0] == '\0'` case. Returns an empty list when there are
+/// no names.
+fn input_arg_names_decoded(
+    names: &Option<Vec<Option<String>>>,
+    modes: &Option<Vec<i8>>,
+) -> Vec<Option<String>> {
+    // C: if (proargnames == PointerGetDatum(NULL)) { *arg_names = NULL; return 0; }
+    let Some(names) = names else {
+        return Vec::new();
+    };
+    let mut out: Vec<Option<String>> = Vec::with_capacity(names.len());
+    for (i, name) in names.iter().enumerate() {
+        // C: if (argmodes == NULL || argmodes[i] == PROARGMODE_IN ||
+        //        argmodes[i] == PROARGMODE_INOUT || argmodes[i] == PROARGMODE_VARIADIC)
+        let mode = modes.as_ref().and_then(|m| m.get(i).copied());
+        let is_input = match mode {
+            None => true,
+            Some(m) => {
+                let m = m as u8;
+                m == PROARGMODE_IN || m == PROARGMODE_INOUT || m == PROARGMODE_VARIADIC
+            }
+        };
+        if is_input {
+            // C: if (pname[0] != '\0') inargnames[numinargs] = pname; else NULL;
+            match name {
+                Some(s) if !s.is_empty() => out.push(Some(s.clone())),
+                _ => out.push(None),
+            }
+        }
+    }
+    out
+}
+
+/// `build_function_result_tupdesc_d` (funcapi.c:1751) over already-decoded
+/// argument arrays — the OUT/INOUT/TABLE column projection used when the caller
+/// already holds the new function's parameter vectors (CREATE OR REPLACE
+/// FUNCTION's record-type compatibility check). Mirrors the shared body's
+/// out-arg extraction and gin-up-column-name rule; `None` when there is no
+/// composite result.
+fn build_function_result_tupdesc_d_from_decoded<'mcx>(
+    mcx: Mcx<'mcx>,
+    prokind: u8,
+    proallargtypes: &Option<Vec<Oid>>,
+    proargmodes: &Option<Vec<i8>>,
+    proargnames: &Option<Vec<Option<String>>>,
+) -> PgResult<TupleDesc<'mcx>> {
+    /* Can't have output args if columns are null */
+    let (Some(argtypes), Some(argmodes)) = (proallargtypes, proargmodes) else {
+        return Ok(None);
+    };
+    let numargs = argtypes.len();
+    if argmodes.len() != numargs {
+        return Ok(None);
+    }
+    let argnames = proargnames.as_ref().filter(|n| n.len() == numargs);
+
+    /* zero elements probably shouldn't happen, but handle it gracefully */
+    if numargs == 0 {
+        return Ok(None);
+    }
+
+    /* extract output-argument types and names */
+    let mut outargtypes: Vec<Oid> = Vec::with_capacity(numargs);
+    let mut outargnames: Vec<PgString> = Vec::with_capacity(numargs);
+    let mut numoutargs: usize = 0;
+    for i in 0..numargs {
+        let mode = argmodes[i] as u8;
+        if mode == PROARGMODE_IN || mode == PROARGMODE_VARIADIC {
+            continue;
+        }
+        debug_assert!(
+            mode == PROARGMODE_OUT || mode == PROARGMODE_INOUT || mode == PROARGMODE_TABLE
+        );
+        outargtypes.push(argtypes[i]);
+        let pname = argnames
+            .and_then(|n| n[i].as_deref())
+            .unwrap_or("");
+        let name = if pname.is_empty() {
+            PgString::from_str_in(&format!("column{}", numoutargs + 1), mcx)?
+        } else {
+            PgString::from_str_in(pname, mcx)?
+        };
+        outargnames.push(name);
+        numoutargs += 1;
+    }
+
+    /* If there is no output argument, or only one, no tuple result. */
+    if numoutargs < 2 && prokind != PROKIND_PROCEDURE {
+        return Ok(None);
+    }
+
+    let mut desc = toastdesc::create_template_tuple_desc::call(mcx, numoutargs as i32)?;
+    for i in 0..numoutargs {
+        toastdesc::tuple_desc_init_entry::call(
+            &mut desc,
+            (i + 1) as AttrNumber,
+            outargnames[i].as_str(),
+            outargtypes[i],
+            -1,
+            0,
+        )?;
+    }
+    Ok(Some(mcx::alloc_in(mcx, desc)?))
+}
+
+/// `record_type_change` body (pg_proc.c:455-477): when the replaced function
+/// returns RECORD, compare the OUT-parameter row type of the old definition
+/// (`build_function_result_tupdesc_t` over the old proc OID) against the new
+/// definition (`build_function_result_tupdesc_d` over the new decoded OUT
+/// arrays), classified by `equalRowTypes`.
+pub fn record_type_change(
+    old_funcoid: Oid,
+    prokind: i8,
+    all_parameter_types: Option<Vec<Oid>>,
+    parameter_modes: Option<Vec<i8>>,
+    parameter_names: Option<Vec<Option<String>>>,
+) -> PgResult<backend_catalog_pg_proc_seams::RecordTypeChange> {
+    use backend_catalog_pg_proc_seams::RecordTypeChange;
+
+    // The two descriptors are only compared (equalRowTypes returns a bool); a
+    // private scratch context holds them for the duration of the call.
+    let scratch = MemoryContext::new("record_type_change");
+    let mcx = scratch.mcx();
+
+    let olddesc = build_function_result_tupdesc_t(mcx, old_funcoid)?;
+    let newdesc = build_function_result_tupdesc_d_from_decoded(
+        mcx,
+        prokind as u8,
+        &all_parameter_types,
+        &parameter_modes,
+        &parameter_names,
+    )?;
+
+    // C: if (olddesc == NULL && newdesc == NULL) /* both runtime RECORDs */;
+    //    else if (olddesc == NULL || newdesc == NULL || !equalRowTypes(...)) error.
+    match (olddesc.as_ref(), newdesc.as_ref()) {
+        (None, None) => Ok(RecordTypeChange::BothRuntime),
+        (Some(o), Some(n)) => {
+            if backend_access_common_tupdesc::equalRowTypes(o, n) {
+                Ok(RecordTypeChange::Equal)
+            } else {
+                Ok(RecordTypeChange::Different)
+            }
+        }
+        _ => Ok(RecordTypeChange::Different),
+    }
+}
+
+/// `check_input_param_names_unchanged` body (pg_proc.c:484-523): compare the
+/// old vs new input-parameter name lists (filtered by mode). Returns the first
+/// old input-parameter name that was renamed (the C
+/// `cannot change name of input parameter` trigger), or `None` when every
+/// retained name is unchanged. Adding a name to a formerly-unnamed parameter is
+/// allowed (old name `None` is skipped).
+pub fn check_input_param_names_unchanged(
+    old_proargnames: Option<Vec<Option<String>>>,
+    old_proargmodes: Option<Vec<i8>>,
+    new_parameter_names: Option<Vec<Option<String>>>,
+    new_parameter_modes: Option<Vec<i8>>,
+) -> PgResult<Option<String>> {
+    let old_arg_names = input_arg_names_decoded(&old_proargnames, &old_proargmodes);
+    let new_arg_names = input_arg_names_decoded(&new_parameter_names, &new_parameter_modes);
+
+    // C: for (j = 0; j < n_old_arg_names; j++) { if (old_arg_names[j] == NULL) continue;
+    //      if (j >= n_new_arg_names || new_arg_names[j] == NULL ||
+    //          strcmp(old_arg_names[j], new_arg_names[j]) != 0) ereport(...); }
+    for (j, old_name) in old_arg_names.iter().enumerate() {
+        let Some(old_name) = old_name else {
+            continue;
+        };
+        let renamed = match new_arg_names.get(j) {
+            None | Some(None) => true,
+            Some(Some(new_name)) => new_name != old_name,
+        };
+        if renamed {
+            return Ok(Some(old_name.clone()));
+        }
+    }
+    Ok(None)
 }
 
 /// `get_func_result_name(functionId)` (funcapi.c:1607) — the column name of a

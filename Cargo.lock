@@ -22673,6 +22673,7 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-access-common-tupdesc-seams",
  "backend-catalog-namespace-seams",
+ "backend-catalog-pg-proc-seams",
  "backend-commands-functioncmds-seams",
  "backend-executor-execTuples-seams",
  "backend-nodes-core-seams",
