@@ -2499,6 +2499,7 @@ pub fn init_seams() {
     backend_commands_sequence_seams::reset_sequence_caches::set(ResetSequenceCaches);
     backend_commands_sequence_seams::DeleteSequenceTuple::set(DeleteSequenceTuple);
     backend_commands_sequence_seams::nextval_internal::set(nextval_internal);
+    backend_commands_sequence_seams::sequence_change_persistence::set(SequenceChangePersistence);
 
     // ProcessUtilitySlow dispatch arms (utility.c CREATE/ALTER SEQUENCE).
     backend_tcop_utility_out_seams::define_sequence::set(define_sequence_arm);

@@ -48,3 +48,17 @@ seam_core::seam!(
         check_permissions: bool,
     ) -> types_error::PgResult<i64>
 );
+
+seam_core::seam!(
+    /// `SequenceChangePersistence(seqid, newrelpersistence)`
+    /// (commands/sequence.c:540): flip a sequence relation's persistence to
+    /// match its owning table during `ALTER TABLE ... SET LOGGED/UNLOGGED`.
+    /// Acquires `AccessExclusiveLock`, rewrites the sequence's relfilenode with
+    /// the new persistence, and re-fills its data page. Owned by
+    /// `backend-commands-sequence`; can `ereport(ERROR)`, carried on `Err`.
+    pub fn sequence_change_persistence<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        seqid: types_core::primitive::Oid,
+        new_relpersistence: u8,
+    ) -> types_error::PgResult<()>
+);

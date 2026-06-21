@@ -771,6 +771,57 @@ pub fn findNotNullConstraintAttnum<'mcx>(
     Ok(retval)
 }
 
+/// The `pg_constraint` scan of `ATPrepChangePersistence` (tablecmds.c:18871-18927):
+/// to preserve the invariant that permanent tables cannot reference unlogged
+/// ones (and vice-versa), find this relation's foreign-key constraints and
+/// return, for each, the *opposite* endpoint relation OID plus the constraint
+/// name. When changing to LOGGED we scan `conrelid == relid` (this rel is the
+/// referencing table) and report `confrelid`; otherwise we scan
+/// `confrelid == relid` (this rel is referenced) and report `conrelid`.
+/// Self-referencing FKs (`foreignrelid == relid`) are skipped. The caller opens
+/// each foreign rel and checks `RelationIsPermanent` to raise the right error.
+///
+/// Lives here because the catalog scan + `Form_pg_constraint` deform substrate
+/// is owned by this crate (the C `systable_beginscan` on `pg_constraint`).
+pub fn fk_constraints_for_persistence_check<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    to_logged: bool,
+) -> PgResult<Vec<(Oid, String)>> {
+    let pg_constraint = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
+
+    // Scan conrelid if changing to permanent, else confrelid. The conrelid
+    // scan can use ConstraintRelidTypidNameIndexId; the confrelid scan has no
+    // useful index (InvalidOid → heap scan + key filter), matching the C.
+    let (scan_attno, index_id) = if to_logged {
+        (Anum_pg_constraint_conrelid, ConstraintRelidTypidNameIndexId)
+    } else {
+        (Anum_pg_constraint_confrelid, InvalidOid)
+    };
+    let key = [oid_key(scan_attno, relid)?];
+
+    let mut result: Vec<(Oid, String)> = Vec::new();
+    systable_scan_foreach(&pg_constraint, index_id, &key, |row| {
+        if row.form.contype == CONSTRAINT_FOREIGN {
+            // The opposite end of what we used as scankey.
+            let foreignrelid = if to_logged {
+                row.form.confrelid
+            } else {
+                row.form.conrelid
+            };
+            // Ignore if self-referencing.
+            if foreignrelid != relid {
+                result.push((foreignrelid, row.form.conname_str().to_string()));
+            }
+        }
+        Ok(true)
+    })?;
+
+    pg_constraint.close(AccessShareLock)?;
+
+    Ok(result)
+}
+
 /* ===========================================================================
  * disinherit_constraints — the pg_constraint half of RemoveInheritance
  * (tablecmds.c:18025-18138)

@@ -37,7 +37,10 @@ use mcx::{Mcx, PgVec};
 
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
+use types_error::{
+    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
+};
 use types_acl::ACLCHECK_NOT_OWNER;
 use types_nodes::ddlnodes::{AlterTableCmd, AlterTableStmt, AlterTableType};
 use types_nodes::ddlnodes::AlterTableType::*;
@@ -48,13 +51,14 @@ use types_nodes::parsenodes::{
 };
 use types_rel::Relation;
 use types_storage::lock::{
-    LOCKMODE, AccessExclusiveLock, NoLock, RowShareLock, ShareRowExclusiveLock,
+    LOCKMODE, AccessExclusiveLock, AccessShareLock, NoLock, RowShareLock, ShareRowExclusiveLock,
     ShareUpdateExclusiveLock,
 };
 use types_tuple::access::{
     RangeVar as AccessRangeVar, RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX,
     RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
-    RELKIND_SEQUENCE, RELKIND_VIEW, RELPERSISTENCE_PERMANENT,
+    RELKIND_SEQUENCE, RELKIND_VIEW, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP,
+    RELPERSISTENCE_UNLOGGED,
 };
 use types_tuple::heaptuple::TupleDescData;
 
@@ -958,7 +962,20 @@ pub(crate) fn ATPrepCmd<'mcx>(
         }
         AT_SetLogged | AT_SetUnLogged => {
             ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_SEQUENCE)?;
-            unported("SET LOGGED / SET UNLOGGED (ATPrepChangePersistence)");
+            if wqueue[tab_idx].chgPersistence {
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errmsg("cannot change persistence setting twice".to_string())
+                    .finish(here("ATPrepCmd"));
+            }
+            ATPrepChangePersistence(
+                mcx,
+                wqueue,
+                tab_idx,
+                rel,
+                cmd.subtype == AT_SetLogged,
+            )?;
+            pass = AT_PASS_MISC;
         }
         AT_DropOids => {
             ATSimplePermissions(
@@ -1669,7 +1686,12 @@ fn ATExecCmd<'mcx>(
             // ATExecDropCluster(rel, lockmode)
             _address = crate::at_column::ATExecDropCluster(mcx, rel, lockmode)?;
         }
-        AT_SetLogged | AT_SetUnLogged => unported("SET LOGGED/UNLOGGED (persistence change)"),
+        AT_SetLogged | AT_SetUnLogged => {
+            // C: `break` — a no-op. The actual persistence change is driven by
+            // tab->chgPersistence / tab->newrelpersistence in ATRewriteTables
+            // (the make_new_heap + finish_heap_swap rewrite, set up by
+            // ATPrepChangePersistence in phase 1).
+        }
         AT_SetAccessMethod => unported("SET ACCESS METHOD"),
         AT_SetTableSpace => unported("SET TABLESPACE (ATExecSetTableSpace)"),
         AT_DropOids => unported("SET WITHOUT OIDS"),
@@ -2036,9 +2058,13 @@ fn ATRewriteTables<'mcx>(
             )?;
         } else if wqueue[ti].rewrite > 0 && wqueue[ti].relkind == RELKIND_SEQUENCE {
             // SequenceChangePersistence on rewrite of a sequence (persistence
-            // change). The owner is unported on this frontier.
+            // change). tablecmds.c:6009-6013.
             if wqueue[ti].chgPersistence {
-                unported("ATRewriteTables: SequenceChangePersistence (rewrite of a sequence)");
+                backend_commands_sequence_seams::sequence_change_persistence::call(
+                    mcx,
+                    wqueue[ti].relid,
+                    wqueue[ti].newrelpersistence,
+                )?;
             }
         } else {
             // If required, test the current data against new constraints, but
@@ -2058,11 +2084,20 @@ fn ATRewriteTables<'mcx>(
             }
         }
 
-        // Also change persistence of owned sequences. The getOwnedSequences /
-        // SequenceChangePersistence pair is unported on this frontier; it is only
-        // reached by SET LOGGED/UNLOGGED, which itself sets chgPersistence.
+        // Also change persistence of owned sequences, so that it matches the
+        // table persistence (tablecmds.c:6033-6048).
         if wqueue[ti].chgPersistence {
-            unported("ATRewriteTables: owned-sequence persistence change");
+            let relid = wqueue[ti].relid;
+            let newpersistence = wqueue[ti].newrelpersistence;
+            let seqlist =
+                backend_catalog_pg_depend_seams::getOwnedSequences::call(mcx, relid)?;
+            for &seq_relid in seqlist.iter() {
+                backend_commands_sequence_seams::sequence_change_persistence::call(
+                    mcx,
+                    seq_relid,
+                    newpersistence,
+                )?;
+            }
         }
     }
 
@@ -2233,6 +2268,124 @@ fn run_at_rewrite_table_scan<'mcx>(
         &partition_constraint,
         tab.validate_default,
     )
+}
+
+// ===========================================================================
+// ATPrepChangePersistence (tablecmds.c:18820)
+// ===========================================================================
+
+/// `AT_REWRITE_ALTER_PERSISTENCE` (event_trigger.h) — the persistence-change
+/// rewrite reason bit ORed into `tab->rewrite`.
+const AT_REWRITE_ALTER_PERSISTENCE: i32 = 0x01;
+
+/// `ATPrepChangePersistence(tab, rel, toLogged)` (tablecmds.c:18820) — phase-1
+/// prep for `ALTER TABLE ... SET LOGGED/UNLOGGED`. Rejects temp tables, the
+/// no-op case (already in the target persistence), publication membership when
+/// going unlogged, and FK references that would break the
+/// permanent-cannot-reference-unlogged invariant; then forces a rewrite and
+/// records the new persistence on the work-queue entry.
+fn ATPrepChangePersistence<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    tab_idx: usize,
+    rel: &Relation<'mcx>,
+    to_logged: bool,
+) -> PgResult<()> {
+    // Disallow changing status for a temp table; also verify whether we can get
+    // away with doing nothing.
+    match rel.rd_rel.relpersistence {
+        RELPERSISTENCE_TEMP => {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
+                .errmsg(format!(
+                    "cannot change logged status of table \"{}\" because it is temporary",
+                    rel.name()
+                ))
+                .finish(here("ATPrepChangePersistence"));
+        }
+        RELPERSISTENCE_PERMANENT => {
+            if to_logged {
+                // nothing to do
+                return Ok(());
+            }
+        }
+        RELPERSISTENCE_UNLOGGED => {
+            if !to_logged {
+                // nothing to do
+                return Ok(());
+            }
+        }
+        _ => {}
+    }
+
+    // Check that the table is not part of any publication when changing to
+    // UNLOGGED, as UNLOGGED tables can't be published.
+    if !to_logged
+        && !backend_catalog_pg_publication_seams::GetRelationPublications::call(mcx, rel.rd_id)?
+            .is_empty()
+    {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg(format!(
+                "cannot change table \"{}\" to unlogged because it is part of a publication",
+                rel.name()
+            ))
+            .errdetail("Unlogged relations cannot be replicated.".to_string())
+            .finish(here("ATPrepChangePersistence"));
+    }
+
+    // Check existing foreign key constraints to preserve the invariant that
+    // permanent tables cannot reference unlogged ones. Self-referencing foreign
+    // keys are skipped by the scan helper.
+    let fks = backend_catalog_pg_constraint::fk_constraints_for_persistence_check(
+        mcx, rel.rd_id, to_logged,
+    )?;
+    for (foreignrelid, conname) in fks {
+        let foreignrel = relation_open(mcx, foreignrelid, AccessShareLock)?;
+        let foreign_permanent =
+            foreignrel.rd_rel.relpersistence == RELPERSISTENCE_PERMANENT;
+
+        if to_logged {
+            if !foreign_permanent {
+                let fname = foreignrel.name().to_string();
+                foreignrel.close(AccessShareLock)?;
+                let _ = conname;
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
+                    .errmsg(format!(
+                        "could not change table \"{}\" to logged because it references unlogged table \"{}\"",
+                        rel.name(),
+                        fname
+                    ))
+                    .finish(here("ATPrepChangePersistence"));
+            }
+        } else if foreign_permanent {
+            let fname = foreignrel.name().to_string();
+            foreignrel.close(AccessShareLock)?;
+            let _ = conname;
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
+                .errmsg(format!(
+                    "could not change table \"{}\" to unlogged because it references logged table \"{}\"",
+                    rel.name(),
+                    fname
+                ))
+                .finish(here("ATPrepChangePersistence"));
+        }
+
+        foreignrel.close(AccessShareLock)?;
+    }
+
+    // Force rewrite if necessary; see comment in ATRewriteTables.
+    wqueue[tab_idx].rewrite |= AT_REWRITE_ALTER_PERSISTENCE;
+    wqueue[tab_idx].newrelpersistence = if to_logged {
+        RELPERSISTENCE_PERMANENT
+    } else {
+        RELPERSISTENCE_UNLOGGED
+    };
+    wqueue[tab_idx].chgPersistence = true;
+
+    Ok(())
 }
 
 // ===========================================================================
