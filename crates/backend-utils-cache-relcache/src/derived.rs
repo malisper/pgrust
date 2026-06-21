@@ -1214,15 +1214,15 @@ pub fn relation_has_foreign_keys(relation: Oid) -> PgResult<bool> {
 /// `ForeignKeyCacheInfo` (nodes/parsenodes.h) — the FK cache-info the planner
 /// (`get_relation_foreign_keys`, plancat.c) reads from `rd_fkeylist`.
 #[derive(Clone)]
-pub(crate) struct ForeignKeyCacheInfo {
-    pub(crate) conoid: Oid,
-    pub(crate) conrelid: Oid,
-    pub(crate) confrelid: Oid,
-    pub(crate) conenforced: bool,
-    pub(crate) nkeys: i32,
-    pub(crate) conkey: Vec<types_core::primitive::AttrNumber>,
-    pub(crate) confkey: Vec<types_core::primitive::AttrNumber>,
-    pub(crate) conpfeqop: Vec<Oid>,
+pub struct ForeignKeyCacheInfo {
+    pub conoid: Oid,
+    pub conrelid: Oid,
+    pub confrelid: Oid,
+    pub conenforced: bool,
+    pub nkeys: i32,
+    pub conkey: Vec<types_core::primitive::AttrNumber>,
+    pub confkey: Vec<types_core::primitive::AttrNumber>,
+    pub conpfeqop: Vec<Oid>,
 }
 
 /// `RelationGetIndexExpressions(relation)`'s node-tree transform: `stringToNode`

@@ -723,7 +723,7 @@ pub fn ATExecValidateConstraint<'mcx>(
 /// `QueueFKConstraintValidation(...)` — add an FK validation entry to phase 3
 /// and flip `convalidated`. The partition-recursion leg (when either end is
 /// partitioned) faithfully seam-and-panics.
-fn QueueFKConstraintValidation<'mcx>(
+pub(crate) fn QueueFKConstraintValidation<'mcx>(
     mcx: Mcx<'mcx>,
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     fkrel: &Relation<'mcx>,

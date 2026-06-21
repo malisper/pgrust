@@ -80,6 +80,9 @@ types-datum = { path = "../types-datum" }
 backend-catalog-pg-attrdef = { path = "../backend-catalog-pg-attrdef" }
 backend-catalog-pg-class-seams = { path = "../backend-catalog-pg-class-seams" }
 backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
+backend-access-common-scankey = { path = "../backend-access-common-scankey" }
+types-scan = { path = "../types-scan" }
+backend-utils-adt-ri-triggers = { path = "../backend-utils-adt-ri-triggers" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }

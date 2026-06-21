@@ -918,27 +918,24 @@ pub fn define_relation_clone_partition_objects<'mcx>(
         rel.close(NoLock)?;
     }
 
+    // C (DefineRelation post-partbound):
+    //   if (parent->trigdesc != NULL)  CloneRowTriggersToPartition(parent, rel);
+    //   CloneForeignKeyConstraints(NULL, parent, rel);
+    // The new partition is empty, so C passes a NULL wqueue (no phase-3
+    // validation needed); we mirror that with a throwaway work queue whose
+    // entries (if any) validate against the empty partition and are discarded.
+    if has_triggers || has_fkeys {
+        let rel = backend_access_common_relation::relation_open(mcx, relation_id, NoLock)?;
+        if has_triggers {
+            crate::at_attach::CloneRowTriggersToPartition(mcx, &parent, &rel)?;
+        }
+        let mut throwaway_wqueue: mcx::PgVec<'mcx, crate::at_phase::AlteredTableInfo<'mcx>> =
+            mcx::PgVec::new_in(mcx);
+        crate::at_fk::CloneForeignKeyConstraints(mcx, &mut throwaway_wqueue, &parent, &rel)?;
+        rel.close(NoLock)?;
+    }
+
     parent.close(NoLock)?;
 
-    if has_triggers {
-        return ereport(ERROR)
-            .errmsg_internal(
-                "cloning parent row triggers onto a new partition is not yet supported \
-                 (CloneRowTriggersToPartition unported)",
-            )
-            .finish(here("define_relation_clone_partition_objects"))
-            .map(|()| unreachable!());
-    }
-    if has_fkeys {
-        return ereport(ERROR)
-            .errmsg_internal(
-                "cloning parent foreign keys onto a new partition is not yet supported \
-                 (CloneForeignKeyConstraints unported)",
-            )
-            .finish(here("define_relation_clone_partition_objects"))
-            .map(|()| unreachable!());
-    }
-
-    // Nothing to clone — the no-op path is complete.
     Ok(())
 }

@@ -36,6 +36,7 @@ pub mod queue;
 pub mod remove;
 pub mod rename;
 pub mod ri_accessors;
+pub mod set_parent;
 
 /// Install every implementation in `backend-commands-trigger-seams` (and the
 /// trigger-firing seams `nodeModifyTable` consumes through that crate).

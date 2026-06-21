@@ -331,6 +331,7 @@ fn renametrig_internal<'mcx>(
     // namestrcpy(&tgform->tgname, newname); CatalogTupleUpdate(tgrel, &tup->t_self, tup);
     let fields = pt::TriggerFieldUpdate {
         tgname: Some(namestrcpy_image(newname)),
+        tgparentid: None,
         tgdeferrable: None,
         tginitdeferred: None,
         tgenabled: None,

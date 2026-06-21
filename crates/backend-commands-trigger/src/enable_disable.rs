@@ -144,6 +144,7 @@ pub fn EnableDisableTrigger<'mcx>(
             // CatalogTupleUpdate(tgrel, &newtup->t_self, newtup);
             let fields = pt::TriggerFieldUpdate {
                 tgname: None,
+                tgparentid: None,
                 tgdeferrable: None,
                 tginitdeferred: None,
                 tgenabled: Some(fires_when),

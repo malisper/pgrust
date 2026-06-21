@@ -1793,6 +1793,9 @@ fn catalog_tuple_update_pg_trigger(
     if let Some(c) = fields.tgenabled {
         set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_trigger_tgenabled, Datum::from_char(c));
     }
+    if let Some(p) = fields.tgparentid {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_trigger_tgparentid, Datum::from_oid(p));
+    }
     modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
 }
 

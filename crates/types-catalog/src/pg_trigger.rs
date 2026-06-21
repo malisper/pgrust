@@ -172,12 +172,15 @@ pub struct PgTriggerInsertRow {
 /// owner re-forms the tuple at `tid` from the existing row with these fields
 /// overwritten. Currently only `tgname` (the 64-byte NUL-padded `NameData`
 /// image produced by `namestrcpy`) — the rename path's single mutated column.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TriggerFieldUpdate {
     /// `tgname` — the new trigger name as a zero-filled `NameData` image.
     /// `None` when the mutator does not touch the name (e.g. the ALTER
     /// CONSTRAINT deferrability path).
     pub tgname: Option<[u8; 64]>,
+    /// `tgparentid` — set by `TriggerSetParentTrigger` when attaching a
+    /// partition's trigger to its parent. `None` when untouched.
+    pub tgparentid: Option<Oid>,
     /// `tgdeferrable` — set by `AlterConstrTriggerDeferrability` (ALTER
     /// CONSTRAINT). `None` when the mutator does not touch deferrability.
     pub tgdeferrable: Option<bool>,

@@ -89,6 +89,7 @@ pub fn AlterConstrTriggerDeferrability(
 
         let fields = pt::TriggerFieldUpdate {
             tgname: None,
+            tgparentid: None,
             tgdeferrable: Some(deferrable),
             tginitdeferred: Some(initdeferred),
             tgenabled: None,

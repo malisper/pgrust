@@ -323,11 +323,10 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     backend_catalog_heap::StorePartitionBound(mcx, &attachrel, rel, bound)?;
 
     // Ensure there exists a correct set of indexes / triggers / FKs in the
-    // partition. The cloners are unported; they are genuine no-ops when the
-    // parent carries no such objects, and precise errors otherwise.
+    // partition.
     AttachPartitionEnsureIndexes(mcx, rel, &attachrel)?;
     CloneRowTriggersToPartition(mcx, rel, &attachrel)?;
-    CloneForeignKeyConstraints(mcx, rel, &attachrel)?;
+    crate::at_fk::CloneForeignKeyConstraints(mcx, wqueue, rel, &attachrel)?;
 
     // Generate the partition constraint from the bound spec. If the parent is
     // itself a partition, include its constraint as well.
@@ -662,7 +661,7 @@ fn AttachPartitionEnsureIndexes<'mcx>(
 /// `CreateTrigStmt` from the catalog row (mapping the WHEN qual through the
 /// partition attribute map) and calls `CreateTriggerFiringOn` with
 /// `parentTriggerOid = parent's trigger oid`, `in_partition = true`.
-fn CloneRowTriggersToPartition<'mcx>(
+pub(crate) fn CloneRowTriggersToPartition<'mcx>(
     mcx: Mcx<'mcx>,
     parent: &Relation<'mcx>,
     partition: &Relation<'mcx>,
@@ -817,28 +816,6 @@ fn make_string_node<'mcx>(
             },
         )?,
     )
-}
-
-/// `CloneForeignKeyConstraints` (tablecmds.c). Unported; raises a precise error
-/// when the parent has foreign keys, no-op otherwise.
-fn CloneForeignKeyConstraints<'mcx>(
-    _mcx: Mcx<'mcx>,
-    parent: &Relation<'mcx>,
-    _partition: &Relation<'mcx>,
-) -> PgResult<()> {
-    let has_fkeys =
-        backend_utils_cache_relcache::derived::relation_has_foreign_keys(parent.rd_id)?;
-    if has_fkeys {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(
-                "ATTACH PARTITION onto a parent with foreign keys is not yet supported \
-                 (CloneForeignKeyConstraints unported)"
-                    .to_string(),
-            )
-            .into_error());
-    }
-    Ok(())
 }
 
 // ===========================================================================
