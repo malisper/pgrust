@@ -336,16 +336,83 @@ struct PublicationOptions {
 }
 
 /// Project a `DefElem`'s value node into the `DefElemArg` the define.c value
-/// accessors switch on (`nodeTag(def->arg)`).
-fn defel_arg(defel: &DefElem) -> Option<DefElemArg> {
-    let node = defel.arg.as_deref()?;
-    Some(match node.node_tag() {
+/// accessors switch on (`nodeTag(def->arg)`). Mirrors `defGetString`'s full
+/// node switch (define.c): a bare-identifier value arrives as a `T_TypeName`
+/// (grammar `def_arg: func_type`) and a qualified name as a `T_List`; both
+/// render to their textual form. A `_ => AStar` catch-all would collapse those
+/// to `"*"`.
+fn defel_arg(defel: &DefElem) -> PgResult<Option<DefElemArg>> {
+    let Some(node) = defel.arg.as_deref() else {
+        return Ok(None);
+    };
+    Ok(Some(match node.node_tag() {
         ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
         ntag::T_Float => DefElemArg::Float(node.expect_float().fval.as_str().to_string()),
         ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
         ntag::T_String => DefElemArg::String(node.expect_string().sval.as_str().to_string()),
-        _ => DefElemArg::AStar,
-    })
+        ntag::T_TypeName => DefElemArg::TypeName(defel_type_name_to_string(node.expect_typename())?),
+        ntag::T_List => DefElemArg::List(defel_name_list_to_string(node.expect_list())?),
+        ntag::T_A_Star => DefElemArg::AStar,
+        other => {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!("unrecognized node type: {}", other))
+                .into_error())
+        }
+    }))
+}
+
+/// `TypeNameToString(typeName)` for the `defGetString` `T_TypeName` case
+/// (parse_type.c). A reloption-style `def->arg` `TypeName` is always a parsed
+/// identifier carrying `names`.
+fn defel_type_name_to_string(tn: &types_nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
+    if tn.names.is_empty() {
+        return Err(ereport(ERROR)
+            .errmsg_internal("DefElem TypeName carries no name")
+            .into_error());
+    }
+    let mut out = String::new();
+    for (i, name) in tn.names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node: &Node = name;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            other => {
+                return Err(ereport(ERROR)
+                    .errmsg_internal(format!("unrecognized node type: {}", other))
+                    .into_error())
+            }
+        }
+    }
+    if tn.pct_type {
+        out.push_str("%TYPE");
+    }
+    if !tn.arrayBounds.is_empty() {
+        out.push_str("[]");
+    }
+    Ok(out)
+}
+
+/// `NameListToString(names)` (namespace.c) for the `defGetString` `T_List` case.
+fn defel_name_list_to_string(names: &[types_nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
+    let mut out = String::new();
+    for (i, name) in names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node: &Node = name;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            ntag::T_A_Star => out.push('*'),
+            other => {
+                return Err(ereport(ERROR)
+                    .errmsg_internal(format!("unrecognized node type: {}", other))
+                    .into_error())
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `defGetString(def)` (define.c).
@@ -353,7 +420,7 @@ fn defGetString(mcx: Mcx<'_>, defel: &DefElem) -> PgResult<String> {
     let s = backend_commands_define_seams::def_get_string::call(
         mcx,
         defel.defname.as_deref().unwrap_or("").to_string(),
-        defel_arg(defel),
+        defel_arg(defel)?,
     )?;
     Ok(s.as_str().to_string())
 }
@@ -362,7 +429,7 @@ fn defGetString(mcx: Mcx<'_>, defel: &DefElem) -> PgResult<String> {
 fn defGetBoolean(defel: &DefElem) -> PgResult<bool> {
     backend_commands_define_seams::def_get_boolean::call(
         defel.defname.as_deref().unwrap_or("").to_string(),
-        defel_arg(defel),
+        defel_arg(defel)?,
     )
 }
 

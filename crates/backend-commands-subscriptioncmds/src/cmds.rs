@@ -168,15 +168,79 @@ struct SubOpts {
 
 /// Project a `DefElem`'s value node into the `DefElemArg` the define.c value
 /// accessors switch on (`nodeTag(def->arg)`).
-fn defel_arg(arg: Option<&Node<'_>>) -> Option<DefElemArg> {
-    let node = arg?;
-    Some(match node.node_tag() {
+fn defel_arg(arg: Option<&Node<'_>>) -> PgResult<Option<DefElemArg>> {
+    let Some(node) = arg else {
+        return Ok(None);
+    };
+    // Mirror `defGetString`'s full node switch (define.c): a bare-identifier
+    // value arrives as a `T_TypeName` and a qualified name as a `T_List`; both
+    // render to text. A `_ => AStar` catch-all would collapse those to `"*"`.
+    Ok(Some(match node.node_tag() {
         ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
         ntag::T_Float => DefElemArg::Float(node.expect_float().fval.as_str().to_string()),
         ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
         ntag::T_String => DefElemArg::String(node.expect_string().sval.as_str().to_string()),
-        _ => DefElemArg::AStar,
-    })
+        ntag::T_TypeName => DefElemArg::TypeName(defel_type_name_to_string(node.expect_typename())?),
+        ntag::T_List => DefElemArg::List(defel_name_list_to_string(node.expect_list())?),
+        ntag::T_A_Star => DefElemArg::AStar,
+        other => {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!("unrecognized node type: {}", other))
+                .into_error())
+        }
+    }))
+}
+
+/// `TypeNameToString(typeName)` for the `defGetString` `T_TypeName` case.
+fn defel_type_name_to_string(tn: &types_nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
+    if tn.names.is_empty() {
+        return Err(ereport(ERROR)
+            .errmsg_internal("DefElem TypeName carries no name")
+            .into_error());
+    }
+    let mut out = String::new();
+    for (i, name) in tn.names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node: &Node = name;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            other => {
+                return Err(ereport(ERROR)
+                    .errmsg_internal(format!("unrecognized node type: {}", other))
+                    .into_error())
+            }
+        }
+    }
+    if tn.pct_type {
+        out.push_str("%TYPE");
+    }
+    if !tn.arrayBounds.is_empty() {
+        out.push_str("[]");
+    }
+    Ok(out)
+}
+
+/// `NameListToString(names)` (namespace.c) for the `defGetString` `T_List` case.
+fn defel_name_list_to_string(names: &[types_nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
+    let mut out = String::new();
+    for (i, name) in names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node: &Node = name;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            ntag::T_A_Star => out.push('*'),
+            other => {
+                return Err(ereport(ERROR)
+                    .errmsg_internal(format!("unrecognized node type: {}", other))
+                    .into_error())
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `defGetString(def)` (define.c).
@@ -184,14 +248,14 @@ fn def_get_string(mcx: Mcx<'_>, defname: &str, arg: Option<&Node<'_>>) -> PgResu
     let s = backend_commands_define_seams::def_get_string::call(
         mcx,
         defname.to_string(),
-        defel_arg(arg),
+        defel_arg(arg)?,
     )?;
     Ok(s.as_str().to_string())
 }
 
 /// `defGetBoolean(def)` (define.c).
 fn def_get_boolean(defname: &str, arg: Option<&Node<'_>>) -> PgResult<bool> {
-    backend_commands_define_seams::def_get_boolean::call(defname.to_string(), defel_arg(arg))
+    backend_commands_define_seams::def_get_boolean::call(defname.to_string(), defel_arg(arg)?)
 }
 
 /// `errorConflictingDefElem(defel, pstate)` (defrem.c).

@@ -285,7 +285,15 @@ fn defel_arg(mcx: Mcx<'_>, defel: &DefElem) -> PgResult<Option<DefElemArg>> {
         Node::TypeName(tn) => DefElemArg::TypeName(TypeNameToString(mcx, tn)?),
         Node::List(_) => DefElemArg::List(NameListToString_seam(mcx, &defGetQualifiedName(defel)?)?),
         Node::A_Star => DefElemArg::AStar,
-        _ => DefElemArg::AStar,
+        // `defGetString` (define.c) raises elog(ERROR, "unrecognized node
+        // type") for any other node form; do not collapse to `A_Star`.
+        other => {
+            return ereport(ERROR)
+                .errcode(ERRCODE_INTERNAL_ERROR)
+                .errmsg(format!("unrecognized node type: {}", other.node_tag_name()))
+                .finish(errloc(0, "defGetString"))
+                .map(|()| unreachable!("ereport(ERROR) always yields an Err"));
+        }
     }))
 }
 

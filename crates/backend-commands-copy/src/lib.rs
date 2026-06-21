@@ -71,16 +71,76 @@ fn def_name<'a>(defel: &'a DefElem) -> &'a str {
 
 /// Project a parse-tree `DefElem`'s value node into the `DefElemArg` the
 /// `define.c` value accessors switch on. `None` for `def->arg == NULL`.
-fn defel_arg(defel: &DefElem) -> Option<DefElemArg> {
-    let node = defel.arg.as_deref()?;
-    Some(match node.node_tag() {
+fn defel_arg(defel: &DefElem) -> PgResult<Option<DefElemArg>> {
+    let Some(node) = defel.arg.as_deref() else {
+        return Ok(None);
+    };
+    // Mirror `defGetString`'s full node switch (define.c): a bare-identifier
+    // option value arrives as a `T_TypeName` and a qualified name as a
+    // `T_List`; both render to text. A `_ => AStar` catch-all would collapse
+    // those to `"*"`.
+    Ok(Some(match node.node_tag() {
         ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
         ntag::T_Float => DefElemArg::Float(node.expect_float().fval.to_string()),
         ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
         ntag::T_String => DefElemArg::String(node.expect_string().sval.to_string()),
+        ntag::T_TypeName => DefElemArg::TypeName(defel_type_name_to_string(node.expect_typename())?),
+        ntag::T_List => DefElemArg::List(defel_name_list_to_string(node.expect_list())?),
         ntag::T_A_Star => DefElemArg::AStar,
-        _ => DefElemArg::AStar,
-    })
+        other => {
+            return Err(PgError::error(format!("unrecognized node type: {}", other))
+                .with_sqlstate(ERRCODE_SYNTAX_ERROR))
+        }
+    }))
+}
+
+/// `TypeNameToString(typeName)` for the `defGetString` `T_TypeName` case.
+fn defel_type_name_to_string(tn: &types_nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
+    if tn.names.is_empty() {
+        return Err(PgError::error("DefElem TypeName carries no name")
+            .with_sqlstate(ERRCODE_SYNTAX_ERROR));
+    }
+    let mut out = String::new();
+    for (i, name) in tn.names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node: &Node = name;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            other => {
+                return Err(PgError::error(format!("unrecognized node type: {}", other))
+                    .with_sqlstate(ERRCODE_SYNTAX_ERROR))
+            }
+        }
+    }
+    if tn.pct_type {
+        out.push_str("%TYPE");
+    }
+    if !tn.arrayBounds.is_empty() {
+        out.push_str("[]");
+    }
+    Ok(out)
+}
+
+/// `NameListToString(names)` (namespace.c) for the `defGetString` `T_List` case.
+fn defel_name_list_to_string(names: &[NodePtr<'_>]) -> PgResult<String> {
+    let mut out = String::new();
+    for (i, name) in names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node: &Node = name;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            ntag::T_A_Star => out.push('*'),
+            other => {
+                return Err(PgError::error(format!("unrecognized node type: {}", other))
+                    .with_sqlstate(ERRCODE_SYNTAX_ERROR))
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `defGetString(def)` (define.c) — render the value as a string (`mcx`-owned).
@@ -88,7 +148,7 @@ fn def_get_string<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem) -> PgResult<String> {
     let s = define_s::def_get_string::call(
         mcx,
         def_name(defel).to_string(),
-        defel_arg(defel),
+        defel_arg(defel)?,
     )?;
     Ok(s.to_string())
 }
@@ -97,7 +157,7 @@ fn def_get_string<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem) -> PgResult<String> {
 fn def_get_boolean(defel: &DefElem) -> PgResult<bool> {
     define_s::def_get_boolean::call(
         def_name(defel).to_string(),
-        defel_arg(defel),
+        defel_arg(defel)?,
     )
 }
 
@@ -217,7 +277,7 @@ fn defGetCopyRejectLimitOption(defel: &DefElem) -> PgResult<i64> {
         Some(_) => {
             // defGetInt64 over the projected arg: only Integer / Float / String
             // produce an int64; anything else errors like define.c.
-            match defel_arg(defel) {
+            match defel_arg(defel)? {
                 Some(DefElemArg::Integer(v)) => v,
                 Some(DefElemArg::Float(s)) | Some(DefElemArg::String(s)) => {
                     backend_utils_adt_numutils::pg_strtoint64(&s)?

@@ -248,10 +248,15 @@ fn pg_strcasecmp(a: &str, b: &str) -> i32 {
 
 /// Project a `DefElem`'s value node into the `DefElemArg` the define.c value
 /// accessors switch on (mirrors `nodeTag(def->arg)`); `None` for `arg == NULL`.
-fn defel_arg(opt: &types_nodes::ddlnodes::DefElem<'_>) -> Option<DefElemArg> {
+fn defel_arg(opt: &types_nodes::ddlnodes::DefElem<'_>) -> PgResult<Option<DefElemArg>> {
     use types_nodes::nodes::ntag;
-    let node = opt.arg.as_deref()?;
-    Some(match node.node_tag() {
+    let Some(node) = opt.arg.as_deref() else {
+        return Ok(None);
+    };
+    // Mirror `defGetString`'s full node switch (define.c): a bare-identifier
+    // value arrives as a `T_TypeName` and a qualified name as a `T_List`; both
+    // render to text. A `_ => AStar` catch-all would collapse those to `"*"`.
+    Ok(Some(match node.node_tag() {
         ntag::T_Integer => {
             let i = node.expect_integer();
             DefElemArg::Integer(i.ival as i64)
@@ -268,8 +273,69 @@ fn defel_arg(opt: &types_nodes::ddlnodes::DefElem<'_>) -> Option<DefElemArg> {
             let s = node.expect_string();
             DefElemArg::String(s.sval.as_str().to_string())
         }
-        _ => DefElemArg::AStar,
-    })
+        ntag::T_TypeName => DefElemArg::TypeName(defel_type_name_to_string(node.expect_typename())?),
+        ntag::T_List => DefElemArg::List(defel_name_list_to_string(node.expect_list())?),
+        ntag::T_A_Star => DefElemArg::AStar,
+        other => {
+            return Err(ereport(ERROR)
+                .errmsg_internal(format!("unrecognized node type: {}", other))
+                .into_error())
+        }
+    }))
+}
+
+/// `TypeNameToString(typeName)` for the `defGetString` `T_TypeName` case.
+fn defel_type_name_to_string(tn: &types_nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
+    use types_nodes::nodes::ntag;
+    if tn.names.is_empty() {
+        return Err(ereport(ERROR)
+            .errmsg_internal("DefElem TypeName carries no name")
+            .into_error());
+    }
+    let mut out = String::new();
+    for (i, name) in tn.names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node: &Node = name;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            other => {
+                return Err(ereport(ERROR)
+                    .errmsg_internal(format!("unrecognized node type: {}", other))
+                    .into_error())
+            }
+        }
+    }
+    if tn.pct_type {
+        out.push_str("%TYPE");
+    }
+    if !tn.arrayBounds.is_empty() {
+        out.push_str("[]");
+    }
+    Ok(out)
+}
+
+/// `NameListToString(names)` (namespace.c) for the `defGetString` `T_List` case.
+fn defel_name_list_to_string(names: &[types_nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
+    use types_nodes::nodes::ntag;
+    let mut out = String::new();
+    for (i, name) in names.iter().enumerate() {
+        if i != 0 {
+            out.push('.');
+        }
+        let node: &Node = name;
+        match node.node_tag() {
+            ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
+            ntag::T_A_Star => out.push('*'),
+            other => {
+                return Err(ereport(ERROR)
+                    .errmsg_internal(format!("unrecognized node type: {}", other))
+                    .into_error())
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `def->defname` of a parsed `DefElem`.
@@ -282,17 +348,17 @@ fn def_name(opt: &types_nodes::ddlnodes::DefElem<'_>) -> String {
 
 /// `defGetBoolean(def)`.
 fn defGetBoolean(opt: &types_nodes::ddlnodes::DefElem<'_>) -> PgResult<bool> {
-    define::def_get_boolean::call(def_name(opt), defel_arg(opt))
+    define::def_get_boolean::call(def_name(opt), defel_arg(opt)?)
 }
 
 /// `defGetString(def)`.
 fn defGetString(opt: &types_nodes::ddlnodes::DefElem<'_>) -> PgResult<String> {
-    rt::def_get_string_text::call(def_name(opt), defel_arg(opt))
+    rt::def_get_string_text::call(def_name(opt), defel_arg(opt)?)
 }
 
 /// `defGetInt32(def)`.
 fn defGetInt32(opt: &types_nodes::ddlnodes::DefElem<'_>) -> PgResult<i32> {
-    rt::def_get_int32::call(def_name(opt), defel_arg(opt))
+    rt::def_get_int32::call(def_name(opt), defel_arg(opt)?)
 }
 
 /// `relation->relname` of a `RangeVar` (the bare relation name).
