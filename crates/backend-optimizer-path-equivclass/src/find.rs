@@ -77,7 +77,7 @@ pub fn find_computable_ec_member(
 ) -> Option<EmId> {
     /* pull the Vars/quasi-Vars present in "exprs" */
     let exprvars = ec_seam::pull_var_clause_list::call(
-        exprs.to_vec(),
+        exprs,
         PVC_INCLUDE_AGGREGATES
             | PVC_INCLUDE_WINDOWFUNCS
             | PVC_INCLUDE_PLACEHOLDERS

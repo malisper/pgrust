@@ -8058,17 +8058,19 @@ fn apply_scanjoin_target_to_paths<'mcx>(
     // scanjoin_target = linitial_node(PathTarget, scanjoin_targets) (C:7892):
     // the SRF-free target the scan/join paths must emit.
     let scanjoin_target = &scanjoin_targets[0];
-    // This function recurses for partitioned rels; we don't support that yet.
-    // IS_PARTITIONED_REL(rel): a base/join (or other-member) rel that has a
-    // partitioning scheme and partition children.
+    // IS_PARTITIONED_REL(rel) (pathnodes.h:1086): part_scheme && boundinfo &&
+    // nparts > 0 && part_rels && !IS_DUMMY_REL(rel). The macro does NOT gate on
+    // reloptkind — a partition that is itself partitioned is an
+    // RELOPT_OTHER_MEMBER_REL, and multi-level partitionwise aggregation relies
+    // on recursing into it; gating on BASEREL/JOINREL would skip the recursion
+    // and leave the sub-partition scan pathtargets unlabeled (no sortgrouprefs).
     let rel_is_partitioned = {
         let r = root.rel(rel);
-        matches!(
-            r.reloptkind,
-            types_pathnodes::RELOPT_BASEREL | types_pathnodes::RELOPT_JOINREL
-        ) && r.part_scheme.is_some()
+        r.part_scheme.is_some()
+            && r.boundinfo.is_some()
             && r.nparts > 0
-    };
+            && !r.part_rels.is_empty()
+    } && !backend_optimizer_path_joinrels::is_dummy_rel(root, rel);
 
     // If the rel is partitioned, drop its existing paths and generate new ones,
     // computing the scan/join target below the partitioning Append rather than

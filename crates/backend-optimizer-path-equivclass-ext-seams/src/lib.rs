@@ -91,8 +91,11 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `pull_var_clause` over a list of expressions (the C
-    /// `pull_var_clause((Node *) exprs, ...)` over a `List`).
-    pub fn pull_var_clause_list(nodes: Vec<Expr>, flags: i32) -> Vec<Expr>
+    /// `pull_var_clause((Node *) exprs, ...)` over a `List`). Borrows the slice
+    /// (C passes the `List *` by pointer); a by-value `Vec<Expr>` would force the
+    /// caller to `.to_vec()`, whose shallow `Expr::clone` panics on an `Aggref`
+    /// tlist element (the derived-clone guard) even though the seam only reads.
+    pub fn pull_var_clause_list(nodes: &[Expr], flags: i32) -> Vec<Expr>
 );
 seam_core::seam!(
     /// `pull_varnos(root, (Node *) expr)` (var.c) — the relids referenced in

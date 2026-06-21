@@ -1106,7 +1106,7 @@ fn seam_eqext_pull_var_clause(node: &Expr, flags: i32) -> Vec<Expr> {
 /// `pull_var_clause((Node *) exprs, flags)` (var.c) over a `List` — run the walk
 /// over each expression and concatenate, matching the C single call over the
 /// whole list (the per-element order is preserved).
-fn seam_eqext_pull_var_clause_list(nodes: Vec<Expr>, flags: i32) -> Vec<Expr> {
+fn seam_eqext_pull_var_clause_list(nodes: &[Expr], flags: i32) -> Vec<Expr> {
     let mut out: Vec<Expr> = Vec::new();
     for node in nodes.iter() {
         let scratch = mcx::MemoryContext::new("pull_var_clause_list wrapper");
