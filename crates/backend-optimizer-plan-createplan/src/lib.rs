@@ -2934,23 +2934,23 @@ fn create_tidrangescan_plan<'mcx>(
 
     // The qpqual list must contain all restrictions not enforced by the
     // tidrangequals list. tidrangequals has AND semantics, so we simply remove
-    // any qual that appears in it (matched by EC-derivation / identity over the
-    // RestrictInfos backing the tidrangequals).
-    let trq_rinfos: Vec<RinfoId> = tidrangequals_nodes
-        .iter()
-        .filter_map(|&n| match root.node(n) {
-            Expr::RestrictInfo(r) => Some(RinfoId::from(*r)),
-            _ => None,
-        })
-        .collect();
+    // any qual that appears in it. C's TidRangePath.tidrangequals is a
+    // List<RestrictInfo> and the test is list_member_ptr (pointer identity);
+    // here tidrangepath stored each rinfo's bare `clause` expr (the very node
+    // the RestrictInfo carries), so the faithful stand-in for the pointer test
+    // is `equal()` between this scan clause's `clause` and a tidrangequal expr —
+    // they are the same node when they came from the same RestrictInfo.
     let mut qpqual: Vec<RinfoId> = Vec::new();
     for &rinfo_id in scan_clauses.iter() {
         let rinfo = root.rinfo(rinfo_id);
         if rinfo.pseudoconstant {
             continue; // we may drop pseudoconstants here
         }
-        // list_member_ptr(tidrangequals, rinfo): identity over RestrictInfos.
-        if trq_rinfos.iter().any(|&r| r == rinfo_id) {
+        let rinfo_clause = root.rinfo(rinfo_id).clause;
+        if tidrangequals_nodes
+            .iter()
+            .any(|&tq| equal_expr_seam::call(root.node(rinfo_clause), root.node(tq)))
+        {
             continue; // simple duplicate
         }
         qpqual.push(rinfo_id);
