@@ -50,17 +50,12 @@ pub fn add_join_clause_to_rels<'mcx>(
     restrictinfo: RinfoId,
     join_relids: &Relids,
 ) -> PgResult<()> {
-    // Don't add the clause if it is always true.  Borrow the clause `&Expr`
-    // for the read-only always-true / always-false inspections (a derived
-    // `Expr::clone` panics on a context-allocated child); compute both flags in
-    // the borrow scope so the borrow is released before any `&mut root` use.
-    let (is_always_true, is_always_false) = {
-        let clause_expr: &Expr = root.node(root.rinfo(restrictinfo).clause);
-        (
-            ext_seam::restriction_is_always_true::call(root, clause_expr),
-            ext_seam::restriction_is_always_false::call(root, clause_expr),
-        )
-    };
+    // Don't add the clause if it is always true.  Pass the whole RestrictInfo
+    // (so the has_clone/is_clone guard and the orclause OR-recursion apply, per
+    // initsplan.c restriction_is_always_true/false); compute both flags up front
+    // before any `&mut root` use.
+    let is_always_true = ext_seam::restriction_is_always_true::call(root, restrictinfo);
+    let is_always_false = ext_seam::restriction_is_always_false::call(root, restrictinfo);
     if is_always_true {
         return Ok(());
     }

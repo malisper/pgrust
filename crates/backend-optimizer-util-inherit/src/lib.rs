@@ -1065,13 +1065,13 @@ pub fn apply_child_basequals<'mcx>(
                 None,
             )?;
 
-            // Proven always false / always true? Deep-copy via `clone_in` — the
-            // derived `Expr::clone` panics on an owned-subtree child.
-            let clause_expr = root.node(root.rinfo(childrinfo).clause).clone_in(mcx)?;
-            if joinext::restriction_is_always_false::call(root, &clause_expr) {
+            // Proven always false / always true?  Pass the child RestrictInfo so
+            // the has_clone/is_clone guard and orclause OR-recursion apply (per
+            // inherit.c:910/913, which pass childrinfo).
+            if joinext::restriction_is_always_false::call(root, childrinfo) {
                 return Ok(false);
             }
-            if joinext::restriction_is_always_true::call(root, &clause_expr) {
+            if joinext::restriction_is_always_true::call(root, childrinfo) {
                 continue;
             }
 

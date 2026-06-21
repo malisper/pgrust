@@ -265,11 +265,11 @@ pub fn init_seams() {
     jiext::add_vars_to_attr_needed::set(|root, vars, where_needed| {
         targetlist::add_vars_to_attr_needed(root, vars, where_needed)
     });
-    jiext::restriction_is_always_true::set(|root, clause| {
-        quals::restriction_is_always_true(root, clause)
+    jiext::restriction_is_always_true::set(|root, ri| {
+        quals::restriction_is_always_true_for(root, ri)
     });
-    jiext::restriction_is_always_false::set(|root, clause| {
-        quals::restriction_is_always_false(root, clause)
+    jiext::restriction_is_always_false::set(|root, ri| {
+        quals::restriction_is_always_false_for(root, ri)
     });
 
     /* ---- subselect.c-owned SS_attach_initplans (createplan-seams) -------- */

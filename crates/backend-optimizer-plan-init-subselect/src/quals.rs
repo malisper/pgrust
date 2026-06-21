@@ -539,6 +539,21 @@ fn restriction_is_always_true_ri(root: &PlannerInfo, ri: &RestrictInfo) -> bool 
     false
 }
 
+/// `restriction_is_always_true(root, restrictinfo)` (initsplan.c:3091) over a
+/// `RinfoId` — the faithful C entry point used by `add_join_clause_to_rels` /
+/// `add_base_clause_to_rel`, which pass the whole RestrictInfo (so the
+/// `has_clone`/`is_clone` guard and the `orclause` OR-recursion both apply,
+/// unlike the bare-clause [`restriction_is_always_true`] entry).
+pub fn restriction_is_always_true_for(root: &PlannerInfo, ri: RinfoId) -> bool {
+    restriction_is_always_true_ri(root, root.rinfo(ri))
+}
+
+/// `restriction_is_always_false(root, restrictinfo)` (initsplan.c:3156) over a
+/// `RinfoId` (see [`restriction_is_always_true_for`]).
+pub fn restriction_is_always_false_for(root: &PlannerInfo, ri: RinfoId) -> bool {
+    restriction_is_always_false_ri(root, root.rinfo(ri))
+}
+
 /// The IS_NOT_NULL/argisrow arm shared by the bare-clause and RestrictInfo
 /// `restriction_is_always_true` bodies.
 fn nulltest_always_true(root: &PlannerInfo, nt: &NullTest) -> bool {

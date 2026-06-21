@@ -72,12 +72,15 @@ seam_core::seam!(
     ) -> Option<RelId>
 );
 seam_core::seam!(
-    /// `restriction_is_always_true(root, restrictinfo)` (initsplan.c).
-    pub fn restriction_is_always_true(root: &PlannerInfo, clause: &Expr) -> bool
+    /// `restriction_is_always_true(root, restrictinfo)` (initsplan.c). Takes the
+    /// whole `RestrictInfo` (a `RinfoId`), not the bare clause, so the
+    /// `has_clone`/`is_clone` guard and the `orclause` OR-recursion apply.
+    pub fn restriction_is_always_true(root: &PlannerInfo, restrictinfo: types_pathnodes::RinfoId) -> bool
 );
 seam_core::seam!(
-    /// `restriction_is_always_false(root, restrictinfo)` (initsplan.c).
-    pub fn restriction_is_always_false(root: &PlannerInfo, clause: &Expr) -> bool
+    /// `restriction_is_always_false(root, restrictinfo)` (initsplan.c). See
+    /// [`restriction_is_always_true`].
+    pub fn restriction_is_always_false(root: &PlannerInfo, restrictinfo: types_pathnodes::RinfoId) -> bool
 );
 seam_core::seam!(
     /// `add_vars_to_targetlist(root, vars, where_needed)` (var.c). `vars` is a
