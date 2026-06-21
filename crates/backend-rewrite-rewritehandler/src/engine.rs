@@ -41,7 +41,10 @@ use types_nodes::modifytable::{OnConflictAction, OverridingKind};
 use types_nodes::nodes::{CmdType, Node, NodePtr};
 use types_nodes::parsenodes::{RTEKind, RangeTblEntry};
 use types_nodes::primnodes::{CoerceToDomain, Expr, FieldStore, SetToDefault, SubscriptingRef, Var};
-use types_nodes::rawnodes::CommonTableExpr;
+use types_nodes::rawnodes::{CommonTableExpr, LockClauseStrength, LockWaitPolicy};
+use types_acl::acl::ACL_SELECT_FOR_UPDATE;
+use backend_parser_analyze::applyLockingClause;
+use backend_parser_relation::getRTEPermissionInfo;
 use types_nodes::value::StringNode;
 
 use backend_access_table_table::table_open;
@@ -1687,16 +1690,32 @@ fn ApplyRetrieveRule<'mcx>(
     let mut rule_action = core_clone(&rule.actions[0], mcx)?;
     AcquireRewriteLocks(mcx, &mut rule_action, true, rc.is_some())?;
 
-    if rc.is_some() {
-        // markQueryForLocking on the whole contained view: applyLockingClause +
-        // perminfo requiredPerms, recursing through the jointree. Not on the
-        // plain SELECT spine.
-        return Err(elog(
-            "ApplyRetrieveRule: FOR [KEY] UPDATE/SHARE of a view requires \
-             markQueryForLocking over the contained tables; this view-locking path \
-             is not part of the plain SELECT-from-view spine (owner: \
-             backend-rewrite-rewritehandler)",
-        ));
+    // If FOR [KEY] UPDATE/SHARE of view, mark all the contained tables as
+    // implicit FOR [KEY] UPDATE/SHARE, the same as the parser would have done
+    // if the view's subquery had been written out explicitly.
+    if let Some(rc) = rc.as_ref() {
+        // markQueryForLocking(rule_action, rule_action->jointree, rc->strength,
+        //                     rc->waitPolicy, true).  The jointree is detached so
+        // the walk can read it while the same query's rtable/rteperminfos/rowMarks
+        // are mutated.
+        let jointree = rule_action.jointree.take();
+        let result = (|| -> PgResult<()> {
+            if let Some(jt) = jointree.as_deref() {
+                for item in jt.fromlist.iter() {
+                    markQueryForLocking(
+                        mcx,
+                        &mut rule_action,
+                        item,
+                        rc.strength,
+                        rc.waitPolicy,
+                        true,
+                    )?;
+                }
+            }
+            Ok(())
+        })();
+        rule_action.jointree = jointree;
+        result?;
     }
 
     // Recursively expand view references inside the view.
@@ -1729,6 +1748,92 @@ fn ApplyRetrieveRule<'mcx>(
     }
 
     Ok(parsetree)
+}
+
+/// `markQueryForLocking(qry, jtnode, strength, waitPolicy, pushedDown)`
+/// (rewriteHandler.c:1893) — recursively mark all relations used by a view as
+/// FOR [KEY] UPDATE/SHARE.
+///
+/// This may generate an invalid query, eg if some sub-query uses an aggregate.
+/// We leave it to the planner to detect that.  NB: this must agree with the
+/// parser's `transformLockingClause()`.
+///
+/// `jtnode` is borrowed from a jointree the caller has detached from `qry`, so
+/// that `applyLockingClause`/`getRTEPermissionInfo` may mutate `qry`'s
+/// rtable/rteperminfos/rowMarks while this walk reads the (immutable) jointree.
+fn markQueryForLocking<'mcx>(
+    mcx: Mcx<'mcx>,
+    qry: &mut Query<'mcx>,
+    jtnode: &NodePtr<'mcx>,
+    strength: LockClauseStrength,
+    wait_policy: LockWaitPolicy,
+    pushed_down: bool,
+) -> PgResult<()> {
+    if let Some(rtr) = jtnode.as_rangetblref() {
+        let rti = rtr.rtindex as Index;
+        let rtekind = qry.rtable[(rti - 1) as usize].rtekind;
+
+        if rtekind == RTEKind::RTE_RELATION {
+            applyLockingClause(mcx, qry, rti, strength, wait_policy, pushed_down)?;
+
+            let perminfo_idx =
+                getRTEPermissionInfo(&qry.rteperminfos, &qry.rtable[(rti - 1) as usize])?;
+            qry.rteperminfos[perminfo_idx].requiredPerms |= ACL_SELECT_FOR_UPDATE;
+        } else if rtekind == RTEKind::RTE_SUBQUERY {
+            applyLockingClause(mcx, qry, rti, strength, wait_policy, pushed_down)?;
+
+            // FOR UPDATE/SHARE of subquery is propagated to subquery's rels.
+            // Detach the subquery and its jointree so the recursive walk can
+            // mutate the subquery while reading its jointree.
+            let mut subquery = match qry.rtable[(rti - 1) as usize].subquery.take() {
+                Some(sub) => PgBox::into_inner(sub),
+                None => return Ok(()),
+            };
+            let result = (|| -> PgResult<()> {
+                let subjointree = subquery.jointree.take();
+                let inner = (|| -> PgResult<()> {
+                    if let Some(jt) = subjointree.as_deref() {
+                        for item in jt.fromlist.iter() {
+                            markQueryForLocking(
+                                mcx,
+                                &mut subquery,
+                                item,
+                                strength,
+                                wait_policy,
+                                true,
+                            )?;
+                        }
+                    }
+                    Ok(())
+                })();
+                subquery.jointree = subjointree;
+                inner
+            })();
+            qry.rtable[(rti - 1) as usize].subquery = Some(alloc_in(mcx, subquery)?);
+            result?;
+        }
+        // other RTE types are unaffected by FOR UPDATE
+    } else if let Some(f) = jtnode.as_fromexpr() {
+        // The fromlist must be detached from qry to read it while mutating qry;
+        // FromExpr nodes only occur nested inside an already-detached jointree,
+        // so the borrow here aliases the detached tree, not qry.
+        for l in f.fromlist.iter() {
+            markQueryForLocking(mcx, qry, l, strength, wait_policy, pushed_down)?;
+        }
+    } else if let Some(j) = jtnode.as_joinexpr() {
+        if let Some(larg) = j.larg.as_ref() {
+            markQueryForLocking(mcx, qry, larg, strength, wait_policy, pushed_down)?;
+        }
+        if let Some(rarg) = j.rarg.as_ref() {
+            markQueryForLocking(mcx, qry, rarg, strength, wait_policy, pushed_down)?;
+        }
+    } else {
+        return Err(elog(format!(
+            "unrecognized node type: {}",
+            jtnode.node_tag().0
+        )));
+    }
+    Ok(())
 }
 
 /// `fireRIRrules(parsetree, activeRIRs)` (rewriteHandler.c:1992) — apply all RIR
