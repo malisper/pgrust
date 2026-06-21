@@ -160,7 +160,11 @@ pub fn init_seams() {
                 // `node_arena` `'static` handle-space. The clone lives in `mcx`
                 // (which owns the planner run), so the arena-intern erasure is sound
                 // (no function-local scratch escape).
-                let mut node = types_nodes::nodes::Node::mk_expr(mcx, root.node(id).clone_in(mcx)?)
+                let cloned = root
+                    .node(id)
+                    .clone_in(mcx)
+                    .expect("change_var_nodes: clone_in failed (OOM)");
+                let mut node = types_nodes::nodes::Node::mk_expr(mcx, cloned)
                     .expect("change_var_nodes: opaque Node alloc failed (OOM)");
                 change::ChangeVarNodes(&mut node, rt_index, new_index, 0, mcx);
                 let walked = match node.into_expr() {
@@ -171,7 +175,7 @@ pub fn init_seams() {
                 };
                 *root.node_mut(id) = walked.erase_lifetime();
             }
-            Ok(nodes.to_vec())
+            nodes.to_vec()
         },
     );
 

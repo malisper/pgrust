@@ -221,6 +221,7 @@ seam_core::seam!(
     /// moves it into the mutator (a borrow would force a `.clone()` that panics
     /// on owned-subtree Exprs like `Aggref`).
     pub fn remove_nulling_relids<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         node: Expr<'mcx>,
         removable_relids: &types_pathnodes::Relids,
         except_relids: &types_pathnodes::Relids,

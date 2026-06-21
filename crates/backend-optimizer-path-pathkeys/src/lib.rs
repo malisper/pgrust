@@ -1978,11 +1978,10 @@ fn mcx_collect(
 fn clone_sortkey_expr<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     expr: &types_nodes::primnodes::Expr,
-) -> types_nodes::primnodes::Expr<'static> {
-    // The clone is interned into the planner arena (carried by `mcx`), which
-    // outlives the whole planner run; `erase_lifetime` is the sanctioned
-    // arena-intern boundary that ties the result to that long-lived context.
+) -> types_nodes::primnodes::Expr<'mcx> {
+    // Deep-clone into the planner-run arena carried by `mcx`; the result is
+    // `'mcx`-bound so it can be threaded through the mcx-taking mutators
+    // (`remove_nulling_relids`) and eclass lookup.
     expr.clone_in(mcx)
         .unwrap_or_else(|e| panic!("clone_sortkey_expr: {e:?}"))
-        .erase_lifetime()
 }

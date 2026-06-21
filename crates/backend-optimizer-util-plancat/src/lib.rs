@@ -449,10 +449,10 @@ pub fn get_relation_info<'mcx>(
             info.indexprs = ext::get_index_expressions::call(run.mcx(), root, indexoid)?;
             info.indpred = ext::get_index_predicate::call(run.mcx(), root, indexoid)?;
             if !info.indexprs.is_empty() && varno != 1 {
-                info.indexprs = ext::change_var_nodes::call(root, &info.indexprs, 1, varno as i32);
+                info.indexprs = ext::change_var_nodes::call(run.mcx(), root, &info.indexprs, 1, varno as i32);
             }
             if !info.indpred.is_empty() && varno != 1 {
-                info.indpred = ext::change_var_nodes::call(root, &info.indpred, 1, varno as i32);
+                info.indpred = ext::change_var_nodes::call(run.mcx(), root, &info.indpred, 1, varno as i32);
             }
 
             // Build targetlist using the completed indexprs data.
@@ -748,7 +748,7 @@ pub fn infer_arbiter_indexes<'mcx>(
         // Expression attributes (if any) must match.
         let mut idx_exprs = idx.idx_exprs.clone();
         if !idx_exprs.is_empty() && varno != 1 {
-            idx_exprs = ext::change_var_nodes::call(root, &idx_exprs, 1, varno as i32);
+            idx_exprs = ext::change_var_nodes::call(run.mcx(), root, &idx_exprs, 1, varno as i32);
         }
 
         let mut matched = true;
@@ -785,7 +785,7 @@ pub fn infer_arbiter_indexes<'mcx>(
         // Partial index: predicate must be implied by the ON CONFLICT WHERE.
         let mut pred_exprs = idx.idx_predicate.clone();
         if !pred_exprs.is_empty() && varno != 1 {
-            pred_exprs = ext::change_var_nodes::call(root, &pred_exprs, 1, varno as i32);
+            pred_exprs = ext::change_var_nodes::call(run.mcx(), root, &pred_exprs, 1, varno as i32);
         }
         let arbiter_where = onconflict.arbiter_where.clone();
         if !predtest::predicate_implied_by::call(root, &pred_exprs, &arbiter_where, false) {
