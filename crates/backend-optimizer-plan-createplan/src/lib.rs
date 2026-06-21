@@ -3389,7 +3389,29 @@ fn create_subqueryscan_subplan_inroot<'mcx>(
             // move it back onto `root` afterwards — exactly mirroring the shared
             // pointer. Restore on the error path too.
             subroot.glob = root.glob.take();
+            // Re-attach the parent root so any CTE-scan inside this subquery can
+            // resolve its referenced (sibling-level) CTE. C keeps the whole
+            // PlannerInfo chain reachable by pointer for the lifetime of
+            // create_plan; in the owned model the stored subroot's `parent_root`
+            // was severed when the subquery was first planned, so a materialized
+            // inner CTE referencing a sibling materialized CTE
+            // (resolve_cte_subplan / create_ctescan_plan walk
+            // `subroot->parent_root` for `ctelevelsup` levels to find the root
+            // owning the CTE's `cte_plan_ids`/`init_plans`) would hit a null
+            // parent. Move the live parent root in by value for the duration of
+            // the recursion (its glob was already taken above) and recover it on
+            // the way out — exactly mirroring the shared parent pointer. The
+            // restore must happen on the error path too.
+            let saved_parent = core::mem::replace(&mut subroot.parent_root, None);
+            let parent_root = core::mem::take(root);
+            subroot.parent_root = Some(alloc::boxed::Box::new(parent_root));
             let result = create_plan(mcx, &mut subroot, run, sub_id);
+            // Recover the parent root and restore `*root`.
+            *root = *subroot
+                .parent_root
+                .take()
+                .expect("create_subqueryscan_subplan: subroot lost its parent_root");
+            subroot.parent_root = saved_parent;
             root.glob = subroot.glob.take();
             // Restore the subroot so a later level (e.g. set_subqueryscan_references)
             // can still reach it, even on the error path.
