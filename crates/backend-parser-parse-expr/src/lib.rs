@@ -380,6 +380,10 @@ pub fn transformExprRecurse<'mcx>(
         ntag::T_JsonArrayConstructor => {
             transformJsonArrayConstructor(pstate, expr.into_jsonarrayconstructor().unwrap())?
         }
+        ntag::T_JsonArrayQueryConstructor => transformJsonArrayQueryConstructor(
+            pstate,
+            expr.into_jsonarrayqueryconstructor().unwrap(),
+        )?,
         ntag::T_JsonScalarExpr => {
             transformJsonScalarExpr(pstate, expr.into_jsonscalarexpr().unwrap())?
         }
@@ -4957,6 +4961,185 @@ fn transformJsonArrayConstructor<'mcx>(
         ctor.absent_on_null,
         ctor.location,
     )
+}
+
+/// `transformJsonArrayQueryConstructor(pstate, ctor)` (parse_expr.c:3773).
+///
+/// Transforms `JSON_ARRAY(query [FORMAT] [RETURNING] [ON NULL])` into
+/// `(SELECT JSON_ARRAYAGG(a [FORMAT] [RETURNING] [ON NULL]) FROM (query) q(a))`,
+/// i.e. an `EXPR_SUBLINK` wrapping a synthetic `SELECT`. The user's subquery is
+/// first analyzed (with a throwaway parsestate, via `parse_sub_analyze` exactly
+/// as C's `make_parsestate`/`transformStmt`) solely to verify it returns a
+/// single column; the analyzed result is then discarded and the *raw* subquery
+/// is embedded in the synthetic `SELECT`, which is re-analyzed through the
+/// normal `transformSubLink` path.
+fn transformJsonArrayQueryConstructor<'mcx>(
+    pstate: &mut ParseState<'mcx>,
+    ctor: types_nodes::rawexprnodes::JsonArrayQueryConstructor<'mcx>,
+) -> PgResult<Expr> {
+    let mcx = aexpr_clone_ctx(pstate);
+
+    let query = ctor
+        .query
+        .ok_or_else(|| PgError::error("JSON_ARRAY(): NULL subquery"))?;
+
+    // Transform query only for counting target list entries. parse_sub_analyze
+    // runs its own child parsestate (mirroring C's make_parsestate/transformStmt
+    // over a throwaway qpstate), so the real pstate is not polluted and the
+    // analyzed Query is discarded after the column-count check.
+    let qcopy = mcx::alloc_in(mcx, query.as_ref().clone_in(mcx)?)?;
+    let qtree_node = backend_parser_analyze_seams::parse_sub_analyze::call(
+        mcx, &qcopy, pstate, None, false, true,
+    )?;
+    let qtree = qtree_node
+        .as_ref()
+        .as_query()
+        .ok_or_else(|| PgError::error("JSON_ARRAY(): subquery did not analyze to a Query"))?;
+
+    if count_nonjunk_tlist_entries(&qtree.targetList) != 1 {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("subquery must return only one column")
+            .errposition(parser_errposition(pstate, ctor.location))
+            .into_error());
+    }
+
+    // colref->fields = list_make2(makeString("q"), makeString("a"));
+    let mut fields: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+    fields.push(mcx::alloc_in(
+        mcx,
+        Node::mk_string(
+            mcx,
+            types_nodes::value::StringNode {
+                sval: mcx::PgString::from_str_in("q", mcx)?,
+            },
+        )?,
+    )?);
+    fields.push(mcx::alloc_in(
+        mcx,
+        Node::mk_string(
+            mcx,
+            types_nodes::value::StringNode {
+                sval: mcx::PgString::from_str_in("a", mcx)?,
+            },
+        )?,
+    )?);
+    let colref = Node::mk_column_ref(
+        mcx,
+        types_nodes::rawnodes::ColumnRef {
+            fields,
+            location: ctor.location,
+        },
+    )?;
+    let colref_ptr1 = mcx::alloc_in(mcx, colref)?;
+    let colref_ptr2 = mcx::alloc_in(mcx, colref_ptr1.as_ref().clone_in(mcx)?)?;
+
+    // No formatting necessary, so set formatted_expr to be the same as raw_expr.
+    // agg->arg = makeJsonValueExpr((Expr *) colref, (Expr *) colref, ctor->format);
+    let arg = types_nodes::rawexprnodes::JsonValueExpr {
+        raw_expr: Some(colref_ptr1),
+        formatted_expr: Some(colref_ptr2),
+        format: ctor.format,
+    };
+
+    // agg->constructor = makeNode(JsonAggConstructor);
+    // agg->constructor->agg_order = NIL;
+    // agg->constructor->output = ctor->output;
+    // agg->constructor->location = ctor->location;
+    let constructor = types_nodes::rawexprnodes::JsonAggConstructor {
+        output: ctor.output,
+        agg_filter: None,
+        agg_order: mcx::PgVec::new_in(mcx),
+        over: None,
+        location: ctor.location,
+    };
+
+    let agg = types_nodes::rawexprnodes::JsonArrayAgg {
+        constructor: Some(mcx::alloc_in(mcx, constructor)?),
+        arg: Some(mcx::alloc_in(mcx, arg)?),
+        absent_on_null: ctor.absent_on_null,
+    };
+    let agg_node = mcx::alloc_in(mcx, Node::mk_json_array_agg(mcx, agg)?)?;
+
+    // target->name = NULL; target->indirection = NIL; target->val = agg;
+    let target = Node::mk_res_target(
+        mcx,
+        types_nodes::rawnodes::ResTarget {
+            name: None,
+            indirection: mcx::PgVec::new_in(mcx),
+            val: Some(agg_node),
+            location: ctor.location,
+        },
+    )?;
+
+    // alias->aliasname = "q"; alias->colnames = list_make1(makeString("a"));
+    let mut colnames: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+    colnames.push(mcx::alloc_in(
+        mcx,
+        Node::mk_string(
+            mcx,
+            types_nodes::value::StringNode {
+                sval: mcx::PgString::from_str_in("a", mcx)?,
+            },
+        )?,
+    )?);
+    let alias = types_nodes::rawnodes::Alias {
+        aliasname: Some(mcx::PgString::from_str_in("q", mcx)?),
+        colnames,
+    };
+
+    // range->lateral = false; range->subquery = ctor->query; range->alias = alias;
+    let range = Node::mk_range_subselect(
+        mcx,
+        types_nodes::rawnodes::RangeSubselect {
+            lateral: false,
+            subquery: Some(query),
+            alias: Some(mcx::alloc_in(mcx, alias)?),
+        },
+    )?;
+
+    // select->targetList = list_make1(target); select->fromClause = list_make1(range);
+    let mut target_list: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+    target_list.push(mcx::alloc_in(mcx, target)?);
+    let mut from_clause: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+    from_clause.push(mcx::alloc_in(mcx, range)?);
+
+    let select = types_nodes::rawnodes::SelectStmt {
+        distinctClause: mcx::PgVec::new_in(mcx),
+        intoClause: None,
+        targetList: target_list,
+        fromClause: from_clause,
+        whereClause: None,
+        groupClause: mcx::PgVec::new_in(mcx),
+        groupDistinct: false,
+        havingClause: None,
+        windowClause: mcx::PgVec::new_in(mcx),
+        valuesLists: mcx::PgVec::new_in(mcx),
+        sortClause: mcx::PgVec::new_in(mcx),
+        limitOffset: None,
+        limitCount: None,
+        limitOption: types_nodes::nodelimit::LimitOption::default(),
+        lockingClause: mcx::PgVec::new_in(mcx),
+        withClause: None,
+        op: types_nodes::rawnodes::SetOperation::SETOP_NONE,
+        all: false,
+        larg: None,
+        rarg: None,
+    };
+    let select_node = mcx::alloc_in(mcx, Node::mk_select_stmt(mcx, select)?)?;
+
+    // sublink->subLinkType = EXPR_SUBLINK; ... sublink->subselect = select;
+    let sublink = types_nodes::rawexprnodes::SubLink {
+        sub_link_type: types_nodes::primnodes::SubLinkType::Expr,
+        sub_link_id: 0,
+        testexpr: None,
+        oper_name: mcx::PgVec::new_in(mcx),
+        subselect: Some(select_node),
+        location: ctor.location,
+    };
+
+    // return transformExprRecurse(pstate, (Node *) sublink);
+    transformSubLink(pstate, sublink)
 }
 
 /// `transformJsonScalarExpr(pstate, jsexpr)` (parse_expr.c:4223).
