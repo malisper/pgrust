@@ -550,11 +550,21 @@ pub fn ATPrepAlterColumnType<'mcx>(
 
     // (ReleaseSysCache(tuple) — the FormedTuple drops at end of scope.)
 
-    // Recurse manually by queueing a new command for each child, if necessary.
+    // Recurse manually by queueing a new command for each child, if
+    // necessary. We cannot apply ATSimpleRecursion here because we need to
+    // remap attribute numbers in the USING expression, if any.
+    //
+    // If we are told not to recurse, there had better not be any child
+    // tables; else the alter would put them out of step.
     if recurse {
-        let (child_oids, _child_numparents) =
+        let (child_oids, child_numparents) =
             backend_catalog_pg_inherits::find_all_inheritors(mcx, rel.rd_id, lockmode, true)?;
-        for &childrelid in child_oids.iter() {
+        // want_numparents=true always returns Some.
+        let child_numparents =
+            child_numparents.expect("find_all_inheritors did not return numparents");
+
+        // forboth(lo, child_oids, li, child_numparents)
+        for (&childrelid, &numparents) in child_oids.iter().zip(child_numparents.iter()) {
             if childrelid == rel.rd_id {
                 continue;
             }
@@ -562,10 +572,12 @@ pub fn ATPrepAlterColumnType<'mcx>(
             let childrel = relation_open(mcx, childrelid, NoLock)?;
             CheckAlterTableIsSafe(&childrel)?;
 
-            // Verify the child doesn't have an inherited definition of this
-            // column from outside this inheritance hierarchy.
+            // Verify that the child doesn't have any inherited definitions of
+            // this column that came from outside this inheritance hierarchy.
+            // (renameatt makes a similar test, though in a different way
+            // because of its different recursion mechanism.)
             let childtuple = SearchSysCacheAttName(mcx, childrel.rd_id, col_name)?;
-            let Some(_childtuple) = childtuple else {
+            let Some(childtuple) = childtuple else {
                 return backend_utils_error::ereport(ERROR)
                     .errcode(ERRCODE_UNDEFINED_COLUMN)
                     .errmsg(format!(
@@ -576,10 +588,83 @@ pub fn ATPrepAlterColumnType<'mcx>(
                     .finish(here("ATPrepAlterColumnType"))
                     .map(|()| unreachable!());
             };
-            // The attinhcount-vs-numparents check and the per-child re-queue
-            // (which must remap the USING attnos via build_attrmap_by_name /
-            // map_variable_attnos and re-enter ATPrepCmd) are not yet ported.
-            unported("recurse to inheritance child (attno remap + ATPrepCmd re-entry)");
+
+            let child_attinhcount = SysCacheGetAttrNotNull(
+                mcx,
+                ATTNAME,
+                &childtuple,
+                Anum_pg_attribute_attinhcount as i32,
+            )?
+            .as_i16();
+
+            if (child_attinhcount as i32) > numparents {
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
+                    .errmsg(format!(
+                        "cannot alter inherited column \"{}\" of relation \"{}\"",
+                        col_name,
+                        childrel.name()
+                    ))
+                    .finish(here("ATPrepAlterColumnType"))
+                    .map(|()| unreachable!());
+            }
+
+            // (ReleaseSysCache(childtuple) — childtuple drops at end of loop.)
+
+            // Build the per-child subcommand. C scribbles on a copyObject(cmd);
+            // here we clone the original cmd and, when a USING expression was
+            // specified, remap its attribute numbers for the child.
+            let mut childcmd = cmd.clone_in(mcx)?;
+
+            // Remap the attribute numbers. If no USING expression was
+            // specified, there is no need for this step.
+            if let Some(cooked) = def.cooked_default.as_deref() {
+                let attmap = backend_access_common_next::attmap::build_attrmap_by_name(
+                    mcx,
+                    &childrel.rd_att,
+                    &rel.rd_att,
+                    false,
+                )?;
+                let cooked_clone = cooked.clone_in(mcx)?;
+                let cooked_ptr = mcx::alloc_in(mcx, cooked_clone)?;
+                let (mapped, found_whole_row) =
+                    backend_rewrite_rewritemanip_seams::map_variable_attnos_node::call(
+                        mcx,
+                        cooked_ptr,
+                        1,
+                        0,
+                        &attmap.attnums,
+                        InvalidOid,
+                    )?;
+                if found_whole_row {
+                    return backend_utils_error::ereport(ERROR)
+                        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg("cannot convert whole-row table reference".to_string())
+                        .errdetail(
+                            "USING expression contains a whole-row table reference.".to_string(),
+                        )
+                        .finish(here("ATPrepAlterColumnType"))
+                        .map(|()| unreachable!());
+                }
+                let child_def = childcmd
+                    .def
+                    .as_deref_mut()
+                    .expect("ALTER COLUMN TYPE child cmd.def is NULL")
+                    .expect_columndef_mut();
+                child_def.cooked_default = Some(mapped);
+            }
+
+            crate::at_phase::ATPrepCmd(
+                mcx,
+                wqueue,
+                &childrel,
+                &childcmd,
+                false,
+                true,
+                lockmode,
+                context,
+            )?;
+            childrel.close(NoLock)?;
         }
     } else if !recursing
         && !find_inheritance_children(mcx, rel.rd_id, NoLock)?.is_empty()
