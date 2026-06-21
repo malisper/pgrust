@@ -14,14 +14,32 @@
 //!
 //! The `gtsvector_options` (oid 3434) GiST opclass-options support procedure IS
 //! registered here: `index_opclass_options` resolves it by OID and invokes it
-//! through fmgr, passing the `local_relopts` on the `internal` lane. The
-//! remaining `tsgistidx.c` opclass support procedures (`gtsvector_compress` /
-//! `_decompress` / `_consistent` / `_union` / `_same` / `_penalty` /
-//! `_picksplit`) are dispatched by the GiST AM through the typed by-OID opclass
-//! dispatch, not the fmgr frame; they are not registered here.
+//! through fmgr, passing the `local_relopts` on the `internal` lane.
+//!
+//! The remaining `tsgistidx.c` opclass support procedures (`gtsvector_compress`
+//! = 3648 / `_decompress` = 3649 / `_picksplit` = 3650 / `_union` = 3651 /
+//! `_same` = 3652 / `_penalty` = 3653 / `_consistent` = 3654 + the obsolete
+//! `gtsvector_consistent_oldsig` = 3790) are `prolang => internal` procs. Like
+//! every other GiST opclass (box/point in `backend-access-gist-proc`, inet in
+//! `network_gist.c`, range in `rangetypes_gist.c`), the GiST AM resolves each by
+//! OID via `index_getprocinfo` → `fmgr_info`, which — for an `internal`-language
+//! proc — looks the `prosrc` name up in the fmgr builtin table
+//! (`fmgr_lookupByName`) and errors `internal function "gtsvector_consistent" is
+//! not in internal lookup table` when the row is absent. So every gtsvector GiST
+//! support proc MUST have its `fmgr_builtins[]` row registered for `CREATE INDEX
+//! ... USING gist (... tsvector_ops)` and opclass validation to resolve it —
+//! exactly C's table. [`register_tsgistidx_builtins`] registers all of them
+//! (matching `register_inet_gist_builtins`'s precedent).
+//!
+//! As with the inet/range opclasses, the faithful *invocation* of these support
+//! procs is the GiST core's typed by-OID dispatch
+//! (`backend-access-gist-dispatch-seams`), which reads `FmgrInfo::fn_oid` and
+//! never the `fn_addr`. The `func` adapter installed in the builtin row is the
+//! fmgr-frame entry the owned GiST path never enters; it raises a clear error
+//! naming the dispatch seam if a future `FunctionCallNColl` ever reaches it.
 
 use types_datum::Datum;
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_tsearch::tsgistidx::SignTsVector;
@@ -76,6 +94,27 @@ fn fc_gtsvector_options(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum
     Ok(Datum::null())
 }
 
+/// The shared fmgr-frame entry point for every gtsvector GiST opclass support
+/// proc (`gtsvector_consistent` / `_union` / `_compress` / `_decompress` /
+/// `_penalty` / `_picksplit` / `_same`). In the owned model the GiST access
+/// method invokes these procs through the typed by-OID dispatch
+/// (`backend-access-gist-dispatch-seams` → `backend-access-gist-proc`), reading
+/// `FmgrInfo::fn_oid` — never `fn_addr`. This frame entry therefore is not
+/// reached on the owned GiST path; it exists so the `fmgr_builtins[]` row carries
+/// a non-`None` callable (matching C's table), and raises a clear error if a
+/// future fmgr-frame call site is added, pointing at the dispatch seam to use.
+fn fc_gtsvector_support_via_dispatch(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    let foid = fcinfo.flinfo.as_ref().map(|fi| fi.fn_oid).unwrap_or(0);
+    Err(PgError::error(format!(
+        "gtsvector GiST support function (OID {foid}) must be invoked through the \
+         typed GiST opclass dispatch (backend-access-gist-dispatch-seams / \
+         backend-access-gist-proc), not the fmgr frame; the owned GiST access \
+         method dispatches these by FmgrInfo.fn_oid"
+    )))
+}
+
 fn builtin(
     foid: u32,
     name: &str,
@@ -107,5 +146,20 @@ pub fn register_tsgistidx_builtins() {
         builtin(3647, "gtsvectorout", 1, true, fc_gtsvectorout),
         // `gtsvector_options` is `proisstrict => 'f'`.
         builtin(3434, "gtsvector_options", 1, false, fc_gtsvector_options),
+        // The GiST `tsvector_ops` opclass support procedures (all
+        // `proisstrict => 't'` — the default — and not retset). OIDs / nargs
+        // transcribed from `pg_proc.dat`; the bodies live in this crate
+        // (`crate::gtsvector_*`) and are invoked through the GiST core's typed
+        // by-OID dispatch, so the row's `func` adapter is the never-entered
+        // dispatch-frame stub.
+        builtin(3648, "gtsvector_compress", 1, true, fc_gtsvector_support_via_dispatch),
+        builtin(3649, "gtsvector_decompress", 1, true, fc_gtsvector_support_via_dispatch),
+        builtin(3650, "gtsvector_picksplit", 2, true, fc_gtsvector_support_via_dispatch),
+        builtin(3651, "gtsvector_union", 2, true, fc_gtsvector_support_via_dispatch),
+        builtin(3652, "gtsvector_same", 3, true, fc_gtsvector_support_via_dispatch),
+        builtin(3653, "gtsvector_penalty", 3, true, fc_gtsvector_support_via_dispatch),
+        builtin(3654, "gtsvector_consistent", 5, true, fc_gtsvector_support_via_dispatch),
+        // `gtsvector_consistent_oldsig` (obsolete signature, prosrc differs).
+        builtin(3790, "gtsvector_consistent_oldsig", 5, true, fc_gtsvector_support_via_dispatch),
     ]);
 }
