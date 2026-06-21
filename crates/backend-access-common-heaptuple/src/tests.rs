@@ -308,9 +308,12 @@ fn cstring_roundtrip() {
 
     let formed = heap_form_tuple(mcx, &td, &values, &isnull).expect("form");
     let cols = heap_deform_tuple(mcx, &formed.tuple, &td, &formed.data).expect("deform");
+    // A cstring (attlen == -2) deforms to `Datum::Cstring` (the logical string,
+    // no trailing NUL) so it crosses the fmgr cstring lane; the stored field is
+    // `strlen + 1` bytes with a terminating NUL.
     match &cols[0].0 {
-        Datum::ByRef(b) => assert_eq!(&b[..], &cstr[..]),
-        other => panic!("expected cstring ByRef, got {other:?}"),
+        Datum::Cstring(s) => assert_eq!(s.as_str(), "abc"),
+        other => panic!("expected cstring Cstring, got {other:?}"),
     }
 }
 

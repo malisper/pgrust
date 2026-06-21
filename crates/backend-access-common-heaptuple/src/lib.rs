@@ -535,12 +535,24 @@ fn att_addlength_datum(
     } else {
         debug_assert_eq!(attlen, -2);
         // strlen + 1
-        let bytes = val.as_ref_bytes();
-        let mut len = 0usize;
-        while bytes[len] != 0 {
-            len += 1;
-        }
-        cur_offset + len + 1
+        cur_offset + cstring_content_len(val.as_ref_bytes()) + 1
+    }
+}
+
+/// `strlen(DatumGetCString(datum))` for an `attlen == -2` cstring attribute.
+///
+/// C stores a cstring value as a NUL-terminated `char *`, so its on-tuple length
+/// is `strlen + 1`. The owned `Datum` model carries the cstring two ways: a
+/// `Datum::ByRef` image that *may* include the terminating NUL (e.g. a value read
+/// back off another tuple's data area), or a `Datum::Cstring`/header-less `ByRef`
+/// whose bytes are the logical string with **no** trailing NUL (an `unknown`
+/// literal `Const`). Scan to the first NUL when one is present; otherwise the
+/// whole slice is the string content (the NUL is appended when filling).
+#[inline]
+fn cstring_content_len(bytes: &[u8]) -> usize {
+    match bytes.iter().position(|&b| b == 0) {
+        Some(n) => n,
+        None => bytes.len(),
     }
 }
 
@@ -654,13 +666,14 @@ fn fill_val(
         *infomask |= HEAP_HASVARWIDTH;
         debug_assert_eq!(att.attalignby, 1);
         let val = datum.as_ref_bytes();
-        // strlen(DatumGetCString(datum)) + 1
-        let mut slen = 0usize;
-        while val[slen] != 0 {
-            slen += 1;
-        }
+        // data_length = strlen(DatumGetCString(datum)) + 1; memcpy the content and
+        // write the terminating NUL ourselves — the owned cstring image
+        // (`Datum::Cstring`, or an `unknown` literal's header-less `ByRef`) carries
+        // the logical string with no trailing NUL.
+        let slen = cstring_content_len(val);
         data_length = slen + 1;
-        data[off..off + data_length].copy_from_slice(&val[..data_length]);
+        data[off..off + slen].copy_from_slice(&val[..slen]);
+        data[off + slen] = 0;
     } else {
         // fixed-length pass-by-reference
         off = att_nominal_alignby(off, att.attalignby);
@@ -1095,6 +1108,14 @@ fn fetchatt<'mcx>(
 ) -> PgResult<Datum<'mcx>> {
     if att.attbyval {
         Ok(Datum::from_usize(fetch_att_byval(data, off, att.attlen)))
+    } else if att.attlen == -2 {
+        // cstring: C returns a `char *` into the NUL-terminated field. The owned
+        // model carries a cstring value as `Datum::Cstring` (logical string, no
+        // trailing NUL) so it crosses the fmgr cstring lane correctly; the stored
+        // field is `strlen + 1` bytes, so strip the terminator.
+        let len = cstring_content_len(&data[off..]);
+        let s = alloc::string::String::from_utf8_lossy(&data[off..off + len]).into_owned();
+        Ok(Datum::from_cstring(s))
     } else {
         let end = att_addlength_pointer(off, att.attlen, data, off);
         Ok(Datum::ByRef(slice_in(mcx, &data[off..end])?))
