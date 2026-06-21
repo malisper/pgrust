@@ -605,3 +605,99 @@ seam_core::seam!(
         rowtupdesc_handle: u64,
     ) -> PgResult<RowCompositeDatum>
 );
+
+// ===========================================================================
+// Cursor surface (pl_exec.c's exec_stmt_open / exec_stmt_fetch /
+// exec_stmt_close / exec_stmt_forc) over the SPI cursor functions
+// (SPI_cursor_open_with_paramlist / SPI_cursor_parse_open /
+// SPI_scroll_cursor_fetch / SPI_scroll_cursor_move / SPI_cursor_find /
+// SPI_cursor_close). The executor unit (pl_exec.c) is layered below the SPI
+// cursor/portal surface, so it reaches it through these seams; the handler
+// (top layer with SPI access) installs them.
+// ===========================================================================
+
+/// `FetchDirection` (`nodes/parsenodes.h`) as it crosses the cursor seam — the
+/// fetch/move direction of a `FETCH`/`MOVE`. Mirrors `types_plpgsql::FetchDirection`
+/// (same `repr(i32)` values) so the executor passes it without depending on the
+/// portal crate; the SPI installer maps it onto `types_portal::FetchDirection`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum CursorFetchDirection {
+    Forward = 0,
+    Backward = 1,
+    Absolute = 2,
+    Relative = 3,
+}
+
+/// The result of a cursor `FETCH`/`MOVE` (`SPI_scroll_cursor_fetch`/`_move` then
+/// `SPI_processed` / `SPI_tuptable`): the number of rows fetched/skipped and —
+/// for a `FETCH` (not a `MOVE`) — every fetched row's columns. A `MOVE` returns
+/// no rows (C's `None_Receiver`).
+#[derive(Clone, Debug)]
+pub struct CursorFetchResult {
+    pub processed: u64,
+    /// The fetched rows (empty for a `MOVE`). Each row is its columns in the
+    /// cursor result-descriptor order.
+    pub rows: std::vec::Vec<std::vec::Vec<ExecsqlColumn>>,
+}
+
+seam_core::seam!(
+    /// `SPI_cursor_open_with_paramlist(name, plan, paramLI, read_only)` →
+    /// `SPI_cursor_open_internal` (`spi.c`), specialized to the PL/pgSQL `OPEN`
+    /// path over a static query: prepare the embedded `query` (in `parse_mode`,
+    /// with the PL/pgSQL bareword parser hooks from `parse_state`), bind the
+    /// referenced scalar datums from `datum_snapshot`, open a real portal with the
+    /// given `cursor_options` (`CURSOR_OPT_*`), and return the open portal's name
+    /// (`portal->name`). `curname` is the explicit cursor name (`None`/empty → a
+    /// generated nonconflicting name, C's `CreateNewPortal`).
+    pub fn spi_cursor_open(
+        curname: std::option::Option<std::string::String>,
+        query: std::string::String,
+        parse_mode: types_parsenodes::RawParseMode,
+        parse_state: types_nodes::parsestmt::PlpgsqlExprParseState,
+        cursor_options: int32,
+        read_only: bool,
+        datum_snapshot: std::vec::Vec<Option<EvalParamValue>>,
+    ) -> PgResult<std::string::String>
+);
+
+seam_core::seam!(
+    /// `exec_dynquery_with_params(estate, dynquery, params, curname, cursorOptions)`
+    /// (`pl_exec.c`) → `SPI_cursor_parse_open(name, querystr, options)` (`spi.c`):
+    /// open an implicit cursor over the already-rendered dynamic query string
+    /// `query` (parsed `RAW_PARSE_DEFAULT`) with the already-evaluated `USING`
+    /// params, and the given `cursor_options`. Returns the open portal's name.
+    pub fn spi_cursor_open_execute(
+        curname: std::option::Option<std::string::String>,
+        query: std::string::String,
+        params: std::vec::Vec<DynUsingParam>,
+        cursor_options: int32,
+        read_only: bool,
+    ) -> PgResult<std::string::String>
+);
+
+seam_core::seam!(
+    /// `SPI_cursor_find(name)` (`spi.c`) — does a cursor (portal) of this name
+    /// currently exist? (`GetPortalByName(name) != NULL`.)
+    pub fn spi_cursor_find(name: std::string::String) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `SPI_scroll_cursor_fetch` / `SPI_scroll_cursor_move` →
+    /// `_SPI_cursor_operation` (`spi.c`): find the cursor by name, run
+    /// `PortalRunFetch` in `direction` for `count` rows, and (for a fetch) return
+    /// every fetched row's columns. A move (`is_move`) uses the `None` receiver and
+    /// returns no rows.
+    pub fn spi_cursor_fetch_move(
+        name: std::string::String,
+        direction: CursorFetchDirection,
+        count: i64,
+        is_move: bool,
+    ) -> PgResult<CursorFetchResult>
+);
+
+seam_core::seam!(
+    /// `SPI_cursor_close(portal)` (`spi.c`) — close (drop) the named cursor.
+    /// `Err` for an invalid portal name (C: `elog(ERROR, "invalid portal …")`).
+    pub fn spi_cursor_close(name: std::string::String) -> PgResult<()>
+);

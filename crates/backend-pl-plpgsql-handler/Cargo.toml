@@ -26,6 +26,10 @@ backend-pl-plpgsql-funcs = { path = "../backend-pl-plpgsql-funcs" }
 # SPI_connect_ext / SPI_finish bracketing (spi.c) — direct (top layer, no cycle).
 backend-executor-spi = { path = "../backend-executor-spi" }
 
+# FetchDirection for the cursor FETCH/MOVE seam install (maps the executor's
+# CursorFetchDirection onto the SPI cursor surface's types_portal direction).
+types-portal = { path = "../types-portal" }
+
 # BeginInternalSubTransaction / ReleaseCurrentSubTransaction /
 # RollbackAndReleaseCurrentSubTransaction (xact.c) for the exec_stmt_block
 # EXCEPTION leg — direct (top layer, no cycle).

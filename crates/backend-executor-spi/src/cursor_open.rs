@@ -32,7 +32,10 @@ use types_resowner::ResourceOwner;
 
 use crate::dest_spi::{create_spi_dest_receiver, take_spi_raw_result, RawCol};
 use crate::eval::EvalParamValue;
-use crate::execsql::{build_param_list, prepare_execsql_plan, ExecsqlColumn};
+use crate::execsql::{
+    build_dyn_param_list, build_param_list, prepare_dynexecute_plan, prepare_execsql_plan,
+    ExecsqlColumn,
+};
 
 use backend_executor_execMain as execmain;
 use backend_tcop_dest_seams as dest_seams;
@@ -96,15 +99,11 @@ pub fn spi_cursor_open_plpgsql(
     // `plancache_list` entry of C's transient `_SPI_plan`.
     let source = prepare_execsql_plan(mcx, interned, parsemode, parse_state.clone())?;
 
-    let result = open_internal(
-        mcx,
-        curname,
-        source,
-        cursor_options,
-        read_only,
-        &parse_state,
-        resolve,
-    );
+    // Build a value ParamListInfo from the referenced estate datums (C's
+    // _SPI_convert_params / copyParamList of the bound paramLI). The portal
+    // owner copies it into the portal context.
+    let result = build_param_list(&parse_state, resolve)
+        .and_then(|param_li| open_internal(mcx, curname, source, cursor_options, read_only, param_li));
 
     // The source is the one-shot (unsaved) plan; once the portal owns its own
     // copy of the statements (or on error before that), drop it. C's
@@ -124,8 +123,7 @@ fn open_internal(
     source: SourceHandle,
     cursor_options: i32,
     read_only: bool,
-    parse_state: &PlpgsqlExprParseState,
-    resolve: &mut dyn FnMut(i32) -> PgResult<EvalParamValue>,
+    param_li: types_nodes::params::ParamListInfo,
 ) -> PgResult<String> {
     // SPI_is_cursor_plan(plan): the plan must return tuples (plansource->
     // resultDesc != NULL). A SELECT INTO / DML / utility cannot be a cursor.
@@ -147,11 +145,6 @@ fn open_internal(
         Some(name) if !name.is_empty() => portalmem::create_portal::call(name, false, false)?,
         _ => portalmem::create_new_portal::call()?,
     };
-
-    // Build a value ParamListInfo from the referenced estate datums (C's
-    // _SPI_convert_params / copyParamList of the bound paramLI). The portal
-    // owner copies it into the portal context.
-    let param_li = build_param_list(parse_state, resolve)?;
 
     // Replan if needed and materialize the planned statements (C: GetCachedPlan
     // + cplan->stmt_list). For an unsaved one-shot source the portal must not
@@ -255,6 +248,40 @@ fn open_internal(
 
     let name = portal.borrow().name.clone();
     Ok(name)
+}
+
+/// `SPI_cursor_parse_open(name, src, options)` (spi.c) → `SPI_cursor_open_internal`,
+/// specialized to the PL/pgSQL `OPEN ... FOR EXECUTE` path
+/// (`exec_dynquery_with_params`): prepare the already-rendered dynamic query
+/// string `query` as a top-level statement (`RAW_PARSE_DEFAULT`, with the
+/// `USING`-param types as fixed parameters), open a real portal with the given
+/// `cursor_options`, and return the portal name. `params` are the already
+/// evaluated `USING` values.
+pub fn spi_cursor_parse_open(
+    curname: Option<&str>,
+    query: &str,
+    params: &[EvalParamValue],
+    cursor_options: i32,
+    read_only: bool,
+) -> PgResult<String> {
+    let cxt = MemoryContext::new("SPI Cursor Parse Open");
+    let mcx = cxt.mcx();
+    let interned = leak_str_in(mcx, query)?;
+
+    // _SPI_prepare_plan with the USING param types as fixed parameters (no
+    // PL/pgSQL parser hooks); C's SPI_cursor_parse_open uses RAW_PARSE_DEFAULT.
+    let param_types: Vec<types_core::Oid> = params.iter().map(|p| p.typeid).collect();
+    let source = prepare_dynexecute_plan(mcx, interned, &param_types)?;
+
+    // Build the value ParamListInfo directly from the evaluated USING values.
+    let result = build_dyn_param_list(params)
+        .and_then(|param_li| open_internal(mcx, curname, source, cursor_options, read_only, param_li));
+
+    // The one-shot (unsaved) source: once the portal owns its copy of the
+    // statements (or on error before that), drop it.
+    let _ = plancache::DropCachedPlan(source);
+
+    result
 }
 
 /// `SPI_cursor_find(name)` — does a cursor of this name currently exist?

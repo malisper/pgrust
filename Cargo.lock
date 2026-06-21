@@ -14806,6 +14806,7 @@ dependencies = [
  "types-fmgr",
  "types-parsenodes",
  "types-plpgsql",
+ "types-portal",
  "types-tuple",
 ]
 

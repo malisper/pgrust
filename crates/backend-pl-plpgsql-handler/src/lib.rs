@@ -993,6 +993,119 @@ pub fn init_seams() {
         },
     );
 
+    // Install the PL/pgSQL cursor surface (pl_exec.c's exec_stmt_open /
+    // exec_stmt_fetch / exec_stmt_close / exec_stmt_forc) over the SPI cursor
+    // functions. The executor unit is layered below the SPI cursor/portal
+    // surface, so it reaches it through these seams; the handler (top layer
+    // with SPI access) installs them — thin marshal + delegate, no behavior.
+
+    // `SPI_cursor_open_with_paramlist` over a static OPEN query.
+    backend_pl_plpgsql_exec_seams::spi_cursor_open::set(
+        |curname: Option<String>,
+         query: String,
+         parse_mode,
+         parse_state,
+         cursor_options,
+         read_only,
+         datum_snapshot: Vec<Option<backend_pl_plpgsql_exec_seams::EvalParamValue>>| {
+            let mut resolve = |dno: i32| -> PgResult<backend_executor_spi::EvalParamValue> {
+                match datum_snapshot.get(dno as usize).and_then(|o| o.as_ref()) {
+                    Some(v) => Ok(backend_executor_spi::EvalParamValue {
+                        value: v.value,
+                        isnull: v.isnull,
+                        typeid: v.typeid,
+                        byref: v.byref.clone(),
+                    }),
+                    None => Err(types_error::PgError::error(format!(
+                        "PL/pgSQL cursor query references datum {dno} that is not a scalar variable"
+                    ))),
+                }
+            };
+            backend_executor_spi::spi_cursor_open_plpgsql(
+                curname.as_deref(),
+                &query,
+                parse_mode,
+                parse_state,
+                cursor_options,
+                read_only,
+                &mut resolve,
+            )
+        },
+    );
+
+    // `SPI_cursor_parse_open` over an OPEN ... FOR EXECUTE dynamic query string.
+    backend_pl_plpgsql_exec_seams::spi_cursor_open_execute::set(
+        |curname: Option<String>,
+         query: String,
+         params: Vec<backend_pl_plpgsql_exec_seams::DynUsingParam>,
+         cursor_options,
+         read_only| {
+            let using: Vec<backend_executor_spi::EvalParamValue> = params
+                .into_iter()
+                .map(|p| backend_executor_spi::EvalParamValue {
+                    value: p.value,
+                    isnull: p.isnull,
+                    typeid: p.typeid,
+                    byref: p.byref,
+                })
+                .collect();
+            backend_executor_spi::spi_cursor_parse_open(
+                curname.as_deref(),
+                &query,
+                &using,
+                cursor_options,
+                read_only,
+            )
+        },
+    );
+
+    // `SPI_cursor_find(name)` — does a cursor of this name exist?
+    backend_pl_plpgsql_exec_seams::spi_cursor_find::set(|name: String| {
+        backend_executor_spi::spi_cursor_find(&name)
+    });
+
+    // `SPI_scroll_cursor_fetch` / `SPI_scroll_cursor_move` (FETCH / MOVE).
+    backend_pl_plpgsql_exec_seams::spi_cursor_fetch_move::set(
+        |name: String,
+         direction: backend_pl_plpgsql_exec_seams::CursorFetchDirection,
+         count: i64,
+         is_move: bool| {
+            use backend_pl_plpgsql_exec_seams::CursorFetchDirection as CFD;
+            use types_portal::FetchDirection as PFD;
+            let dir = match direction {
+                CFD::Forward => PFD::FETCH_FORWARD,
+                CFD::Backward => PFD::FETCH_BACKWARD,
+                CFD::Absolute => PFD::FETCH_ABSOLUTE,
+                CFD::Relative => PFD::FETCH_RELATIVE,
+            };
+            let r = backend_executor_spi::spi_cursor_fetch_move(&name, dir, count, is_move)?;
+            Ok(backend_pl_plpgsql_exec_seams::CursorFetchResult {
+                processed: r.processed,
+                rows: r
+                    .rows
+                    .into_iter()
+                    .map(|row| {
+                        row.into_iter()
+                            .map(|c| backend_pl_plpgsql_exec_seams::ExecsqlColumn {
+                                value: c.value,
+                                isnull: c.isnull,
+                                typeid: c.typeid,
+                                typmod: -1,
+                                name: c.name,
+                                byref: c.byref,
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            })
+        },
+    );
+
+    // `SPI_cursor_close(portal)` (CLOSE).
+    backend_pl_plpgsql_exec_seams::spi_cursor_close::set(|name: String| {
+        backend_executor_spi::spi_cursor_close_by_name(&name)
+    });
+
     // Install the array-iteration leg of `exec_stmt_foreach_a` (pl_exec.c). The
     // executor unit is layered below the array/lsyscache owners; the handler
     // (which depends on backend-utils-adt-arrayfuncs + lsyscache) drives the C

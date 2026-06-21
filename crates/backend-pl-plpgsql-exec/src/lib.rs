@@ -70,6 +70,10 @@ use types_tuple::backend_access_common_heaptuple::Datum as RichDatum;
 /// `InvalidOid` — the zero OID sentinel.
 const INVALID_OID: Oid = 0;
 
+/// `FETCH_ALL` (`commands/portalcmds.h`: `#define FETCH_ALL LONG_MAX`) — the
+/// "fetch every remaining row" count for a forward cursor fetch.
+const FETCH_ALL: i64 = i64::MAX;
+
 /// `UNKNOWNOID` (705).
 const UNKNOWNOID: Oid = 705;
 
@@ -764,7 +768,7 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
             PLpgSQL_stmt::While(s) => exec_stmt_while(estate, s),
             PLpgSQL_stmt::Fori(s) => exec_stmt_fori(estate, s),
             PLpgSQL_stmt::Fors(s) => exec_stmt_fors(estate, s),
-            PLpgSQL_stmt::Forc(_) => exec_stmt_forc(estate),
+            PLpgSQL_stmt::Forc(s) => exec_stmt_forc(estate, s),
             PLpgSQL_stmt::ForeachA(s) => exec_stmt_foreach_a(estate, s),
             PLpgSQL_stmt::Exit(s) => exec_stmt_exit(estate, s),
             PLpgSQL_stmt::Return(s) => exec_stmt_return(estate, s),
@@ -775,9 +779,9 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
             PLpgSQL_stmt::Execsql(s) => exec_stmt_execsql(estate, s),
             PLpgSQL_stmt::Dynexecute(s) => exec_stmt_dynexecute(estate, s),
             PLpgSQL_stmt::Dynfors(s) => exec_stmt_dynfors(estate, s),
-            PLpgSQL_stmt::Open(_) => exec_stmt_open(estate),
-            PLpgSQL_stmt::Fetch(_) => exec_stmt_fetch(estate),
-            PLpgSQL_stmt::Close(_) => exec_stmt_close(estate),
+            PLpgSQL_stmt::Open(s) => exec_stmt_open(estate, s),
+            PLpgSQL_stmt::Fetch(s) => exec_stmt_fetch(estate, s),
+            PLpgSQL_stmt::Close(s) => exec_stmt_close(estate, s),
             PLpgSQL_stmt::Commit(_) => exec_stmt_commit(estate),
             PLpgSQL_stmt::Rollback(_) => exec_stmt_rollback(estate),
         })() {
@@ -2383,11 +2387,91 @@ fn exec_stmt_fors(
     Ok(rc)
 }
 
-fn exec_stmt_forc(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
-    panic!(
-        "seam not wired: exec_stmt_forc (pl_exec.c) — SPI_cursor_open_with_paramlist + \
-         exec_for_query (SPI cursor surface)"
-    );
+/// `exec_stmt_forc(estate, stmt)` (pl_exec.c 2868) — FOR rec/row IN <bound
+/// cursor> LOOP. Open the cursor (just like `OPEN`), then run the shared FOR-loop
+/// driver over every fetched row, and close the cursor on the way out.
+fn exec_stmt_forc(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_forc,
+) -> PLpgSQL_rc_result {
+    // Get the cursor variable and, if it has an assigned name, check it's not
+    // already in use.
+    let curname: Option<String> = cursor_var_name(estate, stmt.curvar)?;
+    let curname_was_null = curname.is_none();
+    if let Some(name) = &curname {
+        if exec_seams::spi_cursor_find::call(name.clone())? {
+            return Err(types_error::PgError::error(format!(
+                "cursor \"{name}\" already in use"
+            ))
+            .with_sqlstate(types_error::ERRCODE_DUPLICATE_CURSOR));
+        }
+    }
+
+    // OPEN CURSOR with args, if any: fake a SELECT ... INTO ... to evaluate the
+    // args into the cursor's internal argument row.
+    let argrow = cursor_var_argrow(estate, stmt.curvar);
+    if let Some(argquery) = stmt.argquery.as_deref() {
+        if argrow < 0 {
+            return Err(types_error::PgError::error(
+                "arguments given for cursor without arguments".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR));
+        }
+        open_cursor_args(estate, argquery, argrow, stmt.lineno)?;
+    } else if argrow >= 0 {
+        return Err(types_error::PgError::error(
+            "arguments required for cursor".to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR));
+    }
+
+    // Open the cursor (the explicit query the cursor was declared with).
+    let (query, cursor_options) = cursor_var_explicit_query(estate, stmt.curvar)?;
+    let parse_state = build_plpgsql_parse_state(estate, &query, INVALID_OID)?;
+    let snapshot = build_datum_snapshot(estate)?;
+    let portal_name = exec_seams::spi_cursor_open::call(
+        curname.clone(),
+        query.query.clone(),
+        query.parseMode,
+        parse_state,
+        cursor_options,
+        estate.readonly_func,
+        snapshot,
+    )?;
+
+    // If the cursor variable was NULL, store the generated portal name in it.
+    if curname_was_null {
+        exec_check_assignable(estate, stmt.curvar)?;
+        assign_text_var(estate, stmt.curvar, portal_name.clone())?;
+    }
+
+    exec_eval_cleanup(estate);
+
+    // Fetch every row from the cursor (the owned model materializes the cursor's
+    // rows up front; the observable iteration is identical to C's per-row
+    // PortalRunFetch in exec_for_query — there is no UPDATE WHERE CURRENT OF
+    // inside the loop reachable here without the live portal, which stays open).
+    let name = curname.unwrap_or_else(|| portal_name.clone());
+    let fetched = exec_seams::spi_cursor_fetch_move::call(
+        name.clone(),
+        exec_seams::CursorFetchDirection::Forward,
+        FETCH_ALL,
+        false,
+    )?;
+    estate.eval_processed = fetched.processed;
+
+    let loopvar = stmt.var.as_deref().expect("FOR-IN-cursor carries a loop variable");
+    let rc = exec_for_query(estate, loopvar, &stmt.body, stmt.label.as_deref(), fetched.rows)?;
+
+    // Close the portal, and restore the cursor variable if it was initially NULL.
+    exec_seams::spi_cursor_close::call(name)?;
+    if curname_was_null {
+        let mut var = take_var(estate, stmt.curvar);
+        assign_simple_var(estate, &mut var, Datum::null(), true, false);
+        put_var(estate, stmt.curvar, var);
+    }
+
+    Ok(rc)
 }
 
 /// Read a declared record/row/scalar variable's current value into a column
@@ -3401,28 +3485,222 @@ fn exec_dynquery_with_params(
     Ok(result.all_rows)
 }
 
-// NB: the FOR-IN-EXECUTE USING leg above stays a loud `panic!` (unported
-// dynamic-param substrate), reached before any row is produced.
+/// `exec_dynquery_with_params(estate, dynquery, params, curname, cursorOptions)`
+/// (pl_exec.c 8951) — the OPEN ... FOR EXECUTE leg: evaluate the dynamic
+/// query-string expression to a text value, then open an implicit cursor over it
+/// (via `SPI_cursor_parse_open`) with the already-evaluated USING params. Returns
+/// the open portal's name.
+fn exec_dynquery_open_cursor(
+    estate: &mut PLpgSQL_execstate,
+    dynquery: &types_plpgsql::PLpgSQL_expr,
+    params: &[types_plpgsql::PLpgSQL_expr],
+    curname: Option<String>,
+    cursor_options: int32,
+) -> types_error::PgResult<String> {
+    // Evaluate the string expression after EXECUTE (querystr = exec_eval_expr).
+    let (value, isnull, restype, _restypmod) = exec_eval_expr_impl(estate, dynquery)?;
+    if isnull {
+        return Err(types_error::PgError::error(
+            "query string argument of EXECUTE is null".to_string(),
+        )
+        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+    }
+    let byref = estate.last_eval_byref.take();
+    let querystr = convert_value_to_string(value, byref, restype)?;
+    exec_eval_cleanup(estate);
 
-fn exec_stmt_open(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
-    panic!(
-        "seam not wired: exec_stmt_open (pl_exec.c) — exec_prepare_plan / \
-         SPI_cursor_open_with_paramlist / exec_dynquery_with_params (SPI cursor surface)"
-    );
+    // exec_eval_using_params(estate, params): evaluate the USING expressions.
+    let using = exec_eval_using_params(estate, params)?;
+
+    // SPI_cursor_parse_open(portalname, querystr, &options).
+    exec_seams::spi_cursor_open_execute::call(
+        curname,
+        querystr,
+        using,
+        cursor_options,
+        estate.readonly_func,
+    )
 }
 
-fn exec_stmt_fetch(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
-    panic!(
-        "seam not wired: exec_stmt_fetch (pl_exec.c) — SPI_scroll_cursor_fetch/move + \
-         exec_move_row (SPI cursor surface + value substrate)"
-    );
+/// `exec_stmt_open(estate, stmt)` (pl_exec.c 4656) — OPEN a cursor variable. The
+/// three shapes: OPEN refcursor FOR SELECT (`stmt.query`), OPEN refcursor FOR
+/// EXECUTE (`stmt.dynquery`), and OPEN <bound cursor> [(args)] (the cursor's own
+/// declared query, `cursor_explicit_expr`).
+fn exec_stmt_open(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_open,
+) -> PLpgSQL_rc_result {
+    // Get the cursor variable and, if it has an assigned name, check it's not
+    // already in use.
+    let curname: Option<String> = cursor_var_name(estate, stmt.curvar)?;
+    let curname_was_null = curname.is_none();
+    if let Some(name) = &curname {
+        if exec_seams::spi_cursor_find::call(name.clone())? {
+            return Err(types_error::PgError::error(format!(
+                "cursor \"{name}\" already in use"
+            ))
+            .with_sqlstate(types_error::ERRCODE_DUPLICATE_CURSOR));
+        }
+    }
+
+    // Process the OPEN according to its type.
+    let (query, cursor_options) = if let Some(q) = stmt.query.as_deref() {
+        // OPEN refcursor FOR SELECT ... — the real work is downstairs.
+        (q.clone(), stmt.cursor_options)
+    } else if let Some(dynq) = stmt.dynquery.as_deref() {
+        // OPEN refcursor FOR EXECUTE ...
+        let portal_name = exec_dynquery_open_cursor(
+            estate,
+            dynq,
+            &stmt.params,
+            curname,
+            stmt.cursor_options,
+        )?;
+        if curname_was_null {
+            exec_check_assignable(estate, stmt.curvar)?;
+            assign_text_var(estate, stmt.curvar, portal_name)?;
+        }
+        return Ok(PLpgSQL_rc::PLPGSQL_RC_OK);
+    } else {
+        // OPEN <bound cursor> [(args)].
+        let argrow = cursor_var_argrow(estate, stmt.curvar);
+        if let Some(argquery) = stmt.argquery.as_deref() {
+            if argrow < 0 {
+                return Err(types_error::PgError::error(
+                    "arguments given for cursor without arguments".to_string(),
+                )
+                .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR));
+            }
+            open_cursor_args(estate, argquery, argrow, stmt.lineno)?;
+        } else if argrow >= 0 {
+            return Err(types_error::PgError::error(
+                "arguments required for cursor".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR));
+        }
+        cursor_var_explicit_query(estate, stmt.curvar)?
+    };
+
+    // Set up the parse state + param snapshot for this query, then open the
+    // cursor (the paramlist gets copied into the portal).
+    let parse_state = build_plpgsql_parse_state(estate, &query, INVALID_OID)?;
+    let snapshot = build_datum_snapshot(estate)?;
+    let portal_name = exec_seams::spi_cursor_open::call(
+        curname,
+        query.query.clone(),
+        query.parseMode,
+        parse_state,
+        cursor_options,
+        estate.readonly_func,
+        snapshot,
+    )?;
+
+    // If the cursor variable was NULL, store the generated portal name in it.
+    if curname_was_null {
+        exec_check_assignable(estate, stmt.curvar)?;
+        assign_text_var(estate, stmt.curvar, portal_name)?;
+    }
+
+    exec_eval_cleanup(estate);
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
-fn exec_stmt_close(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
-    panic!(
-        "seam not wired: exec_stmt_close (pl_exec.c) — SPI_cursor_find / SPI_cursor_close \
-         (SPI cursor surface)"
-    );
+/// `exec_stmt_fetch(estate, stmt)` (pl_exec.c 4822) — FETCH from a cursor into a
+/// target, or just MOVE the cursor position.
+fn exec_stmt_fetch(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_fetch,
+) -> PLpgSQL_rc_result {
+    // Get the portal of the cursor by name.
+    let curname = cursor_var_name(estate, stmt.curvar)?.ok_or_else(|| {
+        types_error::PgError::error(format!(
+            "cursor variable \"{}\" is null",
+            cursor_var_refname(estate, stmt.curvar)
+        ))
+        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
+    })?;
+
+    if !exec_seams::spi_cursor_find::call(curname.clone())? {
+        return Err(types_error::PgError::error(format!(
+            "cursor \"{curname}\" does not exist"
+        ))
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_CURSOR));
+    }
+
+    // Calculate position for FETCH_RELATIVE or FETCH_ABSOLUTE.
+    let how_many = if let Some(expr) = stmt.expr.as_deref() {
+        let (n, isnull) = exec_eval_integer(estate, expr)?;
+        if isnull {
+            return Err(types_error::PgError::error(
+                "relative or absolute cursor position is null".to_string(),
+            )
+            .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+        }
+        exec_eval_cleanup(estate);
+        n as i64
+    } else {
+        stmt.how_many
+    };
+
+    let direction = match stmt.direction {
+        types_plpgsql::FetchDirection::FETCH_FORWARD => exec_seams::CursorFetchDirection::Forward,
+        types_plpgsql::FetchDirection::FETCH_BACKWARD => exec_seams::CursorFetchDirection::Backward,
+        types_plpgsql::FetchDirection::FETCH_ABSOLUTE => exec_seams::CursorFetchDirection::Absolute,
+        types_plpgsql::FetchDirection::FETCH_RELATIVE => exec_seams::CursorFetchDirection::Relative,
+    };
+
+    let n;
+    if !stmt.is_move {
+        // Fetch 1 (or how_many) tuple(s); the target gets the FIRST row.
+        let fetched =
+            exec_seams::spi_cursor_fetch_move::call(curname, direction, how_many, false)?;
+        n = fetched.processed;
+
+        let target = stmt
+            .target
+            .as_deref()
+            .expect("FETCH ... INTO carries a target");
+        if n == 0 || fetched.rows.is_empty() {
+            // exec_move_row(estate, target, NULL, tupdesc) — set all fields NULL.
+            exec_move_row_into_target(estate, target, &[])?;
+        } else {
+            exec_move_row_into_target(estate, target, &fetched.rows[0])?;
+        }
+        exec_eval_cleanup(estate);
+    } else {
+        // Move the cursor.
+        let moved = exec_seams::spi_cursor_fetch_move::call(curname, direction, how_many, true)?;
+        n = moved.processed;
+    }
+
+    // Set ROW_COUNT and the global FOUND variable.
+    estate.eval_processed = n;
+    exec_set_found(estate, n != 0);
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
+}
+
+/// `exec_stmt_close(estate, stmt)` (pl_exec.c 4913) — CLOSE a cursor.
+fn exec_stmt_close(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_close,
+) -> PLpgSQL_rc_result {
+    let curname = cursor_var_name(estate, stmt.curvar)?.ok_or_else(|| {
+        types_error::PgError::error(format!(
+            "cursor variable \"{}\" is null",
+            cursor_var_refname(estate, stmt.curvar)
+        ))
+        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
+    })?;
+
+    if !exec_seams::spi_cursor_find::call(curname.clone())? {
+        return Err(types_error::PgError::error(format!(
+            "cursor \"{curname}\" does not exist"
+        ))
+        .with_sqlstate(types_error::ERRCODE_UNDEFINED_CURSOR));
+    }
+
+    exec_seams::spi_cursor_close::call(curname)?;
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
 fn exec_stmt_commit(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
@@ -4098,6 +4376,148 @@ fn read_var_value_byref(d: &PLpgSQL_datum) -> Option<Vec<u8>> {
         PLpgSQL_datum::Var(v) => v.value_byref.clone(),
         _ => panic!("read_var_value_byref on non-VAR datum"),
     }
+}
+
+// ===========================================================================
+// Cursor variable helpers — read the cursor VAR's name / declared query / arg
+// row, and the OPEN-args fake-SELECT-INTO leg (pl_exec.c exec_stmt_open /
+// exec_stmt_forc).
+// ===========================================================================
+
+/// The cursor variable's currently-assigned portal name (`TextDatumGetCString`
+/// of `curvar->value`), or `None` if the cursor variable is NULL (unnamed). C:
+/// `if (!curvar->isnull) curname = TextDatumGetCString(curvar->value)`.
+fn cursor_var_name(
+    estate: &PLpgSQL_execstate,
+    curvar_dno: int32,
+) -> types_error::PgResult<Option<String>> {
+    match &estate.datums[curvar_dno as usize] {
+        PLpgSQL_datum::Var(v) => {
+            if v.isnull {
+                return Ok(None);
+            }
+            // TextDatumGetCString(curvar->value): the cursor var is a refcursor
+            // (text) — render its varlena image to the C-string portal name.
+            let s = convert_value_to_string(v.value, v.value_byref.clone(), TEXTOID)?;
+            Ok(Some(s))
+        }
+        _ => panic!("cursor variable is not a PLpgSQL_var"),
+    }
+}
+
+/// The cursor variable's `refname` (for the "cursor variable is null" error).
+fn cursor_var_refname(estate: &PLpgSQL_execstate, curvar_dno: int32) -> String {
+    match &estate.datums[curvar_dno as usize] {
+        PLpgSQL_datum::Var(v) => v.refname.clone(),
+        _ => panic!("cursor variable is not a PLpgSQL_var"),
+    }
+}
+
+/// The cursor variable's `cursor_explicit_argrow` (the datum number of its
+/// internal argument row, or `-1` for an argumentless cursor).
+fn cursor_var_argrow(estate: &PLpgSQL_execstate, curvar_dno: int32) -> int32 {
+    match &estate.datums[curvar_dno as usize] {
+        PLpgSQL_datum::Var(v) => v.cursor_explicit_argrow,
+        _ => panic!("cursor variable is not a PLpgSQL_var"),
+    }
+}
+
+/// The cursor variable's declared query (`cursor_explicit_expr`) and its
+/// `cursor_options`. C: `query = curvar->cursor_explicit_expr; Assert(query)`.
+fn cursor_var_explicit_query(
+    estate: &PLpgSQL_execstate,
+    curvar_dno: int32,
+) -> types_error::PgResult<(types_plpgsql::PLpgSQL_expr, int32)> {
+    match &estate.datums[curvar_dno as usize] {
+        PLpgSQL_datum::Var(v) => {
+            let query = v
+                .cursor_explicit_expr
+                .as_deref()
+                .cloned()
+                .expect("a bound cursor variable carries cursor_explicit_expr");
+            Ok((query, v.cursor_options))
+        }
+        _ => panic!("cursor variable is not a PLpgSQL_var"),
+    }
+}
+
+/// `OPEN CURSOR with args` (pl_exec.c exec_stmt_open/forc): fake a
+/// `SELECT ... INTO <argrow>` statement to evaluate the cursor's arguments and
+/// put them into its internal argument row. C builds a transient
+/// `PLpgSQL_stmt_execsql{ into=true, target=argrow, sqlstmt=argquery }` and runs
+/// it through `exec_stmt_execsql` (historically NOT STRICT).
+fn open_cursor_args(
+    estate: &mut PLpgSQL_execstate,
+    argquery: &types_plpgsql::PLpgSQL_expr,
+    argrow: int32,
+    lineno: int32,
+) -> types_error::PgResult<()> {
+    let target = types_plpgsql::PLpgSQL_variable {
+        dtype: datum_dtype(&estate.datums[argrow as usize]),
+        dno: argrow,
+        refname: String::new(),
+        lineno,
+        isconst: false,
+        notnull: false,
+        default_val: None,
+    };
+    let set_args = types_plpgsql::PLpgSQL_stmt_execsql {
+        cmd_type: types_plpgsql::PLpgSQL_stmt_type::PLPGSQL_STMT_EXECSQL,
+        lineno,
+        stmtid: 0,
+        sqlstmt: Some(Box::new(argquery.clone())),
+        mod_stmt: false,
+        mod_stmt_set: false,
+        into: true,
+        strict: false, // XXX historically this has not been STRICT
+        target: Some(Box::new(target)),
+    };
+    if exec_stmt_execsql(estate, &set_args)? != PLpgSQL_rc::PLPGSQL_RC_OK {
+        return Err(types_error::PgError::error(
+            "open cursor failed during argument processing".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// `exec_check_assignable(estate, dno)` (pl_exec.c 8714) — verify the datum is
+/// assignable (not a CONST variable). Used before storing a generated portal
+/// name into a cursor variable that was NULL.
+fn exec_check_assignable(
+    estate: &PLpgSQL_execstate,
+    dno: int32,
+) -> types_error::PgResult<()> {
+    if let PLpgSQL_datum::Var(v) = &estate.datums[dno as usize] {
+        if v.isconst {
+            return Err(types_error::PgError::error(format!(
+                "variable \"{}\" is declared CONSTANT",
+                v.refname
+            ))
+            .with_sqlstate(types_error::ERRCODE_ERROR_IN_ASSIGNMENT));
+        }
+    }
+    Ok(())
+}
+
+/// `exec_eval_integer(estate, expr, &isnull)` (pl_exec.c 5630) — evaluate an
+/// expression and coerce it to an `int4`. Used by FETCH/MOVE for the
+/// RELATIVE/ABSOLUTE count. Returns `(value, isnull)`.
+fn exec_eval_integer(
+    estate: &mut PLpgSQL_execstate,
+    expr: &types_plpgsql::PLpgSQL_expr,
+) -> types_error::PgResult<(i32, bool)> {
+    let (value, isnull, valtype, valtypmod) = exec_eval_expr_impl(estate, expr)?;
+    let src_byref = estate.last_eval_byref.take();
+    if isnull {
+        return Ok((0, true));
+    }
+    // exec_cast_value(value, INT4OID) — coerce to int4 (the count is small).
+    const INT4OID: Oid = 23;
+    let (casted, _isnull, _byref) = exec_cast_value_with_byref(
+        estate, value, src_byref, false, valtype, valtypmod, INT4OID, -1,
+    )?;
+    // An int4 is by-value; the bare word is the i32.
+    Ok((casted.as_usize() as u32 as i32, false))
 }
 
 fn discard_temp_var(estate: &mut PLpgSQL_execstate, dno: int32) {

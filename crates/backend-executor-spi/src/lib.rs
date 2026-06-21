@@ -86,7 +86,7 @@ pub use backbone::*;
 pub use cursor::{spi_cursor_fetch, spi_cursor_tupdesc};
 pub use cursor_open::{
     spi_cursor_close_by_name, spi_cursor_fetch_move, spi_cursor_find, spi_cursor_open_plpgsql,
-    CursorFetchResult,
+    spi_cursor_parse_open, CursorFetchResult,
 };
 pub use dest_spi::create_spi_dest_receiver;
 pub use eval::{spi_eval_expr, EvalParamValue, EvalResult};

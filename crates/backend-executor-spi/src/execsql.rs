@@ -175,7 +175,7 @@ pub fn spi_execsql_dynamic(
 /// CreateCachedPlan + `parse_analyze_fixedparams` (the USING param types, no
 /// PL/pgSQL hooks) + QueryRewrite + CompleteCachedPlan. Returns the completed
 /// source handle.
-fn prepare_dynexecute_plan<'mcx>(
+pub(crate) fn prepare_dynexecute_plan<'mcx>(
     mcx: Mcx<'mcx>,
     query: &'mcx str,
     param_types: &[Oid],
@@ -219,7 +219,7 @@ fn prepare_dynexecute_plan<'mcx>(
 /// `exec_eval_using_params` result -> `ParamListInfo` (`pl_exec.c`): build the
 /// value param list from the already-evaluated USING values, param id `$i+1`
 /// (index `i`). Returns `None` when there are no params (C's NIL fast path).
-fn build_dyn_param_list(params: &[EvalParamValue]) -> PgResult<ParamListInfo> {
+pub(crate) fn build_dyn_param_list(params: &[EvalParamValue]) -> PgResult<ParamListInfo> {
     if params.is_empty() {
         return Ok(None);
     }
