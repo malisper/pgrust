@@ -777,4 +777,50 @@ pub fn AlterOperator(stmt: &AlterOperatorStmt) -> PgResult<ObjectAddress> {
 /// cycle) but its C lives here, so this crate is its installer.
 pub fn init_seams() {
     backend_catalog_pg_operator_seams::RemoveOperatorById::set(RemoveOperatorById);
+
+    // ProcessUtilitySlow dispatch target (utility.c): ALTER OPERATOR. Decode the
+    // rich `AlterOperatorStmt` into the flat parsenodes form the ported
+    // `AlterOperator` body consumes.
+    backend_tcop_utility_out_seams::alter_operator::set(alter_operator_seam);
+}
+
+/// Outward-seam adapter for `AlterOperator(stmt)` (utility.c `ProcessUtilitySlow`
+/// `T_AlterOperatorStmt`): decode the rich `AlterOperatorStmt` into the flat
+/// [`types_parsenodes::AlterOperatorStmt`] and run the ported [`AlterOperator`]
+/// body.
+fn alter_operator_seam<'mcx>(
+    _mcx: Mcx<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> PgResult<ObjectAddress> {
+    use backend_parser_parse_type::{rich_node_to_parse, rich_objectwithargs_to_parse};
+
+    let aos = match stmt.as_alteroperatorstmt() {
+        Some(s) => s,
+        None => {
+            return Err(ereport(ERROR)
+                .errmsg_internal("alter_operator_seam: statement is not an AlterOperatorStmt")
+                .into_error())
+        }
+    };
+
+    let opername = match aos.opername.as_deref() {
+        Some(n) => match n.as_objectwithargs() {
+            Some(owa) => Some(rich_objectwithargs_to_parse(owa)?),
+            None => {
+                return Err(ereport(ERROR)
+                    .errmsg_internal("ALTER OPERATOR: opername is not an ObjectWithArgs")
+                    .into_error())
+            }
+        },
+        None => None,
+    };
+
+    let mut options: Vec<types_parsenodes::Node> = Vec::with_capacity(aos.options.len());
+    for n in aos.options.iter() {
+        options.push(rich_node_to_parse(n)?);
+    }
+
+    let pn = types_parsenodes::AlterOperatorStmt { opername, options };
+
+    AlterOperator(&pn)
 }

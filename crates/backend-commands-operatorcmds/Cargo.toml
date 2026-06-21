@@ -21,7 +21,9 @@ backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-catalog-pg-operator-seams = { path = "../backend-catalog-pg-operator-seams" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
 backend-parser-parse-oper-seams = { path = "../backend-parser-parse-oper-seams" }
+backend-parser-parse-type = { path = "../backend-parser-parse-type" }
 backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
+backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
