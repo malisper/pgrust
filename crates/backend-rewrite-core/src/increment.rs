@@ -23,7 +23,7 @@ use types_error::{PgError, PgResult, ERROR};
 use types_nodes::copy_query::Query;
 use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsenodes::{RangeTblEntry, RTEKind};
-use types_nodes::primnodes::VarReturningType;
+use types_nodes::primnodes::{Expr, VarReturningType};
 
 /// `elog(ERROR, ...)` shorthand.
 fn elog_error(msg: &str) -> PgError {
@@ -84,10 +84,25 @@ fn IncrementVarSublevelsUp_walker<'mcx>(node: &mut Node<'mcx>, ctx: &mut IncrCtx
             incr_walk_children(node, ctx)
         }
         ntag::T_GroupingFunc => {
-            let grp = node.as_groupingfunc_mut().unwrap();
-            if grp.agglevelsup as i32 >= ctx.min_sublevels_up {
-                grp.agglevelsup =
-                    (grp.agglevelsup as i32 + ctx.delta_sublevels_up) as u32;
+            // In an analyzed tree a `GroupingFunc` is carried as the
+            // `Expr::GroupingFunc` variant (`NodePayload_Expr`), which shares the
+            // `T_GroupingFunc` tag with the standalone raw-parse `NodePayload_
+            // GroupingFunc`. The two have different memory layouts, so the
+            // Node-level `as_groupingfunc_mut` (which downcasts to the standalone
+            // payload) would misread an `Expr`-wrapped node; access the
+            // `agglevelsup` through the `Expr` routing, mirroring the `T_Aggref`
+            // arm above.
+            if let Some(Expr::GroupingFunc(grp)) = node.as_expr_mut() {
+                if grp.agglevelsup as i32 >= ctx.min_sublevels_up {
+                    grp.agglevelsup =
+                        (grp.agglevelsup as i32 + ctx.delta_sublevels_up) as u32;
+                }
+            } else {
+                let grp = node.as_groupingfunc_mut().unwrap();
+                if grp.agglevelsup as i32 >= ctx.min_sublevels_up {
+                    grp.agglevelsup =
+                        (grp.agglevelsup as i32 + ctx.delta_sublevels_up) as u32;
+                }
             }
             incr_walk_children(node, ctx)
         }
