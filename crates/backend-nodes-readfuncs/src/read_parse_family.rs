@@ -1834,6 +1834,46 @@ pub(crate) fn read_table_func<'mcx>(
     })
 }
 
+/// `_readJsonTablePathScan` — the `JsonTablePlan` leaf reader. Mirrors
+/// `out_json_table_path_scan` exactly: `path` (node), `name` (string),
+/// `errorOnError` (bool), `child` (opt node), `colMin`/`colMax` (ints).
+///
+/// Note: the C `_readJsonTablePathScan` reads `path` as a `JsonTablePath`
+/// node, but this port's outfuncs collapses the `JsonTablePath` wrapper into
+/// its `value` (Const) + `name` fields, so we read those two directly in the
+/// same order they were written.
+pub(crate) fn read_json_table_path_scan<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_nodes::primnodes::JsonTablePathScan<'mcx>> {
+    let path = read_node_field(mcx)?
+        .ok_or_else(|| elog_error("JsonTablePathScan.path must not be NULL"))?;
+    let name = read_string_field(mcx)?;
+    let errorOnError = crate::read_bool_field()?;
+    let child = read_opt_node(mcx)?;
+    let colMin = crate::read_int_field()?;
+    let colMax = crate::read_int_field()?;
+    Ok(types_nodes::primnodes::JsonTablePathScan {
+        path,
+        name,
+        errorOnError,
+        child,
+        colMin,
+        colMax,
+    })
+}
+
+/// `_readJsonTableSiblingJoin` — the sibling-join plan reader. Mirrors
+/// `out_json_table_sibling_join`: `lplan` (node), `rplan` (node).
+pub(crate) fn read_json_table_sibling_join<'mcx>(
+    mcx: Mcx<'mcx>,
+) -> PgResult<types_nodes::primnodes::JsonTableSiblingJoin<'mcx>> {
+    let lplan = read_node_field(mcx)?
+        .ok_or_else(|| elog_error("JsonTableSiblingJoin.lplan must not be NULL"))?;
+    let rplan = read_node_field(mcx)?
+        .ok_or_else(|| elog_error("JsonTableSiblingJoin.rplan must not be NULL"))?;
+    Ok(types_nodes::primnodes::JsonTableSiblingJoin { lplan, rplan })
+}
+
 // ===========================================================================
 // Dispatch.
 // ===========================================================================
@@ -1893,6 +1933,13 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
         b"A_CONST" => read_a_const(mcx).and_then(|p| Node::mk_a_const(mcx, p)),
 
         b"TABLEFUNC" => read_table_func(mcx).and_then(|p| Node::mk_table_func(mcx, p)),
+
+        b"JSONTABLEPATHSCAN" => {
+            read_json_table_path_scan(mcx).and_then(|p| Node::mk_json_table_path_scan(mcx, p))
+        }
+        b"JSONTABLESIBLINGJOIN" => {
+            read_json_table_sibling_join(mcx).and_then(|p| Node::mk_json_table_sibling_join(mcx, p))
+        }
 
         b"COMMONTABLEEXPR" => read_common_table_expr(mcx).and_then(|p| Node::mk_common_table_expr(mcx, p)),
 
