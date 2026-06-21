@@ -60,6 +60,8 @@ pub struct PgClassForm {
     pub relfrozenxid: TransactionId,
     /// `MultiXactId relminmxid`.
     pub relminmxid: MultiXactId,
+    /// `bool relispartition` — true if table/index is a partition.
+    pub relispartition: bool,
 }
 
 /* ----------------------------------------------------------------

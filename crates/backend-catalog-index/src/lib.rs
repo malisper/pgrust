@@ -2441,6 +2441,11 @@ pub fn index_concurrently_swap<'mcx>(
     new_class_form.relname = old_relname;
     old_class_form.relname = old_name.to_string();
 
+    /* Swap the partition flags to track inheritance properly */
+    let is_partition = new_class_form.relispartition;
+    new_class_form.relispartition = old_class_form.relispartition;
+    old_class_form.relispartition = is_partition;
+
     indexing::catalog_tuple_update_pg_class::call(mcx, &pg_class, old_class_tid, &old_class_form)?;
     indexing::catalog_tuple_update_pg_class::call(mcx, &pg_class, new_class_tid, &new_class_form)?;
 

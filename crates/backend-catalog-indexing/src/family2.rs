@@ -551,6 +551,8 @@ fn update_pg_class_from_form<'mcx>(
     set_col(&mut values, &mut nulls, &mut replaces, 13, Datum::from_i32(form.relallfrozen));
     set_col(&mut values, &mut nulls, &mut replaces, 30, Datum::from_transaction_id(form.relfrozenxid));
     set_col(&mut values, &mut nulls, &mut replaces, 31, Datum::from_u32(form.relminmxid));
+    // relispartition (28): swapped by index_concurrently_swap to track inheritance.
+    set_col(&mut values, &mut nulls, &mut replaces, 28, Datum::from_bool(form.relispartition));
 
     let tupdesc = rel.rd_att_clone_in(mcx)?;
     let mut tup = heap_modify_tuple(mcx, &oldtup, &tupdesc, &values, &nulls, &replaces)?;

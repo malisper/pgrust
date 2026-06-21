@@ -4450,6 +4450,7 @@ pub(crate) fn search_syscache_copy_pg_class<'mcx>(
 ) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, types_cluster::PgClassForm)>> {
     const Anum_pg_class_relam: i32 = 7;
     const Anum_pg_class_relallfrozen: i32 = 13;
+    const Anum_pg_class_relispartition: i32 = 28;
     let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(relid)))?;
     let Some(tup) = tuple else {
         return Ok(None);
@@ -4473,6 +4474,7 @@ pub(crate) fn search_syscache_copy_pg_class<'mcx>(
         relallfrozen: getattr_i32(mcx, RELOID, &tup, Anum_pg_class_relallfrozen)?,
         relfrozenxid: getattr_u32(mcx, RELOID, &tup, Anum_pg_class_relfrozenxid)?,
         relminmxid: getattr_u32(mcx, RELOID, &tup, Anum_pg_class_relminmxid)?,
+        relispartition: getattr_bool(mcx, RELOID, &tup, Anum_pg_class_relispartition)?,
     };
     let tid = tup.tuple.t_self;
     ReleaseSysCache(tup);
