@@ -1029,6 +1029,12 @@ seam!(
     pub fn create_statistics<'mcx>(mcx: Mcx<'mcx>, stmt: NodePtr<'mcx>) -> PgResult<ObjectAddress>
 );
 seam!(
+    /// `CreateStatistics(stmt, false)` (statscmds.c) — the `ATExecAddStatistics`
+    /// rebuild leg (`AT_ReAddStatistics`, tablecmds.c:9683). `is_rebuild` is
+    /// always true on this path, so `check_rights = !is_rebuild = false`.
+    pub fn create_statistics_rebuild<'mcx>(mcx: Mcx<'mcx>, stmt: NodePtr<'mcx>) -> PgResult<ObjectAddress>
+);
+seam!(
     /// `RangeVarGetRelid(rel, ShareUpdateExclusiveLock, false)` (namespace.c) — the
     /// CREATE STATISTICS relation-OID lookup.
     pub fn range_var_get_relid_share_update<'mcx>(mcx: Mcx<'mcx>, rel: NodePtr<'mcx>) -> PgResult<Oid>

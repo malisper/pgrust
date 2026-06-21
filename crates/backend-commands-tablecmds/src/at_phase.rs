@@ -1703,7 +1703,20 @@ fn ATExecCmd<'mcx>(
             wqueue[ti].rel = Some(owned_rel);
             _address = res?;
         }
-        AT_ReAddStatistics => unported("ReAdd STATISTICS (ATExecAddStatistics)"),
+        AT_ReAddStatistics => {
+            // ATExecAddStatistics(tab, rel, (CreateStatsStmt *) cmd->def, true,
+            // lockmode) (tablecmds.c:9683). is_rebuild is always true on the
+            // AT_ReAddStatistics path, so CreateStatistics is called with
+            // check_rights = !is_rebuild = false. The stmt has already been
+            // through transformStatsStmt in ATPostAlterTypeParse.
+            let def = cmd
+                .def
+                .as_deref()
+                .expect("AT_ReAddStatistics: cmd.def is NULL");
+            let stmt = mcx::alloc_in(mcx, def.clone_in(mcx)?)?;
+            _address =
+                backend_tcop_utility_out_seams::create_statistics_rebuild::call(mcx, stmt)?;
+        }
         AT_AddConstraint | AT_ReAddConstraint => {
             // Transform the command only during initial examination
             // (AT_PASS_ADD_CONSTR). Take the single open `tab->rel` out of the

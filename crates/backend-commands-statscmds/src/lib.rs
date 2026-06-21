@@ -1083,6 +1083,19 @@ fn create_statistics_arm<'mcx>(
     }
 }
 
+/// `ATExecAddStatistics(tab, rel, stmt, true, lockmode)` (tablecmds.c:9683) —
+/// the `AT_ReAddStatistics` rebuild leg. `is_rebuild` is always true here, so
+/// `CreateStatistics` is called with `check_rights = !is_rebuild = false`.
+fn create_statistics_rebuild_arm<'mcx>(
+    mcx: Mcx<'mcx>,
+    stmt: types_nodes::nodes::NodePtr<'mcx>,
+) -> PgResult<ObjectAddress> {
+    match (&*stmt).node_tag() {
+        ntag::T_CreateStatsStmt => CreateStatistics(mcx, (&*stmt).expect_createstatsstmt(), false),
+        _ => panic!("create_statistics_rebuild: parse tree is not a CreateStatsStmt"),
+    }
+}
+
 /// `RangeVarGetRelid(rel, ShareUpdateExclusiveLock, false)` (utility.c
 /// `T_CreateStatsStmt`) — resolve the CREATE STATISTICS relation OID. The
 /// dispatch passes the FROM-clause `RangeVar` node; build the resolved
@@ -1118,6 +1131,7 @@ pub fn init_seams() {
     // ProcessUtilitySlow dispatch arms (utility.c CREATE/ALTER STATISTICS).
     backend_tcop_utility_out_seams::alter_statistics::set(alter_statistics_arm);
     backend_tcop_utility_out_seams::create_statistics::set(create_statistics_arm);
+    backend_tcop_utility_out_seams::create_statistics_rebuild::set(create_statistics_rebuild_arm);
     backend_tcop_utility_out_seams::range_var_get_relid_share_update::set(
         range_var_get_relid_share_update_arm,
     );
