@@ -89,6 +89,7 @@ backend-utils-adt-ri-triggers = { path = "../backend-utils-adt-ri-triggers" }
 backend-catalog-catalog = { path = "../backend-catalog-catalog" }
 backend-catalog-toasting = { path = "../backend-catalog-toasting" }
 backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
+backend-commands-foreigncmds-seams = { path = "../backend-commands-foreigncmds-seams" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }

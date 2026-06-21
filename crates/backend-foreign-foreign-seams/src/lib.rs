@@ -603,3 +603,12 @@ seam_core::seam!(
         missing_ok: bool,
     ) -> PgResult<Option<ForeignServer<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `SearchSysCache1(FOREIGNTABLEREL, relid)` → `ftserver`
+    /// (`ATExecAlterColumnGenericOptions`, tablecmds.c:15980): the foreign
+    /// server OID for foreign table `relid`. `None` when `relid` has no
+    /// `pg_foreign_table` row (the C `!HeapTupleIsValid(tuple)` → "foreign
+    /// table does not exist" branch, raised by the caller).
+    pub fn foreign_table_server_oid(relid: Oid) -> PgResult<Option<Oid>>
+);

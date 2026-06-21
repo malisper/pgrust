@@ -1870,7 +1870,20 @@ fn ATExecCmd<'mcx>(
             _address = res?;
         }
         AT_AlterColumnGenericOptions => {
-            unported("ALTER COLUMN OPTIONS (ATExecAlterColumnGenericOptions)")
+            // ATExecAlterColumnGenericOptions(rel, cmd->name, (List *) cmd->def,
+            //   lockmode).
+            let colName = cmd
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("ALTER COLUMN OPTIONS requires a column name");
+            _address = crate::at_column::ATExecAlterColumnGenericOptions(
+                mcx,
+                rel,
+                colName,
+                cmd.def.as_deref(),
+                lockmode,
+            )?;
         }
         AT_ClusterOn => {
             // ATExecClusterOn(rel, cmd->name, lockmode)

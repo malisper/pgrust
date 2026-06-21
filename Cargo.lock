@@ -8262,6 +8262,7 @@ dependencies = [
  "backend-commands-createas-seams",
  "backend-commands-define-seams",
  "backend-commands-event-trigger-seams",
+ "backend-commands-foreigncmds-seams",
  "backend-commands-indexcmds",
  "backend-commands-indexcmds-seams",
  "backend-commands-sequence-seams",

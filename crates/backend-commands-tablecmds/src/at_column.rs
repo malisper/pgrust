@@ -988,6 +988,140 @@ pub fn ATExecSetStorage<'mcx>(
     Ok(object_address_subset(RelationRelationId, rel.rd_id, attnum as i32))
 }
 
+/// `ATExecAlterColumnGenericOptions(rel, colName, options, lockmode)`
+/// (tablecmds.c:15955) — ALTER COLUMN OPTIONS (...) on a foreign-table column.
+/// Determines the FDW validator for the foreign table's server, merges the
+/// SET/ADD/DROP option actions into the column's current `attfdwoptions` (via
+/// `transformGenericOptions`), and writes the resulting `text[]` back to
+/// `pg_attribute.attfdwoptions`.
+///
+/// `options` is the `(List *) cmd->def` — a `Node::List` of `Node::DefElem`.
+/// The foreign-domain pieces (the validator lookup and the option merge /
+/// validator call) are delegated to the `backend-commands-foreigncmds` seams;
+/// the `pg_attribute` read/write stays here.
+pub fn ATExecAlterColumnGenericOptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    colName: &str,
+    options: Option<&Node<'mcx>>,
+    _lockmode: LOCKMODE,
+) -> PgResult<ObjectAddress> {
+    use backend_commands_foreigncmds_seams as fc_seam;
+
+    // Collect the new options: (name, value, defaction) from the DefElem list.
+    // if (options == NIL) return InvalidObjectAddress;
+    let mut new_options: Vec<(String, Option<String>, i32)> = Vec::new();
+    if let Some(def) = options {
+        if let Some(items) = def.as_list() {
+            for it in items.iter() {
+                if let Some(de) = it.as_defelem() {
+                    let name = de.defname.as_ref().map(|s| s.as_str().to_string()).ok_or_else(
+                        || backend_utils_error::PgError::error("DefElem has no defname"),
+                    )?;
+                    // The option value: a quoted string literal (T_String). A
+                    // value-less DROP carries `arg == NULL`.
+                    let value = match de.arg.as_deref() {
+                        None => None,
+                        Some(node) => Some(node.expect_string().sval.as_str().to_string()),
+                    };
+                    let action = de.defaction as i32;
+                    new_options.push((name, value, action));
+                }
+            }
+        }
+    }
+    if new_options.is_empty() {
+        // C: `if (options == NIL) return InvalidObjectAddress;`
+        return Ok(ObjectAddress {
+            classId: types_core::InvalidOid,
+            objectId: types_core::InvalidOid,
+            objectSubId: 0,
+        });
+    }
+
+    // First, determine FDW validator associated to the foreign table.
+    let fdwvalidator = fc_seam::foreign_table_fdwvalidator::call(rel.rd_id, &rel.name())?;
+
+    // attrel = table_open(AttributeRelationId, RowExclusiveLock);
+    let attrelation = relation_open(mcx, AttributeRelationId, RowExclusiveLock)?;
+
+    // tuple = SearchSysCacheAttName(RelationGetRelid(rel), colName);
+    let tuple = match SearchSysCacheAttName(mcx, rel.rd_id, colName)? {
+        Some(t) => t,
+        None => {
+            return backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_COLUMN)
+                .errmsg(format!(
+                    "column \"{}\" of relation \"{}\" does not exist",
+                    colName,
+                    rel.name()
+                ))
+                .finish(here("ATExecAlterColumnGenericOptions"))
+                .map(|()| unreachable!());
+        }
+    };
+
+    // Prevent them from altering a system attribute.
+    let attnum = att_field_i16(mcx, ATTNAME, &tuple, Anum_pg_attribute_attnum)?;
+    if attnum <= 0 {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("cannot alter system column \"{colName}\""))
+            .finish(here("ATExecAlterColumnGenericOptions"))
+            .map(|()| unreachable!());
+    }
+
+    // Extract the current options: datum = SysCacheGetAttr(ATTNAME, tuple,
+    // attfdwoptions, &isnull); options = isnull ? NIL : untransformRelOptions(datum);
+    let (cur_datum, cur_isnull) = backend_utils_cache_syscache::SysCacheGetAttr(
+        mcx,
+        ATTNAME,
+        &tuple,
+        types_catalog::pg_attribute::Anum_pg_attribute_attfdwoptions as i32,
+    )?;
+    let old_options: Vec<(String, Option<String>)> = if cur_isnull {
+        Vec::new()
+    } else {
+        backend_access_common_reloptions::untransformRelOptions(mcx, Some(cur_datum.as_ref_bytes()))?
+    };
+
+    // datum = transformGenericOptions(AttributeRelationId, datum, options,
+    //                                 fdw->fdwvalidator);
+    let merged = fc_seam::transform_generic_options::call(
+        AttributeRelationId,
+        &old_options,
+        &new_options,
+        fdwvalidator,
+    )?;
+
+    // if (PointerIsValid(DatumGetPointer(datum))) repl_val[..] = datum;
+    // else repl_null[..] = true;  — an empty merged list is the SQL-NULL case.
+    let pairs: Option<Vec<(String, String)>> = if merged.is_empty() {
+        None
+    } else {
+        Some(
+            merged
+                .into_iter()
+                .map(|(n, v)| (n, v.unwrap_or_default()))
+                .collect(),
+        )
+    };
+    let row = PgAttributeUpdateRow {
+        attfdwoptions: Some(pairs),
+        ..Default::default()
+    };
+    indexing_seam::catalog_tuple_update_pg_attribute::call(mcx, &attrelation, &tuple, &row)?;
+
+    // InvokeObjectPostAlterHook(RelationRelationId, RelationGetRelid(rel), attnum);
+    objaccess_seam::invoke_object_post_alter_hook::call(RelationRelationId, rel.rd_id, attnum as i32)?;
+
+    // table_close(attrel, RowExclusiveLock) — RAII.
+    drop(attrelation);
+
+    // ObjectAddressSubSet(address, RelationRelationId, RelationGetRelid(rel), attnum);
+    Ok(object_address_subset(RelationRelationId, rel.rd_id, attnum as i32))
+}
+
 /// `ATExecSetCompression(rel, column, newValue, lockmode)` (tablecmds.c) —
 /// ALTER COLUMN SET COMPRESSION. Resolves the named compression method via
 /// `GetAttributeCompression`, writes `pg_attribute.attcompression`, then

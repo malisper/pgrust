@@ -541,11 +541,13 @@ pub fn transformColumnDefinition<'mcx>(
 
     // If needed, generate ALTER FOREIGN TABLE ... per-column FDW options.
     if !column.fdwoptions.is_empty() {
-        // C: cmd->def = (Node *) column->fdwoptions; the DefElem list is carried
-        // as the subcommand's `def`. We move the fdwoptions out and rewrap them
-        // as a single `List`-style node is not modelled, so the def is left
-        // None here (tablecmds reads the per-column FDW options elsewhere in this
-        // owned model). Mirror the rest of the statement faithfully.
+        // C: cmd->def = (Node *) column->fdwoptions; the per-column `DefElem`
+        // list is carried verbatim as the subcommand's `def`. Move the
+        // fdwoptions `List` (a Vec of `Node::DefElem` pointers) out of the
+        // column and rewrap it as a `Node::List` so `ATExecAlterColumnGenericOptions`
+        // can read it in phase 2.
+        let fdwopts = core::mem::replace(&mut column.fdwoptions, PgVec::new_in(mcx));
+        let def_node = mcx::alloc_in(mcx, Node::mk_list(mcx, fdwopts)?)?;
         let altercmd = AlterTableCmd {
             subtype: AT_AlterColumnGenericOptions,
             name: match &column.colname {
@@ -554,7 +556,7 @@ pub fn transformColumnDefinition<'mcx>(
             },
             num: 0,
             newowner: None,
-            def: None,
+            def: Some(def_node),
             behavior: DROP_RESTRICT,
             missing_ok: false,
             recurse: false,

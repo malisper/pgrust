@@ -1403,6 +1403,12 @@ pub fn init_seams() {
 
     inward::get_foreign_data_wrapper_by_name::set(GetForeignDataWrapperByName);
 
+    inward::foreign_table_server_oid::set(|relid| {
+        // SearchSysCache1(FOREIGNTABLEREL, relid) → ftserver; None when the
+        // foreign table has no pg_foreign_table row.
+        syscache::foreign_table_server_by_relid::call(relid)
+    });
+
     inward::get_foreign_server::set(|mcx, serverid| {
         // GetForeignServer raises (Err) on a missing server (flags = 0); the
         // inward seam returns the descriptor by value, so unwrap the `Some`.

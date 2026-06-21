@@ -230,7 +230,7 @@ fn text_array_datum<'mcx>(
 /// `optionListToArray`'s result for `Option<Vec<(name, value)>>` options:
 /// render each pair to the `"name=value"` text element, build the `text[]`, or
 /// `None` for the absent/empty list (store SQL NULL).
-fn options_array_datum<'mcx>(
+pub(crate) fn options_array_datum<'mcx>(
     mcx: Mcx<'mcx>,
     options: &Option<Vec<(String, String)>>,
 ) -> PgResult<Option<Datum<'mcx>>> {

@@ -181,4 +181,13 @@ pub struct PgAttributeUpdateRow {
     /// (`change_owner_fix_column_acls`'s owner-rewrite), `Some(None)` stores SQL
     /// NULL, `None` leaves the column unchanged.
     pub attacl: Option<Option<Vec<u8>>>,
+    /// `attfdwoptions` — `ALTER COLUMN OPTIONS (...)` on a foreign-table column
+    /// (`ATExecAlterColumnGenericOptions`). `Some(Some(pairs))` stores the
+    /// `text[]` image built from the merged option `(name, value)` pairs,
+    /// `Some(None)` stores SQL NULL (no options remain), `None` leaves the
+    /// column unchanged. The pairs are encoded to the `text[]` varlena on the
+    /// catalog side (`options_array_datum`), matching the foreign-table store
+    /// path; this keeps the `transformGenericOptions` DefElem list — not a bare
+    /// varlena Datum — as the carried representation.
+    pub attfdwoptions: Option<Option<Vec<(String, String)>>>,
 }

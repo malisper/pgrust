@@ -443,6 +443,22 @@ fn catalog_tuple_update_pg_attribute<'mcx>(
             None => isnull[i] = true,
         }
     }
+    // attfdwoptions — ALTER COLUMN OPTIONS (ATExecAlterColumnGenericOptions).
+    // Some(Some(pairs)) encodes the merged options to the text[] varlena via
+    // options_array_datum (the C `transformGenericOptions` result, which when
+    // non-NULL is a text[]); Some(None) (no options remain) stores SQL NULL,
+    // mirroring the C `if (PointerIsValid(datum)) repl_val[..] = datum; else
+    // repl_null[..] = true;`.
+    if let Some(fdwopts) = &row.attfdwoptions {
+        // `fdwopts: &Option<Vec<(name, value)>>` — `None` (or an empty list,
+        // handled by options_array_datum returning None) stores SQL NULL.
+        let i = pa::Anum_pg_attribute_attfdwoptions as usize - 1;
+        replaces[i] = true;
+        match crate::family2::options_array_datum(mcx, fdwopts)? {
+            Some(d) => values[i] = d,
+            None => isnull[i] = true,
+        }
+    }
 
     // new_tuple = heap_modify_tuple(attr_tuple, RelationGetDescr(pg_attribute_rel),
     //                               values, isnull, replaces);

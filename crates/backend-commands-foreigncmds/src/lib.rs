@@ -196,6 +196,117 @@ fn options_for_store<'a, 'mcx>(options: &'a [DefElem<'mcx>]) -> Option<&'a [DefE
 }
 
 /* ===========================================================================
+ * ATExecAlterColumnGenericOptions helper seams (tablecmds.c:15955).
+ *
+ * The C `ATExecAlterColumnGenericOptions` lives in tablecmds.c, but the two
+ * foreign-domain pieces it needs — the column's foreign-data-wrapper validator
+ * OID and the `transformGenericOptions` merge — are owned here. tablecmds reads
+ * and writes the `pg_attribute.attfdwoptions` column itself (its catalog-write
+ * machinery) and calls down to these seams for the foreign-specific logic.
+ * ======================================================================== */
+
+/// Seam body for [`backend_commands_foreigncmds_seams::foreign_table_fdwvalidator`]:
+/// `GetForeignServer(fttableform->ftserver)` then
+/// `GetForeignDataWrapper(server->fdwid)->fdwvalidator`. `None` from the
+/// FOREIGNTABLEREL lookup is the C `!HeapTupleIsValid(tuple)` →
+/// `ereport(... "foreign table \"%s\" does not exist")`.
+fn foreign_table_fdwvalidator_impl(relid: Oid, relname: &str) -> PgResult<Oid> {
+    let ctx = mcx::MemoryContext::new("foreign_table_fdwvalidator");
+    let mcx = ctx.mcx();
+    let serverid = match foreign_seams::foreign_table_server_oid::call(relid)? {
+        Some(s) => s,
+        None => {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_UNDEFINED_OBJECT)
+                .errmsg(format!("foreign table \"{relname}\" does not exist"))
+                .into_error()
+                .with_error_location(errloc(15981, "ATExecAlterColumnGenericOptions")));
+        }
+    };
+    let server = foreign_seams::get_foreign_server::call(mcx, serverid)?;
+    let fdw = foreign_seams::get_foreign_data_wrapper::call(mcx, server.fdwid)?;
+    Ok(fdw.fdwvalidator)
+}
+
+/// Seam body for [`backend_commands_foreigncmds_seams::transform_generic_options`]:
+/// build the flat `DefElem` lists from the `(name, value[, action])` string
+/// tuples, run [`transformGenericOptions`], and project the merged result back
+/// to `(name, value)` pairs. `value == None` is a value-less option (the C
+/// `DefElem` with `arg == NULL`, which `defGetString` would reject — but the
+/// merge itself never reads `arg`, and the foreign-table column options always
+/// carry a string value, so a `None` value round-trips as a value-less option).
+fn transform_generic_options_impl(
+    catalog_id: Oid,
+    old_options: &[(String, Option<String>)],
+    new_options: &[(String, Option<String>, i32)],
+    fdwvalidator: Oid,
+) -> PgResult<Vec<(String, Option<String>)>> {
+    let ctx = mcx::MemoryContext::new("transformGenericOptions");
+    let mcx = ctx.mcx();
+
+    fn mk_arg<'m>(
+        mcx: Mcx<'m>,
+        value: &Option<String>,
+    ) -> PgResult<Option<mcx::PgBox<'m, DefElemArg<'m>>>> {
+        match value {
+            None => Ok(None),
+            Some(v) => Ok(Some(mcx::alloc_in(
+                mcx,
+                DefElemArg::String(mcx::PgString::from_str_in(v, mcx)?),
+            )?)),
+        }
+    }
+
+    // old_options: existing values (DEFELEM_UNSPEC).
+    let mut old: PgVec<'_, DefElem<'_>> = mcx::vec_with_capacity_in(mcx, old_options.len())?;
+    for (name, value) in old_options {
+        old.push(DefElem {
+            defname: mcx::PgString::from_str_in(name, mcx)?,
+            arg: mk_arg(mcx, value)?,
+            defaction: DefElemAction::Unspec,
+        });
+    }
+
+    // new_options: carry the parser DefElemAction discriminant.
+    let mut new: PgVec<'_, DefElem<'_>> = mcx::vec_with_capacity_in(mcx, new_options.len())?;
+    for (name, value, action) in new_options {
+        let defaction = match *action {
+            1 => DefElemAction::Set,
+            2 => DefElemAction::Add,
+            3 => DefElemAction::Drop,
+            _ => DefElemAction::Unspec,
+        };
+        new.push(DefElem {
+            defname: mcx::PgString::from_str_in(name, mcx)?,
+            arg: mk_arg(mcx, value)?,
+            defaction,
+        });
+    }
+
+    let merged = transformGenericOptions(mcx, catalog_id, old, &new, fdwvalidator)?;
+
+    let mut out = Vec::with_capacity(merged.len());
+    for def in merged.iter() {
+        let value = match &def.arg {
+            None => None,
+            Some(a) => match &**a {
+                DefElemArg::String(s) => Some(s.as_str().to_string()),
+                DefElemArg::Float(s) => Some(s.as_str().to_string()),
+                DefElemArg::Integer(v) => Some(v.to_string()),
+                DefElemArg::Boolean(b) => Some(if *b { "true" } else { "false" }.to_string()),
+                DefElemArg::NameList(_) => {
+                    return Err(PgError::error(
+                        "foreign-table column option value is a name list",
+                    ))
+                }
+            },
+        };
+        out.push((def.defname.as_str().to_string(), value));
+    }
+    Ok(out)
+}
+
+/* ===========================================================================
  * AlterForeignDataWrapperOwner_internal (foreigncmds.c:215-278)
  * ======================================================================== */
 
@@ -1952,6 +2063,8 @@ pub fn init_seams() {
         let ctx = mcx::MemoryContext::new("AlterForeignDataWrapperOwner_oid");
         AlterForeignDataWrapperOwner_oid(ctx.mcx(), fdw_id, new_owner_id)
     });
+    s::foreign_table_fdwvalidator::set(foreign_table_fdwvalidator_impl);
+    s::transform_generic_options::set(transform_generic_options_impl);
 
     // ProcessUtilitySlow dispatch arms (utility.c).
     backend_tcop_utility_out_seams::create_foreign_data_wrapper::set(create_fdw_seam);
