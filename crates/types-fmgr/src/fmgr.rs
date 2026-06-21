@@ -201,6 +201,12 @@ pub struct FunctionCallInfoBaseData {
 pub struct ContextNode {
     /// `nodeTag(node)`.
     pub tag: u32,
+    /// For a `T_CallContext` node, `CallContext.atomic`. The procedure-CALL
+    /// dispatcher (`ExecuteCallStmt`) deposits the calling context's atomicity
+    /// here so the call handler's `nonatomic = !castNode(CallContext,
+    /// fcinfo->context)->atomic` demux (pl_handler.c) is faithful. Always
+    /// `true` (the safe, atomic default) for any non-`CallContext` tag.
+    pub atomic: bool,
 }
 
 thread_local! {
@@ -219,7 +225,9 @@ thread_local! {
     /// `TriggerData` relation / NEW-OLD tuples) rides the dispatcher's own
     /// per-call side-channel, which the callee reads through the trigger
     /// accessors; only the tag — the demux discriminant — needs to cross here.
-    static CURRENT_CALL_CONTEXT_TAG: core::cell::Cell<Option<u32>> =
+    /// `(nodeTag, atomic)`; `atomic` is only meaningful for `T_CallContext` and
+    /// is `true` for every other context tag (the safe default).
+    static CURRENT_CALL_CONTEXT_TAG: core::cell::Cell<Option<(u32, bool)>> =
         const { core::cell::Cell::new(None) };
 }
 
@@ -410,14 +418,25 @@ pub fn current_estate_link() -> Option<RawEStateLink> {
 /// inner plain call observes `None`, exactly as a freshly-zeroed C `fcinfo`).
 #[must_use]
 pub struct CallContextTagGuard {
-    prev: Option<u32>,
+    prev: Option<(u32, bool)>,
 }
 
 impl CallContextTagGuard {
     /// Install `tag` as the current fmgr-call context node-tag (C:
-    /// `fcinfo->context = (Node *) node` where `nodeTag(node) == tag`).
+    /// `fcinfo->context = (Node *) node` where `nodeTag(node) == tag`). The
+    /// context is treated as atomic (the trigger / non-CALL default); for a
+    /// procedure-CALL context use [`install_call`](Self::install_call).
     pub fn install(tag: u32) -> Self {
-        let prev = CURRENT_CALL_CONTEXT_TAG.with(|c| c.replace(Some(tag)));
+        let prev = CURRENT_CALL_CONTEXT_TAG.with(|c| c.replace(Some((tag, true))));
+        CallContextTagGuard { prev }
+    }
+
+    /// Install a `T_CallContext` with `nodeTag == tag` and the calling context's
+    /// `atomic` flag (C: `fcinfo->context = (Node *) callcontext` where
+    /// `callcontext->atomic == atomic`). `ExecuteCallStmt` uses this so the
+    /// procedure language handler's nonatomic demux is faithful.
+    pub fn install_call(tag: u32, atomic: bool) -> Self {
+        let prev = CURRENT_CALL_CONTEXT_TAG.with(|c| c.replace(Some((tag, atomic))));
         CallContextTagGuard { prev }
     }
 }
@@ -432,7 +451,7 @@ impl Drop for CallContextTagGuard {
 /// currently being issued — the value fmgr-core stamps onto the new call
 /// frame's [`FunctionCallInfoBaseData::context`]. `None` is a plain call (C's
 /// freshly-zeroed `fcinfo->context == NULL`).
-pub fn current_call_context_tag() -> Option<u32> {
+pub fn current_call_context_tag() -> Option<(u32, bool)> {
     CURRENT_CALL_CONTEXT_TAG.with(|c| c.get())
 }
 
@@ -445,7 +464,7 @@ pub fn current_call_context_tag() -> Option<u32> {
 /// `fcinfo->context`. The dispatcher's RAII [`CallContextTagGuard`] still
 /// restores the prior value on drop, so a sibling trigger fired afterwards sees
 /// the tag again.
-pub fn take_call_context_tag() -> Option<u32> {
+pub fn take_call_context_tag() -> Option<(u32, bool)> {
     CURRENT_CALL_CONTEXT_TAG.with(|c| c.replace(None))
 }
 

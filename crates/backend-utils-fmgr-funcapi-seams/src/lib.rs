@@ -207,6 +207,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `build_function_result_tupdesc_t(procedureTuple)` (funcapi.c:1683): build
+    /// the result `TupleDesc` describing the OUT/INOUT columns of the procedure
+    /// whose `pg_proc` OID is `proc_oid`. Returns `None` when the procedure is
+    /// not declared to return a composite (no OUT params / not RECORD-returning).
+    /// The descriptor is owned in `mcx`. Used by `CallStmtResultDesc`
+    /// (functioncmds.c). Fallible on the cache-lookup `ereport(ERROR)`.
+    pub fn build_function_result_tupdesc_t<'mcx>(
+        mcx: Mcx<'mcx>,
+        proc_oid: Oid,
+    ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+);
+
+seam_core::seam!(
     /// `get_expr_result_tupdesc(expr, noError)` (funcapi.c): get the tuple
     /// descriptor describing the result of an expression of composite type. Used
     /// by `ParseComplexProjection` (parse_func.c). With `no_error = true` an

@@ -119,19 +119,14 @@ pub fn find_rendezvous_variable_plpgsql_plugin() {
 /// `nonatomic = fcinfo->context && IsA(fcinfo->context, CallContext) &&
 /// !castNode(CallContext, fcinfo->context)->atomic`.
 ///
-/// The `CallContext.atomic` flag is not carried through the tag-only
-/// `ContextNode`; absent a CallContext the call is atomic (the function-call /
-/// CREATE-FUNCTION common case), matching C when `context` is not a CallContext.
+/// The CALL dispatcher (`ExecuteCallStmt`) deposits `CallContext.atomic` onto
+/// the `ContextNode` it stamps on the call frame, so the nonatomic flag is
+/// `IsA(fcinfo->context, CallContext) && !context->atomic`. Absent a CallContext
+/// the call is atomic (the function-call / CREATE-FUNCTION common case), matching
+/// C when `context` is not a CallContext.
 pub fn called_nonatomic(fcinfo: &FunctionCallInfoBaseData) -> bool {
     match &fcinfo.context {
-        Some(c) if c.tag == T_CALL_CONTEXT => {
-            // The atomic bit is not modeled on ContextNode; a procedure CALL in
-            // a nonatomic context needs it. Loud rather than silently atomic.
-            panic!(
-                "seam not wired: CallContext.atomic (pl_handler.c) — the nonatomic flag is not \
-                 carried through the tag-only fmgr ContextNode (CALL/procedure substrate)"
-            );
-        }
+        Some(c) if c.tag == T_CALL_CONTEXT => !c.atomic,
         _ => false,
     }
 }

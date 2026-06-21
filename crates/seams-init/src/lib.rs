@@ -1375,14 +1375,16 @@ mod recurrence_guard {
         // `es_cte_shared` precedent — and nodeRecursiveunion calls
         // `backend_executor_nodeWorktablescan::publish_wtparam_slot` directly,
         // so the former CONTRACT_RECONCILE_PENDING entry for it is retired.)
-        // nodes-core re-homes these two cross-unit DESIGN_DEBT seams onto its own
-        // -seams crate so the guard can track them (see DESIGN_DEBT.md). Both
-        // read the unported call-expression node tree (FuncExpr/OpExpr/RowExpr/
-        // Const) and fold into funcapi's `internal_get_result_type` /
-        // `build_function_result_tupdesc_t` tupdesc spine — neither the node
-        // model nor a funcapi callback seam exists yet, so the body stays
-        // seam-and-panic (mirror-pg-and-panic) until those owners land.
-        ("backend_nodes_core", "call_stmt_result_desc"),
+        // (`call_stmt_result_desc` is now INSTALLED: CALL's result descriptor is
+        // owned by backend-commands-functioncmds on the
+        // `backend_tcop_utility_out_seams::call_stmt_result_desc` seam, reading
+        // the live transformed `T_CallStmt` funcexpr/outargs.)
+        // nodes-core re-homes this cross-unit DESIGN_DEBT seam onto its own
+        // -seams crate so the guard can track it (see DESIGN_DEBT.md). It reads
+        // the unported call-expression node tree (FuncExpr/OpExpr/RowExpr/Const)
+        // and folds into funcapi's `internal_get_result_type` tupdesc spine — no
+        // funcapi callback seam exists yet, so the body stays seam-and-panic
+        // (mirror-pg-and-panic) until that owner lands.
         ("backend_nodes_core", "get_expr_result_type_node"),
         // DESIGN_DEBT (provider-unported): the CustomScan/CustomScanState
         // provider callbacks (extensible.h `CustomScanMethods` /

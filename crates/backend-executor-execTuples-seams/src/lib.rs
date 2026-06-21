@@ -914,3 +914,55 @@ seam_core::seam!(
         names: &[&str],
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `begin_tup_output_tupdesc(dest, tupdesc, tts_ops)` (execTuples.c): set up
+    /// a `TupOutputState` for sending rows of `tupdesc` to `dest`. Used by the
+    /// utility-statement tuple senders (`ExecuteCallStmt`'s RECORD result, SHOW,
+    /// EXPLAIN). Allocates the single output slot in `mcx`. Fallible on OOM /
+    /// the receiver's `rStartup` `ereport(ERROR)`.
+    pub fn begin_tup_output_tupdesc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        dest: types_nodes::parsestmt::DestReceiverHandle,
+        tupdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+        tts_ops: types_nodes::TupleSlotKind,
+    ) -> types_error::PgResult<types_nodes::tuptable::TupOutputState<'mcx>>
+);
+
+seam_core::seam!(
+    /// `do_tup_output(tstate, values, isnull)` (execTuples.c): store one row of
+    /// `values`/`isnull` into the output slot and send it to the receiver.
+    /// Fallible on OOM / the receiver's `receiveSlot` `ereport(ERROR)`.
+    pub fn do_tup_output<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tstate: &mut types_nodes::tuptable::TupOutputState<'mcx>,
+        values: &[types_tuple::Datum<'mcx>],
+        isnull: &[bool],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `end_tup_output(tstate)` (execTuples.c): shut down the receiver and drop
+    /// the output slot. Fallible on the receiver's `rShutdown` `ereport(ERROR)`.
+    pub fn end_tup_output<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tstate: types_nodes::tuptable::TupOutputState<'mcx>,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// Decode a composite (RECORD) `Datum` into its row type id / typmod and the
+    /// per-column `(value, isnull)` arrays (`DatumGetHeapTupleHeader` +
+    /// `lookup_rowtype_tupdesc` + deform). `ExecuteCallStmt` (functioncmds.c)
+    /// uses this to materialize a RECORD-returning procedure's result for the
+    /// tuple sender. Fallible on the rowtype lookup / OOM.
+    pub fn deform_record_datum<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        datum: types_tuple::Datum<'mcx>,
+    ) -> types_error::PgResult<(
+        types_core::Oid,
+        i32,
+        std::vec::Vec<types_tuple::Datum<'mcx>>,
+        std::vec::Vec<bool>,
+    )>
+);

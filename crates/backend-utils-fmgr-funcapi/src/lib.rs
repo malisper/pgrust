@@ -105,6 +105,11 @@ pub fn init_seams() {
     backend_utils_fmgr_funcapi_seams::get_expr_result_tupdesc::set(
         result_type::get_expr_result_tupdesc,
     );
+    // `build_function_result_tupdesc_t(proc_oid)` — CallStmtResultDesc
+    // (functioncmds.c) builds the CALL result descriptor through this.
+    backend_utils_fmgr_funcapi_seams::build_function_result_tupdesc_t::set(
+        proc_info::build_function_result_tupdesc_t,
+    );
     // `get_expr_result_type(expr)` — ExecInitFunctionScan (nodeFunctionscan.c)
     // resolves the SRF's result class / type / tupdesc through this.
     backend_utils_fmgr_funcapi_seams::get_expr_result_type::set(

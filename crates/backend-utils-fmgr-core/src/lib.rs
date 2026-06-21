@@ -355,7 +355,7 @@ fn init_fcinfo(
     // dispatcher's RAII guard still restores the prior tag on drop, so a sibling
     // trigger fired afterwards re-observes it.
     let context = types_fmgr::fmgr::take_call_context_tag()
-        .map(|tag| types_fmgr::fmgr::ContextNode { tag });
+        .map(|(tag, atomic)| types_fmgr::fmgr::ContextNode { tag, atomic });
     let mut fcinfo =
         FunctionCallInfoBaseData::new(flinfo.map(Box::new), nargs, collation, context, None);
     // C: `fcinfo->context = (Node *) aggstate` for an aggregate transition/final
@@ -3357,7 +3357,8 @@ fn function_call_invoke_seam(
     // the caller's fn_expr before the FmgrInfo is moved into fcinfo.
     let fn_expr = resolved.finfo.fn_expr.clone();
     // Re-deposit the snapshot tag so `init_fcinfo` consumes it onto this frame.
-    let _ctx_reinstall = deposited_ctx.map(types_fmgr::fmgr::CallContextTagGuard::install);
+    let _ctx_reinstall = deposited_ctx
+        .map(|(tag, atomic)| types_fmgr::fmgr::CallContextTagGuard::install_call(tag, atomic));
     let mut fcinfo = init_fcinfo(Some(resolved.finfo), collation, args.to_vec());
     // C: fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo);
     fcinfo.isnull = false;

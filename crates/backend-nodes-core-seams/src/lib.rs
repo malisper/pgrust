@@ -325,26 +325,13 @@ seam_core::seam!(
     pub fn print_slot(slot: &types_nodes::tuptable::SlotBase<'_>) -> types_error::PgResult<()>
 );
 
-seam_core::seam!(
-    /// `CallStmtResultDesc(stmt)` (functioncmds.c:2383) — the polymorphic
-    /// output-argument tuple descriptor for a CALL. Re-homed here (from
-    /// `backend-nodes-nodeFuncs-seams`) onto the `backend-nodes-core` owner so
-    /// the seam-install guard can track it: the function is keyed entirely by
-    /// the unported planner expression node `stmt->funcexpr` (`FuncExpr.funcid`,
-    /// which functioncmds carries opaquely — the layered node tree does not yet
-    /// model the call expression), runs `build_function_result_tupdesc_t` over
-    /// the `PROCOID` tuple, and re-types each output column from
-    /// `stmt->outargs[i]` via `exprType`. Both the `funcid` read and the
-    /// `exprType` fixup are nodeFuncs/nodes-core expression-tree territory, and
-    /// the tupdesc spine is funcapi-owned, so the whole body still lands behind
-    /// the real owners — it is DESIGN_DEBT (CONTRACT_RECONCILE_PENDING). Takes
-    /// `Mcx<'mcx>`, returns the descriptor in the caller's context. Fallible on
-    /// the cache-lookup `ereport(ERROR)`.
-    pub fn call_stmt_result_desc<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        stmt: types_parsenodes::CallStmt,
-    ) -> types_error::PgResult<types_tuple::TupleDesc<'mcx>>
-);
+// `CallStmtResultDesc` (functioncmds.c) is owned by
+// `backend-commands-functioncmds` and installed on
+// `backend_tcop_utility_out_seams::call_stmt_result_desc`, reading the live
+// `T_CallStmt` node's transformed `funcexpr`/`outargs` directly. The `exprType`
+// re-type fixup runs through `backend_nodes_core::nodefuncs::expr_type` and the
+// descriptor spine through `funcapi`'s `build_function_result_tupdesc_t` seam,
+// so this is no longer a nodes-core seam.
 
 seam_core::seam!(
     /// The non-`FuncExpr`/`OpExpr` arms of `get_expr_result_type` (funcapi.c):

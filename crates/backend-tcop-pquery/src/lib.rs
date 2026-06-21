@@ -2078,6 +2078,7 @@ pub fn init_seams() {
         portal_run_fetch(portal, fdirection, count, dest)
     });
     backend_tcop_pquery_seams::choose_portal_strategy_queries::set(choose_portal_strategy_queries);
+    backend_tcop_pquery_seams::ensure_portal_snapshot_exists::set(ensure_portal_snapshot_exists);
 
     // The CTAS executor-driven leg (createas.c 300-361). Owned-decl by
     // backend-commands-createas (it carries the DR_intorel receiver); installed

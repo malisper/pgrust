@@ -505,6 +505,64 @@ pub fn install_guc_funcs_show_seams() {
     gseams::end_tup_output::set(|mcx, tstate| end_tup_output(mcx, tstate));
 }
 
+/// Install the general (raw-`Datum`) `begin/do/end_tup_output` family on
+/// `backend-executor-execTuples-seams`. These are the descriptor-driven tuple
+/// senders `ExecuteCallStmt` (functioncmds.c) uses to deliver a procedure's
+/// RECORD result to the live `DestReceiver`.
+pub fn install_tup_output_seams() {
+    use backend_executor_execTuples_seams as eseams;
+
+    eseams::begin_tup_output_tupdesc::set(begin_tup_output_tupdesc);
+    eseams::do_tup_output::set(do_tup_output);
+    eseams::end_tup_output::set(end_tup_output);
+    eseams::deform_record_datum::set(deform_record_datum);
+}
+
+/// Decode a composite (RECORD) `Datum` — the value a RECORD-returning procedure
+/// returns — into its row type id / typmod and the per-column `(value, isnull)`
+/// arrays, ready for [`do_tup_output`]. Mirrors `ExecuteCallStmt`'s RECORD
+/// branch: `DatumGetHeapTupleHeader(retval)` → `HeapTupleHeaderGetTypeId/TypMod`
+/// → `lookup_rowtype_tupdesc` → deform.
+pub fn deform_record_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    datum: Datum<'mcx>,
+) -> PgResult<(types_core::Oid, i32, Vec<Datum<'mcx>>, Vec<bool>)> {
+    // td = DatumGetHeapTupleHeader(retval).
+    let formed: FormedTuple<'mcx> =
+        backend_access_common_heaptuple::DatumGetHeapTupleHeader(mcx, &datum)?;
+    let header = formed
+        .tuple
+        .t_data
+        .as_ref()
+        .ok_or_else(|| types_error::PgError::error("deform_record_datum: record has no header"))?;
+    // tupType = HeapTupleHeaderGetTypeId(td); tupTypmod = HeapTupleHeaderGetTypMod(td).
+    let tup_type = types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
+    let tup_typmod = types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
+
+    // retdesc = lookup_rowtype_tupdesc(tupType, tupTypmod).
+    let retdesc = backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(
+        mcx, tup_type, tup_typmod,
+    )?;
+
+    // Deform the record into per-column (value, isnull).
+    let cols =
+        backend_access_common_heaptuple::heap_deform_tuple(mcx, &formed.tuple, &retdesc, &formed.data)?;
+    let natts = retdesc.natts as usize;
+    let mut values: Vec<Datum<'mcx>> = Vec::with_capacity(natts);
+    let mut nulls: Vec<bool> = Vec::with_capacity(natts);
+    for (val, isnull) in cols.iter() {
+        values.push(val.clone_in(mcx)?);
+        nulls.push(*isnull);
+    }
+    // heap_deform_tuple returns one entry per descriptor attribute; pad if short.
+    while values.len() < natts {
+        values.push(Datum::null());
+        nulls.push(true);
+    }
+
+    Ok((tup_type, tup_typmod, values, nulls))
+}
+
 /// `&Slot` use marker — keeps the live-slot type referenced from the output
 /// family's documented surface (the output slot is a [`SlotData`]).
 #[allow(dead_code)]

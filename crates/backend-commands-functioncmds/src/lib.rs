@@ -75,6 +75,16 @@ pub fn init_seams() {
     // function/DO/transform in a language the caller lacks USAGE on. Delegates
     // to the generic `aclcheck_error` in aclchk.
     backend_commands_functioncmds_seams::aclcheck_error_language::set(aclcheck_error_language_seam);
+
+    // CALL (functioncmds.c): `ExecuteCallStmt` is reached by
+    // standard_ProcessUtility's T_CallStmt arm, and `CallStmtResultDesc` by
+    // UtilityTupleDescriptor — both through the `backend_tcop_utility_out_seams`
+    // inward seams, operating on the live `T_CallStmt` node whose `funcexpr` /
+    // `outargs` transformCallStmt (analyze.c) already populated.
+    backend_tcop_utility_out_seams::execute_call_stmt::set(call_stmt::execute_call_stmt_seam);
+    backend_tcop_utility_out_seams::call_stmt_result_desc::set(
+        call_stmt::call_stmt_result_desc_seam,
+    );
 }
 
 /// `aclcheck_error(aclresult, OBJECT_LANGUAGE, lanname)` (functioncmds.c).

@@ -87,7 +87,7 @@ pub fn UtilityTupleDescriptor<'mcx>(
 ) -> PgResult<TupleDesc<'mcx>> {
     let desc: TupleDesc<'mcx> = match parsetree.node_tag() {
         // case T_CallStmt: return CallStmtResultDesc((CallStmt *) parsetree);
-        ntag::T_CallStmt => rt::call_stmt_result_desc::call(mcx, parsetree),
+        ntag::T_CallStmt => rt::call_stmt_result_desc::call(mcx, parsetree)?,
         // case T_FetchStmt:
         ntag::T_FetchStmt => {
             let stmt = parsetree.expect_fetchstmt();

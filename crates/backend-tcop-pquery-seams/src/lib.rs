@@ -63,3 +63,11 @@ seam_core::seam!(
     /// de-handle will switch to.
     pub fn choose_portal_strategy_queries(stmts: &[Query<'_>]) -> PgResult<PortalStrategy>
 );
+
+seam_core::seam!(
+    /// `EnsurePortalSnapshotExists()` (pquery.c:1763): if there is no active
+    /// snapshot, push one tied to the active portal so a procedure's RECORD
+    /// result (`ExecuteCallStmt`) can be materialized under a snapshot. No-op
+    /// when a snapshot is already active. Can `ereport(ERROR)`.
+    pub fn ensure_portal_snapshot_exists() -> PgResult<()>
+);

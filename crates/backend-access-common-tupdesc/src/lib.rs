@@ -905,6 +905,7 @@ pub fn init_seams() {
         TupleDescInitEntryCollation,
     );
     backend_access_common_tupdesc_seams::tuple_desc_copy_entry::set(TupleDescCopyEntry);
+    backend_access_common_tupdesc_seams::tuple_desc_init_entry::set(TupleDescInitEntry);
 
     // The `tupdesc.c` constructor surface other crates reach across the cycle
     // through `toastdesc-seams` (value-typed `TupleDescData`).

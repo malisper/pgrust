@@ -59,6 +59,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `TupleDescInitEntry(desc, attributeNumber, attributeName, oidtypeid,
+    /// typmod, attdim)` (tupdesc.c): initialize the `attributeNumber`-th
+    /// (1-based) attribute of `desc` from the catalog type `oidtypeid`, with
+    /// the given name (or keep the existing name when `None`), typmod and array
+    /// dimension. `CallStmtResultDesc` (functioncmds.c) uses this to re-type each
+    /// output column from `exprType(outarg)`. Fallible on the type-cache lookup
+    /// `ereport(ERROR)`.
+    pub fn tuple_desc_init_entry(
+        desc: &mut TupleDescData<'_>,
+        attribute_number: AttrNumber,
+        attribute_name: Option<&str>,
+        oidtypeid: Oid,
+        typmod: i32,
+        attdim: i32,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `TupleDescCopyEntry(dst, dstAttno, src, srcAttno)` (tupdesc.c): copy the
     /// `srcAttno`-th (1-based) attribute of `src` into the `dstAttno`-th slot of
     /// `dst` (dropping constraint/default flags). Fallible on an out-of-range

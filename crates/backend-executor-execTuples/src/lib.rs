@@ -76,4 +76,5 @@ mod tests;
 pub fn init_seams() {
     exec_init_slots::init_seams();
     exectype_tupoutput::install_guc_funcs_show_seams();
+    exectype_tupoutput::install_tup_output_seams();
 }

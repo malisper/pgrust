@@ -61,8 +61,11 @@ seam!(
     pub fn execute_stmt_has_result(stmt: &Node) -> bool
 );
 seam!(
-    /// `CallStmtResultDesc(stmt)` (functioncmds.c).
-    pub fn call_stmt_result_desc<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> TupleDesc<'mcx>
+    /// `CallStmtResultDesc(stmt)` (functioncmds.c) — the CALL result descriptor
+    /// from the procedure's OUT/INOUT params, re-typed from `stmt->outargs`. Can
+    /// `ereport(ERROR)` on the `build_function_result_tupdesc_t` / `exprType`
+    /// cache lookups.
+    pub fn call_stmt_result_desc<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<TupleDesc<'mcx>>
 );
 seam!(
     /// FETCH: `CreateTupleDescCopy(GetPortalByName(name)->tupDesc)` (portalmem.c).

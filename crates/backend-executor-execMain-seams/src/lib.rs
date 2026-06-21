@@ -15,22 +15,10 @@
 // fetch helpers land with the EvalPlanQual (execMain.c) port itself. They are
 // removed here per docs/types.md rule 3 (lands with first consumer).
 
-seam_core::seam!(
-    /// `ExecuteCallStmt(stmt, params, atomic, dest)` (functioncmds.c:2206) — the
-    /// runtime CALL-procedure invocation. Re-homed here from
-    /// `backend-commands-functioncmds-seams`: the entire body operates on the
-    /// unported planner expression node `stmt->funcexpr` (`FuncExpr.funcid` /
-    /// `args` / `inputcollid` / `funcresulttype`), the unported execExpr
-    /// expression evaluation (`ExecPrepareExpr` / `ExecEvalExprSwitchContext`),
-    /// and the *runtime* `ParamListInfo params` / `DestReceiver *dest` (not part
-    /// of the owned parse tree), so it belongs to the executor's CALL runtime,
-    /// not to functioncmds (whose `CallStmt` only carries the opaque `funcexpr`
-    /// `Node` + transformed `outargs`). The owner threads `params`/`dest` from
-    /// the live portal; this seam carries only the owned-tree inputs. Fallible on
-    /// the ACL / cache-lookup / too-many-args / null-record / unexpected-result
-    /// `ereport(ERROR)` surface.
-    pub fn execute_call_stmt(stmt: types_parsenodes::CallStmt, atomic: bool) -> types_error::PgResult<()>
-);
+// `ExecuteCallStmt` (functioncmds.c) is owned by `backend-commands-functioncmds`
+// and installed on `backend_tcop_utility_out_seams::execute_call_stmt`, reading
+// the live `T_CallStmt` node's transformed `funcexpr`/`outargs` directly (the
+// rich call tree transformCallStmt populates). It is not an execMain seam.
 
 // ---------------------------------------------------------------------------
 // PARAM_EXEC `execPlan`-link plumbing. These operate on the executor-owned

@@ -1490,6 +1490,25 @@ pub fn init_seams() {
             let ctx = MemoryContext::new("functioncmds proc_ownercheck");
             object_ownercheck(ctx.mcx(), ProcedureRelationId, func_oid, role_id)
         });
+        // `object_aclcheck(ProcedureRelationId, funcoid, roleid, mode)` — the CALL
+        // (functioncmds.c `ExecuteCallStmt`) EXECUTE-privilege check and the
+        // CREATE CAST function-EXECUTE check. Body owned here; cross-install onto
+        // the functioncmds-seams declaration, mirroring `proc_ownercheck`.
+        fc::proc_aclcheck::set(|func_oid, role_id, mode| {
+            let ctx = MemoryContext::new("functioncmds proc_aclcheck");
+            object_aclcheck(ctx.mcx(), ProcedureRelationId, func_oid, role_id, mode)
+        });
+        fc::aclcheck_error_function::set(|aclresult, objname| {
+            aclcheck_error(aclresult, ObjectType::Function, Some(objname))
+        });
+        // `get_func_name(funcid)` — the procedure name for the CALL ACL error.
+        // Body owned by lsyscache (`get_func_name`); cross-install onto the
+        // functioncmds-seams declaration.
+        fc::get_func_name::set(|func_oid| {
+            let ctx = MemoryContext::new("functioncmds get_func_name");
+            let name = backend_utils_cache_lsyscache_seams::get_func_name::call(ctx.mcx(), func_oid)?;
+            Ok(name.map(|s| s.as_str().to_string()))
+        });
         fc::aclcheck_error_schema::set(|aclresult, objname| {
             aclcheck_error(aclresult, ObjectType::Schema, objname)
         });
