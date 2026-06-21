@@ -2611,6 +2611,11 @@ pub fn init_seams() {
     // BMS_MULTIPLE` over the owned-`Relids` model through joinpath-seams; same
     // `bms_membership` body as the relnode-seams `relids_membership`.
     joinpath::bms_membership_is_multiple::set(|a| bms_membership(a) == 2);
+    // joinpath.c's `try_partitionwise_join`/`get_joinrel_parampathinfo` PHV
+    // eval-at check reaches `bms_equal(ph_eval_at, innerrelids)` over the
+    // owned-`Relids` model through joinpath-seams; same body as the
+    // relnode-seams `relids_equal`.
+    joinpath::bms_equal::set(bms_equal);
     bms::relids_add_range::set(bms_add_range);
     bms::relids_copy::set(bms_copy);
     bms::relids_equal::set(bms_equal);
