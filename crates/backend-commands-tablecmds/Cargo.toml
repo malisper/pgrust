@@ -49,6 +49,7 @@ backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predica
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
+backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 backend-catalog-heap-seams = { path = "../backend-catalog-heap-seams" }
 # ATExecAddColumn: CheckAttributeType + InsertPgAttributeTuples. Cycle-free:
 # backend-catalog-heap depends only on backend-commands-tablecmds-seams.

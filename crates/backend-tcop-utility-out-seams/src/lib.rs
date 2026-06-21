@@ -901,6 +901,21 @@ seam!(
     ) -> PgResult<()>
 );
 seam!(
+    /// `AlterTableMoveAll(stmt)` (tablecmds.c:16985) — ALTER (TABLE|INDEX|
+    /// MATERIALIZED VIEW) ALL IN TABLESPACE x [OWNED BY ...] SET TABLESPACE y
+    /// (utility.c:1767). Scans `pg_class` for the relations in the source
+    /// tablespace matching the requested relkind (skipping catalog/shared/temp/
+    /// toast and, when `OWNED BY` was given, relations not owned by one of the
+    /// named roles), then drives `ATExecSetTableSpace` per relation through
+    /// `AlterTableInternal` inside an event-trigger fence. The commands are
+    /// stashed inside, so the dispatcher sets `commandCollected = true`. The
+    /// `Node` carries the `AlterTableMoveAllStmt`.
+    pub fn alter_table_move_all<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &Node<'mcx>,
+    ) -> PgResult<()>
+);
+seam!(
     /// The CREATE INDEX partition-recursion pre-check (utility.c:1418-1452): when
     /// `stmt->relation->inh` and the relation is a partitioned table, lock all
     /// inheritors (`find_all_inheritors`), validate each partition relkind, and

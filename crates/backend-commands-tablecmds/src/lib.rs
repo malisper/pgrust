@@ -39,6 +39,7 @@ mod at_constraint;
 mod at_dropvalidate;
 mod at_fk;
 mod at_identity;
+mod at_move_all;
 mod at_owner;
 mod at_phase;
 mod at_tablespace;
@@ -206,6 +207,9 @@ pub fn init_seams() {
     // --- ProcessUtilitySlow ALTER TABLE arm (utility.c:1270-1331) ---
     backend_tcop_utility_out_seams::alter_table_slow::set(alter_table_slow_arm);
 
+    // --- ProcessUtilitySlow ALTER ... ALL IN TABLESPACE arm (utility.c:1767) ---
+    backend_tcop_utility_out_seams::alter_table_move_all::set(alter_table_move_all_arm);
+
     // ALTER DOMAIN ADD / VALIDATE CONSTRAINT validation scans (typecmds.c).
     // typecmds declares these OUTWARD seams because the bodies need the executor
     // (CreateExecutorState/ExecPrepareExpr/ExecEvalExpr + the table-AM scan) and
@@ -320,5 +324,18 @@ fn alter_table_slow_arm<'mcx>(
             .errmsg(format!("relation \"{relname}\" does not exist, skipping"))
             .finish(helpers::here("alter_table_slow"))?;
     }
+    Ok(())
+}
+
+/// `case T_AlterTableMoveAllStmt: AlterTableMoveAll(stmt)` (utility.c:1767). The
+/// dispatch carries the parse tree as `&Node`; extract the rich
+/// `AlterTableMoveAllStmt` variant and forward. The destination tablespace OID
+/// returned by `AlterTableMoveAll` is discarded here (the C path likewise
+/// ignores it at the utility level; commands are stashed inside).
+fn alter_table_move_all_arm<'mcx>(mcx: Mcx<'mcx>, parsetree: &Node<'mcx>) -> PgResult<()> {
+    let Some(stmt) = parsetree.as_altertablemoveallstmt() else {
+        panic!("alter_table_move_all: parse tree is not an AlterTableMoveAllStmt");
+    };
+    at_move_all::AlterTableMoveAll(mcx, stmt)?;
     Ok(())
 }

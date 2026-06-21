@@ -8254,6 +8254,7 @@ dependencies = [
  "backend-catalog-index-seams",
  "backend-catalog-indexing-seams",
  "backend-catalog-namespace",
+ "backend-catalog-namespace-seams",
  "backend-catalog-objectaccess-seams",
  "backend-catalog-objectaddress",
  "backend-catalog-objectaddress-seams",
