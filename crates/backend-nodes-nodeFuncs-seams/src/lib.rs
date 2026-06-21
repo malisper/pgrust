@@ -188,7 +188,7 @@ seam_core::seam!(
     /// `equal(a, b)` (equalfuncs.c) — deep structural equality of two expression
     /// nodes, over the arena `Expr` value. `equal(NULL, NULL)` is true; this
     /// helper is only called with two present nodes.
-    pub fn equal<'mcx>(a: &Expr<'mcx>, b: &Expr<'mcx>) -> bool
+    pub fn equal<'a, 'b>(a: &Expr<'a>, b: &Expr<'b>) -> bool
 );
 
 seam_core::seam!(

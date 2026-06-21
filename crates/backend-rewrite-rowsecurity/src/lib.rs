@@ -689,7 +689,7 @@ fn check_role_for_policy(roles: &[Oid], user_id: Oid) -> PgResult<bool> {
 
 /// Deep-copy a policy qual `Node` into `mcx` and extract its inner `Expr` (the
 /// policy quals are always expression nodes, so OR-combining works on `Expr`).
-fn node_to_expr_clone<'mcx>(node: &Node<'_>, mcx: Mcx<'mcx>) -> PgResult<Expr> {
+fn node_to_expr_clone<'mcx>(node: &Node<'_>, mcx: Mcx<'mcx>) -> PgResult<Expr<'mcx>> {
     let cloned = node.clone_in(mcx)?;
     cloned
         .into_expr()

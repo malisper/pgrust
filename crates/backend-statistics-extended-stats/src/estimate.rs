@@ -219,13 +219,13 @@ fn dependency_is_compatible_clause(clause: &Expr, relid: i32) -> PgResult<Option
 /// concatenation of every dependency-kind statistics object's `exprs` (as
 /// `&Expr`), in statlist order; a match returns the matching expression's
 /// position so the caller can dedup with `equal`.
-fn dependency_is_compatible_expression<'a, 'mcx>(
-    clause: &'a Expr<'a>,
+fn dependency_is_compatible_expression<'e, 'mcx>(
+    clause: &Expr<'e>,
     relid: i32,
-    stat_exprs: &'a [Expr<'a>],
+    stat_exprs: &[Expr<'e>],
     run: &PlannerRun<'mcx>,
 ) -> PgResult<Option<Expr<'mcx>>> {
-    let clause_expr: &Expr = match clause {
+    let clause_expr: &Expr<'e> = match clause {
         Expr::OpExpr(expr) | Expr::DistinctExpr(expr) | Expr::NullIfExpr(expr) => {
             if expr.args.len() != 2 {
                 return Ok(None);
@@ -755,7 +755,7 @@ fn collect_stat_oids<'mcx>(
     rte_inh: bool,
     clauses_attnums: &Relids,
     attnum_offset: i32,
-    unique_exprs: &[Expr<'_>],
+    unique_exprs: &[Expr<'mcx>],
     run: &PlannerRun<'mcx>,
 ) -> PgResult<Vec<(Oid, Vec<Expr<'mcx>>)>> {
     let mut out = Vec::new();

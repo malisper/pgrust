@@ -168,14 +168,14 @@ fn oprrest_supported(opno: Oid) -> PgResult<bool> {
  * statext_is_compatible_clause_internal (extended_stats.c:1328)
  * ======================================================================== */
 
-fn statext_is_compatible_clause_internal(
+fn statext_is_compatible_clause_internal<'mcx>(
     root: &PlannerInfo,
-    clause: &Expr,
+    clause: &Expr<'_>,
     relid: i32,
     attnums: &mut Relids,
-    exprs: &mut Vec<Expr>,
+    exprs: &mut Vec<Expr<'mcx>>,
     leakproof: &mut bool,
-    run: &PlannerRun<'_>,
+    run: &PlannerRun<'mcx>,
 ) -> PgResult<bool> {
     // Look inside any binary-compatible relabeling.
     let clause = strip_relabel(clause);
@@ -295,13 +295,13 @@ fn statext_is_compatible_clause_internal(
 /// pull_varattnos/all_rows_selectable owners — until they land, such a clause is
 /// conservatively rejected (returns false), exactly the safe direction the C
 /// permission check would take when access is not provable.
-fn statext_is_compatible_clause(
+fn statext_is_compatible_clause<'mcx>(
     root: &PlannerInfo,
-    clause: &Expr,
+    clause: &Expr<'_>,
     relid: i32,
     attnums: &mut Relids,
-    exprs: &mut Vec<Expr>,
-    run: &PlannerRun<'_>,
+    exprs: &mut Vec<Expr<'mcx>>,
+    run: &PlannerRun<'mcx>,
 ) -> PgResult<bool> {
     // Special-case bare BoolExpr AND clauses (no RestrictInfo built on top).
     if is_andclause(clause) {

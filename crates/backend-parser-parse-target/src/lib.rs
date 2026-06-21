@@ -742,8 +742,13 @@ pub fn updateTargetListEntry<'mcx>(
     indirection: &PgVec<'mcx, NodePtr<'mcx>>,
     location: i32,
 ) -> PgResult<()> {
-    // Fix up expression as needed.
-    let expr = tle.expr.take().map(|b| PgBox::into_inner(b));
+    // Fix up expression as needed. The assigned-expr machinery works over the
+    // parser/coerce `'static` arena; erase the taken `'mcx` expr into it and clone
+    // the fixed result back into `mcx`.
+    let expr = tle
+        .expr
+        .take()
+        .map(|b| PgBox::into_inner(b).erase_lifetime());
     let fixed = transformAssignedExpr(
         mcx,
         pstate,
@@ -754,7 +759,7 @@ pub fn updateTargetListEntry<'mcx>(
         indirection,
         location,
     )?;
-    tle.expr = Some(alloc_in(mcx, fixed)?);
+    tle.expr = Some(alloc_in(mcx, fixed.clone_in(mcx)?)?);
 
     // Set the resno/resname to identify the target column.
     tle.resno = attrno as AttrNumber;
@@ -922,11 +927,13 @@ pub fn transformAssignmentIndirection<'mcx>(
                 resulttype: base_type_id,
             };
 
-            // If target is a domain, apply constraints.
+            // If target is a domain, apply constraints. coerce_to_domain operates
+            // over the parser/coerce `'static` arena; erase the FieldStore into it
+            // and clone the coerced result back into `mcx`.
             if base_type_id != target_type_id {
-                return Ok(Node::mk_expr(mcx, parse_coerce::coerce_to_domain(
+                let coerced = parse_coerce::coerce_to_domain(
                     mcx,
-                    Expr::FieldStore(fstore),
+                    Expr::FieldStore(fstore).erase_lifetime(),
                     base_type_id,
                     base_type_mod,
                     target_type_id,
@@ -934,7 +941,8 @@ pub fn transformAssignmentIndirection<'mcx>(
                     CoercionForm::COERCE_IMPLICIT_CAST,
                     location,
                     false,
-                )?)?);
+                )?;
+                return Ok(Node::mk_expr(mcx, coerced.clone_in(mcx)?)?);
             }
 
             return Ok(Node::mk_field_store(mcx, fstore)?);
@@ -1496,12 +1504,13 @@ fn ExpandIndirectionStar<'mcx>(
     let new_len = ind.indirection.len().saturating_sub(1);
     ind.indirection.truncate(new_len);
 
-    // Transform that.
+    // Transform that. The transformed expr carries the parser arena's `'static`
+    // notional lifetime; clone it into `mcx` to wrap as a `Node<'mcx>`.
     let expr = parse_expr::transformExpr::call(pstate, Some(Node::mk_a_indirection(mcx, ind)?), expr_kind)?
         .expect("ExpandIndirectionStar: NULL expr");
 
     // Expand the rowtype expression into individual fields.
-    ExpandRowReference(mcx, pstate, expr_to_node(mcx, expr)?, make_target_entry)
+    ExpandRowReference(mcx, pstate, expr_to_node(mcx, expr.clone_in(mcx)?)?, make_target_entry)
 }
 
 // ===========================================================================
@@ -1652,7 +1661,9 @@ fn ExpandRowReference<'mcx>(
             )?;
             push_te(mcx, &mut targets, te)?;
         } else {
-            push_expr(mcx, &mut exprs, Expr::FieldSelect(fselect))?;
+            // The bare-expr (ROW()/VALUES) result list carries the parser arena's
+            // `'static` notional lifetime; erase the mcx-built FieldSelect to match.
+            push_expr(mcx, &mut exprs, Expr::FieldSelect(fselect).erase_lifetime())?;
         }
     }
 
