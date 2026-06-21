@@ -324,13 +324,48 @@ pub fn advance_transition_function<'mcx>(
     // through the fcinfo side channel and stamps the live-AggState `fcinfo.context`
     // tag (K1/K2: `AggCheckCallContext` reaches back via the call-context channel).
     // arg[1] is the single ordered/distinct input on `distinct_value`.
-    let trans_value = pergroupstate.trans_value.clone();
+    // MOVE the running value out of `pergroupstate` (replaced immediately
+    // below) rather than cloning it. The `internal`-pseudo-type transition state
+    // (e.g. ArrayBuildState for array_agg, NumericAggState) is a `Datum::Internal`
+    // box that has no `Clone` (C passes it by a bare pointer word with single
+    // ownership); cloning it panics. A by-value scalar/by-ref move is identical to
+    // C's pointer copy. This mirrors `ExecAggPlainTransByVal`/`ByRef`, the
+    // interpreter's per-row transition path.
+    let trans_value = core::mem::replace(&mut pergroupstate.trans_value, AggDatum::null());
     let trans_value_is_null = pergroupstate.trans_value_is_null;
     let mcx = estate.es_query_cxt;
     let estate_link = estate_raw_link(estate);
+
+    // C `internal`-pseudo-type transition state: the transfn mutates the state in
+    // place and returns the same pointer, so C's `newVal == transValue` reparent
+    // fast path is always taken (no datumCopy, no comparison — `Datum::Internal`
+    // is not comparable). MOVE the state through and store the result back.
+    let is_internal = pertrans.aggtranstype == INTERNALOID;
+    if is_internal {
+        let (new_val, isnull) = invoke_transfn(
+            pertrans,
+            trans_value,
+            trans_value_is_null,
+            &input_args,
+            &input_args_null,
+            mcx,
+            estate_link,
+        )?;
+        pergroupstate.trans_value = new_val;
+        pergroupstate.trans_value_is_null = isnull;
+        return Ok(());
+    }
+
+    let transtype_by_val = pertrans.transtype_by_val;
+    let transtype_len = pertrans.transtype_len;
+    // For a by-reference (non-internal) transtype the `ExecAggCopyTransValue`
+    // pointer-equality fast path needs the prior transValue both as an input to
+    // the transfn and as the comparison anchor; the transfn does not consume it
+    // (it reads it), so a clone here is faithful (C reads a bare word twice).
+    let trans_value_for_cmp = trans_value.clone();
     let (new_val, isnull) = invoke_transfn(
         pertrans,
-        trans_value.clone(),
+        trans_value,
         trans_value_is_null,
         &input_args,
         &input_args_null,
@@ -343,16 +378,14 @@ pub fn advance_transition_function<'mcx>(
     //       newVal = ExecAggCopyTransValue(...);
     //   pergroupstate->transValue = newVal;
     //   pergroupstate->transValueIsNull = fcinfo->isnull;
-    let transtype_by_val = pertrans.transtype_by_val;
-    let transtype_len = pertrans.transtype_len;
     let aggcontext = curaggcontext_ecxt(aggstate);
-    let new_val = if !transtype_by_val && !datum_ptr_eq(&new_val, &trans_value) {
+    let new_val = if !transtype_by_val && !datum_ptr_eq(&new_val, &trans_value_for_cmp) {
         ExecAggCopyTransValue(
             aggstate,
             aggstate.curpertrans.max(0) as usize,
             new_val,
             isnull,
-            trans_value,
+            trans_value_for_cmp,
             trans_value_is_null,
             transtype_by_val,
             transtype_len,
