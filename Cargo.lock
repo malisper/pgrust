@@ -11694,6 +11694,7 @@ dependencies = [
  "backend-libpq-auth",
  "backend-libpq-auth-scram-seams",
  "backend-libpq-auth-seams",
+ "backend-libpq-crypt-seams",
  "backend-libpq-pqcomm",
  "backend-libpq-pqformat",
  "backend-utils-error",

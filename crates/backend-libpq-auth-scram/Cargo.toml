@@ -13,6 +13,7 @@ crate-type = ["rlib"]
 seam-core = { path = "../seam-core" }
 backend-libpq-auth = { path = "../backend-libpq-auth" }
 backend-libpq-auth-seams = { path = "../backend-libpq-auth-seams" }
+backend-libpq-crypt-seams = { path = "../backend-libpq-crypt-seams" }
 backend-libpq-auth-scram-seams = { path = "../backend-libpq-auth-scram-seams" }
 backend-commands-user-seams = { path = "../backend-commands-user-seams" }
 types-authid = { path = "../types-authid" }

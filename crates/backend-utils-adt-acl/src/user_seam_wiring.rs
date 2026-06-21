@@ -61,6 +61,19 @@ fn authid_by_name_seam<'mcx>(mcx: Mcx<'mcx>, rolename: String) -> PgResult<Optio
     )
 }
 
+/// `authid_exists_by_name(rolename)` — `SearchSysCacheExists1(AUTHNAME, name)`
+/// (user.c). The seam carries no caller `mcx`, so the existence probe runs
+/// behind a scratch context.
+fn authid_exists_by_name_seam(rolename: String) -> PgResult<bool> {
+    let scratch = MemoryContext::new("authid_exists_by_name");
+    let exists = backend_utils_cache_syscache_seams::lookup_authid_by_name::call(
+        scratch.mcx(),
+        &rolename,
+    )?
+    .is_some();
+    Ok(exists)
+}
+
 fn authid_by_oid_seam<'mcx>(mcx: Mcx<'mcx>, roleid: Oid) -> PgResult<Option<AuthIdForm>> {
     Ok(
         backend_utils_cache_syscache_seams::lookup_authid_by_oid::call(mcx, roleid)?
@@ -146,6 +159,7 @@ pub fn install() {
     // value.
     user::get_rolespec_tuple::set(get_rolespec_tuple_seam);
     user::authid_by_name::set(authid_by_name_seam);
+    user::authid_exists_by_name::set(authid_exists_by_name_seam);
     user::authid_by_oid::set(authid_by_oid_seam);
     user::authmem_by_keys::set(authmem_by_keys_seam);
     user::authmem_list_by_role::set(authmem_list_by_role_seam);

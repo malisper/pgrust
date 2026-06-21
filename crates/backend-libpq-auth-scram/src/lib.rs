@@ -1601,6 +1601,36 @@ pub fn init_seams() {
 
     backend_libpq_auth_seams::check_scram_sasl_auth::set(check_scram_sasl_auth_entry);
 
+    // crypt.c (`get_password_type`/`encrypt_password`/`plain_crypt_verify`)
+    // consume three `common/scram-common.c` + `auth-scram.c` routines whose real
+    // bodies live in this crate. Install them onto the crypt seams (cross-crate
+    // install; the owner crypt-seams crate has no body of its own).
+    backend_libpq_crypt_seams::parse_scram_secret::set(|secret| {
+        // crypt.c only needs the yes/no result; run the full parse with throwaway
+        // out-params.
+        let mut iterations: i32 = 0;
+        let mut hash_type: pg_cryptohash_type = PG_SHA256;
+        let mut key_length: i32 = 0;
+        let mut encoded_salt: Option<String> = None;
+        let mut stored_key = [0u8; SCRAM_MAX_KEY_LEN];
+        let mut server_key = [0u8; SCRAM_MAX_KEY_LEN];
+        parse_scram_secret(
+            secret.as_bytes(),
+            &mut iterations,
+            &mut hash_type,
+            &mut key_length,
+            &mut encoded_salt,
+            &mut stored_key,
+            &mut server_key,
+        )
+    });
+    backend_libpq_crypt_seams::pg_be_scram_build_secret::set(|password| {
+        pg_be_scram_build_secret(password.as_bytes())
+    });
+    backend_libpq_crypt_seams::scram_verify_plain_password::set(|user, password, secret| {
+        scram_verify_plain_password(user, password.as_bytes(), secret.as_bytes())
+    });
+
     // The C GUC `int scram_sha_256_iterations` (auth-scram.c:196) is the backing
     // store for the `scram_iterations` GUC and is read straight from the slot at
     // secret-build time (auth-scram.c:508). The GUC machinery reaches our
