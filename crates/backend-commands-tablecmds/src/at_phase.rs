@@ -828,7 +828,7 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
             )?;
             ATSimpleRecursion(mcx, wqueue, rel, &cmd, recurse, lockmode, context)?;
-            unported("ALTER COLUMN SET EXPRESSION (ATRewriteTable)");
+            pass = AT_PASS_SET_EXPRESSION;
         }
         AT_DropExpression => {
             ATSimplePermissions(
@@ -1471,7 +1471,34 @@ fn ATExecCmd<'mcx>(
             wqueue[ti].rel = Some(owned_rel);
             _address = res?;
         }
-        AT_SetExpression => unported("SET EXPRESSION (ATExecSetExpression + ATRewriteTable)"),
+        AT_SetExpression => {
+            // ATExecSetExpression(tab, rel, cmd->name, cmd->def, lockmode).
+            // ATExecSetExpression appends to tab->newvals and sets tab->rewrite,
+            // so it needs &mut wqueue; re-open `rel` by relid into an owned
+            // carrier rather than borrowing it out of wqueue[ti].
+            let relid = wqueue[ti].relid;
+            let owned_rel = backend_access_common_relation::relation_open(mcx, relid, NoLock)?;
+            let colname = cmd
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("ALTER COLUMN SET EXPRESSION requires a column name");
+            let new_expr = cmd
+                .def
+                .as_deref()
+                .expect("ALTER COLUMN SET EXPRESSION requires a new expression");
+            let new_expr = new_expr.clone_in(mcx)?;
+            _address = crate::at_altertype::ATExecSetExpression(
+                mcx,
+                wqueue,
+                ti,
+                &owned_rel,
+                colname,
+                &new_expr,
+                lockmode,
+            )?;
+            drop(owned_rel);
+        }
         AT_DropExpression => unported("DROP EXPRESSION (ATExecDropExpression)"),
         AT_SetCompression => unported("SET COMPRESSION (ATExecSetCompression)"),
         AT_DropColumn => {

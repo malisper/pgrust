@@ -39,9 +39,9 @@ use mcx::{Mcx, PgVec};
 use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
 use types_catalog::pg_attribute::{
     Anum_pg_attribute_attcollation, Anum_pg_attribute_attgenerated, Anum_pg_attribute_atthasdef,
-    Anum_pg_attribute_atthasmissing, Anum_pg_attribute_attinhcount, Anum_pg_attribute_attnum,
-    Anum_pg_attribute_atttypid, Anum_pg_attribute_atttypmod, AttributeRelationId,
-    PgAttributeUpdateRow,
+    Anum_pg_attribute_atthasmissing, Anum_pg_attribute_attinhcount, Anum_pg_attribute_attnotnull,
+    Anum_pg_attribute_attnum, Anum_pg_attribute_atttypid, Anum_pg_attribute_atttypmod,
+    AttributeRelationId, PgAttributeUpdateRow,
 };
 use types_catalog::pg_attrdef::AttrDefaultRelationId;
 use types_catalog::pg_collation::CollationRelationId;
@@ -57,16 +57,18 @@ use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_COLUMN_DEFINITION, ERRCODE_INVALID_TABLE_DEFINITION,
-    ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_COLUMN, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+    ERRCODE_UNDEFINED_COLUMN, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use types_nodes::ddlnodes::{AlterTableCmd, CoercionContext};
+use types_nodes::ddlnodes::{AlterTableCmd, AlterTableType, CoercionContext};
 use types_nodes::nodes::Node;
 use types_nodes::primnodes::{CoercionForm, Expr};
 use types_rel::Relation;
 use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
 use types_tuple::access::{
-    ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX,
-    RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
+    ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_COMPOSITE_TYPE,
+    RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,
+    RELKIND_RELATION, RELKIND_SEQUENCE,
 };
 use types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, InvalidCompressionMethod};
 
@@ -591,93 +593,132 @@ pub fn ATPrepAlterColumnType<'mcx>(
 // RememberAllDependentForRebuilding (tablecmds.c:15042)
 // ===========================================================================
 
-/// `RememberAllDependentForRebuilding(tab, AT_AlterColumnType, rel, attnum,
-/// colName)` (tablecmds.c:15042). Find everything that depends on the column;
-/// the dependent-object rebuild itself (ATPostAlterTypeCleanup) is unported, so
-/// any index / constraint / extended-stats dependent stops loudly here, while
-/// the function/view/rule/trigger/policy/publication dependents raise the same
-/// FEATURE_NOT_SUPPORTED errors C does.
+/// `RememberAllDependentForRebuilding(tab, subtype, rel, attnum, colName)`
+/// (tablecmds.c:15042). Subroutine for `ATExecAlterColumnType` and
+/// `ATExecSetExpression`: find everything that depends on the column
+/// (constraints, indexes, etc) and record enough information to recreate it.
+///
+/// The dependent-object rebuild itself (`ATPostAlterTypeCleanup`) is unported,
+/// so any index / constraint / extended-stats dependent stops loudly here. The
+/// function/view/rule/trigger/policy/publication/generated-column punts are
+/// errors only for `AT_AlterColumnType` (per the C `if (subtype ==
+/// AT_AlterColumnType)` guards); for `AT_SetExpression` those dependents are
+/// tolerated (no rebuild needed — only the generation expression changed).
 fn RememberAllDependentForRebuilding<'mcx>(
     mcx: Mcx<'mcx>,
+    subtype: AlterTableType,
     rel: &Relation<'mcx>,
     attnum: AttrNumber,
     col_name: &str,
-    old_atttypid: Oid,
 ) -> PgResult<()> {
-    let _ = (rel, attnum);
-    // C scans pg_depend by (refclassid=pg_class, refobjid=relid, refobjsubid=attnum).
-    // Our shared scan keys on the *type* OID; the column's dependents are those
-    // referencing the column's old type via a pg_class/constraint/... entry whose
-    // ref is the column. Faithful column-dependent scan keyed on the relation +
-    // attnum is the precise C key; we approximate it by examining the dependents
-    // of the column's old datatype, which over-approximates only across columns
-    // sharing a type — but the only actionable outcomes are the loud stops and
-    // the C errors, so a same-type sibling column merely triggers the same stop.
-    let rows = pg_depend_seam::scan_type_referers::call(mcx, old_atttypid)?;
+    debug_assert!(
+        subtype == AlterTableType::AT_AlterColumnType
+            || subtype == AlterTableType::AT_SetExpression
+    );
+    let is_alter_type = subtype == AlterTableType::AT_AlterColumnType;
+
+    // C scans pg_depend by (refclassid=pg_class, refobjid=relid,
+    // refobjsubid=attnum) — every object depending on this specific column.
+    let rows = pg_depend_seam::scan_column_referers::call(mcx, rel.rd_id, attnum)?;
     for row in rows.iter() {
-        // We only act on dependents that are the kinds C dispatches on; the
-        // shared scan returns all referers of the type, so anything that is the
-        // column's own datatype dependency (a pg_class/attribute self-ref) is
-        // handled by the own-dep delete in ATExecAlterColumnType, not here.
         match row.classid {
             x if x == RelationRelationId => {
                 let rel_kind = get_rel_relkind(row.objid)?;
                 if rel_kind == RELKIND_INDEX || rel_kind == RELKIND_PARTITIONED_INDEX {
+                    // RememberIndexForRebuilding(objid, tab) — the rebuild leg
+                    // (ATPostAlterTypeCleanup) is unported.
                     unported("rebuild of dependent index (ATPostAlterTypeCleanup)");
                 } else if rel_kind == RELKIND_SEQUENCE {
                     // SERIAL column's sequence — nothing to do.
                 } else {
-                    // The own pg_attribute datatype dependency lands here (the
-                    // relation is the table itself); it is removed by the
-                    // own-dependency delete, not rebuilt. Ignore.
+                    // C: elog(ERROR, "unexpected object depending on column").
+                    return Err(types_error::PgError::error(
+                        "unexpected object depending on column",
+                    ));
                 }
             }
             x if x == ConstraintRelationId => {
+                // RememberConstraintForRebuilding(objid, tab) — unported rebuild.
                 unported("rebuild of dependent constraint (ATPostAlterTypeCleanup)");
             }
             x if x == ProcedureRelationId => {
-                return feature_not_supported(
-                    "cannot alter type of a column used by a function or procedure",
-                    col_name,
-                );
+                if is_alter_type {
+                    return feature_not_supported(
+                        "cannot alter type of a column used by a function or procedure",
+                        col_name,
+                    );
+                }
             }
             x if x == RewriteRelationId => {
-                return feature_not_supported(
-                    "cannot alter type of a column used by a view or rule",
-                    col_name,
-                );
+                if is_alter_type {
+                    return feature_not_supported(
+                        "cannot alter type of a column used by a view or rule",
+                        col_name,
+                    );
+                }
             }
             x if x == TriggerRelationId => {
-                return feature_not_supported(
-                    "cannot alter type of a column used in a trigger definition",
-                    col_name,
-                );
+                if is_alter_type {
+                    return feature_not_supported(
+                        "cannot alter type of a column used in a trigger definition",
+                        col_name,
+                    );
+                }
             }
             x if x == PolicyRelationId => {
-                return feature_not_supported(
-                    "cannot alter type of a column used in a policy definition",
-                    col_name,
-                );
+                if is_alter_type {
+                    return feature_not_supported(
+                        "cannot alter type of a column used in a policy definition",
+                        col_name,
+                    );
+                }
             }
             x if x == PublicationRelRelationId => {
-                return feature_not_supported(
-                    "cannot alter type of a column used by a publication WHERE clause",
-                    col_name,
-                );
+                if is_alter_type {
+                    return feature_not_supported(
+                        "cannot alter type of a column used by a publication WHERE clause",
+                        col_name,
+                    );
+                }
             }
             x if x == StatisticExtRelationId => {
+                // RememberStatisticsForRebuilding(objid, tab) — unported rebuild.
                 unported("rebuild of dependent extended statistics (ATPostAlterTypeCleanup)");
             }
             x if x == AttrDefaultRelationId => {
-                // Could be the column's own default (handled by the caller) or a
-                // generated column elsewhere referencing it. We cannot cheaply
-                // tell which here without GetAttrDefaultColumnAddress; the own
-                // default is re-stored by the caller, and a foreign generated
-                // column is a punt in C. Treat as the own-default ignore.
+                // Could be the column's own default/generation expression
+                // (handled by the caller) or a generated column elsewhere in the
+                // same table referencing it.
+                let col = backend_catalog_pg_attrdef::GetAttrDefaultColumnAddress(mcx, row.objid)?;
+                if col.objectId == rel.rd_id && col.objectSubId == attnum as i32 {
+                    // Ignore the column's own expression; the caller deals with it.
+                } else if is_alter_type {
+                    // A generated column elsewhere uses this column — punt.
+                    let gen_name = backend_utils_cache_lsyscache::attribute::get_attname(
+                        mcx,
+                        col.objectId,
+                        col.objectSubId as AttrNumber,
+                        false,
+                    )?
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                    return backend_utils_error::ereport(ERROR)
+                        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errmsg(
+                            "cannot alter type of a column used by a generated column".to_string(),
+                        )
+                        .errdetail(format!(
+                            "Column \"{col_name}\" is used by generated column \"{gen_name}\"."
+                        ))
+                        .finish(here("RememberAllDependentForRebuilding"))
+                        .map(|()| unreachable!());
+                }
+                // For AT_SetExpression a foreign generated-column reference needs
+                // no action.
             }
             _ => {
-                // Other classes: not the column's own type dependency; ignore the
-                // type-keyed over-approximation (collation etc. handled elsewhere).
+                // Other classes: not relevant (the column's own datatype /
+                // collation dependencies are removed by the caller).
             }
         }
     }
@@ -691,6 +732,234 @@ fn feature_not_supported(msg: &str, col_name: &str) -> PgResult<()> {
         .errdetail(format!("Column \"{col_name}\" is depended on."))
         .finish(here("RememberAllDependentForRebuilding"))
         .map(|()| unreachable!())
+}
+
+/// `AT_REWRITE_DEFAULT_VAL` (tablecmds.c) — phase-3 must rewrite to recompute a
+/// changed default / generation expression. Same bit as in `at_coladd`.
+const AT_REWRITE_DEFAULT_VAL: i32 = 0x02;
+
+// ===========================================================================
+// ATExecSetExpression (tablecmds.c:8602)
+// ===========================================================================
+
+/// `ATExecSetExpression(tab, rel, colName, newExpr, lockmode)`
+/// (tablecmds.c:8602) — ALTER COLUMN ... SET EXPRESSION AS (...). Replace the
+/// generation expression of a generated column: drop the old `pg_attrdef`
+/// expression (and its dependency records), store the new one, and — for STORED
+/// generated columns — queue a phase-3 table rewrite that recomputes every
+/// existing row's stored value.
+pub fn ATExecSetExpression<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    ti: usize,
+    rel: &Relation<'mcx>,
+    col_name: &str,
+    new_expr: &Node<'mcx>,
+    _lockmode: LOCKMODE,
+) -> PgResult<ObjectAddress> {
+    // tuple = SearchSysCacheAttName(RelationGetRelid(rel), colName);
+    let tuple = SearchSysCacheAttName(mcx, rel.rd_id, col_name)?;
+    let Some(tuple) = tuple else {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_UNDEFINED_COLUMN)
+            .errmsg(format!(
+                "column \"{}\" of relation \"{}\" does not exist",
+                col_name,
+                rel.name()
+            ))
+            .finish(here("ATExecSetExpression"))
+            .map(|()| unreachable!());
+    };
+
+    let attnum = SysCacheGetAttrNotNull(mcx, ATTNAME, &tuple, Anum_pg_attribute_attnum as i32)?
+        .as_i16();
+    if attnum <= 0 {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!("cannot alter system column \"{col_name}\""))
+            .finish(here("ATExecSetExpression"))
+            .map(|()| unreachable!());
+    }
+
+    let attgenerated =
+        SysCacheGetAttrNotNull(mcx, ATTNAME, &tuple, Anum_pg_attribute_attgenerated as i32)?
+            .as_char();
+    if attgenerated == 0 {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg(format!(
+                "column \"{}\" of relation \"{}\" is not a generated column",
+                col_name,
+                rel.name()
+            ))
+            .finish(here("ATExecSetExpression"))
+            .map(|()| unreachable!());
+    }
+    let attnotnull =
+        SysCacheGetAttrNotNull(mcx, ATTNAME, &tuple, Anum_pg_attribute_attnotnull as i32)?
+            .as_bool();
+
+    // TODO (C comment): virtual generated columns with CHECK constraints could be
+    // supported, just need to recheck constraints afterwards. For now reject.
+    let has_check = rel
+        .rd_att
+        .constr
+        .as_ref()
+        .is_some_and(|c| c.num_check > 0);
+    if attgenerated == ATTRIBUTE_GENERATED_VIRTUAL && has_check {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(
+                "ALTER TABLE / SET EXPRESSION is not supported for virtual generated columns in \
+                 tables with check constraints"
+                    .to_string(),
+            )
+            .errdetail(format!(
+                "Column \"{}\" of relation \"{}\" is a virtual generated column.",
+                col_name,
+                rel.name()
+            ))
+            .finish(here("ATExecSetExpression"))
+            .map(|()| unreachable!());
+    }
+
+    if attgenerated == ATTRIBUTE_GENERATED_VIRTUAL && attnotnull {
+        wqueue[ti].verify_new_notnull = true;
+    }
+
+    // A change of expression could affect a row filter and inject expressions
+    // that are not permitted in a row filter; prevent that for virtual columns
+    // that belong to a published table.
+    if attgenerated == ATTRIBUTE_GENERATED_VIRTUAL
+        && !backend_catalog_pg_publication_seams::GetRelationPublications::call(mcx, rel.rd_id)?
+            .is_empty()
+    {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(
+                "ALTER TABLE / SET EXPRESSION is not supported for virtual generated columns in \
+                 tables that are part of a publication"
+                    .to_string(),
+            )
+            .errdetail(format!(
+                "Column \"{}\" of relation \"{}\" is a virtual generated column.",
+                col_name,
+                rel.name()
+            ))
+            .finish(here("ATExecSetExpression"))
+            .map(|()| unreachable!());
+    }
+
+    let rewrite = attgenerated == ATTRIBUTE_GENERATED_STORED;
+
+    // ReleaseSysCache(tuple): the FormedTuple is dropped at end of scope; we have
+    // copied every field we need out of it.
+    drop(tuple);
+
+    if rewrite {
+        // Clear all the missing values if we're rewriting the table, since this
+        // renders them pointless.
+        RelationClearMissing(mcx, rel)?;
+
+        // Make sure we don't conflict with later attribute modifications.
+        CommandCounterIncrement()?;
+
+        // Find everything that depends on the column (constraints, indexes, etc),
+        // and record enough information to recreate the objects after rewrite.
+        RememberAllDependentForRebuilding(
+            mcx,
+            AlterTableType::AT_SetExpression,
+            rel,
+            attnum,
+            col_name,
+        )?;
+    }
+
+    // Drop the dependency records of the GENERATED expression, in particular its
+    // INTERNAL dependency on the column, which would otherwise cause
+    // dependency.c to refuse to perform the deletion.
+    let attrdefoid = backend_catalog_pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
+    if !OidIsValid(attrdefoid) {
+        return Err(types_error::PgError::error(&format!(
+            "could not find attrdef tuple for relation {} attnum {}",
+            rel.rd_id, attnum
+        )));
+    }
+    let _ = pg_depend_seam::deleteDependencyRecordsFor::call(
+        AttrDefaultRelationId,
+        attrdefoid,
+        false,
+    )?;
+
+    // Make above changes visible.
+    CommandCounterIncrement()?;
+
+    // Get rid of the GENERATED expression itself. RESTRICT for safety; nothing is
+    // expected to depend on the expression.
+    RemoveAttrDefault(rel.rd_id, attnum, DROP_RESTRICT, false, false)?;
+
+    // Prepare to store the new expression, in the catalogs.
+    //   rawEnt->attnum = attnum;
+    //   rawEnt->raw_default = newExpr;
+    //   rawEnt->generated = attgenerated;
+    //   AddRelationNewConstraints(rel, list_make1(rawEnt), NIL, false, true, false, NULL);
+    let raw_default_ptr = mcx::alloc_in(mcx, new_expr.clone_in(mcx)?)?;
+    let raw_defaults: [(AttrNumber, types_nodes::nodes::NodePtr<'mcx>, i8); 1] =
+        [(attnum, raw_default_ptr, attgenerated)];
+    seam::add_relation_new_constraints::call(
+        mcx,
+        rel,
+        &raw_defaults,
+        &[],
+        false,
+        true,
+        false,
+        None,
+    )?;
+
+    // Make the new expression visible.
+    CommandCounterIncrement()?;
+
+    if rewrite {
+        // Prepare for table rewrite: defval = build_column_default(rel, attnum);
+        // newval->expr = expression_planner(defval).
+        //
+        // build_column_default reads the relation's in-memory tuple descriptor
+        // (rd_att) for the column's generation expression. C relies on the
+        // relcache being rebuilt in place by the invalidation that
+        // AddRelationNewConstraints + CommandCounterIncrement triggered, so
+        // `rel`'s rd_att already reflects the new expression. Our `rel` carrier
+        // is a snapshot taken before the catalog write, so re-open the relation
+        // to pick up the freshly-built descriptor carrying the new expression.
+        let fresh_rel = relation_open(mcx, rel.rd_id, NoLock)?;
+        let defval =
+            rewrite_seam::build_column_default::call(mcx, fresh_rel.alias(), attnum as i32)?
+                .expect("build_column_default returned NULL for generated column SET EXPRESSION");
+        fresh_rel.close(NoLock)?;
+        let planned =
+            backend_optimizer_plan_planner::expression_planner(mcx, (*defval).clone_in(mcx)?)?;
+
+        let node = mcx::alloc_in(mcx, Node::mk_expr(mcx, planned)?)?;
+        wqueue[ti].newvals.push(crate::at_phase::NewColumnValue {
+            attnum,
+            expr: Some(node),
+            is_generated: true,
+        });
+        wqueue[ti].rewrite |= AT_REWRITE_DEFAULT_VAL;
+    }
+
+    // Drop any pg_statistic entry for the column.
+    RemoveStatistics(mcx, rel.rd_id, attnum)?;
+
+    // InvokeObjectPostAlterHook(RelationRelationId, RelationGetRelid(rel), attnum).
+    backend_catalog_objectaccess_seams::invoke_object_post_alter_hook::call(
+        RelationRelationId,
+        rel.rd_id,
+        attnum as i32,
+    )?;
+
+    // ObjectAddressSubSet(address, RelationRelationId, RelationGetRelid(rel), attnum).
+    Ok(object_address_subset(RelationRelationId, rel.rd_id, attnum as i32))
 }
 
 // ===========================================================================
@@ -838,7 +1107,13 @@ pub fn ATExecAlterColumnType<'mcx>(
     // Find everything that depends on the column and record enough info to
     // recreate the objects (rebuild itself is unported — loud stop on
     // index/constraint/stats dependents).
-    RememberAllDependentForRebuilding(mcx, rel, attnum, col_name, old_atttypid)?;
+    RememberAllDependentForRebuilding(
+        mcx,
+        AlterTableType::AT_AlterColumnType,
+        rel,
+        attnum,
+        col_name,
+    )?;
 
     // Now drop the column's own dependency on its (still-current) type +
     // collation. C scans pg_depend by depender and deletes exactly the NORMAL

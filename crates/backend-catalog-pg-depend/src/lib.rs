@@ -850,6 +850,47 @@ pub fn scan_type_referers<'mcx>(
     Ok(result)
 }
 
+/// `systable_beginscan(pg_depend, DependReferenceIndexId, ...)` keyed on
+/// `(refclassid = RelationRelationId, refobjid = relid, refobjsubid = attnum)` —
+/// the precise column-address scan that `RememberAllDependentForRebuilding`
+/// (tablecmds.c:15042) drives over to find every object depending on a specific
+/// column. Returns the `(classid, objid, objsubid, deptype)` projection of every
+/// matching row in scan order; the caller (tablecmds) supplies the relation-open
+/// / relkind dispatch.
+pub fn scan_column_referers<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    attnum: AttrNumber,
+) -> PgResult<PgVec<'mcx, TypeRefererRow>> {
+    let mut result: PgVec<'mcx, TypeRefererRow> = PgVec::new_in(mcx);
+
+    let dep_ctx = MemoryContext::new("pg_depend");
+    let depRel = open_depend(dep_ctx.mcx(), AccessShareLock)?;
+
+    let key = [
+        oid_key(Anum_pg_depend_refclassid, RELATION_RELATION_ID)?,
+        oid_key(Anum_pg_depend_refobjid, relid)?,
+        int4_key(Anum_pg_depend_refobjsubid, attnum as i32)?,
+    ];
+
+    systable_scan_foreach(&depRel, DependReferenceIndexId, &key, |row| {
+        let depform = form_pg_depend(row);
+        result
+            .try_reserve(1)
+            .map_err(|_| mcx.oom(core::mem::size_of::<TypeRefererRow>()))?;
+        result.push(TypeRefererRow {
+            classid: depform.classid,
+            objid: depform.objid,
+            objsubid: depform.objsubid,
+            deptype: depform.deptype,
+        });
+        Ok(true)
+    })?;
+
+    depRel.close(AccessShareLock)?;
+    Ok(result)
+}
+
 /// Return (possibly empty) list of extensions that the given object depends
 /// on in `DEPENDENCY_AUTO_EXTENSION` mode.
 pub fn getAutoExtensionsOfObject<'mcx>(
@@ -1203,6 +1244,7 @@ pub fn init_seams() {
     seams::get_index_constraint::set(get_index_constraint);
     seams::get_index_ref_constraints::set(get_index_ref_constraints);
     seams::scan_type_referers::set(scan_type_referers);
+    seams::scan_column_referers::set(scan_column_referers);
 
     // The snake_case `backend-catalog-dependency-seams` declarations are a
     // parallel seam surface for the SAME pg_depend.c functions that catalog

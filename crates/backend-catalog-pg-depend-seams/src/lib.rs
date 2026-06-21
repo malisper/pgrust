@@ -213,3 +213,17 @@ seam_core::seam!(
         type_oid: Oid,
     ) -> PgResult<PgVec<'mcx, TypeRefererRow>>
 );
+
+seam_core::seam!(
+    /// `systable_beginscan(pg_depend, DependReferenceIndexId, ...)` keyed on
+    /// `(refclassid = pg_class, refobjid = relid, refobjsubid = attnum)` — the
+    /// precise column-address scan that tablecmds'
+    /// `RememberAllDependentForRebuilding` (tablecmds.c:15042) drives to find
+    /// every object depending on a specific column. Returns every matching row's
+    /// `(classid, objid, objsubid, deptype)` in scan order.
+    pub fn scan_column_referers<'mcx>(
+        mcx: Mcx<'mcx>,
+        relid: Oid,
+        attnum: AttrNumber,
+    ) -> PgResult<PgVec<'mcx, TypeRefererRow>>
+);
