@@ -9773,12 +9773,16 @@ pub fn init_seams() {
                 None, // setops
             )?;
 
-            // Recover the parent root (taken in by value, mutated for any
-            // upper-Var plan_params) and restore it onto `*root`.
-            *root = *subroot
-                .parent_root
-                .take()
-                .expect("plan_sublink_subquery: subroot lost its parent_root");
+            // C keeps the parent_root pointer live on `subroot` throughout
+            // path-building AND create_plan: a CTE reference in the subquery
+            // carries `ctelevelsup > 0` and `create_ctescan_plan` /
+            // `create_worktablescan_plan` (resolve_cte_subplan / set_cte_pathlist)
+            // walk `subroot->parent_root` to reach the level that defines the CTE.
+            // In this owned model `parent_root` is the moved-in parent value, so
+            // we must NOT take it back out until create_plan has finished — else a
+            // CTE referenced from inside a SubLink subquery (e.g. a MERGE WHEN
+            // action's correlated `(SELECT ... FROM cte)`) fails with
+            // "bad levelsup for CTE". The restore is deferred to after create_plan.
 
             // final_rel = fetch_upper_rel(subroot, UPPERREL_FINAL, NULL);
             // best_path = get_cheapest_fractional_path(final_rel, tuple_fraction);
@@ -9798,9 +9802,16 @@ pub fn init_seams() {
             let plan =
                 backend_optimizer_plan_createplan::create_plan(mcx, &mut subroot, run, best_path)?;
 
-            // Move the (now-accumulated) glob back to the parent root so
-            // build_subplan / generate_new_exec_param see one shared glob.
-            root.glob = subroot.glob.take();
+            // Now recover the parent root (taken in by value, mutated for any
+            // upper-Var plan_params) and restore it onto `*root`, then move the
+            // (now-accumulated) glob back to the parent root so build_subplan /
+            // generate_new_exec_param see one shared glob.
+            let glob = subroot.glob.take();
+            *root = *subroot
+                .parent_root
+                .take()
+                .expect("plan_sublink_subquery: subroot lost its parent_root");
+            root.glob = glob;
 
             Ok(
                 backend_optimizer_plan_init_subselect_ext_seams::SublinkPlanResult {
