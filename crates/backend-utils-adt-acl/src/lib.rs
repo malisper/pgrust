@@ -71,6 +71,20 @@ pub fn init_seams() {
         role_membership::has_privs_of_role(member, role)
             .expect("has_privs_of_role catalog lookup failed")
     });
+    // `pg_class_aclcheck(relid, userid, ACL_MAINTAIN) == ACLCHECK_OK` (acl.c) —
+    // the CLUSTER "may I maintain this relation?" predicate (cluster.c). The
+    // underlying `pg_class_aclcheck` body lives in aclchk and is already
+    // installed onto its own seam; this is the thin acl.c convenience wrapper,
+    // declared in catalog-perm-seams. Install it here so the cluster caller
+    // stops hitting an uninstalled seam.
+    backend_utils_adt_catalog_perm_seams::pg_class_aclcheck_maintain_ok::set(|relid, userid| {
+        let res = backend_catalog_aclchk_seams::pg_class_aclcheck::call(
+            relid,
+            userid,
+            types_acl::ACL_MAINTAIN,
+        )?;
+        Ok(res == types_acl::ACLCHECK_OK)
+    });
     backend_utils_adt_acl_seams::get_rolespec_oid::set(role_membership::get_rolespec_oid);
     backend_utils_adt_acl_seams::get_role_oid::set(role_membership::get_role_oid);
     backend_utils_adt_acl_seams::initialize_acl::set(role_membership::initialize_acl);

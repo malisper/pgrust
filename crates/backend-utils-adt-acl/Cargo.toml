@@ -37,6 +37,7 @@ types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
 port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
+backend-utils-adt-catalog-perm-seams = { path = "../backend-utils-adt-catalog-perm-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 backend-catalog-pg-largeobject-seams = { path = "../backend-catalog-pg-largeobject-seams" }
 backend-commands-dbcommands-seams = { path = "../backend-commands-dbcommands-seams" }

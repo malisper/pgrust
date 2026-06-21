@@ -1482,6 +1482,14 @@ pub fn init_seams() {
             let ctx = MemoryContext::new("functioncmds type_ownercheck");
             object_ownercheck(ctx.mcx(), TypeRelationId, type_id, role_id)
         });
+        // `object_ownercheck(ProcedureRelationId, funcoid, roleid)` — the CREATE
+        // CAST `pg_proc_ownercheck(funcid, ...)` permission check
+        // (functioncmds.c cast path). Body owned here; cross-install onto the
+        // functioncmds-seams declaration, mirroring `type_ownercheck`.
+        fc::proc_ownercheck::set(|func_oid, role_id| {
+            let ctx = MemoryContext::new("functioncmds proc_ownercheck");
+            object_ownercheck(ctx.mcx(), ProcedureRelationId, func_oid, role_id)
+        });
         fc::aclcheck_error_schema::set(|aclresult, objname| {
             aclcheck_error(aclresult, ObjectType::Schema, objname)
         });

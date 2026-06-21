@@ -123,6 +123,20 @@ pub fn init_seams() {
     seam::set_relation_has_subclass::set(smallfns::set_relation_has_subclass);
     seam::check_relation_tablespace_move::set(smallfns::check_relation_tablespace_move);
     seam::set_relation_tablespace::set(smallfns::set_relation_tablespace);
+    // `CheckRelationTableSpaceMove` / `SetRelationTableSpace` (tablecmds.c) are
+    // also reached from `reindex_index` (index.c) when REINDEX moves an index's
+    // tablespace. That caller fires the catalog-index-seams declarations (no
+    // caller-side `mcx`); the bodies live here, so cross-install them. The
+    // `set` adapter supplies a transient `mcx` for the `SetRelationTableSpace`
+    // call frame (it allocates only a syscache modifiable-copy that does not
+    // outlive the catalog update).
+    backend_catalog_index_seams::check_relation_table_space_move::set(
+        smallfns::check_relation_tablespace_move,
+    );
+    backend_catalog_index_seams::set_relation_table_space::set(|rel, new_ts, new_relfile| {
+        let scratch = mcx::MemoryContext::new("SetRelationTableSpace");
+        smallfns::set_relation_tablespace(scratch.mcx(), rel, new_ts, new_relfile)
+    });
     seam::reset_rel_rewrite::set(at_column::ResetRelRewrite);
 
     // F1 (RENAME / namespace / owner).
