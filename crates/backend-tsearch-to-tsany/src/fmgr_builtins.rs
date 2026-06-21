@@ -56,9 +56,47 @@ fn arg_jsonb_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u
         .expect("to_tsany fn: by-ref jsonb arg missing from by-ref lane")
 }
 
-/// Set a header-ful `tsvector`/`tsquery` varlena result on the by-ref lane.
+/// `PG_GETARG_TSQUERY(i)` / `PG_GETARG_JSONB_P(i)`: the full varlena image of a
+/// by-ref arg (header included), passed verbatim to a core that reads the
+/// header itself.
+#[inline]
+fn arg_varlena_full<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("to_tsany fn: by-ref arg missing from by-ref lane")
+}
+
+/// The optional options-`text` argument of a `ts_headline*_opt` variant:
+/// `(PG_NARGS() > 3 && PG_GETARG_POINTER(3)) ? PG_GETARG_TEXT_PP(3) : NULL`.
+/// Returns the FULL options `text` varlena image (header included) — the
+/// `deserialize_deflist` seam performs its own `TextDatumGetCString` detoast —
+/// or `None` when the argument is absent. (These functions are STRICT, so a
+/// present argument is never SQL NULL.)
+#[inline]
+fn arg_opt_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> Option<&'a [u8]> {
+    if fcinfo.nargs() <= i {
+        return None;
+    }
+    fcinfo.ref_arg(i).and_then(|p| p.as_varlena())
+}
+
+/// Set a header-ful `tsvector`/`tsquery`/`jsonb` varlena result on the by-ref
+/// lane.
 #[inline]
 fn ret_varlena_image(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
+
+/// Frame a header-stripped `text`/`json` payload as a 4-byte-header varlena and
+/// set it as the by-ref result.
+#[inline]
+fn ret_text_payload(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
+    let total = VARHDRSZ + payload.len();
+    let mut image = Vec::with_capacity(total);
+    image.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+    image.extend_from_slice(&payload);
     fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
@@ -226,6 +264,161 @@ fn fc_get_current_ts_config(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<
     Ok(Datum::from_oid(oid))
 }
 
+// ---------------------------------------------------------------------------
+// ts_headline (text) — wparser.c:287..364
+// ---------------------------------------------------------------------------
+
+fn fc_ts_headline_byid_opt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let cfg = arg_oid(fcinfo, 0);
+    let input = arg_text(fcinfo, 1).to_vec();
+    let query = arg_varlena_full(fcinfo, 2).to_vec();
+    let opt = arg_opt_text(fcinfo, 3).map(<[u8]>::to_vec);
+    let m = scratch_mcx();
+    let img =
+        crate::ts_headline::ts_headline_byid_opt(m.mcx(), cfg, &input, &query, opt.as_deref())?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+fn fc_ts_headline_byid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let cfg = arg_oid(fcinfo, 0);
+    let input = arg_text(fcinfo, 1).to_vec();
+    let query = arg_varlena_full(fcinfo, 2).to_vec();
+    let m = scratch_mcx();
+    let img = crate::ts_headline::ts_headline_byid(m.mcx(), cfg, &input, &query)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+fn fc_ts_headline(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let input = arg_text(fcinfo, 0).to_vec();
+    let query = arg_varlena_full(fcinfo, 1).to_vec();
+    let m = scratch_mcx();
+    let img = crate::ts_headline::ts_headline(m.mcx(), &input, &query)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+fn fc_ts_headline_opt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let input = arg_text(fcinfo, 0).to_vec();
+    let query = arg_varlena_full(fcinfo, 1).to_vec();
+    let opt = arg_varlena_full(fcinfo, 2).to_vec();
+    let m = scratch_mcx();
+    let img = crate::ts_headline::ts_headline_opt(m.mcx(), &input, &query, &opt)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+// ---------------------------------------------------------------------------
+// ts_headline (jsonb) — wparser.c:366..440
+// ---------------------------------------------------------------------------
+
+fn fc_ts_headline_jsonb_byid_opt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let cfg = arg_oid(fcinfo, 0);
+    let jb = arg_jsonb_image(fcinfo, 1).to_vec();
+    let query = arg_varlena_full(fcinfo, 2).to_vec();
+    let opt = arg_opt_text(fcinfo, 3).map(<[u8]>::to_vec);
+    let m = scratch_mcx();
+    let img = crate::ts_headline::ts_headline_jsonb_byid_opt(
+        m.mcx(),
+        cfg,
+        &jb,
+        &query,
+        opt.as_deref(),
+    )?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+fn fc_ts_headline_jsonb_byid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let cfg = arg_oid(fcinfo, 0);
+    let jb = arg_jsonb_image(fcinfo, 1).to_vec();
+    let query = arg_varlena_full(fcinfo, 2).to_vec();
+    let m = scratch_mcx();
+    let img = crate::ts_headline::ts_headline_jsonb_byid(m.mcx(), cfg, &jb, &query)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+fn fc_ts_headline_jsonb(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let jb = arg_jsonb_image(fcinfo, 0).to_vec();
+    let query = arg_varlena_full(fcinfo, 1).to_vec();
+    let m = scratch_mcx();
+    let img = crate::ts_headline::ts_headline_jsonb(m.mcx(), &jb, &query)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+fn fc_ts_headline_jsonb_opt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let jb = arg_jsonb_image(fcinfo, 0).to_vec();
+    let query = arg_varlena_full(fcinfo, 1).to_vec();
+    let opt = arg_varlena_full(fcinfo, 2).to_vec();
+    let m = scratch_mcx();
+    let img = crate::ts_headline::ts_headline_jsonb_opt(m.mcx(), &jb, &query, &opt)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+// ---------------------------------------------------------------------------
+// ts_headline (json) — wparser.c:442..516
+// ---------------------------------------------------------------------------
+
+fn fc_ts_headline_json_byid_opt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let cfg = arg_oid(fcinfo, 0);
+    let json = arg_text(fcinfo, 1).to_vec();
+    let query = arg_varlena_full(fcinfo, 2).to_vec();
+    let opt = arg_opt_text(fcinfo, 3).map(<[u8]>::to_vec);
+    let m = scratch_mcx();
+    let payload = crate::ts_headline::ts_headline_json_byid_opt(
+        m.mcx(),
+        cfg,
+        &json,
+        &query,
+        opt.as_deref(),
+    )?;
+    Ok(ret_text_payload(fcinfo, payload))
+}
+
+fn fc_ts_headline_json_byid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let cfg = arg_oid(fcinfo, 0);
+    let json = arg_text(fcinfo, 1).to_vec();
+    let query = arg_varlena_full(fcinfo, 2).to_vec();
+    let m = scratch_mcx();
+    let payload = crate::ts_headline::ts_headline_json_byid(m.mcx(), cfg, &json, &query)?;
+    Ok(ret_text_payload(fcinfo, payload))
+}
+
+fn fc_ts_headline_json(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let json = arg_text(fcinfo, 0).to_vec();
+    let query = arg_varlena_full(fcinfo, 1).to_vec();
+    let m = scratch_mcx();
+    let payload = crate::ts_headline::ts_headline_json(m.mcx(), &json, &query)?;
+    Ok(ret_text_payload(fcinfo, payload))
+}
+
+fn fc_ts_headline_json_opt(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let json = arg_text(fcinfo, 0).to_vec();
+    let query = arg_varlena_full(fcinfo, 1).to_vec();
+    let opt = arg_varlena_full(fcinfo, 2).to_vec();
+    let m = scratch_mcx();
+    let payload = crate::ts_headline::ts_headline_json_opt(m.mcx(), &json, &query, &opt)?;
+    Ok(ret_text_payload(fcinfo, payload))
+}
+
+// ---------------------------------------------------------------------------
+// Default text-search parser methods (wparser_def.c) — registered so C's eager
+// `fmgr_info(prsobj->startOid/...)` in `lookup_ts_parser_cache` resolves.
+//
+// These functions use an internal pointer-passing ABI (`TParser *`,
+// `HeadlineParsedText *`, `internal`): C dispatches them via `FunctionCallN`,
+// but this port calls their typed Rust bodies directly from `parsetext` /
+// `hlparsetext` / `prsd_headline`. The registry entries exist only to satisfy
+// the eager `fmgr_info` resolution; the generic `Datum fn(PG_FUNCTION_ARGS)`
+// lane cannot carry the internal pointers, so a dispatch through it is a port
+// invariant violation rather than a reachable path.
+// ---------------------------------------------------------------------------
+
+fn fc_prsd_internal_only(_fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    panic!(
+        "default text-search parser method dispatched through the generic fmgr \
+         lane; this port calls prsd_start/prsd_nexttoken/prsd_end/prsd_headline/\
+         prsd_lextype directly (internal pointer ABI) — the builtin is registered \
+         only so fmgr_info resolution succeeds"
+    );
+}
+
 fn builtin(foid: u32, name: &str, nargs: i16, native: PgFnNative) -> (BuiltinFunction, PgFnNative) {
     (
         BuiltinFunction {
@@ -262,5 +455,29 @@ pub fn register_to_tsany_builtins() {
         builtin(5007, "websearch_to_tsquery_byid", 2, fc_websearch_to_tsquery_byid),
         builtin(5009, "websearch_to_tsquery", 1, fc_websearch_to_tsquery),
         builtin(3759, "get_current_ts_config", 0, fc_get_current_ts_config),
+        // ts_headline (text) — wparser.c
+        builtin(3743, "ts_headline_byid_opt", 4, fc_ts_headline_byid_opt),
+        builtin(3744, "ts_headline_byid", 3, fc_ts_headline_byid),
+        builtin(3754, "ts_headline_opt", 3, fc_ts_headline_opt),
+        builtin(3755, "ts_headline", 2, fc_ts_headline),
+        // ts_headline (jsonb)
+        builtin(4201, "ts_headline_jsonb_byid_opt", 4, fc_ts_headline_jsonb_byid_opt),
+        builtin(4202, "ts_headline_jsonb_byid", 3, fc_ts_headline_jsonb_byid),
+        builtin(4203, "ts_headline_jsonb_opt", 3, fc_ts_headline_jsonb_opt),
+        builtin(4204, "ts_headline_jsonb", 2, fc_ts_headline_jsonb),
+        // ts_headline (json)
+        builtin(4205, "ts_headline_json_byid_opt", 4, fc_ts_headline_json_byid_opt),
+        builtin(4206, "ts_headline_json_byid", 3, fc_ts_headline_json_byid),
+        builtin(4207, "ts_headline_json_opt", 3, fc_ts_headline_json_opt),
+        builtin(4208, "ts_headline_json", 2, fc_ts_headline_json),
+        // Default parser methods (wparser_def.c): resolution-only registrations
+        // (see fc_prsd_internal_only). hlparsetext/prsd_headline call the typed
+        // Rust bodies directly; these satisfy lookup_ts_parser_cache's eager
+        // fmgr_info on startOid/tokenOid/endOid/headlineOid/lextypeOid.
+        builtin(3717, "prsd_start", 2, fc_prsd_internal_only),
+        builtin(3718, "prsd_nexttoken", 3, fc_prsd_internal_only),
+        builtin(3719, "prsd_end", 1, fc_prsd_internal_only),
+        builtin(3720, "prsd_headline", 3, fc_prsd_internal_only),
+        builtin(3721, "prsd_lextype", 1, fc_prsd_internal_only),
     ]);
 }

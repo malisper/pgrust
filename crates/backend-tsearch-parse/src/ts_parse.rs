@@ -564,7 +564,7 @@ const VARHDRSZ: usize = 4;
 // because the canonical `ts_type.h` / `ts_utils.h` shapes there differ (the
 // packed `len_dist` `QueryOperand`, the three-arm `QueryItem` union, and the
 // `WordEntryPos`-positioned `ExecPhraseData`).
-pub use backend_tsearch_parse_seams::{ExecPhraseData, QueryItem, QueryOperand};
+pub use backend_tsearch_parse_seams::{ExecPhraseData, QueryItem, QueryOperand, QueryOperator};
 
 /// `TS_EXEC_EMPTY` (`ts_utils.h`): the default `TS_execute` flag the headline
 /// path passes (no special empty/phrase handling).

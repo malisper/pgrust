@@ -56,5 +56,10 @@ pub fn init_seams() {
     s::tsquery_requires_match::set(op::tsquery_requires_match);
     s::ts_execute::set(op::ts_execute_seam);
     s::ts_execute_ternary::set(op::ts_execute_ternary_seam);
+    // Headline tsquery execution (checkcondition_HL): tsvector-core owns the
+    // generic TS_execute engine, so it installs the parse-seams `*_hl` slots
+    // the default parser's `prsd_headline` selector calls.
+    backend_tsearch_parse_seams::ts_execute_hl::set(op::ts_execute_hl_seam);
+    backend_tsearch_parse_seams::ts_execute_locations_hl::set(op::ts_execute_locations_hl_seam);
     fmgr_builtins::register_tsvector_builtins();
 }

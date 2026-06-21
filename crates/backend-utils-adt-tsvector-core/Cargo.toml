@@ -30,5 +30,6 @@ types-ri-triggers = { path = "../types-ri-triggers" }
 backend-executor-spi = { path = "../backend-executor-spi" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }
 backend-tsearch-parse = { path = "../backend-tsearch-parse" }
+backend-tsearch-parse-seams = { path = "../backend-tsearch-parse-seams" }
 backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 seam-core = { path = "../seam-core" }

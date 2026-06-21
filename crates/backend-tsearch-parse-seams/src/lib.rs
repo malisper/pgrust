@@ -90,14 +90,29 @@ pub struct QueryOperand {
     pub distance: u32,
 }
 
+/// `QueryOperator` (`ts_type.h`): a tsquery operator node. The generic
+/// `TS_execute` engine (run for the headline path through the
+/// `ts_execute*_hl` seams) reads `oper` and `left` to recurse.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryOperator {
+    /// `QI_OPR` for an operator.
+    pub type_: i8,
+    /// `OP_NOT`/`OP_AND`/`OP_OR`/`OP_PHRASE`.
+    pub oper: i8,
+    /// distance between args for `OP_PHRASE`.
+    pub distance: i16,
+    /// offset to the left operand (the right operand is `item + 1`).
+    pub left: u32,
+}
+
 /// `QueryItem`: one node in a tsquery — operator or operand
-/// (`ts_type.h` union). The headline path only inspects operands.
+/// (`ts_type.h` union).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QueryItem {
     /// `QI_VAL` operand (`qoperand`).
     Operand(QueryOperand),
-    /// `QI_OPR`/other: an operator node (its `type` byte).
-    Operator(i8),
+    /// `QI_OPR` operator (`qoperator`).
+    Operator(QueryOperator),
 }
 
 /// `ExecPhraseData` (`ts_utils.h:159`): the per-operand/-phrase position list a

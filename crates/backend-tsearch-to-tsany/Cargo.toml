@@ -22,6 +22,7 @@ backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-cache-ts-cache = { path = "../backend-utils-cache-ts-cache" }
 backend-utils-adt-jsonfuncs = { path = "../backend-utils-adt-jsonfuncs" }
+backend-commands-tsearchcmds-seams = { path = "../backend-commands-tsearchcmds-seams" }
 backend-tsearch-parse = { path = "../backend-tsearch-parse" }
 backend-tsearch-parse-seams = { path = "../backend-tsearch-parse-seams" }
 backend-tsearch-dict = { path = "../backend-tsearch-dict" }

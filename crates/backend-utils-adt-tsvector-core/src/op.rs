@@ -2480,3 +2480,156 @@ fn qualified_name_length(name: &[u8]) -> usize {
     }
     count
 }
+
+// ===========================================================================
+// Headline tsquery execution (checkcondition_HL) — wparser_def.c
+//
+// The headline selector (`prsd_headline` in backend-tsearch-parse) runs the
+// generic TS_execute engine against the parsed headline word list rather than
+// a tsvector. The per-operand match callback is `checkcondition_HL`: a query
+// operand "matches" a headline word when that word's `item` index equals the
+// operand's query-item index, reporting the word's position.
+//
+// These two functions back the `ts_execute_hl` / `ts_execute_locations_hl`
+// seams declared in `backend-tsearch-parse-seams`; tsvector-core owns the
+// TS_execute engine and installs them. The seam carries the parse-side
+// idiomatic `QueryItem`/`ExecPhraseData` types, so the bodies bridge to the
+// ABI `types-tsearch` shapes the engine consumes.
+// ===========================================================================
+
+use backend_tsearch_parse_seams::{
+    ExecPhraseData as HlExecPhraseData, QueryItem as HlQueryItem, QueryOperand as HlQueryOperand,
+    QueryOperator as HlQueryOperator,
+};
+
+/// Bridge one parse-side `QueryItem` to the ABI `types-tsearch` `QueryItem`
+/// the engine reads.
+fn hl_query_item_to_core(it: &HlQueryItem) -> QueryItem {
+    match it {
+        HlQueryItem::Operand(o) => QueryItem::Qoperand(hl_operand_to_core(o)),
+        HlQueryItem::Operator(o) => QueryItem::Qoperator(hl_operator_to_core(o)),
+    }
+}
+
+/// Bridge a parse-side `QueryOperator` to the ABI `QueryOperator`.
+fn hl_operator_to_core(o: &HlQueryOperator) -> QueryOperator {
+    QueryOperator {
+        type_: o.type_,
+        oper: o.oper,
+        distance: o.distance,
+        left: o.left,
+    }
+}
+
+/// Bridge a parse-side `QueryOperand` to the ABI `QueryOperand`. The engine
+/// only reads `type_`/`weight`/`prefix` for the HL callback (operand identity
+/// is by index), so the CRC/len/distance fields are reconstructed faithfully.
+fn hl_operand_to_core(o: &HlQueryOperand) -> QueryOperand {
+    let mut core = QueryOperand {
+        type_: o.type_,
+        weight: o.weight,
+        prefix: o.prefix,
+        valcrc: o.valcrc,
+        len_dist: 0,
+    };
+    core.set_length(o.length);
+    core.set_distance(o.distance);
+    core
+}
+
+/// `checkcondition_HL` (wparser_def.c:1981): the `TSExecuteCallback` over the
+/// headline word match-table. `match_table[i] == (item, pos)` for headline
+/// word `i`; operand `opidx` matches every word whose `item == Some(opidx)`,
+/// reporting those words' positions (ordered, kept strictly increasing).
+struct HlCallback<'a> {
+    match_table: &'a [(Option<usize>, u16)],
+}
+
+impl TSExecuteCallback for HlCallback<'_> {
+    fn chkcond(
+        &mut self,
+        opidx: usize,
+        _val: QueryOperand,
+        data: Option<&mut PhraseData>,
+    ) -> TSTernaryValue {
+        match data {
+            None => {
+                // if (!data) return any-match ? TS_YES : TS_NO.
+                for (item, _pos) in self.match_table {
+                    if *item == Some(opidx) {
+                        return TS_YES;
+                    }
+                }
+                TS_NO
+            }
+            Some(data) => {
+                for (item, pos) in self.match_table {
+                    if *item == Some(opidx) {
+                        let p = *pos;
+                        // data->pos[npos-1] < pos: keep strictly increasing.
+                        if data.pos.last().map(|&last| last < p).unwrap_or(true) {
+                            data.pos.push(p);
+                            data.npos = data.pos.len() as i32;
+                        }
+                    }
+                }
+                if data.npos > 0 {
+                    TS_YES
+                } else {
+                    TS_NO
+                }
+            }
+        }
+    }
+}
+
+/// Bridge the seam's `QueryItem` list into the ABI form the engine consumes.
+fn hl_items_to_core(items: &[HlQueryItem]) -> alloc::vec::Vec<QueryItem> {
+    items.iter().map(hl_query_item_to_core).collect()
+}
+
+/// `ts_execute_hl` seam body: `TS_execute(GETQUERY(query), &ch, flags,
+/// checkcondition_HL)` — the boolean form used by `hlCover`.
+pub fn ts_execute_hl_seam(
+    items: alloc::vec::Vec<HlQueryItem>,
+    match_table: alloc::vec::Vec<(Option<usize>, u16)>,
+    flags: u32,
+) -> PgResult<bool> {
+    let core_items = hl_items_to_core(&items);
+    let mut cb = HlCallback {
+        match_table: &match_table,
+    };
+    Ok(TS_execute_recurse(&core_items, 0, &mut cb, flags)? != TS_NO)
+}
+
+/// `ts_execute_locations_hl` seam body: `TS_execute_locations(GETQUERY(query),
+/// &ch, flags, checkcondition_HL)` — the per-AND'ed-term position lists
+/// `hlCover` walks to find covers.
+pub fn ts_execute_locations_hl_seam(
+    items: alloc::vec::Vec<HlQueryItem>,
+    match_table: alloc::vec::Vec<(Option<usize>, u16)>,
+    _flags: u32,
+) -> PgResult<alloc::vec::Vec<HlExecPhraseData>> {
+    let core_items = hl_items_to_core(&items);
+    let mut cb = HlCallback {
+        match_table: &match_table,
+    };
+    let mut result: alloc::vec::Vec<PhraseData> = alloc::vec::Vec::new();
+    if TS_execute_locations_recurse(&core_items, 0, &mut cb, &mut result)? {
+        let mut out = alloc::vec::Vec::new();
+        try_reserve(&mut out, result.len())?;
+        for d in result {
+            out.push(HlExecPhraseData {
+                npos: d.npos,
+                // ExecPhraseData.pos on the parse side is `Vec<i32>`; the engine
+                // tracks `Vec<WordEntryPos>` (u16). HL positions never carry a
+                // weight bit, so the value is the position directly.
+                pos: d.pos.iter().map(|&p| p as i32).collect(),
+                width: d.width,
+            });
+        }
+        Ok(out)
+    } else {
+        Ok(alloc::vec::Vec::new())
+    }
+}

@@ -44,8 +44,8 @@ pub use install::init_seams;
 
 pub use ts_parse::{
     generateHeadline, hlparsetext, parsetext, DictSubState, ExecPhraseData, HeadlineParsedText,
-    HeadlineWordEntry, LexizeLexeme, ParsedText, ParsedWord, QueryItem, QueryOperand, TSQuery,
-    TS_EXEC_EMPTY,
+    HeadlineWordEntry, LexizeLexeme, ParsedText, ParsedWord, QueryItem, QueryOperand,
+    QueryOperator, TSQuery, TS_EXEC_EMPTY,
 };
 pub use wparser::{prs_tokenize, tt_storage_list, LexemeEntry, TokenTypeRow};
 pub use wparser_def::{

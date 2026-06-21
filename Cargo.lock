@@ -18785,6 +18785,7 @@ name = "backend-tsearch-to-tsany"
 version = "0.0.0"
 dependencies = [
  "backend-commands-define-seams",
+ "backend-commands-tsearchcmds-seams",
  "backend-snowball-dict-snowball",
  "backend-tsearch-dict",
  "backend-tsearch-dict-seams",
@@ -21389,6 +21390,7 @@ dependencies = [
  "backend-parser-coerce",
  "backend-tcop-postgres-seams",
  "backend-tsearch-parse",
+ "backend-tsearch-parse-seams",
  "backend-utils-adt-array-more-seams",
  "backend-utils-adt-ts-small",
  "backend-utils-adt-tsvector-core-seams",

@@ -17,10 +17,18 @@
 //! options) and the dictionary crates (the ported `*_lexize` bodies), so it is
 //! the natural home for that dispatch.
 //!
-//! Not ported here (documented deferrals): the `json(b)_to_tsvector` family
-//! (`add_to_tsvector`, the `*_to_tsvector_worker` helpers) — those drive the
-//! `jsonfuncs` GIN-iteration seams and are an additive follow-on over the same
-//! `parsetext` + `make_tsvector` machine landed here.
+//! The `json(b)_to_tsvector` family (`add_to_tsvector`, the
+//! `*_to_tsvector_worker` helpers) is also here ([`to_tsvector`]), driving the
+//! `jsonfuncs` GIN-iteration helpers over the same `parsetext` + `make_tsvector`
+//! machine.
+//!
+//! This crate additionally hosts the SQL-callable `ts_headline*` drivers of
+//! `src/backend/tsearch/wparser.c` ([`ts_headline`]) — the headline framework
+//! they call (`hlparsetext`, the default parser's `prsd_headline` selector, and
+//! `generateHeadline`) is owned by `backend-tsearch-parse` (which owns
+//! `wparser.c`'s parser bodies). The drivers live here because they sit above
+//! `ts_cache`, the deflist deserializer (`tsearchcmds`), and the `jsonfuncs`
+//! json(b) string-value transforms — the same front-end fan-in as `to_tsany.c`.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -34,6 +42,7 @@ pub mod fmgr_builtins;
 pub mod make_tsvector;
 pub mod to_tsquery;
 pub mod to_tsvector;
+pub mod ts_headline;
 
 /// Install this crate's seams: the `parsetext` config/lexize dispatch (into
 /// `backend-tsearch-parse-seams` and `backend-tsearch-dict-seams`) and the
