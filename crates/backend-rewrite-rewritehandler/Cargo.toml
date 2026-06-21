@@ -54,3 +54,6 @@ backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-s
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
 backend-foreign-foreign-seams = { path = "../backend-foreign-foreign-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
+backend-access-common-reloptions = { path = "../backend-access-common-reloptions" }
+types-reloptions = { path = "../types-reloptions" }

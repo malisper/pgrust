@@ -16437,6 +16437,7 @@ name = "backend-rewrite-rewritehandler"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-relation-seams",
+ "backend-access-common-reloptions",
  "backend-access-common-tupdesc",
  "backend-access-table-table",
  "backend-catalog-pg-depend",
@@ -16459,6 +16460,7 @@ dependencies = [
  "backend-utils-adt-ruleutils-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-relcache-seams",
+ "backend-utils-cache-syscache-seams",
  "backend-utils-misc-guc-tables",
  "backend-utils-misc-guc-tables-seams",
  "mcx",
@@ -16469,6 +16471,7 @@ dependencies = [
  "types-nodes",
  "types-pathnodes",
  "types-rel",
+ "types-reloptions",
  "types-storage",
  "types-trigger",
  "types-tuple",

@@ -83,17 +83,49 @@ pub fn init_seams() {
 // correct result for a plain `CREATE VIEW` (no reloptions). A view defined WITH
 // CHECK OPTION or as a security_barrier/security_invoker view is the documented
 // banked blocker (its enforcement needs the ViewOptions carrier on rd_options).
-fn seam_relation_has_security_invoker(_view: &types_rel::Relation<'_>) -> bool {
-    false
+/// The C view-option predicates read the parsed `ViewOptions` out of
+/// `(relation)->rd_options`. The trimmed `RelationData::rd_options` carries only
+/// the heap `StdRdOptions`, so the parsed view options are not recoverable from
+/// the relcache entry. We recover the *same* information faithfully by fetching
+/// the view's `pg_class.reloptions` text[] via syscache and re-running the
+/// (already-complete) `view_reloptions` parser — exactly the parse the relcache
+/// performs in C when it builds `rd_options`. A view with no reloptions parses to
+/// `None`, yielding the C no-options default (all flags false / NOT_SET), which
+/// matches `(relation)->rd_options ? ... : false`.
+fn view_options_of(view: &types_rel::Relation<'_>) -> types_reloptions::relopts::ViewOptions {
+    let relid = view.rd_id;
+    let scratch = mcx::MemoryContext::new("RelationViewOptions");
+    let smcx = scratch.mcx();
+    let token =
+        match backend_utils_cache_syscache_seams::fetch_class_reloptions::call(smcx, relid) {
+            Ok(t) => t,
+            // Missing tuple (concurrently dropped): treat as no options, matching
+            // the C `rd_options == NULL` branch.
+            Err(_) => return types_reloptions::relopts::ViewOptions::default(),
+        };
+    if token.is_null {
+        return types_reloptions::relopts::ViewOptions::default();
+    }
+    // validate=false: never errors; just parse the stored, already-validated bytes.
+    match backend_access_common_reloptions::view_reloptions(smcx, Some(&token.bytes), false) {
+        Ok(Some(backend_access_common_reloptions::RelOptStruct::View(v))) => v,
+        _ => types_reloptions::relopts::ViewOptions::default(),
+    }
 }
-fn seam_relation_is_security_view(_view: &types_rel::Relation<'_>) -> bool {
-    false
+
+fn seam_relation_has_security_invoker(view: &types_rel::Relation<'_>) -> bool {
+    view_options_of(view).security_invoker
 }
-fn seam_relation_has_check_option(_view: &types_rel::Relation<'_>) -> bool {
-    false
+fn seam_relation_is_security_view(view: &types_rel::Relation<'_>) -> bool {
+    view_options_of(view).security_barrier
 }
-fn seam_relation_has_cascaded_check_option(_view: &types_rel::Relation<'_>) -> bool {
-    false
+fn seam_relation_has_check_option(view: &types_rel::Relation<'_>) -> bool {
+    view_options_of(view).check_option
+        != types_reloptions::relopts::VIEW_OPTION_CHECK_OPTION_NOT_SET
+}
+fn seam_relation_has_cascaded_check_option(view: &types_rel::Relation<'_>) -> bool {
+    view_options_of(view).check_option
+        == types_reloptions::relopts::VIEW_OPTION_CHECK_OPTION_CASCADED
 }
 
 /// `AcquireRewriteLocks(parsetree, forExecute, forUpdatePushedDown)`
