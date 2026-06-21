@@ -933,7 +933,64 @@ fn dispatch_function_call_message<'mcx>(
 /// + `InitPostgres` run here via their seams (the catalog/shmem connection
 /// setup C does in this vicinity).
 pub fn PostgresMain(dbname: Option<&str>, username: Option<&str>) -> ! {
-    match postgres_main_inner(dbname, username) {
+    // Run the backend body under a top-level unwind guard. The per-iteration
+    // `catch_unwind` inside the main loop already turns query-time panics into
+    // recoverable SQL errors, but the *setup phase* before the loop — most
+    // importantly `InitPostgres` (catalog/relcache/catcache connection on a
+    // fresh backend, including a `\c`-reconnect after heavy catalog churn) — is
+    // not covered by it. In C an error there is `ereport(FATAL)`, which exits
+    // the backend cleanly (status 1); the postmaster treats that as a normal
+    // disconnect, NOT a crash. A bare Rust panic escaping `postgres_main_inner`
+    // would instead unwind through this `-> !` frame to the process top and exit
+    // 101, which the postmaster's `CleanupBackend` classifies as a crash
+    // (`exit_status != 0 && != 1`) → `HandleChildCrash` → crash recovery. Since
+    // pgrust's `StartupXLOG` crash recovery cannot replay a crashed datadir, the
+    // postmaster then wedges forever in "the database system is in recovery
+    // mode", refusing all new connections — the file-level TIMEOUT hang. Catch
+    // the escaped panic here and route it through the same FATAL report + clean
+    // `proc_exit(1)` path a returned setup-phase FATAL already uses, mirroring
+    // C's top-level PostgresMain sigsetjmp handler.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        postgres_main_inner(dbname, username)
+    }));
+    let outcome: PgResult<()> = match result {
+        Ok(r) => r,
+        // Reconstruct the structured PgError from the panic payload (the same
+        // payload channels as the loop's per-iteration catch_unwind): a
+        // structured `PgError`, a legacy `PGRUST-SQLSTATE:`/seam-miss string,
+        // or an unknown payload. Force the level to FATAL — an error that
+        // escaped all of `postgres_main_inner` is unrecoverable for this
+        // backend (C `ereport(FATAL)`).
+        Err(payload) => {
+            let mut err = match payload.downcast::<types_error::PgError>() {
+                Ok(e) => *e,
+                Err(payload) => {
+                    let msg = payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()));
+                    match msg {
+                        Some(m) => match m.strip_prefix("PGRUST-SQLSTATE:") {
+                            Some(rest) if rest.len() > 6 && rest.as_bytes()[5] == b':' => {
+                                let (code, msg) = rest.split_at(5);
+                                let mut chars = [0u8; 5];
+                                chars.copy_from_slice(code.as_bytes());
+                                types_error::PgError::error(msg[1..].to_string())
+                                    .with_sqlstate(types_error::make_sqlstate(chars))
+                            }
+                            _ => types_error::PgError::error(m),
+                        },
+                        None => types_error::PgError::error("backend setup path panicked"),
+                    }
+                }
+            };
+            // Force FATAL: an error that escaped all of `postgres_main_inner` is
+            // unrecoverable for this backend (C `ereport(FATAL)`).
+            err.level = FATAL;
+            Err(err)
+        }
+    };
+    match outcome {
         Ok(()) => {
             // The loop only exits via proc_exit (diverging); reaching here means
             // the loop returned Ok, which it never should.
@@ -941,8 +998,9 @@ pub fn PostgresMain(dbname: Option<&str>, username: Option<&str>) -> ! {
         }
         Err(err) => {
             // A FATAL escaped the loop's own recovery (e.g. lost protocol sync,
-            // or a setup-phase FATAL). Report it and exit, mirroring the C where
-            // an unrecoverable FATAL ends the process.
+            // or a setup-phase FATAL/panic). Report it and exit cleanly (status
+            // 1), mirroring the C where an unrecoverable FATAL ends the process
+            // without provoking postmaster crash recovery.
             backend_utils_error::emit_error_report_for(&err);
             backend_storage_ipc_ipc_seams::proc_exit::call(1)
         }

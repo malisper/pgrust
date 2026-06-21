@@ -149,20 +149,48 @@ pub fn backend_main(startup_data: &StartupData) -> ! {
     let top = MemoryContext::new("TopMemoryContext");
     let mcx = top.mcx();
 
-    // BackendInitialize(MyClientSocket, bsdata->canAcceptConnections);
-    let client_sock = backend_utils_init_small_seams::my_client_socket::call()
-        .expect("MyClientSocket must be set before BackendMain (postmaster_child_launch)");
-    backend_initialize(mcx, client_sock, bsdata.can_accept_connections);
+    // Run the rest of backend startup + the main loop under a top-level unwind
+    // backstop. `PostgresMain` has its own catch that turns a setup-phase panic
+    // (e.g. `InitPostgres` cache-init on a `\c`-reconnect) into a reported FATAL,
+    // but the steps *before* it here — `backend_initialize` (auth / Port setup)
+    // and `InitProcess` — plus any path that re-panics during PostgresMain are
+    // not covered by it. A bare panic escaping this `-> !` frame unwinds to the
+    // process top and exits 101, which the postmaster's `CleanupBackend`
+    // classifies as a crash (status != 0 && != 1) → `HandleChildCrash` → crash
+    // recovery; pgrust's `StartupXLOG` cannot replay a crashed datadir, so the
+    // postmaster then wedges forever in "the database system is in recovery
+    // mode", refusing every new connection (the file-level TIMEOUT hang). Catch
+    // the escape and `proc_exit(1)` cleanly — a normal FATAL disconnect that
+    // never provokes crash recovery, mirroring C where any unrecoverable backend
+    // error is `ereport(FATAL)` (clean exit), never an abnormal termination.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // BackendInitialize(MyClientSocket, bsdata->canAcceptConnections);
+        let client_sock = backend_utils_init_small_seams::my_client_socket::call()
+            .expect("MyClientSocket must be set before BackendMain (postmaster_child_launch)");
+        backend_initialize(mcx, client_sock, bsdata.can_accept_connections);
 
-    // InitProcess(): create a per-backend PGPROC in shared memory.
-    backend_storage_lmgr_proc_seams::init_process::call();
+        // InitProcess(): create a per-backend PGPROC in shared memory.
+        backend_storage_lmgr_proc_seams::init_process::call();
 
-    // MemoryContextSwitchTo(TopMemoryContext): explicit-Mcx threading; nothing
-    // to switch.
+        // MemoryContextSwitchTo(TopMemoryContext): explicit-Mcx threading;
+        // nothing to switch.
 
-    // PostgresMain(MyProcPort->database_name, MyProcPort->user_name);
-    let (dbname, username) = read_proc_port_names();
-    backend_tcop_postgres_seams::postgres_main::call(dbname.as_deref(), username.as_deref())
+        // PostgresMain(MyProcPort->database_name, MyProcPort->user_name);
+        let (dbname, username) = read_proc_port_names();
+        backend_tcop_postgres_seams::postgres_main::call(
+            dbname.as_deref(),
+            username.as_deref(),
+        )
+    }));
+    // The closure body diverges (PostgresMain is `-> !`), so `Ok` is
+    // unreachable; only an escaped panic reaches here.
+    match outcome {
+        Ok(never) => never,
+        Err(_payload) => {
+            let my_pid = backend_utils_init_small_seams::my_proc_pid::call();
+            backend_storage_ipc_dsm_core_seams::proc_exit::call(1, my_pid)
+        }
+    }
 }
 
 /// `PostgresMain(MyProcPort->database_name, MyProcPort->user_name)` argument
