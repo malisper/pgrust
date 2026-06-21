@@ -999,14 +999,18 @@ fn build_setop_child_paths<'mcx>(
     // Import each chosen subroot path into the outer root's arena, convert its
     // pathkeys to outer representation, and wrap in a subqueryscan path.
     for sub_id in to_import {
-        let imported = {
+        let imported_id = {
             let subroot = root.rel_mut(rel).subroot.0.take().expect("subroot vanished");
-            let sub_pathkeys = subroot.path(sub_id).base().pathkeys.clone();
             let id = import_path_from_subroot(mcx, root, &subroot, sub_id);
             root.rel_mut(rel).subroot.0 = Some(subroot);
-            (id, sub_pathkeys)
+            id
         };
-        let (imported_id, sub_pathkeys) = imported;
+        // `import_path_from_subroot` already remapped the imported path's
+        // pathkeys' `pk_eclass` handles into `root`'s EquivalenceClass arena.
+        // Read them off the imported copy (not the subroot path, whose `EcId`s
+        // index the subroot) so `convert_subquery_pathkeys` resolves them in
+        // `root`.
+        let sub_pathkeys = root.path(imported_id).base().pathkeys.clone();
 
         let imported_tlist = make_tlist_from_pathtarget_ids(root, imported_id)?;
         let pathkeys_outer =

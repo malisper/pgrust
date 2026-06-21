@@ -322,13 +322,20 @@ fn wrap_subquery_subpath<'mcx>(
     trivial_pathtarget: bool,
     required_outer: &types_pathnodes::Relids,
 ) -> PgResult<PathId> {
-    let (imported_id, sub_pathkeys) = {
+    let imported_id = {
         let subroot = root.rel_mut(rel).subroot.0.take().expect("subroot vanished");
-        let sub_pathkeys = subroot.path(sub_id).base().pathkeys.clone();
         let id = pathnode::import_path_from_subroot::call(mcx, root, &subroot, sub_id);
         root.rel_mut(rel).subroot.0 = Some(subroot);
-        (id, sub_pathkeys)
+        id
     };
+    // The subroot path's `pathkeys` carry `pk_eclass` handles into the SUBROOT's
+    // equivalence-class arena; `import_path_from_subroot` already remapped them
+    // into `root`'s arena on the imported copy. Read the (remapped) pathkeys off
+    // the imported path so `convert_subquery_pathkeys`' `root.ec(sub_eclass)`
+    // resolves in `root` — never indexing a subroot `EcId` out of bounds. C
+    // dereferences `pk_eclass` directly (absolute pointer) and can use the
+    // subroot copy; our `EcId`s are per-root.
+    let sub_pathkeys = root.path(imported_id).base().pathkeys.clone();
 
     // make_tlist_from_pathtarget(subpath->pathtarget) over the imported path's
     // (in-root) reltarget, then convert_subquery_pathkeys to outer repr.
