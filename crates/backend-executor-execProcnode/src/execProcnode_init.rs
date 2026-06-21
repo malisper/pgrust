@@ -440,6 +440,22 @@ fn exec_init_node_finish<'mcx>(
     // is stamped now, mirroring C's `(PlanState *) state` identity.
     result.stamp_expr_parents();
 
+    // ModifyTable nodes own additional `ExprState`s that live on the per-result
+    // relation `ResultRelInfo` in the `EState`, not on the node's `PlanState`
+    // head: the RETURNING projection (`ri_projectReturning` — where a
+    // `merge_action()` in RETURNING compiles to `EEOP_MERGE_SUPPORT_FUNC`), the
+    // per-MERGE-action projections/quals (`mas_proj`/`mas_whenqual`), and the
+    // MERGE join-condition qual (`ri_MergeJoinCondition`). C sets their
+    // `state->parent = &mtstate->ps` at build time; the owned model stamps them
+    // here, once the `PlanStateNode::ModifyTable` enum is address-stable, so
+    // `EEOP_MERGE_SUPPORT_FUNC` can recover the `ModifyTableState` through
+    // `parent.as_modify_table_state()`.
+    if let types_nodes::PlanStateNode::ModifyTable(m) = &*result {
+        let result_rel_ids: Vec<types_nodes::execnodes::RriId> =
+            m.resultRelInfo.iter().copied().collect();
+        result.stamp_modifytable_expr_parents(estate, &result_rel_ids);
+    }
+
     // Agg nodes additionally own the compiled `evaltrans` ExprState on every
     // phase (and its cached recompiled variants). C sets `state->parent =
     // &aggstate->ss.ps` inside `ExecBuildAggTrans`; in the owned tree the

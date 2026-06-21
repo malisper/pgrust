@@ -311,6 +311,60 @@ impl<'mcx> PlanStateNode<'mcx> {
         }
     }
 
+    /// Back-fill the `ExprState.parent` back-link on the MERGE- and
+    /// RETURNING-related `ExprState`s a `ModifyTableState` owns but that live on
+    /// the per-result-relation [`ResultRelInfo`](crate::execnodes::ResultRelInfo)
+    /// in the `EState` (not on the node's own `PlanState` head, so
+    /// [`Self::stamp_expr_parents`] does not reach them).
+    ///
+    /// In C every `ExecBuildProjectionInfo`/`ExecInitQual` call inside
+    /// `ExecInitModifyTable`/`ExecInitMerge` passes `&mtstate->ps` as the parent,
+    /// so the result-relation projections (`ri_projectReturning` — where a
+    /// `merge_action()` in the RETURNING list compiles to `EEOP_MERGE_SUPPORT_FUNC`),
+    /// the per-action projections/quals (`mas_proj`, `mas_whenqual`), and the MERGE
+    /// join-condition qual (`ri_MergeJoinCondition`) are all linked back to the
+    /// `ModifyTableState` at build time. In the owned model the enclosing
+    /// `PlanStateNode::ModifyTable` enum is only address-stable after the node is
+    /// boxed, so the back-link is stamped here, mirroring C's `(PlanState *) mtstate`.
+    ///
+    /// No-op for any non-`ModifyTable` node. `result_rel_ids` are the
+    /// `ModifyTableState.resultRelInfo` ids; `estate` owns the `ResultRelInfo`s.
+    pub fn stamp_modifytable_expr_parents(
+        &self,
+        estate: &mut crate::execnodes::EStateData<'mcx>,
+        result_rel_ids: &[crate::execnodes::RriId],
+    ) {
+        // Only ModifyTable nodes carry these result-relation ExprStates.
+        if !matches!(self, PlanStateNode::ModifyTable(_)) {
+            return;
+        }
+        let link = PlanStateLink::from_ref(self);
+        for &rri in result_rel_ids {
+            let rel = estate.result_rel_mut(rri);
+            // ri_projectReturning (RETURNING list — holds merge_action()).
+            if let Some(proj) = rel.ri_projectReturning.as_mut() {
+                proj.pi_state.parent = Some(link);
+            }
+            // ri_MergeJoinCondition (MERGE ON qual).
+            if let Some(jc) = rel.ri_MergeJoinCondition.as_mut() {
+                jc.parent = Some(link);
+            }
+            // Per-action mas_proj / mas_whenqual across every match kind.
+            for actions in rel.ri_MergeActions.iter_mut() {
+                if let Some(actions) = actions.as_mut() {
+                    for action in actions.iter_mut() {
+                        if let Some(proj) = action.mas_proj.as_mut() {
+                            proj.pi_state.parent = Some(link);
+                        }
+                        if let Some(qual) = action.mas_whenqual.as_mut() {
+                            qual.parent = Some(link);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// `(ScanState *) node` — the embedded `ScanState` of a relation-scan-node
     /// state (`SeqScanState`, `IndexScanState`, ... — every concrete scan-node
     /// struct begins with a `ScanState`). `None` for non-scan nodes. Returns

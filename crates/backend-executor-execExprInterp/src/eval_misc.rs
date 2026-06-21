@@ -208,12 +208,18 @@ pub fn ExecEvalMergeSupportFunc<'mcx>(
         .expect("ExecEvalMergeSupportFunc: MergeActionState has no mas_action")
         .commandType;
 
-    // Return the MERGE action ("INSERT", "UPDATE", or "DELETE")
+    // Return the MERGE action ("INSERT", "UPDATE", or "DELETE").
+    //
+    // C: `*op->resvalue = PointerGetDatum(cstring_to_text_with_len("INSERT", 6))`.
+    // `text` is pass-by-reference, so the result is a `Datum::ByRef` holding the
+    // freshly built varlena bytes — `cstring_to_text_v` yields exactly that. (The
+    // legacy `cstring_to_text` shim returns the header-less payload, which must
+    // NOT be wrapped as a by-value scalar: the RETURNING projection reads it back
+    // as a varlena and would trip the by-ref/by-value Datum accessor.)
     let value = match command_type {
-        // *op->resvalue = PointerGetDatum(cstring_to_text_with_len("INSERT", 6));
-        CmdType::CMD_INSERT => varlena::cstring_to_text::call(mcx, "INSERT")?,
-        CmdType::CMD_UPDATE => varlena::cstring_to_text::call(mcx, "UPDATE")?,
-        CmdType::CMD_DELETE => varlena::cstring_to_text::call(mcx, "DELETE")?,
+        CmdType::CMD_INSERT => varlena::cstring_to_text_v::call(mcx, "INSERT")?,
+        CmdType::CMD_UPDATE => varlena::cstring_to_text_v::call(mcx, "UPDATE")?,
+        CmdType::CMD_DELETE => varlena::cstring_to_text_v::call(mcx, "DELETE")?,
         CmdType::CMD_NOTHING => {
             return Err(PgError::error("unexpected merge action: DO NOTHING"));
         }
@@ -229,6 +235,6 @@ pub fn ExecEvalMergeSupportFunc<'mcx>(
     // Route through write_cell: a top-level MERGE-support RETURNING expression has
     // resvalue == STATE_RESULT_CELL, which must land in the ExprState's own
     // resvalue/resnull, not a dead arena slot 0.
-    crate::interp_loop::write_cell(state, resvalue_id, Datum::ByVal(value.as_usize()), false);
+    crate::interp_loop::write_cell(state, resvalue_id, value, false);
     Ok(())
 }
