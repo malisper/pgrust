@@ -3467,6 +3467,7 @@ dependencies = [
  "backend-access-transam-varsup-seams",
  "backend-access-transam-xact-seams",
  "backend-access-transam-xlog-seams",
+ "backend-access-transam-xlogreader-seams",
  "backend-catalog-storage-seams",
  "backend-replication-logical-origin-seams",
  "backend-replication-syncrep-seams",
@@ -3493,6 +3494,7 @@ dependencies = [
  "types-core",
  "types-datum",
  "types-error",
+ "types-logical",
  "types-tuple",
  "types-wal",
 ]

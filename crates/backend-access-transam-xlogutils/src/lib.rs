@@ -749,6 +749,43 @@ pub fn read_local_xlog_page(
     read_local_xlog_page_guts(state, targetPagePtr, reqLen, targetRecPtr, cur_page, true)
 }
 
+/// The [`WALSegmentOpenCB`](types_wal::rmgr::WALSegmentOpenCB) adapter for
+/// [`wal_segment_open`]. The CB takes `TimeLineID *tli_p` (in/out); the ported
+/// `wal_segment_open` takes the timeline by value (it only reads it — local
+/// pg_wal segment open never rewrites the caller's TLI), so the adapter just
+/// dereferences.
+fn wal_segment_open_cb(
+    state: &mut XLogReaderState<'_>,
+    next_seg_no: XLogSegNo,
+    tli_p: &mut TimeLineID,
+) -> PgResult<()> {
+    wal_segment_open(state, next_seg_no, *tli_p)
+}
+
+/// The [`XLogPageReadCB`](types_wal::rmgr::XLogPageReadCB) adapter for
+/// [`read_local_xlog_page`]. The C callback takes `char *readBuf` as its last
+/// argument, which is the reader's own `state->readBuf`; in C the reader passes
+/// `state->readBuf` to `state->routine.page_read(...)` itself. Our value-typed
+/// reader keeps `readBuf` inside the same `state` struct, so the `&mut`-borrow
+/// rules forbid handing both `state` and `&mut state.readBuf` to the inner fn
+/// at once. We therefore temporarily move `readBuf` out, run the read into it,
+/// and move it back — behaviourally identical to C (the reader's `readBuf` ends
+/// up holding the page just read).
+fn read_local_xlog_page_cb(
+    state: &mut XLogReaderState<'_>,
+    target_page_ptr: XLogRecPtr,
+    req_len: i32,
+    target_rec_ptr: XLogRecPtr,
+) -> PgResult<i32> {
+    let mut buf = state
+        .readBuf
+        .take()
+        .expect("XLogReaderState.readBuf must be allocated before a page read");
+    let res = read_local_xlog_page(state, target_page_ptr, req_len, target_rec_ptr, &mut buf[..]);
+    state.readBuf = Some(buf);
+    res
+}
+
 /// Same as [`read_local_xlog_page`] except it doesn't wait for future WAL to be
 /// available (`read_local_xlog_page_no_wait`, lines 856-863).
 pub fn read_local_xlog_page_no_wait(
@@ -933,6 +970,19 @@ fn lsn_format_args(lsn: XLogRecPtr) -> String {
 /// Install this crate's inward seams (the per-backend globals + redo fetcher it
 /// owns).
 pub fn init_seams() {
+    // Resolve the opaque `XLogReaderRoutineHandle` into the stock local-xlog
+    // routine: `XL_ROUTINE(.page_read = read_local_xlog_page, .segment_open =
+    // wal_segment_open, .segment_close = wal_segment_close)` (the routine the
+    // bootstrap/2PC/SQL WAL readers forward). The handle is the C
+    // `XLogReaderRoutine *`; the only routine the in-tree callers ever pass is
+    // this stock one, so resolution is constant.
+    backend_access_transam_xlogreader_seams::xlog_reader_routine_for_handle::set(|_handle| {
+        types_wal::rmgr::XLogReaderRoutine {
+            page_read: Some(read_local_xlog_page_cb),
+            segment_open: Some(wal_segment_open_cb),
+            segment_close: Some(wal_segment_close),
+        }
+    });
     backend_access_transam_xlogutils_seams::standby_state::set(standby_state);
     backend_access_transam_xlogutils_seams::set_standby_state::set(set_standby_state);
     backend_access_transam_xlogutils_seams::in_recovery::set(in_recovery);

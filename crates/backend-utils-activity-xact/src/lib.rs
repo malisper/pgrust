@@ -98,6 +98,33 @@ pub fn init_seams() {
             .collect();
         pgstat_execute_transactional_drops(&core_items, is_redo)
     });
+
+    // The raw-bytes flavor used by twophase.c's FinishPreparedTransaction:
+    // `pgstat_execute_transactional_drops(hdr->ncommitstats, commitstats,
+    // false)`. `commitstats`/`abortstats` arrive as the on-disk
+    // `xl_xact_stats_item[]` slice straight out of the 2PC buffer, so we decode
+    // them here (matching the C struct: kind int32, dboid Oid, objid uint64 as
+    // lo/hi int32 pair). `is_redo` is always false on this path.
+    stat_seams::pgstat_execute_transactional_drops::set(|bytes, nitems| {
+        const SIZEOF_ITEM: usize = 16;
+        let n = nitems.max(0) as usize;
+        let mut core_items: Vec<XlXactStatsItem> = Vec::with_capacity(n);
+        for i in 0..n {
+            let o = i * SIZEOF_ITEM;
+            let kind = i32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+            let dboid = u32::from_le_bytes(bytes[o + 4..o + 8].try_into().unwrap());
+            let objid_lo = u32::from_le_bytes(bytes[o + 8..o + 12].try_into().unwrap());
+            let objid_hi = u32::from_le_bytes(bytes[o + 12..o + 16].try_into().unwrap());
+            let objid = ((objid_hi as u64) << 32) | objid_lo as u64;
+            core_items.push(XlXactStatsItem { kind, dboid, objid });
+        }
+        pgstat_execute_transactional_drops(&core_items, false)
+    });
+
+    // `AtEOXact_PgStat(isCommit, false)` flavor used by twophase.c's
+    // FinishPreparedTransaction (a finishing prepared transaction is never
+    // parallel).
+    stat_seams::at_eoxact_pgstat::set(|is_commit| AtEOXact_PgStat(is_commit, false));
 }
 
 thread_local! {

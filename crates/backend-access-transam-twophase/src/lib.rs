@@ -38,6 +38,7 @@ use backend_access_transam_subtrans_seams as subtrans;
 use backend_access_transam_varsup_seams as varsup;
 use backend_access_transam_xact_seams as xact;
 use backend_access_transam_xlog_seams as wal; // xlog insert/flush/read + crit section
+use backend_access_transam_xlogreader_seams as xlogreader; // handle-based WAL record reader
 use backend_replication_logical_origin_seams as origin;
 use backend_replication_syncrep_seams as syncrep; // SyncRepWaitForLSN
 use backend_access_transam_twophase_fileio_seams as files; // pg_twophase file body I/O
@@ -1103,6 +1104,71 @@ pub fn read_twophase_file(xid: TransactionId, missing_ok: bool) -> PgResult<Opti
     }
 
     Ok(Some(buf))
+}
+
+/// `XlogReadTwoPhaseData(lsn, &buf, &len)` (twophase.c:1404). Re-read the
+/// prepare-record body from WAL at `lsn`. Used when COMMIT/ABORT PREPARED runs
+/// before the prepare record's checkpoint has moved the state to disk, and by
+/// `CheckPointTwoPhase`/recovery. Allocates a throwaway [`XLogReader`] over the
+/// local pg_wal files (the stock `read_local_xlog_page` routine), reads exactly
+/// one record at `lsn`, validates it is an `RM_XACT_ID`/`XLOG_XACT_PREPARE`
+/// record, and returns its rmgr data bytes.
+pub fn xlog_read_twophase_data(lsn: XLogRecPtr) -> PgResult<Vec<u8>> {
+    use types_logical::XLogReaderRoutineHandle;
+
+    // XLogReaderAllocate(wal_segment_size, NULL, XL_ROUTINE(...), NULL).
+    let wal_segment_size = wal::wal_segment_size::call();
+    let reader = xlogreader::XLogReaderAllocate::call(
+        wal_segment_size,
+        XLogReaderRoutineHandle::default(),
+    )
+    .ok_or_else(|| {
+        ereport(ERROR)
+            .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+            .errmsg("out of memory")
+            .errdetail("Failed while allocating a WAL reading processor.")
+            .into_error()
+    })?;
+
+    // Guard so the reader's context is always freed, even on the error paths.
+    let result = (|| -> PgResult<Vec<u8>> {
+        xlogreader::XLogBeginRead::call(reader, lsn);
+        let read = xlogreader::XLogReadRecord::call(reader);
+
+        let (h, l) = ((lsn >> 32) as u32, lsn as u32);
+        if !read.record {
+            return match read.err {
+                Some(errormsg) => raise(ereport(ERROR)
+                    .errcode_for_file_access()
+                    .errmsg(alloc::format!(
+                        "could not read two-phase state from WAL at {h:X}/{l:X}: {errormsg}"
+                    ))),
+                None => raise(ereport(ERROR)
+                    .errcode_for_file_access()
+                    .errmsg(alloc::format!(
+                        "could not read two-phase state from WAL at {h:X}/{l:X}"
+                    ))),
+            };
+        }
+
+        let rmid = xlogreader::xlog_rec_get_rmid::call(reader);
+        let info = xlogreader::xlog_rec_get_info::call(reader);
+        if rmid != types_wal::wal::RM_XACT_ID
+            || (info & types_wal::xact::XLOG_XACT_OPMASK) != types_wal::xact::XLOG_XACT_PREPARE
+        {
+            return raise(ereport(ERROR)
+                .errcode_for_file_access()
+                .errmsg(alloc::format!(
+                    "expected two-phase state data is not present in WAL at {h:X}/{l:X}"
+                )));
+        }
+
+        Ok(xlogreader::xlog_rec_get_main_data::call(reader))
+    })();
+
+    // XLogReaderFree(xlogreader): always reclaim the reader + its context.
+    xlogreader::XLogReaderFree::call(reader);
+    result
 }
 
 /// `RecreateTwoPhaseFile` — compute the CRC over `content` and write the file.
@@ -2466,11 +2532,53 @@ pub fn two_phase_shmem_init() -> PgResult<()> {
 /// Panics if [`two_phase_shmem_init`] has not run (the C invariant: the shmem
 /// struct exists before any prepare/abort/redo path touches it).
 pub fn with_twophase_state<R>(f: impl FnOnce(&mut TwoPhaseStateData) -> R) -> R {
+    // Reentrancy: in C, `TwoPhaseStateLock` is an LWLock that a single backend
+    // may already hold when a nested 2PC path re-enters (e.g.
+    // `FinishPreparedTransaction` holds it across `ProcessRecords`, whose
+    // `lock_twophase_postcommit`/`postabort` callbacks call
+    // `TwoPhaseGetDummyProc(xid, lock_held=true)`). The owned model serializes
+    // the shared `TwoPhaseStateData` behind a process-local non-reentrant
+    // `Mutex`; re-locking it on the SAME thread would self-deadlock. Since each
+    // backend is its own process (real fork), the Mutex never actually contends
+    // across backends — it is purely the per-process guard — so when this thread
+    // already holds it we reuse the live `&mut` through a thread-local raw
+    // pointer instead of re-acquiring (the C `lock_held` fast path).
+    if let Some(ptr) = TWO_PHASE_STATE_HELD.with(|h| h.get()) {
+        // SAFETY: `ptr` was published below from a live `&mut TwoPhaseStateData`
+        // borrow held by an enclosing `with_twophase_state` frame on THIS
+        // thread, which is still on the stack (the published pointer is cleared
+        // before that frame returns). No other thread can observe it (the cell
+        // is thread-local), and the outer frame does not touch the state while
+        // `f` runs, so this re-borrow is exclusive for the nested call's span.
+        let state: &mut TwoPhaseStateData = unsafe { &mut *ptr };
+        return f(state);
+    }
+
     let mtx = TWO_PHASE_STATE
         .get()
         .expect("TwoPhaseState accessed before TwoPhaseShmemInit");
     let mut guard = mtx.lock().expect("TwoPhaseStateLock poisoned");
+    let ptr: *mut TwoPhaseStateData = &mut *guard;
+    TWO_PHASE_STATE_HELD.with(|h| h.set(Some(ptr)));
+    // Clear the published pointer on the way out (including on unwind) before
+    // the guard drops, so no nested frame can observe a dangling pointer.
+    struct ClearOnDrop;
+    impl Drop for ClearOnDrop {
+        fn drop(&mut self) {
+            TWO_PHASE_STATE_HELD.with(|h| h.set(None));
+        }
+    }
+    let _clear = ClearOnDrop;
     f(&mut guard)
+}
+
+::std::thread_local! {
+    /// Raw pointer to the `TwoPhaseStateData` this thread currently holds the
+    /// guard for (`None` when not held). Enables the reentrant `lock_held` fast
+    /// path in [`with_twophase_state`]. Backend-local (per-process), matching
+    /// the C invariant that `TwoPhaseStateLock` is held by at most one backend.
+    static TWO_PHASE_STATE_HELD: core::cell::Cell<Option<*mut TwoPhaseStateData>> =
+        const { core::cell::Cell::new(None) };
 }
 
 // ---------------------------------------------------------------------------
@@ -2529,6 +2637,11 @@ pub fn init_seams() {
     seams::standby_transaction_id_is_prepared::set(|xid| {
         standby_transaction_id_is_prepared(xid, max_prepared_xacts_guc())
     });
+
+    // `XlogReadTwoPhaseData` (twophase.c:1404) — re-read a prepare record from
+    // WAL. The seam is homed in xlog-seams (sibling-file split) but the body
+    // belongs to twophase.c, so this unit owns its install.
+    wal::xlog_read_twophase_data::set(xlog_read_twophase_data);
 
     // `MarkAsPreparing` — over the global state + this backend's
     // MyLockedGxact / twophaseExitRegistered statics. The returned slot is

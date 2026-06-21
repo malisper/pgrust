@@ -2660,8 +2660,10 @@ pub fn multixactmemberssyncfiletag(ftag: FileTag) -> PgResult<FileTagOpResult> {
 // Two-phase / message helpers
 // ===========================================================================
 
-/// `TWOPHASE_RM_MULTIXACT_ID` (twophase_rmgr.h) — the 2PC RM slot index.
-const TWOPHASE_RM_MULTIXACT_ID: u8 = 5;
+/// `TWOPHASE_RM_MULTIXACT_ID` (twophase_rmgr.h) — the 2PC RM slot index. The
+/// built-in 2PC resource managers are END=0, LOCK=1, PGSTAT=2, MULTIXACT=3,
+/// PREDICATELOCK=4 (`TWOPHASE_RM_MAX_ID`); MultiXact is slot 3.
+const TWOPHASE_RM_MULTIXACT_ID: u8 = 3;
 
 /// Read a database's name into a `String` for warning messages (the warnings
 /// only need the name; the borrowed `PgString` is copied out before its scratch

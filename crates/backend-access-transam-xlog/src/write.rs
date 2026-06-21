@@ -63,6 +63,7 @@ const XLOGDIR: &str = "pg_wal";
 /// `PG_BINARY` (c.h) — 0 on non-Windows.
 const PG_BINARY: i32 = 0;
 
+const O_RDONLY: i32 = libc::O_RDONLY;
 const O_RDWR: i32 = libc::O_RDWR;
 const O_CREAT: i32 = libc::O_CREAT;
 const O_EXCL: i32 = libc::O_EXCL;
@@ -1104,4 +1105,78 @@ pub fn issue_xlog_fsync(fd: i32, segno: XLogSegNo, tli: TimeLineID) -> PgResult<
         )));
     }
     Ok(())
+}
+
+/// `WALRead(state, buf, startptr, count, tli, &errinfo)` (xlogreader.c:1514),
+/// reshaped for the `wal_read` seam: read `count` bytes of WAL beginning at
+/// `startptr` on timeline `tli` and return them owned. The C drives the read
+/// through the reader's cached `seg`/`segcxt` (open one segment, pread, advance,
+/// re-open at each segment boundary) using the reader routine's `segment_open`
+/// callback (`wal_segment_open`, which opens `pg_wal/<segfile>`). The seam has
+/// no reader to cache an fd in, so this opens each spanned segment with a plain
+/// `BasicOpenFile(O_RDONLY)` and closes it before advancing — the same bytes are
+/// read, only without the cross-call fd cache (a single 2PC prepare record never
+/// spans more than the one or two segments it covers here).
+pub fn wal_read(
+    startptr: XLogRecPtr,
+    count: i32,
+    tli: TimeLineID,
+) -> backend_access_transam_xlog_seams::WalReadOutcome {
+    use backend_access_transam_xlog_seams::{WalReadErrorInfo, WalReadOutcome};
+
+    let seg = wal_segment_size();
+    let mut out = std::vec![0u8; count.max(0) as usize];
+    let mut recptr = startptr;
+    let mut nbytes = count as i64;
+    let mut p: usize = 0;
+
+    while nbytes > 0 {
+        let startoff = XLogSegmentOffset(recptr, seg);
+        let segno = XLByteToSeg(recptr, seg);
+
+        // open(pg_wal/<segfile>, O_RDONLY) — the C wal_segment_open callback.
+        let path = XLogFilePath(tli, segno, seg);
+        let fd = match fd::basic_open_file_flags::call(&path, O_RDONLY | PG_BINARY | O_CLOEXEC) {
+            Ok(fd) if fd >= 0 => fd,
+            Ok(_) | Err(_) => {
+                let e = fd::last_errno::call();
+                return WalReadOutcome::Error(WalReadErrorInfo {
+                    wre_errno: e,
+                    wre_off: startoff as i32,
+                    wre_req: 0,
+                    wre_read: -1,
+                    wre_seg_segno: segno,
+                    wre_seg_tli: tli,
+                });
+            }
+        };
+
+        // How many bytes are within this segment?
+        let segbytes: i64 = if nbytes > (seg as i64 - startoff as i64) {
+            seg as i64 - startoff as i64
+        } else {
+            nbytes
+        };
+
+        let readbytes = fd::pg_pread::call(fd, &mut out[p..p + segbytes as usize], startoff as i64);
+        if readbytes <= 0 {
+            let e = if readbytes < 0 { fd::last_errno::call() } else { 0 };
+            close_bare_fd(fd);
+            return WalReadOutcome::Error(WalReadErrorInfo {
+                wre_errno: e,
+                wre_off: startoff as i32,
+                wre_req: segbytes as i32,
+                wre_read: readbytes as i32,
+                wre_seg_segno: segno,
+                wre_seg_tli: tli,
+            });
+        }
+        close_bare_fd(fd);
+
+        recptr += readbytes as u64;
+        nbytes -= readbytes as i64;
+        p += readbytes as usize;
+    }
+
+    WalReadOutcome::Ok(out)
 }

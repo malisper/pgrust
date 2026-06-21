@@ -861,6 +861,10 @@ pub fn init_seams() {
     s::enable_fsync::set(write::enable_fsync);
     s::wal_sync_method::set(write::wal_sync_method);
     s::wal_segment_size::set(shmem::wal_segment_size);
+    // WALRead (xlogreader.c) reshaped for the wal_read seam — the local pg_wal
+    // segment read backing `read_local_xlog_page` (used by XlogReadTwoPhaseData
+    // and other local-WAL readers).
+    s::wal_read::set(write::wal_read);
 
     // xlog.c GUC-value reads consumed by the checkpointer aux-process main loop
     // (CheckArchiveTimeout / IsCheckpointOnSchedule). `XLogArchiveTimeout` is the
