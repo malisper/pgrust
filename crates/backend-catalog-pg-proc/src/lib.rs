@@ -598,11 +598,18 @@ pub fn ProcedureCreate(
 
         /* First, get default permissions and set up proacl */
         let proacl = aclchk_seams::get_user_default_acl::call(
+            mcx,
             OBJECT_FUNCTION,
             proowner,
             procNamespace,
         )?;
         proacl_present = proacl.is_some();
+        let proacl_bytes: Option<Vec<u8>> = match &proacl {
+            Some(types_tuple::backend_access_common_heaptuple::Datum::ByRef(b)) => {
+                Some(b[..].to_vec())
+            }
+            _ => None,
+        };
 
         let newOid = indexing_seams::get_new_oid_with_index_pg_proc::call(&rel)?;
         let row = build_insert_row(
@@ -635,7 +642,7 @@ pub fn ProcedureCreate(
             &prosqlbody_text,
             &proconfig,
             newOid,
-            proacl,
+            proacl_bytes,
         );
         indexing_seams::catalog_tuple_insert_pg_proc::call(mcx, &rel, &row)?;
 
@@ -723,11 +730,12 @@ pub fn ProcedureCreate(
          * insert path did (get_user_default_acl is deterministic for the same
          * inputs), matching the C, which passes the same `proacl` pointer. */
         let proacl = if proacl_present {
-            aclchk_seams::get_user_default_acl::call(OBJECT_FUNCTION, proowner, procNamespace)?
+            aclchk_seams::get_user_default_acl::call(mcx, OBJECT_FUNCTION, proowner, procNamespace)?
         } else {
             None
         };
         aclchk_seams::record_dependency_on_new_acl::call(
+            mcx,
             ProcedureRelationId,
             retval,
             0,
@@ -801,7 +809,7 @@ fn build_insert_row(
     prosqlbody_text: &Option<String>,
     proconfig: &Option<Vec<String>>,
     oid: Oid,
-    proacl: Option<types_array::ArrayType>,
+    proacl: Option<Vec<u8>>,
 ) -> PgProcInsertRow {
     PgProcInsertRow {
         fields: ProcFormFields {

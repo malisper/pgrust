@@ -12,7 +12,6 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use types_array::ArrayType;
 use types_core::primitive::Oid;
 
 /* ==========================================================================
@@ -142,8 +141,9 @@ pub struct PgProcInsertRow {
     /// `proconfig` (`text[]`) — GUC set clauses (`"name=value"`), `None` ≡ SQL
     /// NULL.
     pub proconfig: Option<alloc::vec::Vec<String>>,
-    /// `proacl` (`aclitem[]`) — the default ACL array, `None` ≡ SQL NULL.
-    pub proacl: Option<ArrayType>,
+    /// `proacl` (`aclitem[]`) — the default ACL array as its full on-disk
+    /// varlena image, `None` ≡ SQL NULL.
+    pub proacl: Option<alloc::vec::Vec<u8>>,
 }
 
 /// The fixed-width `Form_pg_proc` columns of one `pg_proc` row. Field

@@ -315,7 +315,7 @@ fn restrict_and_check_grant(
 /// (`PointerGetDatum(Acl)`). This is the inverse of the syscache
 /// `decode_acl`: a 1-D, no-null array of 16-byte `aclitem`s, the same
 /// `ARR_SETUP` C's `allocacl` builds.
-fn acl_to_datum<'mcx>(mcx: Mcx<'mcx>, acl: &[AclItem]) -> PgResult<Datum<'mcx>> {
+pub(crate) fn acl_to_datum<'mcx>(mcx: Mcx<'mcx>, acl: &[AclItem]) -> PgResult<Datum<'mcx>> {
     let n = acl.len();
     let data_off = maxalign(ARRAYTYPE_HDRSZ + 2 * 4); // ndim=1: dims[1] + lbound[1]
     let total = data_off + n * SIZEOF_ACLITEM;
@@ -1132,7 +1132,7 @@ fn exec_grant_attribute(
 
 /// Inverse of the syscache `decode_acl`: read a 1-D `aclitem[]` array varlena
 /// into an `&[AclItem]`. The header layout matches [`acl_to_datum`].
-fn decode_acl<'mcx>(mcx: Mcx<'mcx>, on_disk: &[u8]) -> PgResult<&'mcx mut [AclItem]> {
+pub(crate) fn decode_acl<'mcx>(mcx: Mcx<'mcx>, on_disk: &[u8]) -> PgResult<&'mcx mut [AclItem]> {
     // DatumGetAclPCopy: detoast first (an inline short varlena round-trips
     // unchanged, but a compressed/external ACL must be expanded).
     let raw = backend_access_common_detoast_seams::detoast_attr::call(mcx, on_disk)?;

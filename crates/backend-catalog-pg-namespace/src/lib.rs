@@ -69,15 +69,19 @@ pub fn NamespaceCreate(nspName: &str, ownerId: Oid, isTemp: bool) -> PgResult<Oi
             .into_error());
     }
 
-    let nspacl = if !isTemp {
-        get_user_default_acl::call(ObjectType::Schema, ownerId, InvalidOid)?
-    } else {
-        None
-    };
-
     /* The C `CurrentMemoryContext` for `table_open` / the extension lookup. */
     let ctx = MemoryContext::new("NamespaceCreate");
     let mcx = ctx.mcx();
+
+    let nspacl = if !isTemp {
+        get_user_default_acl::call(mcx, ObjectType::Schema, ownerId, InvalidOid)?
+    } else {
+        None
+    };
+    let nspacl_bytes: Option<&[u8]> = match &nspacl {
+        Some(types_tuple::backend_access_common_heaptuple::Datum::ByRef(b)) => Some(&b[..]),
+        _ => None,
+    };
 
     let nspdesc = table_open(mcx, NamespaceRelationId, RowExclusiveLock)?;
 
@@ -89,7 +93,7 @@ pub fn NamespaceCreate(nspName: &str, ownerId: Oid, isTemp: bool) -> PgResult<Oi
      * Anum_pg_namespace_oid)` and returns it.  `nspacl == None` ⇒
      * `nulls[Anum_pg_namespace_nspacl - 1] = true`.
      */
-    nspoid = catalog_tuple_insert_pg_namespace::call(&nspdesc, nspName, ownerId, nspacl)?;
+    nspoid = catalog_tuple_insert_pg_namespace::call(&nspdesc, nspName, ownerId, nspacl_bytes)?;
     debug_assert!(OidIsValid(nspoid));
 
     nspdesc.close(RowExclusiveLock)?;
@@ -105,7 +109,7 @@ pub fn NamespaceCreate(nspName: &str, ownerId: Oid, isTemp: bool) -> PgResult<Oi
     recordDependencyOnOwner::call(NamespaceRelationId, nspoid, ownerId)?;
 
     /* dependencies on roles mentioned in default ACL */
-    record_dependency_on_new_acl::call(NamespaceRelationId, nspoid, 0, ownerId, nspacl)?;
+    record_dependency_on_new_acl::call(mcx, NamespaceRelationId, nspoid, 0, ownerId, nspacl)?;
 
     /* dependency on extension ... but not for magic temp schemas */
     if !isTemp {

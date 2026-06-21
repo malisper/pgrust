@@ -381,13 +381,13 @@ seam_core::seam!(
     /// pg_namespace row (pg_namespace.c `NamespaceCreate`): assigns and returns
     /// the new namespace OID, building the row from the schema name, owner, and
     /// optional default ACL (`acl == None` ⇒ `nulls[Anum_pg_namespace_nspacl
-    /// - 1] = true`). The `acl` varlena (`Acl *` = `ArrayType`) crosses
-    /// unchanged. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    /// - 1] = true`). The `acl` varlena (`Acl *`) crosses as its full on-disk
+    /// `aclitem[]` image. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_namespace(
         rel: &RelationData<'_>,
         nspname: &str,
         nspowner: Oid,
-        nspacl: Option<types_array::ArrayType>,
+        nspacl: Option<&[u8]>,
     ) -> PgResult<Oid>
 );
 
@@ -454,13 +454,13 @@ seam_core::seam!(
     /// `LargeObjectCreate` itself), so this seam does no OID allocation; it just
     /// builds `values[]` (`oid = loid`, `lomowner = lomowner`) and, when
     /// `lomacl == None`, sets `nulls[Anum_pg_largeobject_metadata_lomacl - 1] =
-    /// true`. The `lomacl` varlena (`Acl *` = `ArrayType`) crosses unchanged.
-    /// `Err` carries the heap/index-mutation `ereport(ERROR)`s.
+    /// true`. The `lomacl` varlena (`Acl *`) crosses as its full on-disk
+    /// `aclitem[]` image. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_largeobject_metadata(
         rel: &RelationData<'_>,
         loid: Oid,
         lomowner: Oid,
-        lomacl: Option<types_array::ArrayType>,
+        lomacl: Option<&[u8]>,
     ) -> PgResult<()>
 );
 

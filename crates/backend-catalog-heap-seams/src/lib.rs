@@ -339,16 +339,16 @@ seam_core::seam!(
     /// Tuple data is taken from `new_rel_desc->rd_rel` plus the write-only
     /// columns (`write`) that `AddNewRelationTuple` scribbles on `rd_rel` but
     /// the trimmed relcache `FormData_pg_class` does not carry. The C `Datum
-    /// relacl` / `Datum reloptions` cross as `Option<ArrayType>` / `Option<Vec<u8>>`
-    /// (`None` is the C `(Datum) 0` → SQL NULL). Can `ereport(ERROR)`, carried
-    /// on `Err`.
+    /// relacl` crosses as the full on-disk `aclitem[]` varlena image
+    /// (`Option<&[u8]>`); `Datum reloptions` as `Option<Vec<u8>>` (`None` is
+    /// the C `(Datum) 0` → SQL NULL). Can `ereport(ERROR)`, carried on `Err`.
     pub fn InsertPgClassTuple<'mcx>(
         mcx: Mcx<'mcx>,
         pg_class_desc: &Relation<'mcx>,
         new_rel_desc: &Relation<'mcx>,
         new_rel_oid: Oid,
         write: &PgClassWriteFields,
-        relacl: Option<types_array::ArrayType>,
+        relacl: Option<&[u8]>,
         reloptions: Option<std::vec::Vec<u8>>,
     ) -> PgResult<()>
 );

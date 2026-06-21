@@ -12,7 +12,6 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use types_array::ArrayType;
 use types_core::primitive::{InvalidOid, Oid};
 
 /* ==========================================================================
@@ -210,8 +209,9 @@ pub struct PgTypeInsertRow {
     pub typdefaultbin: Option<String>,
     /// `typdefault` — the human-readable default value text.
     pub typdefault: Option<String>,
-    /// `typacl` — the `aclitem[]` ACL array (`Acl *`).
-    pub typacl: Option<ArrayType>,
+    /// `typacl` — the `aclitem[]` ACL array (`Acl *`), as its full on-disk
+    /// varlena image (`None` ≡ SQL NULL).
+    pub typacl: Option<alloc::vec::Vec<u8>>,
 }
 
 /// `setconfig`-style decode of the `Acl *` typacl, plus the `defaultTypeBin`
@@ -223,8 +223,8 @@ pub struct TypeTupleExtras {
     /// when the column is SQL NULL.
     pub typdefaultbin: Option<String>,
     /// `DatumGetAclPCopy(heap_getattr(typeTuple, Anum_pg_type_typacl))`, or
-    /// `None` when the column is SQL NULL.
-    pub typacl: Option<ArrayType>,
+    /// `None` when the column is SQL NULL. Full on-disk varlena image.
+    pub typacl: Option<alloc::vec::Vec<u8>>,
 }
 
 /// `TypeCreateParams` and the helpers compute the same `Vec`-free fixed

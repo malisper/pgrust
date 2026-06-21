@@ -5608,6 +5608,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-storage",
+ "types-tuple",
 ]
 
 [[package]]

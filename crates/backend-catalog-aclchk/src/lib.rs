@@ -36,8 +36,8 @@ use types_acl::{
     ACL_EXECUTE, ACL_INSERT, ACL_MAINTAIN, ACL_NO_RIGHTS, ACL_REFERENCES, ACL_SELECT, ACL_SET,
     ACL_TRIGGER, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
-use types_array::ArrayType;
 use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use types_tuple::backend_access_common_heaptuple::Datum as TupDatum;
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA,
@@ -1071,36 +1071,33 @@ fn scan_owner_for_catalog(mcx: Mcx<'_>, classid: Oid, objectid: Oid) -> PgResult
 /* ===========================================================================
  * get_default_acl_internal / get_user_default_acl (aclchk.c)
  *
- * Bounded to the EMPTY pg_default_acl case (a fresh cluster with no
- * `ALTER DEFAULT PRIVILEGES`): both `DEFACLROLENSPOBJ` lookups MISS, so
- * `get_user_default_acl` returns `None` and the caller falls back to the
- * owner's hard-wired implicit default. The non-empty path (decode the
- * `defaclacl` aclitem[] + merge hard-wired defaults) stays a loud panic until
- * a real `Acl` (aclitem[]) carrier crosses the seam — unreached until
- * `ALTER DEFAULT PRIVILEGES` is run.
+ * Full port: looks up the per-role/per-schema `pg_default_acl` entries
+ * established by `ALTER DEFAULT PRIVILEGES`, merges them with the hard-wired
+ * implicit default, and returns the on-disk `aclitem[]` varlena `Datum` to
+ * apply to a newly-created object (or `None` when the built-in default should
+ * be used).
  *
- * `recordDependencyOnNewAcl` is reachable only when `get_user_default_acl`
- * returns a non-NULL ACL, so it stays NOT-installed for now (the empty case
- * never records dependencies).
+ * `recordDependencyOnNewAcl` records `pg_shdepend` dependencies on every role
+ * mentioned in that ACL.
  *
  * has_createrole_privilege / has_bypassrls_privilege are already ported and
  * installed by `backend-utils-adt-acl` (role_membership.rs); not re-ported here.
  * ========================================================================= */
 
 /// `get_default_acl_internal(roleId, nsp_oid, objtype)` (aclchk.c): fetch the
-/// `pg_default_acl` entry for the given role, namespace and object type.
-/// Returns `None` when no such entry exists.
-///
-/// Bounded to the cache-MISS (empty-catalog) case: a hit decodes the
-/// `defaclacl` aclitem[] column, which has no value-shaped carrier across the
-/// seam yet, so a hit panics loudly.
+/// `pg_default_acl` entry for the given role, namespace and object type,
+/// decoding its `defaclacl` aclitem[] column. Returns `None` when no such entry
+/// exists (or the column is SQL-NULL).
 fn get_default_acl_internal<'mcx>(
     mcx: Mcx<'mcx>,
     role_id: Oid,
     nsp_oid: Oid,
     objtype: i8,
-) -> PgResult<Option<ArrayType>> {
-    use backend_utils_cache_syscache::{SearchSysCache3, DEFACLROLENSPOBJ};
+) -> PgResult<Option<&'mcx [AclItem]>> {
+    use backend_catalog_objectaddress::consts::Anum_pg_default_acl_defaclacl;
+    use backend_utils_cache_syscache::{
+        ReleaseSysCache, SearchSysCache3, SysCacheGetAttr, DEFACLROLENSPOBJ,
+    };
     use types_cache::SysCacheKey;
     use types_datum::Datum as KeyDatum;
 
@@ -1112,15 +1109,36 @@ fn get_default_acl_internal<'mcx>(
         SysCacheKey::Value(KeyDatum::from_char(objtype)),
     )?;
 
-    match tuple {
-        None => Ok(None),
-        Some(_) => panic!(
-            "get_default_acl_internal: non-empty pg_default_acl entry \
-             (role={role_id:?} nsp={nsp_oid:?} objtype={objtype}) — decoding the \
-             defaclacl aclitem[] column is not yet supported (run only without \
-             ALTER DEFAULT PRIVILEGES)"
-        ),
-    }
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    // aclDatum = SysCacheGetAttr(DEFACLROLENSPOBJ, tuple,
+    //                            Anum_pg_default_acl_defaclacl, &isNull);
+    // if (!isNull) result = DatumGetAclPCopy(aclDatum);
+    let (acl_datum, is_null) = SysCacheGetAttr(
+        mcx,
+        DEFACLROLENSPOBJ,
+        &tup,
+        Anum_pg_default_acl_defaclacl as i32,
+    )?;
+    let result = if is_null {
+        None
+    } else {
+        let raw = match &acl_datum {
+            TupDatum::ByRef(b) => &b[..],
+            _ => {
+                ReleaseSysCache(tup);
+                return Err(PgError::error(
+                    "get_default_acl_internal: defaclacl column is not a varlena",
+                ));
+            }
+        };
+        Some(&*grant_exec::decode_acl(mcx, raw)?)
+    };
+
+    ReleaseSysCache(tup);
+    Ok(result)
 }
 
 /// `get_user_default_acl(objtype, ownerId, nsp_oid)` (aclchk.c): default
@@ -1132,11 +1150,13 @@ pub fn get_user_default_acl<'mcx>(
     objtype: ObjectType,
     owner_id: Oid,
     nsp_oid: Oid,
-) -> PgResult<Option<ArrayType>> {
+) -> PgResult<Option<TupDatum<'mcx>>> {
     use backend_catalog_objectaddress::consts::{
         DEFACLOBJ_FUNCTION, DEFACLOBJ_LARGEOBJECT, DEFACLOBJ_NAMESPACE, DEFACLOBJ_RELATION,
         DEFACLOBJ_SEQUENCE, DEFACLOBJ_TYPE,
     };
+    use backend_utils_adt_acl::acl_ops::{aclequal, aclitemsort, aclmerge};
+    use backend_utils_adt_acl::acldefault::acldefault;
 
     // Use NULL during bootstrap, since pg_default_acl probably isn't there yet.
     if backend_utils_init_miscinit_seams::is_bootstrap_processing_mode::call() {
@@ -1158,20 +1178,33 @@ pub fn get_user_default_acl<'mcx>(
     let glob_acl = get_default_acl_internal(mcx, owner_id, InvalidOid, defaclobjtype)?;
     let schema_acl = get_default_acl_internal(mcx, owner_id, nsp_oid, defaclobjtype)?;
 
-    // Quick out if neither entry exists — the empty-catalog fast path.
+    // Quick out if neither entry exists.
     if glob_acl.is_none() && schema_acl.is_none() {
         return Ok(None);
     }
 
-    // The merge path (substitute hard-wired default, aclmerge, aclitemsort,
-    // aclequal-vs-default quick-out) requires a real Acl (aclitem[]) carrier
-    // across the seam; unreached on a fresh cluster.
-    panic!(
-        "get_user_default_acl: a pg_default_acl entry exists \
-         (objtype={objtype:?} owner={owner_id:?} nsp={nsp_oid:?}) — merging \
-         per-schema/global default ACLs is not yet supported (run only without \
-         ALTER DEFAULT PRIVILEGES)"
-    );
+    // We need to know the hard-wired default value, too.
+    let def_acl: &[AclItem] = acldefault(mcx, objtype, owner_id)?;
+
+    // If there's no global entry, substitute the hard-wired default. A missing
+    // per-schema entry is the empty ACL, the NULL equivalent for `aclmerge`.
+    let glob_acl: &[AclItem] = glob_acl.unwrap_or(def_acl);
+    let schema_acl: &[AclItem] = schema_acl.unwrap_or(&[]);
+
+    // Merge in any per-schema privileges.
+    let result: &mut [AclItem] = aclmerge(mcx, glob_acl, schema_acl, owner_id)?;
+
+    // For efficiency, we want to return None if the result equals default.
+    // This requires sorting both arrays to get an accurate comparison.
+    aclitemsort(result);
+    // Sort a private copy of the default so callers that share it are unaffected.
+    let mut def_sorted: mcx::PgVec<AclItem> = mcx::slice_in(mcx, def_acl)?;
+    aclitemsort(&mut def_sorted);
+    if aclequal(result, &def_sorted) {
+        return Ok(None);
+    }
+
+    Ok(Some(grant_exec::acl_to_datum(mcx, result)?))
 }
 
 /* ===========================================================================
@@ -1483,12 +1516,10 @@ pub fn init_seams() {
         grant_exec::acl_change_owner_datum(mcx, acl_on_disk, old_owner, new_owner)
     });
 
-    // get_user_default_acl: bounded to the empty pg_default_acl fast path
-    // (returns None on a fresh cluster; a non-empty entry panics until a real
-    // Acl carrier crosses the seam).
-    seam::get_user_default_acl::set(|objtype, owner_id, nsp_oid| {
-        let ctx = MemoryContext::new("get_user_default_acl");
-        get_user_default_acl(ctx.mcx(), objtype, owner_id, nsp_oid)
+    // get_user_default_acl: full default-ACL lookup/merge; the result carries
+    // the on-disk aclitem[] varlena Datum in the caller's `mcx`.
+    seam::get_user_default_acl::set(|mcx, objtype, owner_id, nsp_oid| {
+        get_user_default_acl(mcx, objtype, owner_id, nsp_oid)
     });
 
     // `recordDependencyOnNewAcl(classId, objectId, objsubId, ownerId, acl)`
@@ -1503,30 +1534,42 @@ pub fn init_seams() {
     // The `acl == NULL` fast path is the common case (a plain CREATE TABLE /
     // CREATE TYPE with no `ALTER DEFAULT PRIVILEGES` in force): the object is
     // created with a defaulted (NULL stored) ACL, so there is nothing to record.
-    // That path is ported faithfully and is what CREATE TABLE exercises.
-    //
-    // The non-NULL branch needs to walk the `aclitem[]` payload via
-    // `aclmembers`, but the model's `ArrayType` carrier (types-array) is the
-    // fixed varlena *header* only and carries no inline aclitem payload — the
-    // same Acl-carrier gap that holds `get_user_default_acl`'s non-empty path at
-    // a loud panic. No ACL with a payload can currently cross this seam (the
-    // sole producer, `get_user_default_acl`, only ever yields `None`), so the
-    // branch is unreachable; it surfaces a precise error rather than silently
-    // skipping the dependency bookkeeping if a payload-bearing Acl is ever wired.
     seam::record_dependency_on_new_acl::set(
-        |_class_id, _object_id, _objsub_id, _owner_id, acl| {
-            match acl {
-                // C: `if (acl == NULL) return;`
-                None => Ok(()),
-                Some(_acl) => Err(ereport(types_error::error::ERROR)
-                    .errmsg_internal(
-                        "recordDependencyOnNewAcl: non-defaulted ACL needs the \
-                         aclitem[] payload carrier (Acl-array keystone, shared \
-                         with get_user_default_acl's non-empty path)"
-                            .to_string(),
-                    )
-                    .into_error()),
+        |mcx, class_id, object_id, objsub_id, owner_id, acl| {
+            // C: `if (acl == NULL) return;`
+            let Some(acl) = acl else {
+                return Ok(());
+            };
+            let raw = match &acl {
+                TupDatum::ByRef(b) => &b[..],
+                _ => {
+                    return Err(PgError::error(
+                        "recordDependencyOnNewAcl: ACL is not a varlena",
+                    ))
+                }
+            };
+            let items = grant_exec::decode_acl(mcx, raw)?;
+
+            // nmembers = aclmembers(acl, &members);
+            let members = backend_utils_adt_acl::acl_ops::aclmembers(mcx, items)?;
+            let mut new_members: mcx::PgVec<Oid> =
+                mcx::vec_with_capacity_in(mcx, members.len())?;
+            for m in members.iter() {
+                new_members.push(*m);
             }
+            let old_members: mcx::PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+
+            // updateAclDependencies(classId, objectId, objsubId, ownerId,
+            //                       0, NULL, nmembers, members);
+            backend_catalog_pg_shdepend_seams::updateAclDependencies::call(
+                mcx,
+                class_id,
+                object_id,
+                objsub_id,
+                owner_id,
+                old_members,
+                new_members,
+            )
         },
     );
 

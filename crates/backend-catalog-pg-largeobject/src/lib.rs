@@ -157,7 +157,11 @@ pub fn LargeObjectCreate(loid: Oid) -> PgResult<Oid> {
         )?;
     }
     ownerId = get_user_id::call();
-    let lomacl = get_user_default_acl::call(ObjectType::Largeobject, ownerId, types_core::primitive::InvalidOid)?;
+    let lomacl = get_user_default_acl::call(mcx, ObjectType::Largeobject, ownerId, types_core::primitive::InvalidOid)?;
+    let lomacl_bytes: Option<&[u8]> = match &lomacl {
+        Some(types_tuple::backend_access_common_heaptuple::Datum::ByRef(b)) => Some(&b[..]),
+        _ => None,
+    };
 
     // values[Anum_pg_largeobject_metadata_oid - 1] = ObjectIdGetDatum(loid_new);
     // values[Anum_pg_largeobject_metadata_lomowner - 1] = ObjectIdGetDatum(ownerId);
@@ -174,14 +178,14 @@ pub fn LargeObjectCreate(loid: Oid) -> PgResult<Oid> {
         &pg_lo_meta,
         loid_new,
         ownerId,
-        lomacl.clone(),
+        lomacl_bytes,
     )?;
 
     pg_lo_meta.close(RowExclusiveLock)?;
 
     /* dependencies on roles mentioned in default ACL */
     // recordDependencyOnNewAcl(LargeObjectRelationId, loid_new, 0, ownerId, lomacl);
-    record_dependency_on_new_acl::call(LargeObjectRelationId, loid_new, 0, ownerId, lomacl)?;
+    record_dependency_on_new_acl::call(mcx, LargeObjectRelationId, loid_new, 0, ownerId, lomacl)?;
 
     Ok(loid_new)
 }

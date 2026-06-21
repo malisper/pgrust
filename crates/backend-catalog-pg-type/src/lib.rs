@@ -305,17 +305,21 @@ pub fn TypeCreate(params: TypeCreateParams) -> PgResult<ObjectAddress> {
     let mut fields = type_create_fields(&params);
     fields.typname = namestrcpy(&params.type_name);
 
+    let ctx = MemoryContext::new("TypeCreate");
+    let mcx = ctx.mcx();
+
     /*
      * Initialize the type's ACL.  Dependent types don't get one.
      */
-    let typacl: Option<ArrayType> = if isDependentType {
+    let typacl: Option<types_tuple::backend_access_common_heaptuple::Datum> = if isDependentType {
         None
     } else {
-        get_user_default_acl::call(OBJECT_TYPE, params.owner_id, params.type_namespace)?
+        get_user_default_acl::call(mcx, OBJECT_TYPE, params.owner_id, params.type_namespace)?
     };
-
-    let ctx = MemoryContext::new("TypeCreate");
-    let mcx = ctx.mcx();
+    let typacl_bytes: Option<Vec<u8>> = match &typacl {
+        Some(types_tuple::backend_access_common_heaptuple::Datum::ByRef(b)) => Some(b[..].to_vec()),
+        _ => None,
+    };
 
     /*
      * open pg_type and prepare to insert or update a row.  (Update will not
@@ -364,7 +368,7 @@ pub fn TypeCreate(params: TypeCreateParams) -> PgResult<ObjectAddress> {
         fields.oid = typeObjectId;
 
         /* Okay to update existing shell type tuple (replaces all but oid). */
-        let row = build_insert_row(&params, fields.clone(), &typacl)?;
+        let row = build_insert_row(&params, fields.clone(), &typacl_bytes)?;
         indexing_seams::catalog_tuple_update_pg_type::call(&pg_type_desc, &row)?;
 
         rebuildDeps = true; /* get rid of shell type's dependencies */
@@ -390,7 +394,7 @@ pub fn TypeCreate(params: TypeCreateParams) -> PgResult<ObjectAddress> {
 
         fields.oid = typeObjectId;
 
-        let row = build_insert_row(&params, fields.clone(), &typacl)?;
+        let row = build_insert_row(&params, fields.clone(), &typacl_bytes)?;
         indexing_seams::catalog_tuple_insert_pg_type::call(&pg_type_desc, &row)?;
     }
 
@@ -400,7 +404,7 @@ pub fn TypeCreate(params: TypeCreateParams) -> PgResult<ObjectAddress> {
             mcx,
             &fields,
             params.default_type_bin.clone(),
-            typacl.clone(),
+            typacl,
             params.relation_kind,
             params.is_implicit_array,
             isDependentType,
@@ -434,7 +438,7 @@ fn invalid_byval_alignment(alignment: i8, internal_size: i16) -> types_error::Pg
 fn build_insert_row(
     params: &TypeCreateParams,
     fields: TypeFormFields,
-    typacl: &Option<ArrayType>,
+    typacl: &Option<Vec<u8>>,
 ) -> PgResult<PgTypeInsertRow> {
     Ok(PgTypeInsertRow {
         fields,
@@ -452,11 +456,11 @@ fn build_insert_row(
 /// `GenerateTypeDependencies(...)` (pg_type.c:556-753), value-typed: the formed
 /// `pg_type` row crosses as [`TypeFormFields`]; `default_expr_bin` is the cooked
 /// default's `nodeToString` text (`None` = SQL NULL); `typacl` the ACL array.
-fn generate_type_dependencies(
-    mcx: mcx::Mcx<'_>,
+fn generate_type_dependencies<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
     typeForm: &TypeFormFields,
     default_expr_bin: Option<String>,
-    typacl: Option<ArrayType>,
+    typacl: Option<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
     relationKind: i8,
     isImplicitArray: bool,
     isDependentType: bool,
@@ -487,6 +491,7 @@ fn generate_type_dependencies(
     if !isDependentType {
         recordDependencyOnOwner(TypeRelationId, typeObjectId, typeForm.typowner)?;
         record_dependency_on_new_acl::call(
+            mcx,
             TypeRelationId,
             typeObjectId,
             0,
@@ -1109,8 +1114,15 @@ pub fn init_seams() {
     s::generate_type_dependencies::set(
         |type_form, default_expr_bin, typacl, relation_kind, is_implicit_array, is_dependent_type, make_extension_dep, rebuild| {
             let ctx = MemoryContext::new("GenerateTypeDependencies");
+            let mcx = ctx.mcx();
+            let typacl = match typacl {
+                Some(image) => Some(types_tuple::backend_access_common_heaptuple::Datum::ByRef(
+                    mcx::slice_in(mcx, &image)?,
+                )),
+                None => None,
+            };
             generate_type_dependencies(
-                ctx.mcx(),
+                mcx,
                 &type_form,
                 default_expr_bin,
                 typacl,

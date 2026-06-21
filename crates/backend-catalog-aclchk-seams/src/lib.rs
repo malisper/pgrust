@@ -5,7 +5,6 @@
 //! then a call panics loudly.
 
 use types_acl::{AclMaskHow, AclMode, AclResult};
-use types_array::ArrayType;
 use types_core::Oid;
 use types_error::PgResult;
 use types_nodes::parsenodes::ObjectType;
@@ -231,11 +230,12 @@ seam_core::seam!(
     /// (no applicable `pg_default_acl` entry — the common case). The `Acl` is
     /// a varlena `aclitem[]` array (`ArrayType`). Can `ereport(ERROR)`,
     /// carried on `Err`.
-    pub fn get_user_default_acl(
+    pub fn get_user_default_acl<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         objtype: ObjectType,
         owner_id: Oid,
         nsp_oid: Oid,
-    ) -> PgResult<Option<ArrayType>>
+    ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>>
 );
 
 seam_core::seam!(
@@ -243,12 +243,13 @@ seam_core::seam!(
     /// (aclchk.c): record `pg_shdepend` dependencies on every role mentioned
     /// in a freshly-created object's ACL. `acl == None` is the C `acl == NULL`
     /// fast path (nothing to record). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn record_dependency_on_new_acl(
+    pub fn record_dependency_on_new_acl<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
         class_id: Oid,
         object_id: Oid,
         objsub_id: i32,
         owner_id: Oid,
-        acl: Option<ArrayType>,
+        acl: Option<types_tuple::backend_access_common_heaptuple::Datum<'mcx>>,
     ) -> PgResult<()>
 );
 

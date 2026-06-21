@@ -43,19 +43,6 @@ use crate::{
     TYPTYPE_BASE_C, TYPTYPE_COMPOSITE_C, CheckAttributeNamesTypes,
 };
 
-/// The on-disk varlena header bytes of an `ArrayType` (the repo's `ArrayType`
-/// is exactly the 16-byte `{vl_len_, ndim, dataoffset, elemtype}` header; the
-/// catalog producers store array-typed columns at header fidelity — mirroring
-/// `backend-catalog-indexing`'s `arraytype_header_bytes`).
-fn arraytype_header_bytes(arr: &types_array::ArrayType) -> [u8; 16] {
-    let mut out = [0u8; 16];
-    out[0..4].copy_from_slice(&arr.vl_len_.to_ne_bytes());
-    out[4..8].copy_from_slice(&arr.ndim.to_ne_bytes());
-    out[8..12].copy_from_slice(&arr.dataoffset.to_ne_bytes());
-    out[12..16].copy_from_slice(&arr.elemtype.to_ne_bytes());
-    out
-}
-
 /// `ObjectAddressSet(object, classId, objectId)` (objectaddress.h).
 fn object_address(class_id: Oid, object_id: Oid) -> ObjectAddress {
     ObjectAddress {
@@ -104,16 +91,14 @@ pub fn InsertPgClassTuple<'mcx>(
     new_rel_desc: &Relation<'mcx>,
     new_rel_oid: Oid,
     write: &PgClassWriteFields,
-    relacl: Option<types_array::ArrayType>,
+    relacl: Option<&[u8]>,
     reloptions: Option<Vec<u8>>,
 ) -> PgResult<()> {
     let rd_rel = &new_rel_desc.rd_rel;
 
-    // C: `if (relacl != (Datum) 0) values[relacl] = relacl`. The repo's
-    // `ArrayType` is the 16-byte on-disk varlena header (the element payload is
-    // modeled at header fidelity by the catalog producers — same level as
-    // pg_namespace.nspacl / pg_type.typacl). `None` ⇒ SQL NULL.
-    let relacl: Option<Vec<u8>> = relacl.map(|arr| arraytype_header_bytes(&arr).to_vec());
+    // C: `if (relacl != (Datum) 0) values[relacl] = relacl`. The full on-disk
+    // `aclitem[]` varlena image is stored verbatim. `None` ⇒ SQL NULL.
+    let relacl: Option<Vec<u8>> = relacl.map(|image| image.to_vec());
 
     let row = PgClassInsertRow {
         oid: new_rel_oid,
@@ -181,7 +166,7 @@ pub fn AddNewRelationTuple<'mcx>(
     relfrozenxid: TransactionId,
     relminmxid: u32,
     relrewrite: Oid,
-    relacl: Option<types_array::ArrayType>,
+    relacl: Option<&[u8]>,
     reloptions: Option<Vec<u8>>,
 ) -> PgResult<()> {
     /*
@@ -596,7 +581,7 @@ pub fn heap_create_with_catalog<'mcx>(
     /*
      * Determine the relation's initial permissions.
      */
-    let relacl: Option<types_array::ArrayType> = if use_user_acl {
+    let relacl: Option<types_tuple::backend_access_common_heaptuple::Datum<'mcx>> = if use_user_acl {
         match relkind {
             x if x == RELKIND_RELATION
                 || x == RELKIND_VIEW
@@ -605,12 +590,14 @@ pub fn heap_create_with_catalog<'mcx>(
                 || x == RELKIND_PARTITIONED_TABLE =>
             {
                 backend_catalog_aclchk_seams::get_user_default_acl::call(
+                    mcx,
                     ObjectType::Table,
                     ownerid,
                     relnamespace,
                 )?
             }
             x if x == RELKIND_SEQUENCE => backend_catalog_aclchk_seams::get_user_default_acl::call(
+                mcx,
                 ObjectType::Sequence,
                 ownerid,
                 relnamespace,
@@ -619,6 +606,10 @@ pub fn heap_create_with_catalog<'mcx>(
         }
     } else {
         None
+    };
+    let relacl_bytes: Option<&[u8]> = match &relacl {
+        Some(types_tuple::backend_access_common_heaptuple::Datum::ByRef(b)) => Some(&b[..]),
+        _ => None,
     };
 
     /*
@@ -742,7 +733,7 @@ pub fn heap_create_with_catalog<'mcx>(
         relfrozenxid,
         relminmxid,
         relrewrite,
-        relacl,
+        relacl_bytes,
         reloptions,
     )?;
 
@@ -769,6 +760,7 @@ pub fn heap_create_with_catalog<'mcx>(
         )?;
 
         backend_catalog_aclchk_seams::record_dependency_on_new_acl::call(
+            mcx,
             RelationRelationId,
             relid,
             0,

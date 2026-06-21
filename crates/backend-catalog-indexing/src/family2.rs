@@ -144,18 +144,6 @@ fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>>
     Ok(Datum::ByRef(buf))
 }
 
-/// The on-disk varlena header bytes of an `ArrayType` (the repo's `ArrayType`
-/// expresses only the 16-byte header; the element payload follows out of line
-/// in C). Used for the `pg_type.typacl` column, whose carrier is the header.
-fn arraytype_header_bytes(arr: &types_array::ArrayType) -> [u8; 16] {
-    let mut b = [0u8; 16];
-    b[0..4].copy_from_slice(&arr.vl_len_.to_ne_bytes());
-    b[4..8].copy_from_slice(&arr.ndim.to_ne_bytes());
-    b[8..12].copy_from_slice(&arr.dataoffset.to_ne_bytes());
-    b[12..16].copy_from_slice(&arr.elemtype.to_ne_bytes());
-    b
-}
-
 /// Build a 1-D, no-nulls array varlena image directly from per-element on-disk
 /// byte slices (the faithful manual rendering of `construct_md_array`'s layout,
 /// avoiding the repo's Datum-pointer-forge element lane, which routes by-ref
@@ -1866,13 +1854,11 @@ fn type_values<'mcx>(
         }
     }
     match &row.typacl {
-        // `typacl` (`Acl *` = `ArrayType`) crosses as its on-disk array header
-        // (`types_array::ArrayType` is the 16-byte varlena header; the element
-        // payload follows out of line as in C). On the `TypeCreate` path this is
-        // either NULL (the common case — `isDependentType`, or
-        // `get_user_default_acl()` returned NULL) or a default ACL; serialize the
-        // carried header bytes verbatim.
-        Some(arr) => values.push(Datum::ByRef(mcx::slice_in(mcx, &arraytype_header_bytes(arr))?)),
+        // `typacl` (`Acl *`) crosses as its full on-disk `aclitem[]` varlena
+        // image. On the `TypeCreate` path this is either NULL (the common case —
+        // `isDependentType`, or `get_user_default_acl()` returned NULL) or a
+        // default ACL from `ALTER DEFAULT PRIVILEGES`; serialize the bytes verbatim.
+        Some(image) => values.push(Datum::ByRef(mcx::slice_in(mcx, image)?)),
         None => {
             values.push(Datum::null());
             nulls[(pt::Anum_pg_type_typacl - 1) as usize] = true;
@@ -2210,7 +2196,7 @@ fn insert_pg_namespace(
     rel: &RelationData<'_>,
     nspname: &str,
     nspowner: Oid,
-    nspacl: Option<types_array::ArrayType>,
+    nspacl: Option<&[u8]>,
 ) -> PgResult<Oid> {
     let ctx = MemoryContext::new("insert_pg_namespace");
     let mcx = ctx.mcx();
@@ -2236,10 +2222,10 @@ fn insert_pg_namespace(
     values[(ANUM_PG_NAMESPACE_NSPOWNER - 1) as usize] = Datum::from_oid(nspowner);
     // if (nspacl != NULL) values[..nspacl] = PointerGetDatum(nspacl);
     // else nulls[Anum_pg_namespace_nspacl - 1] = true;
-    match &nspacl {
-        Some(acl) => {
+    match nspacl {
+        Some(image) => {
             values[(ANUM_PG_NAMESPACE_NSPACL - 1) as usize] =
-                Datum::ByRef(mcx::slice_in(mcx, &arraytype_header_bytes(acl))?)
+                Datum::ByRef(mcx::slice_in(mcx, image)?)
         }
         None => nulls[(ANUM_PG_NAMESPACE_NSPACL - 1) as usize] = true,
     }
@@ -2853,7 +2839,7 @@ fn catalog_tuple_insert_pg_largeobject_metadata(
     rel: &RelationData<'_>,
     loid: Oid,
     lomowner: Oid,
-    lomacl: Option<types_array::ArrayType>,
+    lomacl: Option<&[u8]>,
 ) -> PgResult<()> {
     use cat::catalog::{
         ANUM_PG_LARGEOBJECT_METADATA_LOMACL, ANUM_PG_LARGEOBJECT_METADATA_LOMOWNER,
@@ -2875,10 +2861,10 @@ fn catalog_tuple_insert_pg_largeobject_metadata(
     values[(ANUM_PG_LARGEOBJECT_METADATA_LOMOWNER - 1) as usize] = Datum::from_oid(lomowner);
     // if (lomacl != NULL) values[..lomacl] = PointerGetDatum(lomacl);
     // else nulls[Anum_pg_largeobject_metadata_lomacl - 1] = true;
-    match &lomacl {
-        Some(acl) => {
+    match lomacl {
+        Some(image) => {
             values[(ANUM_PG_LARGEOBJECT_METADATA_LOMACL - 1) as usize] =
-                Datum::ByRef(mcx::slice_in(mcx, &arraytype_header_bytes(acl))?)
+                Datum::ByRef(mcx::slice_in(mcx, image)?)
         }
         None => nulls[(ANUM_PG_LARGEOBJECT_METADATA_LOMACL - 1) as usize] = true,
     }

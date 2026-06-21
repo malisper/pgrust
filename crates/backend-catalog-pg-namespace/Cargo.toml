@@ -16,6 +16,7 @@ types-error = { path = "../types-error" }
 types-catalog = { path = "../types-catalog" }
 types-nodes = { path = "../types-nodes" }
 types-storage = { path = "../types-storage" }
+types-tuple = { path = "../types-tuple" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-catalog-pg-namespace-seams = { path = "../backend-catalog-pg-namespace-seams" }

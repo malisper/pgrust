@@ -13,7 +13,6 @@
 
 #![allow(non_snake_case)]
 
-use types_array::ArrayType;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_catalog::pg_type::{TypeCreateParams, TypeFormFields};
 use types_core::Oid;
@@ -42,7 +41,7 @@ seam_core::seam!(
     pub fn generate_type_dependencies(
         type_form: TypeFormFields,
         default_expr_bin: Option<String>,
-        typacl: Option<ArrayType>,
+        typacl: Option<std::vec::Vec<u8>>,
         relation_kind: i8,
         is_implicit_array: bool,
         is_dependent_type: bool,

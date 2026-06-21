@@ -981,38 +981,18 @@ fn proc_values_nulls<'mcx>(
         }
         None => nulls[(pp::Anum_pg_proc_proconfig - 1) as usize] = true,
     }
-    // proacl (pg_proc.c:599-602) — set on the insert path with a default ACL.
-    // The shared `types_array::ArrayType` carrier is the 16-byte varlena header
-    // only (no `aclitem[]` data area — see backend-catalog-aclchk, the
-    // `get_user_default_acl` owner, which is itself mirror-and-panic until a
-    // real `Acl` carrier lands), so the column image is the framed header. This
-    // path is only reached once `get_user_default_acl` returns a real value,
-    // which the ACL-carrier keystone delivers together with the widened
-    // `ArrayType`; until then the producer panics and `proacl` is always None.
+    // proacl (pg_proc.c:599-602) — set on the insert path with a default ACL
+    // from `ALTER DEFAULT PRIVILEGES` (`get_user_default_acl`); carried as the
+    // full on-disk `aclitem[]` varlena image, NULL otherwise.
     match &row.proacl {
-        Some(acl) => {
+        Some(image) => {
             values[(pp::Anum_pg_proc_proacl - 1) as usize] =
-                Datum::ByRef(array_type_header_bytes(mcx, acl)?)
+                Datum::ByRef(mcx::slice_in(mcx, image)?)
         }
         None => nulls[(pp::Anum_pg_proc_proacl - 1) as usize] = true,
     }
 
     Ok((values, nulls))
-}
-
-/// Frame the (header-only) `types_array::ArrayType` varlena header into its
-/// 16-byte on-disk image. See the `proacl` note in [`proc_values_nulls`].
-fn array_type_header_bytes<'mcx>(
-    mcx: Mcx<'mcx>,
-    acl: &types_array::ArrayType,
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, 16)?;
-    buf.resize(16, 0u8);
-    buf[0..4].copy_from_slice(&acl.vl_len_.to_ne_bytes());
-    buf[4..8].copy_from_slice(&acl.ndim.to_ne_bytes());
-    buf[8..12].copy_from_slice(&acl.dataoffset.to_ne_bytes());
-    buf[12..16].copy_from_slice(&acl.elemtype.to_ne_bytes());
-    Ok(buf)
 }
 
 fn get_new_oid_pg_proc<'mcx>(rel: &Relation<'mcx>) -> PgResult<Oid> {
