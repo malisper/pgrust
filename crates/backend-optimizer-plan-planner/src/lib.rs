@@ -6091,12 +6091,27 @@ fn estimate_num_groups_for_gset<'mcx>(
     )
 }
 
+/// `PartitionwiseAggregateType` (pathnodes.h) — drives the partitionwise
+/// aggregation branching in `create_ordinary_grouping_paths` /
+/// `create_partitionwise_grouping_paths`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PartitionwiseAggregateType {
+    /// PARTITIONWISE_AGGREGATE_NONE — no partitionwise aggregation.
+    None,
+    /// PARTITIONWISE_AGGREGATE_FULL — full partitionwise aggregation (GROUP BY
+    /// includes the partition keys): aggregate each partition then Append.
+    Full,
+    /// PARTITIONWISE_AGGREGATE_PARTIAL — partial partitionwise aggregation:
+    /// partial-aggregate each partition, Append, then finalize.
+    Partial,
+}
+
 /// `create_grouping_paths(root, input_rel, target, target_parallel_safe, gd)`
 /// (planner.c:3779) — build a new upperrel containing Paths for grouping and/or
 /// aggregation. Restricted to the non-degenerate, non-grouping-sets,
-/// non-partitionwise, non-parallel cases reachable on this path: the sorted
-/// Agg / Group path over the cheapest input. Partial/partitionwise/degenerate
-/// legs loud-panic (they are gated out upstream or require unported machinery).
+/// non-parallel cases reachable on this path: the sorted Agg / Group path over
+/// the cheapest input, plus partitionwise aggregation when the input rel is
+/// partitioned. Parallel/partial-only legs loud-panic (gated out upstream).
 fn create_grouping_paths<'mcx>(
     mcx: Mcx<'mcx>,
     run: &mut PlannerRun<'mcx>,
@@ -6161,10 +6176,22 @@ fn create_grouping_paths<'mcx>(
         return Ok(grouped_rel);
     }
 
+    // Determine whether partitionwise aggregation is in theory possible. It can
+    // be disabled by the user, and for now we don't try to support grouping sets.
+    // create_ordinary_grouping_paths checks additional conditions, such as
+    // whether input_rel is partitioned (C:3864-3873).
+    let parent_patype = if backend_optimizer_path_costsize::ENABLE_PARTITIONWISE_AGGREGATE()
+        && !has_grouping_sets
+    {
+        PartitionwiseAggregateType::Full
+    } else {
+        PartitionwiseAggregateType::None
+    };
+
     // create_ordinary_grouping_paths(root, input_rel, grouped_rel, &agg_costs,
-    // gd, &extra, &partially_grouped_rel) (C:3875). The partitionwise /
-    // partial-agg / parallel legs require IS_PARTITIONED_REL(input_rel) or
-    // consider_parallel, both false here; they are skipped exactly as in C.
+    // gd, &extra, &partially_grouped_rel) (C:3875). For the top grouping rel the
+    // havingQual is parse->havingQual (no per-child translation), so the override
+    // is None.
     create_ordinary_grouping_paths(
         mcx,
         run,
@@ -6175,6 +6202,8 @@ fn create_grouping_paths<'mcx>(
         has_group_clause,
         has_aggs,
         gd,
+        parent_patype,
+        None,
     )?;
 
     // set_cheapest(grouped_rel) (C:3880).
@@ -6281,7 +6310,44 @@ fn create_ordinary_grouping_paths<'mcx>(
     has_group_clause: bool,
     has_aggs: bool,
     mut gd: Option<&mut GroupingSetsData<'mcx>>,
-) -> PgResult<()> {
+    // extra->patype: the partitionwise-aggregate type computed for the parent
+    // rel (FULL/NONE at the top; for a partitionwise child it is the parent's
+    // local patype, threaded down by create_partitionwise_grouping_paths).
+    parent_patype: PartitionwiseAggregateType,
+    // extra->havingQual: the HAVING qual to use for this rel. None means "read
+    // parse->havingQual" (the top rel); Some carries the per-child translated
+    // qual produced by adjust_appendrel_attrs in the partitionwise recursion.
+    having_qual_override: Option<&Expr>,
+) -> PgResult<Option<RelId>> {
+    // If this is the topmost grouping relation or if the parent relation is
+    // doing some form of partitionwise aggregation, then we may be able to do it
+    // at this level also.  However, if the input relation is not partitioned,
+    // partitionwise aggregate is impossible (C:4043-4073).
+    let mut patype = PartitionwiseAggregateType::None;
+    if parent_patype != PartitionwiseAggregateType::None
+        && is_partitioned_rel(root, input_rel)
+    {
+        // If this is the topmost relation or the parent is doing full
+        // partitionwise aggregation, we can do full partitionwise aggregation
+        // provided the GROUP BY clause contains all of the partitioning columns
+        // at this level (with matching collation). Otherwise at most partial.
+        // C checks parse->groupClause (not processed_groupClause) so a partition
+        // column proven redundant still counts. The port stores the resolvable
+        // SortGroupClause handles only in processed_groupClause; the two differ
+        // only when eval_const_expressions proved a partition key redundant
+        // (e.g. GROUP BY const), which the partitionwise tests don't exercise.
+        let group_clause = root.processed_groupClause.clone();
+        if parent_patype == PartitionwiseAggregateType::Full
+            && group_by_has_partkey(root, input_rel, &group_clause)?
+        {
+            patype = PartitionwiseAggregateType::Full;
+        } else if can_partial_agg(run, root) {
+            patype = PartitionwiseAggregateType::Partial;
+        } else {
+            patype = PartitionwiseAggregateType::None;
+        }
+    }
+
     // Compute the GROUPING_CAN_USE_{SORT,HASH} flags (C create_grouping_paths
     // 3812-3845). can_sort if any rollup is sortable or the processed_groupClause
     // is sortable; can_hash if there's a GROUP BY, no ordered aggs, and the
@@ -6315,17 +6381,21 @@ fn create_ordinary_grouping_paths<'mcx>(
 
     // Before generating paths for grouped_rel, generate any possible partially
     // grouped paths; that way, later code can easily consider both parallel and
-    // non-parallel approaches to grouping (C:4079). The partitionwise-partial
-    // force_rel_creation path requires IS_PARTITIONED_REL(input_rel); on this
-    // non-partitioned path patype == NONE so force_rel_creation = false.
+    // non-parallel approaches to grouping (C:4079). If we're doing partitionwise
+    // aggregation at this level, force creation of a partially_grouped_rel so we
+    // can add partitionwise paths to it (C:4082-4089).
     //
     // agg_partial_costs (AGGSPLIT_INITIAL_SERIAL) / agg_final_costs
     // (AGGSPLIT_FINAL_DESERIAL) correspond to extra->agg_partial_costs /
     // extra->agg_final_costs, computed lazily by create_partial_grouping_paths
     // (extra->partial_costs_set). We compute them here and thread both down.
     let mut partially_grouped_rel: Option<RelId> = None;
+    let mut agg_partial_costs_saved: Option<
+        backend_optimizer_util_pathnode_seams::AggClauseCostsLite,
+    > = None;
     let mut agg_final_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite> = None;
     if can_partial {
+        let force_rel_creation = patype == PartitionwiseAggregateType::Partial;
         let (agg_partial_costs, agg_final) = if run.resolve(root.parse).hasAggs {
             let mut p = types_pathnodes::AggClauseCosts::default();
             backend_optimizer_prep_prepagg::get_agg_clause_costs(
@@ -6347,6 +6417,7 @@ fn create_ordinary_grouping_paths<'mcx>(
             )
         };
         agg_final_costs = agg_final;
+        agg_partial_costs_saved = agg_partial_costs;
         partially_grouped_rel = create_partial_grouping_paths(
             mcx,
             run,
@@ -6357,8 +6428,39 @@ fn create_ordinary_grouping_paths<'mcx>(
             can_hash,
             agg_partial_costs,
             gd.as_deref_mut(),
-            /* force_rel_creation */ false,
+            force_rel_creation,
+            parent_patype,
+            having_qual_override,
         )?;
+    }
+
+    // Apply partitionwise aggregation technique, if possible (C:4104).
+    if patype != PartitionwiseAggregateType::None {
+        create_partitionwise_grouping_paths(
+            mcx,
+            run,
+            root,
+            input_rel,
+            grouped_rel,
+            partially_grouped_rel,
+            agg_costs,
+            agg_partial_costs_saved,
+            agg_final_costs,
+            gd.as_deref_mut(),
+            patype,
+            having_qual_override,
+        )?;
+    }
+
+    // If we are doing partial aggregation only, return (C:4109-4118). The parent
+    // will finalize the partially-grouped Append we just built.
+    if parent_patype == PartitionwiseAggregateType::Partial {
+        let pgr = partially_grouped_rel
+            .expect("create_ordinary_grouping_paths: PARTIAL parent without partially_grouped_rel");
+        if !root.rel(pgr).pathlist.is_empty() {
+            backend_optimizer_util_pathnode::set_cheapest(root, pgr)?;
+        }
+        return Ok(partially_grouped_rel);
     }
 
     // Gather any partially grouped partial paths (C:4121).
@@ -6389,6 +6491,7 @@ fn create_ordinary_grouping_paths<'mcx>(
         can_sort,
         can_hash,
         gd.as_deref_mut(),
+        having_qual_override,
     )?;
 
     // Give a helpful error if we failed to find any implementation (C:4141).
@@ -6397,6 +6500,352 @@ fn create_ordinary_grouping_paths<'mcx>(
             "could not implement GROUP BY",
         ));
     }
+    Ok(partially_grouped_rel)
+}
+
+/// `IS_PARTITIONED_REL(rel)` (pathnodes.h:1086): the rel has a partitioning
+/// scheme, partition bounds, live partition children, and is not a dummy rel.
+fn is_partitioned_rel(root: &PlannerInfo, rel: RelId) -> bool {
+    let r = root.rel(rel);
+    r.part_scheme.is_some()
+        && r.boundinfo.is_some()
+        && r.nparts > 0
+        && !r.part_rels.is_empty()
+        && !backend_optimizer_path_joinrels::is_dummy_rel(root, rel)
+}
+
+/// `make_grouping_rel(root, input_rel, target, target_parallel_safe, havingQual)`
+/// (planner.c:3893) — construct the upper grouping relation for `input_rel`. For
+/// the top grouping rel the relids set is NULL by tradition; for a partition
+/// child (IS_OTHER_REL) it is the child's relids and the rel is marked
+/// RELOPT_OTHER_UPPER_REL. The havingQual parallel-safety check folds into the
+/// consider_parallel computation; on this non-parallel path the child rels are
+/// never consider_parallel so it stays false.
+fn make_grouping_rel<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    input_rel: RelId,
+    target: Box<types_pathnodes::PathTarget>,
+    target_parallel_safe: bool,
+) -> PgResult<RelId> {
+    // IS_OTHER_REL(input_rel): an OTHER_MEMBER / OTHER_JOINREL / OTHER_UPPER rel.
+    let is_other_rel = matches!(
+        root.rel(input_rel).reloptkind,
+        types_pathnodes::RELOPT_OTHER_MEMBER_REL
+            | types_pathnodes::RELOPT_OTHER_JOINREL
+            | types_pathnodes::RELOPT_OTHER_UPPER_REL
+    );
+
+    let grouped_rel = if is_other_rel {
+        let relids = root.rel(input_rel).relids.clone();
+        let g = backend_optimizer_util_relnode::fetch_upper_rel(root, UPPERREL_GROUP_AGG, &relids);
+        root.rel_mut(g).reloptkind = types_pathnodes::RELOPT_OTHER_UPPER_REL;
+        g
+    } else {
+        backend_optimizer_util_relnode::fetch_upper_rel(root, UPPERREL_GROUP_AGG, &None)
+    };
+
+    // Set target.
+    root.rel_mut(grouped_rel).reltarget = Some(target);
+
+    // If the input relation is not parallel-safe, the grouped relation can't be
+    // either; otherwise it's parallel-safe if the target list and HAVING quals
+    // are parallel-safe. On this path is_parallel_safe(havingQual) folds into the
+    // target check and child input rels are not consider_parallel.
+    let input_cp = root.rel(input_rel).consider_parallel;
+    root.rel_mut(grouped_rel).consider_parallel = input_cp && target_parallel_safe;
+
+    // If the input rel belongs to a single FDW, so does the grouped rel.
+    let (serverid, userid, useridiscurrent, has_fdwroutine) = {
+        let ir = root.rel(input_rel);
+        (ir.serverid, ir.userid, ir.useridiscurrent, ir.has_fdwroutine)
+    };
+    {
+        let gr = root.rel_mut(grouped_rel);
+        gr.serverid = serverid;
+        gr.userid = userid;
+        gr.useridiscurrent = useridiscurrent;
+        gr.has_fdwroutine = has_fdwroutine;
+    }
+    let _ = run;
+    Ok(grouped_rel)
+}
+
+/// `group_by_has_partkey(input_rel, targetList, groupClause)` (planner.c:8207).
+/// Returns true if all the partition keys of `input_rel` are part of the GROUP
+/// BY clauses, including matching collation. `groupClause` is the raw
+/// `parse->groupClause` (SortGroupClause handles); the target list used to
+/// resolve sortgrouprefs is `root.processed_tlist` (equivalent to
+/// `parse->targetList` for the grouping columns, since sortgrouprefs are
+/// preserved).
+fn group_by_has_partkey(
+    root: &mut PlannerInfo,
+    input_rel: RelId,
+    group_clause: &[types_pathnodes::NodeId],
+) -> PgResult<bool> {
+    // groupexprs = get_sortgrouplist_exprs(groupClause, targetList).
+    let tlist = root.processed_tlist.clone();
+    let group_expr_ids: Vec<types_pathnodes::NodeId> = group_clause
+        .iter()
+        .map(|&sgc| {
+            backend_nodes_nodeFuncs_seams::get_sortgroupclause_expr::call(root, sgc, &tlist)
+        })
+        .collect();
+
+    // Rule out early if there are no partition keys present.
+    let partexprs = root.rel(input_rel).partexprs.clone();
+    if partexprs.is_empty() {
+        return Ok(false);
+    }
+
+    let part_scheme = root
+        .rel(input_rel)
+        .part_scheme
+        .clone()
+        .expect("group_by_has_partkey: input rel has no part_scheme");
+    let partnatts = part_scheme.partnatts as usize;
+
+    for cnt in 0..partnatts {
+        let this_partexprs = match partexprs.get(cnt) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let partcoll = *part_scheme
+            .partcollation
+            .get(cnt)
+            .expect("group_by_has_partkey: partcollation shorter than partnatts");
+        let mut found = false;
+
+        for &partexpr_id in this_partexprs.iter() {
+            let partexpr = root.node(partexpr_id).clone();
+
+            for &groupexpr_id in group_expr_ids.iter() {
+                // Note: we can assume there is at most one RelabelType node;
+                // eval_const_expressions() will have simplified if more than one.
+                let mut groupexpr = root.node(groupexpr_id).clone();
+                if let types_nodes::primnodes::Expr::RelabelType(rt) = &groupexpr {
+                    if let Some(arg) = rt.arg.as_deref() {
+                        groupexpr = arg.clone();
+                    }
+                }
+                let groupcoll =
+                    backend_nodes_nodeFuncs_seams::exprCollation::call(&groupexpr);
+
+                if backend_nodes_equalfuncs_seams::equal_expr::call(&groupexpr, &partexpr) {
+                    // Reject a match if the grouping collation does not match the
+                    // partitioning collation.
+                    if types_core::primitive::OidIsValid(partcoll)
+                        && types_core::primitive::OidIsValid(groupcoll)
+                        && partcoll != groupcoll
+                    {
+                        return Ok(false);
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                break;
+            }
+        }
+
+        // If none of the partition key expressions match any GROUP BY
+        // expression, return false.
+        if !found {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+/// `create_partitionwise_grouping_paths(root, input_rel, grouped_rel,
+/// partially_grouped_rel, agg_costs, gd, patype, extra)` (planner.c:8064). Break
+/// aggregation/grouping over a partitioned relation down into per-partition
+/// aggregation, appending the results. For FULL partitionwise aggregation each
+/// partition is fully aggregated and the results Appended; for PARTIAL, each
+/// partition is partially aggregated, Appended, then finalized by the caller.
+#[allow(clippy::too_many_arguments)]
+fn create_partitionwise_grouping_paths<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    input_rel: RelId,
+    grouped_rel: RelId,
+    partially_grouped_rel: Option<RelId>,
+    agg_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
+    _agg_partial_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
+    _agg_final_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
+    mut gd: Option<&mut GroupingSetsData<'mcx>>,
+    patype: PartitionwiseAggregateType,
+    having_qual_override: Option<&Expr>,
+) -> PgResult<()> {
+    debug_assert!(patype != PartitionwiseAggregateType::None);
+    debug_assert!(
+        patype != PartitionwiseAggregateType::Partial || partially_grouped_rel.is_some()
+    );
+    let mut grouped_live_children: Vec<RelId> = Vec::new();
+    let mut partially_grouped_live_children: Vec<RelId> = Vec::new();
+    let mut partial_grouping_valid = true;
+
+    // target = grouped_rel->reltarget.
+    let target = root
+        .rel(grouped_rel)
+        .reltarget
+        .clone()
+        .ok_or_else(|| PgError::error("create_partitionwise_grouping_paths: grouped rel has no reltarget"))?;
+
+    // extra->target_parallel_safe — used by make_grouping_rel for the child.
+    let target_parallel_safe = root.rel(grouped_rel).consider_parallel;
+
+    // extra->havingQual for the parent rel (parse->havingQual at the top, or the
+    // translated qual for a nested partitionwise child). Deep-copy via clone_in:
+    // the HAVING qual carries Aggrefs whose derived Expr::clone guards a shallow
+    // copy.
+    let parent_having: Option<Expr> = match having_qual_override {
+        Some(e) => Some(e.clone_in(mcx)?),
+        None => match run.resolve(root.parse).havingQual.as_deref() {
+            Some(e) => Some(e.clone_in(mcx)?),
+            None => None,
+        },
+    };
+
+    // Add paths for partitionwise aggregation/grouping: walk input_rel->live_parts.
+    let live_indexes: Vec<usize> = root
+        .rel(input_rel)
+        .live_parts
+        .as_ref()
+        .map(|b| {
+            let mut out = Vec::new();
+            for (wi, &word) in b.words.iter().enumerate() {
+                let mut w = word;
+                while w != 0 {
+                    let bit = w.trailing_zeros() as usize;
+                    out.push(wi * 64 + bit);
+                    w &= w - 1;
+                }
+            }
+            out
+        })
+        .unwrap_or_default();
+
+    for i in live_indexes {
+        let child_input_rel = root.rel(input_rel).part_rels[i]
+            .expect("create_partitionwise_grouping_paths: live part_rels slot is NULL");
+
+        // Dummy children can be ignored.
+        if backend_optimizer_path_joinrels::is_dummy_rel(root, child_input_rel) {
+            continue;
+        }
+
+        // child_target = copy_pathtarget(target); translate its exprs.
+        let child_relids = root.rel(child_input_rel).relids.clone();
+        let appinfos =
+            backend_optimizer_util_appendinfo::find_appinfos_by_relids(root, &child_relids)?;
+
+        let mut child_target = backend_optimizer_util_vars::tlist::copy_pathtarget(&target);
+        let mut new_exprs: Vec<types_pathnodes::NodeId> = Vec::with_capacity(child_target.exprs.len());
+        for &expr_id in child_target.exprs.iter() {
+            // Deep-copy via clone_in: the grouped-rel reltarget exprs include
+            // Aggrefs whose args are context-allocated TargetEntry lists; the
+            // derived Expr::clone guards against a shallow copy.
+            let expr = root.node(expr_id).clone_in(mcx)?;
+            let adjusted = backend_optimizer_util_appendinfo::adjust_appendrel_attrs_run(
+                Some(run),
+                root,
+                expr,
+                &appinfos,
+            )?;
+            new_exprs.push(root.alloc_node(adjusted));
+        }
+        child_target.exprs = new_exprs;
+
+        // Translate havingQual for this child (child_extra.havingQual). Deep-copy
+        // via clone_in: the qual carries Aggrefs (the derived Expr::clone guards
+        // a shallow copy); adjust_appendrel_attrs_run then mutates it in place.
+        let child_having: Option<Expr> = match &parent_having {
+            Some(hq) => Some(backend_optimizer_util_appendinfo::adjust_appendrel_attrs_run(
+                Some(run),
+                root,
+                hq.clone_in(mcx)?,
+                &appinfos,
+            )?),
+            None => None,
+        };
+
+        // child_extra.patype = patype (this rel's value becomes the child's
+        // parent value).
+        let child_parent_patype = patype;
+
+        // make_grouping_rel for the child (holds fully aggregated paths).
+        let child_grouped_rel = make_grouping_rel(
+            run,
+            root,
+            child_input_rel,
+            Box::new(child_target),
+            target_parallel_safe,
+        )?;
+
+        // Create grouping paths for this child relation.
+        let child_partially_grouped_rel = create_ordinary_grouping_paths(
+            mcx,
+            run,
+            root,
+            child_input_rel,
+            child_grouped_rel,
+            agg_costs,
+            // has_group_clause / has_aggs are global (parse-level) properties and
+            // identical for every child.
+            !run.resolve(root.parse).groupClause.is_empty(),
+            run.resolve(root.parse).hasAggs,
+            gd.as_deref_mut(),
+            child_parent_patype,
+            child_having.as_ref(),
+        )?;
+
+        if let Some(cpg) = child_partially_grouped_rel {
+            partially_grouped_live_children.push(cpg);
+        } else {
+            partial_grouping_valid = false;
+        }
+
+        if patype == PartitionwiseAggregateType::Full {
+            backend_optimizer_util_pathnode::set_cheapest(root, child_grouped_rel)?;
+            grouped_live_children.push(child_grouped_rel);
+        }
+    }
+
+    // Try to create append paths for partially grouped children. We must have a
+    // partially grouped path for every child to generate one for this relation.
+    if let Some(pgr) = partially_grouped_rel {
+        if partial_grouping_valid {
+            debug_assert!(!partially_grouped_live_children.is_empty());
+            backend_optimizer_path_allpaths::add_paths_to_append_rel(
+                mcx,
+                root,
+                run,
+                pgr,
+                &partially_grouped_live_children,
+            )?;
+            // set_cheapest, since the finalization step uses the cheapest path.
+            if !root.rel(pgr).pathlist.is_empty() {
+                backend_optimizer_util_pathnode::set_cheapest(root, pgr)?;
+            }
+        }
+    }
+
+    // If possible, create append paths for fully grouped children.
+    if patype == PartitionwiseAggregateType::Full {
+        debug_assert!(!grouped_live_children.is_empty());
+        backend_optimizer_path_allpaths::add_paths_to_append_rel(
+            mcx,
+            root,
+            run,
+            grouped_rel,
+            &grouped_live_children,
+        )?;
+    }
+
     Ok(())
 }
 
@@ -6441,6 +6890,9 @@ fn add_paths_to_grouping_rel<'mcx>(
     can_sort: bool,
     can_hash: bool,
     mut gd: Option<&mut GroupingSetsData<'mcx>>,
+    // extra->havingQual override (per-child translated qual). None => read
+    // parse->havingQual (top rel).
+    having_qual_override: Option<&Expr>,
 ) -> PgResult<()> {
     let has_grouping_sets = gd.is_some();
 
@@ -6451,11 +6903,18 @@ fn add_paths_to_grouping_rel<'mcx>(
     }
 
     // havingQual (extra->havingQual) — the HAVING qual clause list as bare node
-    // handles. parse->havingQual is the owned Option<PgBox<Expr>>; clone it into
-    // the arena to obtain the qual list the Agg/Group path carries.
+    // handles. For the top rel parse->havingQual is the owned Option<PgBox<Expr>>;
+    // for a partitionwise child it is the translated qual passed via
+    // having_qual_override. Clone it into the arena to obtain the qual list the
+    // Agg/Group path carries.
     let having_quals: Vec<types_pathnodes::NodeId> = {
-        match run.resolve(root.parse).havingQual.as_deref() {
+        let src: Option<&Expr> = match having_qual_override {
+            Some(e) => Some(e),
+            None => run.resolve(root.parse).havingQual.as_deref(),
+        };
+        match src {
             Some(e) => {
+                // Deep-copy via clone_in: the qual carries Aggrefs.
                 let cloned = e.clone_in(mcx)?;
                 alloc::vec![root.alloc_node(cloned)]
             }
@@ -6686,14 +7145,27 @@ fn create_partial_grouping_paths<'mcx>(
     agg_partial_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
     mut gd: Option<&mut GroupingSetsData<'mcx>>,
     force_rel_creation: bool,
+    // extra->patype: the partitionwise-aggregate type at the PARENT level (NONE
+    // off the partitionwise path; PARTIAL when the parent does partial
+    // partitionwise aggregation, which enables the non-partial partial-agg leg).
+    parent_patype: PartitionwiseAggregateType,
+    // extra->havingQual: per-child translated qual (None => parse->havingQual).
+    having_qual_override: Option<&Expr>,
 ) -> PgResult<Option<RelId>> {
     let has_aggs = run.resolve(root.parse).hasAggs;
 
-    // cheapest_total_path is only used when the parent is doing partial
-    // partitionwise aggregation (extra->patype == PARTITIONWISE_AGGREGATE_PARTIAL).
-    // That branch requires IS_PARTITIONED_REL(input_rel); on the non-partitioned
-    // path patype == NONE, so cheapest_total_path stays None (C:7370-7378).
-    let cheapest_total_path: Option<PathId> = None;
+    // Consider generating partially aggregated non-partial paths. We can only do
+    // this if we have a non-partial path, and only if the parent of the input rel
+    // is performing partial partitionwise aggregation. (extra->patype is the type
+    // at the PARENT level, not this level.) (C:7370-7379).
+    let cheapest_total_path: Option<PathId> =
+        if !root.rel(input_rel).pathlist.is_empty()
+            && parent_patype == PartitionwiseAggregateType::Partial
+        {
+            root.rel(input_rel).cheapest_total_path
+        } else {
+            None
+        };
 
     // If parallelism is possible for grouped_rel and the input has partial paths,
     // consider partially-grouped partial paths (C:7381-7388).
@@ -6747,7 +7219,8 @@ fn create_partial_grouping_paths<'mcx>(
         .reltarget
         .clone()
         .ok_or_else(|| PgError::error("create_partial_grouping_paths: grouped rel has no reltarget"))?;
-    let partial_target = make_partial_grouping_target(mcx, run, root, &grouped_target)?;
+    let partial_target =
+        make_partial_grouping_target(mcx, run, root, &grouped_target, having_qual_override)?;
     let partial_target = Box::new(partial_target);
     root.rel_mut(partially_grouped_rel).reltarget = Some(partial_target.clone());
 
@@ -7027,6 +7500,10 @@ fn make_partial_grouping_target<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     grouping_target: &PathTarget,
+    // extra->havingQual: the HAVING qual to source HAVING Vars/Aggrefs from. None
+    // => parse->havingQual (top rel); Some => the per-child translated qual, so
+    // the pulled columns carry the child's varnos (matching the child scan).
+    having_qual_override: Option<&Expr>,
 ) -> PgResult<PathTarget> {
     let mut partial_target = backend_optimizer_util_vars::tlist::create_empty_pathtarget();
     let mut non_group_cols: Vec<types_pathnodes::NodeId> = Vec::new();
@@ -7060,7 +7537,11 @@ fn make_partial_grouping_target<'mcx>(
     }
 
     // If there's a HAVING clause, we'll need the Vars/Aggrefs it uses too (C:5684).
-    if let Some(hq) = run.resolve(root.parse).havingQual.as_deref() {
+    let having_src: Option<&Expr> = match having_qual_override {
+        Some(e) => Some(e),
+        None => run.resolve(root.parse).havingQual.as_deref(),
+    };
+    if let Some(hq) = having_src {
         let cloned = hq.clone_in(mcx)?;
         non_group_cols.push(root.alloc_node(cloned));
     }

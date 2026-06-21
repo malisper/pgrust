@@ -192,6 +192,11 @@ pub fn ENABLE_PARALLEL_HASH() -> bool {
 pub fn ENABLE_PARTITIONWISE_JOIN() -> bool {
     guc::get_partitionwise_join()
 }
+#[inline]
+#[allow(non_snake_case)]
+pub fn ENABLE_PARTITIONWISE_AGGREGATE() -> bool {
+    guc::get_partitionwise_aggregate()
+}
 
 // Inline GUC accessors so the cost arithmetic reads like the C source. Each
 // reads the runtime-mutable cell (the GUC engine writes them via guc.rs).
