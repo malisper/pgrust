@@ -1608,13 +1608,21 @@ fn CheckValidResultRel<'mcx>(
         ))
         .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
     } else if relkind == RELKIND_VIEW {
-        // Okay only with a suitable INSTEAD OF trigger (view_has_instead_trigger,
-        // rewriteHandler.c); else error_view_not_updatable. Both owners are off
-        // the INSERT-into-table path.
-        Err(unported(
-            "CheckValidResultRel: writable-view target \
-             (view_has_instead_trigger is not wired here)",
-        ))
+        // Okay only if there's a suitable INSTEAD OF trigger (or, for MERGE, all
+        // actions either have one or are CMD_NOTHING). Otherwise complain, but
+        // omit errdetail (NULL) — the executor's just-in-case check should never
+        // fail, and the information isn't handy here. Mirrors
+        // view_has_instead_trigger / error_view_not_updatable (rewriteHandler.c)
+        // for the executor call path (execMain.c CheckValidResultRel).
+        if !view_has_instead_trigger(&result_rel, operation, merge_action_cmds) {
+            Err(error_view_not_updatable_exec(
+                &result_rel,
+                operation,
+                merge_action_cmds,
+            ))
+        } else {
+            Ok(())
+        }
     } else if relkind == RELKIND_MATVIEW {
         // Okay only when MatViewIncrementalMaintenanceIsEnabled().
         Err(unported(
@@ -1633,6 +1641,130 @@ fn CheckValidResultRel<'mcx>(
             "cannot change relation \"{relname}\""
         ))
         .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+    }
+}
+
+/// `view_has_instead_trigger(view, event, mergeActionList)` (rewriteHandler.c)
+/// — does the view have a suitable INSTEAD OF trigger for `event`? For MERGE,
+/// it returns true only if every action either has a matching INSTEAD OF
+/// trigger or is `CMD_NOTHING` (DO NOTHING needs no trigger). Here the C
+/// `mergeActionList` is carried as the per-result-rel `CmdType` list the
+/// executor already built.
+fn view_has_instead_trigger(
+    view: &types_rel::RelationData<'_>,
+    event: CmdType,
+    merge_action_cmds: &[CmdType],
+) -> bool {
+    let trig_desc = view.rd_trigdesc.as_deref();
+    match event {
+        CmdType::CMD_INSERT => trig_desc.is_some_and(|t| t.trig_insert_instead_row),
+        CmdType::CMD_UPDATE => trig_desc.is_some_and(|t| t.trig_update_instead_row),
+        CmdType::CMD_DELETE => trig_desc.is_some_and(|t| t.trig_delete_instead_row),
+        CmdType::CMD_MERGE => {
+            for &action_cmd in merge_action_cmds {
+                match action_cmd {
+                    CmdType::CMD_INSERT => {
+                        if !trig_desc.is_some_and(|t| t.trig_insert_instead_row) {
+                            return false;
+                        }
+                    }
+                    CmdType::CMD_UPDATE => {
+                        if !trig_desc.is_some_and(|t| t.trig_update_instead_row) {
+                            return false;
+                        }
+                    }
+                    CmdType::CMD_DELETE => {
+                        if !trig_desc.is_some_and(|t| t.trig_delete_instead_row) {
+                            return false;
+                        }
+                    }
+                    // CMD_NOTHING: no trigger required. Other CmdTypes can't
+                    // appear in a MergeAction.
+                    _ => {}
+                }
+            }
+            // No actions without an INSTEAD OF trigger.
+            true
+        }
+        _ => false,
+    }
+}
+
+/// `error_view_not_updatable(view, command, mergeActionList, NULL)`
+/// (rewriteHandler.c) for the executor call path — always returns `Err`. The
+/// executor always passes a NULL `detail` (the information isn't handy and the
+/// check shouldn't fail), so no errdetail is attached. For MERGE the hint is
+/// per offending action, matching the C `error_view_not_updatable` MERGE arm.
+fn error_view_not_updatable_exec(
+    view: &types_rel::RelationData<'_>,
+    command: CmdType,
+    merge_action_cmds: &[CmdType],
+) -> types_error::PgError {
+    use types_error::error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE;
+    let name = view.name().to_string();
+    let mk = |msg: alloc::string::String, hint: &str| -> types_error::PgError {
+        types_error::PgError::new(ERROR, msg)
+            .with_sqlstate(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .with_hint(hint.to_string())
+    };
+    let trig_desc = view.rd_trigdesc.as_deref();
+    match command {
+        CmdType::CMD_INSERT => mk(
+            alloc::format!("cannot insert into view \"{name}\""),
+            "To enable inserting into the view, provide an INSTEAD OF INSERT trigger or an unconditional ON INSERT DO INSTEAD rule.",
+        ),
+        CmdType::CMD_UPDATE => mk(
+            alloc::format!("cannot update view \"{name}\""),
+            "To enable updating the view, provide an INSTEAD OF UPDATE trigger or an unconditional ON UPDATE DO INSTEAD rule.",
+        ),
+        CmdType::CMD_DELETE => mk(
+            alloc::format!("cannot delete from view \"{name}\""),
+            "To enable deleting from the view, provide an INSTEAD OF DELETE trigger or an unconditional ON DELETE DO INSTEAD rule.",
+        ),
+        CmdType::CMD_MERGE => {
+            // The hints here differ from above, since MERGE doesn't support
+            // rules. Report the first action lacking a suitable trigger.
+            for &action_cmd in merge_action_cmds {
+                match action_cmd {
+                    CmdType::CMD_INSERT => {
+                        if !trig_desc.is_some_and(|t| t.trig_insert_instead_row) {
+                            return mk(
+                                alloc::format!("cannot insert into view \"{name}\""),
+                                "To enable inserting into the view using MERGE, provide an INSTEAD OF INSERT trigger.",
+                            );
+                        }
+                    }
+                    CmdType::CMD_UPDATE => {
+                        if !trig_desc.is_some_and(|t| t.trig_update_instead_row) {
+                            return mk(
+                                alloc::format!("cannot update view \"{name}\""),
+                                "To enable updating the view using MERGE, provide an INSTEAD OF UPDATE trigger.",
+                            );
+                        }
+                    }
+                    CmdType::CMD_DELETE => {
+                        if !trig_desc.is_some_and(|t| t.trig_delete_instead_row) {
+                            return mk(
+                                alloc::format!("cannot delete from view \"{name}\""),
+                                "To enable deleting from the view using MERGE, provide an INSTEAD OF DELETE trigger.",
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // The caller only invokes this when view_has_instead_trigger
+            // returned false, so an offending action exists above; this is a
+            // defensive fallback mirroring the C function falling through.
+            mk(
+                alloc::format!("cannot merge into view \"{name}\""),
+                "",
+            )
+        }
+        other => types_error::PgError::error(alloc::format!(
+            "unrecognized CmdType: {}",
+            other as i32
+        )),
     }
 }
 
