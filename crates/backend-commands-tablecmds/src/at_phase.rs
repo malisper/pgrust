@@ -779,7 +779,11 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_VIEW | ATT_FOREIGN_TABLE,
             )?;
-            unported("ALTER COLUMN ADD IDENTITY (phase-2 recursion + ATParseTransformCmd)");
+            // Set up recursion for phase 2; no other prep needed.
+            if recurse {
+                cmd.recurse = true;
+            }
+            pass = AT_PASS_ADD_OTHERCONSTR;
         }
         AT_SetIdentity => {
             ATSimplePermissions(
@@ -787,7 +791,12 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_VIEW | ATT_FOREIGN_TABLE,
             )?;
-            unported("ALTER COLUMN SET IDENTITY (phase-2 recursion + ATParseTransformCmd)");
+            // Set up recursion for phase 2; no other prep needed.
+            if recurse {
+                cmd.recurse = true;
+            }
+            // This should run after AddIdentity, so do it in MISC pass.
+            pass = AT_PASS_MISC;
         }
         AT_DropIdentity => {
             ATSimplePermissions(
@@ -795,7 +804,11 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_VIEW | ATT_FOREIGN_TABLE,
             )?;
-            unported("ALTER COLUMN DROP IDENTITY");
+            // Set up recursion for phase 2; no other prep needed.
+            if recurse {
+                cmd.recurse = true;
+            }
+            pass = AT_PASS_DROP;
         }
         AT_DropNotNull => {
             ATSimplePermissions(
@@ -1426,9 +1439,104 @@ fn ATExecCmd<'mcx>(
             )?;
             drop(owned_rel);
         }
-        AT_AddIdentity => unported("ADD IDENTITY (ATExecAddIdentity)"),
-        AT_SetIdentity => unported("SET IDENTITY (ATExecSetIdentity)"),
-        AT_DropIdentity => unported("DROP IDENTITY (ATExecDropIdentity)"),
+        AT_AddIdentity => {
+            // cmd = ATParseTransformCmd(wqueue, tab, rel, cmd, false, lockmode,
+            //     cur_pass, context); Assert(cmd != NULL);
+            // address = ATExecAddIdentity(rel, cmd->name, cmd->def, lockmode,
+            //     cmd->recurse, false);
+            // ATParseTransformCmd needs &mut wqueue, so re-open `rel` by relid
+            // into an owned carrier rather than borrowing it out of wqueue[ti].
+            let relid = wqueue[ti].relid;
+            let owned_rel = backend_access_common_relation::relation_open(mcx, relid, NoLock)?;
+            let cmd2 = crate::at_coladd::ATParseTransformCmd(
+                mcx,
+                wqueue,
+                ti,
+                &owned_rel,
+                cmd.clone_in(mcx)?,
+                false,
+                lockmode,
+                cur_pass,
+                context,
+            )?
+            .expect("ATParseTransformCmd returned None for AT_AddIdentity");
+            let colname = cmd2
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("ADD IDENTITY requires a column name");
+            let def = cmd2
+                .def
+                .as_deref()
+                .expect("ADD IDENTITY requires a transformed ColumnDef");
+            _address = crate::at_identity::ATExecAddIdentity(
+                mcx,
+                &owned_rel,
+                colname,
+                def,
+                lockmode,
+                cmd2.recurse,
+                false,
+            )?;
+            drop(owned_rel);
+        }
+        AT_SetIdentity => {
+            // cmd = ATParseTransformCmd(wqueue, tab, rel, cmd, false, lockmode,
+            //     cur_pass, context); Assert(cmd != NULL);
+            // address = ATExecSetIdentity(rel, cmd->name, cmd->def, lockmode,
+            //     cmd->recurse, false);
+            let relid = wqueue[ti].relid;
+            let owned_rel = backend_access_common_relation::relation_open(mcx, relid, NoLock)?;
+            let cmd2 = crate::at_coladd::ATParseTransformCmd(
+                mcx,
+                wqueue,
+                ti,
+                &owned_rel,
+                cmd.clone_in(mcx)?,
+                false,
+                lockmode,
+                cur_pass,
+                context,
+            )?
+            .expect("ATParseTransformCmd returned None for AT_SetIdentity");
+            let colname = cmd2
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("SET IDENTITY requires a column name");
+            let def = cmd2
+                .def
+                .as_deref()
+                .expect("SET IDENTITY requires an options List");
+            _address = crate::at_identity::ATExecSetIdentity(
+                mcx,
+                &owned_rel,
+                colname,
+                def,
+                lockmode,
+                cmd2.recurse,
+                false,
+            )?;
+            drop(owned_rel);
+        }
+        AT_DropIdentity => {
+            // ATExecDropIdentity(rel, cmd->name, cmd->missing_ok, lockmode,
+            //     cmd->recurse, false). No parse-transform for DROP.
+            let colname = cmd
+                .name
+                .as_ref()
+                .map(|s| s.as_str())
+                .expect("DROP IDENTITY requires a column name");
+            _address = crate::at_identity::ATExecDropIdentity(
+                mcx,
+                rel,
+                colname,
+                cmd.missing_ok,
+                lockmode,
+                cmd.recurse,
+                false,
+            )?;
+        }
         AT_DropNotNull => {
             // ATExecDropNotNull(rel, cmd->name, cmd->recurse, lockmode)
             let colname = cmd

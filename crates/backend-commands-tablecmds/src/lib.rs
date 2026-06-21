@@ -38,6 +38,7 @@ mod at_column;
 mod at_constraint;
 mod at_dropvalidate;
 mod at_fk;
+mod at_identity;
 mod at_owner;
 mod at_phase;
 mod create;
