@@ -2696,12 +2696,16 @@ pub fn deconstruct_text_array_nullable<'mcx>(
 }
 
 /// Seam `deconstruct_tid_array` — `deconstruct_array_builtin(..., TIDOID)`.
+///
+/// `array` is the `tid[]` on-disk varlena image (the by-reference array carrier
+/// the executor produces for `ARRAY[...]::tid[]`), exactly as
+/// `deconstruct_text_array_nullable` takes its `text[]` image.
 pub fn deconstruct_tid_array<'mcx>(
     mcx: Mcx<'mcx>,
-    arraydatum: Datum,
+    array: &[u8],
 ) -> PgResult<PgVec<'mcx, (ItemPointerData, bool)>> {
     // DatumGetArrayTypeP(arraydatum) — detoast the array varlena.
-    let arr = detoast_seam::detoast_attr::call(mcx, datum_as_byte_window(arraydatum))?;
+    let arr = detoast_seam::detoast_attr::call(mcx, array)?;
     let (elmlen, elmbyval, elmalign) = deconstruct_builtin_meta(foundation::TIDOID)?;
     // `tid` is a 6-byte pass-by-reference element type. The bare-word
     // `deconstruct_array` would store only the in-buffer *offset* in each

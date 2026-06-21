@@ -1387,37 +1387,17 @@ pub fn ExecEvalSysVar<'mcx>(
 
     // d = slot_getsysattr(slot, op->d.var.attnum, op->resnull);
     //
-    // The slot header carries the two system attributes that do not live in the
-    // physical tuple: `ctid` (SelfItemPointerAttributeNumber -> tts_tid) and
-    // `tableoid` (TableOidAttributeNumber -> tts_tableOid). slot_getsysattr
-    // returns these *before* dispatching to the per-kind getsysattr callback (see
-    // execTuples slot_ops_vtables::slot_getsysattr), so they are reachable from
-    // the pooled TupleTableSlot header without the full payload model. The
-    // remaining system attributes (xmin/xmax/cmin/cmax) require the underlying
-    // physical tuple, which the trimmed pooled slot does not carry — those stay
-    // blocked on the execTuples slot-payload model.
+    // The slot is the payload-bearing `SlotData` in the EState tuple-table pool,
+    // so the full `slot->tts_ops->getsysattr` dispatch is reachable: ctid
+    // (tts_tid) and tableoid (tts_tableOid) are answered from the slot header,
+    // and xmin/xmax/cmin/cmax are read from the slot's underlying physical tuple
+    // by the per-kind getsysattr callback (heap/buffer-heap). slot_getsysattr in
+    // execTuples handles all of this faithfully; call it through its seam.
     let _ = econtext;
     let mcx = estate.es_query_cxt;
+    let slot_data = estate.slot_data_mut(slot);
     let (value, isnull): (DatumV<'mcx>, bool) =
-        if attnum == types_tuple::heaptuple::SelfItemPointerAttributeNumber as i32 {
-            let s = estate.slot_mut(slot);
-            let bytes = backend_access_common_heaptuple::item_pointer_bytes(
-                mcx,
-                &s.tts_tid,
-            )?;
-            (DatumV::ByRef(bytes), false)
-        } else if attnum == types_tuple::heaptuple::TableOidAttributeNumber as i32 {
-            let s = estate.slot_mut(slot);
-            (DatumV::from_oid(s.tts_tableOid), false)
-        } else {
-            panic!(
-                "ExecEvalSysVar: system attribute {attnum} (other than ctid/tableoid) \
-                 must be read from the slot's underlying physical tuple, owned by the \
-                 unported execTuples slot-payload model (the trimmed pooled \
-                 TupleTableSlot carries only tts_values / tts_tid / tts_tableOid); \
-                 blocked until execTuples lands."
-            );
-        };
+        backend_executor_execTuples_seams::slot_getsysattr::call(mcx, slot_data, attnum as i16)?;
 
     // if (unlikely(*op->resnull)) elog(ERROR, "failed to fetch attribute from slot");
     if isnull {

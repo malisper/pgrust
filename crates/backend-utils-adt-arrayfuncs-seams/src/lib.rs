@@ -226,15 +226,18 @@ seam_core::seam!(
 seam_core::seam!(
     /// `DatumGetArrayTypeP(arraydatum)` then
     /// `deconstruct_array_builtin(itemarray, TIDOID, &ipdatums, &ipnulls,
-    /// &ndatums)` (arrayfuncs.c): detoast the `tid[]` array `Datum` and split
+    /// &ndatums)` (arrayfuncs.c): detoast the `tid[]` array image and split
     /// it into its per-element `(ItemPointerData, isnull)` pairs, in order
     /// (`ipdatums[i]` reinterpreted via `DatumGetPointer` as an
-    /// `ItemPointer`). The C result arrays are palloc'd in the current context
-    /// (and pfree'd by the caller); the owned model returns them in `mcx`.
-    /// Fallible on `ereport(ERROR)` (malformed array).
+    /// `ItemPointer`). `array` is the on-disk `tid[]` varlena byte image (the
+    /// by-reference array carrier the executor produces for
+    /// `ARRAY[...]::tid[]`), exactly the lane the `text[]` deconstructors take;
+    /// the C result arrays are palloc'd in the current context (and pfree'd by
+    /// the caller), the owned model returns them in `mcx`. Fallible on
+    /// `ereport(ERROR)` (malformed array).
     pub fn deconstruct_tid_array<'mcx>(
         mcx: Mcx<'mcx>,
-        arraydatum: Datum,
+        array: &[u8],
     ) -> PgResult<PgVec<'mcx, (types_tuple::heaptuple::ItemPointerData, bool)>>
 );
 
