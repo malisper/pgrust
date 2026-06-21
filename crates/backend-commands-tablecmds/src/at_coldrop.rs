@@ -73,14 +73,14 @@ fn att_bool(mcx: Mcx<'_>, tup: &FormedTuple<'_>, anum: i16) -> PgResult<bool> {
 /// `ATPrepDropColumn(wqueue, rel, recurse, recursing, cmd, lockmode, context)`
 /// (tablecmds.c:9256).
 pub fn ATPrepDropColumn<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _wqueue: &mut PgVec<'mcx, crate::at_phase::AlteredTableInfo<'mcx>>,
+    mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, crate::at_phase::AlteredTableInfo<'mcx>>,
     rel: &Relation<'mcx>,
     recurse: bool,
     recursing: bool,
     cmd: &mut AlterTableCmd<'mcx>,
-    _lockmode: LOCKMODE,
-    _context: &AlterTableUtilityContext<'_>,
+    lockmode: LOCKMODE,
+    context: &AlterTableUtilityContext<'_>,
 ) -> PgResult<()> {
     // if (rel->rd_rel->reloftype && !recursing) ereport(cannot drop column from
     // typed table). reloftype is not carried on the relcache rd_rel; read it
@@ -96,12 +96,7 @@ pub fn ATPrepDropColumn<'mcx>(
     }
 
     if rel.rd_rel.relkind == RELKIND_COMPOSITE_TYPE {
-        // ATTypedTableRecursion(wqueue, rel, cmd, lockmode, context) — the
-        // composite-type fan-out helper is not yet ported.
-        panic!(
-            "ALTER TYPE ... DROP ATTRIBUTE on a composite type: ATTypedTableRecursion \
-             is not yet ported in backend-commands-tablecmds (faithful seam-and-panic)"
-        );
+        crate::at_phase::ATTypedTableRecursion(mcx, wqueue, rel, cmd, lockmode, context)?;
     }
 
     if recurse {

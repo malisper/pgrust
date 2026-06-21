@@ -690,6 +690,10 @@ pub fn init_seams() {
     heapam_seam::read_pg_type::set(|mcx| catalog_drivers::read_pg_type(mcx));
     // cluster.c get_tables_to_cluster — pg_index indisclustered systable scan.
     heapam_seam::scan_indisclustered::set(|mcx| catalog_drivers::scan_indisclustered(mcx));
+    // tablecmds.c find_typed_table_dependencies — pg_class reloftype catalog scan.
+    heapam_seam::scan_typed_table_dependencies::set(|mcx, type_oid| {
+        catalog_drivers::scan_typed_table_dependencies(mcx, type_oid)
+    });
     // genam.c index_compute_xid_horizon_for_tuples — AM-generic
     // table_index_delete_tuples() shim over heap_index_delete_tuples.
     heapam_seam::index_compute_xid_horizon_for_tuples::set(|irel, hrel, ibuf, itemnos| {

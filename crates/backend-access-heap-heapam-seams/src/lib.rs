@@ -169,6 +169,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The catalog-scan half of `find_typed_table_dependencies(typeOid, ...)`
+    /// (tablecmds.c:7094): `table_open(RelationRelationId, AccessShareLock)` +
+    /// `ScanKeyInit(reloftype = typeOid)` + `table_beginscan_catalog` +
+    /// `heap_getnext(ForwardScanDirection)` loop + `table_endscan` +
+    /// `table_close`, returning the `oid` of every `pg_class` row whose
+    /// `reloftype` equals `typeOid` (the typed tables declared `OF that_type`).
+    /// The RESTRICT/CASCADE policy + error stays in tablecmds.c. Used by
+    /// ALTER TYPE's `ATTypedTableRecursion` and `renameatt_internal`.
+    /// **Installed by `backend-access-heap-heapam`.**
+    pub fn scan_typed_table_dependencies<'mcx>(
+        mcx: Mcx<'mcx>,
+        type_oid: Oid,
+    ) -> PgResult<PgVec<'mcx, Oid>>
+);
+
+seam_core::seam!(
     /// `log_heap_visible(rel, heap_buffer, vm_buffer, snapshotConflictHorizon,
     /// vmflags)` (heapam.c): emit the `XLOG_HEAP2_VISIBLE` WAL record when a
     /// visibility-map bit is *set* during VACUUM, registering the VM buffer

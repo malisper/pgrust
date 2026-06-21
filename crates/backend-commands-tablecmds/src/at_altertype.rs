@@ -679,7 +679,7 @@ pub fn ATPrepAlterColumnType<'mcx>(
     }
 
     if relkind == RELKIND_COMPOSITE_TYPE {
-        unported("ATTypedTableRecursion (ALTER TYPE composite recursion)");
+        crate::at_phase::ATTypedTableRecursion(mcx, wqueue, rel, cmd, lockmode, context)?;
     }
 
     Ok(())

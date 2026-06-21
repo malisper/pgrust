@@ -294,6 +294,65 @@ pub fn scan_indisclustered<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, (Oid, O
 }
 
 // ===========================================================================
+// scan_typed_table_dependencies   (tablecmds.c:7094 find_typed_table_dependencies)
+// ===========================================================================
+
+/// The catalog-scan half of `find_typed_table_dependencies(typeOid, ...)`
+/// (tablecmds.c:7094): `table_open(RelationRelationId, AccessShareLock)` +
+/// `ScanKeyInit(Anum_pg_class_reloftype = typeOid)` +
+/// `table_beginscan_catalog` + `heap_getnext(ForwardScanDirection)` loop +
+/// `table_endscan` + `table_close`, returning the `oid` of every `pg_class`
+/// row whose `reloftype` equals `typeOid` (the typed tables declared
+/// `OF that_type`). The RESTRICT/CASCADE policy and the error stay in
+/// tablecmds.c's `find_typed_table_dependencies` caller.
+pub fn scan_typed_table_dependencies<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_oid: Oid,
+) -> PgResult<PgVec<'mcx, Oid>> {
+    use types_catalog::pg_class::{Anum_pg_class_oid, Anum_pg_class_reloftype, RelationRelationId};
+    use types_core::fmgr::{FmgrInfo, F_OIDEQ};
+
+    // classRel = table_open(RelationRelationId, AccessShareLock);
+    let rel = table_seam::table_open::call(mcx, RelationRelationId, AccessShareLock)?;
+
+    // ScanKeyInit(&key[0], Anum_pg_class_reloftype, BTEqualStrategyNumber,
+    //             F_OIDEQ, ObjectIdGetDatum(typeOid));
+    let mut entry = ScanKeyData::empty();
+    entry.sk_flags = 0;
+    entry.sk_attno = Anum_pg_class_reloftype;
+    entry.sk_strategy = BTEqualStrategyNumber;
+    entry.sk_subtype = types_core::InvalidOid;
+    entry.sk_collation = types_core::InvalidOid;
+    entry.sk_func = FmgrInfo {
+        fn_oid: F_OIDEQ,
+        ..Default::default()
+    };
+    entry.sk_argument = TupleDatum::from_oid(type_oid);
+    let mut key: PgVec<ScanKeyData> = PgVec::new_in(mcx);
+    key.push(entry);
+
+    // scan = table_beginscan_catalog(classRel, 1, key);
+    let mut scan = table_beginscan_catalog(mcx, &rel, 1, key)?;
+
+    let mut out: PgVec<Oid> = PgVec::new_in(mcx);
+
+    // while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+    while let Some(tup) = heap_getnext(mcx, &mut scan, ScanDirection::ForwardScanDirection)? {
+        // classform = (Form_pg_class) GETSTRUCT(tuple); result =
+        // lappend_oid(result, classform->oid);
+        let cols = heap_deform_tuple(mcx, &tup.tuple, &rel.rd_att, &tup.data)?;
+        out.push(col_oid(&cols, Anum_pg_class_oid));
+    }
+
+    // table_endscan(scan);
+    table_endscan(scan)?;
+    // table_close(classRel, AccessShareLock);
+    rel.close(AccessShareLock)?;
+
+    Ok(out)
+}
+
+// ===========================================================================
 // insert_one_tuple / InsertOneTuple   (bootstrap.c:629)
 // ===========================================================================
 

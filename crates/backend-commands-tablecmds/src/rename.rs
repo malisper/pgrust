@@ -191,6 +191,7 @@ fn renameatt_internal<'mcx>(
     recurse: bool,
     recursing: bool,
     expected_parents: i32,
+    behavior: types_nodes::parsenodes::DropBehavior,
 ) -> PgResult<AttrNumber> {
     /*
      * Grab an exclusive lock on the target table, which we will NOT release
@@ -239,6 +240,7 @@ fn renameatt_internal<'mcx>(
                 false,
                 true,
                 numparents,
+                behavior,
             )?;
         }
     } else {
@@ -261,18 +263,30 @@ fn renameatt_internal<'mcx>(
 
     /* rename attributes in typed tables of composite type */
     if target_relkind == RELKIND_COMPOSITE_TYPE {
-        // find_typed_table_dependencies(reltype, relname, behavior) recursion.
-        // The find_typed_table_dependencies substrate is not ported, so a
-        // composite type with dependent typed tables is an honest loud stop.
-        let _ = target_reltype;
-        return ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg_internal(
-                "renameatt_internal: RENAME of a composite-type attribute with dependent \
-                 typed tables (find_typed_table_dependencies) is not yet ported",
-            )
-            .finish(here("renameatt_internal"))
-            .map(|()| unreachable!());
+        // child_oids = find_typed_table_dependencies(targetrelation->rd_rel->reltype,
+        //                  RelationGetRelationName(targetrelation), behavior);
+        let child_oids = crate::at_phase::find_typed_table_dependencies(
+            mcx,
+            target_reltype,
+            &targetrelation.name(),
+            behavior,
+        )?;
+
+        // foreach(lo, child_oids)
+        //   renameatt_internal(lfirst_oid(lo), oldattname, newattname, true,
+        //                      true, 0, behavior);
+        for childrelid in child_oids.iter().copied() {
+            renameatt_internal(
+                mcx,
+                childrelid,
+                oldattname,
+                newattname,
+                true,
+                true,
+                0,
+                behavior,
+            )?;
+        }
     }
 
     // attrelation = table_open(AttributeRelationId, RowExclusiveLock);
@@ -408,6 +422,7 @@ pub fn renameatt<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt) -> PgResult<ObjectAddr
         relation.inh, /* recursive? */
         false,        /* recursing? */
         0,            /* expected inhcount */
+        stmt.behavior,
     )?;
 
     // ObjectAddressSubSet(address, RelationRelationId, relid, attnum);

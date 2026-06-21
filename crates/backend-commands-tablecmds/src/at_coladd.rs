@@ -217,12 +217,15 @@ pub fn ATParseTransformCmd<'mcx>(
 /// `ATPrepAddColumn(wqueue, rel, recurse, recursing, is_view, cmd, lockmode,
 /// context)` (tablecmds.c:7193).
 pub fn ATPrepAddColumn<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     rel: &Relation<'mcx>,
     recurse: bool,
     recursing: bool,
     is_view: bool,
     cmd: &mut AlterTableCmd<'mcx>,
+    lockmode: LOCKMODE,
+    context: &AlterTableUtilityContext<'_>,
 ) -> PgResult<()> {
     // if (rel->rd_rel->reloftype && !recursing) ereport(cannot add column to
     // typed table). reloftype read through the syscache projection.
@@ -237,11 +240,7 @@ pub fn ATPrepAddColumn<'mcx>(
     }
 
     if rel.rd_rel.relkind == RELKIND_COMPOSITE_TYPE {
-        // ATTypedTableRecursion is not yet ported.
-        panic!(
-            "ALTER TYPE ... ADD ATTRIBUTE on a composite type: ATTypedTableRecursion \
-             is not yet ported in backend-commands-tablecmds (faithful seam-and-panic)"
-        );
+        crate::at_phase::ATTypedTableRecursion(mcx, wqueue, rel, cmd, lockmode, context)?;
     }
 
     if recurse && !is_view {

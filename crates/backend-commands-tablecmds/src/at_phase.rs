@@ -71,6 +71,7 @@ use backend_catalog_objectaccess_seams as objaccess_seam;
 use backend_catalog_objectaddress_seams as objaddr_seam;
 use backend_catalog_pg_class_seams as pgclass_seam;
 use backend_catalog_pg_inherits_seams as inherits_seam;
+use backend_access_heap_heapam_seams as heapam_seam;
 use backend_utils_init_miscinit::GetUserId;
 
 use backend_commands_tablecmds_seams as seam;
@@ -733,13 +734,17 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_COMPOSITE_TYPE | ATT_FOREIGN_TABLE,
             )?;
-            crate::at_coladd::ATPrepAddColumn(mcx, rel, recurse, recursing, false, &mut cmd)?;
+            crate::at_coladd::ATPrepAddColumn(
+                mcx, wqueue, rel, recurse, recursing, false, &mut cmd, lockmode, context,
+            )?;
             // Recursion occurs during execution phase.
             pass = AT_PASS_ADD_COL;
         }
         AT_AddColumnToView => {
             ATSimplePermissions(cmd.subtype, rel, ATT_VIEW)?;
-            crate::at_coladd::ATPrepAddColumn(mcx, rel, recurse, recursing, true, &mut cmd)?;
+            crate::at_coladd::ATPrepAddColumn(
+                mcx, wqueue, rel, recurse, recursing, true, &mut cmd, lockmode, context,
+            )?;
             pass = AT_PASS_ADD_COL;
         }
         AT_ColumnDefault => {
@@ -2791,6 +2796,71 @@ fn ATSimpleRecursion<'mcx>(
             ATPrepCmd(mcx, wqueue, &childrel, cmd, false, true, lockmode, context)?;
             childrel.close(NoLock)?;
         }
+    }
+    Ok(())
+}
+
+/// `find_typed_table_dependencies(typeOid, typeName, behavior)`
+/// (tablecmds.c:7094).
+///
+/// Check to see if a composite type is being used as the type of a typed
+/// table. Abort if any are found and behavior is RESTRICT; else return the
+/// list of tables. The catalog scan of `pg_class` keyed on `reloftype` crosses
+/// to the heap owner as the [`heapam_seam::scan_typed_table_dependencies`]
+/// driver; the RESTRICT/CASCADE policy stays here.
+pub(crate) fn find_typed_table_dependencies<'mcx>(
+    mcx: Mcx<'mcx>,
+    type_oid: Oid,
+    type_name: &str,
+    behavior: types_nodes::parsenodes::DropBehavior,
+) -> PgResult<PgVec<'mcx, Oid>> {
+    let oids = heapam_seam::scan_typed_table_dependencies::call(mcx, type_oid)?;
+
+    // C errors out on the first match under DROP_RESTRICT; otherwise it returns
+    // the whole list.
+    if !oids.is_empty() && behavior == types_nodes::parsenodes::DropBehavior::Restrict {
+        return backend_utils_error::ereport(ERROR)
+            .errcode(types_error::ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST)
+            .errmsg(format!(
+                "cannot alter type \"{type_name}\" because it is the type of a typed table"
+            ))
+            .errhint("Use ALTER ... CASCADE to alter the typed tables too.")
+            .finish(here("find_typed_table_dependencies"))
+            .map(|()| unreachable!());
+    }
+
+    Ok(oids)
+}
+
+/// `ATTypedTableRecursion(wqueue, rel, cmd, lockmode, context)`
+/// (tablecmds.c:6891).
+///
+/// Propagate ALTER TYPE operations to the typed tables of that type. Also
+/// check the RESTRICT/CASCADE behavior. Given CASCADE, also permit recursion
+/// to inheritance children of the typed tables (handled by the per-table
+/// `ATPrepCmd(recurse=true)`).
+pub(crate) fn ATTypedTableRecursion<'mcx>(
+    mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    rel: &Relation<'mcx>,
+    cmd: &AlterTableCmd<'mcx>,
+    lockmode: LOCKMODE,
+    context: &AlterTableUtilityContext<'_>,
+) -> PgResult<()> {
+    debug_assert_eq!(rel.rd_rel.relkind, RELKIND_COMPOSITE_TYPE);
+
+    let children = find_typed_table_dependencies(
+        mcx,
+        rel.rd_rel.reltype,
+        &rel.name(),
+        cmd.behavior,
+    )?;
+
+    for &childrelid in children.iter() {
+        let childrel = relation_open(mcx, childrelid, lockmode)?;
+        CheckAlterTableIsSafe(&childrel)?;
+        ATPrepCmd(mcx, wqueue, &childrel, cmd, true, true, lockmode, context)?;
+        childrel.close(NoLock)?;
     }
     Ok(())
 }

@@ -8196,6 +8196,7 @@ dependencies = [
  "backend-access-common-scankey",
  "backend-access-common-toast-compression",
  "backend-access-common-tupdesc",
+ "backend-access-heap-heapam-seams",
  "backend-access-index-amapi-seams",
  "backend-access-index-genam-seams",
  "backend-access-index-indexam-seams",
