@@ -102,6 +102,22 @@ fn ret_internal(fcinfo: &mut FunctionCallInfoBaseData, state: Box<dyn core::any:
     Datum::from_usize(0)
 }
 
+/// Restore an `internal` transition state into `args[0]` after a *final*
+/// function read it. C's `array_agg_finalfn` reads its state with
+/// `PG_GETARG_POINTER(0)` and builds the result with `makeMdArrayResult(...,
+/// release = false)`: the read does NOT consume the running `ArrayBuildState`.
+/// For a moving window frame (`ROWS n PRECEDING`) array_agg has no inverse
+/// transfn, so eval_windowaggregates keeps adding to the same live state across
+/// rows; finalizing one row must leave that state intact for the next row's
+/// forward transition. The owned model carries the state as a move-only
+/// `Box<dyn Any>` on `ref_args[0]`; `take_array_state` moved it out to downcast,
+/// so put it back here so the owned-finalfn seam can hand it back to the
+/// executor (otherwise the next row reinitializes from scratch and only the
+/// newly-added element survives).
+fn keep_internal(fcinfo: &mut FunctionCallInfoBaseData, state: Box<dyn core::any::Any>) {
+    fcinfo.set_ref_arg(0, RefPayload::Internal(state));
+}
+
 /// `PG_RETURN_NULL()`.
 fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     fcinfo.set_result_null(true);
@@ -235,6 +251,9 @@ fn fc_array_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum
             let image = construct::make_md_array_result(m.mcx(), astate, ndims, &dims, &lbs)?
                 .as_slice()
                 .to_vec();
+            // makeMdArrayResult(..., release = false): the read is non-destructive,
+            // so restore the running state for the next (window-frame) row.
+            keep_internal(fcinfo, carrier);
             Ok(ret_array(fcinfo, image))
         }
     }
@@ -351,6 +370,9 @@ fn fc_array_agg_array_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult
             let image = construct::make_array_result_arr(m.mcx(), &carrier.state)?
                 .as_slice()
                 .to_vec();
+            // makeArrayResultArr(..., release = false): non-destructive read, so
+            // restore the running state for the next (window-frame) row.
+            keep_internal(fcinfo, carrier);
             Ok(ret_array(fcinfo, image))
         }
     }
