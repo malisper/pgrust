@@ -869,9 +869,12 @@ pub fn int4range_canonical_v1<'mcx>(
     let typcache = range_get_typcache(range_type_get_oid(r))?;
     // The kernel performs deserialize, the empty short-circuit (returns `r`), the
     // boundary +1/inclusivity normalization with the integer-out-of-range
-    // overflow check, and range_serialize.
-    let out = int4range_canonical(mcx, &typcache, r)?;
-    Ok(return_range_p(fcinfo, out))
+    // overflow check (`ereturn(fcinfo->context, ...)`), and range_serialize.
+    let escontext = fcinfo.escontext_mut();
+    match int4range_canonical(mcx, &typcache, r, escontext)? {
+        Some(out) => Ok(return_range_p(fcinfo, out)),
+        None => Ok(return_null(fcinfo)),
+    }
 }
 
 /// `int8range_canonical(PG_FUNCTION_ARGS)` (rangetypes.c:1574).
@@ -881,8 +884,11 @@ pub fn int8range_canonical_v1<'mcx>(
 ) -> PgResult<Datum> {
     let r = getarg_range_p(mcx, fcinfo, 0)?;
     let typcache = range_get_typcache(range_type_get_oid(r))?;
-    let out = int8range_canonical(mcx, &typcache, r)?;
-    Ok(return_range_p(fcinfo, out))
+    let escontext = fcinfo.escontext_mut();
+    match int8range_canonical(mcx, &typcache, r, escontext)? {
+        Some(out) => Ok(return_range_p(fcinfo, out)),
+        None => Ok(return_null(fcinfo)),
+    }
 }
 
 /// `daterange_canonical(PG_FUNCTION_ARGS)` (rangetypes.c:1622).
@@ -892,8 +898,11 @@ pub fn daterange_canonical_v1<'mcx>(
 ) -> PgResult<Datum> {
     let r = getarg_range_p(mcx, fcinfo, 0)?;
     let typcache = range_get_typcache(range_type_get_oid(r))?;
-    let out = daterange_canonical(mcx, &typcache, r)?;
-    Ok(return_range_p(fcinfo, out))
+    let escontext = fcinfo.escontext_mut();
+    match daterange_canonical(mcx, &typcache, r, escontext)? {
+        Some(out) => Ok(return_range_p(fcinfo, out)),
+        None => Ok(return_null(fcinfo)),
+    }
 }
 
 /// `int4range_subdiff(PG_FUNCTION_ARGS)` (rangetypes.c:1685).

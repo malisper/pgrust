@@ -23,7 +23,7 @@ use types_rangetypes::{
     RANGE_LB_NULL, RANGE_UB_INC, RANGE_UB_INF, RANGE_UB_NULL,
 };
 
-use crate::range_repr_serialize::{make_range, range_deserialize, range_get_flags};
+use crate::range_repr_serialize::{make_range, make_range_soft, range_deserialize, range_get_flags};
 
 /// `RANGE_HAS_LBOUND(flags)` (rangetypes.h:48).
 #[inline]
@@ -230,19 +230,21 @@ pub fn range_in<'mcx>(
     // C: range = make_range(typcache, &lower, &upper, flags & RANGE_EMPTY,
     //                       escontext); if (!range) PG_RETURN_NULL();
     //
-    // `make_range` only soft-fails on a discrete canonicalization error
-    // (`range_serialize` reporting "range lower bound must be <= upper bound" is
-    // hard, but a discrete-type canonical proc can ereturn). The owned
-    // `make_range` raises hard here (no escontext arg); that matches every
-    // current caller and the dominant `pg_input_is_valid` cases are the parse /
-    // element-input legs handled above.
-    Ok(Some(make_range(
+    // `make_range` forwards `escontext` to `range_serialize`, whose
+    // lower-bound-above-upper-bound check (rangetypes.c:1819) `ereturn`s a soft
+    // error — so a malformed `[5,1)` literal under `pg_input_is_valid` returns
+    // false instead of raising.
+    match make_range_soft(
         mcx,
         &cache.typcache,
         &lower,
         &upper,
         flags & RANGE_EMPTY != 0,
-    )?))
+        escontext.as_deref_mut(),
+    )? {
+        Some(range) => Ok(Some(range)),
+        None => Ok(None),
+    }
 }
 
 /// `range_out(range)` body (rangetypes.c:139): the canonical text form.

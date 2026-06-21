@@ -13,8 +13,8 @@ use mcx::Mcx;
 use types_cache::typcache::TypeCacheEntry;
 use types_core::primitive::OidIsValid;
 use types_datum::datum::Datum;
-use types_error::{PgError, PgResult, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
-                  ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
+use types_error::{ereturn, PgError, PgResult, SoftErrorContext,
+                  ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
 use types_rangetypes::{
     RangeTypeP, RANGE_EMPTY, RANGE_LB_INF, RANGE_LB_NULL, RANGE_UB_INF, RANGE_UB_NULL,
 };
@@ -27,7 +27,7 @@ use backend_utils_fmgr_fmgr_seams::{
 use common_hashfn_seams::{hash_bytes_uint32, hash_bytes_uint32_extended};
 
 use crate::range_bounds_compare::range_cmp_bounds;
-use crate::range_repr_serialize::{range_deserialize, range_get_flags, range_serialize};
+use crate::range_repr_serialize::{range_deserialize, range_get_flags, range_serialize_soft};
 
 // --- helpers mirroring the C header macros ---------------------------------
 
@@ -97,17 +97,22 @@ fn is_valid_date(d: i32) -> bool {
 // --- canonical functions (rangetypes.c) ------------------------------------
 
 /// `int4range_canonical(r)` body (rangetypes.c:1528): normalize to `[)`.
+///
+/// `escontext` is C's `fcinfo->context`: the overflow `ereturn`s a soft error
+/// (returning `Ok(None)`) when present, else hard-errors. The trailing
+/// `range_serialize` also forwards it.
 pub fn int4range_canonical<'mcx>(
     mcx: Mcx<'mcx>,
     typcache: &TypeCacheEntry,
     r: RangeTypeP<'_>,
-) -> PgResult<RangeTypeP<'mcx>> {
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<RangeTypeP<'mcx>>> {
     let (mut lower, mut upper, empty) = range_deserialize(typcache, r)?;
 
     if empty {
         // PG_RETURN_RANGE_P(r) -- the input is already canonical; copy it into
         // the current context (`mcx`) to match the seam's lifetime contract.
-        return datum_get_range_type_p_copy(mcx, r);
+        return Ok(Some(datum_get_range_type_p_copy(mcx, r)?));
     }
 
     if !lower.infinite && !lower.inclusive {
@@ -115,8 +120,12 @@ pub fn int4range_canonical<'mcx>(
 
         // Handle possible overflow manually
         if bnd == i32::MAX {
-            return Err(PgError::error("integer out of range")
-                .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE));
+            return ereturn(
+                escontext,
+                None,
+                PgError::error("integer out of range")
+                    .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+            );
         }
         lower.val = Datum::from_i32(bnd + 1);
         lower.inclusive = true;
@@ -126,14 +135,18 @@ pub fn int4range_canonical<'mcx>(
         let bnd = upper.val.as_i32();
 
         if bnd == i32::MAX {
-            return Err(PgError::error("integer out of range")
-                .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE));
+            return ereturn(
+                escontext,
+                None,
+                PgError::error("integer out of range")
+                    .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+            );
         }
         upper.val = Datum::from_i32(bnd + 1);
         upper.inclusive = false;
     }
 
-    range_serialize(mcx, typcache, &lower, &upper, false)
+    range_serialize_soft(mcx, typcache, &lower, &upper, false, escontext.as_deref_mut())
 }
 
 /// `int8range_canonical(r)` body (rangetypes.c:1575).
@@ -141,19 +154,24 @@ pub fn int8range_canonical<'mcx>(
     mcx: Mcx<'mcx>,
     typcache: &TypeCacheEntry,
     r: RangeTypeP<'_>,
-) -> PgResult<RangeTypeP<'mcx>> {
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<RangeTypeP<'mcx>>> {
     let (mut lower, mut upper, empty) = range_deserialize(typcache, r)?;
 
     if empty {
-        return datum_get_range_type_p_copy(mcx, r);
+        return Ok(Some(datum_get_range_type_p_copy(mcx, r)?));
     }
 
     if !lower.infinite && !lower.inclusive {
         let bnd = lower.val.as_i64();
 
         if bnd == i64::MAX {
-            return Err(PgError::error("bigint out of range")
-                .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE));
+            return ereturn(
+                escontext,
+                None,
+                PgError::error("bigint out of range")
+                    .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+            );
         }
         lower.val = Datum::from_i64(bnd + 1);
         lower.inclusive = true;
@@ -163,14 +181,18 @@ pub fn int8range_canonical<'mcx>(
         let bnd = upper.val.as_i64();
 
         if bnd == i64::MAX {
-            return Err(PgError::error("bigint out of range")
-                .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE));
+            return ereturn(
+                escontext,
+                None,
+                PgError::error("bigint out of range")
+                    .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+            );
         }
         upper.val = Datum::from_i64(bnd + 1);
         upper.inclusive = false;
     }
 
-    range_serialize(mcx, typcache, &lower, &upper, false)
+    range_serialize_soft(mcx, typcache, &lower, &upper, false, escontext.as_deref_mut())
 }
 
 /// `daterange_canonical(r)` body (rangetypes.c:1622).
@@ -178,11 +200,12 @@ pub fn daterange_canonical<'mcx>(
     mcx: Mcx<'mcx>,
     typcache: &TypeCacheEntry,
     r: RangeTypeP<'_>,
-) -> PgResult<RangeTypeP<'mcx>> {
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<RangeTypeP<'mcx>>> {
     let (mut lower, mut upper, empty) = range_deserialize(typcache, r)?;
 
     if empty {
-        return datum_get_range_type_p_copy(mcx, r);
+        return Ok(Some(datum_get_range_type_p_copy(mcx, r)?));
     }
 
     // DateADT is int32.
@@ -192,8 +215,12 @@ pub fn daterange_canonical<'mcx>(
         // Check for overflow -- note we already eliminated PG_INT32_MAX
         bnd += 1;
         if !is_valid_date(bnd) {
-            return Err(PgError::error("date out of range")
-                .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE));
+            return ereturn(
+                escontext,
+                None,
+                PgError::error("date out of range")
+                    .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+            );
         }
         lower.val = Datum::from_i32(bnd);
         lower.inclusive = true;
@@ -204,14 +231,18 @@ pub fn daterange_canonical<'mcx>(
 
         bnd += 1;
         if !is_valid_date(bnd) {
-            return Err(PgError::error("date out of range")
-                .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE));
+            return ereturn(
+                escontext,
+                None,
+                PgError::error("date out of range")
+                    .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+            );
         }
         upper.val = Datum::from_i32(bnd);
         upper.inclusive = false;
     }
 
-    range_serialize(mcx, typcache, &lower, &upper, false)
+    range_serialize_soft(mcx, typcache, &lower, &upper, false, escontext.as_deref_mut())
 }
 
 /// `PG_RETURN_RANGE_P(r)` for the empty fast-path: hand the already-canonical

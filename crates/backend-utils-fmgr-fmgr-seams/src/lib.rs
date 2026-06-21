@@ -1077,6 +1077,26 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `FunctionCallInvoke(fcinfo)` with a soft-error sink installed on the call
+    /// frame (C: `InitFunctionCallInfoData(*fcinfo, ..., escontext, NULL)` in
+    /// `make_range`, rangetypes.c:2034). Identical to [`function_call_invoke_datum`]
+    /// except `fcinfo->context` is set to `escontext`, so a callee that `ereturn`s
+    /// a recoverable error (e.g. `int4range_canonical`'s "integer out of range"
+    /// overflow) records it into the sink instead of raising. Returns `Ok(None)`
+    /// when a soft error occurred (C: `if (SOFT_ERROR_OCCURRED(escontext)) return
+    /// NULL;`); otherwise `Ok(Some((result, isnull)))`.
+    pub fn function_call_invoke_datum_soft<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        fn_oid: Oid,
+        collation: Oid,
+        args: &[Datum<'mcx>],
+        args_null: &[bool],
+        fn_expr: Option<types_core::fmgr::FnExprErased>,
+        escontext: &mut types_error::SoftErrorContext,
+    ) -> PgResult<Option<(Datum<'mcx>, bool)>>
+);
+
+seam_core::seam!(
     /// `FunctionCallInvoke(fcinfo)` over the canonical [`Datum`] lane, taking the
     /// arguments **by value** (moving them in). This is the form an aggregate
     /// transition function needs: a `Datum::Internal` (C `internal` pseudo-type)

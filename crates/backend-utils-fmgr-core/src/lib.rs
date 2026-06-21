@@ -3508,6 +3508,26 @@ fn function_call_invoke_datum_core<'mcx>(
     ref_args: Vec<Option<RefPayload>>,
     fn_expr: Option<types_core::fmgr::FnExprErased>,
 ) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
+    match function_call_invoke_datum_core_soft(mcx, fn_oid, collation, nargs, ref_args, fn_expr, None)? {
+        Some(pair) => Ok(pair),
+        // No escontext was installed, so a soft error never occurs: any callee
+        // error propagated as a hard `Err` above.
+        None => unreachable!("function_call_invoke_datum_core with NULL escontext never soft-fails"),
+    }
+}
+
+/// Like [`function_call_invoke_datum_core`] but with an optional soft-error sink
+/// installed on the call frame (C: `InitFunctionCallInfoData(*fcinfo, ...,
+/// escontext, NULL)`). Returns `Ok(None)` when a soft error was recorded.
+fn function_call_invoke_datum_core_soft<'mcx>(
+    mcx: Mcx<'mcx>,
+    fn_oid: Oid,
+    collation: Oid,
+    nargs: Vec<NullableDatum>,
+    ref_args: Vec<Option<RefPayload>>,
+    fn_expr: Option<types_core::fmgr::FnExprErased>,
+    escontext: Option<&mut types_error::SoftErrorContext>,
+) -> PgResult<Option<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)>> {
     let mut resolved = fmgr_info(mcx, fn_oid)?;
 
     // C: ExecInitFunc does `fmgr_info_set_expr((Node *) node, flinfo)`, so the
@@ -3548,22 +3568,39 @@ fn function_call_invoke_datum_core<'mcx>(
     }
     fcinfo.ref_args = flat_ref_args;
     fcinfo.debug_assert_ref_null_consistency();
+    // C: `InitFunctionCallInfoData(*fcinfo, ..., escontext, NULL)` — install the
+    // soft-error sink so a callee's `ereturn` records into it instead of raising
+    // (a fresh frame-local context whose captured error is lifted back to the
+    // caller after the call, mirroring `input_function_call_safe_typed`).
+    if let Some(caller) = escontext.as_ref() {
+        fcinfo.set_escontext(types_error::SoftErrorContext::new(caller.details_wanted()));
+    }
     // C: fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo). Dispatch directly
     // (NOT through `invoke_flinfo`/`null_check`): a function may legitimately
     // return NULL via `fcinfo->isnull`, which the caller stores.
     fcinfo.isnull = false;
     let word = function_call_invoke_with_expr(mcx, &resolved.resolution, &mut fcinfo, fn_expr)?;
+    // C: if (SOFT_ERROR_OCCURRED(escontext)) return NULL;
+    if fcinfo.soft_error_occurred() {
+        if let Some(caller) = escontext {
+            match fcinfo.escontext.as_mut().and_then(|c| c.take_error()) {
+                Some(captured) => caller.save(captured),
+                None => caller.mark_error_occurred(),
+            }
+        }
+        return Ok(None);
+    }
     let isnull = fcinfo.isnull;
     let ref_result = fcinfo.take_ref_result();
     if isnull {
-        return Ok((
+        return Ok(Some((
             types_tuple::backend_access_common_heaptuple::Datum::null(),
             true,
-        ));
+        )));
     }
     // Materialize the result into `mcx` (by-value or by-reference).
     let result = ref_out_to_datum(mcx, word, ref_result)?;
-    Ok((result, false))
+    Ok(Some((result, false)))
 }
 
 fn function_call_invoke_datum_seam<'mcx>(
@@ -3593,6 +3630,33 @@ fn function_call_invoke_datum_seam<'mcx>(
         ref_args.push(if is_null { None } else { refp });
     }
     function_call_invoke_datum_core(mcx, fn_oid, collation, nargs, ref_args, fn_expr)
+}
+
+/// Soft-error form of [`function_call_invoke_datum_seam`]: installs `escontext`
+/// on the call frame so a callee's recoverable `ereturn` records into it (C:
+/// `make_range`'s canonical-proc call, rangetypes.c:2034). Returns `Ok(None)`
+/// when a soft error occurred.
+fn function_call_invoke_datum_soft_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    fn_oid: Oid,
+    collation: Oid,
+    args: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+    args_null: &[bool],
+    fn_expr: Option<types_core::fmgr::FnExprErased>,
+    escontext: &mut types_error::SoftErrorContext,
+) -> PgResult<Option<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)>> {
+    let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
+    let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
+    for (i, val) in args.iter().enumerate() {
+        let is_null = args_null.get(i).copied().unwrap_or(false);
+        let (mut nd, refp) = datum_to_ref_arg(val);
+        if is_null {
+            nd.isnull = true;
+        }
+        nargs.push(nd);
+        ref_args.push(if is_null { None } else { refp });
+    }
+    function_call_invoke_datum_core_soft(mcx, fn_oid, collation, nargs, ref_args, fn_expr, Some(escontext))
 }
 
 /// By-value form of [`function_call_invoke_datum_seam`]: consumes `args`, so an
@@ -4539,6 +4603,7 @@ pub fn init_seams() {
         fastpath_function_call_invoke_seam,
     );
     backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::set(function_call_invoke_datum_seam);
+    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum_soft::set(function_call_invoke_datum_soft_seam);
     backend_utils_fmgr_fmgr_seams::function_call_invoke_datum_owned::set(
         function_call_invoke_datum_owned_seam,
     );

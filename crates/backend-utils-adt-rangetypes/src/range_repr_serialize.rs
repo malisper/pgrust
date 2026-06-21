@@ -25,7 +25,7 @@ use mcx::Mcx;
 use types_cache::typcache::TypeCacheEntry;
 use types_core::primitive::OidIsValid;
 use types_datum::datum::Datum;
-use types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION};
+use types_error::{ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATA_EXCEPTION};
 use types_rangetypes::{
     RangeBound, RangeType, RangeTypeP, RANGE_EMPTY, RANGE_LB_INC, RANGE_LB_INF, RANGE_UB_INC,
     RANGE_UB_INF,
@@ -389,10 +389,8 @@ fn palloc0_maxaligned<'mcx>(mcx: Mcx<'mcx>, size: usize) -> PgResult<*mut u8> {
 /// `range_serialize(typcache, lower, upper, empty, escontext)` (rangetypes.c:1791):
 /// build a serialized `RangeType` from in-memory bounds, allocated in `mcx`.
 ///
-/// `escontext` is `NULL` here (the hard-error path), so the lower-bound-above-
-/// upper-bound check raises directly. The bound `Datum`s are taken by value
-/// from copies (C mutates the caller's `RangeBound.val` when detoasting; we
-/// detoast into `mcx` and rebind the local copies the same way).
+/// `escontext` is `NULL` here (the hard-error path); a soft error never occurs,
+/// so the result is always `Some`. Thin wrapper over [`range_serialize_soft`].
 pub fn range_serialize<'mcx>(
     mcx: Mcx<'mcx>,
     typcache: &TypeCacheEntry,
@@ -400,6 +398,27 @@ pub fn range_serialize<'mcx>(
     upper: &RangeBound,
     empty: bool,
 ) -> PgResult<RangeTypeP<'mcx>> {
+    Ok(range_serialize_soft(mcx, typcache, lower, upper, empty, None)?
+        .expect("range_serialize with NULL escontext never returns NULL"))
+}
+
+/// `range_serialize(typcache, lower, upper, empty, escontext)` (rangetypes.c:1791)
+/// with the soft-error context threaded: build a serialized `RangeType` from
+/// in-memory bounds, allocated in `mcx`.
+///
+/// Returns `Ok(None)` for the C `ereturn(escontext, NULL, …)` soft-error path
+/// (the lower-bound-above-upper-bound check, rangetypes.c:1819) when `escontext`
+/// is `Some`; without one that error propagates hard. The bound `Datum`s are
+/// taken by value from copies (C mutates the caller's `RangeBound.val` when
+/// detoasting; we detoast into `mcx` and rebind the local copies the same way).
+pub fn range_serialize_soft<'mcx>(
+    mcx: Mcx<'mcx>,
+    typcache: &TypeCacheEntry,
+    lower: &RangeBound,
+    upper: &RangeBound,
+    empty: bool,
+    escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<RangeTypeP<'mcx>>> {
     // Working copies of the bounds: C rewrites lower->val / upper->val in place
     // after detoasting; we mirror that on local copies.
     let mut lower = *lower;
@@ -419,10 +438,14 @@ pub fn range_serialize<'mcx>(
 
         // error check: if lower bound value is above upper, it's wrong
         if cmp > 0 {
-            return Err(PgError::error(
-                "range lower bound must be less than or equal to range upper bound",
-            )
-            .with_sqlstate(ERRCODE_DATA_EXCEPTION));
+            return ereturn(
+                escontext,
+                None,
+                PgError::error(
+                    "range lower bound must be less than or equal to range upper bound",
+                )
+                .with_sqlstate(ERRCODE_DATA_EXCEPTION),
+            );
         }
 
         // if bounds are equal, and not both inclusive, range is empty
@@ -510,10 +533,10 @@ pub fn range_serialize<'mcx>(
         *ptr = flags;
     }
 
-    Ok(RangeTypeP {
+    Ok(Some(RangeTypeP {
         ptr: range as *const RangeType,
         _marker: core::marker::PhantomData,
-    })
+    }))
 }
 
 /// Inward seam shape for `range_serialize` (thin pass-through to
@@ -627,7 +650,8 @@ pub fn range_set_contain_empty(range: RangeTypeP<'_>) {
 /// `make_range(typcache, lower, upper, empty, escontext)` (rangetypes.c:2016):
 /// serialize and (if the type has a canonical fn) canonicalize.
 ///
-/// `escontext` is `NULL` here (hard-error path), so a soft-error never occurs.
+/// `escontext` is `NULL` here (hard-error path), so a soft-error never occurs;
+/// the result is always `Some`. Thin wrapper over [`make_range_soft`].
 pub fn make_range<'mcx>(
     mcx: Mcx<'mcx>,
     typcache: &TypeCacheEntry,
@@ -635,7 +659,36 @@ pub fn make_range<'mcx>(
     upper: &RangeBound,
     empty: bool,
 ) -> PgResult<RangeTypeP<'mcx>> {
-    let mut range = range_serialize(mcx, typcache, lower, upper, empty)?;
+    Ok(make_range_soft(mcx, typcache, lower, upper, empty, None)?
+        .expect("make_range with NULL escontext never returns NULL"))
+}
+
+/// `make_range(typcache, lower, upper, empty, escontext)` (rangetypes.c:2016)
+/// with the soft-error context threaded: serialize and (if the type has a
+/// canonical fn) canonicalize.
+///
+/// Returns `Ok(None)` when `range_serialize` soft-fails (rangetypes.c:2021:
+/// `if (range == NULL) return NULL;`).
+pub fn make_range_soft<'mcx>(
+    mcx: Mcx<'mcx>,
+    typcache: &TypeCacheEntry,
+    lower: &RangeBound,
+    upper: &RangeBound,
+    empty: bool,
+    mut escontext: Option<&mut SoftErrorContext>,
+) -> PgResult<Option<RangeTypeP<'mcx>>> {
+    // C: range = range_serialize(...); if (SOFT_ERROR_OCCURRED(escontext)) return NULL;
+    let mut range = match range_serialize_soft(
+        mcx,
+        typcache,
+        lower,
+        upper,
+        empty,
+        escontext.as_deref_mut(),
+    )? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
 
     // no need to call canonical on empty ranges ...
     if OidIsValid(typcache.rng_canonical_finfo.fn_oid) && !range_is_empty(range) {
@@ -648,16 +701,36 @@ pub fn make_range<'mcx>(
         // path — the latter would drop the by-ref referent and hand back a null
         // word. Marshal the serialized range as a `ByRef` arg and read the
         // canonicalized range back from the `ByRef` result.
+        //
+        // C: `InitFunctionCallInfoData(*fcinfo, ..., escontext, NULL)` — the
+        // canonical proc gets the soft-error sink, so an overflow (e.g.
+        // `int4range_canonical` on `[1,INT_MAX]`) `ereturn`s "integer out of
+        // range" into `escontext` instead of raising.
         use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
         let arg = CanonDatum::ByRef(mcx::slice_in(mcx, &range_to_varlena_bytes(range))?);
-        let (result, isnull) = fmgr::function_call_invoke_datum::call(
-            mcx,
-            typcache.rng_canonical_finfo.fn_oid,
-            typcache.rng_collation,
-            &[arg],
-            &[],
-            None,
-        )?;
+        let (result, isnull) = match escontext.as_deref_mut() {
+            Some(ctx) => match fmgr::function_call_invoke_datum_soft::call(
+                mcx,
+                typcache.rng_canonical_finfo.fn_oid,
+                typcache.rng_collation,
+                &[arg],
+                &[],
+                None,
+                ctx,
+            )? {
+                Some(pair) => pair,
+                // C: if (SOFT_ERROR_OCCURRED(escontext)) return NULL;
+                None => return Ok(None),
+            },
+            None => fmgr::function_call_invoke_datum::call(
+                mcx,
+                typcache.rng_canonical_finfo.fn_oid,
+                typcache.rng_collation,
+                &[arg],
+                &[],
+                None,
+            )?,
+        };
         if isnull {
             // C: strict-null `function %u returned NULL` (canonical fns are strict
             // and never return NULL for a non-empty range).
@@ -676,7 +749,7 @@ pub fn make_range<'mcx>(
         range = range_p_from_varlena_bytes(mcx, bytes.as_slice())?;
     }
 
-    Ok(range)
+    Ok(Some(range))
 }
 
 /// `make_empty_range(typcache)` (rangetypes.c:2229): the canonical empty range.
