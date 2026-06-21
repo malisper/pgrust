@@ -46,7 +46,7 @@ use backend_utils_misc_stack_depth::check_stack_depth;
 
 use crate::at_phase::{
     AlteredTableInfo, AlterTableUtilityContext, NewConstraint, ATGetQueueEntry, ATSimplePermissions,
-    CheckAlterTableIsSafe, AT_PASS_ADD_INDEX,
+    CheckAlterTableIsSafe, AT_PASS_ADD_INDEX, ATT_FOREIGN_TABLE, ATT_PARTITIONED_TABLE, ATT_TABLE,
 };
 use crate::helpers::here;
 
@@ -57,10 +57,6 @@ const INDEX_CONSTR_CREATE_DEFERRABLE: u16 = 1 << 1;
 const INDEX_CONSTR_CREATE_INIT_DEFERRED: u16 = 1 << 2;
 const INDEX_CONSTR_CREATE_UPDATE_INDEX: u16 = 1 << 3;
 const INDEX_CONSTR_CREATE_REMOVE_OLD_DEPS: u16 = 1 << 4;
-
-const ATT_TABLE: i32 = 1 << 0;
-const ATT_PARTITIONED_TABLE: i32 = 1 << 4;
-const ATT_FOREIGN_TABLE: i32 = 1 << 6;
 
 /// Deep-copy an `Option<PgString>` into `mcx`.
 fn opt_str_clone<'mcx>(

@@ -481,6 +481,61 @@ pub fn map_variable_attnos_expr_list<'mcx>(
     Ok((out, found_whole_row))
 }
 
+/// `map_variable_attnos((Node *) returningList, firstVarno, 0, attmap,
+/// RelationGetForm(partrel)->reltype, &found_whole_row)` over a `List *` of
+/// `TargetEntry`, as `execPartition.c` `ExecInitPartitionInfo` calls it on the
+/// first plan's RETURNING list.
+///
+/// In C `map_variable_attnos((Node *) returningList, ...)` recurses into the
+/// `T_List` arm of the mutator, then into each `TargetEntry` (the generic
+/// `expression_tree_mutator` arm copies the `TargetEntry` and recurses into its
+/// `expr`). Over the owned model the list is a `PgVec<TargetEntry>`; we map each
+/// element's `expr` in place (wrapping it as a `Node::Expr`, mirroring the C
+/// per-element rewrite) with `sublevels_up = 0` and the caller-supplied
+/// `target_varno` / `to_rowtype`, and OR-accumulate `found_whole_row`. The input
+/// vector is consumed and returned mutated.
+pub fn map_variable_attnos_targetentry_list<'mcx>(
+    mcx: Mcx<'mcx>,
+    tlist: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>,
+    target_varno: i32,
+    attmap: &[i16],
+    to_rowtype: Oid,
+) -> PgResult<(PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>, bool)> {
+    let mut out: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, tlist.len())?;
+    let mut found_whole_row = false;
+    for mut tle in tlist.into_iter() {
+        if let Some(expr_box) = tle.expr.take() {
+            // Move the TargetEntry's expr out, wrap it as a Node::Expr, map it in
+            // place (the C generic mutator arm recurses into tle->expr), then
+            // write it back. found_whole_row is OR-accumulated across the list.
+            let owned: Expr = mcx::box_into_inner_leak(expr_box);
+            let mut node = Node::mk_expr(mcx, owned)?;
+            let mut one_fwr = false;
+            map_variable_attnos(
+                &mut node,
+                target_varno,
+                0,
+                attmap,
+                to_rowtype,
+                &mut one_fwr,
+                mcx,
+            )?;
+            found_whole_row |= one_fwr;
+            match node.into_expr() {
+                Some(mapped) => {
+                    tle.expr = Some(mcx::alloc_in(mcx, mapped)?);
+                }
+                None => unreachable!(
+                    "map_variable_attnos returned a non-Expr for a TargetEntry expr input"
+                ),
+            }
+        }
+        out.push(tle);
+    }
+    Ok((out, found_whole_row))
+}
+
 // ===========================================================================
 // ReplaceVarsFromTargetList (rewriteManip.c:1728)
 // ===========================================================================

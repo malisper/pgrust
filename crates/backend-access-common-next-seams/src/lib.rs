@@ -8,6 +8,19 @@
 #![allow(non_snake_case)]
 
 seam_core::seam!(
+    /// `build_attrmap_by_name(indesc, outdesc, missing_ok)` (attmap.c): map
+    /// input-descriptor columns to output-descriptor columns by name, always
+    /// returning the (possibly identity) `AttrMap`. `Err` carries the C
+    /// `ereport(ERROR)`s ("could not convert row type") and OOM.
+    pub fn build_attrmap_by_name<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        indesc: &types_tuple::heaptuple::TupleDescData<'_>,
+        outdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+        missing_ok: bool,
+    ) -> types_error::PgResult<mcx::PgBox<'mcx, types_tuple::attmap::AttrMap<'mcx>>>
+);
+
+seam_core::seam!(
     /// `build_attrmap_by_name_if_req(indesc, outdesc, missing_ok)`
     /// (attmap.c): map input-descriptor columns to output-descriptor columns
     /// by name, returning `None` when the map would be the identity (no

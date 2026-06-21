@@ -61,12 +61,9 @@ fn bms_is_member(x: i32, set: &[i32]) -> bool {
 
 use crate::at_phase::{
     AlteredTableInfo, ATGetQueueEntry, ATSimplePermissions, CheckAlterTableIsSafe, NewConstraint,
+    ATT_FOREIGN_TABLE, ATT_PARTITIONED_TABLE, ATT_TABLE,
 };
 use crate::helpers::here;
-
-const ATT_TABLE: i32 = 1 << 0;
-const ATT_PARTITIONED_TABLE: i32 = 1 << 4;
-const ATT_FOREIGN_TABLE: i32 = 1 << 6;
 
 const RELKIND_RELATION: u8 = b'r';
 const RELKIND_PARTITIONED_TABLE: u8 = b'p';

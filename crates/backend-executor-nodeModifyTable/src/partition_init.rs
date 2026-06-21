@@ -133,25 +133,84 @@ pub fn ExecInitPartitionReturning<'mcx>(
         Some(n) => n,
         None => return Ok(()),
     };
+    // returningList = linitial(node->returningLists); — the first plan's
+    // RETURNING list is the reference. Clone it out of the plan node into the
+    // per-query context so it can be remapped to the partition's attnos.
     let ref_returning_list = match node.returningLists.as_ref() {
         Some(lists) if !lists.is_empty() => lists[0].as_slice(),
         _ => return Ok(()),
     };
+    let mut returning_list: mcx::PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> =
+        mcx::vec_with_capacity_in(mcx, ref_returning_list.len())?;
+    for tle in ref_returning_list {
+        returning_list.push(tle.clone_in(mcx)?);
+    }
+
+    // Convert Vars in it to contain this partition's attribute numbers.
+    //   if (part_attmap == NULL)
+    //       part_attmap = build_attrmap_by_name(RelationGetDescr(partrel),
+    //                                           RelationGetDescr(firstResultRel),
+    //                                           false);
+    let part_desc = estate
+        .result_rel(leaf_part_rri)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecInitPartitionReturning: leaf partition ResultRelInfo has no open relation")
+        .rd_att_clone_in(mcx)?;
+    let part_reltype = estate
+        .result_rel(leaf_part_rri)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecInitPartitionReturning: leaf partition ResultRelInfo has no open relation")
+        .rd_rel
+        .reltype;
+    let first_desc = estate
+        .result_rel(first_result_rel)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecInitPartitionReturning: first result ResultRelInfo has no open relation")
+        .rd_att_clone_in(mcx)?;
+    let part_attmap = backend_access_common_next_seams::build_attrmap_by_name::call(
+        mcx,
+        &part_desc,
+        &first_desc,
+        false,
+    )?;
+
+    //   returningList = (List *)
+    //       map_variable_attnos((Node *) returningList,
+    //                           firstVarno, 0,
+    //                           part_attmap,
+    //                           RelationGetForm(partrel)->reltype,
+    //                           &found_whole_row);
+    //   /* We ignore the value of found_whole_row. */
+    let (returning_list, _found_whole_row) =
+        backend_rewrite_rewritemanip_seams::map_variable_attnos_targetentry_list::call(
+            mcx,
+            returning_list,
+            first_varno as i32,
+            &part_attmap.attnums,
+            part_reltype,
+        )?;
 
     // Assert(mtstate->ps.ps_ResultTupleSlot != NULL);
     // Assert(mtstate->ps.ps_ExprContext != NULL);
     //
-    // Map Vars to the partition's attnos and build ri_projectReturning via
-    // ExecBuildProjectionInfo using the slot/econtext set up in
-    // ExecInitModifyTable — all execExpr/rewrite-owned.
-    backend_executor_execExpr_seams::partition_init_returning::call(
-        mcx,
+    //   leaf_part_rri->ri_returningList = returningList;
+    //   leaf_part_rri->ri_projectReturning =
+    //       ExecBuildProjectionInfo(returningList, econtext, slot,
+    //                               &mtstate->ps, RelationGetDescr(partrel));
+    //
+    // Build ri_projectReturning via ExecBuildProjectionInfo using the slot
+    // (mtstate->ps.ps_ResultTupleSlot) / econtext (ps_ExprContext) set up in
+    // ExecInitModifyTable and the partition's tupdesc (leaf_part_rri's rd_att),
+    // and store ri_returningList — execExpr-owned (the leaf's own rd_att is the
+    // input descriptor, matching RelationGetDescr(partrel)).
+    backend_executor_execExpr_seams::exec_build_returning_projection::call(
         mtstate,
         estate,
         leaf_part_rri,
-        first_result_rel,
-        first_varno,
-        ref_returning_list,
+        returning_list.as_slice(),
     )
 }
 

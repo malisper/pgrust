@@ -10932,6 +10932,7 @@ name = "backend-executor-nodeModifyTable"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-common-next-seams",
  "backend-access-heap-heapam-handler-dml-seams",
  "backend-access-table-tableam",
  "backend-access-transam-xact-seams",
@@ -10954,6 +10955,7 @@ dependencies = [
  "backend-nodes-nodeFuncs-seams",
  "backend-optimizer-util-var-seams",
  "backend-rewrite-rewritehandler-seams",
+ "backend-rewrite-rewritemanip-seams",
  "backend-storage-lmgr-lmgr-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-adt-datum-seams",

@@ -28,6 +28,9 @@ mod syncscan_tests;
 /// Install every inward seam this unit owns.
 pub fn init_seams() {
     // attmap.c / tupconvert.c entry points (backend-access-common-next-seams).
+    backend_access_common_next_seams::build_attrmap_by_name::set(
+        attmap::build_attrmap_by_name,
+    );
     backend_access_common_next_seams::build_attrmap_by_name_if_req::set(
         attmap::build_attrmap_by_name_if_req,
     );

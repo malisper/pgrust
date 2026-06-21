@@ -116,6 +116,18 @@ pub fn init_seams() {
         replace::map_variable_attnos_expr_list(mcx, exprs, attmap)
     });
 
+    s::map_variable_attnos_targetentry_list::set(
+        |mcx, tlist, target_varno, attmap, to_rowtype| {
+            replace::map_variable_attnos_targetentry_list(
+                mcx,
+                tlist,
+                target_varno,
+                attmap,
+                to_rowtype,
+            )
+        },
+    );
+
     s::map_variable_attnos_node::set(
         |mcx, mut node, target_varno, sublevels_up, attmap, to_rowtype| {
             let mut found_whole_row = false;

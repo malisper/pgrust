@@ -38,6 +38,8 @@ backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandl
 backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
 backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
 backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-seams" }
+backend-access-common-next-seams = { path = "../backend-access-common-next-seams" }
+backend-rewrite-rewritemanip-seams = { path = "../backend-rewrite-rewritemanip-seams" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }

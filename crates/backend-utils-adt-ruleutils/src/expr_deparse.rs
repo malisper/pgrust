@@ -1642,6 +1642,15 @@ fn get_subscripting_ref(
     Ok(())
 }
 
+/// Crate-visible wrapper over [`print_subscripts`] so `query_deparse`'s
+/// `processIndirection` (the assignment-target path) can print subscripts.
+pub(crate) fn print_subscripts_pub(
+    sbsref: &SubscriptingRef,
+    context: &mut DeparseContext<'_>,
+) -> PgResult<()> {
+    print_subscripts(sbsref, context)
+}
+
 /// `static void printSubscripts(SubscriptingRef *sbsref, deparse_context
 /// *context)` — C 12998-13020.
 fn print_subscripts(sbsref: &SubscriptingRef, context: &mut DeparseContext<'_>) -> PgResult<()> {
