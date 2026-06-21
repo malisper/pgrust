@@ -871,10 +871,29 @@ fn deconstruct_distribute_oj_quals(
     item_list: &mut Vec<JoinTreeItem>,
     jti: JtId,
 ) -> types_error::PgResult<()> {
-    let sjinfo: Box<SpecialJoinInfo> = item_list[jti]
+    // The jtitem stores a *copy* of the SpecialJoinInfo made at the time the
+    // join was first processed (deconstruct_distribute), but make_outerjoininfo
+    // back-patches the commute_above_l / commute_above_r fields of already-built
+    // SpecialJoinInfos in root.join_info_list when a syntactically-higher
+    // commuting outer join is later discovered. In C, jtitem->sjinfo and the
+    // root->join_info_list entry are the *same* pointer, so that back-patch is
+    // visible here; in this owned-value port they are independent clones, so the
+    // jtitem copy has stale (empty) commute_above_* sets. Re-fetch the
+    // authoritative, back-patched SpecialJoinInfo from root.join_info_list by
+    // ojrelid (it is appended there at the end of deconstruct_distribute, so it
+    // is always present by the time the distribute pass runs).
+    let oj_relid = item_list[jti]
         .sjinfo
-        .clone()
-        .expect("oj item has sjinfo");
+        .as_ref()
+        .expect("oj item has sjinfo")
+        .ojrelid;
+    let sjinfo: Box<SpecialJoinInfo> = Box::new(
+        root.join_info_list
+            .iter()
+            .find(|s| s.ojrelid == oj_relid)
+            .expect("oj sjinfo in join_info_list")
+            .clone(),
+    );
 
     // Recompute syntactic and semantic scopes of this left join.
     let mut qualscope = bms::relids_union::call(&sjinfo.syn_lefthand, &sjinfo.syn_righthand);
