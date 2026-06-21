@@ -359,17 +359,25 @@ fn make_tlist_from_pathtarget_ids(
     root: &mut PlannerInfo,
     path: PathId,
 ) -> Vec<types_pathnodes::NodeId> {
-    let exprs: Vec<types_pathnodes::NodeId> = match root.path(path).base().pathtarget.as_deref() {
-        Some(t) => t.exprs.clone(),
-        None => Vec::new(),
-    };
+    let (exprs, sortgrouprefs): (Vec<types_pathnodes::NodeId>, Vec<u32>) =
+        match root.path(path).base().pathtarget.as_deref() {
+            Some(t) => (t.exprs.clone(), t.sortgrouprefs.clone()),
+            None => (Vec::new(), Vec::new()),
+        };
     let mut out: Vec<types_pathnodes::NodeId> = Vec::with_capacity(exprs.len());
     for (i, expr_id) in exprs.into_iter().enumerate() {
+        // C make_tlist_from_pathtarget (tlist.c:645-650): copy
+        // target->sortgrouprefs[i] into the TLE's ressortgroupref when present.
+        // Dropping it (hardcoding 0) made convert_subquery_pathkeys' volatile-EC
+        // branch — which matches by `get_sortgroupref_tle(ec_sortref, tlist)` —
+        // fail with "ORDER/GROUP BY expression not found in targetlist" for a
+        // volatile DISTINCT key (e.g. `SELECT DISTINCT random() ...`).
+        let ressortgroupref = sortgrouprefs.get(i).copied().unwrap_or(0) as _;
         out.push(root.alloc_targetentry(TargetEntryNode {
             expr: expr_id,
             resno: (i + 1) as types_core::primitive::AttrNumber,
             resname: None,
-            ressortgroupref: 0,
+            ressortgroupref,
             resorigtbl: 0,
             resorigcol: 0,
             resjunk: false,

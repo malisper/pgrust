@@ -196,7 +196,12 @@ fn p_last_srf_eq(pstate: &ParseState<'_>, last_srf: Option<&Expr>) -> PgResult<b
 /// Set `pstate->p_last_srf = (Node *) result` (boxed `Node::Expr` in `mcx`).
 fn set_p_last_srf<'mcx>(pstate: &mut ParseState<'mcx>, result: &Expr) -> PgResult<()> {
     let mcx = pstate_mcx(pstate);
-    pstate.p_last_srf = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, result.clone())?)?);
+    // Deep-copy via the sanctioned `Expr::clone_in` path, not a plain derived
+    // `.clone()`: `result` may be a SRF `FuncExpr` whose args carry an embedded
+    // owned `SubLink`/`Aggref` sub-tree (e.g. `unnest(array(SELECT ...))`),
+    // whose derived `Clone` panics. `clone_in` routes those through the proper
+    // `clone_in`/`copyObject` deep copy.
+    pstate.p_last_srf = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, result.clone_in(mcx)?)?)?);
     Ok(())
 }
 
