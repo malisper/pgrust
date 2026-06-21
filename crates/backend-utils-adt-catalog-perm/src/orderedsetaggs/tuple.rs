@@ -1,12 +1,19 @@
 //! Tuple-path ordered-set aggregates (`use_tuples=true`): the multi-column
 //! input drain `ordered_set_transition_multi` (orderedsetaggs.c:383) and the
 //! hypothetical-set finals `hypothetical_rank_final` / `_percent_rank_final` /
-//! `_cume_dist_final` (1244/1258/1278) built on `hypothetical_rank_common`
-//! (1171). `hypothetical_dense_rank_final` (1295) is NOT here — it needs the
-//! standalone-ExprContext `execTuplesMatchPrepare`/`ExecQualAndReset` distinct
-//! counting, whose seams are `EState`-pool-bound and unreachable from an
-//! aggregate finalfn frame (it carries only `&FunctionCallInfoBaseData`, no
-//! `&mut EStateData`); see the crate docs for the precise blocker.
+//! `_cume_dist_final` / `_dense_rank_final` (1244/1258/1278/1295) built on
+//! `hypothetical_rank_common` (1171).
+//!
+//! `hypothetical_dense_rank_final` counts adjacent duplicate rows after the
+//! sort. C does this with `execTuplesMatchPrepare`/`ExecQualAndReset` (an
+//! `ExprState` grouping-equal expression run under a standalone ExprContext);
+//! that machinery is `EState`-pool-bound and unreachable from an aggregate
+//! finalfn frame. The owned port reproduces the exact IS-NOT-DISTINCT-FROM
+//! per-column comparison directly: for each distinct sort column it holds the
+//! previous row's value and compares it to the current row using the column's
+//! equality function (`get_opcode(eqOperator)` → `FunctionCall2Coll`) and
+//! collation — the same primitive `mode_final` already uses for single-datum
+//! equality — so no ExprContext is required.
 //!
 //! These sort heap tuples (not bare datums), so they use a standalone
 //! `MakeSingleTupleTableSlot` slot (`qstate->tupslot`) plus
@@ -489,4 +496,218 @@ pub fn fc_hypothetical_cume_dist_final(fcinfo: &mut FunctionCallInfoBaseData) ->
     let (rank, rowcount) = hypothetical_rank_common(fcinfo, 1);
     let result_val = rank as f64 / (rowcount + 1) as f64;
     Word::from_f64(result_val)
+}
+
+/// One distinct sort column's held value across the dense-rank scan: NULL, a
+/// by-value word, or an owned by-ref image. Mirrors `mode.rs::HeldVal` plus an
+/// explicit NULL state so the IS-NOT-DISTINCT-FROM comparison can treat
+/// both-null as equal and one-null as unequal (C `ExecBuildGroupingEqual`).
+#[derive(Clone)]
+enum ColVal {
+    Null,
+    Val(usize),
+    Ref(alloc::vec::Vec<u8>),
+}
+
+impl ColVal {
+    fn from_slot(d: &CDatum<'_>, isnull: bool, by_val: bool) -> Self {
+        if isnull {
+            return ColVal::Null;
+        }
+        if by_val {
+            return ColVal::Val(d.as_usize());
+        }
+        match d {
+            CDatum::ByRef(v) => ColVal::Ref(v.iter().copied().collect()),
+            CDatum::ByVal(w) => ColVal::Val(*w),
+            _ => raise(PgError::error(
+                "hypothetical_dense_rank_final: unexpected by-ref datum shape",
+            )),
+        }
+    }
+}
+
+/// IS-NOT-DISTINCT-FROM for one column (the per-column body of C
+/// `ExecBuildGroupingEqual`): both NULL → equal; exactly one NULL → not equal;
+/// else `DatumGetBool(FunctionCall2Coll(eqfn, collation, a, b))`.
+fn col_not_distinct(
+    fn_oid: Oid,
+    collation: Oid,
+    a: &ColVal,
+    b: &ColVal,
+) -> bool {
+    match (a, b) {
+        (ColVal::Null, ColVal::Null) => true,
+        (ColVal::Null, _) | (_, ColVal::Null) => false,
+        (ColVal::Ref(x), ColVal::Ref(y)) => x == y,
+        (ColVal::Val(x), ColVal::Val(y)) => {
+            let r = ok(backend_utils_fmgr_fmgr_seams::function_call2_coll::call(
+                fn_oid,
+                collation,
+                Word::from_usize(*x),
+                Word::from_usize(*y),
+            ));
+            r.as_bool()
+        }
+        _ => false,
+    }
+}
+
+/// `hypothetical_dense_rank_final(PG_FUNCTION_ARGS)` (1295).
+///
+/// Like the rank family, but additionally counts adjacent non-distinct rows and
+/// subtracts that count from the final rank. The distinct comparison runs over
+/// every sort column except the flag column (`numSortCols - 1`), with
+/// IS-NOT-DISTINCT-FROM semantics, matching C's `execTuplesMatchPrepare`
+/// comparator built on the same `eqOperators`/`collations`.
+pub fn fc_hypothetical_dense_rank_final(fcinfo: &mut FunctionCallInfoBaseData) -> Word {
+    let nargs_total = fcinfo.nargs() as usize - 1;
+    let mut rank: i64 = 1;
+
+    // If there were no regular rows, the rank is always 1.
+    if arg_isnull(fcinfo, 0) {
+        return Word::from_i64(rank);
+    }
+
+    let mut osastate =
+        take_group_state(fcinfo).expect("hypothetical_dense_rank: non-null arg0");
+
+    // Adjust nargs to be the number of direct (or aggregated) args.
+    if nargs_total % 2 != 0 {
+        raise(PgError::error(
+            "wrong number of arguments in hypothetical-set function",
+        ));
+    }
+    let nargs = nargs_total / 2;
+
+    check_argtypes(fcinfo, nargs, &osastate);
+
+    // We compare on every sort column except the flag column.
+    let tuple = osastate
+        .qstate
+        .tuple
+        .as_ref()
+        .expect("hypothetical_dense_rank: missing tuple state");
+    let num_distinct_cols = (tuple.num_sort_cols - 1).max(0) as usize;
+
+    // Collect the per-distinct-column comparison plan: (attno, eq function oid,
+    // collation, by_val). The eq operator is resolved to its underlying function
+    // via get_opcode (C execTuplesMatchPrepare). by_val comes from the aggregated
+    // column's type (sortColIdx[i] is a 1-based attno into the args tupdesc).
+    let mut col_attno: alloc::vec::Vec<AttrNumber> = alloc::vec::Vec::with_capacity(num_distinct_cols);
+    let mut col_eqfn: alloc::vec::Vec<Oid> = alloc::vec::Vec::with_capacity(num_distinct_cols);
+    let mut col_coll: alloc::vec::Vec<Oid> = alloc::vec::Vec::with_capacity(num_distinct_cols);
+    let mut col_byval: alloc::vec::Vec<bool> = alloc::vec::Vec::with_capacity(num_distinct_cols);
+    for i in 0..num_distinct_cols {
+        let attno = tuple.sort_col_idx[i];
+        let eqfn = ok(backend_utils_cache_lsyscache_seams::get_opcode::call(
+            tuple.eq_operators[i],
+        ));
+        let coll = tuple.sort_collations[i];
+        let by_val = ok(backend_utils_cache_lsyscache_seams::get_typbyval::call(
+            tuple.col_recipe[(attno as usize) - 1].typid,
+        ));
+        col_attno.push(attno);
+        col_eqfn.push(eqfn);
+        col_coll.push(coll);
+        col_byval.push(by_val);
+    }
+
+    // Because we need a hypothetical row, we can't share transition state.
+    debug_assert!(!osastate.sort_done);
+
+    // Insert the hypothetical row into the sort with flag = -1.
+    let mut values: alloc::vec::Vec<CDatum<'static>> = alloc::vec::Vec::with_capacity(nargs + 1);
+    let mut isnull: alloc::vec::Vec<bool> = alloc::vec::Vec::with_capacity(nargs + 1);
+    for i in 0..nargs {
+        values.push(getarg_cdatum(fcinfo, i + 1));
+        isnull.push(arg_isnull(fcinfo, i + 1));
+    }
+    values.push(CDatum::from_usize(Word::from_i32(-1).as_usize()));
+    isnull.push(false);
+
+    store_and_put(&mut osastate, &values, &isnull);
+
+    // Finish the sort.
+    with_sortstate_mut(osastate.sort_id, |s| ok(tsort::tuplesort_performsort::call(s)));
+    osastate.sort_done = true;
+
+    // Iterate till we find the hypothetical row, counting adjacent duplicate
+    // (non-distinct) rows along the way. We hold the previous row's distinct
+    // columns to compare against the current row (the owned analogue of C's
+    // slot/extraslot swap).
+    let flag_attno = (nargs + 1) as AttrNumber;
+    let mut duplicate_count: i64 = 0;
+    let mut prev: Option<alloc::vec::Vec<ColVal>> = None;
+    loop {
+        let got = {
+            let slot = osastate
+                .tupslot
+                .as_mut()
+                .expect("tuple path without standalone slot");
+            with_sortstate_mut(osastate.sort_id, |s| {
+                ok(tsort::tuplesort_gettupleslot_standalone::call(s, true, true, slot))
+            })
+        };
+        if !got {
+            break;
+        }
+
+        // Stop when we reach the hypothetical row (flag != 0).
+        let (fd, fisn) = {
+            let slot = osastate
+                .tupslot
+                .as_mut()
+                .expect("tuple path without standalone slot");
+            let mcx = leak_ctx("hypothetical dense_rank flag fetch");
+            ok(slots::slot_getattr_standalone::call(mcx, slot, flag_attno))
+        };
+        if !fisn && (fd.as_usize() as i32) != 0 {
+            break;
+        }
+
+        // Fetch the distinct columns of this row.
+        let mut cur: alloc::vec::Vec<ColVal> = alloc::vec::Vec::with_capacity(num_distinct_cols);
+        for j in 0..num_distinct_cols {
+            let (d, isn) = {
+                let slot = osastate
+                    .tupslot
+                    .as_mut()
+                    .expect("tuple path without standalone slot");
+                let mcx = leak_ctx("hypothetical dense_rank col fetch");
+                ok(slots::slot_getattr_standalone::call(mcx, slot, col_attno[j]))
+            };
+            cur.push(ColVal::from_slot(&d, isn, col_byval[j]));
+        }
+
+        if let Some(p) = prev.as_ref() {
+            let mut equal = true;
+            for j in 0..num_distinct_cols {
+                if !col_not_distinct(col_eqfn[j], col_coll[j], &cur[j], &p[j]) {
+                    equal = false;
+                    break;
+                }
+            }
+            if equal {
+                duplicate_count += 1;
+            }
+        }
+
+        prev = Some(cur);
+        rank += 1;
+    }
+
+    // ExecClearTuple(slot).
+    {
+        let slot = osastate
+            .tupslot
+            .as_mut()
+            .expect("tuple path without standalone slot");
+        ok(slots::exec_clear_tuple_standalone::call(slot));
+    }
+
+    restash(fcinfo, osastate);
+
+    rank -= duplicate_count;
+    Word::from_i64(rank)
 }

@@ -744,5 +744,8 @@ pub fn register_orderedset_builtins() {
         entry(3991, "hypothetical_cume_dist_final", 2, |fc| {
             Ok(tuple::fc_hypothetical_cume_dist_final(fc))
         }),
+        entry(3993, "hypothetical_dense_rank_final", 2, |fc| {
+            Ok(tuple::fc_hypothetical_dense_rank_final(fc))
+        }),
     ]);
 }

@@ -444,7 +444,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (3987, "hypothetical_rank_final", BuiltinGapKind::NotRegistered),
     (3989, "hypothetical_percent_rank_final", BuiltinGapKind::NotRegistered),
     (3991, "hypothetical_cume_dist_final", BuiltinGapKind::NotRegistered),
-    (3993, "hypothetical_dense_rank_final", BuiltinGapKind::NotRegistered),
     (3994, "generate_series_int4_support", BuiltinGapKind::NotRegistered),
     (3995, "generate_series_int8_support", BuiltinGapKind::NotRegistered),
     (3996, "array_unnest_support", BuiltinGapKind::NotRegistered),
