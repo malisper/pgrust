@@ -441,7 +441,19 @@ macro_rules! fc_mr_bound {
                 Some(d) => match crate::serialize_core::bound_elem_canon(&rangetyp, d) {
                     crate::serialize_core::BoundElem::ByVal(w) => w,
                     crate::serialize_core::BoundElem::ByRef(image) => {
-                        fcinfo.set_ref_result(RefPayload::Varlena(image));
+                        // A composite (rowtype) subtype's flat `HeapTupleHeader`
+                        // image must ride the `Composite` lane so a downstream
+                        // record consumer (`row_to_json`, record I/O) reads it
+                        // canonically as a composite Datum; a plain `numeric`/
+                        // `text` subtype stays on the generic `Varlena` lane. C
+                        // makes no such distinction (a composite Datum is just a
+                        // varlena pointer) — the lane tag is the port's own.
+                        let elem_oid = crate::serialize_core::elem_type(&rangetyp).type_id;
+                        if backend_utils_cache_lsyscache_seams::type_is_rowtype::call(elem_oid)? {
+                            fcinfo.set_ref_result(RefPayload::Composite(image));
+                        } else {
+                            fcinfo.set_ref_result(RefPayload::Varlena(image));
+                        }
                         Datum::null()
                     }
                 },

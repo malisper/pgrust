@@ -274,18 +274,20 @@ fn byref_bytes_to_arg_word<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum
 
 /// The detoasted element type's metadata, dereferenced from
 /// `rangetyp->rngelemtype` (C unconditionally derefs this for a range type).
-struct ElemType {
-    typlen: i16,
-    typbyval: bool,
-    typalign: i8,
+pub(crate) struct ElemType {
+    pub(crate) type_id: Oid,
+    pub(crate) typlen: i16,
+    pub(crate) typbyval: bool,
+    pub(crate) typalign: i8,
 }
 
-fn elem_type(rangetyp: &TypeCacheEntry) -> ElemType {
+pub(crate) fn elem_type(rangetyp: &TypeCacheEntry) -> ElemType {
     let e = rangetyp
         .rngelemtype
         .as_deref()
         .expect("range typcache has rngelemtype");
     ElemType {
+        type_id: e.type_id,
         typlen: e.typlen,
         typbyval: e.typbyval,
         typalign: e.typalign,

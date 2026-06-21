@@ -106,7 +106,10 @@ fn stage_elem_arg<'mcx>(
         return Ok(getarg_datum(fcinfo, n));
     }
     // By-reference element: the referent image rides the by-ref side channel.
-    match fcinfo.ref_arg(n).and_then(|p| p.as_varlena()) {
+    // A composite subtype (e.g. `range(subtype = two_ints)`) arrives on the
+    // `Composite` lane rather than `Varlena`; both carry the same flat
+    // self-describing image, so accept either.
+    match fcinfo.ref_arg(n).and_then(|p| p.as_byref_image()) {
         Some(image) => materialize_byref_word(mcx, image),
         // No by-ref payload present: fall back to the bare word. This covers a
         // fixed-length-by-reference element already passed as a live pointer (or
@@ -379,7 +382,23 @@ fn return_elem<'mcx>(
     match canon {
         types_tuple::backend_access_common_heaptuple::Datum::ByVal(w) => Ok(Datum::from_usize(w)),
         types_tuple::backend_access_common_heaptuple::Datum::ByRef(b) => {
-            fcinfo.set_ref_result(types_fmgr::RefPayload::Varlena(b.as_slice().to_vec()));
+            // A by-reference element image is a flat varlena; for a composite
+            // (rowtype) subtype it is a `HeapTupleHeader` and must ride the
+            // `Composite` lane so a downstream record consumer (`row_to_json`,
+            // record I/O) sees it canonically as a composite Datum, not a plain
+            // varlena. C makes no such distinction (a composite Datum is just a
+            // varlena pointer); the lane tag is the port's own and must match.
+            let elem_oid = typcache
+                .rngelemtype
+                .as_ref()
+                .map(|e| e.type_id)
+                .unwrap_or_default();
+            let payload = if backend_utils_cache_lsyscache_seams::type_is_rowtype::call(elem_oid)? {
+                types_fmgr::RefPayload::Composite(b.as_slice().to_vec())
+            } else {
+                types_fmgr::RefPayload::Varlena(b.as_slice().to_vec())
+            };
+            fcinfo.set_ref_result(payload);
             Ok(Datum::null())
         }
         // A range element is only ever by-value or a varlena/fixed-len by-ref

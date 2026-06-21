@@ -96,6 +96,20 @@ impl RefPayload {
         }
     }
 
+    /// Borrow the payload as a self-describing by-reference varlena image,
+    /// accepting either the generic `Varlena` lane or the `Composite`
+    /// (`HeapTupleHeader`) lane. In C both are the same physical image: a
+    /// pointer to a varlena-tagged block. The `Varlena`/`Composite` split is a
+    /// port-side tag with no C analogue, so a consumer that only needs the
+    /// raw varlena bytes (e.g. a generic by-reference *element* whose subtype
+    /// happens to be composite) must accept both.
+    pub fn as_byref_image(&self) -> Option<&[u8]> {
+        match self {
+            RefPayload::Varlena(b) | RefPayload::Composite(b) => Some(b.as_slice()),
+            _ => None,
+        }
+    }
+
     /// PG `VARATT_IS_EXPANDED`: true iff this is a live expanded object.
     pub fn is_expanded(&self) -> bool {
         matches!(self, RefPayload::Expanded(_))
