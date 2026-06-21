@@ -90,6 +90,10 @@ pub(crate) fn ParseExplainOptionList<'mcx>(
 ) -> PgResult<()> {
     let mcx = es.str.allocator();
 
+    let mut timing_set = false;
+    let mut buffers_set = false;
+    let mut summary_set = false;
+
     for opt_node in options {
         let opt = match (**opt_node).node_tag() {
             ntag::T_DefElem => (**opt_node).expect_defelem(),
@@ -106,6 +110,7 @@ pub(crate) fn ParseExplainOptionList<'mcx>(
         } else if defname == "costs" {
             es.costs = def_get_boolean(opt)?;
         } else if defname == "buffers" {
+            buffers_set = true;
             es.buffers = def_get_boolean(opt)?;
         } else if defname == "wal" {
             es.wal = def_get_boolean(opt)?;
@@ -114,8 +119,10 @@ pub(crate) fn ParseExplainOptionList<'mcx>(
         } else if defname == "generic_plan" {
             es.generic = def_get_boolean(opt)?;
         } else if defname == "timing" {
+            timing_set = true;
             es.timing = def_get_boolean(opt)?;
         } else if defname == "summary" {
+            summary_set = true;
             es.summary = def_get_boolean(opt)?;
         } else if defname == "memory" {
             es.memory = def_get_boolean(opt)?;
@@ -175,12 +182,10 @@ pub(crate) fn ParseExplainOptionList<'mcx>(
     }
 
     // if the timing was not set explicitly, set default value
-    es.timing = if es.timing { true } else { es.analyze };
+    es.timing = if timing_set { es.timing } else { es.analyze };
 
     // if the buffers was not set explicitly, set default value
-    if !es.buffers {
-        es.buffers = es.analyze;
-    }
+    es.buffers = if buffers_set { es.buffers } else { es.analyze };
 
     // check that timing is used with EXPLAIN ANALYZE
     if es.timing && !es.analyze {
@@ -207,9 +212,7 @@ pub(crate) fn ParseExplainOptionList<'mcx>(
     }
 
     // if the summary was not set explicitly, set default value
-    if !es.summary {
-        es.summary = es.analyze;
-    }
+    es.summary = if summary_set { es.summary } else { es.analyze };
 
     Ok(())
 }
