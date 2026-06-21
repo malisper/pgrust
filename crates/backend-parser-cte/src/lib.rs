@@ -1261,9 +1261,112 @@ fn raw_walk_children_dep<'mcx>(
     Ok(false)
 }
 
-/// Collect the immediate children the raw walker would visit (cloned), so the
-/// recursion can thread `&mut`-state through them.
+/// Push a child onto the immediate-children vector, OOM-checked.
+fn push_child<'mcx>(children: &mut Vec<Node<'mcx>>, c: Node<'mcx>) -> PgResult<()> {
+    children.try_reserve(1).map_err(|_| out_of_memory())?;
+    children.push(c);
+    Ok(())
+}
+
+/// Collect the immediate children the C `raw_expression_tree_walker` would visit
+/// (cloned), so the recursion can thread `&mut`-state through them.
+///
+/// C's walker hands every immediate child to the consumer walker as a `Node`,
+/// including the set-operation operands `stmt->larg`/`stmt->rarg` and the
+/// `stmt->withClause` (the consumer's `T_SelectStmt`/`T_WithClause` arms then
+/// decide what to do — e.g. enter `WalkInnerWith` for a sub-WITH). The shared
+/// `raw_expression_tree_walker` here instead *flattens* a `SelectStmt`'s set-op
+/// operands (recursing their grandchildren directly) and expands a WithClause's
+/// CTE queries inline, because it is infallible/Mcx-free and a `SelectStmt`/
+/// `WithClause` is carried as `PgBox<…>` (not a `Node`) so it cannot wrap them.
+/// That flattening robs the parse_cte walkers of the per-node control they need
+/// (a sub-WITH in a recursive term's operand was never routed through
+/// `WalkInnerWith`, so its self-reference went unrecorded and the CTE was not
+/// marked `cterecursive`). So for the statement nodes that carry these typed
+/// `PgBox` children, build the true immediate-children list here, where an `Mcx`
+/// is available to re-wrap them as real `Node`s.
 fn collect_children<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &Node<'mcx>,
+) -> PgResult<Vec<Node<'mcx>>> {
+    if node.node_tag() == ntag::T_SelectStmt {
+        let stmt = node.expect_selectstmt();
+        // Walk only the leaf fields generically by stripping the typed PgBox
+        // children (larg/rarg/withClause); re-emit those as Nodes afterwards in
+        // C field order (… lockingClause, withClause, larg, rarg).
+        let mut stripped = stmt.clone_in(mcx)?;
+        let larg = stripped.larg.take();
+        let rarg = stripped.rarg.take();
+        let with = stripped.withClause.take();
+        let stripped_node = Node::mk_select_stmt(mcx, stripped)?;
+
+        let mut children = collect_leaf_children(mcx, &stripped_node)?;
+        if let Some(w) = with {
+            push_child(&mut children, Node::mk_with_clause(mcx, w.clone_in(mcx)?)?)?;
+        }
+        if let Some(l) = larg {
+            push_child(&mut children, Node::mk_select_stmt(mcx, l.clone_in(mcx)?)?)?;
+        }
+        if let Some(r) = rarg {
+            push_child(&mut children, Node::mk_select_stmt(mcx, r.clone_in(mcx)?)?)?;
+        }
+        return Ok(children);
+    }
+
+    // The DML statement nodes (Insert/Update/Delete/Merge) likewise carry their
+    // WITH clause as a typed PgBox the shared walker expands inline. Strip it
+    // before the leaf walk and re-emit it as a real Node so the consumer's
+    // T_WithClause arm controls descent (no inline cte double-walk).
+    match node.node_tag() {
+        ntag::T_InsertStmt => {
+            let mut s = node.expect_insertstmt().clone_in(mcx)?;
+            let with = s.withClause.take();
+            let stripped = Node::mk_insert_stmt(mcx, s)?;
+            let mut children = collect_leaf_children(mcx, &stripped)?;
+            if let Some(w) = with {
+                push_child(&mut children, Node::mk_with_clause(mcx, w.clone_in(mcx)?)?)?;
+            }
+            Ok(children)
+        }
+        ntag::T_UpdateStmt => {
+            let mut s = node.expect_updatestmt().clone_in(mcx)?;
+            let with = s.withClause.take();
+            let stripped = Node::mk_update_stmt(mcx, s)?;
+            let mut children = collect_leaf_children(mcx, &stripped)?;
+            if let Some(w) = with {
+                push_child(&mut children, Node::mk_with_clause(mcx, w.clone_in(mcx)?)?)?;
+            }
+            Ok(children)
+        }
+        ntag::T_DeleteStmt => {
+            let mut s = node.expect_deletestmt().clone_in(mcx)?;
+            let with = s.withClause.take();
+            let stripped = Node::mk_delete_stmt(mcx, s)?;
+            let mut children = collect_leaf_children(mcx, &stripped)?;
+            if let Some(w) = with {
+                push_child(&mut children, Node::mk_with_clause(mcx, w.clone_in(mcx)?)?)?;
+            }
+            Ok(children)
+        }
+        ntag::T_MergeStmt => {
+            let mut s = node.expect_mergestmt().clone_in(mcx)?;
+            let with = s.withClause.take();
+            let stripped = Node::mk_merge_stmt(mcx, s)?;
+            let mut children = collect_leaf_children(mcx, &stripped)?;
+            if let Some(w) = with {
+                push_child(&mut children, Node::mk_with_clause(mcx, w.clone_in(mcx)?)?)?;
+            }
+            Ok(children)
+        }
+        _ => collect_leaf_children(mcx, node),
+    }
+}
+
+/// Collect the children the shared `raw_expression_tree_walker` yields for
+/// `node`. For a SelectStmt this includes the inline-expanded withClause ctes and
+/// the flattened set-op operands; callers that need C's immediate-children shape
+/// strip those typed children first (see [`collect_children`]).
+fn collect_leaf_children<'mcx>(
     mcx: Mcx<'mcx>,
     node: &Node<'mcx>,
 ) -> PgResult<Vec<Node<'mcx>>> {
