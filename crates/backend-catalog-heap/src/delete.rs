@@ -26,7 +26,7 @@ const AttributeRelidNumIndexId: Oid = 2659;
 
 /* pg_attribute attribute numbers (genbki). */
 const Anum_pg_attribute_attrelid: AttrNumber = 1;
-const Anum_pg_attribute_attnum: AttrNumber = 6;
+const Anum_pg_attribute_attnum: AttrNumber = 5;
 /* pg_inherits attribute number. */
 const Anum_pg_inherits_inhrelid: AttrNumber = 1;
 

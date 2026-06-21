@@ -1629,7 +1629,7 @@ pub fn RelationClearMissing<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgRes
     const AttributeRelationId: Oid = 1249;
     const AttributeRelidNumIndexId: Oid = 2659;
     const Anum_pg_attribute_attrelid: AttrNumber = 1;
-    const Anum_pg_attribute_attnum: AttrNumber = 6;
+    const Anum_pg_attribute_attnum: AttrNumber = 5;
     const Anum_pg_attribute_atthasmissing: AttrNumber = 14;
     const Anum_pg_attribute_attmissingval: AttrNumber = 25;
 

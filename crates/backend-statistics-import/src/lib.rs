@@ -1419,8 +1419,8 @@ struct PgAttributeFields {
 }
 
 /// `(Form_pg_attribute) GETSTRUCT(atup)` for the fields we need.  pg_attribute
-/// (`pg_attribute.h`): attrelid(1) attname(2) atttypid(3) attlen(4) attnum(6)
-/// atttypmod(7) ... attisdropped(20) ... attcollation(25).
+/// (`pg_attribute.h`): attrelid(1) attname(2) atttypid(3) attlen(4) attnum(5)
+/// atttypmod(6) ... attisdropped(17) ... attcollation(20).
 fn pg_attribute_form(mcx: Mcx<'_>, atup: &types_tuple::FormedTuple<'_>) -> PgResult<PgAttributeFields> {
     let arel = relation_open::call(mcx, AttributeRelationId, AccessShareLock)?;
     let deformed = heap_deform_tuple(mcx, &atup.tuple, &arel.rd_att, &atup.data)?;
@@ -1438,10 +1438,10 @@ fn pg_attribute_form(mcx: Mcx<'_>, atup: &types_tuple::FormedTuple<'_>) -> PgRes
 
 const AttributeRelationId: Oid = 1249;
 const Anum_pg_attribute_atttypid: i16 = 3;
-const Anum_pg_attribute_attnum: i16 = 6;
-const Anum_pg_attribute_atttypmod: i16 = 7;
-const Anum_pg_attribute_attisdropped: i16 = 20;
-const Anum_pg_attribute_attcollation: i16 = 25;
+const Anum_pg_attribute_attnum: i16 = 5;
+const Anum_pg_attribute_atttypmod: i16 = 6;
+const Anum_pg_attribute_attisdropped: i16 = 17;
+const Anum_pg_attribute_attcollation: i16 = 20;
 
 /// `text_to_stavalues(staname, array_in, d, typid, typmod, ok)`
 /// (attribute_stats.c).  Casts the text datum into an array of `typid` via
