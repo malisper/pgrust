@@ -30,7 +30,7 @@ use types_nodes::copy_query::Query;
 use types_nodes::ddlnodes::{CreateStmt, RuleStmt};
 use types_nodes::nodes::{ntag, Node};
 
-use backend_parser_small1::{free_parsestate, make_parsestate};
+use backend_parser_small1::{free_parsestate, make_parsestate, parser_errposition};
 use types_storage::lock::NoLock;
 
 use crate::column::transformColumnDefinition;
@@ -80,8 +80,26 @@ pub fn transformCreateStmt<'mcx>(
         Some(rv) => rv,
         None => unreachable!("CreateStmt.relation must be a RangeVar"),
     };
+    // C wraps this lookup in
+    //   setup_parser_errposition_callback(&pcbstate, pstate, stmt->relation->location)
+    // so a sub-error (e.g. the temp/non-temp-schema mismatch raised by
+    // RangeVarAdjustRelationPersistence) reports the relation's source position.
+    // The ambient callback chain is retired (docs/query-lifecycle-raii.md); attach
+    // the location at the propagation site exactly as pcb_error_callback does — tag
+    // the error with parser_errposition(pstate, location) as the cursor position,
+    // but only when it has none of its own (C: `if (edata->cursorpos == 0)`).
+    let rel_location =
+        relation.as_rangevar().map_or(-1, |rv| rv.location);
     let (relation, existing_relid, namespace_name) =
-        range_var_get_and_check_creation_namespace(mcx, relation)?;
+        range_var_get_and_check_creation_namespace(mcx, relation).map_err(|mut e| {
+            if e.cursor_position().is_none() {
+                let pos = parser_errposition(&pstate, rel_location);
+                if pos > 0 {
+                    e = e.with_cursor_position(pos);
+                }
+            }
+            e
+        })?;
     stmt.relation = Some(relation);
 
     // Pull the (possibly-mutated) relation's schemaname / relpersistence / name.
