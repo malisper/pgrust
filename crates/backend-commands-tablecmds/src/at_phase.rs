@@ -2086,6 +2086,7 @@ fn ATRewriteTables<'mcx>(
             ) && old_heap
                 .rd_options
                 .as_ref()
+                .and_then(|o| o.std())
                 .is_some_and(|o| o.user_catalog_table);
             if used_as_catalog {
                 let name = old_heap.name().to_string();

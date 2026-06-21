@@ -333,7 +333,7 @@ fn relation_is_accessible_in_logical_decoding(
 /// (relkind == RELATION || relkind == MATVIEW) ?
 /// ((StdRdOptions *) rd_options)->user_catalog_table : false`.
 fn relation_is_used_as_catalog_table(relation: &types_rel::RelationData<'_>) -> bool {
-    match &relation.rd_options {
+    match relation.rd_options.as_ref().and_then(|o| o.std()) {
         Some(opts)
             if relation.rd_rel.relkind == RELKIND_RELATION
                 || relation.rd_rel.relkind == RELKIND_MATVIEW =>

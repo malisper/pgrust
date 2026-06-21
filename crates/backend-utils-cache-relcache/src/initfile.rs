@@ -1193,7 +1193,9 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
         } else {
             // The parsed options are rebuilt from the catalog when the entry is
             // next opened; the presence marker restores "has options" state.
-            Some(types_reloptions::StdRdOptions::default())
+            Some(types_reloptions::RdOptions::Std(
+                types_reloptions::StdRdOptions::default(),
+            ))
         };
 
         // C: index-only payloads when relkind == RELKIND_INDEX.

@@ -169,7 +169,7 @@ pub fn RelationInitPhysicalAddr(rd: &mut RelationData) -> PgResult<()> {
             && (wal >= WAL_LEVEL_REPLICA
                 || (rd.rd_createSubid == InvalidSubTransactionId
                     && rd.rd_firstRelfilelocatorSubid == InvalidSubTransactionId));
-        let used_as_catalog_table = rd.rd_options.as_ref().is_some_and(|o| {
+        let used_as_catalog_table = rd.rd_options.as_ref().and_then(|o| o.std()).is_some_and(|o| {
             (rd.rd_rel.relkind == RELKIND_RELATION || rd.rd_rel.relkind == RELKIND_MATVIEW)
                 && o.user_catalog_table
         });

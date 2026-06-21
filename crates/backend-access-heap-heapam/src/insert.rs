@@ -955,6 +955,7 @@ fn relation_is_used_as_catalog_table(relation: &RelationData<'_>) -> bool {
         && relation
             .rd_options
             .as_ref()
+            .and_then(|o| o.std())
             .is_some_and(|o| o.user_catalog_table)
 }
 

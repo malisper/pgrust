@@ -433,6 +433,7 @@ fn relation_parallel_workers(relid: Oid) -> PgResult<i32> {
     with_relation(relid, |rd| {
         rd.rd_options
             .as_ref()
+            .and_then(|o| o.std())
             .map(|o| o.parallel_workers)
             .unwrap_or(-1)
     })

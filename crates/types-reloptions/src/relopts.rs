@@ -90,3 +90,48 @@ pub struct ViewOptions {
     pub security_invoker: bool,
     pub check_option: ViewOptCheckOption,
 }
+
+/// `bytea *rd_options` — the relcache's opaque parsed-reloptions slot.
+///
+/// In C `rd_options` is a single `bytea *` that each access method casts to its
+/// own option struct (`StdRdOptions` for heaps/toast/matviews/partitioned
+/// tables, `ViewOptions` for views, an AM-private struct such as `BrinOptions`
+/// for indexes). The owned model carries the parsed `StdRdOptions`/`ViewOptions`
+/// by value where it has a typed stand-in, and keeps the raw serialized varlena
+/// bytes for an AM-defined index-option blob the relcache cannot interpret
+/// generically — exactly the AMs (BRIN, GiST, …) whose `amoptions` produces a
+/// custom struct. The owning AM reinterprets [`RdOptions::Bytea`] on demand
+/// (e.g. `BrinGetPagesPerRange`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum RdOptions {
+    /// Parsed `StdRdOptions` (heap / toast / matview / partitioned table).
+    Std(StdRdOptions),
+    /// Parsed `ViewOptions` (views / materialized-view view side).
+    View(ViewOptions),
+    /// Opaque AM-defined option struct, kept as its serialized varlena bytes
+    /// (the C `bytea`). Includes the 4-byte `vl_len_` varlena header, so byte
+    /// offsets match the C struct's `offsetof` (e.g. `BrinOptions.pagesPerRange`
+    /// at offset 4).
+    Bytea(alloc::vec::Vec<u8>),
+}
+
+impl RdOptions {
+    /// Return the parsed `StdRdOptions` if this slot holds one, else `None`.
+    /// Used by `RelationGetFillFactor`/`RelationGetToastTupleTarget` and the
+    /// autovacuum/parallel-workers readers, which only ever look at a table's
+    /// `StdRdOptions` slot (an index/view never reaches those code paths).
+    pub fn std(&self) -> Option<&StdRdOptions> {
+        match self {
+            RdOptions::Std(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Return the opaque AM-defined option bytes if this slot holds them.
+    pub fn bytea(&self) -> Option<&[u8]> {
+        match self {
+            RdOptions::Bytea(b) => Some(b),
+            _ => None,
+        }
+    }
+}

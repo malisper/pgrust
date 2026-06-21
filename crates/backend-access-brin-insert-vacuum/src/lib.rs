@@ -115,14 +115,15 @@ const BRIN_AM_OID: Oid = 3580;
 /// for `pageRange` to summarize the whole table.
 const BRIN_ALL_BLOCKRANGES: BlockNumber = types_core::primitive::InvalidBlockNumber;
 
-/// `BRIN_DEFAULT_PAGES_PER_RANGE` / autosummarize default. The relcache trims
-/// `rd_options` to [`types_rel::StdRdOptions`] (heap reloptions), which carries
-/// no BRIN-specific `autosummarize` field, so — like
-/// [`types_rel::RelationData::get_fillfactor`]'s default-on-`None` — the
-/// behaviour-preserving value is the C `BrinOptions` default (`false`). When a
-/// BRIN reloptions carrier lands in the relcache trim this reads it instead.
-fn brin_get_auto_summarize(_idx_rel: &Relation<'_>) -> bool {
-    false
+/// `BrinGetAutoSummarize(relation)` (brin.h): the index's autosummarize flag,
+/// the `bool` at byte offset 8 of the serialized `BrinOptions`
+/// (`{ int32 vl_len_; BlockNumber pagesPerRange; bool autosummarize; }`, carried
+/// opaque in `RdOptions::Bytea`), else the C default `false`.
+fn brin_get_auto_summarize(idx_rel: &Relation<'_>) -> bool {
+    match idx_rel.rd_options.as_ref().and_then(|o| o.bytea()) {
+        Some(b) if b.len() >= 9 => b[8] != 0,
+        _ => false,
+    }
 }
 
 // ===========================================================================
@@ -1029,16 +1030,20 @@ fn form_and_insert_tuple<'mcx>(mcx: Mcx<'mcx>, state: &mut BrinBuildState<'mcx>)
 
 /// `BrinGetPagesPerRange(relation)` (brin.h): the index's pages-per-range,
 /// taken from the `BrinOptions` reloptions if present, else
-/// `BRIN_DEFAULT_PAGES_PER_RANGE`. BRIN reloptions are not yet parsed into the
-/// relcache's trimmed `rd_options` (see `brin_get_auto_summarize`), so — exactly
-/// like that sibling default-on-`None` — the behaviour-preserving value is the C
-/// default (128), which is correct for `USING brin (col)` with no
-/// `pages_per_range` option. When a BRIN reloptions carrier lands in the relcache
-/// trim this reads it instead.
-fn brin_get_pages_per_range(_index: &Relation<'_>) -> BlockNumber {
+/// `BRIN_DEFAULT_PAGES_PER_RANGE`. C reads `rd_options` as a `BrinOptions *`;
+/// the owned model carries that opaque AM struct as its serialized varlena bytes
+/// in `RdOptions::Bytea`. `BrinOptions` is
+/// `{ int32 vl_len_; BlockNumber pagesPerRange; bool autosummarize; }`, so
+/// `pagesPerRange` is the little-endian `u32` at byte offset 4.
+fn brin_get_pages_per_range(index: &Relation<'_>) -> BlockNumber {
     /// `BRIN_DEFAULT_PAGES_PER_RANGE` (brin.h).
     const BRIN_DEFAULT_PAGES_PER_RANGE: BlockNumber = 128;
-    BRIN_DEFAULT_PAGES_PER_RANGE
+    match index.rd_options.as_ref().and_then(|o| o.bytea()) {
+        Some(b) if b.len() >= 8 => {
+            BlockNumber::from_ne_bytes([b[4], b[5], b[6], b[7]])
+        }
+        _ => BRIN_DEFAULT_PAGES_PER_RANGE,
+    }
 }
 
 /// `brinbuildCallback(index, tid, values, isnull, tupleIsAlive, brstate)`

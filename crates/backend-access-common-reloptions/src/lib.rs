@@ -1699,27 +1699,28 @@ pub fn AlterTableGetRelOptionsLockLevel(def_list: &[DefElem]) -> LOCKMODE {
 /// `pg_class.reloptions` into the relcache's parsed-options struct.
 ///
 /// `extractRelOptions` returns the full per-relkind [`RelOptStruct`]; the
-/// relcache `rd_options` carries only the `Std` arm (`StdRdOptions`), which is
-/// what the table / toast / matview / partitioned-table relkinds produce. The
-/// view (`RelOptStruct::View`) and AM-defined index (`RelOptStruct::Bytea`)
-/// arms are not modeled by the trimmed `rd_options`, so they map to `None`
-/// (the relcache leaves `rd_options` NULL for them) — matching the model's
-/// existing reloptions trim. A scratch context holds the transient parse
-/// allocations (C parses in the caller's context and copies into
-/// `CacheMemoryContext`; the owned value is returned by value).
+/// relcache `rd_options` carries the table/toast/matview/partitioned-table
+/// `Std` arm, the view `View` arm, and the AM-defined index `Bytea` arm (the
+/// opaque option struct an index AM such as BRIN reinterprets). Attribute /
+/// tablespace options are not relation `rd_options` (they live on
+/// `pg_attribute`/`pg_tablespace`), so they map to `None`. A scratch context
+/// holds the transient parse allocations (C parses in the caller's context and
+/// copies into `CacheMemoryContext`; the owned value is returned by value).
 fn extract_rel_options_seam(
     relkind: u8,
     reloptions: Option<&[u8]>,
     amoptions: Option<types_core::Oid>,
-) -> PgResult<Option<StdRdOptions>> {
+) -> PgResult<Option<types_reloptions::RdOptions>> {
+    use types_reloptions::RdOptions;
     let scratch = mcx::MemoryContext::new("RelationParseRelOptions");
     let input = ExtractRelOptionsInput { relkind, reloptions };
     let parsed = extractRelOptions(scratch.mcx(), &input, amoptions)?;
     Ok(match parsed {
-        Some(RelOptStruct::Std(s)) => Some(s),
-        // View/Attribute/TableSpace/Bytea are not carried by the trimmed
-        // rd_options (Option<StdRdOptions>); the relcache leaves rd_options NULL.
-        _ => None,
+        Some(RelOptStruct::Std(s)) => Some(RdOptions::Std(s)),
+        Some(RelOptStruct::View(v)) => Some(RdOptions::View(v)),
+        Some(RelOptStruct::Bytea(b)) => Some(RdOptions::Bytea(b)),
+        // Attribute/TableSpace options are not relation rd_options.
+        Some(RelOptStruct::Attribute(_)) | Some(RelOptStruct::TableSpace(_)) | None => None,
     })
 }
 

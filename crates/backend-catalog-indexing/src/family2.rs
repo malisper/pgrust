@@ -910,7 +910,7 @@ fn index_update_stats(rel: &Relation<'_>, hasindex: bool, reltuples: f64) -> PgR
     {
         if backend_postmaster_autovacuum_seams::auto_vacuuming_active::call() {
             // StdRdOptions *options = (StdRdOptions *) rel->rd_options;
-            if let Some(options) = rel.rd_options.as_ref() {
+            if let Some(options) = rel.rd_options.as_ref().and_then(|o| o.std()) {
                 if !options.autovacuum.enabled {
                     update_stats = false;
                 }

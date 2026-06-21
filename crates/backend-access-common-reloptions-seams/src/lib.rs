@@ -11,7 +11,7 @@
 
 use types_core::Oid;
 use types_error::PgResult;
-use types_reloptions::{local_relopts, AttributeOpts, StdRdOptions, TableSpaceOpts};
+use types_reloptions::{local_relopts, AttributeOpts, RdOptions, TableSpaceOpts};
 
 seam_core::seam!(
     /// `extractRelOptions(tuple, GetPgClassDescriptor(), amoptsfn)` (reloptions.c),
@@ -22,16 +22,15 @@ seam_core::seam!(
     /// AM's option-parser handler OID (the relcache's `rd_indam->amoptions`),
     /// `None` for non-index relkinds. Returns the parsed `StdRdOptions` (the
     /// table/toast/matview/partitioned-table `RelOptStruct::Std` arm the relcache
-    /// `rd_options` carries), or `None` for the C NULL — including the relkinds
-    /// whose parsed options the trimmed `rd_options` does not model (view /
-    /// AM-defined index `bytea`). `Err` carries the validation `ereport(ERROR)`
-    /// surface; the index path additionally drives the (genuinely unported) AM
-    /// `am_reloptions` callback.
+    /// `rd_options` carries), the view (`RdOptions::View`) or AM-defined index
+    /// (`RdOptions::Bytea`) arm, or `None` for the C NULL. `Err` carries the
+    /// validation `ereport(ERROR)` surface; the index path additionally drives
+    /// the AM `am_reloptions` callback.
     pub fn extract_rel_options(
         relkind: u8,
         reloptions: Option<&[u8]>,
         amoptions: Option<Oid>,
-    ) -> PgResult<Option<StdRdOptions>>
+    ) -> PgResult<Option<RdOptions>>
 );
 
 seam_core::seam!(

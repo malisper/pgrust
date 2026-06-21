@@ -1162,7 +1162,7 @@ fn relation_is_accessible_in_logical_decoding(
             && (wal >= WAL_LEVEL_REPLICA
                 || (rd.rd_createSubid == InvalidSubTransactionId
                     && rd.rd_firstRelfilelocatorSubid == InvalidSubTransactionId));
-        let used_as_catalog_table = rd.rd_options.as_ref().is_some_and(|o| {
+        let used_as_catalog_table = rd.rd_options.as_ref().and_then(|o| o.std()).is_some_and(|o| {
             (rd.rd_rel.relkind == RELKIND_RELATION || rd.rd_rel.relkind == RELKIND_MATVIEW)
                 && o.user_catalog_table
         });
@@ -1584,7 +1584,7 @@ fn rel_rd_toastoid(rel: Oid) -> PgResult<Oid> {
     with_entry(rel, |rd| rd.rd_toastoid)
 }
 fn rel_std_rd_options(rel: Oid) -> PgResult<sx::StdRdOptionsView> {
-    with_entry(rel, |rd| match &rd.rd_options {
+    with_entry(rel, |rd| match rd.rd_options.as_ref().and_then(|o| o.std()) {
         None => sx::StdRdOptionsView::default(),
         Some(opts) => sx::StdRdOptionsView {
             has_options: true,

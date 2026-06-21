@@ -708,7 +708,7 @@ pub fn transformOnConflictArbiter<'mcx>(
 /// `RelationIsUsedAsCatalogTable(relation)` (utils/rel.h):
 /// `(relation)->rd_options && ((StdRdOptions *) (relation)->rd_options)->user_catalog_table`.
 fn RelationIsUsedAsCatalogTable(relation: &types_rel::RelationData<'_>) -> bool {
-    match &relation.rd_options {
+    match relation.rd_options.as_ref().and_then(|o| o.std()) {
         Some(opts) => opts.user_catalog_table,
         None => false,
     }

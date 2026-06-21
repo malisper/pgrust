@@ -651,8 +651,10 @@ pub struct RelationData {
     /// `PublicationDesc *rd_pubdesc` presence (publication vocabulary, seamed).
     pub rd_has_pubdesc: bool,
 
-    /// `bytea *rd_options` — parsed reloptions; `None` is the C NULL.
-    pub rd_options: Option<types_reloptions::StdRdOptions>,
+    /// `bytea *rd_options` — parsed reloptions; `None` is the C NULL. Carries
+    /// either a typed `StdRdOptions`/`ViewOptions` or an opaque AM-defined
+    /// index-option blob (e.g. `BrinOptions`) the owning AM reinterprets.
+    pub rd_options: Option<types_reloptions::RdOptions>,
 
     /// `Oid rd_amhandler` — the AM handler function OID.
     pub rd_amhandler: Oid,
@@ -770,7 +772,7 @@ impl RelationData {
 
     /// `RelationGetFillFactor(relation, defaultff)` (utils/rel.h).
     pub fn get_fillfactor(&self, defaultff: i32) -> i32 {
-        match &self.rd_options {
+        match self.rd_options.as_ref().and_then(|o| o.std()) {
             Some(opts) => opts.fillfactor,
             None => defaultff,
         }
@@ -778,7 +780,7 @@ impl RelationData {
 
     /// `RelationGetToastTupleTarget(relation, defaulttarg)` (utils/rel.h).
     pub fn get_toast_tuple_target(&self, default_target: i32) -> i32 {
-        match &self.rd_options {
+        match self.rd_options.as_ref().and_then(|o| o.std()) {
             Some(opts) => opts.toast_tuple_target,
             None => default_target,
         }
