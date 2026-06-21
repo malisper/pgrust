@@ -845,6 +845,9 @@ struct PruneInputs<'mcx> {
     has_partition_qual: bool,
     /// The baserestrictinfo clauses (already deref'd to owned Exprs).
     clauses: Vec<Expr>,
+    /// `rel->partition_qual` — the partition constraint (implicit-AND list of
+    /// Exprs), deref'd to owned Exprs. Empty for a top-level partitioned table.
+    partition_qual: Vec<Expr>,
 }
 
 /// Collect the partition metadata + restriction clauses needed to prune `rel`.
@@ -875,7 +878,7 @@ fn collect_prune_inputs_with_clauses<'mcx>(
     override_clauses: Option<Vec<Expr>>,
 ) -> PgResult<PruneInputs<'mcx>> {
     // Read the RelOptInfo fields we need (immutable borrow, then drop it).
-    let (relid_index, nparts, has_default, has_partition_qual, partexpr_ids, restrict_ids) = {
+    let (relid_index, nparts, has_default, has_partition_qual, partexpr_ids, restrict_ids, partqual_ids) = {
         let r = root.rel(rel);
         // rel->relid -> simple_rte_array[relid] -> RTE relid Oid.
         let relid_index = r.relid;
@@ -886,12 +889,19 @@ fn collect_prune_inputs_with_clauses<'mcx>(
         let partexpr_ids: Vec<types_pathnodes::NodeId> =
             r.partexprs.iter().map(|v| v[0]).collect();
         let restrict_ids: Vec<types_pathnodes::RinfoId> = r.baserestrictinfo.clone();
-        (relid_index, nparts, has_default, has_partition_qual, partexpr_ids, restrict_ids)
+        let partqual_ids: Vec<types_pathnodes::NodeId> = r.partition_qual.clone();
+        (relid_index, nparts, has_default, has_partition_qual, partexpr_ids, restrict_ids, partqual_ids)
     };
 
     // Deref the partexprs and restriction clauses out of the planner arenas to
     // owned Exprs.
     let partexprs: Vec<Expr> = partexpr_ids
+        .iter()
+        .map(|id| root.node(*id).clone_in(mcx))
+        .collect::<PgResult<Vec<Expr>>>()?;
+    // rel->partition_qual is a list of plain Exprs (implicit-AND form, not
+    // RestrictInfos); deref each out of the planner arena.
+    let partition_qual: Vec<Expr> = partqual_ids
         .iter()
         .map(|id| root.node(*id).clone_in(mcx))
         .collect::<PgResult<Vec<Expr>>>()?;
@@ -961,6 +971,7 @@ fn collect_prune_inputs_with_clauses<'mcx>(
         has_default,
         has_partition_qual,
         clauses,
+        partition_qual,
     })
 }
 
@@ -1076,19 +1087,24 @@ fn gen_partprune_steps<'a, 'mcx>(
     };
 
     // If this partitioned table has a default partition and is itself a
-    // partition (partition_qual is not NIL), the parent's constraint can help
-    // prune the default. (partition_qual is NIL for top-level tables, so this is
-    // skipped on the common path.)
-    // C borrows the caller's `clauses` list (no copy on the common path); only
-    // the default + partition_qual case does `list_concat_copy`. Borrow directly
-    // — a derived `Vec<Expr>::clone` would deep-`Expr::clone` and panic on an
-    // owned-subtree child (a SubPlan/AlternativeSubPlan in an EXISTS-or qual).
+    // partition (partition_qual is not NIL), include the partition constraint in
+    // the clauses so the default partition can be pruned using the parent's
+    // bound (partprune.c gen_partprune_steps:
+    //   if (partition_bound_has_default(rel->boundinfo) && rel->partition_qual)
+    //       clauses = list_concat_copy(clauses, rel->partition_qual); ).
+    // partition_qual is empty for a top-level partitioned table, so the common
+    // path uses the baserestrictinfo clauses unchanged.
     if context.has_default && context.has_partition_qual {
-        // list_concat_copy(clauses, rel->partition_qual). The partition_qual
-        // clauses would need to be deref'd; on the common (top-level) path this
-        // branch is not taken. When it is, gen_partprune_steps_internal's
-        // predicate_refuted_by call handles the default-vs-constraint check.
-        // (partition_qual deref deferred to the run-time lane; see crate docs.)
+        let mut combined: Vec<Expr> =
+            Vec::with_capacity(inputs.clauses.len() + inputs.partition_qual.len());
+        for c in &inputs.clauses {
+            combined.push(c.clone_in(inputs.mcx)?);
+        }
+        for c in &inputs.partition_qual {
+            combined.push(c.clone_in(inputs.mcx)?);
+        }
+        gen_partprune_steps_internal(&mut context, &combined)?;
+        return Ok(context);
     }
 
     gen_partprune_steps_internal(&mut context, &inputs.clauses)?;
