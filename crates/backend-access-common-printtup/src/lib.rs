@@ -871,10 +871,109 @@ fn debugtup_dest_shutdown<'mcx>(_mcx: Mcx<'mcx>, _state: u64) -> PgResult<()> {
     Ok(())
 }
 
+/// `PqMsg_NoData` (`libpq/protocol.h`).
+pub const PqMsg_NoData: u8 = b'n';
+/// `PqMsg_ParameterDescription` (`libpq/protocol.h`).
+pub const PqMsg_ParameterDescription: u8 = b't';
+
+/// Project a `Node`-wrapped target-list (e.g. the `CachedPlanGetTargetList`
+/// result, whose elements are `TargetEntry` nodes) to the printtup-relevant
+/// `TargetEntryInfo` triples `SendRowDescriptionMessage` reads.
+fn targetlist_info_from_nodes(tlist: &[types_nodes::nodes::Node<'_>]) -> Vec<TargetEntryInfo> {
+    tlist
+        .iter()
+        .map(|node| {
+            let te = node.expect_targetentry();
+            TargetEntryInfo {
+                resjunk: te.resjunk,
+                resorigtbl: te.resorigtbl,
+                resorigcol: te.resorigcol as i16,
+            }
+        })
+        .collect()
+}
+
+/// `exec_describe_portal_message`'s reply (postgres.c:2734): send a
+/// `RowDescription` describing the portal's result (when `portal->tupDesc`),
+/// else a `NoData` message. The target-list projection (`FetchPortalTargetList`)
+/// and the per-column result formats are read off the portal here.
+///
+/// The `whereToSendOutput != DestRemote` early-return and the aborted-xact
+/// guard live in the caller (postgres.c); this runs only when there is output
+/// to produce.
+pub fn send_describe_portal<'mcx>(
+    mcx: Mcx<'mcx>,
+    portal: &types_portal::Portal,
+) -> PgResult<()> {
+    let p = portal.borrow();
+    match p.tupDesc.as_ref() {
+        Some(tupdesc) => {
+            let targetlist = portal_target_list_info(&p);
+            let formats: Option<Vec<i16>> = if p.formats.is_empty() {
+                None
+            } else {
+                Some(p.formats.clone())
+            };
+            // SendRowDescriptionMessage(&row_description_buf, portal->tupDesc,
+            //                           FetchPortalTargetList(portal),
+            //                           portal->formats);
+            let mut buf = backend_libpq_pqformat::pq_beginmessage(mcx, PqMsg_RowDescription)?;
+            // SendRowDescriptionMessage re-begins the message on the same buffer
+            // (pq_beginmessage_reuse) and ends it (pq_endmessage_reuse).
+            SendRowDescriptionMessage(&mut buf, tupdesc, &targetlist, formats.as_deref())?;
+            Ok(())
+        }
+        None => backend_libpq_pqformat::pq_putemptymessage(PqMsg_NoData),
+    }
+}
+
+/// `exec_describe_statement_message`'s reply (postgres.c:2641): first a
+/// `ParameterDescription` listing the parameter type OIDs, then a
+/// `RowDescription` (when the cached plan has a result descriptor) or a
+/// `NoData` message. The plancache reads are threaded in by the caller; the
+/// wire encoding + `TargetEntryInfo` projection live here.
+///
+/// The `whereToSendOutput != DestRemote` early-return and the aborted-xact
+/// guard live in the caller (postgres.c).
+pub fn send_describe_statement<'mcx>(
+    mcx: Mcx<'mcx>,
+    param_types: &[Oid],
+    result_desc: Option<&TupleDescData<'mcx>>,
+    targetlist: &[types_nodes::nodes::Node<'mcx>],
+) -> PgResult<()> {
+    // First describe the parameters...
+    //   pq_beginmessage_reuse(&row_description_buf, PqMsg_ParameterDescription);
+    //   pq_sendint16(&row_description_buf, psrc->num_params);
+    //   for (i = 0; i < psrc->num_params; i++)
+    //       pq_sendint32(&row_description_buf, (int) psrc->param_types[i]);
+    //   pq_endmessage_reuse(&row_description_buf);
+    let mut buf = backend_libpq_pqformat::pq_beginmessage(mcx, PqMsg_ParameterDescription)?;
+    pq_sendint16(&mut buf, param_types.len() as u16)?;
+    for &ptype in param_types {
+        pq_sendint32(&mut buf, ptype)?;
+    }
+    pq_endmessage_reuse(&buf)?;
+
+    // Next send RowDescription or NoData to describe the result...
+    match result_desc {
+        Some(tupdesc) => {
+            let tlist = targetlist_info_from_nodes(targetlist);
+            // SendRowDescriptionMessage(&row_description_buf, psrc->resultDesc,
+            //                           tlist, NULL);
+            let mut buf = backend_libpq_pqformat::pq_beginmessage(mcx, PqMsg_RowDescription)?;
+            SendRowDescriptionMessage(&mut buf, tupdesc, &tlist, None)?;
+            Ok(())
+        }
+        None => backend_libpq_pqformat::pq_putemptymessage(PqMsg_NoData),
+    }
+}
+
 /// Install this crate's inward seams (the printtup / debugtup dest-router
 /// constructors and `SetRemoteDestReceiverParams`). Wired into `seams-init`.
 pub fn init_seams() {
     backend_access_common_printtup_seams::printtup_create_dr::set(printtup_create_dr_routed);
+    backend_access_common_printtup_seams::send_describe_portal::set(send_describe_portal);
+    backend_access_common_printtup_seams::send_describe_statement::set(send_describe_statement);
     backend_access_common_printtup_seams::create_debug_dest_receiver::set(
         create_debug_dest_receiver_routed,
     );

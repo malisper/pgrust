@@ -35,3 +35,39 @@ seam_core::seam!(
     /// `init_seams()`.
     pub fn create_debug_dest_receiver() -> types_nodes::parsestmt::DestReceiverHandle
 );
+
+seam_core::seam!(
+    /// `SendRowDescriptionMessage(&row_description_buf, portal->tupDesc,
+    /// FetchPortalTargetList(portal), portal->formats)` else
+    /// `pq_putemptymessage(PqMsg_NoData)` (postgres.c `exec_describe_portal_message`).
+    /// Sends the Describe-portal reply: a `RowDescription` when the portal
+    /// returns tuples (`portal->tupDesc != NULL`), otherwise a `NoData` message.
+    /// The target-list projection (`resjunk`/`resorigtbl`/`resorigcol`) and the
+    /// per-column result formats are read off the portal here, in printtup,
+    /// where `SendRowDescriptionMessage` and the `TargetEntryInfo` projection
+    /// live. `tcop/postgres.c` reaches it through this seam (it cannot depend on
+    /// printtup directly without a cycle); printtup installs it from its own
+    /// `init_seams()`.
+    pub fn send_describe_portal<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        portal: &types_portal::Portal,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The Describe-statement reply (postgres.c `exec_describe_statement_message`):
+    /// first a `ParameterDescription` listing the prepared statement's parameter
+    /// type OIDs, then either a `RowDescription` (when the cached plan has a
+    /// result descriptor) or a `NoData` message. The plancache reads
+    /// (`num_params` / `param_types` / `resultDesc` / `CachedPlanGetTargetList`)
+    /// are done by the caller and threaded in; printtup owns the wire encoding +
+    /// the `TargetEntryInfo` projection. `result_desc` is `None` (C's
+    /// `psrc->resultDesc == NULL`) → `NoData`. `tcop/postgres.c` reaches it
+    /// through this seam; printtup installs it from its own `init_seams()`.
+    pub fn send_describe_statement<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        param_types: &[types_core::Oid],
+        result_desc: Option<&types_tuple::heaptuple::TupleDescData<'mcx>>,
+        targetlist: &[types_nodes::nodes::Node<'mcx>],
+    ) -> types_error::PgResult<()>
+);
