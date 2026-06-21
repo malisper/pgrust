@@ -8149,22 +8149,97 @@ fn create_ordered_paths<'mcx>(
         backend_optimizer_util_pathnode::add_path(root, ordered_rel, sorted_path)?;
     }
 
-    // Partial-path + Gather-Merge block (C:5400-5470). Only reachable when
-    // ordered_rel is parallel-safe and there are partial paths; on the
-    // non-parallel SELECT path this is skipped. Mirror the C precisely; the
-    // Gather-Merge construction here needs the PlannerRun (for parampathinfo),
-    // which create_ordered_paths is not threaded with, so a genuinely-reached
-    // parallel ORDER BY plan loud-panics at this exact site rather than dropping
-    // the parallel paths.
+    // Generate a partial-path + Gather-Merge plan for the relation, in case the
+    // sort is computed in parallel (C:5395-5472). It may make sense to sort the
+    // cheapest partial path or incrementally sort any partial path that is
+    // partially sorted according to the required output order and then use
+    // Gather Merge. Only reachable when ordered_rel is parallel-safe and there
+    // are partial paths; on the non-parallel SELECT path this is skipped.
     let ordered_consider_parallel = root.rel(ordered_rel).consider_parallel;
     let input_has_partials = !root.rel(input_rel).partial_pathlist.is_empty();
     if ordered_consider_parallel && !sort_pathkeys.is_empty() && input_has_partials {
-        panic!(
-            "create_ordered_paths: parallel ORDER BY (create_gather_merge_path over \
-             input_rel->partial_pathlist, planner.c:5400-5470) needs the PlannerRun \
-             for get_baserel_parampathinfo, which is not threaded into \
-             create_ordered_paths"
-        );
+        let cheapest_partial_path = root.rel(input_rel).partial_pathlist[0];
+
+        let partial_pathlist = root.rel(input_rel).partial_pathlist.clone();
+        for input_path in partial_pathlist {
+            let input_pathkeys = root.path(input_path).base().pathkeys.clone();
+            let (is_sorted, presorted_keys) =
+                backend_optimizer_path_pathkeys::pathkeys_count_contained_in(
+                    &sort_pathkeys,
+                    &input_pathkeys,
+                );
+
+            if is_sorted {
+                continue;
+            }
+
+            // Try at least sorting the cheapest path and also try incrementally
+            // sorting any path which is partially sorted already (no need to
+            // deal with paths which have presorted keys when incremental sort
+            // is disabled unless it's the cheapest partial path).
+            if input_path != cheapest_partial_path
+                && (presorted_keys == 0 || !enable_incremental_sort())
+            {
+                continue;
+            }
+
+            // We've no need to consider both a sort and incremental sort. We'll
+            // just do a sort if there are no presorted keys and an incremental
+            // sort when there are presorted keys.
+            let mut sorted_path = if presorted_keys == 0 || !enable_incremental_sort() {
+                backend_optimizer_util_pathnode::create::create_sort_path(
+                    root,
+                    ordered_rel,
+                    input_path,
+                    sort_pathkeys.clone(),
+                    limit_tuples,
+                )?
+            } else {
+                backend_optimizer_util_pathnode::create::create_incremental_sort_path(
+                    root,
+                    run,
+                    ordered_rel,
+                    input_path,
+                    sort_pathkeys.clone(),
+                    presorted_keys,
+                    limit_tuples,
+                )?
+            };
+
+            let total_groups = backend_optimizer_path_costsize::compute_gather_rows(
+                root.path(sorted_path).base(),
+            );
+            // create_gather_merge_path(root, ordered_rel, sorted_path,
+            //   sorted_path->pathtarget, root->sort_pathkeys, NULL, &total_groups).
+            let sorted_pathtarget = root
+                .path(sorted_path)
+                .base()
+                .pathtarget
+                .clone();
+            sorted_path = backend_optimizer_util_pathnode::create::create_gather_merge_path(
+                root,
+                run,
+                ordered_rel,
+                sorted_path,
+                sorted_pathtarget,
+                sort_pathkeys.clone(),
+                &None,
+                Some(total_groups),
+            )?;
+
+            // If the pathtarget of the result path has different expressions
+            // from the target to be applied, a projection step is needed.
+            if !pathtarget_exprs_equal(root, sorted_path, target) {
+                sorted_path = backend_optimizer_util_pathnode::create::apply_projection_to_path(
+                    root,
+                    ordered_rel,
+                    sorted_path,
+                    Box::new(target.clone()),
+                )?;
+            }
+
+            backend_optimizer_util_pathnode::add_path(root, ordered_rel, sorted_path)?;
+        }
     }
 
     // GetForeignUpperPaths (C:5475-5481): no FDW upper-path routine modeled.
