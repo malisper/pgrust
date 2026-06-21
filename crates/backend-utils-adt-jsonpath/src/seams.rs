@@ -20,4 +20,8 @@
 //! family is published by its owner's `init_seams()`.
 pub fn init_seams() {
     crate::register_jsonpath_builtins();
+
+    // clauses.c's contain_mutable_functions JsonExpr arm crosses here for
+    // jspIsMutable (jsonpath.c); this unit owns it.
+    backend_optimizer_util_clauses_seams::jsp_is_mutable::set(crate::jsp_is_mutable_seam);
 }

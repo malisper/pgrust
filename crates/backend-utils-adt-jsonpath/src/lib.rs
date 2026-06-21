@@ -1611,6 +1611,74 @@ pub fn jspIsMutable(
     Ok(cxt.mutable)
 }
 
+/// `jsp_is_mutable` inward-seam adapter for `clauses.c`'s
+/// `contain_mutable_functions_walker` `JsonExpr` arm (clauses.c:430):
+///
+/// ```c
+/// if (jspIsMutable(DatumGetJsonPathP(cnst->constvalue),
+///                  jexpr->passing_names, jexpr->passing_values))
+/// ```
+///
+/// The consumer hands the whole [`JsonExpr`] across the seam (it has the node
+/// accessors but not the jsonpath reader); this owner extracts the constant
+/// jsonpath image from `path_spec`, marshals the PASSING names/values, and runs
+/// [`jspIsMutable`]. The caller has already verified `path_spec` is a non-null
+/// `Const` of type `JSONPATHOID`; we re-check defensively and treat any other
+/// shape as non-mutable-by-this-path (the C `Assert(cnst->consttype ==
+/// JSONPATHOID)` plus the `constisnull` guard).
+fn jsp_is_mutable_seam(jsonexpr: &types_nodes::primnodes::Expr) -> PgResult<bool> {
+    use types_nodes::primnodes::Expr;
+
+    let Expr::JsonExpr(jexpr) = jsonexpr else {
+        return Ok(false);
+    };
+
+    // DatumGetJsonPathP(cnst->constvalue): the path_spec must be a non-null
+    // jsonpath Const.
+    let Some(path_spec) = jexpr.path_spec.as_deref() else {
+        return Ok(false);
+    };
+    let Expr::Const(cnst) = path_spec else {
+        return Ok(false);
+    };
+    if cnst.constisnull {
+        return Ok(false);
+    }
+
+    // The jsonpath `Const`'s by-ref value carries the full jsonpath varlena
+    // behind one leading `VARHDRSZ` word (the canonical pass-by-reference ABI
+    // framing); strip it to recover the image the cores slice into
+    // (`jsonpath_header` reads `[4..8]`, `jspInit` slices `[8..]`).
+    const VARHDRSZ: usize = 4;
+    let raw = cnst.constvalue.as_ref_bytes();
+    let path: &[u8] = if raw.len() >= VARHDRSZ {
+        &raw[VARHDRSZ..]
+    } else {
+        raw
+    };
+
+    // jexpr->passing_names (list of String) -> varnames.
+    let varnames: Vec<Vec<u8>> = jexpr
+        .passing_names
+        .iter()
+        .map(|n| n.as_bytes().to_vec())
+        .collect();
+
+    // jexpr->passing_values (list of Node) -> varexprs. Each is carried as the
+    // field-bearing `ExternalFnExpr` the `exprType` seam downcasts back to read
+    // the value's result type (jspIsMutableWalker's `jpiVariable` arm).
+    let varexprs: Vec<ExternalFnExpr> = jexpr
+        .passing_values
+        .iter()
+        .map(|e| ExternalFnExpr {
+            tag: e.expr_tag().0,
+            node: Some(types_core::fmgr::FnExprErased::new(e.clone())),
+        })
+        .collect();
+
+    jspIsMutable(path, &varnames, &varexprs)
+}
+
 /// C: `jspIsMutableWalker(JsonPathItem *jpi, struct JsonPathMutableContext
 /// *cxt)` — recursive walker for [`jspIsMutable`].
 fn jspIsMutableWalker(

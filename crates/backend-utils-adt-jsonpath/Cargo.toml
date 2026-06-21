@@ -15,7 +15,11 @@ types-error = { path = "../types-error" }
 types-tuple = { path = "../types-tuple" }
 types-datum = { path = "../types-datum" }
 types-fmgr = { path = "../types-fmgr" }
+types-nodes = { path = "../types-nodes" }
 types-jsonpath = { path = "../types-jsonpath" }
+# jsp_is_mutable inward seam — clauses.c's contain_mutable_functions JsonExpr
+# arm; this unit (jsonpath.c) owns jspIsMutable and installs it here.
+backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
 # escape_json_with_len (json.c) — owner crate, reached through its seam.
 backend-utils-adt-json-seams = { path = "../backend-utils-adt-json-seams" }
 # numeric_out (numeric.c) — direct dep (no cycle).

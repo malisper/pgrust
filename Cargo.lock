@@ -20116,6 +20116,7 @@ name = "backend-utils-adt-jsonpath"
 version = "0.0.0"
 dependencies = [
  "backend-nodes-nodeFuncs-seams",
+ "backend-optimizer-util-clauses-seams",
  "backend-regex-core",
  "backend-utils-adt-formatting",
  "backend-utils-adt-json-seams",
@@ -20128,6 +20129,7 @@ dependencies = [
  "types-error",
  "types-fmgr",
  "types-jsonpath",
+ "types-nodes",
  "types-tuple",
 ]
 
