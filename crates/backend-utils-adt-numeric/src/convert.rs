@@ -692,6 +692,10 @@ pub fn int128_to_numericvar<'mcx>(mcx: Mcx<'mcx>, val: i128) -> PgResult<Numeric
 /// loss (15 on IEEE 754).
 const DBL_DIG: i32 = 15;
 
+/// `FLT_DIG` from `<float.h>`: decimal digits a `float` (`f32`) represents
+/// without loss (6 on IEEE 754).
+const FLT_DIG: i32 = 6;
+
 /// Render a finite `f64` exactly as C's `snprintf("%.*g", prec, val)` would:
 /// `%g` with `prec` significant digits (treating `prec == 0` as 1),
 /// round-half-to-even, trailing zeros stripped (no `#` flag), and `%e` vs `%f`
@@ -806,6 +810,32 @@ pub fn float8_to_numeric<'mcx>(mcx: Mcx<'mcx>, val: f64) -> PgResult<PgVec<'mcx,
     let buf = format_g(val, DBL_DIG);
     // No leading/trailing spaces in our own rendering; set_var_from_str never
     // soft-errors on a `%g` string.
+    let (result, _endptr) = io::set_var_from_str(mcx, &buf, 0)?;
+    make_result(mcx, &result)
+}
+
+/// `float4_numeric(val)`: build an on-disk byte image from an `f32`. NaN -> NaN
+/// special, +-Inf -> +-Inf special; a finite value is rendered with `%.*g` at
+/// `FLT_DIG` (6) precision — NOT widened to `f64` and rendered with `DBL_DIG`,
+/// which would print the float's spurious low-order decimal digits — then parsed
+/// by `set_var_from_str`. (numeric.c:4822, `float4_numeric`)
+pub fn float4_to_numeric<'mcx>(mcx: Mcx<'mcx>, val: f32) -> PgResult<PgVec<'mcx, u8>> {
+    if val.is_nan() {
+        return make_result(mcx, &NumericVar::special(mcx, NumericSign::NaN));
+    }
+    if val.is_infinite() {
+        let sign = if val < 0.0 {
+            NumericSign::NInf
+        } else {
+            NumericSign::PInf
+        };
+        return make_result(mcx, &NumericVar::special(mcx, sign));
+    }
+
+    // C: snprintf(buf, ..., "%.*g", FLT_DIG, val). format_g rounds the f64
+    // widening of `val` to FLT_DIG significant digits, which reproduces the
+    // float4's own decimal expansion (the rounding kills the f64 padding bits).
+    let buf = format_g(val as f64, FLT_DIG);
     let (result, _endptr) = io::set_var_from_str(mcx, &buf, 0)?;
     make_result(mcx, &result)
 }

@@ -416,12 +416,14 @@ fn fc_float8_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgRe
     Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
 }
 
-/// `float4_numeric(float4) -> numeric` (oid 1742). C widens `float4` to
-/// `float8` before the decimal rendering (`float4_numeric` -> `(float8) val`).
+/// `float4_numeric(float4) -> numeric` (oid 1742). C renders the `float4` with
+/// `snprintf("%.*g", FLT_DIG, val)` (6 sig digits) — it does NOT widen to
+/// `float8` and use DBL_DIG, which would print the float's spurious low-order
+/// decimal digits and yield a too-precise (and wrong-when-aggregated) numeric.
 fn fc_float4_numeric(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    let val = fcinfo.arg(0).expect("missing arg").value.as_f32() as f64;
+    let val = fcinfo.arg(0).expect("missing arg").value.as_f32();
     let m = scratch_mcx();
-    let image = crate::convert::float8_to_numeric(m.mcx(), val)?;
+    let image = crate::convert::float4_to_numeric(m.mcx(), val)?;
     Ok(ret_numeric(fcinfo, image.as_slice().to_vec()))
 }
 
