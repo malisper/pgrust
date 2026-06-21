@@ -792,9 +792,9 @@ pub fn ExecInitHashJoin<'mcx>(
 fn node_list_to_exprs<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     nodes: Option<&[types_nodes::nodes::Node<'mcx>]>,
-) -> PgResult<PgVec<'mcx, Expr>> {
+) -> PgResult<PgVec<'mcx, Expr<'mcx>>> {
     let nodes = nodes.unwrap_or(&[]);
-    let mut out: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, nodes.len())?;
+    let mut out: PgVec<'mcx, Expr<'mcx>> = vec_with_capacity_in(mcx, nodes.len())?;
     for n in nodes {
         match n.as_expr() {
             // A hashkey may carry context-allocated children (a SubPlan when

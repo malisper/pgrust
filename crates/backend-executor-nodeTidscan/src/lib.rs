@@ -93,12 +93,12 @@ fn is_ctid_var(node: Option<&Expr>) -> bool {
 }
 
 /// `get_leftop(expr)` — left arg of a binary opclause (only arg of a unary).
-fn get_leftop(args: &[Expr]) -> Option<&Expr> {
+fn get_leftop<'a, 'mcx>(args: &'a [Expr<'mcx>]) -> Option<&'a Expr<'mcx>> {
     args.first()
 }
 
 /// `get_rightop(expr)` — right arg of a binary opclause (NULL if unary).
-fn get_rightop(args: &[Expr]) -> Option<&Expr> {
+fn get_rightop<'a, 'mcx>(args: &'a [Expr<'mcx>]) -> Option<&'a Expr<'mcx>> {
     if args.len() >= 2 {
         Some(&args[1])
     } else {

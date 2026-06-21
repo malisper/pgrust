@@ -95,7 +95,7 @@ seam_core::seam!(
     /// `IsA(expr, FuncExpr) ? ((FuncExpr *) expr)->funcvariadic : false`. Unlike
     /// the tag-only [`expr_variadic`] carrier (which cannot see `funcvariadic`),
     /// this reads the real flag off the node.
-    pub fn expr_variadic_expr(expr: &Expr<'static>) -> bool
+    pub fn expr_variadic_expr<'mcx>(expr: &Expr<'mcx>) -> bool
 );
 
 seam_core::seam!(
@@ -108,7 +108,7 @@ seam_core::seam!(
     /// `Const` or an external (`PARAM_EXTERN`) `Param`. Unlike the tag-only
     /// [`call_expr_arg_stable`] carrier (which cannot see the argument list),
     /// this reads the real arguments off the node.
-    pub fn call_expr_arg_stable_expr(expr: &Expr<'static>, argnum: i32) -> bool
+    pub fn call_expr_arg_stable_expr<'mcx>(expr: &Expr<'mcx>, argnum: i32) -> bool
 );
 
 seam_core::seam!(
@@ -148,7 +148,7 @@ seam_core::seam!(
     /// call uses (`FuncExpr.inputcollid` / `OpExpr.inputcollid` / …); a pure node
     /// inspection. Returns `InvalidOid` for a node kind that stores no input
     /// collation.
-    pub fn expr_input_collation_expr(expr: &Expr<'static>) -> Oid
+    pub fn expr_input_collation_expr<'mcx>(expr: &Expr<'mcx>) -> Oid
 );
 
 /* ======================================================================
@@ -174,34 +174,34 @@ seam_core::seam!(
 seam_core::seam!(
     /// `exprCollation(node)` (nodeFuncs.c) — the collation of an expression node,
     /// over the arena `Expr` value. Pure read.
-    pub fn exprCollation(expr: &Expr<'static>) -> Oid
+    pub fn exprCollation<'mcx>(expr: &Expr<'mcx>) -> Oid
 );
 
 seam_core::seam!(
     /// `exprLocation(node)` (nodeFuncs.c) — the parse location of an expression
     /// node (or -1 if unknown), over the arena `Expr` value. Pure read.
     /// Installed by the nodeFuncs.c owner; until then a call panics.
-    pub fn exprLocation(expr: &Expr<'static>) -> i32
+    pub fn exprLocation<'mcx>(expr: &Expr<'mcx>) -> i32
 );
 
 seam_core::seam!(
     /// `equal(a, b)` (equalfuncs.c) — deep structural equality of two expression
     /// nodes, over the arena `Expr` value. `equal(NULL, NULL)` is true; this
     /// helper is only called with two present nodes.
-    pub fn equal(a: &Expr<'static>, b: &Expr<'static>) -> bool
+    pub fn equal<'mcx>(a: &Expr<'mcx>, b: &Expr<'mcx>) -> bool
 );
 
 seam_core::seam!(
     /// `copyObject(node)` (copyfuncs.c) — a deep copy of an expression node,
     /// over the arena `Expr` value (the C `copyObject(var)` in
     /// `find_var_for_subquery_tle`).
-    pub fn copyObject(expr: &Expr<'static>) -> Expr<'static>
+    pub fn copyObject<'mcx>(expr: &Expr<'mcx>) -> Expr<'mcx>
 );
 
 seam_core::seam!(
     /// `is_notclause(clause)` (nodes/makefuncs.h) — true iff `clause` is a
     /// `BoolExpr` with `boolop == NOT_EXPR`.
-    pub fn is_notclause(clause: &Expr<'static>) -> bool
+    pub fn is_notclause<'mcx>(clause: &Expr<'mcx>) -> bool
 );
 
 seam_core::seam!(
@@ -209,7 +209,7 @@ seam_core::seam!(
     /// `BoolExpr`. C returns `linitial(args)` — a borrowed pointer into the
     /// existing tree, never a copy — so we hand back a borrow tied to the input
     /// (a `.clone()` of a `SubLink`-bearing arg would hit its deep-copy guard).
-    pub fn get_notclausearg<'a>(notclause: &'a Expr<'static>) -> &'a Expr<'static>
+    pub fn get_notclausearg<'a, 'mcx>(notclause: &'a Expr<'mcx>) -> &'a Expr<'mcx>
 );
 
 seam_core::seam!(
@@ -220,11 +220,11 @@ seam_core::seam!(
     /// is taken BY VALUE: C mutates the passed tree in place, so the owner
     /// moves it into the mutator (a borrow would force a `.clone()` that panics
     /// on owned-subtree Exprs like `Aggref`).
-    pub fn remove_nulling_relids(
-        node: Expr<'static>,
+    pub fn remove_nulling_relids<'mcx>(
+        node: Expr<'mcx>,
         removable_relids: &types_pathnodes::Relids,
         except_relids: &types_pathnodes::Relids,
-    ) -> Expr<'static>
+    ) -> Expr<'mcx>
 );
 
 seam_core::seam!(
