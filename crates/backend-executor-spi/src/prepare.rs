@@ -55,6 +55,7 @@ use crate::result_code::{
 use backend_executor_execMain as execmain;
 use backend_utils_cache_plancache as plancache;
 use backend_utils_cache_plancache_seams as plancache_seams;
+use backend_access_transam_xact_seams as xact;
 use backend_utils_time_snapmgr_seams as snapmgr;
 
 // The plancache owner's pub fns operate on its bare `u64` source/plan handle
@@ -299,8 +300,9 @@ pub fn spi_execute_snapshot<'mcx>(
     let mut last_result: Option<SpiResult> = None;
 
     for &source in sources.iter() {
-        let (res, processed, result) =
-            execute_one_source(mcx, source, &param_li, &snapshot, &crosscheck, tcount)?;
+        let (res, processed, result) = execute_one_source(
+            mcx, source, &param_li, &snapshot, &crosscheck, _read_only, tcount,
+        )?;
         my_res = res;
         my_processed = processed;
         if result.is_some() {
@@ -330,6 +332,7 @@ fn execute_one_source<'mcx>(
     param_li: &ParamListInfo,
     snapshot: &Option<types_snapshot::SnapshotData>,
     crosscheck: &Option<types_snapshot::SnapshotData>,
+    read_only: bool,
     tcount: i64,
 ) -> PgResult<(i32, u64, Option<SpiResult>)> {
     // _SPI_execute_plan: when no caller snapshot is given, RI's read-only check
@@ -346,7 +349,7 @@ fn execute_one_source<'mcx>(
         }
     };
 
-    let out = run_cached(mcx, source, param_li, crosscheck, tcount);
+    let out = run_cached(mcx, source, param_li, crosscheck, read_only, pushed, tcount);
 
     if pushed {
         let _ = snapmgr::pop_active_snapshot::call();
@@ -359,6 +362,8 @@ fn run_cached<'mcx>(
     source: SourceHandle,
     param_li: &ParamListInfo,
     crosscheck: &Option<types_snapshot::SnapshotData>,
+    read_only: bool,
+    pushed_active_snap: bool,
     tcount: i64,
 ) -> PgResult<(i32, u64, Option<SpiResult>)> {
     let cplan = plancache::GetCachedPlan(source, param_li.clone(), ResourceOwner::NULL, None)?;
@@ -369,6 +374,15 @@ fn run_cached<'mcx>(
     let mut last_result: Option<SpiResult> = None;
 
     for stmt in stmt_list.iter() {
+        // _SPI_execute_plan: in non-read-only mode, advance the command counter
+        // before each command and update the active snapshot's command id, so a
+        // statement sees the effects of the prior commands in this same SPI call
+        // (e.g. a cascaded FK UPDATE's re-fired RI check must see the row the
+        // outer UPDATE just changed). Skipped when the snapshot isn't ours.
+        if !read_only && pushed_active_snap {
+            xact::command_counter_increment::call()?;
+            snapmgr::update_active_snapshot_command_id::call()?;
+        }
         let (code, n, result) = run_one_stmt(stmt, param_li, crosscheck, tcount)?;
         res = code;
         processed = n;
