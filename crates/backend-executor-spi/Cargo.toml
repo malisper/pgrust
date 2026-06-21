@@ -32,6 +32,7 @@ backend-catalog-heap = { path = "../backend-catalog-heap" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-tcop-cmdtag = { path = "../backend-tcop-cmdtag" }
 backend-tcop-dest = { path = "../backend-tcop-dest" }
+backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
 backend-tcop-pquery = { path = "../backend-tcop-pquery" }
 backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
 backend-parser-driver = { path = "../backend-parser-driver" }

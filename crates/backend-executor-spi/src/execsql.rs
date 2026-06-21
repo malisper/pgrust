@@ -308,7 +308,7 @@ fn spi_execsql_inner(
 /// `_SPI_prepare_plan` for an embedded SQL statement: raw_parser(parsemode) ->
 /// CreateCachedPlan + parse_analyze_plpgsql_expr + QueryRewrite +
 /// CompleteCachedPlan. Returns the completed source handle.
-fn prepare_execsql_plan<'mcx>(
+pub(crate) fn prepare_execsql_plan<'mcx>(
     mcx: Mcx<'mcx>,
     query: &'mcx str,
     parsemode: RawParseMode,
@@ -347,7 +347,7 @@ fn prepare_execsql_plan<'mcx>(
 
 /// `setup_param_list(estate, expr)`: build a value `ParamListInfo` covering the
 /// referenced datum numbers (param id `dno+1`, vector indexed by `dno`).
-fn build_param_list(
+pub(crate) fn build_param_list(
     parse_state: &PlpgsqlExprParseState,
     resolve: &mut dyn FnMut(i32) -> PgResult<EvalParamValue>,
 ) -> PgResult<ParamListInfo> {
