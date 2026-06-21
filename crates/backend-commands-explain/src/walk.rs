@@ -1170,6 +1170,11 @@ pub fn ExplainNode<'es, 'p>(
             let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
             show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
         }
+        ntag::T_Memoize => {
+            // show_memoize_info (explain.c:2253): the "Cache Key" / "Cache Mode"
+            // detail (and ANALYZE-time cache instrumentation).
+            show_memoize_info(es, mcx, plan_node, ancestors, planstate)?;
+        }
         ntag::T_WindowAgg | ntag::T_Result => {
             // explain.c:2208/2238: the WindowAgg `Run Condition` / Result
             // `One-Time Filter` detail lines were emitted earlier (before the
@@ -2258,6 +2263,165 @@ fn show_sort_group_keys<'es, 'p>(
             result_presorted.iter().map(|s| s.as_str()).collect();
         fmt::ExplainPropertyList("Presorted Key", &pview, es)?;
     }
+    Ok(())
+}
+
+/// `BYTES_TO_KILOBYTES(b)` — `(b + 1023) / 1024` (memutils.h).
+fn bytes_to_kilobytes(b: i64) -> i64 {
+    (b + (1024 - 1)) / 1024
+}
+
+/// `show_memoize_info(mstate, ancestors, es)` (explain.c:3582). Deparse the
+/// Memoize node's `param_exprs` as the "Cache Key" list, print the "Cache Mode"
+/// (binary/logical), and — for EXPLAIN ANALYZE — the cache hit/miss/eviction
+/// instrumentation (serial line plus any per-worker `shared_info` lines).
+fn show_memoize_info<'es>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plan_node: &Node<'_>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+    planstate: &PlanStateNode<'_>,
+) -> PgResult<()> {
+    let memo = plan_node.expect_memoize();
+
+    // useprefix = es->rtable_size > 1 || es->verbose.
+    let useprefix = es.rtable_size > 1 || es.verbose;
+
+    // Set up deparsing context: context plan = the Memoize node itself
+    // (set_deparse_context_plan(es->deparse_cxt, plan, ancestors)). Clone into
+    // the formatting arena, matching show_sort_group_keys.
+    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let es_pstmt = es
+        .pstmt
+        .as_deref()
+        .expect("EXPLAIN: es->pstmt must be set before deparse")
+        .clone_in(mcx)?;
+    let es_pstmt: PgBox<'es, PlannedStmt<'es>> = mcx::alloc_in(mcx, es_pstmt)?;
+
+    // Build the comma-separated "Cache Key" string from param_exprs.
+    let mut keystr = alloc::string::String::new();
+    let mut separator = "";
+    for expr in memo.param_exprs.iter() {
+        keystr.push_str(separator);
+        let expr_node = Node::mk_expr(mcx, expr.clone_in(mcx)?)?;
+        let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+            mcx,
+            &es_pstmt,
+            &es.rtable_names,
+            &plan_owned,
+            ancestors,
+            &expr_node,
+            useprefix,
+            false,
+        )?;
+        keystr.push_str(exprstr.as_str());
+        separator = ", ";
+    }
+
+    fmt::ExplainPropertyText("Cache Key", keystr.as_str(), es)?;
+    fmt::ExplainPropertyText(
+        "Cache Mode",
+        if memo.binary_mode { "binary" } else { "logical" },
+        es,
+    )?;
+
+    if !es.analyze {
+        return Ok(());
+    }
+
+    // Pull the runtime MemoizeState stats. On the structural slice this is
+    // available only when the executing PlanState is a Memoize node.
+    let mstate = match planstate {
+        PlanStateNode::Memoize(m) => m,
+        // EXPLAIN without a started executor (e.g. EXPLAIN ANALYZE on a plan that
+        // never ran a Memoize state) carries no stats — nothing more to print.
+        _ => return Ok(()),
+    };
+
+    if mstate.stats.cache_misses > 0 {
+        // mem_peak is only set when we freed memory, so use mem_used when 0.
+        let mem_peak_kb = if mstate.stats.mem_peak > 0 {
+            bytes_to_kilobytes(mstate.stats.mem_peak as i64)
+        } else {
+            bytes_to_kilobytes(mstate.mem_used as i64)
+        };
+
+        if es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT {
+            fmt::ExplainPropertyInteger("Cache Hits", None, mstate.stats.cache_hits as i64, es)?;
+            fmt::ExplainPropertyInteger(
+                "Cache Misses",
+                None,
+                mstate.stats.cache_misses as i64,
+                es,
+            )?;
+            fmt::ExplainPropertyInteger(
+                "Cache Evictions",
+                None,
+                mstate.stats.cache_evictions as i64,
+                es,
+            )?;
+            fmt::ExplainPropertyInteger(
+                "Cache Overflows",
+                None,
+                mstate.stats.cache_overflows as i64,
+                es,
+            )?;
+            fmt::ExplainPropertyInteger("Peak Memory Usage", Some("kB"), mem_peak_kb, es)?;
+        } else {
+            fmt::ExplainIndentText(es)?;
+            es.str.try_push_str(&format!(
+                "Hits: {}  Misses: {}  Evictions: {}  Overflows: {}  Memory Usage: {}kB\n",
+                mstate.stats.cache_hits,
+                mstate.stats.cache_misses,
+                mstate.stats.cache_evictions,
+                mstate.stats.cache_overflows,
+                mem_peak_kb,
+            ))?;
+        }
+    }
+
+    // Show details from parallel workers (shared_info). On the structural slice
+    // this is populated only on the worker-DSM round-trip (blocked, like the
+    // IncrementalSort shared_info path); mirror C's loop faithfully.
+    let shared = match mstate.shared_info.as_deref() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    for n in 0..shared.num_workers {
+        let si = match shared.sinstrument.get(n as usize) {
+            Some(s) => s,
+            None => break,
+        };
+
+        // Skip workers that didn't do any work (a miss always precedes a hit).
+        if si.cache_misses == 0 {
+            continue;
+        }
+
+        // es->workers_state is unmodelled on the structural slice; ExplainOpenWorker
+        // is a no-op there. mem_peak is set by ExecEndMemoize, no zero check needed.
+        let mem_peak_kb = bytes_to_kilobytes(si.mem_peak as i64);
+
+        if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+            fmt::ExplainIndentText(es)?;
+            es.str.try_push_str(&format!(
+                "Hits: {}  Misses: {}  Evictions: {}  Overflows: {}  Memory Usage: {}kB\n",
+                si.cache_hits,
+                si.cache_misses,
+                si.cache_evictions,
+                si.cache_overflows,
+                mem_peak_kb,
+            ))?;
+        } else {
+            fmt::ExplainPropertyInteger("Cache Hits", None, si.cache_hits as i64, es)?;
+            fmt::ExplainPropertyInteger("Cache Misses", None, si.cache_misses as i64, es)?;
+            fmt::ExplainPropertyInteger("Cache Evictions", None, si.cache_evictions as i64, es)?;
+            fmt::ExplainPropertyInteger("Cache Overflows", None, si.cache_overflows as i64, es)?;
+            fmt::ExplainPropertyInteger("Peak Memory Usage", Some("kB"), mem_peak_kb, es)?;
+        }
+    }
+
     Ok(())
 }
 
