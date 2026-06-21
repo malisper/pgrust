@@ -4626,7 +4626,7 @@ fn transform_json_value_expr<'mcx>(
         expr = coerce::coerce_to_specific_type::call(pstate, expr, TEXTOID, construct_name)?;
     }
 
-    let rawexpr = expr.clone();
+    let rawexpr = expr.clone_in(aexpr_clone_ctx(pstate))?;
     let mut exprtype = expr_type(Some(&expr))?;
     let location = expr_location(Some(&expr))?;
 
@@ -4725,7 +4725,7 @@ fn transform_json_value_expr<'mcx>(
 
         let coerced = coerce::coerce_to_target_type::call(
             pstate,
-            expr.clone(),
+            expr.clone_in(aexpr_clone_ctx(pstate))?,
             exprtype,
             targettype,
             -1,
@@ -4752,7 +4752,7 @@ fn transform_json_value_expr<'mcx>(
                 make_func_expr(
                     fnoid,
                     targettype,
-                    alloc::vec![expr.clone()],
+                    alloc::vec![expr.clone_in(aexpr_clone_ctx(pstate))?],
                     InvalidOid,
                     InvalidOid,
                     CoercionForm::COERCE_EXPLICIT_CALL,

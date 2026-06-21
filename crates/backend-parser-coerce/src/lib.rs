@@ -437,7 +437,7 @@ pub fn coerce_type<'mcx>(
         } else {
             let result = coerce_to_domain(
                 mcx,
-                node.clone(),
+                node.clone_in(mcx)?,
                 baseTypeId,
                 baseTypeMod,
                 targetTypeId,
@@ -1263,7 +1263,7 @@ pub fn coerce_to_boolean<'mcx>(
         let newnode = coerce_to_target_type(
             mcx,
             pstate,
-            node.clone(),
+            node,
             inputTypeId,
             BOOLOID,
             -1,
@@ -1311,7 +1311,7 @@ pub fn coerce_to_specific_type_typmod<'mcx>(
         let newnode = coerce_to_target_type(
             mcx,
             pstate,
-            node.clone(),
+            node,
             inputTypeId,
             targetTypeId,
             targetTypmod,

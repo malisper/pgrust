@@ -234,7 +234,7 @@ pub(crate) fn checkExprIsVarFree<'mcx>(
     constructName: &str,
 ) -> PgResult<()> {
     let mcx: Mcx<'mcx> = *pstate.p_rtable.allocator();
-    let node = Node::mk_expr(mcx, n.clone())?;
+    let node = Node::mk_expr(mcx, n.clone_in(mcx)?)?;
     if contain_vars_of_level(&node, 0) {
         let location = locate_var_of_level(&node, 0);
         return Err(ereport(ERROR)

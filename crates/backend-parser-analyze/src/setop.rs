@@ -619,7 +619,7 @@ fn determineRecursiveColTypes<'mcx>(
             .expr
             .as_deref()
             .ok_or_else(|| elog_error("recursive col expr is NULL"))?
-            .clone();
+            .clone_in(mcx)?;
         let tle = backend_nodes_core::makefuncs::make_target_entry(
             mcx,
             expr,

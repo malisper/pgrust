@@ -684,7 +684,7 @@ fn transformRangeFunction<'mcx>(
      * info for Vars created from it.
      */
     {
-        let mut exprs = funcexprs_to_expr_vec(&funcexprs)?;
+        let mut exprs = funcexprs_to_expr_vec(mcx, &funcexprs)?;
         assign_list_collations(Some(pstate), &mut exprs)?;
         store_back_funcexprs(mcx, &mut funcexprs, exprs)?;
     }
@@ -2297,11 +2297,11 @@ fn clone_namespace<'mcx>(
 
 /// Borrowed `Expr` view of the transformed func expr nodes for
 /// `assign_list_collations`, which mutates the `Expr`s in place.
-fn funcexprs_to_expr_vec(funcexprs: &[NodePtr<'_>]) -> PgResult<Vec<Expr>> {
+fn funcexprs_to_expr_vec<'mcx>(mcx: Mcx<'mcx>, funcexprs: &[NodePtr<'_>]) -> PgResult<Vec<Expr>> {
     let mut v = Vec::with_capacity(funcexprs.len());
     for n in funcexprs.iter() {
         match n.as_expr() {
-            Some(e) => v.push(e.clone()),
+            Some(e) => v.push(e.clone_in(mcx)?),
             None => return Err(elog_error("transformRangeFunction: funcexpr is not a transformed Expr")),
         }
     }

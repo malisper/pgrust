@@ -1630,6 +1630,27 @@ impl Aggref {
     }
 }
 
+impl XmlExpr {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Mirrors the
+    /// [`Expr::XmlExpr`] [`Expr::clone_in`] arm — the derived `.clone()` recurses
+    /// into the `Vec<Expr>` children (which may carry a panicking `Aggref`), so
+    /// callers that deep-copy an `XmlExpr` must route through here.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<XmlExpr> {
+        Ok(XmlExpr {
+            op: self.op,
+            name: self.name.clone(),
+            named_args: clone_vec_expr(&self.named_args, mcx)?,
+            arg_names: self.arg_names.clone(),
+            args: clone_vec_expr(&self.args, mcx)?,
+            xmloption: self.xmloption,
+            indent: self.indent,
+            r#type: self.r#type,
+            typmod: self.typmod,
+            location: self.location,
+        })
+    }
+}
+
 impl GroupingFunc {
     /// Deep copy into `mcx` (C: `copyObject` shape). Mirrors the
     /// [`Expr::GroupingFunc`] [`Expr::clone_in`] arm.
