@@ -364,6 +364,42 @@ pub fn ExecEvalJsonConstructor<'mcx>(
         }
     }
 
+    // JSCTOR_JSON_PARSE: JSON(text) — validate (json) or build jsonb, with the
+    // optional WITH UNIQUE KEYS duplicate-key check. Handled before the build
+    // `bytes` match because the json case returns the input text value verbatim.
+    if ctor_type == Ct::JSCTOR_JSON_PARSE {
+        if arg_nulls[0] {
+            write_cell(state, resv, Datum::ByVal(0), true);
+            if resnull != resv {
+                write_cell(state, resnull, Datum::from_bool(true), false);
+            }
+            return Ok(());
+        }
+
+        let value = &arg_values[0];
+        // A text `ByRef` value is the FULL varlena image (4-byte VARHDRSZ length
+        // word + payload); jsonb_from_text / json_validate want the header-less
+        // JSON text (C's DatumGetTextP + VARDATA_ANY).
+        const VARHDRSZ: usize = 4;
+        let img = value.as_ref_bytes();
+        let js = if img.len() >= VARHDRSZ { &img[VARHDRSZ..] } else { img };
+
+        if is_jsonb {
+            // res = jsonb_from_text(js, true);
+            let jb = backend_utils_adt_jsonb::jsonb_from_text(mcx, js, true)?;
+            let payload = mcx::slice_in(mcx, jb.as_slice())?;
+            write_cell(state, resv, Datum::ByRef(payload), false);
+        } else {
+            // (void) json_validate(js, true, true); res = value;
+            backend_utils_adt_json::json_validate(js, true, true)?;
+            write_cell(state, resv, value.clone_in(mcx)?, false);
+        }
+        if resnull != resv {
+            write_cell(state, resnull, Datum::from_bool(false), false);
+        }
+        return Ok(());
+    }
+
     let bytes: Vec<u8> = match ctor_type {
         Ct::JSCTOR_JSON_ARRAY => {
             if is_jsonb {
@@ -398,16 +434,6 @@ pub fn ExecEvalJsonConstructor<'mcx>(
                 "JSON_SCALAR constructor (JSCTOR_JSON_SCALAR) is not yet supported: \
                  datum_to_json/datum_to_jsonb and json_categorize_type have no \
                  executor-facing seam",
-            )
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
-        }
-        Ct::JSCTOR_JSON_PARSE => {
-            // JSON(text) / jsonb_from_text — only reachable here for the JSONB
-            // `unique` case (text non-unique is shortcut at init). jsonb_from_text
-            // has no executor-facing seam.
-            return Err(PgError::error(
-                "JSON PARSE constructor (JSCTOR_JSON_PARSE) is not yet supported: \
-                 jsonb_from_text has no executor-facing seam",
             )
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
         }
