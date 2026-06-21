@@ -587,7 +587,7 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
             PLpgSQL_stmt::ReturnNext(s) => exec_stmt_return_next(estate, s),
             PLpgSQL_stmt::ReturnQuery(s) => exec_stmt_return_query(estate, s),
             PLpgSQL_stmt::Raise(s) => exec_stmt_raise(estate, s),
-            PLpgSQL_stmt::Assert(_) => exec_stmt_assert(estate),
+            PLpgSQL_stmt::Assert(s) => exec_stmt_assert(estate, s),
             PLpgSQL_stmt::Execsql(s) => exec_stmt_execsql(estate, s),
             PLpgSQL_stmt::Dynexecute(s) => exec_stmt_dynexecute(estate, s),
             PLpgSQL_stmt::Dynfors(s) => exec_stmt_dynfors(estate, s),
@@ -998,7 +998,10 @@ fn exec_stmt_return(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_return) 
         // the function result; a by-value result leaves it None.
         estate.retval_byref = estate.last_eval_byref.take();
 
-        if estate.retistuple && !estate.retisnull && !seam::type_is_rowtype(estate.rettype) {
+        if estate.retistuple
+            && !estate.retisnull
+            && !exec_seams::type_is_rowtype::call(estate.rettype)?
+        {
             return Err(seam::ereport_return_noncomposite());
         }
 
@@ -1686,7 +1689,7 @@ fn exec_assign_value_byref_impl(
             if isnull {
                 seam::exec_move_row_null(estate, target_dno)?;
             } else {
-                if !seam::type_is_rowtype(valtype) {
+                if !exec_seams::type_is_rowtype::call(valtype)? {
                     return Err(seam::ereport_return_noncomposite());
                 }
                 seam::exec_move_row_from_datum(estate, target_dno, value)?;
@@ -2578,11 +2581,41 @@ fn unpack_sql_state(sql_state: int32) -> String {
     out
 }
 
-fn exec_stmt_assert(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
-    panic!(
-        "seam not wired: exec_stmt_assert (pl_exec.c) — exec_eval_boolean(cond) + \
-         exec_eval_expr(message) + ereport(ASSERT_FAILURE) (value substrate)"
-    );
+/// `exec_stmt_assert(estate, stmt)` (pl_exec.c) — evaluate the ASSERT condition;
+/// on a NULL/false result raise `ERRCODE_ASSERT_FAILURE`, using the optional
+/// message expression's string when present.
+fn exec_stmt_assert(
+    estate: &mut PLpgSQL_execstate,
+    stmt: &types_plpgsql::PLpgSQL_stmt_assert,
+) -> PLpgSQL_rc_result {
+    // do nothing when asserts are not enabled
+    if !exec_seams::plpgsql_check_asserts::call() {
+        return Ok(PLpgSQL_rc::PLPGSQL_RC_OK);
+    }
+
+    let cond = stmt.cond.as_deref().expect("ASSERT carries a cond");
+    let (cval, cisnull, ctype, _ctypmod) = exec_eval_expr_impl(estate, cond)?;
+    // exec_eval_boolean coerces the result to bool (exec_cast_value to BOOLOID);
+    // the condition expression is parsed as a boolean expression so the result
+    // type is already bool. Read the bool out of the value word.
+    let _ = ctype;
+    let value = !cisnull && cval.as_usize() != 0;
+    exec_eval_cleanup(estate);
+
+    if cisnull || !value {
+        let mut message: Option<String> = None;
+        if let Some(msg_expr) = stmt.message.as_deref() {
+            let (mval, misnull, mtype, _mtypmod) = exec_eval_expr_impl(estate, msg_expr)?;
+            if !misnull {
+                let byref = estate.last_eval_byref.take();
+                message = Some(convert_value_to_string(mval, byref, mtype)?);
+            }
+            // we mustn't do exec_eval_cleanup here (C comment)
+        }
+        return Err(seam::ereport_assert_failure(message));
+    }
+
+    Ok(PLpgSQL_rc::PLPGSQL_RC_OK)
 }
 
 /// `exec_stmt_execsql(estate, stmt)` (pl_exec.c 4208) — execute an embedded SQL

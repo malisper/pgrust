@@ -548,3 +548,20 @@ seam_core::seam!(
         slice: int32,
     ) -> PgResult<ForeachIterateResult>
 );
+
+seam_core::seam!(
+    /// `plpgsql_check_asserts` (pl_handler.c) — the `plpgsql.check_asserts` GUC
+    /// (default `true`). `exec_stmt_assert` returns early when it is off, so the
+    /// executor must read it; the GUC variable lives in the handler unit
+    /// (`pl_handler.c`), which is layered above the executor. The handler installs
+    /// it. Infallible bool read.
+    pub fn plpgsql_check_asserts() -> bool
+);
+
+seam_core::seam!(
+    /// `type_is_rowtype(typid)` (`lsyscache.c`) — is the type a composite/row
+    /// type (or a domain over one)? `exec_stmt_return` uses it to decide whether
+    /// a RETURN value of a SETOF/composite function is a row. The executor unit
+    /// is layered below lsyscache; the handler installs it.
+    pub fn type_is_rowtype(typid: Oid) -> PgResult<bool>
+);

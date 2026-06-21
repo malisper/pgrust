@@ -342,15 +342,6 @@ pub fn reset_expr_context(_econtext: &ExprContext) {
     );
 }
 
-/// `type_is_rowtype(rettype)` (lsyscache.c, via `exec_stmt_return`): is the
-/// type a composite/row type?
-pub fn type_is_rowtype(_typeid: Oid) -> bool {
-    panic!(
-        "seam not wired: type_is_rowtype (lsyscache.c) — composite-type test \
-         for RETURN of a non-composite from a SETOF/composite function"
-    );
-}
-
 // --- ereport sites that abort a statement (faithful: the C site ereports) ----
 
 /// `ereport(ERROR, ERRCODE_CASE_NOT_FOUND)` — CASE with no matching WHEN and no
@@ -359,6 +350,15 @@ pub fn ereport_case_not_found() -> types_error::PgError {
     types_error::PgError::error("case not found".to_string())
         .with_detail("CASE statement is missing ELSE part.".to_string())
         .with_sqlstate(types_error::ERRCODE_CASE_NOT_FOUND)
+}
+
+/// `ereport(ERROR, ERRCODE_ASSERT_FAILURE)` — an ASSERT condition was NULL or
+/// false (`exec_stmt_assert`). With a `message` expression that evaluated to a
+/// non-NULL string, C uses `errmsg_internal("%s", message)`; otherwise the
+/// fixed `errmsg("assertion failed")`.
+pub fn ereport_assert_failure(message: Option<String>) -> types_error::PgError {
+    let msg = message.unwrap_or_else(|| "assertion failed".to_string());
+    types_error::PgError::error(msg).with_sqlstate(types_error::ERRCODE_ASSERT_FAILURE)
 }
 
 /// `ereport(ERROR, ERRCODE_NULL_VALUE_NOT_ALLOWED)` — a FOR(i) loop bound /

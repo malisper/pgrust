@@ -1007,6 +1007,15 @@ pub fn init_seams() {
         backend_utils_cache_lsyscache_seams::get_element_type::call(typid)
     });
 
+    // `plpgsql_check_asserts` GUC read for exec_stmt_assert. The GUC variable is
+    // owned in this unit (pl_handler.c); the executor reads it through the seam.
+    backend_pl_plpgsql_exec_seams::plpgsql_check_asserts::set(plpgsql_check_asserts);
+
+    // `type_is_rowtype` for exec_stmt_return's composite-result test.
+    backend_pl_plpgsql_exec_seams::type_is_rowtype::set(|typid: types_core::Oid| {
+        backend_utils_cache_lsyscache_seams::type_is_rowtype::call(typid)
+    });
+
     // Install the `exec_stmt_block` EXCEPTION-leg subtransaction entry points
     // (pl_exec.c keystone #215). The executor unit is layered below xact; the
     // handler (top layer) bridges to the now-ported xact subxact engine. These
