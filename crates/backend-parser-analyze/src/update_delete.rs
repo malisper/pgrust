@@ -588,7 +588,20 @@ pub(crate) fn transformReturningClause<'mcx>(
     // Complain if the nonempty tlist expanded to nothing (possible for a
     // star-expansion of a zero-column table).
     if returning_list.is_empty() {
-        return Err(elog_error("RETURNING must have at least one column"));
+        // C: parser_errposition(pstate, exprLocation(linitial(returningClause->exprs))).
+        // exprLocation over a T_ResTarget returns the ResTarget's own location, so
+        // the location of the first (linitial) RETURNING ResTarget is the report point.
+        let loc = rc
+            .exprs
+            .first()
+            .and_then(|n| n.as_ref().as_restarget())
+            .map(|rt| rt.location)
+            .unwrap_or(-1);
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg("RETURNING must have at least one column")
+            .errposition(backend_parser_small1::parser_errposition(pstate, loc))
+            .into_error());
     }
 
     // mark column origins
