@@ -1867,6 +1867,18 @@ fn exec_br_ir_insert_triggers<'mcx>(
                     newtuple = Some(rt);
                 } else {
                     // newtuple != oldtuple — the trigger modified the row.
+                    // newtuple = check_modified_virtual_generated(
+                    //     RelationGetDescr(relinfo->ri_RelationDesc), newtuple);
+                    let rt = {
+                        let tupdesc = estate
+                            .result_rel(relinfo)
+                            .ri_RelationDesc
+                            .as_ref()
+                            .expect("ExecBRInsertTriggers: ri_RelationDesc is NULL")
+                            .rd_att
+                            .clone_in(mcx)?;
+                        check_modified_virtual_generated(mcx, &tupdesc, rt)?
+                    };
                     // ExecForceStoreHeapTuple(newtuple, slot, false);
                     backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
                         estate,
@@ -1882,6 +1894,58 @@ fn exec_br_ir_insert_triggers<'mcx>(
     }
 
     Ok(true)
+}
+
+/// `check_modified_virtual_generated(tupdesc, tuple)` (trigger.c) — check
+/// whether a trigger modified a virtual generated column and replace the value
+/// with null if so.  We need this so that we don't end up storing a non-null
+/// value in a virtual generated column.  (Stored generated columns are
+/// overwritten later anyway, so they need no handling here.)
+fn check_modified_virtual_generated<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+    mut tuple: types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+) -> PgResult<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>> {
+    // if (!(tupdesc->constr && tupdesc->constr->has_generated_virtual)) return tuple;
+    let has_virtual = tupdesc
+        .constr
+        .as_ref()
+        .is_some_and(|c| c.has_generated_virtual);
+    if !has_virtual {
+        return Ok(tuple);
+    }
+
+    for i in 0..tupdesc.natts {
+        if tupdesc.attr(i as usize).attgenerated
+            == types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL
+        {
+            // if (!heap_attisnull(tuple, i + 1, tupdesc))
+            if !backend_access_common_heaptuple::heap_attisnull(
+                &tuple.tuple,
+                i + 1,
+                Some(tupdesc),
+            ) {
+                // tuple = heap_modify_tuple_by_cols(tuple, tupdesc, 1,
+                //                                   &replCol, &replValue=0, &replIsnull=true);
+                let repl_cols = [i + 1];
+                let repl_values =
+                    [types_tuple::backend_access_common_heaptuple::Datum::from_u64(0)];
+                let repl_isnull = [true];
+                tuple = backend_access_common_heaptuple::heap_modify_tuple_by_cols(
+                    mcx,
+                    &tuple,
+                    tupdesc,
+                    1,
+                    &repl_cols,
+                    &repl_values,
+                    &repl_isnull,
+                )
+                .map_err(|_| mcx.oom(0))?;
+            }
+        }
+    }
+
+    Ok(tuple)
 }
 
 /// The C `newtuple != oldtuple` pointer-identity test, realized in the owned
@@ -3940,8 +4004,19 @@ fn exec_br_update_triggers_impl<'mcx>(
                     newtuple = Some(rt);
                 } else {
                     // newtuple != oldtuple — the trigger modified the NEW row.
-                    // (check_modified_virtual_generated is a no-op without virtual
-                    // generated columns.)  ExecForceStoreHeapTuple(newtuple, newslot, false);
+                    // newtuple = check_modified_virtual_generated(
+                    //     RelationGetDescr(relinfo->ri_RelationDesc), newtuple);
+                    let rt = {
+                        let tupdesc = estate
+                            .result_rel(relinfo)
+                            .ri_RelationDesc
+                            .as_ref()
+                            .expect("ExecBRUpdateTriggers: ri_RelationDesc is NULL")
+                            .rd_att
+                            .clone_in(mcx)?;
+                        check_modified_virtual_generated(mcx, &tupdesc, rt)?
+                    };
+                    // ExecForceStoreHeapTuple(newtuple, newslot, false);
                     backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
                         estate,
                         newslot,

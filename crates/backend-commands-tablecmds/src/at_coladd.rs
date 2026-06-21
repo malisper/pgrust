@@ -44,7 +44,7 @@ use types_tuple::heaptuple::{MaxHeapAttributeNumber, DEFAULT_COLLATION_OID};
 
 use backend_access_common_relation::relation_open;
 use backend_catalog_dependency_seams as dep_seam;
-use backend_catalog_heap::{CheckAttributeType, InsertPgAttributeTuples};
+use backend_catalog_heap::{CheckAttributeType, InsertPgAttributeTuples, CHKATYPE_IS_VIRTUAL};
 use backend_catalog_indexing_seams as indexing_seam;
 use backend_catalog_pg_inherits::find_inheritance_children;
 use backend_utils_cache_syscache::{SearchSysCacheAttName, SysCacheGetAttrNotNull, ATTNAME};
@@ -781,8 +781,6 @@ fn columndef_colname<'a>(col_def: &'a types_nodes::rawnodes::ColumnDef<'_>) -> &
         .map(|s| s.as_str())
         .expect("ColumnDef has no colname")
 }
-
-const CHKATYPE_IS_VIRTUAL: i32 = 1 << 2;
 
 /// `AT_REWRITE_DEFAULT_VAL` (tablecmds.c) — phase-3 must rewrite to fill in a
 /// non-out-of-heap default value.
