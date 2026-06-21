@@ -21,11 +21,12 @@
 //! `recordSharedDependencyOn` / `deleteSharedDependencyRecordsFor`
 //! (pg_shdepend) directly.
 //!
-//! `RelationBuildRowSecurity` (the relcache-side per-policy load) is genuinely
-//! blocked on the unported `RowSecurityDesc` / `RowSecurityPolicy` carriers and
-//! the relcache `rd_rsdesc` field model (presence-only today); it
-//! mirror-PG-and-panics until that keystone lands. relcache's build path
-//! already seam-and-panics its own call site.
+//! `RelationBuildRowSecurity` (the relcache-side per-policy load) lives in the
+//! relcache crate (`backend-utils-cache-relcache::derived`): it operates over
+//! `&mut RelationData` (relcache's own entry type, which cannot cross a crate
+//! seam) and stores the assembled `RowSecurityDesc` in `rd_rsdesc`. Both the
+//! `RelationBuildDesc` build path and the corrupt-initfile rebuild path call it
+//! directly. It is therefore not a `policy.c` extern here.
 //!
 //! ─────────────────────────────────────────────────────────────────────────
 //! FUNCTION INVENTORY (policy.c, PostgreSQL 18.3) — 11 functions:
@@ -35,7 +36,7 @@
 //!  | 63-96      | static | `RangeVarCallbackForPolicy`       |
 //!  | 107-129    | static | `parse_policy_command`            |
 //!  | 136-183    | static | `policy_role_list_to_array`       |
-//!  | 192-322    | extern | `RelationBuildRowSecurity`        |
+//!  | 192-322    | extern | `RelationBuildRowSecurity` (in relcache::derived) |
 //!  | 331-400    | extern | `RemovePolicyById`                |
 //!  | 415-560    | extern | `RemoveRoleFromObjectPolicy`      |
 //!  | 568-759    | extern | `CreatePolicy`                    |
@@ -478,22 +479,12 @@ fn policy_role_list_to_array<'mcx>(
 }
 
 /* ===========================================================================
- * RelationBuildRowSecurity (policy.c:192-322) — keystone-blocked
+ * RelationBuildRowSecurity (policy.c:192-322)
+ *
+ * Ported in the relcache crate (`backend-utils-cache-relcache::derived`),
+ * where it operates over `&mut RelationData` (relcache's own entry type) and
+ * stores the `RowSecurityDesc` in `rd_rsdesc`. Not duplicated here.
  * ========================================================================= */
-
-/// `RelationBuildRowSecurity` — load the relation's RLS policies from
-/// `pg_policy` and store the resulting `RowSecurityDesc` in its relcache entry.
-/// policy.c:192-322.
-///
-/// Genuinely blocked: the `RowSecurityDesc` / `RowSecurityPolicy` carriers and
-/// the relcache `rd_rsdesc` field are not modeled (presence-only). Mirror-PG-
-/// and-panic until that keystone lands.
-pub fn RelationBuildRowSecurity(_relation: Oid) -> PgResult<()> {
-    panic!(
-        "RelationBuildRowSecurity: RowSecurityDesc/RowSecurityPolicy carriers + relcache \
-         rd_rsdesc field not yet modeled (keystone)"
-    )
-}
 
 /* ===========================================================================
  * RemovePolicyById (policy.c:331-400)

@@ -363,7 +363,13 @@ fn finish_relcache_entries() -> PgResult<()> {
                 restart = true;
             }
             if with_rel(rd, |r| r.rd_rel.relrowsecurity && !r.rd_has_rsdesc) {
-                xunit::RelationBuildRowSecurity(rd)?;
+                with_rel_mut(rd, crate::derived::RelationBuildRowSecurity)?;
+                with_rel_mut(rd, |r| {
+                    // RelationBuildRowSecurity sets r.rd_rsdesc; keep the
+                    // presence flag in sync (C: relrowsecurity stays set, the
+                    // descriptor is always installed when relrowsecurity is on).
+                    r.rd_has_rsdesc = r.rd_rsdesc.is_some();
+                });
                 restart = true;
             }
             let needs_tableam = with_rel(rd, |r| {
@@ -1927,11 +1933,5 @@ mod xunit {
         // C: Desc_pg_* (the genbki Schema_pg_* arrays). Outward seam to the
         // bootstrap-catalog-data owner; installed from its `init_seams()`.
         backend_utils_cache_relcache_seams::catalog_schema_attrs::call(reltype)
-    }
-    /// `RelationBuildRowSecurity(rel)` (policy.c): scan `pg_policy`, build
-    /// `rel->rd_rsdesc`. Mutates the relcache entry in place; the policy unit is
-    /// not yet ported. Panics until it lands.
-    pub(super) fn RelationBuildRowSecurity(_rel: types_core::primitive::Oid) -> PgResult<()> {
-        panic!("relcache-initfile: RelationBuildRowSecurity (backend-commands-policy not yet ported)")
     }
 }
