@@ -252,7 +252,7 @@ fn resolve_rowmark_strategy(
 /// The plain-scan strategy: dig through the cursor's plan to find the scan node.
 /// Fail if it's not there or buried underneath aggregation.
 fn resolve_scan_strategy(
-    _mcx: Mcx<'_>,
+    mcx: Mcx<'_>,
     portal: &RunningCursorState,
     estate: &EStateData,
     cursor_name: &str,
@@ -306,9 +306,24 @@ fn resolve_scan_strategy(
     // column, so the TID comes from xs_heaptid, otherwise from the scan tuple's
     // SelfItemPointerAttributeNumber. Both reach the concrete scan-node state,
     // owned by execMain.
-    let is_index_only = scannode.tag() == T_IndexOnlyScanState;
-    match execMain::scan_node_extract_tid::call(estate, scanstate.ss_ScanTupleSlot, is_index_only)?
-    {
+    // For an IndexOnlyScan, the tuple in ss_ScanTupleSlot may be a virtual tuple
+    // without a ctid column, so the TID comes from the scan descriptor's
+    // xs_heaptid; read it here (we hold the concrete scan node) and hand it to
+    // the owner. The default path passes None and digs the TID out of the slot.
+    let index_only_tid = if scannode.tag() == T_IndexOnlyScanState {
+        let ioss = scannode
+            .as_index_only_scan_state()
+            .expect("T_IndexOnlyScanState node is an IndexOnlyScanState");
+        ioss.ioss_ScanDesc.as_ref().map(|sd| sd.xs_heaptid)
+    } else {
+        None
+    };
+    match execMain::scan_node_extract_tid::call(
+        mcx,
+        estate,
+        scanstate.ss_ScanTupleSlot,
+        index_only_tid,
+    )? {
         ScanTidOutcome::Tid(tid) => {
             debug_assert!(item_pointer_is_valid(&tid));
             Ok(CurrentOfTid::Found(tid))

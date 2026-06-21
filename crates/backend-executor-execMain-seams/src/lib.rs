@@ -139,10 +139,11 @@ seam_core::seam!(
     /// discriminated [`ScanTidOutcome`] — a null self-ctid is the C
     /// "not a simply updatable scan" path. Owner: `backend-executor-execMain`
     /// (the live concrete scan-node states + execTuples `slot_getsysattr`).
-    pub fn scan_node_extract_tid(
-        estate: &types_nodes::EStateData,
+    pub fn scan_node_extract_tid<'mcx, 'a>(
+        mcx: mcx::Mcx<'a>,
+        estate: &types_nodes::EStateData<'mcx>,
         scan_tuple_slot: Option<types_nodes::SlotId>,
-        is_index_only: bool,
+        index_only_tid: Option<types_tuple::heaptuple::ItemPointerData>,
     ) -> types_error::PgResult<types_nodes::ScanTidOutcome>
 );
 

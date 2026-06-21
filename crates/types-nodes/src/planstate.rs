@@ -423,6 +423,19 @@ impl<'mcx> PlanStateNode<'mcx> {
         }
     }
 
+    /// `(IndexOnlyScanState *) node` — the concrete index-only-scan node state,
+    /// or `None` if this is not an `IndexOnlyScanState`. Used by
+    /// `execCurrentOf` to read `ioss_ScanDesc->xs_heaptid` (the index-only scan
+    /// may store a virtual tuple without a ctid column).
+    pub fn as_index_only_scan_state(
+        &self,
+    ) -> Option<&crate::nodeindexonlyscan::IndexOnlyScanState<'mcx>> {
+        match self {
+            PlanStateNode::IndexOnlyScan(i) => Some(i),
+            _ => None,
+        }
+    }
+
     /// `outerPlanState(node)` (execnodes.h) — `node->lefttree`, the input plan
     /// state descended through by `Result`/`Limit`. `None` when there is none.
     pub fn outer_plan_state(&self) -> Option<&PlanStateNode<'mcx>> {

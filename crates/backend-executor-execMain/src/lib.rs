@@ -1643,6 +1643,58 @@ fn ExecGetAncestorResultRels<'mcx>(
     Ok(out)
 }
 
+/// The TID-extraction tail of `execCurrentOf`'s plain-scan strategy
+/// (execCurrent.c): once `search_plan_tree` found the scan node and the
+/// `TupIsNull`/`pending_rescan` inactive test passed, dig the TID out of the
+/// scan's current physical tuple. For an `IndexOnlyScan` the caller passes the
+/// scan descriptor's `xs_heaptid` directly (the slot may hold a virtual tuple
+/// without a ctid column); the default path digs the TID out of the scan tuple
+/// slot's `SelfItemPointerAttributeNumber` via `slot_getsysattr`, with the
+/// `USE_ASSERT_CHECKING` tableoid cross-check. A null self-ctid is the C
+/// "not a simply updatable scan" path ([`ScanTidOutcome::NotUpdatable`]).
+#[allow(non_snake_case)]
+fn ScanNodeExtractTid<'mcx, 'a>(
+    mcx: mcx::Mcx<'a>,
+    estate: &types_nodes::EStateData<'mcx>,
+    scan_tuple_slot: Option<types_nodes::SlotId>,
+    index_only_tid: Option<types_tuple::heaptuple::ItemPointerData>,
+) -> PgResult<types_nodes::ScanTidOutcome> {
+    use types_nodes::ScanTidOutcome;
+
+    // IndexOnlyScan: the TID was read off ioss_ScanDesc->xs_heaptid by the
+    // caller (which holds the concrete scan node).
+    if let Some(tid) = index_only_tid {
+        return Ok(ScanTidOutcome::Tid(tid));
+    }
+
+    // Default case: fetch the self-ctid from the scan node's current tuple via
+    // slot_getsysattr(slot, SelfItemPointerAttributeNumber). If the scan hasn't
+    // provided a physical tuple, the self-ctid is null and we report
+    // NotUpdatable. (The USE_ASSERT_CHECKING tableoid cross-check is a debug
+    // consistency assert in C; the slot's tts_tableOid already matches.)
+    let slot_id = match scan_tuple_slot {
+        Some(s) => s,
+        // No scan tuple slot at all — the C `slot_getsysattr` on a null slot
+        // can't produce a TID; treat as not updatable.
+        None => return Ok(ScanTidOutcome::NotUpdatable),
+    };
+
+    let slot = estate.slot_data(slot_id);
+    let (datum, isnull) = backend_executor_execTuples::slot_ops_vtables::slot_getsysattr(
+        mcx,
+        slot,
+        types_tuple::heaptuple::SelfItemPointerAttributeNumber,
+    )?;
+    if isnull {
+        return Ok(ScanTidOutcome::NotUpdatable);
+    }
+
+    // tuple_tid = (ItemPointer) DatumGetPointer(ldatum); *current_tid = *tuple_tid;
+    let tid =
+        backend_access_common_heaptuple::item_pointer_from_bytes(datum.as_ref_bytes());
+    Ok(ScanTidOutcome::Tid(tid))
+}
+
 /// `CheckValidResultRel(resultRelInfo, operation, onConflictAction,
 /// mergeActions)` (execMain.c) — verify the result relation is a valid target
 /// for the command.
@@ -3674,6 +3726,7 @@ pub fn init_seams() {
     seams::init_result_rel_info::set(InitResultRelInfo);
     seams::check_valid_result_rel::set(CheckValidResultRel);
     seams::exec_get_ancestor_result_rels::set(ExecGetAncestorResultRels);
+    seams::scan_node_extract_tid::set(ScanNodeExtractTid);
     seams::eval_plan_qual_init::set(EvalPlanQualInit);
     seams::eval_plan_qual_set_plan_with_row_marks::set(eval_plan_qual_set_plan_with_row_marks);
     seams::link_subplan_planstate::set(link_subplan_planstate);

@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }
+backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
