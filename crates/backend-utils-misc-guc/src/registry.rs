@@ -25,8 +25,8 @@ use types_core::Oid;
 use types_guc::{
     GucContext, GucSource, GUC_ALLOW_IN_PARALLEL, GUC_IS_NAME, GUC_NO_RESET, GUC_UNIT, PGC_BACKEND,
     PGC_INTERNAL, PGC_POSTMASTER, PGC_SIGHUP, PGC_SUSET, PGC_SU_BACKEND, PGC_S_CLIENT,
-    PGC_S_DATABASE, PGC_S_DATABASE_USER, PGC_S_DEFAULT, PGC_S_FILE, PGC_S_GLOBAL, PGC_S_OVERRIDE,
-    PGC_S_SESSION, PGC_S_USER, PGC_USERSET,
+    PGC_S_DATABASE, PGC_S_DATABASE_USER, PGC_S_DEFAULT, PGC_S_DYNAMIC_DEFAULT, PGC_S_FILE,
+    PGC_S_GLOBAL, PGC_S_OVERRIDE, PGC_S_SESSION, PGC_S_USER, PGC_USERSET,
 };
 
 use backend_utils_misc_guc_tables::GucHookExtra;
@@ -928,6 +928,13 @@ pub fn set_config_option(
 ) -> PgResult<i32> {
     let elevel = resolve_elevel(elevel, source);
 
+    // Save the original context/source/srole before the reset-source rewrite
+    // (guc.c:3654) overwrites `context`/`source`/`srole` below. The
+    // session_authorization -> role kluge (guc.c:4116) must use these originals.
+    let orig_context = context;
+    let orig_source = source;
+    let orig_srole = srole;
+
     let Some(idx) = reg.find_index_pub(name) else {
         let e = err(
             ERRCODE_UNDEFINED_OBJECT,
@@ -1051,6 +1058,35 @@ pub fn set_config_option(
             // session_authorization -> is_superuser chain) does not re-lock the
             // store / alias the live `&mut reg`.
             deferred_hooks.push(hook);
+        }
+
+        // Ugly hack (guc.c:4116): during SET session_authorization, forcibly do
+        // SET ROLE NONE with the same context/source/etc so the effects have
+        // identical lifespan (required by the SQL spec; the variable's check/
+        // assign hooks lack the info to do it). For RESET session_authorization
+        // (value == None) pass NULL to "role" so it does RESET role rather than
+        // SET ROLE NONE. Skipped when is_reload. The actual role change must run
+        // outside the live store borrow, so it is deferred like the assign hook.
+        if !is_reload && name == "session_authorization" {
+            let role_value: Option<&'static str> = if value.is_some() { Some("none") } else { None };
+            let role_source = if orig_source == PGC_S_OVERRIDE {
+                PGC_S_DYNAMIC_DEFAULT
+            } else {
+                orig_source
+            };
+            deferred_hooks.push(Box::new(move || {
+                let _ = crate::live::set_config_option_global(
+                    "role",
+                    role_value,
+                    orig_context,
+                    role_source,
+                    orig_srole,
+                    action,
+                    true,
+                    elevel,
+                    false,
+                );
+            }));
         }
     }
     if make_default {
