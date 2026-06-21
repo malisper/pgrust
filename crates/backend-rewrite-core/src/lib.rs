@@ -184,21 +184,18 @@ pub fn init_seams() {
     // the `ExprRelids` the walker reads; `target = None` is the C NULL "modify all
     // level-zero Vars" case.
     backend_optimizer_plan_init_subselect_ext_seams::add_nulling_relids_expr::set(
-        |expr, target, added| {
+        |mcx, expr, target, added| {
             let target_er = target.map(|b| types_nodes::primnodes::ExprRelids { words: b.words });
             let added_er = added
                 .map(|b| types_nodes::primnodes::ExprRelids { words: b.words })
                 .unwrap_or_default();
-            let scratch = mcx::MemoryContext::new("add_nulling_relids seam");
-            let mcx = scratch.mcx();
+            // The walker consumes and rebuilds the node tree into the caller-
+            // provided arena `mcx`; the result is `'mcx`-branded (no scratch escape).
             let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)
                 .expect("add_nulling_relids: opaque Node alloc failed (OOM)");
             nulling::add_nulling_relids(&mut node, target_er.as_ref(), &added_er, mcx);
             match node.into_expr() {
-                // In-place mutation: only the transient `Node` wrapper lived in
-                // `scratch`; the `Expr`'s owned children stay in the planner arena.
-                // Re-intern the walked node into the seam's `'static` handle-space.
-                Some(e) => e.erase_lifetime(),
+                Some(e) => e,
                 None => unreachable!("add_nulling_relids returned a non-Expr for an Expr input"),
             }
         },
@@ -209,16 +206,13 @@ pub fn init_seams() {
     // init-subselect for upper-level LATERAL PlaceHolderVars. Same `&mut Node`
     // wrap/unwrap as above; the walker is fallible (catalog lookups), propagated.
     backend_optimizer_plan_init_subselect_ext_seams::increment_var_sublevels_up_expr::set(
-        |expr, delta_sublevels_up, min_sublevels_up| {
-            let scratch = mcx::MemoryContext::new("increment_var_sublevels_up seam");
-            let mcx = scratch.mcx();
+        |mcx, expr, delta_sublevels_up, min_sublevels_up| {
+            // The walker consumes and rebuilds the node tree into the caller-
+            // provided arena `mcx`; the result is `'mcx`-branded (no scratch escape).
             let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)?;
             increment::IncrementVarSublevelsUp(&mut node, delta_sublevels_up, min_sublevels_up, mcx)?;
             Ok(match node.into_expr() {
-                // In-place mutation: only the transient `Node` wrapper lived in
-                // `scratch`; re-intern the walked node into the seam's `'static`
-                // handle-space.
-                Some(e) => e.erase_lifetime(),
+                Some(e) => e,
                 None => unreachable!(
                     "IncrementVarSublevelsUp returned a non-Expr for an Expr input"
                 ),

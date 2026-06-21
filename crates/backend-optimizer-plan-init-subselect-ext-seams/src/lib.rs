@@ -78,8 +78,10 @@ seam_core::seam!(
 seam_core::seam!(
     /// `IncrementVarSublevelsUp((Node *) expr, -((int) phlevelsup), 0)`
     /// (rewriteManip.c) over an owned arena `Expr`. Only reached for upper-level
-    /// LATERAL PlaceHolderVars in `extract_lateral_references`.
-    pub fn increment_var_sublevels_up_expr(expr: Expr<'static>, delta_sublevels_up: i32, min_sublevels_up: i32) -> PgResult<Expr<'static>>
+    /// LATERAL PlaceHolderVars in `extract_lateral_references`. C allocates the
+    /// rebuilt tree in `CurrentMemoryContext`; the owned model threads that arena
+    /// as `mcx` so the result is `'mcx`-branded (no function-local scratch escape).
+    pub fn increment_var_sublevels_up_expr<'mcx>(mcx: mcx::Mcx<'mcx>, expr: Expr<'mcx>, delta_sublevels_up: i32, min_sublevels_up: i32) -> PgResult<Expr<'mcx>>
 );
 
 seam_core::seam!(
@@ -107,8 +109,9 @@ seam_core::seam!(
     /// an owned arena `Expr` (a single implicit-AND conjunct). The rewrite-core
     /// owner works over `&mut Node`, a model mismatch — homed here as a per-`Expr`
     /// seam. Only reached for outer-join clone quals in
-    /// `deconstruct_distribute_oj_quals`.
-    pub fn add_nulling_relids_expr(expr: Expr<'static>, target: Relids, added: Relids) -> Expr<'static>
+    /// `deconstruct_distribute_oj_quals`. C allocates the rebuilt tree in
+    /// `CurrentMemoryContext`; the owned model threads that arena as `mcx`.
+    pub fn add_nulling_relids_expr<'mcx>(mcx: mcx::Mcx<'mcx>, expr: Expr<'mcx>, target: Relids, added: Relids) -> Expr<'mcx>
 );
 
 seam_core::seam!(

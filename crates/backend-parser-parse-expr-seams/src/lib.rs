@@ -39,7 +39,7 @@ pub struct AnalyzedExecParam<'mcx> {
     /// [`Expr`] tree threaded on into `ExecPrepareExprList`. `None` when
     /// `coerce_to_target_type(...)` returned NULL (the C NULL `expr`); the
     /// driver raises the cannot-be-coerced ereport in that case.
-    pub expr: Option<PgBox<'mcx, Expr<'static>>>,
+    pub expr: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `coerce_to_target_type(...)` returned NULL — the coercion failed.
     pub coercion_failed: bool,
     /// `exprType(expr)` of the given (pre-coercion) expression.

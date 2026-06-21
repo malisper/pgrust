@@ -29,7 +29,10 @@ use crate::util::{
 /// Deep-copy a slice of `Expr` into `mcx` via `Expr::clone_in` (C copyObject).
 /// The derived `Expr::clone` panics on an owned-subtree child
 /// (`Aggref`/`SubLink`/`SubPlan`).
-fn clone_exprs_in(exprs: &[Expr], mcx: Mcx<'_>) -> Result<Vec<Expr>, types_error::PgError> {
+fn clone_exprs_in<'mcx>(
+    exprs: &[Expr<'_>],
+    mcx: Mcx<'mcx>,
+) -> Result<Vec<Expr<'mcx>>, types_error::PgError> {
     let mut out = Vec::with_capacity(exprs.len());
     for e in exprs {
         out.push(e.clone_in(mcx)?);
@@ -179,16 +182,16 @@ fn or_arg_index_match_cmp_group(a: &OrArgIndexMatch, b: &OrArgIndexMatch) -> cor
 /// `indexkey op constant` arms (same indexkey/op/collation) so they can later be
 /// folded into a SAOP. Returns the processed list of OR-clause argument nodes;
 /// when nothing groups, returns the original arg list unchanged.
-pub fn group_similar_or_args(
-    mcx: Mcx<'_>,
+pub fn group_similar_or_args<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     rel: RelId,
     rinfo: RinfoId,
-) -> Result<Vec<Expr>, types_error::PgError> {
+) -> Result<Vec<Expr<'mcx>>, types_error::PgError> {
     let relid = root.rel(rel).relid;
 
     let orclause_id = root.rinfo(rinfo).orclause.expect("RestrictInfo without orclause");
-    let orargs: Vec<Expr> = clone_exprs_in(
+    let orargs: Vec<Expr<'mcx>> = clone_exprs_in(
         &root
             .node(orclause_id)
             .as_boolexpr()
@@ -314,7 +317,7 @@ pub fn group_similar_or_args(
     matches.sort_by(or_arg_index_match_cmp_group);
 
     // Group similar clauses into single sub-restrictinfos.
-    let mut result: Vec<Expr> = Vec::new();
+    let mut result: Vec<Expr<'mcx>> = Vec::new();
     let mut group_start = 0usize;
     let mut i = 1usize;
     while i <= n {
@@ -386,7 +389,7 @@ pub fn group_similar_or_args(
 
 /// Peel a single `RelabelType` above an operand (eval_const_expressions ensures
 /// at most one), mirroring `group_similar_or_args`'s relabel handling.
-fn peel_relabel(op: &Expr) -> &Expr {
+fn peel_relabel<'a, 'mcx>(op: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     if let Some(rt) = op.as_relabeltype() {
         if let Some(arg) = rt.arg.as_deref() {
             return arg;
@@ -625,7 +628,7 @@ fn orarg_to_rinfo(
 /// [`Expr::RestrictInfo`] handle, dereference it to the wrapped
 /// `RestrictInfo.clause`; otherwise the arg is itself the clause (C's
 /// `IsA(arg, RestrictInfo) ? argrinfo->clause : arg`).
-fn orarg_clause<'a>(root: &'a PlannerInfo, orarg: &'a Expr) -> &'a Expr {
+fn orarg_clause<'a>(root: &'a PlannerInfo, orarg: &'a Expr<'static>) -> &'a Expr<'static> {
     if let Expr::RestrictInfo(r) = orarg {
         root.node(root.rinfo(RinfoId::from(*r)).clause)
     } else {

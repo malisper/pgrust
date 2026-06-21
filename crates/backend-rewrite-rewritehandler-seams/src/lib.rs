@@ -71,7 +71,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         rel: types_rel::Relation<'mcx>,
         attrno: i32,
-    ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Expr<'static>>>>
+    ) -> PgResult<Option<mcx::PgBox<'mcx, types_nodes::Expr<'mcx>>>>
 );
 
 seam_core::seam!(

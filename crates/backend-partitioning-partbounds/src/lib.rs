@@ -133,20 +133,20 @@ struct PartitionHashBound {
 /// `PartitionListValue` (partbounds.c) — one value coming from some list
 /// partition (the owned `Datum` carried by value).
 #[derive(Clone, Debug)]
-struct PartitionListValue {
+struct PartitionListValue<'mcx> {
     index: i32,
-    value: Datum<'static>,
+    value: Datum<'mcx>,
 }
 
 /// `PartitionRangeBound` (partbounds.c) — one bound of a range partition,
 /// expanded from a list of [`types_nodes::ddlnodes::PartitionRangeDatum`].
 #[derive(Clone, Debug)]
-struct PartitionRangeBound {
+struct PartitionRangeBound<'mcx> {
     /// `int index` — partition's position in the original list.
     index: i32,
     /// `Datum *datums` — the per-column bound values (undefined for non-VALUE
     /// columns).
-    datums: Vec<Datum<'static>>,
+    datums: Vec<Datum<'mcx>>,
     /// `PartitionRangeDatumKind *kind` — per-column MINVALUE/VALUE/MAXVALUE.
     kind: Vec<PartitionRangeDatumKind>,
     /// `bool lower` — is this a lower bound?
@@ -341,7 +341,7 @@ fn create_list_bounds<'mcx>(
 
     let ndatums = get_non_null_list_datum_count(boundspecs, nparts)?;
     // all_values = palloc(ndatums * sizeof(PartitionListValue)).
-    let mut all_values: Vec<PartitionListValue> = Vec::with_capacity(ndatums);
+    let mut all_values: Vec<PartitionListValue<'mcx>> = Vec::with_capacity(ndatums);
 
     // Create a unified list of non-null values across all partitions.
     for (i, spec) in boundspecs.iter().enumerate().take(nparts) {
@@ -360,7 +360,9 @@ fn create_list_bounds<'mcx>(
             if !val.constisnull {
                 all_values.push(PartitionListValue {
                     index: i as i32,
-                    value: val.constvalue.clone(),
+                    // Deep-clone the by-ref bound value into `mcx` (faithful
+                    // copyObject) so it is independent of the input spec's arena.
+                    value: val.constvalue.clone_in(mcx)?,
                 });
             } else {
                 // Never put a null into the values array; save the index.
@@ -493,18 +495,19 @@ fn add_interleaved<'mcx>(
     Ok(())
 }
 
-/// `make_one_partition_rbound(key, index, datums, lower)` (partbounds.c) — build
+/// `make_one_partition_rbound(mcx, key, index, datums, lower)` (partbounds.c) — build
 /// a [`PartitionRangeBound`] from a list of `PartitionRangeDatum` nodes.
-fn make_one_partition_rbound(
+fn make_one_partition_rbound<'mcx>(
+    mcx: Mcx<'mcx>,
     key: &PartitionKeyData<'_>,
     index: i32,
     datum_nodes: &[mcx::PgBox<'_, Node<'_>>],
     lower: bool,
-) -> PgResult<PartitionRangeBound> {
+) -> PgResult<PartitionRangeBound<'mcx>> {
     debug_assert!(!datum_nodes.is_empty());
 
     let partnatts = key.partnatts as usize;
-    let mut datums: Vec<Datum<'static>> = Vec::with_capacity(partnatts);
+    let mut datums: Vec<Datum<'mcx>> = Vec::with_capacity(partnatts);
     datums.resize(partnatts, Datum::null());
     let mut kind: Vec<PartitionRangeDatumKind> = Vec::with_capacity(partnatts);
     kind.resize(partnatts, PartitionRangeDatumKind::Value);
@@ -528,7 +531,10 @@ fn make_one_partition_rbound(
             if val.constisnull {
                 return Err(elog_error("invalid range bound datum"));
             }
-            datums[i] = val.constvalue.clone();
+            // Deep-clone the by-ref bound value into `mcx` so the range bound is
+            // independent of the input spec's arena (faithful copyObject; a
+            // derived `.clone()` of the by-ref Datum would dangle).
+            datums[i] = val.constvalue.clone_in(mcx)?;
         }
     }
 
@@ -622,8 +628,8 @@ fn create_range_bounds<'mcx>(
             continue;
         }
 
-        let lower = make_one_partition_rbound(key, i as i32, &spec.lowerdatums, true)?;
-        let upper = make_one_partition_rbound(key, i as i32, &spec.upperdatums, false)?;
+        let lower = make_one_partition_rbound(mcx, key, i as i32, &spec.lowerdatums, true)?;
+        let upper = make_one_partition_rbound(mcx, key, i as i32, &spec.upperdatums, false)?;
         all_bounds.push(lower);
         all_bounds.push(upper);
     }
@@ -1284,8 +1290,8 @@ pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
         }
         PartitionStrategy::Range => {
             debug_assert!(spec.strategy == PartitionStrategy::Range as i8);
-            let lower = make_one_partition_rbound(key, -1, &spec.lowerdatums, true)?;
-            let upper = make_one_partition_rbound(key, -1, &spec.upperdatums, false)?;
+            let lower = make_one_partition_rbound(mcx, key, -1, &spec.lowerdatums, true)?;
+            let upper = make_one_partition_rbound(mcx, key, -1, &spec.upperdatums, false)?;
 
             // First check if the resulting range would be empty.
             // partition_rbound_cmp cannot return zero here (the lower-bound

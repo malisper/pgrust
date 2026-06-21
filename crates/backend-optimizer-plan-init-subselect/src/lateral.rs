@@ -178,6 +178,7 @@ fn extract_lateral_references<'mcx>(
                     // it through the per-`Expr` seam and rebuild the PHV from the
                     // result (the result is still an Expr::PlaceHolderVar).
                     let shifted = initext::increment_var_sublevels_up_expr::call(
+                        mcx,
                         Expr::PlaceHolderVar(phv),
                         -(levelsup as i32),
                         0,

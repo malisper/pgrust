@@ -2049,8 +2049,10 @@ fn build_child_join_reltarget(
     for e in parent_exprs {
         // Deep-copy via `Expr::clone_in` (moved into `adjust_appendrel_attrs_node`
         // / the arena under `&mut root`; a derived `Expr::clone` panics on a
-        // context-allocated child).
-        let node = root.node(e).clone_in(mcx)?;
+        // context-allocated child). The clone is interned into the planner arena
+        // (via `root.alloc_node` below), so erase to the arena's notional
+        // `'static` at this boundary, matching the seam's signature.
+        let node = root.node(e).clone_in(mcx)?.erase_lifetime();
         let adjusted = ext::adjust_appendrel_attrs_node::call(root, node, appinfos)?;
         child_exprs.push(root.alloc_node(adjusted));
     }

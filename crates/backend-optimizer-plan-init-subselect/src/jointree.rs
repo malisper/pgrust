@@ -1087,6 +1087,7 @@ fn add_nulling_relids_exprs(mcx: mcx::Mcx<'_>, quals: &[Expr], target: &Relids, 
         .iter()
         .map(|q| {
             initext::add_nulling_relids_expr::call(
+                mcx,
                 clone_qual_expr(mcx, q),
                 bms::relids_copy::call(target),
                 bms::relids_copy::call(added),

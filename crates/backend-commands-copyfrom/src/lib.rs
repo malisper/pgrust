@@ -448,7 +448,7 @@ pub struct CopyFromStateData<'mcx> {
     /// and compile them into `cstate.defexprs` (+ build `defmap`/`num_defaults`)
     /// in `CopyFrom`, before the row loop. This is a faithful split of the same
     /// C steps — no behavior change, only the allocation context differs.
-    pub raw_defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, types_nodes::Expr>>>,
+    pub raw_defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, types_nodes::Expr<'mcx>>>>,
 }
 
 /* ===========================================================================
@@ -475,7 +475,7 @@ pub fn BeginCopyFrom<'mcx>(
     filename: Option<&str>,
     is_program: bool,
     data_source_cb: Option<CopyDataSourceCb>,
-    where_clause: mcx::PgVec<'mcx, types_nodes::primnodes::Expr>,
+    where_clause: mcx::PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>>,
 ) -> PgResult<CopyFromStateData<'mcx>> {
     let binary = opts.binary;
 

@@ -101,13 +101,25 @@ fn node<'mcx>(mcx: Mcx<'mcx>, e: Expr<'mcx>) -> PgResult<Node<'mcx>> {
 
 /// Extract the `Const` carried by a `PartitionRangeDatum`/`spec->listdatums`
 /// node pointer (a `Node::Expr(Expr::Const)`), cloned into `mcx`.
-fn const_of<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Const<'mcx>> {
-    let _ = mcx;
-    // `Const` carries no arena lifetime (its `constvalue` is `Datum<'static>`),
-    // so the derived `Clone` is a faithful `copyObject(Const)`.
-    n.as_const()
-        .cloned()
-        .ok_or_else(|| elog("partition bound datum is not a Const"))
+fn const_of<'mcx>(mcx: Mcx<'mcx>, n: &Node<'_>) -> PgResult<Const<'mcx>> {
+    // `Const.constvalue` is the by-ref `Datum` carrier; deep-clone it into `mcx`
+    // (`copyObject(Const)`) so the returned `Const<'mcx>` is tied to the mcx
+    // lifetime and independent of the input node's arena — a derived `.clone()`
+    // would copy the by-ref `Datum` pointer into a node that may outlive the
+    // source bound spec (a UAF the borrow checker now rejects).
+    let c = n
+        .as_const()
+        .ok_or_else(|| elog("partition bound datum is not a Const"))?;
+    Ok(Const {
+        consttype: c.consttype,
+        consttypmod: c.consttypmod,
+        constcollid: c.constcollid,
+        constlen: c.constlen,
+        constvalue: c.constvalue.clone_in(mcx)?,
+        constisnull: c.constisnull,
+        constbyval: c.constbyval,
+        location: c.location,
+    })
 }
 
 fn elog(msg: &str) -> PgError {
