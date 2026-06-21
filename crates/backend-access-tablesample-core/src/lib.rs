@@ -259,7 +259,7 @@ pub fn tsm_system_handler() -> TsmRoutine {
 pub fn system_samplescangetsamplesize<'mcx>(
     mcx: Mcx<'mcx>,
     baserel: &RelOptInfo,
-    paramexprs: &[Expr],
+    paramexprs: &[Expr<'mcx>],
 ) -> PgResult<(BlockNumber, f64)> {
     // Node *pctnode = (Node *) linitial(paramexprs);
     // pctnode = estimate_expression_value(root, pctnode);
@@ -440,7 +440,7 @@ pub fn tsm_bernoulli_handler() -> TsmRoutine {
 pub fn bernoulli_samplescangetsamplesize<'mcx>(
     mcx: Mcx<'mcx>,
     baserel: &RelOptInfo,
-    paramexprs: &[Expr],
+    paramexprs: &[Expr<'mcx>],
 ) -> PgResult<(BlockNumber, f64)> {
     // pctnode = (Node *) linitial(paramexprs);
     // pctnode = estimate_expression_value(root, pctnode);

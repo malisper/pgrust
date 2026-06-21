@@ -166,7 +166,11 @@ pub fn init_seams() {
                     // Expr input.
                     None => unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"),
                 };
-                *root.node_mut(id) = walked;
+                // `ChangeVarNodes` is an in-place varno re-stamp; only the transient
+                // `Node` wrapper lived in `scratch` (the `Expr`'s children stay in the
+                // planner arena). Re-intern the walked node into the `node_arena`
+                // `'static` handle-space (the sanctioned arena-intern erasure).
+                *root.node_mut(id) = walked.erase_lifetime();
             }
             nodes.to_vec()
         },
@@ -191,7 +195,10 @@ pub fn init_seams() {
                 .expect("add_nulling_relids: opaque Node alloc failed (OOM)");
             nulling::add_nulling_relids(&mut node, target_er.as_ref(), &added_er, mcx);
             match node.into_expr() {
-                Some(e) => e,
+                // In-place mutation: only the transient `Node` wrapper lived in
+                // `scratch`; the `Expr`'s owned children stay in the planner arena.
+                // Re-intern the walked node into the seam's `'static` handle-space.
+                Some(e) => e.erase_lifetime(),
                 None => unreachable!("add_nulling_relids returned a non-Expr for an Expr input"),
             }
         },
@@ -208,7 +215,10 @@ pub fn init_seams() {
             let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)?;
             increment::IncrementVarSublevelsUp(&mut node, delta_sublevels_up, min_sublevels_up, mcx)?;
             Ok(match node.into_expr() {
-                Some(e) => e,
+                // In-place mutation: only the transient `Node` wrapper lived in
+                // `scratch`; re-intern the walked node into the seam's `'static`
+                // handle-space.
+                Some(e) => e.erase_lifetime(),
                 None => unreachable!(
                     "IncrementVarSublevelsUp returned a non-Expr for an Expr input"
                 ),
@@ -239,7 +249,10 @@ pub fn init_seams() {
                 .expect("remove_nulling_relids: opaque Node alloc failed (OOM)");
             nulling::remove_nulling_relids(&mut node, &removable_er, &except_er, mcx);
             match node.into_expr() {
-                Some(e) => e,
+                // In-place mutation: only the transient `Node` wrapper lived in
+                // `scratch`; re-intern the walked node into the seam's `'static`
+                // handle-space.
+                Some(e) => e.erase_lifetime(),
                 None => unreachable!("remove_nulling_relids returned a non-Expr for an Expr input"),
             }
         },
@@ -250,14 +263,14 @@ pub fn init_seams() {
     // equivclass-ext consumer seam. Same wrap/unwrap; the `Relids` (Bitmapset)
     // sets convert to `ExprRelids` by their word storage.
     backend_optimizer_path_equivclass_ext_seams::remove_nulling_relids::set(
-        |expr, removable, except| {
+        |mcx, expr, removable, except| {
             let to_er = |r: &types_pathnodes::Relids| types_nodes::primnodes::ExprRelids {
                 words: r.as_ref().map(|b| b.words.clone()).unwrap_or_default(),
             };
             let removable_er = to_er(&removable);
             let except_er = to_er(&except);
-            let scratch = mcx::MemoryContext::new("remove_nulling_relids seam");
-            let mcx = scratch.mcx();
+            // The walker consumes and rebuilds the node tree into the caller-
+            // provided arena `mcx`; the result is `'mcx`-branded (no scratch escape).
             let mut node = types_nodes::nodes::Node::mk_expr(mcx, expr)
                 .expect("remove_nulling_relids: opaque Node alloc failed (OOM)");
             nulling::remove_nulling_relids(&mut node, &removable_er, &except_er, mcx);

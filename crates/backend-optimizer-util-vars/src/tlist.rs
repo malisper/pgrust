@@ -862,6 +862,7 @@ fn split_pathtarget_walker(node: &Expr, context: &mut SplitPathtargetContext) ->
         && context.parse_has_grouping_sets
     {
         backend_optimizer_path_equivclass_ext_seams::remove_nulling_relids::call(
+            mcx,
             clone_expr!(node),
             bms_make_singleton_relids(context.group_rtindex),
             None,

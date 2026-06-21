@@ -103,8 +103,12 @@ seam_core::seam!(
     pub fn pull_varnos<'mcx>(root: &PlannerInfo, expr: &Expr<'mcx>) -> Relids
 );
 seam_core::seam!(
-    /// `remove_nulling_relids((Node *) node, removable, except)` (var.c).
-    pub fn remove_nulling_relids<'mcx>(node: Expr<'mcx>, removable: Relids, except: Relids) -> Expr<'mcx>
+    /// `remove_nulling_relids((Node *) node, removable, except)` (var.c). C
+    /// allocates the rebuilt tree in `CurrentMemoryContext`; the owned model
+    /// threads that arena explicitly as `mcx` (the rewrite walker consumes and
+    /// rebuilds the node tree into it) so the result is `'mcx`-branded rather than
+    /// escaping a function-local scratch context.
+    pub fn remove_nulling_relids<'mcx>(mcx: mcx::Mcx<'mcx>, node: Expr<'mcx>, removable: Relids, except: Relids) -> Expr<'mcx>
 );
 
 /* ---- appendrel attr translation (appendinfo.c) -------------------- */

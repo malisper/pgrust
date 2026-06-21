@@ -260,7 +260,7 @@ pub fn generate_series_step_numeric<'mcx>(
 /// `ret`); `Ok(None)` is "no simplification" (C's `NULL`). Reached from the
 /// `simplify_function` support-call site once the `prosupport`-OID dispatch
 /// lands.
-pub fn numeric_support<'mcx>(args: &[Expr]) -> PgResult<Option<Expr>> {
+pub fn numeric_support<'mcx>(args: &[Expr<'mcx>]) -> PgResult<Option<Expr<'mcx>>> {
     // FuncExpr *expr = req->fcall; Assert(list_length(expr->args) >= 2);
     debug_assert!(args.len() >= 2);
 
@@ -315,7 +315,7 @@ pub fn numeric_support<'mcx>(args: &[Expr]) -> PgResult<Option<Expr>> {
 pub fn generate_series_numeric_support<'mcx>(
     mcx: Mcx<'mcx>,
     _root: &PlannerInfo,
-    args: &[Expr],
+    args: &[Expr<'mcx>],
 ) -> PgResult<Option<f64>> {
     let nargs = args.len();
 
@@ -324,7 +324,7 @@ pub fn generate_series_numeric_support<'mcx>(
     // pass owned clones (C copies into the SupportRequest's working node).
     let arg1 = estimate_expression_value(mcx, args[0].clone())?;
     let arg2 = estimate_expression_value(mcx, args[1].clone())?;
-    let arg3: Option<Expr> = if nargs >= 3 {
+    let arg3: Option<Expr<'mcx>> = if nargs >= 3 {
         Some(estimate_expression_value(mcx, args[2].clone())?)
     } else {
         None
@@ -347,7 +347,7 @@ pub fn generate_series_numeric_support<'mcx>(
 
     if let (ConstArg::Value(start_dat), ConstArg::Value(stop_dat)) = (&arg1c, &arg2c) {
         // arg3 absent, or a (possibly-null already handled) Const.
-        let step_dat: Option<&Datum<'static>> = match &arg3c {
+        let step_dat: Option<&Datum<'mcx>> = match &arg3c {
             None => None,
             Some(ConstArg::Value(d)) => Some(d),
             // arg3 present but not a plain Const -> can't estimate.
@@ -407,17 +407,17 @@ pub fn generate_series_numeric_support<'mcx>(
 
 /// One folded `generate_series` argument, classified as C's
 /// `IsA(arg, Const)` / `constisnull` triple needs.
-enum ConstArg {
+enum ConstArg<'mcx> {
     /// `IsA(arg, Const)` and `constisnull` — zero rows.
     Null,
     /// `IsA(arg, Const)` and not null — the payload `Datum`.
-    Value(Datum<'static>),
+    Value(Datum<'mcx>),
     /// not a `Const` — can't estimate.
     NotConst,
 }
 
 /// `IsA(expr, Const)` + null/value split (primnodes.h).
-fn as_const(expr: &Expr) -> ConstArg {
+fn as_const<'mcx>(expr: &Expr<'mcx>) -> ConstArg<'mcx> {
     match expr {
         Expr::Const(c) if c.constisnull => ConstArg::Null,
         Expr::Const(c) => ConstArg::Value(c.constvalue.clone()),

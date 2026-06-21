@@ -80,7 +80,9 @@ fn read_owned_string_field() -> PgResult<Option<String>> {
 
 /// Unwrap a `node_read` result to a `Box<Expr>` (the C `Node *` child is an
 /// `Expr` here); `<>` is `None`.
-fn node_to_opt_box_expr(read: Option<PgBox<'_, Node<'_>>>) -> PgResult<Option<Box<Expr>>> {
+fn node_to_opt_box_expr<'mcx>(
+    read: Option<PgBox<'_, Node<'mcx>>>,
+) -> PgResult<Option<Box<Expr<'mcx>>>> {
     match read {
         None => Ok(None),
         Some(n) => {
@@ -105,7 +107,7 @@ fn read_opt_box_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<Box<Expr>>> {
 
 /// `READ_NODE_FIELD` of a `List *` of `Expr`: skip label, `node_read`; a `<>`
 /// (NIL) is the empty list. Each list element is an `Expr`.
-fn read_expr_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<Expr>> {
+fn read_expr_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<Expr<'mcx>>> {
     let _label = next_token()?;
     match read::node_read(mcx, None)? {
         None => Ok(Vec::new()),
@@ -1141,7 +1143,7 @@ fn read_returning_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ReturningExpr> {
     })
 }
 
-fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubLink> {
+fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubLink<'mcx>> {
     let sub_link_type = sublink_type_from(read_enum_field()?);
     let sub_link_id = read_int_field()?;
     let testexpr = read_opt_box_expr(mcx)?;
@@ -1163,9 +1165,10 @@ fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubLin
         None => None,
         Some(boxed) => match PgBox::into_inner(boxed).into_query() {
             Some(q) => {
-                // Erase to the Expr tree's 'static notional lifetime via the
-                // types-nodes helper (this crate is `#![forbid(unsafe_code)]`).
-                Some(types_nodes::primnodes::query_box_into_static(q, mcx)?)
+                // The sub-`Query` is read into `mcx`; box it in `mcx` and keep the
+                // `'mcx` lifetime to match the `SubLink<'mcx>.subselect` field (no
+                // `'static` erasure — the node is arena-bound to `mcx`).
+                Some(mcx::alloc_in(mcx, q)?)
             }
             None => {
                 return Err(elog_error(
@@ -1191,7 +1194,7 @@ fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<types_nodes::primnodes::SubLin
 /// are fully owned in `mcx`, so the `'mcx` → `'static` erase is a
 /// lifetime-parameter-only transmute (the exact idiom `clone_aggref` /
 /// `tlist_into_static` use). `<>`/`()` → empty.
-fn read_aggref_args_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<pn::TargetEntry<'static>>> {
+fn read_aggref_args_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<pn::TargetEntry<'mcx>>> {
     let _label = next_token()?;
     let elements = match read::node_read(mcx, None)? {
         None => return Ok(Vec::new()),
@@ -1209,18 +1212,16 @@ fn read_aggref_args_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<pn::TargetEntry<
             }
         }
     };
-    let mut out: Vec<pn::TargetEntry<'static>> = Vec::with_capacity(elements.len());
+    let mut out: Vec<pn::TargetEntry<'mcx>> = Vec::with_capacity(elements.len());
     for cell in elements {
         let __n = PgBox::into_inner(cell);
         let __tag = __n.node_tag();
         match __n.into_targetentry() {
             Some(te) => {
                 // The TargetEntry's children (expr/resname) are fully owned in
-                // `mcx`; erase `'mcx` → the Expr tree's `'static` notional
-                // lifetime via the unsafe-permitting types-nodes helper (this
-                // crate is `#![forbid(unsafe_code)]`). Same idiom as
-                // `clone_aggref`.
-                out.push(pn::targetentry_into_static(te));
+                // `mcx`; keep the `'mcx` lifetime to match `Aggref<'mcx>.args`
+                // (no `'static` erasure — the node is arena-bound to `mcx`).
+                out.push(te);
             }
             None => {
                 return Err(elog_error(alloc::format!(
@@ -1275,7 +1276,7 @@ fn read_sortgroupclause_list_field<'mcx>(
 /// [`crate::out_expr_family::out_aggref`] (i.e. `_outAggref`) wrote them. The
 /// `aggno`/`aggtransno`/`aggpresorted` fields carry `read_write_ignore` in C and
 /// are NOT serialized — they default (0/0/false) as `makeNode` would zero them.
-fn read_aggref<'mcx>(mcx: Mcx<'mcx>) -> PgResult<pn::Aggref> {
+fn read_aggref<'mcx>(mcx: Mcx<'mcx>) -> PgResult<pn::Aggref<'mcx>> {
     let aggfnoid = read_oid_field()?;
     let aggtype = read_oid_field()?;
     let aggcollid = read_oid_field()?;

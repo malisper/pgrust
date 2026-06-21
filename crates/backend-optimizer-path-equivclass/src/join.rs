@@ -803,11 +803,13 @@ fn reconsider_full_join_clause<'mcx>(
             let csecond = cexpr.args[1].clone_in(run.mcx())?;
             /* strip the full join from the COALESCE args' nullingrels */
             let cfirst = ec_seam::remove_nulling_relids::call(
+                run.mcx(),
                 cfirst,
                 bms::relids_copy::call(&fjrelids),
                 None,
             );
             let csecond = ec_seam::remove_nulling_relids::call(
+                run.mcx(),
                 csecond,
                 bms::relids_copy::call(&fjrelids),
                 None,
