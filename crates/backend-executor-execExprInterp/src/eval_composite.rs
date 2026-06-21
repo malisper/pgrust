@@ -268,7 +268,26 @@ pub fn ExecEvalRow<'mcx>(
         .map_err(|e| types_error::PgError::error(format!("ExecEvalRow: {e:?}")))?;
 
     // *op->resvalue = HeapTupleGetDatum(tuple);  *op->resnull = false;
-    store_result(state, op, Datum::Composite(tuple), false);
+    //
+    // HeapTupleGetDatum -> HeapTupleHeaderGetDatum (execTuples.c:2413): if the
+    // formed tuple carries any external TOAST pointers, inline them now so the
+    // composite Datum does not reference foreign toast (which would dangle once
+    // that relation is deleted/dropped). The HASEXTERNAL tuple takes the flatten
+    // path; the common case keeps the formed tuple by value.
+    let has_external = tuple
+        .tuple
+        .t_data
+        .as_ref()
+        .map(|h| types_tuple::heaptuple::HeapTupleHeaderHasExternal(h))
+        .unwrap_or(false);
+    let datum = if has_external {
+        let (flattened, _datum) =
+            backend_access_heap_heaptoast::heap_tuple_header_get_datum(mcx, tuple)?;
+        Datum::Composite(flattened)
+    } else {
+        Datum::Composite(tuple)
+    };
+    store_result(state, op, datum, false);
     Ok(())
 }
 
