@@ -485,7 +485,10 @@ pub fn StartupXLOG() -> PgResult<()> {
     // Preallocate additional log files, if wanted.
     crate::checkpoint::prealloc_xlog_files(end_of_log, new_tli)?;
 
-    // Okay, we're officially UP. (InRecovery = false in the owner.)
+    // Okay, we're officially UP.
+    // InRecovery = false; (xlog.c:6138) — cleared in the xlogrecovery owner
+    // before the end-of-recovery SLRU trims, which assert !InRecovery.
+    recovery_seam::end_recovery::call();
 
     // start the archive_timeout timer and LSN running.
     unsafe {
@@ -777,6 +780,29 @@ pub fn PerformRecoveryXLogAction() -> PgResult<bool> {
         checkpointer_seam::request_checkpoint::call(
             CHECKPOINT_END_OF_RECOVERY | CHECKPOINT_IMMEDIATE | CHECKPOINT_WAIT,
         );
+        // The end-of-recovery checkpoint above is currently a graceful no-op
+        // (the XLogCtl checkpoint-record driver is unported, so no checkpoint
+        // WAL record is written). But the buffer-flush half of CheckPointGuts —
+        // making every page modified during redo durable — is essential and
+        // independent of the record write: without it the recovered catalog /
+        // heap pages live only in the startup process's buffers and are lost
+        // when it exits, leaving a half-applied datadir. Flush them here so
+        // crash recovery comes up consistent. We flush both halves that
+        // CheckPointGuts persists and that govern post-recovery visibility:
+        //   - the SLRU commit log (CheckPointCLOG): redo marked replayed
+        //     transactions committed in the CLOG SLRU buffers, but without this
+        //     flush pg_xact on disk still shows them in-progress, so every row
+        //     they wrote is invisible to the backends that fork after recovery;
+        //   - the shared buffers (CheckPointBuffers): the recovered heap/catalog
+        //     pages.
+        // (The remaining CheckPointGuts SLRU arms — CommitTs / MultiXact /
+        // Subtrans / predicate / ReplicationOrigin — are still gated behind the
+        // unported CheckPointGutsCallbacks checkpoint-deps debt; CLOG is the one
+        // that governs basic committed-row visibility.)
+        clog_seam::check_point_clog::call()?;
+        backend_storage_buffer_bufmgr_seams::check_point_buffers::call(
+            CHECKPOINT_END_OF_RECOVERY | CHECKPOINT_IMMEDIATE,
+        )?;
     }
 
     Ok(promoted)

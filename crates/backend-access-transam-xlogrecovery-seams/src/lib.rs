@@ -127,6 +127,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `InRecovery = false;` (xlog.c:6138, "Okay, we're officially UP.") —
+    /// clears the startup process's local replay flag once redo is complete
+    /// and before the end-of-recovery SLRU trims (`TrimCLOG`/`TrimMultiXact`)
+    /// run, which assert `!InRecovery`. Owned by xlogrecovery.c (the flag's
+    /// backing store).
+    pub fn end_recovery() -> ()
+);
+
+seam_core::seam!(
     /// `GetXLogReplayRecPtr(NULL)` (xlogrecovery.c) — the last WAL position
     /// replayed by the startup process.
     pub fn get_xlog_replay_recptr() -> XLogRecPtr

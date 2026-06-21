@@ -1183,3 +1183,10 @@ seam_core::seam!(
     /// I/O `ereport(ERROR)` surface.
     pub fn flush_database_buffers(dbid: types_core::Oid) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CheckPointBuffers(flags)` (bufmgr.c) — flush every dirty shared buffer
+    /// to disk (the `BufferSync` pass `CheckPointGuts` performs). Owned by
+    /// bufmgr. `Err` carries the I/O `ereport(ERROR)` surface.
+    pub fn check_point_buffers(flags: i32) -> types_error::PgResult<()>
+);

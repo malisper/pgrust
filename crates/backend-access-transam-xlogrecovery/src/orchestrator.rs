@@ -958,6 +958,13 @@ pub(crate) fn in_recovery_flag() -> bool {
     IN_RECOVERY.with(Cell::get)
 }
 
+/// `InRecovery = false;` (xlog.c:6138) for the `end_recovery` seam install —
+/// clears the flag once StartupXLOG declares the cluster "officially UP",
+/// before the end-of-recovery SLRU trims run.
+pub(crate) fn end_recovery() {
+    IN_RECOVERY.with(|c| c.set(false));
+}
+
 /// `ArchiveRecoveryRequested` read for the `archive_recovery_requested` seam
 /// install (the startup process's per-backend recovery state).
 pub(crate) fn archive_recovery_requested() -> bool {

@@ -606,6 +606,12 @@ fn flush_database_buffers(dbid: types_core::Oid) -> types_error::PgResult<()> {
     BufferManager::global_expect().FlushDatabaseBuffers(dbid)
 }
 
+/// `CheckPointBuffers(flags)` installed seam (bufmgr.c) — flush every dirty
+/// shared buffer to disk.
+fn check_point_buffers(flags: i32) -> types_error::PgResult<()> {
+    BufferManager::global_expect().CheckPointBuffers(flags)
+}
+
 /// `DropDatabaseBuffers(dbid)` installed seam (bufmgr.c:4888) — drop (without
 /// writing) every shared-buffer page of one database, for `dropdb` /
 /// `dbase_redo` XLOG_DBASE_DROP cleanup.
@@ -793,6 +799,7 @@ pub fn init_seams() {
     );
     backend_storage_buffer_bufmgr_seams::flush_relation_buffers::set(flush_relation_buffers);
     backend_storage_buffer_bufmgr_seams::flush_database_buffers::set(flush_database_buffers);
+    backend_storage_buffer_bufmgr_seams::check_point_buffers::set(check_point_buffers);
     backend_storage_buffer_bufmgr_seams::drop_database_buffers::set(drop_database_buffers);
     backend_storage_buffer_bufmgr_seams::release_buffer_io::set(release_buffer_io);
     // F5: the per-backend checkpoint/bgwriter statistics counters — no-op

@@ -1074,6 +1074,7 @@ pub fn init_seams() {
     // clean DB_SHUTDOWNED / end-of-recovery path.
     clog_seams::startup_clog::set(StartupCLOG);
     clog_seams::trim_clog::set(TrimCLOG);
+    clog_seams::check_point_clog::set(CheckPointCLOG);
 
     // vacuum's `vac_truncate_clog` truncation entry point.
     clog_seams::truncate_clog::set(TruncateCLOG);

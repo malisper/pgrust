@@ -725,6 +725,15 @@ pub fn init_seams() {
     use backend_access_transam_xlog_seams as s;
     s::xlog_redo::set(redo::xlog_redo);
 
+    // `CheckpointStats.ckpt_slru_written++` (bumped by slru.c during an SLRU
+    // SimpleLruWriteAll). The full checkpoint driver that owns the live
+    // `CheckpointStats` accumulator is not yet ported, but SLRU write-all runs
+    // outside a full checkpoint too (end-of-recovery CLOG flush), so this
+    // counter increment must not panic. It is pure stats bookkeeping with no
+    // reader on the recovery path; install a no-op until the checkpoint driver
+    // lands and tracks the accumulator.
+    s::count_ckpt_slru_written::set(|| {});
+
     // `int wal_level` (xlog.c GUC) — the effective `wal_level` value. C reads the
     // global `int wal_level` directly; here it lives in the `wal_level` enum GUC
     // slot (boot_val WAL_LEVEL_REPLICA), whose stored int is the WalLevel ordinal

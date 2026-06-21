@@ -171,6 +171,7 @@ pub fn init_seams() {
     // `InRecovery` (the startup process's backend-local replay flag), now backed
     // by the orchestrator's recovery-state tracking. (xlogrecovery.c global.)
     seams::in_recovery::set(orchestrator::in_recovery_flag);
+    seams::end_recovery::set(orchestrator::end_recovery);
 
     // `ArchiveRecoveryRequested` / `recoveryTargetTLI` (xlogrecovery.c globals),
     // read by the WAL-startup driver (xlog.c `StartupXLOG`). Backed by the

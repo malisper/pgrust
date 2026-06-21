@@ -148,10 +148,14 @@ const fn BKPIMAGE_COMPRESSED(info: uint8) -> bool {
 const XLP_FIRST_IS_CONTRECORD: uint16 = 0x0001;
 /// `XLP_LONG_HEADER` (access/xlog_internal.h).
 const XLP_LONG_HEADER: uint16 = 0x0002;
+// `XLP_BKP_REMOVABLE` (access/xlog_internal.h) = 0x0004 — set on most pages and
+// benign to the reader; no named constant, but the bit must NOT be conflated
+// with XLP_FIRST_IS_OVERWRITE_CONTRECORD (0x0008), which was the page-crossing
+// recovery bug.
 /// `XLP_FIRST_IS_OVERWRITE_CONTRECORD` (access/xlog_internal.h).
-const XLP_FIRST_IS_OVERWRITE_CONTRECORD: uint16 = 0x0004;
+const XLP_FIRST_IS_OVERWRITE_CONTRECORD: uint16 = 0x0008;
 /// `XLP_ALL_FLAGS` (access/xlog_internal.h).
-const XLP_ALL_FLAGS: uint16 = 0x0007;
+const XLP_ALL_FLAGS: uint16 = 0x000F;
 /// `XLOG_PAGE_MAGIC` (access/xlog_internal.h, PG 18).
 const XLOG_PAGE_MAGIC: uint16 = 0xD118;
 
