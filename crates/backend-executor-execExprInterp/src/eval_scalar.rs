@@ -611,44 +611,63 @@ pub fn exec_hashdatum_step<'mcx>(
     Ok(op + 1)
 }
 
+/// Read a `Func`-payload step's `(fn_stats, fn_oid)` — C's
+/// `fcinfo->flinfo->fn_stats` / `fcinfo->flinfo->fn_oid`, the two values
+/// `pgstat_init_function_usage` needs.
+fn func_step_stats(state: &ExprState<'_>, op: usize) -> (u8, types_core::primitive::Oid) {
+    match step_data(state, op) {
+        ExprEvalStepData::Func { finfo, .. } => {
+            let finfo = finfo
+                .as_ref()
+                .expect("EEOP_FUNCEXPR_FUSAGE: op->d.func.finfo not resolved");
+            (finfo.fn_stats, finfo.fn_oid)
+        }
+        other => unreachable!("EEOP_FUNCEXPR_FUSAGE step carries the wrong payload: {other:?}"),
+    }
+}
+
 /// `ExecEvalFuncExprFusage(ExprState *state, ExprEvalStep *op,
 /// ExprContext *econtext)` — call a (non-strict) function, tracking usage stats.
+///
+/// ```c
+/// FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
+/// PgStat_FunctionCallUsage fcusage;
+/// Datum d;
+///
+/// pgstat_init_function_usage(fcinfo, &fcusage);
+/// fcinfo->isnull = false;
+/// d = op->d.func.fn_addr(fcinfo);
+/// *op->resvalue = d;
+/// *op->resnull = fcinfo->isnull;
+/// pgstat_end_function_usage(&fcusage, true);
+/// ```
+///
+/// The call dispatch is `exec_func_step` (the non-FUSAGE body, #296). The
+/// surrounding `pgstat_init_function_usage` / `pgstat_end_function_usage`
+/// usage-tracking cross to the pgstat-function owner through the
+/// `pgstat-function-seams`; the FUSAGE opcodes are selected precisely when
+/// `pgstat_track_functions > fn_stats`, so they record the per-function
+/// execution stats `pg_stat_user_functions` exposes.
 pub fn ExecEvalFuncExprFusage<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
-    // PgStat_FunctionCallUsage fcusage;
-    // Datum d;
-    //
-    // pgstat_init_function_usage(fcinfo, &fcusage);
-    // fcinfo->isnull = false;
-    // d = op->d.func.fn_addr(fcinfo);
-    // *op->resvalue = d;
-    // *op->resnull = fcinfo->isnull;
-    // pgstat_end_function_usage(&fcusage, true);
-    //
-    // #296: the call-frame dispatch itself is now modeled (exec_func_step) —
-    // the fmgr-widened FunctionCallInfoBaseData carries fncollation/args/isnull,
-    // and function_call_invoke re-dispatches by fn_oid. The REMAINING blocker is
-    // the pgstat usage tracking that wraps the call
-    // (pgstat_init_function_usage / pgstat_end_function_usage): the FUSAGE
-    // opcodes are selected precisely when pgstat_track_functions > fn_stats, so
-    // they exist to record per-function execution stats — there is no pgstat
-    // function-usage seam (the pgstat owner is unported), and silently running
-    // the call without the surrounding init/end usage would drop the very stats
-    // this opcode variant exists to collect. Mirror-PG-and-panic until the
-    // pgstat function-usage seam lands; the non-FUSAGE EEOP_FUNCEXPR family is
-    // the common, stats-free path and runs through exec_func_step.
-    let _ = (state, op, econtext, estate);
-    panic!(
-        "ExecEvalFuncExprFusage: the function call itself is modeled \
-         (exec_func_step), but the pgstat_init/end_function_usage tracking that \
-         wraps it has no seam (pgstat owner unported); skipping it would drop the \
-         per-function stats this FUSAGE opcode exists to collect. Blocked until \
-         the pgstat function-usage seam lands"
+    let _ = econtext;
+    let (fn_stats, fn_oid) = func_step_stats(state, op);
+    let mut fcusage =
+        backend_utils_activity_pgstat_function_seams::pgstat_init_function_usage::call(
+            fn_stats, fn_oid,
+        )?;
+    // fcinfo->isnull = false; d = fn_addr(fcinfo); *resvalue = d; *resnull = isnull.
+    // C's inline FUSAGE body has no PG_TRY: if the call ereport(ERROR)s the
+    // longjmp skips pgstat_end_function_usage, so propagate the error first.
+    exec_func_step(state, op, false, estate)?;
+    // pgstat_end_function_usage(&fcusage, true).
+    backend_utils_activity_pgstat_function_seams::pgstat_end_function_usage::call(
+        &mut fcusage,
+        true,
     )
 }
 
@@ -660,33 +679,42 @@ pub fn ExecEvalFuncExprStrictFusage<'mcx>(
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    // FunctionCallInfo fcinfo = op->d.func.fcinfo_data;
-    // NullableDatum *args = fcinfo->args;
-    // int nargs = op->d.func.nargs;
+    // C:
+    //   /* strict function, so check for NULL args */
+    //   for (argno = 0; argno < nargs; argno++)
+    //       if (args[argno].isnull) { *op->resnull = true; return; }
+    //   pgstat_init_function_usage(fcinfo, &fcusage);
+    //   fcinfo->isnull = false; d = fn_addr(fcinfo);
+    //   *op->resvalue = d; *op->resnull = fcinfo->isnull;
+    //   pgstat_end_function_usage(&fcusage, true);
     //
-    // /* strict function, so check for NULL args */
-    // for (int argno = 0; argno < nargs; argno++)
-    //     if (args[argno].isnull) { *op->resnull = true; return; }
-    //
-    // pgstat_init_function_usage(fcinfo, &fcusage);
-    // fcinfo->isnull = false;
-    // d = op->d.func.fn_addr(fcinfo);
-    // *op->resvalue = d;
-    // *op->resnull = fcinfo->isnull;
-    // pgstat_end_function_usage(&fcusage, true);
-    //
-    // #296: the strict-NULL arg scan and the call dispatch are now modeled
-    // (exec_func_step with strict=true reads the gathered fcinfo->args[i].isnull
-    // and dispatches through function_call_invoke). The REMAINING blocker is the
-    // pgstat usage tracking — see ExecEvalFuncExprFusage. Mirror-PG-and-panic
-    // until the pgstat function-usage seam lands.
-    let _ = (state, op, econtext, estate);
-    panic!(
-        "ExecEvalFuncExprStrictFusage: the strict-NULL scan + call are modeled \
-         (exec_func_step), but the pgstat_init/end_function_usage tracking has \
-         no seam (pgstat owner unported); skipping it would drop the per-function \
-         stats this FUSAGE opcode exists to collect. Blocked until the pgstat \
-         function-usage seam lands"
+    // The strict NULL-arg scan (and short-circuit-to-NULL) and the call dispatch
+    // are `exec_func_step(strict=true)` (#296). Crucially the NULL check runs
+    // BEFORE pgstat_init_function_usage, so a NULL arg returns without recording
+    // a call — gather the arg nulls here for the short-circuit, then only
+    // init/end usage on the non-NULL path.
+    let _ = econtext;
+    let (_fn_oid_args, _coll, _args, nulls, _nargs) = func_step_inputs(state, op);
+    if nulls.iter().any(|&n| n) {
+        // *op->resnull = true; return. (Routes STATE_RESULT_CELL to the
+        // ExprState's own cell — see exec_func_step.)
+        let (resvalue_id, _resnull_id) = res_cells(state, op);
+        crate::interp_loop::write_cell(state, resvalue_id, DatumV::null(), true);
+        return Ok(());
+    }
+
+    let (fn_stats, fn_oid) = func_step_stats(state, op);
+    let mut fcusage =
+        backend_utils_activity_pgstat_function_seams::pgstat_init_function_usage::call(
+            fn_stats, fn_oid,
+        )?;
+    // No NULL args remain, so exec_func_step(strict=true) won't short-circuit;
+    // it runs the dispatch. C's inline body has no PG_TRY, so an ereport(ERROR)
+    // skips pgstat_end_function_usage — propagate the error first.
+    exec_func_step(state, op, true, estate)?;
+    backend_utils_activity_pgstat_function_seams::pgstat_end_function_usage::call(
+        &mut fcusage,
+        true,
     )
 }
 

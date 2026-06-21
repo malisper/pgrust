@@ -9392,6 +9392,7 @@ dependencies = [
  "backend-executor-nodeSubplan-seams",
  "backend-nodes-core-seams",
  "backend-nodes-nodeFuncs-seams",
+ "backend-utils-activity-pgstat-function-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-datetime",
  "backend-utils-adt-datum-seams",
@@ -9417,6 +9418,7 @@ dependencies = [
  "types-error",
  "types-jsonb",
  "types-nodes",
+ "types-pgstat",
  "types-tuple",
 ]
 
@@ -19138,6 +19140,7 @@ version = "0.0.0"
 dependencies = [
  "backend-catalog-pg-proc-seams",
  "backend-utils-activity-pgstat",
+ "backend-utils-activity-pgstat-function-seams",
  "backend-utils-activity-xact",
  "backend-utils-cache-inval-seams",
  "backend-utils-cache-syscache-seams",
@@ -19150,6 +19153,16 @@ dependencies = [
  "types-datum",
  "types-error",
  "types-fmgr",
+ "types-pgstat",
+]
+
+[[package]]
+name = "backend-utils-activity-pgstat-function-seams"
+version = "0.0.0"
+dependencies = [
+ "seam-core",
+ "types-core",
+ "types-error",
  "types-pgstat",
 ]
 

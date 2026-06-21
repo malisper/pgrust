@@ -352,4 +352,13 @@ pub fn init_seams() {
 
     // pgstat_function.c outward seam with a live caller (pg_proc.c).
     backend_catalog_pg_proc_seams::pgstat_create_function::set(pgstat_create_function);
+
+    // Function-usage tracking seams, called by the executor's FUSAGE function
+    // opcodes (execExprInterp.c) and the set-returning-function path.
+    backend_utils_activity_pgstat_function_seams::pgstat_init_function_usage::set(
+        pgstat_init_function_usage,
+    );
+    backend_utils_activity_pgstat_function_seams::pgstat_end_function_usage::set(
+        pgstat_end_function_usage,
+    );
 }

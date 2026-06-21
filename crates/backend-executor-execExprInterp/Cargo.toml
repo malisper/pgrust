@@ -59,6 +59,8 @@ backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-activity-pgstat-function-seams = { path = "../backend-utils-activity-pgstat-function-seams" }
+types-pgstat = { path = "../types-pgstat" }
 backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-seams" }
 backend-utils-adt-datum-seams = { path = "../backend-utils-adt-datum-seams" }
 # Hashed-SAOP build path: deconstruct the array const and read its element
