@@ -322,11 +322,16 @@ pub fn walk_composite<'mcx>(
     composite: &Datum<'mcx>,
 ) -> PgResult<Vec<CompositeFieldForJson<'mcx>>> {
     // td = DatumGetHeapTupleHeader(composite); the canonical composite value is
-    // a materialized FormedTuple (header + data).
-    let tuple = composite
-        .as_composite()
-        .expect("walk_composite: value is not a composite Datum")
-        .clone_in(mcx)?;
+    // a materialized FormedTuple (header + data). A composite value reaching this
+    // path through an array element (deconstruct_array yields the per-element
+    // record image as a by-reference varlena, not a `Datum::Composite`) is the
+    // same self-describing `struct varlena *`-tagged block C points
+    // `DatumGetHeapTupleHeader` at — reconstruct the FormedTuple from that flat
+    // image (the inverse of `to_datum_image`).
+    let tuple = match composite.as_composite() {
+        Some(t) => t.clone_in(mcx)?,
+        None => types_tuple::FormedTuple::from_datum_image(mcx, composite.as_ref_bytes())?,
+    };
     let td = tuple
         .tuple
         .t_data
