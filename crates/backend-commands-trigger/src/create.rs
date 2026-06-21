@@ -14,16 +14,19 @@
 //!     AFTER INSERT OR UPDATE deferred-uniqueness-recheck trigger for a
 //!     deferrable PK/UNIQUE constraint.
 //!
-//! Genuinely-unported STOP boundaries (loud `PgError`): the WHEN-clause
-//! transform (needs a Trigger pstate + `transformWhereClause` + a `pg_node_tree`
-//! image), REFERENCING transition tables (no `TriggerTransition` node), user
-//! `CREATE CONSTRAINT TRIGGER` (the `pg_constraint` entry), and the
-//! partitioned-table FOR EACH ROW fan-out (`RelationGetPartitionDesc`).
+//! Partitioned-table FOR EACH ROW triggers fan out: after the parent
+//! `pg_trigger` row is written, the trigger is cloned onto every partition
+//! (`tgparentid` set, WHEN qual remapped through the partition attribute map),
+//! recursing through `CreateTriggerFiringOn`.
+//!
+//! Genuinely-unported STOP boundaries (loud `PgError`): user
+//! `CREATE CONSTRAINT TRIGGER` (the `pg_constraint` entry).
 
 use mcx::Mcx;
 use types_acl::acl::{ACL_EXECUTE, ACL_TRIGGER, ACLCHECK_OK};
 use types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
+    DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC,
 };
 use types_catalog::pg_trigger as pt;
 use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
@@ -92,6 +95,7 @@ pub fn CreateTrigger<'mcx>(
         index_oid,
         funcoid,
         parent_trigger_oid,
+        None,
         is_internal,
         in_partition,
         pt::TRIGGER_FIRES_ON_ORIGIN,
@@ -110,6 +114,7 @@ pub fn CreateTriggerFiringOn<'mcx>(
     index_oid: Oid,
     mut funcoid: Oid,
     parent_trigger_oid: Oid,
+    when_clause: Option<Node<'mcx>>,
     is_internal: bool,
     in_partition: bool,
     trigger_fires_when: i8,
@@ -237,12 +242,12 @@ pub fn CreateTriggerFiringOn<'mcx>(
         }
     }
 
-    // Partitioned FOR EACH ROW fan-out is unported.
-    if !is_internal && stmt.row && relkind == RELKIND_PARTITIONED_TABLE {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("FOR EACH ROW triggers on partitioned tables are not yet supported")
-            .into_error());
+    // When called on a partitioned table to create a FOR EACH ROW trigger
+    // that's not internal, we create one trigger for each partition, too.
+    // For that, we'd better hold lock on all of them ahead of time.
+    let partition_recurse = !is_internal && stmt.row && relkind == RELKIND_PARTITIONED_TABLE;
+    if partition_recurse {
+        backend_catalog_pg_inherits::find_all_inheritors(mcx, relid, ShareRowExclusiveLock, false)?;
     }
 
     // Compute tgtype.
@@ -280,7 +285,7 @@ pub fn CreateTriggerFiringOn<'mcx>(
     // (the OLD/NEW pseudo-relation RTEs), which we'll need below for
     // recordDependencyOnExpr. (We are never passed an already-transformed
     // clause here; the partition-recurse leg that would do so is gated below.)
-    let when = transform_trigger_when(mcx, &rel, stmt, tgtype, query_string)?;
+    let when = transform_trigger_when(mcx, &rel, stmt, tgtype, query_string, when_clause)?;
 
     // User CREATE CONSTRAINT TRIGGER (its own pg_constraint entry) is unported.
     if stmt.isconstraint && !valid(constraint_oid) {
@@ -488,6 +493,22 @@ pub fn CreateTriggerFiringOn<'mcx>(
                 DEPENDENCY_INTERNAL,
             )?;
         }
+
+        // If it's a partition trigger, create the partition dependencies.
+        if valid(parent_trigger_oid) {
+            recordDependencyOn(
+                mcx,
+                &myself,
+                &addr(pt::TriggerRelationId, parent_trigger_oid, 0),
+                DEPENDENCY_PARTITION_PRI,
+            )?;
+            recordDependencyOn(
+                mcx,
+                &myself,
+                &addr(RELATION_RELATION_ID, relid, 0),
+                DEPENDENCY_PARTITION_SEC,
+            )?;
+        }
     }
 
     for &col in &columns {
@@ -521,10 +542,91 @@ pub fn CreateTriggerFiringOn<'mcx>(
         is_internal,
     )?;
 
+    // Lastly, create the trigger on child relations, if needed.
+    if partition_recurse {
+        let partdesc = backend_partitioning_partdesc::RelationGetPartitionDesc(mcx, &rel, true)?;
+
+        // We don't currently expect to be called with a valid indexOid. If that
+        // ever changes then we'll need to find the corresponding child index.
+        debug_assert!(!valid(index_oid));
+
+        // Iterate to create the trigger on each existing partition.
+        for i in 0..(partdesc.nparts as usize) {
+            let child_oid = partdesc.oids[i];
+            let child_tbl = backend_access_table_table_seams::table_open::call(
+                mcx,
+                child_oid,
+                ShareRowExclusiveLock,
+            )?;
+
+            // Initialize our fabricated parse node by copying the original one,
+            // then resetting fields that we pass separately.
+            let mut child_stmt = stmt.clone_in(mcx)?;
+            child_stmt.funcname = mcx::PgVec::new_in(mcx);
+            child_stmt.whenClause = None;
+
+            // If there is a WHEN clause, create a modified copy of it.
+            let child_qual = map_when_to_partition(mcx, &when.when_clause, &child_tbl, &rel)?;
+
+            CreateTriggerFiringOn(
+                mcx,
+                &child_stmt,
+                query_string,
+                child_oid,
+                ref_rel_oid,
+                InvalidOid,
+                InvalidOid,
+                funcoid,
+                trigoid,
+                child_qual,
+                is_internal,
+                true,
+                trigger_fires_when,
+            )?;
+
+            child_tbl.close(NoLock)?;
+        }
+    }
+
     // Keep lock on target rel until end of xact.
     rel.close(NoLock)?;
 
     Ok(myself)
+}
+
+/// Build a per-partition copy of a trigger WHEN clause: `copyObject(whenClause)`
+/// followed by `map_partition_varattnos(..., PRS2_OLD_VARNO, ...)` and the same
+/// for `PRS2_NEW_VARNO` (commands/trigger.c:1181-1188). Returns `None` when
+/// there is no WHEN clause.
+fn map_when_to_partition<'mcx>(
+    mcx: Mcx<'mcx>,
+    when_clause: &Option<Node<'mcx>>,
+    child_tbl: &types_rel::RelationData<'mcx>,
+    parent: &types_rel::RelationData<'mcx>,
+) -> PgResult<Option<Node<'mcx>>> {
+    let Some(node) = when_clause.as_ref() else {
+        return Ok(None);
+    };
+
+    // map_partition_varattnos walks any node tree; wrap the single qual node in a
+    // one-element list, map OLD then NEW varnos, and unwrap.
+    let mut exprs: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    exprs.push(node.clone_in(mcx)?);
+    let exprs = backend_catalog_partition_seams::map_partition_varattnos::call(
+        mcx,
+        exprs,
+        PRS2_OLD_VARNO,
+        child_tbl,
+        parent,
+    )?;
+    let mut exprs = backend_catalog_partition_seams::map_partition_varattnos::call(
+        mcx,
+        exprs,
+        PRS2_NEW_VARNO,
+        child_tbl,
+        parent,
+    )?;
+    Ok(exprs.pop())
 }
 
 /// `PRS2_OLD_VARNO` / `PRS2_NEW_VARNO` (primnodes.h): the WHEN clause's OLD/NEW
@@ -743,13 +845,31 @@ fn transform_trigger_when<'mcx>(
     stmt: &CreateTrigStmt<'mcx>,
     tgtype: i16,
     query_string: &str,
+    when_clause_in: Option<Node<'mcx>>,
 ) -> PgResult<WhenTransform<'mcx>> {
+    // Mirrors commands/trigger.c:566-688. Three branches:
+    //   * stmt->whenClause set: transform the raw clause (parent path).
+    //   * neither stmt->whenClause nor a passed-in clause: no WHEN at all.
+    //   * a pre-transformed clause passed in (partition-recurse / clone path):
+    //     just nodeToString() it; no rtable (deps already recorded on parent).
     let Some(when_in) = stmt.whenClause.as_ref() else {
-        return Ok(WhenTransform {
-            qual: None,
-            when_clause: None,
-            when_rtable: mcx::PgVec::new_in(mcx),
-        });
+        return match when_clause_in {
+            None => Ok(WhenTransform {
+                qual: None,
+                when_clause: None,
+                when_rtable: mcx::PgVec::new_in(mcx),
+            }),
+            Some(node) => {
+                let qual = backend_nodes_outfuncs::nodeToString(mcx, &node)?
+                    .as_str()
+                    .to_string();
+                Ok(WhenTransform {
+                    qual: Some(qual),
+                    when_clause: Some(node),
+                    when_rtable: mcx::PgVec::new_in(mcx),
+                })
+            }
+        };
     };
 
     // Set up a pstate to parse with.

@@ -81,6 +81,13 @@ fn elog(msg: impl Into<String>) -> PgError {
         .into_error()
 }
 
+/// `InvalidOid` (postgres_ext.h).
+const InvalidOid: Oid = 0;
+/// `PRS2_OLD_VARNO` / `PRS2_NEW_VARNO` (primnodes.h): the WHEN clause's OLD/NEW
+/// pseudo-relations are always range-table entries 1 and 2.
+const PRS2_OLD_VARNO: i32 = 1;
+const PRS2_NEW_VARNO: i32 = 2;
+
 /// Wrap a freshly built `Expr` as a `Node` (implicit-AND list element),
 /// allocating the opaque node in `mcx`.
 fn enode<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
@@ -648,26 +655,168 @@ fn AttachPartitionEnsureIndexes<'mcx>(
     Ok(())
 }
 
-/// `CloneRowTriggersToPartition` (tablecmds.c:20755). Unported; raises a precise
-/// error when the parent has triggers, no-op otherwise.
+/// `CloneRowTriggersToPartition(parent, partition)` (tablecmds.c:20755) —
+/// subroutine for `ATExecAttachPartition`/`DefineRelation` that recreates the
+/// parent's user row triggers on a freshly-attached partition. For each
+/// row-level, non-internal BEFORE/AFTER trigger on `parent`, it rebuilds a
+/// `CreateTrigStmt` from the catalog row (mapping the WHEN qual through the
+/// partition attribute map) and calls `CreateTriggerFiringOn` with
+/// `parentTriggerOid = parent's trigger oid`, `in_partition = true`.
 fn CloneRowTriggersToPartition<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     parent: &Relation<'mcx>,
-    _partition: &Relation<'mcx>,
+    partition: &Relation<'mcx>,
 ) -> PgResult<()> {
-    let has_triggers =
-        backend_utils_cache_syscache_seams::rel_relhastriggers::call(parent.rd_id)?.unwrap_or(false);
-    if has_triggers {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg(
-                "ATTACH PARTITION onto a parent with row triggers is not yet supported \
-                 (CloneRowTriggersToPartition unported)"
-                    .to_string(),
-            )
-            .into_error());
+    use types_catalog::pg_trigger as pt;
+
+    // ScanKeyInit(&key, Anum_pg_trigger_tgrelid, ..., RelationGetRelid(parent));
+    // systable_beginscan(pg_trigger, TriggerRelidNameIndexId, tgrelid = parent).
+    // The genam-owned by-tgrelid scan returns every Form_pg_trigger column
+    // (tgattr/tgargs already split, tgqual as nodeToString text) — the exact
+    // set the C loop reads.
+    let trigs = backend_access_index_genam_seams::relcache_scan_pg_trigger::call(parent.rd_id)?;
+
+    for trig in &trigs {
+        // Ignore statement-level triggers; those are not cloned.
+        if !pt::TRIGGER_FOR_ROW(trig.tgtype) {
+            continue;
+        }
+
+        // Don't clone internal triggers, because the constraint cloning code
+        // will.
+        if trig.tgisinternal {
+            continue;
+        }
+
+        // Complain if we find an unexpected trigger type.
+        if !trigger_for_before(trig.tgtype) && !trigger_for_after(trig.tgtype) {
+            return Err(elog(format!(
+                "unexpected trigger \"{}\" found",
+                trig.tgname
+            )));
+        }
+
+        // If there is a WHEN clause, generate a 'cooked' version of it that's
+        // appropriate for the partition.
+        let qual: Option<Node<'mcx>> = match &trig.tgqual {
+            None => None,
+            Some(qual_text) => {
+                // qual = stringToNode(TextDatumGetCString(value));
+                let node = backend_nodes_read_seams::string_to_node::call(mcx, qual_text.as_str())?;
+                // qual = map_partition_varattnos(qual, PRS2_OLD_VARNO, partition, parent);
+                // qual = map_partition_varattnos(qual, PRS2_NEW_VARNO, partition, parent);
+                let mut exprs: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
+                exprs.push(mcx::PgBox::into_inner(node));
+                let exprs = backend_catalog_partition_seams::map_partition_varattnos::call(
+                    mcx,
+                    exprs,
+                    PRS2_OLD_VARNO,
+                    partition,
+                    parent,
+                )?;
+                let mut exprs = backend_catalog_partition_seams::map_partition_varattnos::call(
+                    mcx,
+                    exprs,
+                    PRS2_NEW_VARNO,
+                    partition,
+                    parent,
+                )?;
+                exprs.pop()
+            }
+        };
+
+        // If there is a column list, transform it to a list of column names.
+        // Note we don't need to map this list in any way ...
+        let mut cols: PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+        for &attnum in &trig.tgattr {
+            // col = TupleDescAttr(parent->rd_att, tgattr.values[i] - 1);
+            let att = parent.rd_att.attr((attnum - 1) as usize);
+            let name = std::str::from_utf8(att.attname.name_str())
+                .map_err(|_| elog("trigger column name is not valid UTF-8"))?;
+            cols.push(make_string_node(mcx, name)?);
+        }
+
+        // Reconstruct trigger arguments list (already split by the decode).
+        let mut trigargs: PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+        if trig.tgnargs > 0 {
+            if trig.tgargs.is_empty() {
+                return Err(elog(format!(
+                    "tgargs is null for trigger \"{}\" in partition \"{}\"",
+                    trig.tgname,
+                    partition.name()
+                )));
+            }
+            for arg in &trig.tgargs {
+                trigargs.push(make_string_node(mcx, arg)?);
+            }
+        }
+
+        // trigStmt = makeNode(CreateTrigStmt); ... (funcname/whenClause/constrrel
+        // passed separately).
+        let trig_stmt = types_nodes::ddlnodes::CreateTrigStmt {
+            replace: false,
+            isconstraint: OidIsValid(trig.tgconstraint),
+            trigname: Some(mcx::PgString::from_str_in(&trig.tgname, mcx)?),
+            relation: None,
+            funcname: PgVec::new_in(mcx),
+            args: trigargs,
+            row: true,
+            timing: trig.tgtype & pt::TRIGGER_TYPE_TIMING_MASK,
+            events: trig.tgtype & pt::TRIGGER_TYPE_EVENT_MASK,
+            columns: cols,
+            whenClause: None,
+            transitionRels: PgVec::new_in(mcx),
+            deferrable: trig.tgdeferrable,
+            initdeferred: trig.tginitdeferred,
+            constrrel: None,
+        };
+
+        backend_commands_trigger::create::CreateTriggerFiringOn(
+            mcx,
+            &trig_stmt,
+            "",
+            partition.rd_id,
+            trig.tgconstrrelid,
+            InvalidOid,
+            InvalidOid,
+            trig.tgfoid,
+            trig.tgoid,
+            qual,
+            false,
+            true,
+            trig.tgenabled,
+        )?;
     }
+
     Ok(())
+}
+
+/// `TRIGGER_FOR_BEFORE(type)` (pg_trigger.h).
+fn trigger_for_before(tgtype: i16) -> bool {
+    use types_catalog::pg_trigger as pt;
+    (tgtype & pt::TRIGGER_TYPE_TIMING_MASK) == pt::TRIGGER_TYPE_BEFORE
+}
+
+/// `TRIGGER_FOR_AFTER(type)` (pg_trigger.h).
+fn trigger_for_after(tgtype: i16) -> bool {
+    use types_catalog::pg_trigger as pt;
+    (tgtype & pt::TRIGGER_TYPE_TIMING_MASK) == pt::TRIGGER_TYPE_AFTER
+}
+
+/// `makeString(pstrdup(name))` — a `String` value node wrapping `s`.
+fn make_string_node<'mcx>(
+    mcx: Mcx<'mcx>,
+    s: &str,
+) -> PgResult<types_nodes::nodes::NodePtr<'mcx>> {
+    mcx::alloc_in(
+        mcx,
+        Node::mk_string(
+            mcx,
+            types_nodes::value::StringNode {
+                sval: mcx::PgString::from_str_in(s, mcx)?,
+            },
+        )?,
+    )
 }
 
 /// `CloneForeignKeyConstraints` (tablecmds.c). Unported; raises a precise error
