@@ -964,6 +964,37 @@ fn create_into_rel_dest_receiver_seam<'mcx>(
     CreateIntoRelDestReceiver(into)
 }
 
+/// `CreateIntoRelDestReceiver(into)` + bind the run-state with `into` for callers
+/// (EXPLAIN of CREATE TABLE AS) that drive the executor themselves. Mirrors what
+/// `ExecCreateTableAs` does (create receiver, then `receiver_setup_run`) but
+/// without running the query — the caller's own `ExecutorStart`/`ExecutorRun`
+/// invokes `intorel_startup`, which recovers `into` from the bound run-state.
+pub fn CreateIntoRelDestReceiverSetup<'mcx>(
+    mcx: Mcx<'mcx>,
+    into: &IntoClause<'mcx>,
+) -> PgResult<DestReceiverHandle> {
+    let dest = CreateIntoRelDestReceiver(Some(into))?;
+    let token = backend_tcop_dest::dest_receiver_state_token(dest);
+    receiver_setup_run(token, mcx, into.clone_in(mcx)?)?;
+    Ok(dest)
+}
+
+/// `create_into_rel_dest_receiver_setup` inward seam impl over the trimmed
+/// `parsestmt::IntoClause` the EXPLAIN driver carries. The full createas-owned
+/// `ddlnodes::IntoClause` is recovered from the opaque node payload (`into.node`),
+/// the same trim the EXPLAIN driver builds in `ExplainOneUtility`. Returns the
+/// receiver handle's raw value for the EXPLAIN executor-start.
+fn create_into_rel_dest_receiver_setup_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    into: &types_nodes::parsestmt::IntoClause<'mcx>,
+) -> PgResult<u64> {
+    let ddl_into = into
+        .node
+        .as_intoclause()
+        .expect("create_into_rel_dest_receiver_setup: into.node is not an IntoClause");
+    Ok(CreateIntoRelDestReceiverSetup(mcx, ddl_into)?.0)
+}
+
 /// Install this crate's inward seams. Wired into `seams-init`.
 pub fn init_seams() {
     backend_commands_createas_seams::get_into_rel_eflags::set(get_into_rel_eflags_seam);
@@ -971,6 +1002,9 @@ pub fn init_seams() {
     backend_commands_createas_seams::create_table_as_rel_exists::set(create_table_as_rel_exists_seam);
     backend_commands_createas_seams::create_into_rel_dest_receiver::set(
         create_into_rel_dest_receiver_seam,
+    );
+    backend_commands_createas_seams::create_into_rel_dest_receiver_setup::set(
+        create_into_rel_dest_receiver_setup_seam,
     );
     // The utility dispatcher (ProcessUtilitySlow) reaches ExecCreateTableAs
     // through tcop-utility-out-seams; install the dispatch-shape adapter.

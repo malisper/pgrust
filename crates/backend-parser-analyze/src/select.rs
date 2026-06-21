@@ -33,6 +33,17 @@ pub(crate) fn sortby_list<'mcx>(
     Ok(out)
 }
 
+/// `exprLocation((Node *) intoClause)` (nodeFuncs.c): an `IntoClause` reports the
+/// location of its contained `RangeVar` ("close enough"), or -1 when absent.
+pub(crate) fn into_clause_location(into_node: &Node<'_>) -> i32 {
+    into_node
+        .as_intoclause()
+        .and_then(|into| into.rel.as_deref())
+        .and_then(|rel| rel.as_rangevar())
+        .map(|rv| rv.location)
+        .unwrap_or(-1)
+}
+
 /// `transformSelectStmt(pstate, stmt)` — transform a single (non-set-op,
 /// non-VALUES) SELECT into a `Query`.
 pub fn transformSelectStmt<'mcx>(
@@ -53,8 +64,17 @@ pub fn transformSelectStmt<'mcx>(
     }
 
     /* Complain if we get called from someplace where INTO is not allowed */
-    if stmt.intoClause.is_some() {
-        return Err(elog_error("SELECT ... INTO is not allowed here"));
+    if let Some(into_node) = stmt.intoClause.as_deref() {
+        // C: parser_errposition(pstate, exprLocation((Node *) stmt->intoClause)).
+        // exprLocation(IntoClause) uses the contained RangeVar's location.
+        return Err(backend_utils_error::ereport(types_error::ERROR)
+            .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+            .errmsg("SELECT ... INTO is not allowed here".to_string())
+            .errposition(backend_parser_small1::parser_errposition(
+                pstate,
+                into_clause_location(into_node),
+            ))
+            .into_error());
     }
 
     /* make FOR UPDATE/FOR SHARE info available to addRangeTableEntry */

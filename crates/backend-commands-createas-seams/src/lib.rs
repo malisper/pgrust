@@ -67,6 +67,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CreateIntoRelDestReceiver(intoClause)` *plus* binding the receiver's
+    /// run-state with the live `into` (the owned-model stand-in for C's
+    /// `CreateIntoRelDestReceiver` storing `self->into` at receiver creation).
+    /// Used by the EXPLAIN-(CTAS) leg (`ExplainOnePlan`), which — unlike
+    /// `ExecCreateTableAs` — drives the executor itself and so must set up the
+    /// run-state before `ExecutorStart`/`ExecutorRun` invoke `intorel_startup`.
+    /// `into` is cloned into the per-query arena `mcx` for the duration of the run.
+    /// Returns the receiver handle's raw value (`DestReceiverHandle.0`), which the
+    /// EXPLAIN executor-start reconstitutes into the run's dest as `into_receiver`.
+    pub fn create_into_rel_dest_receiver_setup<'mcx>(
+        mcx: Mcx<'mcx>,
+        into: &IntoClause<'mcx>,
+    ) -> PgResult<u64>
+);
+
+seam_core::seam!(
     /// The CTAS executor-driven leg (createas.c 300-361, the `else` branch):
     /// `QueryRewrite(query)` → single-`SELECT` check → `pg_plan_query(query,
     /// queryString, CURSOR_OPT_PARALLEL_OK, params)` →

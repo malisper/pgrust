@@ -371,14 +371,15 @@ fn explain_one_plan<'mcx>(
     //   if (into) dest = CreateIntoRelDestReceiver(into);
     //   else dest = None_Receiver;
     let dest = match into {
-        Some(into) => {
-            // into->node carries the full ddlnodes::IntoClause payload.
-            let ddl_into = into
-                .node
-                .as_intoclause()
-                .expect("explain_one_plan: IntoClause->node is not an IntoClause");
-            createas_s::create_into_rel_dest_receiver::call(Some(ddl_into))?
-        }
+        // `create_into_rel_dest_receiver_setup` builds the DR_intorel receiver AND
+        // binds its run-state with `into` (the owned-model stand-in for C storing
+        // self->into at receiver creation). Unlike the bare
+        // `create_into_rel_dest_receiver`, this is what lets `intorel_startup`
+        // recover `into` when the EXPLAIN executor drives the run itself — without
+        // it, the receiver is unbound and the startup callback errors.
+        Some(into) => types_nodes::parsestmt::DestReceiverHandle(
+            createas_s::create_into_rel_dest_receiver_setup::call(es.str.allocator(), into)?,
+        ),
         None => types_nodes::parsestmt::DestReceiverHandle::NULL,
     };
 

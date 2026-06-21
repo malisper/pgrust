@@ -71,8 +71,17 @@ pub fn transformSetOperationStmt<'mcx>(
             leftmost = l.larg.as_deref();
         }
         if let Some(l) = leftmost {
-            if l.intoClause.is_some() {
-                return Err(elog_error("SELECT ... INTO is not allowed here"));
+            if let Some(into_node) = l.intoClause.as_deref() {
+                // C: parser_errposition(pstate,
+                //     exprLocation((Node *) leftmostSelect->intoClause)).
+                return Err(backend_utils_error::ereport(types_error::ERROR)
+                    .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                    .errmsg("SELECT ... INTO is not allowed here".to_string())
+                    .errposition(backend_parser_small1::parser_errposition(
+                        pstate,
+                        crate::select::into_clause_location(into_node),
+                    ))
+                    .into_error());
             }
         }
     }
