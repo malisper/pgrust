@@ -138,6 +138,16 @@ pub fn init_seams() {
             misc::estimate_multivariate_bucketsize(root, inner_rel, hashclauses)
         },
     );
+    // `estimate_array_length(root, arrayexpr)` (selfuncs.c) — used by costsize.c
+    // and clauselist cost accounting (e.g. ScalarArrayOpExpr loop counts, the
+    // TID `ctid = ANY(array)` path). selfuncs.c's body is infallible (it only
+    // inspects a Const/ArrayExpr); the unused scratch context satisfies the
+    // allocating signature without ever erroring.
+    backend_optimizer_path_costsize_seams::estimate_array_length::set(|root, node| {
+        let scratch = mcx::MemoryContext::new("estimate_array_length");
+        misc::estimate_array_length(scratch.mcx(), root, node)
+            .expect("estimate_array_length is infallible")
+    });
 }
 
 /* ---------------------------------------------------------------------------

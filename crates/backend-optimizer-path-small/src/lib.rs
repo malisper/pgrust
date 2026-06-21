@@ -1498,16 +1498,35 @@ fn TidQualFromRestrictInfoList<'mcx>(
             for orarg in &orargs {
                 let sublist: Vec<RinfoId>;
 
+                // In C, `rinfo->orclause` is a BoolExpr whose args are each
+                // either an AND clause (a plain BoolExpr of RestrictInfos) or a
+                // single RestrictInfo. In the arena the args arrive wrapped as
+                // `Expr::RestrictInfo` handles; unwrap to the underlying rinfo
+                // and inspect its clause to classify the AND case.
+                let (arg_rinfo, arg_clause): (Option<RinfoId>, Expr) = match orarg {
+                    Expr::RestrictInfo(r) => {
+                        let rid = RinfoId::from(*r);
+                        (Some(rid), root.node(root.rinfo(rid).clause).clone_in(run.mcx())?)
+                    }
+                    other => (None, other.clone_in(run.mcx())?),
+                };
+
                 // OR arguments should be ANDs or sub-RestrictInfos
-                if is_andclause(orarg) {
-                    let andargs = orarg
+                if is_andclause(&arg_clause) {
+                    let andargs = arg_clause
                         .as_boolexpr()
                         .map(|b| b.args.clone())
                         .unwrap_or_default();
                     // Recurse in case there are sub-ORs. The C passes the AND's
-                    // arg List (RestrictInfos); we materialise each arg as a
-                    // transient rinfo to address it by handle.
-                    let andrinfos = exprs_as_rinfos(root, &andargs);
+                    // arg List (RestrictInfos); each AND arg is itself wrapped as
+                    // a RestrictInfo handle, so address them by their handles.
+                    let andrinfos: Vec<RinfoId> = andargs
+                        .iter()
+                        .map(|a| match a {
+                            Expr::RestrictInfo(r) => RinfoId::from(*r),
+                            other => expr_as_rinfo(root, other.clone()),
+                        })
+                        .collect();
                     let (sub, sublist_is_current_of) =
                         TidQualFromRestrictInfoList(root, run, &andrinfos, rel)?;
                     if sublist_is_current_of {
@@ -1515,9 +1534,14 @@ fn TidQualFromRestrictInfoList<'mcx>(
                     }
                     sublist = sub;
                 } else {
-                    // castNode(RestrictInfo, orarg): the OR arg is a
-                    // RestrictInfo. In the arena it is a bare expr; wrap it.
-                    let ri = expr_as_rinfo(root, orarg.clone());
+                    // castNode(RestrictInfo, orarg): the OR arg is a single
+                    // RestrictInfo. Use its existing handle when it arrived
+                    // wrapped (preserving the real RestrictInfo's fields);
+                    // otherwise synthesize a bare rinfo around the clause.
+                    let ri = match arg_rinfo {
+                        Some(rid) => rid,
+                        None => expr_as_rinfo(root, arg_clause.clone()),
+                    };
                     debug_assert!(!seam::restriction_is_or_clause::call(root, ri));
                     if RestrictInfoIsTidQual(root, run, ri, rel) {
                         sublist = alloc::vec![ri];

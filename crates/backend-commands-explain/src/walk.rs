@@ -948,6 +948,23 @@ pub fn ExplainNode<'es, 'p>(
             let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
             show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
         }
+        ntag::T_TidScan => {
+            // explain.c:2105: tidquals has OR semantics, so wrap a multi-element
+            // list in a single make_orclause before showing it as "TID Cond";
+            // then plan->qual -> "Filter".
+            let ts = plan_node.expect_tidscan();
+            let tidcond = build_cond_list(mcx, ts.tidquals.as_ref(), false)?;
+            show_scan_qual_owned(es, mcx, plan_node, ancestors, tidcond, "TID Cond")?;
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+        }
+        ntag::T_TidRangeScan => {
+            // explain.c:2127: tidrangequals has AND semantics, so wrap a
+            // multi-element list in a single make_andclause; then Filter.
+            let trs = plan_node.expect_tidrangescan();
+            let tidcond = build_cond_list(mcx, trs.tidrangequals.as_ref(), true)?;
+            show_scan_qual_owned(es, mcx, plan_node, ancestors, tidcond, "TID Cond")?;
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+        }
         _ => {
             // The generic `Filter` leg (SeqScan / SampleScan / ValuesScan /
             // CteScan / NamedTuplestoreScan / WorkTableScan / SubqueryScan /
@@ -1356,6 +1373,78 @@ fn clone_expr_qual<'es>(
         }
     }
     Ok(out)
+}
+
+/// Build the single-clause TID condition list explain.c constructs for a
+/// TidScan/TidRangeScan: an empty/None list yields an empty Vec; a single clause
+/// is cloned as-is; a multi-clause list is wrapped in one `make_orclause`
+/// (`is_and = false`, OR semantics for tidquals) or `make_andclause`
+/// (`is_and = true`, AND semantics for tidrangequals). The result is then
+/// rendered by `show_scan_qual_owned` (which `make_ands_explicit`s a 1-element
+/// list to that very clause).
+fn build_cond_list<'es>(
+    mcx: Mcx<'es>,
+    quals: Option<&PgVec<'_, types_nodes::primnodes::Expr>>,
+    is_and: bool,
+) -> PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr>> {
+    let Some(quals) = quals.filter(|q| !q.is_empty()) else {
+        return Ok(alloc::vec::Vec::new());
+    };
+    let mut cloned: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+        alloc::vec::Vec::with_capacity(quals.len());
+    for e in quals.iter() {
+        cloned.push(e.clone_in(mcx)?);
+    }
+    if cloned.len() > 1 {
+        let wrapped = if is_and {
+            backend_nodes_core::makefuncs::make_andclause(cloned)
+        } else {
+            backend_nodes_core::makefuncs::make_orclause(cloned)
+        };
+        Ok(alloc::vec![wrapped])
+    } else {
+        Ok(cloned)
+    }
+}
+
+/// Like `show_scan_qual` but over an owned `Vec` (the caller pre-wrapped the
+/// list). Uses the scan-qual prefix rule `useprefix = IsA(plan, SubqueryScan)
+/// || es->verbose` (explain.c:2470), which for a TidScan/TidRangeScan reduces to
+/// `es->verbose` — so the scan's own Var is unqualified while an outer
+/// (join-inner) Var keeps its alias, matching pg_regress's `TID Cond` output.
+fn show_scan_qual_owned<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plan_node: &Node<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+    exprs: alloc::vec::Vec<types_nodes::primnodes::Expr>,
+    qlabel: &str,
+) -> PgResult<()> {
+    if exprs.is_empty() {
+        return Ok(());
+    }
+    let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
+    let node = Node::mk_expr(mcx, anded)?;
+
+    let useprefix = matches!(plan_node.node_tag(), ntag::T_SubqueryScan) || es.verbose;
+
+    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let es_pstmt = es
+        .pstmt
+        .as_deref()
+        .expect("EXPLAIN: es->pstmt must be set before deparse");
+    let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+        mcx,
+        es_pstmt,
+        &es.rtable_names,
+        &plan_owned,
+        ancestors,
+        &node,
+        useprefix,
+        false,
+    )?;
+    fmt::ExplainPropertyText(qlabel, exprstr.as_str(), es)?;
+    Ok(())
 }
 
 /// `show_indexsearches_info(planstate, es)` (explain.c:3837) — show the total

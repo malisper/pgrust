@@ -1030,6 +1030,10 @@ pub fn init_seams() {
     // does, matching C exactly.
     use backend_optimizer_path_small_seams as ps;
     ps::num_relids::set(seam_num_relids_root);
+    // tidpath.c's `IsTidEqualClause` rides `pull_varnos(root, (Node *) arg2)`
+    // over an inline `&Expr` operand of the CTID = const clause. var.c owns
+    // pull_varnos; same root-threaded shape as the equivclass-ext leg.
+    ps::pull_varnos_expr::set(seam_ps_pull_varnos_expr);
 
     // cost_incremental_sort's `bms_is_member(0, pull_varnos(root, em_expr))`
     // (costsize.c). var.c owns pull_varnos.
@@ -1080,6 +1084,15 @@ fn seam_eqext_pull_var_clause_list(nodes: Vec<Expr>, flags: i32) -> Vec<Expr> {
 /// `pull_varnos(root, (Node *) expr)` (var.c) — the equivclass-ext seam,
 /// threading `root` so PlaceHolderVars are processed (the `root != NULL` path).
 fn seam_eqext_pull_varnos(root: &PlannerInfo, expr: &Expr) -> Relids {
+    let scratch = mcx::MemoryContext::new("pull_varnos wrapper");
+    let wrapped = node_expr_wrapper(expr, scratch.mcx());
+    pull_varnos(Some(root), &wrapped)
+}
+
+/// `pull_varnos(root, (Node *) expr)` (var.c) for tidpath.c's path-small seam.
+/// Same root-threaded behavior as the equivclass-ext leg; the only difference
+/// is the `&mut PlannerInfo` receiver the path-small declaration mirrors.
+fn seam_ps_pull_varnos_expr(root: &mut PlannerInfo, expr: &Expr) -> Relids {
     let scratch = mcx::MemoryContext::new("pull_varnos wrapper");
     let wrapped = node_expr_wrapper(expr, scratch.mcx());
     pull_varnos(Some(root), &wrapped)

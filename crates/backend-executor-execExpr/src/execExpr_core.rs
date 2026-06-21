@@ -2894,11 +2894,23 @@ pub fn exec_eval_tid_expr_switch_context<'mcx>(
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(ItemPointerData, bool)> {
-    let _ = (state, econtext, estate);
-    panic!(
-        "execExpr-core: ExecEvalExprSwitchContext yielding an ItemPointer must be evaluated by \
-         the interpreter (execExprInterp), which dereferences the result Datum"
-    );
+    // itemptr = (ItemPointer) DatumGetPointer(
+    //     ExecEvalExprSwitchContext(tidexpr->exprstate, econtext, &isNull));
+    let (datum, isnull) = exec_eval_expr_switch_context(state, econtext, estate)?;
+    if isnull {
+        // The caller (nodeTidscan) discards the value when isNull; return a
+        // placeholder ItemPointer that it never reads.
+        return Ok((ItemPointerData::new(0, 0), true));
+    }
+    // The TID Datum crosses by reference as the canonical 6-byte ItemPointerData
+    // image: BlockIdData{bi_hi, bi_lo} (two native-endian uint16) then the
+    // uint16 ip_posid offset (storage/itemptr.h native struct layout).
+    let image = datum.as_ref_bytes();
+    let bi_hi = u16::from_ne_bytes([image[0], image[1]]);
+    let bi_lo = u16::from_ne_bytes([image[2], image[3]]);
+    let off = u16::from_ne_bytes([image[4], image[5]]);
+    let block_number = ((bi_hi as u32) << 16) | bi_lo as u32;
+    Ok((ItemPointerData::new(block_number, off), false))
 }
 
 /// `ExecEvalExprSwitchContext(...)` yielding a `tid[]` array `Datum`.

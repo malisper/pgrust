@@ -2784,9 +2784,20 @@ fn create_tidscan_plan<'mcx>(
             if rinfo.pseudoconstant {
                 continue; // we may drop pseudoconstants here
             }
-            // list_member_ptr(tidquals, rinfo): tidquals here are bare expr
-            // handles, so pointer-identity to the RestrictInfo cannot match;
-            // the EC-derivation test below subsumes the duplicate case.
+            // list_member_ptr(tidquals, rinfo): C's TidPath.tidquals is a
+            // List<RestrictInfo>, so this is pointer identity. tidpath here
+            // stored each rinfo's bare `clause` expr (the very node this
+            // RestrictInfo carries), so the faithful stand-in for the pointer
+            // test is `equal()` between this scan clause's `clause` and a
+            // tidqual expr — they are the same node when they came from the same
+            // RestrictInfo.
+            let rinfo_clause = root.rinfo(rinfo_id).clause;
+            if tidquals_nodes
+                .iter()
+                .any(|&tq| equal_expr_seam::call(root.node(rinfo_clause), root.node(tq)))
+            {
+                continue; // already enforced by tidquals
+            }
             // is_redundant_derived_clause(rinfo, tidquals): tidquals in C is a
             // List<RestrictInfo>; here tidpath stored bare exprs, so this test
             // is over the (single) tidqual clause node. The seam compares the
