@@ -100,7 +100,7 @@ fn as_alter_table_cmd<'a, 'mcx>(node: &'a NodePtr<'mcx>) -> &'a AlterTableCmd<'m
 /// `ATExecSetRelOptions` (which would) is unported.
 fn cmd_def_elem_list<'mcx>(
     cmd: &AlterTableCmd<'mcx>,
-) -> Vec<backend_access_common_reloptions::DefElem> {
+) -> PgResult<Vec<backend_access_common_reloptions::DefElem>> {
     let mut out = Vec::new();
     if let Some(def) = &cmd.def {
         if let Some(items) = def.as_list() {
@@ -108,20 +108,11 @@ fn cmd_def_elem_list<'mcx>(
                 if let Some(de) = it.as_defelem() {
                     // Project the value node (`def->arg`) to the `DefElemArg` the
                     // reloptions `defGetString`/`defGetBoolean` seams read; `None`
-                    // mirrors `def->arg == NULL`. Without this the option value
-                    // (e.g. `fillfactor=90`) is dropped and `defGetString` falls
-                    // back to the no-arg "true" — a wrong reloption.
-                    let arg = de.arg.as_deref().map(|node| {
-                        use backend_commands_define_seams::DefElemArg;
-                        use types_nodes::nodes::ntag;
-                        match node.node_tag() {
-                            ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
-                            ntag::T_Float => DefElemArg::Float(node.expect_float().fval.as_str().to_string()),
-                            ntag::T_Boolean => DefElemArg::Boolean(node.expect_boolean().boolval),
-                            ntag::T_String => DefElemArg::String(node.expect_string().sval.as_str().to_string()),
-                            _ => DefElemArg::AStar,
-                        }
-                    });
+                    // mirrors `def->arg == NULL`. The full `defGetString` node
+                    // switch (incl. T_TypeName/T_List bare-identifier values such
+                    // as `check_option=local`) lives in `crate::create::defel_arg`;
+                    // a prior `_ => AStar` catch-all here collapsed those to `"*"`.
+                    let arg = crate::create::defel_arg(de)?;
                     out.push(backend_access_common_reloptions::DefElem::new(
                         de.defnamespace.as_ref().map(|s| s.as_str()),
                         de.defname.as_ref().map(|s| s.as_str()).unwrap_or(""),
@@ -131,7 +122,7 @@ fn cmd_def_elem_list<'mcx>(
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Faithful seam-and-panic for an ALTER TABLE subcommand family whose execution
@@ -601,7 +592,7 @@ pub fn AlterTableGetLockLevel(cmds: &PgVec<'_, NodePtr<'_>>) -> PgResult<LOCKMOD
 
             // Rel options: tables/views/indexes share this grammar.
             AT_SetRelOptions | AT_ResetRelOptions => {
-                let def_list = cmd_def_elem_list(cmd);
+                let def_list = cmd_def_elem_list(cmd)?;
                 cmd_lockmode =
                     backend_access_common_reloptions::AlterTableGetRelOptionsLockLevel(&def_list[..]);
             }
@@ -1345,7 +1336,7 @@ fn ATExecCmd<'mcx>(
             _address = crate::at_column::ATExecSetRelOptions(
                 mcx,
                 rel,
-                cmd_def_elem_list(cmd),
+                cmd_def_elem_list(cmd)?,
                 AT_SetRelOptions,
                 lockmode,
             )?;
@@ -1354,7 +1345,7 @@ fn ATExecCmd<'mcx>(
             _address = crate::at_column::ATExecSetRelOptions(
                 mcx,
                 rel,
-                cmd_def_elem_list(cmd),
+                cmd_def_elem_list(cmd)?,
                 AT_ResetRelOptions,
                 lockmode,
             )?;
@@ -1363,7 +1354,7 @@ fn ATExecCmd<'mcx>(
             _address = crate::at_column::ATExecSetRelOptions(
                 mcx,
                 rel,
-                cmd_def_elem_list(cmd),
+                cmd_def_elem_list(cmd)?,
                 AT_ReplaceRelOptions,
                 lockmode,
             )?;

@@ -88,7 +88,7 @@ const HEAP_RELOPT_NAMESPACES: &[&str] = &["toast"];
 /// `define.c` `DefElemArg` the reloptions `defGetString`/`defGetBoolean`
 /// dispatch on — the same projection every DDL caller uses (cf.
 /// `backend-commands-vacuum::defel_arg`). `None` mirrors `def->arg == NULL`.
-fn defel_arg(
+pub(crate) fn defel_arg(
     def: &types_nodes::ddlnodes::DefElem<'_>,
 ) -> PgResult<Option<backend_commands_define_seams::DefElemArg>> {
     use backend_commands_define_seams::DefElemArg;
