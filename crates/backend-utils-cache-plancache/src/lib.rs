@@ -2470,6 +2470,54 @@ fn seam_plansource_has_result_desc(plansource: SeamSourceHandle) -> PgResult<boo
     Ok(get_source(plansource.0).borrow().result_desc.is_some())
 }
 
+/// `create_cached_plan_empty(mcx, query_string, command_tag)` — the empty-query
+/// Parse case (`CreateCachedPlan(NULL, ...)`).
+fn seam_create_cached_plan_empty<'mcx>(
+    _mcx: Mcx<'mcx>,
+    query_string: &str,
+    command_tag: CommandTag,
+) -> PgResult<SeamSourceHandle> {
+    Ok(SeamSourceHandle(CreateCachedPlanEmpty(
+        query_string,
+        command_tag,
+    )?))
+}
+
+/// `psrc->raw_parse_tree && IsTransactionExitStmt(psrc->raw_parse_tree->stmt)`.
+fn seam_plansource_raw_is_transaction_exit_stmt(
+    plansource: SeamSourceHandle,
+) -> PgResult<bool> {
+    use types_nodes::ddlnodes::TransactionStmtKind;
+    let src = get_source(plansource.0);
+    let p = src.borrow();
+    let raw = match p.raw_parse_tree.as_ref() {
+        Some(r) => r,
+        None => return Ok(false),
+    };
+    // IsTransactionExitStmt(parsetree): COMMIT/PREPARE/ROLLBACK/ROLLBACK-TO.
+    let is_exit = match raw.stmt.as_transactionstmt() {
+        Some(stmt) => matches!(
+            stmt.kind,
+            TransactionStmtKind::TRANS_STMT_COMMIT
+                | TransactionStmtKind::TRANS_STMT_PREPARE
+                | TransactionStmtKind::TRANS_STMT_ROLLBACK
+                | TransactionStmtKind::TRANS_STMT_ROLLBACK_TO
+        ),
+        None => false,
+    };
+    Ok(is_exit)
+}
+
+/// `psrc->raw_parse_tree && analyze_requires_snapshot(psrc->raw_parse_tree)`.
+fn seam_plansource_raw_requires_snapshot(plansource: SeamSourceHandle) -> PgResult<bool> {
+    let src = get_source(plansource.0);
+    let p = src.borrow();
+    match p.raw_parse_tree.as_ref() {
+        Some(raw) => analyze_seams::analyze_requires_snapshot_value::call(raw),
+        None => Ok(false),
+    }
+}
+
 /// `plansource_num_generic_plans(plansource)`.
 fn seam_plansource_num_generic_plans(plansource: SeamSourceHandle) -> PgResult<i64> {
     Ok(get_source(plansource.0).borrow().num_generic_plans)
@@ -2505,6 +2553,11 @@ pub fn init_seams() {
     inward::init_plan_cache::set(InitPlanCache);
 
     inward::create_cached_plan::set(seam_create_cached_plan);
+    inward::create_cached_plan_empty::set(seam_create_cached_plan_empty);
+    inward::plansource_raw_is_transaction_exit_stmt::set(
+        seam_plansource_raw_is_transaction_exit_stmt,
+    );
+    inward::plansource_raw_requires_snapshot::set(seam_plansource_raw_requires_snapshot);
     inward::complete_cached_plan::set(seam_complete_cached_plan);
     inward::save_cached_plan::set(seam_save_cached_plan);
     inward::drop_cached_plan::set(seam_drop_cached_plan);

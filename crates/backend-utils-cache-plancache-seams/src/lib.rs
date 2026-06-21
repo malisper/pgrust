@@ -163,3 +163,34 @@ seam_core::seam!(
     /// callbacks. `Err` carries its `ereport` surface.
     pub fn init_plan_cache() -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CreateCachedPlan(NULL, query_string, commandTag)` (plancache.c) — the
+    /// empty-query Parse case (a `CachedPlanSource` with no raw parse tree).
+    /// Allocates / can `ereport(ERROR)`.
+    pub fn create_cached_plan_empty<'mcx>(
+        mcx: Mcx<'mcx>,
+        query_string: &str,
+        command_tag: CommandTag,
+    ) -> PgResult<CachedPlanSourceHandle>
+);
+
+seam_core::seam!(
+    /// `psrc->raw_parse_tree && IsTransactionExitStmt(psrc->raw_parse_tree->stmt)`
+    /// (postgres.c, exec_bind_message's aborted-xact guard): whether the cached
+    /// source's raw statement is a transaction-exit command
+    /// (COMMIT/PREPARE/ROLLBACK/ROLLBACK-TO). `false` when there is no raw tree.
+    pub fn plansource_raw_is_transaction_exit_stmt(
+        plansource: CachedPlanSourceHandle,
+    ) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `psrc->raw_parse_tree && analyze_requires_snapshot(psrc->raw_parse_tree)`
+    /// (postgres.c, exec_bind_message): whether binding/planning the cached
+    /// source's raw statement needs a transaction snapshot. `false` when there
+    /// is no raw tree.
+    pub fn plansource_raw_requires_snapshot(
+        plansource: CachedPlanSourceHandle,
+    ) -> PgResult<bool>
+);
