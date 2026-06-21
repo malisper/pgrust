@@ -5011,6 +5011,7 @@ const Anum_pg_statistic_ext_stxrelid_b2: i32 = 2;
 const Anum_pg_statistic_ext_stxname_b2: i32 = 3;
 const Anum_pg_statistic_ext_stxnamespace_b2: i32 = 4;
 const Anum_pg_statistic_ext_stxkeys_b2: i32 = 6;
+const Anum_pg_statistic_ext_stxkind_b2: i32 = 8;
 const Anum_pg_statistic_ext_stxexprs_b2: i32 = 9;
 const Anum_pg_statistic_ext_data_stxdinherit_b2: i32 = 2;
 const Anum_pg_statistic_ext_data_stxdndistinct_b2: i32 = 3;
@@ -6952,6 +6953,70 @@ pub(crate) fn statext_keys_exprs_text<'mcx>(
 
     ReleaseSysCache(tup);
     Ok(Some((keys, exprs_text)))
+}
+
+/// `SearchSysCache1(STATEXTOID, statextid)` projected to the catalog fields
+/// `pg_get_statisticsobj_worker` (ruleutils.c 1654-1837) deparses. Returns
+/// `(stxnamespace, stxname, stxrelid, stxkeys, stxkind, stxexprs_text)`, or
+/// `Ok(None)` on a cache miss.
+pub(crate) fn statext_objdef_fields<'mcx>(
+    mcx: Mcx<'mcx>,
+    statextid: Oid,
+) -> PgResult<Option<(Oid, PgString<'mcx>, Oid, Vec<i32>, Vec<u8>, Option<PgString<'mcx>>)>> {
+    let tuple = SearchSysCache1(mcx, STATEXTOID, SysCacheKey::Value(KeyDatum::from_oid(statextid)))?;
+    let Some(tup) = tuple else {
+        return Ok(None);
+    };
+
+    // statextrec->stxnamespace / NameStr(statextrec->stxname) / statextrec->stxrelid.
+    let stxnamespace = getattr_oid(mcx, STATEXTOID, &tup, Anum_pg_statistic_ext_stxnamespace_b2)?;
+    let stxname = getattr_name(mcx, STATEXTOID, &tup, Anum_pg_statistic_ext_stxname_b2)?;
+    let stxrelid = getattr_oid(mcx, STATEXTOID, &tup, Anum_pg_statistic_ext_stxrelid_b2)?;
+
+    // statextrec->stxkeys (int2vector, BKI_FORCE_NOT_NULL) attnums.
+    let stxkeys_datum = SysCacheGetAttrNotNull(mcx, STATEXTOID, &tup, Anum_pg_statistic_ext_stxkeys_b2)?;
+    let keys: Vec<i32> = match &stxkeys_datum {
+        Datum::ByRef(b) => arrayfuncs_seams::int2vector_to_i16s_bytes::call(mcx, &b[..])?
+            .into_iter()
+            .map(|k| k as i32)
+            .collect(),
+        _ => {
+            ReleaseSysCache(tup);
+            return Err(PgError::error(
+                "statext_objdef_fields: stxkeys attribute is by-value",
+            ));
+        }
+    };
+
+    // datum = SysCacheGetAttrNotNull(STATEXTOID, ..., Anum_pg_statistic_ext_stxkind);
+    // arr = DatumGetArrayTypeP(datum); the 1-D char[] of enabled kinds.
+    // (C: elog(ERROR, "stxkind is not a 1-D char array") when malformed.)
+    let kind: Vec<u8> = match getattr_char_array(mcx, STATEXTOID, &tup, Anum_pg_statistic_ext_stxkind_b2)? {
+        Some(arr) => {
+            if arr.ndim != 1 || arr.hasnull || arr.elemtype != SYS_CHAROID {
+                ReleaseSysCache(tup);
+                return Err(PgError::error("stxkind is not a 1-D char array"));
+            }
+            arr.values.iter().copied().collect::<Vec<u8>>()
+        }
+        None => {
+            ReleaseSysCache(tup);
+            return Err(PgError::error("stxkind is not a 1-D char array"));
+        }
+    };
+
+    // datum = SysCacheGetAttr(STATEXTOID, htup, Anum_pg_statistic_ext_stxexprs, &isnull);
+    // if (!isnull) exprsString = TextDatumGetCString(datum);
+    let (stxexprs_val, stxexprs_isnull) =
+        SysCacheGetAttr(mcx, STATEXTOID, &tup, Anum_pg_statistic_ext_stxexprs_b2)?;
+    let exprs_text = if stxexprs_isnull {
+        None
+    } else {
+        Some(varlena_seams::text_to_cstring_v::call(mcx, &stxexprs_val)?)
+    };
+
+    ReleaseSysCache(tup);
+    Ok(Some((stxnamespace, stxname, stxrelid, keys, kind, exprs_text)))
 }
 
 /// `SearchSysCache2(STATEXTDATASTXOID, statOid, inh)` projected to the

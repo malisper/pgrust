@@ -2292,6 +2292,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `SearchSysCache1(STATEXTOID, statextid)` projected to the catalog fields
+    /// `pg_get_statisticsobj_worker` (ruleutils.c) deparses: `stxnamespace`,
+    /// `stxname`, `stxrelid`, the `stxkeys` int2vector attnums, the `stxkind`
+    /// 1-D `char[]` array (each enabled `STATS_EXT_*` kind, `'d'`/`'f'`/`'m'`/
+    /// `'e'`), and the raw `stxexprs` `pg_node_tree` text (`NULL ⇒ None`).
+    /// Returned as `(stxnamespace, stxname, stxrelid, stxkeys, stxkind, stxexprs_text)`.
+    /// `Ok(None)` on a cache miss (the worker returns NULL when `missing_ok`).
+    pub fn statext_objdef_fields<'mcx>(
+        mcx: Mcx<'mcx>,
+        statextid: Oid,
+    ) -> PgResult<Option<(Oid, PgString<'mcx>, Oid, Vec<i32>, Vec<u8>, Option<PgString<'mcx>>)>>
+);
+
+seam_core::seam!(
     /// `SearchSysCache2(STATEXTDATASTXOID, statOid, inh)` projected to the
     /// `stxdinherit` flag and the four `statext_is_kind_built` results — the
     /// non-null status of `stxdndistinct`/`stxddependencies`/`stxdmcv`/`stxdexpr`
