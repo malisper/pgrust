@@ -2758,13 +2758,16 @@ fn bt_checkkeys_look_ahead<'mcx>(
         return Ok(());
     }
 
-    // Don't look ahead when there aren't enough tuples remaining.
+    // Don't look ahead when there aren't enough tuples remaining. In C the
+    // OffsetNumber operands are promoted to int before the subtract/add, so
+    // `maxoff - LOOK_AHEAD_DEFAULT_DISTANCE` is signed and may go negative
+    // (small page) without wrapping; mirror that with i32 arithmetic.
     if ScanDirectionIsForward(dir)
-        && pstate.offnum >= pstate.maxoff - LOOK_AHEAD_DEFAULT_DISTANCE as OffsetNumber
+        && pstate.offnum as i32 >= pstate.maxoff as i32 - LOOK_AHEAD_DEFAULT_DISTANCE as i32
     {
         return Ok(());
     } else if ScanDirectionIsBackward(dir)
-        && pstate.offnum <= pstate.minoff + LOOK_AHEAD_DEFAULT_DISTANCE as OffsetNumber
+        && pstate.offnum as i32 <= pstate.minoff as i32 + LOOK_AHEAD_DEFAULT_DISTANCE as i32
     {
         return Ok(());
     }
