@@ -782,7 +782,7 @@ pub fn ExplainNode<'es, 'p>(
             .and_then(|r| r.resconstantqual.as_ref())
             .filter(|q| !q.is_empty())
         {
-            let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+            let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr<'es>> =
                 alloc::vec::Vec::with_capacity(rcq.len());
             for e in rcq.iter() {
                 exprs.push(e.clone_in(mcx)?);
@@ -821,7 +821,7 @@ pub fn ExplainNode<'es, 'p>(
         //                 planstate, ancestors, es). useprefix = rtable>1||verbose.
         let wagg = plan_node.expect_windowagg();
         if let Some(rc) = wagg.runConditionOrig.as_ref().filter(|q| !q.is_empty()) {
-            let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+            let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr<'es>> =
                 alloc::vec::Vec::with_capacity(rc.len());
             for e in rc.iter() {
                 exprs.push(e.clone_in(mcx)?);
@@ -1437,7 +1437,7 @@ fn show_scan_qual<'es, 'p>(
     // node = (Node *) make_ands_explicit(qual);
     // Deep-clone via clone_in: a qual may carry a SubPlan / Aggref child, on
     // which a bare derived `Expr::clone()` panics (clone-in convention).
-    let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+    let mut exprs: alloc::vec::Vec<types_nodes::primnodes::Expr<'es>> =
         alloc::vec::Vec::with_capacity(qual.len());
     for e in qual.iter() {
         exprs.push(e.clone_in(mcx)?);
@@ -1635,7 +1635,7 @@ fn show_upper_qual<'es, 'p>(
     mcx: Mcx<'es>,
     plan_node: &Node<'p>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
-    exprs: alloc::vec::Vec<types_nodes::primnodes::Expr>,
+    exprs: alloc::vec::Vec<types_nodes::primnodes::Expr<'es>>,
     qlabel: &str,
 ) -> PgResult<()> {
     if exprs.is_empty() {
@@ -1669,8 +1669,8 @@ fn show_upper_qual<'es, 'p>(
 /// Aggref children). Returns an empty vec for `None`.
 fn clone_expr_qual<'es>(
     mcx: Mcx<'es>,
-    qual: Option<&PgVec<'_, types_nodes::primnodes::Expr>>,
-) -> PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr>> {
+    qual: Option<&PgVec<'_, types_nodes::primnodes::Expr<'_>>>,
+) -> PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr<'es>>> {
     let mut out = alloc::vec::Vec::new();
     if let Some(q) = qual {
         out.reserve(q.len());
@@ -1690,13 +1690,13 @@ fn clone_expr_qual<'es>(
 /// list to that very clause).
 fn build_cond_list<'es>(
     mcx: Mcx<'es>,
-    quals: Option<&PgVec<'_, types_nodes::primnodes::Expr>>,
+    quals: Option<&PgVec<'_, types_nodes::primnodes::Expr<'_>>>,
     is_and: bool,
-) -> PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr>> {
+) -> PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr<'es>>> {
     let Some(quals) = quals.filter(|q| !q.is_empty()) else {
         return Ok(alloc::vec::Vec::new());
     };
-    let mut cloned: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+    let mut cloned: alloc::vec::Vec<types_nodes::primnodes::Expr<'es>> =
         alloc::vec::Vec::with_capacity(quals.len());
     for e in quals.iter() {
         cloned.push(e.clone_in(mcx)?);
@@ -1723,7 +1723,7 @@ fn show_scan_qual_owned<'es, 'p>(
     mcx: Mcx<'es>,
     plan_node: &Node<'p>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
-    exprs: alloc::vec::Vec<types_nodes::primnodes::Expr>,
+    exprs: alloc::vec::Vec<types_nodes::primnodes::Expr<'es>>,
     qlabel: &str,
 ) -> PgResult<()> {
     if exprs.is_empty() {

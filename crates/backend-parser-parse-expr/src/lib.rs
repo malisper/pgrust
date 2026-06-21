@@ -1314,7 +1314,7 @@ fn clone_last_srf(pstate: &ParseState<'_>) -> Option<(types_nodes::nodes::NodeTa
 }
 
 /// View the inner `Expr` of a boxed `p_last_srf` `Node`.
-fn node_as_expr<'a>(b: &'a nodes::NodePtr<'_>) -> Option<&'a Expr> {
+fn node_as_expr<'a, 'mcx>(b: &'a nodes::NodePtr<'mcx>) -> Option<&'a Expr<'mcx>> {
     b.as_expr()
 }
 
@@ -2394,7 +2394,7 @@ pub fn ParseExprKindName(expr_kind: ParseExprKind) -> &'static str {
 /// Clone the inner `Expr` of `pstate->p_last_srf` (the most recent
 /// set-returning function/operator). Public so `analyze.c`'s `transformCallStmt`
 /// can pass it to `ParseFuncOrColumn` (C reads `pstate->p_last_srf` directly).
-pub fn last_srf_expr(pstate: &ParseState<'_>) -> Option<Expr> {
+pub fn last_srf_expr<'a>(pstate: &'a ParseState<'a>) -> Option<Expr<'a>> {
     pstate
         .p_last_srf
         .as_ref()
@@ -5283,7 +5283,7 @@ fn transform_json_parse_arg<'mcx>(
     pstate: &mut ParseState<'mcx>,
     raw: Option<Node<'mcx>>,
     format: &Option<JsonFormat>,
-) -> PgResult<(Expr, Oid)> {
+) -> PgResult<(Expr<'static>, Oid)> {
     let raw_expr = transformExprRecurse(pstate, raw)?
         .ok_or_else(|| PgError::error("transformJsonParseArg: NULL argument"))?;
 
@@ -6189,12 +6189,12 @@ fn transform_json_behavior<'mcx>(
     jsexpr: &JsonExpr,
     behavior: Option<&RawJsonBehavior<'mcx>>,
     default_behavior: JsonBehaviorType,
-) -> PgResult<Option<JsonBehavior>> {
+) -> PgResult<Option<JsonBehavior<'static>>> {
     let mcx = aexpr_clone_ctx(pstate);
     let ret_typid = jsexpr.returning.as_ref().unwrap().typid;
     let ret_typmod = jsexpr.returning.as_ref().unwrap().typmod;
     let mut btype = default_behavior;
-    let mut expr: Option<Expr> = None;
+    let mut expr: Option<Expr<'static>> = None;
     let mut coerce_at_runtime = false;
     let mut location = -1;
 
