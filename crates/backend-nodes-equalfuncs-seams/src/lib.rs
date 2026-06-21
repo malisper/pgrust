@@ -14,7 +14,7 @@
 seam_core::seam!(
     /// `equal((Node *) a, (Node *) b)` (equalfuncs.c) — structural equality of
     /// two expression sub-trees.
-    pub fn equal_expr(a: &types_nodes::primnodes::Expr, b: &types_nodes::primnodes::Expr) -> bool
+    pub fn equal_expr<'mcx>(a: &types_nodes::primnodes::Expr<'mcx>, b: &types_nodes::primnodes::Expr<'mcx>) -> bool
 );
 
 seam_core::seam!(
@@ -22,7 +22,7 @@ seam_core::seam!(
     /// two arbitrary nodes (used by `transformWindowFuncCall` to de-duplicate
     /// WINDOW definitions: PARTITION BY / ORDER BY clause lists and frame
     /// offset expressions are general nodes, not bare `Expr`s).
-    pub fn equal_node(a: &types_nodes::nodes::Node<'_>, b: &types_nodes::nodes::Node<'_>) -> bool
+    pub fn equal_node<'mcx>(a: &types_nodes::nodes::Node<'mcx>, b: &types_nodes::nodes::Node<'mcx>) -> bool
 );
 
 seam_core::seam!(
@@ -31,7 +31,7 @@ seam_core::seam!(
     /// over a `List<Expr>`). Used by prepagg's `find_compatible_agg` to compare
     /// `Aggref.aggdirectargs` (an `Expr` list) and by any prep-layer dedup that
     /// compares two owned `Vec<Expr>`. Length then element-wise `equal()`.
-    pub fn equal_expr_list(a: &[types_nodes::primnodes::Expr], b: &[types_nodes::primnodes::Expr]) -> bool
+    pub fn equal_expr_list<'mcx>(a: &[types_nodes::primnodes::Expr<'mcx>], b: &[types_nodes::primnodes::Expr<'mcx>]) -> bool
 );
 
 seam_core::seam!(
@@ -39,9 +39,9 @@ seam_core::seam!(
     /// the `_equalList`/`_equalTargetEntry` form for a target list. Used by
     /// prepagg's `find_compatible_agg` to compare `Aggref.args` (analyzed
     /// aggregate argument target lists). Length then element-wise `equal()`.
-    pub fn equal_targetentry_list(
-        a: &[types_nodes::primnodes::TargetEntry<'_>],
-        b: &[types_nodes::primnodes::TargetEntry<'_>]
+    pub fn equal_targetentry_list<'mcx>(
+        a: &[types_nodes::primnodes::TargetEntry<'mcx>],
+        b: &[types_nodes::primnodes::TargetEntry<'mcx>]
     ) -> bool
 );
 
