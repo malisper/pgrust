@@ -793,10 +793,40 @@ pub fn identify_current_nestloop_params(
         // We are looking for Vars and PHVs that can be supplied by the lefthand
         // rels.  When we find one, it's okay to modify it in-place because all
         // the routines above make a fresh copy to put into curOuterParams.
-        let pv = root.nestloop_param(lc).paramval.clone();
-        match pv {
+        //
+        // C dispatches on the node tag (`IsA`) of `nlp->paramval` *by pointer*,
+        // never copying it.  A derived `paramval.clone()` here is unsound: when
+        // the PHV's `phexpr` still wraps a `SubLink` (the very edge case handled
+        // below), `Expr::clone` recurses into the panicking `SubLink::clone`
+        // (and for any context-allocated child it would bit-copy a `PgBox<'mcx>`
+        // into a second owner — a double-free against the planner arena).  So we
+        // only *borrow* `paramval` to read its tag and the handful of scalar
+        // fields C reads (`var->varno`; `phv->phid`/`phlevelsup`), then mutate
+        // the original in place exactly like C.
+        enum ParamKindToken {
+            LeftVar,
+            Phv { phid: u32, phlevelsup: u32 },
+            Other,
+        }
+        let token = match &root.nestloop_param(lc).paramval {
             Expr::Var(var) if relids_is_member::call(var.varno, leftrelids) => {
-                let rel = root.simple_rel_array[var.varno as usize]
+                ParamKindToken::LeftVar
+            }
+            Expr::PlaceHolderVar(phv) => ParamKindToken::Phv {
+                phid: phv.phid,
+                phlevelsup: phv.phlevelsup,
+            },
+            _ => ParamKindToken::Other,
+        };
+        match token {
+            ParamKindToken::LeftVar => {
+                // Reborrow to read `varno` (the guard already confirmed the tag
+                // and left-rel membership above).
+                let varno = match &root.nestloop_param(lc).paramval {
+                    Expr::Var(var) => var.varno,
+                    _ => unreachable!("paramval tag was just matched as Var"),
+                };
+                let rel = root.simple_rel_array[varno as usize]
                     .expect("paramassign: simple_rel_array slot for nestloop Var");
                 let nulling = root.rel_arena[rel.index()].nulling_relids.clone();
                 let intersected = relids_intersect::call(&nulling, leftrelids);
@@ -806,8 +836,20 @@ pub fn identify_current_nestloop_params(
                 }
                 result.push(lc);
             }
-            Expr::PlaceHolderVar(phv) => {
-                let phinfo = find_placeholder_info(root, &phv)?;
+            ParamKindToken::Phv { phid, phlevelsup } => {
+                // `find_placeholder_info` reads only `phid`/`phlevelsup` from the
+                // PHV, so feed it a minimal stand-in (no `phexpr`) instead of
+                // cloning the real PHV — cloning would recurse into the SubLink
+                // and panic.  Faithful to C, which passes the live pointer to a
+                // routine that touches just those two scalars.
+                let probe = PlaceHolderVar {
+                    phexpr: None,
+                    phrels: ExprRelids::default(),
+                    phnullingrels: ExprRelids::default(),
+                    phid,
+                    phlevelsup,
+                };
+                let phinfo = find_placeholder_info(root, &probe)?;
                 let eval_at = root.phinfo(phinfo).ph_eval_at.clone();
 
                 if relids_is_subset::call(&eval_at, &allleftrelids) && relids_overlap::call(&eval_at, leftrelids)
@@ -837,7 +879,7 @@ pub fn identify_current_nestloop_params(
                     kept.push(lc);
                 }
             }
-            _ => kept.push(lc),
+            ParamKindToken::Other => kept.push(lc),
         }
     }
 
