@@ -435,8 +435,22 @@ pub fn cluster_rel(
 
     // The C body uses `goto out`; the inner closure replicates it, then the
     // `out:` cleanup runs unconditionally afterward.
+    let mut OldHeap = OldHeap;
     let body_result: PgResult<()> = cluster_rel_body(mcx, &OldHeap, tableOid, indexOid, &params,
         recheck, verbose, save_userid);
+
+    // The C body owns the single `relation_close(OldHeap, ...)`: every success
+    // path of `cluster_rel_body` (its `goto out` bailouts and the main
+    // `rebuild_relation` leg) already released `OldHeap`'s relcache reference
+    // by OID. So on `Ok`, disarm this owned handle's `Drop` to avoid a second
+    // refcount release (which would trip the `rd_refcnt > 0` guard and crash
+    // the backend — the VACUUM FULL / CLUSTER double-close). On `Err`, the body
+    // bailed out *before* closing (the `ereport(ERROR)` legs), so leave `Drop`
+    // armed to release the reference on the error path, mirroring C's resowner
+    // cleanup at transaction abort.
+    if body_result.is_ok() {
+        OldHeap.disarm_closer();
+    }
 
     // out:
     match body_result {

@@ -490,6 +490,20 @@ impl<'mcx> Relation<'mcx> {
             None => Ok(()),
         }
     }
+
+    /// Surrender this handle's release authority *without* closing the
+    /// relation, so its `Drop` will not release the relcache reference.
+    ///
+    /// This is for the case where the single C-level `relation_close`/
+    /// `table_close` has already been performed by another (by-OID) path on the
+    /// same relation — e.g. `cluster_rel`, where the body releases `OldHeap`'s
+    /// refcount via `relation_close(rd_id, NoLock)` itself. The owned handle is
+    /// still in scope and would otherwise double-release the refcount from its
+    /// `Drop` (tripping the `rd_refcnt > 0` guard). After this call the handle
+    /// is an inert view; the relation has already been closed exactly once.
+    pub fn disarm_closer(&mut self) {
+        let _ = self.closer.take();
+    }
 }
 
 impl<'mcx> core::ops::Deref for Relation<'mcx> {
