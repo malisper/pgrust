@@ -609,3 +609,44 @@ seam_core::seam!(
         buffer: Buffer,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `heap_beginscan(relation, snapshot, nkeys=0, key=NULL, pscan=NULL, flags)`
+    /// (heapam.c) — start a sequential heap scan. The owned variant takes the
+    /// relation by value (the scan holds it for its duration, aliased by the
+    /// caller) and the registered MVCC `snapshot`. The scankey-less / non-parallel
+    /// full-table case (`flags` = `SO_TYPE_SEQSCAN | SO_ALLOW_STRAT |
+    /// SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE`) is all callers here need. Returns the
+    /// owned [`TableScanDesc`] (`Box<TableScanDescData>`). `Err` carries the
+    /// relcache-refcount / scan-setup error surface. **Installed by
+    /// `backend-access-heap-heapam`.**
+    pub fn heap_beginscan<'mcx>(
+        mcx: Mcx<'mcx>,
+        relation: Relation<'mcx>,
+        snapshot: SnapshotData,
+        flags: u32,
+    ) -> PgResult<types_tableam::relscan::TableScanDesc<'mcx>>
+);
+
+seam_core::seam!(
+    /// `heap_getnext(sscan, ForwardScanDirection)` (heapam.c) — fetch the next
+    /// MVCC-visible tuple of a sequential scan. Returns the next [`FormedTuple`]
+    /// (deep-copied into `mcx` so it outlives the scan's buffer state), or `None`
+    /// at end of scan. `Err` carries the clog/multixact/buffer `ereport(ERROR)`
+    /// surface the visibility test raises. **Installed by
+    /// `backend-access-heap-heapam`.**
+    pub fn heap_getnext<'mcx>(
+        mcx: Mcx<'mcx>,
+        sscan: &mut types_tableam::relscan::TableScanDescData<'mcx>,
+    ) -> PgResult<Option<FormedTuple<'mcx>>>
+);
+
+seam_core::seam!(
+    /// `heap_endscan(sscan)` (heapam.c) — end a sequential heap scan, releasing
+    /// the relation refcount and any pinned buffer. The owned
+    /// [`TableScanDesc`] is consumed. **Installed by
+    /// `backend-access-heap-heapam`.**
+    pub fn heap_endscan<'mcx>(
+        sscan: types_tableam::relscan::TableScanDesc<'mcx>,
+    ) -> PgResult<()>
+);

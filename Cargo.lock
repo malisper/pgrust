@@ -8184,6 +8184,7 @@ dependencies = [
  "backend-commands-tablespace-globals-seams",
  "backend-commands-tablespace-seams",
  "backend-commands-trigger",
+ "backend-commands-trigger-seams",
  "backend-commands-view-seams",
  "backend-executor-execMain-seams",
  "backend-executor-execTuples",
@@ -8391,6 +8392,7 @@ dependencies = [
  "backend-storage-lmgr-lmgr",
  "backend-tcop-utility-out-seams",
  "backend-utils-adt-datum-seams",
+ "backend-utils-adt-ri-triggers-seams",
  "backend-utils-cache-inval",
  "backend-utils-cache-lsyscache",
  "backend-utils-cache-lsyscache-seams",
@@ -8402,6 +8404,7 @@ dependencies = [
  "backend-utils-init-miscinit",
  "backend-utils-init-small",
  "backend-utils-misc-guc-tables",
+ "backend-utils-time-snapmgr-seams",
  "mcx",
  "seam-core",
  "types-acl",
@@ -21060,7 +21063,11 @@ dependencies = [
 name = "backend-utils-adt-ri-triggers-seams"
 version = "0.0.0"
 dependencies = [
+ "mcx",
  "seam-core",
+ "types-error",
+ "types-rel",
+ "types-ri-triggers",
 ]
 
 [[package]]

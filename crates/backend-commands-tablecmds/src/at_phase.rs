@@ -48,7 +48,8 @@ use types_nodes::parsenodes::{
 };
 use types_rel::Relation;
 use types_storage::lock::{
-    LOCKMODE, AccessExclusiveLock, NoLock, ShareRowExclusiveLock, ShareUpdateExclusiveLock,
+    LOCKMODE, AccessExclusiveLock, NoLock, RowShareLock, ShareRowExclusiveLock,
+    ShareUpdateExclusiveLock,
 };
 use types_tuple::access::{
     RangeVar as AccessRangeVar, RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX,
@@ -1985,17 +1986,72 @@ fn ATRewriteTables<'mcx>(
         }
     }
 
-    // Foreign-key constraints are checked in a final pass (after all rewrites).
+    // Foreign-key constraints are checked in a final pass, since (a) it's
+    // generally best to examine each one separately, and (b) it's at least
+    // theoretically possible that we have changed both relations of the foreign
+    // key, and we'd better have finished both rewrites before we try to read the
+    // tables.
     for ti in 0..wqueue.len() {
+        // Relations without storage may be ignored here too.
         if !backend_catalog_heap::RELKIND_HAS_STORAGE(wqueue[ti].relkind) {
             continue;
         }
+
+        // rel = NULL: opened lazily on the first FK constraint, kept across the
+        // inner loop (C `if (rel == NULL) rel = table_open(tab->relid, NoLock)`).
+        let mut rel: Option<Relation<'mcx>> = None;
+
         for ci in 0..wqueue[ti].constraints.len() {
             if wqueue[ti].constraints[ci].contype
-                == types_nodes::ddlnodes::ConstrType::CONSTR_FOREIGN as i32
+                != types_nodes::ddlnodes::ConstrType::CONSTR_FOREIGN as i32
             {
-                unported("ATRewriteTables: validateForeignKeyConstraint final pass");
+                continue;
             }
+
+            let conname = wqueue[ti].constraints[ci]
+                .name
+                .as_ref()
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default();
+            let refrelid = wqueue[ti].constraints[ci].refrelid;
+            let refindid = wqueue[ti].constraints[ci].refindid;
+            let conid = wqueue[ti].constraints[ci].conid;
+
+            if rel.is_none() {
+                // Long since locked, no need for another.
+                rel = Some(relation_open(mcx, wqueue[ti].relid, NoLock)?);
+            }
+
+            // refrel = table_open(con->refrelid, RowShareLock).
+            let refrel = relation_open(mcx, refrelid, RowShareLock)?;
+
+            // con->conwithperiod: the FK uses PERIOD? Read pg_constraint.conperiod
+            // (the NewConstraint carries no period flag).
+            let hasperiod =
+                backend_utils_cache_syscache_seams::search_constraint_form_by_oid::call(conid)?
+                    .map(|c| c.form.conperiod)
+                    .unwrap_or(false);
+
+            // validateForeignKeyConstraint(conname, rel, refrel, con->refindid,
+            //                              con->conid, con->conwithperiod);
+            let result = backend_commands_trigger_seams::validate_foreign_key_constraint::call(
+                mcx,
+                &conname,
+                rel.as_ref().expect("rel opened above"),
+                &refrel,
+                refindid,
+                conid,
+                hasperiod,
+            );
+
+            // No need to mark the constraint row as validated; that was done when
+            // the row was inserted earlier. table_close(refrel, NoLock).
+            refrel.close(NoLock)?;
+            result?;
+        }
+
+        if let Some(rel) = rel {
+            rel.close(NoLock)?;
         }
     }
 

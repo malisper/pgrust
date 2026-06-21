@@ -334,6 +334,11 @@ pub fn init_seams() {
     backend_utils_adt_ri_triggers_seams::invalidate_constraint_cache_callback::set(
         cache::invalidate_constraint_cache_callback,
     );
+    // The FK phase-3 validator (`validateForeignKeyConstraint`, owned by the
+    // trigger manager) calls these through `-seams` to avoid a dependency cycle:
+    // the set-based initial check and the per-row check-on-insert trigger.
+    backend_utils_adt_ri_triggers_seams::ri_initial_check::set(triggers::ri_initial_check);
+    backend_utils_adt_ri_triggers_seams::ri_fkey_check_ins::set(triggers::ri_fkey_check_ins);
     // Register the RI trigger procs into the fmgr builtin table so that the
     // FK-enforcing triggers dispatch to their bodies (C: their `fmgr_builtins[]`
     // rows). Must run before any FK trigger fires.

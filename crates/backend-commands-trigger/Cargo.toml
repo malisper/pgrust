@@ -39,6 +39,10 @@ backend-utils-cache-relcache-seams = { path = "../backend-utils-cache-relcache-s
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+# FK phase-3 validation scan (validate_foreign_key_constraint): the registered
+# MVCC snapshot for the scan + the RI set-based check / per-row check trigger.
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-utils-adt-ri-triggers-seams = { path = "../backend-utils-adt-ri-triggers-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 # assign_session_replication_role flushes the plan cache when the role changes.

@@ -606,3 +606,27 @@ seam_core::seam!(
         initdeferred: bool,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `validateForeignKeyConstraint(conname, rel, pkrel, pkindOid,
+    /// constraintOid, hasperiod)` (tablecmds.c) — validate that all existing
+    /// rows of the referencing relation `rel` satisfy the FK constraint, called
+    /// from ALTER TABLE phase 3 (ADD CONSTRAINT validating + ALTER CONSTRAINT
+    /// ENFORCED). Owned by the trigger manager because the fire-the-trigger
+    /// fallback installs the current-trigger side-channel (a synthetic `Trigger`
+    /// + per-row `TriggerData`) the RI procs read. It first tries the set-based
+    /// `RI_Initial_Check` (single LEFT JOIN SPI query); if that cannot run
+    /// (permissions/RLS) or `hasperiod` (temporal FK, no LEFT JOIN yet), it scans
+    /// every row firing `RI_FKey_check_ins`. On a violation either leg raises the
+    /// standard FK-violation `ereport(ERROR)` (`Err`). **Installed by
+    /// `backend-commands-trigger`.**
+    pub fn validate_foreign_key_constraint<'mcx>(
+        mcx: Mcx<'mcx>,
+        conname: &str,
+        rel: &types_rel::Relation<'mcx>,
+        pkrel: &types_rel::Relation<'mcx>,
+        pkind_oid: Oid,
+        constraint_oid: Oid,
+        hasperiod: bool,
+    ) -> PgResult<()>
+);

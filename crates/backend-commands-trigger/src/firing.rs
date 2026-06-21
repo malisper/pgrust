@@ -785,6 +785,224 @@ fn fetch_trigger_tuple<'mcx>(
 }
 
 // ===========================================================================
+// validateForeignKeyConstraint (tablecmds.c:13694)
+// ===========================================================================
+
+/// `TRIGGER_FIRES_ON_ORIGIN` (`commands/trigger.h`) — the default `tgenabled`.
+const TRIGGER_FIRES_ON_ORIGIN: i8 = b'O' as i8;
+
+/// `validateForeignKeyConstraint(conname, rel, pkrel, pkindOid, constraintOid,
+/// hasperiod)` (tablecmds.c:13694) — validate that every existing row of the
+/// referencing relation `rel` satisfies the FK constraint.
+///
+/// It lives with the trigger manager (rather than tablecmds) because both legs
+/// read the RI procs' `Trigger`/`TriggerData` off the current-trigger
+/// side-channel: a synthetic `Trigger` carrying the constraint identity
+/// (`tgname`/`tgconstrrelid`/`tgconstrindid`/`tgconstraint`) is installed for the
+/// set-based `RI_Initial_Check`, and a per-row `TriggerData` (with the scanned
+/// row as `tg_trigslot`) for the fire-the-trigger fallback. The owned analogue of
+/// C's stack `Trigger trig = {0}`.
+pub fn validate_foreign_key_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    conname: &str,
+    rel: &types_rel::Relation<'mcx>,
+    pkrel: &types_rel::Relation<'mcx>,
+    pkind_oid: Oid,
+    constraint_oid: Oid,
+    hasperiod: bool,
+) -> PgResult<()> {
+    // ereport(DEBUG1, "validating foreign key constraint \"%s\"") — no-op.
+
+    // Build a trigger call structure; we'll need it either way.
+    //   trig.tgoid = InvalidOid;            trig.tgname = conname;
+    //   trig.tgenabled = TRIGGER_FIRES_ON_ORIGIN;  trig.tgisinternal = true;
+    //   trig.tgconstrrelid = RelationGetRelid(pkrel);
+    //   trig.tgconstrindid = pkindOid;      trig.tgconstraint = constraintOid;
+    //   trig.tgdeferrable = false;          trig.tginitdeferred = false;
+    // The remaining fields are the C `{0}` zero-fill. Box the synthetic Trigger
+    // into `mcx` and extend its lifetime to 'static — the side-channel that
+    // borrows it is installed and dropped within this call (same query-context
+    // discipline as `after_trigger_execute`).
+    let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
+        let boxed = trigger_box_clone(mcx, conname, pkrel.rd_id, pkind_oid, constraint_oid)?;
+        // SAFETY: allocated in `mcx`; borrowed only for this call's duration.
+        unsafe { core::mem::transmute(boxed) }
+    };
+
+    // `tg_relation` for the RI procs (relname/attrs/descriptor reads): the
+    // referencing relation, aliased (refcount bump) for the call's duration.
+    let tg_relation: types_rel::Relation<'static> = {
+        let aliased = rel.alias();
+        // SAFETY: query-context lifetime extension, as in `after_trigger_execute`.
+        unsafe { core::mem::transmute(aliased) }
+    };
+
+    // See if we can do it with a single LEFT JOIN query (RI_Initial_Check). We
+    // can't do a LEFT JOIN for temporal FKs yet (hasperiod), and a false result
+    // means we must proceed with the fire-the-trigger method.
+    //
+    // Install the side-channel TriggerData (no slot — the initial check reads
+    // only the trigger's tgconstraint) for the duration of the call.
+    {
+        let trigdata = TriggerData {
+            type_: T_TriggerData,
+            tg_event: 0,
+            tg_relation: Some(tg_relation),
+            tg_trigtuple: None,
+            tg_newtuple: None,
+            tg_trigger: Some(trigger_box),
+            tg_trigslot: None,
+            tg_newslot: None,
+            tg_oldtable: None,
+            tg_newtable: None,
+            tg_updatedcols: None,
+        };
+        let _td_guard = CurrentTriggerGuard::install(trigdata);
+        if !hasperiod
+            && backend_utils_adt_ri_triggers_seams::ri_initial_check::call(
+                mcx,
+                types_ri_triggers::TriggerRef(crate::ri_accessors::CURRENT),
+                rel,
+                pkrel,
+            )?
+        {
+            return Ok(());
+        }
+    }
+
+    // Scan through each tuple, calling RI_FKey_check_ins (insert trigger) as if
+    // that tuple had just been inserted. If any fail, RI_FKey_check_ins
+    // ereport(ERROR)s and that's that.
+    //
+    //   snapshot = RegisterSnapshot(GetLatestSnapshot());
+    let snapshot = backend_utils_time_snapmgr_seams::register_snapshot::call(
+        backend_utils_time_snapmgr_seams::get_latest_snapshot::call()?,
+    )?;
+
+    //   scan = table_beginscan(rel, snapshot, 0, NULL);
+    // C's table_beginscan flags: SO_TYPE_SEQSCAN | SO_ALLOW_STRAT |
+    // SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE.
+    use types_tableam::relscan::{
+        SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TYPE_SEQSCAN,
+    };
+    let flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
+    let mut scan = backend_access_heap_heapam_seams::heap_beginscan::call(
+        mcx,
+        rel.alias(),
+        snapshot.clone(),
+        flags,
+    )?;
+
+    // The synthetic trigger / tg_relation must be rebuilt for the per-row
+    // TriggerData (the initial-check TriggerData consumed the originals above).
+    let scan_result: PgResult<()> = (|| {
+        while let Some(formed) =
+            backend_access_heap_heapam_seams::heap_getnext::call(mcx, &mut scan)?
+        {
+            // CHECK_FOR_INTERRUPTS(): no signal machinery reachable here (no-op).
+
+            // The scanned row, deep-copied into `mcx`, rides the slot
+            // side-channel as `tg_trigslot` so RI_FKey_check_ins' slot_getattr
+            // reads its FK columns; its HeapTuple view is `tg_trigtuple`.
+            let formed_static: types_tuple::backend_access_common_heaptuple::FormedTuple<'static> = {
+                // SAFETY: `formed` is allocated in `mcx`; the side-channel that
+                // borrows it is installed and dropped within this loop iteration.
+                unsafe { core::mem::transmute(formed) }
+            };
+
+            // Rebuild the synthetic Trigger + tg_relation for this row's
+            // TriggerData (each is moved into the per-call channel).
+            let row_trigger: mcx::PgBox<'static, Trigger<'static>> = {
+                let cloned = trigger_box_clone(mcx, conname, pkrel.rd_id, pkind_oid, constraint_oid)?;
+                unsafe { core::mem::transmute(cloned) }
+            };
+            let row_relation: types_rel::Relation<'static> = {
+                let aliased = rel.alias();
+                unsafe { core::mem::transmute(aliased) }
+            };
+            let tg_trigtuple: HeapTuple<'static> = {
+                let copied: HeapTupleData<'mcx> = formed_static.tuple.clone_in(mcx)?;
+                let boxed: mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
+                    mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
+                Some(unsafe { core::mem::transmute(boxed) })
+            };
+
+            let trigdata = TriggerData {
+                type_: T_TriggerData,
+                tg_event: TRIGGER_EVENT_INSERT | TRIGGER_EVENT_ROW,
+                tg_relation: Some(row_relation.alias()),
+                tg_trigtuple,
+                tg_newtuple: None,
+                tg_trigger: Some(row_trigger),
+                tg_trigslot: Some(types_nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32)),
+                tg_newslot: None,
+                tg_oldtable: None,
+                tg_newtable: None,
+                tg_updatedcols: None,
+            };
+
+            // Install the per-row slot side-channel (the scanned tuple + the
+            // relation descriptor) and the TriggerData channel, then fire the
+            // INSERT check trigger.
+            let _slots_guard = CurrentSlotsGuard::install(CurrentTriggerSlots {
+                relation: row_relation,
+                trigtuple: Some(formed_static),
+                newtuple: None,
+            });
+            let _td_guard = CurrentTriggerGuard::install(trigdata);
+
+            backend_utils_adt_ri_triggers_seams::ri_fkey_check_ins::call(
+                mcx,
+                types_ri_triggers::TriggerDataRef(crate::ri_accessors::CURRENT),
+            )?;
+        }
+        Ok(())
+    })();
+
+    // table_endscan(scan); UnregisterSnapshot(snapshot);
+    // (Always run, even on a violation Err, so the scan/snapshot don't leak.)
+    let end = backend_access_heap_heapam_seams::heap_endscan::call(scan);
+    backend_utils_time_snapmgr_seams::unregister_snapshot::call(snapshot);
+    scan_result?;
+    end?;
+    Ok(())
+}
+
+/// Build the synthetic FK-validation `Trigger` (the C `Trigger trig = {0}` with
+/// the constraint-identity fields filled in), used per row in the
+/// fire-the-trigger fallback of [`validate_foreign_key_constraint`].
+fn trigger_box_clone<'mcx>(
+    mcx: Mcx<'mcx>,
+    conname: &str,
+    pkrelid: Oid,
+    pkind_oid: Oid,
+    constraint_oid: Oid,
+) -> PgResult<mcx::PgBox<'mcx, Trigger<'mcx>>> {
+    let trig = Trigger {
+        tgoid: INVALID_OID,
+        tgname: mcx::PgString::from_str_in(conname, mcx)?,
+        tgfoid: INVALID_OID,
+        tgtype: 0,
+        tgenabled: TRIGGER_FIRES_ON_ORIGIN,
+        tgisinternal: true,
+        tgisclone: false,
+        tgconstrrelid: pkrelid,
+        tgconstrindid: pkind_oid,
+        tgconstraint: constraint_oid,
+        tgdeferrable: false,
+        tginitdeferred: false,
+        tgnargs: 0,
+        tgnattr: 0,
+        tgattr: mcx::PgVec::new_in(mcx),
+        tgargs: mcx::PgVec::new_in(mcx),
+        tgqual: None,
+        tgoldtable: None,
+        tgnewtable: None,
+    };
+    mcx::PgBox::try_new_in(trig, mcx).map_err(|_| mcx.oom(0))
+}
+
+// ===========================================================================
 // afterTriggerMarkEvents (trigger.c:4614)
 // ===========================================================================
 
@@ -3267,6 +3485,10 @@ pub fn init_seams() {
     s::after_trigger_end_xact::set(after_trigger_end_xact_impl);
     s::after_trigger_begin_sub_xact::set(after_trigger_begin_sub_xact_impl);
     s::after_trigger_end_sub_xact::set(after_trigger_end_sub_xact_impl);
+
+    // FK phase-3 validation scan (validateForeignKeyConstraint), called from
+    // ALTER TABLE ADD/ALTER CONSTRAINT through tablecmds.
+    s::validate_foreign_key_constraint::set(validate_foreign_key_constraint);
 
     // DDL name lookup (deferred catalog-read leg).
     s::get_trigger_oid::set(get_trigger_oid_impl);

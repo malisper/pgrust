@@ -1325,7 +1325,7 @@ fn CreateFKCheckTrigger<'mcx>(
 // createForeignKeyActionTriggers (tablecmds.c:13857)
 // ===========================================================================
 
-fn createForeignKeyActionTriggers<'mcx>(
+pub(crate) fn createForeignKeyActionTriggers<'mcx>(
     mcx: Mcx<'mcx>,
     my_rel_oid: Oid,
     ref_rel_oid: Oid,
@@ -1425,7 +1425,7 @@ fn action_trigger_func<'mcx>(
 // createForeignKeyCheckTriggers (tablecmds.c:13992)
 // ===========================================================================
 
-fn createForeignKeyCheckTriggers<'mcx>(
+pub(crate) fn createForeignKeyCheckTriggers<'mcx>(
     mcx: Mcx<'mcx>,
     my_rel_oid: Oid,
     ref_rel_oid: Oid,

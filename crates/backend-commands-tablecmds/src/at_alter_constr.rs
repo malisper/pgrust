@@ -3,11 +3,14 @@
 //!
 //! Fully ported: the deferrability path (`ALTER CONSTRAINT ... [NOT]
 //! DEFERRABLE / INITIALLY {DEFERRED,IMMEDIATE}`) for non-partitioned tables,
-//! including the `pg_constraint` and `pg_trigger` catalog writes. The
-//! enforceability path (which depends on the unported phase-3
-//! `validateForeignKeyConstraint` final pass) and the inheritability path
-//! (NOT NULL `connoinherit` child propagation) faithfully seam-and-panic, as
-//! does recursion into partition children.
+//! including the `pg_constraint` and `pg_trigger` catalog writes; and the
+//! enforceability ENFORCED leg (NOT ENFORCED → ENFORCED) for non-partitioned
+//! tables: it updates `pg_constraint`, recreates the FK action / check triggers
+//! (`createForeignKey{Action,Check}Triggers`), and queues the phase-3
+//! `validateForeignKeyConstraint` recheck (driven by the FK final pass in
+//! `ATRewriteTables`). The NOT ENFORCED leg's `DropForeignKeyConstraintTriggers`,
+//! the inheritability path (NOT NULL `connoinherit` child propagation), and
+//! recursion into partition children faithfully seam-and-panic.
 
 use mcx::{Mcx, PgVec};
 use types_catalog::catalog_dependency::ObjectAddress;
@@ -16,15 +19,65 @@ use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use types_nodes::ddlnodes::ATAlterConstraint;
 use types_rel::Relation;
-use types_storage::lock::LOCKMODE;
-use types_tuple::access::RELKIND_PARTITIONED_TABLE;
+use types_storage::lock::{LOCKMODE, NoLock};
+use types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 
+use backend_access_common_relation::relation_open;
 use backend_catalog_objectaddress::consts::ConstraintRelationId;
 use backend_catalog_pg_constraint::{AlterConstrFlags, AlterConstrUpdateConstraintEntry};
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use backend_utils_error::ereport;
 
 use crate::at_phase::AlteredTableInfo;
+
+/// A `makeNode(Constraint)` skeleton (palloc0 baseline) carrying only the FK
+/// fields the trigger-creation helpers read, used by the ENFORCED transition.
+fn make_fk_constraint<'mcx>(
+    mcx: Mcx<'mcx>,
+    conname: &str,
+    fk_matchtype: i8,
+    fk_upd_action: i8,
+    fk_del_action: i8,
+) -> PgResult<types_nodes::ddlnodes::Constraint<'mcx>> {
+    use types_nodes::ddlnodes::ConstrType;
+    Ok(types_nodes::ddlnodes::Constraint {
+        contype: ConstrType::CONSTR_FOREIGN,
+        conname: Some(mcx::PgString::from_str_in(conname, mcx)?),
+        deferrable: false,
+        initdeferred: false,
+        is_enforced: true,
+        skip_validation: false,
+        initially_valid: false,
+        is_no_inherit: false,
+        raw_expr: None,
+        cooked_expr: None,
+        generated_when: 0,
+        generated_kind: 0,
+        nulls_not_distinct: false,
+        keys: PgVec::new_in(mcx),
+        without_overlaps: false,
+        including: PgVec::new_in(mcx),
+        exclusions: PgVec::new_in(mcx),
+        options: PgVec::new_in(mcx),
+        indexname: None,
+        indexspace: None,
+        reset_default_tblspc: false,
+        access_method: None,
+        where_clause: None,
+        pktable: None,
+        fk_attrs: PgVec::new_in(mcx),
+        pk_attrs: PgVec::new_in(mcx),
+        fk_with_period: false,
+        pk_with_period: false,
+        fk_matchtype,
+        fk_upd_action,
+        fk_del_action,
+        fk_del_set_cols: PgVec::new_in(mcx),
+        old_conpfeqop: PgVec::new_in(mcx),
+        old_pktable_oid: 0,
+        location: -1,
+    })
+}
 
 fn unported(what: &str) -> ! {
     panic!(
@@ -43,7 +96,7 @@ fn name_str(buf: &[u8; 64]) -> &str {
 /// (tablecmds.c:12198).
 pub fn ATExecAlterConstraint<'mcx>(
     mcx: Mcx<'mcx>,
-    _wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     rel: &Relation<'mcx>,
     cmdcon: &ATAlterConstraint<'mcx>,
     recurse: bool,
@@ -170,7 +223,7 @@ pub fn ATExecAlterConstraint<'mcx>(
     };
 
     // Do the actual catalog work, and recurse if necessary.
-    if ATExecAlterConstraintInternal(mcx, cmdcon, rel, &con, recurse, lockmode)? {
+    if ATExecAlterConstraintInternal(mcx, wqueue, cmdcon, rel, &con, recurse, lockmode)? {
         address = ObjectAddress {
             classId: ConstraintRelationId,
             objectId: currcon.oid,
@@ -185,6 +238,7 @@ pub fn ATExecAlterConstraint<'mcx>(
 /// enforceability / deferrability / inheritability subroutines.
 fn ATExecAlterConstraintInternal<'mcx>(
     mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     cmdcon: &ATAlterConstraint<'mcx>,
     rel: &Relation<'mcx>,
     con: &types_catalog::pg_constraint::ConstraintFormCopy,
@@ -194,7 +248,7 @@ fn ATExecAlterConstraintInternal<'mcx>(
     let mut changed = false;
 
     if cmdcon.alterEnforceability {
-        if ATExecAlterConstrEnforceability(mcx, cmdcon, rel, con, lockmode)? {
+        if ATExecAlterConstrEnforceability(mcx, wqueue, cmdcon, rel, con, lockmode)? {
             changed = true;
         }
     } else if cmdcon.alterDeferrability {
@@ -276,19 +330,144 @@ fn ATExecAlterConstrDeferrability<'mcx>(
     Ok(changed)
 }
 
-/// `ATExecAlterConstrEnforceability(...)` (tablecmds.c:12412). Faithfully
-/// seam-and-panicked: the ENFORCED leg requires the phase-3
-/// `validateForeignKeyConstraint` final pass (still unported, see
-/// `ATRewriteTables`), and the NOT ENFORCED leg requires
-/// `DropForeignKeyConstraintTriggers`.
+/// `ATExecAlterConstrEnforceability(...)` (tablecmds.c:12412) — apply a
+/// `[NOT] ENFORCED` change to a foreign-key constraint.
+///
+/// The ENFORCED leg (NOT ENFORCED → ENFORCED) updates `pg_constraint`, recreates
+/// the FK action / check triggers, and queues the phase-3
+/// `validateForeignKeyConstraint` recheck against existing rows (driven by the FK
+/// final pass in `ATRewriteTables`). The NOT ENFORCED leg's
+/// `DropForeignKeyConstraintTriggers` and the partition-recursion
+/// (`AlterConstrEnforceabilityRecurse`) are distinct unported functions and
+/// faithfully seam-and-panic.
 fn ATExecAlterConstrEnforceability<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _cmdcon: &ATAlterConstraint<'mcx>,
-    _rel: &Relation<'mcx>,
-    _con: &types_catalog::pg_constraint::ConstraintFormCopy,
-    _lockmode: LOCKMODE,
+    mcx: Mcx<'mcx>,
+    wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
+    cmdcon: &ATAlterConstraint<'mcx>,
+    rel: &Relation<'mcx>,
+    con: &types_catalog::pg_constraint::ConstraintFormCopy,
+    lockmode: LOCKMODE,
 ) -> PgResult<bool> {
-    unported("ALTER CONSTRAINT ENFORCED/NOT ENFORCED (ATExecAlterConstrEnforceability — needs validateForeignKeyConstraint phase-3 pass / DropForeignKeyConstraintTriggers)");
+    let currcon = con.form;
+    let conoid = currcon.oid;
+    debug_assert_eq!(currcon.contype, CONSTRAINT_FOREIGN);
+
+    // For the top-level (non-recursing) call, the root FK / PK relids are the
+    // constraint's own conrelid / confrelid (C passes these as fkrelid/pkrelid;
+    // recursion preserves the root, which is the partitioned leg below).
+    let fkrelid = currcon.conrelid;
+    let pkrelid = currcon.confrelid;
+
+    // rel = table_open(currcon->conrelid, lockmode). The caller already holds the
+    // relation as `rel` (= conrelid for a top-level alter); reuse it.
+    let crel = relation_open(mcx, currcon.conrelid, lockmode)?;
+    let crel_relkind = crel.rd_rel.relkind;
+
+    let result = (|| -> PgResult<bool> {
+        let mut changed = false;
+
+        if currcon.conenforced != cmdcon.is_enforced {
+            let flags = AlterConstrFlags {
+                alter_enforceability: true,
+                is_enforced: cmdcon.is_enforced,
+                alter_deferrability: false,
+                deferrable: currcon.condeferrable,
+                initdeferred: currcon.condeferred,
+                alter_inheritability: false,
+                noinherit: currcon.connoinherit,
+            };
+            let conrelid = AlterConstrUpdateConstraintEntry(mcx, conoid, &flags)?;
+            backend_utils_cache_inval::cache_invalidate::CacheInvalidateRelcacheByRelid(conrelid)?;
+            changed = true;
+        }
+
+        if !cmdcon.is_enforced {
+            // Setting a constraint to NOT ENFORCED: its constraint triggers must
+            // be dropped. The partition recursion + DropForeignKeyConstraintTriggers
+            // are distinct unported functions.
+            if crel_relkind == RELKIND_PARTITIONED_TABLE
+                || lsyscache_seams::get_rel_relkind::call(currcon.confrelid)?
+                    == RELKIND_PARTITIONED_TABLE
+            {
+                unported("ALTER CONSTRAINT NOT ENFORCED partition-child recursion (AlterConstrEnforceabilityRecurse)");
+            }
+            unported("ALTER CONSTRAINT NOT ENFORCED (DropForeignKeyConstraintTriggers)");
+        } else if changed {
+            // Create triggers. Prepare the minimal Constraint the trigger-creation
+            // helpers read (conname / fk_matchtype / fk_upd_action / fk_del_action).
+            // C: fkconstraint = makeNode(Constraint) (palloc0) with those four
+            // fields filled in.
+            let fkconstraint = make_fk_constraint(
+                mcx,
+                name_str(&currcon.conname),
+                currcon.confmatchtype,
+                currcon.confupdtype,
+                currcon.confdeltype,
+            )?;
+
+            // Create referenced (action) triggers when this row is the FK row of
+            // the root pair.
+            if currcon.conrelid == fkrelid {
+                crate::at_fk::createForeignKeyActionTriggers(
+                    mcx,
+                    currcon.conrelid,
+                    currcon.confrelid,
+                    &fkconstraint,
+                    conoid,
+                    currcon.conindid,
+                    InvalidOid,
+                    InvalidOid,
+                )?;
+            }
+
+            // Create referencing (check) triggers when this row points at the
+            // root PK.
+            if currcon.confrelid == pkrelid {
+                crate::at_fk::createForeignKeyCheckTriggers(
+                    mcx,
+                    currcon.conrelid,
+                    pkrelid,
+                    &fkconstraint,
+                    conoid,
+                    currcon.conindid,
+                    InvalidOid,
+                    InvalidOid,
+                )?;
+            }
+
+            // Tell Phase 3 to check that the constraint is satisfied by existing
+            // rows. Only for plain tables whose FK row points at the root PK.
+            if crel_relkind == RELKIND_RELATION && currcon.confrelid == pkrelid {
+                let newcon = crate::at_phase::NewConstraint {
+                    name: Some(mcx::PgString::from_str_in(
+                        name_str(&currcon.conname),
+                        mcx,
+                    )?),
+                    contype: types_nodes::ddlnodes::ConstrType::CONSTR_FOREIGN as i32,
+                    refrelid: currcon.confrelid,
+                    refindid: currcon.conindid,
+                    conid: conoid,
+                    qual: None,
+                };
+                let tab = crate::at_phase::ATGetQueueEntry(mcx, wqueue, &crel)?;
+                wqueue[tab].constraints.push(newcon);
+            }
+
+            // Partition recursion.
+            if crel_relkind == RELKIND_PARTITIONED_TABLE
+                || lsyscache_seams::get_rel_relkind::call(currcon.confrelid)?
+                    == RELKIND_PARTITIONED_TABLE
+            {
+                unported("ALTER CONSTRAINT ENFORCED partition-child recursion (AlterConstrEnforceabilityRecurse)");
+            }
+        }
+
+        Ok(changed)
+    })();
+
+    // table_close(rel, NoLock).
+    crel.close(NoLock)?;
+    result
 }
 
 /// `ATExecAlterConstrInheritability(...)` (tablecmds.c:12617). Faithfully

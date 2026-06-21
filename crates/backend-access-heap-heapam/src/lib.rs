@@ -489,6 +489,35 @@ pub fn init_seams() {
         scan::heap_key_test(mcx, tuple, rel, keys)
     });
 
+    // Sequential-scan entry points for the FK phase-3 validation scan
+    // (`validateForeignKeyConstraint`'s fire-the-trigger fallback): scankey-less,
+    // non-parallel full-table scan under a registered MVCC snapshot.
+    heapam_seam::heap_beginscan::set(|mcx, relation, snapshot, flags| {
+        scan::heap_beginscan(
+            mcx,
+            relation,
+            Some(snapshot),
+            0,
+            mcx::vec_with_capacity_in(mcx, 0)?,
+            None,
+            flags,
+        )
+    });
+    // The seam returns an owned `FormedTuple` (deep-copied into `mcx`) rather
+    // than the borrow `heap_getnext` hands back, so the caller can drive its own
+    // per-row work after the scan-state borrow ends.
+    heapam_seam::heap_getnext::set(|mcx, sscan| {
+        match scan::heap_getnext(
+            mcx,
+            sscan,
+            types_scan::sdir::ScanDirection::ForwardScanDirection,
+        )? {
+            Some(tup) => Ok(Some(tup.clone_in(mcx)?)),
+            None => Ok(None),
+        }
+    });
+    heapam_seam::heap_endscan::set(|sscan| scan::heap_endscan(sscan));
+
     // F5 FREEZE: `heap_tuple_should_freeze(buffer, offnum, cutoffs, ...)` reads
     // the on-page `HeapTupleHeader` at `offnum` and runs the pure
     // `freeze::heap_tuple_should_freeze`, returning the advanced "no freeze"
