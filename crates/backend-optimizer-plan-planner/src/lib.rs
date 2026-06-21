@@ -1474,7 +1474,10 @@ fn pqe_per_rte<'mcx>(
                     let e: Expr = {
                         let parse = run.resolve(root.parse);
                         match parse.rtable[i].groupexprs[g].as_expr() {
-                            Some(e) => e.clone(),
+                            // Deep-copy through `clone_in` (copyObject shape), not
+                            // the derived `.clone()`: a groupexpr can carry a
+                            // SubLink-bearing subtree, whose derived Clone panics.
+                            Some(e) => e.clone_in(mcx)?,
                             None => {
                                 return Err(types_error::PgError::error(
                                     "subquery_planner: RTE_GROUP groupexpr is not an Expr",
@@ -1521,12 +1524,23 @@ fn pqe_per_rte<'mcx>(
                         let parse = run.resolve(root.parse);
                         let fn_node = &*parse.rtable[i].functions[f];
                         match fn_node.node_tag() {
-                            ntag::T_RangeTblFunction => fn_node
-                                .expect_rangetblfunction()
-                                .funcexpr
-                                .as_deref()
-                                .and_then(|n| n.as_expr())
-                                .cloned(),
+                            ntag::T_RangeTblFunction => {
+                                // Route through `clone_in` (not the derived
+                                // `.clone()`): a funcexpr substituted in by
+                                // subquery pullup can carry a SubLink-bearing
+                                // subtree (e.g. a view column whose expression is
+                                // a CASE containing a scalar subselect), whose
+                                // derived Clone is a guard that panics.
+                                match fn_node
+                                    .expect_rangetblfunction()
+                                    .funcexpr
+                                    .as_deref()
+                                    .and_then(|n| n.as_expr())
+                                {
+                                    Some(e) => Some(e.clone_in(mcx)?),
+                                    None => None,
+                                }
+                            }
                             _ => {
                                 return Err(types_error::PgError::error(
                                     "subquery_planner: RTE_FUNCTION functions entry is not a RangeTblFunction",
@@ -1591,11 +1605,15 @@ fn pqe_per_rte<'mcx>(
                 // docexpr
                 let doc = {
                     let parse = run.resolve(root.parse);
-                    parse.rtable[i]
+                    match parse.rtable[i]
                         .tablefunc
                         .as_deref()
                         .and_then(|n| n.as_table_func())
-                        .and_then(|tf| tf.docexpr.as_deref().cloned())
+                        .and_then(|tf| tf.docexpr.as_deref())
+                    {
+                        Some(e) => Some(e.clone_in(mcx)?),
+                        None => None,
+                    }
                 };
                 if let Some(pe) = preprocess_one!(doc) {
                     if let Some(tf) = (*run.resolve_mut(root.parse).rtable[i].tablefunc.as_mut().unwrap()).as_table_func_mut() {
@@ -1605,11 +1623,15 @@ fn pqe_per_rte<'mcx>(
                 // rowexpr
                 let row = {
                     let parse = run.resolve(root.parse);
-                    parse.rtable[i]
+                    match parse.rtable[i]
                         .tablefunc
                         .as_deref()
                         .and_then(|n| n.as_table_func())
-                        .and_then(|tf| tf.rowexpr.as_deref().cloned())
+                        .and_then(|tf| tf.rowexpr.as_deref())
+                    {
+                        Some(e) => Some(e.clone_in(mcx)?),
+                        None => None,
+                    }
                 };
                 if let Some(pe) = preprocess_one!(row) {
                     if let Some(tf) = (*run.resolve_mut(root.parse).rtable[i].tablefunc.as_mut().unwrap()).as_table_func_mut() {
@@ -1629,13 +1651,17 @@ fn pqe_per_rte<'mcx>(
                 for k in 0..ncols {
                     let ce = {
                         let parse = run.resolve(root.parse);
-                        parse.rtable[i]
+                        match parse.rtable[i]
                             .tablefunc
                             .as_deref()
                             .and_then(|n| n.as_table_func())
                             .and_then(|tf| tf.colexprs.as_ref())
                             .and_then(|v| v.get(k))
-                            .and_then(|o| o.as_deref().cloned())
+                            .and_then(|o| o.as_deref())
+                        {
+                            Some(e) => Some(e.clone_in(mcx)?),
+                            None => None,
+                        }
                     };
                     if let Some(pe) = preprocess_one!(ce) {
                         if let Some(tf) = (*run.resolve_mut(root.parse).rtable[i].tablefunc.as_mut().unwrap()).as_table_func_mut() {
@@ -1646,13 +1672,17 @@ fn pqe_per_rte<'mcx>(
                     }
                     let cde = {
                         let parse = run.resolve(root.parse);
-                        parse.rtable[i]
+                        match parse.rtable[i]
                             .tablefunc
                             .as_deref()
                             .and_then(|n| n.as_table_func())
                             .and_then(|tf| tf.coldefexprs.as_ref())
                             .and_then(|v| v.get(k))
-                            .and_then(|o| o.as_deref().cloned())
+                            .and_then(|o| o.as_deref())
+                        {
+                            Some(e) => Some(e.clone_in(mcx)?),
+                            None => None,
+                        }
                     };
                     if let Some(pe) = preprocess_one!(cde) {
                         if let Some(tf) = (*run.resolve_mut(root.parse).rtable[i].tablefunc.as_mut().unwrap()).as_table_func_mut() {
@@ -1675,13 +1705,16 @@ fn pqe_per_rte<'mcx>(
                 for k in 0..nns {
                     let ne = {
                         let parse = run.resolve(root.parse);
-                        parse.rtable[i]
+                        match parse.rtable[i]
                             .tablefunc
                             .as_deref()
                             .and_then(|n| n.as_table_func())
                             .and_then(|tf| tf.ns_uris.as_ref())
                             .and_then(|v| v.get(k))
-                            .map(|b| (**b).clone())
+                        {
+                            Some(b) => Some((**b).clone_in(mcx)?),
+                            None => None,
+                        }
                     };
                     if let Some(pe) = preprocess_one!(ne) {
                         if let Some(tf) = (*run.resolve_mut(root.parse).rtable[i].tablefunc.as_mut().unwrap()).as_table_func_mut() {
