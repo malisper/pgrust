@@ -31,6 +31,9 @@ const FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER: i32 = -7;
 /// `UNKNOWNOID` (catalog/pg_type_d.h) — the unknown literal type.
 const UNKNOWNOID: Oid = 705;
 
+/// `RECORDOID` (catalog/pg_type_d.h) — the generic record type.
+const RECORDOID: Oid = 2249;
+
 /// `transformInsertStmt(pstate, stmt)` (analyze.c:625) — transform an
 /// `InsertStmt` into an analyzed `Query`.
 pub fn transformInsertStmt<'mcx>(
@@ -542,7 +545,26 @@ pub fn transformInsertRow<'mcx>(
             .into_error());
     }
     if !stmtcols.is_empty() && exprlist.len() < icolumns.len() {
-        return Err(elog_error("INSERT has more target columns than expressions"));
+        // We can get here for cases like INSERT ... SELECT (a,b,c) FROM ...
+        // where the user accidentally created a RowExpr instead of separate
+        // columns. Add a suitable hint if that seems to be the problem.
+        // C: parser_errposition(pstate, exprLocation(list_nth(icolumns,
+        //     list_length(exprlist)))) — icolumns elements are ResTarget, whose
+        // exprLocation is its `location` field.
+        let loc = icolumns[exprlist.len()].location;
+        let mut report = ereport(ERROR)
+            .errcode(ERRCODE_SYNTAX_ERROR)
+            .errmsg_internal("INSERT has more target columns than expressions".to_string());
+        if exprlist.len() == 1
+            && count_rowexpr_columns(pstate, &exprlist[0]) == icolumns.len() as i32
+        {
+            report = report.errhint(
+                "The insertion source is a row expression containing the same number of columns expected by the INSERT. Did you accidentally use extra parentheses?",
+            );
+        }
+        return Err(report
+            .errposition(backend_parser_small1::parser_errposition(pstate, loc))
+            .into_error());
     }
 
     // Prepare columns for assignment to the target table.
@@ -593,6 +615,45 @@ pub fn transformInsertRow<'mcx>(
         result.push(transformed);
     }
     Ok(result)
+}
+
+/// `count_rowexpr_columns(pstate, expr)` (analyze.c) — try to report the number
+/// of columns contained in a RowExpr, so that the "more target columns than
+/// expressions" error can offer the extra-parentheses hint. Returns -1 if we
+/// can't determine the number of columns.
+fn count_rowexpr_columns<'mcx>(pstate: &ParseState<'mcx>, expr: &Expr) -> i32 {
+    match expr {
+        Expr::RowExpr(r) => r.args.len() as i32,
+        Expr::Var(var) => {
+            let attnum = var.varattno;
+            if attnum > 0 && var.vartype == RECORDOID {
+                let rte = backend_parser_relation::GetRTEByRangeTablePosn(
+                    pstate,
+                    var.varno,
+                    var.varlevelsup as i32,
+                );
+                if rte.rtekind == types_nodes::parsenodes::RTEKind::RTE_SUBQUERY {
+                    // Subselect-in-FROM: examine sub-select's output expr.
+                    if let Some(subquery) = rte.subquery.as_deref() {
+                        if let Some(ste) = backend_parser_relation::get_tle_by_resno(
+                            &subquery.targetList,
+                            attnum,
+                        ) {
+                            if !ste.resjunk {
+                                if let Some(sexpr) = ste.expr.as_deref() {
+                                    if let Expr::RowExpr(r) = sexpr {
+                                        return r.args.len() as i32;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            -1
+        }
+        _ => -1,
+    }
 }
 
 /// Deep-copy the raw `cols` list (a `List` of `ResTarget` nodes) into `mcx` as a
