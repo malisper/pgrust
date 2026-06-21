@@ -99,6 +99,10 @@ fn errloc(lineno: i32, funcname: &'static str) -> ErrorLocation {
 // `ACL_ALL_RIGHTS_SCHEMA` (`utils/acl.h`).
 const ACL_ALL_RIGHTS_SCHEMA: AclMode = ACL_USAGE | ACL_CREATE;
 
+// `ACL_ALL_RIGHTS_FDW` / `ACL_ALL_RIGHTS_FOREIGN_SERVER` (`utils/acl.h`).
+const ACL_ALL_RIGHTS_FDW: AclMode = ACL_USAGE;
+const ACL_ALL_RIGHTS_FOREIGN_SERVER: AclMode = ACL_USAGE;
+
 // `ACL_ALL_RIGHTS_RELATION` / `ACL_ALL_RIGHTS_SEQUENCE` / `ACL_ALL_RIGHTS_COLUMN`
 // (`utils/acl.h`).
 const ACL_ALL_RIGHTS_RELATION: AclMode = ACL_INSERT
@@ -222,6 +226,8 @@ fn restrict_and_check_grant(
         }
         ObjectType::Largeobject => ACL_ALL_RIGHTS_LARGEOBJECT,
         ObjectType::Language => ACL_ALL_RIGHTS_LANGUAGE,
+        ObjectType::Fdw => ACL_ALL_RIGHTS_FDW,
+        ObjectType::ForeignServer => ACL_ALL_RIGHTS_FOREIGN_SERVER,
         other => {
             return Err(PgError::error(format!(
                 "restrict_and_check_grant: unsupported object type {other:?} in grant slice"
@@ -1384,7 +1390,10 @@ fn read_name(mcx: Mcx<'_>, cacheid: i32, tuple: &FormedTuple<'_>, attnum: i32) -
 
 /// `ExecGrantStmt_oids(istmt)` (aclchk.c) — dispatch on object type.
 fn exec_grant_stmt_oids(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<()> {
-    use backend_catalog_objectaddress::consts::{DatabaseRelationId, LanguageRelationId};
+    use backend_catalog_objectaddress::consts::{
+        DatabaseRelationId, ForeignDataWrapperRelationId, ForeignServerRelationId,
+        LanguageRelationId,
+    };
     match istmt.objtype {
         ObjectType::Table | ObjectType::Sequence => exec_grant_relation(mcx, istmt),
         OBJECT_SCHEMA => {
@@ -1410,6 +1419,20 @@ fn exec_grant_stmt_oids(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult
             LanguageRelationId,
             ACL_ALL_RIGHTS_LANGUAGE,
             Some(exec_grant_language_check),
+        ),
+        ObjectType::Fdw => exec_grant_common(
+            mcx,
+            istmt,
+            ForeignDataWrapperRelationId,
+            ACL_ALL_RIGHTS_FDW,
+            None,
+        ),
+        ObjectType::ForeignServer => exec_grant_common(
+            mcx,
+            istmt,
+            ForeignServerRelationId,
+            ACL_ALL_RIGHTS_FOREIGN_SERVER,
+            None,
         ),
         other => Err(PgError::error(format!(
             "GRANT/REVOKE executor not ported for object type {other:?} \
@@ -2550,6 +2573,14 @@ fn objtype_all_privileges(objtype: ObjectType) -> PgResult<(AclMode, &'static st
         ObjectType::Language => Ok((
             ACL_ALL_RIGHTS_LANGUAGE,
             "invalid privilege type %s for language",
+        )),
+        ObjectType::Fdw => Ok((
+            ACL_ALL_RIGHTS_FDW,
+            "invalid privilege type %s for foreign-data wrapper",
+        )),
+        ObjectType::ForeignServer => Ok((
+            ACL_ALL_RIGHTS_FOREIGN_SERVER,
+            "invalid privilege type %s for foreign server",
         )),
         other => Err(PgError::error(format!(
             "GRANT objtype {other:?} not ported (schema/relation slice)"
