@@ -2959,12 +2959,166 @@ pub fn expandRTE<'mcx>(
             }
         }
         RTE_FUNCTION => {
-            // The RTE_FUNCTION expansion needs get_expr_result_type /
-            // expandTupleDesc over a funcapi tupdesc — unported funcapi here.
-            panic!(
-                "expandRTE RTE_FUNCTION arm needs get_expr_result_type + the funcapi \
-                 tupdesc expansion (unported here) (parse_relation.c:2825)"
-            );
+            // Function RTE (parse_relation.c:2825-2951).
+            use types_nodes::funcapi::TypeFuncClass;
+            use types_tuple::heaptuple::INT8OID;
+
+            let eref = rte.eref.as_deref().expect("eref set");
+            let mut atts_done: i32 = 0;
+
+            for func_node in rte.functions.iter() {
+                // C: RangeTblFunction *rtfunc = (RangeTblFunction *) lfirst(lc);
+                let rtfunc = match func_node.as_rangetblfunction() {
+                    Some(r) => r,
+                    None => {
+                        return Err(ereport(ERROR)
+                            .errmsg_internal(format!(
+                                "unexpected node type in RTE_FUNCTION functions list: {:?}",
+                                func_node.node_tag()
+                            ))
+                            .into_error());
+                    }
+                };
+
+                // If it has a coldeflist, it returns RECORD; otherwise classify
+                // the result type via funcapi.
+                let (functypclass, funcrettype, tupdesc): (
+                    Option<TypeFuncClass>,
+                    Oid,
+                    Option<TupleDescData<'mcx>>,
+                ) = if !rtfunc.funccolnames.is_empty() {
+                    (Some(TypeFuncClass::Record), InvalidOid, None)
+                } else {
+                    // C: functypclass = get_expr_result_type(rtfunc->funcexpr,
+                    //                       &funcrettype, &tupdesc);
+                    let resolved = backend_utils_fmgr_funcapi::result_type::get_expr_result_type(
+                        mcx,
+                        rtfunc.funcexpr.as_deref(),
+                    )?;
+                    let td = match resolved.result_tuple_desc {
+                        Some(td) => Some((*td).clone_in(mcx)?),
+                        None => None,
+                    };
+                    (
+                        resolved.class,
+                        resolved.result_type_id.unwrap_or(InvalidOid),
+                        td,
+                    )
+                };
+
+                match functypclass {
+                    Some(TypeFuncClass::Composite) | Some(TypeFuncClass::CompositeDomain) => {
+                        // Composite data type, e.g. a table's row type.
+                        // C: Assert(tupdesc);
+                        let tupdesc = tupdesc.as_ref().expect("composite tupdesc");
+                        expandTupleDesc(
+                            mcx,
+                            tupdesc,
+                            eref,
+                            rtfunc.funccolcount,
+                            atts_done,
+                            rtindex,
+                            sublevels_up,
+                            returning_type,
+                            location,
+                            include_dropped,
+                            colnames.as_deref_mut(),
+                            colvars.as_deref_mut(),
+                        )?;
+                    }
+                    Some(TypeFuncClass::Scalar) => {
+                        // Base data type, i.e. scalar.
+                        if let Some(cn) = colnames.as_deref_mut() {
+                            // C: list_nth(rte->eref->colnames, atts_done)
+                            let label = str_val(&eref.colnames[atts_done as usize]);
+                            cn.push(make_string_node(mcx, label)?);
+                        }
+                        if let Some(cv) = colvars.as_deref_mut() {
+                            let funcexpr = rtfunc.funcexpr.as_deref().and_then(|n| n.as_expr());
+                            let mut varnode = make_var(
+                                rtindex,
+                                (atts_done + 1) as AttrNumber,
+                                funcrettype,
+                                backend_nodes_core::nodefuncs::expr_typmod(funcexpr)?,
+                                backend_nodes_core::nodefuncs::expr_collation(funcexpr)?,
+                                sublevels_up as Index,
+                            );
+                            varnode.varreturningtype = returning_type;
+                            varnode.location = location;
+                            cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
+                        }
+                    }
+                    Some(TypeFuncClass::Record) => {
+                        if let Some(cn) = colnames.as_deref_mut() {
+                            // C: extract appropriate subset of column list:
+                            //   namelist = list_truncate(
+                            //       list_copy_tail(rte->eref->colnames, atts_done),
+                            //       rtfunc->funccolcount);
+                            let start = atts_done as usize;
+                            let end =
+                                (start + rtfunc.funccolcount as usize).min(eref.colnames.len());
+                            for i in start..end {
+                                let label = str_val(&eref.colnames[i]);
+                                cn.push(make_string_node(mcx, label)?);
+                            }
+                        }
+                        if let Some(cv) = colvars.as_deref_mut() {
+                            // C: forthree over funccoltypes/typmods/collations.
+                            let mut attnum = atts_done;
+                            for i in 0..rtfunc.funccoltypes.len() {
+                                let attrtype = rtfunc.funccoltypes[i];
+                                let attrtypmod = rtfunc.funccoltypmods[i];
+                                let attrcollation = rtfunc.funccolcollations[i];
+                                attnum += 1;
+                                let mut varnode = make_var(
+                                    rtindex,
+                                    attnum as AttrNumber,
+                                    attrtype,
+                                    attrtypmod,
+                                    attrcollation,
+                                    sublevels_up as Index,
+                                );
+                                varnode.varreturningtype = returning_type;
+                                varnode.location = location;
+                                cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
+                            }
+                        }
+                    }
+                    _ => {
+                        // addRangeTableEntryForFunction should've caught this.
+                        return Err(ereport(ERROR)
+                            .errmsg_internal("function in FROM has unsupported return type")
+                            .into_error());
+                    }
+                }
+
+                atts_done += rtfunc.funccolcount;
+            }
+
+            // Append the ordinality column if any.
+            if rte.funcordinality {
+                if let Some(cn) = colnames.as_deref_mut() {
+                    // C: llast(rte->eref->colnames)
+                    let last = eref
+                        .colnames
+                        .last()
+                        .expect("ordinality colname present");
+                    let label = str_val(last);
+                    cn.push(make_string_node(mcx, label)?);
+                }
+                if let Some(cv) = colvars.as_deref_mut() {
+                    let mut varnode = make_var(
+                        rtindex,
+                        (atts_done + 1) as AttrNumber,
+                        INT8OID,
+                        -1,
+                        InvalidOid,
+                        sublevels_up as Index,
+                    );
+                    varnode.varreturningtype = returning_type;
+                    cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
+                }
+            }
         }
         RTE_JOIN => {
             let eref = rte.eref.as_deref().expect("eref set");
@@ -4040,4 +4194,48 @@ pub fn init_seams() {
     // Cross-crate: parser-relation owns get_rte_attribute_name's body; ruleutils'
     // expression deparser reaches it through this seam (system-column names).
     backend_utils_adt_ruleutils_seams::get_rte_attribute_name::set(get_rte_attribute_name);
+    // Cross-crate: parser-relation owns expandRTE; ruleutils'
+    // set_relation_column_names reaches its RTE_FUNCTION branch through this seam.
+    backend_utils_adt_ruleutils_seams::ruleutils_expand_function_rte_colnames::set(
+        ruleutils_expand_function_rte_colnames,
+    );
+}
+
+/// `set_relation_column_names`' RTE_FUNCTION branch (ruleutils.c 4434-4439):
+/// `expandRTE(rte, 1, 0, VAR_RETURNING_DEFAULT, -1, true /* include dropped */,
+/// &colnames, NULL)`. Returns the up-to-date column names of the composite the
+/// function returns (one entry per column, dropped columns as empty strings →
+/// `None`). parser-relation owns `expandRTE`, so it installs this for the
+/// deparse engine.
+fn ruleutils_expand_function_rte_colnames<'mcx>(
+    mcx: Mcx<'mcx>,
+    rte: &RangeTblEntry<'mcx>,
+) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>> {
+    // C: since we're not creating Vars, rtindex etc. don't matter.
+    let mut colnames: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+    expandRTE(
+        mcx,
+        rte,
+        1,
+        0,
+        VAR_RETURNING_DEFAULT,
+        -1,
+        true, /* include dropped */
+        Some(&mut colnames),
+        None,
+    )?;
+
+    // Map each String node to Some(name); an empty string is a dropped column,
+    // which the engine maps to None.
+    let mut out: PgVec<'mcx, Option<PgString<'mcx>>> = PgVec::new_in(mcx);
+    out.try_reserve(colnames.len()).map_err(|_| mcx.oom(0))?;
+    for cn in colnames.iter() {
+        let name = str_val(cn);
+        if name.is_empty() {
+            out.push(None);
+        } else {
+            out.push(Some(PgString::from_str_in(name, mcx)?));
+        }
+    }
+    Ok(out)
 }
