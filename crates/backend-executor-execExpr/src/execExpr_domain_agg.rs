@@ -1149,8 +1149,10 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
 /// (`exec_create_expr_setup_steps_list` / `exec_init_expr_rec`), and
 /// `fmgr_info(hashfunc_oids[i])` crosses the fmgr seam.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn exec_build_hash32_expr<'mcx>(
     mcx: Mcx<'mcx>,
+    es_link: types_nodes::execnodes::EStateLink,
     desc: &TupleDescData<'mcx>,
     ops: TupleSlotKind,
     hashfunc_oids: &[Oid],
@@ -1165,6 +1167,11 @@ pub fn exec_build_hash32_expr<'mcx>(
     debug_assert_eq!(num_exprs as usize, collations.len());
 
     let mut state = make_expr_state(mcx)?;
+    // C `ExecBuildHash32Expr(..., PlanState *parent, ...)` sets `state->parent =
+    // parent`, through which a hash-key SubPlan reaches `parent->state ->
+    // es_subplanstates`. Stamp the non-owning EState back-link so a correlated
+    // SubPlan embedded in a hash key (`a = (SELECT ...)`) finds its parent plan.
+    state.es_link = Some(es_link);
 
     // Insert setup steps as needed: ExecCreateExprSetupSteps(state, (Node *)
     // hash_exprs) — the FETCHSOME deform prescan over the expression list (the

@@ -881,12 +881,16 @@ seam_core::seam!(
     /// combined via the `HASHDATUM_FIRST`/`_NEXT32`(`_STRICT`) opcodes;
     /// `opstrict[i]` + `!keep_nulls` selects the NULL-aborting strict variant.
     /// `init_value` optionally seeds the running hash. The owned model passes the
-    /// node's result `desc`/`ops` directly (the C `parent` is only used for slot
-    /// descriptors / SubPlan attribution). The compiled `ExprState` is allocated
-    /// in `mcx`; fallible on OOM / `ereport(ERROR)`.
+    /// node's result `desc`/`ops` directly; the C `parent` (`PlanState *`) reaches
+    /// the `EState` for SubPlan attribution, so the non-owning `es_link` back-link
+    /// is threaded and stamped on the compiled `ExprState` (a hash key may itself
+    /// be a correlated SubPlan, e.g. `t1.a = (SELECT min(a) ...)`, which compiles
+    /// to a SUBPLAN step that needs `es_subplanstates`). The compiled `ExprState`
+    /// is allocated in `mcx`; fallible on OOM / `ereport(ERROR)`.
     #[allow(clippy::too_many_arguments)]
     pub fn exec_build_hash32_expr<'mcx>(
         mcx: mcx::Mcx<'mcx>,
+        es_link: types_nodes::execnodes::EStateLink,
         desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
         ops: types_nodes::TupleSlotKind,
         hashfunc_oids: &[types_core::Oid],

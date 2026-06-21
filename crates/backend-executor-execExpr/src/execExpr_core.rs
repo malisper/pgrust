@@ -3496,7 +3496,11 @@ pub fn exec_init_hashjoin_qual<'mcx>(
                     let mut out = mcx::vec_with_capacity_in(mcx, list.len())?;
                     for n in list.iter() {
                         if let Some(e) = n.as_expr() {
-                            out.push(e.clone());
+                            // A hashclause `OpExpr` may carry context-allocated
+                            // children (a SubPlan when the key is `a = (SELECT
+                            // ...)`); deep-copy through `Expr::clone_in` rather
+                            // than the panicking derived `.clone()`.
+                            out.push(e.clone_in(mcx)?);
                         } else {
                             panic!(
                                 "ExecInitHashJoin: hashclauses element is not an \

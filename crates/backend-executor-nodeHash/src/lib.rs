@@ -363,8 +363,12 @@ mod adapters {
         let ops = ps
             .resultops
             .expect("exec_build_hash32_expr: resultops is unset");
+        // C threads `&hjstate->js.ps` as `parent`, reaching the EState for
+        // SubPlan attribution; pass the non-owning EState back-link so a
+        // correlated SubPlan in a hash key can find `es_subplanstates`.
+        let es_link = types_nodes::execnodes::EStateLink::from_ref(estate);
         execExpr::exec_build_hash32_expr::call(
-            mcx, desc, ops, hashfuncids, collations, hash_exprs, opstrict, init_value,
+            mcx, es_link, desc, ops, hashfuncids, collations, hash_exprs, opstrict, init_value,
             keep_nulls,
         )
     }
