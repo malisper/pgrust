@@ -47,7 +47,7 @@ use types_error::{
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };
-use types_nodes::parsenodes::{ObjectType, OBJECT_INDEX};
+use types_nodes::parsenodes::OBJECT_INDEX;
 use types_parsenodes::RenameStmt;
 use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
 use types_tuple::access::{
@@ -442,9 +442,15 @@ pub fn RenameRelation<'mcx>(mcx: Mcx<'mcx>, stmt: &RenameStmt) -> PgResult<Objec
         //             stmt->missing_ok ? RVR_MISSING_OK : 0,
         //             RangeVarCallbackForAlterRelation, stmt);
         let flags = if stmt.missing_ok { RVR_MISSING_OK } else { 0 };
-        let reltype: ObjectType = stmt.renameType;
+        // RangeVarCallbackForAlterRelation, stmt — the Rename-aware callback:
+        // it applies the namespace ACL_CREATE recheck and the
+        // `!IsA(stmt, RenameStmt)` relaxation of the ALTER INDEX rule (so
+        // `ALTER INDEX <table> RENAME` / `ALTER TABLE <index> RENAME` are allowed),
+        // unlike the ALTER TABLE phase variant in `at_phase`.
         let mut cb = |rv: &AccessRangeVar, candidate: Oid, oldrelid: Oid| {
-            crate::at_phase::RangeVarCallbackForAlterRelation(mcx, rv, candidate, oldrelid, reltype)
+            crate::rename_schema::range_var_callback_for_alter_relation_rename(
+                mcx, rv, candidate, oldrelid, stmt,
+            )
         };
         let candidate =
             RangeVarGetRelidExtended(mcx, relation, lockmode, flags, Some(&mut cb))?;

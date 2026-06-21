@@ -630,9 +630,24 @@ fn alter_seq_namespaces<'mcx>(
 /// statement, used to derive `reltype` and the RENAME / SET SCHEMA extra
 /// checks.
 enum AlterArg<'a> {
-    #[allow(dead_code)]
     Rename(&'a RenameStmt),
     Schema(&'a AlterObjectSchemaStmt),
+}
+
+/// `RangeVarCallbackForAlterRelation` invoked with a `RenameStmt` arg — the
+/// callback `RenameRelation` (tablecmds.c:4206) passes to
+/// `RangeVarGetRelidExtended`. This is the Rename-aware path: it applies the
+/// namespace `ACL_CREATE` recheck and the `!IsA(stmt, RenameStmt)` relaxation of
+/// the ALTER INDEX "is not an index" rule (so `ALTER INDEX <table> RENAME` is
+/// permitted, matching C).
+pub(crate) fn range_var_callback_for_alter_relation_rename<'mcx>(
+    mcx: Mcx<'mcx>,
+    rv: &AccessRangeVar,
+    relid: Oid,
+    oldrelid: Oid,
+    stmt: &RenameStmt,
+) -> PgResult<()> {
+    range_var_callback_for_alter_relation(mcx, rv, relid, oldrelid, AlterArg::Rename(stmt))
 }
 
 /// `RangeVarCallbackForAlterRelation(rv, relid, oldrelid, arg)`
