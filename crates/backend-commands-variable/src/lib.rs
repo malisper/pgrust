@@ -1367,9 +1367,10 @@ mod install {
         own::get_authenticated_user_id::set(backend_utils_init_miscinit::GetAuthenticatedUserId);
         own::get_current_role_id::set(backend_utils_init_miscinit::GetCurrentRoleId);
         own::current_role_is_superuser::set(|| {
-            // The C `bool current_role_is_superuser` miscinit.c global is not yet
-            // surfaced; only reached during parallel-worker init.
-            panic!("current_role_is_superuser (miscinit.c) not yet ported")
+            // The C `bool current_role_is_superuser` is the GUC-tables backing
+            // variable for the `is_superuser` GUC, maintained via
+            // SetConfigOption("is_superuser", ...) in SetOuterUserId.
+            backend_utils_misc_guc_tables::backing::current_role_is_superuser()
         });
         own::set_session_authorization::set(
             backend_utils_init_miscinit::SetSessionAuthorization,
