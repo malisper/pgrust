@@ -43,3 +43,6 @@ backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigg
 
 # Inward seam this crate installs (plpgsql_exec_get_datum_type_info).
 backend-pl-plpgsql-exec-seams = { path = "../backend-pl-plpgsql-exec-seams" }
+# plpgsql_build_datatype: rebuild the simple-CASE temp var's datatype when the
+# test-expr's runtime type differs from the declared one (exec_stmt_case).
+backend-pl-plpgsql-comp-seams = { path = "../backend-pl-plpgsql-comp-seams" }

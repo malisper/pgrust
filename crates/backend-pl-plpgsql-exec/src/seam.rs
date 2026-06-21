@@ -312,15 +312,20 @@ pub fn exec_move_row_null(estate: &mut PLpgSQL_execstate, target_dno: int32) -> 
 /// runtime type differs from the temp var's declared type, rebuild the var's
 /// `datatype` via `plpgsql_build_datatype`.
 pub fn case_rebuild_temp_var_datatype(
-    _estate: &mut PLpgSQL_execstate,
-    _var: &mut PLpgSQL_var,
-    _typoid: Oid,
-    _typmod: int32,
-) {
-    panic!(
-        "seam not wired: exec_stmt_case temp-var datatype rebuild (pl_exec.c) — \
-         plpgsql_build_datatype (compiler datatype builder over typcache)"
-    );
+    estate: &mut PLpgSQL_execstate,
+    var: &mut PLpgSQL_var,
+    typoid: Oid,
+    typmod: int32,
+) -> PgResult<()> {
+    // C: t_var->datatype = plpgsql_build_datatype(t_typoid, t_typmod,
+    //                          estate->func->fn_input_collation, NULL);
+    let dt = backend_pl_plpgsql_comp_seams::plpgsql_build_datatype::call(
+        typoid,
+        typmod,
+        estate.fn_input_collation,
+    )?;
+    var.datatype = Some(dt);
+    Ok(())
 }
 
 /// `ResetExprContext(econtext)` (pl_exec.c `exec_eval_cleanup`): reset the

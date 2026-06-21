@@ -1121,6 +1121,12 @@ pub struct PLpgSQL_execstate {
     pub retistuple: bool,
     pub retisset: bool,
 
+    /// `func->fn_input_collation` — the function's input collation, carried
+    /// directly so paths that rebuild a datatype (`exec_stmt_case`'s simple-CASE
+    /// temp var) can pass it to `plpgsql_build_datatype` without dereferencing
+    /// the opaque `func` back-reference.
+    pub fn_input_collation: Oid,
+
     pub readonly_func: bool,
     pub atomic: bool,
 

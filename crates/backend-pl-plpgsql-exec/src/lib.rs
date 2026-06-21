@@ -858,7 +858,7 @@ fn exec_stmt_case(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_case) -> P
         let t_varno = stmt.t_varno;
         if temp_var_type_differs(&estate.datums[t_varno as usize], t_typoid, t_typmod) {
             let mut t_var = take_var(estate, t_varno);
-            seam::case_rebuild_temp_var_datatype(estate, &mut t_var, t_typoid, t_typmod);
+            seam::case_rebuild_temp_var_datatype(estate, &mut t_var, t_typoid, t_typmod)?;
             put_var(estate, t_varno, t_var);
         }
 
@@ -3487,6 +3487,8 @@ pub fn plpgsql_estate_setup(
         fn_rettype: func.fn_rettype,
         retistuple: func.fn_retistuple,
         retisset: func.fn_retset,
+
+        fn_input_collation: func.fn_input_collation,
 
         readonly_func: func.fn_readonly,
         atomic: true,

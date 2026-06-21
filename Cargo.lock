@@ -14698,6 +14698,7 @@ dependencies = [
  "backend-commands-event-trigger-seams",
  "backend-commands-trigger-seams",
  "backend-executor-execTuples",
+ "backend-pl-plpgsql-comp-seams",
  "backend-pl-plpgsql-exec-seams",
  "backend-utils-adt-misc2",
  "backend-utils-cache-typcache",
