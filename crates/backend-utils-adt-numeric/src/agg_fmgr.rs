@@ -685,6 +685,46 @@ fn fc_numeric_poly_combine(fcinfo: &mut FunctionCallInfoBaseData) -> types_error
     Ok(ret_internal(fcinfo, Box::new(combined)))
 }
 
+/// `int8_avg_serialize`(2786): serialize an `Int128AggState` poly state for
+/// AVG(int8) (N + sumX only, no sumX2).
+fn fc_int8_avg_serialize(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let state = take_poly_state(fcinfo)
+        .expect("int8_avg_serialize: NULL internal state (strict aggregate)");
+    let out = run_final(|m| Ok(Some(aggregate::int8_avg_serialize(m, &state)?)))?;
+    keep_internal(fcinfo, state);
+    Ok(ret_bytea(fcinfo, out.expect("serialize produced no image")))
+}
+
+/// `int8_avg_deserialize`(2787): rebuild an `Int128AggState` from `bytea` for
+/// AVG(int8) (N + sumX only, no sumX2).
+fn fc_int8_avg_deserialize(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let body = arg_bytea_body(fcinfo, 0);
+    let m = crate::fmgr_builtins::scratch_mcx();
+    let state = aggregate::int8_avg_deserialize(m.mcx(), &body)?;
+    Ok(ret_internal(fcinfo, Box::new(state)))
+}
+
+/// `int8_avg_combine`(2785): combine two `Int128AggState` poly states for
+/// AVG(int8) (N + sumX only, no sumX2).
+fn fc_int8_avg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let state1 = take_poly_state(fcinfo).map(|b| *b);
+    let state2 = take_poly_state_at(fcinfo, 1);
+
+    let state2 = match state2 {
+        None => {
+            // if (state2 == NULL) PG_RETURN_POINTER(state1);
+            return Ok(match state1 {
+                Some(s1) => ret_internal(fcinfo, Box::new(s1)),
+                None => ret_null(fcinfo),
+            });
+        }
+        Some(s2) => *s2,
+    };
+
+    let combined = aggregate::int8_avg_combine(state1, &state2);
+    Ok(ret_internal(fcinfo, Box::new(combined)))
+}
+
 // ===========================================================================
 // Registration (C: their `fmgr_builtins[]` rows; OIDs/nargs from pg_proc.dat —
 // transition/final functions are `proisstrict => 'f'` because they handle the
@@ -736,5 +776,9 @@ pub fn register_numeric_agg_builtins() {
         builtin(3339, "numeric_poly_serialize", 1, true, false, fc_numeric_poly_serialize),
         builtin(3340, "numeric_poly_deserialize", 2, true, false, fc_numeric_poly_deserialize),
         builtin(3338, "numeric_poly_combine", 2, false, false, fc_numeric_poly_combine),
+        // Int128AggState (poly, AVG(int8) — N + sumX only, no sumX2).
+        builtin(2786, "int8_avg_serialize", 1, true, false, fc_int8_avg_serialize),
+        builtin(2787, "int8_avg_deserialize", 2, true, false, fc_int8_avg_deserialize),
+        builtin(2785, "int8_avg_combine", 2, false, false, fc_int8_avg_combine),
     ]);
 }

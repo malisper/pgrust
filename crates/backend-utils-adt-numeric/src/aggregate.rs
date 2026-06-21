@@ -923,6 +923,71 @@ pub fn numeric_poly_deserialize<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<In
     Ok(result)
 }
 
+/// `int8_avg_combine(state1, state2)` (numeric.c:5938): combine two 128-bit poly
+/// transition states for aggregates which don't require sumX2 (AVG(int8)).  Same
+/// shape as [`numeric_poly_combine`] but the fresh state is created with
+/// `calc_sum_x2 = false` and only N + sumX are copied/accumulated.
+pub fn int8_avg_combine(
+    state1: Option<Int128AggState>,
+    state2: &Int128AggState,
+) -> Int128AggState {
+    let mut state1 = match state1 {
+        None => {
+            // makePolyNumAggState(fcinfo, false); copy N + sumX only.
+            let mut s1 = make_int128_agg_state(false);
+            s1.n = state2.n;
+            s1.sum_x = state2.sum_x;
+            return s1;
+        }
+        Some(s1) => s1,
+    };
+
+    if state2.n > 0 {
+        state1.n += state2.n;
+        state1.sum_x += state2.sum_x;
+    }
+    state1
+}
+
+/// `int8_avg_serialize(state)` (numeric.c:5998): serialize a 128-bit poly
+/// transition state for AVG(int8) parallel transfer.  Like
+/// [`numeric_poly_serialize`] but without sumX2 (only N + sumX).
+pub fn int8_avg_serialize<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &Int128AggState,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut buf = begin_typsend(mcx);
+
+    // N
+    send_int64(&mut buf, state.n);
+
+    // sumX
+    let tmp_var = int128_to_numericvar(mcx, state.sum_x)?;
+    io_serialize_var(&mut buf, &tmp_var);
+
+    end_typsend(&mut buf);
+    Ok(buf)
+}
+
+/// `int8_avg_deserialize(buf)` (numeric.c:6047): deserialize a 128-bit poly
+/// transition state for AVG(int8).  Like [`numeric_poly_deserialize`] but
+/// without sumX2 (only N + sumX).
+pub fn int8_avg_deserialize<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<Int128AggState> {
+    let mut pos = 0usize;
+
+    // makePolyNumAggStateCurrentContext(false).
+    let mut result = make_int128_agg_state(false);
+
+    // N
+    result.n = get_int64(buf, &mut pos);
+
+    // sumX
+    let tmp_var = crate::io::numericvar_deserialize(mcx, buf, &mut pos)?;
+    result.sum_x = convert::numericvar_to_int128(&tmp_var)?.unwrap_or(0);
+
+    Ok(result)
+}
+
 /// `int2_accum(state, newval)` (numeric.c:5669): SUM/AVG(int2) transition on the
 /// 128-bit fast path (`HAVE_INT128`).
 pub fn int2_accum(state: Option<Int128AggState>, newval: i16) -> PgResult<Int128AggState> {

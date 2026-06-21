@@ -284,9 +284,114 @@ fn fc_bytea_string_agg_finalfn(
     })
 }
 
+/// `string_agg_combine`(6299): combine two `StringInfo` transition states for
+/// parallel `string_agg`. `proisstrict => 'f'`. C: if state2 is NULL return
+/// state1; if state1 is NULL copy state2's data + cursor into a fresh state;
+/// else append state2's bytes (cursor unchanged). The first delimiter is kept in
+/// every partial state so the combine joins the strings correctly; it is
+/// stripped only in the final function.
+fn fc_string_agg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    // state1 = PG_ARGISNULL(0) ? NULL : ...; state2 = PG_ARGISNULL(1) ? NULL : ...
+    let state1 = take_string_state(fcinfo);
+    let state2 = take_string_state_at(fcinfo, 1);
+
+    // if (state2 == NULL) { if (state1==NULL) PG_RETURN_NULL(); PG_RETURN_POINTER(state1); }
+    let state2 = match state2 {
+        None => {
+            return Ok(match state1 {
+                None => ret_null(fcinfo),
+                Some(s1) => ret_internal(fcinfo, s1),
+            });
+        }
+        Some(s2) => s2,
+    };
+
+    let combined = match state1 {
+        // state1 == NULL: copy state2's data into the agg_context.
+        None => {
+            let mut s1 = StringAggState::new();
+            s1.data.extend_from_slice(&state2.data);
+            s1.cursor = state2.cursor;
+            s1
+        }
+        // else if (state2->len > 0): append state2's bytes; cursor unchanged.
+        Some(mut s1) => {
+            if !state2.data.is_empty() {
+                s1.data.extend_from_slice(&state2.data);
+            }
+            s1
+        }
+    };
+
+    Ok(ret_internal(fcinfo, combined))
+}
+
+/// `string_agg_serialize`(6300): serialize a `StringInfo` transition state into a
+/// `bytea` for parallel transfer. Strict. Wire format (mirrors C
+/// `pq_begintypsend`/`pq_sendint(cursor,4)`/`pq_sendbytes(data)`): a 4-byte
+/// big-endian cursor followed by the raw data bytes.
+fn fc_string_agg_serialize(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let state = take_string_state(fcinfo)
+        .expect("string_agg_serialize: NULL internal state (strict aggregate)");
+
+    // pq_sendint(&buf, state->cursor, 4) — 4-byte big-endian.
+    let mut payload = Vec::with_capacity(4 + state.data.len());
+    payload.extend_from_slice(&(state.cursor as u32).to_be_bytes());
+    // pq_sendbytes(&buf, state->data, state->len).
+    payload.extend_from_slice(&state.data);
+
+    // C `PG_GETARG_POINTER(0)` does not consume the state; restore it.
+    keep_string_state(fcinfo, state);
+    Ok(ret_bytea(fcinfo, payload))
+}
+
+/// `string_agg_deserialize`(6301): rebuild a `StringInfo` transition state from a
+/// `bytea`. Strict. The payload is a 4-byte big-endian cursor followed by the
+/// raw data bytes (everything after the cursor word).
+fn fc_string_agg_deserialize(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    // sstate = PG_GETARG_BYTEA_PP(0); VARDATA_ANY skips the 4-byte varlena header.
+    let body = arg_bytea(fcinfo, 0);
+
+    let mut result = StringAggState::new();
+    // cursor = pq_getmsgint(&buf, 4) — 4-byte big-endian.
+    let cursor = if body.len() >= 4 {
+        u32::from_be_bytes([body[0], body[1], body[2], body[3]]) as usize
+    } else {
+        0
+    };
+    result.cursor = cursor;
+    // datalen = VARSIZE_ANY_EXHDR(sstate) - 4; data = pq_getmsgbytes(&buf, datalen).
+    if body.len() > 4 {
+        result.data.extend_from_slice(&body[4..]);
+    }
+
+    Ok(ret_internal(fcinfo, result))
+}
+
+/// Take the `internal` transition state out of `args[i]`. `None` is C's
+/// `PG_ARGISNULL(i)`.
+fn take_string_state_at(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    i: usize,
+) -> Option<Box<StringAggState>> {
+    if arg_isnull(fcinfo, i) {
+        return None;
+    }
+    match fcinfo.take_ref_arg(i) {
+        Some(RefPayload::Internal(b)) => Some(b.downcast::<StringAggState>().unwrap_or_else(|_| {
+            panic!("string_agg fn: args[{i}] internal state is not a StringAggState")
+        })),
+        Some(other) => panic!("string_agg fn: args[{i}] is not an internal state ({other:?})"),
+        None => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Registration (C: their `fmgr_builtins[]` rows; all `proisstrict => 'f'` —
-// they handle the NULL `internal` running state / NULL input themselves).
+// Registration (C: their `fmgr_builtins[]` rows; transfn/finalfn/combine are
+// `proisstrict => 'f'` — they handle the NULL `internal` running state / NULL
+// input themselves; serialize/deserialize are `proisstrict => 't'`).
 // ---------------------------------------------------------------------------
 
 pub fn register_string_agg_builtins() {
@@ -295,7 +400,32 @@ pub fn register_string_agg_builtins() {
         builtin(3536, "string_agg_finalfn", 1, fc_string_agg_finalfn),
         builtin(3543, "bytea_string_agg_transfn", 3, fc_bytea_string_agg_transfn),
         builtin(3544, "bytea_string_agg_finalfn", 1, fc_bytea_string_agg_finalfn),
+        builtin(6299, "string_agg_combine", 2, fc_string_agg_combine),
     ]);
+    backend_utils_fmgr_core::register_builtins_native([
+        builtin_strict(6300, "string_agg_serialize", 1, fc_string_agg_serialize),
+        builtin_strict(6301, "string_agg_deserialize", 2, fc_string_agg_deserialize),
+    ]);
+}
+
+/// A strict (`proisstrict => 't'`) Result-native builtin row.
+fn builtin_strict(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+    native: PgFnNative,
+) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        native,
+    )
 }
 
 /// A non-strict (`proisstrict => 'f'`) Result-native builtin row (`func: None`;
