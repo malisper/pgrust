@@ -20739,6 +20739,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-utils-adt-pg-locale-builtin"
+version = "0.0.0"
+dependencies = [
+ "backend-commands-collationcmds-seams",
+ "backend-utils-adt-pg-locale-builtin-seams",
+ "backend-utils-adt-pg-locale-catalog-seams",
+ "backend-utils-adt-pg-locale-seams",
+ "backend-utils-init-small-seams",
+ "backend-utils-mb-mbutils-seams",
+ "common-unicode-case",
+ "common-unicode-category",
+ "mcx",
+ "seam-core",
+ "types-core",
+ "types-error",
+ "types-locale",
+ "types-tuple",
+]
+
+[[package]]
 name = "backend-utils-adt-pg-locale-builtin-seams"
 version = "0.0.0"
 dependencies = [
@@ -24987,6 +25007,7 @@ dependencies = [
  "backend-utils-adt-oid",
  "backend-utils-adt-oracle-compat",
  "backend-utils-adt-pg-locale",
+ "backend-utils-adt-pg-locale-builtin",
  "backend-utils-adt-pg-locale-icu",
  "backend-utils-adt-pseudorandomfuncs",
  "backend-utils-adt-pseudotypes",

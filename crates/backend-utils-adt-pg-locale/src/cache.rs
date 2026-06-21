@@ -58,10 +58,14 @@ pub enum LocaleInfo {
     /// A libc-provider locale: an owned `locale_t` (NULL for C/POSIX collate).
     Libc(LibcLocale),
     /// A builtin-provider locale (`pg_locale_builtin.c`): the builtin Unicode
-    /// tables live in the builtin unit, which is not yet ported. The flag core
-    /// is all this crate holds; case-mapping dispatches to the builtin owner
-    /// seam.
-    Builtin,
+    /// tables live in the builtin unit. Beyond the flag core this carries
+    /// `info.builtin.casemap_full` (true only for `PG_UNICODE_FAST`), which the
+    /// collid-keyed case-mapping and regex-predicate seams need; case-mapping
+    /// itself dispatches to the builtin owner seam.
+    Builtin {
+        /// `info.builtin.casemap_full` — full Unicode case mapping.
+        casemap_full: bool,
+    },
 }
 
 impl LocaleInfo {
@@ -71,7 +75,7 @@ impl LocaleInfo {
     fn has_collate_methods(&self) -> bool {
         match self {
             LocaleInfo::Libc(l) => l.has_collate_methods(),
-            LocaleInfo::CLocale | LocaleInfo::Builtin => false,
+            LocaleInfo::CLocale | LocaleInfo::Builtin { .. } => false,
         }
     }
 }
@@ -288,14 +292,14 @@ fn datctype_is_c(datctype: &str) -> bool {
 /// interned in the backend-lifetime `Box`, matching C's permanent cache).
 fn create_pg_locale_builtin(collid: Oid) -> PgResult<LocaleEntry> {
     let ctx = mcx::MemoryContext::new("create_pg_locale_builtin");
-    let view = {
-        let pg_locale =
+    let (view, casemap_full) = {
+        let result =
             backend_utils_adt_pg_locale_builtin_seams::create_pg_locale_builtin::call(ctx.mcx(), collid)?;
-        *pg_locale
+        (*result.view, result.casemap_full)
     };
     Ok(LocaleEntry {
         view,
-        info: LocaleInfo::Builtin,
+        info: LocaleInfo::Builtin { casemap_full },
     })
 }
 

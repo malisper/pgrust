@@ -517,6 +517,7 @@ backend-utils-adt-uuid = { path = "../backend-utils-adt-uuid" }
 backend-utils-adt-pseudorandomfuncs = { path = "../backend-utils-adt-pseudorandomfuncs" }
 backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
 backend-utils-adt-pg-locale = { path = "../backend-utils-adt-pg-locale" }
+backend-utils-adt-pg-locale-builtin = { path = "../backend-utils-adt-pg-locale-builtin" }
 backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
 backend-utils-adt-pseudotypes = { path = "../backend-utils-adt-pseudotypes" }
 backend-utils-adt-enum = { path = "../backend-utils-adt-enum" }

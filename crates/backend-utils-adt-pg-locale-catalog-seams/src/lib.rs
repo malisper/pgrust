@@ -53,6 +53,9 @@ pub struct DatabaseLocaleRow {
     pub collate: String,
     /// `datctype` (libc LC_CTYPE for the database default).
     pub ctype: String,
+    /// `datlocale` (builtin/ICU locale for the database default), text or NULL.
+    /// `create_pg_locale_builtin`'s `DEFAULT_COLLATION_OID` branch reads it.
+    pub locale: Option<String>,
 }
 
 seam_core::seam!(

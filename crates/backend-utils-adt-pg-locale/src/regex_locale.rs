@@ -40,9 +40,12 @@ pub fn regex_wc_isclass(collation: types_core::primitive::Oid, class: RegexWcCla
         (LocaleInfo::Libc(l), _) => {
             crate::libc_provider::regex_wc_isclass_libc(l, class, c, libc_is_wide())
         }
-        (LocaleInfo::Builtin, _) | (_, CollProvider::Builtin) => {
-            builtin::regex_wc_isclass_builtin::call(class, c)
+        (LocaleInfo::Builtin { casemap_full }, _) => {
+            builtin::regex_wc_isclass_builtin::call(class, c, !casemap_full)
         }
+        // Provider says builtin but info isn't (cannot happen for a resolved
+        // builtin entry); C/POSIX builtin locales use posix = !casemap_full = true.
+        (_, CollProvider::Builtin) => builtin::regex_wc_isclass_builtin::call(class, c, true),
         // ICU is disabled; the C-locale strategy never crosses this seam.
         _ => false,
     }
@@ -58,7 +61,7 @@ pub fn regex_wc_toupper(collation: types_core::primitive::Oid, c: PgWChar) -> Pg
         (LocaleInfo::Libc(l), _) => {
             crate::libc_provider::regex_wc_toupper_libc(l, c, libc_is_wide())
         }
-        (LocaleInfo::Builtin, _) | (_, CollProvider::Builtin) => {
+        (LocaleInfo::Builtin { .. }, _) | (_, CollProvider::Builtin) => {
             builtin::regex_wc_toupper_builtin::call(c)
         }
         _ => c,
@@ -75,7 +78,7 @@ pub fn regex_wc_tolower(collation: types_core::primitive::Oid, c: PgWChar) -> Pg
         (LocaleInfo::Libc(l), _) => {
             crate::libc_provider::regex_wc_tolower_libc(l, c, libc_is_wide())
         }
-        (LocaleInfo::Builtin, _) | (_, CollProvider::Builtin) => {
+        (LocaleInfo::Builtin { .. }, _) | (_, CollProvider::Builtin) => {
             builtin::regex_wc_tolower_builtin::call(c)
         }
         _ => c,

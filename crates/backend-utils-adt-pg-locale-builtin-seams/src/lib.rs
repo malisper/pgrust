@@ -14,14 +14,29 @@ use types_locale::PgLocale;
 
 pub use backend_utils_adt_pg_locale_seams::RegexWcClass;
 
+/// The builtin-provider locale `create_pg_locale_builtin` returns: the
+/// provider-independent flag core (allocated in the caller's `mcx`) plus the
+/// `info.builtin.casemap_full` flag the trimmed [`PgLocale`] flag core does not
+/// carry. The consumer stores `casemap_full` in its `LocaleInfo::Builtin` arm,
+/// where C keeps the `info` union; it is true only for `PG_UNICODE_FAST`
+/// (`pg_locale_builtin.c:160`).
+pub struct PgLocaleBuiltinResult<'mcx> {
+    /// The flag core (`provider`/`deterministic`/`collate_is_c`/`ctype_is_c`),
+    /// allocated in `mcx`.
+    pub view: PgLocale<'mcx>,
+    /// `info.builtin.casemap_full` — full Unicode case mapping (`PG_UNICODE_FAST`).
+    pub casemap_full: bool,
+}
+
 seam_core::seam!(
     /// `create_pg_locale_builtin(collid, context)` (`pg_locale_builtin.c`):
     /// build the `pg_locale_t` flag core for a builtin-provider collation
-    /// (`PG_C_UTF8` / `C.UTF-8` / `PG_UNICODE_FAST`), allocated in `mcx`.
+    /// (`C` / `C.UTF-8` / `PG_UNICODE_FAST`), allocated in `mcx`, along with the
+    /// `info.builtin.casemap_full` flag.
     pub fn create_pg_locale_builtin<'mcx>(
         mcx: Mcx<'mcx>,
         collid: Oid,
-    ) -> PgResult<PgLocale<'mcx>>
+    ) -> PgResult<PgLocaleBuiltinResult<'mcx>>
 );
 
 seam_core::seam!(
@@ -82,10 +97,12 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `pg_wc_is*` BUILTIN strategy (`regc_pg_locale.c`): the builtin Unicode
-    /// ctype predicate (`pg_u_isalpha`/…) for wide character `c`. Locale-
-    /// independent (the builtin tables carry no per-collation state), so no
-    /// collation/locale argument. Owner: the builtin unit (`unicode_*`).
-    pub fn regex_wc_isclass_builtin(class: RegexWcClass, c: PgWChar) -> bool
+    /// ctype predicate (`pg_u_isalpha`/…) for wide character `c`. The digit,
+    /// alnum, and punct predicates take a `posix` argument (`pg_u_isdigit` etc.,
+    /// `regc_pg_locale.c:307/361/505`), which C derives from the locale as
+    /// `!info.builtin.casemap_full`; the consumer resolves it from the
+    /// collation's `casemap_full` and passes it here.
+    pub fn regex_wc_isclass_builtin(class: RegexWcClass, c: PgWChar, posix: bool) -> bool
 );
 
 seam_core::seam!(

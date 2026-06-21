@@ -1954,11 +1954,14 @@ pub(crate) fn database_locale_row(
         .ok_or_else(|| PgError::error(format!("null datcollate for database {dbid}")))?;
     let ctype = getattr_option_text(mcx, DATABASEOID, &tup, Anum_pg_database_datctype_loc)?
         .ok_or_else(|| PgError::error(format!("null datctype for database {dbid}")))?;
+    // datlocale is nullable (NULL for the libc provider).
+    let locale = getattr_option_text(mcx, DATABASEOID, &tup, Anum_pg_database_datlocale_loc)?;
     ReleaseSysCache(tup);
     Ok(Some(backend_utils_adt_pg_locale_catalog_seams::DatabaseLocaleRow {
         provider,
         collate,
         ctype,
+        locale,
     }))
 }
 
