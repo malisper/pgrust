@@ -2090,6 +2090,10 @@ pub fn exec_init_expr<'mcx>(
     let mcx = estate.es_query_cxt;
 
     let mut state = make_expr_state();
+    // C `state->expr = node` — retain the original expression on the ExprState
+    // (read back by callers like JSON_TABLE's PASSING-args loop, which derives
+    // each variable's exprType/exprTypmod from state->expr).
+    state.expr = Some(mcx::alloc_in(mcx, node.clone_in(mcx)?)?);
     // C `state->parent = parent` reaches the EState via `parent->state`; the
     // owned model defers parent stamping to `stamp_expr_parents`, so we stamp
     // the non-owning EState back-link here (a parent IS present at this entry —
@@ -2380,6 +2384,8 @@ pub fn exec_init_expr_no_parent<'mcx>(
     let mcx = estate.es_query_cxt;
 
     let mut state = make_expr_state();
+    // C `state->expr = node` (ExecInitExpr).
+    state.expr = Some(mcx::alloc_in(mcx, node.clone_in(mcx)?)?);
     state.ext_params = 0;
     ensure_result_arena(mcx, &mut state)?;
 

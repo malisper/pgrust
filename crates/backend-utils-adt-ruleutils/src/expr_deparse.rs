@@ -483,14 +483,366 @@ pub(crate) fn get_tablefunc(
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
 ) -> PgResult<()> {
-    use types_nodes::primnodes::TFT_XMLTABLE;
+    use types_nodes::primnodes::{TFT_JSON_TABLE, TFT_XMLTABLE};
+    // XMLTABLE and JSON_TABLE are the only existing implementations.
     if tf.functype == TFT_XMLTABLE {
         get_xmltable(tf, context, showimplicit)
+    } else if tf.functype == TFT_JSON_TABLE {
+        get_json_table(tf, context, showimplicit)
     } else {
-        Err(deferred(
-            "get_tablefunc TFT_JSON_TABLE (get_json_table; JSON deparser family)",
-        ))
+        Ok(())
     }
+}
+
+/// `get_json_behavior(behavior, context, on)` (ruleutils.c:9173) — render an ON
+/// ERROR / ON EMPTY behavior clause. 1:1 port.
+fn get_json_behavior(
+    behavior: &types_nodes::primnodes::JsonBehavior,
+    context: &mut DeparseContext<'_>,
+    on: &str,
+) -> PgResult<()> {
+    use types_nodes::primnodes::JsonBehaviorType::*;
+    let mcx = context.buf.allocator();
+
+    // The order of array elements must correspond to the order of
+    // JsonBehaviorType members.
+    let behavior_name = match behavior.btype {
+        JSON_BEHAVIOR_NULL => " NULL",
+        JSON_BEHAVIOR_ERROR => " ERROR",
+        JSON_BEHAVIOR_EMPTY => " EMPTY",
+        JSON_BEHAVIOR_TRUE => " TRUE",
+        JSON_BEHAVIOR_FALSE => " FALSE",
+        JSON_BEHAVIOR_UNKNOWN => " UNKNOWN",
+        JSON_BEHAVIOR_EMPTY_ARRAY => " EMPTY ARRAY",
+        JSON_BEHAVIOR_EMPTY_OBJECT => " EMPTY OBJECT",
+        JSON_BEHAVIOR_DEFAULT => " DEFAULT ",
+    };
+
+    str_(context, behavior_name)?;
+
+    if behavior.btype == JSON_BEHAVIOR_DEFAULT {
+        if let Some(expr) = behavior.expr.as_deref() {
+            let n = Node::mk_expr(mcx, expr.clone_in(mcx)?)?;
+            get_rule_expr(&n, context, false)?;
+        }
+    }
+
+    str_(context, " ON ")?;
+    str_(context, on)?;
+    Ok(())
+}
+
+/// `get_json_expr_options(jsexpr, context, default_behavior)` (ruleutils.c:9211)
+/// — parse back common options for JSON_QUERY, JSON_VALUE, JSON_EXISTS and
+/// JSON_TABLE columns. 1:1 port.
+fn get_json_expr_options(
+    jsexpr: &types_nodes::primnodes::JsonExpr,
+    context: &mut DeparseContext<'_>,
+    default_behavior: types_nodes::primnodes::JsonBehaviorType,
+) -> PgResult<()> {
+    use types_nodes::primnodes::JsonExprOp::JSON_QUERY_OP;
+    use types_nodes::primnodes::JsonWrapper::*;
+
+    if jsexpr.op == JSON_QUERY_OP {
+        match jsexpr.wrapper {
+            JSW_CONDITIONAL => str_(context, " WITH CONDITIONAL WRAPPER")?,
+            JSW_UNCONDITIONAL => str_(context, " WITH UNCONDITIONAL WRAPPER")?,
+            // The default
+            JSW_NONE | JSW_UNSPEC => str_(context, " WITHOUT WRAPPER")?,
+        }
+
+        if jsexpr.omit_quotes {
+            str_(context, " OMIT QUOTES")?;
+        } else {
+            // The default
+            str_(context, " KEEP QUOTES")?;
+        }
+    }
+
+    if let Some(on_empty) = jsexpr.on_empty.as_deref() {
+        if on_empty.btype != default_behavior {
+            get_json_behavior(on_empty, context, "EMPTY")?;
+        }
+    }
+    if let Some(on_error) = jsexpr.on_error.as_deref() {
+        if on_error.btype != default_behavior {
+            get_json_behavior(on_error, context, "ERROR")?;
+        }
+    }
+    Ok(())
+}
+
+/// `get_json_path_spec(path_spec, context, showimplicit)` (ruleutils.c:11615) —
+/// parse back a JSON path spec. 1:1 port.
+fn get_json_path_spec(
+    path_spec: &Expr,
+    context: &mut DeparseContext<'_>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    let mcx = context.buf.allocator();
+    if let Expr::Const(c) = path_spec {
+        get_const_expr_inner(c, context, -1)
+    } else {
+        let n = Node::mk_expr(mcx, path_spec.clone_in(mcx)?)?;
+        get_rule_expr(&n, context, showimplicit)
+    }
+}
+
+/// `get_json_table_nested_columns(tf, plan, context, showimplicit, needcomma)`
+/// (ruleutils.c:12043) — parse back nested JSON_TABLE columns. 1:1 port.
+fn get_json_table_nested_columns(
+    tf: &types_nodes::primnodes::TableFunc<'_>,
+    plan: &Node<'_>,
+    context: &mut DeparseContext<'_>,
+    showimplicit: bool,
+    needcomma: bool,
+) -> PgResult<()> {
+    use crate::query_deparse::append_context_keyword;
+    if let Some(scan) = plan.as_jsontablepathscan() {
+        if needcomma {
+            ch_(context, b',')?;
+        }
+
+        ch_(context, b' ')?;
+        append_context_keyword(context, "NESTED PATH ", 0, 0, 0)?;
+        // scan->path->value — the collapsed `path` is the Const value node.
+        get_const_expr(&scan.path, context, -1)?;
+        str_(context, " AS ")?;
+        let mcx = context.buf.allocator();
+        let q = quote_identifier(
+            mcx,
+            scan.name.as_ref().map(|s| s.as_str()).unwrap_or(""),
+        )?;
+        str_(context, q.as_str())?;
+        get_json_table_columns(tf, scan, context, showimplicit)?;
+    } else if let Some(join) = plan.as_jsontablesiblingjoin() {
+        get_json_table_nested_columns(tf, &join.lplan, context, showimplicit, needcomma)?;
+        get_json_table_nested_columns(tf, &join.rplan, context, showimplicit, true)?;
+    }
+    Ok(())
+}
+
+/// `get_json_table_columns(tf, scan, context, showimplicit)` (ruleutils.c:12075)
+/// — parse back JSON_TABLE columns. 1:1 port.
+fn get_json_table_columns(
+    tf: &types_nodes::primnodes::TableFunc<'_>,
+    scan: &types_nodes::primnodes::JsonTablePathScan<'_>,
+    context: &mut DeparseContext<'_>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    use crate::query_deparse::{append_context_keyword, PRETTYINDENT_VAR};
+    use types_nodes::primnodes::JsonBehaviorType::{JSON_BEHAVIOR_FALSE, JSON_BEHAVIOR_NULL};
+    use types_nodes::primnodes::JsonExprOp::{JSON_EXISTS_OP, JSON_QUERY_OP};
+    use types_nodes::primnodes::JsonFormatType::JS_FORMAT_JSONB;
+
+    // TYPCATEGORY_STRING ('S').
+    const TYPCATEGORY_STRING: u8 = b'S';
+
+    ch_(context, b' ')?;
+    append_context_keyword(context, "COLUMNS (", 0, 0, 0)?;
+
+    if pretty_indent(context) {
+        context.indentLevel += PRETTYINDENT_VAR;
+    }
+
+    let colnames = tf.colnames.as_ref();
+    let coltypes = tf.coltypes.as_ref();
+    let coltypmods = tf.coltypmods.as_ref();
+    let colvalexprs = tf.colvalexprs.as_ref();
+
+    let ncols = colvalexprs.map(|v| v.len()).unwrap_or(0);
+    let mut colnum: i32 = 0;
+    for i in 0..ncols {
+        let colname = colnames
+            .and_then(|v| v.get(i))
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let typid = coltypes.and_then(|v| v.get(i)).copied().unwrap_or(0);
+        let typmod = coltypmods.and_then(|v| v.get(i)).copied().unwrap_or(-1);
+        // castNode(JsonExpr, lfirst(lc_colvalexpr)) — NULL for an ordinality col.
+        let colexpr: Option<&types_nodes::primnodes::JsonExpr> = colvalexprs
+            .and_then(|v| v.get(i))
+            .and_then(|o| o.as_deref())
+            .and_then(|e| match e {
+                Expr::JsonExpr(j) => Some(j),
+                _ => None,
+            });
+
+        // Skip columns that don't belong to this scan.
+        if scan.colMin < 0 || colnum < scan.colMin {
+            colnum += 1;
+            continue;
+        }
+        if colnum > scan.colMax {
+            break;
+        }
+
+        if colnum > scan.colMin {
+            str_(context, ", ")?;
+        }
+
+        colnum += 1;
+
+        let ordinality = colexpr.is_none();
+
+        append_context_keyword(context, "", 0, 0, 0)?;
+
+        let mcx = context.buf.allocator();
+        let q = quote_identifier(mcx, colname)?;
+        str_(context, q.as_str())?;
+        ch_(context, b' ')?;
+        if ordinality {
+            str_(context, "FOR ORDINALITY")?;
+        } else {
+            let ty = format_type_with_typemod(mcx, typid, typmod)?;
+            str_(context, ty.as_str())?;
+        }
+        if ordinality {
+            continue;
+        }
+
+        let colexpr = colexpr.unwrap();
+
+        // Set default_behavior to guide get_json_expr_options() on whether to
+        // emit the ON ERROR / EMPTY clauses.
+        let default_behavior;
+        if colexpr.op == JSON_EXISTS_OP {
+            str_(context, " EXISTS")?;
+            default_behavior = JSON_BEHAVIOR_FALSE;
+        } else {
+            if colexpr.op == JSON_QUERY_OP {
+                let (typcategory, _typispreferred) =
+                    backend_utils_cache_lsyscache_seams::get_type_category_preferred::call(typid)?;
+
+                if typcategory == TYPCATEGORY_STRING {
+                    let is_jsonb = colexpr
+                        .format
+                        .map(|f| f.format_type == JS_FORMAT_JSONB)
+                        .unwrap_or(false);
+                    str_(
+                        context,
+                        if is_jsonb {
+                            " FORMAT JSONB"
+                        } else {
+                            " FORMAT JSON"
+                        },
+                    )?;
+                }
+            }
+
+            default_behavior = JSON_BEHAVIOR_NULL;
+        }
+
+        str_(context, " PATH ")?;
+
+        if let Some(path_spec) = colexpr.path_spec.as_deref() {
+            get_json_path_spec(path_spec, context, showimplicit)?;
+        }
+
+        get_json_expr_options(colexpr, context, default_behavior)?;
+    }
+
+    if let Some(child) = scan.child.as_deref() {
+        get_json_table_nested_columns(tf, child, context, showimplicit, scan.colMin >= 0)?;
+    }
+
+    if pretty_indent(context) {
+        context.indentLevel -= PRETTYINDENT_VAR;
+    }
+
+    append_context_keyword(context, ")", 0, 0, 0)?;
+    Ok(())
+}
+
+/// `get_json_table(tf, context, showimplicit)` (ruleutils.c:12182) — parse back
+/// a JSON_TABLE function. 1:1 port.
+fn get_json_table(
+    tf: &types_nodes::primnodes::TableFunc<'_>,
+    context: &mut DeparseContext<'_>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    use crate::query_deparse::{append_context_keyword, PRETTYINDENT_VAR};
+    let mcx = context.buf.allocator();
+
+    // jexpr = castNode(JsonExpr, tf->docexpr).
+    let jexpr = match tf.docexpr.as_deref() {
+        Some(Expr::JsonExpr(j)) => j,
+        _ => return Err(elog_error("get_json_table: docexpr is not a JsonExpr".to_string())),
+    };
+    // root = castNode(JsonTablePathScan, tf->plan).
+    let root = tf
+        .plan
+        .as_deref()
+        .and_then(|n| n.as_jsontablepathscan())
+        .ok_or_else(|| elog_error("get_json_table: plan is not a JsonTablePathScan".to_string()))?;
+
+    str_(context, "JSON_TABLE(")?;
+
+    if pretty_indent(context) {
+        context.indentLevel += PRETTYINDENT_VAR;
+    }
+
+    append_context_keyword(context, "", 0, 0, 0)?;
+
+    if let Some(formatted_expr) = jexpr.formatted_expr.as_deref() {
+        let n = Node::mk_expr(mcx, formatted_expr.clone_in(mcx)?)?;
+        get_rule_expr(&n, context, showimplicit)?;
+    }
+
+    str_(context, ", ")?;
+
+    // root->path->value — the collapsed `path` is the Const value node.
+    get_const_expr(&root.path, context, -1)?;
+
+    str_(context, " AS ")?;
+    let q = quote_identifier(mcx, root.name.as_ref().map(|s| s.as_str()).unwrap_or(""))?;
+    str_(context, q.as_str())?;
+
+    if !jexpr.passing_values.is_empty() {
+        let mut needcomma = false;
+
+        ch_(context, b' ')?;
+        append_context_keyword(context, "PASSING ", 0, 0, 0)?;
+
+        if pretty_indent(context) {
+            context.indentLevel += PRETTYINDENT_VAR;
+        }
+
+        for (i, val) in jexpr.passing_values.iter().enumerate() {
+            if needcomma {
+                str_(context, ", ")?;
+            }
+            needcomma = true;
+
+            append_context_keyword(context, "", 0, 0, 0)?;
+
+            let n = Node::mk_expr(mcx, val.clone_in(mcx)?)?;
+            get_rule_expr(&n, context, false)?;
+            str_(context, " AS ")?;
+            let name = jexpr.passing_names.get(i).map(|s| s.as_str()).unwrap_or("");
+            let q = quote_identifier(mcx, name)?;
+            str_(context, q.as_str())?;
+        }
+
+        if pretty_indent(context) {
+            context.indentLevel -= PRETTYINDENT_VAR;
+        }
+    }
+
+    get_json_table_columns(tf, root, context, showimplicit)?;
+
+    if let Some(on_error) = jexpr.on_error.as_deref() {
+        if on_error.btype != types_nodes::primnodes::JsonBehaviorType::JSON_BEHAVIOR_EMPTY_ARRAY {
+            get_json_behavior(on_error, context, "ERROR")?;
+        }
+    }
+
+    if pretty_indent(context) {
+        context.indentLevel -= PRETTYINDENT_VAR;
+    }
+
+    append_context_keyword(context, ")", 0, 0, 0)?;
+    Ok(())
 }
 
 /// `get_xmltable(tf, context, showimplicit)` (ruleutils.c:11945) — parse back an
