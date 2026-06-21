@@ -820,17 +820,53 @@ fn get_rule_expr_e(
             }
         }
 
-        Expr::RowExpr(_) => {
-            // C 9700-9753: rendered as `ROW(args)` (or schema-qualified composite
-            // when row_format != COERCE_EXPLICIT_CALL and the rowtype is named),
-            // and the toplevel `*` whole-row sub-case calls get_variable with
-            // istoplevel + a lookup_rowtype_tupdesc catalog probe. The named-row
-            // path needs M1 catalog (get_typ_typrelid / lookup_rowtype_tupdesc);
-            // defer the whole arm to the catalog family rather than render only
-            // the un-named subset (which would silently differ for casts).
-            return Err(deferred(
-                "RowExpr (lookup_rowtype_tupdesc / get_variable toplevel; M1 catalog)",
-            ));
+        Expr::RowExpr(rowexpr) => {
+            // C 9883-9942. If it's a named type and not RECORD, we may have to
+            // skip dropped columns and/or claim there are NULLs for added
+            // columns, so probe the rowtype's tuple descriptor.
+            const RECORDOID: Oid = 2249;
+            let tupdesc = if rowexpr.row_typeid != RECORDOID {
+                let td = backend_utils_cache_typcache_seams::lookup_rowtype_tupdesc::call(
+                    mcx,
+                    rowexpr.row_typeid,
+                    -1,
+                )?;
+                debug_assert!(rowexpr.args.len() as i32 <= td.natts);
+                Some(td)
+            } else {
+                None
+            };
+
+            // SQL99 allows "ROW" to be omitted when there is more than one
+            // column, but for simplicity we always print it.
+            str_(context, "ROW(")?;
+            let mut sep = "";
+            let mut i: i32 = 0;
+            for e in rowexpr.args.iter() {
+                if tupdesc.as_ref().is_none_or(|td| !td.attr(i as usize).attisdropped) {
+                    str_(context, sep)?;
+                    // Whole-row Vars need special treatment here.
+                    get_rule_expr_toplevel_expr(e, context, true)?;
+                    sep = ", ";
+                }
+                i += 1;
+            }
+            if let Some(td) = tupdesc.as_ref() {
+                while i < td.natts {
+                    if !td.attr(i as usize).attisdropped {
+                        str_(context, sep)?;
+                        str_(context, "NULL")?;
+                        sep = ", ";
+                    }
+                    i += 1;
+                }
+            }
+            ch_(context, b')')?;
+            if rowexpr.row_format == types_nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CAST {
+                let ty = format_type_with_typemod(mcx, rowexpr.row_typeid, -1)?;
+                str_(context, "::")?;
+                str_(context, ty.as_str())?;
+            }
         }
 
         Expr::RowCompareExpr(rc) => {
