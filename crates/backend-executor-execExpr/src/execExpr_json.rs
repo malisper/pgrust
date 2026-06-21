@@ -537,7 +537,7 @@ pub(crate) fn exec_init_xml_expr<'mcx>(
         resvalue: resv,
         resnull: resv,
         d: ExprEvalStepData::XmlExpr {
-            xexpr: xexpr.clone(),
+            xexpr: xexpr.clone_in(mcx)?,
             named_arg_cells,
             named_arg_types,
             arg_cells,
