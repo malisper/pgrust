@@ -676,10 +676,15 @@ fn initialize_brin_buildstate<'mcx>(
     let bs_bdesc = brin_build_desc(mcx, idx_rel)?;
     let bs_dtuple = brin_new_memtuple(mcx, &bs_bdesc)?;
 
-    // Calculate the start of the last page range.
+    // Calculate the start of the last page range. C does this in uint32
+    // BlockNumber arithmetic that wraps; when `table_pages` is the
+    // BRIN_ALL_BLOCKRANGES sentinel (InvalidBlockNumber = 0xFFFFFFFF, passed by
+    // `brinsummarize` for an all-ranges summarize), `lastRange + pagesPerRange`
+    // overflows uint32 and wraps. Mirror the wraparound (Rust would panic on
+    // the `+` in debug) so the value matches C bit-for-bit.
     let mut last_range = 0;
     if table_pages > 0 {
-        last_range = ((table_pages - 1) / pages_per_range) * pages_per_range;
+        last_range = (table_pages.wrapping_sub(1) / pages_per_range).wrapping_mul(pages_per_range);
     }
 
     Ok(BrinBuildState {
@@ -688,7 +693,7 @@ fn initialize_brin_buildstate<'mcx>(
         bs_currentInsertBuf: InvalidBuffer,
         bs_pagesPerRange: pages_per_range,
         bs_currRangeStart: 0,
-        bs_maxRangeStart: last_range + pages_per_range,
+        bs_maxRangeStart: last_range.wrapping_add(pages_per_range),
         bs_rmAccess: revmap,
         bs_bdesc,
         bs_dtuple,
@@ -757,7 +762,7 @@ fn summarize_range<'mcx>(
 
     // Compute range end. Table cannot shrink (ShareUpdateExclusive) but can grow.
     debug_assert_eq!(heap_blk % state.bs_pagesPerRange, 0);
-    let scan_num_blks = if heap_blk + state.bs_pagesPerRange > heap_num_blks {
+    let scan_num_blks = if heap_blk.wrapping_add(state.bs_pagesPerRange) > heap_num_blks {
         // Final (possibly partial) range: recompute the table size.
         core::cmp::min(
             relation_get_number_of_blocks::call(heap_rel)? - heap_blk,
@@ -768,33 +773,29 @@ fn summarize_range<'mcx>(
     };
 
     // Execute the partial heap scan covering the range, summarizing the heap
-    // tuples in it. SANCTIONED panic leg: the heap AM scan layer is unported.
+    // tuples in it. C: `table_index_build_range_scan(heapRel, state->bs_irel,
+    // indexInfo, false, true, false, heapBlk, scanNumBlks, brinbuildCallback,
+    // state, NULL)` (brin.c:1817). The per-tuple callback is the same
+    // `brinbuildCallback` the full index build uses — it accumulates each live
+    // tuple into the running range summary, flushing completed ranges.
     state.bs_currRangeStart = heap_blk;
     {
-        // brinbuildCallback(state) per live tuple (brin.c:1051): add the heap
-        // tuple's values to bs_dtuple, flushing/inserting at range boundaries.
-        // It bottoms out in `add_values_to_range`; here it crosses the (gated)
-        // heap-scan seam as a closure, but the seam is uninstalled so the call
-        // panics before the closure ever runs.
-        let bs_pages_per_range = state.bs_pagesPerRange;
-        let _ = bs_pages_per_range;
-        let mut callback = |_heap_tid: ItemPointerData,
-                            _values: &[Datum<'mcx>],
-                            _isnull: &[bool],
+        // Alias the index Relation out of the build state so the closure can
+        // take `&mut state` without aliasing the `&state.bs_irel` the scan
+        // borrows (mirrors `brinbuild`, which captures `index_alias` + `st`).
+        let index_alias = state.bs_irel.alias();
+        let st = &mut *state;
+        let mut callback = |tid: ItemPointerData,
+                            values: &[Datum<'mcx>],
+                            isnull: &[bool],
                             _tuple_is_alive: bool|
          -> PgResult<()> {
-            // brinbuildCallback drives form_and_insert_tuple +
-            // add_values_to_range across range boundaries. It is only reachable
-            // once the heap scan layer lands; the seam panics first.
-            panic!(
-                "brinbuildCallback: BRIN range summarization drives the heap \
-                 scan layer (table_index_build_range_scan) which is unported"
-            )
+            brinbuild_callback(mcx, &index_alias, &tid, values, isnull, st)
         };
         table_index_build_range_scan::call(
             mcx,
             heap_rel,
-            &state.bs_irel,
+            &index_alias,
             index_info,
             false,
             true,
@@ -889,8 +890,11 @@ fn brinsummarize<'mcx>(
     if page_range == BRIN_ALL_BLOCKRANGES {
         start_blk = 0;
     } else {
-        start_blk = (page_range / pages_per_range) * pages_per_range;
-        heap_num_blocks = core::cmp::min(heap_num_blocks, start_blk + pages_per_range);
+        // C BlockNumber (uint32) arithmetic; a high explicit page_range can push
+        // start_blk + pages_per_range past uint32, which C wraps.
+        start_blk = (page_range / pages_per_range).wrapping_mul(pages_per_range);
+        heap_num_blocks =
+            core::cmp::min(heap_num_blocks, start_blk.wrapping_add(pages_per_range));
     }
     if start_blk > heap_num_blocks {
         // Nothing to do if start point is beyond end of table.
@@ -905,8 +909,8 @@ fn brinsummarize<'mcx>(
 
     while start_blk < heap_num_blocks {
         // Unless requested to summarize even a partial range, stop if the next
-        // range is partial.
-        if !include_partial && (start_blk + pages_per_range > heap_num_blocks) {
+        // range is partial. (uint32 wrap, matching C BlockNumber arithmetic.)
+        if !include_partial && (start_blk.wrapping_add(pages_per_range) > heap_num_blocks) {
             break;
         }
 
@@ -969,7 +973,7 @@ fn brinsummarize<'mcx>(
             lock_buffer::call(buf, BUFFER_LOCK_UNLOCK)?;
         }
 
-        start_blk += pages_per_range;
+        start_blk = start_blk.wrapping_add(pages_per_range);
     }
 
     if BufferIsValid(buf) {
@@ -979,6 +983,13 @@ fn brinsummarize<'mcx>(
     // free resources
     brinRevmapTerminate(&revmap)?;
     if let Some(st) = state {
+        // The build state was created with its OWN revmap (a fresh
+        // `brinRevmapInitialize`, to keep the outer `revmap` borrow disjoint —
+        // C passes the single live revmap into the build state). That revmap
+        // pins the metapage buffer; terminate it before dropping the state, or
+        // the pin leaks (mirrors `brinbuild`, which terminates `bs_rmAccess`
+        // before `terminate_brin_buildstate`).
+        brinRevmapTerminate(&st.bs_rmAccess)?;
         terminate_brin_buildstate(mcx, st)?;
         // pfree(indexInfo): index_info dropped here.
         drop(index_info);
