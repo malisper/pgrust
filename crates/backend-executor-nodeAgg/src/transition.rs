@@ -346,7 +346,7 @@ pub fn advance_transition_function<'mcx>(
             pertrans,
             trans_value,
             trans_value_is_null,
-            &input_args,
+            input_args,
             &input_args_null,
             mcx,
             estate_link,
@@ -367,7 +367,7 @@ pub fn advance_transition_function<'mcx>(
         pertrans,
         trans_value,
         trans_value_is_null,
-        &input_args,
+        input_args,
         &input_args_null,
         mcx,
         estate_link,
@@ -468,7 +468,7 @@ fn invoke_transfn<'mcx>(
     pertrans: &AggStatePerTransData<'mcx>,
     trans_value: AggDatum<'mcx>,
     trans_value_is_null: bool,
-    input_args: &[AggDatum<'mcx>],
+    input_args: Vec<AggDatum<'mcx>>,
     input_args_null: &[bool],
     mcx: Mcx<'mcx>,
     estate_link: types_fmgr::fmgr::RawEStateLink,
@@ -484,8 +484,12 @@ fn invoke_transfn<'mcx>(
         alloc::vec::Vec::with_capacity(1 + input_args.len());
     args.push(trans_value);
     args_null.push(trans_value_is_null);
-    for (i, a) in input_args.iter().enumerate() {
-        args.push(a.clone());
+    for (i, a) in input_args.into_iter().enumerate() {
+        // MOVE each input in (no clone): a combine aggregate's input is a
+        // move-only `Datum::Internal` (the deserialized transition state) that
+        // cannot be cloned; for an ordinary by-value/by-ref input a move equals
+        // a copy.
+        args.push(a);
         args_null.push(input_args_null.get(i).copied().unwrap_or(false));
     }
     // C: `pertrans->transfn_fcinfo->flinfo` is `&pertrans->transfn`, onto which
@@ -559,6 +563,25 @@ pub(crate) fn agg_call_context_guard(
     ))
 }
 
+/// Deposit the aggregate-call back-pointer built directly from the live
+/// `AggState` (C: `ds_fcinfo->context = (Node *) aggstate`) on the fmgr
+/// thread-local channel for the about-to-be-issued call, returning the RAII
+/// guard. Used by the `EEOP_AGG_*DESERIALIZE` interp step, whose `ds_fcinfo`
+/// frame the execExpr builder did not stamp with the Agg context; the deserialfn
+/// (`numeric_deserialize` et al.) calls `AggCheckCallContext`, which needs it.
+pub fn agg_call_context_guard_for(
+    aggstate: &AggStateData<'_>,
+) -> types_fmgr::fmgr::AggCallContextGuard {
+    let link = types_nodes::aggstate_carrier::AggStateContextLink::from_ref(
+        aggstate as &(dyn types_nodes::aggstate_carrier::AggStateLive<'_> + '_),
+    );
+    let (data, vtable) = link.to_raw();
+    types_fmgr::fmgr::AggCallContextGuard::install(types_fmgr::fmgr::RawAggContextLink {
+        data,
+        vtable,
+    })
+}
+
 /// `ExecAggInitGroup(aggstate, pertrans, pergroup, aggcontext)`
 /// (execExprInterp.c:5616) — first-non-NULL-input initialization of a group's
 /// transition value: copy `fcinfo->args[1].value` (here `input_args[0]`) into
@@ -596,7 +619,7 @@ pub fn ExecAggPlainTransByVal<'mcx>(
     setoff: usize,
     setno: i32,
     _aggcontext: Option<types_nodes::execnodes::EcxtId>,
-    input_args: &[AggDatum<'mcx>],
+    input_args: Vec<AggDatum<'mcx>>,
     input_args_null: &[bool],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -641,7 +664,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
     setoff: usize,
     setno: i32,
     aggcontext: Option<types_nodes::execnodes::EcxtId>,
-    input_args: &[AggDatum<'mcx>],
+    input_args: Vec<AggDatum<'mcx>>,
     input_args_null: &[bool],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {

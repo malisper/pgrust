@@ -275,6 +275,7 @@ pub fn finalize_partialaggregate<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     peragg: &AggStatePerAggData<'mcx>,
     pergroupstate: &mut AggStatePerGroupData<'mcx>,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
     let pertrans = pertrans_for(aggstate, peragg.transno);
@@ -291,7 +292,7 @@ pub fn finalize_partialaggregate<'mcx>(
     if OidIsValid(serialfn_oid) {
         // Don't call a strict serialization function with NULL input.
         // if (pertrans->serialfn.fn_strict && pergroupstate->transValueIsNull)
-        if serialfn_is_strict(aggstate, peragg.transno) && pergroupstate.trans_value_is_null {
+        if pertrans.serialfn.fn_strict && pergroupstate.trans_value_is_null {
             // *resultVal = (Datum) 0; *resultIsNull = true;
             result_val = Datum::null();
             result_is_null = true;
@@ -302,16 +303,35 @@ pub fn finalize_partialaggregate<'mcx>(
             //     pertrans->transtypeLen);
             // fcinfo->args[0].isnull = pergroupstate->transValueIsNull;
             // fcinfo->isnull = false;
+            // An `internal`-transtype state is a move-only `Datum::Internal`
+            // (C `internal` has no copy); move it out (this is its terminal use
+            // in the partial path). Any other transtype is cloned.
+            let trans_value = if pergroupstate.trans_value.is_internal() {
+                core::mem::replace(&mut pergroupstate.trans_value, Datum::null())
+            } else {
+                pergroupstate.trans_value.clone()
+            };
             let arg0 = make_expanded_object_read_only(
-                pergroupstate.trans_value.clone(),
+                trans_value,
                 pergroupstate.trans_value_is_null,
                 transtype_len,
             );
-            set_serialfn_arg0(aggstate, peragg.transno, arg0, pergroupstate.trans_value_is_null);
 
             // *resultVal = FunctionCallInvoke(fcinfo);
             // *resultIsNull = fcinfo->isnull;
-            let (result, isnull) = invoke_serialfn(aggstate, peragg.transno);
+            //
+            // C's serialfn reads `PG_GETARG_POINTER(0)` WITHOUT consuming the
+            // transition state: when several aggregates share one transition state
+            // (e.g. `sum(numeric)` and `avg(numeric)` sharing `numeric_avg_accum`),
+            // each one's serialfn must run against the same live state in turn. In
+            // the owned model the `internal` state moved out above; recover it from
+            // the call and restore it so the next sharing aggregate's serialfn sees
+            // it.
+            let (result, isnull, surviving) =
+                invoke_serialfn(aggstate, peragg.transno, arg0, pergroupstate.trans_value_is_null, estate)?;
+            if let Some(state) = surviving {
+                pergroupstate.trans_value = state;
+            }
             result_val = result;
             result_is_null = isnull;
         }
@@ -413,48 +433,56 @@ fn invoke_finalfn<'mcx>(
     )
 }
 
-/// `pertrans->serialfn.fn_strict` — the serialfn's strictness from its resolved
-/// `FmgrInfo`. `FmgrInfo.fn_strict` IS modeled (fmgr #52); the blocker is reaching
-/// the per-trans serialfn FmgrInfo on the nodeAgg-owned `AggStatePerTransData`,
-/// set up by the unported `ExecInitAgg`/build path.
-fn serialfn_is_strict<'mcx>(_aggstate: &AggStateData<'mcx>, _transno: i32) -> bool {
-    panic!(
-        "backend-executor-nodeAgg::finalize_partialaggregate: FmgrInfo.fn_strict is \
-         modeled (fmgr #52), but the per-trans serialfn FmgrInfo \
-         (AggStatePerTransData.serialfn) is not yet populated by the unported \
-         ExecInitAgg/build_pertrans path"
-    );
-}
+/// `*resultVal = FunctionCallInvoke(pertrans->serialfn_fcinfo)` — invoke the
+/// resolved serialfn over `args[0] = transValue` (the running per-group state).
+///
+/// C: the serialfn frame (`pertrans->serialfn_fcinfo`) carries `&pertrans->serialfn`
+/// as its `FmgrInfo` and `(Node *) aggstate` as its context, both set up by
+/// `build_pertrans_for_aggref`. As elsewhere in nodeAgg, the resolved `FmgrInfo`
+/// cannot cross the fmgr seam, so re-dispatch by `serialfn.fn_oid` under the
+/// serialfn frame's collation (built with `InvalidOid`), threading the call node
+/// (`fmgr_info_set_expr`) so a polymorphic serialfn sees its declared types and
+/// the live-`AggState`/`EState` context channels so a serialfn calling
+/// `AggCheckCallContext` recovers the calling aggregate. `args[0]` is the
+/// `internal`-transtype state (a move-only `Datum::Internal`) which the owned
+/// by-reference lane moves in and the serialfn reads via `PG_GETARG_POINTER(0)`.
+fn invoke_serialfn<'mcx>(
+    aggstate: &mut AggStateData<'mcx>,
+    transno: i32,
+    arg0: Datum<'mcx>,
+    arg0_isnull: bool,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool, Option<Datum<'mcx>>)> {
+    let mcx = estate.es_query_cxt;
+    let estate_link = crate::transition::estate_raw_link(estate);
 
-/// `fcinfo->args[0].value = v; fcinfo->args[0].isnull = isnull; fcinfo->isnull
-/// = false;` on `pertrans->serialfn_fcinfo`. The shared call frame carries args[]
-/// (#296); the blocker is the nodeAgg-owned per-trans serialfn_fcinfo frame, not
-/// yet built/populated by the unported ExecInitAgg/build path.
-fn set_serialfn_arg0<'mcx>(
-    _aggstate: &mut AggStateData<'mcx>,
-    _transno: i32,
-    _value: Datum<'_>,
-    _isnull: bool,
-) {
-    panic!(
-        "backend-executor-nodeAgg::finalize_partialaggregate: the shared call frame \
-         carries args[] (#296), but the nodeAgg-owned per-trans serialfn_fcinfo \
-         (AggStatePerTransData.serialfn_fcinfo) is not yet built/populated by the \
-         unported ExecInitAgg/build_pertrans path"
-    );
-}
+    let pertrans = pertrans_for(aggstate, transno);
+    let serialfn_oid = pertrans.serialfn.fn_oid;
+    // The serialfn frame was built with `InvalidOid` collation (numeric.c serialfns
+    // ignore collation); `agg_collation` is the input collation and is not used by
+    // the serialfn. Mirror the C `InitFunctionCallInfoData(..., InvalidOid, ...)`.
+    let collation = types_core::primitive::INVALID_OID;
+    let fn_expr = pertrans.serialfn.fn_expr.clone();
+    let serialfn_fcinfo = pertrans.serialfn_fcinfo.as_deref();
 
-/// `FunctionCallInvoke(pertrans->serialfn_fcinfo)`; returns `(result,
-/// fcinfo->isnull)`. `FunctionCallInvoke` is ported (fmgr-core #52) and the shared
-/// call frame carries args[] (#296); the block is the nodeAgg-owned per-trans
-/// serialfn_fcinfo frame, not yet built/populated by the unported ExecInitAgg path.
-fn invoke_serialfn<'mcx>(_aggstate: &mut AggStateData<'mcx>, _transno: i32) -> (Datum<'mcx>, bool) {
-    panic!(
-        "backend-executor-nodeAgg::finalize_partialaggregate: FunctionCallInvoke is \
-         ported (fmgr-core #52) and the shared call frame carries args[] (#296), but \
-         the nodeAgg-owned per-trans serialfn_fcinfo (AggStatePerTransData.serialfn_fcinfo) \
-         is not yet built/populated by the unported ExecInitAgg/build_pertrans path"
-    );
+    // K1/K2: deposit the live-AggState back-pointer (C: serialfn_fcinfo->context =
+    // (Node *) aggstate) on the fmgr thread-local channel for this one dispatch, so
+    // a serialfn calling AggCheckCallContext recovers the AggState. numeric.c
+    // serialfns DO call AggCheckCallContext, so this link is required.
+    let _agg_ctx_guard = crate::transition::agg_call_context_guard(serialfn_fcinfo);
+    let _estate_guard = types_fmgr::fmgr::EStateCallContextGuard::install(estate_link);
+
+    // The FINAL form returns the surviving `args[0]` (the `internal` state the
+    // serialfn read but did not consume) so the caller can restore it for any
+    // sibling aggregate sharing the same transition state.
+    backend_utils_fmgr_fmgr_seams::function_call_finalfn_owned::call(
+        mcx,
+        serialfn_oid,
+        collation,
+        alloc::vec![arg0],
+        alloc::vec![arg0_isnull],
+        fn_expr,
+    )
 }
 
 /// `MakeExpandedObjectReadOnly(d, isnull, typlen)` (utils/expandeddatum.h):
@@ -707,7 +735,7 @@ pub fn finalize_aggregates<'mcx>(
 
         let (value, isnull) = if do_aggsplit_skipfinal(aggsplit) {
             let peragg = &peragg_vec[aggno as usize];
-            finalize_partialaggregate(aggstate, peragg, pergroupstate)?
+            finalize_partialaggregate(aggstate, peragg, pergroupstate, estate)?
         } else {
             // Evaluate the direct args first (needs `&mut ExprState` + `&mut
             // EState`), then hand the values to finalize_aggregate (which needs

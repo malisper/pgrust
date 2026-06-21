@@ -87,6 +87,23 @@ pub(crate) fn read_cell<'mcx>(state: &ExprState<'mcx>, id: ResultCellId) -> (Dat
     }
 }
 
+/// Take (move out, leaving a default) the `(value, isnull)` of the cell named by
+/// `id`. Used to gather a transition function's input args where one may be a
+/// move-only `Datum::Internal` (the C `internal` pseudo-type) — e.g. the
+/// deserialized transition state a combine step consumes once. For an ordinary
+/// by-value/by-ref input this is equivalent to [`read_cell`] (the cell is
+/// re-evaluated each row before its next use).
+#[inline]
+pub(crate) fn take_cell<'mcx>(state: &mut ExprState<'mcx>, id: ResultCellId) -> (Datum<'mcx>, bool) {
+    if id == types_nodes::execexpr::STATE_RESULT_CELL {
+        let v = core::mem::replace(&mut state.resvalue, Datum::null());
+        (v, state.resnull)
+    } else {
+        let c = state.result_cells.take(id);
+        (c.value, c.isnull)
+    }
+}
+
 /// Write the `(value, isnull)` of the cell named by `id` (see [`read_cell`]).
 #[inline]
 pub(crate) fn write_cell<'mcx>(
@@ -1020,31 +1037,77 @@ pub fn ExecInterpExpr<'mcx>(
             EEOP_AGG_STRICT_DESERIALIZE | EEOP_AGG_DESERIALIZE => {
                 // C (STRICT): if (op->d.agg_deserialize.fcinfo_data->args[0].isnull)
                 //                 EEO_JUMP(op->d.agg_deserialize.jumpnull);  /* else fall through */
-                // C (DESERIALIZE): switch to aggstate->tmpcontext memory, dispatch
-                //                  FunctionCallInvoke(fcinfo), store result.
+                // C (DESERIALIZE):
+                //   AggState *aggstate = castNode(AggState, state->parent);
+                //   MemoryContext oldContext =
+                //       MemoryContextSwitchTo(aggstate->tmpcontext->ecxt_per_tuple_memory);
+                //   fcinfo->isnull = false;
+                //   *op->resvalue = FunctionCallInvoke(fcinfo);
+                //   *op->resnull = fcinfo->isnull;
+                //   MemoryContextSwitchTo(oldContext);
                 //
-                // The args[0].isnull read and the FunctionCallInvoke dispatch are
-                // now expressible (fmgr #296 widened the call frame +
-                // function_call_invoke). The REMAINING blocker is the non-strict
-                // arm (which the STRICT arm falls through into): it runs the
-                // deserialfn inside aggstate->tmpcontext->ecxt_per_tuple_memory,
-                // and aggstate = castNode(AggState, state->parent) — the
-                // nodeAgg-owned AggState reached through state->parent, which the
-                // F0 model does not thread here (AggState-as-Node, #200). Running
-                // the deserialfn in the wrong memory context would leak/misplace
-                // its allocations, so this stays mirror-PG-and-panic. The pair
-                // can't be split: the STRICT arm is a bare null-check that falls
-                // through to the non-strict body.
-                let _ = (op, estate);
-                panic!(
-                    "EEOP_AGG_*DESERIALIZE: the args[0].isnull check + deserialfn \
-                     FunctionCallInvoke are modeled (fmgr #296), but the non-strict \
-                     arm must run the call inside aggstate->tmpcontext \
-                     (aggstate = castNode(AggState, state->parent)), the \
-                     nodeAgg-owned AggState the F0 model does not thread here \
-                     (AggState-as-Node, #200); blocked until nodeAgg threads \
-                     state->parent's AggState + its tmpcontext"
-                );
+                // The serialized transition state is read from `arg_cell` (the C
+                // `&ds_fcinfo->args[0]` the source sub-expression evaluated into);
+                // the dummy `args[1]` is supplied here. The deserialfn produces an
+                // `internal`-transtype state which in the owned model carries its
+                // own leaked per-aggregate context (the by-ref `Datum::Internal`
+                // box), so the C `tmpcontext` switch is not needed for its storage
+                // — the state is self-managing across the boundary. The AggState
+                // back-link (C `(Node *) aggstate` on the ds frame) is threaded so
+                // a deserialfn calling `AggCheckCallContext` recovers the AggState.
+                let strict = opcode == EEOP_AGG_STRICT_DESERIALIZE;
+                let (arg_cell, jumpnull, fn_oid, collation, fn_expr) = {
+                    let steps = state.steps.as_ref().unwrap();
+                    match &steps[op].d {
+                        ExprEvalStepData::AggDeserialize {
+                            fcinfo_data,
+                            arg_cell,
+                            jumpnull,
+                        } => {
+                            let fc = fcinfo_data
+                                .as_deref()
+                                .expect("EEOP_AGG_*DESERIALIZE: ds_fcinfo frame not built");
+                            let fl = fc
+                                .flinfo
+                                .as_ref()
+                                .expect("EEOP_AGG_*DESERIALIZE: ds_fcinfo has no FmgrInfo");
+                            (*arg_cell, *jumpnull, fl.fn_oid, fc.fncollation, fl.fn_expr.clone())
+                        }
+                        other => unreachable!(
+                            "EEOP_AGG_*DESERIALIZE: payload is not AggDeserialize: {other:?}"
+                        ),
+                    }
+                };
+
+                // STRICT: jump over the call when the serialized input is NULL.
+                let (in_val, in_null) = read_cell(state, arg_cell);
+                if strict && in_null {
+                    op = jumpnull as usize; // EEO_JUMP(jumpnull)
+                    continue;
+                }
+
+                // Deposit the live-AggState back-pointer on the fmgr thread-local
+                // channel for this dispatch (C: ds_fcinfo->context = (Node*)aggstate),
+                // so a deserialfn calling AggCheckCallContext recovers the AggState.
+                let mcx = estate.es_query_cxt;
+                let _agg_ctx_guard = {
+                    let aggstate: &backend_executor_nodeAgg::AggStateData<'mcx> =
+                        agg_parent_mut(state);
+                    backend_executor_nodeAgg::transition::agg_call_context_guard_for(aggstate)
+                };
+
+                // fcinfo->args[0] = serialized state; args[1] = dummy NULL internal.
+                let (result, isnull) =
+                    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum_owned::call(
+                        mcx,
+                        fn_oid,
+                        collation,
+                        vec![in_val, Datum::null()],
+                        vec![in_null, true],
+                        fn_expr,
+                    )?;
+                write_cell(state, resv, result, isnull);
+                op += 1; // EEO_NEXT()
             }
 
             EEOP_AGG_STRICT_INPUT_CHECK_ARGS
@@ -1165,7 +1228,7 @@ pub fn ExecInterpExpr<'mcx>(
                 let mut input_args: Vec<Datum<'mcx>> = Vec::with_capacity(arg_cell_ids.len());
                 let mut input_args_null: Vec<bool> = Vec::with_capacity(arg_cell_ids.len());
                 for &c in &arg_cell_ids {
-                    let (v, isnull) = read_cell(state, c);
+                    let (v, isnull) = take_cell(state, c);
                     input_args.push(v);
                     input_args_null.push(isnull);
                 }
@@ -1210,7 +1273,7 @@ pub fn ExecInterpExpr<'mcx>(
                         setoff,
                         setno,
                         aggcontext,
-                        &input_args,
+                        input_args,
                         &input_args_null,
                         estate,
                     )?;
@@ -1221,7 +1284,7 @@ pub fn ExecInterpExpr<'mcx>(
                         setoff,
                         setno,
                         aggcontext,
-                        &input_args,
+                        input_args,
                         &input_args_null,
                         estate,
                     )?;

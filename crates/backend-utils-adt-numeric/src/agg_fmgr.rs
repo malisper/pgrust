@@ -112,30 +112,46 @@ fn numeric_has_header(bytes: &[u8]) -> bool {
 /// Take the `internal` transition state out of `args[0]`, downcast to the
 /// concrete carrier. `None` is C's `PG_ARGISNULL(0)` (first call).
 fn take_numeric_state(fcinfo: &mut FunctionCallInfoBaseData) -> Option<Box<NumericAggInternal>> {
-    if arg_isnull(fcinfo, 0) {
+    take_numeric_state_at(fcinfo, 0)
+}
+
+/// Take the `internal` transition state out of `args[i]`.
+fn take_numeric_state_at(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    i: usize,
+) -> Option<Box<NumericAggInternal>> {
+    if arg_isnull(fcinfo, i) {
         return None;
     }
-    match fcinfo.take_ref_arg(0) {
+    match fcinfo.take_ref_arg(i) {
         Some(RefPayload::Internal(b)) => Some(
             b.downcast::<NumericAggInternal>()
-                .unwrap_or_else(|_| panic!("numeric agg fn: args[0] internal state is not a NumericAggInternal")),
+                .unwrap_or_else(|_| panic!("numeric agg fn: args[{i}] internal state is not a NumericAggInternal")),
         ),
-        Some(other) => panic!("numeric agg fn: args[0] is not an internal state ({other:?})"),
+        Some(other) => panic!("numeric agg fn: args[{i}] is not an internal state ({other:?})"),
         None => None,
     }
 }
 
 /// Take the 128-bit `internal` transition state out of `args[0]`.
 fn take_poly_state(fcinfo: &mut FunctionCallInfoBaseData) -> Option<Box<Int128AggState>> {
-    if arg_isnull(fcinfo, 0) {
+    take_poly_state_at(fcinfo, 0)
+}
+
+/// Take the 128-bit `internal` transition state out of `args[i]`.
+fn take_poly_state_at(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    i: usize,
+) -> Option<Box<Int128AggState>> {
+    if arg_isnull(fcinfo, i) {
         return None;
     }
-    match fcinfo.take_ref_arg(0) {
+    match fcinfo.take_ref_arg(i) {
         Some(RefPayload::Internal(b)) => Some(
             b.downcast::<Int128AggState>()
-                .unwrap_or_else(|_| panic!("poly agg fn: args[0] internal state is not an Int128AggState")),
+                .unwrap_or_else(|_| panic!("poly agg fn: args[{i}] internal state is not an Int128AggState")),
         ),
-        Some(other) => panic!("poly agg fn: args[0] is not an internal state ({other:?})"),
+        Some(other) => panic!("poly agg fn: args[{i}] is not an internal state ({other:?})"),
         None => None,
     }
 }
@@ -500,6 +516,176 @@ fn fc_numeric_poly_stddev_samp(fcinfo: &mut FunctionCallInfoBaseData) -> types_e
 }
 
 // ===========================================================================
+// Serialize / deserialize / combine (parallel-aggregation support).
+// ===========================================================================
+
+/// `PG_RETURN_BYTEA_P(result)` — the serialized state is a header-ful `bytea`
+/// image (`end_typsend` set the 4-byte length word); hand it back verbatim on
+/// the by-ref Varlena result lane.
+fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
+
+/// `VARDATA_ANY(PG_GETARG_BYTEA_PP(0))` — the wire body of the `bytea`
+/// deserialize argument, with any 4-byte varlena header stripped. The state
+/// `bytea` crosses the by-ref lane; it may arrive header-ful (the result of a
+/// peer's serialize) or already header-less, so strip only when a length word
+/// matching the image length is present.
+fn arg_bytea_body(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
+    let payload = fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("agg deserialize fn: by-ref `bytea` arg missing from by-ref lane");
+    if numeric_has_header(payload) {
+        payload[types_datum::varlena::VARHDRSZ..].to_vec()
+    } else {
+        payload.to_vec()
+    }
+}
+
+/// `numeric_serialize`(3335) / `numeric_avg_serialize`(2740): serialize a
+/// `NumericAggState` (var/stddev family requires sumX2; avg/sum family does not).
+fn numeric_serialize_common(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    with_sum_x2: bool,
+) -> types_error::PgResult<Datum> {
+    // strict: the `internal` state arg is always present.
+    let carrier = take_numeric_state(fcinfo)
+        .expect("numeric serialize fn: NULL internal state (strict aggregate)");
+    let out = run_final(|m| {
+        let img = if with_sum_x2 {
+            aggregate::numeric_serialize(m, &carrier.state)?
+        } else {
+            aggregate::numeric_avg_serialize(m, &carrier.state)?
+        };
+        Ok(Some(img))
+    })?;
+    // PG_GETARG_POINTER(0) does not consume the state; restore it.
+    keep_internal(fcinfo, carrier);
+    Ok(ret_bytea(fcinfo, out.expect("serialize produced no image")))
+}
+
+fn fc_numeric_serialize(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    numeric_serialize_common(fcinfo, true)
+}
+fn fc_numeric_avg_serialize(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    numeric_serialize_common(fcinfo, false)
+}
+
+/// `numeric_deserialize`(3336) / `numeric_avg_deserialize`(2741): rebuild a
+/// `NumericAggState` from the serialized `bytea`. The fresh state lives in a
+/// leaked per-aggregate context (matching `makeNumericAggStateCurrentContext`).
+fn numeric_deserialize_common(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    with_sum_x2: bool,
+) -> types_error::PgResult<Datum> {
+    let body = arg_bytea_body(fcinfo, 0);
+    let ctx: &'static MemoryContext =
+        Box::leak(Box::new(MemoryContext::new("numeric agg state")));
+    let state = if with_sum_x2 {
+        aggregate::numeric_deserialize(ctx.mcx(), &body)?
+    } else {
+        aggregate::numeric_avg_deserialize(ctx.mcx(), &body)?
+    };
+    let carrier = Box::new(NumericAggInternal { ctx, state });
+    Ok(ret_internal(fcinfo, carrier))
+}
+
+fn fc_numeric_deserialize(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    numeric_deserialize_common(fcinfo, true)
+}
+fn fc_numeric_avg_deserialize(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    numeric_deserialize_common(fcinfo, false)
+}
+
+/// `numeric_combine`(3341) / `numeric_avg_combine`(3337): combine two
+/// `NumericAggState` transition states. Both args are `internal`; either may be
+/// NULL. The combined state is allocated in `state1`'s context (or a fresh
+/// leaked context when `state1` is NULL), matching C's aggcontext.
+fn numeric_combine_common(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    with_sum_x2: bool,
+) -> types_error::PgResult<Datum> {
+    let carrier1 = take_numeric_state(fcinfo);
+    let carrier2 = take_numeric_state_at(fcinfo, 1);
+
+    // if (state2 == NULL) PG_RETURN_POINTER(state1);
+    let carrier2 = match carrier2 {
+        None => {
+            return Ok(match carrier1 {
+                Some(c1) => ret_internal(fcinfo, c1),
+                None => ret_null(fcinfo),
+            })
+        }
+        Some(c2) => c2,
+    };
+
+    // Result lives in state1's context, or a fresh leaked context if state1 is
+    // NULL (C switches to agg_context for makeNumericAggStateCurrentContext).
+    let ctx: &'static MemoryContext = match &carrier1 {
+        Some(c1) => c1.ctx,
+        None => Box::leak(Box::new(MemoryContext::new("numeric agg state"))),
+    };
+    let state1_in = carrier1.map(|c1| c1.state);
+    let combined = if with_sum_x2 {
+        aggregate::numeric_combine(ctx.mcx(), state1_in, &carrier2.state)?
+    } else {
+        aggregate::numeric_avg_combine(ctx.mcx(), state1_in, &carrier2.state)?
+    };
+    let carrier = Box::new(NumericAggInternal { ctx, state: combined });
+    Ok(ret_internal(fcinfo, carrier))
+}
+
+fn fc_numeric_combine(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    numeric_combine_common(fcinfo, true)
+}
+fn fc_numeric_avg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    numeric_combine_common(fcinfo, false)
+}
+
+/// `numeric_poly_serialize`(3339): serialize an `Int128AggState` poly state.
+fn fc_numeric_poly_serialize(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let state = take_poly_state(fcinfo)
+        .expect("numeric_poly_serialize: NULL internal state (strict aggregate)");
+    let out = run_final(|m| Ok(Some(aggregate::numeric_poly_serialize(m, &state)?)))?;
+    keep_internal(fcinfo, state);
+    Ok(ret_bytea(fcinfo, out.expect("serialize produced no image")))
+}
+
+/// `numeric_poly_deserialize`(3340): rebuild an `Int128AggState` from `bytea`.
+fn fc_numeric_poly_deserialize(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let body = arg_bytea_body(fcinfo, 0);
+    // The deserialize converts NumericVar→int128 in a scratch context; the
+    // resulting Int128AggState is Copy/'static and needs no leaked context.
+    let m = crate::fmgr_builtins::scratch_mcx();
+    let state = aggregate::numeric_poly_deserialize(m.mcx(), &body)?;
+    Ok(ret_internal(fcinfo, Box::new(state)))
+}
+
+/// `numeric_poly_combine`(3338): combine two `Int128AggState` poly states.
+fn fc_numeric_poly_combine(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let state1 = take_poly_state(fcinfo).map(|b| *b);
+    let state2 = take_poly_state_at(fcinfo, 1);
+
+    let state2 = match state2 {
+        None => {
+            // if (state2 == NULL) PG_RETURN_POINTER(state1);
+            return Ok(match state1 {
+                Some(s1) => ret_internal(fcinfo, Box::new(s1)),
+                None => ret_null(fcinfo),
+            });
+        }
+        Some(s2) => *s2,
+    };
+
+    let combined = aggregate::numeric_poly_combine(state1, &state2);
+    Ok(ret_internal(fcinfo, Box::new(combined)))
+}
+
+// ===========================================================================
 // Registration (C: their `fmgr_builtins[]` rows; OIDs/nargs from pg_proc.dat —
 // transition/final functions are `proisstrict => 'f'` because they handle the
 // NULL `internal` running state, except the int8 finals which are strict).
@@ -537,5 +723,18 @@ pub fn register_numeric_agg_builtins() {
         builtin(3391, "numeric_poly_var_samp", 1, false, false, fc_numeric_poly_var_samp),
         builtin(3392, "numeric_poly_stddev_pop", 1, false, false, fc_numeric_poly_stddev_pop),
         builtin(3393, "numeric_poly_stddev_samp", 1, false, false, fc_numeric_poly_stddev_samp),
+        // Parallel-aggregation serialize / deserialize / combine.
+        // NumericAggState (var/stddev family, with sumX2).
+        builtin(3335, "numeric_serialize", 1, true, false, fc_numeric_serialize),
+        builtin(3336, "numeric_deserialize", 2, true, false, fc_numeric_deserialize),
+        builtin(3341, "numeric_combine", 2, false, false, fc_numeric_combine),
+        // NumericAggState (avg/sum family, no sumX2).
+        builtin(2740, "numeric_avg_serialize", 1, true, false, fc_numeric_avg_serialize),
+        builtin(2741, "numeric_avg_deserialize", 2, true, false, fc_numeric_avg_deserialize),
+        builtin(3337, "numeric_avg_combine", 2, false, false, fc_numeric_avg_combine),
+        // Int128AggState (poly) serialize / deserialize / combine.
+        builtin(3339, "numeric_poly_serialize", 1, true, false, fc_numeric_poly_serialize),
+        builtin(3340, "numeric_poly_deserialize", 2, true, false, fc_numeric_poly_deserialize),
+        builtin(3338, "numeric_poly_combine", 2, false, false, fc_numeric_poly_combine),
     ]);
 }

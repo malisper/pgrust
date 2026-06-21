@@ -691,6 +691,126 @@ pub fn numeric_deserialize<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<Numeric
     Ok(result)
 }
 
+/// `numeric_avg_combine(state1, state2)` (numeric.c:5097): combine two AVG/SUM
+/// transition states (no sumX2).  When `state1` is `None` (the C NULL),
+/// `state2` is copied.  The caller handles a NULL `state2` (returns `state1`).
+pub fn numeric_avg_combine<'mcx>(
+    mcx: Mcx<'mcx>,
+    state1: Option<NumericAggState<'_>>,
+    state2: &NumericAggState<'_>,
+) -> PgResult<NumericAggState<'mcx>> {
+    // Manually copy all fields from state2 to state1 when state1 is NULL.
+    let mut state1 = match state1 {
+        None => {
+            let mut s1 = NumericAggState::new(mcx, false);
+            s1.n = state2.n;
+            s1.nan_count = state2.nan_count;
+            s1.p_inf_count = state2.p_inf_count;
+            s1.n_inf_count = state2.n_inf_count;
+            s1.max_scale = state2.max_scale;
+            s1.max_scale_count = state2.max_scale_count;
+
+            s1.sum_x = accum_sum_copy(mcx, &state2.sum_x);
+
+            return Ok(s1);
+        }
+        Some(s1) => clone_agg_state(mcx, &s1),
+    };
+
+    state1.n += state2.n;
+    state1.nan_count += state2.nan_count;
+    state1.p_inf_count += state2.p_inf_count;
+    state1.n_inf_count += state2.n_inf_count;
+
+    if state2.n > 0 {
+        // These are currently only needed for moving aggregates, but do the
+        // right thing anyway.
+        if state2.max_scale > state1.max_scale {
+            state1.max_scale = state2.max_scale;
+            state1.max_scale_count = state2.max_scale_count;
+        } else if state2.max_scale == state1.max_scale {
+            state1.max_scale_count += state2.max_scale_count;
+        }
+
+        // Accumulate sums.
+        accum_sum_combine(mcx, &mut state1.sum_x, &state2.sum_x)?;
+    }
+
+    Ok(state1)
+}
+
+/// `numeric_avg_serialize(state)` (numeric.c:5377): serialize an AVG/SUM
+/// transition state (no sumX2) for parallel transfer.  Mirrors `pq_begintypsend`
+/// / `pq_sendint64` / `numericvar_serialize` / `pq_endtypsend` over a `bytea`
+/// payload (big-endian wire ints, varlena header).
+pub fn numeric_avg_serialize<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &NumericAggState<'_>,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut buf = begin_typsend(mcx);
+
+    // N
+    send_int64(&mut buf, state.n);
+
+    // sumX
+    let tmp_var = accum_sum_final(mcx, &state.sum_x)?;
+    io_serialize_var(&mut buf, &tmp_var);
+
+    // maxScale
+    send_int32(&mut buf, state.max_scale);
+
+    // maxScaleCount
+    send_int64(&mut buf, state.max_scale_count);
+
+    // NaNcount
+    send_int64(&mut buf, state.nan_count);
+
+    // pInfcount
+    send_int64(&mut buf, state.p_inf_count);
+
+    // nInfcount
+    send_int64(&mut buf, state.n_inf_count);
+
+    end_typsend(&mut buf);
+    Ok(buf)
+}
+
+/// `numeric_avg_deserialize(buf)` (numeric.c:5421): deserialize an AVG/SUM
+/// transition state (no sumX2).  `buf` is the `bytea` payload (the wire body, no
+/// varlena header — matching `VARDATA_ANY`).
+pub fn numeric_avg_deserialize<'mcx>(
+    mcx: Mcx<'mcx>,
+    buf: &[u8],
+) -> PgResult<NumericAggState<'mcx>> {
+    let mut pos = 0usize;
+
+    let mut result = NumericAggState::new(mcx, false);
+
+    // N
+    result.n = get_int64(buf, &mut pos);
+
+    // sumX
+    let tmp_var = crate::io::numericvar_deserialize(mcx, buf, &mut pos)?;
+    accum_sum_add(&mut result.sum_x, &tmp_var)?;
+
+    // maxScale
+    result.max_scale = get_int32(buf, &mut pos);
+
+    // maxScaleCount
+    result.max_scale_count = get_int64(buf, &mut pos);
+
+    // NaNcount
+    result.nan_count = get_int64(buf, &mut pos);
+
+    // pInfcount
+    result.p_inf_count = get_int64(buf, &mut pos);
+
+    // nInfcount
+    result.n_inf_count = get_int64(buf, &mut pos);
+
+    Ok(result)
+}
+
 // ---------------------------------------------------------------------------
 // Int128AggState fast path (numeric.c do_int128_accum + int*_accum + the
 // numeric_poly_* finals).
@@ -725,6 +845,82 @@ pub fn do_int128_discard(state: &mut Int128AggState, newval: i128) {
 
     state.sum_x -= newval;
     state.n -= 1;
+}
+
+/// `numeric_poly_combine(state1, state2)` (numeric.c:5179): combine two 128-bit
+/// poly transition states.  On `HAVE_INT128` the sums are plain int128 adds.
+/// When `state1` is `None` (the C NULL), `state2` is copied; the caller handles
+/// a NULL `state2` (returns `state1`).
+pub fn numeric_poly_combine(
+    state1: Option<Int128AggState>,
+    state2: &Int128AggState,
+) -> Int128AggState {
+    let mut state1 = match state1 {
+        None => {
+            // makePolyNumAggState(fcinfo, true); copy N + both sums.
+            let mut s1 = make_int128_agg_state(true);
+            s1.n = state2.n;
+            s1.sum_x = state2.sum_x;
+            s1.sum_x2 = state2.sum_x2;
+            return s1;
+        }
+        Some(s1) => s1,
+    };
+
+    if state2.n > 0 {
+        state1.n += state2.n;
+        state1.sum_x += state2.sum_x;
+        state1.sum_x2 += state2.sum_x2;
+    }
+    state1
+}
+
+/// `numeric_poly_serialize(state)` (numeric.c:5247): serialize a 128-bit poly
+/// transition state for parallel transfer.  On `HAVE_INT128` the int128 sums are
+/// converted to `NumericVar` so the wire format is platform-independent.
+pub fn numeric_poly_serialize<'mcx>(
+    mcx: Mcx<'mcx>,
+    state: &Int128AggState,
+) -> PgResult<PgVec<'mcx, u8>> {
+    let mut buf = begin_typsend(mcx);
+
+    // N
+    send_int64(&mut buf, state.n);
+
+    // sumX
+    let tmp_var = int128_to_numericvar(mcx, state.sum_x)?;
+    io_serialize_var(&mut buf, &tmp_var);
+
+    // sumX2
+    let tmp_var = int128_to_numericvar(mcx, state.sum_x2)?;
+    io_serialize_var(&mut buf, &tmp_var);
+
+    end_typsend(&mut buf);
+    Ok(buf)
+}
+
+/// `numeric_poly_deserialize(buf)` (numeric.c:5310): deserialize a 128-bit poly
+/// transition state.  `buf` is the `bytea` payload (the wire body, no varlena
+/// header — matching `VARDATA_ANY`).  On `HAVE_INT128` the `NumericVar` sums are
+/// converted back to int128.
+pub fn numeric_poly_deserialize<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<Int128AggState> {
+    let mut pos = 0usize;
+
+    // makePolyNumAggStateCurrentContext(false).
+    let mut result = make_int128_agg_state(false);
+
+    // N
+    result.n = get_int64(buf, &mut pos);
+
+    // sumX
+    let tmp_var = crate::io::numericvar_deserialize(mcx, buf, &mut pos)?;
+    result.sum_x = convert::numericvar_to_int128(&tmp_var)?.unwrap_or(0);
+
+    // sumX2
+    let tmp_var = crate::io::numericvar_deserialize(mcx, buf, &mut pos)?;
+    result.sum_x2 = convert::numericvar_to_int128(&tmp_var)?.unwrap_or(0);
+
+    Ok(result)
 }
 
 /// `int2_accum(state, newval)` (numeric.c:5669): SUM/AVG(int2) transition on the

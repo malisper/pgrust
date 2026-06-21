@@ -548,7 +548,12 @@ pub fn exec_build_agg_trans<'mcx>(
                 // second argument from the deserialfn frame at call time. The
                 // re-resolved deserialfn FmgrInfo / collation are threaded by the
                 // owner alongside the frame, exactly like the transfn frame.
-                let ds_fcinfo = init_fcinfo(mcx, types_core::InvalidOid)?;
+                // InitFunctionCallInfoData(*ds_fcinfo, &pertrans->deserialfn, 2,
+                //   InvalidOid, (Node *) aggstate, NULL) — point the frame at the
+                // resolved deserialfn FmgrInfo so the interpreter re-dispatches by
+                // its fn_oid (the collation stays InvalidOid; deserialfns ignore it).
+                let mut ds_fcinfo = init_fcinfo(mcx, types_core::InvalidOid)?;
+                ds_fcinfo.flinfo = Some(p.deserialfn.clone());
                 let ds_arg_cell = new_result_cell(mcx, &mut state)?;
                 core::exec_init_expr_rec(mcx, &source_expr, &mut state, ds_arg_cell)?;
 
@@ -1664,6 +1669,11 @@ struct PertransPred {
     aggref_args_len: usize,
     deserialfn_valid: bool,
     deserialfn_strict: bool,
+    /// `&pertrans->deserialfn` — the resolved deserialfn FmgrInfo (built by
+    /// `build_pertrans_for_aggref`) the C `ds_fcinfo->flinfo` points at. The
+    /// interpreter re-dispatches by `deserialfn.fn_oid` under the deserialfn
+    /// frame's collation; threaded onto the `ds_fcinfo` frame at build time.
+    deserialfn: FmgrInfo,
     transfn_strict: bool,
     transtype_by_val: bool,
     init_value_is_null: bool,
@@ -1690,6 +1700,7 @@ fn pertrans_pred(aggstate: &AggStateData<'_>, transno: usize) -> PertransPred {
         // OidIsValid(pertrans->deserialfn_oid)
         deserialfn_valid: pt.deserialfn_oid != types_core::InvalidOid,
         deserialfn_strict: pt.deserialfn.fn_strict,
+        deserialfn: pt.deserialfn.clone(),
         // trans_fcinfo->flinfo->fn_strict
         transfn_strict: pt.transfn.fn_strict,
         transtype_by_val: pt.transtype_by_val,

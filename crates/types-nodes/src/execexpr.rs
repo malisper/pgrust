@@ -1526,6 +1526,21 @@ impl<'mcx> ResultCellArena<'mcx> {
             .unwrap_or_default()
     }
 
+    /// Take (move out, leaving a default cell) a cell by id. For a move-only
+    /// `Datum::Internal` cell value (the C `internal` pseudo-type, which cannot
+    /// be cloned) that is consumed exactly once — e.g. the deserialized
+    /// transition state an `EEOP_AGG_DESERIALIZE` step wrote, read by the
+    /// following combine transition step.
+    pub fn take(&mut self, id: ResultCellId) -> ResultCell<'mcx> {
+        if let Some(cells) = self.cells.as_mut() {
+            let i = id.0 as usize;
+            if i < cells.len() {
+                return core::mem::take(&mut cells[i]);
+            }
+        }
+        ResultCell::default()
+    }
+
     /// Write a cell by id (extends the arena with default cells if needed).
     pub fn set(&mut self, id: ResultCellId, cell: ResultCell<'mcx>) {
         if let Some(cells) = self.cells.as_mut() {
