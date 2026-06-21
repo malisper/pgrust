@@ -474,7 +474,7 @@ fn switch_to_presorted_prefix_mode<'mcx>(
         // tuplesort we have to carry over the last read tuple into the next batch.
         if n_tuples == 0 && !transfer_tuple_is_null(node) {
             // tuplesort_puttupleslot(node->prefixsort_state, node->transfer_tuple);
-            put_standalone(node, SortState::Prefix, StandaloneSlot::TransferTuple)?;
+            put_standalone(node, estate.es_query_cxt, SortState::Prefix, StandaloneSlot::TransferTuple)?;
             // ExecCopySlot(node->group_pivot, node->transfer_tuple);
             copy_standalone(node, estate, StandaloneSlot::GroupPivot, StandaloneSlot::TransferTuple)?;
         } else {
@@ -500,7 +500,7 @@ fn switch_to_presorted_prefix_mode<'mcx>(
             }
 
             if is_current_group(node, estate, CmpSlot::GroupPivot, CmpSlot::TransferTuple)? {
-                put_standalone(node, SortState::Prefix, StandaloneSlot::TransferTuple)?;
+                put_standalone(node, estate.es_query_cxt, SortState::Prefix, StandaloneSlot::TransferTuple)?;
             } else {
                 // The tuple isn't part of the current batch so we carry it over
                 // into the next batch (it's already in transfer_tuple). Reset the
@@ -667,7 +667,7 @@ pub fn ExecIncrementalSort<'mcx>(
         // detect the new prefix key group, and add it to the new group's sort
         // before reading any new tuples from the outer node.
         if !group_pivot_is_null(node) {
-            put_standalone(node, SortState::Full, StandaloneSlot::GroupPivot)?;
+            put_standalone(node, estate.es_query_cxt, SortState::Full, StandaloneSlot::GroupPivot)?;
             n_tuples += 1;
 
             // We can't assume the group pivot tuple will remain the same -- unless
@@ -1269,26 +1269,32 @@ enum StandaloneSlot {
 /// `tuplesort_puttupleslot(state, slot)` for a standalone node slot.
 fn put_standalone<'mcx>(
     node: &mut IncrementalSortStateData<'mcx>,
+    mcx: Mcx<'mcx>,
     state: SortState,
     which: StandaloneSlot,
 ) -> PgResult<()> {
     let (slot_opt, ts_opt) = match (which, state) {
         (StandaloneSlot::GroupPivot, SortState::Full) => {
-            (&node.group_pivot, &mut node.fullsort_state)
+            (&mut node.group_pivot, &mut node.fullsort_state)
         }
         (StandaloneSlot::GroupPivot, SortState::Prefix) => {
-            (&node.group_pivot, &mut node.prefixsort_state)
+            (&mut node.group_pivot, &mut node.prefixsort_state)
         }
         (StandaloneSlot::TransferTuple, SortState::Full) => {
-            (&node.transfer_tuple, &mut node.fullsort_state)
+            (&mut node.transfer_tuple, &mut node.fullsort_state)
         }
         (StandaloneSlot::TransferTuple, SortState::Prefix) => {
-            (&node.transfer_tuple, &mut node.prefixsort_state)
+            (&mut node.transfer_tuple, &mut node.prefixsort_state)
         }
     };
     let slot = slot_opt
-        .as_deref()
+        .as_deref_mut()
         .ok_or_else(|| missing_standalone_slot("standalone slot"))?;
+    // As put_pool: the standalone slot (group_pivot / transfer_tuple) is filled
+    // by ExecCopySlot as a lazily-materialized MinimalTuple (tts_nvalid == 0), so
+    // it must be fully deformed before the owned puttupleslot seam reads its
+    // tts_values/tts_isnull arrays.
+    let _ = execTuples::slot_getallattrs::call(mcx, slot)?;
     let ts = ts_opt
         .as_deref_mut()
         .ok_or_else(|| missing_sort_state("sort state"))?;
@@ -1298,10 +1304,17 @@ fn put_standalone<'mcx>(
 /// `tuplesort_puttupleslot(state, slot)` for an `es_tupleTable` pool slot.
 fn put_pool<'mcx>(
     node: &mut IncrementalSortStateData<'mcx>,
-    estate: &EStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
     state: SortState,
     slot: SlotId,
 ) -> PgResult<()> {
+    // C's tuplesort_puttupleslot does ExecCopySlotMinimalTuple(slot), whose
+    // per-kind copy_minimal_tuple callback deconstructs the source slot first.
+    // The owned puttupleslot seam instead reads the slot's tts_values/tts_isnull
+    // arrays directly, so a lazily-materialized slot (e.g. a MinimalTuple result
+    // slot from an outer Sort node, with tts_nvalid == 0) must be fully deformed
+    // first or we'd form a tuple of stale (zero) values. Mirrors nodeSort.
+    let _ = execTuples::slot_getallattrs_by_id::call(estate, slot)?;
     let ts = sort_state_mut(node, state)?;
     tuplesort::tuplesort_puttupleslot::call(ts, estate.slot(slot))
 }
