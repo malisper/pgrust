@@ -54,6 +54,13 @@ backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" 
 backend-utils-error = { path = "../backend-utils-error" }
 types-slot = { path = "../types-slot" }
 
+# es->memory: planner-context create/switch + MemoryContextMemConsumed
+# (commands/explain.c ExplainOnePlan's mem_counters leg). The fgram mmgr unit
+# carries its own (fgram) error world, bridged to this crate's PgError at the
+# call sites.
+backend-utils-mmgr-fgram = { path = "../backend-utils-mmgr-fgram" }
+mmgr-error = { package = "backend-utils-error-fgram", path = "../backend-utils-error-fgram" }
+
 # Owner seam crates (calls into other owners; panic until installed).
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }
 backend-executor-instrument = { path = "../backend-executor-instrument" }

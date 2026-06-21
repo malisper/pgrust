@@ -42,6 +42,20 @@ pub struct Bookkeeping {
     pub bufusage: BufferUsage,
     /// whether `es->buffers` was set at begin.
     pub buffers: bool,
+    /// whether `es->memory` was set at begin (drives the planner-context
+    /// `MemoryContextMemConsumed` accounting + the `mem_counters` Planning leg).
+    pub memory: bool,
+    /// the planner `MemoryContext` created when `es->memory` (C's
+    /// `planner_ctx`). Carried so `explain_memory_accounting` can switch back to
+    /// `saved_ctx`, measure consumption, and delete it. `0` when unset.
+    pub planner_ctx: u64,
+    /// the context active before the planner-context switch (C's `saved_ctx`).
+    pub saved_ctx: u64,
+    /// `MemoryContextCounters.totalspace` measured by `MemoryContextMemConsumed`
+    /// (only meaningful when `memory`). Consumed by `show_memory_counters`.
+    pub mem_totalspace: i64,
+    /// `MemoryContextCounters.freespace` measured by `MemoryContextMemConsumed`.
+    pub mem_freespace: i64,
 }
 
 seam_core::seam!(

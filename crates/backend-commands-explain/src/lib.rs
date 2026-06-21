@@ -36,6 +36,7 @@ use backend_commands_explain_seams as seams;
 use backend_commands_explain_seams::Bookkeeping;
 use backend_executor_execMain_seams as execmain_s;
 use backend_executor_instrument as instr;
+use backend_utils_mmgr as mmgr;
 use backend_utils_time_snapmgr_seams as snapmgr_s;
 use backend_access_transam_xact_seams as xact_s;
 
@@ -59,19 +60,41 @@ mod tests;
 // value / `&mut`.
 // ===========================================================================
 
+/// Bridge a `backend-utils-mmgr` (`-fgram`) error into this crate's
+/// `types-error::PgError`. The two crates carry independent `PgError` types;
+/// the memory-context create/switch/consume operations used by the `es->memory`
+/// leg fail only on out-of-memory (which `palloc` turns into an `ERROR` ereport
+/// anyway), so we re-raise the message under our error world.
+fn bridge_mmgr<T>(r: Result<T, mmgr_error::PgError>) -> PgResult<T> {
+    r.map_err(|e| {
+        backend_utils_error::ereport(types_error::ERROR)
+            .errmsg(e.message().to_string())
+            .into_error()
+    })
+}
+
 /// `explain_execute_begin` — the pre-lookup EXPLAIN-EXECUTE bookkeeping:
 /// `if (es->memory) { ... planner ctx ... }; if (es->buffers) bufusage_start =
 /// pgBufferUsage; INSTR_TIME_SET_CURRENT(planstart);`.
 fn explain_execute_begin(es: &ExplainState<'_>) -> PgResult<Bookkeeping> {
-    // if (es->memory) { mem_ctx = AllocSetContextCreate(..., "explain analyze
-    //     planner context", ...); MemoryContextSwitchTo(mem_ctx); }
-    if es.memory {
-        panic!(
-            "explain_execute_begin: es->memory needs the planner MemoryContext + \
-             MemoryContextMemConsumed (unported)"
-        );
-    }
     let mut bk = Bookkeeping::default();
+    // if (es->memory) { planner_ctx = AllocSetContextCreate(CurrentMemoryContext,
+    //     "explain analyze planner context", ALLOCSET_DEFAULT_SIZES);
+    //     saved_ctx = MemoryContextSwitchTo(planner_ctx); }
+    if es.memory {
+        let parent = bridge_mmgr(mmgr::PgMemoryContext::current())?;
+        let planner_ctx = bridge_mmgr(mmgr::AllocSetContextCreateInternal(
+            Some(parent),
+            "explain analyze planner context",
+            mmgr::ALLOCSET_DEFAULT_MINSIZE,
+            mmgr::ALLOCSET_DEFAULT_INITSIZE,
+            mmgr::ALLOCSET_DEFAULT_MAXSIZE,
+        ))?;
+        let saved_ctx = bridge_mmgr(mmgr::MemoryContextSwitchTo(planner_ctx))?;
+        bk.memory = true;
+        bk.planner_ctx = planner_ctx.as_ptr() as usize as u64;
+        bk.saved_ctx = saved_ctx.as_ptr() as usize as u64;
+    }
     // if (es->buffers) bufusage_start = pgBufferUsage;
     if es.buffers {
         bk.buffers = true;
@@ -94,11 +117,20 @@ fn explain_planduration(bk: &mut Bookkeeping) -> PgResult<()> {
 
 /// `explain_memory_accounting` — the `es->memory` branch
 /// (`MemoryContextSwitchTo(saved); MemoryContextMemConsumed(planner_ctx, &mc);`).
-fn explain_memory_accounting(_bk: &mut Bookkeeping) -> PgResult<()> {
-    panic!(
-        "explain_memory_accounting: MemoryContextMemConsumed / planner context \
-         restore (es->memory) unported"
-    );
+fn explain_memory_accounting(bk: &mut Bookkeeping) -> PgResult<()> {
+    // if (es->memory) { MemoryContextSwitchTo(saved_ctx);
+    //     MemoryContextMemConsumed(planner_ctx, &mem_counters); }
+    let saved_ctx = bridge_mmgr(mmgr::PgMemoryContext::from_raw(
+        bk.saved_ctx as usize as mmgr::MemoryContext,
+    ))?;
+    bridge_mmgr(mmgr::MemoryContextSwitchTo(saved_ctx))?;
+    let planner_ctx = bridge_mmgr(mmgr::PgMemoryContext::from_raw(
+        bk.planner_ctx as usize as mmgr::MemoryContext,
+    ))?;
+    let counters = bridge_mmgr(mmgr::MemoryContextMemConsumed(planner_ctx))?;
+    bk.mem_totalspace = counters.totalspace as i64;
+    bk.mem_freespace = counters.freespace as i64;
+    Ok(())
 }
 
 /// `explain_buffer_accounting` — the `es->buffers` branch
@@ -436,14 +468,14 @@ fn explain_one_plan<'mcx>(
     // Planning buffer/memory usage block: peek_buffer_usage(es, bufusage) ||
     // mem_counters. mem_counters is the es->memory branch (unported, gated at
     // begin); bufusage is the planning buffer usage from `bk`.
-    let _ = es_memory;
     let planning_bufusage = if es_buffers { Some(&bk.bufusage) } else { None };
-    // peek_buffer_usage(es, bufusage) || mem_counters. In non-text formats the
-    // Planning block always shows (zeros are printed); mem_counters is the
-    // es->memory branch, rejected at begin.
-    if details::peek_buffer_usage(es, planning_bufusage) {
+    // peek_buffer_usage(es, bufusage) || mem_counters. The mem_counters leg
+    // (es->memory) carries the planner-context consumption measured at
+    // explain_memory_accounting.
+    if details::peek_buffer_usage(es, planning_bufusage) || es_memory {
         // ExplainOpenGroup("Planning", "Planning", true, es);
-        // show_buffer_usage(es, bufusage); ExplainCloseGroup(...).
+        // show_buffer_usage(es, bufusage); show_memory_counters(es, mem_counters);
+        // ExplainCloseGroup(...).
         fmt::ExplainOpenGroup("Planning", Some("Planning"), true, es)?;
         if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
             // ExplainIndentText(es); appendStringInfo("Planning:\n"); es->indent++.
@@ -451,7 +483,12 @@ fn explain_one_plan<'mcx>(
             es.str.try_push_str("Planning:\n")?;
             es.indent += 1;
         }
-        show_buffer_usage(es, &bk.bufusage)?;
+        if es_buffers {
+            show_buffer_usage(es, &bk.bufusage)?;
+        }
+        if es_memory {
+            details::show_memory_counters(es, bk.mem_totalspace, bk.mem_freespace)?;
+        }
         if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
             es.indent -= 1;
         }
