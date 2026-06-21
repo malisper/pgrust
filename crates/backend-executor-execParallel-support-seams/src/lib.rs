@@ -43,10 +43,15 @@ use types_nodes::EStateData;
 /// `ExecSerializePlan(planstate->plan, estate)` — the whole worker
 /// plan-shipping pipeline: `copyObject(plan)` → clear the top target list's
 /// `resjunk` → build the dummy `PlannedStmt` (field-fill + parallel-safe-subplan
-/// filtering) → `nodeToString(pstmt)`. Reads the owned plan + `EState`; the plan
-/// itself is reached through `estate->es_plannedstmt`. Owned by
-/// copyfuncs/outfuncs (not yet ported); panics until they land.
-seam_core::seam!(pub fn serialize_plan_for_workers(estate: &mut EStateData<'_>) -> PgResult<String>);
+/// filtering) → `nodeToString(pstmt)`. Takes the leader plan node
+/// (C `planstate->plan`, the `Gather`/`GatherMerge` outer subplan) plus the
+/// owned `EState` (its range table / perm infos / subplans fill the dummy);
+/// the copy allocates against `mcx`. Owned by outfuncs (the plan serializer).
+seam_core::seam!(pub fn serialize_plan_for_workers<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    plan: &types_nodes::nodes::Node<'_>,
+    estate: &mut EStateData<'_>,
+) -> PgResult<String>);
 
 /// `CreateQueryDesc(stringToNode(pstmtspace), queryString, GetActiveSnapshot(),
 /// InvalidSnapshot, receiver, RestoreParamList(...), NULL, instrument_options)`

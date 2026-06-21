@@ -221,6 +221,12 @@ pub fn standard_ExecutorStart(query_desc: &mut QueryDesc, mut eflags: i32) -> Pg
         if let Some(cid) = es_output_cid {
             w.estate.es_output_cid = cid;
         }
+        // estate->es_sourceText = queryDesc->sourceText; re-homed into the
+        // query context (the parallel executor ships it to workers). The source
+        // text and the EState share the query arena, so this is a same-arena copy.
+        let src = w.source_text.as_str().to_string();
+        w.estate.es_sourceText =
+            Some(mcx::PgString::from_str_in(&src, w.estate.es_query_cxt)?);
         w.estate.es_param_list_info = params;
         w.estate.es_snapshot = es_snapshot.clone();
         w.estate.es_crosscheck_snapshot = es_crosscheck_snapshot.clone();

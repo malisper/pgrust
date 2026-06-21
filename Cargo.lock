@@ -12317,6 +12317,7 @@ name = "backend-nodes-outfuncs"
 version = "0.0.0"
 dependencies = [
  "backend-commands-typecmds-seams",
+ "backend-executor-execParallel-support-seams",
  "backend-nodes-core-seams",
  "mcx",
  "types-error",

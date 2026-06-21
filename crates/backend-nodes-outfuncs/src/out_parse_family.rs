@@ -359,7 +359,7 @@ fn crate_out_targetentry(buf: &mut String, te: &types_nodes::primnodes::TargetEn
 // _outRangeTblEntry — custom, switch on rtekind.
 // ===========================================================================
 
-fn out_range_tbl_entry(buf: &mut String, n: &types_nodes::parsenodes::RangeTblEntry<'_>, wl: bool) {
+pub(crate) fn out_range_tbl_entry(buf: &mut String, n: &types_nodes::parsenodes::RangeTblEntry<'_>, wl: bool) {
     use types_nodes::parsenodes::RTEKind;
     buf.push_str("RANGETBLENTRY");
     write_opt_framed(buf, "alias", &n.alias, wl, out_alias);
@@ -438,7 +438,7 @@ fn out_range_tbl_entry(buf: &mut String, n: &types_nodes::parsenodes::RangeTblEn
 // _outRTEPermissionInfo
 // ===========================================================================
 
-fn out_rte_perm_info(buf: &mut String, n: &types_nodes::parsenodes::RTEPermissionInfo<'_>, _wl: bool) {
+pub(crate) fn out_rte_perm_info(buf: &mut String, n: &types_nodes::parsenodes::RTEPermissionInfo<'_>, _wl: bool) {
     buf.push_str("RTEPERMISSIONINFO");
     write_oid_field(buf, "relid", n.relid);
     write_bool_field(buf, "inh", n.inh);

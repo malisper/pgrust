@@ -61,6 +61,7 @@ pub(crate) mod out_expr_family;
 pub(crate) mod out_parse_family;
 pub(crate) mod out_plan_family;
 pub(crate) mod out_ddl_family;
+pub mod serialize_plan;
 
 use alloc::string::String;
 
@@ -321,7 +322,7 @@ pub(crate) fn write_expr_field(buf: &mut String, name: &str, child: Option<&Expr
 /// `WRITE_NODE_FIELD` over a `List *` of node pointers (C: `outNode` of the
 /// `List`, which renders the bare `(child child ...)` form). `None`/empty list
 /// → `<>` (C `NIL` is a NULL `List *`, and `outNode(NULL)` is `<>`).
-fn write_node_list_field<T>(
+pub(crate) fn write_node_list_field<T>(
     buf: &mut String,
     name: &str,
     list: Option<&[T]>,
@@ -752,4 +753,10 @@ pub fn init_seams() {
     // typecmds.c serializes a cooked default/check expression with
     // `nodeToString(expr)` for `typdefaultbin` / `conbin`.
     backend_commands_typecmds_seams::node_to_string::set(|mcx, node| nodeToString(mcx, &node));
+    // `ExecSerializePlan` (execParallel.c) — the worker plan-shipping
+    // serializer; reached over the execParallel-support seam to avoid the
+    // executor->outfuncs cycle.
+    backend_executor_execParallel_support_seams::serialize_plan_for_workers::set(
+        serialize_plan::serialize_plan_for_workers,
+    );
 }

@@ -19,3 +19,6 @@ types-tuple = { path = "../types-tuple" }
 # install guard can track it); installing it here retires the live panic the
 # `print` family drives it through.
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+# `ExecSerializePlan` worker plan-shipping serializer is installed here over the
+# execParallel-support seam (an executor->outfuncs direct dep would cycle).
+backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }

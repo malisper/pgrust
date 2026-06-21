@@ -159,21 +159,19 @@ pub fn init_seams() {
 // 1. ExecSerializePlan (execParallel.c:145-221)
 // ===========================================================================
 
-/// `ExecSerializePlan` — create a serialized representation of the plan to be
-/// sent to each worker. Returns `nodeToString(pstmt)`.
+/// `ExecSerializePlan(plan, estate)` — create a serialized representation of the
+/// plan to be sent to each worker. Returns `nodeToString(pstmt)`.
 ///
-/// The plan-fix-up + serialization is the worker plan-shipping path, owned by
-/// `copyfuncs.c`/`outfuncs.c` (not yet ported); the owned plan tree
-/// (`estate->es_plannedstmt` reached through the owned `EStateData`) is handed
-/// to the plan-shipping seam, which honestly panics until those land.
-fn ExecSerializePlan(estate: &mut EStateData<'_>) -> PgResult<String> {
-    // We can't scribble on the original plan, so make a copy; clear resjunk on
-    // the top target list; build the dummy PlannedStmt (field-fill +
-    // parallel-safe-subplan filtering) and serialize it. The whole plan-shipping
-    // pipeline (copyObject(plan) → clear resjunk → build serializable
-    // PlannedStmt → nodeToString) is the worker plan-shipping path; reached
-    // through the owner seam, which panics until copyfuncs/out funcs land.
-    sup::serialize_plan_for_workers::call(estate)
+/// `plan` is the leader plan node (C `planstate->plan`). The plan-fix-up +
+/// serialization (copyObject(plan) → clear resjunk → build the dummy
+/// PlannedStmt → nodeToString) is the worker plan-shipping path, owned by
+/// outfuncs; reached over the support seam.
+fn ExecSerializePlan(
+    mcx: Mcx<'_>,
+    plan: &types_nodes::nodes::Node<'_>,
+    estate: &mut EStateData<'_>,
+) -> PgResult<String> {
+    sup::serialize_plan_for_workers::call(mcx, plan, estate)
 }
 
 // ===========================================================================
@@ -544,7 +542,14 @@ pub fn ExecInitParallelPlan<'mcx>(
     };
 
     // Fix up and serialize plan to be sent to workers.
-    let pstmt_data = ExecSerializePlan(estate)?;
+    //   pstmt_data = ExecSerializePlan(planstate->plan, estate);
+    // `planstate->plan` is a back-pointer into the plan tree (`&'mcx Node`), so
+    // copy out the reference before re-borrowing `estate` mutably.
+    let leader_plan: &types_nodes::nodes::Node<'mcx> = planstate
+        .ps_head()
+        .plan
+        .ok_or_else(|| PgError::error("ExecInitParallelPlan: planstate->plan is NULL"))?;
+    let pstmt_data = ExecSerializePlan(mcx, leader_plan, estate)?;
 
     // Create a parallel context.
     let pcxt = parallel::create_parallel_context(
