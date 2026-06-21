@@ -1033,10 +1033,10 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
         if OidIsValid(conform.conrelid) {
             con_relid = conform.conrelid;
         } else {
-            // Must be a domain constraint: relid = get_typ_typrelid(getBaseType(
-            // con->contypid)). getBaseType is not yet ported in this crate's
-            // reach, so stop loudly at the exact C site.
-            unported("ATPostAlterTypeCleanup domain-constraint rebuild (getBaseType/get_typ_typrelid)");
+            // Must be a domain constraint:
+            // relid = get_typ_typrelid(getBaseType(con->contypid)).
+            let base = backend_utils_cache_lsyscache_seams::get_base_type::call(conform.contypid)?;
+            con_relid = backend_utils_cache_lsyscache_seams::get_typ_typrelid::call(base)?;
         }
         let confrelid = conform.confrelid;
         let conislocal = conform.conislocal;

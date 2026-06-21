@@ -97,6 +97,9 @@ const F_TO_JSON: Oid = 3176;
 const F_TO_JSONB: Oid = 3787;
 /// `F_CONVERT_FROM` (utils/fmgroids.h).
 const F_CONVERT_FROM: Oid = 1714;
+
+/// `F_CONVERT_TO` (utils/fmgroids.h).
+const F_CONVERT_TO: Oid = 1717;
 /// `TYPCATEGORY_STRING` (catalog/pg_type.h).
 const TYPCATEGORY_STRING: u8 = b'S';
 /// `TYPCATEGORY_BITSTRING` (catalog/pg_type.h).
@@ -4574,12 +4577,22 @@ fn coerce_json_func_expr<'mcx>(
     if returning.format.map(|f| f.format_type) == Some(JsonFormatType::JS_FORMAT_JSON)
         && returning.typid == BYTEAOID
     {
-        // encode json text into bytea using pg_convert_to() — the by-ref name
-        // encoding `Const` path; not yet ported.
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("RETURNING bytea FORMAT JSON is not yet supported")
-            .into_error());
+        // encode json text into bytea using pg_convert_to()
+        let texpr =
+            coerce::coerce_to_specific_type::call(pstate, expr, TEXTOID, "JSON_FUNCTION")?;
+        let enc = get_json_encoding_const(aexpr_clone_ctx(pstate), &returning.format)?;
+        let fexpr = FuncExpr {
+            funcid: F_CONVERT_TO,
+            funcresulttype: BYTEAOID,
+            funcretset: false,
+            funcvariadic: false,
+            funcformat: CoercionForm::COERCE_EXPLICIT_CALL,
+            funccollid: InvalidOid,
+            inputcollid: InvalidOid,
+            args: alloc::vec![texpr, enc],
+            location,
+        };
+        return Ok(Some(Expr::FuncExpr(fexpr)));
     }
 
     let res = coerce::coerce_to_target_type::call(
@@ -4972,8 +4985,8 @@ fn transformJsonScalarExpr<'mcx>(
     build_json_constructor_expr(
         pstate,
         JsonConstructorType::JSCTOR_JSON_SCALAR,
-        Vec::new(),
-        Some(arg),
+        alloc::vec![arg],
+        None,
         returning,
         false,
         false,

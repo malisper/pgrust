@@ -410,6 +410,17 @@ pub fn ExecEvalJsonConstructor<'mcx>(
         return Ok(());
     }
 
+    // JSCTOR_JSON_SCALAR with a NULL argument produces SQL NULL (C: res = 0,
+    // isnull = true). The non-null serialization is handled in the `bytes` match
+    // below, sharing the json/jsonb varlena-wrap with the other constructors.
+    if ctor_type == Ct::JSCTOR_JSON_SCALAR && arg_nulls[0] {
+        write_cell(state, resv, Datum::ByVal(0), true);
+        if resnull != resv {
+            write_cell(state, resnull, Datum::from_bool(true), false);
+        }
+        return Ok(());
+    }
+
     let bytes: Vec<u8> = match ctor_type {
         Ct::JSCTOR_JSON_ARRAY => {
             if is_jsonb {
@@ -438,14 +449,22 @@ pub fn ExecEvalJsonConstructor<'mcx>(
             .to_vec()
         }
         Ct::JSCTOR_JSON_SCALAR => {
-            // datum_to_json[b](value, category, outfuncid) needs the per-arg
-            // json_categorize_type cache, which has no executor-facing seam.
-            return Err(PgError::error(
-                "JSON_SCALAR constructor (JSCTOR_JSON_SCALAR) is not yet supported: \
-                 datum_to_json/datum_to_jsonb and json_categorize_type have no \
-                 executor-facing seam",
-            )
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+            // datum_to_json[b](value, category, outfuncid). C caches the
+            // (category, outfuncid) per arg at init via json_categorize_type;
+            // categorizing here off arg_types[0] is behaviorally identical.
+            let value = &arg_values[0];
+            let (category, outfuncid) =
+                backend_utils_adt_jsonfuncs::categorize::json_categorize_type(
+                    arg_types[0],
+                    is_jsonb,
+                )?;
+            if is_jsonb {
+                backend_utils_adt_jsonb::datum_to_jsonb(mcx, value, category, outfuncid)?
+            } else {
+                backend_utils_adt_json::datum_to_json(mcx, value, category, outfuncid)?
+            }
+            .as_slice()
+            .to_vec()
         }
         other => {
             return Err(PgError::error(format!(
