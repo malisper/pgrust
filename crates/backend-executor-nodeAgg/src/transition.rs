@@ -849,6 +849,17 @@ pub fn process_ordered_aggregate_single<'mcx>(
         pfree_datum(old_val);
     }
 
+    // The staged transfn input arg[1] (`pertrans->distinct_value`) held the last
+    // datum fetched from this sort. For a pass-by-reference input that datum is a
+    // `ByRef` whose bytes live in THIS tuplesort's memory context, which
+    // `tuplesort_end` is about to free. Clearing it now drops that handle while
+    // the context is still alive; otherwise the stale `ByRef` would be dropped on
+    // a later overwrite (the next group's drain, or another aggregate's), freeing
+    // through an already-destroyed context. C carries `args[1].value` as a bare
+    // transient Datum pointer with no such ownership, so this has no C counterpart.
+    pertrans.distinct_value = types_tuple::backend_access_common_heaptuple::Datum::null();
+    pertrans.distinct_value_isnull = false;
+
     // tuplesort_end(pertrans->sortstates[aggstate->current_set]);
     // pertrans->sortstates[aggstate->current_set] = NULL; (already taken out)
     backend_utils_sort_tuplesort_seams::tuplesort_end::call(state)?;
@@ -1000,6 +1011,14 @@ pub fn process_ordered_aggregate_multi<'mcx>(
     if let Some(s2) = slot2 {
         backend_executor_execTuples_seams::exec_clear_tuple::call(estate, s2)?;
     }
+
+    // The staged multi-column transfn input args (`pertrans->trans_input_args`)
+    // hold the last drained tuple's columns; a pass-by-reference column is a
+    // `ByRef` whose bytes live in this tuplesort's (about-to-be-freed) context.
+    // Clear them while the context is alive so the stale handles are not dropped
+    // later through a destroyed context (mirrors the single-column clear above).
+    pertrans.trans_input_args.clear();
+    pertrans.trans_input_args_null.clear();
 
     // tuplesort_end(pertrans->sortstates[aggstate->current_set]);
     // pertrans->sortstates[aggstate->current_set] = NULL; (already taken out)
