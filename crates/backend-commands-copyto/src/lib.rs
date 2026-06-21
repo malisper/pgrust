@@ -364,16 +364,14 @@ fn copy_to_binary_one_row(
             copy_send_int32(cstate, -1)?;
         } else {
             let finfo = &cstate.out_functions[(attnum - 1) as usize];
-            // outputbytes = SendFunctionCall(...): a freshly built `bytea` value
-            // (4-byte-uncompressed varlena from pq_endtypsend). C writes only the
-            // payload: `CopySendInt32(VARSIZE(outputbytes) - VARHDRSZ)` then
-            // `CopySendData(VARDATA(outputbytes), VARSIZE - VARHDRSZ)`
-            // (copyto.c:367-369). Strip the 4-byte varlena header here.
+            // C: `outputbytes = SendFunctionCall(...)` is a `bytea*` and C writes
+            // `CopySendInt32(VARSIZE - VARHDRSZ)` + `CopySendData(VARDATA, ...)`
+            // (copyto.c:367-369). The `send_function_call` seam already returns the
+            // header-stripped wire payload (VARDATA), so write it verbatim.
             let outputbytes = fmgr_s::send_function_call::call(cstate.mcx, finfo, value)?;
             let outputbytes: alloc::vec::Vec<u8> = outputbytes.to_vec();
-            let payload = &outputbytes[types_datum::varlena::VARHDRSZ..];
-            copy_send_int32(cstate, payload.len() as i32)?;
-            copy_send_data(cstate, payload)?;
+            copy_send_int32(cstate, outputbytes.len() as i32)?;
+            copy_send_data(cstate, &outputbytes)?;
         }
     }
 

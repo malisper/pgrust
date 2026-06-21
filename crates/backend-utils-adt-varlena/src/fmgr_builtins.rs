@@ -415,8 +415,13 @@ fn fc_textout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Da
 fn fc_textsend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
-    let bytes = (crate::wire_io::textsend(m.mcx(), arg_bytes(fcinfo, 0)))?.as_bytes().to_vec();
-    Ok(ret_varlena(fcinfo, bytes))
+    // `textsend` returns a complete `bytea` value (4-byte-headered image from
+    // pq_endtypsend); `.as_bytes()` already carries its SET_VARSIZE header. Set it
+    // verbatim — re-stamping via `ret_varlena` would double-wrap the header,
+    // shifting the payload by VARHDRSZ (the send seam then strips only the outer
+    // 4 bytes, leaving a nested `bytea` image on the wire).
+    let image = (crate::wire_io::textsend(m.mcx(), arg_bytes(fcinfo, 0)))?.as_bytes().to_vec();
+    Ok(ret_varlena_image(fcinfo, image))
 }
 fn fc_byteain(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     // Copy the cstring out first so the immutable arg borrow ends before we take

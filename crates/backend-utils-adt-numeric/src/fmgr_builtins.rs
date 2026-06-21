@@ -354,8 +354,16 @@ fn fc_numeric_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResu
 fn fc_numeric_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let num = arg_numeric(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = crate::io::numeric_send(m.mcx(), &num)?;
-    Ok(ret_varlena(fcinfo, bytes.as_slice().to_vec()))
+    let payload = crate::io::numeric_send(m.mcx(), &num)?;
+    // C: `numeric_send` returns a `bytea*` (pq_endtypsend), a header-ful varlena.
+    // The send seam (oid_send_function_call_seam) strips VARHDRSZ to recover the
+    // wire payload, so stamp the 4-byte SET_VARSIZE header here — otherwise the
+    // strip eats the first 4 wire bytes ("invalid sign in external numeric").
+    let total = payload.len() + types_datum::varlena::VARHDRSZ;
+    let mut image = Vec::with_capacity(total);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(total));
+    image.extend_from_slice(payload.as_slice());
+    Ok(ret_varlena(fcinfo, image))
 }
 
 // ---------------------------------------------------------------------------

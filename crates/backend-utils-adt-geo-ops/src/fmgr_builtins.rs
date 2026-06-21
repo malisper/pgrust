@@ -134,6 +134,21 @@ fn ret_ref(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
     Datum::from_usize(0)
 }
 
+/// Set a `*_send` result (a `bytea` of wire bytes) on the by-ref lane. C's send
+/// functions return a header-ful `bytea*` (pq_endtypsend); the send seam
+/// (oid_send_function_call_seam) recovers the wire payload by stripping VARHDRSZ,
+/// so stamp the 4-byte SET_VARSIZE header here. Without it the strip eats the
+/// first 4 wire bytes ("insufficient data left in message").
+#[inline]
+fn ret_send(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
+    const VARHDRSZ: usize = 4;
+    let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
+    image.extend_from_slice(&types_datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(&payload);
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
+
 #[inline]
 fn ret_point(fcinfo: &mut FunctionCallInfoBaseData, p: Point) -> Datum {
     ret_ref(fcinfo, p.to_datum_bytes().to_vec())
@@ -1278,25 +1293,25 @@ fn fc_poly_circle(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResul
 // --- binary `*_send` -> bytea (wire bytes, header-stripped on the by-ref lane) ---
 
 fn fc_point_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    Ok(ret_ref(fcinfo, crate::io::point_send(&arg_point(fcinfo, 0))))
+    Ok(ret_send(fcinfo, crate::io::point_send(&arg_point(fcinfo, 0))))
 }
 fn fc_box_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    Ok(ret_ref(fcinfo, crate::io::box_send(&arg_box(fcinfo, 0))))
+    Ok(ret_send(fcinfo, crate::io::box_send(&arg_box(fcinfo, 0))))
 }
 fn fc_lseg_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    Ok(ret_ref(fcinfo, crate::io::lseg_send(&arg_lseg(fcinfo, 0))))
+    Ok(ret_send(fcinfo, crate::io::lseg_send(&arg_lseg(fcinfo, 0))))
 }
 fn fc_line_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    Ok(ret_ref(fcinfo, crate::io::line_send(&arg_line(fcinfo, 0))))
+    Ok(ret_send(fcinfo, crate::io::line_send(&arg_line(fcinfo, 0))))
 }
 fn fc_circle_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    Ok(ret_ref(fcinfo, crate::io::circle_send(&arg_circle(fcinfo, 0))))
+    Ok(ret_send(fcinfo, crate::io::circle_send(&arg_circle(fcinfo, 0))))
 }
 fn fc_path_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    Ok(ret_ref(fcinfo, crate::io::path_send(&arg_path(fcinfo, 0))))
+    Ok(ret_send(fcinfo, crate::io::path_send(&arg_path(fcinfo, 0))))
 }
 fn fc_poly_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    Ok(ret_ref(fcinfo, crate::io::poly_send(&arg_poly(fcinfo, 0))))
+    Ok(ret_send(fcinfo, crate::io::poly_send(&arg_poly(fcinfo, 0))))
 }
 
 // --- binary `*_recv` <- internal (the wire message rides the by-ref lane) ---
@@ -1704,14 +1719,17 @@ mod tests {
         assert!(call_pred2(339, img.clone(), img));
     }
 
-    /// `point_send` (2429) emits the 16-byte big-endian wire image of a point on
-    /// the by-ref `bytea` lane (two float8 in network byte order).
+    /// `point_send` (2429) emits a header-ful `bytea` (C: pq_endtypsend) carrying
+    /// the 16-byte big-endian wire image of a point (two float8 in network byte
+    /// order). The send seam strips VARHDRSZ to recover the wire payload.
     #[test]
     fn point_send_by_oid() {
+        const VARHDRSZ: usize = 4;
         let p = image_in(117, "(1,2)");
-        let wire = call_unary_ref(2429, p);
-        // point_send = 2 * float8send = 16 bytes, big-endian f64 1.0 then 2.0.
-        assert_eq!(wire.len(), 16);
+        let image = call_unary_ref(2429, p);
+        // bytea image = 4-byte SET_VARSIZE header + 2 * float8send (16 bytes).
+        assert_eq!(image.len(), VARHDRSZ + 16);
+        let wire = &image[VARHDRSZ..];
         assert_eq!(&wire[0..8], &1.0f64.to_be_bytes());
         assert_eq!(&wire[8..16], &2.0f64.to_be_bytes());
     }
