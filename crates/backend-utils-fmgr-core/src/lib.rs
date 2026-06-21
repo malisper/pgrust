@@ -3193,6 +3193,14 @@ fn input_function_call_seam<'mcx>(
     use types_tuple::backend_access_common_heaptuple::Datum as CanonDatum;
     match oid_input_function_call_out(mcx, function_id, str, typioparam, typmod)? {
         FmgrOut::ByVal(d) => Ok(CanonDatum::ByVal(canon_word(&d).as_usize())),
+        // A `cstring`-returning input function (`cstring_in`, typlen == -2) yields
+        // C's `char *` (`CStringGetDatum`), NOT a varlena pointer. Preserve the
+        // `Cstring` tag on the canonical lane so a downstream consumer reading
+        // `PG_GETARG_CSTRING` (e.g. `array_in`'s arg0 when a user writes a literal
+        // `'{1,2,3}'::cstring`) sees the cstring referent. Flattening it to `ByRef`
+        // (a varlena image) would mis-tag it on the by-ref lane and the cstring
+        // reader would not find it.
+        FmgrOut::Ref(RefPayload::Cstring(s)) => Ok(CanonDatum::Cstring(s)),
         FmgrOut::Ref(payload) => {
             let bytes: Vec<u8> = payload.flatten();
             Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
