@@ -468,7 +468,9 @@ pub static shared_memory_options: &[config_enum_entry] = &[
 
 pub static default_toast_compression_options: &[config_enum_entry] = &[
     config_enum_entry { name: "pglz", val: TOAST_PGLZ_COMPRESSION, hidden: false },
-    config_enum_entry { name: "lz4", val: TOAST_LZ4_COMPRESSION, hidden: false },
+    // #ifdef USE_LZ4 — this build is non-LZ4, so the "lz4" entry is compiled out
+    // exactly as the C `#ifndef USE_LZ4` table, matching the toast-compression
+    // crate's NO_LZ4_SUPPORT() runtime gate.
 ];
 
 pub static wal_compression_options: &[config_enum_entry] = &[
