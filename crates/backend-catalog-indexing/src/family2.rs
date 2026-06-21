@@ -1773,6 +1773,8 @@ fn catalog_tuple_update_pg_constraint(
     set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_convalidated, Datum::from_bool(fields.convalidated));
     set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_connoinherit, Datum::from_bool(fields.connoinherit));
     set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_conenforced, Datum::from_bool(fields.conenforced));
+    set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_condeferrable, Datum::from_bool(fields.condeferrable));
+    set_col(&mut values, &mut nulls, &mut replaces, pc::Anum_pg_constraint_condeferred, Datum::from_bool(fields.condeferred));
     modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
 }
 
@@ -1791,7 +1793,15 @@ fn catalog_tuple_update_pg_trigger(
         .ok_or_else(|| PgError::error("could not re-read pg_trigger tuple for update"))?;
     let (mut values, mut nulls) = deform(mcx, &r, &oldtup)?;
     let mut replaces = vec![false; values.len()];
-    set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_trigger_tgname, name_datum(mcx, &fields.tgname)?);
+    if let Some(tgname) = &fields.tgname {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_trigger_tgname, name_datum(mcx, tgname)?);
+    }
+    if let Some(d) = fields.tgdeferrable {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_trigger_tgdeferrable, Datum::from_bool(d));
+    }
+    if let Some(d) = fields.tginitdeferred {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_trigger_tginitdeferred, Datum::from_bool(d));
+    }
     modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
 }
 

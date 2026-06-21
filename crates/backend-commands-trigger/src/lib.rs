@@ -27,6 +27,7 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+pub mod alter_constr;
 pub mod create;
 pub mod firing;
 pub mod fmgr_builtins;

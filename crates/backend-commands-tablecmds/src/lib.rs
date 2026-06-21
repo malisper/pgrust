@@ -27,6 +27,7 @@
 
 #![allow(non_snake_case)]
 
+mod at_alter_constr;
 mod at_altertype;
 mod at_attach;
 mod at_attach_idx;

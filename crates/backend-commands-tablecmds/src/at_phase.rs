@@ -1025,7 +1025,11 @@ pub(crate) fn ATPrepCmd<'mcx>(
         }
         AT_AlterConstraint => {
             ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_PARTITIONED_TABLE)?;
-            unported("ALTER CONSTRAINT");
+            // Recursion occurs during execution phase.
+            if recurse {
+                cmd.recurse = true;
+            }
+            pass = AT_PASS_MISC;
         }
         AT_ValidateConstraint => {
             ATSimplePermissions(
@@ -1548,7 +1552,27 @@ fn ATExecCmd<'mcx>(
             wqueue[ti].rel = Some(owned_rel);
             _address = res?;
         }
-        AT_AlterConstraint => unported("ALTER CONSTRAINT (ATExecAlterConstraint)"),
+        AT_AlterConstraint => {
+            // ATExecAlterConstraint(wqueue, rel, castNode(ATAlterConstraint, cmd->def),
+            //     cmd->recurse, lockmode).
+            let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");
+            let cmdcon = cmd
+                .def
+                .as_deref()
+                .expect("AT_AlterConstraint: cmd.def is NULL")
+                .as_atalterconstraint()
+                .expect("AT_AlterConstraint: cmd.def is not an ATAlterConstraint");
+            let res = crate::at_alter_constr::ATExecAlterConstraint(
+                mcx,
+                wqueue,
+                &owned_rel,
+                cmdcon,
+                cmd.recurse,
+                lockmode,
+            );
+            wqueue[ti].rel = Some(owned_rel);
+            _address = res?;
+        }
         AT_ValidateConstraint => {
             // ATExecValidateConstraint(wqueue, rel, cmd->name, cmd->recurse, false, lockmode).
             let owned_rel = wqueue[ti].rel.take().expect("ATExecCmd: tab->rel is open");

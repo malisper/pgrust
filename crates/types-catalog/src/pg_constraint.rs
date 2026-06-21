@@ -249,6 +249,14 @@ pub struct ConstraintFieldUpdate {
     /// enforced child constraint is merged into a not-enforced parent; the other
     /// mutator sites carry through the row's existing value.
     pub conenforced: bool,
+    /// `condeferrable` — set by `AlterConstrUpdateConstraintEntry` for ALTER
+    /// CONSTRAINT ... DEFERRABLE; the other mutator sites carry through the
+    /// row's existing value.
+    pub condeferrable: bool,
+    /// `condeferred` — set by `AlterConstrUpdateConstraintEntry` for ALTER
+    /// CONSTRAINT ... INITIALLY DEFERRED; the other mutator sites carry through
+    /// the row's existing value.
+    pub condeferred: bool,
 }
 
 /// A `SearchSysCache1(CONSTROID)` projection: the scalar `Form_pg_constraint`

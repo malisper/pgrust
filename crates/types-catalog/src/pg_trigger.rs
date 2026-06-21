@@ -175,5 +175,13 @@ pub struct PgTriggerInsertRow {
 #[derive(Clone, Debug)]
 pub struct TriggerFieldUpdate {
     /// `tgname` — the new trigger name as a zero-filled `NameData` image.
-    pub tgname: [u8; 64],
+    /// `None` when the mutator does not touch the name (e.g. the ALTER
+    /// CONSTRAINT deferrability path).
+    pub tgname: Option<[u8; 64]>,
+    /// `tgdeferrable` — set by `AlterConstrTriggerDeferrability` (ALTER
+    /// CONSTRAINT). `None` when the mutator does not touch deferrability.
+    pub tgdeferrable: Option<bool>,
+    /// `tginitdeferred` — set by `AlterConstrTriggerDeferrability`. `None` when
+    /// the mutator does not touch deferrability.
+    pub tginitdeferred: Option<bool>,
 }

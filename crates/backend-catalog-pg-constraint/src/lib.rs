@@ -869,6 +869,8 @@ pub fn disinherit_constraints(
                 convalidated: con.convalidated,
                 connoinherit: con.connoinherit,
                 conenforced: con.conenforced,
+                condeferrable: con.condeferrable,
+                condeferred: con.condeferred,
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(
                 &catalog,
@@ -1150,6 +1152,8 @@ pub fn AdjustNotNullInheritance(
                 convalidated: conform.convalidated,
                 connoinherit: conform.connoinherit,
                 conenforced: conform.conenforced,
+                condeferrable: conform.condeferrable,
+                condeferred: conform.condeferred,
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(
                 &pg_constraint,
@@ -1403,6 +1407,8 @@ pub fn MergeWithExistingConstraint(
         convalidated: con.convalidated,
         connoinherit: con.connoinherit,
         conenforced: con.conenforced,
+        condeferrable: con.condeferrable,
+        condeferred: con.condeferred,
     };
     indexing_seams::catalog_tuple_update_pg_constraint::call(&conDesc, tid, &fields)?;
 
@@ -1751,6 +1757,8 @@ pub fn RenameConstraintById(mcx: Mcx<'_>, conId: Oid, newname: &str) -> PgResult
         convalidated: conform.convalidated,
         connoinherit: conform.connoinherit,
         conenforced: conform.conenforced,
+        condeferrable: conform.condeferrable,
+        condeferred: conform.condeferred,
     };
     indexing_seams::catalog_tuple_update_pg_constraint::call(&conDesc, con.tid, &fields)?;
 
@@ -1808,6 +1816,8 @@ pub fn AlterConstraintNamespaces(
                 convalidated: conform.convalidated,
                 connoinherit: conform.connoinherit,
                 conenforced: conform.conenforced,
+                condeferrable: conform.condeferrable,
+                condeferred: conform.condeferred,
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(&conRel, row.tid, &fields)?;
 
@@ -1887,6 +1897,8 @@ pub fn ConstraintSetParentConstraint(
             convalidated: constrForm.convalidated,
             connoinherit: constrForm.connoinherit,
             conenforced: constrForm.conenforced,
+            condeferrable: constrForm.condeferrable,
+            condeferred: constrForm.condeferred,
         };
         indexing_seams::catalog_tuple_update_pg_constraint::call(&constrRel, tid, &fields)?;
 
@@ -1926,6 +1938,8 @@ pub fn ConstraintSetParentConstraint(
             convalidated: constrForm.convalidated,
             connoinherit: constrForm.connoinherit,
             conenforced: constrForm.conenforced,
+            condeferrable: constrForm.condeferrable,
+            condeferred: constrForm.condeferred,
         };
         indexing_seams::catalog_tuple_update_pg_constraint::call(&constrRel, tid, &fields)?;
 
@@ -2866,6 +2880,8 @@ pub fn set_constraint_validated(_mcx: Mcx<'_>, con_oid: Oid) -> PgResult<()> {
         convalidated: true,
         connoinherit: conform.connoinherit,
         conenforced: conform.conenforced,
+        condeferrable: conform.condeferrable,
+        condeferred: conform.condeferred,
     };
     indexing_seams::catalog_tuple_update_pg_constraint::call(&conrel, con.tid, &fields)?;
 
@@ -2875,6 +2891,129 @@ pub fn set_constraint_validated(_mcx: Mcx<'_>, con_oid: Oid) -> PgResult<()> {
     conrel.close(RowExclusiveLock)?;
 
     Ok(())
+}
+
+/// The set of `ATAlterConstraint` flags `AlterConstrUpdateConstraintEntry`
+/// applies (tablecmds.c:12854). Each `alter_*` selector gates whether the
+/// matching column(s) are overwritten; the values are carried in the same
+/// struct.
+#[derive(Clone, Copy, Debug)]
+pub struct AlterConstrFlags {
+    pub alter_enforceability: bool,
+    pub is_enforced: bool,
+    pub alter_deferrability: bool,
+    pub deferrable: bool,
+    pub initdeferred: bool,
+    pub alter_inheritability: bool,
+    pub noinherit: bool,
+}
+
+/// `AlterConstrUpdateConstraintEntry(cmdcon, conrel, contuple)`
+/// (tablecmds.c:12854). Re-reads the `pg_constraint` row by OID, overwrites the
+/// enforceability / deferrability / inheritability columns selected by `flags`,
+/// re-stores it, and fires `InvokeObjectPostAlterHook`. Returns the row's
+/// `conrelid` so the caller can `CacheInvalidateRelcacheByRelid` (the C does
+/// that invalidation inside this function; here the relcache facet lives in the
+/// caller's crate).
+pub fn AlterConstrUpdateConstraintEntry(
+    _mcx: Mcx<'_>,
+    con_oid: Oid,
+    flags: &AlterConstrFlags,
+) -> PgResult<Oid> {
+    debug_assert!(
+        flags.alter_enforceability || flags.alter_deferrability || flags.alter_inheritability
+    );
+
+    let con_ctx = MemoryContext::new("pg_constraint");
+    let conrel = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
+
+    let con = match syscache_seams::search_constraint_form_by_oid::call(con_oid)? {
+        Some(c) => c,
+        None => {
+            conrel.close(RowExclusiveLock)?;
+            return Err(PgError::error(format!(
+                "cache lookup failed for constraint {con_oid}"
+            )));
+        }
+    };
+    let conform = con.form;
+
+    let mut convalidated = conform.convalidated;
+    let mut conenforced = conform.conenforced;
+    let mut condeferrable = conform.condeferrable;
+    let mut condeferred = conform.condeferred;
+    let mut connoinherit = conform.connoinherit;
+
+    if flags.alter_enforceability {
+        conenforced = flags.is_enforced;
+        // The convalidated status is irrelevant when NOT ENFORCED, but for
+        // consistency it is set to match; when ENFORCED, phase 3 validation
+        // makes it valid.
+        convalidated = flags.is_enforced;
+    }
+    if flags.alter_deferrability {
+        condeferrable = flags.deferrable;
+        condeferred = flags.initdeferred;
+    }
+    if flags.alter_inheritability {
+        connoinherit = flags.noinherit;
+    }
+
+    let fields = ConstraintFieldUpdate {
+        conname: conform.conname,
+        connamespace: conform.connamespace,
+        conislocal: conform.conislocal,
+        coninhcount: conform.coninhcount,
+        conparentid: conform.conparentid,
+        convalidated,
+        connoinherit,
+        conenforced,
+        condeferrable,
+        condeferred,
+    };
+    indexing_seams::catalog_tuple_update_pg_constraint::call(&conrel, con.tid, &fields)?;
+
+    objectaccess_seams::invoke_object_post_alter_hook::call(CONSTRAINT_RELATION_ID, con_oid, 0)?;
+
+    conrel.close(RowExclusiveLock)?;
+
+    Ok(conform.conrelid)
+}
+
+/// Scan `pg_constraint` for a relation-level constraint by name
+/// (`(conrelid, contypid = InvalidOid, conname)` over
+/// `ConstraintRelidTypidNameIndexId`); returns the form copy + TID, or `None`
+/// when no row matches. The by-name lookup the ATExecAlterConstraint entry
+/// performs; the caller raises the "does not exist" error so it can use the
+/// ALTER-specific wording.
+pub fn find_relation_constraint_by_name(
+    mcx: Mcx<'_>,
+    relid: Oid,
+    conname: &str,
+) -> PgResult<Option<types_catalog::pg_constraint::ConstraintFormCopy>> {
+    let con_ctx = MemoryContext::new("pg_constraint");
+    let pg_constraint = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, AccessShareLock)?;
+
+    let skey = [
+        oid_key(Anum_pg_constraint_conrelid, relid)?,
+        oid_key(Anum_pg_constraint_contypid, InvalidOid)?,
+        name_key(mcx, Anum_pg_constraint_conname, conname)?,
+    ];
+
+    let mut found: Option<types_catalog::pg_constraint::ConstraintFormCopy> = None;
+    /* There can be at most one matching row */
+    systable_scan_foreach(&pg_constraint, ConstraintRelidTypidNameIndexId, &skey, |row| {
+        found = Some(types_catalog::pg_constraint::ConstraintFormCopy {
+            form: row.form.clone(),
+            conkey: None,
+            tid: row.tid,
+        });
+        Ok(false)
+    })?;
+
+    pg_constraint.close(AccessShareLock)?;
+
+    Ok(found)
 }
 
 pub fn init_seams() {
@@ -3139,6 +3278,8 @@ pub fn merge_constraints_into_existing<'mcx>(
                 convalidated: child_form.convalidated,
                 connoinherit: child_form.connoinherit,
                 conenforced: child_form.conenforced,
+                condeferrable: child_form.condeferrable,
+                condeferred: child_form.condeferred,
             };
             indexing_seams::catalog_tuple_update_pg_constraint::call(&constraintrel, tid, &fields)?;
             found = true;
