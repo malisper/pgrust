@@ -18005,6 +18005,7 @@ dependencies = [
 name = "backend-storage-lmgr-lwlock"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-tablespace-globals-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock-seams",
  "backend-storage-lmgr-proc-seams",

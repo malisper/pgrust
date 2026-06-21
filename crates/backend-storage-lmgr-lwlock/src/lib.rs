@@ -1642,6 +1642,10 @@ fn release_held(lock: *const LWLock) -> PgResult<()> {
 /// `PG_LWLOCK(18, TwoPhaseState)`).
 const TWOPHASE_STATE_LOCK_OFFSET: usize = 18;
 
+/// `TablespaceCreateLock` — offset 19 in `MainLWLockArray` (`lwlocklist.h`
+/// `PG_LWLOCK(19, TablespaceCreate)`).
+const TABLESPACE_CREATE_LOCK_OFFSET: usize = 19;
+
 /// `RelationMappingLock` — offset 25 in `MainLWLockArray` (`lwlocklist.h`
 /// `PG_LWLOCK(8, RelationMapping)`; the `8` is the historical NAME id, the
 /// runtime array offset is 25, matching `BUILTIN_TRANCHE_NAMES[25]`).
@@ -1725,6 +1729,21 @@ fn unlock_twophase_state_seam() -> PgResult<()> {
 fn twophase_state_held_exclusive_seam() -> bool {
     let lock = main_lock(TWOPHASE_STATE_LOCK_OFFSET);
     LWLockHeldByMeInMode(lock, LW_EXCLUSIVE)
+}
+
+/// `lwlock_acquire_tablespace_create` seam shape:
+/// `LWLockAcquire(TablespaceCreateLock, LW_EXCLUSIVE)`. `MyProcNumber` is read
+/// from the globals seam (the C ambient per-backend global).
+fn lwlock_acquire_tablespace_create_seam() -> PgResult<()> {
+    let lock = main_lock(TABLESPACE_CREATE_LOCK_OFFSET);
+    LWLockAcquire(lock, LW_EXCLUSIVE, globals::my_proc_number::call()).map(|_| ())
+}
+
+/// `lwlock_release_tablespace_create` seam shape:
+/// `LWLockRelease(TablespaceCreateLock)`.
+fn lwlock_release_tablespace_create_seam() -> PgResult<()> {
+    let lock = main_lock(TABLESPACE_CREATE_LOCK_OFFSET);
+    LWLockRelease(lock)
 }
 
 /// `lock_relation_mapping` seam shape: acquire `RelationMappingLock` in the
@@ -1851,6 +1870,15 @@ pub fn init_seams() {
     );
     backend_storage_lmgr_lwlock_seams::lock_relation_mapping::set(lock_relation_mapping_seam);
     backend_storage_lmgr_lwlock_seams::unlock_relation_mapping::set(unlock_relation_mapping_seam);
+    // tablespace.c's TablespaceCreateDbspace serializes against DROP TABLESPACE
+    // on TablespaceCreateLock; lwlock (lwlock.c) owns the built-in lock array so
+    // it installs these into the tablespace-globals seam crate.
+    backend_commands_tablespace_globals_seams::lwlock_acquire_tablespace_create::set(
+        lwlock_acquire_tablespace_create_seam,
+    );
+    backend_commands_tablespace_globals_seams::lwlock_release_tablespace_create::set(
+        lwlock_release_tablespace_create_seam,
+    );
     backend_storage_lmgr_lwlock_seams::relation_mapping_lock_held_by_me_exclusive::set(
         relation_mapping_lock_held_by_me_exclusive_seam,
     );

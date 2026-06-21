@@ -18,6 +18,7 @@ types-pgstat = { path = "../types-pgstat" }
 backend-utils-error = { path = "../backend-utils-error" }
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
 backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
