@@ -43,10 +43,10 @@
 //!     ConditionalLockBuffer / ExtendBufferedRel seam exists yet (the page.rs
 //!     copies already panic at these exact boundaries). The split / new-root /
 //!     fastpath paths bottom out here.
-//!   * `CheckForSerializableConflictIn` / `PredicateLockPage(Split)` /
-//!     `SpeculativeInsertionWait` / `XactLockTableWait` (SSI / speculative-insert)
-//!     — not plumbed to this layer; behaviour-preserving no-ops / honest panics
-//!     as noted at each call site.
+//!   * `CheckForSerializableConflictIn` / `PredicateLockPage(Split)` (SSI) —
+//!     not plumbed to this layer; behaviour-preserving no-ops as noted at each
+//!     call site. `SpeculativeInsertionWait` / `XactLockTableWait` ARE wired
+//!     (lmgr seams) for the unique-conflict retry loop.
 //!   * `BuildIndexValueDescription` (genam) — cosmetic unique-violation detail;
 //!     omitted with a faithful message (the `Err` itself is load-bearing).
 
@@ -90,6 +90,7 @@ use backend_access_nbt_dedup as dedup;
 use backend_access_table_tableam_seams as tableam_seams;
 use backend_access_transam_xloginsert_seams as xloginsert;
 use backend_storage_buffer_bufmgr_seams as bufmgr;
+use backend_storage_lmgr_lmgr_seams as lmgr;
 use backend_utils_cache_relcache_seams as relcache;
 use backend_utils_init_miscinit_seams as miscinit;
 
@@ -644,14 +645,11 @@ fn _bt_vacuum_cycleid<'mcx>(rel: &Relation<'mcx>) -> PgResult<u16> {
     crate::utils::bt_vacuum_cycleid(rel)
 }
 
-/// `ReadBuffer(rel, blkno)` (bufmgr) — read-without-lock, for the fastpath cache
-/// probe in `_bt_search_insert`. Only `read_buffer_extended` (the locked read)
-/// exists as a seam; the fastpath optimization additionally needs a bare pinned
-/// read followed by a *conditional* lock, neither of which is reachable, so the
-/// fastpath probe is the boundary (it is only an optimization — the non-fastpath
-/// `_bt_search` descent below is fully ported).
-fn read_buffer_unlocked<'mcx>(_rel: &Relation<'mcx>, _blkno: BlockNumber) -> Buffer {
-    panic!("_bt_search_insert: ReadBuffer (bare pinned read for fastpath) not yet ported")
+/// `ReadBuffer(rel, blkno)` (bufmgr) — bare pinned read (no lock) of the given
+/// block of the relation's MAIN_FORKNUM, for the fastpath cache probe in
+/// `_bt_search_insert`. Delegates to the `read_buffer` bufmgr seam.
+fn read_buffer_unlocked<'mcx>(rel: &Relation<'mcx>, blkno: BlockNumber) -> PgResult<Buffer> {
+    bufmgr::read_buffer::call(rel, blkno)
 }
 
 /// `RelationGetTargetBlock(rel)` — backend-local rightmost-leaf cache. The
@@ -785,16 +783,24 @@ fn _bt_doinsert_inner<'mcx>(
                 insertstate.buf = InvalidBuffer;
 
                 /*
-                 * Wait for the conflicting xact (or speculative insertion) to
-                 * finish, then retry. SpeculativeInsertionWait / XactLockTableWait
-                 * are not plumbed to this layer; surface the dependency honestly.
+                 * If it's a speculative insertion, wait for it to finish (ie. to
+                 * go ahead with the insertion, or kill the tuple). Otherwise wait
+                 * for the transaction to finish as usual.
                  */
                 if speculative_token != 0 {
-                    panic!("_bt_doinsert: SpeculativeInsertionWait not yet ported");
+                    lmgr::speculative_insertion_wait::call(xwait, speculative_token)?;
                 } else {
-                    panic!("_bt_doinsert: XactLockTableWait not yet ported");
+                    lmgr::xact_lock_table_wait::call(
+                        xwait,
+                        rel_name(rel).to_string(),
+                        itup_t_tid,
+                        types_storage::lock::XLTW_Oper::InsertIndex,
+                    )?;
                 }
-                /* (start over: drop stack, goto search — unreachable past panic) */
+
+                /* start over: drop stack, restart the search loop. */
+                drop(stack);
+                continue 'search;
             }
 
             /* Uniqueness is established -- restore heap tid as scantid */
@@ -861,7 +867,7 @@ fn _bt_doinsert_inner<'mcx>(
 /// `_bt_search_insert(rel, heaprel, insertstate)` — `_bt_search()` wrapper for
 /// inserts, with the rightmost-leaf fastpath optimization.
 fn _bt_search_insert<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     heaprel: &Relation<'mcx>,
     insertstate: &mut BTInsertStateData<'mcx>,
@@ -871,20 +877,44 @@ fn _bt_search_insert<'mcx>(
     debug_assert!(insertstate.postingoff == 0);
 
     if relation_get_target_block(rel) != InvalidBlockNumber {
-        /*
-         * Fastpath: simulate a _bt_getbuf() call with conditional locking on the
-         * cached rightmost leaf. The bare ReadBuffer + ConditionalLockBuffer
-         * primitives are unported; relation_get_target_block() returns
-         * InvalidBlockNumber so this branch is never taken (the slow descent
-         * below is always correct). The code is retained for fidelity.
-         */
-        insertstate.buf = read_buffer_unlocked(rel, relation_get_target_block(rel));
+        /* Simulate a _bt_getbuf() call with conditional locking. */
+        insertstate.buf = read_buffer_unlocked(rel, relation_get_target_block(rel))?;
         if _bt_conditionallockbuf(rel, insertstate.buf) {
-            // (unreachable in this repo — see read_buffer_unlocked panic)
-            relation_set_target_block(rel, InvalidBlockNumber);
+            crate::page::bt_checkpage(rel, insertstate.buf)?;
+            let page = bufmgr::buffer_get_page::call(mcx, insertstate.buf)?;
+            let opaque = opaque_from_page(&page)?;
+
+            /*
+             * Check if the page is still the rightmost leaf page and has enough
+             * free space to accommodate the new tuple. Also check that the
+             * insertion scan key is strictly greater than the first non-pivot
+             * tuple on the page. (We expect itup_key's scantid to be unset when
+             * our caller is a checkingunique inserter.)
+             */
+            if P_RIGHTMOST(&opaque)
+                && P_ISLEAF(&opaque)
+                && !P_IGNORE(&opaque)
+                && PageGetFreeSpace(&PageRef::new(&page)?) > insertstate.itemsz
+                && PageGetMaxOffsetNumber(&PageRef::new(&page)?) >= P_HIKEY
+                && crate::search::bt_compare(rel, &insertstate.itup_key, &page, P_HIKEY)? > 0
+            {
+                /*
+                 * Caller can use the fastpath optimization because cached block
+                 * is still rightmost leaf page, which can fit caller's new tuple
+                 * without splitting. Keep block in local cache for next insert,
+                 * and have caller use NULL stack.
+                 */
+                return Ok(None);
+            }
+
+            /* Page unsuitable for caller, drop lock and pin. */
+            page_bt_relbuf(rel, insertstate.buf);
         } else {
+            /* Lock unavailable, drop pin. */
             bufmgr::release_buffer::call(insertstate.buf);
         }
+
+        /* Forget block, since cache doesn't appear to be useful. */
         relation_set_target_block(rel, InvalidBlockNumber);
     }
 
