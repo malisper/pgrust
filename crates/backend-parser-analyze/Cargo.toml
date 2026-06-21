@@ -30,6 +30,7 @@ backend-parser-analyze-seams = { path = "../backend-parser-analyze-seams" }
 # interpreter), installed by this crate — it owns transformStmt + nodeToString +
 # the dependency-reference walker.
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
+backend-catalog-pg-proc-seams = { path = "../backend-catalog-pg-proc-seams" }
 backend-catalog-dependency = { path = "../backend-catalog-dependency" }
 
 # Merged sibling owners called directly (cycle-free; they depend on the

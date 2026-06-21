@@ -360,7 +360,7 @@ pub fn DefineAggregate(
     let allParameterTypes: Option<Vec<Oid>>;
     let parameterModes: Option<Vec<i8>>;
     let parameterNames: Option<Vec<Option<String>>>;
-    let parameterDefaults: Vec<Node>;
+    let parameterDefaults: backend_commands_functioncmds_seams::CookedParameterDefaults;
     let variadicArgType: Oid;
     if oldstyle {
         /*
@@ -402,7 +402,7 @@ pub fn DefineAggregate(
         allParameterTypes = None;
         parameterModes = None;
         parameterNames = None;
-        parameterDefaults = Vec::new();
+        parameterDefaults = backend_commands_functioncmds_seams::CookedParameterDefaults::default();
         variadicArgType = InvalidOid;
     } else {
         /*
@@ -417,8 +417,12 @@ pub fn DefineAggregate(
         }
 
         numArgs = arg_list.len() as i32;
+        /* Aggregate parameters cannot have defaults (grammar-enforced), so no
+         * rich DEFAULT side-channel is needed. */
         let interpreted = interpret_function_parameter_list(
+            mcx,
             arg_list,
+            &[],
             InvalidOid,
             OBJECT_AGGREGATE,
             false,
@@ -432,7 +436,7 @@ pub fn DefineAggregate(
         parameterDefaults = interpreted.parameter_defaults;
         variadicArgType = interpreted.variadic_arg_type;
         /* Parameter defaults are not currently allowed by the grammar */
-        debug_assert!(parameterDefaults.is_empty());
+        debug_assert!(parameterDefaults.text.is_none());
         /* There shouldn't have been any OUT parameters, either */
         debug_assert_eq!(interpreted.required_result_type, InvalidOid);
     }

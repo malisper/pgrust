@@ -158,7 +158,9 @@ fn format_procedure_owned(funcoid: Oid) -> PgResult<String> {
 /// / `parameterNames` / `trftypes` / `proconfig` are `Option<Vec<…>>` (`None` ≡
 /// the C `PointerGetDatum(NULL)`); `prosqlbody` is the cooked SQL-body already
 /// serialized to its `pg_node_tree` text (`Option<String>`);
-/// `parameterDefaults` is a `Vec<Node>` (empty ≡ `NIL`); `trfoids` a `Vec<Oid>`.
+/// `parameterDefaults` is the cooked `pg_node_tree` text (`None` ≡ `NIL`), with
+/// its count (`pronargdefaults`) and object references alongside; `trfoids` a
+/// `Vec<Oid>`.
 pub fn ProcedureCreate(
     procedureName: &str,
     procNamespace: Oid,
@@ -182,7 +184,16 @@ pub fn ProcedureCreate(
     allParameterTypes: Option<Vec<Oid>>,
     parameterModes: Option<Vec<i8>>,
     parameterNames: Option<Vec<Option<String>>>,
-    parameterDefaults: Vec<Node>,
+    // The cooked `parameterDefaults` `List`, already serialized to its
+    // `pg_node_tree` text (`proargdefaults`, `None` ≡ no defaults) by
+    // `cook_parameter_defaults` — mirrors the `prosqlbody` path.
+    parameterDefaults: Option<String>,
+    // `pronargdefaults` — the number of defaulted parameters (list_length of the
+    // cooked `parameterDefaults`).
+    pronargdefaults: i32,
+    // The defaults' referenced objects, recorded against the new function
+    // (`recordDependencyOnExpr`'s reference half) — mirrors `prosqlbody_refs`.
+    parameterDefaultsRefs: Vec<types_catalog::catalog_dependency::ObjectAddress>,
     trftypes: Option<Vec<Oid>>,
     trfoids: Vec<Oid>,
     proconfig: Option<Vec<String>>,
@@ -359,19 +370,13 @@ pub fn ProcedureCreate(
      * 580-585) lives inside the catalog-tuple seam, driven by the
      * `PgProcInsertRow` we build here. `pronargdefaults` = list_length.
      */
-    let pronargdefaults_new: i32 = parameterDefaults.len() as i32;
+    let pronargdefaults_new: i32 = pronargdefaults;
 
-    /* serialize the two pg_node_tree columns up front (nodeToString). The
-     * cooked-tree serializer (outfuncs.c) crosses through the pg-proc seam since
-     * `prosqlbody` / `parameterDefaults` carry the consumer's cooked
-     * `types_parsenodes::Node` vocabulary. */
-    let proargdefaults_text: Option<String> = if !parameterDefaults.is_empty() {
-        Some(seam::node_to_string_defaults::call(parameterDefaults.clone())?)
-    } else {
-        None
-    };
-    /* `prosqlbody` already arrives serialized to its `pg_node_tree` text
-     * (interpret_sql_body did the nodeToString in the parser-owning crate). */
+    /* `parameterDefaults` and `prosqlbody` both already arrive serialized to
+     * their `pg_node_tree` text (`cook_parameter_defaults` / `interpret_sql_body`
+     * did the `nodeToString` in the parser-owning crate), so there is no cooked
+     * serializer to cross here. */
+    let proargdefaults_text: Option<String> = parameterDefaults.clone();
     let prosqlbody_text: Option<String> = prosqlbody.clone();
 
     let ctx = MemoryContext::new("ProcedureCreate");
@@ -531,12 +536,17 @@ pub fn ProcedureCreate(
                 .proargdefaults
                 .clone()
                 .ok_or_else(|| elog_error("missing proargdefaults in existing function"))?;
-            /* the new defaults cross as cooked nodes so the seam can exprType()
-             * both sides (the old side is stringToNode'd from its text). */
+            /* both old and new defaults cross as their `pg_node_tree` text; the
+             * seam `stringToNode`s each side and `exprType()`s the elements
+             * pairwise (pg_proc.c:549-573). The new side is non-NULL here
+             * (pronargdefaults_new >= oldproc.pronargdefaults != 0). */
+            let new_defaults_text = proargdefaults_text
+                .clone()
+                .ok_or_else(|| elog_error("missing new proargdefaults during redefinition"))?;
             let compat = seam::check_defaults_compatible::call(
                 old_defaults_text,
                 oldproc.pronargdefaults,
-                parameterDefaults.clone(),
+                new_defaults_text,
             )?;
             if compat == DefaultCompat::TypeChanged {
                 return Err(ereport(ERROR)
@@ -713,10 +723,17 @@ pub fn ProcedureCreate(
     }
 
     /* dependency on parameter default expressions */
-    if !parameterDefaults.is_empty() {
+    if !parameterDefaultsRefs.is_empty() {
         /* recordDependencyOnExpr(&myself, (Node *) parameterDefaults, NIL,
-         * DEPENDENCY_NORMAL) over the cooked default-expr list. */
-        seam::record_dependency_on_defaults::call(retval, parameterDefaults.clone())?;
+         * DEPENDENCY_NORMAL): the defaults' object references were extracted from
+         * the *in-memory* cooked `List` by `cook_parameter_defaults` (so we never
+         * round-trip the stored text back through `stringToNode`). Record them
+         * against the new function exactly as `recordDependencyOnExpr` would. */
+        let mut default_addrs = new_object_addresses();
+        for r in &parameterDefaultsRefs {
+            add_exact_object_address(r, &mut default_addrs);
+        }
+        record_object_address_dependencies(&myself, &mut default_addrs, DEPENDENCY_NORMAL)?;
     }
 
     /* dependency on owner */
@@ -1365,6 +1382,16 @@ fn procedure_create_from_args(
         prorows,
     } = args;
 
+    /* `pronargdefaults` is the count of defaulted parameters; the consumer set it
+     * by accumulating one cooked node per default before serializing the `List`.
+     * It is not recoverable from the serialized text alone here, so it travels
+     * alongside (consumer-side `parameter_defaults` count). */
+    let backend_commands_functioncmds_seams::CookedParameterDefaults {
+        text: parameter_defaults_text,
+        nargdefaults: parameter_defaults_nargdefaults,
+        refs: parameter_defaults_refs,
+    } = parameter_defaults;
+
     ProcedureCreate(
         &procedure_name,
         namespace_id,
@@ -1388,7 +1415,9 @@ fn procedure_create_from_args(
         all_parameter_types,
         parameter_modes,
         parameter_names,
-        parameter_defaults,
+        parameter_defaults_text,
+        parameter_defaults_nargdefaults,
+        parameter_defaults_refs,
         trftypes,
         trfoids,
         proconfig,

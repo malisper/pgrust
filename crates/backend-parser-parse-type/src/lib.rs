@@ -1297,8 +1297,16 @@ pub fn rich_functionparameter_to_parse(
         Some(a) => Some(Box::new(rich_node_to_parse(a)?)),
         None => None,
     };
-    let defexpr = match fp.defexpr.as_deref() {
-        Some(a) => Some(Box::new(rich_node_to_parse(a)?)),
+    // The raw DEFAULT expression is an arbitrary expression node (A_Const /
+    // TypeCast / FuncCall / ...) that the flat `types_parsenodes` vocabulary
+    // cannot hold. It is threaded to `CreateFunction` on the *rich* parameter
+    // node instead (see `create_function_seam`); the flat field only needs to
+    // signal presence so the rest of the lowering is unaffected, exactly like the
+    // SQL-standard `sql_body`. Carry presence with a placeholder `A_Star`
+    // (`FunctionParameter` consumers never read the flat `defexpr` value — the
+    // cooked default is produced from the rich node).
+    let defexpr = match fp.defexpr {
+        Some(_) => Some(Box::new(types_parsenodes::Node::A_Star)),
         None => None,
     };
     Ok(types_parsenodes::FunctionParameter {

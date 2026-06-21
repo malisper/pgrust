@@ -34,8 +34,9 @@ pub struct AggregateCreateArgs {
     pub parameter_modes: Option<Vec<i8>>,
     /// `parameterNames` (text[] of param names), or `None`.
     pub parameter_names: Option<Vec<Option<String>>>,
-    /// `parameterDefaults` (list of default exprs) — always empty for aggregates.
-    pub parameter_defaults: Vec<Node>,
+    /// `parameterDefaults` (the cooked default `List`) — always empty for
+    /// aggregates (the grammar forbids aggregate parameter defaults).
+    pub parameter_defaults: backend_commands_functioncmds_seams::CookedParameterDefaults,
     pub variadic_arg_type: Oid,
     /// step function name (qualified name list).
     pub transfunc_name: Vec<Node>,

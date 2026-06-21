@@ -150,15 +150,27 @@ pub struct InterpretedParameters {
     pub parameter_modes: Option<Vec<i8>>,
     pub parameter_names: Option<Vec<Option<String>>>,
     pub in_parameter_names_list: Vec<String>,
-    pub parameter_defaults: Vec<Node>,
+    /// The cooked `parameterDefaults` `List`, already serialized to its
+    /// `pg_node_tree` text plus its object references — mirrors the prosqlbody
+    /// path (`interpret_sql_body` serializes up front, `ProcedureCreate` just
+    /// stores the text). `text: None` when there are no defaults.
+    pub parameter_defaults: backend_commands_functioncmds_seams::CookedParameterDefaults,
     pub variadic_arg_type: Oid,
     pub required_result_type: Oid,
 }
 
 /// `interpret_function_parameter_list(pstate, parameters, languageOid, objtype,
 /// ...)` (functioncmds.c:182). `objtype` is the `ObjectType` int.
-pub fn interpret_function_parameter_list(
+///
+/// `rich_parameters` is the rich (raw-parse) `FunctionParameter` list parallel to
+/// the flat `parameters`; its `defexpr` carries the raw DEFAULT expression (an
+/// arbitrary `A_Const`/`TypeCast`/`FuncCall`/... node the flat
+/// `types_parsenodes` vocabulary cannot hold), which is transformed and cooked
+/// here. `mcx` owns the cooked default nodes until they are serialized.
+pub fn interpret_function_parameter_list<'mcx>(
+    mcx: Mcx<'mcx>,
     parameters: &[Node],
+    rich_parameters: &[&types_nodes::nodes::Node<'mcx>],
     language_oid: Oid,
     objtype: i32,
     want_parameter_types_list: bool,
@@ -176,6 +188,12 @@ pub fn interpret_function_parameter_list(
     let mut have_defaults = false;
 
     let mut out = InterpretedParameters::default();
+
+    /* Cooked DEFAULT-expression nodes accumulate here (one per defaulted input
+     * parameter), in mcx, until they are serialized into the `proargdefaults`
+     * `List` after the scan. */
+    let mut parameter_defaults: mcx::PgVec<'mcx, types_nodes::nodes::NodePtr<'mcx>> =
+        mcx::PgVec::new_in(mcx);
 
     /* Scan the list and extract data into work arrays */
     let cells: Vec<&FunctionParameter> = parameters
@@ -390,7 +408,15 @@ pub fn interpret_function_parameter_list(
             out.in_parameter_names_list.push(s);
         }
 
-        if let Some(defexpr) = &fp.defexpr {
+        /* The raw DEFAULT expression lives on the *rich* parameter node — the flat
+         * `fp.defexpr` only signals presence (the flat vocabulary can't hold an
+         * arbitrary expression). */
+        let rich_defexpr: Option<&types_nodes::nodes::Node<'mcx>> = rich_parameters
+            .get(i)
+            .and_then(|rp| rp.as_functionparameter())
+            .and_then(|rfp| rfp.defexpr.as_deref());
+
+        if let Some(defexpr) = rich_defexpr {
             if !isinput {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
@@ -399,21 +425,25 @@ pub fn interpret_function_parameter_list(
                     .into_error());
             }
 
-            let def = seam::transform_parameter_default::call((**defexpr).clone(), toid)?;
-
             /*
-             * Make sure no variables are referred to (this is probably dead
-             * code now that add_missing_from is history).
+             * transformExpr + coerce_to_specific_type(..., "DEFAULT") +
+             * assign_expr_collations, then the `pstate->p_rtable != NIL ||
+             * contain_var_clause(def)` no-table-references check — all inside the
+             * parser-owned seam (functioncmds.c:419-433). The cooked node is
+             * allocated in `mcx`.
              */
-            if seam::default_has_table_refs::call(def.clone())? {
-                return Err(ereport(ERROR)
-                    .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
-                    .errmsg("cannot use table references in parameter default value")
-                    .errposition(seam::parser_errposition::call(source_text.map(str::to_string), fp.location))
-                    .into_error());
-            }
+            let def = seam::transform_parameter_default::call(
+                mcx,
+                defexpr,
+                toid,
+                fp.location,
+                source_text.map(str::to_string),
+            )?;
 
-            out.parameter_defaults.push(def);
+            parameter_defaults
+                .try_reserve(1)
+                .map_err(|_| mcx.oom(1))?;
+            parameter_defaults.push(mcx::alloc_in(mcx, def)?);
             have_defaults = true;
         } else {
             if isinput && have_defaults {
@@ -461,6 +491,15 @@ pub fn interpret_function_parameter_list(
     } else {
         out.parameter_names = None;
     }
+
+    /* Serialize the cooked `parameterDefaults` `List` to its `pg_node_tree` text
+     * (`nodeToString`) and collect its object references, up front in the
+     * parser-owned seam (mirrors the prosqlbody path). `ProcedureCreate` then
+     * stores the text and records the references without owning the cooked-node
+     * serializer. */
+    let default_refs: Vec<&types_nodes::nodes::Node<'mcx>> =
+        parameter_defaults.iter().map(|b| &**b).collect();
+    out.parameter_defaults = seam::cook_parameter_defaults::call(mcx, default_refs)?;
 
     Ok(out)
 }
@@ -931,6 +970,7 @@ fn interpret_AS_clause<'a>(
 pub fn CreateFunction<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateFunctionStmt,
+    rich_parameters: &[&types_nodes::nodes::Node<'mcx>],
     sql_body_rich: Option<&types_nodes::nodes::Node<'mcx>>,
     query_string: Option<String>,
 ) -> PgResult<ObjectAddress> {
@@ -1027,7 +1067,9 @@ pub fn CreateFunction<'mcx>(
 
     /* Convert remaining parameters of CREATE to form wanted by ProcedureCreate. */
     let params = interpret_function_parameter_list(
+        mcx,
         &stmt.parameters,
+        rich_parameters,
         language_oid,
         if is_procedure {
             OBJECT_PROCEDURE

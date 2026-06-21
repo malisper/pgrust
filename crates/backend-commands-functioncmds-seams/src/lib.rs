@@ -126,7 +126,11 @@ pub struct ProcedureCreateArgs {
     pub all_parameter_types: Option<Vec<Oid>>,
     pub parameter_modes: Option<Vec<i8>>,
     pub parameter_names: Option<Vec<Option<String>>>,
-    pub parameter_defaults: Vec<Node>,
+    /// The cooked `parameterDefaults` `List`, already serialized to its
+    /// `pg_node_tree` text (`proargdefaults`) plus the object references it
+    /// depends on — produced up front by `cook_parameter_defaults` (mirrors the
+    /// prosqlbody path). `text: None` for a function with no defaults.
+    pub parameter_defaults: CookedParameterDefaults,
     pub trftypes: Option<Vec<Oid>>,
     pub trfoids: Vec<Oid>,
     pub proconfig: Option<Vec<String>>,
@@ -338,13 +342,58 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// The DEFAULT-expression pipeline for one input parameter.
-    pub fn transform_parameter_default(defexpr: Node, toid: Oid) -> PgResult<Node>
+    /// The DEFAULT-expression pipeline for one input parameter
+    /// (functioncmds.c:419-447). Transforms the raw rich `defexpr`
+    /// (`transformExpr` with `EXPR_KIND_FUNCTION_DEFAULT`), coerces it to the
+    /// parameter type (`coerce_to_specific_type(..., "DEFAULT")`), assigns
+    /// collations (`assign_expr_collations`), and enforces the no-table-references
+    /// rule (`pstate->p_rtable != NIL || contain_var_clause(def)` —
+    /// `p_rtable` is always NIL for the fresh DEFAULT pstate, so the check reduces
+    /// to `contain_var_clause`). Returns the cooked default as a rich node
+    /// allocated in `mcx` (later serialized as the `proargdefaults` `List`).
+    /// The owner (`backend-parser-analyze`) installs it: it owns `transformExpr`,
+    /// `coerce_to_specific_type`, `assign_expr_collations`, and
+    /// `contain_var_clause`. `query_string` carries `pstate->p_sourcetext` for
+    /// error positions.
+    pub fn transform_parameter_default<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        defexpr: &types_nodes::nodes::Node<'mcx>,
+        toid: Oid,
+        location: i32,
+        query_string: Option<String>,
+    ) -> PgResult<types_nodes::nodes::Node<'mcx>>
 );
 
+/// The cooked `parameterDefaults` `List`, ready for storage: its serialized
+/// `pg_node_tree` text (`nodeToString` of the whole `List`) plus the object
+/// references the defaults depend on (`recordDependencyOnExpr`'s reference half),
+/// to be recorded against the new function in `ProcedureCreate`. Mirrors
+/// [`InterpretedSqlBody`]; lets `ProcedureCreate` store the text without owning
+/// the cooked-node serializer.
+#[derive(Clone, Debug, Default)]
+pub struct CookedParameterDefaults {
+    /// `nodeToString((Node *) parameterDefaults)` — the stored `pg_node_tree`,
+    /// `None` when there are no defaults.
+    pub text: Option<String>,
+    /// `pronargdefaults` — the number of defaulted parameters (list_length of the
+    /// cooked `List`), carried so `ProcedureCreate` need not re-parse the text.
+    pub nargdefaults: i32,
+    /// The defaults' referenced objects (`find_expr_references` over the cooked
+    /// `List`), recorded against the new function in `ProcedureCreate`.
+    pub refs: Vec<ObjectAddress>,
+}
+
 seam_core::seam!(
-    /// `pstate->p_rtable != NIL || contain_var_clause(def)`.
-    pub fn default_has_table_refs(def: Node) -> PgResult<bool>
+    /// Serialize the cooked `parameterDefaults` `List` to its `pg_node_tree` text
+    /// (`nodeToString`, pg_proc.c:360) and collect its object references
+    /// (`recordDependencyOnExpr` reference half, pg_proc.c:670). The owner
+    /// (`backend-parser-analyze`) installs it: it owns the rich `nodeToString`
+    /// serializer and the dependency-reference walker. An empty `defaults`
+    /// yields `text: None`, `refs: []`.
+    pub fn cook_parameter_defaults<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        defaults: Vec<&types_nodes::nodes::Node<'mcx>>,
+    ) -> PgResult<CookedParameterDefaults>
 );
 
 /// The product of `interpret_AS_clause`'s inline-SQL-body branch: the serialized

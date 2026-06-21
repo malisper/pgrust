@@ -248,8 +248,15 @@ fn create_function_seam<'mcx>(
         sql_body: None,
     };
 
+    // The rich `FunctionParameter` nodes carry the raw DEFAULT expressions (an
+    // arbitrary `A_Const`/`TypeCast`/`FuncCall`/... node the flat
+    // `types_parsenodes` vocabulary can't hold); thread them as a side-channel
+    // parallel to the flat `parameters`, exactly as `sql_body_rich` is threaded.
+    let rich_parameters: Vec<&types_nodes::nodes::Node<'mcx>> =
+        cfs.parameters.iter().map(|n| n.as_ref()).collect();
+
     let query_string = pstate.p_sourcetext.as_ref().map(|s| s.as_str().to_string());
-    ddl_core::CreateFunction(mcx, &pn, sql_body_rich, query_string)
+    ddl_core::CreateFunction(mcx, &pn, &rich_parameters, sql_body_rich, query_string)
 }
 
 /// Outward-seam adapter for `CreateCast(stmt)` (utility.c `ProcessUtilitySlow`

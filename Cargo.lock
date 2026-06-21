@@ -5144,6 +5144,7 @@ dependencies = [
 name = "backend-catalog-pg-aggregate-seams"
 version = "0.0.0"
 dependencies = [
+ "backend-commands-functioncmds-seams",
  "seam-core",
  "types-catalog",
  "types-core",
@@ -6128,6 +6129,7 @@ dependencies = [
  "backend-catalog-pg-aggregate-seams",
  "backend-commands-define",
  "backend-commands-functioncmds",
+ "backend-commands-functioncmds-seams",
  "backend-parser-parse-type-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-cache-lsyscache-seams",
@@ -13756,6 +13758,7 @@ dependencies = [
  "backend-access-common-tupdesc",
  "backend-catalog-dependency",
  "backend-catalog-pg-class",
+ "backend-catalog-pg-proc-seams",
  "backend-commands-createas-seams",
  "backend-commands-functioncmds-seams",
  "backend-nodes-core",

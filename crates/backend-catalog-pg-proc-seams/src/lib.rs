@@ -146,13 +146,14 @@ seam_core::seam!(
     /// then for each retained old default compare
     /// `exprType(oldDef) != exprType(newDef)` against the tail of the new
     /// `parameterDefaults`. `old_proargdefaults` is the held old row's
-    /// `proargdefaults` `nodeToString` text; `new_parameter_defaults` is the
-    /// new defaults' `nodeToString` text (the owner already has the new nodes,
-    /// serialized for the cross). `Err` carries the parse / type error surface.
+    /// `proargdefaults` `nodeToString` text; `new_proargdefaults` is the
+    /// new defaults' `nodeToString` text. Both sides are `stringToNode`'d and
+    /// their elements compared by `exprType` pairwise. `Err` carries the parse /
+    /// type error surface.
     pub fn check_defaults_compatible(
         old_proargdefaults: String,
         old_nargdefaults: i16,
-        new_parameter_defaults: Vec<types_parsenodes::Node>,
+        new_proargdefaults: String,
     ) -> PgResult<DefaultCompat>
 );
 
@@ -259,25 +260,12 @@ seam_core::seam!(
  * directly and records the references without a seam (the
  * `node_to_string_sqlbody` / `record_dependency_on_sqlbody` seams are gone). */
 
-seam_core::seam!(
-    /// `nodeToString((Node *) parameterDefaults)` (pg_proc.c:360): serialize the
-    /// `List *` of cooked default-expr nodes to its `pg_node_tree` text. `Err`
-    /// carries OOM / serializer error.
-    pub fn node_to_string_defaults(
-        parameter_defaults: Vec<types_parsenodes::Node>,
-    ) -> PgResult<String>
-);
-
-seam_core::seam!(
-    /// `recordDependencyOnExpr(&myself, (Node *) parameterDefaults, NIL,
-    /// DEPENDENCY_NORMAL)` (pg_proc.c:670): record the default exprs' object
-    /// references against the new function. `Err` carries the heap/index-mutation
-    /// `ereport(ERROR)`s.
-    pub fn record_dependency_on_defaults(
-        func_oid: Oid,
-        parameter_defaults: Vec<types_parsenodes::Node>,
-    ) -> PgResult<()>
-);
+/* `node_to_string_defaults` / `record_dependency_on_defaults` are gone: the
+ * cooked `parameterDefaults` `List` now arrives already serialized to its
+ * `pg_node_tree` text with its object references extracted, produced by
+ * `cook_parameter_defaults` in the parser-owning crate (mirrors the prosqlbody
+ * path), so `ProcedureCreate` stores the text and records the references
+ * directly. */
 
 seam_core::seam!(
     /// `pgstat_create_function(retval)` (pgstat): ensure the new function's

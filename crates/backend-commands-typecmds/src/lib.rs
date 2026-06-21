@@ -1623,7 +1623,9 @@ fn makeRangeConstructors(name: &str, namespace: Oid, rangeOid: Oid, subtype: Oid
             None,                          /* allParameterTypes */
             None,                          /* parameterModes */
             None,                          /* parameterNames */
-            Vec::new(),                    /* parameterDefaults */
+            None,                          /* parameterDefaults (text) */
+            0,                             /* pronargdefaults */
+            Vec::new(),                    /* parameterDefaultsRefs */
             None,                          /* trftypes */
             Vec::new(),                    /* trfoids */
             None,                          /* proconfig */
@@ -1691,7 +1693,9 @@ fn makeMultirangeConstructors(
         None,
         None,
         None,
-        Vec::new(),
+        None,       /* parameterDefaults (text) */
+        0,          /* pronargdefaults */
+        Vec::new(), /* parameterDefaultsRefs */
         None,
         Vec::new(),
         None,
@@ -1734,7 +1738,9 @@ fn makeMultirangeConstructors(
         None,
         None,
         None,
-        Vec::new(),
+        None,       /* parameterDefaults (text) */
+        0,          /* pronargdefaults */
+        Vec::new(), /* parameterDefaultsRefs */
         None,
         Vec::new(),
         None,
@@ -1773,7 +1779,9 @@ fn makeMultirangeConstructors(
         Some(vec![rangeArrayOid]),  /* allParameterTypes */
         Some(vec![FUNC_PARAM_VARIADIC]), /* parameterModes */
         None,
-        Vec::new(),
+        None,       /* parameterDefaults (text) */
+        0,          /* pronargdefaults */
+        Vec::new(), /* parameterDefaultsRefs */
         None,
         Vec::new(),
         None,

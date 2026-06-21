@@ -16,6 +16,7 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-commands-define = { path = "../backend-commands-define" }
 backend-commands-functioncmds = { path = "../backend-commands-functioncmds" }
+backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
 
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-catalog-pg-aggregate-seams = { path = "../backend-catalog-pg-aggregate-seams" }

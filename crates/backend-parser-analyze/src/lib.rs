@@ -357,6 +357,154 @@ pub fn interpret_sql_body<'mcx>(
 }
 
 /* ===========================================================================
+ * Parameter DEFAULT expressions (functioncmds.c:419-447 / pg_proc.c:549-573)
+ * =========================================================================== */
+
+/// `transformExpr(pstate, fp->defexpr, EXPR_KIND_FUNCTION_DEFAULT)` +
+/// `coerce_to_specific_type(pstate, def, toid, "DEFAULT")` +
+/// `assign_expr_collations(pstate, def)`, then the
+/// `pstate->p_rtable != NIL || contain_var_clause(def)` no-table-references
+/// check (functioncmds.c:419-433). `p_rtable` is always NIL for the fresh
+/// DEFAULT parse state, so the check reduces to `contain_var_clause`. Returns
+/// the cooked default as a rich `Node` (the `parameterDefaults` `List` element).
+fn transform_parameter_default<'mcx>(
+    mcx: Mcx<'mcx>,
+    defexpr: &Node<'mcx>,
+    toid: types_core::primitive::Oid,
+    location: i32,
+    query_string: Option<String>,
+) -> PgResult<Node<'mcx>> {
+    use types_nodes::parsestmt::ParseExprKind;
+
+    let mut pstate = backend_parser_small1::make_parsestate(mcx, None)?;
+    if let Some(s) = query_string.as_deref() {
+        pstate.p_sourcetext = Some(mcx::PgString::from_str_in(s, mcx)?);
+    }
+
+    // def = transformExpr(pstate, fp->defexpr, EXPR_KIND_FUNCTION_DEFAULT);
+    let raw = defexpr.clone_in(mcx)?;
+    let def = backend_parser_parse_expr::transformExpr(
+        &mut pstate,
+        Some(raw),
+        ParseExprKind::EXPR_KIND_FUNCTION_DEFAULT,
+    )?;
+    let def = def.ok_or_else(|| elog_error("transform_parameter_default: NULL default expr"))?;
+
+    // def = coerce_to_specific_type(pstate, def, toid, "DEFAULT");
+    let def = backend_parser_coerce::coerce_to_specific_type(
+        mcx,
+        Some(&mut pstate),
+        def,
+        toid,
+        "DEFAULT",
+    )?;
+
+    // assign_expr_collations(pstate, def);
+    let mut def = def;
+    backend_parser_parse_collate::assign_expr_collations(Some(&pstate), &mut def)?;
+
+    // Wrap the cooked Expr as a Node for the var-clause check and serialization.
+    let cooked = Node::mk_expr(mcx, def)?;
+
+    // if (pstate->p_rtable != NIL || contain_var_clause(def))
+    if !pstate.p_rtable.is_empty()
+        || backend_optimizer_util_vars::var::contain_var_clause(&cooked)
+    {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_INVALID_COLUMN_REFERENCE)
+            .errmsg("cannot use table references in parameter default value")
+            .errposition(backend_parser_small1::parser_errposition(&pstate, location))
+            .into_error());
+    }
+
+    backend_parser_small1::free_parsestate(pstate)?;
+    Ok(cooked)
+}
+
+/// Serialize the cooked `parameterDefaults` `List` to its `pg_node_tree` text
+/// (`nodeToString`, pg_proc.c:360) and collect its object references
+/// (`recordDependencyOnExpr`'s reference half, pg_proc.c:670). An empty list
+/// yields `text: None`, `nargdefaults: 0`, `refs: []`.
+fn cook_parameter_defaults<'mcx>(
+    mcx: Mcx<'mcx>,
+    defaults: Vec<&Node<'mcx>>,
+) -> PgResult<backend_commands_functioncmds_seams::CookedParameterDefaults> {
+    let nargdefaults = defaults.len() as i32;
+    if defaults.is_empty() {
+        return Ok(backend_commands_functioncmds_seams::CookedParameterDefaults::default());
+    }
+
+    // Build the `List *` of cooked default nodes.
+    let mut elems: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+    elems.try_reserve(defaults.len()).map_err(|_| mcx.oom(defaults.len()))?;
+    for d in defaults {
+        elems.push(mcx::alloc_in(mcx, d.clone_in(mcx)?)?);
+    }
+    let list = Node::mk_list(mcx, elems)?;
+
+    // nodeToString((Node *) parameterDefaults).
+    let text = backend_nodes_outfuncs::nodeToString(mcx, &list)?
+        .as_str()
+        .to_string();
+
+    // recordDependencyOnExpr's reference-collection half over the in-memory list.
+    let mut refs_ctx =
+        backend_catalog_dependency::find_expr::FindExprReferencesContext::new(mcx);
+    backend_catalog_dependency::find_expr::find_expr_references_walker(&list, &mut refs_ctx)?;
+    if let Some(e) = refs_ctx.err.take() {
+        return Err(e);
+    }
+    let refs = refs_ctx.addrs.refs;
+
+    Ok(backend_commands_functioncmds_seams::CookedParameterDefaults {
+        text: Some(text),
+        nargdefaults,
+        refs,
+    })
+}
+
+/// `check_for_default_argument_drop` half of `ProcedureCreate` (pg_proc.c:549-573):
+/// `stringToNode` both old and new `proargdefaults` `List`s and compare the
+/// retained old defaults' `exprType` against the corresponding new defaults
+/// (the new list may have more, advanced over from the tail).
+fn check_defaults_compatible(
+    old_proargdefaults: String,
+    old_nargdefaults: i16,
+    new_proargdefaults: String,
+) -> PgResult<backend_catalog_pg_proc_seams::DefaultCompat> {
+    use backend_catalog_pg_proc_seams::DefaultCompat;
+
+    let scratch = mcx::MemoryContext::new("check_defaults_compatible");
+    let mcx = scratch.mcx();
+
+    let old_node = backend_nodes_core::read::string_to_node(mcx, &old_proargdefaults)?;
+    let new_node = backend_nodes_core::read::string_to_node(mcx, &new_proargdefaults)?;
+
+    if old_node.node_tag() != ntag::T_List {
+        return Err(elog_error("old proargdefaults is not a List"));
+    }
+    if new_node.node_tag() != ntag::T_List {
+        return Err(elog_error("new proargdefaults is not a List"));
+    }
+    let old_defaults = old_node.expect_list();
+    let new_defaults = new_node.expect_list();
+
+    // Assert(list_length(oldDefaults) == oldproc->pronargdefaults);
+    debug_assert_eq!(old_defaults.len(), old_nargdefaults as usize);
+
+    // newlc = list_nth_cell(parameterDefaults, len(new) - oldproc->pronargdefaults)
+    let skip = new_defaults.len().saturating_sub(old_nargdefaults as usize);
+    for (oldlc, newlc) in old_defaults.iter().zip(new_defaults.iter().skip(skip)) {
+        let old_ty = backend_nodes_core::nodefuncs::expr_type((**oldlc).as_expr())?;
+        let new_ty = backend_nodes_core::nodefuncs::expr_type((**newlc).as_expr())?;
+        if old_ty != new_ty {
+            return Ok(DefaultCompat::TypeChanged);
+        }
+    }
+    Ok(DefaultCompat::Ok)
+}
+
+/* ===========================================================================
  * parse_sub_analyze
  * =========================================================================== */
 
@@ -853,6 +1001,18 @@ pub fn init_seams() {
     // The inline SQL-function body interpreter (functioncmds.c:910): this is the
     // lowest crate that owns `transformStmt` and the rich node serializer.
     backend_commands_functioncmds_seams::interpret_sql_body::set(interpret_sql_body);
+    // Parameter DEFAULT expressions (functioncmds.c:419-447): this crate owns
+    // transformExpr, coerce_to_specific_type, assign_expr_collations, and
+    // contain_var_clause. It transforms/coerces each raw DEFAULT and serializes
+    // the cooked `parameterDefaults` `List` up front (mirrors interpret_sql_body).
+    backend_commands_functioncmds_seams::transform_parameter_default::set(
+        transform_parameter_default,
+    );
+    backend_commands_functioncmds_seams::cook_parameter_defaults::set(cook_parameter_defaults);
+    // The redefinition default-type compatibility check (pg_proc.c:549-573): owned
+    // here because it `stringToNode`s both serialized `proargdefaults` and
+    // `exprType`s the elements.
+    backend_catalog_pg_proc_seams::check_defaults_compatible::set(check_defaults_compatible);
     // `if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query,
     // jstate);` (analyze.c:127/169/206). The hook is a per-backend `fn` pointer
     // extensions install; it is NULL by default. With no extension loaded the C
