@@ -337,8 +337,17 @@ pub fn ginPostingListDecodeAllSegments(
     ndecoded_out: Option<&mut i32>,
 ) -> Vec<ItemPointerData> {
     let endseg = len as usize;
-    // C guesses an initial array size of `segment->nbytes * 2 + 1`.
-    let nallocated = read_nbytes(&segment[0..]) as usize * 2 + 1;
+    // C guesses an initial array size of `segment->nbytes * 2 + 1`, reading
+    // `segment->nbytes` from the page region (always a non-empty buffer in C).
+    // Here `segment` is a slice that is exactly empty when the leaf's posting
+    // region holds no segments (`len == 0`, e.g. a vacuum-emptied leaf), so the
+    // header read must be guarded — with no segments the result is empty and the
+    // loop below never runs.
+    let nallocated = if endseg < SIZE_OF_GIN_POSTING_LIST_HEADER {
+        1
+    } else {
+        read_nbytes(&segment[0..]) as usize * 2 + 1
+    };
     let mut result: Vec<ItemPointerData> = Vec::with_capacity(nallocated);
 
     let mut seg_off: usize = 0;

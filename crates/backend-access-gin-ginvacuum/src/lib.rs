@@ -780,19 +780,27 @@ fn ginScanToDelete(
     }
 
     // Assert(GinPageIsData(page));
-    let page = page_bytes(buffer)?;
+    let mut page = page_bytes(buffer)?;
     let is_leaf = GinPageIsLeaf(&page);
 
     if !is_leaf {
         me.blkno = blkno;
-        let maxoff = gin_page_get_maxoff(&page);
+        // C re-reads the live page each iteration: `i <= GinPageGetOpaque(page)->
+        // maxoff` and `GinDataPageGetPostingItem(page, i)` dereference the page
+        // pointer freshly, so when a child deletion (`ginDeletePage`) removes the
+        // downlink at offset `i` from THIS page it shifts the remaining items down
+        // and decrements `maxoff`. We hold only a byte-image copy, so re-fetch it
+        // from the buffer each iteration; a stale snapshot/captured `maxoff` would
+        // iterate past the real end and read shifted-away downlinks (wrong child
+        // block numbers, tripping ginDeletePage's downlink assertion).
         let mut i: OffsetNumber = FirstOffsetNumber;
-        while i <= maxoff {
+        while i <= gin_page_get_maxoff(&page) {
             let child_blkno = PostingItemGetBlockNumber(&GinDataPageGetPostingItem(&page, i));
             if ginScanToDelete(gvs, child_blkno, false, &mut me, i)? {
                 i -= 1;
             }
             i += 1;
+            page = page_bytes(buffer)?;
         }
 
         // if (GinPageRightMost(page) && BufferIsValid(me->child->leftBuffer))
