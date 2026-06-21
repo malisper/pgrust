@@ -952,12 +952,12 @@ fn exec_index_build_scan_keys_into<'mcx>(
     planstate: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
     index: types_rel::Relation<'mcx>,
-    quals: Option<&[Expr]>,
+    quals: Option<&[Expr<'mcx>]>,
     isorderby: bool,
     out: ScanKeyOut<'_, 'mcx>,
 ) -> PgResult<()> {
     let mcx: Mcx<'mcx> = estate.es_query_cxt;
-    let quals: &[Expr] = quals.unwrap_or(&[]);
+    let quals: &[Expr<'mcx>] = quals.unwrap_or(&[]);
     let n_scan_keys = quals.len();
 
     // Allocate array for ScanKey structs: one per qual.
@@ -1451,7 +1451,7 @@ fn build_scan_keys_is<'mcx>(
     node: &mut IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     index: types_rel::Relation<'mcx>,
-    quals: Option<&[Expr]>,
+    quals: Option<&[Expr<'mcx>]>,
     isorderby: bool,
 ) -> PgResult<()> {
     // The plain IndexScan passes NULL ArrayKeys; both the quals call (writing
@@ -1858,17 +1858,17 @@ fn clone_datum_vec<'mcx>(src: &[Datum<'mcx>]) -> alloc::vec::Vec<Datum<'mcx>> {
 // --- scankey-build sub-helpers (nodeFuncs / catalog logic, owned) ----------
 
 /// `get_leftop(clause)` — first argument of a binary op clause.
-fn get_leftop(args: &[Expr]) -> Option<&Expr> {
+fn get_leftop<'a, 'mcx>(args: &'a [Expr<'mcx>]) -> Option<&'a Expr<'mcx>> {
     args.first()
 }
 
 /// `get_rightop(clause)` — second argument of a binary op clause.
-fn get_rightop(args: &[Expr]) -> Option<&Expr> {
+fn get_rightop<'a, 'mcx>(args: &'a [Expr<'mcx>]) -> Option<&'a Expr<'mcx>> {
     args.get(1)
 }
 
 /// `if (IsA(op, RelabelType)) op = ((RelabelType *) op)->arg`.
-fn strip_relabel(expr: Option<&Expr>) -> Option<&Expr> {
+fn strip_relabel<'a, 'mcx>(expr: Option<&'a Expr<'mcx>>) -> Option<&'a Expr<'mcx>> {
     match expr {
         Some(Expr::RelabelType(r)) => r.arg.as_deref(),
         other => other,
@@ -1921,7 +1921,7 @@ fn type_is_toastable(_typid: Oid) -> bool {
 /// `((Const *) rightop)->constvalue` copied into `mcx` as a canonical Datum.
 /// The plan-tree Const carries a `Datum<'static>`; copying it into the
 /// per-query context decouples it from the (read-only) plan tree.
-fn const_value_in<'mcx>(mcx: Mcx<'mcx>, value: &Datum<'static>) -> PgResult<Datum<'mcx>> {
+fn const_value_in<'mcx, 'v>(mcx: Mcx<'mcx>, value: &Datum<'v>) -> PgResult<Datum<'mcx>> {
     // Faithfully `datumCopy` the Const's value into the per-query context. The
     // canonical `Datum::clone_in` covers every kind: ByVal (no-op word copy),
     // ByRef (deep-copy the varlena bytes), Cstring (clone the NUL-terminated
@@ -2039,7 +2039,7 @@ fn seam_build_scan_keys_ios<'mcx>(
     node: &mut types_nodes::IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     index: types_rel::Relation<'mcx>,
-    quals: Option<&[Expr]>,
+    quals: Option<&[Expr<'mcx>]>,
     is_orderby: bool,
 ) -> PgResult<()> {
     let mut dummy_num_array = 0i32;
@@ -2098,7 +2098,7 @@ fn seam_build_scan_keys_bis<'mcx>(
     node: &mut types_nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     index: types_rel::Relation<'mcx>,
-    quals: Option<&[Expr]>,
+    quals: Option<&[Expr<'mcx>]>,
 ) -> PgResult<()> {
     let types_nodes::nodebitmapindexscan::BitmapIndexScanState {
         ss,
