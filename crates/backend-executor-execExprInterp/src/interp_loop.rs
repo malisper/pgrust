@@ -87,6 +87,20 @@ pub(crate) fn read_cell<'mcx>(state: &ExprState<'mcx>, id: ResultCellId) -> (Dat
     }
 }
 
+/// True iff the cell named by `id` currently holds a `Datum::Internal` (the
+/// move-only `internal` pseudo-type). Used by the combine-transition step to
+/// decide whether the input arg must be *taken* (the deserialized state is
+/// consumed once) rather than *peeked* (cloned). The `STATE_RESULT_CELL` never
+/// carries an internal transition state, so it reports false.
+#[inline]
+pub(crate) fn cell_value_is_internal<'mcx>(state: &ExprState<'mcx>, id: ResultCellId) -> bool {
+    if id == types_nodes::execexpr::STATE_RESULT_CELL {
+        state.resvalue.as_internal().is_some()
+    } else {
+        state.result_cells.peek(id).is_some_and(|c| c.value.as_internal().is_some())
+    }
+}
+
 /// Write the `(value, isnull)` of the cell named by `id` (see [`read_cell`]).
 #[inline]
 pub(crate) fn write_cell<'mcx>(
@@ -1219,9 +1233,25 @@ pub fn ExecInterpExpr<'mcx>(
                 let mut input_args: Vec<Datum<'mcx>> = Vec::with_capacity(arg_cell_ids.len());
                 let mut input_args_null: Vec<bool> = Vec::with_capacity(arg_cell_ids.len());
                 for &c in &arg_cell_ids {
-                    let (v, isnull) = read_cell(state, c);
-                    input_args.push(v);
-                    input_args_null.push(isnull);
+                    // C reads pertrans->transfn_fcinfo->args (a bare pointer word for a
+                    // by-ref/internal arg) and leaves the cell intact — harmless because
+                    // it's just a pointer the combinefn dereferences. In the owned model
+                    // an ordinary by-value/by-ref arg can be peeked (cloned) so it stays
+                    // available to a sibling grouping-set trans step. A combine-aggregate
+                    // input, however, is a move-only `Datum::Internal` (the transition
+                    // state the preceding EEOP_AGG_*DESERIALIZE step wrote into this cell)
+                    // that cannot be cloned and is consumed exactly once by the combinefn
+                    // — MOVE it out (take), leaving a default-null cell, mirroring C's
+                    // single hand-off of the deserialized state pointer.
+                    if cell_value_is_internal(state, c) {
+                        let cell = state.result_cells.take(c);
+                        input_args.push(cell.value);
+                        input_args_null.push(cell.isnull);
+                    } else {
+                        let (v, isnull) = read_cell(state, c);
+                        input_args.push(v);
+                        input_args_null.push(isnull);
+                    }
                 }
 
                 let byref = matches!(

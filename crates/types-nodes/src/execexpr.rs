@@ -1529,6 +1529,13 @@ impl<'mcx> ResultCellArena<'mcx> {
             .unwrap_or_default()
     }
 
+    /// Borrow a cell by id without cloning (returns `None` for an out-of-range
+    /// id). Needed to inspect a cell whose value is a non-cloneable
+    /// `Datum::Internal` before deciding to [`take`](Self::take) it.
+    pub fn peek(&self, id: ResultCellId) -> Option<&ResultCell<'mcx>> {
+        self.cells.as_ref().and_then(|c| c.get(id.0 as usize))
+    }
+
     /// Take (move out, leaving a default cell) a cell by id. For a move-only
     /// `Datum::Internal` cell value (the C `internal` pseudo-type, which cannot
     /// be cloned) that is consumed exactly once — e.g. the deserialized
