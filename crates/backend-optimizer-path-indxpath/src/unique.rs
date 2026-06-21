@@ -15,7 +15,7 @@ use crate::operand::match_index_to_operand;
 use crate::util::{index_coll_matches_expr_coll, BTREE_AM_OID};
 
 /// `get_leftop(clause)` (clauses.h) — the left operand of a binary `OpExpr`.
-fn get_leftop(clause: &Expr) -> &Expr {
+fn get_leftop<'a, 'mcx>(clause: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     clause
         .as_opexpr()
         .expect("get_leftop: not an OpExpr")
@@ -25,7 +25,7 @@ fn get_leftop(clause: &Expr) -> &Expr {
 }
 
 /// `get_rightop(clause)` (clauses.h) — the right operand of a binary `OpExpr`.
-fn get_rightop(clause: &Expr) -> &Expr {
+fn get_rightop<'a, 'mcx>(clause: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     clause
         .as_opexpr()
         .expect("get_rightop: not an OpExpr")

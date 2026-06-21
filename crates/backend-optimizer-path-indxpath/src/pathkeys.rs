@@ -123,14 +123,14 @@ fn collect_ec_members(root: &PlannerInfo, ec_id: types_pathnodes::EcId) -> Vec<E
 /// (indxpath.c:3829) — determine whether an ordering operator expression matches
 /// an index column. On success return `clause` as-is (indexkey on left) or a
 /// commuted copy; on no match, `None`.
-pub fn match_clause_to_ordering_op(
-    mcx: Mcx<'_>,
+pub fn match_clause_to_ordering_op<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     index: &IndexOptInfo,
     indexcol: usize,
-    clause: &Expr,
+    clause: &Expr<'_>,
     pk_opfamily: Oid,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     debug_assert!(indexcol < index.nkeycolumns as usize);
 
     let opfamily = index.opfamily[indexcol];

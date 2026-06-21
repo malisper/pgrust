@@ -193,7 +193,7 @@ struct CachedExpressionData {
     /// `Node *expr` — owned planned expression, allocated into `context` below
     /// (see `GetCachedExpression`). Its `PgBox`/`PgVec` children live in that
     /// context, so `context` must outlive `expr`.
-    expr: Expr,
+    expr: Expr<'static>,
     is_valid: bool,
     relation_oids: Vec<Oid>,
     inval_items: Vec<InvalItemKey>,
@@ -1718,7 +1718,7 @@ pub fn CachedPlanGetTargetList<'mcx>(
  * ======================================================================== */
 
 /// `GetCachedExpression(expr)`.
-pub fn GetCachedExpression(expr: Expr) -> PgResult<CachedExpressionHandle> {
+pub fn GetCachedExpression(expr: Expr<'static>) -> PgResult<CachedExpressionHandle> {
     // expression_planner_with_deps(expr, &relationOids, &invalItems).
     //
     // The planned `Expr` is cached at backend lifetime (in `s.expressions` /

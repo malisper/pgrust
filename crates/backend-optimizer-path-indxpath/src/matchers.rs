@@ -28,7 +28,7 @@ use crate::util::{
 /// Deep-copy a slice of `Expr` into `mcx` via `Expr::clone_in` (C copyObject).
 /// The derived `Expr::clone` panics on an owned-subtree child
 /// (`Aggref`/`SubLink`/`SubPlan`), so any moved-into-node copy must go here.
-fn clone_exprs_in(exprs: &[Expr], mcx: Mcx<'_>) -> PgResult<Vec<Expr>> {
+fn clone_exprs_in<'mcx>(exprs: &[Expr<'_>], mcx: Mcx<'mcx>) -> PgResult<Vec<Expr<'mcx>>> {
     let mut out = Vec::with_capacity(exprs.len());
     for e in exprs {
         out.push(e.clone_in(mcx)?);

@@ -226,8 +226,8 @@ pub fn mark_aggrefs_presorted(node: &mut Expr, aggnos: &[i32]) {
 /// child recursion for the node types a planner tlist / HAVING qual can carry.
 /// (The parser guarantees no nested same-level aggregates inside an `Aggref`'s
 /// own args/filter, so `Aggref` is handled by the caller and not descended.)
-fn expr_children_mut<'a>(node: &'a mut Expr) -> alloc::vec::Vec<&'a mut Expr> {
-    let mut out: alloc::vec::Vec<&'a mut Expr> = alloc::vec::Vec::new();
+fn expr_children_mut<'a, 'mcx>(node: &'a mut Expr<'mcx>) -> alloc::vec::Vec<&'a mut Expr<'mcx>> {
+    let mut out: alloc::vec::Vec<&'a mut Expr<'mcx>> = alloc::vec::Vec::new();
     // The child-recursion arms of `expression_tree_walker` (nodeFuncs.c), one per
     // node type the walker descends into. Mechanically transcribed from
     // expression_tree_walker_impl; childless leaf types (Var/Const/Param/
@@ -1141,13 +1141,13 @@ fn equal_opt_expr(a: Option<&Expr>, b: Option<&Expr>) -> bool {
 /// View an `Expr::Aggref` node as `&Aggref` (the working node is always an
 /// `Aggref` — built by `clone_in` of an `Expr::Aggref`).
 #[inline]
-fn as_aggref(node: &Expr) -> &Aggref {
+fn as_aggref<'a, 'mcx>(node: &'a Expr<'mcx>) -> &'a Aggref<'mcx> {
     node.expect_aggref()
 }
 
 /// View an `Expr::Aggref` node as `&mut Aggref`.
 #[inline]
-fn as_aggref_mut(node: &mut Expr) -> &mut Aggref {
+fn as_aggref_mut<'a, 'mcx>(node: &'a mut Expr<'mcx>) -> &'a mut Aggref<'mcx> {
     node.as_aggref_mut()
         .expect("prepagg working node is always Expr::Aggref")
 }
@@ -1156,7 +1156,7 @@ fn as_aggref_mut(node: &mut Expr) -> &mut Aggref {
 /// `AggTransInfo.args` element form). Mirrors how `processed_tlist` interns TLEs.
 fn clone_targetentry_into_arena<'mcx>(
     root: &mut PlannerInfo,
-    tle: &types_nodes::primnodes::TargetEntry<'static>,
+    tle: &types_nodes::primnodes::TargetEntry<'_>,
     mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<NodeId> {
     let expr_src = tle.expr.as_deref().expect(

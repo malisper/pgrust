@@ -639,11 +639,11 @@ fn orarg_clause<'a>(root: &'a PlannerInfo, orarg: &'a Expr<'static>) -> &'a Expr
 /// Owned-clone variant of [`orarg_clause`] for callers that need to release the
 /// `&PlannerInfo` borrow before taking `&mut PlannerInfo`. Returns the arm's
 /// underlying clause node (deref'ing an [`Expr::RestrictInfo`] handle).
-pub fn orarg_clause_owned(
-    mcx: Mcx<'_>,
+pub fn orarg_clause_owned<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &PlannerInfo,
-    orarg: &Expr,
-) -> Result<Option<Expr>, types_error::PgError> {
+    orarg: &Expr<'static>,
+) -> Result<Option<Expr<'mcx>>, types_error::PgError> {
     // Deep-copy via `clone_in` (C copyObject); a derived `Expr::clone` panics on
     // an owned-subtree child (`Aggref`/`SubLink`/`SubPlan`).
     Ok(Some(orarg_clause(root, orarg).clone_in(mcx)?))
@@ -651,14 +651,14 @@ pub fn orarg_clause_owned(
 
 /// Is this grouped OR arm itself an OR clause (a sub-OR `BoolExpr`)? Looks
 /// through the arm's `RestrictInfo` handle to its underlying clause.
-fn orarg_is_or_clause(root: &PlannerInfo, orarg: &Expr) -> bool {
+fn orarg_is_or_clause(root: &PlannerInfo, orarg: &Expr<'static>) -> bool {
     use types_nodes::primnodes::BoolExprType;
     matches!(orarg_clause(root, orarg).as_boolexpr(), Some(b) if b.boolop == BoolExprType::OR_EXPR)
 }
 
 /// Structural equality of two `Expr` lists (for the "grouping changed the args"
 /// test in `generate_bitmap_or_paths`). Uses node-level `equal`.
-fn exprs_eq(a: &[Expr], b: &[Expr]) -> bool {
+fn exprs_eq(a: &[Expr<'_>], b: &[Expr<'_>]) -> bool {
     if a.len() != b.len() {
         return false;
     }

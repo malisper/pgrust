@@ -108,7 +108,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `agg_args_support_sendreceive(aggref)` (parse_agg.c).
-    pub fn agg_args_support_sendreceive(aggref: &Aggref<'static>) -> PgResult<bool>
+    pub fn agg_args_support_sendreceive<'a>(aggref: &Aggref<'a>) -> PgResult<bool>
 );
 
 seam_core::seam!(
