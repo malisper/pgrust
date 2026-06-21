@@ -39,8 +39,9 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 use types_acl::acl::{AclResult, ACL_MAINTAIN};
 use types_cache::syscache::SysCacheKey;
 use types_catalog::pg_class::{
-    Anum_pg_class_relallfrozen, Anum_pg_class_relallvisible, Anum_pg_class_relpages,
-    Anum_pg_class_reltuples, RelationRelationId,
+    Anum_pg_class_relallfrozen, Anum_pg_class_relallvisible, Anum_pg_class_relisshared,
+    Anum_pg_class_relkind, Anum_pg_class_relname, Anum_pg_class_relpages, Anum_pg_class_reltuples,
+    RelationRelationId,
 };
 use types_catalog::pg_database::DatabaseRelationId;
 use types_catalog::pg_type::{TYPTYPE_MULTIRANGE, TYPTYPE_RANGE};
@@ -745,13 +746,6 @@ fn read_name_datum(d: &Datum) -> String {
 fn my_database_id() -> Oid {
     backend_utils_init_small_seams::my_database_id::call()
 }
-
-// `pg_class` attnum constants needed by `pg_class_form` (types-catalog provides
-// the stats-update ones; relname/relkind/relisshared we pin locally with their
-// pg_class.h numbers).
-const Anum_pg_class_relname: i16 = 2;
-const Anum_pg_class_relisshared: i16 = 16;
-const Anum_pg_class_relkind: i16 = 17;
 
 // ===========================================================================
 // relation_stats.c
