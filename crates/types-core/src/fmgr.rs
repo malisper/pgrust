@@ -172,6 +172,40 @@ impl FnExprErased {
         Self(alloc::rc::Rc::new(expr))
     }
 
+    /// Box an `'mcx`-arena node into the erased carrier (C's bare `fmNodePtr`).
+    ///
+    /// `FnExprErased` is the documented type-erased (`dyn Any: 'static`) model of
+    /// C's `fmNodePtr fn_expr` — a bare pointer the caller keeps alive through the
+    /// node's memory context, *not* through Rust's borrow tracker. The owned model
+    /// makes that explicit: the node is allocated in the `mcx` context that shares
+    /// the `FmgrInfo`'s lifetime, and erasing it requires forgetting the `'mcx`
+    /// brand (Any is `'static`). This is the single sanctioned lifetime-erasure
+    /// boundary for `fn_expr` — exactly the `RinfoRef`-style index/handle carve-out
+    /// the Expr-`'mcx` campaign excludes from the borrow check (the node's validity
+    /// is governed by the memory context, mirroring C's pointer).
+    ///
+    /// SAFETY: caller must guarantee the erased node's backing context outlives
+    /// every `downcast_ref` read of this carrier — the same contract C relies on
+    /// for the bare `fn_expr` pointer. `STATIC` must be the `'static` form of the
+    /// `'mcx`-branded `MCX` type (same concrete type, lifetime forgotten); callers
+    /// pass `Expr<'mcx>` / `Expr<'static>`.
+    pub fn from_node_erased<MCX, STATIC: core::any::Any>(expr: MCX) -> Self {
+        // Forget the `'mcx` brand to satisfy `Any: 'static`. The node lives in a
+        // memory context, not on the Rust stack; this mirrors C storing a bare
+        // `Node *` into `fn_expr` with no lifetime tracking. `MCX` and `STATIC` are
+        // the same type up to the lifetime parameter, so the transmute is a no-op
+        // reinterpretation of an identical layout.
+        debug_assert_eq!(
+            core::mem::size_of::<MCX>(),
+            core::mem::size_of::<STATIC>(),
+            "from_node_erased: MCX and STATIC must be the same type up to lifetime"
+        );
+        let boxed: alloc::rc::Rc<MCX> = alloc::rc::Rc::new(expr);
+        let restamped: alloc::rc::Rc<STATIC> =
+            unsafe { core::mem::transmute::<alloc::rc::Rc<MCX>, alloc::rc::Rc<STATIC>>(boxed) };
+        Self(restamped)
+    }
+
     /// Downcast the erased node back to `&T` (the concrete expression type a
     /// `types-nodes`-depending reader knows), or `None` if it is some other
     /// type. Mirrors C reading through the `fmNodePtr`.

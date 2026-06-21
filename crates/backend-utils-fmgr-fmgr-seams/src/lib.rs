@@ -203,7 +203,7 @@ seam_core::seam!(
     pub fn fmgr_info_set_expr<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         finfo: &mut types_core::fmgr::FmgrInfo,
-        expr: &types_nodes::primnodes::Expr,
+        expr: &types_nodes::primnodes::Expr<'mcx>,
     ) -> PgResult<()>
 );
 

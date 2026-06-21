@@ -2001,7 +2001,7 @@ fn oid_input_function_call_out<'mcx>(
 /// node available — the readers then fall through to the tag-only seams). The
 /// downcast targets the one concrete type the setter ever boxes; a mismatch
 /// maps to the same `None` fall-through.
-fn external_expr(ext: &types_fmgr::ExternalFnExpr) -> Option<&types_nodes::primnodes::Expr> {
+fn external_expr(ext: &types_fmgr::ExternalFnExpr) -> Option<&types_nodes::primnodes::Expr<'static>> {
     ext.node
         .as_ref()?
         .downcast_ref::<types_nodes::primnodes::Expr>()
@@ -2292,12 +2292,15 @@ fn fmgr_info_resolve(mcx: Mcx<'_>, function_id: Oid) -> PgResult<types_core::fmg
 fn fmgr_info_set_expr_seam<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     finfo: &mut types_core::fmgr::FmgrInfo,
-    expr: &types_nodes::primnodes::Expr,
+    expr: &types_nodes::primnodes::Expr<'mcx>,
 ) -> types_error::PgResult<()> {
     // clone_in: the call node may be an OpExpr/FuncExpr carrying an Aggref (a
     // HAVING qual operator), whose context-allocated TargetEntry args a bare
     // derived `.clone()` panics on.
-    finfo.fn_expr = Some(types_core::fmgr::FnExprErased::new(expr.clone_in(mcx)?));
+    finfo.fn_expr = Some(types_core::fmgr::FnExprErased::from_node_erased::<
+        types_nodes::primnodes::Expr,
+        types_nodes::primnodes::Expr,
+    >(expr.clone_in(mcx)?));
     Ok(())
 }
 
@@ -2309,7 +2312,7 @@ fn fmgr_info_set_expr_seam<'mcx>(
 /// same `None` fall-through.
 fn fcinfo_fn_expr<'a>(
     fcinfo: &'a types_nodes::fmgr::FunctionCallInfoBaseData<'_>,
-) -> Option<&'a types_nodes::primnodes::Expr> {
+) -> Option<&'a types_nodes::primnodes::Expr<'static>> {
     fcinfo
         .flinfo
         .as_ref()?
@@ -2757,7 +2760,10 @@ fn fmgr_call_seam<'mcx>(
         // panics on.
         resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(types_fmgr::ExternalFnExpr {
             tag: 0,
-            node: Some(types_core::fmgr::FnExprErased::new(expr.clone_in(mcx)?)),
+            node: Some(types_core::fmgr::FnExprErased::from_node_erased::<
+                types_nodes::primnodes::Expr,
+                types_nodes::primnodes::Expr,
+            >(expr.clone_in(mcx)?)),
         })));
     }
 
