@@ -1191,6 +1191,10 @@ fn xpath_eval(
             xmlFreeParserCtxt(ctxt);
             return Err(oom("could not allocate XPath context"));
         }
+        // xml.c:4426 `xpathctx->node = (xmlNodePtr) doc;` — evaluate the XPath
+        // expression with the document node as the context node, so relative
+        // location paths (e.g. `root`) match against the document's children.
+        xpathctx_set_node(xpathctx, doc as *mut xmlNode);
 
         let cleanup = |xpathobj: *mut xmlXPathObject,
                        xpathcomp: *mut xmlXPathCompExpr,
