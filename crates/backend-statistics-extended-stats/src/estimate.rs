@@ -203,6 +203,102 @@ fn dependency_is_compatible_clause(clause: &Expr, relid: i32) -> PgResult<Option
 }
 
 /* ===========================================================================
+ * dependency_is_compatible_expression (dependencies.c:1167)
+ *
+ * Like dependency_is_compatible_clause, but the operand need not be a simple
+ * Var: on success it returns the matching statistics expression (a node from
+ * one of the rel's statistics objects' `exprs`). `clause` is RestrictInfo-
+ * unwrapped by the caller (we receive the bare clause Expr; the RestrictInfo
+ * pseudoconstant/singleton checks are applied in the driver's per-clause loop).
+ * ======================================================================== */
+
+/// `dependency_is_compatible_expression(clause, relid, statlist, &expr)`
+/// (dependencies.c:1167). Returns the index into `stat_exprs` (a flat list of
+/// all dependency-stat expressions, paired with their owning order) when the
+/// operand exactly matches a statistics expression. `stat_exprs` is the
+/// concatenation of every dependency-kind statistics object's `exprs` (as
+/// `&Expr`), in statlist order; a match returns the matching expression's
+/// position so the caller can dedup with `equal`.
+fn dependency_is_compatible_expression(
+    clause: &Expr,
+    relid: i32,
+    stat_exprs: &[Expr],
+    run: &PlannerRun<'_>,
+) -> PgResult<Option<Expr>> {
+    let clause_expr: &Expr = match clause {
+        Expr::OpExpr(expr) | Expr::DistinctExpr(expr) | Expr::NullIfExpr(expr) => {
+            if expr.args.len() != 2 {
+                return Ok(None);
+            }
+            let cexpr = if sel_seam::is_pseudo_constant_clause::call(&expr.args[1])? {
+                &expr.args[0]
+            } else if sel_seam::is_pseudo_constant_clause::call(&expr.args[0])? {
+                &expr.args[1]
+            } else {
+                return Ok(None);
+            };
+            if lsyscache::get_oprrest::call(expr.opno)? != F_EQSEL {
+                return Ok(None);
+            }
+            cexpr
+        }
+        Expr::ScalarArrayOpExpr(expr) => {
+            if !expr.useOr {
+                return Ok(None);
+            }
+            if expr.args.len() != 2 {
+                return Ok(None);
+            }
+            if !sel_seam::is_pseudo_constant_clause::call(&expr.args[1])? {
+                return Ok(None);
+            }
+            let cexpr = &expr.args[0];
+            if lsyscache::get_oprrest::call(expr.opno)? != F_EQSEL {
+                return Ok(None);
+            }
+            cexpr
+        }
+        Expr::BoolExpr(b) if b.boolop == OR_EXPR => {
+            // OR: all arguments must match the same statistics expression.
+            let mut matched: Option<Expr> = None;
+            for arg in &b.args {
+                match dependency_is_compatible_expression(arg, relid, stat_exprs, run)? {
+                    None => return Ok(None),
+                    Some(or_expr) => {
+                        match &matched {
+                            None => matched = Some(or_expr),
+                            Some(prev) => {
+                                if !nodefuncs::equal::call(&or_expr, prev) {
+                                    return Ok(None);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(matched);
+        }
+        Expr::BoolExpr(b) if b.boolop == NOT_EXPR => {
+            // "NOT x" == "x = false".
+            nodefuncs::get_notclausearg::call(clause)
+        }
+        _ => clause,
+    };
+
+    // Ignore any RelabelType above the operand.
+    let clause_expr = strip_relabel(clause_expr);
+
+    // Search for a matching statistics expression.
+    for stat_expr in stat_exprs {
+        if nodefuncs::equal::call(clause_expr, stat_expr) {
+            return Ok(Some(stat_expr.clone_in(run.mcx())?));
+        }
+    }
+
+    Ok(None)
+}
+
+/* ===========================================================================
  * dependencies_clauselist_selectivity (dependencies.c:1369)
  * ======================================================================== */
 
@@ -231,8 +327,15 @@ fn dependencies_clauselist_selectivity(
     let rel_relid = root.rel(rel).relid;
     let rte_inh = planner_rt_fetch(run, root, rel_relid).inh;
 
+    // The concatenation of every dependency-stat object's expressions, used by
+    // dependency_is_compatible_expression. With the stxexprs build leg deferred,
+    // these lists are empty, so the expression path produces no unique_exprs.
+    let dep_stat_exprs = collect_dependency_stat_exprs(root, rel, run)?;
+
     let nclauses = clauses.len();
     let mut list_attnums: Vec<i32> = Vec::with_capacity(nclauses);
+    // Expressions get negative attnums (-1, -2, ...) deduped via equal().
+    let mut unique_exprs: Vec<Expr> = Vec::new();
 
     for (listidx, &rid) in clauses.iter().enumerate() {
         let mut attnum = INVALID_ATTNUM;
@@ -247,7 +350,27 @@ fn dependencies_clauselist_selectivity(
             if !pseudoconstant && singleton_ok {
                 let clause: Expr = root.node(clause_node).clone_in(run.mcx())?;
                 if let Some(a) = dependency_is_compatible_clause(&clause, rel_relid as i32)? {
+                    // simple column reference
                     attnum = a;
+                } else if let Some(expr) = dependency_is_compatible_expression(
+                    &clause,
+                    rel_relid as i32,
+                    &dep_stat_exprs,
+                    run,
+                )? {
+                    // expression: assign a negative attnum, deduping by equal().
+                    let mut found = INVALID_ATTNUM;
+                    for (i, ue) in unique_exprs.iter().enumerate() {
+                        if nodefuncs::equal::call(ue, &expr) {
+                            found = -((i as i32) + 1);
+                            break;
+                        }
+                    }
+                    if found == INVALID_ATTNUM {
+                        unique_exprs.push(expr);
+                        found = -(unique_exprs.len() as i32);
+                    }
+                    attnum = found;
                 }
             }
         }
@@ -255,8 +378,14 @@ fn dependencies_clauselist_selectivity(
         list_attnums.push(attnum);
     }
 
-    // No expressions in practice, so attnum_offset == 0 (see module note).
-    let attnum_offset = 0;
+    let unique_exprs_cnt = unique_exprs.len() as i32;
+
+    // Offset enough for the lowest value (-unique_exprs_cnt) to become 1.
+    let attnum_offset = if unique_exprs_cnt > 0 {
+        unique_exprs_cnt + 1
+    } else {
+        0
+    };
 
     let mut clauses_attnums: Relids = None;
     for i in 0..nclauses {
@@ -272,7 +401,9 @@ fn dependencies_clauselist_selectivity(
         return Ok(1.0);
     }
 
-    // Load functional dependencies for stats matching >= 2 attributes.
+    // Load functional dependencies for stats matching >= 2 attributes, remapping
+    // each dependency's attnums (regular attrs offset; expressions translated to
+    // the unique-expr attnum) and dropping dependencies not fully covered.
     let stat_oids = collect_stat_oids(
         root,
         rel,
@@ -280,11 +411,24 @@ fn dependencies_clauselist_selectivity(
         rte_inh,
         &clauses_attnums,
         attnum_offset,
-    );
+        &unique_exprs,
+        run,
+    )?;
 
     let mut func_dependencies: Vec<MVDependencies> = Vec::new();
-    for stat_oid in stat_oids {
-        let d = statext_dependencies_load(run.mcx(), stat_oid, rte_inh)?;
+    for (stat_oid, stat_exprs) in stat_oids {
+        let mut d = statext_dependencies_load(run.mcx(), stat_oid, rte_inh)?;
+
+        if unique_exprs_cnt > 0 || !stat_exprs.is_empty() {
+            remap_dependencies(
+                &mut d,
+                attnum_offset,
+                &clauses_attnums,
+                &stat_exprs,
+                &unique_exprs,
+            )?;
+        }
+
         // It's possible we've removed all dependencies, in which case we don't
         // bother adding it to the list.
         if d.ndeps > 0 {
@@ -566,9 +710,34 @@ fn has_stats_of_kind(root: &PlannerInfo, rel: RelId, requiredkind: i8) -> bool {
         .any(|&id| root.statistic_ext(id).kind == requiredkind)
 }
 
-/// Collect the `statOid`s of dependency-kind statistics objects on `rel` whose
-/// inheritance flag matches `rte_inh` and which match at least two clause
-/// attnums (the C "skip objects matching fewer than two attributes" gate).
+/// The concatenation of every dependency-kind statistics object's expressions
+/// on `rel` (as owned `Expr`s), for `dependency_is_compatible_expression`. With
+/// the stxexprs build leg deferred these lists are empty.
+fn collect_dependency_stat_exprs(
+    root: &PlannerInfo,
+    rel: RelId,
+    run: &PlannerRun<'_>,
+) -> PgResult<Vec<Expr>> {
+    let mut out = Vec::new();
+    let statlist = root.rel(rel).statlist.clone();
+    for id in statlist {
+        let stat = root.statistic_ext(id);
+        if stat.kind != STATS_EXT_DEPENDENCIES {
+            continue;
+        }
+        let expr_ids = stat.exprs.clone();
+        for eid in expr_ids {
+            out.push(root.node(eid).clone_in(run.mcx())?);
+        }
+    }
+    Ok(out)
+}
+
+/// Collect the `(statOid, exprs)` of dependency-kind statistics objects on `rel`
+/// whose inheritance flag matches `rte_inh` and which match at least two clause
+/// attnums or expressions (the C "skip objects matching fewer than two
+/// attributes/expressions" gate). `exprs` is the object's own expression list,
+/// passed on to the per-dependency remapping.
 fn collect_stat_oids(
     root: &PlannerInfo,
     rel: RelId,
@@ -576,7 +745,9 @@ fn collect_stat_oids(
     rte_inh: bool,
     clauses_attnums: &Relids,
     attnum_offset: i32,
-) -> Vec<Oid> {
+    unique_exprs: &[Expr],
+    run: &PlannerRun<'_>,
+) -> PgResult<Vec<(Oid, Vec<Expr>)>> {
     let mut out = Vec::new();
     let statlist = root.rel(rel).statlist.clone();
     for id in statlist {
@@ -588,6 +759,8 @@ fn collect_stat_oids(
             continue;
         }
 
+        // Count matching attributes (offset to match clauses_attnums); skip
+        // expression keys (non-user-defined attnums).
         let mut nmatched = 0;
         for k in relids_to_vec(&stat.keys) {
             if !attr_is_user_defined(k) {
@@ -599,13 +772,102 @@ fn collect_stat_oids(
             }
         }
 
-        if nmatched < 2 {
+        // Resolve and count matching expressions.
+        let stat_exprs: Vec<Expr> = {
+            let expr_ids = stat.exprs.clone();
+            let mut v = Vec::with_capacity(expr_ids.len());
+            for eid in expr_ids {
+                v.push(root.node(eid).clone_in(run.mcx())?);
+            }
+            v
+        };
+        let mut nexprs = 0;
+        for ue in unique_exprs {
+            for stat_expr in &stat_exprs {
+                if nodefuncs::equal::call(stat_expr, ue) {
+                    nexprs += 1;
+                }
+            }
+        }
+
+        if nmatched + nexprs < 2 {
             continue;
         }
 
-        out.push(stat.stat_oid);
+        out.push((stat.stat_oid, stat_exprs));
     }
-    out
+    Ok(out)
+}
+
+/// The per-dependency attnum remapping (dependencies.c:1657-1758): for each
+/// dependency, offset its regular attnums and translate its expression attnums
+/// to the unique-expr attnum; drop dependencies that reference an attribute or
+/// expression not present in the clauses. Mutates `deps` in place (compacting
+/// the kept dependencies and updating `ndeps`).
+fn remap_dependencies(
+    deps: &mut MVDependencies,
+    attnum_offset: i32,
+    clauses_attnums: &Relids,
+    stat_exprs: &[Expr],
+    unique_exprs: &[Expr],
+) -> PgResult<()> {
+    let mut ndeps = 0usize;
+    let total = deps.ndeps as usize;
+    for i in 0..total {
+        let mut skip = false;
+        // Walk the dependency's attributes, remapping in place.
+        for j in 0..deps.deps[i].nattributes as usize {
+            let attnum = deps.deps[i].attributes[j] as i32;
+
+            if attr_is_user_defined(attnum) {
+                // Regular attribute: offset and check membership.
+                let mapped = attnum + attnum_offset;
+                deps.deps[i].attributes[j] = mapped as i16;
+                if !bms::relids_is_member::call(mapped, clauses_attnums) {
+                    skip = true;
+                    break;
+                }
+                continue;
+            }
+
+            // Expression: translate the negative attnum to the stat-expr index,
+            // then to the unique-expr attnum.
+            let idx = (-(1 + attnum)) as usize;
+            if idx >= stat_exprs.len() {
+                // C asserts this is in range; defensively skip if not.
+                skip = true;
+                break;
+            }
+            let expr = &stat_exprs[idx];
+
+            let mut unique_attnum = INVALID_ATTNUM;
+            for (m, ue) in unique_exprs.iter().enumerate() {
+                if nodefuncs::equal::call(ue, expr) {
+                    unique_attnum = -((m as i32) + 1) + attnum_offset;
+                    break;
+                }
+            }
+
+            if unique_attnum == INVALID_ATTNUM {
+                // No matching expression: the dependency can't be fully covered.
+                skip = true;
+                break;
+            }
+
+            deps.deps[i].attributes[j] = unique_attnum as i16;
+        }
+
+        if !skip {
+            if ndeps != i {
+                deps.deps.swap(ndeps, i);
+            }
+            ndeps += 1;
+        }
+    }
+
+    deps.deps.truncate(ndeps);
+    deps.ndeps = ndeps as u32;
+    Ok(())
 }
 
 /// Materialize a `Relids` as an ascending `Vec<i32>` (the `bms_next_member` walk).
