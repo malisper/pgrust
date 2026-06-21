@@ -1353,10 +1353,10 @@ fn expand_function_arguments_inner<'mcx>(
 
     if has_named_args {
         args = reorder_function_arguments(mcx, args, pronargs, funcid, eff_form)?;
-        args = recheck_cast_function_args(args, result_type, eff_form)?;
+        args = recheck_cast_function_args(mcx, args, result_type, eff_form)?;
     } else if (args.len() as i32) < pronargs {
         args = add_function_defaults(mcx, args, pronargs, funcid, eff_form)?;
-        args = recheck_cast_function_args(args, result_type, eff_form)?;
+        args = recheck_cast_function_args(mcx, args, result_type, eff_form)?;
     }
     Ok(args)
 }
@@ -1443,6 +1443,7 @@ fn add_function_defaults<'mcx>(
 /// `enforce_generic_type_consistency` + `make_fn_arguments` legs ride the seam;
 /// the FUNC_MAX_ARGS / pronargs sanity checks stay in-crate.
 fn recheck_cast_function_args<'mcx>(
+    mcx: Mcx<'mcx>,
     args: Vec<Expr<'mcx>>,
     result_type: Oid,
     form: &PgProcSimple,
@@ -1451,12 +1452,23 @@ fn recheck_cast_function_args<'mcx>(
         return Err(PgError::error("too many function arguments"));
     }
     debug_assert_eq!(args.len(), form.proargtypes.len());
-    clauses_seam::recheck_cast_function_args::call(
-        args,
+    // The seam re-runs `make_fn_arguments`/`coerce_type`, which operate over the
+    // parser/coerce `'static` arena; erase the args into it for the call and
+    // re-localize the (possibly cast) result back into `mcx`. The cast nodes the
+    // seam produces live in a backend-lifetime context, so `'static` is honest
+    // and the `clone_in` is the faithful copy back into the caller's arena.
+    let static_args: Vec<Expr<'static>> = args.into_iter().map(|e| e.erase_lifetime()).collect();
+    let out = clauses_seam::recheck_cast_function_args::call(
+        static_args,
         result_type,
         form.proargtypes.clone(),
         form.prorettype,
-    )
+    )?;
+    let mut result: Vec<Expr<'mcx>> = Vec::with_capacity(out.len());
+    for e in out.iter() {
+        result.push(e.clone_in(mcx)?);
+    }
+    Ok(result)
 }
 
 /// `evaluate_function` (clauses.c:4427).

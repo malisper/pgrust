@@ -168,7 +168,7 @@ seam_core::seam!(
     /// cannot-coerce `ereport(ERROR)` surface.
     pub fn make_fn_arguments<'mcx>(
         pstate: Option<&mut ParseState<'mcx>>,
-        fargs: &mut [Expr],
+        fargs: &mut [Expr<'static>],
         actual_arg_types: &[Oid],
         declared_arg_types: &[Oid],
     ) -> PgResult<()>
@@ -185,7 +185,7 @@ seam_core::seam!(
     /// `ereport(ERROR)` surface.
     pub fn check_srf_call_placement<'mcx>(
         pstate: &mut ParseState<'mcx>,
-        last_srf: Option<&Expr>,
+        last_srf: Option<&Expr<'_>>,
         location: i32,
     ) -> PgResult<()>
 );
@@ -196,5 +196,5 @@ seam_core::seam!(
     /// nested-SRF error checks at higher levels. The C only performs this when
     /// `pstate != NULL`, so `pstate` crosses as `&mut ParseState`; the owner
     /// writes the real `ParseState->p_last_srf`.
-    pub fn set_last_srf<'mcx>(pstate: &mut ParseState<'mcx>, result: &Expr) -> PgResult<()>
+    pub fn set_last_srf<'mcx>(pstate: &mut ParseState<'mcx>, result: &Expr<'_>) -> PgResult<()>
 );

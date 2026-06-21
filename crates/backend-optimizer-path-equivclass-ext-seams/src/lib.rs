@@ -87,7 +87,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `pull_var_clause((Node *) node, flags)` (var.c) — the Vars/quasi-Vars in
     /// `node`, per the `PVC_*` flags.
-    pub fn pull_var_clause<'mcx>(node: &Expr<'mcx>, flags: i32) -> Vec<Expr<'mcx>>
+    pub fn pull_var_clause<'mcx>(node: &Expr<'mcx>, flags: i32) -> Vec<Expr<'static>>
 );
 seam_core::seam!(
     /// `pull_var_clause` over a list of expressions (the C
@@ -95,7 +95,7 @@ seam_core::seam!(
     /// (C passes the `List *` by pointer); a by-value `Vec<Expr>` would force the
     /// caller to `.to_vec()`, whose shallow `Expr::clone` panics on an `Aggref`
     /// tlist element (the derived-clone guard) even though the seam only reads.
-    pub fn pull_var_clause_list<'mcx>(nodes: &[Expr<'mcx>], flags: i32) -> Vec<Expr<'mcx>>
+    pub fn pull_var_clause_list<'mcx>(nodes: &[Expr<'mcx>], flags: i32) -> Vec<Expr<'static>>
 );
 seam_core::seam!(
     /// `pull_varnos(root, (Node *) expr)` (var.c) — the relids referenced in

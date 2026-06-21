@@ -84,7 +84,7 @@ pub fn tlist_member_match_var<'a, 'mcx>(
 pub fn add_to_flat_tlist<'mcx>(
     mcx: Mcx<'mcx>,
     mut tlist: Vec<TargetEntry<'mcx>>,
-    exprs: &[Expr],
+    exprs: &[Expr<'mcx>],
 ) -> PgResult<Vec<TargetEntry<'mcx>>> {
     let mut next_resno = tlist.len() as AttrNumber + 1;
     for expr in exprs {
@@ -104,7 +104,7 @@ pub fn add_to_flat_tlist<'mcx>(
 /// `get_tlist_exprs(tlist, includeJunk)` (tlist.c:172). The expression subtrees
 /// of `tlist`; resjunk columns are skipped unless `includeJunk`. Clones each
 /// expr (the owned tree does not alias).
-pub fn get_tlist_exprs(tlist: &[TargetEntry<'_>], includeJunk: bool) -> Vec<Expr> {
+pub fn get_tlist_exprs<'mcx>(tlist: &[TargetEntry<'mcx>], includeJunk: bool) -> Vec<Expr<'mcx>> {
     let mut result = Vec::new();
     for tle in tlist {
         if tle.resjunk && !includeJunk {
@@ -258,20 +258,20 @@ pub fn get_sortgroupclause_tle<'a, 'mcx>(
 
 /// `get_sortgroupclause_expr(sgClause, targetList)` (tlist.c). The matching
 /// tlist entry's expression (cloned).
-pub fn get_sortgroupclause_expr(
+pub fn get_sortgroupclause_expr<'mcx>(
     sgClause: &SortGroupClause,
-    targetList: &[TargetEntry<'_>],
-) -> PgResult<Option<Expr>> {
+    targetList: &[TargetEntry<'mcx>],
+) -> PgResult<Option<Expr<'mcx>>> {
     let tle = get_sortgroupclause_tle(sgClause, targetList)?;
     Ok(tle.expr.as_deref().cloned())
 }
 
 /// `get_sortgrouplist_exprs(sgClauses, targetList)` (tlist.c). The referenced
 /// tlist expressions, in order.
-pub fn get_sortgrouplist_exprs(
+pub fn get_sortgrouplist_exprs<'mcx>(
     sgClauses: &[SortGroupClause],
-    targetList: &[TargetEntry<'_>],
-) -> PgResult<Vec<Option<Expr>>> {
+    targetList: &[TargetEntry<'mcx>],
+) -> PgResult<Vec<Option<Expr<'mcx>>>> {
     let mut result = Vec::with_capacity(sgClauses.len());
     for sortcl in sgClauses {
         result.push(get_sortgroupclause_expr(sortcl, targetList)?);
@@ -573,14 +573,14 @@ fn is_srf_call(node: &Expr) -> bool {
 /// Deliberately *not* `#[derive(Clone)]`: the owned `Expr` deep-copies through
 /// the panicking derived `Expr::clone` for `Aggref`/`SubLink`/… payloads, so
 /// any copy must go through [`SplitPathtargetItem::clone_in`] (`Expr::clone_in`).
-struct SplitPathtargetItem {
-    expr: Expr,
+struct SplitPathtargetItem<'mcx> {
+    expr: Expr<'mcx>,
     sortgroupref: u32,
 }
 
-impl SplitPathtargetItem {
+impl<'mcx> SplitPathtargetItem<'mcx> {
     /// Deep-copy via `Expr::clone_in` (never the panicking derived clone).
-    fn clone_in<'mcx>(&self, mcx: Mcx<'mcx>) -> PgResult<SplitPathtargetItem> {
+    fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<SplitPathtargetItem<'b>> {
         Ok(SplitPathtargetItem {
             expr: self.expr.clone_in(mcx)?,
             sortgroupref: self.sortgroupref,
@@ -590,9 +590,9 @@ impl SplitPathtargetItem {
 
 /// Deep-copy a slice of [`SplitPathtargetItem`] via `clone_in`.
 fn clone_items_in<'mcx>(
-    items: &[SplitPathtargetItem],
+    items: &[SplitPathtargetItem<'_>],
     mcx: Mcx<'mcx>,
-) -> PgResult<Vec<SplitPathtargetItem>> {
+) -> PgResult<Vec<SplitPathtargetItem<'mcx>>> {
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         out.push(item.clone_in(mcx)?);
@@ -610,17 +610,17 @@ struct SplitPathtargetContext<'mcx> {
     parse_has_grouping_sets: bool,
     group_rtindex: i32,
     /// exprs available from input (resolved owned `Expr`s)
-    input_target_exprs: Vec<Expr>,
+    input_target_exprs: Vec<Expr<'mcx>>,
     /// SRF exprs to evaluate at each level
-    level_srfs: Vec<Vec<SplitPathtargetItem>>,
+    level_srfs: Vec<Vec<SplitPathtargetItem<'mcx>>>,
     /// input vars needed at each level
-    level_input_vars: Vec<Vec<SplitPathtargetItem>>,
+    level_input_vars: Vec<Vec<SplitPathtargetItem<'mcx>>>,
     /// input SRFs needed at each level
-    level_input_srfs: Vec<Vec<SplitPathtargetItem>>,
+    level_input_srfs: Vec<Vec<SplitPathtargetItem<'mcx>>>,
     /// vars needed in current subexpr
-    current_input_vars: Vec<SplitPathtargetItem>,
+    current_input_vars: Vec<SplitPathtargetItem<'mcx>>,
     /// SRFs needed in current subexpr
-    current_input_srfs: Vec<SplitPathtargetItem>,
+    current_input_srfs: Vec<SplitPathtargetItem<'mcx>>,
     /// max SRF depth in current subexpr
     current_depth: i32,
     /// current subexpr's sortgroupref, or 0
@@ -693,7 +693,7 @@ fn split_pathtarget_at_srfs_extended<'mcx>(
     // Resolve the input target's bare expression handles to owned, deep-copied
     // `Expr`s (`clone_in` so `Aggref`/`SubLink`/… deep-copy correctly rather
     // than hitting the panicking derived `Expr::clone`).
-    let mut input_target_exprs: Vec<Expr> = Vec::new();
+    let mut input_target_exprs: Vec<Expr<'mcx>> = Vec::new();
     if let Some(it) = input_target {
         for &id in it.exprs.iter() {
             input_target_exprs.push(root.node(id).clone_in(mcx)?);

@@ -31,12 +31,12 @@ struct FuncDetail<'mcx> {
 pub fn ParseFuncOrColumn<'mcx>(
     pstate: &mut ParseState<'mcx>,
     funcname: &[PgString<'_>],
-    mut fargs: Vec<Expr>,
-    last_srf: Option<&Expr>,
+    mut fargs: Vec<Expr<'mcx>>,
+    last_srf: Option<&Expr<'_>>,
     fn_: Option<&FuncCall<'mcx>>,
     proc_call: bool,
     location: i32,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     let mcx = pstate_mcx(pstate);
 
     let is_column = fn_.is_none();
@@ -934,7 +934,7 @@ fn ordered_set_direct_args_error(
 
 /// Re-stamp the named-notation argument positions returned by `func_get_detail`
 /// onto our owned `fargs`.
-fn apply_named_arg_positions(fargs: &mut [Expr], argnumbers: &Option<Vec<i32>>) {
+fn apply_named_arg_positions(fargs: &mut [Expr<'_>], argnumbers: &Option<Vec<i32>>) {
     let Some(numbers) = argnumbers else {
         return;
     };
@@ -950,7 +950,7 @@ fn apply_named_arg_positions(fargs: &mut [Expr], argnumbers: &Option<Vec<i32>>) 
 /// `exprLocation((Node *) list)` over a `List *` of exprs (the variadic-array
 /// list location). Mirrors `exprLocation`'s list handling: the earliest member
 /// location.
-fn expr_location_list(list: &[Expr]) -> PgResult<i32> {
+fn expr_location_list(list: &[Expr<'_>]) -> PgResult<i32> {
     let mut loc = -1i32;
     for e in list {
         let l = exprLocation(Some(e))?;
@@ -984,7 +984,7 @@ fn clone_node_ptr_vec<'mcx>(
 fn transform_where_clause_filter<'mcx>(
     pstate: &mut ParseState<'mcx>,
     af: &Node<'mcx>,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     let mcx = pstate_mcx(pstate);
     let clause = af.clone_in(mcx)?;
     backend_parser_clause_seams::transform_where_clause::call(
@@ -1007,7 +1007,7 @@ fn transform_where_clause_filter<'mcx>(
 fn func_get_detail<'mcx>(
     mcx: Mcx<'mcx>,
     funcname: &[PgString<'_>],
-    fargs: &[Expr],
+    fargs: &[Expr<'_>],
     fargnames: &[PgString<'_>],
     nargs: i32,
     argtypes: &[Oid],
@@ -1311,9 +1311,9 @@ fn unify_hypothetical_args<'mcx>(
 fn ParseComplexProjection<'mcx>(
     pstate: &mut ParseState<'mcx>,
     funcname: &str,
-    first_arg: Option<Expr>,
+    first_arg: Option<Expr<'mcx>>,
     location: i32,
-) -> PgResult<Option<Expr>> {
+) -> PgResult<Option<Expr<'mcx>>> {
     let mcx = pstate_mcx(pstate);
 
     let first_arg = match first_arg {

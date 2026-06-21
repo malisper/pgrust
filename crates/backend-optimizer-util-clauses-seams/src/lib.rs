@@ -298,12 +298,12 @@ seam_core::seam!(
     /// `proargtypes` / `prorettype` come from the pg_proc row. Returns the
     /// possibly-cast argument list. `Err` carries the type-resolution
     /// `ereport(ERROR)`. Owner: parser (parse_coerce).
-    pub fn recheck_cast_function_args<'mcx>(
-        args: alloc::vec::Vec<Expr<'mcx>>,
+    pub fn recheck_cast_function_args(
+        args: alloc::vec::Vec<Expr<'static>>,
         result_type: Oid,
         proargtypes: alloc::vec::Vec<Oid>,
         prorettype: Oid,
-    ) -> PgResult<alloc::vec::Vec<Expr<'mcx>>>
+    ) -> PgResult<alloc::vec::Vec<Expr<'static>>>
 );
 
 seam_core::seam!(

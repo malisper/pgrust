@@ -192,20 +192,23 @@ fn node_expr_location(node: Option<&Node<'_>>) -> PgResult<i32> {
 /// SRF call node's `(tag, location)` uniquely identifies it within a single
 /// query parse (locations are distinct byte offsets), so this is a faithful
 /// stand-in for the pointer equality the C performs.
-fn p_last_srf_eq(pstate: &ParseState<'_>, last_srf: Option<&Expr>) -> PgResult<bool> {
+fn p_last_srf_eq(pstate: &ParseState<'_>, last_srf: Option<&Expr<'_>>) -> PgResult<bool> {
     let cur = pstate.p_last_srf.as_deref().and_then(|n| n.as_expr());
-    Ok(match (cur, last_srf) {
-        (None, None) => true,
-        (Some(a), Some(b)) => {
-            core::mem::discriminant(a) == core::mem::discriminant(b)
-                && exprLocation(Some(a))? == exprLocation(Some(b))?
-        }
-        _ => false,
-    })
+    // Compare `(tag, location)` of each side independently so the two `&Expr`
+    // (from different arenas) are never unified into a single lifetime.
+    let cur_id = match cur {
+        Some(a) => Some((a.expr_tag(), exprLocation(Some(a))?)),
+        None => None,
+    };
+    let srf_id = match last_srf {
+        Some(b) => Some((b.expr_tag(), exprLocation(Some(b))?)),
+        None => None,
+    };
+    Ok(cur_id == srf_id)
 }
 
 /// Set `pstate->p_last_srf = (Node *) result` (boxed `Node::Expr` in `mcx`).
-fn set_p_last_srf<'mcx>(pstate: &mut ParseState<'mcx>, result: &Expr) -> PgResult<()> {
+fn set_p_last_srf<'mcx>(pstate: &mut ParseState<'mcx>, result: &Expr<'_>) -> PgResult<()> {
     let mcx = pstate_mcx(pstate);
     // Deep-copy via the sanctioned `Expr::clone_in` path, not a plain derived
     // `.clone()`: `result` may be a SRF `FuncExpr` whose args carry an embedded
@@ -529,7 +532,7 @@ fn clone_candidate<'mcx>(
 /// is `None` when the C `pstate == NULL`.
 pub fn make_fn_arguments<'mcx>(
     mut pstate: Option<&mut ParseState<'mcx>>,
-    fargs: &mut [Expr],
+    fargs: &mut [Expr<'static>],
     actual_arg_types: &[Oid],
     declared_arg_types: &[Oid],
 ) -> PgResult<()> {
@@ -1187,7 +1190,7 @@ fn check_arg_count(objtype: ObjectType, argcount: i32) -> PgResult<()> {
 /// effect is to set `pstate->p_hasTargetSRFs` true if appropriate.
 pub fn check_srf_call_placement<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    last_srf: Option<&Expr>,
+    last_srf: Option<&Expr<'_>>,
     location: i32,
 ) -> PgResult<()> {
     use ParseExprKind::*;
@@ -1343,7 +1346,7 @@ fn oid_slices_eq(a: &[Oid], b: &[Oid], n: usize) -> bool {
 /// A throwaway placeholder `Const` used only as a temporary while we move an
 /// `Expr` out of a `&mut [Expr]` slot during in-place coercion. It is always
 /// overwritten before the function returns.
-fn dummy_const() -> types_nodes::primnodes::Const {
+fn dummy_const() -> types_nodes::primnodes::Const<'static> {
     types_nodes::primnodes::Const {
         consttype: InvalidOid,
         consttypmod: -1,
@@ -1483,11 +1486,11 @@ pub fn init_seams() {
 /// result type still matches what the parser produced, then applies any needed
 /// casts via `make_fn_arguments`. Returns the (possibly cast) argument list.
 fn seam_recheck_cast_function_args(
-    mut args: Vec<Expr>,
+    mut args: Vec<Expr<'static>>,
     result_type: Oid,
     proargtypes: Vec<Oid>,
     prorettype: Oid,
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'static>>> {
     if args.len() > FUNC_MAX_ARGS {
         return Err(internal_error("too many function arguments"));
     }
@@ -1611,14 +1614,14 @@ fn seam_lookup_func_with_args_for_objtype(
 
 fn seam_make_fn_arguments<'mcx>(
     pstate: Option<&mut ParseState<'mcx>>,
-    fargs: &mut [Expr],
+    fargs: &mut [Expr<'static>],
     actual_arg_types: &[Oid],
     declared_arg_types: &[Oid],
 ) -> PgResult<()> {
     make_fn_arguments(pstate, fargs, actual_arg_types, declared_arg_types)
 }
 
-fn seam_set_last_srf<'mcx>(pstate: &mut ParseState<'mcx>, result: &Expr) -> PgResult<()> {
+fn seam_set_last_srf<'mcx>(pstate: &mut ParseState<'mcx>, result: &Expr<'_>) -> PgResult<()> {
     set_p_last_srf(pstate, result)
 }
 

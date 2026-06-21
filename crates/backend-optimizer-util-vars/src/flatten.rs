@@ -820,10 +820,17 @@ fn mark_nullable_by_grouping<'mcx>(
                 Some(e) => e,
                 None => unreachable!(),
             };
+            // The placeholder builder is declared over the planner arena's
+            // notional `'static`; feed it the (erased) arena-interned expr and
+            // re-localize the resulting `PlaceHolderVar` into the local `mcx` via
+            // `clone_in` so the rebuilt `Node<'mcx>` is arena-correct.
             let mut newphv =
                 backend_optimizer_util_placeholder_seams::make_placeholder_expr::call(
-                    root, expr_val, phrels,
-                );
+                    root,
+                    expr_val.erase_lifetime(),
+                    phrels,
+                )
+                .clone_in(mcx)?;
             // newphv has zero phlevelsup and NULL phnullingrels; fix it.
             newphv.phlevelsup = oldvar.varlevelsup;
             newphv.phnullingrels = expr_relids::copy(&oldvar.varnullingrels);
