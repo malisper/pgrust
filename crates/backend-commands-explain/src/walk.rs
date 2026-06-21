@@ -1251,7 +1251,12 @@ pub fn ExplainNode<'es, 'p>(
         .member_input_states()
         .map(|m| !m.is_empty())
         .unwrap_or(false);
-    let haschildren = has_init || has_outer || has_inner || has_members || has_sub;
+    // A SubqueryScan's child lives in SubqueryScanState.subplan (a "special
+    // child plan" in explain.c's haschildren computation).
+    let has_subquery = matches!(plan_node.node_tag(), ntag::T_SubqueryScan)
+        && planstate.subquery_subplan_state().is_some();
+    let haschildren =
+        has_init || has_outer || has_inner || has_members || has_sub || has_subquery;
 
     // ancestors = lcons(plan, ancestors): prepend this Plan node (cloned into
     // the 'es formatting arena, matching es->pstmt) for the children's deparse,
@@ -1285,6 +1290,15 @@ pub fn ExplainNode<'es, 'p>(
     // righttree (Inner).
     if let Some(inner) = head.righttree.as_deref() {
         ExplainNode(es, mcx, inner, &child_ancestors, Some("Inner"), None)?;
+    }
+
+    // Special child plan (explain.c:2042 switch). A SubqueryScan carries its
+    // single child in `SubqueryScanState.subplan` (not lefttree/righttree); the
+    // C recurses with relationship "Subquery".
+    if let ntag::T_SubqueryScan = plan_node.node_tag() {
+        if let Some(subps) = planstate.subquery_subplan_state() {
+            ExplainNode(es, mcx, subps, &child_ancestors, Some("Subquery"), None)?;
+        }
     }
 
     // Special member-node children (explain.c:2042-2065): Append/MergeAppend
