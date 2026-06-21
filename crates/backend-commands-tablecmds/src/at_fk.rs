@@ -1821,7 +1821,7 @@ fn GetForeignKeyCheckTriggers<'mcx>(
 /// `DropForeignKeyConstraintTriggers(trigrel, conoid, confrelid, conrelid)`
 /// (tablecmds.c:12003) — drop the action triggers for the FK constraint that
 /// become redundant once a partition is attached to its parent's constraint.
-fn DropForeignKeyConstraintTriggers<'mcx>(
+pub(crate) fn DropForeignKeyConstraintTriggers<'mcx>(
     mcx: Mcx<'mcx>,
     trigrel: &Relation<'mcx>,
     conoid: Oid,

@@ -27,7 +27,7 @@ use backend_access_common_scankey::ScanKeyInit;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 use backend_access_common_relation::relation_open;
-use backend_catalog_objectaddress::consts::ConstraintRelationId;
+use backend_catalog_objectaddress::consts::{ConstraintRelationId, TriggerRelationId};
 use backend_catalog_pg_constraint::{AlterConstrFlags, AlterConstrUpdateConstraintEntry};
 use backend_utils_cache_lsyscache_seams as lsyscache_seams;
 use backend_utils_error::ereport;
@@ -393,14 +393,22 @@ fn ATExecAlterConstrEnforceability<'mcx>(
         let mut changed = false;
 
         if currcon.conenforced != cmdcon.is_enforced {
+            // C: AlterConstrUpdateConstraintEntry(cmdcon, conrel, contuple).
+            // That helper applies the enforceability, deferrability AND
+            // inheritability changes per the cmdcon flags — not just the
+            // enforceability fields. When `ALTER CONSTRAINT ... NOT ENFORCED
+            // NOT DEFERRABLE` combines both, cmdcon->alterDeferrability is set,
+            // and the single catalog update here must also write
+            // condeferrable/condeferred (the dispatcher's `else if` means the
+            // deferrability leg never runs separately in that case).
             let flags = AlterConstrFlags {
-                alter_enforceability: true,
+                alter_enforceability: cmdcon.alterEnforceability,
                 is_enforced: cmdcon.is_enforced,
-                alter_deferrability: false,
-                deferrable: currcon.condeferrable,
-                initdeferred: currcon.condeferred,
-                alter_inheritability: false,
-                noinherit: currcon.connoinherit,
+                alter_deferrability: cmdcon.alterDeferrability,
+                deferrable: cmdcon.deferrable,
+                initdeferred: cmdcon.initdeferred,
+                alter_inheritability: cmdcon.alterInheritability,
+                noinherit: cmdcon.noinherit,
             };
             let conrelid = AlterConstrUpdateConstraintEntry(mcx, conoid, &flags)?;
             backend_utils_cache_inval::cache_invalidate::CacheInvalidateRelcacheByRelid(conrelid)?;
@@ -408,16 +416,47 @@ fn ATExecAlterConstrEnforceability<'mcx>(
         }
 
         if !cmdcon.is_enforced {
-            // Setting a constraint to NOT ENFORCED: its constraint triggers must
-            // be dropped. The partition recursion + DropForeignKeyConstraintTriggers
-            // are distinct unported functions.
+            // When setting a constraint to NOT ENFORCED, the constraint triggers
+            // need to be dropped. Therefore, we must process the child relations
+            // first, followed by the parent, to account for dependencies.
             if crel_relkind == RELKIND_PARTITIONED_TABLE
                 || lsyscache_seams::get_rel_relkind::call(currcon.confrelid)?
                     == RELKIND_PARTITIONED_TABLE
             {
-                unported("ALTER CONSTRAINT NOT ENFORCED partition-child recursion (AlterConstrEnforceabilityRecurse)");
+                AlterConstrEnforceabilityRecurse(
+                    mcx,
+                    wqueue,
+                    cmdcon,
+                    conoid,
+                    fkrelid,
+                    pkrelid,
+                    lockmode,
+                    InvalidOid,
+                    InvalidOid,
+                    InvalidOid,
+                    InvalidOid,
+                )?;
             }
-            unported("ALTER CONSTRAINT NOT ENFORCED (DropForeignKeyConstraintTriggers)");
+
+            // Drop all the triggers.
+            // C: DropForeignKeyConstraintTriggers(tgrel, conoid, InvalidOid,
+            // InvalidOid). The C caller threads `tgrel` (the pg_trigger relation,
+            // opened RowExclusiveLock by ATExecAlterConstraint) down; the Rust
+            // port opens it locally here, mirroring the at_fk callers.
+            let trigrel = backend_access_table_table_seams::table_open::call(
+                mcx,
+                TriggerRelationId,
+                RowExclusiveLock,
+            )?;
+            let dropres = crate::at_fk::DropForeignKeyConstraintTriggers(
+                mcx,
+                &trigrel,
+                conoid,
+                InvalidOid,
+                InvalidOid,
+            );
+            trigrel.close(RowExclusiveLock)?;
+            dropres?;
         } else if changed {
             // Create triggers. Prepare the minimal Constraint the trigger-creation
             // helpers read (conname / fk_matchtype / fk_upd_action / fk_del_action).
