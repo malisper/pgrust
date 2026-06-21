@@ -115,6 +115,22 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     Datum::from_usize(0)
 }
 
+/// Return a fixed-length-by-reference `name` value. A `name` is a NAMEDATALEN
+/// (64) byte NUL-padded buffer, and (unlike a varlena) it carries no length
+/// header, so it crosses the by-ref boundary as its RAW buffer image on the
+/// `Varlena` lane (the raw-buffer name convention — see
+/// `byref-name-fmgr-lane-raw-buffer-convention`). `image` MUST be exactly
+/// NAMEDATALEN bytes (C's `palloc0(NAMEDATALEN)`), so the downstream
+/// fixed-length-by-ref `fill_val` (which copies `attlen` = 64 bytes verbatim)
+/// reads a full buffer rather than slicing past a short cstring.
+#[inline]
+fn ret_name(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
+    debug_assert_eq!(image.len(), NAMEDATALEN);
+    fcinfo.isnull = false;
+    fcinfo.set_ref_result(types_fmgr::boundary::RefPayload::Varlena(image));
+    Datum::from_usize(0)
+}
+
 /// Build a header-ful varlena (`text`/`bytea`) image from its payload bytes
 /// (C: `SET_VARSIZE(result, len + VARHDRSZ)` over a fresh palloc'd block).
 fn varlena_image(payload: &[u8]) -> Vec<u8> {
@@ -183,21 +199,25 @@ fn fc_reverse_name(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         i += 1;
     }
     if i == 0 {
-        // Empty input: C reads string[-1]; mirror by returning empty.
-        return ret_cstring(fcinfo, String::new());
+        // Empty input: C reads string[-1]; mirror by returning the empty
+        // (all-NUL) NAMEDATALEN buffer that `palloc0` produced.
+        return ret_name(fcinfo, vec![0u8; NAMEDATALEN]);
     }
     if i == NAMEDATALEN || i >= string.len() || string[i] == 0 {
         i -= 1;
     }
     let len = i;
+    // C: new_string = palloc0(NAMEDATALEN); the reversed bytes are written into
+    // this zero-filled NAMEDATALEN buffer, which is returned IN FULL — `name` is
+    // a fixed-length-by-reference type, so the whole 64-byte NUL-padded image is
+    // the value (NOT a NUL-trimmed cstring).
     let mut out = vec![0u8; NAMEDATALEN];
     let mut k = i as isize;
     while k >= 0 {
         out[len - k as usize] = string[k as usize];
         k -= 1;
     }
-    let end = out.iter().position(|&b| b == 0).unwrap_or(out.len());
-    ret_cstring(fcinfo, String::from_utf8_lossy(&out[..end]).into_owned())
+    ret_name(fcinfo, out)
 }
 
 /* ===========================================================================
