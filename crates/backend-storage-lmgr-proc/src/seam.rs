@@ -192,13 +192,16 @@ pub(crate) fn set_proc_vxid_lxid(procno: ProcNumber, value: LocalTransactionId) 
 }
 
 /// `GetPGProcByNumber(procno)->lockGroupLeader` as a proc number, or `None`.
+/// Read from the genuinely-shared lockGroupLeader array so a parallel leader's
+/// `BecomeLockGroupLeader()` write is visible to its forked workers.
 pub(crate) fn proc_lock_group_leader(procno: ProcNumber) -> Option<ProcNumber> {
-    crate::proc_shmem::with_proc_by_number(procno, |p| p.lockGroupLeader)
+    crate::proc_shmem::proc_lock_group_leader_shared(procno)
 }
 
-/// `GetPGProcByNumber(procno)->lockGroupLeader = leader`.
+/// `GetPGProcByNumber(procno)->lockGroupLeader = leader`. Written to the
+/// genuinely-shared lockGroupLeader array (cross-process visible).
 pub(crate) fn set_proc_lock_group_leader(procno: ProcNumber, leader: Option<ProcNumber>) {
-    crate::proc_shmem::with_proc_by_number(procno, |p| p.lockGroupLeader = leader);
+    crate::proc_shmem::set_proc_lock_group_leader_shared(procno, leader);
 }
 
 /// `dlist_is_empty(&GetPGProcByNumber(procno)->lockGroupMembers)`.

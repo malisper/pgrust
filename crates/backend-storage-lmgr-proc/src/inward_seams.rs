@@ -500,9 +500,9 @@ fn pgproc_number(proc: &types_storage::storage::PGPROC) -> ProcNumber {
 fn proc_lock_group_leader(procno: ProcNumber) -> ProcNumber {
     // `GetPGProcByNumber(procno)->lockGroupLeader` as a ProcNumber. The
     // wait-queue seam contract returns INVALID_PROC_NUMBER for a NULL leader.
-    with_proc_by_number(procno, |p| {
-        p.lockGroupLeader.unwrap_or(types_core::INVALID_PROC_NUMBER)
-    })
+    // Read from the genuinely-shared lockGroupLeader array (cross-process).
+    crate::proc_shmem::proc_lock_group_leader_shared(procno)
+        .unwrap_or(types_core::INVALID_PROC_NUMBER)
 }
 
 fn set_proc_held_locks(procno: ProcNumber, mask: types_storage::lock::LOCKMASK) {

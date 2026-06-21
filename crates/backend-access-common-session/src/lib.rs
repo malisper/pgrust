@@ -257,23 +257,25 @@ fn initialize_session() -> PgResult<()> {
 fn get_session_dsm_handle() -> PgResult<dsm_handle> {
     // TEMPORARY: force the leader-only path by returning INVALID.
     //
-    // The session-DSM substrate below is complete, the bgworker fork/launch path
-    // now works end-to-end (PMSignalState + BackgroundWorkerData moved into REAL
-    // shared memory; PostmasterPid is set — workers fork, run, and exit cleanly,
-    // confirmed in logs), BUT the leader still HANGS in `ExecParallelFinish` ->
-    // `WaitForParallelWorkersToFinish`: after the workers exit (exit code 0), the
-    // leader never observes their completion (the cross-process `shm_mq`
-    // detach/terminate signaling + `error_mqh` teardown is not yet wired through),
-    // so it waits forever on its latch. With a valid handle every parallel-eligible
-    // query would wedge (verified: forced-parallel count(*) hangs ~109s until an
-    // outer watchdog kills the cluster). Returning INVALID restores the known-good
-    // leader-only behavior (correct results, no hang). Delete this early return
-    // ONLY together with the `WaitForParallelWorkersToFinish` completion-detection
-    // fix, gated on a hang-free parallel smoke test.
+    // The lock-group fork-private blocker is now fixed (PGPROC.lockGroupLeader
+    // lives in genuine shared memory), so parallel workers fork, join the leader's
+    // lock group, attach as error-queue senders, and run the real query entry
+    // point — and the leader-finish wait (`WaitForParallelWorkersToFinish` +
+    // shm_mq detach/'X' signaling) is wired and correct. BUT the parallel worker's
+    // `RestoreTransactionSnapshot` still fails ("could not import the requested
+    // snapshot / source transaction is not running anymore") because the leader's
+    // `PGPROC.xmin` / `databaseId` / `statusFlags` are still fork-private (not in
+    // shared memory), so `ProcArrayInstallRestoredXmin` can't see the live
+    // leader's advertised xmin; the worker then errors (and a separate
+    // `attempt to subtract with overflow` panic in the parallel-scan executor
+    // crashes the postmaster). With a valid handle, every parallel-eligible query
+    // would therefore crash. Returning INVALID restores the known-good leader-only
+    // behavior (correct results, no crash). Delete this early return ONLY together
+    // with the PGPROC-xmin shared-memory promotion + the overflow-panic fix, gated
+    // on a crash-free parallel smoke test.
     return Ok(DSM_HANDLE_INVALID);
 
     // If we already created a session-scope segment, return its handle.
-    #[allow(unreachable_code)]
     if let Some(seg_id) = CURRENT_SESSION.with(|s| s.borrow().as_ref().and_then(|x| x.segment)) {
         return Ok(dsm_segment_handle(seg_id));
     }

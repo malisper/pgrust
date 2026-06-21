@@ -188,6 +188,28 @@ static SHARED_PROC_PGXACTOFF: AtomicPtr<i32> = AtomicPtr::new(core::ptr::null_mu
 /// Length of [`SHARED_PROC_PGXACTOFF`] (`total_procs`), for bounds checks.
 static SHARED_PROC_PGXACTOFF_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Base of the genuinely-shared per-proc `lockGroupLeader` array (one `i32`
+/// holding the leader's `ProcNumber`, or `INVALID_PROC_NUMBER`/-1 for NULL).
+/// Set by [`InitProcGlobal`], NULL until then.
+///
+/// In C `PGPROC.lockGroupLeader` lives in the shared PGPROC block, so a parallel
+/// **leader**'s `BecomeLockGroupLeader()` write (`MyProc->lockGroupLeader =
+/// MyProc`) is immediately visible to the **worker** processes the postmaster
+/// forks afterwards, and the worker's `BecomeLockGroupMember()` interlock
+/// (`leader->lockGroupLeader == leader`) succeeds. With `lockGroupLeader`
+/// fork-private in [`PROC_GLOBAL`], the worker reads the stale fork-COW image
+/// (the leader becomes group leader *after* it is forked / the worker inherits a
+/// NULL), the interlock fails, and the worker exits silently before ever
+/// attaching as the error-queue sender — so the leader hangs forever in
+/// `WaitForParallelWorkersToFinish` (the queues never carry the `'X'` terminate
+/// and `known_attached_workers[]` stays false). So this word lives in genuine
+/// shmem, the same idiom as [`SHARED_PROC_PIDS`].
+static SHARED_PROC_LOCK_GROUP_LEADER: AtomicPtr<i32> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_LOCK_GROUP_LEADER`] (`total_procs`), for bounds
+/// checks.
+static SHARED_PROC_LOCK_GROUP_LEADER_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 /// Base of the genuinely-shared dense `ProcGlobal->xids[]` array (one
 /// `TransactionId` per `pgxactoff` slot — the cache-dense mirror of every live
 /// backend's `PGPROC.xid` that `GetSnapshotData` scans). Set by
@@ -801,6 +823,49 @@ fn shared_pgxactoff_slot(procno: ProcNumber) -> &'static AtomicI32 {
     unsafe { AtomicI32::from_ptr(base.add(idx)) }
 }
 
+/// `&ProcGlobal->allProcs[procno].lockGroupLeader` over the genuinely-shared
+/// lock-group-leader array. Panics if `InitProcGlobal` has not run or `procno`
+/// is out of range (caller bugs mirroring the C deref of a slot in the shared
+/// PGPROC block).
+fn shared_lock_group_leader_slot(procno: ProcNumber) -> &'static AtomicI32 {
+    let base = SHARED_PROC_LOCK_GROUP_LEADER.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC lockGroupLeader array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_LOCK_GROUP_LEADER_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(
+        idx < count,
+        "PGPROC lockGroupLeader index {idx} out of range (count {count})"
+    );
+    // SAFETY: `base` addresses `count` `i32` words of genuine shared memory and
+    // `idx < count`. `i32`/`AtomicI32` share layout, so the word may be accessed
+    // atomically — the cross-process discipline mirrors C's plain pointer
+    // read/written under the lock-group LWLock partition, with atomics making the
+    // per-word access well-defined under the Rust memory model.
+    unsafe { AtomicI32::from_ptr(base.add(idx)) }
+}
+
+/// `ProcGlobal->allProcs[procno].lockGroupLeader` as a `ProcNumber`, or `None`
+/// (the canonical shared word; visible to every process). `INVALID_PROC_NUMBER`
+/// (-1) encodes NULL.
+pub(crate) fn proc_lock_group_leader_shared(procno: ProcNumber) -> Option<ProcNumber> {
+    let raw = shared_lock_group_leader_slot(procno).load(AtomicOrdering::Relaxed);
+    if raw == types_core::INVALID_PROC_NUMBER {
+        None
+    } else {
+        Some(raw)
+    }
+}
+
+/// `ProcGlobal->allProcs[procno].lockGroupLeader = leader` — write the canonical
+/// (shared) word, visible to every process (the parallel leader/member set).
+pub(crate) fn set_proc_lock_group_leader_shared(procno: ProcNumber, leader: Option<ProcNumber>) {
+    let raw = leader.unwrap_or(types_core::INVALID_PROC_NUMBER);
+    shared_lock_group_leader_slot(procno).store(raw, AtomicOrdering::Relaxed);
+}
+
 /// `ProcGlobal->allProcs[procno].pgxactoff` — read the canonical (shared) word.
 pub(crate) fn proc_pgxactoff_shared(procno: ProcNumber) -> i32 {
     shared_pgxactoff_slot(procno).load(AtomicOrdering::Relaxed)
@@ -851,6 +916,29 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
     }
     SHARED_PROC_PGXACTOFF.store(off_ptr, AtomicOrdering::Relaxed);
     SHARED_PROC_PGXACTOFF_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // lockGroupLeader array (the canonical per-proc lock-group-leader ProcNumber,
+    // or INVALID_PROC_NUMBER for NULL). In C this is part of the shared PGPROC
+    // block; a parallel leader's BecomeLockGroupLeader() write must be visible to
+    // the workers the postmaster forks afterwards (their BecomeLockGroupMember
+    // interlock reads `leader->lockGroupLeader == leader`). Fork-private storage
+    // makes the worker read a stale/NULL value and abort silently, wedging the
+    // leader's finish-wait. So it lives in genuine shmem.
+    let lgl_size = mul_size(total_procs, size_of::<i32>());
+    let (lgl_ptr, lgl_found) =
+        shmem::shmem_init_struct::call("PGPROC lockGroupLeader words", lgl_size)?;
+    let lgl_ptr = lgl_ptr as *mut i32;
+    if !lgl_found {
+        // Initialize every slot to INVALID_PROC_NUMBER (-1 == NULL leader). Unlike
+        // the pid/offset arrays this is NOT a zero fill: ProcNumber 0 is a valid
+        // proc, so we must stamp the -1 sentinel explicitly.
+        for k in 0..total_procs {
+            // SAFETY: `lgl_ptr` addresses `total_procs` writable `i32` shmem words.
+            unsafe { lgl_ptr.add(k).write(types_core::INVALID_PROC_NUMBER) };
+        }
+    }
+    SHARED_PROC_LOCK_GROUP_LEADER.store(lgl_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_LOCK_GROUP_LEADER_COUNT.store(total_procs, AtomicOrdering::Relaxed);
 
     // Dense ProcGlobal mirror arrays (xids[] / subxidStates[] / statusFlags[]),
     // one element per pgxactoff slot. In C these are part of the PGPROC
@@ -1470,7 +1558,7 @@ pub(crate) fn lock_group_members_snapshot(leader: ProcNumber) -> Vec<ProcNumber>
 /// from its leader's `lockGroupMembers` list. The leader is `member`'s own
 /// `lockGroupLeader` (every member, including the leader itself, records it).
 pub(crate) fn dlist_delete_lock_group_link(member: ProcNumber) {
-    let leader = with_proc_by_number(member, |p| p.lockGroupLeader);
+    let leader = proc_lock_group_leader_shared(member);
     if let Some(leader) = leader {
         with_proc_by_number(leader, |p| p.lockGroupMembers.remove(member));
     }

@@ -569,18 +569,19 @@ pub(crate) fn proc_pid_of(procno: ProcNumber) -> i32 {
 /// — whether the proc in slot `procno` has slot `leaderno` as its lock-group
 /// leader.
 pub(crate) fn proc_lock_group_leader_is(procno: ProcNumber, leaderno: ProcNumber) -> bool {
-    crate::proc_shmem::with_proc_by_number(procno, |p| p.lockGroupLeader == Some(leaderno))
+    crate::proc_shmem::proc_lock_group_leader_shared(procno) == Some(leaderno)
 }
 
 /// `GetPGProcByNumber(procno)->lockGroupLeader == NULL`.
 pub(crate) fn proc_lock_group_leader_is_none(procno: ProcNumber) -> bool {
-    crate::proc_shmem::with_proc_by_number(procno, |p| p.lockGroupLeader.is_none())
+    crate::proc_shmem::proc_lock_group_leader_shared(procno).is_none()
 }
 
-/// `MyProc->lockGroupLeader = GetPGProcByNumber(leaderno)`.
+/// `MyProc->lockGroupLeader = GetPGProcByNumber(leaderno)`. Written to the
+/// genuinely-shared lockGroupLeader array (cross-process visible).
 pub(crate) fn set_my_proc_lock_group_leader(leaderno: ProcNumber) {
     let my_procno = seam::my_proc_number();
-    crate::proc_shmem::with_proc_by_number(my_procno, |p| p.lockGroupLeader = Some(leaderno));
+    crate::proc_shmem::set_proc_lock_group_leader_shared(my_procno, Some(leaderno));
 }
 
 /// `dlist_push_head(&GetPGProcByNumber(leaderno)->lockGroupMembers,
