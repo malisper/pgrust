@@ -973,8 +973,41 @@ fn alter_type_recurse_update(
     let arrtypoid =
         indexing_seams::catalog_tuple_update_attrs_pg_type::call(&rel, type_oid, attr)?;
 
-    /* Rebuild dependencies for this type. */
-    let typeForm = fetch_type_form_internal(type_oid)?;
+    /*
+     * Rebuild dependencies for this type.
+     *
+     * C reads the just-modified `newtup` (`heap_modify_tuple` result) so
+     * `GenerateTypeDependencies` sees the new I/O-function columns immediately.
+     * Here the catalog update registers a syscache invalidation that does not
+     * take effect until the next CommandCounterIncrement, so a plain
+     * `SearchSysCache1(TYPEOID)` re-read would return the *stale* pre-ALTER form
+     * (missing e.g. the new `typsend`) and the type→function dependencies would
+     * not be recorded. Re-read the cached form and overlay exactly the columns
+     * `catalog_tuple_update_attrs_pg_type` just wrote, reproducing the value C
+     * builds from `newtup`.
+     */
+    let mut typeForm = fetch_type_form_internal(type_oid)?;
+    if attr.update_storage {
+        typeForm.typstorage = attr.storage;
+    }
+    if attr.update_receive {
+        typeForm.typreceive = attr.receive_oid;
+    }
+    if attr.update_send {
+        typeForm.typsend = attr.send_oid;
+    }
+    if attr.update_typmodin {
+        typeForm.typmodin = attr.typmodin_oid;
+    }
+    if attr.update_typmodout {
+        typeForm.typmodout = attr.typmodout_oid;
+    }
+    if attr.update_analyze {
+        typeForm.typanalyze = attr.analyze_oid;
+    }
+    if attr.update_subscript {
+        typeForm.typsubscript = attr.subscript_oid;
+    }
     generate_type_dependencies(
         mcx,
         &typeForm,

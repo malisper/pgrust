@@ -243,6 +243,44 @@ fn fc_varcharsend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResul
     Ok(ret_varlena(fcinfo, bytes))
 }
 
+/// Decode a `recv` builtin: build a `StringInfo` over a copy of the wire bytes
+/// (charged to a scratch context that outlives the read) and run `decode`. The
+/// internal `StringInfo` arg arrives as its raw payload image on the by-ref
+/// lane. A decoder `ereport(ERROR)` travels as `Err(PgError)` back to fmgr
+/// dispatch — no panic / `catch_unwind`. C: `pq_getmsgtext` consumes the buffer
+/// from `cursor`.
+fn fc_recv(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    decode: impl for<'m> FnOnce(
+        mcx::Mcx<'m>,
+        &mut types_stringinfo::StringInfo<'_>,
+        Oid,
+        i32,
+    ) -> types_error::PgResult<mcx::PgVec<'m, u8>>,
+) -> types_error::PgResult<Datum> {
+    // arg0 = internal (StringInfo wire bytes); arg1 = typelem oid; arg2 = atttypmod.
+    let src = arg_bytes(fcinfo, 0).to_vec();
+    let typelem = fcinfo.arg(1).expect("recv: missing typelem").value.as_oid();
+    let atttypmod = arg_i32(fcinfo, 2);
+    let m = scratch_mcx();
+    let mut data = mcx::PgVec::new_in(m.mcx());
+    if data.try_reserve(src.len()).is_err() {
+        return Err(types_error::PgError::error("out of memory"));
+    }
+    data.extend_from_slice(&src);
+    let mut buf = types_stringinfo::StringInfo::from_vec(data);
+    let payload = decode(m.mcx(), &mut buf, typelem, atttypmod)?.to_vec();
+    Ok(ret_text(fcinfo, payload))
+}
+
+fn fc_bpcharrecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    fc_recv(fcinfo, crate::bpcharrecv)
+}
+
+fn fc_varcharrecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    fc_recv(fcinfo, crate::varcharrecv)
+}
+
 fn fc_varchartypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let out = crate::varchartypmodout(m.mcx(), arg_i32(fcinfo, 0))?;
@@ -449,7 +487,9 @@ pub fn register_varchar_builtins() {
         builtin(1045, "bpcharout", 1, fc_bpcharout),
         builtin(1046, "varcharin", 3, fc_varcharin),
         builtin(1047, "varcharout", 1, fc_varcharout),
+        builtin(2430, "bpcharrecv", 3, fc_bpcharrecv),
         builtin(2431, "bpcharsend", 1, fc_bpcharsend),
+        builtin(2432, "varcharrecv", 3, fc_varcharrecv),
         builtin(2433, "varcharsend", 1, fc_varcharsend),
         builtin(2913, "bpchartypmodin", 1, fc_bpchartypmodin),
         builtin(2914, "bpchartypmodout", 1, fc_bpchartypmodout),

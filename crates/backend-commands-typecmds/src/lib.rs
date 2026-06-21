@@ -647,7 +647,7 @@ pub fn DefineType<'mcx>(
             ereport(WARNING)
                 .errcode(ERRCODE_SYNTAX_ERROR)
                 .errmsg(format!("type attribute \"{defname}\" not recognized"))
-                .errposition(parser_errposition(defel.location))
+                .errposition(parser_errposition_src(source_text, defel.location))
                 .finish(errloc(333, "DefineType"))?;
             continue;
         };
