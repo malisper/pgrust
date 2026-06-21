@@ -1009,6 +1009,20 @@ pub fn init_seams() {
         backend_access_transam_xact::RollbackAndReleaseCurrentSubTransaction()
     });
 
+    // `oldowner = CurrentResourceOwner` / `CurrentResourceOwner = oldowner` —
+    // the snapshot+restore pl_exec.c's exec_stmt_block performs around the
+    // internal subtransaction. The subxact engine's CleanupSubTransaction leaves
+    // CurrentResourceOwner at the parent (CurTransaction) owner; without this
+    // restore, the outer statement's relation refs / buffer pins (opened under
+    // the portal's resource owner) are later forgotten under the wrong owner.
+    // `ResourceOwner::NULL` (the C NULL owner) round-trips faithfully.
+    backend_pl_plpgsql_exec_seams::current_resource_owner::set(|| {
+        backend_utils_resowner_resowner_seams::CurrentResourceOwner::call()
+    });
+    backend_pl_plpgsql_exec_seams::set_current_resource_owner::set(|owner| {
+        backend_utils_resowner_resowner_seams::set_CurrentResourceOwner::call(owner)
+    });
+
     // Install `CStringGetTextDatum` for the EXCEPTION handler's SQLSTATE/SQLERRM
     // special-var binding (assign_error_vars) and `exec_stmt_getdiag`. C does
     // `CStringGetTextDatum(s)` = `cstring_to_text(s)` palloc'd in

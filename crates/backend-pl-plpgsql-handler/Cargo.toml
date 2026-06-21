@@ -31,6 +31,11 @@ backend-executor-spi = { path = "../backend-executor-spi" }
 # EXCEPTION leg — direct (top layer, no cycle).
 backend-access-transam-xact = { path = "../backend-access-transam-xact" }
 
+# CurrentResourceOwner get/set for the exec_stmt_block EXCEPTION leg's
+# `oldowner = CurrentResourceOwner` snapshot+restore around the internal
+# subtransaction (pl_exec.c) — direct (top layer, no cycle).
+backend-utils-resowner-resowner-seams = { path = "../backend-utils-resowner-resowner-seams" }
+
 # The fmgr built-in registry: register the three handler PGFunctions so a
 # C-language pg_proc row (prosrc = "plpgsql_call_handler" / ...) resolves here.
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }

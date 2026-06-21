@@ -313,6 +313,20 @@ fn exec_stmt_block_with_exceptions(
     estate: &mut PLpgSQL_execstate,
     block: &PLpgSQL_stmt_block,
 ) -> PLpgSQL_rc_result {
+    // C (pl_exec.c exec_stmt_block): `oldowner = CurrentResourceOwner;` is
+    // snapshotted BEFORE entering the internal subtransaction, then restored
+    // (`CurrentResourceOwner = oldowner;`) after the subxact is released
+    // (no-error path) or rolled back (PG_CATCH). This restore is NOT optional /
+    // RAII: `CleanupSubTransaction` leaves `CurrentResourceOwner` pointing at the
+    // parent (CurTransaction) resource owner, but the block ran with the PORTAL's
+    // resource owner current (pquery sets `CurrentResourceOwner = portal->resowner`
+    // around execution). Without restoring `oldowner`, relation refs / buffer pins
+    // the OUTER statement opened under the portal owner are later forgotten under
+    // the wrong (TopTransaction) owner — `ResourceOwnerForgetRelationRef` fails
+    // "not owned by resource owner TopTransaction" and the rd_refcnt underflows,
+    // killing the backend (the `revalidate_bug` ANALYZE-then-div-by-zero case).
+    let oldowner = exec_seams::current_resource_owner::call();
+
     // BeginInternalSubTransaction(NULL) + remember the caller context / owner.
     begin_internal_subtransaction(estate)?;
 
@@ -338,7 +352,12 @@ fn exec_stmt_block_with_exceptions(
         Ok(rc) => rc,
         Err(payload) => {
             // Best-effort rollback of the open subtransaction, then re-raise.
+            // Restore the saved owner (C `CurrentResourceOwner = oldowner;`) so
+            // the unwinding outer statement's resowner cleanup runs against the
+            // owner it opened resources under, not the parent owner the subxact
+            // cleanup left current.
             let _ = rollback_and_release_current_subtransaction(estate);
+            exec_seams::set_current_resource_owner::call(oldowner);
             std::panic::resume_unwind(payload);
         }
     };
@@ -346,13 +365,21 @@ fn exec_stmt_block_with_exceptions(
     match caught {
         Ok(rc) => {
             // No error: ReleaseCurrentSubTransaction + restore context/owner.
+            // C: `ReleaseCurrentSubTransaction(); ... CurrentResourceOwner = oldowner;`
             release_current_subtransaction(estate)?;
+            exec_seams::set_current_resource_owner::call(oldowner);
             Ok(rc)
         }
         Err(edata) => {
             // PG_CATCH: roll back the subtransaction, restore the SPI
             // connection, then look for a matching exception handler.
             rollback_and_release_current_subtransaction(estate)?;
+            // C: `CurrentResourceOwner = oldowner;` immediately after the
+            // rollback, so the EXCEPTION handler statements (and the eventual
+            // outer-statement resowner cleanup) run under the owner that was
+            // current when the block began (the portal owner), not the parent
+            // owner the subxact cleanup left current.
+            exec_seams::set_current_resource_owner::call(oldowner);
 
             let exceptions = block
                 .exceptions

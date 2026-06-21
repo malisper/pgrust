@@ -14593,6 +14593,7 @@ dependencies = [
  "types-nodes",
  "types-parsenodes",
  "types-plpgsql",
+ "types-resowner",
 ]
 
 [[package]]
@@ -14650,6 +14651,7 @@ dependencies = [
  "backend-utils-fmgr-dfmgr-seams",
  "backend-utils-fmgr-fmgr-seams",
  "backend-utils-misc-guc-tables",
+ "backend-utils-resowner-resowner-seams",
  "mcx",
  "types-catalog",
  "types-core",

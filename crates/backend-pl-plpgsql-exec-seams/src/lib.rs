@@ -26,6 +26,7 @@
 use types_core::Oid;
 use types_error::PgResult;
 use types_plpgsql::int32;
+use types_resowner::ResourceOwner;
 
 /// The `(typeId, typMod, collation)` triple filled by
 /// `plpgsql_exec_get_datum_type_info`.
@@ -413,6 +414,24 @@ seam_core::seam!(
     /// EXCEPTION block's internal subtransaction when the body raised an error,
     /// popping back to the parent transaction state.
     pub fn rollback_and_release_current_subtransaction() -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// Read `CurrentResourceOwner` (resowner.c global). `exec_stmt_block`'s
+    /// EXCEPTION leg snapshots this (`oldowner = CurrentResourceOwner`) before
+    /// `BeginInternalSubTransaction` so it can restore it after the subxact
+    /// release/rollback — the subxact engine leaves `CurrentResourceOwner` set
+    /// to the parent (CurTransaction) owner, not the portal owner that was
+    /// current when the block ran.
+    pub fn current_resource_owner() -> ResourceOwner
+);
+
+seam_core::seam!(
+    /// `CurrentResourceOwner = owner` (resowner.c global). `exec_stmt_block`'s
+    /// EXCEPTION leg restores the snapshot (`CurrentResourceOwner = oldowner`)
+    /// after the internal subtransaction is released or rolled back, exactly as
+    /// pl_exec.c does.
+    pub fn set_current_resource_owner(owner: ResourceOwner)
 );
 
 seam_core::seam!(
