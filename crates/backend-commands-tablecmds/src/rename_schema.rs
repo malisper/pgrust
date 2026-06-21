@@ -197,17 +197,36 @@ fn rename_constraint_internal<'mcx>(
         && !con.connoinherit
     {
         if recurse {
-            // find_all_inheritors recursion — honest deferral (find_* unported).
-            // For a childless relation the C loop renames only this constraint, so
-            // fall through; only the genuine multi-relation recursion is deferred.
-            if has_inheritance_children(mcx, myrelid)? {
-                return Err(ereport(ERROR)
-                    .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-                    .errmsg_internal(
-                        "rename_constraint_internal: recursive RENAME CONSTRAINT \
-                         across inheritance children (find_all_inheritors) is deferred",
-                    )
-                    .into_error());
+            // child_oids = find_all_inheritors(myrelid, AccessExclusiveLock,
+            //                                  &child_numparents);
+            let (child_oids, child_numparents) = backend_catalog_pg_inherits::find_all_inheritors(
+                mcx,
+                myrelid,
+                AccessExclusiveLock,
+                true,
+            )?;
+            // forboth(lo, child_oids, li, child_numparents)
+            let child_numparents = child_numparents
+                .expect("find_all_inheritors(want_numparents=true) returns child_numparents");
+            for (lo, li) in child_oids.iter().zip(child_numparents.iter()) {
+                let childrelid = *lo;
+                let numparents = *li;
+                // if (childrelid == myrelid) continue;
+                if childrelid == myrelid {
+                    continue;
+                }
+                // rename_constraint_internal(childrelid, InvalidOid, oldconname,
+                //                            newconname, false, true, numparents);
+                rename_constraint_internal(
+                    mcx,
+                    childrelid,
+                    InvalidOid,
+                    oldconname,
+                    newconname,
+                    false,
+                    true,
+                    numparents,
+                )?;
             }
         } else {
             // if (expected_parents == 0 && find_inheritance_children(myrelid) != NIL)
