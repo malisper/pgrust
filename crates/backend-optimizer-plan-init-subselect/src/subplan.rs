@@ -1234,6 +1234,21 @@ fn inline_cte_walker_query<'mcx>(
     // mutably and recurse into SubLink subselects.
     inline_cte_walk_query_exprs(mcx, query, ctx)?;
 
+    // Descend into the queries of *this level's* CTEs. C's query_tree_walker
+    // does `WALK(query->cteList)`, and the CommonTableExpr walker arm recurses
+    // into `cte->ctequery` — another Query level — so a reference to the CTE
+    // being inlined that appears inside a *sibling* CTE's query gets rewritten
+    // too (the `cterefcount==1` default-materialize inline path depends on it).
+    for i in 0..query.cteList.len() {
+        let cq_opt: Option<&mut types_nodes::copy_query::Query<'mcx>> = query.cteList[i]
+            .as_commontableexpr_mut()
+            .and_then(|c| c.ctequery.as_deref_mut())
+            .and_then(|n| n.as_query_mut());
+        if let Some(cq) = cq_opt {
+            inline_cte_walker_query(mcx, cq, ctx)?;
+        }
+    }
+
     // Now rewrite this level's RTE_CTE references that match.
     for i in 0..query.rtable.len() {
         let rte = &mut query.rtable[i];
@@ -1285,35 +1300,67 @@ fn inline_cte_walk_query_exprs<'mcx>(
     query: &mut types_nodes::copy_query::Query<'mcx>,
     ctx: &mut InlineCteCtx<'mcx>,
 ) -> PgResult<()> {
-    // Collect a mutable visit over the query's expression children. We use the
-    // mutable node walker; for each visited Expr that is a SubLink, recurse into
-    // its subselect Query (a deeper level for inline_cte_walker).
+    // Walk this query's expression trees mutably. C's `inline_cte_walker` is a
+    // `query_or_expression_tree_walker`: at every node it does the default
+    // recursion into all children, and a SubLink's subselect (a nested Query
+    // level) is reached because the default walker recurses into it. The mutator
+    // we drive here calls `visit` on each top-level expression but does NOT, on
+    // its own, descend into a node's grandchildren — so `visit` must itself
+    // recurse into the node's expression children, otherwise a SubLink buried
+    // inside an Aggref / FuncExpr / etc. is never seen. We therefore mirror the
+    // `IncrementVarSublevelsUp_walker` shape: handle the SubLink arm (recurse
+    // into its subselect as a new Query level), and for every other node recurse
+    // into its expression children via `expression_tree_walker_mut`.
     let mut err: Option<PgError> = None;
-    let mut visit = |n: &mut Node| -> bool {
+    fn visit_node<'mcx>(
+        n: &mut Node<'mcx>,
+        ctx: &mut InlineCteCtx<'mcx>,
+        err: &mut Option<PgError>,
+        mcx: Mcx<'mcx>,
+    ) -> bool {
         if err.is_some() {
             return true;
         }
-        if let Some(e) = n.as_expr_mut() {
-            if let Expr::SubLink(sl) = e {
-                if let Some(subq) = sl.subselect.as_deref_mut() {
-                    // SubLink.subselect is PgBox<'static, Query<'static>>; the
-                    // levels walker mutates the embedded Query in place.
-                    // SAFETY: the 'static notional lifetime matches the arena
-                    // convention; treat as a Query<'mcx> for the recursion.
+        if let Some(Expr::SubLink(sl)) = n.as_expr_mut() {
+            // Walk the subselect ourselves (a new Query level) and detach it so
+            // the default `expression_tree_walker_mut` below does not descend
+            // into it a second time at the wrong level; it still walks testexpr.
+            let saved = sl.subselect.take();
+            if let Some(mut sub_box) = saved {
+                {
                     let subq: &mut types_nodes::copy_query::Query<'mcx> =
-                        unsafe { core::mem::transmute(subq) };
+                        unsafe { core::mem::transmute(&mut *sub_box) };
                     if let Err(e2) = inline_cte_walker_query(mcx, subq, ctx) {
-                        err = Some(e2);
+                        // restore before aborting
+                        if let Some(Expr::SubLink(sl)) = n.as_expr_mut() {
+                            sl.subselect = Some(sub_box);
+                        }
+                        *err = Some(e2);
                         return true;
                     }
                 }
+                if let Some(Expr::SubLink(sl)) = n.as_expr_mut() {
+                    sl.subselect = Some(sub_box);
+                }
             }
+            // Recurse into the SubLink's testexpr children (same query level).
+            return backend_nodes_core::node_walker::expression_tree_walker_mut(
+                n,
+                &mut |c| visit_node(c, ctx, err, mcx),
+                mcx,
+            );
         }
-        false
-    };
+        // Any other node: recurse into its expression children so SubLinks
+        // nested inside (Aggref args, FuncExpr args, CaseExpr, ...) are reached.
+        backend_nodes_core::node_walker::expression_tree_walker_mut(
+            n,
+            &mut |c| visit_node(c, ctx, err, mcx),
+            mcx,
+        )
+    }
     backend_nodes_core::node_walker::query_tree_mutator(
         query,
-        &mut visit,
+        &mut |n| visit_node(n, ctx, &mut err, mcx),
         backend_nodes_core::node_walker::QTW_IGNORE_RANGE_TABLE,
         mcx,
     );

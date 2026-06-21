@@ -250,6 +250,7 @@ pub fn transformInsertStmt<'mcx>(
 
     backend_parser_parse_collate::assign_query_collations(Some(pstate), &mut qry)?;
 
+    crate::sync_cte_refcounts(pstate, &mut qry.cteList);
     Ok(qry)
 }
 

@@ -1492,6 +1492,29 @@ pub fn query_tree_mutator<'mcx>(
             return true;
         }
     }
+    // C `query_tree_walker`/`query_tree_mutator` walks `query->onConflict`
+    // (nodeFuncs.c:2712): the `T_OnConflictExpr` arm visits arbiterElems,
+    // arbiterWhere, onConflictSet, onConflictWhere, exclRelTlist. Without this a
+    // CTE reference inside an ON CONFLICT ... DO UPDATE SET/WHERE sublink is
+    // never reached by manip walkers (inline_cte, etc.), so the CTE plan is
+    // dropped. The list/opt members are `NodePtr`s, walked directly.
+    if let Some(oce) = query.onConflict.as_deref_mut() {
+        if list_walk!(oce.arbiterElems) {
+            return true;
+        }
+        if walk_opt!(oce.arbiterWhere.as_mut()) {
+            return true;
+        }
+        if list_walk!(oce.onConflictSet) {
+            return true;
+        }
+        if walk_opt!(oce.onConflictWhere.as_mut()) {
+            return true;
+        }
+        if list_walk!(oce.exclRelTlist) {
+            return true;
+        }
+    }
     if list_walk!(query.mergeActionList) {
         return true;
     }

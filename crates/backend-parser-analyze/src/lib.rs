@@ -457,6 +457,7 @@ fn merge_perminfo_marks<'mcx>(
 /// per matching CTE name transfers the bump. C does not need this because the
 /// namespace and `qry->cteList` alias the single shared `CommonTableExpr`.
 fn merge_cte_refcounts<'mcx>(dst: &mut ParseState<'mcx>, src: &ParseState<'mcx>) {
+    // Merge this level's namespace bumps.
     for d in dst.p_ctenamespace.iter_mut() {
         let name = match d.ctename.as_deref() {
             Some(n) => n,
@@ -470,6 +471,22 @@ fn merge_cte_refcounts<'mcx>(dst: &mut ParseState<'mcx>, src: &ParseState<'mcx>)
                 break;
             }
         }
+    }
+
+    // A CTE reference that crossed more than one query level (e.g. a sublink
+    // inside a sibling CTE's body referencing an outer-WITH CTE) did
+    // `cterefcount++` `levelsup` ParseStates up — which, in the owned model,
+    // landed on the corresponding ancestor *clone* in `src`'s
+    // `parentParseState` chain rather than on this level's namespace. A single
+    // level of merge therefore misses it. Recurse down both clone/live chains
+    // in lockstep so every level's bumps propagate to the live ancestor that
+    // eventually becomes `qry->cteList` at its defining level. (C needs none of
+    // this: the namespace and cteList alias the single shared CommonTableExpr,
+    // so one `cterefcount++` is visible everywhere.)
+    if let (Some(dst_parent), Some(src_parent)) =
+        (dst.parentParseState.as_deref_mut(), src.parentParseState.as_deref())
+    {
+        merge_cte_refcounts(dst_parent, src_parent);
     }
 }
 
