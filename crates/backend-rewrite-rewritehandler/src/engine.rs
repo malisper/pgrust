@@ -1724,11 +1724,10 @@ fn ApplyRetrieveRule<'mcx>(
     parsetree.hasRowSecurity |= rule_action.hasRowSecurity;
 
     // Plug the view query in as a subselect.
-    let security_barrier = relation.rd_rel.relkind == RELKIND_VIEW as u8 && {
-        // RelationIsSecurityView: reloptions security_barrier — not carried;
-        // default false (security-barrier views are not the common spine).
-        false
-    };
+    // C: rte->security_barrier = RelationIsSecurityView(relation); the macro
+    // asserts relkind == RELKIND_VIEW. ApplyRetrieveRule is only reached for view
+    // ON SELECT rules, so `relation` is always a view here, matching the C path.
+    let security_barrier = rewrite_relation_is_security_view(relation);
     let num_cols =
         backend_executor_execUtils::ExecCleanTargetListLength(&rule_action.targetList);
 
