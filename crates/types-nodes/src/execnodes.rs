@@ -689,6 +689,17 @@ pub struct PlanStateData<'mcx> {
     /// `List *subPlan` — `SubPlanState` nodes in my expressions. `None` is the
     /// C `NIL`.
     pub subPlan: Option<PgVec<'mcx, SubPlanState<'mcx>>>,
+    /// Owned-model split of C `PlanState.initPlan`: the 1-based `plan_id`s of the
+    /// InitPlan `SubPlanState`s this node owns. The `SubPlanState`s themselves
+    /// live single-owned in `EState.es_initplan` (for the lazy-eval reachability
+    /// from `ExecEvalParamExec`); this list lets `ExecReScan` re-arm them
+    /// (`ExecReScanSetParamPlan`) the way C walks `node->initPlan`.
+    pub init_plan_ids: Option<PgVec<'mcx, i32>>,
+    /// Owned-model split of C `PlanState.subPlan`: the 1-based `plan_id`s of the
+    /// expression `SubPlanState`s attached to this node. Used by `ExecReScan` to
+    /// propagate `chgParam` into each correlated subplan's child plan, mirroring
+    /// C's `foreach(l, node->subPlan)` walk.
+    pub sub_plan_ids: Option<PgVec<'mcx, i32>>,
     /// `Bitmapset *chgParam` — set of IDs of changed Params.
     pub chgParam: Option<PgBox<'mcx, Bitmapset<'mcx>>>,
     /// `ExprContext *ps_ExprContext` — node's expression-evaluation context

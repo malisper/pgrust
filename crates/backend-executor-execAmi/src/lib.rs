@@ -142,74 +142,105 @@ pub fn exec_re_scan<'mcx>(
     // InitPlans).
     if node.ps_head().chgParam.is_some() {
         let mcx = estate.es_query_cxt;
-        let head = node.ps_head_mut();
 
-        // foreach(l, node->initPlan)
-        let init_len = head.initPlan.as_ref().map_or(0, |l| l.len());
-        for i in 0..init_len {
-            // SubPlanState *sstate = lfirst(l); PlanState *splan = sstate->planstate;
-            //
-            // if (splan->plan->extParam != NULL)  /* don't care about child
-            //                                      * local Params */
-            //     UpdateChangedParamSet(splan, node->chgParam);
-            let splan_has_ext_param = head.initPlan.as_ref().expect("checked above")[i]
-                .planstate
-                .as_deref()
-                .and_then(|splan| splan.ps_head().plan)
+        // Owned-model rendering of the C `foreach(l, node->initPlan)` /
+        // `foreach(l, node->subPlan)` walks. C reaches each subplan's child
+        // PlanState through `sstate->planstate`; here that child lives in
+        // `es_subplanstates[plan_id-1]` (and the SubPlanState itself, for the
+        // InitPlan re-arm, in `es_initplan[plan_id-1]`). We walk this node's
+        // recorded `init_plan_ids` / `sub_plan_ids`. The parent's `chgParam` is
+        // taken out for the duration so the per-id calls can borrow `estate`
+        // (which holds the child states) concurrently; it is restored after,
+        // including any bits ExecReScanSetParamPlan added for InitPlan outputs.
+        let mut parent_chg = node.ps_head_mut().chgParam.take();
+
+        let init_len = node.ps_head().init_plan_ids.as_ref().map_or(0, |v| v.len());
+        let mut init_ids: mcx::PgVec<'mcx, i32> = mcx::vec_with_capacity_in(mcx, init_len)?;
+        if let Some(v) = node.ps_head().init_plan_ids.as_ref() {
+            for id in v.iter() {
+                init_ids.push(*id);
+            }
+        }
+        for plan_id in init_ids.iter().copied() {
+            let idx = (plan_id as usize).saturating_sub(1);
+
+            // if (splan->plan->extParam != NULL) UpdateChangedParamSet(splan, ...)
+            let splan_has_ext_param = estate
+                .es_subplanstates
+                .get(idx)
+                .and_then(|b| b.as_deref())
+                .and_then(|ps| ps.ps_head().plan)
                 .is_some_and(|plan| plan.plan_head().extParam.is_some());
             if splan_has_ext_param {
-                let newchg = head
-                    .chgParam
+                let newchg = parent_chg
                     .as_deref()
                     .expect("ExecReScan: chgParam went NULL during the InitPlan walk");
-                let splan = head.initPlan.as_mut().expect("checked above")[i]
-                    .planstate
-                    .as_deref_mut()
-                    .expect("ExecReScan: initPlan planstate is NULL");
-                execUtils::UpdateChangedParamSet(splan.ps_head_mut(), Some(newchg), mcx)?;
+                let child = estate
+                    .es_subplanstates
+                    .get_mut(idx)
+                    .and_then(|b| b.as_deref_mut())
+                    .expect("ExecReScan: initPlan child planstate is NULL");
+                execUtils::UpdateChangedParamSet(child.ps_head_mut(), Some(newchg), mcx)?;
             }
 
-            // if (splan->chgParam != NULL)
-            //     ExecReScanSetParamPlan(sstate, node);
-            //
-            // (re-tested AFTER the update above: UpdateChangedParamSet may
-            // have set splan->chgParam.)
-            let splan_has_chg_param = head.initPlan.as_ref().expect("checked above")[i]
-                .planstate
-                .as_deref()
-                .is_some_and(|splan| splan.ps_head().chgParam.is_some());
+            // if (splan->chgParam != NULL) ExecReScanSetParamPlan(sstate, node);
+            let splan_has_chg_param = estate
+                .es_subplanstates
+                .get(idx)
+                .and_then(|b| b.as_deref())
+                .is_some_and(|ps| ps.ps_head().chgParam.is_some());
             if splan_has_chg_param {
-                let sstate = &mut head.initPlan.as_mut().expect("checked above")[i];
-                nodeSubplan::exec_re_scan_set_param_plan::call(
-                    sstate,
-                    &mut head.chgParam,
+                // Take the InitPlan SubPlanState out of es_initplan so the call
+                // can borrow estate (it reaches the child via es_subplanstates).
+                let mut sstate = estate
+                    .es_initplan
+                    .get_mut(idx)
+                    .and_then(|slot| slot.take())
+                    .expect("ExecReScan: initPlan SubPlanState missing from es_initplan");
+                let r = nodeSubplan::exec_re_scan_set_param_plan::call(
+                    &mut sstate,
+                    &mut parent_chg,
                     estate,
-                )?;
+                );
+                estate.es_initplan[idx] = Some(sstate);
+                r?;
             }
         }
 
-        // foreach(l, node->subPlan)
-        let sub_len = head.subPlan.as_ref().map_or(0, |l| l.len());
-        for i in 0..sub_len {
-            // if (splan->plan->extParam != NULL)
-            //     UpdateChangedParamSet(splan, node->chgParam);
-            let splan_has_ext_param = head.subPlan.as_ref().expect("checked above")[i]
-                .planstate
-                .as_deref()
-                .and_then(|splan| splan.ps_head().plan)
+        // foreach(l, node->subPlan): propagate chgParam into each correlated
+        // expression SubPlan's child plan (no re-arm; SubPlans are always
+        // re-evaluated by ExecScanSubPlan).
+        let sub_len = node.ps_head().sub_plan_ids.as_ref().map_or(0, |v| v.len());
+        let mut sub_ids: mcx::PgVec<'mcx, i32> = mcx::vec_with_capacity_in(mcx, sub_len)?;
+        if let Some(v) = node.ps_head().sub_plan_ids.as_ref() {
+            for id in v.iter() {
+                sub_ids.push(*id);
+            }
+        }
+        for plan_id in sub_ids.iter().copied() {
+            let idx = (plan_id as usize).saturating_sub(1);
+            let splan_has_ext_param = estate
+                .es_subplanstates
+                .get(idx)
+                .and_then(|b| b.as_deref())
+                .and_then(|ps| ps.ps_head().plan)
                 .is_some_and(|plan| plan.plan_head().extParam.is_some());
             if splan_has_ext_param {
-                let newchg = head
-                    .chgParam
+                let newchg = parent_chg
                     .as_deref()
                     .expect("ExecReScan: chgParam went NULL during the subPlan walk");
-                let splan = head.subPlan.as_mut().expect("checked above")[i]
-                    .planstate
-                    .as_deref_mut()
-                    .expect("ExecReScan: subPlan planstate is NULL");
-                execUtils::UpdateChangedParamSet(splan.ps_head_mut(), Some(newchg), mcx)?;
+                let child = estate
+                    .es_subplanstates
+                    .get_mut(idx)
+                    .and_then(|b| b.as_deref_mut())
+                    .expect("ExecReScan: subPlan child planstate is NULL");
+                execUtils::UpdateChangedParamSet(child.ps_head_mut(), Some(newchg), mcx)?;
             }
         }
+
+        // Restore the parent chgParam (with any InitPlan-output bits added).
+        node.ps_head_mut().chgParam = parent_chg;
+        let head = node.ps_head_mut();
 
         // Well. Now set chgParam for child trees.
         if head.lefttree.is_some() {

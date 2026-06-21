@@ -550,6 +550,19 @@ fn exec_init_node_finish<'mcx>(
                 estate.es_initplan.push(None);
             }
             estate.es_initplan[idx] = Some(sstate);
+
+            // Owned-model bookkeeping for the rescan re-arm: C keeps the
+            // SubPlanState on `result->initPlan` and walks it in ExecReScan to
+            // re-arm correlated InitPlans (ExecReScanSetParamPlan). Here the
+            // SubPlanState lives single-owned in `es_initplan`; record this
+            // node's InitPlan `plan_id` so ExecReScan can reach it.
+            let head = result.ps_head_mut();
+            if head.init_plan_ids.is_none() {
+                head.init_plan_ids = Some(mcx::PgVec::new_in(mcx));
+            }
+            let v = head.init_plan_ids.as_mut().expect("just set");
+            v.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<i32>()))?;
+            v.push(plan_id);
         }
     }
 
