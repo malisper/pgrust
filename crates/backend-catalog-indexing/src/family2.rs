@@ -2842,6 +2842,54 @@ fn catalog_tuple_insert_with_info_pg_largeobject<'mcx>(
     CatalogTupleInsertWithInfo(mcx, &heap_rel, &mut tup, indstate)
 }
 
+/// `catalog_tuple_insert_pg_largeobject_metadata`: form a new
+/// `pg_largeobject_metadata` row (`oid = loid`, `lomowner`, optional `lomacl`)
+/// and `CatalogTupleInsert` with index maintenance — the value layer of
+/// pg_largeobject.c `LargeObjectCreate`. The OID is already chosen by the caller
+/// (`LargeObjectCreate` ran the `OidIsValid(loid) ? loid : GetNewOidWithIndex`
+/// branch), so this does no OID allocation. When `lomacl == None` the
+/// `lomacl` column is set NULL.
+fn catalog_tuple_insert_pg_largeobject_metadata(
+    rel: &RelationData<'_>,
+    loid: Oid,
+    lomowner: Oid,
+    lomacl: Option<types_array::ArrayType>,
+) -> PgResult<()> {
+    use cat::catalog::{
+        ANUM_PG_LARGEOBJECT_METADATA_LOMACL, ANUM_PG_LARGEOBJECT_METADATA_LOMOWNER,
+        ANUM_PG_LARGEOBJECT_METADATA_OID, NATTS_PG_LARGEOBJECT_METADATA,
+    };
+
+    let ctx = MemoryContext::new("catalog_tuple_insert_pg_largeobject_metadata");
+    let mcx = ctx.mcx();
+    let rel = reopen(mcx, rel)?;
+
+    // memset(values, 0, ...); memset(nulls, false, ...);
+    let mut values: [Datum; NATTS_PG_LARGEOBJECT_METADATA] =
+        core::array::from_fn(|_| Datum::null());
+    let mut nulls = [false; NATTS_PG_LARGEOBJECT_METADATA];
+
+    // values[Anum_pg_largeobject_metadata_oid - 1] = ObjectIdGetDatum(loid_new);
+    values[(ANUM_PG_LARGEOBJECT_METADATA_OID - 1) as usize] = Datum::from_oid(loid);
+    // values[Anum_pg_largeobject_metadata_lomowner - 1] = ObjectIdGetDatum(ownerId);
+    values[(ANUM_PG_LARGEOBJECT_METADATA_LOMOWNER - 1) as usize] = Datum::from_oid(lomowner);
+    // if (lomacl != NULL) values[..lomacl] = PointerGetDatum(lomacl);
+    // else nulls[Anum_pg_largeobject_metadata_lomacl - 1] = true;
+    match &lomacl {
+        Some(acl) => {
+            values[(ANUM_PG_LARGEOBJECT_METADATA_LOMACL - 1) as usize] =
+                Datum::ByRef(mcx::slice_in(mcx, &arraytype_header_bytes(acl))?)
+        }
+        None => nulls[(ANUM_PG_LARGEOBJECT_METADATA_LOMACL - 1) as usize] = true,
+    }
+
+    // ntup = heap_form_tuple(RelationGetDescr(pg_lo_meta), values, nulls);
+    // CatalogTupleInsert(pg_lo_meta, ntup); heap_freetuple(ntup);
+    form_and_insert(mcx, &rel, &values, &nulls)?;
+    rel.close(RowExclusiveLock)?;
+    Ok(())
+}
+
 /// `catalog_tuple_update_with_info_pg_largeobject`: re-read the old page tuple
 /// at `tid`, replace only the `data` column, `CatalogTupleUpdateWithInfo`. `rel`
 /// and `indstate` are the caller's open relation and index state.
@@ -3073,6 +3121,9 @@ pub fn install() {
     s::catalog_tuple_insert_pg_db_role_setting::set(catalog_tuple_insert_pg_db_role_setting);
 
     // pg_largeobject.
+    s::catalog_tuple_insert_pg_largeobject_metadata::set(
+        catalog_tuple_insert_pg_largeobject_metadata,
+    );
     s::deform_lo_page::set(deform_lo_page);
     s::catalog_tuple_insert_with_info_pg_largeobject::set(catalog_tuple_insert_with_info_pg_largeobject);
     s::catalog_tuple_update_with_info_pg_largeobject::set(catalog_tuple_update_with_info_pg_largeobject);

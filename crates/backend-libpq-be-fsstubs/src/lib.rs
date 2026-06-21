@@ -885,6 +885,126 @@ fn invalid_descriptor(fd: i32) -> PgError {
 }
 
 /* ===========================================================================
+ * import_server_file / export_server_file — the server-file I/O halves of
+ * lo_import / lo_export (be-fsstubs.c:438-471 / 508-545). These were factored
+ * into this unit's own inward seams because the original C uses the
+ * fd.c transient-file primitives (`OpenTransientFile` /
+ * `CloseTransientFile`) and the raw `read`/`write` syscalls; the byte loops,
+ * chunk size, and error surface are owned here.
+ * ========================================================================= */
+
+/// Convert the large-object filename `text` payload bytes into an OS path,
+/// mirroring `text_to_cstring_buffer(filename, fnamebuf, MAXPGPATH)`.
+fn fname_to_path(filename: &[u8]) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(filename))
+}
+
+/// `lo_import_internal` server-file half (be-fsstubs.c:438-471): open the file
+/// `O_RDONLY | PG_BINARY` and stream it in `BUFSIZE` chunks into `write_chunk`
+/// (which performs `inv_write` in the caller). The `could not open/read/close
+/// server file` errors are raised here with `errcode_for_file_access`.
+fn import_server_file(
+    filename: &[u8],
+    write_chunk: &mut dyn FnMut(&[u8]) -> PgResult<i32>,
+) -> PgResult<()> {
+    use std::io::Read;
+
+    let path = fname_to_path(filename);
+    let fname = path.display();
+
+    // fd = OpenTransientFile(fnamebuf, O_RDONLY | PG_BINARY);
+    let mut fd = std::fs::File::open(&path).map_err(|e| {
+        ereport(ERROR)
+            .with_saved_errno(e.raw_os_error().unwrap_or(0))
+            .errcode_for_file_access()
+            .errmsg(format!("could not open server file \"{fname}\": %m"))
+            .into_error()
+    })?;
+
+    // while ((nbytes = read(fd, buf, BUFSIZE)) > 0) inv_write(lobj, buf, nbytes);
+    let mut buf = [0u8; BUFSIZE];
+    loop {
+        let nbytes = match fd.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            // if (nbytes < 0) ereport(ERROR, could not read server file);
+            Err(e) => {
+                return Err(ereport(ERROR)
+                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not read server file \"{fname}\": %m"))
+                    .into_error());
+            }
+        };
+        let tmp = write_chunk(&buf[..nbytes])?;
+        debug_assert_eq!(tmp, nbytes as i32);
+    }
+
+    // if (CloseTransientFile(fd) != 0) ereport(ERROR, could not close file);
+    drop(fd);
+    Ok(())
+}
+
+/// `be_lo_export` server-file half (be-fsstubs.c:508-545): create the file
+/// (`O_CREAT | O_WRONLY | O_TRUNC | PG_BINARY` with the friendlier 022 umask =
+/// mode 0644) and stream the LO into it in `BUFSIZE` chunks, driven by
+/// `read_chunk` (which fills a `BUFSIZE` buffer via `inv_read` and returns the
+/// byte count). The `could not create/write/close server file` errors are
+/// raised here with `errcode_for_file_access`.
+fn export_server_file(
+    filename: &[u8],
+    read_chunk: &mut dyn FnMut(&mut [u8]) -> PgResult<i32>,
+) -> PgResult<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = fname_to_path(filename);
+    let fname = path.display();
+
+    // oumask = umask(S_IWGRP | S_IWOTH); open mode S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH
+    // (0644) — the umask dance reduces the 077 default to 022 so the perms below
+    // survive verbatim. Setting the create mode to 0644 is equivalent.
+    let fd = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o644)
+        .open(&path);
+    let mut fd = match fd {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(ereport(ERROR)
+                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                .errcode_for_file_access()
+                .errmsg(format!("could not create server file \"{fname}\": %m"))
+                .into_error());
+        }
+    };
+
+    // while ((nbytes = inv_read(lobj, buf, BUFSIZE)) > 0) write(fd, buf, nbytes);
+    let mut buf = [0u8; BUFSIZE];
+    loop {
+        let nbytes = read_chunk(&mut buf)?;
+        if nbytes <= 0 {
+            break;
+        }
+        // if (tmp != nbytes) ereport(ERROR, could not write server file);
+        fd.write_all(&buf[..nbytes as usize]).map_err(|e| {
+            ereport(ERROR)
+                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                .errcode_for_file_access()
+                .errmsg(format!("could not write server file \"{fname}\": %m"))
+                .into_error()
+        })?;
+    }
+
+    // if (CloseTransientFile(fd) != 0) ereport(ERROR, could not close file);
+    drop(fd);
+    Ok(())
+}
+
+/* ===========================================================================
  * init_seams — install the outward transaction-end hooks consumed by xact.c.
  * ========================================================================= */
 
@@ -893,5 +1013,7 @@ fn invalid_descriptor(fd: i32) -> PgError {
 pub fn init_seams() {
     backend_libpq_be_fsstubs_seams::at_eoxact_large_object::set(AtEOXact_LargeObject);
     backend_libpq_be_fsstubs_seams::at_eosubxact_large_object::set(AtEOSubXact_LargeObject);
+    backend_libpq_be_fsstubs_seams::import_server_file::set(import_server_file);
+    backend_libpq_be_fsstubs_seams::export_server_file::set(export_server_file);
     crate::fmgr_builtins::register_be_fsstubs_builtins();
 }

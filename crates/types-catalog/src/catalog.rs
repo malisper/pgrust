@@ -108,6 +108,15 @@ pub const LARGE_OBJECT_METADATA_OID_INDEX_ID: Oid = 2996;
 /// `Anum_pg_largeobject_metadata_oid` — `pg_largeobject_metadata.oid` column
 /// number (`pg_largeobject_metadata_d.h`).
 pub const ANUM_PG_LARGEOBJECT_METADATA_OID: types_core::primitive::AttrNumber = 1;
+/// `Anum_pg_largeobject_metadata_lomowner` — `pg_largeobject_metadata.lomowner`
+/// column number (`pg_largeobject_metadata_d.h`).
+pub const ANUM_PG_LARGEOBJECT_METADATA_LOMOWNER: types_core::primitive::AttrNumber = 2;
+/// `Anum_pg_largeobject_metadata_lomacl` — `pg_largeobject_metadata.lomacl`
+/// column number (`pg_largeobject_metadata_d.h`).
+pub const ANUM_PG_LARGEOBJECT_METADATA_LOMACL: types_core::primitive::AttrNumber = 3;
+/// `Natts_pg_largeobject_metadata` — number of `pg_largeobject_metadata`
+/// columns (`pg_largeobject_metadata_d.h`).
+pub const NATTS_PG_LARGEOBJECT_METADATA: usize = 3;
 /// `Anum_pg_largeobject_loid` — `pg_largeobject.loid` column number
 /// (`pg_largeobject_d.h`).
 pub const ANUM_PG_LARGEOBJECT_LOID: types_core::primitive::AttrNumber = 1;
