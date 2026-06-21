@@ -32,7 +32,7 @@ seam_core::seam!(
     /// inspections (no allocation); the bundling lets partition-key build read
     /// all three from one call. `Err` carries the C `elog(ERROR, "unrecognized
     /// node type")` for an unexpected tag.
-    pub fn expr_type_info(expr: &Expr<'static>) -> PgResult<ExprTypeInfo>
+    pub fn expr_type_info<'mcx>(expr: &Expr<'mcx>) -> PgResult<ExprTypeInfo>
 );
 
 seam_core::seam!(
@@ -49,7 +49,7 @@ seam_core::seam!(
     /// `(true, coercedTypmod)` with the coerced type modifier, or `(false, -1)`.
     /// Pure node inspection. Used by ruleutils' cast deparse to print the typmod
     /// on the target type name. `Err` carries an unexpected-node `elog(ERROR)`.
-    pub fn expr_is_length_coercion(expr: &Expr<'static>) -> PgResult<(bool, i32)>
+    pub fn expr_is_length_coercion<'mcx>(expr: &Expr<'mcx>) -> PgResult<(bool, i32)>
 );
 
 seam_core::seam!(
@@ -73,7 +73,7 @@ seam_core::seam!(
     /// (`get_base_element_type`). Returns `InvalidOid` out of range / for an
     /// unhandled node kind (the C fall-through). `Err` carries the
     /// `get_base_element_type` / `exprType` cache-lookup `ereport`.
-    pub fn get_call_expr_argtype_expr(expr: &Expr<'static>, argnum: i32) -> PgResult<Oid>
+    pub fn get_call_expr_argtype_expr<'mcx>(expr: &Expr<'mcx>, argnum: i32) -> PgResult<Oid>
 );
 
 seam_core::seam!(

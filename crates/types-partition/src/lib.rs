@@ -10,7 +10,7 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
-use mcx::{slice_in, Mcx, PgVec};
+use mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
@@ -46,7 +46,7 @@ pub struct PartitionKeyData<'mcx> {
     pub partattrs: PgVec<'mcx, AttrNumber>,
     /// `partexprs` — list of expressions in the partitioning key, one for
     /// each zero-valued `partattrs`.
-    pub partexprs: PgVec<'mcx, types_nodes::Expr<'static>>,
+    pub partexprs: PgVec<'mcx, types_nodes::Expr<'mcx>>,
     /// `partopfamily` — OIDs of operator families.
     pub partopfamily: PgVec<'mcx, Oid>,
     /// `partopcintype` — OIDs of opclass declared input data types.
@@ -91,7 +91,7 @@ pub struct PartrelTupleData<'mcx> {
     /// `partcollation` oidvector values — the per-key collation OIDs.
     pub partcollation: PgVec<'mcx, Oid>,
     /// the processed `partexprs` list (NIL ⇒ empty).
-    pub partexprs: PgVec<'mcx, types_nodes::Expr<'static>>,
+    pub partexprs: PgVec<'mcx, types_nodes::Expr<'mcx>>,
 }
 
 /// Per-partition-key opclass facts resolved from one `pg_opclass` tuple
@@ -142,7 +142,15 @@ impl<'mcx> PartitionKeyData<'mcx> {
             strategy: self.strategy,
             partnatts: self.partnatts,
             partattrs: slice_in(mcx, &self.partattrs)?,
-            partexprs: slice_in(mcx, &self.partexprs)?,
+            partexprs: {
+                // Deep-clone each Expr into the destination arena `'b` (slice_in
+                // would do a shallow copy that cannot retie the invariant 'mcx).
+                let mut v = vec_with_capacity_in(mcx, self.partexprs.len())?;
+                for e in self.partexprs.iter() {
+                    v.push(e.clone_in(mcx)?);
+                }
+                v
+            },
             partopfamily: slice_in(mcx, &self.partopfamily)?,
             partopcintype: slice_in(mcx, &self.partopcintype)?,
             partsupfunc: slice_in(mcx, &self.partsupfunc)?,
@@ -167,7 +175,7 @@ impl<'mcx> PartitionKeyData<'mcx> {
     }
 
     /// `get_partition_exprs(key)` (`utils/partcache.h`): `key->partexprs`.
-    pub fn get_partition_exprs(&self) -> &[types_nodes::Expr<'static>] {
+    pub fn get_partition_exprs(&self) -> &[types_nodes::Expr<'mcx>] {
         &self.partexprs
     }
 
