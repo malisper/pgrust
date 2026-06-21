@@ -27,10 +27,15 @@ use types_tuple::backend_access_common_heaptuple::Datum;
 seam_core::seam!(
     /// `routine->InitOpaque(state, natts)` (tablefunc.h): allocate and
     /// initialize the table builder's private space (`state->opaque`).
-    pub fn routine_init_opaque(
-        state: &mut TableFuncScanState<'_>,
+    ///
+    /// `estate` is threaded so the JSON_TABLE provider can evaluate the PASSING
+    /// argument expressions (`ExecEvalExpr` against `state->ss.ps.ps_ExprContext`,
+    /// which is an `EcxtId` into the EState pool); the XML provider ignores it.
+    pub fn routine_init_opaque<'mcx>(
+        state: &mut TableFuncScanState<'mcx>,
         kind: TableFuncRoutineKind,
         natts: i32,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -95,12 +100,18 @@ seam_core::seam!(
     /// `routine->GetValue(state, colnum, typid, typmod, &isnull)`
     /// (tablefunc.h): fetch the current row's value for column `colnum`,
     /// converted to type `typid`/`typmod`. Returns `(Datum, is_null)`.
+    ///
+    /// `estate` is threaded so the JSON_TABLE provider can evaluate the column's
+    /// `JsonExpr` (`ExecEvalExpr` against `state->ss.ps.ps_ExprContext` with
+    /// `caseValue_datum` set to the row-pattern value); the XML provider ignores
+    /// it.
     pub fn routine_get_value<'mcx>(
         state: &mut TableFuncScanState<'mcx>,
         kind: TableFuncRoutineKind,
         colnum: i32,
         typid: Oid,
         typmod: i32,
+        estate: &mut types_nodes::EStateData<'mcx>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );
 

@@ -1889,10 +1889,21 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             expr_eval_push_step(mcx, state, scratch)?;
             Ok(())
         }
-        // ----- T_JsonExpr (JSON_VALUE / JSON_QUERY / JSON_EXISTS) -----
+        // ----- T_JsonExpr (JSON_VALUE / JSON_QUERY / JSON_EXISTS / JSON_TABLE) -----
         etag::T_JsonExpr => {
             let jsexpr = node.expect_jsonexpr();
-            crate::execExpr_json::exec_init_json_expr(mcx, jsexpr, state, resv)
+            // No need to initialize a full JsonExprState for JSON_TABLE(),
+            // because the upstream caller tfuncFetchRows() is only interested
+            // in the value of formatted_expr (the document). (execExpr.c:2493)
+            if jsexpr.op == types_nodes::primnodes::JsonExprOp::JSON_TABLE_OP {
+                let formatted_expr = jsexpr
+                    .formatted_expr
+                    .as_deref()
+                    .expect("JSON_TABLE JsonExpr.formatted_expr present");
+                exec_init_expr_rec(mcx, formatted_expr, state, resv)
+            } else {
+                crate::execExpr_json::exec_init_json_expr(mcx, jsexpr, state, resv)
+            }
         }
         // ----- T_XmlExpr (XMLELEMENT / XMLFOREST / XMLCONCAT / ...) -----
         etag::T_XmlExpr => {

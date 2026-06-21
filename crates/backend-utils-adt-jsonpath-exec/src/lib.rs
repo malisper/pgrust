@@ -78,7 +78,6 @@ use JsonPathItemType::*;
 mod datetime;
 mod fmgr_builtins;
 mod json_table;
-mod routine_install;
 mod seams;
 #[cfg(test)]
 mod tests;
@@ -87,8 +86,8 @@ pub use fmgr_builtins::register_jsonpath_exec_builtins;
 pub use seams::init_seams;
 
 pub use json_table::{
-    JsonTableDestroyOpaque, JsonTableExecContext, JsonTableFetchRow, JsonTableGetValue,
-    JsonTableInitOpaque, JsonTableSetDocument,
+    JsonTableCurrentRow, JsonTableDestroyOpaque, JsonTableExecContext, JsonTableFetchRow,
+    JsonTableInitOpaque, JsonTableRowValue, JsonTableSetDocument,
 };
 
 // Re-export the seam vocabulary so wiring can install the genuine-external

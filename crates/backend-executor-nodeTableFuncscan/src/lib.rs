@@ -37,7 +37,9 @@ use backend_executor_execTuples_seams as execTuples;
 use backend_executor_execUtils_seams as execUtils;
 use backend_executor_tablefuncRoutine_seams as routine;
 use backend_nodes_core_seams as nodes_core;
+use backend_nodes_nodeFuncs_seams as nodeFuncs;
 use backend_tcop_postgres_seams as tcop_postgres;
+use backend_utils_adt_jsonpath_exec as jsonpath_exec;
 use backend_utils_adt_varlena_seams as varlena;
 use backend_utils_adt_xml as xml;
 use backend_utils_cache_lsyscache_seams as lsyscache;
@@ -79,8 +81,11 @@ use types_nodes::executor::EXEC_FLAG_MARK;
 /// libxml parser-context lifecycle is wholly internal to the provider, so the
 /// `&mut TableFuncScanState` / document `Datum` are unused on this arm.)
 ///
-/// The `JsonbTable` arm is gated behind the JSON_TABLE executor-integration
-/// keystone — see [`json_table_not_wired`].
+/// The `JsonbTable` arm routes into the `jsonpath_exec` crate's `JsonTable*`
+/// row-pattern builder (`JsonTableInitOpaque` / `SetDocument` / `FetchRow` /
+/// `JsonTableCurrentRow` / `DestroyOpaque`), with this crate building the root
+/// `JsonTablePlan` from `tf->plan` and evaluating the PASSING / column
+/// `JsonExpr` expressions via `ExecEvalExpr`.
 pub fn init_seams() {
     routine::routine_init_opaque::set(routine_init_opaque);
     routine::routine_set_document::set(routine_set_document);
@@ -98,51 +103,84 @@ pub fn init_seams() {
 //
 // C dispatches every builder call through `routine->Method(state, ...)`, where
 // `routine` is one of the two `const TableFuncRoutine` instances. The owned
-// model keys that dispatch on `TableFuncRoutineKind`. The two providers live in
-// unported `utils/adt` owners; the XML half is reachable today (the `xml` crate
-// hosts its `--without-libxml` entry points), the JSON_TABLE half awaits its
-// executor-integration keystone.
+// model keys that dispatch on `TableFuncRoutineKind`. The XML half routes to the
+// `xml` crate's `--without-libxml` entry points; the JSON_TABLE half routes to
+// the `jsonpath_exec` crate's `JsonTable*` row-pattern builder.
 // ===========================================================================
 
-/// The `JsonbTableRoutine` arm is not yet wired: the JSON_TABLE row-pattern
-/// builder lives in `backend-utils-adt-jsonpath-exec` (`JsonTable*`) and is
-/// fully ported, but reaching it from here needs the JSON_TABLE
-/// executor-integration substrate that is a separate campaign — the
-/// `jsonpath-exec` `init_table_func` / `eval_column` seams (which build the
-/// `JsonTablePlan` from `TableFunc.plan` and evaluate each `JsonExpr` column via
-/// `ExecEvalExpr`) are uninstalled, the document `Datum` must be detoasted to
-/// jsonb varlena bytes, and the seam's `types_tuple` `Datum` must bridge to the
-/// owner's `types_datum` `Datum`. Until that lands, JSON_TABLE errors cleanly
-/// here rather than executing.
+/// `JsonbTableRoutine` leaves `SetNamespace` / `SetRowFilter` /
+/// `SetColumnFilter` NULL — only XMLTABLE drives those. Reaching one for
+/// JSON_TABLE is a defensive programming-error guard (the caller's
+/// `ns_uris`/`SetRowFilter`-presence/`colexprs` gating never lands here).
 fn json_table_not_wired(what: &str) -> PgError {
-    PgError::error(alloc::format!("JSON_TABLE is not yet supported ({what})"))
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+    PgError::error(alloc::format!(
+        "JsonbTableRoutine has no {what} method (NULL in C); only XMLTABLE uses it"
+    ))
+    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+}
+
+/// Borrow the `JsonTableExecContext` out of an `Opaque` (`state->opaque`),
+/// panicking if it is absent or of the wrong kind (`InitOpaque` runs first, so
+/// absence is a programming error — same as the C `GetJsonTableExecContext`
+/// magic check's precondition).
+fn json_exec_context(
+    opaque: &mut types_nodes::execnodes::Opaque,
+) -> &mut jsonpath_exec::JsonTableExecContext {
+    opaque
+        .0
+        .as_mut()
+        .expect("JsonbTableRoutine: state->opaque is NULL (InitOpaque not run)")
+        .downcast_mut::<jsonpath_exec::JsonTableExecContext>()
+        .expect("JsonbTableRoutine: state->opaque is not a JsonTableExecContext")
 }
 
 /// `routine->InitOpaque(state, natts)`.
-fn routine_init_opaque(
-    _state: &mut TableFuncScanState<'_>,
+fn routine_init_opaque<'mcx>(
+    state: &mut TableFuncScanState<'mcx>,
     kind: TableFuncRoutineKind,
     natts: i32,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     match kind {
         TableFuncRoutineKind::XmlTable => xml::XmlTableInitOpaque(natts),
-        TableFuncRoutineKind::JsonbTable => Err(json_table_not_wired("InitOpaque")),
+        // C: `JsonTableInitOpaque` (jsonpath_exec.c:4109). The plan-walk
+        // machinery is owned by `jsonpath_exec`; this arm — which holds the
+        // `TableFuncScanState` and the expression evaluator — builds the root
+        // `JsonTablePlan` from `tf->plan`, evaluates the PASSING argument
+        // expressions, and hands those (plus the column count) to
+        // `JsonTableInitOpaque`. `natts` is unused (C ignores it too).
+        TableFuncRoutineKind::JsonbTable => json_table_init_opaque(state, estate),
     }
 }
 
 /// `routine->SetDocument(state, value)`.
 fn routine_set_document<'mcx>(
-    _state: &mut TableFuncScanState<'mcx>,
+    state: &mut TableFuncScanState<'mcx>,
     kind: TableFuncRoutineKind,
-    _value: Datum<'mcx>,
+    value: Datum<'mcx>,
 ) -> PgResult<()> {
     match kind {
         // The XML provider errors before reading the document, so the seam's
         // `Datum` (a `types_tuple` value) is not forwarded; a future libxml
         // provider takes the value through its own internal context.
         TableFuncRoutineKind::XmlTable => xml::XmlTableSetDocument(types_datum::Datum::null()),
-        TableFuncRoutineKind::JsonbTable => Err(json_table_not_wired("SetDocument")),
+        // C: `JsonTableSetDocument` (jsonpath_exec.c:4238) —
+        // `DatumGetJsonbP(value)` then evaluate the root row pattern. The
+        // document is the input jsonb varlena bytes.
+        TableFuncRoutineKind::JsonbTable => {
+            // C: DatumGetJsonbP detoasts; here the document value already
+            // carries its flat bytes (the common, non-toasted case).
+            let bytes = value.as_ref_bytes().to_vec();
+            // Disjoint field borrows: `perTableCxt` (for the Mcx) and `opaque`
+            // (the context). Borrow the fields directly so the borrow checker
+            // sees them as disjoint.
+            let TableFuncScanState { perTableCxt, opaque, .. } = state;
+            let per_table = perTableCxt
+                .as_ref()
+                .expect("JsonbTableRoutine: perTableCxt not initialized");
+            let cxt = json_exec_context(opaque);
+            jsonpath_exec::JsonTableSetDocument(per_table.mcx(), cxt, &bytes)
+        }
     }
 }
 
@@ -202,22 +240,31 @@ fn routine_set_column_filter(
 
 /// `routine->FetchRow(state)`.
 fn routine_fetch_row(
-    _state: &mut TableFuncScanState<'_>,
+    state: &mut TableFuncScanState<'_>,
     kind: TableFuncRoutineKind,
 ) -> PgResult<bool> {
     match kind {
         TableFuncRoutineKind::XmlTable => xml::XmlTableFetchRow(),
-        TableFuncRoutineKind::JsonbTable => Err(json_table_not_wired("FetchRow")),
+        // C: `JsonTableFetchRow` (jsonpath_exec.c:4436) — advance the root plan.
+        TableFuncRoutineKind::JsonbTable => {
+            let TableFuncScanState { perTableCxt, opaque, .. } = state;
+            let per_table = perTableCxt
+                .as_ref()
+                .expect("JsonbTableRoutine: perTableCxt not initialized");
+            let cxt = json_exec_context(opaque);
+            jsonpath_exec::JsonTableFetchRow(per_table.mcx(), cxt)
+        }
     }
 }
 
 /// `routine->GetValue(state, colnum, typid, typmod, &isnull)`.
 fn routine_get_value<'mcx>(
-    _state: &mut TableFuncScanState<'mcx>,
+    state: &mut TableFuncScanState<'mcx>,
     kind: TableFuncRoutineKind,
     colnum: i32,
     typid: types_core::primitive::Oid,
     typmod: i32,
+    estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     match kind {
         // The XML provider errors before producing a value, so its
@@ -226,7 +273,10 @@ fn routine_get_value<'mcx>(
         TableFuncRoutineKind::XmlTable => {
             xml::XmlTableGetValue(colnum, typid, typmod).map(|(_d, isnull)| (Datum::null(), isnull))
         }
-        TableFuncRoutineKind::JsonbTable => Err(json_table_not_wired("GetValue")),
+        // C: `JsonTableGetValue` (jsonpath_exec.c:4452).
+        TableFuncRoutineKind::JsonbTable => {
+            json_table_get_value(state, colnum, estate)
+        }
     }
 }
 
@@ -244,10 +294,242 @@ fn routine_destroy_opaque(
             state.opaque.0 = None;
             r
         }
+        // C: `JsonTableDestroyOpaque` (jsonpath_exec.c:4174) — invalidate the
+        // context magic, then clear `state->opaque`.
         TableFuncRoutineKind::JsonbTable => {
+            {
+                let cxt = json_exec_context(&mut state.opaque);
+                jsonpath_exec::JsonTableDestroyOpaque(cxt)?;
+            }
             state.opaque.0 = None;
-            Err(json_table_not_wired("DestroyOpaque"))
+            Ok(())
         }
+    }
+}
+
+// ===========================================================================
+//        JSON_TABLE provider integration (jsonpath_exec.c JsonTable*)
+//
+// The JSON_TABLE row-pattern plan-walk machinery is owned by the
+// `jsonpath_exec` crate; the parts that touch executor state — building the
+// root `JsonTablePlan` from `tf->plan`, evaluating the PASSING / column
+// `JsonExpr` expressions via `ExecEvalExpr` — live here, where the
+// `TableFuncScanState` and the EState/`ExprContext` are reachable.
+// ===========================================================================
+
+/// C: `JsonTableInitOpaque` (jsonpath_exec.c:4109). Build the root
+/// `JsonTablePlan` from `tf->plan`, evaluate the PASSING argument expressions,
+/// hand both (plus the column count) to `jsonpath_exec::JsonTableInitOpaque`,
+/// and install the result in `state->opaque`.
+fn json_table_init_opaque<'mcx>(
+    state: &mut TableFuncScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // tf = castNode(TableFuncScan, ps->plan)->tablefunc — the plan node aliases
+    // the shared read-only plan tree (`'mcx`), so this borrow is independent of
+    // `&mut state`.
+    let tf: &'mcx types_nodes::primnodes::TableFunc<'mcx> = match state.ss.ps.plan {
+        Some(p) => &p.expect_tablefuncscan().tablefunc,
+        None => panic!("JsonTableInitOpaque: plan is not a TableFuncScan node"),
+    };
+
+    // rootplan = (JsonTablePlan *) tf->plan
+    let rootplan_node = tf
+        .plan
+        .as_deref()
+        .expect("JsonTableInitOpaque: tf->plan is NULL for JSON_TABLE");
+    let rootplan = build_json_table_plan(rootplan_node)?;
+
+    // cxt->colplanstates is sized to list_length(tf->colvalexprs).
+    let ncols = state.colvalexprs.len();
+
+    // Evaluate the PASSING arguments. je = castNode(JsonExpr, tf->docexpr);
+    // forboth(state->passingvalexprs, je->passing_names).
+    let args = eval_passing_args(state, tf, estate)?;
+
+    let cxt = jsonpath_exec::JsonTableInitOpaque(rootplan, args, ncols)?;
+    state.opaque = types_nodes::execnodes::Opaque(Some(alloc::boxed::Box::new(cxt)));
+    Ok(())
+}
+
+/// C: `JsonTableInitOpaque`'s PASSING-args loop (jsonpath_exec.c:4127-4153).
+/// `forboth(exprlc, state->passingvalexprs, namelc, je->passing_names)`:
+/// evaluate each PASSING expression and pair it with its name.
+fn eval_passing_args<'mcx>(
+    state: &mut TableFuncScanState<'mcx>,
+    tf: &types_nodes::primnodes::TableFunc<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<alloc::vec::Vec<jsonpath_exec::JsonTableVariable>> {
+    let mut args: alloc::vec::Vec<jsonpath_exec::JsonTableVariable> = alloc::vec::Vec::new();
+    if state.passingvalexprs.is_empty() {
+        return Ok(args);
+    }
+
+    // je = castNode(JsonExpr, tf->docexpr) — the document JsonExpr carries the
+    // PASSING argument names.
+    let passing_names: &[alloc::string::String] = match tf.docexpr.as_deref() {
+        Some(types_nodes::primnodes::Expr::JsonExpr(je)) => &je.passing_names,
+        _ => panic!(
+            "JsonTableInitOpaque: tf->docexpr is not a JsonExpr (required for JSON_TABLE PASSING)"
+        ),
+    };
+
+    debug_assert_eq!(state.passingvalexprs.len(), passing_names.len());
+    let econtext = node_econtext(state);
+
+    for i in 0..state.passingvalexprs.len() {
+        // var->typid = exprType(state->expr); var->typmod = exprTypmod(...).
+        // The ExprState's `.expr` is the original Expr; read its type triple.
+        let (typid, typmod) = {
+            let exprstate = state.passingvalexprs[i]
+                .as_ref()
+                .expect("JSON_TABLE PASSING: ExprState is NULL");
+            let expr = exprstate
+                .expr
+                .as_deref()
+                .expect("JSON_TABLE PASSING: ExprState has no expr");
+            let info = nodeFuncs::expr_type_info::call(expr)?;
+            (info.typid, info.typmod)
+        };
+
+        // var->value = ExecEvalExpr(state, ps->ps_ExprContext, &var->isnull).
+        let (value, isnull) = {
+            let exprstate = state.passingvalexprs[i]
+                .as_mut()
+                .expect("JSON_TABLE PASSING: ExprState is NULL");
+            execExpr::exec_eval_expr_switch_context::call(exprstate, econtext, estate)?
+        };
+
+        // var->name = pstrdup(name->sval).
+        let name = passing_names[i].as_bytes().to_vec();
+
+        args.push(jsonpath_exec::JsonTableVariable {
+            name,
+            typid,
+            typmod,
+            value: tuple_datum_to_word(&value),
+            isnull,
+        });
+    }
+
+    Ok(args)
+}
+
+/// Convert a `types_tuple::Datum` (the `ExecEvalExpr` result) into the bare-word
+/// `types_datum::Datum` the jsonpath `JsonPathVariable` carries.
+///
+/// A by-value scalar maps directly to its machine word. A by-reference PASSING
+/// value (text / jsonb / numeric …) cannot be carried by the bare word — that
+/// is the by-reference-`Datum` substrate gap also noted on the jsonpath_exec
+/// `json_item_from_datum` seam (which a by-ref PASSING var would dispatch into),
+/// so a real by-ref PASSING argument panics loudly until that lane lands.
+/// JSON_TABLE without PASSING (the common case) never reaches this arm.
+fn tuple_datum_to_word(d: &Datum<'_>) -> types_datum::Datum {
+    match d {
+        Datum::ByVal(w) => types_datum::Datum::from_usize(*w),
+        _ => panic!(
+            "JSON_TABLE PASSING: by-reference argument value — the by-reference-Datum \
+             substrate for varlena PASSING args is not yet landed"
+        ),
+    }
+}
+
+/// Recursively convert a `tf->plan` `Node` (a `JsonTablePathScan` /
+/// `JsonTableSiblingJoin` tree) into the `jsonpath_exec` crate's
+/// `JsonTablePlan` vocabulary, extracting the on-disk jsonpath bytes from each
+/// path `Const`.
+fn build_json_table_plan(
+    node: &types_nodes::nodes::Node<'_>,
+) -> PgResult<jsonpath_exec::JsonTablePlan> {
+    if let Some(scan) = node.as_jsontablepathscan() {
+        // planstate->path = DatumGetJsonPathP(scan->path->value->constvalue):
+        // the path is a `Const` of type `jsonpath` whose by-reference value is
+        // the full on-disk jsonpath varlena (header + body).
+        let path_const = scan
+            .path
+            .as_const()
+            .expect("JsonTablePathScan: path is not a Const node");
+        let path = path_const.constvalue.as_ref_bytes().to_vec();
+
+        let child = match scan.child.as_deref() {
+            Some(c) => Some(alloc::boxed::Box::new(build_json_table_plan(c)?)),
+            None => None,
+        };
+
+        Ok(jsonpath_exec::JsonTablePlan::PathScan(
+            backend_utils_adt_jsonpath_exec_seams::JsonTablePathScan {
+                path,
+                error_on_error: scan.errorOnError,
+                col_min: scan.colMin,
+                col_max: scan.colMax,
+                child,
+            },
+        ))
+    } else if let Some(join) = node.as_jsontablesiblingjoin() {
+        let lplan = alloc::boxed::Box::new(build_json_table_plan(&join.lplan)?);
+        let rplan = alloc::boxed::Box::new(build_json_table_plan(&join.rplan)?);
+        Ok(jsonpath_exec::JsonTablePlan::SiblingJoin(
+            backend_utils_adt_jsonpath_exec_seams::JsonTableSiblingJoin { lplan, rplan },
+        ))
+    } else {
+        Err(PgError::error(alloc::format!(
+            "invalid JsonTablePlan node tag {:?}",
+            node.tag()
+        )))
+    }
+}
+
+/// C: `JsonTableGetValue` (jsonpath_exec.c:4452). Locate the current row's
+/// source value (via `jsonpath_exec::JsonTableCurrentRow`), then:
+///   * if the row pattern is NULL → `(NULL, true)`;
+///   * if the column has a `JsonExpr` (`colvalexprs[colnum]`) → set
+///     `econtext->caseValue_datum` to the row pattern and `ExecEvalExpr`;
+///   * else (ORDINAL column) → `Int32GetDatum(planstate->ordinal)`.
+fn json_table_get_value<'mcx>(
+    state: &mut TableFuncScanState<'mcx>,
+    colnum: i32,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    // Row source from the owning plan-state (jsonpath_exec owns the plan-walk).
+    let row = {
+        let cxt = json_exec_context(&mut state.opaque);
+        jsonpath_exec::JsonTableCurrentRow(cxt, colnum)?
+    };
+
+    // Row pattern value is NULL.
+    if row.isnull {
+        return Ok((Datum::null(), true));
+    }
+
+    let econtext = node_econtext(state);
+
+    // Evaluate JsonExpr if the column has one; otherwise it is an ORDINAL column.
+    match state.colvalexprs[colnum as usize].as_mut() {
+        Some(colvalexpr) => {
+            // Pass the row pattern value via CaseTestExpr, saving/restoring the
+            // econtext's caseValue around the evaluation.
+            let row_value = Datum::ByRef(mcx::slice_in(estate.es_query_cxt, &row.value)?);
+
+            let (saved_datum, saved_isnull) = {
+                let ec = estate.ecxt_mut(econtext);
+                let prev = (ec.caseValue_datum.clone(), ec.caseValue_isNull);
+                ec.caseValue_datum = row_value;
+                ec.caseValue_isNull = false;
+                prev
+            };
+
+            let result =
+                execExpr::exec_eval_expr_switch_context::call(colvalexpr, econtext, estate);
+
+            // Restore caseValue even on error (mirrors C's unconditional restore).
+            let ec = estate.ecxt_mut(econtext);
+            ec.caseValue_datum = saved_datum;
+            ec.caseValue_isNull = saved_isnull;
+
+            result
+        }
+        // ORDINAL column: result = Int32GetDatum(planstate->ordinal).
+        None => Ok((Datum::from_i32(row.ordinal), false)),
     }
 }
 
@@ -609,7 +891,7 @@ fn tfunc_fetch_body<'mcx>(
     //   routine->InitOpaque(tstate,
     //       tstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor->natts);
     let natts = scan_slot_natts(tstate, estate)?;
-    routine::routine_init_opaque::call(tstate, kind, natts)?;
+    routine::routine_init_opaque::call(tstate, kind, natts, estate)?;
 
     // If evaluating the document expression returns NULL, the table expression
     // is empty and we return immediately.
@@ -846,6 +1128,7 @@ fn tfuncLoadRows<'mcx>(
                     colno as i32,
                     att.atttypid,
                     att.atttypmod,
+                    estate,
                 )?;
 
                 // No value? Evaluate and apply the default, if any.

@@ -1,8 +1,9 @@
 //! Seam declarations for the `backend-utils-adt-jsonpath-exec` unit
 //! (`utils/adt/jsonpath_exec.c`): the jsonpath_exec-specific externals whose
 //! signatures carry this unit's local node/value types — the `JsonItemFromDatum`
-//! `Datum`→`JsonbValue` coercions and the JSON_TABLE executor/`ExprState`/node
-//! boundary (`init_table_func`/`eval_column`).
+//! `Datum`→`JsonbValue` coercions. The JSON_TABLE plan vocabulary
+//! (`JsonTablePlan`/`JsonTableVariable`) is also defined here so consumers can
+//! name it without depending on the `types-*` stack.
 //!
 //! The datetime substrate (`parse_datetime` / `compareDatetime` / the
 //! `executeDateTimeMethod` cast switch) is NOT seamed — jsonpath_exec.c is a
@@ -18,9 +19,7 @@
 //! and `jspConvertRegexFlags` (the jsonpath type crate, a direct dep).
 //!
 //! Each remaining seam defaults to a loud panic until its owning unit installs
-//! it. The seams whose signatures carry this module's local node-tree types
-//! (`JsonTablePlan` / `JsonTableVariable`) — `init_table_func` — are declared
-//! here because those types are not in the layered `types-*` stack.
+//! it.
 
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
@@ -126,23 +125,12 @@ pub struct JsonTableVariable {
     pub isnull: bool,
 }
 
-seam_core::seam!(
-    /// C: build the root [`JsonTablePlan`] from `tf->plan`, the PASSING argument
-    /// variables (evaluating each via `ExecEvalExpr`), and the total number of
-    /// columns (`list_length(tf->colvalexprs)`).
-    pub fn init_table_func() -> PgResult<(JsonTablePlan, Vec<JsonTableVariable>, usize)>
-);
-
-seam_core::seam!(
-    /// C: `JsonTableGetValue`'s expression-evaluation arm — evaluate column
-    /// `colnum`'s `JsonExpr` (`ExecEvalExpr`) against the current row pattern
-    /// `current_value` (the row-pattern jsonb varlena bytes), returning
-    /// `(Datum, isnull)`. Returns `Ok(None)` when the column has no expression
-    /// (an ORDINAL column).
-    pub fn eval_column(
-        colnum: i32,
-        typid: Oid,
-        typmod: i32,
-        current_value: Vec<u8>
-    ) -> PgResult<core::option::Option<(Datum, bool)>>
-);
+// The JSON_TABLE executor/`ExprState` boundary is NOT a seam: the executor
+// (`backend-executor-nodeTableFuncscan`) depends on the jsonpath_exec crate
+// directly (no cycle — jsonpath_exec is a leaf adt unit) and orchestrates the
+// JSON_TABLE row-pattern builder. It builds the root [`JsonTablePlan`] from
+// `tf->plan`, evaluates the PASSING / column `JsonExpr` expressions
+// (`ExecEvalExpr`) itself, and calls jsonpath_exec's `JsonTableInitOpaque`
+// (plan + PASSING vars + column count) and `JsonTableCurrentRow` (row-pattern
+// bytes + ordinal) entry points. So `init_table_func` / `eval_column` callback
+// seams are not needed; only the shared plan vocabulary below is.

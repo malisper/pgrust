@@ -16,7 +16,10 @@ backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-sea
 backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
 backend-executor-tablefuncRoutine-seams = { path = "../backend-executor-tablefuncRoutine-seams" }
 backend-nodes-core-seams = { path = "../backend-nodes-core-seams" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+backend-utils-adt-jsonpath-exec = { path = "../backend-utils-adt-jsonpath-exec" }
+backend-utils-adt-jsonpath-exec-seams = { path = "../backend-utils-adt-jsonpath-exec-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-adt-xml = { path = "../backend-utils-adt-xml" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }

@@ -27,18 +27,18 @@
 //!    `get_database_encoding`).
 //!
 //!  * The remaining jsonpath_exec.c-private `Datum`->`JsonbValue` coercion
-//!    (`json_item_from_datum`, the varlena/by-ref arms) and the JSON_TABLE
-//!    executor/`ExprState` boundary (`init_table_func` / `eval_column`), which
-//!    still bottom out on the by-ref-`Datum` detoast lane and the
-//!    `TableFunc`/`JsonExpr` `ExecEvalExpr` executor substrate respectively — a
-//!    call panics loudly until those land, which is correct.
+//!    (`json_item_from_datum`, the varlena/by-ref arms), which still bottoms
+//!    out on the by-ref-`Datum` detoast lane — a call panics loudly until that
+//!    lands, which is correct.
 //!
-//! This unit also owns the `JsonbTable` half of the `TableFuncRoutine` vtable
-//! dispatch (jsonpath_exec.c's `JsonbTableRoutine`); `init_seams()` installs
-//! those `routine_*` seams (see [`crate::routine_install`]). Its own jsonpath_exec
-//! seams have no inward contract.
+//! The `JsonbTable` half of the `TableFuncRoutine` vtable dispatch
+//! (jsonpath_exec.c's `JsonbTableRoutine`) is driven by
+//! `backend-executor-nodeTableFuncscan` — the single kind-dispatching owner of
+//! the routine seams — which calls this crate's `JsonTable*` entry points
+//! (`JsonTableInitOpaque` / `SetDocument` / `FetchRow` / `JsonTableCurrentRow` /
+//! `DestroyOpaque`) directly. This unit's own jsonpath_exec seams have no inward
+//! contract.
 pub fn init_seams() {
-    crate::routine_install::install_routines();
     // Register the scalar (non-SRF) jsonpath_exec.c predicates / query helpers
     // into the fmgr-core builtin table (C: `fmgr_builtins[]`). The set-returning
     // `jsonb_path_query` / `_tz` are registered by the SRF executor-frame lane.

@@ -17,8 +17,6 @@ use mcx::Mcx;
 
 use backend_utils_error::{ereport, PgError, PgResult};
 use types_error::ERROR;
-use types_datum::Datum;
-use types_core::Oid;
 
 use crate::seam;
 use seam::{JsonTablePlan, JsonTableVariable};
@@ -135,8 +133,18 @@ fn vars_from_table_vars(vars: Vec<JsonTableVariable>) -> JsonPathVars {
 
 /// C: `JsonTableInitOpaque` (jsonpath_exec.c:4109) — `TableFuncRoutine` callback.
 /// Returns the opaque context the executor stores in `state->opaque`.
-pub fn JsonTableInitOpaque(_natts: i32) -> PgResult<JsonTableExecContext> {
-    let (rootplan, args, ncols) = seam::init_table_func::call()?;
+///
+/// The executor (`nodeTableFuncscan`, holder of the `TableFuncScanState`) builds
+/// the root [`JsonTablePlan`] from `tf->plan`, evaluates the PASSING argument
+/// expressions (`state->passingvalexprs` via `ExecEvalExpr`) into
+/// `args`, and supplies the column count (`list_length(tf->colvalexprs)`),
+/// because those touch executor state / the expression evaluator. The
+/// row-pattern plan-walk machinery below is wholly in-crate.
+pub fn JsonTableInitOpaque(
+    rootplan: JsonTablePlan,
+    args: Vec<JsonTableVariable>,
+    ncols: usize,
+) -> PgResult<JsonTableExecContext> {
     let args = vars_from_table_vars(args);
 
     let mut colplan_paths: Vec<Vec<ChildStep>> = vec![Vec::new(); ncols];
@@ -411,36 +419,43 @@ pub fn JsonTableFetchRow(mcx: Mcx<'_>, cxt: &mut JsonTableExecContext) -> PgResu
     JsonTablePlanNextRow(mcx, &mut cxt.rootplanstate)
 }
 
-/// C: `JsonTableGetValue` (jsonpath_exec.c:4452) — `TableFuncRoutine` callback.
-/// Returns `(Datum, isnull)` for column `colnum` of the current row.
-pub fn JsonTableGetValue(
+/// The current-row source data for a JSON_TABLE column, extracted from the
+/// owning plan-state (C: `cxt->colplanstates[colnum]->current` + `->ordinal`).
+///
+/// This is the pure-data half of C's `JsonTableGetValue`: the executor
+/// (`nodeTableFuncscan`) holds the column `JsonExpr` `ExprState`s
+/// (`colvalexprs`) and the `ExprContext`, so it performs the `ExecEvalExpr`
+/// (with `caseValue_datum` = the row pattern) and the ORDINAL-column fallback
+/// itself; this crate only supplies what it owns — the row-pattern jsonb bytes,
+/// its null-ness, and the ordinal counter.
+#[derive(Clone, Debug)]
+pub struct JsonTableRowValue {
+    /// C: `current->value` as the row-pattern jsonb varlena bytes (valid only
+    /// when `!isnull`).
+    pub value: Vec<u8>,
+    /// C: `current->isnull` — the row pattern value is NULL.
+    pub isnull: bool,
+    /// C: `planstate->ordinal` — used for an ORDINAL column.
+    pub ordinal: i32,
+}
+
+/// C: `JsonTableGetValue` (jsonpath_exec.c:4452), data half — locate column
+/// `colnum`'s owning plan-state and report its current row-pattern value, its
+/// null-ness, and the ordinal counter.
+pub fn JsonTableCurrentRow(
     cxt: &mut JsonTableExecContext,
     colnum: i32,
-    typid: Oid,
-    typmod: i32,
-) -> PgResult<(Datum, bool)> {
+) -> PgResult<JsonTableRowValue> {
     check_magic(cxt, "JsonTableGetValue")?;
 
     // Locate the column's owning plan-state via the recorded path.
     let path = cxt.colplan_paths[colnum as usize].clone();
     let planstate = follow_path(&cxt.rootplanstate, &path)?;
-    let current_isnull = planstate.current.isnull;
-    let ordinal = planstate.ordinal;
-    let current_value = planstate.current.value.clone();
-
-    // Row pattern value is NULL.
-    if current_isnull {
-        return Ok((Datum::null(), true));
-    }
-
-    // Evaluate JsonExpr, or compute the ORDINAL value.
-    match seam::eval_column::call(colnum, typid, typmod, current_value)? {
-        Some((datum, isnull)) => Ok((datum, isnull)),
-        None => {
-            // ORDINAL column.
-            Ok((Datum::from_i32(ordinal), false))
-        }
-    }
+    Ok(JsonTableRowValue {
+        value: planstate.current.value.clone(),
+        isnull: planstate.current.isnull,
+        ordinal: planstate.ordinal,
+    })
 }
 
 /// C: `JsonTableDestroyOpaque` (jsonpath_exec.c:4174) — invalidate the context.
