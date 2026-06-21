@@ -1087,10 +1087,63 @@ fn get_rule_expr_e(
         Expr::NextValueExpr(_) => {
             return Err(deferred("NextValueExpr (generate_relation_name; catalog)"))
         }
-        Expr::InferenceElem(_) => {
-            return Err(deferred(
-                "InferenceElem (get_opclass_name / get_opclass_input_type; catalog)",
-            ))
+        Expr::InferenceElem(iexpr) => {
+            // InferenceElem can only refer to target relation, so a prefix is
+            // not useful, and indeed would cause parse errors.
+            let save_varprefix = context.varprefix;
+            context.varprefix = false;
+
+            // Parenthesize the element unless it's a simple Var or a bare
+            // function call.  Follows pg_get_indexdef_worker().
+            //   need_parens = !IsA(iexpr->expr, Var);
+            //   if (IsA(iexpr->expr, FuncExpr) &&
+            //       ((FuncExpr *) iexpr->expr)->funcformat == COERCE_EXPLICIT_CALL)
+            //       need_parens = false;
+            let inner = iexpr.expr.as_deref();
+            let mut need_parens = !matches!(inner, Some(Expr::Var(_)));
+            if let Some(Expr::FuncExpr(f)) = inner {
+                if f.funcformat == types_nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL {
+                    need_parens = false;
+                }
+            }
+
+            if need_parens {
+                ch_(context, b'(')?;
+            }
+            if let Some(arg) = inner {
+                get_rule_expr_e(arg, context, false)?;
+            }
+            if need_parens {
+                ch_(context, b')')?;
+            }
+
+            context.varprefix = save_varprefix;
+
+            // if (iexpr->infercollid)
+            //     appendStringInfo(buf, " COLLATE %s",
+            //                      generate_collation_name(iexpr->infercollid));
+            if oid_is_valid(iexpr.infercollid) {
+                let mcx = context.buf.allocator();
+                let coll = generate_collation_name(mcx, iexpr.infercollid)?;
+                str_(context, " COLLATE ")?;
+                str_(context, coll.as_str())?;
+            }
+
+            // Add the operator class name, if not default.
+            // if (iexpr->inferopclass) {
+            //     inferopcinputtype = get_opclass_input_type(iexpr->inferopclass);
+            //     get_opclass_name(inferopclass, inferopcinputtype, buf);
+            // }
+            if oid_is_valid(iexpr.inferopclass) {
+                let mcx = context.buf.allocator();
+                let inferopcinputtype =
+                    backend_utils_cache_lsyscache_seams::get_opclass_input_type::call(
+                        iexpr.inferopclass,
+                    )?;
+                let mut opcbuf = alloc::string::String::new();
+                crate::get_opclass_name(mcx, &mut opcbuf, iexpr.inferopclass, inferopcinputtype)?;
+                str_(context, &opcbuf)?;
+            }
         }
         Expr::JsonValueExpr(_) => {
             return Err(deferred("JsonValueExpr (get_json_format; JSON deparser family)"))
