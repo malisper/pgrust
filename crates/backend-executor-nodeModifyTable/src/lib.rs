@@ -250,18 +250,32 @@ pub fn init_seams() {
             .ps
             .ps_ExprContext
             .expect("ON CONFLICT DO UPDATE node has an expression context");
+        // The pooled ResultRelInfo and the EState are aliased by `&mut estate`,
+        // so detach the compiled WHERE-clause ExprState out of the pool to
+        // satisfy the borrow checker, run ExecQual, then restore it. A shallow
+        // `.clone()` of the ExprState would NOT work: `ExprState::clone` is a
+        // handle-only clone that resets the compiled `steps`/`resultslot` to
+        // None, so ExecQual would evaluate an empty program. The qual's
+        // identity/contents are unchanged by evaluation, so take/restore is
+        // sound (same pattern as exec_project_oc below).
         let mut where_clause = estate
-            .result_rel(rri)
+            .result_rel_mut(rri)
             .ri_onConflict
-            .as_deref()
-            .and_then(|oc| oc.oc_WhereClause.as_ref())
-            .map(|w| w.clone());
-        match where_clause.as_mut() {
+            .as_deref_mut()
+            .and_then(|oc| oc.oc_WhereClause.take());
+        let result = match where_clause.as_mut() {
             Some(state) => {
                 backend_executor_execExpr_seams::exec_qual::call(state, econtext, estate)
             }
+            // NULL WHERE clause is always-true.
             None => Ok(true),
+        };
+
+        if let Some(oc) = estate.result_rel_mut(rri).ri_onConflict.as_deref_mut() {
+            oc.oc_WhereClause = where_clause;
         }
+
+        result
     });
 
     // `ExecProject(resultRelInfo->ri_onConflict->oc_ProjInfo)` — project the new
