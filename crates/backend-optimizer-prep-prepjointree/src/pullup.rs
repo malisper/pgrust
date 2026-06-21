@@ -918,8 +918,24 @@ fn pull_up_simple_subquery<'mcx>(
     }
 
     // And now add subquery's AppendRelInfos to our list.
+    //
+    // The `translated_vars` are `NodeId` handles into the *subroot's* node arena
+    // (#274); in C they are plain `Node *` pointers that stay valid across the
+    // list concat, but here root and subroot own *separate* arenas, so each
+    // referenced Var must be re-interned into the parent root's arena and its
+    // handle rewritten — otherwise the handle dangles (OOB) or silently resolves
+    // to an unrelated arena slot in the parent.
     {
-        let appinfos = core::mem::take(&mut subroot.append_rel_list);
+        let mut appinfos = core::mem::take(&mut subroot.append_rel_list);
+        for ai in appinfos.iter_mut() {
+            for id in ai.translated_vars.iter_mut() {
+                if *id == NodeId::default() {
+                    continue;
+                }
+                let expr = subroot.node(*id).clone_in(mcx)?;
+                *id = root.alloc_node(expr);
+            }
+        }
         for ai in appinfos {
             root.append_rel_list.push(ai);
         }
