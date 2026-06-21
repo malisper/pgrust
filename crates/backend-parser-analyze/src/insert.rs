@@ -288,6 +288,21 @@ fn transformInsertSelect<'mcx>(
 
     let select_query = crate::transformStmt(mcx, &mut sub_pstate, select_stmt_node)?;
 
+    // The owned model holds `parentParseState` by value (a deep copy of the
+    // INSERT pstate's spine), so a SELECT-privilege mark or `cterefcount++` that
+    // the sub-SELECT applies to an outer-level RTE / CTE (walking up
+    // `parentParseState`) lands on the *clone*, not the live `pstate`. C bumps
+    // the single shared node directly. Merge the clone's marks/refcounts back
+    // into the live `pstate` before the child state is freed — the same step
+    // `parse_sub_analyze` performs for a general subquery. Without the CTE merge,
+    // a WITH attached to `INSERT ... SELECT` whose only reference is in the
+    // SELECT keeps `cterefcount == 0`, and the planner drops the CTE plan ("no
+    // plan was made for CTE").
+    if let Some(cloned_parent) = sub_pstate.parentParseState.as_deref() {
+        crate::merge_perminfo_marks(mcx, pstate, cloned_parent)?;
+        crate::merge_cte_refcounts(pstate, cloned_parent);
+    }
+
     backend_parser_small1::free_parsestate(sub_pstate)?;
 
     // The grammar should have produced a SELECT.
