@@ -1071,8 +1071,16 @@ fn estimate_setop_child_groups<'mcx>(
         let cheapest = root.rel(rel).cheapest_total_path.expect("no cheapest for group est");
         root.path(cheapest).base().rows
     };
-    // Read subroot->parse for grouping/aggregation flags + tlist exprs.
-    let subroot = root.rel_mut(rel).subroot.0.take().expect("no subroot for group est");
+    // Read subroot->parse for grouping/aggregation flags + tlist exprs. C runs
+    // estimate_num_groups over the SUBROOT, using the subroot->parse's ORIGINAL
+    // targetlist expressions (not subroot->processed_tlist nor the imported
+    // child_tlist, which can hold "varno 0" Vars from generate_append_tlist or a
+    // setop junk-flag column that would confuse estimate_num_groups). Those
+    // expressions reference the subquery's own range table, so they must be
+    // resolved against the subroot — passing the outer root would treat a leaf
+    // Var's varno/varattno as an index into the setop subquery RTE and fail
+    // ("subquery does not have attribute N").
+    let mut subroot = root.rel_mut(rel).subroot.0.take().expect("no subroot for group est");
     let parse_id = subroot.parse;
     let (has_grouping, group_exprs): (bool, Vec<Expr>) = {
         let parse = run.resolve(parse_id);
@@ -1098,19 +1106,25 @@ fn estimate_setop_child_groups<'mcx>(
         };
         (hg, exprs)
     };
-    root.rel_mut(rel).subroot.0 = Some(subroot);
 
     if has_grouping {
+        root.rel_mut(rel).subroot.0 = Some(subroot);
         return Ok(cheapest_rows);
     }
-    // estimate_num_groups runs over the SUBROOT (C uses subroot). We estimate
-    // over the outer root's view of the imported tlist exprs instead — but the
-    // group exprs reference the subquery's range table. Allocate the exprs into
-    // root's arena as the group_exprs handles.
-    let group_expr_ids: Vec<NodeId> = group_exprs.into_iter().map(|e| root.alloc_node(e)).collect();
-    backend_utils_adt_selfuncs_seams::estimate_num_groups::call(
-        run, root, &group_expr_ids, cheapest_rows, None,
-    )
+
+    // Allocate the grouping exprs into the SUBROOT's node arena and estimate
+    // against the subroot, matching C (estimate_num_groups(subroot, ...)).
+    let group_expr_ids: Vec<NodeId> =
+        group_exprs.into_iter().map(|e| subroot.alloc_node(e)).collect();
+    let result = backend_utils_adt_selfuncs_seams::estimate_num_groups::call(
+        run,
+        &mut subroot,
+        &group_expr_ids,
+        cheapest_rows,
+        None,
+    );
+    root.rel_mut(rel).subroot.0 = Some(subroot);
+    result
 }
 
 /// Find an existing `UPPERREL_FINAL` rel in a subroot (it was created during
