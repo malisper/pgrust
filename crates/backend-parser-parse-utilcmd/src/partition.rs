@@ -9,11 +9,21 @@
 //! `transformPartitionBound` is routed through the outward seam, and
 //! `transformPartitionCmd` reads the parent's relkind through that same path.
 
+use alloc::string::ToString;
+
 use types_core::Oid;
-use types_error::PgResult;
+use types_error::{PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR};
 
 use types_nodes::nodes::{ntag, Node};
 use types_nodes::parsestmt::ParseState;
+
+use types_tuple::access::{
+    RELKIND_INDEX, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
+};
+
+use backend_utils_cache_lsyscache::relation::get_rel_name;
+use backend_utils_cache_lsyscache_seams::get_rel_relkind;
+use backend_utils_error::ereport;
 
 use backend_parser_parse_utilcmd_outward_seams as sx;
 
@@ -50,9 +60,72 @@ pub fn transformPartitionCmd<'mcx>(
         _ => unreachable!("transformPartitionCmd: not a PartitionCmd node: {}", cmd.node_tag()),
     };
 
-    if let Some(bound) = bound {
-        cxt.partbound = Some(transformPartitionBound(mcx, &mut cxt.pstate, cxt.rel_oid, bound)?);
-        // NB: `&mut cxt.pstate` deref-coerces `PgBox<ParseState>` to `&mut ParseState`.
+    // switch (parentRel->rd_rel->relkind) — the parent relation is already open
+    // and locked, so reading the relkind through the syscache is consistent.
+    let relkind = get_rel_relkind::call(cxt.rel_oid)?;
+    match relkind {
+        RELKIND_PARTITIONED_TABLE => {
+            // transform the partition bound, if any
+            if let Some(bound) = bound {
+                cxt.partbound =
+                    Some(transformPartitionBound(mcx, &mut cxt.pstate, cxt.rel_oid, bound)?);
+                // NB: `&mut cxt.pstate` deref-coerces `PgBox<ParseState>` to
+                // `&mut ParseState`.
+            }
+            Ok(())
+        }
+        RELKIND_PARTITIONED_INDEX => {
+            // A partitioned index cannot have a partition bound set. ALTER INDEX
+            // prevents that with its grammar, but not ALTER TABLE.
+            if bound.is_some() {
+                return partition_cmd_error(mcx, cxt.rel_oid, "is not a partitioned table");
+            }
+            Ok(())
+        }
+        RELKIND_RELATION => {
+            // the table must be partitioned
+            partition_cmd_error(mcx, cxt.rel_oid, "is not partitioned table")
+        }
+        RELKIND_INDEX => {
+            // the index must be partitioned
+            partition_cmd_error(mcx, cxt.rel_oid, "is not partitioned index")
+        }
+        _ => {
+            // parser shouldn't let this case through
+            Err(ereport(ERROR)
+                .errmsg_internal(alloc::format!(
+                    "\"{}\" is not a partitioned table or index",
+                    rel_name_or_empty(mcx, cxt.rel_oid)?
+                ))
+                .into_error())
+        }
     }
-    Ok(())
+}
+
+/// Build the `errcode(ERRCODE_INVALID_OBJECT_DEFINITION)` errors raised by the
+/// relkind dispatch in `transformPartitionCmd`. `kind` selects the message form:
+/// `"is not a partitioned table"` (partitioned index), `"is not partitioned
+/// table"` (plain relation → `table "%s" is not partitioned`), or `"is not
+/// partitioned index"` (plain index → `index "%s" is not partitioned`).
+fn partition_cmd_error<'mcx>(mcx: mcx::Mcx<'mcx>, relid: Oid, kind: &str) -> PgResult<()> {
+    let relname = rel_name_or_empty(mcx, relid)?;
+    let msg = match kind {
+        "is not partitioned table" => alloc::format!("table \"{relname}\" is not partitioned"),
+        "is not partitioned index" => alloc::format!("index \"{relname}\" is not partitioned"),
+        _ => alloc::format!("\"{relname}\" is not a partitioned table"),
+    };
+    Err(ereport(ERROR)
+        .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
+        .errmsg(msg)
+        .into_error())
+}
+
+/// `RelationGetRelationName(parentRel)` — the parent relation's name.
+fn rel_name_or_empty<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    relid: Oid,
+) -> PgResult<alloc::string::String> {
+    Ok(get_rel_name(mcx, relid)?
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default())
 }
