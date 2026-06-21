@@ -9522,6 +9522,7 @@ dependencies = [
  "backend-catalog-catalog",
  "backend-catalog-objectaddress-seams",
  "backend-catalog-partition-seams",
+ "backend-commands-matview-seams",
  "backend-commands-trigger-seams",
  "backend-executor-execAmi",
  "backend-executor-execAmi-seams",

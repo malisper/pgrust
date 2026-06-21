@@ -1788,10 +1788,14 @@ fn CheckValidResultRel<'mcx>(
         }
     } else if relkind == RELKIND_MATVIEW {
         // Okay only when MatViewIncrementalMaintenanceIsEnabled().
-        Err(unported(
-            "CheckValidResultRel: materialized-view target \
-             (MatViewIncrementalMaintenanceIsEnabled is not wired here)",
-        ))
+        if !backend_commands_matview_seams::MatViewIncrementalMaintenanceIsEnabled::call() {
+            Err(types_error::PgError::error(alloc::format!(
+                "cannot change materialized view \"{relname}\""
+            ))
+            .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+        } else {
+            Ok(())
+        }
     } else if relkind == RELKIND_FOREIGN_TABLE {
         // Okay only if the FDW supports the operation; the FDW routine vtable is
         // not carried on the trimmed ResultRelInfo.
@@ -2035,7 +2039,7 @@ fn CheckValidRowMarkRel<'mcx>(
     rel: &types_rel::Relation<'mcx>,
     mark_type: types_nodes::nodelockrows::RowMarkType,
 ) -> PgResult<()> {
-    use types_nodes::nodelockrows::{ROW_MARK_COPY, ROW_MARK_REFERENCE};
+    use types_nodes::nodelockrows::ROW_MARK_REFERENCE;
     use types_tuple::access::{
         RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
         RELKIND_SEQUENCE, RELKIND_TOASTVALUE, RELKIND_VIEW,
@@ -2058,20 +2062,21 @@ fn CheckValidRowMarkRel<'mcx>(
         ))
         .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
     } else if relkind == RELKIND_VIEW {
-        // Allow referencing a view (the planner expands it), but not locking.
-        if mark_type != ROW_MARK_REFERENCE && mark_type != ROW_MARK_COPY {
+        // Should not get here; planner should have expanded the view.
+        Err(types_error::PgError::error(alloc::format!(
+            "cannot lock rows in view \"{relname}\""
+        ))
+        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
+    } else if relkind == RELKIND_MATVIEW {
+        // Allow referencing a matview, but not actual locking clauses.
+        if mark_type != ROW_MARK_REFERENCE {
             Err(types_error::PgError::error(alloc::format!(
-                "cannot lock rows in view \"{relname}\""
+                "cannot lock rows in materialized view \"{relname}\""
             ))
             .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
         } else {
             Ok(())
         }
-    } else if relkind == RELKIND_MATVIEW {
-        Err(types_error::PgError::error(alloc::format!(
-            "cannot lock rows in materialized view \"{relname}\""
-        ))
-        .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE))
     } else if relkind == RELKIND_FOREIGN_TABLE {
         // Okay only if the FDW supports it; no FDW row-locking is modelled.
         Err(types_error::PgError::error(alloc::format!(
