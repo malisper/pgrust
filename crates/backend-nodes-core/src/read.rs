@@ -561,6 +561,17 @@ impl Drop for StrtokGuard {
     }
 }
 
+/// Run `f` with the shared `pg_strtok` cursor pointed at `s`, restoring the
+/// prior cursor afterward (re-entrant, exactly like `stringToNodeInternal`'s
+/// save/restore). This is the cursor-driver primitive a non-`Node` top-level
+/// reader (e.g. the worker plan-shipping `PlannedStmt` reader, which is not a
+/// `Node` variant in the trimmed model so cannot route through `stringToNode`)
+/// uses to drive `pg_strtok`/`node_read` itself.
+pub fn with_strtok<R>(s: &str, f: impl FnOnce() -> R) -> R {
+    let _guard = StrtokGuard::install(s);
+    f()
+}
+
 /// `stringToNodeInternal(const char *str, bool restore_loc_fields)` (read.c).
 ///
 /// Save/restore the `pg_strtok` cursor around `nodeRead(NULL, 0)`, so the read

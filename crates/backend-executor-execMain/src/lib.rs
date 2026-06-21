@@ -3870,6 +3870,51 @@ pub fn init_seams() {
     sup::query_desc_source_text_owned::set(|qd| Ok(qd.source_text_owned()));
     sup::set_query_desc_jit_flags_owned::set(|qd, jit_flags| qd.set_jit_flags(jit_flags));
     sup::query_desc_estate_has_jit_owned::set(|qd| qd.estate_has_jit());
+    // The worker plan-shipping `QueryDesc` reconstruction
+    // (`ExecParallelGetQueryDesc`): `stringToNode(pstmtspace)` -> CreateQueryDesc
+    // with GetActiveSnapshot()/InvalidSnapshot. The `PlannedStmt` reader is the
+    // readfuncs plan-ship leg; this crate owns `CreateQueryDesc`.
+    sup::create_parallel_query_desc::set(create_parallel_query_desc);
+}
+
+/// `ExecParallelGetQueryDesc` body — `(PlannedStmt *) stringToNode(pstmtspace)`
+/// then `CreateQueryDesc(pstmt, queryString, GetActiveSnapshot(),
+/// InvalidSnapshot, receiver, RestoreParamList(...), NULL, instrument_options)`.
+///
+/// The `PlannedStmt` is parsed into `mcx` (the worker's executor/top context);
+/// `CreateQueryDesc` deep-copies it into the `QueryDesc`'s own per-query context
+/// (a child of `mcx`'s context, like C's `CurrentMemoryContext`), so the
+/// temporary parse allocation can be reclaimed with `mcx`.
+fn create_parallel_query_desc<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    pstmt_text: alloc::string::String,
+    query_string: alloc::string::String,
+    receiver: types_execparallel::DestReceiverHandle,
+    params: ParamListInfo,
+    instrument_options: i32,
+) -> PgResult<QueryDesc> {
+    // pstmt = (PlannedStmt *) stringToNode(pstmtspace);
+    let pstmt = backend_nodes_readfuncs_seams::string_to_planned_stmt::call(mcx, &pstmt_text)?;
+
+    // GetActiveSnapshot() — the leader's active snapshot was restored into the
+    // worker's snapshot stack by InitializeParallelDSM / RestoreSnapshot.
+    let snapshot = backend_utils_time_snapmgr_seams::get_active_snapshot::call()?;
+
+    // The parallel-executor `DestReceiverHandle` (types_execparallel) and the
+    // executor's `dest.h` `DestReceiverHandle` (types_nodes::parsestmt) are the
+    // same live `DestReceiver *` token under two homes; carry the value across.
+    let dest = DestReceiverHandle(receiver.0 as u64);
+
+    CreateQueryDesc(
+        mcx.context(),
+        &pstmt,
+        &query_string,
+        snapshot,
+        None, // InvalidSnapshot crosscheck_snapshot
+        dest,
+        params,
+        instrument_options,
+    )
 }
 
 // ===========================================================================

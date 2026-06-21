@@ -23,6 +23,7 @@ types-error = { path = "../types-error" }
 types-core = { path = "../types-core" }
 types-execparallel = { path = "../types-execparallel" }
 backend-executor-execParallel-support-seams = { path = "../backend-executor-execParallel-support-seams" }
+backend-nodes-readfuncs-seams = { path = "../backend-nodes-readfuncs-seams" }
 types-nodes = { path = "../types-nodes" }
 types-rel = { path = "../types-rel" }
 types-acl = { path = "../types-acl" }

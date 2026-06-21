@@ -22,7 +22,23 @@
 
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
+use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::Node;
+
+seam_core::seam!(
+    /// `(PlannedStmt *) stringToNode(pstmtspace)` (execParallel.c
+    /// `ExecParallelGetQueryDesc`) — reconstruct a `PlannedStmt` from its
+    /// `nodeToString` text. `PlannedStmt` is not a `Node` enum variant in the
+    /// trimmed model, so it cannot route through the `parse_node_string`
+    /// (`Node`-returning) dispatch; this dedicated reader drives the shared
+    /// `pg_strtok` cursor itself (`read.c`'s `with_strtok`), reads the opening
+    /// `{ PLANNEDSTMT`, and reverses `ExecSerializePlan`'s `_outPlannedStmt`
+    /// field-for-field. Allocated in `mcx`. `Err` carries OOM / a parse error.
+    pub fn string_to_planned_stmt<'mcx>(
+        mcx: Mcx<'mcx>,
+        text: &str,
+    ) -> PgResult<PgBox<'mcx, PlannedStmt<'mcx>>>
+);
 
 seam_core::seam!(
     /// `parseNodeString()` (`nodes/readfuncs.c`): with the shared `pg_strtok`

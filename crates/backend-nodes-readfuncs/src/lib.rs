@@ -63,6 +63,7 @@ pub(crate) mod read_expr_family;
 pub(crate) mod read_parse_family;
 pub(crate) mod read_plan_family;
 pub(crate) mod read_ddl_family;
+pub mod read_plannedstmt;
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -93,7 +94,7 @@ pub(crate) fn elog_error(message: impl Into<String>) -> PgError {
 
 /// Pull the next token off the shared cursor, erroring on premature EOF (C's
 /// readers assume a well-formed string; a missing token is a malformed node).
-fn next_token<'a>() -> PgResult<Token<'a>> {
+pub(crate) fn next_token<'a>() -> PgResult<Token<'a>> {
     read::pg_strtok().ok_or_else(|| elog_error("unexpected end of node string"))
 }
 
@@ -786,6 +787,9 @@ pub fn parse_node_string<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, Node<'mcx
 /// panic `string_to_node` of a `{...}`-framed node would otherwise hit.
 pub fn init_seams() {
     backend_nodes_readfuncs_seams::parse_node_string::set(parse_node_string);
+    backend_nodes_readfuncs_seams::string_to_planned_stmt::set(
+        read_plannedstmt::string_to_planned_stmt,
+    );
 }
 
 #[cfg(test)]

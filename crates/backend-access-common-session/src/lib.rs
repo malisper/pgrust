@@ -266,24 +266,40 @@ fn get_session_dsm_handle() -> PgResult<dsm_handle> {
     // now passes reset_extra to the assign hooks), and resolves chunks in the
     // worker-attached DSM TOC (shm_toc_* dispatches worker-base vs leader-slot).
     //
-    // BUT the worker still cannot finish the query: THREE downstream keystones
-    // remain, each crashes the postmaster:
-    //   1. ProcArrayAdd (procarray.c) — the worker's `ProcArrayAdd` trips the
-    //      `allProcs[procno].pgxactoff == index - 1` shift-loop assertion: the
-    //      worker's procarray view (pgxactoff vs the shared pgprocnos[]/numProcs)
-    //      is inconsistent at insert time. Needs the worker-side ProcArrayAdd
-    //      pgxactoff seeding audited.
-    //   2. `create_parallel_query_desc` seam is UNINSTALLED — the worker's
-    //      `ExecParallelGetQueryDesc` reconstructs its owned `QueryDesc` from the
-    //      serialized `PlannedStmt` text via `stringToNode` (readfuncs plan-ship
-    //      path), which is not yet ported. This is the real deep blocker.
-    //   3. multixact `!InRecovery` assertion fires as a crash-recovery cascade
-    //      after the first worker crash poisons the cluster.
-    // With a valid handle, every parallel-eligible query therefore still crashes.
+    // The deep plan-shipping blocker is now CLEARED: `create_parallel_query_desc`
+    // is installed (execMain), so the worker reconstructs its owned `QueryDesc`
+    // from the serialized `PlannedStmt` text — `string_to_planned_stmt`
+    // (backend-nodes-readfuncs::read_plannedstmt) reverses `ExecSerializePlan`'s
+    // `_outPlannedStmt` field-for-field — then `CreateQueryDesc` + `ExecutorStart`
+    // run in the worker. Verified empirically: with this early return removed the
+    // worker forks, joins, restores the snapshot, deserializes the plan, and
+    // reaches the executor (the prior `unrecognized token`/`stringToNode`
+    // deserialization gap is gone).
+    //
+    // BUT the worker still cannot FINISH the query — THREE further downstream
+    // keystones remain (each crashes the worker → postmaster reinit):
+    //   1. tqueue DestReceiver is not bridged into the tcop-dest router. The
+    //      worker's `QueryDesc.dest` is a `types_execparallel::DestReceiverHandle`
+    //      into tqueue's OWN registry, but the executor dispatches `receiveSlot`
+    //      through the `backend-tcop-dest` registry (different handle space). The
+    //      tqueue `tqueueReceiveSlot`/`tqueueStartupReceiver`/`tqueueShutdownReceiver`
+    //      are ported but never registered via `backend_tcop_dest::register_dest_receiver`.
+    //      Bridging needs a `&mut SlotData`-only minimal-tuple-copy form (the dest
+    //      vtable `receiveSlot(mcx, state, slot)` boundary carries no `EState`, but
+    //      tqueue's send path needs `exec_fetch_slot_minimal_tuple_copy(mcx,estate,
+    //      SlotId)`). This is the next deep blocker (parallel tuple-transport leg).
+    //   2. `relation_open` `CheckRelationLockedByMe` assert: the worker scans the
+    //      base rel without the heavyweight lock the assert expects (lock-group
+    //      lock acquired by the leader is not reflected in the worker's local lock
+    //      view at the `relation_open` boundary).
+    //   3. `ProcArrayAdd` shift-loop `pgxactoff == index-1` debug_assert: the
+    //      worker's procarray insert ordering vs the shared pgxactoff renumber is
+    //      inconsistent (intermittent; masked under release where asserts are off,
+    //      then (1) is the real wall).
+    // With a valid handle, parallel-eligible queries therefore still crash.
     // Returning INVALID restores the known-good leader-only behavior (correct
-    // results, no crash). Delete this early return ONLY together with the worker
-    // ProcArrayAdd fix + the create_parallel_query_desc (stringToNode) port, gated
-    // on a crash-free parallel smoke test.
+    // results, no crash). Delete this early return ONLY together with the tqueue
+    // dest-bridge + lock/procarray fixes, gated on a crash-free parallel smoke.
     return Ok(DSM_HANDLE_INVALID);
 
     // If we already created a session-scope segment, return its handle.
