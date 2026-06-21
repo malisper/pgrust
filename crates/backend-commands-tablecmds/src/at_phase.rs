@@ -1014,7 +1014,24 @@ pub(crate) fn ATPrepCmd<'mcx>(
                     .errmsg("cannot change inheritance of typed table".to_string())
                     .finish(here("ATPrepCmd"));
             }
-            unported("INHERIT (ATPrepAddInherit)");
+            // ATPrepAddInherit: if (child_rel->rd_rel->relispartition)
+            //   ereport(ERROR, "cannot change inheritance of a partition").
+            if rel.rd_rel.relispartition {
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .errmsg("cannot change inheritance of a partition".to_string())
+                    .finish(here("ATPrepCmd"));
+            }
+            // if (child_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+            //   ereport(ERROR, "cannot change inheritance of partitioned table").
+            if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+                return backend_utils_error::ereport(ERROR)
+                    .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .errmsg("cannot change inheritance of partitioned table".to_string())
+                    .finish(here("ATPrepCmd"));
+            }
+            // This command never recurses.
+            pass = AT_PASS_MISC;
         }
         AT_DropInherit => {
             ATSimplePermissions(
@@ -1022,7 +1039,8 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
             )?;
-            unported("NO INHERIT");
+            // This command never recurses; no command-specific prep needed.
+            pass = AT_PASS_MISC;
         }
         AT_AlterConstraint => {
             ATSimplePermissions(cmd.subtype, rel, ATT_TABLE | ATT_PARTITIONED_TABLE)?;
@@ -1655,8 +1673,28 @@ fn ATExecCmd<'mcx>(
         AT_SetAccessMethod => unported("SET ACCESS METHOD"),
         AT_SetTableSpace => unported("SET TABLESPACE (ATExecSetTableSpace)"),
         AT_DropOids => unported("SET WITHOUT OIDS"),
-        AT_AddInherit => unported("INHERIT (ATExecAddInherit)"),
-        AT_DropInherit => unported("NO INHERIT (ATExecDropInherit)"),
+        AT_AddInherit => {
+            // ATExecAddInherit(rel, (RangeVar *) cmd->def, lockmode).
+            let def = cmd
+                .def
+                .as_deref()
+                .expect("AT_AddInherit: cmd.def is NULL");
+            let parent = def
+                .as_rangevar()
+                .expect("AT_AddInherit: cmd.def is not a RangeVar");
+            _address = crate::at_attach::ATExecAddInherit(mcx, rel, parent, lockmode)?;
+        }
+        AT_DropInherit => {
+            // ATExecDropInherit(rel, (RangeVar *) cmd->def, lockmode).
+            let def = cmd
+                .def
+                .as_deref()
+                .expect("AT_DropInherit: cmd.def is NULL");
+            let parent = def
+                .as_rangevar()
+                .expect("AT_DropInherit: cmd.def is not a RangeVar");
+            _address = crate::at_detach::ATExecDropInherit(mcx, rel, parent, lockmode)?;
+        }
         AT_AddOf => unported("OF (ATExecAddOf)"),
         AT_DropOf => unported("NOT OF (ATExecDropOf)"),
         AT_ReplicaIdentity => {

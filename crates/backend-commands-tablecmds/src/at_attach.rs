@@ -712,6 +712,140 @@ fn FindTriggerIncompatibleWithInheritance<'mcx>(
 }
 
 // ===========================================================================
+// ATExecAddInherit (tablecmds.c:17261)
+// ===========================================================================
+
+/// `ATExecAddInherit(child_rel, parent, lockmode)` (tablecmds.c:17261) —
+/// `ALTER TABLE <child> INHERIT <parent>`. Returns the address of the new parent
+/// relation. `child_rel` is the (open, locked) child being altered; `parent` is
+/// the parse-node `RangeVar` from `cmd->def`.
+pub(crate) fn ATExecAddInherit<'mcx>(
+    mcx: Mcx<'mcx>,
+    child_rel: &Relation<'mcx>,
+    parent: &types_nodes::rawnodes::RangeVar<'mcx>,
+    _lockmode: types_storage::lock::LOCKMODE,
+) -> PgResult<ObjectAddress> {
+    // A self-exclusive lock is needed here. See the similar case in
+    // MergeAttributes() for a full explanation.
+    let access_rv = to_access_range_var(parent);
+    let parent_rel = table_openrv(
+        mcx,
+        &access_rv,
+        types_storage::lock::ShareUpdateExclusiveLock,
+    )?;
+
+    // Must be owner of both parent and child -- child was checked by the
+    // ATSimplePermissions call in ATPrepCmd.
+    ATSimplePermissions(
+        AlterTableType::AT_AddInherit,
+        &parent_rel,
+        ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
+    )?;
+
+    // Permanent rels cannot inherit from temporary ones.
+    if parent_rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP
+        && child_rel.rd_rel.relpersistence != RELPERSISTENCE_TEMP
+    {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!(
+                "cannot inherit from temporary relation \"{}\"",
+                parent_rel.name()
+            ))
+            .into_error());
+    }
+
+    // If parent rel is temp, it must belong to this session.
+    if parent_rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP
+        && crate::smallfns::relation_is_other_temp(&parent_rel)?
+    {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg("cannot inherit from temporary relation of another session".to_string())
+            .into_error());
+    }
+
+    // Ditto for the child.
+    if child_rel.rd_rel.relpersistence == RELPERSISTENCE_TEMP
+        && crate::smallfns::relation_is_other_temp(child_rel)?
+    {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg("cannot inherit to temporary relation of another session".to_string())
+            .into_error());
+    }
+
+    // Prevent partitioned tables from becoming inheritance parents.
+    if parent_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!(
+                "cannot inherit from partitioned table \"{}\"",
+                parent.relname.as_deref().unwrap_or("")
+            ))
+            .into_error());
+    }
+
+    // Likewise for partitions.
+    if parent_rel.rd_rel.relispartition {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg("cannot inherit from a partition".to_string())
+            .into_error());
+    }
+
+    // Prevent circularity by seeing if proposed parent inherits from child. (In
+    // particular, this disallows making a rel inherit from itself.)
+    //
+    // We use the weakest lock we can on child's children, namely AccessShareLock.
+    let (children, _) = backend_catalog_pg_inherits::find_all_inheritors(
+        mcx,
+        child_rel.rd_id,
+        AccessShareLock,
+        false,
+    )?;
+
+    if children.iter().any(|&o| o == parent_rel.rd_id) {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_DUPLICATE_TABLE)
+            .errmsg("circular inheritance not allowed".to_string())
+            .errdetail(format!(
+                "\"{}\" is already a child of \"{}\".",
+                parent.relname.as_deref().unwrap_or(""),
+                child_rel.name()
+            ))
+            .into_error());
+    }
+
+    // If child_rel has row-level triggers with transition tables, we currently
+    // don't allow it to become an inheritance child.
+    if let Some(trigger_name) = FindTriggerIncompatibleWithInheritance(child_rel)? {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg(format!(
+                "trigger \"{}\" prevents table \"{}\" from becoming an inheritance child",
+                trigger_name,
+                child_rel.name()
+            ))
+            .errdetail(
+                "ROW triggers with transition tables are not supported in inheritance hierarchies."
+                    .to_string(),
+            )
+            .into_error());
+    }
+
+    // OK to create inheritance.
+    CreateInheritance(mcx, child_rel, &parent_rel, false)?;
+
+    let address = object_address_set(RelationRelationId, parent_rel.rd_id);
+
+    // keep our lock on the parent relation until commit.
+    parent_rel.close(NoLock)?;
+
+    Ok(address)
+}
+
+// ===========================================================================
 // CreateInheritance (tablecmds.c:17374)
 // ===========================================================================
 

@@ -175,6 +175,51 @@ pub(crate) fn ATExecDetachPartition<'mcx>(
 }
 
 // ===========================================================================
+// ATExecDropInherit (tablecmds.c:17825)
+// ===========================================================================
+
+/// `ATExecDropInherit(rel, parent, lockmode)` (tablecmds.c:17825) —
+/// `ALTER TABLE <child> NO INHERIT <parent>`. Returns the address of the parent
+/// relation. `rel` is the (open, locked) child; `parent` is the parse-node
+/// `RangeVar` from `cmd->def`.
+pub(crate) fn ATExecDropInherit<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    parent: &types_nodes::rawnodes::RangeVar<'mcx>,
+    _lockmode: types_storage::lock::LOCKMODE,
+) -> PgResult<ObjectAddress> {
+    if rel.rd_rel.relispartition {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg("cannot change inheritance of a partition".to_string())
+            .into_error());
+    }
+
+    // AccessShareLock on the parent is probably enough, seeing that DROP TABLE
+    // doesn't lock parent tables at all. We need some lock since we'll be
+    // inspecting the parent's schema.
+    let access_rv = to_access_range_var(parent);
+    let parent_rel = table_openrv(
+        mcx,
+        &access_rv,
+        types_storage::lock::AccessShareLock,
+    )?;
+
+    // We don't bother to check ownership of the parent table --- ownership of the
+    // child is presumed enough rights.
+
+    // Off to RemoveInheritance() where most of the work happens.
+    RemoveInheritance(mcx, rel, &parent_rel, false)?;
+
+    let address = object_address_set(RelationRelationId, parent_rel.rd_id);
+
+    // keep our lock on the parent relation until commit.
+    parent_rel.close(NoLock)?;
+
+    Ok(address)
+}
+
+// ===========================================================================
 // RemoveInheritance (tablecmds.c:17950)
 // ===========================================================================
 
