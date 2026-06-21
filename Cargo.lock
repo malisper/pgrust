@@ -16832,10 +16832,12 @@ version = "0.0.0"
 dependencies = [
  "backend-statistics-core-seams",
  "backend-utils-adt-varlena",
+ "backend-utils-fmgr-core",
  "mcx",
  "types-core",
  "types-datum",
  "types-error",
+ "types-fmgr",
  "types-statistics",
  "types-tuple",
 ]
@@ -24983,6 +24985,7 @@ dependencies = [
  "backend-statistics-dependencies",
  "backend-statistics-extended-stats",
  "backend-statistics-import",
+ "backend-statistics-mcv",
  "backend-statistics-mvdistinct",
  "backend-storage-aio-methods",
  "backend-storage-aio-read-stream",

@@ -48,6 +48,8 @@
 
 use core::mem::size_of;
 
+mod fmgr_builtins;
+
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
 // The canonical `'mcx` byte-lane value type — MCV statistic values may be
@@ -1300,12 +1302,12 @@ fn dimension_info_from_bytes(body: &[u8], pos: &mut usize) -> PgResult<Dimension
     })
 }
 
-/// This crate installs NO inward seams — its public functions are called only by
-/// the (unported) `backend-statistics-core` dispatcher and the fmgr catalog,
-/// neither of which is in-repo yet. Present so the aggregator can invoke it
-/// uniformly; the recurrence guard only requires wiring for crates that actually
-/// install a seam.
-pub fn init_seams() {}
+/// Registers the `pg_mcv_list` type I/O builtins into the fmgr builtin table.
+/// (This crate installs no cross-crate *seams*; the only thing it wires is its
+/// own fmgr-builtin rows, matching every other `adt`/statistics I/O crate.)
+pub fn init_seams() {
+    fmgr_builtins::register_mcv_builtins();
+}
 
 #[cfg(test)]
 mod tests;
