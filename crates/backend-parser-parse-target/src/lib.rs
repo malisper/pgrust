@@ -150,7 +150,7 @@ pub fn transformTargetEntry<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     node: Option<Node<'mcx>>,
-    expr: Option<Expr>,
+    expr: Option<Expr<'static>>,
     expr_kind: ParseExprKind,
     colname: Option<String>,
     resjunk: bool,
@@ -194,13 +194,13 @@ pub fn transformTargetEntry<'mcx>(
     let resno = pstate.p_next_resno as AttrNumber;
     pstate.p_next_resno += 1;
 
-    make_target_entry(
-        mcx,
-        expr.expect("transformTargetEntry: NULL expr"),
-        resno,
-        colname.as_deref(),
-        resjunk,
-    )
+    // The transformed `expr` carries the parser arena's `'static` notional
+    // lifetime; clone it into `mcx` so the produced `TargetEntry<'mcx>` is
+    // arena-bound (make_target_entry allocs the expr in `mcx`).
+    let expr = expr
+        .expect("transformTargetEntry: NULL expr")
+        .clone_in(mcx)?;
+    make_target_entry(mcx, expr, resno, colname.as_deref(), resjunk)
 }
 
 /// Clone an `Option<Node>` for the `transformExpr` call (the C reads `node`
@@ -305,8 +305,8 @@ fn push_te_list<'mcx>(
 /// `list_concat(list, more)` over an expression list.
 fn push_expr_list<'mcx>(
     mcx: Mcx<'mcx>,
-    list: &mut PgVec<'mcx, Expr>,
-    more: PgVec<'mcx, Expr>,
+    list: &mut PgVec<'mcx, Expr<'static>>,
+    more: PgVec<'mcx, Expr<'static>>,
 ) -> PgResult<()> {
     list.try_reserve(more.len()).map_err(|_| mcx.oom(more.len()))?;
     for e in more.into_iter() {
@@ -316,7 +316,7 @@ fn push_expr_list<'mcx>(
 }
 
 /// `lappend(list, e)` over an expression list.
-fn push_expr<'mcx>(mcx: Mcx<'mcx>, list: &mut PgVec<'mcx, Expr>, e: Expr) -> PgResult<()> {
+fn push_expr<'mcx>(mcx: Mcx<'mcx>, list: &mut PgVec<'mcx, Expr<'static>>, e: Expr<'static>) -> PgResult<()> {
     list.try_reserve(1).map_err(|_| mcx.oom(1))?;
     list.push(e);
     Ok(())
@@ -334,8 +334,8 @@ pub fn transformExpressionList<'mcx>(
     exprlist: PgVec<'mcx, NodePtr<'mcx>>,
     expr_kind: ParseExprKind,
     allow_default: bool,
-) -> PgResult<PgVec<'mcx, Expr>> {
-    let mut result: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+) -> PgResult<PgVec<'mcx, Expr<'static>>> {
+    let mut result: PgVec<'mcx, Expr<'static>> = PgVec::new_in(mcx);
 
     for e in exprlist.into_iter() {
         let e = PgBox::into_inner(e);
@@ -383,7 +383,7 @@ pub fn transformExpressionList<'mcx>(
 /// flag.  The producer always returns the variant matching the flag.
 pub enum ExpandResult<'mcx> {
     Targets(PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>>),
-    Exprs(PgVec<'mcx, Expr>),
+    Exprs(PgVec<'mcx, Expr<'static>>),
 }
 
 impl<'mcx> ExpandResult<'mcx> {
@@ -394,7 +394,7 @@ impl<'mcx> ExpandResult<'mcx> {
         }
     }
 
-    fn into_exprs(self) -> PgVec<'mcx, Expr> {
+    fn into_exprs(self) -> PgVec<'mcx, Expr<'static>> {
         match self {
             ExpandResult::Exprs(v) => v,
             ExpandResult::Targets(_) => panic!("ExpandResult: expected Expr list"),
@@ -417,7 +417,12 @@ pub fn resolveTargetListUnknowns<'mcx>(
         let restype = expr_type(tle.expr.as_deref())?;
 
         if restype == UNKNOWNOID {
-            let expr = tle.expr.take().map(|b| PgBox::into_inner(b));
+            // coerce_type operates over the parser/coerce `'static` arena; erase
+            // the taken `'mcx` expr into it, then clone the result back into `mcx`.
+            let expr = tle
+                .expr
+                .take()
+                .map(|b| PgBox::into_inner(b).erase_lifetime());
             let coerced = parse_coerce::coerce_type(
                 mcx,
                 Some(pstate),
@@ -430,7 +435,7 @@ pub fn resolveTargetListUnknowns<'mcx>(
                 -1,
             )?;
             tle.expr = match coerced {
-                Some(e) => Some(alloc_in(mcx, e)?),
+                Some(e) => Some(alloc_in(mcx, e.clone_in(mcx)?)?),
                 None => None,
             };
         }
@@ -566,13 +571,13 @@ fn rte_eref_aliasname<'a>(rte: &'a RangeTblEntry<'_>) -> &'a str {
 pub fn transformAssignedExpr<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    expr: Option<Expr>,
+    expr: Option<Expr<'static>>,
     expr_kind: ParseExprKind,
     colname: &str,
     attrno: i32,
     indirection: &PgVec<'mcx, NodePtr<'mcx>>,
     location: i32,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     // Save and restore identity of expression type we're parsing.
     debug_assert!(expr_kind != ParseExprKind::EXPR_KIND_NONE);
     let sv_expr_kind = pstate.p_expr_kind;
@@ -661,7 +666,11 @@ pub fn transformAssignedExpr<'mcx>(
             Node::mk_var(mcx, var)?
         };
 
-        let rhs = expr_to_node(mcx, expr.expect("transformAssignedExpr: NULL expr for indirection"))?;
+        let rhs = expr_to_node(
+            mcx,
+            expr.expect("transformAssignedExpr: NULL expr for indirection")
+                .clone_in(mcx)?,
+        )?;
         let assigned = transformAssignmentIndirection(
             mcx,
             pstate,
@@ -677,7 +686,9 @@ pub fn transformAssignedExpr<'mcx>(
             CoercionContext::COERCION_ASSIGNMENT,
             location,
         )?;
-        node_to_expr(assigned)
+        // The assignment expr is built in `mcx`; erase to the parser arena's
+        // `'static` notional lifetime to match the function's result.
+        node_to_expr(assigned).erase_lifetime()
     } else {
         // Normal non-qualified target column: type checking and coercion.
         let orig_expr = expr.expect("transformAssignedExpr: NULL expr");
@@ -953,7 +964,9 @@ pub fn transformAssignmentIndirection<'mcx>(
 
     // Base case: just coerce RHS to match target type ID.
     let rhs_type = expr_type(Some(node_expr_ref(&rhs)))?;
-    let rhs_expr = node_to_expr(rhs);
+    // coerce_to_target_type operates over the parser/coerce `'static` arena; erase
+    // the `'mcx` rhs into it and clone the result back into `mcx`.
+    let rhs_expr = node_to_expr(rhs).erase_lifetime();
     let result = parse_coerce::coerce_to_target_type(
         mcx,
         Some(pstate),
@@ -966,7 +979,7 @@ pub fn transformAssignmentIndirection<'mcx>(
         -1,
     )?;
     match result {
-        Some(e) => Ok(Node::mk_expr(mcx, e)?),
+        Some(e) => Ok(Node::mk_expr(mcx, e.clone_in(mcx)?)?),
         None => {
             if target_is_subscripting {
                 Err(ereport(ERROR)
@@ -1081,13 +1094,15 @@ fn transformAssignmentSubscripts<'mcx>(
 
     let mut result = Expr::SubscriptingRef(sbsref);
 
-    // If target was a domain over container, coerce up to the domain.
+    // If target was a domain over container, coerce up to the domain. The
+    // coerce seam operates over the parser/coerce `'static` arena; erase `result`
+    // into it and clone the coerced result back into `mcx`.
     if container_type != target_type_id {
         let resulttype = expr_type(Some(&result))?;
         let coerced = parse_coerce::coerce_to_target_type(
             mcx,
             Some(pstate),
-            result,
+            result.erase_lifetime(),
             resulttype,
             target_type_id,
             target_typmod,
@@ -1096,7 +1111,7 @@ fn transformAssignmentSubscripts<'mcx>(
             -1,
         )?;
         result = match coerced {
-            Some(e) => e,
+            Some(e) => e.clone_in(mcx)?,
             None => {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_CANNOT_COERCE)
@@ -1552,7 +1567,7 @@ fn ExpandSingleTable<'mcx>(
     }
 
     // Require read access to each column, and collect the Vars.
-    let mut result: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    let mut result: PgVec<'mcx, Expr<'static>> = PgVec::new_in(mcx);
     for varnode in vars.into_iter() {
         let var = match node_to_var(PgBox::into_inner(varnode)) {
             Some(v) => v,
@@ -1610,7 +1625,7 @@ fn ExpandRowReference<'mcx>(
     // Generate a list of references to the individual fields.
     let num_attrs = tuple_desc.attrs.len();
     let mut targets: PgVec<'mcx, types_nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
-    let mut exprs: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
+    let mut exprs: PgVec<'mcx, Expr<'static>> = PgVec::new_in(mcx);
 
     for i in 0..num_attrs {
         let att = tuple_desc.attr(i);
@@ -1931,7 +1946,7 @@ pub fn FigureColname(node: Option<&Node<'_>>) -> Option<String> {
 /// from the transformed `expr` (the only naming difference a transform causes:
 /// every other `FigureColnameInternal` arm reads parse-time fields that
 /// transformExpr leaves untouched).
-fn figure_colname_for_target(node: Option<&Node<'_>>, expr: Option<&Expr>) -> Option<String> {
+fn figure_colname_for_target(node: Option<&Node<'_>>, expr: Option<&Expr<'_>>) -> Option<String> {
     // Mirror FigureColnameInternal's EXPR_SUBLINK branch on the transformed node:
     // the analyzed Query is reachable through the transformed SubLink, not the
     // raw one.  All other node kinds keep the raw-node naming.
@@ -2270,12 +2285,12 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
 // ===========================================================================
 
 /// Move an `Expr` into a raw `Node` wrapper (`Node::Expr`).
-fn expr_to_node<'mcx>(mcx: Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
+fn expr_to_node<'mcx>(mcx: Mcx<'mcx>, e: Expr<'mcx>) -> PgResult<Node<'mcx>> {
     Ok(Node::mk_expr(mcx, e)?)
 }
 
 /// `(Node *) expr` — unwrap a `Node::Expr` to its inner `Expr`.
-fn node_to_expr<'mcx>(n: Node<'mcx>) -> Expr {
+fn node_to_expr<'mcx>(n: Node<'mcx>) -> Expr<'mcx> {
     let tag = n.node_tag();
     n.into_expr()
         .unwrap_or_else(|| panic!("node_to_expr: non-Expr node ({tag:?}) where an Expr was required"))
@@ -2283,7 +2298,7 @@ fn node_to_expr<'mcx>(n: Node<'mcx>) -> Expr {
 
 /// Borrow the inner `Expr` of a `Node::Expr` for an `exprType`/`exprTypmod`
 /// inspection.
-fn node_expr_ref<'a, 'mcx>(n: &'a Node<'mcx>) -> &'a Expr {
+fn node_expr_ref<'a, 'mcx>(n: &'a Node<'mcx>) -> &'a Expr<'mcx> {
     n.as_expr()
         .expect("node_expr_ref: non-Expr node where an Expr was required")
 }
@@ -2307,7 +2322,7 @@ fn transform_target_entry_seam<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     node: &Node<'mcx>,
-    expr: Expr,
+    expr: Expr<'static>,
     expr_kind: ParseExprKind,
     colname: Option<&str>,
     resjunk: bool,

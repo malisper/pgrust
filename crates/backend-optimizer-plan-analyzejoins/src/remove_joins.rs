@@ -947,7 +947,7 @@ fn change_expr_relids_standalone<'mcx>(
 
 /// A throwaway [`Expr`] used as the `mem::replace` placeholder; immediately
 /// overwritten and never observed.
-fn dummy_expr() -> Expr {
+fn dummy_expr<'mcx>() -> Expr<'mcx> {
     Expr::Const(types_nodes::primnodes::Const::default())
 }
 
@@ -1014,7 +1014,7 @@ fn match_unique_clauses<'mcx>(
 
 /// For an OpExpr clause, return `(iclause, c1)`:
 ///   when `left_empty`: `(get_rightop, get_leftop)` else `(get_leftop, get_rightop)`.
-fn op_sides(clause: &Expr, left_empty: bool) -> (Option<Expr>, Option<Expr>) {
+fn op_sides<'mcx>(clause: &Expr<'mcx>, left_empty: bool) -> (Option<Expr<'mcx>>, Option<Expr<'mcx>>) {
     if let Expr::OpExpr(op) = clause {
         let left = op.args.first().cloned();
         let right = op.args.get(1).cloned();

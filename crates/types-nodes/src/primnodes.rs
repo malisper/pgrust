@@ -2519,6 +2519,17 @@ pub fn targetentry_into_static(te: TargetEntry<'_>) -> TargetEntry<'static> {
     unsafe { core::mem::transmute(te) }
 }
 
+/// Erase a [`PlaceHolderVar`]'s lifetime to the planner arena's notional
+/// `'static` (sibling of [`targetentry_into_static`]). The PHV's `phexpr`
+/// subtree is fully owned (moved in), so this is a lifetime-parameter-only
+/// erase — used when a `PlaceHolderInfo`/`NestLoopParam` interns a PHV into the
+/// planner-run arena that, not Rust's borrow tracker, governs its validity.
+pub fn placeholdervar_into_static(phv: PlaceHolderVar<'_>) -> PlaceHolderVar<'static> {
+    // SAFETY: `phv`'s children are fully owned; lifetime-parameter-only erase to
+    // the Expr tree's 'static notional lifetime (cf. targetentry_into_static).
+    unsafe { core::mem::transmute(phv) }
+}
+
 impl<'mcx> Expr<'mcx> {
     /// Erase an `Expr<'mcx>`'s lifetime to the planner `node_arena`'s notional
     /// `'static`. The `node_arena` is an index-handle (`NodeId`) intern table that

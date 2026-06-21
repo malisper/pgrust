@@ -67,9 +67,9 @@ pub fn make_placeholder_expr(
 
 /// `find_placeholder_info`
 ///		Fetch (or, if missing, create) the PlaceHolderInfo for the given PHV.
-pub fn find_placeholder_info(
+pub fn find_placeholder_info<'a>(
     root: &mut PlannerInfo,
-    phv: &PlaceHolderVar<'static>,
+    phv: &PlaceHolderVar<'a>,
 ) -> PgResult<PhInfoId> {
     // If this ever isn't true, we'd need to look in parent lists.
     debug_assert!(phv.phlevelsup == 0);
@@ -95,7 +95,11 @@ pub fn find_placeholder_info(
 
     // ph_var = copyObject(phv) with phnullingrels forced empty (placeholder.c
     // convention: the PlaceHolderInfo represents the initially-calculated state).
-    let mut ph_var = phv.clone();
+    // copyObject(phv): the PHV is interned into the planner-run arena (the
+    // PlaceHolderInfo lives for the run), so erase the (input-lifetime) clone to
+    // the arena's notional 'static at this sanctioned intern boundary.
+    let mut ph_var =
+        types_nodes::primnodes::placeholdervar_into_static(phv.clone());
     ph_var.phnullingrels = ExprRelids { words: Vec::new() };
 
     let phexpr = ph_var

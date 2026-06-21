@@ -134,7 +134,9 @@ fn bms_member_index(keys: &Relids, attnum: i32) -> i32 {
 /// — split a 2-arg operator's arguments into the (Expr, Const, expronleft) parts,
 /// stripping a RelabelType off either side. Returns `None` when neither side is a
 /// bare `Const` (the C `false` return).
-fn examine_opclause_args<'a>(args: &'a [Expr]) -> Option<(&'a Expr, &'a Const, bool)> {
+fn examine_opclause_args<'a, 'mcx>(
+    args: &'a [Expr<'mcx>],
+) -> Option<(&'a Expr<'mcx>, &'a Const<'mcx>, bool)> {
     // Assert(list_length(args) == 2) — enforced by the caller.
     if args.len() != 2 {
         return None;
