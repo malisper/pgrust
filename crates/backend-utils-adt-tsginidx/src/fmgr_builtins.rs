@@ -84,10 +84,58 @@ fn builtin(
     )
 }
 
+/// The shared fmgr-frame entry point for every `tsvector_ops` GIN support proc
+/// whose `internal`-typed out-parameters cannot cross the by-word fmgr `Datum`
+/// lane (`gin_extract_tsvector` / `gin_extract_tsquery` / `gin_tsquery_consistent`
+/// / `gin_tsquery_triconsistent` / `gin_cmp_prefix` and the back-compat stubs).
+///
+/// In the owned model the GIN access method invokes these procs through the
+/// typed by-OID dispatch in `backend-access-gin-core-probe::dispatch`, reading
+/// `FmgrInfo::fn_oid` — never `fn_addr`. This frame entry is therefore never
+/// reached on any port path; it exists only so the `fmgr_builtins[]` row carries
+/// a non-`None` callable (matching C's table) and `fmgr_isbuiltin` / `fmgr_info`
+/// can resolve the `internal` prosrc name. It raises a clear error if a future
+/// fmgr-frame call site is ever added, pointing at the dispatch seam to use.
+fn fc_gin_tsvector_via_dispatch(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let foid = fcinfo.flinfo.as_ref().map(|fi| fi.fn_oid).unwrap_or(0);
+    Err(types_error::PgError::error(format!(
+        "GIN tsvector_ops support function (OID {foid}) must be invoked through \
+         the typed opclass dispatch (gin_extract_value / gin_extract_query / \
+         gin_consistent_call_{{bool,tri}} seams), not the fmgr frame; the owned \
+         GIN access method dispatches these by FmgrInfo.fn_oid"
+    )))
+}
+
+fn dispatch_builtin(foid: u32, name: &str, nargs: i16) -> (BuiltinFunction, PgFnNative) {
+    (
+        BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            // Every tsginidx.c support proc is proisstrict => 't' and not
+            // proretset in pg_proc.dat.
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        fc_gin_tsvector_via_dispatch,
+    )
+}
+
 /// Register the scalar `tsginidx.c` builtins (C: their `fmgr_builtins[]` rows).
 /// Called from this crate's `init_seams()`. OIDs / nargs / strict / retset
 /// transcribed exactly from `pg_proc.dat` (`gin_cmp_tslexeme`:
 /// `proisstrict => 't'`, 2 args, not retset).
+///
+/// Besides `gin_cmp_tslexeme` (the lone fmgr-boundary-expressible row), the
+/// `internal`-out-param GIN `tsvector_ops` support procs are registered with a
+/// dispatch-only frame entry so `index_getprocinfo` → `fmgr_info` can resolve
+/// their `internal` prosrc names (without which `CREATE INDEX ... USING gin
+/// (tsvector_ops)` errors `internal function "gin_extract_tsvector" is not in
+/// internal lookup table`); they are actually invoked through the by-OID typed
+/// dispatch in `backend-access-gin-core-probe::dispatch`. OIDs / prosrc names /
+/// nargs from `pg_proc.dat` (fmgr resolves by prosrc name, so the `*_2args` /
+/// `*_5args` / `*_6args` / `*_oldsig` rows carry their prosrc, not proname).
 pub fn register_tsginidx_builtins() {
     backend_utils_fmgr_core::register_builtins_native([builtin(
         3724,
@@ -97,4 +145,22 @@ pub fn register_tsginidx_builtins() {
         false,
         fc_gin_cmp_tslexeme,
     )]);
+    backend_utils_fmgr_core::register_builtins_native([
+        // GIN comparePartial (gin_cmp_prefix): declared 4-arg in pg_proc, body
+        // uses 2 (the strategy/extra_data args are NOT_USED).
+        dispatch_builtin(2700, "gin_cmp_prefix", 4),
+        // extractValue.
+        dispatch_builtin(3656, "gin_extract_tsvector", 3),
+        dispatch_builtin(3077, "gin_extract_tsvector_2args", 2),
+        // extractQuery.
+        dispatch_builtin(3657, "gin_extract_tsquery", 7),
+        dispatch_builtin(3087, "gin_extract_tsquery_5args", 5),
+        dispatch_builtin(3791, "gin_extract_tsquery_oldsig", 7),
+        // consistent.
+        dispatch_builtin(3658, "gin_tsquery_consistent", 8),
+        dispatch_builtin(3088, "gin_tsquery_consistent_6args", 6),
+        dispatch_builtin(3792, "gin_tsquery_consistent_oldsig", 8),
+        // triConsistent.
+        dispatch_builtin(3921, "gin_tsquery_triconsistent", 7),
+    ]);
 }

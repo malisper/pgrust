@@ -68,6 +68,53 @@ pub const F_GINARRAYCONSISTENT: u32 = 2744;
 /// `ginarraytriconsistent(...)` — ternary `triConsistent`.
 pub const F_GINARRAYTRICONSISTENT: u32 = 3920;
 
+// pg_proc OIDs (fmgroids.h / pg_proc.dat) of the `tsvector_ops` GIN support
+// procedures (`tsginidx.c`). The default `gin/tsvector_ops` opclass
+// (pg_amproc.dat) resolves amprocnum 2/3/4/6 to OIDs 3656/3657/3658/3921; the
+// older / back-compat declarations (3077/3087/3088, 3791/3792) share the same
+// bodies and are accepted too (a reloaded pre-9.1 contrib/tsearch2 opclass, or
+// an opclass that pins the `_oldsig` rows).
+/// `gin_extract_tsvector(tsvector, internal, internal)` — `extractValue`.
+pub const F_GIN_EXTRACT_TSVECTOR: u32 = 3656;
+/// `gin_extract_tsvector(tsvector, internal)` — legacy two-arg `extractValue`.
+pub const F_GIN_EXTRACT_TSVECTOR_2ARGS: u32 = 3077;
+/// `gin_extract_tsquery(tsvector, internal, int2, ...)` — `extractQuery`.
+pub const F_GIN_EXTRACT_TSQUERY: u32 = 3657;
+/// `gin_extract_tsquery(tsquery, internal, int2, ...)` legacy 5-arg.
+pub const F_GIN_EXTRACT_TSQUERY_5ARGS: u32 = 3087;
+/// `gin_extract_tsquery(tsquery, internal, int2, ...)` old-signature stub.
+pub const F_GIN_EXTRACT_TSQUERY_OLDSIG: u32 = 3791;
+/// `gin_tsquery_consistent(internal, int2, tsvector, int4, ...)` — `consistent`.
+pub const F_GIN_TSQUERY_CONSISTENT: u32 = 3658;
+/// `gin_tsquery_consistent(internal, int2, tsquery, int4, ...)` legacy 6-arg.
+pub const F_GIN_TSQUERY_CONSISTENT_6ARGS: u32 = 3088;
+/// `gin_tsquery_consistent(internal, int2, tsquery, int4, ...)` old-signature.
+pub const F_GIN_TSQUERY_CONSISTENT_OLDSIG: u32 = 3792;
+/// `gin_tsquery_triconsistent(...)` — ternary `triConsistent`.
+pub const F_GIN_TSQUERY_TRICONSISTENT: u32 = 3921;
+
+/// Encode `gin_extract_tsquery`'s `map_item_operand` (the `int *` map the C code
+/// stores in every `extra_data[]` slot) as a native-endian `i32` byte blob, the
+/// per-key opclass-private `extra_data` the GIN scan carries from `extractQuery`
+/// through to `consistent` (`extra_data[0]`). The encoding is symmetric with
+/// [`decode_map_item_operand`].
+fn encode_map_item_operand(map: &[i32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(map.len() * 4);
+    for &v in map {
+        bytes.extend_from_slice(&v.to_ne_bytes());
+    }
+    bytes
+}
+
+/// Decode the `extra_data[0]` byte blob produced by [`encode_map_item_operand`]
+/// back into the `map_item_operand` `i32` array `gin_tsquery_consistent` reads.
+fn decode_map_item_operand(bytes: &[u8]) -> Vec<i32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
 /// Deconstruct an array `Datum` into its canonical element values + null flags,
 /// the shared front half of `ginarrayextract` / `ginqueryarrayextract`
 /// (`get_typlenbyvalalign(ARR_ELEMTYPE(array))` + `deconstruct_array`). The
@@ -123,6 +170,20 @@ fn dispatch_extract_value<'mcx>(
             // already-copied array; the canonical `value` carries the bytes.
             let (elems, nulls) = deconstruct_query_or_value(mcx, value)?;
             Ok(Some((elems, nulls)))
+        }
+        F_GIN_EXTRACT_TSVECTOR | F_GIN_EXTRACT_TSVECTOR_2ARGS => {
+            // gin_extract_tsvector(vector): one `text` key per lexeme. The
+            // detoasted tsvector bytes are the canonical by-ref value image; the
+            // ported body walks them and returns the entry `text` varlenas. C
+            // leaves `nullFlags` NULL (no lexeme key is null), so `null_flags`
+            // stays empty (the seam's C-`NULL` sentinel).
+            let entries =
+                backend_utils_adt_tsginidx::gin_extract_tsvector(mcx, value.as_ref_bytes())?;
+            let mut elems: PgVec<'mcx, Datum<'mcx>> = PgVec::new_in(mcx);
+            for txt in entries {
+                elems.push(Datum::from_byref_bytes_in(mcx, &txt)?);
+            }
+            Ok(Some((elems, PgVec::new_in(mcx))))
         }
         other => Err(unported(other, "extractValue")),
     }
@@ -184,6 +245,49 @@ fn dispatch_extract_query<'mcx>(
                 search_mode,
             })
         }
+        F_GIN_EXTRACT_TSQUERY | F_GIN_EXTRACT_TSQUERY_5ARGS | F_GIN_EXTRACT_TSQUERY_OLDSIG => {
+            // gin_extract_tsquery(query): one operand `text` key per QI_VAL, plus
+            // the per-key partial-match flags and the item->operand map. The map
+            // (`map_item_operand`, the C `extra_data[0]`) is stored — encoded as
+            // a native-endian i32 blob — in EVERY entry's `extra_data` slot,
+            // exactly as C sets `(*extra_data)[j] = (Pointer) map_item_operand`.
+            let _ = strategy; // tsvector_ops ignores the strategy in extractQuery
+            let ext = backend_utils_adt_tsginidx::gin_extract_tsquery(mcx, query.as_ref_bytes())?;
+
+            let mut query_values: PgVec<'mcx, Datum<'mcx>> = PgVec::new_in(mcx);
+            for txt in &ext.entries {
+                query_values.push(Datum::from_byref_bytes_in(mcx, txt)?);
+            }
+
+            let mut partial_matches: PgVec<'mcx, bool> = PgVec::new_in(mcx);
+            for &p in &ext.partialmatch {
+                partial_matches.push(p);
+            }
+
+            // The same map for every entry (C aliases one `map_item_operand`).
+            let map_blob = encode_map_item_operand(&ext.map_item_operand);
+            let mut extra_data: PgVec<'mcx, Option<mcx::PgVec<'mcx, u8>>> = PgVec::new_in(mcx);
+            for _ in 0..ext.entries.len() {
+                let mut slot: mcx::PgVec<'mcx, u8> = PgVec::new_in(mcx);
+                for &b in &map_blob {
+                    slot.push(b);
+                }
+                extra_data.push(Some(slot));
+            }
+
+            // `*searchMode` is untouched by C when query->size == 0 (then
+            // nentries == 0 and the value is unused); default it.
+            let search_mode = ext.search_mode.unwrap_or(GIN_SEARCH_MODE_DEFAULT);
+
+            Ok(GinExtractQueryResult {
+                query_values,
+                // gin_extract_tsquery leaves nullFlags NULL (no key is null).
+                null_flags: PgVec::new_in(mcx),
+                partial_matches,
+                extra_data,
+                search_mode,
+            })
+        }
         other => Err(unported(other, "extractQuery")),
     }
 }
@@ -220,6 +324,34 @@ fn dispatch_consistent_bool(key: &mut GinScanKey) -> bool {
             key.recheckCurItem = recheck;
             res
         }
+        F_GIN_TSQUERY_CONSISTENT | F_GIN_TSQUERY_CONSISTENT_6ARGS
+        | F_GIN_TSQUERY_CONSISTENT_OLDSIG => {
+            let nkeys = key.nuserentries as usize;
+            // check[i] = (entryRes[i] != GIN_FALSE) — gin_tsquery_consistent
+            // reinterprets the GIN `bool` check array as the entry presence.
+            let check: Vec<bool> = key.entryRes[..nkeys].iter().map(|&v| v != 0).collect();
+            // extra_data[0] is the map_item_operand blob extractQuery stored.
+            let map = key
+                .extra_data
+                .first()
+                .and_then(|o| o.as_ref())
+                .map(|b| decode_map_item_operand(b))
+                .unwrap_or_default();
+            // Transient per-call scratch context (C's GIN scan tempCtx): the body
+            // allocates getquery()/check_tri here; the result is a scalar.
+            let scratch = mcx::MemoryContext::new("gin_tsquery_consistent");
+            let (res, recheck) = match backend_utils_adt_tsginidx::gin_tsquery_consistent(
+                scratch.mcx(),
+                &check,
+                key.query.as_ref_bytes(),
+                &map,
+            ) {
+                Ok(r) => r,
+                Err(e) => std::panic::panic_any(e),
+            };
+            key.recheckCurItem = recheck;
+            res
+        }
         other => std::panic::panic_any(unported(other, "consistent")),
     }
 }
@@ -244,6 +376,27 @@ fn dispatch_consistent_tri(key: &mut GinScanKey) -> GinTernaryValue {
                 key.strategy,
                 nkeys as i32,
                 &null_flags,
+            ) {
+                Ok(r) => r,
+                Err(e) => std::panic::panic_any(e),
+            }
+        }
+        F_GIN_TSQUERY_TRICONSISTENT => {
+            let nkeys = key.nuserentries as usize;
+            // check carries the ternary GIN values directly.
+            let check: Vec<GinTernaryValue> = key.entryRes[..nkeys].to_vec();
+            let map = key
+                .extra_data
+                .first()
+                .and_then(|o| o.as_ref())
+                .map(|b| decode_map_item_operand(b))
+                .unwrap_or_default();
+            let scratch = mcx::MemoryContext::new("gin_tsquery_triconsistent");
+            match backend_utils_adt_tsginidx::gin_tsquery_triconsistent(
+                scratch.mcx(),
+                &check,
+                key.query.as_ref_bytes(),
+                &map,
             ) {
                 Ok(r) => r,
                 Err(e) => std::panic::panic_any(e),

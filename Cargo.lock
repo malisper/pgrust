@@ -747,6 +747,7 @@ dependencies = [
  "backend-nodes-core-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-regproc-seams",
+ "backend-utils-adt-tsginidx",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error-seams",
