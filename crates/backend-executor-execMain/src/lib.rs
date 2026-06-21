@@ -866,23 +866,32 @@ pub fn CreateQueryDescAndStartExplain(
     params: ParamListInfo,
     instrument_option: i32,
     eflags: i32,
+    dest: types_nodes::parsestmt::DestReceiverHandle,
 ) -> PgResult<QueryDesc> {
     // queryDesc = CreateQueryDesc(plannedstmt, queryString, GetActiveSnapshot(),
-    //     InvalidSnapshot, None_Receiver, params, queryEnv, instrument_option);
+    //     InvalidSnapshot, dest, params, queryEnv, instrument_option);
     //
-    // C's `None_Receiver` is `&donothingDR` — a real (no-op) receiver, NOT NULL.
-    // An EXPLAIN ANALYZE runs the analyzed query (`ExecutorRun`), whose result
-    // slots are routed to this receiver; a NULL handle would fault the router's
-    // lookup, so obtain the genuine `DestNone` receiver (`CreateDestReceiver
-    // (DestNone)` → the static `donothingDR`).
-    let none_receiver = dest::create_dest_receiver::call(types_dest::CommandDest::None);
+    // The caller selects `dest` exactly as explain.c does: `None_Receiver`
+    // (discard) for a plain EXPLAIN, or the `DR_intorel` receiver from
+    // `CreateIntoRelDestReceiver(into)` for `EXPLAIN ... CREATE TABLE AS`. A NULL
+    // handle stands for the plain-EXPLAIN `None_Receiver`: C's `None_Receiver` is
+    // `&donothingDR` — a real (no-op) receiver, NOT NULL. An EXPLAIN ANALYZE runs
+    // the analyzed query (`ExecutorRun`), whose result slots are routed to this
+    // receiver; a NULL handle would fault the router's lookup, so obtain the
+    // genuine `DestNone` receiver (`CreateDestReceiver(DestNone)` → the static
+    // `donothingDR`) when the caller passed NULL.
+    let dest = if dest == types_nodes::parsestmt::DestReceiverHandle::NULL {
+        dest::create_dest_receiver::call(types_dest::CommandDest::None)
+    } else {
+        dest
+    };
     let mut query_desc = CreateQueryDesc(
         parent,
         plan,
         source_text,
         snapshot,
         None, // InvalidSnapshot crosscheck_snapshot
-        none_receiver, // None_Receiver (discard) = donothingDR
+        dest, // None_Receiver (discard) = donothingDR, or DR_intorel for CTAS
         params,
         instrument_option,
     )?;

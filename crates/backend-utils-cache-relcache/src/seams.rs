@@ -167,6 +167,10 @@ pub fn init_seams() {
     //     relcache owns): the rewrite-rule shape + the stored dataQuery ---
     backend_commands_matview_deps_seams::matview_rule_info::set(matview_rule_info);
     backend_commands_matview_deps_seams::matview_data_query::set(matview_data_query);
+    // is_usable_unique_index (matview.c): the index's Form_pg_index fields +
+    // RelationGetIndexPredicate == NIL test, read off the live index relcache
+    // entry.
+    backend_commands_matview_deps_seams::index_usability_info::set(index_usability_info);
 
     // --- WAL-startup: StartupXLOG (xlog.c:5657) drops stale init files ---
     sx::relation_cache_init_file_remove::set(crate::initfile::RelationCacheInitFileRemove);
@@ -1647,6 +1651,41 @@ fn rd_index_indisready(index: &types_rel::Relation<'_>) -> PgResult<bool> {
 fn rd_index_indnullsnotdistinct(index: &types_rel::Relation<'_>) -> PgResult<bool> {
     with_entry(index.rd_id, |rd| {
         rd.rd_index.as_ref().is_some_and(|i| i.indnullsnotdistinct)
+    })
+}
+/// `index_usability_info(indexRel)` — the `Form_pg_index` fields plus the
+/// `RelationGetIndexPredicate(indexRel) == NIL` test that `is_usable_unique_index`
+/// (matview.c 914-949) inspects but that are not on the matview crate's trimmed
+/// projection. `indisunique`/`indimmediate`/`indisvalid`/`indnatts`/`indkey` are
+/// read straight off the live index relcache entry's `rd_index`; `pred_is_nil`
+/// is `!RelationGetIndexPredicate(indexRel)`, evaluated via the same raw
+/// `pg_index.indpred` attisnull test the other `rd_index_*` readers use (the
+/// materialized predicate node tree is not needed for the NIL test). A cache
+/// miss (no `rd_index`) yields the all-false / empty shape the caller treats as
+/// "not usable".
+fn index_usability_info(
+    index: &types_rel::Relation<'_>,
+) -> PgResult<types_matview::IndexUsabilityInfo> {
+    // pred_is_nil = (RelationGetIndexPredicate(indexRel) == NIL).
+    let pred_is_nil = !backend_utils_cache_syscache_seams::pg_index_has_predicate::call(index.rd_id)?
+        .unwrap_or(false);
+    with_entry(index.rd_id, |rd| match rd.rd_index.as_ref() {
+        Some(i) => types_matview::IndexUsabilityInfo {
+            indisunique: i.indisunique,
+            indimmediate: i.indimmediate,
+            indisvalid: i.indisvalid,
+            pred_is_nil,
+            indnatts: i.indnatts,
+            indkey: i.indkey.clone(),
+        },
+        None => types_matview::IndexUsabilityInfo {
+            indisunique: false,
+            indimmediate: false,
+            indisvalid: false,
+            pred_is_nil,
+            indnatts: 0,
+            indkey: std::vec::Vec::new(),
+        },
     })
 }
 fn rd_rel_relpersistence(rel: &types_rel::Relation<'_>) -> PgResult<i8> {

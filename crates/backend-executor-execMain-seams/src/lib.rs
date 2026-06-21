@@ -372,10 +372,13 @@ seam_core::seam!(
     /// queryEnv, instrument_option)` followed by `ExecutorStart(queryDesc,
     /// eflags)`. The caller has already pushed the active snapshot (explain
     /// `PushCopiedSnapshot(GetActiveSnapshot())`) and passes it in as `snapshot`.
-    /// `dest` is the discard receiver (`None_Receiver` → `DestReceiverHandle::NULL`);
-    /// `instrument_option` is derived by the caller from the EXPLAIN options.
-    /// Returns the started `QueryDesc` whose plan-state tree `ExplainPrintPlan`
-    /// walks. Can `ereport(ERROR)`.
+    /// `dest` is the tuple receiver the C body selects (explain.c): the discard
+    /// `None_Receiver` for a plain EXPLAIN (passed as `DestReceiverHandle::NULL`,
+    /// which the body resolves to `CreateDestReceiver(DestNone)` = `donothingDR`),
+    /// or the `DR_intorel` receiver from `CreateIntoRelDestReceiver(into)` for an
+    /// `EXPLAIN ... CREATE TABLE AS`. `instrument_option` is derived by the caller
+    /// from the EXPLAIN options. Returns the started `QueryDesc` whose plan-state
+    /// tree `ExplainPrintPlan` walks. Can `ereport(ERROR)`.
     pub fn create_query_desc_and_start_explain<'mcx>(
         parent: &mcx::MemoryContext,
         plan: &types_nodes::nodeindexscan::PlannedStmt<'mcx>,
@@ -384,6 +387,7 @@ seam_core::seam!(
         params: types_nodes::params::ParamListInfo,
         instrument_option: i32,
         eflags: i32,
+        dest: types_nodes::parsestmt::DestReceiverHandle,
     ) -> types_error::PgResult<types_nodes::querydesc::QueryDesc>
 );
 

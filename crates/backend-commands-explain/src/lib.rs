@@ -28,8 +28,9 @@ use types_nodes::nodes::{ntag, Node};
 use types_nodes::params::ParamListInfo;
 use types_nodes::parsestmt::IntoClause;
 use types_nodes::queryenvironment::QueryEnvironment;
-use types_scan::sdir::ForwardScanDirection;
+use types_scan::sdir::{ForwardScanDirection, NoMovementScanDirection};
 
+use backend_commands_createas_seams as createas_s;
 use backend_commands_explain_format as fmt;
 use backend_commands_explain_seams as seams;
 use backend_commands_explain_seams::Bookkeeping;
@@ -328,13 +329,7 @@ fn explain_one_plan<'mcx>(
 ) -> PgResult<()> {
     // Assert(plannedstmt->commandType != CMD_UTILITY);  (caller guarantees.)
 
-    // CREATE TABLE AS / SERIALIZE use a non-discard receiver; unported here.
-    if into.is_some() {
-        panic!(
-            "explain_one_plan: EXPLAIN ... CREATE TABLE AS (IntoClause) needs \
-             CreateIntoRelDestReceiver (unported)"
-        );
-    }
+    // SERIALIZE uses its own (still-unported) receiver.
     if es.serialize != types_explain::ExplainSerializeOption::EXPLAIN_SERIALIZE_NONE {
         panic!("explain_one_plan: SERIALIZE needs CreateExplainSerializeDestReceiver (unported)");
     }
@@ -368,15 +363,38 @@ fn explain_one_plan<'mcx>(
     snapmgr_s::update_active_snapshot_command_id::call()?;
     let snapshot = snapmgr_s::get_active_snapshot::call()?;
 
-    // EXEC flags: es->analyze ? 0 : EXEC_FLAG_EXPLAIN_ONLY; |= EXPLAIN_GENERIC.
+    // We discard the output if we have no use for it. If we're explaining
+    // CREATE TABLE AS, we'd better use the appropriate tuple receiver; otherwise
+    // the discard `None_Receiver` (passed as the NULL handle, resolved to
+    // `donothingDR` in the executor seam). The SERIALIZE receiver is rejected
+    // above.
+    //   if (into) dest = CreateIntoRelDestReceiver(into);
+    //   else dest = None_Receiver;
+    let dest = match into {
+        Some(into) => {
+            // into->node carries the full ddlnodes::IntoClause payload.
+            let ddl_into = into
+                .node
+                .as_intoclause()
+                .expect("explain_one_plan: IntoClause->node is not an IntoClause");
+            createas_s::create_into_rel_dest_receiver::call(Some(ddl_into))?
+        }
+        None => types_nodes::parsestmt::DestReceiverHandle::NULL,
+    };
+
+    // EXEC flags: es->analyze ? 0 : EXEC_FLAG_EXPLAIN_ONLY; |= EXPLAIN_GENERIC;
+    //   if (into) eflags |= GetIntoRelEFlags(into);
     const EXEC_FLAG_EXPLAIN_ONLY: i32 = 0x0001;
     const EXEC_FLAG_EXPLAIN_GENERIC: i32 = 0x0002;
     let mut eflags = if es.analyze { 0 } else { EXEC_FLAG_EXPLAIN_ONLY };
     if es.generic {
         eflags |= EXEC_FLAG_EXPLAIN_GENERIC;
     }
+    if let Some(into) = into {
+        eflags |= createas_s::get_into_rel_eflags::call(into)?;
+    }
 
-    // dest = None_Receiver; queryDesc = CreateQueryDesc(...); ExecutorStart(...).
+    // queryDesc = CreateQueryDesc(..., dest, ...); ExecutorStart(...).
     let parent = es.str.allocator().context();
     let mut query_desc = execmain_s::create_query_desc_and_start_explain::call(
         parent,
@@ -386,13 +404,18 @@ fn explain_one_plan<'mcx>(
         params,
         instrument_option,
         eflags,
+        dest,
     )?;
 
     // Execute the plan for statistics if asked for (ANALYZE).
     if es.analyze {
-        // dir = (into && into->skipData) ? NoMovement : Forward; into is None.
+        // dir = (into && into->skipData) ? NoMovement : Forward.
+        let dir = match into {
+            Some(into) if into.skipData => NoMovementScanDirection,
+            _ => ForwardScanDirection,
+        };
         instr::pgBufferUsage(); // touch — keep import live if analyze path used.
-        execmain_s::executor_run::call(&mut query_desc, ForwardScanDirection, 0)?;
+        execmain_s::executor_run::call(&mut query_desc, dir, 0)?;
         execmain_s::executor_finish::call(&mut query_desc)?;
         // totaltime += elapsed_time(&starttime);  (summary path, gated below.)
     }
