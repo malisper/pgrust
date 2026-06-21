@@ -13,6 +13,11 @@ seam-core = { path = "../seam-core" }
 mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
+# CLUSTER seqscan+sort path: the tuplesort seams (begin_cluster / putheaptuple /
+# getheaptuple / performsort / end) + maintenance_work_mem. Routed through the
+# seam crate (not the concrete tuplesort owner) so the edge stays acyclic.
+backend-utils-sort-tuplesort-seams = { path = "../backend-utils-sort-tuplesort-seams" }
+backend-access-heap-vacuumlazy-seams = { path = "../backend-access-heap-vacuumlazy-seams" }
 types-rel = { path = "../types-rel" }
 types-nodes = { path = "../types-nodes" }
 types-slot = { path = "../types-slot" }

@@ -5,16 +5,14 @@
 //! Two scan paths:
 //!  * **index-scan** (`OldIndex != NULL && !use_sort`): scan the old heap in the
 //!    old index's order via an `index_beginscan`/`index_getnext_slot` loop;
-//!  * **seqscan + optional sort** (VACUUM FULL, or CLUSTER on small tables): a
-//!    `table_beginscan`/`table_scan_getnextslot` loop. When `use_sort` is true
-//!    the visible tuples are routed through `tuplesort_*_cluster` and read back
-//!    in index order. The cluster tuplesort variant (tuplesortvariants.c
-//!    `tuplesort_begin_cluster`/`_putheaptuple`/`_getheaptuple`, which pulls in
-//!    `_bt_mkscankey` + `BuildIndexInfo` + SortSupport) is not yet ported, so
-//!    the `use_sort` branch mirrors PG and panics loudly. `plan_cluster_use_sort`
-//!    (planner.c) only sets `use_sort` when an index path is strictly more
-//!    expensive than seqscan+sort; CLUSTER on small/medium tables and all
-//!    VACUUM FULL take the two completed paths.
+//!  * **seqscan + optional sort** (VACUUM FULL, or CLUSTER when seqscan+sort wins):
+//!    a `table_beginscan`/`table_scan_getnextslot` loop. When `use_sort` is true
+//!    (`plan_cluster_use_sort` picked seqscan+sort) the visible tuples are routed
+//!    through the cluster tuplesort (`tuplesort_begin_cluster` /
+//!    `tuplesort_putheaptuple`) and, after `tuplesort_performsort`, read back in
+//!    index order (`tuplesort_getheaptuple`) and rewritten. When `use_sort` is
+//!    false (VACUUM FULL, no index) the tuples are rewritten directly in scan
+//!    order.
 //!
 //! In all paths the old heap is scanned with `SnapshotAny` and each tuple's fate
 //! is decided by `HeapTupleSatisfiesVacuum`: live/recently-dead tuples are
@@ -34,6 +32,10 @@ use backend_access_heap_heapam_visibility as visibility;
 use backend_access_heap_rewriteheap as rewriteheap;
 use backend_access_index_indexam as indexam;
 use backend_storage_buffer_bufmgr_seams as bufmgr_seam;
+// CLUSTER's seqscan+sort path drives the tuplesort through its seam crate (the
+// concrete tuplesort owner depends on this crate's executor seams indirectly;
+// routing the calls through the seams avoids a dependency cycle).
+use backend_utils_sort_tuplesort_seams as tuplesort_seam;
 use backend_executor_execTuples::exec_init_slots::ExecDropSingleTupleTableSlot;
 use backend_executor_execTuples::slot_store_fetch::ExecFetchSlotHeapTuple;
 
@@ -83,17 +85,23 @@ pub fn heapam_relation_copy_for_cluster<'mcx>(
     let mut rwstate =
         rewriteheap::begin_heap_rewrite(mcx, old_heap, new_heap, oldest_xmin, xid_cutoff, multi_cutoff)?;
 
-    // Set up sorting if wanted. The cluster tuplesort variant is not ported.
-    if use_sort {
-        panic!(
-            "heapam_relation_copy_for_cluster: use_sort path needs the cluster \
-             tuplesort variant (tuplesortvariants.c tuplesort_begin_cluster / \
-             tuplesort_putheaptuple / tuplesort_getheaptuple, pulling in \
-             _bt_mkscankey + BuildIndexInfo + SortSupport), not yet ported. \
-             plan_cluster_use_sort only selects this path when index-scan is \
-             strictly more expensive than seqscan+sort."
-        );
-    }
+    // Set up sorting if wanted: tuplesort = tuplesort_begin_cluster(oldTupDesc,
+    // OldIndex, maintenance_work_mem, NULL, TUPLESORT_NONE).
+    let mut tuplesort: Option<types_nodes::Tuplesortstate<'mcx>> = if use_sort {
+        let old_index = old_index
+            .expect("copy_for_cluster: use_sort implies a btree OldIndex (cluster.c)");
+        let maintenance_work_mem =
+            backend_access_heap_vacuumlazy_seams::maintenance_work_mem::call()?;
+        Some(tuplesort_seam::tuplesort_begin_cluster::call(
+            mcx,
+            &old_heap.rd_att,
+            old_index,
+            maintenance_work_mem,
+            types_nodes::TUPLESORT_NONE,
+        )?)
+    } else {
+        None
+    };
 
     // Prepare to scan the OldHeap. To ensure we see recently-dead tuples that
     // still need to be copied, we scan with SnapshotAny and use
@@ -256,9 +264,14 @@ pub fn heapam_relation_copy_for_cluster<'mcx>(
         }
 
         num_tuples += 1.0;
-        // tuplesort != NULL is the use_sort path (panics above); here it's NULL:
-        // reform_and_rewrite_tuple(tuple, OldHeap, NewHeap, values, isnull, rwstate).
-        reform_and_rewrite_tuple(mcx, &tuple, old_heap, new_heap, &mut rwstate)?;
+        if let Some(ts) = tuplesort.as_mut() {
+            // In scan-and-sort mode, stash the tuple in the tuplesort module; it
+            // is written to the new heap (in index order) after the sort.
+            tuplesort_seam::tuplesort_putheaptuple::call(ts, &tuple)?;
+        } else {
+            // reform_and_rewrite_tuple(tuple, OldHeap, NewHeap, values, isnull, rwstate).
+            reform_and_rewrite_tuple(mcx, &tuple, old_heap, new_heap, &mut rwstate)?;
+        }
     }
 
     // index_endscan(indexScan); / table_endscan(tableScan);
@@ -272,7 +285,25 @@ pub fn heapam_relation_copy_for_cluster<'mcx>(
     // free the slot.
     ExecDropSingleTupleTableSlot(slot)?;
 
-    // (use_sort completion loop omitted — that branch panicked above.)
+    // In scan-and-sort mode, complete the sort, then read out all live tuples
+    // from the tuplestore and write them to the new relation.
+    if let Some(mut ts) = tuplesort.take() {
+        tuplesort_seam::tuplesort_performsort::call(&mut ts)?;
+
+        loop {
+            // CHECK_FOR_INTERRUPTS(): cooperative-cancellation point (no-op here).
+            match tuplesort_seam::tuplesort_getheaptuple::call(&mut ts, true)? {
+                None => break,
+                Some(tuple) => {
+                    reform_and_rewrite_tuple(mcx, &tuple, old_heap, new_heap, &mut rwstate)?;
+                }
+            }
+        }
+
+        // tuplesort_end(tuplesort).
+        let boxed: mcx::PgBox<'mcx, types_nodes::Tuplesortstate<'mcx>> = mcx::alloc_in(mcx, ts)?;
+        tuplesort_seam::tuplesort_end::call(boxed)?;
+    }
 
     // Write out any remaining tuples, and fsync if needed.
     rewriteheap::end_heap_rewrite(rwstate)?;

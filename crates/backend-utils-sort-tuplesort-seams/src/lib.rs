@@ -277,6 +277,41 @@ seam_core::seam!(
     ) -> PgResult<Tuplesortstate<'mcx>>
 );
 
+seam_core::seam!(
+    /// `tuplesort_begin_cluster(tupDesc, indexRel, workMem, coordinate=NULL,
+    /// sortopt)` (tuplesortvariants.c): begin a full-HeapTuple sort ordered by a
+    /// btree index definition, used by CLUSTER / VACUUM FULL's
+    /// `heapam_relation_copy_for_cluster`. `tupDesc` is the *heap* descriptor;
+    /// the index's btree scankeys + opclass SortSupport drive the comparison.
+    /// Allocates the sort state in `mcx`; fallible on OOM.
+    pub fn tuplesort_begin_cluster<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tup_desc: &TupleDescData<'mcx>,
+        index_rel: &types_rel::Relation<'mcx>,
+        work_mem: i32,
+        sortopt: i32,
+    ) -> PgResult<Tuplesortstate<'mcx>>
+);
+
+seam_core::seam!(
+    /// `tuplesort_putheaptuple(state, tup)` (tuplesortvariants.c): copy a full
+    /// `HeapTuple` into the CLUSTER sort. Allocates the stored tuple, fallible.
+    pub fn tuplesort_putheaptuple<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        tup: &types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `tuplesort_getheaptuple(state, forward=true)` (tuplesortvariants.c): fetch
+    /// the next sorted `HeapTuple` from the CLUSTER sort; `None` at end of sort.
+    /// Can allocate, fallible.
+    pub fn tuplesort_getheaptuple<'mcx>(
+        state: &mut Tuplesortstate<'mcx>,
+        forward: bool,
+    ) -> PgResult<Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>>
+);
+
 // === index-GiST sorted build sort (tuplesortvariants.c) ====================
 //
 // Consumed by the sorted GiST build (`gist_indexsortbuild` →

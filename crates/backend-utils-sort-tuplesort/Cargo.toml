@@ -55,6 +55,12 @@ backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams
 # owns these two `bool` config variables; `init_seams()` installs their
 # `GucVarAccessors` so the GUC machinery reaches the backing store here.
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+# CLUSTER sort variant (tuplesort_begin_cluster): BuildIndexInfo + FormIndexDatum
+# (catalog/index.c) and the per-comparison expression-eval EState/slot ops
+# (execUtils/execTuples). All are seam crates (decls only) — no dependency cycle.
+backend-catalog-index-seams = { path = "../backend-catalog-index-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
 
 [dev-dependencies]
 # An in-memory BufFile provider for the external-merge tape tests (a leaf-crate
