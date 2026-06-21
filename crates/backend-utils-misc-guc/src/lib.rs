@@ -876,7 +876,7 @@ fn install_guc_state_transfer_seams() {
 /// not yet ported) is empty in this build, so the reserved-prefix loop has no
 /// iterations — matching a backend that has not loaded any prefix-reserving
 /// extension.
-fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> PgResult<bool> {
+pub(crate) fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> PgResult<bool> {
     // const char *sep = strchr(name, GUC_QUALIFIER_SEPARATOR);
     const GUC_QUALIFIER_SEPARATOR: char = '.';
     if name.contains(GUC_QUALIFIER_SEPARATOR) {

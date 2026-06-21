@@ -7,6 +7,16 @@
 
 use crate::slots::{GucBoolVar, GucEnumVar, GucIntVar, GucRealVar, GucSlot, GucStringVar};
 
+/// Storage slot shared by every runtime-created custom-GUC placeholder
+/// (`add_placeholder_variable`, guc.c:1177). C allocates the placeholder's
+/// `char *` at the end of the `config_string` struct because there is "no
+/// 'static' place to point to"; the placeholder's current/boot/reset values
+/// therefore live in the record itself, never in installed owner storage. This
+/// slot is deliberately **never installed** — so `installed()` is always false
+/// and the registry reads/writes the placeholder through the record's own
+/// `value` field, exactly mirroring the C self-contained storage.
+pub static GucPlaceholderVariable: GucStringVar = GucSlot::new("guc_placeholder_variable");
+
 pub static AllowAlterSystem: GucBoolVar = GucSlot::new("AllowAlterSystem");
 pub static Array_nulls: GucBoolVar = GucSlot::new("Array_nulls");
 pub static AuthenticationTimeout: GucIntVar = GucSlot::new("AuthenticationTimeout");

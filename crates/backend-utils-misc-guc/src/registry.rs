@@ -116,6 +116,53 @@ impl GucRegistry {
         Ok(())
     }
 
+    /// `add_placeholder_variable(name, elevel)` (guc.c:1177): create and register
+    /// a `config_string` placeholder for a custom variable name. C allocates the
+    /// `char *` at the end of the struct because the placeholder has no static
+    /// storage; here the placeholder's current/boot/reset values live in the
+    /// record's own `value`/`boot_val`/`reset_val` fields and the `variable` slot
+    /// is the never-installed [`GucPlaceholderVariable`], so all access stays in
+    /// the record (mirroring C's self-contained storage). Returns the index of
+    /// the newly added variable. Fallible: a spine growth surfaces the C
+    /// `guc_malloc` failure as the project's OOM `PgError`.
+    pub fn add_placeholder_variable(&mut self, name: &str) -> PgResult<usize> {
+        use crate::model::{config_generic, config_string};
+        use types_guc::{config_group, config_type, GucContext};
+
+        // C sets gen->context = PGC_USERSET, group = CUSTOM_OPTIONS,
+        // short_desc = "GUC placeholder variable",
+        // flags = GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_CUSTOM_PLACEHOLDER,
+        // vartype = PGC_STRING. The current/boot/reset values "start out NULL".
+        // The placeholder's name must outlive the record; the registry holds
+        // process-lifetime entries, so leak the owned copy into a `'static` str
+        // (the C `guc_strdup` into TopMemoryContext analog — never freed).
+        let gen = config_generic::boot(
+            Box::leak(name.to_string().into_boxed_str()),
+            GucContext::PGC_USERSET,
+            config_group::CUSTOM_OPTIONS,
+            Some("GUC placeholder variable"),
+            None,
+            types_guc::GUC_NO_SHOW_ALL
+                | types_guc::GUC_NOT_IN_SAMPLE
+                | types_guc::GUC_CUSTOM_PLACEHOLDER,
+            config_type::PGC_STRING,
+        );
+        let var = GucVariable::String(config_string {
+            gen,
+            variable: &backend_utils_misc_guc_tables::vars::GucPlaceholderVariable,
+            value: None,
+            boot_val: None,
+            check_hook: None,
+            assign_hook: None,
+            show_hook: None,
+            reset_val: None,
+            reset_extra: None,
+        });
+        self.vars.try_reserve(1).map_err(crate::alloc_err)?;
+        self.vars.push(var);
+        Ok(self.vars.len() - 1)
+    }
+
     /// `find_option(name, create_placeholders=false, skip_errors=true, ...)`
     /// (guc.c:1235), returning an immutable reference. The placeholder-creation
     /// path (custom variables) is not part of the core; callers that need it use
@@ -935,12 +982,24 @@ pub fn set_config_option(
     let orig_source = source;
     let orig_srole = srole;
 
-    let Some(idx) = reg.find_index_pub(name) else {
-        let e = err(
-            ERRCODE_UNDEFINED_OBJECT,
-            format!("unrecognized configuration parameter \"{name}\""),
-        );
-        return reject(elevel, e);
+    // C: `record = find_option(name, true, false, elevel)` (guc.c:3439). The
+    // `create_placeholders=true` path: an unknown name that is a syntactically
+    // valid custom (`class.subname`) name gets a placeholder created on the spot;
+    // any other unknown name is the `unrecognized configuration parameter` error.
+    // `assignable_custom_variable_name(name, skip_errors=false)` reproduces the
+    // exact error surface (invalid-name vs unrecognized) when no placeholder may
+    // be created.
+    let idx = match reg.find_index_pub(name) {
+        Some(idx) => idx,
+        None => match crate::assignable_custom_variable_name(name, false) {
+            Ok(true) => match reg.add_placeholder_variable(name) {
+                Ok(idx) => idx,
+                Err(e) => return reject(elevel, e),
+            },
+            // skip_errors=false never returns Ok(false): it errors instead.
+            Ok(false) => return Ok(0),
+            Err(e) => return reject(elevel, e),
+        },
     };
 
     // Access-permission rules (immutable borrow first).
