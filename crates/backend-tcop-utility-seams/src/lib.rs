@@ -4,6 +4,7 @@
 //! then a call panics loudly.
 
 use types_error::PgResult;
+use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::Node;
 use types_nodes::parsestmt::CommandTag;
 
@@ -12,6 +13,22 @@ seam_core::seam!(
     /// parse-tree node (the PREPARE'd query). Pure classification, but reads
     /// the node tree; cannot `ereport` for well-formed nodes.
     pub fn create_command_tag<'mcx>(query: &Node<'mcx>) -> PgResult<CommandTag>
+);
+
+seam_core::seam!(
+    /// `CommandIsReadOnly(pstmt)` (utility.c:94) — is the planned statement
+    /// *in truth* read-only? Stricter than `XactReadOnly`; the SPI cursor open
+    /// read-only check (`SPI_cursor_open_internal`) uses it. Reads the node;
+    /// `ereport`s only the internal `unrecognized commandType` WARNING path.
+    pub fn command_is_read_only<'mcx>(pstmt: &PlannedStmt<'mcx>) -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// `CreateCommandTag((Node *) pstmt)` (utility.c, `case T_PlannedStmt:`) —
+    /// the `CommandTag` for a planned statement, used by
+    /// `CreateCommandName((Node *) pstmt)` in the SPI "cannot open %s query as
+    /// cursor" / "%s is not allowed in a non-volatile function" messages.
+    pub fn planned_stmt_command_tag<'mcx>(pstmt: &PlannedStmt<'mcx>) -> PgResult<CommandTag>
 );
 
 seam_core::seam!(

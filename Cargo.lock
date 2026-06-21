@@ -11316,6 +11316,7 @@ dependencies = [
  "backend-parser-analyze",
  "backend-parser-driver",
  "backend-rewrite-rewritehandler",
+ "backend-tcop-cmdtag",
  "backend-tcop-dest",
  "backend-tcop-pquery",
  "backend-tcop-utility-seams",

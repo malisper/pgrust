@@ -30,6 +30,7 @@ backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-sea
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-catalog-heap = { path = "../backend-catalog-heap" }
 backend-utils-error = { path = "../backend-utils-error" }
+backend-tcop-cmdtag = { path = "../backend-tcop-cmdtag" }
 backend-tcop-dest = { path = "../backend-tcop-dest" }
 backend-tcop-pquery = { path = "../backend-tcop-pquery" }
 backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }

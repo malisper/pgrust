@@ -50,16 +50,19 @@
 //! These unblock the xml `table/query/cursor_to_xml(schema)` family and the
 //! tsvector trigger / `ts_rewrite` SPI reads.
 //!
-//! What remains **seam-and-panic** (honest decomp-stub bodies that `panic!`,
-//! never `todo!`): the prepared-plan / `SpiPlanPtr` legs the RI triggers use
-//! ([`exec`]: `spi_prepare` / `spi_keepplan` / `spi_execute_snapshot` /
-//! `spi_first_row_columns`). `SpiPlanPtr` is still the opaque `u64` handle in
-//! `types-ri-triggers` (not the real `_SPI_plan` carrier holding
-//! `plancache_list`/`argtypes`/`nargs`/`saved`); re-modelling it to the real
-//! struct + wiring `SPI_prepare`/`SPI_execute_plan` over a saved cached plan is
-//! a separate keystone, and the non-SELECT executor (DML / utility /
-//! `FOR UPDATE` / parallel) is the execMain `#167 F0d` boundary. Only the plain
-//! read-only SELECT the xml/tsvector consumers issue is wired here.
+//! Also landed: the prepared-plan / `SpiPlanPtr` legs the RI triggers use
+//! ([`mod@prepare`]: `spi_prepare` / `spi_keepplan` / `spi_execute_snapshot` /
+//! `spi_first_row_columns`) over an owned `_SPI_plan` carrier holding the
+//! completed `CachedPlanSource`s + `argtypes` + `saved`, and the
+//! `ts_rewrite(query, text)` SPI **cursor** driver ([`mod@exec`]:
+//! `SPI_cursor_open` over the prepared plan + the `SPI_cursor_fetch` loop into
+//! DestSPI).
+//!
+//! What remains a boundary: the non-SELECT executor (DML / utility /
+//! `FOR UPDATE` / parallel) is the execMain `#167 F0d` keystone, and a
+//! multi-statement (`plancache_list` length > 1) SPI plan is the follow-up
+//! multi-statement leg. The SELECT / cursor consumers issue only single-query
+//! read-only plans, which are wired here.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -120,12 +123,14 @@ pub fn init_seams() {
     seams::spi_execute_snapshot::set(prepare::spi_execute_snapshot);
     seams::spi_first_row_columns::set(prepare::spi_first_row_columns);
 
-    // --- seam-and-panic cursor leg (ts_rewrite SPI cursor; honest decomp-stub) ---
+    // --- ts_rewrite SPI cursor leg (real body: SPI_cursor_open over the
+    //     prepared plan + the SPI_cursor_fetch loop into DestSPI) ---
     seams::tsquery_rewrite_run::set(exec::tsquery_rewrite_run_seam);
 
     // matview.c's refresh_by_match_merge drives SPI through its own outward
     // frontier seam crate; spi.c owns the bodies. The execute/exec/getvalue/
-    // processed legs stay on the SPI executor-driver keystone (exec.rs panics).
+    // processed legs stay on the SPI executor-driver keystone (DML/utility
+    // execMain boundary).
     {
         use backend_commands_matview_deps_seams as m;
         m::spi_connect::set(backbone::spi_connect_seam);

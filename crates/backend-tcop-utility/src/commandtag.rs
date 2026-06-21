@@ -424,3 +424,58 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
 
     Ok(tag)
 }
+
+/// `CreateCommandTag` (utility.c) — the `case T_PlannedStmt:` arm. A
+/// `PlannedStmt` is not a `&Node` enum variant in this repo's node model, so
+/// the planned-statement command tag has its own entrypoint (this is what
+/// `CreateCommandName((Node *) pstmt)` reaches in `SPI_cursor_open_internal`'s
+/// "cannot open %s query as cursor" / read-only-violation messages). For the
+/// `CMD_SELECT` case it takes the same extra care the C arm does so the result
+/// is useful for read-only complaints (rendering the `SELECT FOR …` variant
+/// from the first row mark's strength).
+pub fn CreateCommandTagForPlannedStmt(
+    stmt: &types_nodes::nodeindexscan::PlannedStmt<'_>,
+) -> PgResult<CommandTag> {
+    let tag = match stmt.commandType {
+        CMD_SELECT => {
+            // We take a little extra care here so that the result will be useful
+            // for complaints about read-only statements.
+            // `PlanRowMark.strength` is the `LockClauseStrength` i32 alias
+            // (nodelockrows); compare against the enum discriminants.
+            match stmt.rowMarks.as_ref().and_then(|m| m.first()) {
+                Some(rm) => {
+                    let s = rm.strength;
+                    // not 100% but probably close enough
+                    if s == LCS_FORKEYSHARE as i32 {
+                        CMDTAG_SELECT_FOR_KEY_SHARE
+                    } else if s == LCS_FORSHARE as i32 {
+                        CMDTAG_SELECT_FOR_SHARE
+                    } else if s == LCS_FORNOKEYUPDATE as i32 {
+                        CMDTAG_SELECT_FOR_NO_KEY_UPDATE
+                    } else if s == LCS_FORUPDATE as i32 {
+                        CMDTAG_SELECT_FOR_UPDATE
+                    } else {
+                        CMDTAG_SELECT
+                    }
+                }
+                None => CMDTAG_SELECT,
+            }
+        }
+        CMD_UPDATE => CMDTAG_UPDATE,
+        CMD_INSERT => CMDTAG_INSERT,
+        CMD_DELETE => CMDTAG_DELETE,
+        CMD_MERGE => CMDTAG_MERGE,
+        CMD_UTILITY => match &stmt.utilityStmt {
+            Some(inner) => CreateCommandTag(inner)?,
+            None => CMDTAG_UNKNOWN,
+        },
+        other => {
+            backend_utils_error::elog(
+                WARNING,
+                format!("unrecognized commandType: {}", other as i32),
+            )?;
+            CMDTAG_UNKNOWN
+        }
+    };
+    Ok(tag)
+}

@@ -59,7 +59,15 @@ use backend_utils_time_snapmgr_seams as snapmgr;
 
 // The plancache owner's pub fns operate on its bare `u64` source/plan handle
 // aliases; we hold the bare handle and wrap only when calling a seam.
-type SourceHandle = u64;
+pub(crate) type SourceHandle = u64;
+
+/// `plan->plancache_list` and `plan->saved` for the cursor driver
+/// ([`crate::exec`]): the prepared plan's `CachedPlanSource` handles plus
+/// whether `SPI_keepplan` has been applied. `Err` for an invalid handle (the
+/// C `plan == NULL || plan->magic != _SPI_PLAN_MAGIC` guard).
+pub(crate) fn plan_sources(plan: SpiPlanPtr) -> PgResult<(Vec<SourceHandle>, bool)> {
+    with_plan(plan, |p| (p.plancache_list.clone(), p.saved))
+}
 
 /// The owned `_SPI_plan` carrier (one per prepared/saved SPI plan).
 struct SpiPlan {

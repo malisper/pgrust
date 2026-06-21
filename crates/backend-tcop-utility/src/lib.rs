@@ -69,7 +69,7 @@ pub use classify::{
     CheckRestrictedOperation, ClassifyUtilityCommandAsReadOnly, CommandIsReadOnly,
     PreventCommandDuringRecovery, PreventCommandIfParallelMode, PreventCommandIfReadOnly,
 };
-pub use commandtag::{AlterObjectTypeCommandTag, CreateCommandTag};
+pub use commandtag::{AlterObjectTypeCommandTag, CreateCommandTag, CreateCommandTagForPlannedStmt};
 pub use dispatch::{
     ExecDropStmt, ProcessUtility, ProcessUtilityForAlterTable, process_utility_wrapper,
     standard_ProcessUtility,
@@ -93,6 +93,8 @@ pub use returns::{QueryReturnsTuples, UtilityContainsQuery, UtilityReturnsTuples
 /// the dispatch spine; see [`crate::dispatch::ProcessUtility`]).
 pub fn init_seams() {
     backend_tcop_utility_seams::create_command_tag::set(CreateCommandTag);
+    backend_tcop_utility_seams::command_is_read_only::set(CommandIsReadOnly);
+    backend_tcop_utility_seams::planned_stmt_command_tag::set(CreateCommandTagForPlannedStmt);
     backend_tcop_utility_seams::get_command_log_level::set(GetCommandLogLevel);
     backend_tcop_utility_seams::utility_returns_tuples::set(UtilityReturnsTuples);
     backend_tcop_utility_seams::utility_tuple_descriptor::set(UtilityTupleDescriptor);
