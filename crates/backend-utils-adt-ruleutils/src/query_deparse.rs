@@ -2009,9 +2009,13 @@ fn get_from_clause_item<'mcx>(
                     get_function_rte(mcx, &rte, context, &mut rtfunc1_present)?;
                 }
                 RTE_TABLEFUNC => {
-                    return Err(deferred(
-                        "get_from_clause_item RTE_TABLEFUNC (get_tablefunc: XMLTABLE/JSON_TABLE deparse; XML/JSON family)",
-                    ));
+                    // C: get_tablefunc(rte->tablefunc, context, true).
+                    let tf = rte
+                        .tablefunc
+                        .as_deref()
+                        .and_then(|n| n.as_table_func())
+                        .ok_or_else(|| missing_field("RTE_TABLEFUNC tablefunc"))?;
+                    crate::expr_deparse::get_tablefunc(tf, context, true)?;
                 }
                 RTE_VALUES => {
                     ch_(context, b'(')?;

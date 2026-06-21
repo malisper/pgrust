@@ -1548,16 +1548,140 @@ fn pqe_per_rte<'mcx>(
                 }
             }
             RTEKind::RTE_TABLEFUNC => {
-                // planner.c:1022-1027 preprocesses rte->tablefunc; the owned
-                // TableFunc node universe (XMLTABLE / JSON_TABLE) is not
-                // reachable as a walkable Expr here, so this leg loud-panics
-                // until the tablefunc node model lands. No generate_series /
-                // unnest path reaches this arm.
-                panic!(
-                    "subquery_planner: per-RTE expression preprocessing \
-                     (planner.c:1022-1027) for RTE_TABLEFUNC is not wired over \
-                     the owned RTE model"
-                );
+                // planner.c:1022-1027: rte->tablefunc = preprocess_expression(
+                //   root, (Node *) rte->tablefunc, EXPRKIND_TABLEFUNC[_LATERAL]).
+                // C folds the whole TableFunc node as one; in the owned model the
+                // TableFunc carries several Expr subtrees (docexpr, rowexpr, the
+                // per-column colexprs/coldefexprs, and the namespace ns_uris), so
+                // we preprocess each subtree in place — exactly as the RTE_FUNCTION
+                // arm above does for each RangeTblFunction funcexpr.
+                let kind = if lateral {
+                    EXPRKIND_TABLEFUNC_LATERAL
+                } else {
+                    EXPRKIND_TABLEFUNC
+                };
+
+                // Helper: take an Expr out, preprocess it, hand it back.
+                macro_rules! preprocess_one {
+                    ($e:expr) => {{
+                        let taken: Option<Expr> = $e;
+                        match taken {
+                            Some(e) => preprocess_expression(
+                                mcx,
+                                &mut *root,
+                                run,
+                                outer_query_ref,
+                                Some(e),
+                                kind,
+                            )?,
+                            None => None,
+                        }
+                    }};
+                }
+
+                // docexpr
+                let doc = {
+                    let parse = run.resolve(root.parse);
+                    parse.rtable[i]
+                        .tablefunc
+                        .as_deref()
+                        .and_then(|n| n.as_table_func())
+                        .and_then(|tf| tf.docexpr.as_deref().cloned())
+                };
+                if let Some(pe) = preprocess_one!(doc) {
+                    if let Some(tf) = (*run.resolve_mut(root.parse).rtable[i].tablefunc.as_mut().unwrap()).as_table_func_mut() {
+                        tf.docexpr = Some(mcx::alloc_in(mcx, pe)?);
+                    }
+                }
+                // rowexpr
+                let row = {
+                    let parse = run.resolve(root.parse);
+                    parse.rtable[i]
+                        .tablefunc
+                        .as_deref()
+                        .and_then(|n| n.as_table_func())
+                        .and_then(|tf| tf.rowexpr.as_deref().cloned())
+                };
+                if let Some(pe) = preprocess_one!(row) {
+                    if let Some(tf) = (*run.resolve_mut(root.parse).rtable[i].tablefunc.as_mut().unwrap()).as_table_func_mut() {
+                        tf.rowexpr = Some(mcx::alloc_in(mcx, pe)?);
+                    }
+                }
+                // colexprs[k] / coldefexprs[k]
+                let ncols = {
+                    let parse = run.resolve(root.parse);
+                    parse.rtable[i]
+                        .tablefunc
+                        .as_deref()
+                        .and_then(|n| n.as_table_func())
+                        .and_then(|tf| tf.colexprs.as_ref().map(|v| v.len()))
+                        .unwrap_or(0)
+                };
+                for k in 0..ncols {
+                    let ce = {
+                        let parse = run.resolve(root.parse);
+                        parse.rtable[i]
+                            .tablefunc
+                            .as_deref()
+                            .and_then(|n| n.as_table_func())
+                            .and_then(|tf| tf.colexprs.as_ref())
+                            .and_then(|v| v.get(k))
+                            .and_then(|o| o.as_deref().cloned())
+                    };
+                    if let Some(pe) = preprocess_one!(ce) {
+                        if let Some(tf) = (*run.resolve_mut(root.parse).rtable[i].tablefunc.as_mut().unwrap()).as_table_func_mut() {
+                            if let Some(slot) = tf.colexprs.as_mut().and_then(|v| v.get_mut(k)) {
+                                *slot = Some(mcx::alloc_in(mcx, pe)?);
+                            }
+                        }
+                    }
+                    let cde = {
+                        let parse = run.resolve(root.parse);
+                        parse.rtable[i]
+                            .tablefunc
+                            .as_deref()
+                            .and_then(|n| n.as_table_func())
+                            .and_then(|tf| tf.coldefexprs.as_ref())
+                            .and_then(|v| v.get(k))
+                            .and_then(|o| o.as_deref().cloned())
+                    };
+                    if let Some(pe) = preprocess_one!(cde) {
+                        if let Some(tf) = (*run.resolve_mut(root.parse).rtable[i].tablefunc.as_mut().unwrap()).as_table_func_mut() {
+                            if let Some(slot) = tf.coldefexprs.as_mut().and_then(|v| v.get_mut(k)) {
+                                *slot = Some(mcx::alloc_in(mcx, pe)?);
+                            }
+                        }
+                    }
+                }
+                // ns_uris[k]
+                let nns = {
+                    let parse = run.resolve(root.parse);
+                    parse.rtable[i]
+                        .tablefunc
+                        .as_deref()
+                        .and_then(|n| n.as_table_func())
+                        .and_then(|tf| tf.ns_uris.as_ref().map(|v| v.len()))
+                        .unwrap_or(0)
+                };
+                for k in 0..nns {
+                    let ne = {
+                        let parse = run.resolve(root.parse);
+                        parse.rtable[i]
+                            .tablefunc
+                            .as_deref()
+                            .and_then(|n| n.as_table_func())
+                            .and_then(|tf| tf.ns_uris.as_ref())
+                            .and_then(|v| v.get(k))
+                            .map(|b| (**b).clone())
+                    };
+                    if let Some(pe) = preprocess_one!(ne) {
+                        if let Some(tf) = (*run.resolve_mut(root.parse).rtable[i].tablefunc.as_mut().unwrap()).as_table_func_mut() {
+                            if let Some(slot) = tf.ns_uris.as_mut().and_then(|v| v.get_mut(k)) {
+                                *slot = mcx::alloc_in(mcx, pe)?;
+                            }
+                        }
+                    }
+                }
             }
             _ => {}
         }

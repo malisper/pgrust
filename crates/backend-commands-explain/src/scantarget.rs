@@ -214,10 +214,18 @@ pub fn ExplainTargetRel<'mcx>(
         }
         ntag::T_TableFuncScan => {
             // Assert(rte->rtekind == RTE_TABLEFUNC);
-            // tablefunc->functype is on the TableFunc node carried by the
-            // TableFuncScan plan; it is not modelled in the trimmed plan node, so
-            // the structural slice cannot pick xmltable vs json_table. Emit just
-            // the objecttag (alias still printed).
+            // objectname = rte->tablefunc->functype == TFT_XMLTABLE ?
+            //   "xmltable" : "json_table". The TableFunc node is carried by the
+            //   TableFuncScan plan.
+            let tfs = plan_node.expect_tablefuncscan();
+            objectname = Some(mcx::PgString::from_str_in(
+                if tfs.tablefunc.functype == types_nodes::primnodes::TFT_XMLTABLE {
+                    "xmltable"
+                } else {
+                    "json_table"
+                },
+                mcx,
+            )?);
             objecttag = Some("Table Function Name");
         }
         ntag::T_ValuesScan => {

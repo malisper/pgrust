@@ -2357,13 +2357,50 @@ fn set_scan_node_refs<'mcx>(
         ntag::T_TableFuncScan => {
             let s = plan.as_tablefuncscan_mut().unwrap();
             fix_scan_common(root, &mut s.scan, rtoffset, mcx)?;
-            // tablefunc = fix_scan_expr over a TableFunc node (a Node, not Expr).
-            let _ = &s.tablefunc;
-            return Err(PgError::error(
-                "set_plan_refs(T_TableFuncScan): fixing the TableFunc node \
-                 (fix_scan_expr over a Node, not an Expr) requires the node-tree \
-                 walker and is not ported",
-            ));
+            // C: scan->tablefunc = (TableFunc *) fix_scan_expr(root,
+            //    (Node *) scan->tablefunc, rtoffset, 1). fix_scan_expr over a
+            //    TableFunc node descends into and fixes its expression subtrees;
+            //    in the owned model those are individual Exprs (docexpr, rowexpr,
+            //    per-column colexprs/coldefexprs, namespace ns_uris), so apply
+            //    the Expr mutator to each in place (num_exec=1).
+            let tf = &mut *s.tablefunc;
+            if let Some(b) = tf.docexpr.take() {
+                let fixed = fix_scan_expr(mcx, root, PgBox::into_inner(b), rtoffset, 1.0)?;
+                tf.docexpr = Some(mcx::alloc_in(mcx, fixed)?);
+            }
+            if let Some(b) = tf.rowexpr.take() {
+                let fixed = fix_scan_expr(mcx, root, PgBox::into_inner(b), rtoffset, 1.0)?;
+                tf.rowexpr = Some(mcx::alloc_in(mcx, fixed)?);
+            }
+            if let Some(v) = tf.colexprs.as_mut() {
+                let n = v.len();
+                for k in 0..n {
+                    if let Some(b) = v[k].take() {
+                        let fixed =
+                            fix_scan_expr(mcx, root, PgBox::into_inner(b), rtoffset, 1.0)?;
+                        v[k] = Some(mcx::alloc_in(mcx, fixed)?);
+                    }
+                }
+            }
+            if let Some(v) = tf.coldefexprs.as_mut() {
+                let n = v.len();
+                for k in 0..n {
+                    if let Some(b) = v[k].take() {
+                        let fixed =
+                            fix_scan_expr(mcx, root, PgBox::into_inner(b), rtoffset, 1.0)?;
+                        v[k] = Some(mcx::alloc_in(mcx, fixed)?);
+                    }
+                }
+            }
+            if let Some(v) = tf.ns_uris.take() {
+                let mut out: PgVec<'mcx, PgBox<'mcx, Expr>> =
+                    mcx::vec_with_capacity_in(mcx, v.len())?;
+                for b in v.into_iter() {
+                    let fixed = fix_scan_expr(mcx, root, PgBox::into_inner(b), rtoffset, 1.0)?;
+                    out.push(mcx::alloc_in(mcx, fixed)?);
+                }
+                tf.ns_uris = Some(out);
+            }
         }
         ntag::T_ValuesScan => {
             let s = plan.as_valuesscan_mut().unwrap();

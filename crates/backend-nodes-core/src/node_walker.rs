@@ -749,6 +749,28 @@ pub fn raw_expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> 
                 || walk_opt!(rts.repeatable.as_ref())
         }
 
+        // `case T_RangeTableFunc:` (nodeFuncs.c:4520) — XMLTABLE raw grammar.
+        // C WALKs docexpr, rowexpr, namespaces, columns, alias. The `alias`
+        // is an `Alias` node containing only names (no sub-expressions), and
+        // `T_Alias` is a leaf in this walker (returns false), so walking it
+        // is a no-op; we omit it for the same reason `T_RangeSubselect`
+        // above omits its alias.
+        ntag::T_RangeTableFunc => {
+            let rtf = node.expect_rangetablefunc();
+            walk_opt!(rtf.docexpr.as_ref())
+                || walk_opt!(rtf.rowexpr.as_ref())
+                || list_walk!(rtf.namespaces)
+                || list_walk!(rtf.columns)
+        }
+
+        // `case T_RangeTableFuncCol:` (nodeFuncs.c:4536) — WALK colexpr,
+        // coldefexpr. (typeName is walked via its own T_TypeName arm when the
+        // column is reached as a Node; here we mirror C's explicit WALKs.)
+        ntag::T_RangeTableFuncCol => {
+            let rtfc = node.expect_rangetablefunccol();
+            walk_opt!(rtfc.colexpr.as_ref()) || walk_opt!(rtfc.coldefexpr.as_ref())
+        }
+
         ntag::T_TypeName => {
             let tn = node.expect_typename();
             list_walk!(tn.typmods) || list_walk!(tn.arrayBounds)

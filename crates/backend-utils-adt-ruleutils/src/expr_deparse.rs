@@ -453,6 +453,10 @@ pub fn get_rule_expr(
         // C `case T_PartitionBoundSpec:` (ruleutils.c 10429-10486). Reached via
         // pg_get_expr(relpartbound, ...) for a partition's `FOR VALUES …` clause.
         get_rule_partition_bound_spec(spec, context)?;
+    } else if let Some(tf) = node.as_table_func() {
+        // C `case T_TableFunc:` (ruleutils.c 10613) → get_tablefunc. Reached via
+        // EXPLAIN's "Table Function Call:" (show_expression over rte->tablefunc).
+        get_tablefunc(tf, context, showimplicit)?;
     } else if let Some(expr) = node.as_expr() {
         get_rule_expr_e(expr, context, showimplicit)?;
     } else {
@@ -465,6 +469,141 @@ pub fn get_rule_expr(
             node.tag().0
         )));
     }
+    Ok(())
+}
+
+/// `get_tablefunc(tf, context, showimplicit)` (ruleutils.c:12251) — parse back
+/// a table function. XMLTABLE and JSON_TABLE are the only implementations;
+/// JSON_TABLE (`get_json_table`) is deferred until that subsystem lands.
+pub(crate) fn get_tablefunc(
+    tf: &types_nodes::primnodes::TableFunc<'_>,
+    context: &mut DeparseContext<'_>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    use types_nodes::primnodes::TFT_XMLTABLE;
+    if tf.functype == TFT_XMLTABLE {
+        get_xmltable(tf, context, showimplicit)
+    } else {
+        Err(deferred(
+            "get_tablefunc TFT_JSON_TABLE (get_json_table; JSON deparser family)",
+        ))
+    }
+}
+
+/// `get_xmltable(tf, context, showimplicit)` (ruleutils.c:11945) — parse back an
+/// XMLTABLE table function. 1:1 port.
+fn get_xmltable(
+    tf: &types_nodes::primnodes::TableFunc<'_>,
+    context: &mut DeparseContext<'_>,
+    showimplicit: bool,
+) -> PgResult<()> {
+    let mcx = context.buf.allocator();
+
+    str_(context, "XMLTABLE(")?;
+
+    // XMLNAMESPACES (...)
+    if let Some(ns_uris) = tf.ns_uris.as_ref().filter(|v| !v.is_empty()) {
+        str_(context, "XMLNAMESPACES (")?;
+        let mut first = true;
+        for (i, expr) in ns_uris.iter().enumerate() {
+            if !first {
+                str_(context, ", ")?;
+            } else {
+                first = false;
+            }
+            let name: Option<&str> = tf
+                .ns_names
+                .as_ref()
+                .and_then(|v| v.get(i))
+                .and_then(|o| o.as_ref().map(|s| s.as_str()));
+            match name {
+                Some(n) => {
+                    let expr_node = types_nodes::nodes::Node::mk_expr(mcx, (**expr).clone_in(mcx)?)?;
+                    get_rule_expr(&expr_node, context, showimplicit)?;
+                    let q = quote_identifier(mcx, n)?;
+                    str_(context, " AS ")?;
+                    str_(context, q.as_str())?;
+                }
+                None => {
+                    str_(context, "DEFAULT ")?;
+                    let expr_node = types_nodes::nodes::Node::mk_expr(mcx, (**expr).clone_in(mcx)?)?;
+                    get_rule_expr(&expr_node, context, showimplicit)?;
+                }
+            }
+        }
+        str_(context, "), ")?;
+    }
+
+    ch_(context, b'(')?;
+    if let Some(rowexpr) = tf.rowexpr.as_deref() {
+        let n = types_nodes::nodes::Node::mk_expr(mcx, rowexpr.clone_in(mcx)?)?;
+        get_rule_expr(&n, context, showimplicit)?;
+    }
+    str_(context, ") PASSING (")?;
+    if let Some(docexpr) = tf.docexpr.as_deref() {
+        let n = types_nodes::nodes::Node::mk_expr(mcx, docexpr.clone_in(mcx)?)?;
+        get_rule_expr(&n, context, showimplicit)?;
+    }
+    ch_(context, b')')?;
+
+    if let Some(colexprs) = tf.colexprs.as_ref().filter(|v| !v.is_empty()) {
+        let colnames = tf.colnames.as_ref();
+        let coltypes = tf.coltypes.as_ref();
+        let coltypmods = tf.coltypmods.as_ref();
+        let coldefexprs = tf.coldefexprs.as_ref();
+
+        str_(context, " COLUMNS ")?;
+        for colnum in 0..colexprs.len() {
+            let colname = colnames
+                .and_then(|v| v.get(colnum))
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let typid = coltypes.and_then(|v| v.get(colnum)).copied().unwrap_or(0);
+            let typmod = coltypmods.and_then(|v| v.get(colnum)).copied().unwrap_or(-1);
+            let colexpr = colexprs.get(colnum).and_then(|o| o.as_deref());
+            let coldefexpr = coldefexprs.and_then(|v| v.get(colnum)).and_then(|o| o.as_deref());
+            let ordinality = tf.ordinalitycol == colnum as i32;
+            let notnull = backend_nodes_core_seams::bms_is_member::call(
+                colnum as i32,
+                tf.notnulls.as_deref(),
+            );
+
+            if colnum > 0 {
+                str_(context, ", ")?;
+            }
+
+            let q = quote_identifier(mcx, colname)?;
+            str_(context, q.as_str())?;
+            ch_(context, b' ')?;
+            if ordinality {
+                str_(context, "FOR ORDINALITY")?;
+            } else {
+                let ty = format_type_with_typemod(mcx, typid, typmod)?;
+                str_(context, ty.as_str())?;
+            }
+            if ordinality {
+                continue;
+            }
+
+            if let Some(cde) = coldefexpr {
+                str_(context, " DEFAULT (")?;
+                let n = types_nodes::nodes::Node::mk_expr(mcx, cde.clone_in(mcx)?)?;
+                get_rule_expr(&n, context, showimplicit)?;
+                ch_(context, b')')?;
+            }
+            if let Some(ce) = colexpr {
+                str_(context, " PATH (")?;
+                let n = types_nodes::nodes::Node::mk_expr(mcx, ce.clone_in(mcx)?)?;
+                get_rule_expr(&n, context, showimplicit)?;
+                ch_(context, b')')?;
+            }
+            if notnull {
+                str_(context, " NOT NULL")?;
+            }
+        }
+    }
+
+    ch_(context, b')')?;
     Ok(())
 }
 

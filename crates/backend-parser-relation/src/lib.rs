@@ -2176,25 +2176,170 @@ fn expr_location_of_list<'mcx>(list: &PgVec<'mcx, NodePtr<'mcx>>) -> PgResult<i3
     }
 }
 
-/// `addRangeTableEntryForTableFunc` — make a tablefunc RTE.
-///
-/// The RTE's `tablefunc` field (`Option<NodePtr>`) has no `Node::TableFunc`
-/// central-enum variant to carry the `TableFunc` value, so the constructed RTE
-/// cannot store the table function faithfully. Mirror-PG-and-panic until the
-/// central `Node` enum gains a `TableFunc` arm (this is the same modeling gap
-/// that blocks the VALUES adder's row lists).
+/// `addRangeTableEntryForTableFunc` — make a tablefunc RTE
+/// (parse_relation.c:2065). 1:1 port.
 pub fn addRangeTableEntryForTableFunc<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _pstate: &mut ParseState<'mcx>,
-    _tf: TableFunc<'mcx>,
-    _alias: Option<Alias<'mcx>>,
-    _lateral: bool,
-    _in_from_cl: bool,
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    tf: TableFunc<'mcx>,
+    alias: Option<Alias<'mcx>>,
+    lateral: bool,
+    in_from_cl: bool,
 ) -> PgResult<ParseNamespaceItem<'mcx>> {
-    panic!(
-        "addRangeTableEntryForTableFunc: RTE.tablefunc (Option<NodePtr>) has no \
-         Node::TableFunc central-enum variant to carry the TableFunc value \
-         (parse_relation.c:2065)"
+    use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
+    use types_error::error::ERRCODE_TOO_MANY_COLUMNS;
+    use types_nodes::primnodes::TFT_XMLTABLE;
+    use types_tuple::heaptuple::MaxTupleAttributeNumber;
+
+    // The column lists are populated by the caller (transformRangeTableFunc /
+    // transformJsonTable).
+    let colnames_len = tf.colnames.as_ref().map_or(0, |v| v.len());
+    let coltypes = tf.coltypes.as_ref();
+    let coltypmods = tf.coltypmods.as_ref();
+    let colcollations = tf.colcollations.as_ref();
+
+    // Disallow more columns than will fit in a tuple.
+    if colnames_len > MaxTupleAttributeNumber as usize {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_TOO_MANY_COLUMNS)
+            .errmsg(format!(
+                "functions in FROM can return at most {MaxTupleAttributeNumber} columns"
+            ))
+            .into_error());
+    }
+    debug_assert_eq!(coltypes.map_or(0, |v| v.len()), colnames_len);
+    debug_assert_eq!(coltypmods.map_or(0, |v| v.len()), colnames_len);
+    debug_assert_eq!(colcollations.map_or(0, |v| v.len()), colnames_len);
+
+    let is_xmltable = tf.functype == TFT_XMLTABLE;
+
+    let mut rte = RangeTblEntry::new_in(mcx);
+    rte.rtekind = RTE_TABLEFUNC;
+    // relid = InvalidOid, subquery = None (defaults).
+
+    // Snapshot the column lists for the RTE / buildNSItemFromLists before we
+    // move `tf` into the RTE's `tablefunc` field.
+    let coltypes_snap: PgVec<'mcx, Oid> = {
+        let mut v = mcx::vec_with_capacity_in(mcx, colnames_len)?;
+        if let Some(ct) = coltypes {
+            for t in ct.iter() {
+                v.push(*t);
+            }
+        }
+        v
+    };
+    let coltypmods_snap: PgVec<'mcx, i32> = {
+        let mut v = mcx::vec_with_capacity_in(mcx, colnames_len)?;
+        if let Some(ct) = coltypmods {
+            for t in ct.iter() {
+                v.push(*t);
+            }
+        }
+        v
+    };
+    let colcollations_snap: PgVec<'mcx, Oid> = {
+        let mut v = mcx::vec_with_capacity_in(mcx, colnames_len)?;
+        if let Some(cc) = colcollations {
+            for t in cc.iter() {
+                v.push(*t);
+            }
+        }
+        v
+    };
+    // colnames snapshot (as String nodes) for filling unspecified alias cols.
+    let tf_colnames: Vec<String> = tf
+        .colnames
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.as_str().to_string()).collect())
+        .unwrap_or_default();
+
+    // rte->coltypes/coltypmods/colcollations = tf->...
+    rte.coltypes = {
+        let mut v = mcx::vec_with_capacity_in(mcx, colnames_len)?;
+        for t in coltypes_snap.iter() {
+            v.push(*t);
+        }
+        v
+    };
+    rte.coltypmods = {
+        let mut v = mcx::vec_with_capacity_in(mcx, colnames_len)?;
+        for t in coltypmods_snap.iter() {
+            v.push(*t);
+        }
+        v
+    };
+    rte.colcollations = {
+        let mut v = mcx::vec_with_capacity_in(mcx, colnames_len)?;
+        for t in colcollations_snap.iter() {
+            v.push(*t);
+        }
+        v
+    };
+
+    // rte->tablefunc = tf  (store the TableFunc as a Node).
+    rte.tablefunc = Some(mcx::alloc_in(mcx, Node::mk_table_func(mcx, tf)?)?);
+
+    // refname = alias ? alias->aliasname : ("xmltable" | "json_table")
+    let refname_owned: String = match &alias {
+        Some(a) => a.aliasname.as_deref().unwrap_or("").to_string(),
+        None => {
+            if is_xmltable {
+                "xmltable".to_string()
+            } else {
+                "json_table".to_string()
+            }
+        }
+    };
+
+    // eref = alias ? copyObject(alias) : makeAlias(refname, NIL)
+    let mut eref = match &alias {
+        Some(a) => a.clone_in(mcx)?,
+        None => make_alias(mcx, refname_owned.as_str(), PgVec::new_in(mcx))?,
+    };
+
+    let numaliases = eref.colnames.len();
+
+    // fill in any unspecified alias columns
+    if numaliases < colnames_len {
+        for cn in tf_colnames.iter().skip(numaliases) {
+            eref.colnames.push(make_string_node(mcx, cn.as_str())?);
+        }
+    }
+
+    if numaliases > colnames_len {
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
+            .errmsg(format!(
+                "{} function has {} columns available but {} columns specified",
+                if is_xmltable { "XMLTABLE" } else { "JSON_TABLE" },
+                colnames_len,
+                numaliases
+            ))
+            .into_error());
+    }
+
+    rte.alias = match &alias {
+        Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+        None => None,
+    };
+    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+
+    // Tablefuncs are never checked for access rights, so no addRTEPermissionInfo.
+    rte.lateral = lateral;
+    rte.inFromCl = in_from_cl;
+
+    pstate.p_rtable.push(rte);
+    let rtindex = pstate.p_rtable.len() as Index;
+    let rte_ref = &pstate.p_rtable[(rtindex - 1) as usize];
+
+    buildNSItemFromLists(
+        mcx,
+        rte_ref,
+        rtindex,
+        &coltypes_snap,
+        &coltypmods_snap,
+        &colcollations_snap,
     )
 }
 

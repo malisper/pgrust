@@ -74,6 +74,8 @@ use types_nodes::nodeprojectset::ProjectSet as ProjectSetNode;
 use types_nodes::nodes::{ntag, Node, NodeTag};
 use types_nodes::nodectescan::CteScan;
 use types_nodes::nodefunctionscan::FunctionScan;
+use types_nodes::nodetablefuncscan::TableFuncScan;
+use types_nodes::primnodes::TableFunc;
 use types_nodes::nodeindexscan::{SubqueryScan, SubqueryScanStatus, TidScan};
 use types_nodes::nodenamedtuplestorescan::NamedTuplestoreScan;
 use types_nodes::nodesamplescan::{SampleScan, TableSampleClause};
@@ -3051,6 +3053,117 @@ fn create_functionscan_plan<'mcx>(
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
 
     Ok(Node::mk_function_scan(mcx, scan_plan)?)
+}
+
+// ---------------------------------------------------------------------------
+// create_tablefuncscan_plan (createplan.c ~3812)
+// ---------------------------------------------------------------------------
+
+/// `make_tablefuncscan(qptlist, qpqual, scanrelid, tablefunc)` — build a
+/// `TableFuncScan` plan node.
+fn make_tablefuncscan<'mcx>(
+    qptlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
+    qpqual: Option<PgVec<'mcx, Expr>>,
+    scanrelid: u32,
+    tablefunc: PgBox<'mcx, TableFunc<'mcx>>,
+) -> TableFuncScan<'mcx> {
+    let mut node = TableFuncScan {
+        scan: Scan::default(),
+        tablefunc,
+    };
+    let plan: &mut Plan = &mut node.scan.plan;
+    plan.targetlist = qptlist;
+    plan.qual = qpqual;
+    plan.lefttree = None;
+    plan.righttree = None;
+    node.scan.scanrelid = scanrelid;
+    node
+}
+
+/// `create_tablefuncscan_plan(root, best_path, tlist, scan_clauses)` — return a
+/// tablefuncscan plan for the base relation scanned by `best_path`. 1:1 port of
+/// createplan.c:3812.
+fn create_tablefuncscan_plan<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    run: &PlannerRun<'mcx>,
+    best_path: PathId,
+    tlist: Vec<TargetEntry<'mcx>>,
+    scan_clauses: Vec<RinfoId>,
+) -> PgResult<Node<'mcx>> {
+    let rel_id = root.path(best_path).base().parent;
+    let scan_relid = root.rel(rel_id).relid;
+
+    // it should be a function base rel...
+    debug_assert!(scan_relid > 0);
+    let rte = planner_rt_fetch(run, root, scan_relid);
+    debug_assert_eq!(rte.rtekind, types_nodes::parsenodes::RTEKind::RTE_TABLEFUNC);
+
+    // tablefunc = rte->tablefunc — resolve into an owned TableFunc.
+    let mut tablefunc: TableFunc<'mcx> = match rte.tablefunc.as_deref().and_then(|n| n.as_table_func())
+    {
+        Some(tf) => tf.clone_in(mcx)?,
+        None => {
+            return Err(PgError::error(
+                "create_tablefuncscan_plan: RTE_TABLEFUNC has no tablefunc node",
+            ))
+        }
+    };
+
+    let has_param_info = root.path(best_path).base().param_info.is_some();
+
+    // Sort clauses into best execution order.
+    let scan_clauses = order_qual_clauses_rinfo(root, &scan_clauses);
+    // Reduce RestrictInfo list to bare expressions; ignore pseudoconstants.
+    let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
+    // Replace any outer-relation variables with nestloop params.
+    let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    // The function expressions could contain nestloop params, too. Replace
+    // nestloop params within each Expr subtree of the TableFunc.
+    if has_param_info {
+        let mut err: Option<PgError> = None;
+        let mut repl = |e: &mut Expr| {
+            let old = e.clone();
+            *e = replace_nestloop_params_expr(mcx, root, old, &mut err);
+        };
+        if let Some(b) = tablefunc.docexpr.as_deref_mut() {
+            repl(b);
+        }
+        if let Some(b) = tablefunc.rowexpr.as_deref_mut() {
+            repl(b);
+        }
+        if let Some(v) = tablefunc.colexprs.as_mut() {
+            for o in v.iter_mut() {
+                if let Some(b) = o.as_deref_mut() {
+                    repl(b);
+                }
+            }
+        }
+        if let Some(v) = tablefunc.coldefexprs.as_mut() {
+            for o in v.iter_mut() {
+                if let Some(b) = o.as_deref_mut() {
+                    repl(b);
+                }
+            }
+        }
+        if let Some(v) = tablefunc.ns_uris.as_mut() {
+            for b in v.iter_mut() {
+                repl(b);
+            }
+        }
+        if let Some(e) = err {
+            return Err(e);
+        }
+    }
+
+    let tlist = tlist_to_plan_field(mcx, tlist)?;
+    let tf_box = mcx::alloc_in(mcx, tablefunc)?;
+    let mut scan_plan = make_tablefuncscan(tlist, qpqual, scan_relid, tf_box);
+
+    copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
+
+    Ok(Node::mk_table_func_scan(mcx, scan_plan)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -8190,6 +8303,11 @@ pub fn init_seams() {
     // it now that the converter is ported (BitmapHeapScan over BitmapIndexScan/
     // BitmapAnd/BitmapOr).
     cp_seam::create_bitmap_scan_plan::set(create_bitmap_scan_plan);
+
+    // `create_tablefuncscan_plan` (XMLTABLE / JSON_TABLE) reached from
+    // create_scan_plan's dispatch via the `cp_seam` indirection; install the
+    // in-crate converter now that the TableFunc node model is reachable.
+    cp_seam::create_tablefuncscan_plan::set(create_tablefuncscan_plan);
 
     // `create_subqueryscan_subplan`: the subroot-recursion leg of
     // create_subqueryscan_plan. For set-operation children the subquery path

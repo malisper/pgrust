@@ -885,6 +885,23 @@ pub fn ExplainNode<'es, 'p>(
             show_scan_qual(es, mcx, plan_node, ancestors, Some(&bhs.bitmapqualorig), "Recheck Cond")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
         }
+        ntag::T_TableFuncScan => {
+            // explain.c:2089-2095: verbose-only show_expression((Node *)
+            //   scan->tablefunc, "Table Function Call", ...); then Filter.
+            if es.verbose {
+                let tfs = plan_node.expect_tablefuncscan();
+                let tf_node = Node::mk_table_func(mcx, tfs.tablefunc.clone_in(mcx)?)?;
+                show_expression(
+                    es,
+                    mcx,
+                    plan_node,
+                    ancestors,
+                    &tf_node,
+                    "Table Function Call",
+                )?;
+            }
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+        }
         _ => {
             // The generic `Filter` leg (SeqScan / SampleScan / ValuesScan /
             // CteScan / NamedTuplestoreScan / WorkTableScan / SubqueryScan /
@@ -1221,6 +1238,39 @@ fn show_scan_qual<'es, 'p>(
         false,
     )?;
     // ExplainPropertyText(qlabel, exprstr, es);
+    fmt::ExplainPropertyText(qlabel, exprstr.as_str(), es)?;
+    Ok(())
+}
+
+/// `show_expression(node, qlabel, planstate, ancestors, useprefix, es)`
+/// (explain.c:2870) — deparse and print a single expression `node` under
+/// `qlabel`. Used by the TableFuncScan "Table Function Call" leg.
+fn show_expression<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plan_node: &Node<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+    node: &Node<'es>,
+    qlabel: &str,
+) -> PgResult<()> {
+    // useprefix = es->verbose (the only caller, TableFuncScan, passes
+    // es->verbose).
+    let useprefix = es.verbose;
+    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let es_pstmt = es
+        .pstmt
+        .as_deref()
+        .expect("EXPLAIN: es->pstmt must be set before deparse");
+    let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+        mcx,
+        es_pstmt,
+        &es.rtable_names,
+        &plan_owned,
+        ancestors,
+        node,
+        useprefix,
+        false,
+    )?;
     fmt::ExplainPropertyText(qlabel, exprstr.as_str(), es)?;
     Ok(())
 }

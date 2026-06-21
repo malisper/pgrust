@@ -531,20 +531,49 @@ pub fn init_seams() {
     });
 
     // costsize.c `cost_tablefuncscan` (1599): `cost_qual_eval_node((Node *)
-    // rte->tablefunc, root)`. The owned TableFunc node universe is not reachable
-    // as a walkable Expr here, so this leg loud-panics until the tablefunc node
-    // model lands (no generate_series / unnest path reaches it).
+    // rte->tablefunc, root)`. In the owned model the TableFunc carries its
+    // expression subtrees (docexpr, rowexpr, per-column colexprs/coldefexprs,
+    // and namespace ns_uris) as individual Exprs, so we accumulate
+    // `cost_qual_eval_expr` over each — mirroring the RTE_FUNCTION leg above.
     backend_optimizer_path_costsize_seams::rte_tablefunc_exprcost::set(|run, root, rel| {
         let rti = root.rel(rel).relid;
         let rte = planner_rt_fetch(run, root, rti);
-        if rte.tablefunc.is_some() {
-            panic!(
-                "rte_tablefunc_exprcost: cost_qual_eval over rte->tablefunc needs \
-                 the TableFunc node model (unported); no generate_series/unnest \
-                 path reaches this arm"
-            );
+        let mut startup = 0.0_f64;
+        let mut per_tuple = 0.0_f64;
+        if let Some(tf) = rte.tablefunc.as_deref().and_then(|n| n.as_table_func()) {
+            let mut add = |e: &types_nodes::primnodes::Expr| {
+                let (s, pt) =
+                    backend_optimizer_path_costsize::qualcost::cost_qual_eval_expr(root, e);
+                startup += s;
+                per_tuple += pt;
+            };
+            if let Some(e) = tf.docexpr.as_deref() {
+                add(e);
+            }
+            if let Some(e) = tf.rowexpr.as_deref() {
+                add(e);
+            }
+            if let Some(v) = tf.colexprs.as_ref() {
+                for o in v.iter() {
+                    if let Some(e) = o.as_deref() {
+                        add(e);
+                    }
+                }
+            }
+            if let Some(v) = tf.coldefexprs.as_ref() {
+                for o in v.iter() {
+                    if let Some(e) = o.as_deref() {
+                        add(e);
+                    }
+                }
+            }
+            if let Some(v) = tf.ns_uris.as_ref() {
+                for b in v.iter() {
+                    add(&**b);
+                }
+            }
         }
-        (0.0, 0.0)
+        (startup, per_tuple)
     });
 
     // Query-level projections — `root->parse->...`.

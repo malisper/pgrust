@@ -76,11 +76,11 @@ use types_nodes::parsestmt::{
 };
 use types_nodes::nodesamplescan::TableSampleClause;
 use types_nodes::primnodes::{
-    AND_EXPR, CoercionForm, Expr, Var, VarReturningType,
+    AND_EXPR, CoercionForm, Expr, TableFunc, TFT_XMLTABLE, Var, VarReturningType,
 };
 use types_nodes::rawnodes::{
-    A_Expr_Kind, Alias, JoinExpr, RangeFunction, RangeSubselect, RangeTableSample,
-    RangeTblRef, RangeVar,
+    A_Expr_Kind, Alias, JoinExpr, RangeFunction, RangeSubselect, RangeTableFunc,
+    RangeTableSample, RangeTblRef, RangeVar, ResTarget,
 };
 
 use types_parsenodes::CoercionContext;
@@ -95,10 +95,12 @@ use backend_parser_coerce::{coerce_to_specific_type, coerce_type, select_common_
 use backend_parser_relation::{
     addNSItemToQuery, addRangeTableEntryForCTE, addRangeTableEntryForENR,
     addRangeTableEntryForFunction, addRangeTableEntryForJoin, addRangeTableEntryForRelation,
-    addRangeTableEntryForSubquery, addRangeTableEntry, checkNameSpaceConflicts, isLockedRefname,
-    markNullableIfNeeded, markVarForSelectPriv, parserOpenTable, scanNameSpaceForCTE,
-    scanNameSpaceForENR,
+    addRangeTableEntryForSubquery, addRangeTableEntryForTableFunc, addRangeTableEntry,
+    checkNameSpaceConflicts, isLockedRefname, markNullableIfNeeded, markVarForSelectPriv,
+    parserOpenTable, scanNameSpaceForCTE, scanNameSpaceForENR,
 };
+use backend_parser_coerce::coerce_to_specific_type_typmod;
+use backend_parser_parse_type::typenameTypeIdAndMod;
 use backend_access_table_table::table_close;
 
 use backend_parser_parse_func_seams as parse_func;
@@ -753,6 +755,271 @@ fn transformRangeFunction<'mcx>(
 }
 
 // ===========================================================================
+// transformRangeTableFunc — parse_clause.c:686
+// ===========================================================================
+
+/// Transform a raw `RangeTableFunc` (XMLTABLE) into a `TableFunc` RTE.
+///
+/// Transform the namespace clauses, the document-generating expression, the
+/// row-generating expression, the column-generating expressions, and the
+/// default value expressions. 1:1 port of `transformRangeTableFunc`
+/// (parse_clause.c:686); currently only XMLTABLE (JSON_TABLE is
+/// `transformJsonTable`, deferred).
+fn transformRangeTableFunc<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    rtf: &RangeTableFunc<'mcx>,
+) -> PgResult<ParseNamespaceItem<'mcx>> {
+    use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
+    use types_core::catalog::INT4OID;
+    use types_error::error::ERRCODE_INVALID_TABLE_DEFINITION;
+    use types_tuple::heaptuple::{TEXTOID, XMLOID};
+
+    let mut tf = TableFunc::default();
+
+    // Currently we only support XMLTABLE here.
+    tf.functype = TFT_XMLTABLE;
+    let construct_name = "XMLTABLE";
+    let doc_type = XMLOID;
+
+    // We make lateral_only names of this level visible, whether or not the
+    // RangeTableFunc is explicitly marked LATERAL.
+    debug_assert!(!pstate.p_lateral_active);
+    pstate.p_lateral_active = true;
+
+    // Transform and apply typecast to the row-generating expression ...
+    let rowexpr_in = rtf
+        .rowexpr
+        .as_deref()
+        .ok_or_else(|| elog_error("transformRangeTableFunc: rowexpr is NULL"))?;
+    let row_t = transformExpr(
+        pstate,
+        Some(rowexpr_in.clone_in(mcx)?),
+        ParseExprKind::EXPR_KIND_FROM_FUNCTION,
+    )?
+    .ok_or_else(|| elog_error("transformRangeTableFunc: rowexpr transformed to NULL"))?;
+    let mut rowexpr = coerce_to_specific_type(mcx, Some(pstate), row_t, TEXTOID, construct_name)?;
+    assign_expr_collations(Some(pstate), &mut rowexpr)?;
+    tf.rowexpr = Some(alloc_in(mcx, rowexpr)?);
+
+    // ... and to the document itself.
+    let docexpr_in = rtf
+        .docexpr
+        .as_deref()
+        .ok_or_else(|| elog_error("transformRangeTableFunc: docexpr is NULL"))?;
+    let doc_t = transformExpr(
+        pstate,
+        Some(docexpr_in.clone_in(mcx)?),
+        ParseExprKind::EXPR_KIND_FROM_FUNCTION,
+    )?
+    .ok_or_else(|| elog_error("transformRangeTableFunc: docexpr transformed to NULL"))?;
+    let mut docexpr =
+        coerce_to_specific_type(mcx, Some(pstate), doc_t, doc_type, construct_name)?;
+    assign_expr_collations(Some(pstate), &mut docexpr)?;
+    tf.docexpr = Some(alloc_in(mcx, docexpr)?);
+
+    // undef ordinality column number
+    tf.ordinalitycol = -1;
+
+    // Process column specs.
+    let mut colnames: PgVec<'mcx, mcx::PgString<'mcx>> = PgVec::new_in(mcx);
+    let mut coltypes: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    let mut coltypmods: PgVec<'mcx, i32> = PgVec::new_in(mcx);
+    let mut colcollations: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    let mut colexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, Expr>>> = PgVec::new_in(mcx);
+    let mut coldefexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, Expr>>> = PgVec::new_in(mcx);
+    let mut notnulls: Option<mcx::PgBox<'mcx, types_nodes::bitmapset::Bitmapset<'mcx>>> = None;
+    let mut names: Vec<String> = Vec::new();
+
+    for (colno, col) in rtf.columns.iter().enumerate() {
+        let rawc = col.expect_rangetablefunccol();
+        let rawc_name = rawc
+            .colname
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        colnames.push(mcx::PgString::from_str_in(rawc_name.as_str(), mcx)?);
+
+        // Determine the type/typmod. FOR ORDINALITY columns are INTEGER per
+        // spec; the others are user-specified.
+        let (typid, typmod): (Oid, i32);
+        if rawc.for_ordinality {
+            if tf.ordinalitycol != -1 {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg("only one FOR ORDINALITY column is allowed")
+                    .errposition(errpos(pstate, rawc.location))
+                    .into_error());
+            }
+            typid = INT4OID;
+            typmod = -1;
+            tf.ordinalitycol = colno as i32;
+        } else {
+            let type_name = rawc
+                .typeName
+                .as_deref()
+                .ok_or_else(|| elog_error("transformRangeTableFunc: column typeName is NULL"))?;
+            if type_name.setof {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
+                    .errmsg(format!("column \"{rawc_name}\" cannot be declared SETOF"))
+                    .errposition(errpos(pstate, rawc.location))
+                    .into_error());
+            }
+            let tn_pn = backend_parser_parse_type::raw_typename_to_parse(type_name)?;
+            let (id, md) = typenameTypeIdAndMod(mcx, Some(&*pstate), &tn_pn)?;
+            typid = id;
+            typmod = md;
+        }
+
+        coltypes.push(typid);
+        coltypmods.push(typmod);
+        colcollations.push(lsyscache::get_typcollation::call(typid)?);
+
+        // Transform the PATH and DEFAULT expressions.
+        let colexpr: Option<mcx::PgBox<'mcx, Expr>> = if let Some(ce) = rawc.colexpr.as_deref() {
+            let t = transformExpr(
+                pstate,
+                Some(ce.clone_in(mcx)?),
+                ParseExprKind::EXPR_KIND_FROM_FUNCTION,
+            )?
+            .ok_or_else(|| elog_error("transformRangeTableFunc: colexpr transformed to NULL"))?;
+            let mut e = coerce_to_specific_type(mcx, Some(pstate), t, TEXTOID, construct_name)?;
+            assign_expr_collations(Some(pstate), &mut e)?;
+            Some(alloc_in(mcx, e)?)
+        } else {
+            None
+        };
+
+        let coldefexpr: Option<mcx::PgBox<'mcx, Expr>> = if let Some(cde) = rawc.coldefexpr.as_deref() {
+            let t = transformExpr(
+                pstate,
+                Some(cde.clone_in(mcx)?),
+                ParseExprKind::EXPR_KIND_FROM_FUNCTION,
+            )?
+            .ok_or_else(|| {
+                elog_error("transformRangeTableFunc: coldefexpr transformed to NULL")
+            })?;
+            let mut e =
+                coerce_to_specific_type_typmod(mcx, Some(pstate), t, typid, typmod, construct_name)?;
+            assign_expr_collations(Some(pstate), &mut e)?;
+            Some(alloc_in(mcx, e)?)
+        } else {
+            None
+        };
+
+        colexprs.push(colexpr);
+        coldefexprs.push(coldefexpr);
+
+        if rawc.is_not_null {
+            notnulls = Some(backend_nodes_core::bitmapset::bms_add_member(
+                mcx,
+                notnulls.take(),
+                colno as i32,
+            )?);
+        }
+
+        // make sure column names are unique
+        for j in &names {
+            if j == &rawc_name {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_SYNTAX_ERROR)
+                    .errmsg(format!("column name \"{rawc_name}\" is not unique"))
+                    .errposition(errpos(pstate, rawc.location))
+                    .into_error());
+            }
+        }
+        names.push(rawc_name);
+    }
+
+    tf.colnames = Some(colnames);
+    tf.coltypes = Some(coltypes);
+    tf.coltypmods = Some(coltypmods);
+    tf.colcollations = Some(colcollations);
+    tf.colexprs = Some(colexprs);
+    tf.coldefexprs = Some(coldefexprs);
+    tf.notnulls = notnulls;
+
+    // Namespaces, if any, also need to be transformed.
+    if !rtf.namespaces.is_empty() {
+        let mut ns_uris: PgVec<'mcx, mcx::PgBox<'mcx, Expr>> = PgVec::new_in(mcx);
+        let mut ns_names: PgVec<'mcx, Option<mcx::PgString<'mcx>>> = PgVec::new_in(mcx);
+        let mut default_ns_seen = false;
+        let mut seen_names: Vec<String> = Vec::new();
+
+        for ns in rtf.namespaces.iter() {
+            let r: &ResTarget<'mcx> = ns.expect_restarget();
+            let r_val = r
+                .val
+                .as_deref()
+                .ok_or_else(|| elog_error("transformRangeTableFunc: namespace val is NULL"))?;
+            let t = transformExpr(
+                pstate,
+                Some(r_val.clone_in(mcx)?),
+                ParseExprKind::EXPR_KIND_FROM_FUNCTION,
+            )?
+            .ok_or_else(|| {
+                elog_error("transformRangeTableFunc: namespace uri transformed to NULL")
+            })?;
+            let mut ns_uri =
+                coerce_to_specific_type(mcx, Some(pstate), t, TEXTOID, construct_name)?;
+            assign_expr_collations(Some(pstate), &mut ns_uri)?;
+            ns_uris.push(alloc_in(mcx, ns_uri)?);
+
+            // Verify consistency of name list: no dupes, only one DEFAULT.
+            match r.name.as_deref() {
+                Some(rn) => {
+                    let rn_s = rn.to_string();
+                    for existing in &seen_names {
+                        if existing == &rn_s {
+                            return Err(ereport(ERROR)
+                                .errcode(ERRCODE_SYNTAX_ERROR)
+                                .errmsg(format!("namespace name \"{rn_s}\" is not unique"))
+                                .errposition(errpos(pstate, r.location))
+                                .into_error());
+                        }
+                    }
+                    seen_names.push(rn_s.clone());
+                    ns_names.push(Some(mcx::PgString::from_str_in(rn_s.as_str(), mcx)?));
+                }
+                None => {
+                    if default_ns_seen {
+                        return Err(ereport(ERROR)
+                            .errcode(ERRCODE_SYNTAX_ERROR)
+                            .errmsg("only one default namespace is allowed")
+                            .errposition(errpos(pstate, r.location))
+                            .into_error());
+                    }
+                    default_ns_seen = true;
+                    // We represent DEFAULT by a null pointer.
+                    ns_names.push(None);
+                }
+            }
+        }
+
+        tf.ns_uris = Some(ns_uris);
+        tf.ns_names = Some(ns_names);
+    }
+
+    tf.location = rtf.location;
+
+    pstate.p_lateral_active = false;
+
+    // Mark the RTE as LATERAL if the user said LATERAL explicitly, or if there
+    // are any lateral cross-references in it.
+    let tf_node = Node::mk_table_func(mcx, tf)?;
+    let is_lateral = rtf.lateral || contain_vars_of_level(&tf_node, 0);
+    let tf_back = tf_node
+        .into_tablefunc()
+        .ok_or_else(|| elog_error("transformRangeTableFunc: not a TableFunc node"))?;
+
+    let alias = copy_opt_alias(mcx, rtf.alias.as_deref())?;
+    addRangeTableEntryForTableFunc(mcx, pstate, tf_back, alias, is_lateral, true)
+}
+
+// ===========================================================================
 // transformRangeTableSample — parse_clause.c:685
 // ===========================================================================
 
@@ -974,13 +1241,19 @@ fn transformFromClauseItem<'mcx>(
             Ok((rtr, namespace))
         }
         /*
-         * `IsA(n, RangeTableFunc) || IsA(n, JsonTable)` (parse_clause.c:996) —
-         * XMLTABLE / JSON_TABLE. The repo's central `Node` enum has no
-         * `RangeTableFunc` / `JsonTable` arm yet, so the grammar cannot hand
-         * one to this dispatcher; the matching transforms
-         * (`transformRangeTableFunc` / `transformJsonTable`) are deferred to
-         * F3b. There is therefore no reachable arm to write here.
+         * `IsA(n, RangeTableFunc)` (parse_clause.c:1107) — XMLTABLE. (The
+         * combined C arm also dispatches `JsonTable` → `transformJsonTable`,
+         * which is deferred; `T_JsonTable` falls through to the default below
+         * until the JSON_TABLE subsystem lands.)
          */
+        ntag::T_RangeTableFunc => {
+            let rtf = n.expect_rangetablefunc();
+            let nsitem = transformRangeTableFunc(mcx, pstate, rtf)?;
+            let rtindex = nsitem.p_rtindex;
+            let namespace = alloc::vec![nsitem];
+            let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex })?;
+            Ok((rtr, namespace))
+        }
         ntag::T_RangeTableSample => {
             let rts = n.expect_rangetablesample();
             /* TABLESAMPLE clause (wrapping some other valid FROM node) */
