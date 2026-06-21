@@ -87,23 +87,6 @@ pub(crate) fn read_cell<'mcx>(state: &ExprState<'mcx>, id: ResultCellId) -> (Dat
     }
 }
 
-/// Take (move out, leaving a default) the `(value, isnull)` of the cell named by
-/// `id`. Used to gather a transition function's input args where one may be a
-/// move-only `Datum::Internal` (the C `internal` pseudo-type) — e.g. the
-/// deserialized transition state a combine step consumes once. For an ordinary
-/// by-value/by-ref input this is equivalent to [`read_cell`] (the cell is
-/// re-evaluated each row before its next use).
-#[inline]
-pub(crate) fn take_cell<'mcx>(state: &mut ExprState<'mcx>, id: ResultCellId) -> (Datum<'mcx>, bool) {
-    if id == types_nodes::execexpr::STATE_RESULT_CELL {
-        let v = core::mem::replace(&mut state.resvalue, Datum::null());
-        (v, state.resnull)
-    } else {
-        let c = state.result_cells.take(id);
-        (c.value, c.isnull)
-    }
-}
-
 /// Write the `(value, isnull)` of the cell named by `id` (see [`read_cell`]).
 #[inline]
 pub(crate) fn write_cell<'mcx>(
@@ -1225,10 +1208,18 @@ pub fn ExecInterpExpr<'mcx>(
                 // the cells the input sub-expressions evaluated into. Read these
                 // BEFORE re-deriving the &mut AggState (the cells live on `state`,
                 // the trans state on the parent AggState — disjoint, as in C).
+                // NB: read (peek), do NOT take/consume, the input arg cells.
+                // C's EEOP_AGG_PLAIN_TRANS_* reads pertrans->transfn_fcinfo->args
+                // (written once by the preceding input sub-expression steps) and
+                // leaves them intact. With grouping sets, ExecBuildAggTrans emits
+                // one trans-call step per concurrently-evaluated set, all reading
+                // the SAME args; consuming the cells on the first set zeroed the
+                // input for set 1+ (rollup/cube subtotals got sum=0/max=0 while
+                // count(*), which has no input args, stayed correct).
                 let mut input_args: Vec<Datum<'mcx>> = Vec::with_capacity(arg_cell_ids.len());
                 let mut input_args_null: Vec<bool> = Vec::with_capacity(arg_cell_ids.len());
                 for &c in &arg_cell_ids {
-                    let (v, isnull) = take_cell(state, c);
+                    let (v, isnull) = read_cell(state, c);
                     input_args.push(v);
                     input_args_null.push(isnull);
                 }
