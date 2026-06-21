@@ -1430,11 +1430,149 @@ fn get_rule_expr_e(
             str_(context, q.as_str())?;
         }
 
-        // --- Prerequisite-blocked arms (need an unported subsystem) ----------
-        Expr::XmlExpr(_) => {
-            return Err(deferred(
-                "XmlExpr (get_rule_expr XmlExpr arm: map_xml_name_to_sql_identifier; XML deparser family)",
-            ))
+        // `case T_XmlExpr:` (ruleutils.c:10063).
+        Expr::XmlExpr(xexpr) => {
+            use types_nodes::primnodes::XmlExprOp::*;
+            use types_nodes::primnodes::XmlOptionType::XMLOPTION_DOCUMENT;
+
+            let mcx = context.buf.allocator();
+            let mut needcomma = false;
+
+            match xexpr.op {
+                IS_XMLCONCAT => str_(context, "XMLCONCAT(")?,
+                IS_XMLELEMENT => str_(context, "XMLELEMENT(")?,
+                IS_XMLFOREST => str_(context, "XMLFOREST(")?,
+                IS_XMLPARSE => str_(context, "XMLPARSE(")?,
+                IS_XMLPI => str_(context, "XMLPI(")?,
+                IS_XMLROOT => str_(context, "XMLROOT(")?,
+                IS_XMLSERIALIZE => str_(context, "XMLSERIALIZE(")?,
+                IS_DOCUMENT => {}
+            }
+            if xexpr.op == IS_XMLPARSE || xexpr.op == IS_XMLSERIALIZE {
+                if xexpr.xmloption == XMLOPTION_DOCUMENT {
+                    str_(context, "DOCUMENT ")?;
+                } else {
+                    str_(context, "CONTENT ")?;
+                }
+            }
+            if let Some(name) = xexpr.name.as_deref() {
+                let mapped =
+                    backend_utils_adt_xml_seams::map_xml_name_to_sql_identifier::call(mcx, name)?;
+                let q = quote_identifier(mcx, mapped.as_str())?;
+                str_(context, "NAME ")?;
+                str_(context, q.as_str())?;
+                needcomma = true;
+            }
+            if !xexpr.named_args.is_empty() {
+                if xexpr.op != IS_XMLFOREST {
+                    if needcomma {
+                        str_(context, ", ")?;
+                    }
+                    str_(context, "XMLATTRIBUTES(")?;
+                    needcomma = false;
+                }
+                // forboth(arg, named_args, narg, arg_names)
+                for (e, argname) in xexpr.named_args.iter().zip(xexpr.arg_names.iter()) {
+                    if needcomma {
+                        str_(context, ", ")?;
+                    }
+                    get_rule_expr_e(e, context, true)?;
+                    let mapped = backend_utils_adt_xml_seams::map_xml_name_to_sql_identifier::call(
+                        mcx, argname,
+                    )?;
+                    let q = quote_identifier(mcx, mapped.as_str())?;
+                    str_(context, " AS ")?;
+                    str_(context, q.as_str())?;
+                    needcomma = true;
+                }
+                if xexpr.op != IS_XMLFOREST {
+                    ch_(context, b')')?;
+                }
+            }
+            if !xexpr.args.is_empty() {
+                if needcomma {
+                    str_(context, ", ")?;
+                }
+                match xexpr.op {
+                    IS_XMLCONCAT | IS_XMLELEMENT | IS_XMLFOREST | IS_XMLPI | IS_XMLSERIALIZE => {
+                        // no extra decoration needed
+                        get_rule_expr_list_exprs(&xexpr.args, context, true)?;
+                    }
+                    IS_XMLPARSE => {
+                        // Assert(list_length(xexpr->args) == 2);
+                        get_rule_expr_e(&xexpr.args[0], context, true)?;
+
+                        // con = lsecond_node(Const, xexpr->args); Assert(!constisnull);
+                        let con = expr_as_const(&xexpr.args[1])?;
+                        if con.constvalue.clone().as_bool() {
+                            str_(context, " PRESERVE WHITESPACE")?;
+                        } else {
+                            str_(context, " STRIP WHITESPACE")?;
+                        }
+                    }
+                    IS_XMLROOT => {
+                        // Assert(list_length(xexpr->args) == 3);
+                        get_rule_expr_e(&xexpr.args[0], context, true)?;
+
+                        str_(context, ", VERSION ")?;
+                        // con = (Const *) lsecond(xexpr->args);
+                        // if (IsA(con, Const) && con->constisnull) "NO VALUE"
+                        let arg2 = &xexpr.args[1];
+                        let version_no_value =
+                            matches!(arg2, Expr::Const(c) if c.constisnull);
+                        if version_no_value {
+                            str_(context, "NO VALUE")?;
+                        } else {
+                            get_rule_expr_e(arg2, context, false)?;
+                        }
+
+                        // con = lthird_node(Const, xexpr->args);
+                        let con = expr_as_const(&xexpr.args[2])?;
+                        if con.constisnull {
+                            // suppress STANDALONE NO VALUE
+                        } else {
+                            match con.constvalue.clone().as_i32() {
+                                // XML_STANDALONE_YES
+                                0 => str_(context, ", STANDALONE YES")?,
+                                // XML_STANDALONE_NO
+                                1 => str_(context, ", STANDALONE NO")?,
+                                // XML_STANDALONE_NO_VALUE
+                                2 => str_(context, ", STANDALONE NO VALUE")?,
+                                _ => {}
+                            }
+                        }
+                    }
+                    IS_DOCUMENT => {
+                        // get_rule_expr_paren((Node *) xexpr->args, context, false, node)
+                        // — a `List` is not a "simple node", so parens are added
+                        // only under PRETTYFLAG_PAREN.
+                        let need_paren = pretty_paren(context);
+                        if need_paren {
+                            ch_(context, b'(')?;
+                        }
+                        get_rule_expr_list_exprs(&xexpr.args, context, false)?;
+                        if need_paren {
+                            ch_(context, b')')?;
+                        }
+                    }
+                }
+            }
+            if xexpr.op == IS_XMLSERIALIZE {
+                let ty = format_type_with_typemod(mcx, xexpr.r#type, xexpr.typmod)?;
+                str_(context, " AS ")?;
+                str_(context, ty.as_str())?;
+                if xexpr.indent {
+                    str_(context, " INDENT")?;
+                } else {
+                    str_(context, " NO INDENT")?;
+                }
+            }
+
+            if xexpr.op == IS_DOCUMENT {
+                str_(context, " IS DOCUMENT")?;
+            } else {
+                ch_(context, b')')?;
+            }
         }
         Expr::NextValueExpr(_) => {
             return Err(deferred("NextValueExpr (generate_relation_name; catalog)"))
