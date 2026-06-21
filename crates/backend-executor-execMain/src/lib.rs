@@ -2569,9 +2569,20 @@ pub fn ExecPartitionCheckEmitError<'mcx>(
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
 
+    // The error message always names the (leaf) relation whose partition
+    // constraint failed, i.e. resultRelInfo->ri_RelationDesc — independent of
+    // tuple routing (execMain.c: RelationGetRelationName(resultRelInfo->ri_RelationDesc)).
+    let relname = estate
+        .result_rel(result_rel_info)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("ExecPartitionCheckEmitError: ri_RelationDesc is NULL")
+        .name()
+        .to_string();
+
     // If the tuple was routed, convert it back to the root rowtype so val_desc
     // matches the input tuple.
-    let (root_relid, slot, relname) =
+    let (root_relid, slot, _root_relname) =
         convert_routed_slot_for_error(estate, result_rel_info, slot)?;
     let modified_cols = constraint_modified_cols(estate, result_rel_info)?;
 
