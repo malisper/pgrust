@@ -181,7 +181,11 @@ fn copy_get_data_file_impl(
                 let end = (*pos + maxread).min(data.len());
                 let chunk = data[*pos..end].to_vec();
                 *pos = end;
-                let reached_eof = *pos >= data.len();
+                // C: `bytesread = fread(...); if (bytesread == 0) raw_reached_eof = true;`
+                // EOF is reported only by a read that returns zero bytes — never on
+                // the read that delivers the file's final bytes, else
+                // CopyReadBinaryData breaks before transferring them.
+                let reached_eof = chunk.is_empty();
                 Ok(CopyGetDataResult {
                     data: chunk,
                     reached_eof,
