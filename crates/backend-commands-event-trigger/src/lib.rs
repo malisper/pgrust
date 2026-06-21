@@ -35,7 +35,7 @@ use core::cell::RefCell;
 use mcx::{Mcx, MemoryContext};
 use types_catalog::catalog::{
     AUTH_ID_RELATION_ID, AUTH_MEM_RELATION_ID, DATABASE_RELATION_ID, EVENT_TRIGGER_RELATION_ID,
-    PARAMETER_ACL_RELATION_ID, PROCEDURE_RELATION_ID, TABLE_SPACE_RELATION_ID,
+    PARAMETER_ACL_RELATION_ID, PROCEDURE_RELATION_ID, RELATION_RELATION_ID, TABLE_SPACE_RELATION_ID,
 };
 use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
 use types_catalog::pg_event_trigger::PgEventTriggerInsertRow;
@@ -117,6 +117,42 @@ struct CollectedCommand {
     parsetree: Node<'static>,
     address: ObjectAddress,
     secondary_object: ObjectAddress,
+    /// The `command->type`-specific payload (deparse_utility.h `union`).
+    /// `Simple` covers every `SCT_*` simple form modelled by this crate;
+    /// `AlterTable` carries the `d.alterTable` fields built by
+    /// [`event_trigger_alter_table_start`].
+    data: CollectedCommandData,
+}
+
+/// The `command->d` union of `CollectedCommand` (deparse_utility.h). Only the
+/// two variants this crate needs are modelled: the simple-command default and
+/// the `SCT_AlterTable` form with its `subcmds` list.
+#[allow(dead_code)]
+enum CollectedCommandData {
+    /// Any `SCT_Simple` / `SCT_AlterDefaultPrivileges` / etc. — the parse tree
+    /// on the enclosing [`CollectedCommand`] is the whole record.
+    Simple,
+    /// `command->d.alterTable` (`type == SCT_AlterTable`).
+    AlterTable {
+        /// `classId` — always `RelationRelationId` in the C path.
+        class_id: Oid,
+        /// `objectId` — the altered relation, stashed by
+        /// [`event_trigger_alter_table_relid`].
+        object_id: Oid,
+        /// `subcmds` — list of [`CollectedATSubcmd`] gathered by
+        /// [`event_trigger_collect_alter_table_subcmd`].
+        subcmds: Vec<CollectedATSubcmd>,
+    },
+}
+
+/// `typedef struct CollectedATSubcmd` (deparse_utility.h) — one ALTER TABLE
+/// subcommand collected under an active event-trigger state. Both fields are
+/// arena-lived (the subcmd parse tree is deep-copied into the state's private
+/// `cmd_cxt`, like every other collected parse tree).
+#[allow(dead_code)]
+struct CollectedATSubcmd {
+    address: ObjectAddress,
+    parsetree: Node<'static>,
 }
 
 /// `typedef struct EventTriggerQueryState` (event_trigger.c) — backend-local
@@ -146,6 +182,13 @@ struct EventTriggerQueryState {
     command_collection_inhibited: bool,
     /// list of `CollectedCommand`; see deparse_utility.h.
     command_list: Vec<CollectedCommand>,
+    /// `currentCommand` — the in-progress nestable command (currently only the
+    /// `SCT_AlterTable` form). C keeps a single pointer with a `parent`
+    /// back-link; the equivalent stack is this `Vec` whose top is
+    /// `currentCommand` and whose predecessors are reached via `->parent`.
+    /// Pushed by [`event_trigger_alter_table_start`], popped (and conditionally
+    /// promoted into `command_list`) by [`event_trigger_alter_table_end`].
+    current_command: Vec<CollectedCommand>,
 
     /// `state->cxt` — the private arena owning every deep-copied parse tree in
     /// `command_list` / `sql_drop_list`. Declared LAST so it outlives them on
@@ -213,6 +256,7 @@ pub fn event_trigger_begin_complete_query() -> PgResult<bool> {
         table_rewrite_reason: 0,
         command_collection_inhibited: inherited_inhibit,
         command_list: Vec::new(),
+        current_command: Vec::new(),
         cmd_cxt: MemoryContext::new("event trigger state"),
     };
 
@@ -939,6 +983,7 @@ pub fn event_trigger_collect_simple_command(
             parsetree: copied,
             address,
             secondary_object,
+            data: CollectedCommandData::Simple,
         };
 
         st.command_list
@@ -987,6 +1032,7 @@ pub fn event_trigger_collect_alter_def_privs(stmt: &Node) -> PgResult<()> {
             parsetree: copied,
             address: InvalidObjectAddress,
             secondary_object: InvalidObjectAddress,
+            data: CollectedCommandData::Simple,
         };
 
         st.command_list
@@ -1037,6 +1083,7 @@ pub fn event_trigger_collect_simple_command_create_schema(
             parsetree: copied,
             address,
             secondary_object,
+            data: CollectedCommandData::Simple,
         };
 
         st.command_list
@@ -1087,6 +1134,7 @@ pub fn event_trigger_collect_simple_command_reindex(
             parsetree: copied,
             address,
             secondary_object,
+            data: CollectedCommandData::Simple,
         };
 
         st.command_list
@@ -1140,6 +1188,7 @@ pub fn event_trigger_collect_simple_command_publication(
             parsetree: copied,
             address,
             secondary_object,
+            data: CollectedCommandData::Simple,
         };
 
         st.command_list
@@ -1221,16 +1270,54 @@ pub fn event_trigger_collect_alter_opfam(
 /// command variant (with its `parent` back-pointer and `alterTable.subcmds`
 /// list) is part of the deeper command-deparse sub-campaign and is not modelled
 /// by this crate's simple-command `CollectedCommand`, so it loudly stops.
-pub fn event_trigger_alter_table_start(_parsetree: &Node) {
+pub fn event_trigger_alter_table_start(parsetree: &Node) -> PgResult<()> {
     // if (!currentEventTriggerState || commandCollectionInhibited) return;
     if !collecting() {
-        return;
+        return Ok(());
     }
-    panic!(
-        "EventTriggerAlterTableStart: SCT_AlterTable command collection (the \
-         currentCommand stack + alterTable.subcmds list) is part of the \
-         command-deparse sub-campaign and is not modelled here"
-    );
+
+    let in_extension = extension_seams::creating_extension::call();
+
+    CURRENT_STATE.with(|s| {
+        let mut stack = s.borrow_mut();
+        let st = match stack.last_mut() {
+            Some(st) => st,
+            None => return Ok(()),
+        };
+
+        // command = palloc(...); copyObject(parsetree) into the state arena.
+        let copied = parsetree.clone_in(st.cmd_cxt.mcx())?;
+        // SAFETY: `copied` lives in `cmd_cxt`; the `current_command` /
+        // `command_list` Vecs are both dropped before `cmd_cxt` (field
+        // declaration order in `EventTriggerQueryState`), so the copy never
+        // outlives the arena it deallocates through. See
+        // [`event_trigger_collect_simple_command`].
+        let copied: Node<'static> =
+            unsafe { core::mem::transmute::<Node<'_>, Node<'static>>(copied) };
+
+        // command->type = SCT_AlterTable;
+        // command->d.alterTable.classId = RelationRelationId;
+        // command->d.alterTable.objectId = InvalidOid;
+        // command->d.alterTable.subcmds = NIL;
+        let command = CollectedCommand {
+            in_extension,
+            parsetree: copied,
+            address: InvalidObjectAddress,
+            secondary_object: InvalidObjectAddress,
+            data: CollectedCommandData::AlterTable {
+                class_id: RELATION_RELATION_ID,
+                object_id: InvalidOid,
+                subcmds: Vec::new(),
+            },
+        };
+
+        // command->parent = currentCommand; currentCommand = command;
+        st.current_command
+            .try_reserve(1)
+            .map_err(|_| st.cmd_cxt.oom(core::mem::size_of::<CollectedCommand>()))?;
+        st.current_command.push(command);
+        Ok(())
+    })
 }
 
 /// `EventTriggerAlterTableRelid(objectId)` (event_trigger.c:1787) — stash the
@@ -1238,14 +1325,89 @@ pub fn event_trigger_alter_table_start(_parsetree: &Node) {
 /// without an active collection state (standalone). The active path writes
 /// `currentCommand->d.alterTable.objectId`, which lives on the unmodelled
 /// `SCT_AlterTable` command.
-pub fn event_trigger_alter_table_relid(_object_id: Oid) {
+pub fn event_trigger_alter_table_relid(object_id: Oid) {
     if !collecting() {
         return;
     }
-    panic!(
-        "EventTriggerAlterTableRelid: writes the unmodelled SCT_AlterTable \
-         currentCommand (command-deparse sub-campaign)"
-    );
+
+    // currentEventTriggerState->currentCommand->d.alterTable.objectId = objectId;
+    CURRENT_STATE.with(|s| {
+        if let Some(st) = s.borrow_mut().last_mut() {
+            if let Some(cmd) = st.current_command.last_mut() {
+                if let CollectedCommandData::AlterTable { object_id: oid, .. } = &mut cmd.data {
+                    *oid = object_id;
+                }
+            }
+        }
+    });
+}
+
+/// `EventTriggerCollectAlterTableSubcmd(subcmd, address)` (event_trigger.c) —
+/// record one ALTER TABLE subcommand (an `AlterTableCmd`) under the in-progress
+/// `SCT_AlterTable` `currentCommand`. A no-op without an active collection state
+/// or when collection is inhibited (matching the C early `return`). The active
+/// path deep-copies the subcommand parse tree into the state's private `cmd_cxt`
+/// arena and appends a [`CollectedATSubcmd`] to
+/// `currentCommand->d.alterTable.subcmds`.
+pub fn event_trigger_collect_alter_table_subcmd(
+    subcmd: &Node,
+    address: ObjectAddress,
+) -> PgResult<()> {
+    // if (!currentEventTriggerState || commandCollectionInhibited) return;
+    if !collecting() {
+        return Ok(());
+    }
+
+    // Assert(IsA(subcmd, AlterTableCmd));
+    debug_assert_eq!(subcmd.node_tag(), types_nodes::nodes::T_AlterTableCmd);
+
+    CURRENT_STATE.with(|s| {
+        let mut stack = s.borrow_mut();
+        let st = match stack.last_mut() {
+            Some(st) => st,
+            None => return Ok(()),
+        };
+
+        // newsub = palloc(...); newsub->parsetree = copyObject(subcmd).
+        let copied = subcmd.clone_in(st.cmd_cxt.mcx())?;
+        // SAFETY: arena-lived; freed when `cmd_cxt` is torn down, after the
+        // `current_command` Vec holding it is dropped (field declaration order).
+        let copied: Node<'static> =
+            unsafe { core::mem::transmute::<Node<'_>, Node<'static>>(copied) };
+
+        // Split the borrow so the per-field `current_command` / `cmd_cxt`
+        // accesses don't alias through one `&mut st`.
+        let EventTriggerQueryState {
+            current_command,
+            cmd_cxt,
+            ..
+        } = st;
+
+        // Assert(currentCommand != NULL);
+        // Assert(OidIsValid(currentCommand->d.alterTable.objectId));
+        let cmd = match current_command.last_mut() {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+        match &mut cmd.data {
+            CollectedCommandData::AlterTable { subcmds, .. } => {
+                let newsub = CollectedATSubcmd {
+                    address,
+                    parsetree: copied,
+                };
+                subcmds
+                    .try_reserve(1)
+                    .map_err(|_| cmd_cxt.oom(core::mem::size_of::<CollectedATSubcmd>()))?;
+                subcmds.push(newsub);
+            }
+            CollectedCommandData::Simple => {
+                // currentCommand is not an SCT_AlterTable — should not happen
+                // (the C path always opens one via EventTriggerAlterTableStart
+                // before collecting subcmds); ignore defensively.
+            }
+        }
+        Ok(())
+    })
 }
 
 /// `EventTriggerTableRewrite(parsetree, tableOid, reason)` (event_trigger.c:1003)
@@ -1277,14 +1439,43 @@ pub fn event_trigger_table_rewrite(
 /// `EventTriggerAlterTableEnd()` (event_trigger.c:1840) — finish collecting the
 /// ALTER TABLE command and, if it gathered any subcommands, append it to the
 /// command list. No-op without an active collection state (standalone).
-pub fn event_trigger_alter_table_end() {
+pub fn event_trigger_alter_table_end() -> PgResult<()> {
     if !collecting() {
-        return;
+        return Ok(());
     }
-    panic!(
-        "EventTriggerAlterTableEnd: pops/commits the unmodelled SCT_AlterTable \
-         currentCommand (command-deparse sub-campaign)"
-    );
+
+    CURRENT_STATE.with(|s| {
+        let mut stack = s.borrow_mut();
+        let st = match stack.last_mut() {
+            Some(st) => st,
+            None => return Ok(()),
+        };
+
+        // parent = currentCommand->parent; (the predecessor on the stack).
+        // Pop the in-progress command; promoting it to `command_list` iff it
+        // gathered at least one subcommand, else discard (the C `pfree`).
+        let command = match st.current_command.pop() {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        // if (currentCommand->d.alterTable.subcmds != NIL) lappend(commandList, ...)
+        let has_subcmds = match &command.data {
+            CollectedCommandData::AlterTable { subcmds, .. } => !subcmds.is_empty(),
+            CollectedCommandData::Simple => false,
+        };
+
+        if has_subcmds {
+            st.command_list
+                .try_reserve(1)
+                .map_err(|_| st.cmd_cxt.oom(core::mem::size_of::<CollectedCommand>()))?;
+            st.command_list.push(command);
+        }
+        // else: drop `command` (the C `pfree`). Its arena-lived parse tree is
+        // freed when `cmd_cxt` is torn down.
+
+        Ok(())
+    })
 }
 
 // ===========================================================================

@@ -226,13 +226,13 @@ seam!(
     /// `EventTriggerAlterTableEnd()` (event_trigger.c) — close the current
     /// complex-command set before an ALTER TABLE subcommand re-enters the
     /// dispatch (`ProcessUtilityForAlterTable`, utility.c:1593).
-    pub fn event_trigger_alter_table_end()
+    pub fn event_trigger_alter_table_end() -> PgResult<()>
 );
 seam!(
     /// `EventTriggerAlterTableStart(parsetree)` (event_trigger.c) — open a new
     /// complex-command set after the subcommand returns
     /// (`ProcessUtilityForAlterTable`, utility.c:1607).
-    pub fn event_trigger_alter_table_start<'mcx>(parsetree: &Node<'mcx>)
+    pub fn event_trigger_alter_table_start<'mcx>(parsetree: &Node<'mcx>) -> PgResult<()>
 );
 seam!(
     /// `EventTriggerAlterTableRelid(relid)` (event_trigger.c) — record the

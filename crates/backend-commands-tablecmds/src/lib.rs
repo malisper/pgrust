@@ -265,14 +265,14 @@ fn alter_table_slow_arm<'mcx>(
         };
 
         // ... ensure we have an event trigger context ...
-        backend_tcop_utility_out_seams::event_trigger_alter_table_start::call(parsetree);
+        backend_tcop_utility_out_seams::event_trigger_alter_table_start::call(parsetree)?;
         backend_tcop_utility_out_seams::event_trigger_alter_table_relid::call(relid);
 
         // ... and do it.
         at_phase::AlterTable(mcx, atstmt, lockmode, &atcontext)?;
 
         // done.
-        backend_tcop_utility_out_seams::event_trigger_alter_table_end::call();
+        backend_tcop_utility_out_seams::event_trigger_alter_table_end::call()?;
     } else {
         // relation "%s" does not exist, skipping
         let relname: String = atstmt

@@ -321,14 +321,14 @@ fn process_utility_slow_body<'mcx>(
             let stmt2 = rt::transform_index_stmt::call(mcx, relid, stmt_ptr, query_string)?;
 
             // ... and do it.
-            rt::event_trigger_alter_table_start::call(parsetree);
+            rt::event_trigger_alter_table_start::call(parsetree)?;
             address = rt::define_index::call(mcx, relid, stmt2, nparts, is_alter_table)?;
 
             // Add the CREATE INDEX node itself to the stash right away; commands
             // stashed in the ALTER TABLE code must appear after this one.
             rt::event_trigger_collect_simple_command::call(address, secondary_object, parsetree)?;
             command_collected = true;
-            rt::event_trigger_alter_table_end::call();
+            rt::event_trigger_alter_table_end::call()?;
         }
 
         t if t == ntag::T_ReindexStmt => {
@@ -356,7 +356,7 @@ fn process_utility_slow_body<'mcx>(
 
         t if t == ntag::T_ViewStmt => {
             // CREATE VIEW.
-            rt::event_trigger_alter_table_start::call(parsetree);
+            rt::event_trigger_alter_table_start::call(parsetree)?;
             address = rt::define_view::call(
                 mcx,
                 parsetree,
@@ -367,7 +367,7 @@ fn process_utility_slow_body<'mcx>(
             rt::event_trigger_collect_simple_command::call(address, secondary_object, parsetree)?;
             // stashed internally
             command_collected = true;
-            rt::event_trigger_alter_table_end::call();
+            rt::event_trigger_alter_table_end::call()?;
         }
 
         t if t == ntag::T_CreateFunctionStmt => {

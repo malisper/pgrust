@@ -675,7 +675,7 @@ pub fn ProcessUtilityForAlterTable<'mcx>(
     query_string: &str,
     relid: types_core::primitive::Oid,
 ) -> PgResult<()> {
-    rt::event_trigger_alter_table_end::call();
+    rt::event_trigger_alter_table_end::call()?;
 
     rt::process_utility_wrapper::call(
         mcx,
@@ -689,7 +689,7 @@ pub fn ProcessUtilityForAlterTable<'mcx>(
         .utilityStmt
         .as_deref()
         .expect("ProcessUtilityForAlterTable: outer PlannedStmt.utilityStmt is NULL");
-    rt::event_trigger_alter_table_start::call(outer_stmt);
+    rt::event_trigger_alter_table_start::call(outer_stmt)?;
     rt::event_trigger_alter_table_relid::call(relid);
     Ok(())
 }
