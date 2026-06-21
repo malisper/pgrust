@@ -634,12 +634,13 @@ fn pack_rawbms(
     Some(words)
 }
 
-/// `register_partpruneinfo(root, part_prune_index, rtoffset)` (setrefs.c:1759).
+/// `register_partpruneinfo(mcx, root, part_prune_index, rtoffset)` (setrefs.c:1759).
 /// Move the `PartitionPruneInfo` at `root.partPruneInfos[part_prune_index]` into
 /// `glob.part_prune_infos`, applying `rtoffset` to its RT-index fields and
 /// recording leaf-partition RT indexes (when initial pruning is possible) into
 /// `glob.prunable_relids`. Returns the new index in `glob.part_prune_infos`.
-fn register_partpruneinfo(
+fn register_partpruneinfo<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     part_prune_index: i32,
     rtoffset: i32,
@@ -658,11 +659,16 @@ fn register_partpruneinfo(
     for prune_infos in pinfo.prune_infos.iter_mut() {
         for prelinfo in prune_infos.iter_mut() {
             prelinfo.rtindex = (prelinfo.rtindex as i32 + rtoffset) as u32;
-            // initial_pruning_steps / exec_pruning_steps: the C fix_scan_list
-            // applies rtoffset to Vars in the step exprs. gen_partprune_steps
-            // rejects any Var-bearing expr for INITIAL/EXEC targets (only
-            // Consts/Params/stable exprs over Params reach a step), so there are
-            // no Vars to offset and the step exprs are carried unchanged.
+            // prelinfo->initial_pruning_steps = fix_scan_list(root, ..., rtoffset, 1)
+            // prelinfo->exec_pruning_steps    = fix_scan_list(root, ..., rtoffset, 1)
+            // (setrefs.c:1783-1788). Although gen_partprune_steps rejects
+            // Var-bearing exprs for these targets, a step expr CAN contain an
+            // AlternativeSubPlan (e.g. an EXISTS sublink in a join-pruning qual);
+            // fix_scan_expr resolves it to the chosen subplan and records the
+            // selection in root->glob. Skipping this left an unresolved
+            // AlternativeSubPlan in the step expr, crashing the executor.
+            fix_partprune_steps(mcx, root, &mut prelinfo.initial_pruning_steps, rtoffset)?;
+            fix_partprune_steps(mcx, root, &mut prelinfo.exec_pruning_steps, rtoffset)?;
             let has_initial = !prelinfo.initial_pruning_steps.is_empty();
             for k in 0..prelinfo.nparts as usize {
                 // Non-leaf / no-subplan partitions are excluded from this map.
@@ -702,6 +708,30 @@ fn register_partpruneinfo(
         glob.part_prune_infos.push(pinfo);
         Ok(glob.part_prune_infos.len() as i32 - 1)
     }
+}
+
+/// `fix_scan_list(root, steps, rtoffset, 1)` (setrefs.c:1783-1788) for a list of
+/// `PartitionPruneStep`s. Only `PartitionPruneStepOp` carries lookup-key `exprs`;
+/// `PartitionPruneStepCombine` is purely structural (step ids), so it has nothing
+/// to fix. `num_exec` is 1 (pruning runs at most once per Append).
+fn fix_partprune_steps<'mcx>(
+    mcx: Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    steps: &mut [types_nodes::partprune_carrier::PartitionPruneStep],
+    rtoffset: i32,
+) -> PgResult<()> {
+    use types_nodes::partprune_carrier::PartitionPruneStep;
+    for step in steps.iter_mut() {
+        if let PartitionPruneStep::Op(op) = step {
+            let exprs = core::mem::take(&mut op.exprs);
+            let mut fixed = Vec::with_capacity(exprs.len());
+            for e in exprs {
+                fixed.push(fix_scan_expr(mcx, root, e, rtoffset, 1.0)?);
+            }
+            op.exprs = fixed;
+        }
+    }
+    Ok(())
 }
 
 // ===========================================================================
@@ -3244,7 +3274,7 @@ fn set_append_references<'mcx>(
     {
         let part_prune_index = plan.as_append().unwrap().part_prune_index;
         if part_prune_index >= 0 {
-            let new_index = register_partpruneinfo(root, part_prune_index, rtoffset)?;
+            let new_index = register_partpruneinfo(mcx, root, part_prune_index, rtoffset)?;
             plan.as_append_mut().unwrap().part_prune_index = new_index;
         }
         // We don't recurse to lefttree/righttree (asserted NULL).
@@ -3294,7 +3324,7 @@ fn set_mergeappend_references<'mcx>(
     {
         let part_prune_index = plan.as_mergeappend().unwrap().part_prune_index;
         if part_prune_index >= 0 {
-            let new_index = register_partpruneinfo(root, part_prune_index, rtoffset)?;
+            let new_index = register_partpruneinfo(mcx, root, part_prune_index, rtoffset)?;
             plan.as_mergeappend_mut().unwrap().part_prune_index = new_index;
         }
     }
