@@ -15,3 +15,6 @@ types-error = { path = "../types-error" }
 types-network = { path = "../types-network" }
 backend-utils-adt-network = { path = "../backend-utils-adt-network" }
 backend-utils-adt-network-gist-seams = { path = "../backend-utils-adt-network-gist-seams" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+types-datum = { path = "../types-datum" }
+types-fmgr = { path = "../types-fmgr" }

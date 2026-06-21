@@ -801,6 +801,96 @@ pub fn init_seams() {
         Ok(sv)
     });
     s::inet_gist_same::set(|left, right| inet_gist_same(&left, &right));
+
+    register_inet_gist_builtins();
+}
+
+// ---------------------------------------------------------------------------
+// fmgr builtin-table rows (C: network_gist.c's `fmgr_builtins[]` rows).
+//
+// The inet GiST opclass support procedures are `prolang => internal` procs
+// whose `pg_proc.dat` rows carry `internal`-language args (`GISTENTRY *`, the
+// `internal` query, the `GIST_SPLITVEC *`). In C they are real `fmgr_builtins[]`
+// rows whose `fn_addr` the GiST access method invokes through
+// `FunctionCallNColl`. The port replaced that fmgr-frame call with the typed,
+// by-OID dispatch installed above (`backend-access-gist-proc` routes each inet
+// support-proc OID to the seams `init_seams` installs), reading `FmgrInfo.fn_oid`
+// — never `fn_addr`.
+//
+// `initGISTstate` builds each `GISTSTATE` slot with `index_getprocinfo` →
+// `fmgr_info`, which — for an `internal`-language proc — looks the prosrc name
+// up in the fmgr builtin table (`fmgr_lookupByName`) and errors (`internal
+// function "inet_gist_consistent" is not in internal lookup table`) when it is
+// absent. So every inet GiST support proc MUST have its `fmgr_builtins[]` row
+// registered for `CREATE INDEX ... USING gist (... inet_ops)` (and opclass
+// validation) to resolve it — exactly C's table. The inet GiST dispatch is
+// already INSTALLED+active (see [`init_seams`] above and
+// `backend-access-gist-proc`'s `dispatch_consistent`), so these rows complete a
+// real, end-to-end-working opclass.
+//
+// Because the faithful invocation IS the by-OID typed dispatch (the `fn_addr` is
+// structurally never reached through the fmgr frame), the `func` adapter here is
+// the fmgr-frame entry the port never enters; if a future C-faithful
+// `FunctionCallNColl` ever reaches it, it raises a clear `ereport(ERROR)` naming
+// the dispatch seam to route through. OIDs / nargs from `pg_proc.dat` (every row
+// is `proisstrict => 't'` — the default — and not retset).
+// ---------------------------------------------------------------------------
+
+/// The shared fmgr-frame entry point for every inet GiST opclass support proc.
+/// In the owned model the GiST access method invokes these procs through the
+/// typed by-OID dispatch (`backend-access-gist-proc` → the seams installed by
+/// [`init_seams`]), reading `FmgrInfo::fn_oid` — never `fn_addr`. This frame
+/// entry therefore is never reached on any port path; it exists so the
+/// `fmgr_builtins[]` row carries a non-`None` callable (matching C's table). It
+/// raises a clear error if a future fmgr-frame call site is added, pointing at
+/// the dispatch seam to use instead.
+fn fc_inet_gist_support_via_dispatch(
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> types_error::PgResult<types_datum::Datum> {
+    let foid = fcinfo.flinfo.as_ref().map(|fi| fi.fn_oid).unwrap_or(0);
+    Err(PgError::error(format!(
+        "inet GiST support function (OID {foid}) must be invoked through the \
+         typed opclass dispatch (backend-access-gist-proc / \
+         backend-utils-adt-network-gist-seams), not the fmgr frame; the owned \
+         GiST access method dispatches these by FmgrInfo.fn_oid"
+    )))
+}
+
+fn inet_gist_builtin(
+    foid: u32,
+    name: &str,
+    nargs: i16,
+) -> (types_fmgr::BuiltinFunction, types_fmgr::PgFnNative) {
+    (
+        types_fmgr::BuiltinFunction {
+            foid,
+            name: name.to_string(),
+            nargs,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        fc_inet_gist_support_via_dispatch,
+    )
+}
+
+/// Register the `fmgr_builtins[]` rows for every inet GiST opclass support
+/// procedure ported in this crate (C: `network_gist.c`'s `fmgr_builtins[]`
+/// rows). Resolving these rows is what lets `index_getprocinfo` → `fmgr_info`
+/// build the `GISTSTATE` `FmgrInfo` slots for the inet GiST opclass (without
+/// which `CREATE INDEX ... USING gist (... inet_ops)` errors `internal function
+/// "inet_gist_consistent" is not in internal lookup table`). OIDs / nargs from
+/// `pg_proc.dat`.
+pub fn register_inet_gist_builtins() {
+    backend_utils_fmgr_core::register_builtins_native([
+        inet_gist_builtin(3553, "inet_gist_consistent", 5),
+        inet_gist_builtin(3554, "inet_gist_union", 2),
+        inet_gist_builtin(3555, "inet_gist_compress", 1),
+        inet_gist_builtin(3573, "inet_gist_fetch", 1),
+        inet_gist_builtin(3557, "inet_gist_penalty", 3),
+        inet_gist_builtin(3558, "inet_gist_picksplit", 2),
+        inet_gist_builtin(3559, "inet_gist_same", 3),
+    ]);
 }
 
 #[cfg(test)]

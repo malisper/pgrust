@@ -20431,9 +20431,12 @@ version = "0.0.0"
 dependencies = [
  "backend-utils-adt-network",
  "backend-utils-adt-network-gist-seams",
+ "backend-utils-fmgr-core",
  "seam-core",
  "types-core",
+ "types-datum",
  "types-error",
+ "types-fmgr",
  "types-network",
 ]
 
