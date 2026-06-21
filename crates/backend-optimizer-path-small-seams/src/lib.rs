@@ -71,6 +71,25 @@ pub enum ClauseListEntry {
 }
 
 seam_core::seam!(
+    /// `clauselist_selectivity_ext(root, clauses, varRelid, jointype, sjinfo,
+    /// use_extended_stats)` (clausesel.c) — the explicit-`use_extended_stats`
+    /// form. `dependencies_clauselist_selectivity`'s per-attribute simple
+    /// selectivity (`clauselist_apply_dependencies`) calls this with
+    /// `use_extended_stats=false` so it cannot recursively re-enter extended
+    /// statistics while computing the base/simple selectivities it feeds back
+    /// into the dependency combination.
+    pub fn clauselist_selectivity_ext<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+        clauses: &[RinfoId],
+        var_relid: i32,
+        jointype: JoinType,
+        sjinfo: Option<&SpecialJoinInfo>,
+        use_extended_stats: bool,
+    ) -> PgResult<f64>
+);
+
+seam_core::seam!(
     /// `clauselist_selectivity(root, clauses, varRelid, jointype, sjinfo)`
     /// (clausesel.c) — the **mixed-list** form, where `clauses` may contain
     /// both `RestrictInfo` handles and bare `Expr` predicate elements (the C

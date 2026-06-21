@@ -699,8 +699,13 @@ fn data_anl_mcx<'mcx>(stats: &[VacAttrStats<'mcx>]) -> Mcx<'mcx> {
     stats[0].anl_context.expect("anl_context must be set")
 }
 
+mod estimate;
+
 /// Install the analyze-rt extended-statistics seams to the real entry points.
 pub fn init_seams() {
     rt::compute_ext_statistics_rows::set(compute_ext_statistics_rows);
     rt::build_relation_ext_statistics::set(build_relation_ext_statistics);
+    backend_optimizer_path_small_seams::statext_clauselist_selectivity::set(
+        estimate::statext_clauselist_selectivity,
+    );
 }

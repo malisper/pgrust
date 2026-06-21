@@ -34,3 +34,8 @@ backend-statistics-mcv = { path = "../backend-statistics-mcv" }
 backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-commands-statscmds = { path = "../backend-commands-statscmds" }
+types-nodes = { path = "../types-nodes" }
+types-pathnodes = { path = "../types-pathnodes" }
+backend-optimizer-path-small-seams = { path = "../backend-optimizer-path-small-seams" }
+backend-optimizer-util-relnode-seams = { path = "../backend-optimizer-util-relnode-seams" }
+backend-nodes-nodeFuncs-seams = { path = "../backend-nodes-nodeFuncs-seams" }

@@ -32,8 +32,18 @@ pub fn set_baserel_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut Plann
     let baserestrictinfo = root.rel(rel).baserestrictinfo.clone();
     let clause_nodes = rinfo_clause_nodes(root, &baserestrictinfo);
 
+    // Pass the RestrictInfo list (not bare nodes) so the RestrictInfo
+    // superstructure survives for find_single_rel_for_clauses + extended stats,
+    // exactly as C's set_baserel_size_estimates passes rel->baserestrictinfo.
     let nrows = root.rel(rel).tuples
-        * cz::clauselist_selectivity::call(run, root, &clause_nodes, 0, super::JOIN_INNER as i32, None);
+        * cz::clauselist_selectivity_rinfos::call(
+            run,
+            root,
+            &baserestrictinfo,
+            0,
+            super::JOIN_INNER as i32,
+            None,
+        );
 
     root.rel_mut(rel).rows = clamp_row_est(nrows);
 

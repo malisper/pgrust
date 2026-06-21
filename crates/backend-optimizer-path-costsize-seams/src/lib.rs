@@ -113,6 +113,23 @@ seam_core::seam!(
     ) -> Selectivity
 );
 seam_core::seam!(
+    /// `clauselist_selectivity(root, clauses, varRelid, jointype, sjinfo)` over a
+    /// `RestrictInfo` list (the C `List *RestrictInfo*`), identified by `RinfoId`
+    /// handles. Unlike the `NodeId` form, this preserves the RestrictInfo
+    /// superstructure (`clause_relids`/`pseudoconstant`) that extended statistics
+    /// (`statext_clauselist_selectivity`) and `find_single_rel_for_clauses`
+    /// consult; `set_baserel_size_estimates` passes `rel->baserestrictinfo`
+    /// through it, exactly as C does.
+    pub fn clauselist_selectivity_rinfos<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &mut PlannerInfo,
+        clauses: &[RinfoId],
+        var_relid: i32,
+        jointype: i32,
+        sjinfo: Option<&SpecialJoinInfo>,
+    ) -> Selectivity
+);
+seam_core::seam!(
     /// `clause_selectivity(root, clause, varRelid, jointype, sjinfo)`.
     pub fn clause_selectivity<'mcx>(
         run: &types_pathnodes::planner_run::PlannerRun<'mcx>,

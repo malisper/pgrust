@@ -795,7 +795,17 @@ fn boolexpr_args_as_entries<'mcx>(
     if let Some(b) = clause.as_boolexpr() {
         let mut out = Vec::with_capacity(b.args.len());
         for a in &b.args {
-            out.push(ListEntry::Bare(a.clone_in(mcx)?));
+            // An OR-clause's args may themselves be RestrictInfos (the
+            // `rinfo->orclause` variant carries sub-RestrictInfos so that
+            // per-subclause selectivities can be cached). C's clause_selectivity
+            // unwraps each at the top via `IsA(clause, RestrictInfo)`; preserve
+            // the handle as a RestrictInfo entry rather than flattening it to a
+            // bare `Expr::RestrictInfo`, which the per-clause estimator can't
+            // recognize.
+            match a {
+                Expr::RestrictInfo(r) => out.push(ListEntry::Rinfo(RinfoId::from(*r))),
+                _ => out.push(ListEntry::Bare(a.clone_in(mcx)?)),
+            }
         }
         Ok(out)
     } else {
@@ -1802,6 +1812,32 @@ fn clauselist_selectivity_nodes<'mcx>(
     .expect("clauselist_selectivity")
 }
 
+/// `clauselist_selectivity` (clausesel.c) over a `RestrictInfo` list (the
+/// costsize.c-seam form keyed on `RinfoId`). Preserves the RestrictInfo
+/// superstructure so `find_single_rel_for_clauses` and the extended-statistics
+/// path apply, matching C's `set_baserel_size_estimates` (which passes
+/// `rel->baserestrictinfo` directly).
+fn clauselist_selectivity_rinfos<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    clauses: &[RinfoId],
+    var_relid: i32,
+    jointype: i32,
+    sjinfo: Option<&SpecialJoinInfo>,
+) -> f64 {
+    let entries: Vec<ListEntry> = clauses.iter().map(|&r| ListEntry::Rinfo(r)).collect();
+    clauselist_selectivity_ext_entries(
+        run,
+        root,
+        &entries,
+        var_relid,
+        jointype as JoinType,
+        sjinfo,
+        true,
+    )
+    .expect("clauselist_selectivity_rinfos")
+}
+
 /// `clause_selectivity(root, (Node *) clause, varRelid, jointype, sjinfo)` over
 /// a single bare clause-expr [`NodeId`] handle (the costsize.c-seam form).
 fn clause_selectivity_nodes<'mcx>(
@@ -1833,11 +1869,13 @@ fn clause_selectivity_nodes<'mcx>(
 /// single-threaded startup from `seams-init`.
 pub fn init_seams() {
     seam::clauselist_selectivity::set(clauselist_selectivity);
+    seam::clauselist_selectivity_ext::set(clauselist_selectivity_ext);
     seam::clauselist_selectivity_mixed::set(clauselist_selectivity_mixed);
     seam::clause_selectivity::set(clause_selectivity);
     seam::clause_selectivity_node::set(clause_selectivity_node);
     // costsize.c selectivity seams (bare clause-node form).
     cz_seam::clauselist_selectivity::set(clauselist_selectivity_nodes);
+    cz_seam::clauselist_selectivity_rinfos::set(clauselist_selectivity_rinfos);
     cz_seam::clause_selectivity::set(clause_selectivity_nodes);
 }
 
