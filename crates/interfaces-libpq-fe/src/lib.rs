@@ -46,6 +46,7 @@
 
 pub mod client;
 pub mod codec;
+pub mod conninfo_parse;
 pub mod protocol3;
 pub mod registry;
 pub mod result;

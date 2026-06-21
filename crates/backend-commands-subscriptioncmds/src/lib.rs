@@ -55,15 +55,46 @@ use backend_replication_logical_worker_seams as worker_seams;
 use backend_utils_adt_acl_seams as acl_seams;
 use backend_utils_misc_superuser_seams as superuser_seams;
 
+mod cmds;
 mod inward;
 
+pub use cmds::{AlterSubscription, CreateSubscription, DropSubscription};
+
 /// `ObjectIdGetDatum(value)` as a syscache key word.
-fn oid_cache_key(value: Oid) -> SysCacheKey<'static> {
+pub(crate) fn oid_cache_key(value: Oid) -> SysCacheKey<'static> {
     SysCacheKey::Value(KeyDatum::from_oid(value))
 }
 
+/// `CStringGetTextDatum(s)` — a `text` varlena Datum (4-byte header + payload).
+pub(crate) fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
+    const VARHDRSZ: usize = 4;
+    let payload = s.as_bytes();
+    let total = VARHDRSZ + payload.len();
+    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    buf.resize(total, 0u8);
+    let vl_len: u32 = (total as u32) << 2;
+    buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
+    buf[VARHDRSZ..].copy_from_slice(payload);
+    Ok(Datum::ByRef(buf))
+}
+
+/// `namein(s)` image — a `NAMEDATALEN`-byte NUL-padded `NameData` Datum.
+pub(crate) fn name_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
+    use types_core::fmgr::NAMEDATALEN;
+    let mut image: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, NAMEDATALEN as usize)?;
+    let src = s.as_bytes();
+    let take = core::cmp::min(src.len(), (NAMEDATALEN as usize) - 1);
+    for &b in &src[..take] {
+        image.push(b);
+    }
+    while image.len() < NAMEDATALEN as usize {
+        image.push(0);
+    }
+    Ok(Datum::ByRef(image))
+}
+
 /// `ObjectAddressSet(addr, class, object)`.
-fn object_address_set(class_id: Oid, object_id: Oid) -> ObjectAddress {
+pub(crate) fn object_address_set(class_id: Oid, object_id: Oid) -> ObjectAddress {
     ObjectAddress {
         classId: class_id,
         objectId: object_id,
@@ -72,14 +103,14 @@ fn object_address_set(class_id: Oid, object_id: Oid) -> ObjectAddress {
 }
 
 /// `NameStr(...)` — the bytes up to the first NUL of a `NameData` image.
-fn name_str(bytes: &[u8]) -> &str {
+pub(crate) fn name_str(bytes: &[u8]) -> &str {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     core::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
 
 /// `aclcheck_error(aclerr, objtype, objectname)` (aclchk.c) — the C is
 /// `pg_noreturn`; this helper always returns the resulting `PgError`.
-fn aclcheck_error_str(aclerr: AclResult, objtype: ObjectType, objectname: &str) -> PgError {
+pub(crate) fn aclcheck_error_str(aclerr: AclResult, objtype: ObjectType, objectname: &str) -> PgError {
     match aclchk_seams::aclcheck_error::call(aclerr, objtype, Some(objectname.to_string())) {
         Ok(()) => ereport(ERROR)
             .errmsg_internal("aclcheck_error seam returned without raising")
@@ -91,7 +122,7 @@ fn aclcheck_error_str(aclerr: AclResult, objtype: ObjectType, objectname: &str) 
 /// `(Form_pg_subscription) GETSTRUCT(tup)` — deform the cached tuple's fixed
 /// columns. The fixed-width prefix columns (`oid`, `subowner`,
 /// `subpasswordrequired`, `subname`) read here are never NULL.
-fn deform<'mcx>(
+pub(crate) fn deform<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &types_rel::Relation<'mcx>,
     tup: &FormedTuple<'mcx>,

@@ -621,12 +621,28 @@ fn process_utility_slow_body<'mcx>(
             command_collected = true;
         }
 
+        t if t == ntag::T_CreateSubscriptionStmt => {
+            // address = CreateSubscription(pstate, (CreateSubscriptionStmt *) parsetree, isTopLevel);
+            address = rt::create_subscription::call(mcx, pstate, parsetree, is_top_level)?;
+        }
+
+        t if t == ntag::T_AlterSubscriptionStmt => {
+            // address = AlterSubscription(pstate, (AlterSubscriptionStmt *) parsetree, isTopLevel);
+            address = rt::alter_subscription::call(mcx, pstate, parsetree, is_top_level)?;
+        }
+
+        t if t == ntag::T_DropSubscriptionStmt => {
+            // DropSubscription((DropSubscriptionStmt *) parsetree, isTopLevel);
+            // DropSubscription calls EventTriggerSQLDropAddObject directly.
+            rt::drop_subscription::call(mcx, parsetree, is_top_level)?;
+            command_collected = true;
+        }
+
         // The remaining DDL arms whose owner bodies are either unported or whose
         // ported bodies still lack the rich-node → owner-parse-form conversion
-        // layer: ALTER EXTENSION / ALTER EXTENSION … ADD|DROP,
-        // CREATE/ALTER/DROP SUBSCRIPTION, and ALTER TABLE … SET TABLESPACE …
-        // (AlterTableMoveAll). Route them to one documented seam-panic so the
-        // unported set is a single loud panic rather than many.
+        // layer: ALTER EXTENSION / ALTER EXTENSION … ADD|DROP, and ALTER TABLE …
+        // SET TABLESPACE … (AlterTableMoveAll). Route them to one documented
+        // seam-panic so the unported set is a single loud panic rather than many.
         _ => {
             address = rt::process_utility_slow_unported::call(mcx, pstate, parsetree, is_top_level)?;
         }

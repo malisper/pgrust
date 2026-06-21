@@ -529,9 +529,11 @@ fn pq_conninfo(conn: PgConnId) -> Option<Vec<ConninfoOption>> {
     unported_conninfo::call(conn)
 }
 
-/// `PQconninfoParse(conninfo, &err)` — deferred to the loud conninfo parser.
+/// `PQconninfoParse(conninfo, &err)` — the keyword=value conninfo parser
+/// (`conninfo_parse` + option-table keyword validation). The URI form is not
+/// yet ported (it surfaces a clear unsupported-URI error).
 fn pq_conninfo_parse(conninfo: String) -> Result<Vec<ConninfoOption>, Option<String>> {
-    unported_conninfo_parse::call(conninfo)
+    crate::conninfo_parse::pq_conninfo_parse(&conninfo)
 }
 
 /// `PQescapeLiteral(conn, s)` — deferred to the loud encoding-aware escaper.

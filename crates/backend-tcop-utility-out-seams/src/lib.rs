@@ -1147,3 +1147,37 @@ seam!(
         is_top_level: bool,
     ) -> PgResult<ObjectAddress>
 );
+seam!(
+    /// `CreateSubscription(pstate, stmt, isTopLevel)` (subscriptioncmds.c) —
+    /// CREATE SUBSCRIPTION (utility.c:1853). Returns the new subscription's
+    /// `ObjectAddress`.
+    pub fn create_subscription<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: &mut ParseState<'mcx>,
+        stmt: &Node<'mcx>,
+        is_top_level: bool,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `AlterSubscription(pstate, stmt, isTopLevel)` (subscriptioncmds.c) —
+    /// ALTER SUBSCRIPTION (utility.c:1857). Returns the subscription's
+    /// `ObjectAddress`.
+    pub fn alter_subscription<'mcx>(
+        mcx: Mcx<'mcx>,
+        pstate: &mut ParseState<'mcx>,
+        stmt: &Node<'mcx>,
+        is_top_level: bool,
+    ) -> PgResult<ObjectAddress>
+);
+seam!(
+    /// `DropSubscription(stmt, isTopLevel)` (subscriptioncmds.c) — DROP
+    /// SUBSCRIPTION (utility.c:1861). No `ObjectAddress` is returned;
+    /// `DropSubscription` stashes the dropped object via
+    /// `EventTriggerSQLDropAddObject`, so the dispatcher sets
+    /// `commandCollected = true`.
+    pub fn drop_subscription<'mcx>(
+        mcx: Mcx<'mcx>,
+        stmt: &Node<'mcx>,
+        is_top_level: bool,
+    ) -> PgResult<()>
+);
