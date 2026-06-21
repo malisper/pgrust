@@ -491,6 +491,23 @@ pub fn er_flatten_into<'mcx>(
     Ok(())
 }
 
+/// `ExpandedRecordGetDatum(erh)` (expandedrecord.h) — the flat composite Datum
+/// of an expanded record: `EOH_get_flat_size` to size the image, then
+/// `EOH_flatten_into` to write it (stamping the datum header with the record's
+/// registered `er_typeid`/`er_typmod`). The returned bytes are the verbatim
+/// header-ful composite-datum varlena image (the by-reference companion the rest
+/// of the PL/pgSQL value lane forwards), plus the registered `(typeid, typmod)`.
+pub fn expanded_record_get_datum<'mcx>(
+    mcx: Mcx<'mcx>,
+    erh: &mut ExpandedRecordHeader<'mcx>,
+) -> PgResult<(alloc::vec::Vec<u8>, Oid, i32)> {
+    let size = er_get_flat_size(mcx, erh)?;
+    let mut dest: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    dest.resize(size, 0u8);
+    er_flatten_into(mcx, erh, &mut dest)?;
+    Ok((dest, erh.er_typeid, erh.er_typmod))
+}
+
 // ---------------------------------------------------------------------------
 // Composite-datum header field setters over the flat on-disk image.
 //

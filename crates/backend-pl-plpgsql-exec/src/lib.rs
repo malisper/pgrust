@@ -1545,10 +1545,16 @@ fn build_datum_snapshot(
     // projecting their values; fulfillment is idempotent (the promise flag clears
     // to NONE).
     fulfill_pending_promises(estate)?;
-    let mut snap = std::vec::Vec::with_capacity(estate.datums.len());
-    // Snapshot RECFIELD values first borrowing `estate` immutably; collect the
-    // (index, value) pairs so the push order matches the datum order.
-    for d in estate.datums.iter() {
+    let ndatums = estate.datums.len();
+    let mut snap: std::vec::Vec<Option<exec_seams::EvalParamValue>> =
+        std::vec::Vec::with_capacity(ndatums);
+    // Snapshot each datum in order. VAR/RECFIELD read with an immutable borrow;
+    // a whole-row REC/ROW datum (the trigger NEW/OLD record and multi-OUT row
+    // vars) is bound as a composite Param — exec_eval_datum builds its tuple
+    // value, which needs a mutable borrow of `estate`, so those indices are
+    // evaluated in a second pass.
+    let mut whole_row_idx: std::vec::Vec<usize> = std::vec::Vec::new();
+    for (dno, d) in estate.datums.iter().enumerate() {
         match d {
             PLpgSQL_datum::Var(v) => {
                 let typeid = v.datatype.as_ref().map(|t| t.typoid).unwrap_or(INVALID_OID);
@@ -1563,8 +1569,32 @@ fn build_datum_snapshot(
                 }));
             }
             PLpgSQL_datum::Recfield(rf) => snap.push(snapshot_recfield(estate, rf)?),
+            PLpgSQL_datum::Rec(_) => {
+                whole_row_idx.push(dno);
+                snap.push(None); // filled in the second pass
+            }
             _ => snap.push(None),
         }
+    }
+    // Second pass: bind whole-row REC/ROW datums as composite Params. This is
+    // the same logic exec_eval_datum applies (pl_exec.c: DTYPE_REC / DTYPE_ROW)
+    // — a referenced whole-row variable (e.g. `OLD`, `NEW` in a trigger, or a
+    // RECORD passed to a SQL expression) flattens to its header-ful composite
+    // datum image, bound by reference.
+    for dno in whole_row_idx {
+        // exec_eval_datum_impl reads the datum at `dno` and stashes any by-ref
+        // composite image in `estate.last_eval_byref`. It only reads the datum
+        // (REC fetches its value through the global erh handle table), so a
+        // clone of the datum is a faithful, side-effect-free read source.
+        let datum = estate.datums[dno].clone();
+        let (typeid, _typmod, value, isnull) = exec_eval_datum_impl(estate, &datum)?;
+        let byref = estate.last_eval_byref.take();
+        snap[dno] = Some(exec_seams::EvalParamValue {
+            value: if byref.is_some() { 0 } else { value.as_usize() },
+            isnull,
+            typeid,
+            byref,
+        });
     }
     Ok(snap)
 }
@@ -1623,16 +1653,37 @@ fn exec_eval_datum_impl(
             Ok((finfo.ftypeid, finfo.ftypmod, Datum::from_usize(value_word), isnull))
         }
         PLpgSQL_datum::Rec(rec) => {
-            // The whole record as a composite value (rec->erh->er_typeid).
+            // exec_eval_datum DTYPE_REC (pl_exec.c): an uninstantiated or empty
+            // record reads as a typed NULL; a populated record yields its flat
+            // composite Datum (ExpandedRecordGetDatum), whose header carries the
+            // record's registered (er_typeid, er_typmod) — so a RECORD-typed
+            // trigger NEW/OLD flattens with a *registered* typmod, not an
+            // anonymous one that record_out / row-compare cannot resolve.
             let handle = rec.erh.as_ref().map(|h| h.0).unwrap_or(0);
-            let result = erh_table::with_erh(handle, |mcx, erh| {
-                let typeid = erh.er_typeid;
-                let typmod = erh.er_typmod;
-                match er::expanded_record_get_tuple(mcx, erh) {
-                    Ok(Some(ft)) => Ok((typeid, typmod, Some(ft.to_datum_image()), false)),
-                    Ok(None) => Ok((typeid, typmod, None, true)),
-                    Err(e) => Err(e),
+            if handle == 0 {
+                // Uninstantiated record: typed NULL (rec->rectypeid).
+                return Ok((rec.rectypeid, -1, Datum::null(), true));
+            }
+            let rectypeid = rec.rectypeid;
+            let result = erh_table::with_erh_mut(handle, |mcx, erh| -> types_error::PgResult<(Oid, int32, Option<Vec<u8>>, bool)> {
+                if erh.is_empty() {
+                    // Empty record is also a NULL; report its declared type.
+                    let (typeid, typmod) = if rectypeid != RECORDOID {
+                        (rectypeid, -1)
+                    } else {
+                        (erh.er_typeid, erh.er_typmod)
+                    };
+                    return Ok((typeid, typmod, None, true));
                 }
+                let (image, er_typeid, er_typmod) = er::expanded_record_get_datum(mcx, erh)?;
+                // rec->rectypeid != RECORDOID → report the variable's declared
+                // type; else report the record's actual (registered) type.
+                let (typeid, typmod) = if rectypeid != RECORDOID {
+                    (rectypeid, -1)
+                } else {
+                    (er_typeid, er_typmod)
+                };
+                Ok((typeid, typmod, Some(image), false))
             });
             match result {
                 Some(res) => match res? {
