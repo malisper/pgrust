@@ -90,7 +90,11 @@ seam_core::seam!(
     /// TABLESAMPLE sample-function + args parallel safety
     /// (`func_parallel(tsc->tsmhandler) == PROPARALLEL_SAFE` and
     /// `is_parallel_safe(root, tsc->args)`).
-    pub fn tsm_is_parallel_safe(root: &PlannerInfo, rti: Index) -> bool
+    pub fn tsm_is_parallel_safe<'mcx>(
+        run: &PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rti: Index,
+    ) -> types_error::PgResult<bool>
 );
 
 // NOTE: the per-RTE / per-rel `is_parallel_safe` checks

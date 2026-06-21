@@ -467,7 +467,7 @@ pub fn set_rel_consider_parallel<'mcx>(
             }
             // TABLESAMPLE pushdown safety (the sample function + args).
             if rte::rte_has_tablesample::call(run, root, rti) {
-                if !tablesample_is_parallel_safe(root, rti) {
+                if !seams::tsm_is_parallel_safe::call(run, root, rti)? {
                     return Ok(());
                 }
             }
@@ -837,8 +837,30 @@ fn tablesample_repeatable_across_scans<'mcx>(
     Ok(routine.repeatable_across_scans)
 }
 /// TABLESAMPLE function + args parallel-safety (`func_parallel` + `is_parallel_safe`).
-fn tablesample_is_parallel_safe(root: &PlannerInfo, rti: Index) -> bool {
-    seams::tsm_is_parallel_safe::call(root, rti)
+///
+/// Body for the `tsm_is_parallel_safe` seam (allpaths.c:626). `func_parallel`
+/// (pg_proc) and `is_parallel_safe` (clauses.c) over the TABLESAMPLE args live
+/// in crates allpaths already depends on directly; the RTE's `tablesample`
+/// fields are reached through the `rte-seams`.
+fn tablesample_is_parallel_safe_impl<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    rti: Index,
+) -> PgResult<bool> {
+    // `PROPARALLEL_SAFE` ('s'), pg_proc.proparallel.
+    const PROPARALLEL_SAFE: u8 = b's';
+    let handler = rte::rte_tablesample_handler::call(run, root, rti);
+    let proparallel = backend_utils_cache_lsyscache_seams::func_parallel::call(handler)?;
+    if proparallel != PROPARALLEL_SAFE {
+        return Ok(false);
+    }
+    let args = rte::rte_tablesample_args::call(run, root, rti)?;
+    for arg in args.iter() {
+        if !expr_is_parallel_safe(root, arg) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Extract the `is_parallel_safe` glob inputs from `root` (the global
@@ -1037,6 +1059,13 @@ pub fn init_seams() {
     // default_index / interleaved_parts, live_parts) is pure planner data on
     // the RelOptInfo, so install the real body here.
     seams::partitions_are_ordered::set(append::partitions_are_ordered_impl);
+
+    // allpaths.c:626 — set_rel_consider_parallel's TABLESAMPLE leg. The body
+    // navigates the RTE's tablesample fields (rte-seams), reads
+    // func_parallel(tsmhandler) (lsyscache-seams), and checks is_parallel_safe
+    // over the sample args (clauses, via expr_is_parallel_safe). All deps are
+    // direct; allpaths owns allpaths.c so it installs its own seam.
+    seams::tsm_is_parallel_safe::set(tablesample_is_parallel_safe_impl);
 
     // setrefs.c's add_rtes_to_flat_rtable tests whether a subquery RTE's planned
     // subroot has a dummy final rel. The subroot lives in
