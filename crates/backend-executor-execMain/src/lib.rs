@@ -2408,16 +2408,18 @@ pub fn ExecWithCheckOptions<'mcx>(
                 // view the relation directly. convert_routed_slot_for_error maps
                 // a routed slot back to the root tupdesc (the C
                 // ri_RootResultRelInfo path).
-                let (root_relid, desc_slot, rel_name) =
+                let (root_relid, desc_slot, _rel_name) =
                     convert_routed_slot_for_error(estate, result_rel_info, slot)?;
                 let modified_cols = constraint_modified_cols(estate, result_rel_info)?;
                 let val_desc =
                     build_slot_value_desc(estate, root_relid, desc_slot, modified_cols.as_deref())?;
+                // C uses wco->relname (the view name) for the message; the
+                // relation descriptor's name (rel_name) drives only val_desc.
                 let mut err = ereport(ERROR)
                     .errcode(types_error::ERRCODE_WITH_CHECK_OPTION_VIOLATION)
                     .errmsg(alloc::format!(
                         "new row violates check option for view \"{}\"",
-                        rel_name
+                        relname
                     ));
                 if let Some(vd) = val_desc {
                     err = err.errdetail(alloc::format!("Failing row contains {}.", vd.as_str()));
