@@ -210,6 +210,58 @@ static SHARED_PROC_LOCK_GROUP_LEADER: AtomicPtr<i32> = AtomicPtr::new(core::ptr:
 /// checks.
 static SHARED_PROC_LOCK_GROUP_LEADER_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Base of the genuinely-shared per-proc `PGPROC.xmin` array (one
+/// `TransactionId`/`u32` per proc — each backend's advertised snapshot xmin).
+/// Set by [`InitProcGlobal`], NULL until then.
+///
+/// In C `PGPROC.xmin` lives in the shared PGPROC block. A parallel **leader**
+/// advertises its xmin (the transaction whose snapshot it exports); the
+/// **worker** the postmaster forks afterwards calls `RestoreTransactionSnapshot`
+/// → `ProcArrayInstallRestoredXmin`, which reads `proc->xmin` of the *leader's*
+/// PGPROC to interlock the system-wide xmin. With `xmin` fork-private in
+/// [`PROC_GLOBAL`], the worker reads its stale fork-COW image of the leader
+/// (typically `Invalid`/0 — the leader set its xmin *after* the worker forked),
+/// the `TransactionIdIsNormal(xid)` test fails, the install returns false, and
+/// `RestoreTransactionSnapshot` errors "source transaction is not running
+/// anymore". So this word lives in genuine shmem, the same idiom as
+/// [`SHARED_PROC_PIDS`].
+static SHARED_PROC_XMIN: AtomicPtr<TransactionId> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_XMIN`] (`total_procs`), for bounds checks.
+static SHARED_PROC_XMIN_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared per-proc `PGPROC.databaseId` array (one
+/// `Oid`/`u32` per proc — the database the backend is connected to). Set by
+/// [`InitProcGlobal`], NULL until then.
+///
+/// In C `PGPROC.databaseId` lives in the shared PGPROC block.
+/// `ProcArrayInstallRestoredXmin` reads `proc->databaseId == MyDatabaseId` of
+/// the parallel leader's PGPROC; fork-private storage makes the worker read a
+/// stale image and the per-database interlock fails. So this word lives in
+/// genuine shmem, the same idiom as [`SHARED_PROC_PIDS`].
+static SHARED_PROC_DATABASE_ID: AtomicPtr<Oid> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_DATABASE_ID`] (`total_procs`), for bounds checks.
+static SHARED_PROC_DATABASE_ID_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared per-proc `PGPROC.statusFlags` array (one `u8`
+/// per proc — the `PROC_*` status flag bits). Set by [`InitProcGlobal`], NULL
+/// until then.
+///
+/// This is the **per-proc** `PGPROC.statusFlags` word (distinct from the dense
+/// `ProcGlobal->statusFlags[pgxactoff]` mirror [`SHARED_PROC_STATUS_FLAGS`],
+/// which is indexed by `pgxactoff`). In C `PGPROC.statusFlags` lives in the
+/// shared PGPROC block. `ProcArrayInstallRestoredXmin` copies the leader's
+/// `proc->statusFlags & PROC_XMIN_FLAGS` into the worker so the worker's xmin is
+/// interpreted with the same vacuum semantics. Fork-private storage makes the
+/// worker read a stale image of the leader's flags. So this word lives in
+/// genuine shmem, the same idiom as [`SHARED_PROC_PIDS`].
+static SHARED_PROC_PER_PROC_STATUS_FLAGS: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_PER_PROC_STATUS_FLAGS`] (`total_procs`), for bounds
+/// checks.
+static SHARED_PROC_PER_PROC_STATUS_FLAGS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 /// Base of the genuinely-shared dense `ProcGlobal->xids[]` array (one
 /// `TransactionId` per `pgxactoff` slot — the cache-dense mirror of every live
 /// backend's `PGPROC.xid` that `GetSnapshotData` scans). Set by
@@ -802,6 +854,7 @@ fn shared_pid_slot(procno: ProcNumber) -> &'static AtomicI32 {
 }
 
 use core::sync::atomic::AtomicI32;
+use core::sync::atomic::{AtomicU32, AtomicU8};
 
 /// `&ProcGlobal->allProcs[procno].pgxactoff` over the genuinely-shared pgxactoff
 /// array. Panics if `InitProcGlobal` has not run or `procno` is out of range
@@ -864,6 +917,99 @@ pub(crate) fn proc_lock_group_leader_shared(procno: ProcNumber) -> Option<ProcNu
 pub(crate) fn set_proc_lock_group_leader_shared(procno: ProcNumber, leader: Option<ProcNumber>) {
     let raw = leader.unwrap_or(types_core::INVALID_PROC_NUMBER);
     shared_lock_group_leader_slot(procno).store(raw, AtomicOrdering::Relaxed);
+}
+
+/// `&ProcGlobal->allProcs[procno].xmin` over the genuinely-shared per-proc xmin
+/// array (`TransactionId`/`u32`). Panics if `InitProcGlobal` has not run or
+/// `procno` is out of range (caller bugs mirroring the C deref of a slot in the
+/// shared PGPROC block).
+fn shared_xmin_slot(procno: ProcNumber) -> &'static AtomicU32 {
+    let base = SHARED_PROC_XMIN.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC xmin array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_XMIN_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC xmin index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `u32` words of genuine shared memory and
+    // `idx < count`. `TransactionId`/`u32`/`AtomicU32` share layout, so the word
+    // may be accessed atomically — the cross-process discipline mirrors C's plain
+    // `xmin` read/written under ProcArrayLock, with atomics making the per-word
+    // access well-defined under the Rust memory model.
+    unsafe { AtomicU32::from_ptr(base.add(idx) as *mut u32) }
+}
+
+/// `ProcGlobal->allProcs[procno].xmin` — read the canonical (shared) word.
+pub(crate) fn proc_xmin_shared(procno: ProcNumber) -> TransactionId {
+    shared_xmin_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `ProcGlobal->allProcs[procno].xmin = xmin` — write the canonical (shared)
+/// word, visible to every process (the parallel leader's advertised xmin).
+pub(crate) fn set_proc_xmin_shared(procno: ProcNumber, xmin: TransactionId) {
+    shared_xmin_slot(procno).store(xmin, AtomicOrdering::Relaxed);
+}
+
+/// `&ProcGlobal->allProcs[procno].databaseId` over the genuinely-shared per-proc
+/// databaseId array (`Oid`/`u32`). Panics if `InitProcGlobal` has not run or
+/// `procno` is out of range.
+fn shared_database_id_slot(procno: ProcNumber) -> &'static AtomicU32 {
+    let base = SHARED_PROC_DATABASE_ID.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC databaseId array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_DATABASE_ID_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC databaseId index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `u32` words of genuine shared memory and
+    // `idx < count`. `Oid`/`u32`/`AtomicU32` share layout, so the word may be
+    // accessed atomically — the cross-process discipline mirrors C's plain
+    // `databaseId` read/written, with atomics making the access well-defined.
+    unsafe { AtomicU32::from_ptr(base.add(idx) as *mut u32) }
+}
+
+/// `ProcGlobal->allProcs[procno].databaseId` — read the canonical (shared) word.
+pub(crate) fn proc_database_id_shared(procno: ProcNumber) -> Oid {
+    shared_database_id_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `ProcGlobal->allProcs[procno].databaseId = dboid` — write the canonical
+/// (shared) word, visible to every process.
+pub(crate) fn set_proc_database_id_shared(procno: ProcNumber, dboid: Oid) {
+    shared_database_id_slot(procno).store(dboid, AtomicOrdering::Relaxed);
+}
+
+/// `&ProcGlobal->allProcs[procno].statusFlags` over the genuinely-shared
+/// per-proc statusFlags array (`u8`). This is the **per-proc** `PGPROC.statusFlags`
+/// word, distinct from the dense pgxactoff-indexed mirror. Panics if
+/// `InitProcGlobal` has not run or `procno` is out of range.
+fn shared_per_proc_status_flags_slot(procno: ProcNumber) -> &'static AtomicU8 {
+    let base = SHARED_PROC_PER_PROC_STATUS_FLAGS.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC per-proc statusFlags array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_PER_PROC_STATUS_FLAGS_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC statusFlags index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `u8` words of genuine shared memory and
+    // `idx < count`. `u8`/`AtomicU8` share layout, so the word may be accessed
+    // atomically — the cross-process discipline mirrors C's plain `statusFlags`
+    // read/written under ProcArrayLock, with atomics making the access well-defined.
+    unsafe { AtomicU8::from_ptr(base.add(idx)) }
+}
+
+/// `ProcGlobal->allProcs[procno].statusFlags` — read the canonical (shared) word.
+pub(crate) fn proc_status_flags_shared(procno: ProcNumber) -> u8 {
+    shared_per_proc_status_flags_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `ProcGlobal->allProcs[procno].statusFlags = flags` — write the canonical
+/// (shared) word, visible to every process.
+pub(crate) fn set_proc_status_flags_shared(procno: ProcNumber, flags: u8) {
+    shared_per_proc_status_flags_slot(procno).store(flags, AtomicOrdering::Relaxed);
 }
 
 /// `ProcGlobal->allProcs[procno].pgxactoff` — read the canonical (shared) word.
@@ -939,6 +1085,50 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
     }
     SHARED_PROC_LOCK_GROUP_LEADER.store(lgl_ptr, AtomicOrdering::Relaxed);
     SHARED_PROC_LOCK_GROUP_LEADER_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.xmin array (each backend's advertised snapshot xmin). In C
+    // this is part of the shared PGPROC block; a parallel worker's
+    // ProcArrayInstallRestoredXmin reads the leader's proc->xmin to interlock the
+    // system-wide xmin. Fork-private storage makes the worker read a stale/zero
+    // image of the leader and the snapshot restore fails. MemSet(0) ==
+    // InvalidTransactionId, matching the C PGPROC block.
+    let xmin_size = mul_size(total_procs, size_of::<TransactionId>());
+    let (xmin_ptr, xmin_found) = shmem::shmem_init_struct::call("PGPROC xmin words", xmin_size)?;
+    let xmin_ptr = xmin_ptr as *mut TransactionId;
+    if !xmin_found {
+        // SAFETY: `xmin_ptr` addresses `xmin_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(xmin_ptr as *mut u8, 0, xmin_size) };
+    }
+    SHARED_PROC_XMIN.store(xmin_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_XMIN_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.databaseId array (the database the backend is connected to).
+    // Read by ProcArrayInstallRestoredXmin's leader interlock. MemSet(0) ==
+    // InvalidOid, matching the C PGPROC block.
+    let db_size = mul_size(total_procs, size_of::<Oid>());
+    let (db_ptr, db_found) = shmem::shmem_init_struct::call("PGPROC databaseId words", db_size)?;
+    let db_ptr = db_ptr as *mut Oid;
+    if !db_found {
+        // SAFETY: `db_ptr` addresses `db_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(db_ptr as *mut u8, 0, db_size) };
+    }
+    SHARED_PROC_DATABASE_ID.store(db_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_DATABASE_ID_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.statusFlags array (the PROC_* status flag bits). Read+copied
+    // by ProcArrayInstallRestoredXmin (leader's PROC_XMIN_FLAGS). This is the
+    // per-proc word, distinct from the pgxactoff-indexed dense statusFlags mirror.
+    // MemSet(0): no flags set, matching the C PGPROC block.
+    let psf_size = mul_size(total_procs, size_of::<u8>());
+    let (psf_ptr, psf_found) =
+        shmem::shmem_init_struct::call("PGPROC per-proc statusFlags words", psf_size)?;
+    let psf_ptr = psf_ptr as *mut u8;
+    if !psf_found {
+        // SAFETY: `psf_ptr` addresses `psf_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(psf_ptr, 0, psf_size) };
+    }
+    SHARED_PROC_PER_PROC_STATUS_FLAGS.store(psf_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_PER_PROC_STATUS_FLAGS_COUNT.store(total_procs, AtomicOrdering::Relaxed);
 
     // Dense ProcGlobal mirror arrays (xids[] / subxidStates[] / statusFlags[]),
     // one element per pgxactoff slot. In C these are part of the PGPROC

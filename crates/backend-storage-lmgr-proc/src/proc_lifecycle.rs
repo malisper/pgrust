@@ -117,6 +117,15 @@ fn init_my_proc_common(proc: &mut PGPROC, procno: ProcNumber, regular: bool) {
     proc.clogGroupMemberPage = -1;
     proc.clogGroupMemberLsn = INVALID_XLOG_REC_PTR;
     // Assert(clogGroupNext == INVALID_PROC_NUMBER) — assertion only.
+
+    // Mirror the canonical xmin/databaseId/statusFlags fields into the
+    // genuinely-shared per-proc arrays (these PGPROC fields are real shmem in C;
+    // ProcArrayInstallRestoredXmin / GetSnapshotData read them cross-process).
+    // statusFlags is read back from `proc` because the autovac-worker branch
+    // above may have OR'd in PROC_IS_AUTOVACUUM.
+    crate::proc_shmem::set_proc_xmin_shared(procno, InvalidTransactionId);
+    crate::proc_shmem::set_proc_database_id_shared(procno, InvalidOid);
+    crate::proc_shmem::set_proc_status_flags_shared(procno, proc.statusFlags);
 }
 
 /// `InitProcess(void)` — claim a `PGPROC` for a regular/background backend.
@@ -305,6 +314,12 @@ pub fn InitAuxiliaryProcess(_mcx: Mcx<'_>) -> PgResult<()> {
         proc.waitStart.write(0);
         // USE_ASSERT_CHECKING: myProcLocks partitions must be empty — omitted.
     });
+
+    // Mirror the canonical xmin/databaseId/statusFlags into the genuinely-shared
+    // per-proc arrays (real shmem PGPROC fields read cross-process).
+    crate::proc_shmem::set_proc_xmin_shared(aux_procno, InvalidTransactionId);
+    crate::proc_shmem::set_proc_database_id_shared(aux_procno, InvalidOid);
+    crate::proc_shmem::set_proc_status_flags_shared(aux_procno, 0);
 
     // Acquire ownership of the PGPROC's latch and repoint the process latch.
     seam::own_latch(aux_procno);

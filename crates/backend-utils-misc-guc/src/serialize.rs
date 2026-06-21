@@ -417,9 +417,13 @@ fn reset_to_default(var: &mut GucVariable) {
     match var {
         GucVariable::Bool(c) => {
             c.value = Some(c.reset_val);
+            // C `InitializeOneGUCOption`/reset path passes `conf->reset_extra` to
+            // the assign hook (guc.c), NOT NULL: hooks such as
+            // `assign_client_encoding` deref `*extra` unconditionally.
             if let Some(slot) = c.assign_hook {
-                (slot.get())(c.reset_val, None);
+                (slot.get())(c.reset_val, c.reset_extra.as_deref());
             }
+            c.gen.extra = c.reset_extra.clone();
             if c.variable.installed() {
                 c.variable.write(c.reset_val);
             }
@@ -427,8 +431,9 @@ fn reset_to_default(var: &mut GucVariable) {
         GucVariable::Int(c) => {
             c.value = Some(c.reset_val);
             if let Some(slot) = c.assign_hook {
-                (slot.get())(c.reset_val, None);
+                (slot.get())(c.reset_val, c.reset_extra.as_deref());
             }
+            c.gen.extra = c.reset_extra.clone();
             if c.variable.installed() {
                 c.variable.write(c.reset_val);
             }
@@ -436,16 +441,18 @@ fn reset_to_default(var: &mut GucVariable) {
         GucVariable::Real(c) => {
             c.value = Some(c.reset_val);
             if let Some(slot) = c.assign_hook {
-                (slot.get())(c.reset_val, None);
+                (slot.get())(c.reset_val, c.reset_extra.as_deref());
             }
+            c.gen.extra = c.reset_extra.clone();
             if c.variable.installed() {
                 c.variable.write(c.reset_val);
             }
         }
         GucVariable::String(c) => {
             if let Some(slot) = c.assign_hook {
-                (slot.get())(c.reset_val.as_deref(), None);
+                (slot.get())(c.reset_val.as_deref(), c.reset_extra.as_deref());
             }
+            c.gen.extra = c.reset_extra.clone();
             if c.variable.installed() {
                 c.variable.write(c.reset_val.clone());
             }
@@ -454,8 +461,9 @@ fn reset_to_default(var: &mut GucVariable) {
         GucVariable::Enum(c) => {
             c.value = Some(c.reset_val);
             if let Some(slot) = c.assign_hook {
-                (slot.get())(c.reset_val, None);
+                (slot.get())(c.reset_val, c.reset_extra.as_deref());
             }
+            c.gen.extra = c.reset_extra.clone();
             if c.variable.installed() {
                 c.variable.write(c.reset_val);
             }

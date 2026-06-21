@@ -382,6 +382,15 @@ fn proc_init_prepared(
         proc.subxidStatus.count = 0;
     });
 
+    // Mirror the canonical xmin/databaseId/statusFlags fields into the
+    // genuinely-shared per-proc arrays (these PGPROC fields live in real shmem in
+    // C; GetSnapshotData/ProcArrayInstallRestoredXmin read them cross-process).
+    // The closure above set proc.xmin=Invalid (asserted), statusFlags=0,
+    // databaseId=databaseid.
+    crate::proc_shmem::set_proc_xmin_shared(pgprocno, types_core::InvalidTransactionId);
+    crate::proc_shmem::set_proc_database_id_shared(pgprocno, databaseid);
+    crate::proc_shmem::set_proc_status_flags_shared(pgprocno, 0);
+
     Ok(())
 }
 
@@ -410,7 +419,9 @@ fn my_proc_number() -> ProcNumber {
 }
 
 fn proc_database_id(pgprocno: ProcNumber) -> Oid {
-    with_proc_by_number(pgprocno, |p| p.databaseId)
+    // Read from the genuinely-shared databaseId array (cross-process): a parallel
+    // worker's ProcArrayInstallRestoredXmin reads the leader's databaseId.
+    crate::proc_shmem::proc_database_id_shared(pgprocno)
 }
 
 fn proc_xid(pgprocno: ProcNumber) -> TransactionId {
@@ -422,7 +433,10 @@ fn proc_vxid(pgprocno: ProcNumber) -> (ProcNumber, u32) {
 }
 
 fn proc_xmin(pgprocno: ProcNumber) -> TransactionId {
-    with_proc_by_number(pgprocno, |p| p.xmin)
+    // Read from the genuinely-shared xmin array (cross-process): a parallel
+    // worker's ProcArrayInstallRestoredXmin reads the leader's advertised xmin,
+    // and GetSnapshotData scans every backend's xmin.
+    crate::proc_shmem::proc_xmin_shared(pgprocno)
 }
 
 fn proc_role_id(pgprocno: ProcNumber) -> Oid {
@@ -456,15 +470,18 @@ fn proc_subxids(procno: ProcNumber) -> (i32, Vec<TransactionId>) {
 }
 
 fn my_proc_xmin() -> TransactionId {
-    crate::proc_shmem::with_my_proc_ref(|p| p.xmin)
+    // Read from the genuinely-shared xmin array (my own slot).
+    crate::proc_shmem::proc_xmin_shared(crate::proc_shmem::my_proc_number())
 }
 
 fn set_my_proc_xmin(value: TransactionId) {
-    with_my_proc(|p| p.xmin = value);
+    // Advertise into the genuinely-shared xmin array (cross-process visible).
+    crate::proc_shmem::set_proc_xmin_shared(crate::proc_shmem::my_proc_number(), value);
 }
 
 fn set_my_proc_status_flags(flags: u8) {
-    with_my_proc(|p| p.statusFlags = flags);
+    // Write the genuinely-shared per-proc statusFlags array (cross-process visible).
+    crate::proc_shmem::set_proc_status_flags_shared(crate::proc_shmem::my_proc_number(), flags);
 }
 
 fn prepared_xact_procno(i: i32) -> ProcNumber {
@@ -816,11 +833,13 @@ fn set_proc_subxid_status(procno: ProcNumber, count: i32, overflowed: bool) {
 }
 
 fn proc_status_flags(procno: ProcNumber) -> u8 {
-    with_proc_by_number(procno, |p| p.statusFlags)
+    // Read from the genuinely-shared per-proc statusFlags array (cross-process).
+    crate::proc_shmem::proc_status_flags_shared(procno)
 }
 
 fn set_proc_status_flags(procno: ProcNumber, flags: u8) {
-    with_proc_by_number(procno, |p| p.statusFlags = flags);
+    // Write the genuinely-shared per-proc statusFlags array (cross-process).
+    crate::proc_shmem::set_proc_status_flags_shared(procno, flags);
 }
 
 fn set_proc_xid(procno: ProcNumber, xid: TransactionId) {
@@ -828,7 +847,8 @@ fn set_proc_xid(procno: ProcNumber, xid: TransactionId) {
 }
 
 fn set_proc_xmin(procno: ProcNumber, xmin: TransactionId) {
-    with_proc_by_number(procno, |p| p.xmin = xmin);
+    // Write the genuinely-shared xmin array (cross-process visible).
+    crate::proc_shmem::set_proc_xmin_shared(procno, xmin);
 }
 
 fn set_proc_lxid(procno: ProcNumber, lxid: LocalTransactionId) {
@@ -1014,8 +1034,9 @@ fn set_my_proc_role_id(userid: Oid) {
 }
 
 fn set_my_proc_database_id(dboid: Oid) {
-    // `MyProc->databaseId = dboid` — plain shared-memory field store.
-    with_my_proc(|p| p.databaseId = dboid);
+    // `MyProc->databaseId = dboid` — write the genuinely-shared databaseId array
+    // (cross-process visible; ProcArrayInstallRestoredXmin reads the leader's).
+    crate::proc_shmem::set_proc_database_id_shared(crate::proc_shmem::my_proc_number(), dboid);
 }
 
 fn proc_lock_wakeup(_space: &mut types_deadlock::LockSpace, _lock: types_deadlock::LockId) {

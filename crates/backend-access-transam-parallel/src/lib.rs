@@ -371,6 +371,15 @@ fn worker_with_toc<R>(base: usize, f: impl FnOnce(&ShmToc) -> R) -> R {
     })
 }
 
+/// Whether `base` is the real DSM base address of a worker-attached segment.
+/// Used by the shared `shm_toc_*` surface ([`with_toc`]) to dispatch worker-side
+/// TOC access (toc == real DSM address) vs leader-side (toc == small
+/// context-slot index) without a separate worker code path. Leader slot indices
+/// are small integers and never collide with a mapped segment's base pointer.
+fn is_worker_attached_base(base: usize) -> bool {
+    WORKER_ATTACHED.with(|w| w.borrow().iter().any(|e| e.base == base))
+}
+
 // ===========================================================================
 // Cursor / address model (family `shm-toc-address`): a `SerializeCursor` is now
 // the *real* chunk address — the raw pointer `shm_toc_allocate`/`shm_toc_lookup`
@@ -484,6 +493,15 @@ pub fn pcxt_estimate_keys(pcxt: ParallelContextHandle, keys: Size) -> PgResult<(
 /// established, mirroring C's `shm_toc_allocate(pcxt->toc, ...)` after
 /// `shm_toc_create`).
 fn with_toc<R>(toc: ExecShmToc, f: impl FnOnce(&ShmToc, usize) -> R) -> R {
+    // A worker holds no `ParallelContext`: its `ExecShmToc.0` is the real DSM
+    // segment base address it attached to (registered in `WORKER_ATTACHED`), not a
+    // leader-side context slot index. The shared execParallel code calls this same
+    // `shm_toc_*` surface in both processes, so resolve the worker-attached
+    // segment first (keyed by the exact base); leader slot indices are small and
+    // never collide with a mapped segment's base pointer.
+    if is_worker_attached_base(toc.0) {
+        return worker_with_toc(toc.0, |real| f(real, toc.0));
+    }
     with_globals(|g| {
         let c = g.get(ParallelContextHandle(toc_slot(toc)));
         let real = c.toc.expect("shm_toc not yet created for parallel context");

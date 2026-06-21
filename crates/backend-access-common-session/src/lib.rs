@@ -257,21 +257,32 @@ fn initialize_session() -> PgResult<()> {
 fn get_session_dsm_handle() -> PgResult<dsm_handle> {
     // TEMPORARY: force the leader-only path by returning INVALID.
     //
-    // The lock-group fork-private blocker is now fixed (PGPROC.lockGroupLeader
-    // lives in genuine shared memory), so parallel workers fork, join the leader's
-    // lock group, attach as error-queue senders, and run the real query entry
-    // point — and the leader-finish wait (`WaitForParallelWorkersToFinish` +
-    // shm_mq detach/'X' signaling) is wired and correct. BUT the parallel worker's
-    // `RestoreTransactionSnapshot` still fails ("could not import the requested
-    // snapshot / source transaction is not running anymore") because the leader's
-    // `PGPROC.xmin` / `databaseId` / `statusFlags` are still fork-private (not in
-    // shared memory), so `ProcArrayInstallRestoredXmin` can't see the live
-    // leader's advertised xmin; the worker then errors (and a separate
-    // `attempt to subtract with overflow` panic in the parallel-scan executor
-    // crashes the postmaster). With a valid handle, every parallel-eligible query
-    // would therefore crash. Returning INVALID restores the known-good leader-only
-    // behavior (correct results, no crash). Delete this early return ONLY together
-    // with the PGPROC-xmin shared-memory promotion + the overflow-panic fix, gated
+    // Several fork-COW-shared-memory blockers are now fixed, so a parallel worker
+    // gets MUCH further than before: it forks, joins the leader's lock group
+    // (PGPROC.lockGroupLeader in real shmem), attaches as the error-queue sender,
+    // restores the leader's transaction snapshot (PGPROC.xmin / databaseId /
+    // statusFlags now in genuine shmem, so ProcArrayInstallRestoredXmin sees the
+    // live leader's advertised xmin), restores the leader's GUC state (reset path
+    // now passes reset_extra to the assign hooks), and resolves chunks in the
+    // worker-attached DSM TOC (shm_toc_* dispatches worker-base vs leader-slot).
+    //
+    // BUT the worker still cannot finish the query: THREE downstream keystones
+    // remain, each crashes the postmaster:
+    //   1. ProcArrayAdd (procarray.c) — the worker's `ProcArrayAdd` trips the
+    //      `allProcs[procno].pgxactoff == index - 1` shift-loop assertion: the
+    //      worker's procarray view (pgxactoff vs the shared pgprocnos[]/numProcs)
+    //      is inconsistent at insert time. Needs the worker-side ProcArrayAdd
+    //      pgxactoff seeding audited.
+    //   2. `create_parallel_query_desc` seam is UNINSTALLED — the worker's
+    //      `ExecParallelGetQueryDesc` reconstructs its owned `QueryDesc` from the
+    //      serialized `PlannedStmt` text via `stringToNode` (readfuncs plan-ship
+    //      path), which is not yet ported. This is the real deep blocker.
+    //   3. multixact `!InRecovery` assertion fires as a crash-recovery cascade
+    //      after the first worker crash poisons the cluster.
+    // With a valid handle, every parallel-eligible query therefore still crashes.
+    // Returning INVALID restores the known-good leader-only behavior (correct
+    // results, no crash). Delete this early return ONLY together with the worker
+    // ProcArrayAdd fix + the create_parallel_query_desc (stringToNode) port, gated
     // on a crash-free parallel smoke test.
     return Ok(DSM_HANDLE_INVALID);
 

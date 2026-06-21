@@ -46,15 +46,15 @@ pub fn set_my_proc_in_vacuum_flags(is_wraparound: bool) -> PgResult<()> {
     // LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
     lwlock_seams::lwlock_acquire_proc_array::call(LWLockMode::LW_EXCLUSIVE)?;
 
-    let flags = proc_shmem::with_my_proc(|p| {
-        // MyProc->statusFlags |= PROC_IN_VACUUM;
-        p.statusFlags |= PROC_IN_VACUUM;
-        // if (params->is_wraparound) MyProc->statusFlags |= PROC_VACUUM_FOR_WRAPAROUND;
-        if is_wraparound {
-            p.statusFlags |= PROC_VACUUM_FOR_WRAPAROUND;
-        }
-        p.statusFlags
-    });
+    // MyProc->statusFlags is the genuinely-shared per-proc word (cross-process
+    // visible). Read-modify-write it: OR in PROC_IN_VACUUM (+wraparound).
+    let my_procno = proc_shmem::my_proc_number();
+    let mut flags = proc_shmem::proc_status_flags_shared(my_procno);
+    flags |= PROC_IN_VACUUM;
+    if is_wraparound {
+        flags |= PROC_VACUUM_FOR_WRAPAROUND;
+    }
+    proc_shmem::set_proc_status_flags_shared(my_procno, flags);
     // MyProc->pgxactoff — the canonical shared offset (renumbered cross-process
     // by ProcArrayAdd/Remove), not the fork-private PGPROC field.
     let pgxactoff = proc_shmem::my_proc_pgxactoff();
@@ -86,16 +86,17 @@ pub fn set_indexsafe_procflags() -> PgResult<()> {
 
     // This should only be called before installing xid or xmin in MyProc;
     // otherwise concurrent processes could see an Xmin that moves backwards.
-    debug_assert!(proc_shmem::with_my_proc(|p| p.xid == 0 && p.xmin == 0));
+    let my_procno = proc_shmem::my_proc_number();
+    debug_assert!(
+        proc_shmem::with_my_proc(|p| p.xid == 0) && proc_shmem::proc_xmin_shared(my_procno) == 0
+    );
 
     // LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
     lwlock_seams::lwlock_acquire_proc_array::call(LWLockMode::LW_EXCLUSIVE)?;
 
-    // MyProc->statusFlags |= PROC_IN_SAFE_IC;
-    let flags = proc_shmem::with_my_proc(|p| {
-        p.statusFlags |= PROC_IN_SAFE_IC;
-        p.statusFlags
-    });
+    // MyProc->statusFlags |= PROC_IN_SAFE_IC; (the genuinely-shared per-proc word).
+    let flags = proc_shmem::proc_status_flags_shared(my_procno) | PROC_IN_SAFE_IC;
+    proc_shmem::set_proc_status_flags_shared(my_procno, flags);
 
     // ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
     let pgxactoff = proc_shmem::my_proc_pgxactoff();
@@ -111,7 +112,7 @@ pub fn set_indexsafe_procflags() -> PgResult<()> {
 /// support parallel vacuum for autovacuum). Used in the worker entry `Assert`.
 pub fn my_proc_status_flags_is_in_vacuum_only() -> bool {
     use types_storage::storage::PROC_IN_VACUUM;
-    proc_shmem::with_my_proc(|p| p.statusFlags == PROC_IN_VACUUM)
+    proc_shmem::proc_status_flags_shared(proc_shmem::my_proc_number()) == PROC_IN_VACUUM
 }
 
 /// `MyProc->recoveryConflictPending` (proc.c / postgres.c) — read this
