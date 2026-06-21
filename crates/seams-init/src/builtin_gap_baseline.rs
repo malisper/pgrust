@@ -562,7 +562,6 @@ pub const KNOWN_GAP: &[BaselineGap] = &[
     (5019, "pg_mcv_list_out", BuiltinGapKind::NotRegistered),
     (5020, "pg_mcv_list_recv", BuiltinGapKind::NotRegistered),
     (5021, "pg_mcv_list_send", BuiltinGapKind::NotRegistered),
-    (5028, "satisfies_hash_partition", BuiltinGapKind::NotRegistered),
     (5029, "pg_ls_tmpdir_noargs", BuiltinGapKind::NotRegistered),
     (5030, "pg_ls_tmpdir_1arg", BuiltinGapKind::NotRegistered),
     (5031, "pg_ls_archive_statusdir", BuiltinGapKind::NotRegistered),

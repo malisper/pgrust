@@ -23,6 +23,7 @@
 //! machinery); only the routing-search leg lands.
 
 mod qual;
+mod satisfies_hash_partition;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
@@ -1520,6 +1521,9 @@ pub fn init_seams() {
     seams::check_new_partition_bound::set(check_new_partition_bound);
     seams::qual_from_partbound::set(qual::qual_from_partbound_seam);
     seams::get_qual_from_partbound::set(get_qual_from_partbound_seam);
+
+    // Register the SQL-callable hash-partition predicate builtin (OID 5028).
+    satisfies_hash_partition::register();
 }
 
 /// Adapter installing `get_qual_from_partbound` (partbounds.c:249): build the

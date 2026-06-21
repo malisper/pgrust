@@ -30,3 +30,9 @@ backend-utils-cache-partcache-seams = { path = "../backend-utils-cache-partcache
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
 backend-partitioning-partdesc-seams = { path = "../backend-partitioning-partdesc-seams" }
 types-storage = { path = "../types-storage" }
+types-fmgr = { path = "../types-fmgr" }
+types-datum = { path = "../types-datum" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
+backend-parser-coerce-seams = { path = "../backend-parser-coerce-seams" }
+backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }

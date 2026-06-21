@@ -33,8 +33,8 @@ use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use types_nodes::primnodes::{
-    etag, ArrayExpr, BoolExprType, CaseWhen, CoercionForm, Const, Expr, NullTest, NullTestType,
-    ScalarArrayOpExpr,
+    etag, ArrayExpr, BoolExprType, CaseWhen, CoercionForm, Const, Expr, FuncExpr, NullTest,
+    NullTestType, ScalarArrayOpExpr,
 };
 
 use backend_nodes_core::makefuncs::{make_andclause, make_bool_const, make_const, make_null_const};
@@ -1266,6 +1266,7 @@ fn simplify_function(
         result_collid,
         input_collid,
         &args,
+        funcvariadic,
         &form,
         ctx,
     )?;
@@ -1460,6 +1461,7 @@ fn evaluate_function(
     result_collid: Oid,
     input_collid: Oid,
     args: &[Expr],
+    funcvariadic: bool,
     form: &PgProcSimple,
     ctx: &EceContext,
 ) -> PgResult<Option<Expr>> {
@@ -1508,15 +1510,22 @@ fn evaluate_function(
     // C: newexpr = makeNode(FuncExpr); ... fmgr_info_set_expr((Node*)newexpr,
     // &finfo). Synthesize the call node so a polymorphic function (e.g.
     // `int4range`'s `range_constructor2`) can read `funcresulttype` /
-    // declared arg types out of it (`get_fn_expr_rettype/argtype`).
-    let newexpr = backend_nodes_core::makefuncs::make_func_expr(
+    // declared arg types out of it (`get_fn_expr_rettype/argtype`), and so a
+    // VARIADIC-"any" function (e.g. `satisfies_hash_partition`) can read back
+    // `funcvariadic` via `get_fn_expr_variadic`. C builds this with
+    // `makeNode(FuncExpr)` and explicitly copies `funcvariadic`; `makeFuncExpr`
+    // hard-codes `funcvariadic = false`, so build the node directly here.
+    let newexpr = Expr::FuncExpr(FuncExpr {
         funcid,
-        result_type,
-        args.to_vec(),
-        result_collid,
-        input_collid,
-        CoercionForm::COERCE_EXPLICIT_CALL,
-    );
+        funcresulttype: result_type,
+        funcretset: false,
+        funcvariadic,
+        funcformat: CoercionForm::COERCE_EXPLICIT_CALL,
+        funccollid: result_collid,
+        inputcollid: input_collid,
+        args: args.to_vec(),
+        location: -1,
+    });
     Ok(Some(fmgr_fold(
         ctx.mcx,
         funcid,
