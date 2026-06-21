@@ -67,6 +67,7 @@ backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }
 backend-catalog-namespace = { path = "../backend-catalog-namespace" }
 backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-seams" }
 backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
+backend-catalog-pg-constraint-seams = { path = "../backend-catalog-pg-constraint-seams" }
 backend-catalog-pg-depend = { path = "../backend-catalog-pg-depend" }
 backend-catalog-pg-inherits = { path = "../backend-catalog-pg-inherits" }
 backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }

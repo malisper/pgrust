@@ -19,8 +19,9 @@
 //! (`tgparentid` set, WHEN qual remapped through the partition attribute map),
 //! recursing through `CreateTriggerFiringOn`.
 //!
-//! Genuinely-unported STOP boundaries (loud `PgError`): user
-//! `CREATE CONSTRAINT TRIGGER` (the `pg_constraint` entry).
+//! User `CREATE CONSTRAINT TRIGGER` writes its own `pg_constraint` entry
+//! (CONSTRAINT_TRIGGER) via the `create_constraint_entry` seam, then records
+//! the trigger→constraint dependency exactly like an internal constraint trigger.
 
 use mcx::Mcx;
 use types_acl::acl::{ACL_EXECUTE, ACL_TRIGGER, ACLCHECK_OK};
@@ -60,6 +61,8 @@ const TRIGGEROID: Oid = 2279;
 const PROCEDURE_RELATION_ID: Oid = 1255;
 const RELATION_RELATION_ID: Oid = 1259;
 const CONSTRAINT_RELATION_ID: Oid = 2606;
+/// `CONSTRAINT_TRIGGER` (pg_constraint.h) — contype for a constraint trigger.
+const CONSTRAINT_TRIGGER: i8 = b't' as i8;
 
 const ShareRowExclusiveLock: i32 = 6;
 const AccessShareLock: i32 = 1;
@@ -287,12 +290,39 @@ pub fn CreateTriggerFiringOn<'mcx>(
     // clause here; the partition-recurse leg that would do so is gated below.)
     let when = transform_trigger_when(mcx, &rel, stmt, tgtype, query_string, when_clause)?;
 
-    // User CREATE CONSTRAINT TRIGGER (its own pg_constraint entry) is unported.
+    // If it's a user-entered CREATE CONSTRAINT TRIGGER command, make a
+    // corresponding pg_constraint entry (commands/trigger.c:805-844).
+    let mut constraint_oid = constraint_oid;
     if stmt.isconstraint && !valid(constraint_oid) {
-        return Err(ereport(ERROR)
-            .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("user-defined constraint triggers are not yet supported")
-            .into_error());
+        // Internal callers should have made their own constraints.
+        debug_assert!(!is_internal);
+        let trigname_for_constr = stmt
+            .trigname
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or_default();
+        constraint_oid = backend_catalog_pg_constraint_seams::create_constraint_entry::call(
+            mcx,
+            backend_catalog_pg_constraint_seams::CreateConstraintEntryArgs {
+                constraint_name: trigname_for_constr,
+                constraint_namespace: rel.rd_rel.relnamespace,
+                constraint_type: CONSTRAINT_TRIGGER,
+                is_deferrable: stmt.deferrable,
+                is_deferred: stmt.initdeferred,
+                parent_constr_id: InvalidOid, // no parent
+                rel_id: relid,
+                constraint_key: &[], // no conkey
+                constraint_n_keys: 0,
+                constraint_n_total_keys: 0,
+                index_rel_id: InvalidOid, // no index
+                excl_op: None,            // no exclusion
+                con_is_local: true,       // islocal
+                con_inh_count: 0,         // inhcount
+                con_no_inherit: true,     // noinherit
+                con_period: false,        // conperiod
+                is_internal,
+            },
+        )?;
     }
 
     // Find and validate the trigger function.
