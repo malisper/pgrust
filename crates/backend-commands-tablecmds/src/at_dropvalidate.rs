@@ -646,7 +646,7 @@ pub fn ATExecValidateConstraint<'mcx>(
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     rel: &Relation<'mcx>,
     constr_name: &str,
-    _recurse: bool,
+    recurse: bool,
     recursing: bool,
     lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
@@ -699,11 +699,11 @@ pub fn ATExecValidateConstraint<'mcx>(
             )?;
         } else if conform.contype == CONSTRAINT_CHECK {
             QueueCheckConstraintValidation(
-                mcx, wqueue, rel, constr_name, conoid, recursing, lockmode,
+                mcx, wqueue, rel, constr_name, conoid, recurse, recursing, lockmode,
             )?;
         } else {
             // CONSTRAINT_NOTNULL
-            QueueNNConstraintValidation(mcx, wqueue, rel, conoid, recursing, lockmode)?;
+            QueueNNConstraintValidation(mcx, wqueue, rel, conoid, recurse, recursing, lockmode)?;
         }
 
         address = ObjectAddress {
@@ -782,6 +782,7 @@ fn QueueCheckConstraintValidation<'mcx>(
     rel: &Relation<'mcx>,
     constr_name: &str,
     conoid: Oid,
+    recurse: bool,
     recursing: bool,
     lockmode: LOCKMODE,
 ) -> PgResult<()> {
@@ -796,14 +797,34 @@ fn QueueCheckConstraintValidation<'mcx>(
     // If we're recursing, the parent has already done this; also a NO INHERIT
     // constraint isn't looked for in children. We recurse before validating on
     // the parent (C tablecmds.c:13140-13175).
-    if !recursing && !con.form.connoinherit {
-        let (children, _) = find_all_inheritors(mcx, rel.rd_id, lockmode, false)?;
-        // children always contains the parent rel itself; >1 means real
-        // children. The C foreach re-opens each child and calls
-        // ATExecValidateConstraint recursively (and errors if !recurse).
-        if children.len() > 1 {
-            unported("VALIDATE CONSTRAINT for a CHECK constraint: recursion to inheritance children");
+    let children = if !recursing && !con.form.connoinherit {
+        find_all_inheritors(mcx, rel.rd_id, lockmode, false)?.0
+    } else {
+        PgVec::new_in(mcx)
+    };
+
+    // For CHECK constraints we must validate the children before marking the
+    // parent valid. We recurse before validating on the parent, to reduce risk
+    // of deadlocks (tablecmds.c:13150-13175).
+    for &childoid in children.iter() {
+        if childoid == rel.rd_id {
+            continue;
         }
+        // If told not to recurse there had better not be any child tables: we
+        // can't mark the parent constraint valid unless it is valid for all
+        // child tables.
+        if !recurse {
+            return Err(backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
+                .errmsg("constraint must be validated on child tables too".to_string())
+                .into_error());
+        }
+
+        // find_all_inheritors already got lock.
+        let childrel = relation_open(mcx, childoid, NoLock)?;
+        ATExecValidateConstraint(mcx, wqueue, &childrel, constr_name, false, true, lockmode)?;
+        // table_close(childrel, NoLock): RAII drop.
+        drop(childrel);
     }
 
     // Queue validation for phase 3: a NewConstraint of type CONSTR_CHECK whose
@@ -866,6 +887,7 @@ fn QueueNNConstraintValidation<'mcx>(
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     rel: &Relation<'mcx>,
     conoid: Oid,
+    recurse: bool,
     recursing: bool,
     lockmode: LOCKMODE,
 ) -> PgResult<()> {
@@ -891,12 +913,59 @@ fn QueueNNConstraintValidation<'mcx>(
             })?;
     let attnum: AttrNumber = backend_catalog_pg_constraint::extractNotNullColumn(&con_tup)?;
 
-    if !recursing && !con.form.connoinherit {
-        let (children, _) = find_all_inheritors(mcx, rel.rd_id, lockmode, false)?;
-        // children always contains the parent rel itself; >1 means real children.
-        if children.len() > 1 {
-            unported("VALIDATE CONSTRAINT NOT NULL recursion to inheritance children");
+    // We recurse before validating on the parent, to reduce risk of deadlocks.
+    let children = if !recursing && !con.form.connoinherit {
+        find_all_inheritors(mcx, rel.rd_id, lockmode, false)?.0
+    } else {
+        PgVec::new_in(mcx)
+    };
+
+    // colname = get_attname(RelationGetRelid(rel), attnum, false): the child
+    // column may have a different attnum, so children are searched by name.
+    let colname = backend_utils_cache_lsyscache_seams::get_attname::call(mcx, rel.rd_id, attnum, false)?
+        .ok_or_else(|| {
+            backend_utils_error::ereport(ERROR)
+                .errmsg_internal(format!(
+                    "cache lookup failed for attribute {attnum} of relation {}",
+                    rel.rd_id
+                ))
+                .into_error()
+        })?;
+    let colname = colname.as_str();
+
+    for &childoid in children.iter() {
+        if childoid == rel.rd_id {
+            continue;
         }
+        // If told not to recurse there had better not be any child tables.
+        if !recurse {
+            return Err(backend_utils_error::ereport(ERROR)
+                .errcode(ERRCODE_INVALID_TABLE_DEFINITION)
+                .errmsg("constraint must be validated on child tables too".to_string())
+                .into_error());
+        }
+
+        // The column on the child might have a different attnum, so search by
+        // column name (tablecmds.c:13261).
+        let contup = backend_catalog_pg_constraint::findNotNullConstraint(mcx, childoid, colname)?
+            .ok_or_else(|| {
+                backend_utils_error::ereport(ERROR)
+                    .errmsg_internal(format!(
+                        "cache lookup failed for not-null constraint on column \"{colname}\" of relation {childoid}"
+                    ))
+                    .into_error()
+            })?;
+        let childcon = backend_utils_cache_syscache_seams::read_constraint_form::call(&contup)?;
+        if childcon.convalidated {
+            continue;
+        }
+
+        // find_all_inheritors already got lock.
+        let childrel = relation_open(mcx, childoid, NoLock)?;
+        let conname = childcon.conname_str().to_string();
+        // XXX improve ATExecValidateConstraint API to avoid double search.
+        ATExecValidateConstraint(mcx, wqueue, &childrel, &conname, false, true, lockmode)?;
+        drop(childrel);
     }
 
     // Set attnotnull appropriately without queueing another validation
