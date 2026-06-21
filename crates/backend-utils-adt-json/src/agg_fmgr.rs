@@ -88,6 +88,17 @@ fn take_state(fcinfo: &mut FunctionCallInfoBaseData) -> Option<Box<JsonAggIntern
 }
 
 /// `PG_RETURN_POINTER(state)` — hand the transition state back as `internal`.
+/// Restore an `internal` JsonAggInternal into `args[0]` after a *final* function
+/// read it. C's `PG_GETARG_POINTER(0)` does NOT consume the state: a finalfn
+/// only reads it, and the same live state must survive for the next sharing
+/// aggregate's finalfn and, in a moving window frame, for the next row's
+/// forward/inverse transition. `take_state` moved the box out to read it, so put
+/// it back here (mirrors numeric's `keep_internal`).
+#[inline]
+fn keep_state(fcinfo: &mut FunctionCallInfoBaseData, carrier: Box<JsonAggInternal>) {
+    fcinfo.set_ref_arg(0, RefPayload::Internal(carrier));
+}
+
 fn ret_internal(fcinfo: &mut FunctionCallInfoBaseData, state: Box<dyn core::any::Any>) -> BoundaryDatum {
     fcinfo.set_ref_result(RefPayload::Internal(state));
     BoundaryDatum::from_usize(0)
@@ -190,6 +201,9 @@ fn fc_json_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Bounda
             let m = MemoryContext::new("json_agg finalfn");
             let out: Option<Vec<u8>> =
                 json_agg_finalfn(m.mcx(), Some(&carrier.state))?.map(|b| b.as_slice().to_vec());
+            // C `PG_GETARG_POINTER(0)` does not consume the state; restore it so a
+            // sharing finalfn and any moving-window inverse transition keep it.
+            keep_state(fcinfo, carrier);
             Ok(match out {
                 None => ret_null(fcinfo),
                 Some(bytes) => ret_json(fcinfo, &bytes),
@@ -273,6 +287,8 @@ fn fc_json_object_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult
             let m = MemoryContext::new("json_object_agg finalfn");
             let out: Option<Vec<u8>> = json_object_agg_finalfn(m.mcx(), Some(&carrier.state))?
                 .map(|b| b.as_slice().to_vec());
+            // C `PG_GETARG_POINTER(0)` does not consume the state; restore it.
+            keep_state(fcinfo, carrier);
             Ok(match out {
                 None => ret_null(fcinfo),
                 Some(bytes) => ret_json(fcinfo, &bytes),

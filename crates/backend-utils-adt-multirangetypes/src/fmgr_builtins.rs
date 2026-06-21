@@ -903,6 +903,17 @@ fn ret_range_agg_state(
     Datum::null()
 }
 
+/// Restore an `internal` [`RangeAggState`] into `args[0]` after a *final*
+/// function read it. C's `PG_GETARG_POINTER(0)` does NOT consume the state; the
+/// same live state must survive for a sharing aggregate's finalfn and, in a
+/// moving window frame, for the next row's forward/inverse transition (mirrors
+/// numeric's `keep_internal`). `take_range_agg_state` moved the box out, so put
+/// it back.
+#[inline]
+fn keep_range_agg_state(fcinfo: &mut FunctionCallInfoBaseData, state: Box<RangeAggState>) {
+    fcinfo.set_ref_arg(0, RefPayload::Internal(state));
+}
+
 /// `PG_RETURN_NULL()`.
 fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     fcinfo.set_result_null(true);
@@ -997,6 +1008,9 @@ fn fc_range_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum
 
     // Also return NULL if we had zero inputs, like other aggregates.
     if state.images.is_empty() {
+        // C `PG_GETARG_POINTER(0)` does not consume the state; restore it so a
+        // sharing finalfn and any moving-window inverse transition keep it.
+        keep_range_agg_state(fcinfo, state);
         return Ok(ret_null(fcinfo));
     }
 
@@ -1014,6 +1028,10 @@ fn fc_range_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum
     }
 
     let out = crate::setops_ordering_agg::range_agg_finalfn(mcx, mltrngtypoid, &rangetyp, &ranges)?;
+    // C `PG_GETARG_POINTER(0)` does not consume the state; restore it (the
+    // member RangeTypeP handles above only borrowed `state.images`).
+    drop(ranges);
+    keep_range_agg_state(fcinfo, state);
     Ok(match out {
         None => ret_null(fcinfo),
         Some(mr) => ret_multirange(fcinfo, mr),

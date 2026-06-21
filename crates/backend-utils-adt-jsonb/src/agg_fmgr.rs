@@ -71,6 +71,16 @@ fn ret_internal(
     BoundaryDatum::from_usize(0)
 }
 
+/// Restore an `internal` JsonbAggState into `args[0]` after a *final* function
+/// read it. C's `PG_GETARG_POINTER(0)` does NOT consume the state; the same live
+/// state must survive for a sharing aggregate's finalfn and, in a moving window
+/// frame, for the next row's forward/inverse transition (mirrors numeric's
+/// `keep_internal`).
+#[inline]
+fn keep_state(fcinfo: &mut FunctionCallInfoBaseData, state: Box<JsonbAggState>) {
+    fcinfo.set_ref_arg(0, RefPayload::Internal(state));
+}
+
 /// `PG_RETURN_NULL()`.
 fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> BoundaryDatum {
     fcinfo.set_result_null(true);
@@ -150,6 +160,8 @@ fn fc_jsonb_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Bound
             let m = MemoryContext::new("jsonb_agg finalfn");
             let out: Option<Vec<u8>> =
                 jsonb_agg_finalfn(m.mcx(), Some(&state))?.map(|b| b.as_slice().to_vec());
+            // C `PG_GETARG_POINTER(0)` does not consume the state; restore it.
+            keep_state(fcinfo, state);
             Ok(match out {
                 None => ret_null(fcinfo),
                 Some(image) => ret_jsonb(fcinfo, image),
@@ -233,6 +245,8 @@ fn fc_jsonb_object_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResul
             let m = MemoryContext::new("jsonb_object_agg finalfn");
             let out: Option<Vec<u8>> =
                 jsonb_object_agg_finalfn(m.mcx(), Some(&state))?.map(|b| b.as_slice().to_vec());
+            // C `PG_GETARG_POINTER(0)` does not consume the state; restore it.
+            keep_state(fcinfo, state);
             Ok(match out {
                 None => ret_null(fcinfo),
                 Some(image) => ret_jsonb(fcinfo, image),

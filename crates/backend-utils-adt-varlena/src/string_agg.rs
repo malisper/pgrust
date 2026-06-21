@@ -93,6 +93,16 @@ fn ret_internal(fcinfo: &mut FunctionCallInfoBaseData, state: Box<dyn core::any:
     Datum::from_usize(0)
 }
 
+/// Restore an `internal` StringAggState into `args[0]` after a *final* function
+/// read it. C's `PG_GETARG_POINTER(0)` does NOT consume the state; the same live
+/// state must survive for a sharing aggregate's finalfn and, in a moving window
+/// frame, for the next row's forward/inverse transition (mirrors numeric's
+/// `keep_internal`). `take_string_state` moved the box out, so put it back.
+#[inline]
+fn keep_string_state(fcinfo: &mut FunctionCallInfoBaseData, state: Box<StringAggState>) {
+    fcinfo.set_ref_arg(0, RefPayload::Internal(state));
+}
+
 /// `PG_RETURN_NULL()`.
 fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     fcinfo.set_result_null(true);
@@ -169,6 +179,8 @@ fn fc_string_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::
             //                                           state->len - state->cursor));
             let cursor = state.cursor.min(state.data.len());
             let payload = state.data[cursor..].to_vec();
+            // C `PG_GETARG_POINTER(0)` does not consume the state; restore it.
+            keep_string_state(fcinfo, state);
             ret_text(fcinfo, payload)
         }
     })
@@ -265,6 +277,8 @@ fn fc_bytea_string_agg_finalfn(
         Some(state) => {
             let cursor = state.cursor.min(state.data.len());
             let payload = state.data[cursor..].to_vec();
+            // C `PG_GETARG_POINTER(0)` does not consume the state; restore it.
+            keep_string_state(fcinfo, state);
             ret_bytea(fcinfo, payload)
         }
     })
