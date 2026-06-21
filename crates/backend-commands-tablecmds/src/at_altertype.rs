@@ -738,7 +738,9 @@ fn RememberAllDependentForRebuilding<'mcx>(
             x if x == ProcedureRelationId => {
                 if is_alter_type {
                     return feature_not_supported(
+                        mcx,
                         "cannot alter type of a column used by a function or procedure",
+                        &found_object_of(row),
                         col_name,
                     );
                 }
@@ -746,7 +748,9 @@ fn RememberAllDependentForRebuilding<'mcx>(
             x if x == RewriteRelationId => {
                 if is_alter_type {
                     return feature_not_supported(
+                        mcx,
                         "cannot alter type of a column used by a view or rule",
+                        &found_object_of(row),
                         col_name,
                     );
                 }
@@ -754,7 +758,9 @@ fn RememberAllDependentForRebuilding<'mcx>(
             x if x == TriggerRelationId => {
                 if is_alter_type {
                     return feature_not_supported(
+                        mcx,
                         "cannot alter type of a column used in a trigger definition",
+                        &found_object_of(row),
                         col_name,
                     );
                 }
@@ -762,7 +768,9 @@ fn RememberAllDependentForRebuilding<'mcx>(
             x if x == PolicyRelationId => {
                 if is_alter_type {
                     return feature_not_supported(
+                        mcx,
                         "cannot alter type of a column used in a policy definition",
+                        &found_object_of(row),
                         col_name,
                     );
                 }
@@ -770,7 +778,9 @@ fn RememberAllDependentForRebuilding<'mcx>(
             x if x == PublicationRelRelationId => {
                 if is_alter_type {
                     return feature_not_supported(
+                        mcx,
                         "cannot alter type of a column used by a publication WHERE clause",
+                        &found_object_of(row),
                         col_name,
                     );
                 }
@@ -818,11 +828,34 @@ fn RememberAllDependentForRebuilding<'mcx>(
     Ok(())
 }
 
-fn feature_not_supported(msg: &str, col_name: &str) -> PgResult<()> {
+/// Build `foundObject` (`{classid, objid, objsubid}`) from a pg_depend referer
+/// row, matching the C `ObjectAddress` populated in the dependency scan loop.
+fn found_object_of(
+    row: &backend_catalog_pg_depend_seams::TypeRefererRow,
+) -> types_catalog::catalog_dependency::ObjectAddress {
+    types_catalog::catalog_dependency::ObjectAddress {
+        classId: row.classid,
+        objectId: row.objid,
+        objectSubId: row.objsubid,
+    }
+}
+
+fn feature_not_supported<'mcx>(
+    mcx: Mcx<'mcx>,
+    msg: &str,
+    found_object: &types_catalog::catalog_dependency::ObjectAddress,
+    col_name: &str,
+) -> PgResult<()> {
+    // errdetail("%s depends on column \"%s\"",
+    //           getObjectDescription(&foundObject, false), colName)
+    let obj_desc =
+        backend_catalog_objectaddress_seams::get_object_description::call(mcx, found_object, false)?
+            .map(|s| s.to_string())
+            .unwrap_or_default();
     backend_utils_error::ereport(ERROR)
         .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(msg.to_string())
-        .errdetail(format!("Column \"{col_name}\" is depended on."))
+        .errdetail(format!("{obj_desc} depends on column \"{col_name}\""))
         .finish(here("RememberAllDependentForRebuilding"))
         .map(|()| unreachable!())
 }

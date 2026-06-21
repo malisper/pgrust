@@ -568,10 +568,13 @@ pub fn CheckVarSlotCompatibility(
         //             "attribute %d of type %s has been dropped", attnum,
         //             format_type_be(slot_tupdesc->tdtypeid));
         if attr.attisdropped {
+            let typename =
+                backend_utils_adt_format_type_seams::format_type_be_owned::call(
+                    slot_tupdesc.tdtypeid,
+                )?;
             return Err(PgError::error(format!(
                 "attribute {} of type {} has been dropped",
-                attnum,
-                slot_tupdesc.tdtypeid
+                attnum, typename
             ))
             .with_sqlstate(ERRCODE_UNDEFINED_COLUMN));
         }
@@ -584,13 +587,20 @@ pub fn CheckVarSlotCompatibility(
         //                       format_type_be(attr->atttypid),
         //                       format_type_be(vartype));
         if vartype != attr.atttypid {
+            let typename =
+                backend_utils_adt_format_type_seams::format_type_be_owned::call(
+                    slot_tupdesc.tdtypeid,
+                )?;
+            let table_typename =
+                backend_utils_adt_format_type_seams::format_type_be_owned::call(attr.atttypid)?;
+            let query_typename =
+                backend_utils_adt_format_type_seams::format_type_be_owned::call(vartype)?;
             return Err(PgError::error(format!(
-                "attribute {} of type {} has wrong type (table has type OID {}, \
-                 but query expects type OID {})",
-                attnum,
-                slot_tupdesc.tdtypeid,
-                attr.atttypid,
-                vartype
+                "attribute {} of type {} has wrong type",
+                attnum, typename
+            ))
+            .with_detail(format!(
+                "Table has type {table_typename}, but query expects {query_typename}."
             ))
             .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
         }
