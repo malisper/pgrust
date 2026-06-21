@@ -31,6 +31,7 @@ backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-commands-collationcmds-seams = { path = "../backend-commands-collationcmds-seams" }
 backend-commands-define = { path = "../backend-commands-define" }
 backend-commands-define-seams = { path = "../backend-commands-define-seams" }
+backend-parser-parse-type-seams = { path = "../backend-parser-parse-type-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }

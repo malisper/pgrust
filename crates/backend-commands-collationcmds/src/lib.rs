@@ -109,15 +109,48 @@ fn def_name(opt: &DefElem) -> &str {
 /// Project a parse-tree `DefElem`'s value node into the `DefElemArg` the
 /// define.c value accessors (`defGetString`/`defGetBoolean`) switch on. Mirrors
 /// the `nodeTag(def->arg)` dispatch; `None` for `def->arg == NULL`.
-fn defel_arg(defel: &DefElem) -> Option<DefElemArg> {
-    let node = defel.arg.as_deref()?;
-    Some(match node {
+fn defel_arg<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem) -> PgResult<Option<DefElemArg>> {
+    let Some(node) = defel.arg.as_deref() else {
+        return Ok(None);
+    };
+    Ok(Some(match node {
         Node::Integer(i) => DefElemArg::Integer(i.ival as i64),
         Node::Float(f) => DefElemArg::Float(f.fval.clone().unwrap_or_default()),
         Node::Boolean(b) => DefElemArg::Boolean(b.boolval),
         Node::String(s) => DefElemArg::String(s.sval.clone().unwrap_or_default()),
-        _ => DefElemArg::AStar,
-    })
+        // case T_TypeName: return TypeNameToString((TypeName *) def->arg);
+        // A bare identifier in `option = value` (e.g. `provider = builtin`)
+        // parses as a one-element `TypeName`, not a `String`.
+        Node::TypeName(t) => DefElemArg::TypeName(
+            backend_parser_parse_type_seams::typename_to_string_node::call(mcx, t)?
+                .as_str()
+                .to_string(),
+        ),
+        // case T_List: return NameListToString((List *) def->arg);
+        Node::List(cells) => {
+            let names: Vec<Option<String>> = cells
+                .iter()
+                .map(|c| match c {
+                    Node::String(s) => s.sval.clone(),
+                    // A_Star in a name list ⇒ the `*` wildcard cell (None).
+                    _ => None,
+                })
+                .collect();
+            DefElemArg::List(NameListToString(mcx, &names)?.as_str().to_string())
+        }
+        // case T_A_Star: return pstrdup("*");
+        Node::A_Star => DefElemArg::AStar,
+        // default: elog(ERROR, "unrecognized node type: %d", ...);
+        _ => {
+            return ereport(ERROR)
+                .errmsg_internal(format!(
+                    "unrecognized node type: {}",
+                    node.node_tag_name()
+                ))
+                .finish(here("defGetString"))
+                .map(|()| unreachable!());
+        }
+    }))
 }
 
 /// `defGetString(def)` (define.c) — owns its result in `mcx`.
@@ -125,16 +158,16 @@ fn def_get_string<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem) -> PgResult<String> {
     let s = backend_commands_define_seams::def_get_string::call(
         mcx,
         defel.defname.clone().unwrap_or_default(),
-        defel_arg(defel),
+        defel_arg(mcx, defel)?,
     )?;
     Ok(s.to_string())
 }
 
 /// `defGetBoolean(def)` (define.c).
-fn def_get_boolean(defel: &DefElem) -> PgResult<bool> {
+fn def_get_boolean<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem) -> PgResult<bool> {
     backend_commands_define_seams::def_get_boolean::call(
         defel.defname.clone().unwrap_or_default(),
-        defel_arg(defel),
+        defel_arg(mcx, defel)?,
     )
 }
 
@@ -309,7 +342,7 @@ pub fn DefineCollation<'mcx>(
         }
 
         if let Some(deterministicEl) = deterministicEl {
-            collisdeterministic = def_get_boolean(deterministicEl)?;
+            collisdeterministic = def_get_boolean(mcx, deterministicEl)?;
         } else {
             collisdeterministic = true;
         }
