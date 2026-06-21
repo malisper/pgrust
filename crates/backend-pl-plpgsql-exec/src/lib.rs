@@ -854,6 +854,14 @@ fn exec_stmt_case(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_case) -> P
 
     if let Some(t_expr) = stmt.t_expr.as_deref() {
         let (t_val, isnull, t_typoid, t_typmod) = seam::exec_eval_expr(estate, t_expr)?;
+        // A by-reference test value (`text`/`jsonb`/`numeric`/…) carries its image
+        // out-of-band in `estate.last_eval_byref` (the bare `t_val` word is `0`
+        // then). In C `t_val` is a real `Datum` pointer and the image rides with
+        // it; here it must be threaded explicitly into the store, or the temp
+        // CASE variable keeps a NULL by-ref word with no image and a later WHEN
+        // expression that reads the value back compares garbage (`searched CASE`
+        // over `jsonb_typeof(...)` etc.).
+        let t_byref = estate.last_eval_byref.take();
 
         let t_varno = stmt.t_varno;
         if temp_var_type_differs(&estate.datums[t_varno as usize], t_typoid, t_typmod) {
@@ -862,7 +870,7 @@ fn exec_stmt_case(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_case) -> P
             put_var(estate, t_varno, t_var);
         }
 
-        seam::exec_assign_value(estate, t_varno, t_val, isnull, t_typoid, t_typmod)?;
+        exec_assign_value_byref_impl(estate, t_varno, t_val, t_byref, isnull, t_typoid, t_typmod)?;
         exec_eval_cleanup(estate);
     }
 
