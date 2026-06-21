@@ -90,6 +90,7 @@ mod aclexplode;
 mod pg_stat_get_io;
 mod pg_stat_get_slru;
 mod pgstat_composite_srf;
+mod pg_mcv_list_items;
 mod shmem_numa_srf;
 mod system_srf;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
@@ -212,6 +213,12 @@ pub fn init_seams() {
     // `TwoPhaseState` via `with_twophase_state`).
     pg_prepared_xact::register_pg_prepared_xact();
 
+    // `pg_mcv_list_items(pg_mcv_list)` (OID 3427, prosrc
+    // `pg_stats_ext_mcvlist_items`) — the materialize-mode SRF deconstructing a
+    // serialized MCV list into one `(index int4, values text[], nulls bool[],
+    // frequency float8, base_frequency float8)` row per item (its deserialize
+    // core is `backend-statistics-mcv::statext_mcv_deserialize`).
+    pg_mcv_list_items::register_pg_mcv_list_items();
     // `pg_lock_status` (OID 1371) — the `pg_locks` view's underlying SRF.
     pg_lock_status::register_pg_lock_status();
     // `pg_event_trigger_dropped_objects` (OID 3566) — the `sql_drop`

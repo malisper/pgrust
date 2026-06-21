@@ -155,35 +155,6 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `mcv_get_match_bitmap(root, clauses, keys, exprs, mcvlist, is_or)`
-    /// (mcv.c:1598) — evaluate the clause list against the MCV list and return a
-    /// per-item match bitmap (`Vec<bool>` of length `mcvlist->nitems`).
-    ///
-    /// SEAMED: the body walks planner `Node` clauses (`OpExpr` / `NullTest` /
-    /// `ScalarArrayOpExpr` / AND/OR/NOT / boolean `Var` / bare bool expr) over
-    /// the planner arena — `is_opclause` / `examine_opclause_args` /
-    /// `mcv_match_expression` / `bms_member_index` / `deconstruct_array` — and
-    /// dispatches the per-clause fmgr operator (`FunctionCall2Coll`) and
-    /// `DatumGetBool`. None of those node/fmgr surfaces is ported; `clauses` /
-    /// `keys` / `exprs` are opaque planner-arena ids the owner resolves.
-    pub fn mcv_get_match_bitmap<'mcx>(
-        root_id: u64,
-        clauses_id: u64,
-        keys_id: u64,
-        exprs_id: u64,
-        mcvlist: &types_statistics::MCVList<'mcx>,
-        is_or: bool,
-    ) -> types_error::PgResult<std::vec::Vec<bool>>
-);
-
-seam_core::seam!(
-    /// `RangeTblEntry *rte = root->simple_rte_array[rel->relid]; rte->inh`
-    /// (mcv.c:2057) — the `inh` flag the MCV load is keyed on. SEAMED: reads the
-    /// planner `PlannerInfo`/`RelOptInfo` arena.
-    pub fn mcv_rte_inh_for_rel(root_id: u64, rel_id: u64) -> types_error::PgResult<bool>
-);
-
-seam_core::seam!(
     /// `pg_stats_ext_mcvlist_items(fcinfo)` (mcv.c:1337) — the SRF returning the
     /// per-item details. SEAMED: pure SRF / fmgr / tupdesc / array-builder /
     /// type-output dispatch (`get_call_result_type` / `accumArrayResult` /

@@ -1017,29 +1017,13 @@ pub fn pg_mcv_list_send<'mcx>(mcx: Mcx<'mcx>, v: &[u8]) -> PgResult<PgVec<'mcx, 
 }
 
 /* ---------------------------------------------------------------------------
- * mcv_get_match_bitmap (mcv.c:1598) — SEAMED clause evaluation.
+ * mcv_get_match_bitmap (mcv.c:1598) — ported in the planner-facing consumer.
+ *
+ * The clause walk + per-item fmgr operator evaluation lives in the extended-stats
+ * estimator (`backend-statistics-extended-stats`), which holds the planner-arena
+ * `Node`/`RestrictInfo` model and the fmgr dispatch. It computes the per-item
+ * match bitmap and hands it to the frequency-summation kernels below.
  * ------------------------------------------------------------------------- */
-
-/// `mcv_get_match_bitmap(root, clauses, keys, exprs, mcvlist, is_or)`
-/// (mcv.c:1598) — evaluate the clause list against the MCV list and return a
-/// per-item match bitmap (`Vec<bool>` of length `mcvlist->nitems`).
-///
-/// SEAMED: the body walks planner `Node` clauses over the planner arena
-/// (`is_opclause` / `examine_opclause_args` / `mcv_match_expression` /
-/// `bms_member_index` / `deconstruct_array`) and dispatches the per-clause fmgr
-/// operator (`FunctionCall2Coll`) and `DatumGetBool`. None of that node/fmgr
-/// surface is ported; `clauses` / `keys` / `exprs` are opaque planner-arena ids.
-pub fn mcv_get_match_bitmap(
-    root_id: u64,
-    clauses_id: u64,
-    keys_id: u64,
-    exprs_id: u64,
-    mcvlist: &MCVList,
-    is_or: bool,
-) -> PgResult<Vec<bool>> {
-    // (elided-lifetime `&MCVList` binds a fresh `'mcx` for the borrow.)
-    core_seam::mcv_get_match_bitmap::call(root_id, clauses_id, keys_id, exprs_id, mcvlist, is_or)
-}
 
 /* ---------------------------------------------------------------------------
  * mcv_combine_selectivities (mcv.c:2005)
@@ -1088,39 +1072,12 @@ pub struct ClauseListSelectivity {
 /// rel, &basesel, &totalsel)` (mcv.c:2047) — estimate the selectivity of an
 /// implicitly-ANDed list of clauses using MCV statistics.
 ///
-/// The match bitmap and the `rte->inh` / MCV-load reads cross seams; the
-/// frequency summation is in-crate. `root_id`/`rel_id`/`clauses_id`/`keys_id`/
-/// `exprs_id` are opaque planner-arena ids; `stat_oid` is `stat->statOid`.
-/// `varRelid`/`jointype`/`sjinfo` are accepted to mirror the C signature but, as
-/// in C, are unused here.
-#[allow(clippy::too_many_arguments)]
-pub fn mcv_clauselist_selectivity(
-    mcx: Mcx<'_>,
-    root_id: u64,
-    stat_oid: Oid,
-    clauses_id: u64,
-    keys_id: u64,
-    exprs_id: u64,
-    rel_id: u64,
-) -> PgResult<ClauseListSelectivity> {
-    /* RangeTblEntry *rte = root->simple_rte_array[rel->relid]; rte->inh */
-    let inh = core_seam::mcv_rte_inh_for_rel::call(root_id, rel_id)?;
-
-    /* load the MCV list stored in the statistics object */
-    let mcv = match statext_mcv_load(mcx, stat_oid, inh)? {
-        Some(m) => m,
-        None => {
-            /*
-             * The C dereferences `mcv` unconditionally; a NULL load would crash.
-             * Surface it as an error rather than panic.
-             */
-            return Err(PgError::error("MCV list not built for statistics object"));
-        }
-    };
-
-    /* build a match bitmap for the clauses */
-    let matches = mcv_get_match_bitmap(root_id, clauses_id, keys_id, exprs_id, &mcv, false)?;
-
+/// The MCV list is loaded and the per-item AND-list match bitmap computed by the
+/// planner-facing estimator (`mcv_get_match_bitmap` in extended-stats); this is
+/// the in-crate frequency summation over that bitmap. `varRelid`/`jointype`/
+/// `sjinfo` are unused here (as in C). `matches` is the AND-list match bitmap,
+/// length `mcv.nitems`.
+pub fn mcv_clauselist_selectivity(mcv: &MCVList, matches: &[bool]) -> ClauseListSelectivity {
     /* sum frequencies for all the matching MCV items */
     let mut out = ClauseListSelectivity::default();
     let mut i = 0usize;
@@ -1135,7 +1092,7 @@ pub fn mcv_clauselist_selectivity(
         i += 1;
     }
 
-    Ok(out)
+    out
 }
 
 /* ---------------------------------------------------------------------------
@@ -1165,16 +1122,13 @@ pub struct ClauseSelectivityOr {
 ///
 /// `or_matches` is the in/out OR-match bitmap: pass an empty `Vec` on the first
 /// call (the C `*or_matches == NULL`) and reuse the (now-`mcv.nitems`-long)
-/// vector for subsequent clauses. `clause_id` is the clause node id; the match
-/// bitmap (`list_make1(clause)`) crosses the seam.
-#[allow(clippy::too_many_arguments)]
+/// vector for subsequent clauses. `new_matches` is the per-item match bitmap for
+/// this single clause (`list_make1(clause)`), computed by the planner-facing
+/// estimator (`mcv_get_match_bitmap`).
 pub fn mcv_clause_selectivity_or(
     mcx: Mcx<'_>,
-    root_id: u64,
     mcv: &MCVList,
-    clause_id: u64,
-    keys_id: u64,
-    exprs_id: u64,
+    new_matches: &[bool],
     or_matches: &mut Vec<bool>,
 ) -> PgResult<ClauseSelectivityOr> {
     /* build the OR-matches bitmap, if not built already */
@@ -1184,16 +1138,6 @@ pub fn mcv_clause_selectivity_or(
             .map_err(|_| mcx.oom(mcv.nitems as usize * SIZE_BOOL))?;
         or_matches.resize(mcv.nitems as usize, false);
     }
-
-    /* build the match bitmap for the new clause: list_make1(clause) */
-    let new_matches = core_seam::mcv_get_match_bitmap::call(
-        root_id,
-        clause_id, /* the owner builds list_make1(clause) from this single id */
-        keys_id,
-        exprs_id,
-        mcv,
-        false,
-    )?;
 
     /*
      * Sum the frequencies for all the MCV items matching this clause and also

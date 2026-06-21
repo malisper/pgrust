@@ -33,6 +33,10 @@ backend-statistics-dependencies = { path = "../backend-statistics-dependencies" 
 backend-statistics-mcv = { path = "../backend-statistics-mcv" }
 backend-catalog-indexing = { path = "../backend-catalog-indexing" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+# MCV match engine: per-item operator dispatch (FunctionCall2Coll over the
+# unified Datum) and the array-Const deconstruction for ScalarArrayOpExpr.
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-commands-statscmds = { path = "../backend-commands-statscmds" }
 types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }

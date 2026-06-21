@@ -162,6 +162,11 @@ types-pgstat = { path = "../types-pgstat" }
 # CONFLICT_NUM_TYPES (subscription conflict counters).
 types-replication = { path = "../types-replication" }
 
+# pg_mcv_list_items(pg_mcv_list) (OID 3427): the serialized-MCV-list
+# deserialize core (statext_mcv_deserialize), driven over the executor frame to
+# materialize one (index, values, nulls, frequency, base_frequency) row per item.
+backend-statistics-mcv = { path = "../backend-statistics-mcv" }
+
 # Shared type stack + allocator + error.
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 backend-utils-error = { path = "../backend-utils-error" }

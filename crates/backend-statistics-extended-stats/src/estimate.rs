@@ -82,7 +82,7 @@ fn attr_is_user_defined(attnum: i32) -> bool {
 
 /// `CLAMP_PROBABILITY(p)` — clamp to [0,1].
 #[inline]
-fn clamp_probability(p: f64) -> f64 {
+pub(crate) fn clamp_probability(p: f64) -> f64 {
     if p < 0.0 {
         0.0
     } else if p > 1.0 {
@@ -99,7 +99,7 @@ fn clamp_probability(p: f64) -> f64 {
 /// `if (IsA(node, RelabelType)) node = ((RelabelType *) node)->arg` — strip one
 /// binary-compatible relabel (the C arg is never NULL for a valid RelabelType).
 #[inline]
-fn strip_relabel(node: &Expr) -> &Expr {
+pub(crate) fn strip_relabel(node: &Expr) -> &Expr {
     match node {
         Expr::RelabelType(r) => match &r.arg {
             Some(inner) => inner,
@@ -571,8 +571,18 @@ pub fn statext_clauselist_selectivity(
 ) -> PgResult<(f64, Relids)> {
     let mut estimated = estimatedclauses.clone();
 
-    // MCV leg: deferred match engine contributes its neutral identity (see note).
-    let mut sel: f64 = if is_or { 0.0 } else { 1.0 };
+    // First, try estimating clauses using a multivariate MCV list.
+    let mut sel = crate::mcv_estimate::statext_mcv_clauselist_selectivity(
+        run,
+        root,
+        clauses,
+        var_relid,
+        jointype,
+        sjinfo,
+        rel,
+        &mut estimated,
+        is_or,
+    )?;
 
     // Functional dependencies only work for clauses connected by AND.
     if is_or {
@@ -703,7 +713,7 @@ fn varlena_body(data: &[u8]) -> PgResult<&[u8]> {
  * ======================================================================== */
 
 /// `has_stats_of_kind(rel->statlist, requiredkind)` (extended_stats.c).
-fn has_stats_of_kind(root: &PlannerInfo, rel: RelId, requiredkind: i8) -> bool {
+pub(crate) fn has_stats_of_kind(root: &PlannerInfo, rel: RelId, requiredkind: i8) -> bool {
     root.rel(rel)
         .statlist
         .iter()

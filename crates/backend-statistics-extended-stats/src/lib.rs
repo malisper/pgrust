@@ -700,6 +700,7 @@ fn data_anl_mcx<'mcx>(stats: &[VacAttrStats<'mcx>]) -> Mcx<'mcx> {
 }
 
 mod estimate;
+mod mcv_estimate;
 
 /// Install the analyze-rt extended-statistics seams to the real entry points.
 pub fn init_seams() {
