@@ -27,6 +27,7 @@ use types_core::Oid;
 use types_datum::Datum;
 use types_fmgr::boundary::RefPayload;
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use types_stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -443,6 +444,28 @@ fn fc_byteasend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<
     detoast_varlena_args(fcinfo);
     let m = scratch_mcx();
     let bytes = (crate::bytea::byteasend(m.mcx(), arg_bytes(fcinfo, 0)))?.to_vec();
+    Ok(ret_varlena(fcinfo, bytes))
+}
+fn fc_textrecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    // C: `textrecv` reads the remaining wire bytes via `pq_getmsgtext` and
+    // re-wraps them as a `text`. The receive `StringInfo` crosses the fmgr
+    // by-ref lane as its RAW message payload (a `RefPayload::Varlena` over the
+    // wire bytes, NOT a varlena-framed image), so read it VERBATIM — running it
+    // through `vardata_any_slice` would misread the first wire byte as a varlena
+    // header. Build a `StringInfo` over those bytes (cursor at 0) and run the
+    // core, which consumes the whole buffer.
+    let src = fcinfo
+        .ref_arg(0)
+        .and_then(|p| p.as_varlena())
+        .expect("textrecv: receive buffer missing from by-ref lane");
+    let m = scratch_mcx();
+    let mut data = mcx::PgVec::new_in(m.mcx());
+    if data.try_reserve(src.len()).is_err() {
+        return Err(types_error::PgError::error("out of memory"));
+    }
+    data.extend_from_slice(src);
+    let mut buf = StringInfo::from_vec(data);
+    let bytes = (crate::wire_io::textrecv(m.mcx(), &mut buf))?.to_vec();
     Ok(ret_varlena(fcinfo, bytes))
 }
 fn fc_bytearecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
@@ -1418,6 +1441,7 @@ pub fn register_varlena_more_builtins() {
         builtin(2415, "textsend", 1, fc_textsend),
         builtin(1244, "byteain", 1, fc_byteain),
         builtin(31, "byteaout", 1, fc_byteaout),
+        builtin(2414, "textrecv", 1, fc_textrecv),
         builtin(2412, "bytearecv", 1, fc_bytearecv),
         builtin(2413, "byteasend", 1, fc_byteasend),
         // ---- name <-> text casts ----
