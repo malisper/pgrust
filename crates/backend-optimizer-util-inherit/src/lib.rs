@@ -707,11 +707,16 @@ fn expand_single_inheritance_child<'mcx>(
         root.all_result_relids =
             bms::relids_add_member::call(root.all_result_relids.take(), child_rt_index as i32);
 
+        // Non-leaf partitions don't need any row identity info.
         if child_relkind != RELKIND_PARTITIONED_TABLE {
             root.leaf_result_relids =
                 bms::relids_add_member::call(root.leaf_result_relids.take(), child_rt_index as i32);
 
-            // Assume all child target relations need a junk "tableoid" column.
+            // If we have any child target relations, assume they all need to
+            // generate a junk "tableoid" column. (If only one child survives
+            // pruning, we wouldn't really need this, but it's not worth thrashing
+            // about to avoid it.)  rrvar = makeVar(childRTindex,
+            // TableOidAttributeNumber, OIDOID, -1, InvalidOid, 0).
             let rrvar = makefuncs::make_var(
                 child_rt_index as i32,
                 TableOidAttributeNumber,
@@ -720,19 +725,38 @@ fn expand_single_inheritance_child<'mcx>(
                 InvalidOid,
                 0,
             );
-            // add_row_identity_var(root, rrvar, childRTindex, "tableoid") +
+            // add_row_identity_var(root, rrvar, childRTindex, "tableoid").
+            // result_relation = root->parse->resultRelation (threaded through the
+            // seam because the QueryId resolves only via the run).
+            let result_relation = run.resolve(root.parse).resultRelation as Index;
+            backend_optimizer_util_appendinfo_seams::add_row_identity_var::call(
+                root,
+                rrvar,
+                child_rt_index,
+                "tableoid",
+                result_relation,
+            )?;
+
+            // Register any row-identity columns needed by this child.
             // add_row_identity_columns(root, childRTindex, childrte, childrel).
-            // These are appendinfo-owned; the row-identity-var helper is private,
-            // and the column helper's foreign-table delete-trigger predicate is a
-            // seam — both are reached only on the inherited UPDATE/DELETE/MERGE
-            // target path. add_row_identity_var has no public/seam entry, so this
-            // sub-branch mirrors PG and panics until appendinfo exposes it.
-            let _ = rrvar;
-            return Err(PgError::error(
-                "expand_single_inheritance_child: inherited UPDATE/DELETE/MERGE \
-                 child target row-identity registration (add_row_identity_var) is \
-                 not exposed by the appendinfo owner yet",
-            ));
+            // The C reads command_type from root->parse->commandType, relid/relkind
+            // from childrte, and the foreign-table delete-row-trigger predicate from
+            // childrel->trigdesc; the seam takes them pre-resolved.
+            let command_type = run.resolve(root.parse).commandType;
+            let has_delete_row_trigger = childrel
+                .rd_trigdesc
+                .as_deref()
+                .map(|td| td.trig_delete_after_row || td.trig_delete_before_row)
+                .unwrap_or(false);
+            backend_optimizer_util_appendinfo_seams::add_row_identity_columns::call(
+                root,
+                child_rt_index,
+                command_type,
+                child_oid,
+                child_relkind,
+                has_delete_row_trigger,
+                result_relation,
+            )?;
         }
     }
 

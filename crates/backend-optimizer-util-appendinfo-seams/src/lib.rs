@@ -134,3 +134,21 @@ seam_core::seam!(
         result_relation: types_core::primitive::Index,
     ) -> PgResult<()>
 );
+seam_core::seam!(
+    /// `add_row_identity_var(root, orig_var, rtindex, rowid_name)` (appendinfo.c)
+    /// — register a single row-identity column (a `Var` of `rtindex`) to be used
+    /// in UPDATE/DELETE/MERGE. Pushes a junk `TargetEntry` onto
+    /// `root->processed_tlist` when `rtindex == result_relation`, otherwise
+    /// matches/creates a `RowIdentityVarInfo` keyed on `ROWID_VAR`.
+    /// `expand_single_inheritance_child` (inherit.c) calls this directly to add
+    /// the per-child "tableoid" junk column for an inherited UPDATE/DELETE/MERGE
+    /// target. `result_relation` is `root->parse->resultRelation`, threaded in
+    /// because the opaque `QueryId` resolves only through the caller's run.
+    pub fn add_row_identity_var(
+        root: &mut PlannerInfo,
+        orig_var: types_nodes::primnodes::Var,
+        rtindex: types_core::primitive::Index,
+        rowid_name: &str,
+        result_relation: types_core::primitive::Index,
+    ) -> PgResult<()>
+);

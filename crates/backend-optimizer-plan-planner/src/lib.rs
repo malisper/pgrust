@@ -1927,6 +1927,23 @@ fn subquery_planner_carried<'mcx>(
         root.non_recursive_rows = Some(nr_rows);
     }
 
+    // root->all_result_relids = parse->resultRelation ?
+    //     bms_make_singleton(parse->resultRelation) : NULL; (planner.c:699-700).
+    // root->leaf_result_relids = NULL; we'll find out leaf-ness later (C:701).
+    // Seeding all_result_relids with the target relation here is the prerequisite
+    // for expand_single_inheritance_child (inherit.c) to recognize the children of
+    // an inherited UPDATE/DELETE/MERGE target via bms_is_member(parentRTindex,
+    // all_result_relids) and record each leaf in all_result_relids/leaf_result_relids.
+    {
+        let result_relation = run.resolve(root.parse).resultRelation;
+        root.all_result_relids = if result_relation != 0 {
+            bms_make_singleton_relids(result_relation)
+        } else {
+            None
+        };
+        root.leaf_result_relids = None;
+    }
+
     // Top-level join domain (C:710).
     root.join_domains.push(JoinDomain { jd_relids: None });
 
@@ -3470,6 +3487,65 @@ fn build_final_paths<'mcx>(
     Ok(())
 }
 
+/// Build the path/plan carrier for one ModifyTable RETURNING list, materializing
+/// `parse->returningList` into node-arena `TargetEntryNode` handles. When
+/// `this_result_rel != top_result_rel` (an inherited leaf), each TargetEntry's
+/// expression is translated from the top target rel's attribute namespace to the
+/// leaf's via `adjust_appendrel_attrs_multilevel`, mirroring C planner.c:2031-2038
+/// (`returningList = adjust_appendrel_attrs_multilevel(...)`). For the
+/// single-relation / top-rel case the expressions are cloned unchanged.
+fn build_returning_list_for_leaf<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    this_result_rel: types_pathnodes::RelId,
+    top_result_rel: types_pathnodes::RelId,
+) -> PgResult<Vec<types_pathnodes::NodeId>> {
+    let mcx = run.mcx();
+    let translate = this_result_rel != top_result_rel;
+    let n = run.resolve(root.parse).returningList.len();
+    let mut ids: Vec<types_pathnodes::NodeId> = Vec::with_capacity(n);
+    for i in 0..n {
+        let (expr_clone, resno, resname, ressortgroupref, resorigtbl, resorigcol, resjunk) = {
+            let tle = &run.resolve(root.parse).returningList[i];
+            let expr = tle
+                .expr
+                .as_deref()
+                .expect("grouping_planner: RETURNING TargetEntry with NULL expr (parser bug)");
+            (
+                expr.clone_in(mcx)?,
+                tle.resno,
+                tle.resname.as_ref().map(|s| alloc::string::String::from(s.as_str())),
+                tle.ressortgroupref,
+                tle.resorigtbl,
+                tle.resorigcol,
+                tle.resjunk,
+            )
+        };
+        let expr_final = if translate {
+            backend_optimizer_util_appendinfo::adjust_appendrel_attrs_multilevel(
+                root,
+                expr_clone,
+                this_result_rel,
+                top_result_rel,
+            )?
+        } else {
+            expr_clone
+        };
+        let expr_id = root.alloc_node(expr_final);
+        let te = types_pathnodes::TargetEntryNode {
+            expr: expr_id,
+            resno,
+            resname,
+            ressortgroupref,
+            resorigtbl,
+            resorigcol,
+            resjunk,
+        };
+        ids.push(root.alloc_targetentry(te));
+    }
+    Ok(ids)
+}
+
 /// `bms_membership(set) == BMS_MULTIPLE` (bitmapset.c) — true if the relid set
 /// has more than one member. Counts set bits over the planner `Relids` word
 /// storage (`None` == empty == not multiple).
@@ -3517,15 +3593,133 @@ fn add_modifytable_to_path<'mcx>(
         )
     };
 
-    // Inherited UPDATE/DELETE/MERGE (BMS_MULTIPLE) splits into per-leaf result
-    // rels via adjust_appendrel_attrs_multilevel (C:1937-2079) — not modeled.
-    if relids_is_multiple(&root.all_result_relids) {
-        panic!(
-            "grouping_planner: inherited UPDATE/DELETE/MERGE ModifyTable \
-             (BMS_MULTIPLE, planner.c:1937) — per-leaf result-rel translation \
-             is not ported"
-        );
-    }
+    // Inherited UPDATE/DELETE/MERGE (BMS_MULTIPLE, planner.c:1946-2079): the
+    // ModifyTable is given the leaf partitions (root->leaf_result_relids) as its
+    // result relations, the partitioned root is passed forward as rootRelation,
+    // and per-leaf updateColnos / RETURNING lists are translated from the top
+    // target rel's namespace via adjust_inherited_attnums_multilevel /
+    // adjust_appendrel_attrs_multilevel. When taken, `inherited_lists` carries
+    // (rootRelation, resultRelations, updateColnosLists, returningLists) and the
+    // single-relation builders below are skipped.
+    //
+    // The per-leaf WITH-CHECK-OPTION and MERGE-action/join-condition translation
+    // (createplan reads those parse-direct, which is only correct for a single
+    // target rel) is not yet carried per-leaf, so an inherited target that uses
+    // them errors faithfully rather than silently producing wrong results.
+    let inherited_lists: Option<(
+        types_core::primitive::Index,
+        Vec<i32>,
+        Vec<Vec<types_core::primitive::AttrNumber>>,
+        Vec<Vec<types_pathnodes::NodeId>>,
+    )> = if relids_is_multiple(&root.all_result_relids) {
+        if has_wco || has_merge_action {
+            return Err(types_error::PgError::error(
+                "grouping_planner: inherited UPDATE/DELETE/MERGE with \
+                 WITH CHECK OPTION or MERGE actions — per-leaf node-list \
+                 translation in createplan is not modeled yet",
+            ));
+        }
+
+        // top_result_rel = find_base_rel(root, parse->resultRelation).
+        let top_result_relid = result_relation as types_core::primitive::Index;
+        let top_result_rel =
+            backend_optimizer_util_relnode::find_base_rel(root, result_relation);
+        // RelOptInfo->relid is the RT index; for the leaf loop the bms members of
+        // leaf_result_relids ARE the RT indexes, so this_relid == rrelid and
+        // top_parent_relid == parse->resultRelation directly.
+        let top_parent_relid = result_relation as types_core::primitive::Index;
+
+        // Pass the root result rel forward to the executor.
+        let root_relation = top_result_relid;
+
+        let mut result_relations: Vec<i32> = Vec::new();
+        let mut update_colnos_lists: Vec<Vec<types_core::primitive::AttrNumber>> = Vec::new();
+        let mut returning_lists: Vec<Vec<types_pathnodes::NodeId>> = Vec::new();
+
+        // Iterate leaf_result_relids (bms_next_member over the planner Relids word
+        // storage), adding only non-dummy leaves to the ModifyTable.
+        let leaf_members: Vec<i32> = match root.leaf_result_relids.as_ref() {
+            None => Vec::new(),
+            Some(bms) => {
+                let mut v = Vec::new();
+                for (wi, w) in bms.words.iter().enumerate() {
+                    let mut word = *w;
+                    while word != 0 {
+                        let bit = word.trailing_zeros() as usize;
+                        v.push((wi * (u64::BITS as usize) + bit) as i32);
+                        word &= word - 1;
+                    }
+                }
+                v
+            }
+        };
+        for rrelid in leaf_members {
+            let this_result_rel =
+                backend_optimizer_util_relnode::find_base_rel(root, rrelid);
+            // Exclude any leaf rels that have turned dummy (e.g. by constraint
+            // exclusion) since being added to leaf_result_relids.
+            if backend_optimizer_path_joinrels::is_dummy_rel(root, this_result_rel) {
+                continue;
+            }
+            let this_relid = rrelid as types_core::primitive::Index;
+
+            result_relations.push(rrelid);
+
+            if command_type == CmdType::CMD_UPDATE {
+                let update_colnos = if this_relid != top_parent_relid {
+                    let top_update_colnos = root.update_colnos.clone();
+                    backend_optimizer_util_appendinfo::adjust_inherited_attnums_multilevel(
+                        root,
+                        &top_update_colnos,
+                        this_relid,
+                        top_parent_relid,
+                    )?
+                } else {
+                    root.update_colnos.clone()
+                };
+                update_colnos_lists.push(update_colnos);
+            }
+
+            if has_returning {
+                // returningList = parse->returningList, translated to this leaf's
+                // attribute namespace when it isn't the top target rel.
+                let ids = build_returning_list_for_leaf(
+                run,
+                    root,
+                    this_result_rel,
+                    top_result_rel,
+                )?;
+                returning_lists.push(ids);
+            }
+        }
+
+        // If we managed to exclude every child rel, generate a dummy one-relation
+        // plan using info for the top target rel (statement triggers still fire).
+        if result_relations.is_empty() {
+            result_relations.push(result_relation);
+            if command_type == CmdType::CMD_UPDATE {
+                update_colnos_lists.push(root.update_colnos.clone());
+            }
+            if has_returning {
+                let ids = build_returning_list_for_leaf(
+                run,
+                    root,
+                    top_result_rel,
+                    top_result_rel,
+                )?;
+                returning_lists.push(ids);
+            }
+        }
+
+        Some((
+            root_relation,
+            result_relations,
+            update_colnos_lists,
+            returning_lists,
+        ))
+    } else {
+        None
+    };
     // Single-relation MERGE (planner.c:2094-2097): C aliases
     // mergeActionLists = list_make1(parse->mergeActionList) and
     // mergeJoinConditions = list_make1(parse->mergeJoinCondition) into the path.
@@ -3544,53 +3738,39 @@ fn add_modifytable_to_path<'mcx>(
     // parse). So the path carries an empty list and `has_wco` flows via parse.
     let _ = has_wco;
 
-    // Single-relation INSERT/UPDATE/DELETE (C:2082-2093). rootRelation = 0
-    // (there's no separate root rel). updateColnosLists is set for UPDATE.
-    let mut result_relations: Vec<i32> = Vec::with_capacity(1);
-    result_relations.push(result_relation);
-    let mut update_colnos_lists: Vec<Vec<types_core::primitive::AttrNumber>> = Vec::new();
-    if command_type == CmdType::CMD_UPDATE {
-        update_colnos_lists.push(root.update_colnos.clone());
-    }
-
-    // returningLists = list_make1(parse->returningList). Materialize the owned
-    // RETURNING TargetEntry list into the node arena so the path/plan carriers
-    // can hold node handles (resolved back to owned TLEs in createplan).
-    let mut returning_lists: Vec<Vec<types_pathnodes::NodeId>> = Vec::new();
-    if has_returning {
-        let mcx = run.mcx();
-        let n = run.resolve(root.parse).returningList.len();
-        let mut ids: Vec<types_pathnodes::NodeId> = Vec::with_capacity(n);
-        for i in 0..n {
-            let (expr_clone, resno, resname, ressortgroupref, resorigtbl, resorigcol, resjunk) = {
-                let tle = &run.resolve(root.parse).returningList[i];
-                let expr = tle.expr.as_deref().expect(
-                    "grouping_planner: RETURNING TargetEntry with NULL expr (parser bug)",
-                );
-                (
-                    expr.clone_in(mcx)?,
-                    tle.resno,
-                    tle.resname.as_ref().map(|s| alloc::string::String::from(s.as_str())),
-                    tle.ressortgroupref,
-                    tle.resorigtbl,
-                    tle.resorigcol,
-                    tle.resjunk,
-                )
-            };
-            let expr_id = root.alloc_node(expr_clone);
-            let te = types_pathnodes::TargetEntryNode {
-                expr: expr_id,
-                resno,
-                resname,
-                ressortgroupref,
-                resorigtbl,
-                resorigcol,
-                resjunk,
-            };
-            ids.push(root.alloc_targetentry(te));
+    // rootRelation / resultRelations / updateColnosLists / returningLists: from
+    // the inherited (BMS_MULTIPLE) computation above when that branch was taken,
+    // else the single-relation INSERT/UPDATE/DELETE case (C:2099-2112) with
+    // rootRelation = 0 (no separate root rel).
+    let (root_relation, result_relations, update_colnos_lists, returning_lists): (
+        types_core::primitive::Index,
+        Vec<i32>,
+        Vec<Vec<types_core::primitive::AttrNumber>>,
+        Vec<Vec<types_pathnodes::NodeId>>,
+    ) = if let Some((rr, rels, ucl, rl)) = inherited_lists {
+        (rr, rels, ucl, rl)
+    } else {
+        let mut result_relations: Vec<i32> = Vec::with_capacity(1);
+        result_relations.push(result_relation);
+        let mut update_colnos_lists: Vec<Vec<types_core::primitive::AttrNumber>> = Vec::new();
+        if command_type == CmdType::CMD_UPDATE {
+            update_colnos_lists.push(root.update_colnos.clone());
         }
-        returning_lists.push(ids);
-    }
+        // returningLists = list_make1(parse->returningList).
+        let mut returning_lists: Vec<Vec<types_pathnodes::NodeId>> = Vec::new();
+        if has_returning {
+            let top_result_rel =
+                backend_optimizer_util_relnode::find_base_rel(root, result_relation);
+            let ids = build_returning_list_for_leaf(
+                run,
+                root,
+                top_result_rel,
+                top_result_rel,
+            )?;
+            returning_lists.push(ids);
+        }
+        (0, result_relations, update_colnos_lists, returning_lists)
+    };
 
     // If there was a FOR [KEY] UPDATE/SHARE clause the LockRows node dealt with
     // it; else ModifyTable handles it. parse->rowMarks is empty here (guarded
@@ -3622,7 +3802,7 @@ fn add_modifytable_to_path<'mcx>(
         operation,
         can_set_tag,
         result_relation as types_core::primitive::Index,
-        0, // rootRelation
+        root_relation,
         part_cols_updated,
         result_relations,
         update_colnos_lists,
