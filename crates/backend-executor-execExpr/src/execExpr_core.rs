@@ -1211,11 +1211,19 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                     let e = &rowexpr.args[i];
                     let etype = backend_nodes_nodeFuncs_seams::expr_type_info::call(e)?.typid;
                     if etype != att.atttypid {
-                        return Err(types_error::PgError::error("ROW() column has wrong type")
-                            .with_detail(format!(
-                                "ROW() column has type {} instead of type {}",
-                                etype, att.atttypid
-                            )));
+                        // C: ereport(ERROR, errcode(ERRCODE_DATATYPE_MISMATCH),
+                        //     errmsg("ROW() column has type %s instead of type %s",
+                        //            format_type_be(exprType(e)), format_type_be(att->atttypid)));
+                        let got = backend_utils_adt_format_type_seams::format_type_be_owned::call(
+                            etype,
+                        )?;
+                        let want = backend_utils_adt_format_type_seams::format_type_be_owned::call(
+                            att.atttypid,
+                        )?;
+                        return Err(types_error::PgError::error(format!(
+                            "ROW() column has type {got} instead of type {want}"
+                        ))
+                        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
                     }
                     // Evaluate column expr into its workspace cell.
                     let cell = new_result_cell(mcx, state)?;
