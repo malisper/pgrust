@@ -140,11 +140,19 @@ pub enum Operator {
 /// `#define ERX` in `geqo.h`. [`main::geqo`] dispatches on this.
 pub const operator: Operator = Operator::Erx;
 
-/// Install every seam this crate owns. GEQO owns no inward seam (no other crate
-/// calls into it across a cycle — the join-search hook that reaches `geqo()` is
-/// not modeled here). The planner externals GEQO *consumes* live in
-/// [`backend_geqo_all_seams`] and are installed by their owners
-/// (joinrels/joininfo/planner-memory), not here.
+/// Install every seam this crate owns. The three *cross-crate* planner externals
+/// GEQO consumes (`build_and_cost_join_rel`, `have_relevant_joinclause`,
+/// `have_join_order_restriction`) live in [`backend_geqo_all_seams`] and are
+/// installed by their owners (joinrels/joininfo/allpaths), not here.
+///
+/// The remaining two seams in [`backend_geqo_all_seams`] —
+/// `geqo_eval_context_create` / `geqo_eval_context_delete` — are *not* a
+/// sibling crate's functions: they model the private temp `MemoryContext` that
+/// `geqo_eval.c` opens and deletes inline around each tour evaluation. GEQO owns
+/// that C code, so GEQO installs them here. In the owned-arena model they are a
+/// no-op pair (the planner arenas only grow within a run; correctness comes from
+/// `geqo_eval`'s `join_rel_list`/`join_rel_hash` save-restore — see
+/// [`eval::geqo_eval_context_create`]).
 ///
 /// GEQO *does* own the five GEQO GUC variables (`Geqo_effort`,
 /// `Geqo_pool_size`, `Geqo_generations`, `Geqo_selection_bias`, `Geqo_seed`),
@@ -152,4 +160,6 @@ pub const operator: Operator = Operator::Erx;
 /// accessors over this crate's backing store are installed here.
 pub fn init_seams() {
     guc_state::install();
+    backend_geqo_all_seams::geqo_eval_context_create::set(eval::geqo_eval_context_create);
+    backend_geqo_all_seams::geqo_eval_context_delete::set(eval::geqo_eval_context_delete);
 }

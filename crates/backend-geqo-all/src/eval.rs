@@ -13,14 +13,46 @@
 //! [`backend_geqo_all_seams`].
 
 use crate::{Gene, GeqoPrivateData};
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use backend_geqo_all_seams as geqo_seams;
 use types_pathnodes::planner_run::PlannerRun;
-use types_pathnodes::{PlannerInfo, RelId};
+use types_pathnodes::{MemoryContextData, PathnodesMemoryContext, PlannerInfo, RelId};
 use types_core::primitive::Cost;
 
 /// `DBL_MAX` (`<float.h>`) — fitness sentinel for an invalid join order.
 const DBL_MAX: Cost = f64::MAX;
+
+/// `geqo_eval`'s `AllocSetContextCreate(CurrentMemoryContext, "GEQO", …)` +
+/// `MemoryContextSwitchTo(mycontext)` — the two C lines that open the private
+/// temp context per tour evaluation. Returns the saved *old* context.
+///
+/// In the owned-arena model there is no ambient current memory context, and the
+/// planner's path-graph arenas (`rel_arena`/`path_arena`/…) only ever grow
+/// within a planner run — they are never freed mid-run. The C temp context is a
+/// pure *reclamation* device (it lets the many discarded candidate join rels
+/// from each tour be freed between evaluations) and carries no observable
+/// behaviour: correctness is preserved by `geqo_eval`'s `join_rel_list` truncate
+/// and `join_rel_hash` save/restore, which run regardless. So creating and
+/// switching into the temp context is a no-op here, and the returned "old"
+/// context is an opaque placeholder handle that nothing reads (its
+/// [`MemoryContextData`] is an empty struct) — it exists only to be threaded
+/// back to [`geqo_eval_context_delete`], mirroring the C `oldcxt` round-trip.
+pub fn geqo_eval_context_create() -> PathnodesMemoryContext {
+    Some(Box::new(MemoryContextData::default()))
+}
+
+/// `geqo_eval`'s `MemoryContextSwitchTo(oldcxt)` + `MemoryContextDelete(mycontext)`
+/// — the two C lines that restore the saved context and release everything the
+/// tour evaluation allocated. Consumes the saved old context returned by
+/// [`geqo_eval_context_create`].
+///
+/// A no-op in the owned-arena model (see [`geqo_eval_context_create`]): there is
+/// no temp context to delete, and the arenas are reclaimed only when the whole
+/// planner run ends. Dropping `oldcxt` discards the opaque placeholder.
+pub fn geqo_eval_context_delete(oldcxt: PathnodesMemoryContext) {
+    drop(oldcxt);
+}
 
 /// A "clump" of already-joined relations within `gimme_tree`
 /// (`geqo_eval.c` file-local struct).
