@@ -1533,9 +1533,9 @@ fn fulfill_pending_promises(estate: &mut PLpgSQL_execstate) -> types_error::PgRe
 
 /// Build the per-datum value snapshot (`setup_param_list` material): for every
 /// scalar VAR/PROMISE datum, its current `(value, isnull, typeid)`; for a
-/// RECFIELD, the live field value off the parent record's expanded header; a
-/// `None` entry for a ROW/REC datum (bound as a whole-row Param elsewhere, not a
-/// scalar field reference a simple expression binds).
+/// RECFIELD, the live field value off the parent record's expanded header; for a
+/// ROW/REC datum, its whole-row composite value (a tuple image bound as a
+/// whole-row Param), via `exec_eval_datum`.
 fn build_datum_snapshot(
     estate: &mut PLpgSQL_execstate,
 ) -> types_error::PgResult<std::vec::Vec<Option<exec_seams::EvalParamValue>>> {
@@ -1549,10 +1549,10 @@ fn build_datum_snapshot(
     let mut snap: std::vec::Vec<Option<exec_seams::EvalParamValue>> =
         std::vec::Vec::with_capacity(ndatums);
     // Snapshot each datum in order. VAR/RECFIELD read with an immutable borrow;
-    // a whole-row REC/ROW datum (the trigger NEW/OLD record and multi-OUT row
-    // vars) is bound as a composite Param — exec_eval_datum builds its tuple
-    // value, which needs a mutable borrow of `estate`, so those indices are
-    // evaluated in a second pass.
+    // a whole-row REC datum (the trigger NEW/OLD record and composite vars) is
+    // bound as a composite Param — exec_eval_datum builds its tuple value, which
+    // needs a mutable borrow of `estate`, so those indices are evaluated in a
+    // second pass.
     let mut whole_row_idx: std::vec::Vec<usize> = std::vec::Vec::new();
     for (dno, d) in estate.datums.iter().enumerate() {
         match d {
@@ -1573,14 +1573,20 @@ fn build_datum_snapshot(
                 whole_row_idx.push(dno);
                 snap.push(None); // filled in the second pass
             }
+            // A ROW datum's whole-row read needs its (compile-built) rowtupdesc
+            // — only set for multi-OUT-parameter rows — and C's setup_param_list
+            // only evaluates a datum the expression actually references, so an
+            // unreferenced ROW (e.g. an internal block row with no tupdesc) must
+            // not be eagerly read. Leave ROW as None (the multi-OUT whole-row
+            // ROW Param is out of this lane).
             _ => snap.push(None),
         }
     }
-    // Second pass: bind whole-row REC/ROW datums as composite Params. This is
-    // the same logic exec_eval_datum applies (pl_exec.c: DTYPE_REC / DTYPE_ROW)
-    // — a referenced whole-row variable (e.g. `OLD`, `NEW` in a trigger, or a
-    // RECORD passed to a SQL expression) flattens to its header-ful composite
-    // datum image, bound by reference.
+    // Second pass: bind whole-row REC datums as composite Params. This is the
+    // same logic exec_eval_datum applies (pl_exec.c: DTYPE_REC) — a referenced
+    // whole-row record (e.g. `OLD`, `NEW` in a trigger, or a RECORD passed to a
+    // SQL expression) flattens to its header-ful composite datum image, bound by
+    // reference.
     for dno in whole_row_idx {
         // exec_eval_datum_impl reads the datum at `dno` and stashes any by-ref
         // composite image in `estate.last_eval_byref`. It only reads the datum
@@ -1963,15 +1969,18 @@ fn exec_assign_value_byref_impl(
             put_var(estate, target_dno, var);
         }
         PLpgSQL_datum_type::PLPGSQL_DTYPE_ROW | PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => {
-            // The ROW/REC assignment is the composite-deconstruction substrate
-            // (exec_move_row / exec_move_row_from_datum), out of scope.
+            // exec_move_row_from_datum(estate, target, value) (pl_exec.c 5160):
+            // assign a composite RHS into a ROW/REC target. The composite value
+            // arrives as a by-reference HeapTupleHeader image (`value_byref`); the
+            // bare `value` word is `0` then. Thread the image through so the
+            // expanded record is built from the real tuple.
             if isnull {
                 seam::exec_move_row_null(estate, target_dno)?;
             } else {
                 if !exec_seams::type_is_rowtype::call(valtype)? {
                     return Err(seam::ereport_return_noncomposite());
                 }
-                seam::exec_move_row_from_datum(estate, target_dno, value)?;
+                seam::exec_move_row_from_datum_byref(estate, target_dno, value, value_byref)?;
             }
         }
         PLpgSQL_datum_type::PLPGSQL_DTYPE_RECFIELD => {
@@ -3012,7 +3021,7 @@ fn exec_stmt_execsql(
             if n > 1 && (stmt.strict || mod_stmt || too_many_rows_level != 0) {
                 return Err(
                     types_error::PgError::error("query returned more than one row".to_string())
-                        .with_detail("Make sure the query returns a single row, or use LIMIT 1.".to_string())
+                        .with_hint("Make sure the query returns a single row, or use LIMIT 1.".to_string())
                         .with_sqlstate(types_error::ERRCODE_TOO_MANY_ROWS),
                 );
             }
@@ -3684,18 +3693,21 @@ pub fn plpgsql_exec_function(
             // out-of-band in `retval_byref` (a self-describing HeapTupleHeader
             // varlena); forward it as the by-reference function result, exactly
             // as the by-ref scalar path does.
-            //
-            // The genuine-coercion path (`TYPEFUNC_COMPOSITE` whose tupdesc needs
-            // position/dropped-column remapping vs the result) still requires the
-            // get_call_result_type + convert_tuples_by_position substrate; that
-            // remains the loud seam.
             let needs_coercion = estate.fn_rettype != estate.rettype
                 && estate.fn_rettype != RECORDOID;
             if needs_coercion {
-                seam::coerce_function_result_tuple(&mut estate);
+                // The genuine-coercion path (TYPEFUNC_COMPOSITE whose tupdesc
+                // needs position/dropped-column remapping vs the actual result):
+                // deconstruct the flat tuple image, convert_tuples_by_position
+                // against the declared rowtype, optional execute_attr_map_tuple,
+                // then relabel + emit (pl_exec.c:824 flat-datum branch).
+                let image = coerce_function_result_tuple(&mut estate)?;
+                result.value = Datum::from_usize(0);
+                result.byref = Some(image);
+            } else {
+                result.value = estate.retval;
+                result.byref = estate.retval_byref.take();
             }
-            result.value = estate.retval;
-            result.byref = estate.retval_byref.take();
         } else if estate.fn_rettype == estate.rettype {
             // No coercion needed for an exact type match (the common scalar
             // RETURN, and the VOID-return hack rettype==VOIDOID==fn_rettype).
@@ -3737,6 +3749,87 @@ pub fn plpgsql_exec_function(
     })();
 
     body.map_err(|e| attach_plpgsql_context(e, &estate, &func.fn_signature))
+}
+
+/// `coerce_function_result_tuple(estate, tupdesc)` (pl_exec.c 824) — coerce the
+/// composite RETURN value to the function's declared result rowtype and copy it
+/// out as a tuple Datum labeled with that type. `exec_stmt_return` already left
+/// the composite result as a flat `HeapTupleHeader` varlena image in
+/// `estate.retval_byref` (the bare `retval` word is `0`), so this implements C's
+/// flat-datum `else` branch (pl_exec.c 899-925): `deconstruct_composite_datum`
+/// (the image's own tupdesc) → `convert_tuples_by_position` against the declared
+/// tupdesc → optional `execute_attr_map_tuple` → relabel + emit. The declared
+/// tupdesc comes from `lookup_rowtype_tupdesc(fn_rettype)` (the typcache path; we
+/// have no `fcinfo` at this layer, but `exec_stmt_return` rejected a non-rowtype
+/// `rettype`, and a RECORD-returning function would be handled by the RECORD arm
+/// upstream — here `fn_rettype` is a concrete composite type).
+fn coerce_function_result_tuple(
+    estate: &mut PLpgSQL_execstate,
+) -> types_error::PgResult<Vec<u8>> {
+    use types_tuple::heaptuple::{
+        HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, HeapTupleHeaderSetTypMod,
+        HeapTupleHeaderSetTypeId,
+    };
+    use types_tuple::backend_access_common_heaptuple::FormedTuple;
+
+    // The composite result's verbatim HeapTupleHeader image.
+    let image = estate.retval_byref.clone().ok_or_else(|| {
+        types_error::PgError::error(
+            "coerce_function_result_tuple: composite result has no tuple image".to_string(),
+        )
+    })?;
+    let fn_rettype = estate.fn_rettype;
+
+    with_query_mcx(|mcx| {
+        // deconstruct_composite_datum: the source tuple + its own (actual) rowtype.
+        let ft: FormedTuple<'_> = FormedTuple::from_datum_image(mcx, &image)?;
+        let header = ft
+            .tuple
+            .t_data
+            .as_ref()
+            .expect("composite Datum image has a header");
+        let src_typeid = HeapTupleHeaderGetTypeId(header);
+        let src_typmod = HeapTupleHeaderGetTypMod(header);
+
+        let indesc = backend_utils_cache_typcache::lookup_rowtype_tupdesc(
+            mcx, src_typeid, src_typmod,
+        )?;
+        // The declared result rowtype's tupdesc (typmod -1 for a named composite).
+        let outdesc =
+            backend_utils_cache_typcache::lookup_rowtype_tupdesc(mcx, fn_rettype, -1)?;
+
+        // check rowtype compatibility + build the position map (None == identical
+        // layout, no per-column conversion needed).
+        let map = backend_access_common_next::tupconvert::convert_tuples_by_position(
+            mcx,
+            &indesc,
+            &outdesc,
+            "returned record type does not match expected record type",
+        )?;
+
+        // it might need conversion (reordered / dropped columns).
+        let mut out = match map {
+            Some(m) => backend_access_common_next::tupconvert::execute_attr_map_tuple(
+                mcx,
+                &ft.tuple,
+                ft.data.as_slice(),
+                &m,
+            )?,
+            None => ft,
+        };
+
+        // Make sure the result is labeled with the caller-supplied tuple type
+        // (C's SPI_returntuple relabel / HeapTupleHeaderSetTypeId).
+        let out_hdr = out
+            .tuple
+            .t_data
+            .as_mut()
+            .expect("coerced tuple has a header");
+        HeapTupleHeaderSetTypeId(out_hdr, fn_rettype);
+        HeapTupleHeaderSetTypMod(out_hdr, -1);
+
+        Ok(out.to_datum_image())
+    })
 }
 
 /// `plpgsql_exec_trigger(func, trigdata)` (pl_exec.c) — the DML-trigger

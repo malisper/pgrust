@@ -302,16 +302,6 @@ pub fn return_next_var_loud(_estate: &mut PLpgSQL_execstate, _retvarno: int32) {
     );
 }
 
-/// The composite-result coercion leg of `plpgsql_exec_function` (pl_exec.c):
-/// coerce a tuple result to the declared rowtype, handling dropped columns, and
-/// copy it out to the upper executor context. Tupdesc/heaptuple value substrate.
-pub fn coerce_function_result_tuple(_estate: &mut PLpgSQL_execstate) {
-    panic!(
-        "seam not wired: plpgsql_exec_function tuple result coercion (pl_exec.c) — \
-         coerce_function_result_tuple / CreateTupleDescCopy + datumCopy (tupdesc/value substrate)"
-    );
-}
-
 /// `exec_move_row(estate, var, NULL, NULL)` (pl_exec.c): clear a REC/ROW to
 /// the NULL row.
 pub fn exec_move_row_null(estate: &mut PLpgSQL_execstate, target_dno: int32) -> PgResult<()> {
