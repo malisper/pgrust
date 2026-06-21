@@ -121,15 +121,29 @@ fn to_word(d: &Datum) -> types_datum::Datum {
 /// `FunctionCall2Coll(cmpFn, colloid, a, b)` reduced to the repo's by-OID call
 /// seam, returning the boolean comparison result. `function_id` is the cached
 /// comparison-procedure OID stored in the [`MinmaxOpaque`].
+///
+/// The comparison support procedures operate on the indexed column's type, which
+/// may be pass-by-reference (text/bytea/numeric/uuid/...). The value-carrying
+/// `function_call2_coll_datum` seam crosses a `ByRef` argument as its detoasted
+/// bytes through the fmgr by-reference side channel; the bare-word
+/// `function_call2_coll` would panic on a by-ref value (its scalar accessor
+/// reads a by-reference image as a machine word).
 #[inline]
 fn call_strategy2(
+    mcx: Mcx<'_>,
     function_id: Oid,
     colloid: Oid,
     a: &Datum,
     b: &Datum,
 ) -> PgResult<bool> {
-    let r = fmgr::function_call2_coll::call(function_id, colloid, to_word(a), to_word(b))?;
-    Ok(datum_get_bool(r))
+    let r = fmgr::function_call2_coll_datum::call(
+        mcx,
+        function_id,
+        colloid,
+        a.clone_in(mcx)?,
+        b.clone_in(mcx)?,
+    )?;
+    Ok(r.as_bool())
 }
 
 /// Borrow the [`MinmaxOpaque`] cache out of `bdesc.bd_info[attno - 1].oi_opaque`.
@@ -221,7 +235,7 @@ pub fn brin_minmax_add_value<'mcx>(
     // First check if it's less than the existing minimum.
     let cmp_fn =
         minmax_get_strategy_procinfo(bdesc, opaque, attno, atttypid, BT_LESS_STRATEGY_NUMBER)?;
-    if call_strategy2(cmp_fn, colloid, newval, &column.bv_values[0])? {
+    if call_strategy2(mcx, cmp_fn, colloid, newval, &column.bv_values[0])? {
         // if (!attr->attbyval) pfree(DatumGetPointer(column->bv_values[0]));
         // (the canonical Datum frees on overwrite; no explicit pfree needed.)
         column.bv_values[0] = scalar::datum_copy::call(mcx, newval, attbyval, attlen)?;
@@ -231,7 +245,7 @@ pub fn brin_minmax_add_value<'mcx>(
     // And now compare it to the existing maximum.
     let cmp_fn =
         minmax_get_strategy_procinfo(bdesc, opaque, attno, atttypid, BT_GREATER_STRATEGY_NUMBER)?;
-    if call_strategy2(cmp_fn, colloid, newval, &column.bv_values[1])? {
+    if call_strategy2(mcx, cmp_fn, colloid, newval, &column.bv_values[1])? {
         column.bv_values[1] = scalar::datum_copy::call(mcx, newval, attbyval, attlen)?;
         updated = true;
     }
@@ -251,6 +265,7 @@ pub fn brin_minmax_add_value<'mcx>(
 /// there should be no all-NULL ranges either. Returns the C `matches` boolean
 /// (`PG_RETURN_DATUM`).
 pub fn brin_minmax_consistent<'mcx>(
+    mcx: Mcx<'mcx>,
     bdesc: &BrinDesc<'mcx>,
     column: &BrinValues<'mcx>,
     key: &ScanKeyData<'mcx>,
@@ -270,7 +285,7 @@ pub fn brin_minmax_consistent<'mcx>(
         BT_LESS_STRATEGY_NUMBER | BT_LESS_EQUAL_STRATEGY_NUMBER => {
             let finfo =
                 minmax_get_strategy_procinfo(bdesc, opaque, attno, subtype, key.sk_strategy)?;
-            call_strategy2(finfo, colloid, &column.bv_values[0], value)?
+            call_strategy2(mcx, finfo, colloid, &column.bv_values[0], value)?
         }
         BT_EQUAL_STRATEGY_NUMBER => {
             // In the equality case (WHERE col = someval), return the current
@@ -283,7 +298,7 @@ pub fn brin_minmax_consistent<'mcx>(
                 subtype,
                 BT_LESS_EQUAL_STRATEGY_NUMBER,
             )?;
-            let m = call_strategy2(finfo, colloid, &column.bv_values[0], value)?;
+            let m = call_strategy2(mcx, finfo, colloid, &column.bv_values[0], value)?;
             if !m {
                 m
             } else {
@@ -295,13 +310,13 @@ pub fn brin_minmax_consistent<'mcx>(
                     subtype,
                     BT_GREATER_EQUAL_STRATEGY_NUMBER,
                 )?;
-                call_strategy2(finfo, colloid, &column.bv_values[1], value)?
+                call_strategy2(mcx, finfo, colloid, &column.bv_values[1], value)?
             }
         }
         BT_GREATER_EQUAL_STRATEGY_NUMBER | BT_GREATER_STRATEGY_NUMBER => {
             let finfo =
                 minmax_get_strategy_procinfo(bdesc, opaque, attno, subtype, key.sk_strategy)?;
-            call_strategy2(finfo, colloid, &column.bv_values[1], value)?
+            call_strategy2(mcx, finfo, colloid, &column.bv_values[1], value)?
         }
         // shouldn't happen
         other => {
@@ -348,7 +363,7 @@ pub fn brin_minmax_union<'mcx>(
     // Adjust minimum, if B's min is less than A's min.
     let finfo =
         minmax_get_strategy_procinfo(bdesc, opaque, attno, atttypid, BT_LESS_STRATEGY_NUMBER)?;
-    if call_strategy2(finfo, colloid, &col_b.bv_values[0], &col_a.bv_values[0])? {
+    if call_strategy2(mcx, finfo, colloid, &col_b.bv_values[0], &col_a.bv_values[0])? {
         // if (!attr->attbyval) pfree(DatumGetPointer(col_a->bv_values[0]));
         col_a.bv_values[0] = scalar::datum_copy::call(mcx, &col_b.bv_values[0], attbyval, attlen)?;
     }
@@ -356,7 +371,7 @@ pub fn brin_minmax_union<'mcx>(
     // Adjust maximum, if B's max is greater than A's max.
     let finfo =
         minmax_get_strategy_procinfo(bdesc, opaque, attno, atttypid, BT_GREATER_STRATEGY_NUMBER)?;
-    if call_strategy2(finfo, colloid, &col_b.bv_values[1], &col_a.bv_values[1])? {
+    if call_strategy2(mcx, finfo, colloid, &col_b.bv_values[1], &col_a.bv_values[1])? {
         col_a.bv_values[1] = scalar::datum_copy::call(mcx, &col_b.bv_values[1], attbyval, attlen)?;
     }
 
@@ -590,7 +605,7 @@ fn dispatch_consistent_single<'mcx>(
 ) -> PgResult<bool> {
     let oid = support_proc_oid(index, attno, BRIN_PROCNUM_CONSISTENT)?;
     match oid {
-        F_BRIN_MINMAX_CONSISTENT => brin_minmax_consistent(bdesc, bval, key, collation),
+        F_BRIN_MINMAX_CONSISTENT => brin_minmax_consistent(mcx, bdesc, bval, key, collation),
         inclusion::F_BRIN_INCLUSION_CONSISTENT => {
             inclusion::brin_inclusion_consistent(mcx, bdesc, bval, key, collation)
         }
