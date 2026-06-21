@@ -85,7 +85,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
             for &cell in &arg_cells {
                 let (v, isnull) = read_cell(state, cell);
                 if !isnull {
-                    values.push(v.as_ref_bytes().to_vec());
+                    values.push(xml_arg_payload(&v).to_vec());
                 }
             }
             if !values.is_empty() {
@@ -101,7 +101,8 @@ pub fn ExecEvalXmlExpr<'mcx>(
                 let (v, isnull) = read_cell(state, named_arg_cells[i]);
                 if !isnull {
                     let argname = &xexpr.arg_names[i];
-                    let mapped = map_named_value(v, named_arg_types[i])?;
+                    // XMLFOREST escapes each value (xml.c IS_XMLFOREST: true).
+                    let mapped = map_named_value(v, named_arg_types[i], mcx, true)?;
                     buf.extend_from_slice(b"<");
                     buf.extend_from_slice(argname.as_bytes());
                     buf.extend_from_slice(b">");
@@ -125,7 +126,10 @@ pub fn ExecEvalXmlExpr<'mcx>(
                 let mapped = if isnull {
                     None
                 } else {
-                    Some(map_named_value(v, named_arg_types[i])?)
+                    // XMLELEMENT attributes: map WITHOUT escaping — the libxml
+                    // writer (xmlTextWriterWriteAttribute) escapes (xml.c
+                    // xmlelement: named args pass false).
+                    Some(map_named_value(v, named_arg_types[i], mcx, false)?)
                 };
                 named.push((xexpr.arg_names[i].clone(), mapped));
             }
@@ -137,7 +141,9 @@ pub fn ExecEvalXmlExpr<'mcx>(
                 let (v, isnull) = read_cell(state, arg_cells[i]);
                 if !isnull {
                     let typid = expr_type_of_arg(&xexpr, i)?;
-                    content.push(map_named_value(v, typid)?);
+                    // XMLELEMENT content: map WITH escaping (xml.c xmlelement:
+                    // content args pass true); the writer uses WriteRaw.
+                    content.push(map_named_value(v, typid, mcx, true)?);
                 }
             }
             let name = xexpr.name.as_deref().unwrap_or("");
@@ -150,7 +156,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
             if n0 {
                 return Ok(());
             }
-            let data = v0.as_ref_bytes().to_vec();
+            let data = xml_arg_payload(&v0).to_vec();
             let (v1, n1) = read_cell(state, arg_cells[1]);
             if n1 {
                 return Ok(());
@@ -166,7 +172,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
                 if n {
                     (None, true)
                 } else {
-                    (Some(v.as_ref_bytes().to_vec()), false)
+                    (Some(xml_arg_payload(&v).to_vec()), false)
                 }
             } else {
                 (None, false)
@@ -185,9 +191,9 @@ pub fn ExecEvalXmlExpr<'mcx>(
             if n0 {
                 return Ok(());
             }
-            let data = v0.as_ref_bytes().to_vec();
+            let data = xml_arg_payload(&v0).to_vec();
             let (v1, n1) = read_cell(state, arg_cells[1]);
-            let version = if n1 { None } else { Some(v1.as_ref_bytes().to_vec()) };
+            let version = if n1 { None } else { Some(xml_arg_payload(&v1).to_vec()) };
             let (v2, _n2) = read_cell(state, arg_cells[2]); // always present
             let standalone = xml_standalone_from_i32(v2.as_usize() as i32);
             let out =
@@ -200,7 +206,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
             if n0 {
                 return Ok(());
             }
-            let data = v0.as_ref_bytes().to_vec();
+            let data = xml_arg_payload(&v0).to_vec();
             let out = backend_utils_adt_xml::xmltotext_with_options(
                 &data,
                 xexpr.xmloption,
@@ -214,7 +220,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
             if n0 {
                 return Ok(());
             }
-            let data = v0.as_ref_bytes().to_vec();
+            let data = xml_arg_payload(&v0).to_vec();
             let is_doc = backend_utils_adt_xml::xml_is_document(&data)?;
             write_cell(state, resv, Datum::from_bool(is_doc), false);
             if resnull != resv {
@@ -225,13 +231,29 @@ pub fn ExecEvalXmlExpr<'mcx>(
     Ok(())
 }
 
+/// `VARDATA_ANY` for an XmlExpr varlena input value. An xml/text `Datum::ByRef`
+/// reaches the XmlExpr step as a **header-ful** varlena image: this is the
+/// canonical by-reference Datum convention at the executor-value / fmgr boundary
+/// (`backend-utils-fmgr-core`: "the canonical ByRef image is likewise
+/// header-ful"), the same image `xml_in`/casts produce and `write_xmltype`
+/// writes for XmlExpr results. The xml.c value workers want the bare payload, so
+/// strip the 4-byte header. (`cstring_to_text`'s header-less return is a
+/// lower-level varlena-helper convention, not the carrier convention here.)
+fn xml_arg_payload<'a>(v: &'a Datum<'a>) -> &'a [u8] {
+    let img = v.as_ref_bytes();
+    &img[types_datum::varlena::VARHDRSZ.min(img.len())..]
+}
+
 /// Write a freshly built xml/text payload into the result cell as a
 /// by-reference Datum (the C `PointerGetDatum(result)` of a `cstring_to_text` /
 /// `stringinfo_to_xmltype` value), clearing the NULL flag.
 ///
-/// In this model `Datum::ByRef` carries the *header-less* detoasted payload (see
-/// `cstring_to_text_with_len`, which returns the bare bytes via `slice_in`), so
-/// the xml.c worker's payload is stored verbatim.
+/// The stored `Datum::ByRef` is a standard 4-byte-header varlena image
+/// (C: `SET_VARSIZE`), the canonical by-reference Datum convention every xml/text
+/// value uses at the executor-value / fmgr boundary — the form the type's output
+/// function (`xml_out`/`textout`) and the cast/operator fmgr lanes read back via
+/// `VARDATA_ANY`. XmlExpr inputs are read through [`xml_arg_payload`], which
+/// strips this header.
 fn write_xmltype<'mcx>(
     state: &mut ExprState<'mcx>,
     resv: ResultCellId,
@@ -239,8 +261,11 @@ fn write_xmltype<'mcx>(
     mcx: Mcx<'mcx>,
     bytes: &[u8],
 ) -> PgResult<()> {
-    let payload = mcx::slice_in(mcx, bytes)?;
-    write_cell(state, resv, Datum::ByRef(payload), false);
+    let total = types_datum::varlena::VARHDRSZ + bytes.len();
+    let mut img = mcx::vec_with_capacity_in(mcx, total)?;
+    img.extend_from_slice(&types_datum::varlena::set_varsize_4b(total));
+    img.extend_from_slice(bytes);
+    write_cell(state, resv, Datum::ByRef(img), false);
     if resnull != resv {
         write_cell(state, resnull, Datum::from_bool(false), false);
     }
@@ -250,33 +275,18 @@ fn write_xmltype<'mcx>(
 /// Map a SQL value Datum (read out of a result cell) through xml.c's
 /// `map_sql_value_to_xml_value(value, typid, true)`.
 ///
-/// The xml.c worker takes a bare-word `types_datum::Datum` and, for the native
-/// text path, calls `OidOutputFunctionCall(typeOut, value)` through a seam that
-/// receives the machine-word Datum bits. A by-value SQL value (bool / int /
-/// date / timestamp) maps directly. A by-reference (varlena) value cannot be
-/// carried by the bare machine word — that is the genuine by-ref-Datum substrate
-/// gap (the same one ExecEvalJsonExprPath PASSING vars hit): the output-function
-/// seam needs a stable pointer the inline-bytes `Datum::ByRef` model does not
-/// supply. Such a value loud-panics rather than passing a bogus pointer.
+/// Routes the unified value carrier (by-value scalar OR by-reference varlena)
+/// through `map_sql_value_to_xml_value_v`, which reaches the array /
+/// output-function / bytea call-outs via their installed real seams. The
+/// allocation context for the rendered string and any intermediate detoast is
+/// the per-query context `mcx`.
 fn map_named_value<'mcx>(
     value: Datum<'mcx>,
     typid: types_core::primitive::Oid,
+    mcx: Mcx<'mcx>,
+    xml_escape_strings: bool,
 ) -> PgResult<String> {
-    match value {
-        Datum::ByVal(word) => backend_utils_adt_xml::map_sql_value_to_xml_value(
-            types_datum::Datum::from_usize(word),
-            typid,
-            true,
-        ),
-        _ => panic!(
-            "execExprInterp: ExecEvalXmlExpr — XMLELEMENT/XMLFOREST mapping of a by-reference \
-             (varlena) value of type oid {} needs map_sql_value_to_xml_value to reach the \
-             OidOutputFunctionCall / detoast seam, but the inline-bytes Datum::ByRef carrier \
-             cannot supply the stable machine-word pointer those seams consume — the by-ref \
-             Datum substrate for XML value mapping is not yet landed",
-            typid
-        ),
-    }
+    backend_utils_adt_xml::map_sql_value_to_xml_value_v(mcx, value, typid, xml_escape_strings)
 }
 
 /// `exprType(xexpr->args[i])` for an XMLELEMENT content argument. Recovered from

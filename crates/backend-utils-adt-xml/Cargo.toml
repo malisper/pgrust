@@ -28,6 +28,8 @@ backend-utils-error-elog-seams = { path = "../backend-utils-error-elog-seams" }
 backend-utils-adt-xml-seams = { path = "../backend-utils-adt-xml-seams" }
 backend-utils-adt-xml-libxml-seams = { path = "../backend-utils-adt-xml-libxml-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
+backend-utils-fmgr-fmgr-seams = { path = "../backend-utils-fmgr-fmgr-seams" }
+backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 
 # Real owners of the cross-subsystem (non-libxml2) dependency seams xml.c

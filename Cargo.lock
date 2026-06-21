@@ -21706,6 +21706,7 @@ name = "backend-utils-adt-xml"
 version = "0.0.0"
 dependencies = [
  "backend-catalog-namespace",
+ "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-datetime",
  "backend-utils-adt-xml-libxml-seams",
  "backend-utils-adt-xml-seams",
@@ -21713,6 +21714,7 @@ dependencies = [
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-error-elog-seams",
  "backend-utils-fmgr-core",
+ "backend-utils-fmgr-fmgr-seams",
  "backend-utils-mb-mbutils",
  "backend-utils-misc-guc-tables",
  "common-encnames-seams",

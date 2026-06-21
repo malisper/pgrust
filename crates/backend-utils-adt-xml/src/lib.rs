@@ -57,6 +57,10 @@ use types_tuple::heaptuple::{
     XMLOID,
 };
 use types_core::{InvalidOid, Oid};
+/// The unified value carrier (`ByVal`/`ByRef`/`Cstring`) the executor and
+/// row-mapping callers hold column values in, distinct from the bare-word
+/// [`Datum`] (`types_datum::Datum`) the in-crate scalar formatters use.
+use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
 
 pub use types_error::ERRCODE_NOT_AN_XML_DOCUMENT;
 pub use types_nodes::primnodes::{XmlExprOp, XmlOptionType};
@@ -1420,6 +1424,97 @@ pub fn map_sql_value_to_xml_value(
     let str = seam::output_function_call::call(type_, datum_bits(value))?;
 
     // ... exactly as-is for XML, and when escaping is not wanted
+    if type_ == XMLOID || !xml_escape_strings {
+        Ok(str)
+    } else {
+        // otherwise, translate special characters as needed
+        Ok(String::from_utf8_lossy(&escape_xml(str.as_bytes())).into_owned())
+    }
+}
+
+/// `map_sql_value_to_xml_value(value, type, xml_escape_strings)` (xml.c:2562)
+/// over the unified value carrier ([`TDatum`]), the form the executor
+/// (`ExecEvalXmlExpr` for XMLELEMENT/XMLFOREST/XMLCONCAT content) and
+/// `query_to_xml` row mapping hold their column values in.
+///
+/// This is the same algorithm as [`map_sql_value_to_xml_value`] but reaches the
+/// genuinely-external call-outs through their **installed** real seams instead
+/// of the bare-machine-word `xml`-local seams, which cannot represent a
+/// by-reference value: the array branch uses `deconstruct_array_v`, the native
+/// text path uses `getTypeOutputInfo` + `OidOutputFunctionCall` over the full
+/// `Datum<'mcx>` carrier, and `bytea` consumes the (already detoasted,
+/// header-less) `ByRef` payload directly. By-value scalars (bool/date/timestamp)
+/// are read off the carrier's machine word exactly as the bare-word form does.
+pub fn map_sql_value_to_xml_value_v<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    value: TDatum<'mcx>,
+    type_: Oid,
+    xml_escape_strings: bool,
+) -> PgResult<String> {
+    // type_is_array_domain(type): plain arrays and domains over arrays.
+    let elmtype = lsc::get_base_element_type::call(type_)?;
+    if elmtype != InvalidOid {
+        // get_typlenbyvalalign(elmtype, &elmlen, &elmbyval, &elmalign);
+        let tla = lsc::get_typlenbyvalalign::call(elmtype)?;
+        // deconstruct_array(array, elmtype, ..., &elem_values, &elem_nulls, &n);
+        let elems = backend_utils_adt_arrayfuncs_seams::deconstruct_array_v::call(
+            mcx,
+            value,
+            elmtype,
+            tla.typlen,
+            tla.typbyval,
+            tla.typalign as core::ffi::c_char,
+        )?;
+
+        let mut buf: Vec<u8> = Vec::new();
+        for (elem, isnull) in elems.iter() {
+            if *isnull {
+                continue; // if (elem_nulls[i]) continue;
+            }
+            buf.extend_from_slice(b"<element>");
+            let mapped = map_sql_value_to_xml_value_v(mcx, elem.clone_in(mcx)?, elmtype, true)?;
+            buf.extend_from_slice(mapped.as_bytes());
+            buf.extend_from_slice(b"</element>");
+        }
+        return Ok(String::from_utf8_lossy(&buf).into_owned());
+    }
+
+    // Flatten domains; the special-case treatments below should apply to, eg,
+    // domains over boolean not just boolean.
+    let type_ = lsc::get_base_type::call(type_)?;
+
+    // Special XSD formatting for some data types. bool/date/timestamp[tz] are
+    // by-value: read the machine word off the carrier and reuse the bare-word
+    // formatter (identical XSD output). bytea is by-reference.
+    match type_ {
+        BOOLOID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID => {
+            let word = Datum::from_usize(value.as_usize());
+            return map_sql_value_to_xml_value(word, type_, xml_escape_strings);
+        }
+        BYTEAOID => {
+            // #ifdef USE_LIBXML — base64/binhex over the *raw* bytea payload.
+            if !seam::have_libxml::call() {
+                return Err(no_xml_support());
+            }
+            // The carrier is a header-ful varlena image (the canonical by-ref
+            // Datum convention); VARDATA_ANY(bstr) is the payload past the 4-byte
+            // header, which is exactly what the C path base64/binhex-encodes.
+            let img = value.as_ref_bytes();
+            let payload = &img[types_datum::varlena::VARHDRSZ.min(img.len())..];
+            return seam::encode_binary::call(payload, seam::xmlbinary::call());
+        }
+        _ => {}
+    }
+
+    // otherwise, just use the type's native text representation:
+    //   getTypeOutputInfo(type, &typeOut, &isvarlena);
+    //   str = OidOutputFunctionCall(typeOut, value);
+    let (typeout, _isvarlena) = lsc::get_type_output_info::call(type_)?;
+    let str =
+        backend_utils_fmgr_fmgr_seams::oid_output_function_call_datum::call(mcx, typeout, value)?;
+    let str = str.as_str().to_owned();
+
+    // ... exactly as-is for XML, and when escaping is not wanted.
     if type_ == XMLOID || !xml_escape_strings {
         Ok(str)
     } else {
