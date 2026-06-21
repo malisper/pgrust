@@ -1089,29 +1089,69 @@ pub fn init_seams() {
     });
 }
 
+/// The context into which the rootless `pull_var_clause*` ext-seam results are
+/// cloned. The seam returns an owned `Vec<Expr>` with no lifetime, but with
+/// `PVC_INCLUDE_AGGREGATES`/`PVC_INCLUDE_WINDOWFUNCS`/`PVC_INCLUDE_PLACEHOLDERS`
+/// the walker pushes whole `Aggref`/`WindowFunc`/`PlaceHolderVar` nodes that
+/// carry context-allocated children (`Box<_, Mcx>`). Those boxes' allocator
+/// must stay valid for as long as the returned Vec lives, i.e. until the caller
+/// drops it — which it does *after* this function returns. Cloning into a
+/// function-scoped scratch context (the previous behavior) freed that context
+/// at the seam's return, leaving the escaped boxes pointing at freed memory; the
+/// caller's eventual drop then dereferenced the dangling `Mcx` in
+/// `MemoryContext::uncharge` and crashed (SIGSEGV/SIGBUS). This surfaced on the
+/// multi-level partitionwise GROUP BY parallel path
+/// (`find_computable_ec_member` over an EC whose member is an `array_agg(distinct
+/// ...)` Aggref), but was latent for every consumer pulling a non-`Var` node.
+///
+/// C `pull_var_clause` appends the *original* node pointers into a List in
+/// `CurrentMemoryContext` (the planner context, freed when planning ends). The
+/// faithful stand-in here is a process-/thread-lifetime context: the cloned
+/// result nodes outlive any caller's use and are reclaimed at backend exit, just
+/// as the planner context's contents are. `Box::leak` of a single
+/// `MemoryContext` per thread mirrors the escaping-context idiom already used
+/// for `Const`/`ParamListInfo` value carriers.
+fn pull_var_clause_result_mcx() -> mcx::Mcx<'static> {
+    use core::cell::Cell;
+    thread_local! {
+        static CTX: Cell<Option<&'static mcx::MemoryContext>> = const { Cell::new(None) };
+    }
+    CTX.with(|c| match c.get() {
+        Some(ctx) => ctx.mcx(),
+        None => {
+            let ctx: &'static mcx::MemoryContext = alloc::boxed::Box::leak(alloc::boxed::Box::new(
+                mcx::MemoryContext::new("pull_var_clause result"),
+            ));
+            c.set(Some(ctx));
+            ctx.mcx()
+        }
+    })
+}
+
 /// `pull_var_clause((Node *) node, flags)` (var.c) — the equivclass-ext seam
 /// over a single rootless `&Expr`.
 fn seam_eqext_pull_var_clause(node: &Expr, flags: i32) -> Vec<Expr> {
     // Wrap the `&Expr` as a `Node` for the Node-based walker. A bare
     // `Expr::clone` panics on an `Aggref` (context-allocated `TargetEntry`
-    // args); `node_expr_wrapper` deep-copies into a scratch context via the
-    // non-panicking `clone_in`, observationally identical to C's borrowed ptr.
-    // The equivclass-ext caller only pulls Vars (self-contained clones), so the
-    // collected nodes do not retain `scratch`-allocated children.
-    let scratch = mcx::MemoryContext::new("pull_var_clause wrapper");
-    let wrapped = node_expr_wrapper(node, scratch.mcx());
-    pull_var_clause(scratch.mcx(), &wrapped, flags).unwrap_or_default()
+    // args); `node_expr_wrapper` deep-copies via the non-panicking `clone_in`,
+    // observationally identical to C's borrowed ptr. We clone into the
+    // process-lifetime result context (not a function-scoped scratch) because the
+    // walker may push whole `Aggref`/`WindowFunc`/`PlaceHolderVar` nodes whose
+    // `Box<_, Mcx>` children escape in the returned Vec and must outlive it.
+    let mcx = pull_var_clause_result_mcx();
+    let wrapped = node_expr_wrapper(node, mcx);
+    pull_var_clause(mcx, &wrapped, flags).unwrap_or_default()
 }
 
 /// `pull_var_clause((Node *) exprs, flags)` (var.c) over a `List` — run the walk
 /// over each expression and concatenate, matching the C single call over the
 /// whole list (the per-element order is preserved).
 fn seam_eqext_pull_var_clause_list(nodes: &[Expr], flags: i32) -> Vec<Expr> {
+    let mcx = pull_var_clause_result_mcx();
     let mut out: Vec<Expr> = Vec::new();
     for node in nodes.iter() {
-        let scratch = mcx::MemoryContext::new("pull_var_clause_list wrapper");
-        let wrapped = node_expr_wrapper(node, scratch.mcx());
-        out.extend(pull_var_clause(scratch.mcx(), &wrapped, flags).unwrap_or_default());
+        let wrapped = node_expr_wrapper(node, mcx);
+        out.extend(pull_var_clause(mcx, &wrapped, flags).unwrap_or_default());
     }
     out
 }
