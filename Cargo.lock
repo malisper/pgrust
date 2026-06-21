@@ -4829,6 +4829,7 @@ dependencies = [
 name = "backend-catalog-indexing"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
  "backend-access-common-relation-seams",
  "backend-access-common-scankey",

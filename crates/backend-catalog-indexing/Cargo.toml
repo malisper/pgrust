@@ -78,6 +78,7 @@ backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-common-relation-seams = { path = "../backend-access-common-relation-seams" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 backend-commands-functioncmds-seams = { path = "../backend-commands-functioncmds-seams" }
 backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-seams" }
 backend-utils-activity-pgstat-function = { path = "../backend-utils-activity-pgstat-function" }

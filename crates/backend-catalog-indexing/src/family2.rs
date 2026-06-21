@@ -2847,9 +2847,10 @@ fn deform_lo_page<'mcx>(
     // pageno = ((Form_pg_largeobject) GETSTRUCT(tuple))->pageno;
     let pageno = cols[(ANUM_PG_LARGEOBJECT_PAGENO - 1) as usize].0.as_i32();
 
-    // getdatafield: the data bytea, already detoasted by heap_deform_tuple's
-    // fetchatt (the field bytes are copied out verbatim; a stored short/4-byte
-    // header is decoded below). len = VARSIZE - VARHDRSZ.
+    // getdatafield (inv_api.c): the data bytea is the verbatim on-disk varlena
+    // bytes heap_deform_tuple copied out (header included; NOT yet detoasted).
+    // C: if (VARATT_IS_EXTENDED(datafield)) datafield = detoast_attr(datafield);
+    //    len = VARSIZE(datafield) - VARHDRSZ;
     let data_datum = &cols[(ANUM_PG_LARGEOBJECT_DATA - 1) as usize].0;
     let raw = match data_datum {
         Datum::ByRef(v) => &v[..],
@@ -2859,7 +2860,25 @@ fn deform_lo_page<'mcx>(
         | Datum::Expanded(_)
         | Datum::Internal(_) => return Err(PgError::error("pg_largeobject data is by-value")),
     };
-    let (payload_off, len) = if !raw.is_empty() && (raw[0] & 0x01) != 0 {
+    if raw.is_empty() {
+        return Err(PgError::error("pg_largeobject data field too short"));
+    }
+    // VARATT_IS_EXTENDED(ptr): a value that is NOT a plain 4-byte-header
+    // uncompressed varlena — i.e. compressed inline (4B_C, (b0 & 0x03) == 0x02),
+    // on-disk external (1B_E, b0 == 0x01), or short (1B, (b0 & 0x01) == 0x01).
+    // detoast_attr fetches/decompresses and returns a plain inline varlena.
+    let detoasted: Vec<u8>;
+    let raw: &[u8] = if (raw[0] & 0x03) == 0x00 {
+        // VARATT_IS_4B_U: plain 4-byte-header uncompressed; use verbatim.
+        raw
+    } else {
+        let buf = backend_access_common_detoast_seams::detoast_attr::call(mcx, raw)?;
+        detoasted = buf.to_vec();
+        &detoasted
+    };
+    // Now `raw` is a plain inline varlena: either 4B_U (b0 & 0x03 == 0) or, if
+    // detoast returned a short value, 1B uncompressed ((b0 & 0x01) == 1).
+    let (payload_off, len) = if (raw[0] & 0x01) != 0 {
         let hdr = (raw[0] >> 1) as usize;
         (1usize, hdr.saturating_sub(1))
     } else if raw.len() >= 4 {
