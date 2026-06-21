@@ -1512,28 +1512,43 @@ fn ExpandSingleTable<'mcx>(
     }
 
     // make_target_entry == false: produce bare Vars.
+    //
+    // For an uplevel star (`sublevels_up > 0`, e.g. `(VALUES(n.*))` where `n`
+    // is in an outer query), the namespace item lives in the ancestor
+    // ParseState `sublevels_up` levels up — `nsitem_index` is relative to that
+    // level, not the current `pstate`. Resolve the owner ParseState before
+    // reading the nsitem (C holds a direct `ParseNamespaceItem *` from the
+    // matching level, so it never indexes the wrong namespace).
+    let owner = parse_relation::nsitem_level(pstate, sublevels_up);
     let (rtekind, rtindex) = {
-        let nsitem = &pstate.p_namespace[nsitem_index];
+        let nsitem = &owner.p_namespace[nsitem_index];
         let rte = nsitem.p_rte.as_deref().expect("p_rte set");
         (rte.rtekind, nsitem.p_rtindex)
     };
 
-    // expandNSItemVars borrows pstate and the nsitem immutably together.
+    // expandNSItemVars borrows the owner pstate and the nsitem immutably
+    // together; it consumes `sublevels_up` to stamp the Vars' varlevelsup.
     let vars = {
-        let nsitem = &pstate.p_namespace[nsitem_index];
+        let owner = parse_relation::nsitem_level(pstate, sublevels_up);
+        let nsitem = &owner.p_namespace[nsitem_index];
         parse_relation::expandNSItemVars(mcx, pstate, nsitem, sublevels_up, location, None)?
     };
 
     // Require read access to the table (handles zero-column relations).  Only
     // for RTE_RELATION; not for a join (its component tables were already
-    // marked).
+    // marked). The perminfo and rtable belong to the owner level.
     if rtekind == RTE_RELATION {
-        debug_assert!(pstate.p_namespace[nsitem_index].p_perminfo.is_some());
+        let owner = parse_relation::nsitem_level(pstate, sublevels_up);
+        debug_assert!(owner.p_namespace[nsitem_index].p_perminfo.is_some());
         let perminfo_index = {
-            let rte = &pstate.p_rtable[(rtindex - 1) as usize];
-            parse_relation::getRTEPermissionInfo(&pstate.p_rteperminfos, rte)?
+            let rte = &owner.p_rtable[(rtindex - 1) as usize];
+            parse_relation::getRTEPermissionInfo(&owner.p_rteperminfos, rte)?
         };
-        pstate.p_rteperminfos[perminfo_index].requiredPerms |= ACL_SELECT;
+        // Mark on the current pstate when the relation is local; an uplevel
+        // relation's perms were already required at its own level.
+        if sublevels_up == 0 {
+            pstate.p_rteperminfos[perminfo_index].requiredPerms |= ACL_SELECT;
+        }
     }
 
     // Require read access to each column, and collect the Vars.
