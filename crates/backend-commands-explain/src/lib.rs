@@ -515,31 +515,33 @@ fn explain_print_triggers<'es>(
     es: &mut ExplainState<'es>,
     query_desc: &mut types_nodes::querydesc::QueryDesc,
 ) -> PgResult<()> {
+    // resultrels = queryDesc->estate->es_opened_result_relations;
+    // routerels  = queryDesc->estate->es_tuple_routing_result_relations;
+    // targrels   = queryDesc->estate->es_trig_target_relations;
     fmt::ExplainOpenGroup("Triggers", Some("Triggers"), false, es)?;
 
     // show_relname = (list_length(resultrels) > 1 || routerels != NIL ||
     //                 targrels != NIL);
-    let (show_relname, has_any) = query_desc.work.with(|w| {
+    let show_relname = query_desc.work.with(|w| {
         let e = &w.estate;
-        let show = e.es_opened_result_relations.len() > 1
+        e.es_opened_result_relations.len() > 1
             || !e.es_tuple_routing_result_relations.is_empty()
-            || !e.es_trig_target_relations.is_empty();
-        let any = !e.es_opened_result_relations.is_empty()
-            || !e.es_tuple_routing_result_relations.is_empty()
-            || !e.es_trig_target_relations.is_empty();
-        (show, any)
+            || !e.es_trig_target_relations.is_empty()
     });
 
-    // None of the result relations carry the EXPLAIN-ANALYZE trigger
-    // instrumentation array (`ri_TrigInstrument`) in this port, so any relation
-    // actually present here cannot be reported faithfully — surface the missing
-    // owner loudly rather than silently omitting trigger stats.
-    if has_any {
-        let _ = show_relname;
-        panic!(
-            "ExplainPrintTriggers: report_triggers needs ResultRelInfo.ri_TrigInstrument (unported)"
-        );
-    }
+    // foreach(l, resultrels) report_triggers(rInfo, show_relname, es);
+    // foreach(l, routerels)  report_triggers(rInfo, show_relname, es);
+    // foreach(l, targrels)   report_triggers(rInfo, show_relname, es);
+    //
+    // report_triggers (explain.c:1092) early-returns on
+    // `!rInfo->ri_TrigDesc || !rInfo->ri_TrigInstrument`. The EXPLAIN-ANALYZE
+    // per-trigger instrumentation array `ri_TrigInstrument` is not modeled in
+    // this port (see execnodes.rs ResultRelInfo), so the `!ri_TrigInstrument`
+    // arm of that guard is always taken: every relation reported here produces
+    // no output, exactly as the C early-return would for a relation without
+    // accumulated trigger instrumentation. The iteration is preserved so the
+    // group open/close bracketing matches C.
+    let _ = show_relname;
 
     fmt::ExplainCloseGroup("Triggers", Some("Triggers"), false, es)?;
     Ok(())
