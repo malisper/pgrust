@@ -260,9 +260,9 @@ fn recv_empty_errors() {
 
 #[test]
 fn check_string_len_limit() {
-    assert!(checkStringLen(0).is_ok());
-    assert!(checkStringLen(JENTRY_OFFLENMASK).is_ok());
-    let err = checkStringLen(JENTRY_OFFLENMASK + 1).unwrap_err();
+    assert_eq!(checkStringLen(0, None).unwrap(), true);
+    assert_eq!(checkStringLen(JENTRY_OFFLENMASK, None).unwrap(), true);
+    let err = checkStringLen(JENTRY_OFFLENMASK + 1, None).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_PROGRAM_LIMIT_EXCEEDED);
 }
 
@@ -276,11 +276,11 @@ fn semantic_actions_assemble_object_with_number() {
     let mut st = JsonbInState::default();
 
     jsonb_in_object_start(&mut st).unwrap();
-    jsonb_in_object_field_start(&mut st, b"a").unwrap();
-    jsonb_in_scalar(ctx.mcx(), &mut st, Some(b"1"), JsonTokenType::JSON_TOKEN_NUMBER).unwrap();
-    jsonb_in_object_field_start(&mut st, b"b").unwrap();
+    jsonb_in_object_field_start(&mut st, b"a", None).unwrap();
+    jsonb_in_scalar(ctx.mcx(), &mut st, Some(b"1"), JsonTokenType::JSON_TOKEN_NUMBER, None).unwrap();
+    jsonb_in_object_field_start(&mut st, b"b", None).unwrap();
     jsonb_in_array_start(&mut st).unwrap();
-    jsonb_in_scalar(ctx.mcx(), &mut st, None, JsonTokenType::JSON_TOKEN_TRUE).unwrap();
+    jsonb_in_scalar(ctx.mcx(), &mut st, None, JsonTokenType::JSON_TOKEN_TRUE, None).unwrap();
     jsonb_in_array_end(&mut st).unwrap();
     jsonb_in_object_end(&mut st).unwrap();
 
@@ -299,7 +299,7 @@ fn semantic_actions_top_level_scalar_number() {
     install_seams();
     let ctx = MemoryContext::new("s");
     let mut st = JsonbInState::default();
-    jsonb_in_scalar(ctx.mcx(), &mut st, Some(b"42"), JsonTokenType::JSON_TOKEN_NUMBER).unwrap();
+    jsonb_in_scalar(ctx.mcx(), &mut st, Some(b"42"), JsonTokenType::JSON_TOKEN_NUMBER, None).unwrap();
     let bytes = jbu::JsonbValueToJsonb(ctx.mcx(), st.res.as_ref().unwrap())
         .unwrap()
         .as_slice()
