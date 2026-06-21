@@ -217,6 +217,8 @@ fn restrict_and_check_grant(
         ObjectType::Function | ObjectType::Procedure | ObjectType::Routine => {
             ACL_ALL_RIGHTS_FUNCTION
         }
+        ObjectType::Largeobject => ACL_ALL_RIGHTS_LARGEOBJECT,
+        ObjectType::Language => ACL_ALL_RIGHTS_LANGUAGE,
         other => {
             return Err(PgError::error(format!(
                 "restrict_and_check_grant: unsupported object type {other:?} in grant slice"
@@ -576,6 +578,29 @@ fn exec_grant_type_check(mcx: Mcx<'_>, cacheid: i32, tuple: &FormedTuple<'_>) ->
     Ok(())
 }
 
+/// `ExecGrant_Language_check(istmt, tuple)` (aclchk.c:2252) — the per-object
+/// check `ExecGrant_common` runs for `OBJECT_LANGUAGE`: GRANT/REVOKE is rejected
+/// on an untrusted language, since only superusers may use untrusted languages.
+fn exec_grant_language_check(mcx: Mcx<'_>, cacheid: i32, tuple: &FormedTuple<'_>) -> PgResult<()> {
+    use types_catalog::pg_language::{Anum_pg_language_lanname, Anum_pg_language_lanpltrusted};
+
+    let lanpltrusted =
+        SysCacheGetAttrNotNull(mcx, cacheid, tuple, Anum_pg_language_lanpltrusted as i32)?.as_bool();
+    if !lanpltrusted {
+        let lanname = read_name(mcx, cacheid, tuple, Anum_pg_language_lanname as i32)?;
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("language \"{lanname}\" is not trusted"))
+            .errdetail(
+                "GRANT and REVOKE are not allowed on untrusted languages, \
+                 because only superusers can use untrusted languages."
+                    .to_string(),
+            )
+            .into_error());
+    }
+    Ok(())
+}
+
 /// `ExecGrant_Relation(istmt)` (aclchk.c) — the GRANT/REVOKE executor leg for
 /// `OBJECT_TABLE`/`OBJECT_SEQUENCE`. Reads each relation's `pg_class` tuple
 /// under the inplace-update tuple lock, validates relkind, computes the
@@ -890,6 +915,180 @@ fn exec_grant_relation(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<
     Ok(())
 }
 
+/// `ExecGrant_Largeobject(istmt)` (aclchk.c:2268) — the GRANT/REVOKE executor
+/// leg for `OBJECT_LARGEOBJECT`. There is no syscache for
+/// `pg_largeobject_metadata`, so each target object's row is fetched by a
+/// `systable_beginscan` on `LargeObjectMetadataOidIndexId`; the `lomacl`
+/// column is recomputed via `merge_acl_with_grant` and written back with
+/// `heap_modify_tuple` + `CatalogTupleUpdate`.
+fn exec_grant_largeobject(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<()> {
+    use backend_access_common_scankey::ScanKeyInit;
+    use backend_access_index_genam_seams as genam;
+    use backend_catalog_objectaddress::consts::{
+        Anum_pg_largeobject_metadata_lomacl, Anum_pg_largeobject_metadata_lomowner,
+        Anum_pg_largeobject_metadata_oid, LargeObjectMetadataOidIndexId,
+        LargeObjectMetadataRelationId, LargeObjectRelationId,
+    };
+    use backend_access_common_heaptuple::heap_getattr;
+    use types_core::fmgr::F_OIDEQ;
+    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+
+    if istmt.all_privs && istmt.privileges == ACL_NO_RIGHTS {
+        istmt.privileges = ACL_ALL_RIGHTS_LARGEOBJECT;
+    }
+
+    let acl_attnum = Anum_pg_largeobject_metadata_lomacl as i32;
+    let owner_attnum = Anum_pg_largeobject_metadata_lomowner as i32;
+
+    let relation = table_open(mcx, LargeObjectMetadataRelationId, RowExclusiveLock)?;
+
+    for &loid in istmt.objects.iter() {
+        // There's no syscache for pg_largeobject_metadata.
+        let mut key = ScanKeyData::empty();
+        ScanKeyInit(
+            &mut key,
+            Anum_pg_largeobject_metadata_oid as i16,
+            BTEqualStrategyNumber,
+            F_OIDEQ,
+            Datum::from_oid(loid),
+        )?;
+        let keys = [key];
+
+        let mut scan = genam::systable_beginscan::call(
+            &relation,
+            LargeObjectMetadataOidIndexId,
+            true,
+            None,
+            &keys,
+        )?;
+        let tuple = genam::systable_getnext::call(mcx, scan.desc_mut())?;
+        let Some(tuple) = tuple else {
+            scan.end()?;
+            table_close(relation, RowExclusiveLock)?;
+            return Err(PgError::error(format!(
+                "could not find tuple for large object {loid}"
+            )));
+        };
+
+        // Get owner ID and working copy of existing ACL. If there's no ACL,
+        // substitute the proper default.
+        let owner_id = heap_getattr(mcx, &tuple, owner_attnum, &relation.rd_att)?.0.as_oid();
+        let (acl_datum, acl_is_null) = heap_getattr(mcx, &tuple, acl_attnum, &relation.rd_att)?;
+
+        let old_acl: &[AclItem];
+        let mut old_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+        let has_old_members;
+        if acl_is_null {
+            old_acl = acldefault(mcx, ObjectType::Largeobject, owner_id)?;
+            has_old_members = false;
+        } else {
+            let raw = match &acl_datum {
+                Datum::ByRef(b) => &b[..],
+                _ => {
+                    scan.end()?;
+                    table_close(relation, RowExclusiveLock)?;
+                    return Err(PgError::error(
+                        "ExecGrant_Largeobject: lomacl column is not a varlena",
+                    ));
+                }
+            };
+            old_acl = decode_acl(mcx, raw)?;
+            for m in aclmembers(mcx, old_acl)?.iter() {
+                old_members.push(*m);
+            }
+            has_old_members = true;
+        }
+
+        // Determine ID to do the grant as, and available grant options.
+        let user_id = backend_utils_init_miscinit_seams::get_user_id::call();
+        let (grantor_id, avail_goptions) =
+            select_best_grantor(user_id, istmt.privileges, old_acl, owner_id)?;
+
+        // Restrict the privileges to what we can actually grant, and emit the
+        // standards-mandated warning and error messages.
+        let loname = format!("large object {loid}");
+        let this_privileges = restrict_and_check_grant(
+            mcx,
+            istmt.is_grant,
+            avail_goptions,
+            istmt.all_privs,
+            istmt.privileges,
+            loid,
+            grantor_id,
+            ObjectType::Largeobject,
+            &loname,
+            0,
+            None,
+        )?;
+
+        // Generate new ACL.
+        let new_acl = merge_acl_with_grant(
+            mcx,
+            old_acl,
+            istmt.is_grant,
+            istmt.grant_option,
+            istmt.behavior,
+            &istmt.grantees,
+            this_privileges,
+            grantor_id,
+            owner_id,
+        )?;
+
+        let mut new_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+        for m in aclmembers(mcx, new_acl)?.iter() {
+            new_members.push(*m);
+        }
+
+        // finished building new ACL value, now insert it.
+        let natts = relation.rd_att.natts as usize;
+        let mut values: PgVec<Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut nulls: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut replaces: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        for _ in 0..natts {
+            values.push(Datum::ByVal(0));
+            nulls.push(false);
+            replaces.push(false);
+        }
+        let aidx = (acl_attnum - 1) as usize;
+        replaces[aidx] = true;
+        values[aidx] = acl_to_datum(mcx, new_acl)?;
+
+        let mut newtuple =
+            heap_modify_tuple(mcx, &tuple, &relation.rd_att, &values, &nulls, &replaces)
+                .map_err(|e| PgError::error(format!("heap_modify_tuple failed: {e:?}")))?;
+
+        let otid = tuple.tuple.t_self;
+        CatalogTupleUpdate(mcx, &relation, otid, &mut newtuple)?;
+
+        // Update initial privileges for extensions.
+        record_extension_init_priv(loid, LargeObjectRelationId, new_acl)?;
+
+        // Update the shared dependency ACL info.
+        let old_for_dep = if has_old_members {
+            old_members
+        } else {
+            mcx::vec_with_capacity_in(mcx, 0)?
+        };
+        backend_catalog_pg_shdepend_seams::updateAclDependencies::call(
+            mcx,
+            LargeObjectRelationId,
+            loid,
+            0,
+            owner_id,
+            old_for_dep,
+            new_members,
+        )?;
+
+        scan.end()?;
+
+        // prevent error when processing duplicate objects.
+        backend_access_transam_xact_seams::command_counter_increment::call()?;
+    }
+
+    table_close(relation, RowExclusiveLock)?;
+    Ok(())
+}
+
 /// `expand_col_privileges(colnames, table_oid, this_privileges, col_privileges,
 /// num_col_privileges)` (aclchk.c). OR the specified privilege(s) into the
 /// per-column array entries for the named columns.
@@ -1182,7 +1381,7 @@ fn read_name(mcx: Mcx<'_>, cacheid: i32, tuple: &FormedTuple<'_>, attnum: i32) -
 
 /// `ExecGrantStmt_oids(istmt)` (aclchk.c) — dispatch on object type.
 fn exec_grant_stmt_oids(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<()> {
-    use backend_catalog_objectaddress::consts::DatabaseRelationId;
+    use backend_catalog_objectaddress::consts::{DatabaseRelationId, LanguageRelationId};
     match istmt.objtype {
         ObjectType::Table | ObjectType::Sequence => exec_grant_relation(mcx, istmt),
         OBJECT_SCHEMA => {
@@ -1201,6 +1400,14 @@ fn exec_grant_stmt_oids(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult
         ObjectType::Function | ObjectType::Procedure | ObjectType::Routine => {
             exec_grant_common(mcx, istmt, ProcedureRelationId, ACL_ALL_RIGHTS_FUNCTION, None)
         }
+        ObjectType::Largeobject => exec_grant_largeobject(mcx, istmt),
+        ObjectType::Language => exec_grant_common(
+            mcx,
+            istmt,
+            LanguageRelationId,
+            ACL_ALL_RIGHTS_LANGUAGE,
+            Some(exec_grant_language_check),
+        ),
         other => Err(PgError::error(format!(
             "GRANT/REVOKE executor not ported for object type {other:?} \
              (schema/relation slice; remaining aclchk F2/F3 keystone)"
@@ -1238,6 +1445,8 @@ fn rolespec_oid(role: &DdlRoleSpec<'_>, mcx: Mcx<'_>) -> PgResult<Oid> {
 const ACL_ALL_RIGHTS_FUNCTION: AclMode = types_acl::ACL_EXECUTE;
 const ACL_ALL_RIGHTS_TYPE: AclMode = ACL_USAGE;
 const ACL_ALL_RIGHTS_LARGEOBJECT: AclMode = ACL_SELECT | ACL_UPDATE;
+// `ACL_ALL_RIGHTS_LANGUAGE` (`utils/acl.h`).
+const ACL_ALL_RIGHTS_LANGUAGE: AclMode = ACL_USAGE;
 // `ACL_ALL_RIGHTS_DATABASE` (`utils/acl.h`).
 const ACL_ALL_RIGHTS_DATABASE: AclMode =
     types_acl::ACL_CREATE | types_acl::ACL_CREATE_TEMP | types_acl::ACL_CONNECT;
@@ -2144,6 +2353,14 @@ fn objtype_all_privileges(objtype: ObjectType) -> PgResult<(AclMode, &'static st
         ObjectType::Routine => {
             Ok((ACL_ALL_RIGHTS_FUNCTION, "invalid privilege type %s for routine"))
         }
+        ObjectType::Largeobject => Ok((
+            ACL_ALL_RIGHTS_LARGEOBJECT,
+            "invalid privilege type %s for large object",
+        )),
+        ObjectType::Language => Ok((
+            ACL_ALL_RIGHTS_LANGUAGE,
+            "invalid privilege type %s for language",
+        )),
         other => Err(PgError::error(format!(
             "GRANT objtype {other:?} not ported (schema/relation slice)"
         ))),

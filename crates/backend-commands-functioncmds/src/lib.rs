@@ -69,6 +69,24 @@ pub fn init_seams() {
     // ROUTINE. Decode the rich statement into the flat parsenodes form the ported
     // `AlterFunction` body consumes.
     backend_tcop_utility_out_seams::alter_function::set(alter_function_seam);
+
+    // `aclcheck_error(aclresult, OBJECT_LANGUAGE, lanname)` (functioncmds.c) —
+    // the language-USAGE permission-denied raise reached when creating a
+    // function/DO/transform in a language the caller lacks USAGE on. Delegates
+    // to the generic `aclcheck_error` in aclchk.
+    backend_commands_functioncmds_seams::aclcheck_error_language::set(aclcheck_error_language_seam);
+}
+
+/// `aclcheck_error(aclresult, OBJECT_LANGUAGE, lanname)` (functioncmds.c).
+fn aclcheck_error_language_seam(
+    aclresult: types_acl::AclResult,
+    objname: String,
+) -> types_error::PgResult<()> {
+    backend_catalog_aclchk_seams::aclcheck_error::call(
+        aclresult,
+        types_nodes::parsenodes::ObjectType::Language,
+        Some(objname),
+    )
 }
 
 /// Outward-seam adapter for `AlterFunction(pstate, stmt)` (utility.c
