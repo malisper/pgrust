@@ -36,6 +36,8 @@ backend-access-transam-multixact-seams = { path = "../backend-access-transam-mul
 backend-commands-event-trigger-seams = { path = "../backend-commands-event-trigger-seams" }
 # ProcessUtility dispatch arms (installs TRUNCATE + DROP-relations forwarding seams).
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
+# raw_parser() for ATPostAlterTypeParse (re-parse saved index/constraint defs).
+backend-parser-driver = { path = "../backend-parser-driver" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-access-index-indexam-seams = { path = "../backend-access-index-indexam-seams" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }

@@ -30,6 +30,18 @@ const PRETTYFLAG_PAREN: i32 = 0x0001;
 /// (ruleutils.c 1654-1837). Returns the decompiled statistics-object text, or
 /// `Ok(None)` when `missing_ok` and the object is gone (all three fmgr callers
 /// pass `missing_ok = true`).
+/// `pg_get_statisticsobjdef_string(statextid)` (ruleutils.c:1627) — internal
+/// version used to feed `ATPostAlterTypeParse`: the full `CREATE STATISTICS`
+/// command, never NULL (missing_ok = false). Equivalent to
+/// `pg_get_statisticsobj_worker(statextid, false, false)`.
+pub fn pg_get_statisticsobjdef_string<'mcx>(
+    mcx: Mcx<'mcx>,
+    statextid: Oid,
+) -> PgResult<PgString<'mcx>> {
+    let s = pg_get_statisticsobj_worker(mcx, statextid, false, false)?;
+    Ok(s.expect("pg_get_statisticsobjdef_string: worker returned None with missing_ok = false"))
+}
+
 pub fn pg_get_statisticsobj_worker<'mcx>(
     mcx: Mcx<'mcx>,
     statextid: Oid,

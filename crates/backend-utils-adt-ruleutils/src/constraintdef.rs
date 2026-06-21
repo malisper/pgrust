@@ -57,6 +57,19 @@ pub fn pg_get_constraintdef_worker<'mcx>(
     pg_get_constraintdef_worker_inner(mcx, constraint_id, full_command, pretty_flags, true)
 }
 
+/// `pg_get_constraintdef_command(constraintId)` (ruleutils.c:2184) — internal
+/// version used to feed `ATPostAlterTypeParse`: returns the full
+/// `ALTER TABLE ... ADD CONSTRAINT ...` command form, never NULL
+/// (missing_ok = false). Equivalent to
+/// `pg_get_constraintdef_worker(constraintId, true, 0, false)`.
+pub fn pg_get_constraintdef_command<'mcx>(
+    mcx: Mcx<'mcx>,
+    constraint_id: Oid,
+) -> PgResult<PgString<'mcx>> {
+    let s = pg_get_constraintdef_worker_inner(mcx, constraint_id, true, 0, false)?;
+    Ok(s.expect("pg_get_constraintdef_command: worker returned None with missing_ok = false"))
+}
+
 /// As above, threading `missing_ok` (the `pg_get_constraintdef_command`
 /// internal caller passes `false`).
 pub(crate) fn pg_get_constraintdef_worker_inner<'mcx>(

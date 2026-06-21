@@ -8218,6 +8218,7 @@ dependencies = [
  "backend-optimizer-util-vars",
  "backend-parser-coerce",
  "backend-parser-coerce-seams",
+ "backend-parser-driver",
  "backend-parser-parse-collate",
  "backend-parser-parse-expr",
  "backend-parser-parse-type",

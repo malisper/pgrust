@@ -348,3 +348,16 @@ pub fn pg_get_indexdef_worker<'mcx>(
 
     Ok(Some(PgString::from_str_in(&buf, mcx)?))
 }
+
+/// `pg_get_indexdef_string(indexrelid)` (ruleutils.c:1225) — internal version
+/// used to feed `ATPostAlterTypeParse`: includes the index tablespace and the
+/// `ONLY` inheritance marker, never NULL (missing_ok = false). Equivalent to
+/// `pg_get_indexdef_worker(indexrelid, 0, NULL, false, false, true, true, 0,
+/// false)`.
+pub fn pg_get_indexdef_string<'mcx>(mcx: Mcx<'mcx>, indexrelid: Oid) -> PgResult<PgString<'mcx>> {
+    let s = pg_get_indexdef_worker(
+        mcx, indexrelid, 0, None, false, false, true, true, 0, false,
+    )?;
+    // missing_ok = false → the worker never returns None.
+    Ok(s.expect("pg_get_indexdef_string: worker returned None with missing_ok = false"))
+}

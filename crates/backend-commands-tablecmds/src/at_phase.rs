@@ -1214,32 +1214,16 @@ fn ATRewriteCatalogs<'mcx>(
                 ATExecCmd(mcx, wqueue, ti, &cmd, lockmode, pass, context)?;
             }
 
-            // After ALTER TYPE / SET EXPRESSION passes, do cleanup work
-            // (tablecmds.c:5343 `ATPostAlterTypeCleanup`). The cleanup re-parses
-            // and rebuilds every dependent index/constraint/extended-statistics
+            // After the ALTER TYPE / SET EXPRESSION pass, do cleanup work
+            // (tablecmds.c:5343 `ATPostAlterTypeCleanup`). It re-parses and
+            // rebuilds every dependent index/constraint/extended-statistics
             // object captured into `changed*Oids`/`changed*Defs` by
-            // `RememberAllDependentForRebuilding`, and resets a remembered
-            // REPLICA IDENTITY / CLUSTER index. When *no* dependent object was
-            // remembered (the column had no index/constraint/stats depending on
-            // it), every `forboth` loop is empty, `new_object_addresses()` is
-            // empty, and `performMultipleDeletions` over the empty set is a
-            // no-op — so the whole function is a faithful no-op. Our
-            // `ATExecAlterColumnType`/`RememberAllDependentForRebuilding` already
-            // seam-and-panics the moment it finds such a dependent, so when we
-            // get here those lists are guaranteed empty. If any are non-empty we
-            // stop loudly: the deparse/rebuild leg (`ATPostAlterTypeParse`) is
-            // unported.
+            // `RememberAllDependentForRebuilding`, drops them, and queues the
+            // recreate commands plus a remembered REPLICA IDENTITY / CLUSTER
+            // index restore into later passes. Done only once per table even if
+            // multiple columns were altered.
             if pass == AT_PASS_ALTER_TYPE || pass == AT_PASS_SET_EXPRESSION {
-                let tab = &wqueue[ti];
-                if !tab.changedConstraintOids.is_empty()
-                    || !tab.changedIndexOids.is_empty()
-                    || !tab.changedStatisticsOids.is_empty()
-                    || tab.replicaIdentityIndex.is_some()
-                    || tab.clusterOnIndex.is_some()
-                {
-                    unported("ATPostAlterTypeCleanup (rebuild of dependent index/constraint/statistics — ATPostAlterTypeParse deparse+recreate)");
-                }
-                // else: nothing remembered → faithful no-op.
+                crate::at_altertype::ATPostAlterTypeCleanup(mcx, wqueue, ti, lockmode)?;
             }
 
             // Close the per-pass relation.
