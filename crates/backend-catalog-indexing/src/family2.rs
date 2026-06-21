@@ -2119,6 +2119,97 @@ fn catalog_tuple_update_attrs_pg_type(
     Ok(typarray)
 }
 
+/// `AlterFunction`'s single-row write (functioncmds.c:1424-1518): re-fetch the
+/// pg_proc row by `changes.func_oid`, overwrite each scalar `Form_pg_proc`
+/// column the action list changed (`provolatile`/`proisstrict`/`prosecdef`/
+/// `proleakproof`/`procost`/`prorows`/`prosupport`/`proparallel`), and — for a
+/// SET/RESET action — replace `proconfig` (the new array is already merged by
+/// `update_proconfig_value` on the caller side; the inner `None` stores SQL
+/// NULL). Then `heap_modify_tuple` + `CatalogTupleUpdate(rel, &tup->t_self,
+/// tup)` + `InvokeObjectPostAlterHook(ProcedureRelationId, funcOid, 0)`.
+fn alter_function_apply(
+    changes: backend_commands_functioncmds_seams::AlterFunctionChanges,
+) -> PgResult<()> {
+    use cat::pg_proc as pp;
+    let ctx = MemoryContext::new("AlterFunction apply");
+    let mcx = ctx.mcx();
+
+    let rel = table_open(mcx, pp::ProcedureRelationId, RowExclusiveLock)?;
+    let oldtup = fetch_by_oid(mcx, &rel, pp::Anum_pg_proc_oid, changes.func_oid)?.ok_or_else(
+        || PgError::error(format!("cache lookup failed for function {}", changes.func_oid)),
+    )?;
+    let (mut values, mut nulls) = deform(mcx, &rel, &oldtup)?;
+    let mut replaces = vec![false; values.len()];
+
+    if let Some(v) = changes.provolatile {
+        set_col(&mut values, &mut nulls, &mut replaces, pp::Anum_pg_proc_provolatile,
+                Datum::from_char(v));
+    }
+    if let Some(v) = changes.proisstrict {
+        set_col(&mut values, &mut nulls, &mut replaces, pp::Anum_pg_proc_proisstrict,
+                Datum::from_bool(v));
+    }
+    if let Some(v) = changes.prosecdef {
+        set_col(&mut values, &mut nulls, &mut replaces, pp::Anum_pg_proc_prosecdef,
+                Datum::from_bool(v));
+    }
+    if let Some(v) = changes.proleakproof {
+        set_col(&mut values, &mut nulls, &mut replaces, pp::Anum_pg_proc_proleakproof,
+                Datum::from_bool(v));
+    }
+    if let Some(v) = changes.procost {
+        set_col(&mut values, &mut nulls, &mut replaces, pp::Anum_pg_proc_procost,
+                Datum::from_f32(v as f32));
+    }
+    if let Some(v) = changes.prorows {
+        set_col(&mut values, &mut nulls, &mut replaces, pp::Anum_pg_proc_prorows,
+                Datum::from_f32(v as f32));
+    }
+    if let Some(v) = changes.prosupport {
+        set_col(&mut values, &mut nulls, &mut replaces, pp::Anum_pg_proc_prosupport,
+                Datum::from_oid(v));
+    }
+    if let Some(v) = changes.proparallel {
+        set_col(&mut values, &mut nulls, &mut replaces, pp::Anum_pg_proc_proparallel,
+                Datum::from_char(v));
+    }
+    if let Some(new_config) = changes.proconfig {
+        // a = update_proconfig_value(a, set_items) (caller side); here:
+        //   if (a == NULL) { repl_val = 0; repl_null = true; }
+        //   else           { repl_val = PointerGetDatum(a); repl_null = false; }
+        // text_array_datum returns None for an empty list (≡ SQL NULL `a`).
+        let datum = match new_config {
+            Some(items) => text_array_datum(mcx, &items)?,
+            None => None,
+        };
+        let i = (pp::Anum_pg_proc_proconfig - 1) as usize;
+        match datum {
+            Some(d) => {
+                set_col(&mut values, &mut nulls, &mut replaces, pp::Anum_pg_proc_proconfig, d);
+            }
+            None => {
+                values[i] = Datum::null();
+                nulls[i] = true;
+                replaces[i] = true;
+            }
+        }
+    }
+
+    modify_and_update(mcx, &rel, &oldtup, &values, &nulls, &replaces)?;
+
+    // InvokeObjectPostAlterHook(ProcedureRelationId, funcOid, 0);
+    if backend_catalog_objectaccess_seams::object_access_hook_present::call() {
+        backend_catalog_objectaccess_seams::invoke_object_post_alter_hook::call(
+            pp::ProcedureRelationId,
+            changes.func_oid,
+            0,
+        )?;
+    }
+
+    rel.close(RowExclusiveLock)?;
+    Ok(())
+}
+
 /// `GetNewOidWithIndex(pg_type, TypeOidIndexId, Anum_pg_type_oid)`.
 fn get_new_oid_with_index_pg_type<'mcx>(rel: &Relation<'mcx>) -> PgResult<Oid> {
     backend_catalog_catalog::GetNewOidWithIndex(
@@ -3050,6 +3141,7 @@ pub fn install() {
     // the seam is declared on backend-commands-functioncmds-seams but the body
     // needs this crate's CatalogTupleDelete + heap scan substrate).
     backend_commands_functioncmds_seams::remove_function_tuple::set(remove_function_tuple);
+    backend_commands_functioncmds_seams::alter_function_apply::set(alter_function_apply);
 
     // catalog/partition.c update_default_partition_oid pg_partitioned_table
     // single-field write (cross-crate install: the seam is declared on

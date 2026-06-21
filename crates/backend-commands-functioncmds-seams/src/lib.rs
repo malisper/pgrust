@@ -64,12 +64,17 @@ pub struct TransformFuncForm {
 }
 
 /// Lookup + permission preamble result of `AlterFunction`'s opening.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlterFunctionTarget {
     pub func_oid: Oid,
     pub prokind: i8,
     pub proretset: bool,
     pub prosupport: Oid,
+    /// The held row's existing `proconfig` (`SysCacheGetAttr(PROCOID,
+    /// Anum_pg_proc_proconfig)` decoded to `name=value` strings), `None` ≡ SQL
+    /// NULL. `AlterFunction` feeds it to `update_proconfig_value` as the base
+    /// array when a SET/RESET action is present.
+    pub proconfig: Option<Vec<String>>,
 }
 
 /// The set of pg_proc fields `AlterFunction` decided to overwrite.
@@ -84,8 +89,12 @@ pub struct AlterFunctionChanges {
     pub prorows: Option<f64>,
     pub prosupport: Option<Oid>,
     pub proparallel: Option<i8>,
-    /// The SET/RESET items (`VariableSetStmt` nodes), or `None`.
-    pub set_items: Option<Vec<Node>>,
+    /// The new `proconfig` array, when one or more SET/RESET actions were given
+    /// (`AlterFunction` already merged them onto the existing array with
+    /// `update_proconfig_value`). The outer `Some` is the C `repl_repl[
+    /// Anum_pg_proc_proconfig - 1] = true` gate; the inner `None` is the
+    /// `repl_null[..] = true` (RESET ALL emptied the array) arm.
+    pub proconfig: Option<Option<Vec<String>>>,
 }
 
 /// The bundle of arguments `CreateFunction` passes to `ProcedureCreate`.

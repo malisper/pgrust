@@ -88,6 +88,7 @@ use backend_catalog_pg_proc_seams::{DefaultCompat, RecordTypeChange};
 use backend_utils_adt_format_type_seams::format_type_be_str;
 use backend_utils_adt_regproc_seams::format_procedure;
 use backend_utils_cache_lsyscache_seams::{get_element_type, get_typtype};
+use backend_utils_cache_syscache_seams as seam_syscache;
 
 use types_acl::ACLCHECK_NOT_OWNER;
 use types_parsenodes::Node;
@@ -1316,6 +1317,7 @@ fn pg_mblen(s: &[u8]) -> PgResult<i32> {
 /// `procedure_create`. pg_proc.c owns the C function, so it installs the seam.
 pub fn init_seams() {
     backend_commands_functioncmds_seams::procedure_create::set(procedure_create_from_args);
+    backend_commands_functioncmds_seams::alter_function_begin::set(alter_function_begin);
     fmgr_builtins::register_pg_proc_builtins();
 
     // Value-form `function_parse_error_transpose` for the PL/pgSQL compile path
@@ -1394,4 +1396,73 @@ fn procedure_create_from_args(
         procost,
         prorows,
     )
+}
+
+/// `AlterFunction`'s opening catalog preamble (functioncmds.c:1378-1402): open
+/// pg_proc, `LookupFuncWithArgs(stmt->objtype, stmt->func, false)`, fetch the
+/// `Form_pg_proc` (here via the by-OID `search_pg_functiondef_info` read),
+/// owner-check (`object_ownercheck` else `aclcheck_error(ACLCHECK_NOT_OWNER,
+/// stmt->objtype, NameListToString(stmt->func->objname))`), and reject an
+/// aggregate (`prokind == PROKIND_AGGREGATE`). Returns the decision inputs the
+/// in-crate `AlterFunction` body consumes (`funcOid`, `prokind`, `proretset`,
+/// `prosupport`, and the existing `proconfig` it merges SET items onto).
+fn alter_function_begin(
+    objtype: i32,
+    func: types_parsenodes::Node,
+) -> PgResult<backend_commands_functioncmds_seams::AlterFunctionTarget> {
+    let ctx = MemoryContext::new("AlterFunction");
+    let mcx = ctx.mcx();
+
+    /* rel = table_open(ProcedureRelationId, RowExclusiveLock) — the lock is
+     * taken so the subsequent CatalogTupleUpdate in alter_function_apply sees a
+     * consistent catalog; the relation handle is not threaded out. */
+    let rel = table_open(mcx, ProcedureRelationId, RowExclusiveLock)?;
+
+    /* funcOid = LookupFuncWithArgs(stmt->objtype, stmt->func, false). The
+     * func node's objname is needed for the not-owner error message. */
+    let objname: Vec<String> = match func.as_objectwithargs() {
+        Some(owa) => owa.objname.clone(),
+        None => {
+            return Err(ereport(ERROR)
+                .errmsg_internal("AlterFunction: stmt->func is not an ObjectWithArgs")
+                .into_error());
+        }
+    };
+    let func_oid =
+        backend_commands_functioncmds_seams::lookup_func_with_args::call(objtype, func, false)?;
+
+    /* tup = SearchSysCacheCopy1(PROCOID, funcOid); procForm = GETSTRUCT(tup). */
+    let info = seam_syscache::search_pg_functiondef_info::call(mcx, func_oid)?
+        .ok_or_else(|| elog_error(format!("cache lookup failed for function {func_oid}")))?;
+
+    /* Permission check: must own function. */
+    let user_id = backend_commands_functioncmds_seams::get_user_id::call()?;
+    if !aclchk_seams::object_ownercheck::call(ProcedureRelationId, func_oid, user_id)? {
+        let objtype_e = types_nodes::parsenodes::ObjectType::from_i32(objtype).ok_or_else(|| {
+            elog_error(format!("AlterFunction: invalid object type {objtype}"))
+        })?;
+        aclchk_seams::aclcheck_error::call(
+            ACLCHECK_NOT_OWNER,
+            objtype_e,
+            Some(backend_commands_functioncmds_seams::name_list_to_string::call(objname.clone())?),
+        )?;
+    }
+
+    if info.form.prokind == PROKIND_AGGREGATE {
+        let name = backend_commands_functioncmds_seams::name_list_to_string::call(objname)?;
+        return Err(ereport(ERROR)
+            .errcode(ERRCODE_WRONG_OBJECT_TYPE)
+            .errmsg(format!("\"{name}\" is an aggregate function"))
+            .into_error());
+    }
+
+    rel.close(RowExclusiveLock)?;
+
+    Ok(backend_commands_functioncmds_seams::AlterFunctionTarget {
+        func_oid,
+        prokind: info.form.prokind,
+        proretset: info.form.proretset,
+        prosupport: info.form.prosupport,
+        proconfig: info.proconfig,
+    })
 }

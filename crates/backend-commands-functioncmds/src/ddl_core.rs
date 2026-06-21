@@ -1298,7 +1298,10 @@ pub fn AlterFunction(stmt: &AlterFunctionStmt) -> PgResult<ObjectAddress> {
         changes.proparallel = Some(interpret_func_parallel(item)?);
     }
     if !common.set_items.is_empty() {
-        changes.set_items = Some(common.set_items);
+        /* extract existing proconfig setting, then update according to each SET
+         * or RESET item, left to right (functioncmds.c:1495-1501). */
+        let a = update_proconfig_value(target.proconfig.clone(), common.set_items)?;
+        changes.proconfig = Some(a);
     }
 
     /* Do the update (heap_modify_tuple + CatalogTupleUpdate + post-alter hook) */
