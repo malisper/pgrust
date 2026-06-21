@@ -207,9 +207,7 @@ fn find_placeholders_in_from_expr<'mcx>(
         find_placeholders_recurse(root, item)?;
     }
     // Now process the top-level quals.
-    if let Some(quals) = f.quals.as_deref().and_then(|n| n.as_expr()) {
-        find_placeholders_in_expr(root, quals)?;
-    }
+    find_placeholders_in_quals(root, f.quals.as_deref())?;
     Ok(())
 }
 
@@ -230,9 +228,7 @@ fn find_placeholders_recurse<'mcx>(
                 find_placeholders_recurse(root, item)?;
             }
             // Now process the top-level quals.
-            if let Some(quals) = f.quals.as_deref().and_then(|n| n.as_expr()) {
-                find_placeholders_in_expr(root, quals)?;
-            }
+            find_placeholders_in_quals(root, f.quals.as_deref())?;
         }
         ntag::T_JoinExpr => {
             let j = jtnode.expect_joinexpr();
@@ -244,9 +240,7 @@ fn find_placeholders_recurse<'mcx>(
                 find_placeholders_recurse(root, rarg)?;
             }
             // Process the qual clauses.
-            if let Some(quals) = j.quals.as_deref().and_then(|n| n.as_expr()) {
-                find_placeholders_in_expr(root, quals)?;
-            }
+            find_placeholders_in_quals(root, j.quals.as_deref())?;
         }
         other => {
             panic!(
@@ -256,6 +250,48 @@ fn find_placeholders_recurse<'mcx>(
         }
     }
     Ok(())
+}
+
+/// Process a jointree node's `quals` field — the `Node *` that
+/// `find_placeholders_recurse` / `find_placeholders_in_jointree` pass to
+/// `find_placeholders_in_expr((Node *) f->quals, ...)` in C.
+///
+/// In C `f->quals` / `j->quals` is just cast to `(Node *)` and fed straight to
+/// `expression_tree_walker`, which descends into a `List` of clauses
+/// transparently. In this owned model the qual is one of two equivalent shapes
+/// (cf. `quals_implicit_and` in init-subselect's jointree.c port):
+///
+///   * `Node::Expr(e)` — a single qual expression (the common case), or
+///   * `Node::List([...])` — an already-imploded implicit-AND conjunct list
+///     (produced e.g. by `concat_quals` in `remove_useless_result_rtes`, or by
+///     the deparse/pullup of an outer-join WHERE clause).
+///
+/// `Expr::as_expr()` returns `None` for a `T_List` node, so a bare
+/// `as_expr()`-then-walk silently skipped the List form, leaving any
+/// PlaceHolderVars buried in a `List`-shaped qual unregistered until after
+/// `placeholdersFrozen` — the `too late to create a new PlaceHolderInfo` error.
+/// Mirror C: walk each element of a `List`, and a single `Expr` directly.
+fn find_placeholders_in_quals(
+    root: &mut PlannerInfo,
+    quals: Option<&types_nodes::nodes::Node<'_>>,
+) -> PgResult<()> {
+    match quals {
+        None => Ok(()),
+        Some(n) => {
+            if let Some(items) = n.as_list() {
+                for it in items.iter() {
+                    if let Some(e) = it.as_expr() {
+                        find_placeholders_in_expr(root, e)?;
+                    }
+                }
+                Ok(())
+            } else if let Some(e) = n.as_expr() {
+                find_placeholders_in_expr(root, e)
+            } else {
+                Ok(())
+            }
+        }
+    }
 }
 
 /// `find_placeholders_in_expr`
