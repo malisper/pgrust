@@ -544,4 +544,61 @@ pub fn register_jsonfuncs_builtins() {
         builtin(3207, "jsonb_array_length", 1, true, false, fc_jsonb_array_length),
         builtin(3956, "json_array_length", 1, true, false, fc_json_array_length),
     ]);
+
+    // The non-set json/jsonb record functions (`json[b]_populate_record`,
+    // `json[b]_to_record`, `jsonb_populate_record_valid`; `proretset => 'f'`).
+    // C lists them in `fmgr_builtins[]` like any other internal function — so
+    // `fmgr_info` must resolve them (by OID via `fmgr_isbuiltin`, by name via
+    // `fmgr_internal_function`), or a scalar `SELECT json_populate_record(...)`
+    // fails name resolution before evaluation. Their RESULT is the executor-frame
+    // record protocol, which the by-OID builtin dispatch's tag-only `resultinfo`
+    // ABI frame cannot carry (#327 dual-fcinfo-home), so the scalar
+    // `EEOP_FUNCEXPR` interpreter step routes these OIDs to execSRF's
+    // `invoke_scalar_record_function` instead of the builtin call address — these
+    // rows therefore register METADATA ONLY (`func: None`, no native body; the
+    // builtin address is never invoked). OIDs/nargs/strict transcribed from
+    // `pg_proc.dat` (`json[b]_populate_record` + `_valid` are `proisstrict => 'f'`;
+    // `*_to_record` default strict).
+    backend_utils_fmgr_core::register_builtins([
+        BuiltinFunction {
+            foid: 3960,
+            name: alloc::string::String::from("json_populate_record"),
+            nargs: 3,
+            strict: false,
+            retset: false,
+            func: None,
+        },
+        BuiltinFunction {
+            foid: 3209,
+            name: alloc::string::String::from("jsonb_populate_record"),
+            nargs: 2,
+            strict: false,
+            retset: false,
+            func: None,
+        },
+        BuiltinFunction {
+            foid: 6338,
+            name: alloc::string::String::from("jsonb_populate_record_valid"),
+            nargs: 2,
+            strict: false,
+            retset: false,
+            func: None,
+        },
+        BuiltinFunction {
+            foid: 3204,
+            name: alloc::string::String::from("json_to_record"),
+            nargs: 1,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+        BuiltinFunction {
+            foid: 3490,
+            name: alloc::string::String::from("jsonb_to_record"),
+            nargs: 1,
+            strict: true,
+            retset: false,
+            func: None,
+        },
+    ]);
 }

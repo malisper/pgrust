@@ -175,8 +175,24 @@ pub fn exec_func_step<'mcx>(
     // result is materialized into the per-query context.
     let mcx = estate.es_query_cxt;
     let fn_expr = func_step_fn_expr(state, op);
+
+    // The non-set json/jsonb record functions (`json[b]_populate_record`,
+    // `json[b]_to_record`, `jsonb_populate_record_valid`) are also callable as
+    // scalar expressions, but their worker resolves the result row type from the
+    // call's polymorphic argument (`get_call_result_type` off `fn_expr`) and runs
+    // on the executor-frame record protocol — the fmgr-core builtin table's
+    // tag-only `resultinfo` ABI frame cannot carry it (#327 dual-fcinfo-home). So
+    // dispatch them through execSRF, which builds the executor frame the worker
+    // needs. (C: these are ordinary `fmgr_builtins[]` rows; the dual-home split
+    // forces the routing here.)
     let (value, isnull) =
-        function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &nulls, fn_expr)?;
+        if backend_executor_execSRF_seams::is_scalar_record_function::call(fn_oid) {
+            backend_executor_execSRF_seams::invoke_scalar_record_function::call(
+                mcx, fn_oid, collation, &args, &nulls, fn_expr,
+            )?
+        } else {
+            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &nulls, fn_expr)?
+        };
 
     // *op->resvalue = d;  *op->resnull = fcinfo->isnull;
     crate::interp_loop::write_cell(state, resvalue_id, value, isnull);

@@ -104,3 +104,33 @@ seam_core::seam!(
         estate: &mut types_nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, types_nodes::funcapi::Tuplestorestate<'mcx>>>
 );
+
+seam_core::seam!(
+    /// `true` iff `foid` is a non-set json/jsonb record function
+    /// (`json[b]_populate_record` / `json[b]_to_record` /
+    /// `jsonb_populate_record_valid`) the scalar `EEOP_FUNCEXPR` interpreter step
+    /// must route through [`invoke_scalar_record_function`] rather than the
+    /// fmgr-core builtin table (whose tag-only `resultinfo` ABI frame cannot
+    /// carry the record protocol — the #327 dual-fcinfo-home). Infallible.
+    pub fn is_scalar_record_function(foid: types_core::Oid) -> bool
+);
+
+seam_core::seam!(
+    /// Dispatch a non-set json/jsonb record function as a scalar expression
+    /// (`SELECT json_populate_record(null::jpop, '{...}')`). Builds the
+    /// executor-frame call frame the `populate_record_worker` requires (a real
+    /// `FmgrInfo` carrying `fn_oid` + the call node's `fn_expr` for the
+    /// polymorphic result-type resolution, the `fn_mcxt` per-call arena, the
+    /// by-value/by-reference split argument frame) from the interpreter's
+    /// canonical `Datum` argument vector, then runs the worker through the
+    /// execSRF by-OID table. Returns `(result_datum, isnull)` — the single
+    /// composite row or SQL NULL. Fallible on `ereport(ERROR)` from the worker.
+    pub fn invoke_scalar_record_function<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        foid: types_core::Oid,
+        collation: types_core::Oid,
+        args: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+        nulls: &[bool],
+        fn_expr: Option<types_core::fmgr::FnExprErased>,
+    ) -> types_error::PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)>
+);

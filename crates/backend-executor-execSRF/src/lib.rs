@@ -94,6 +94,7 @@ mod pg_mcv_list_items;
 mod shmem_numa_srf;
 mod system_srf;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
+pub use json_record::{invoke_scalar_record_function, is_scalar_record_function};
 
 #[cfg(test)]
 mod tests;
@@ -105,6 +106,8 @@ pub fn init_seams() {
     seams::exec_make_table_function_result::set(ExecMakeTableFunctionResult);
     seams::exec_init_function_result_set::set(ExecInitFunctionResultSet);
     seams::exec_make_function_result_set::set(ExecMakeFunctionResultSet);
+    seams::is_scalar_record_function::set(json_record::is_scalar_record_function);
+    seams::invoke_scalar_record_function::set(json_record::invoke_scalar_record_function);
     // The executor-frame `fmgrtab` analogue for the int4/int8 generate_series
     // SRFs (the by-OID builtin registry's tag-only resultinfo can't carry the
     // live ReturnSetInfo — WONTFIX dual-home).

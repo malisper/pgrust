@@ -9332,6 +9332,7 @@ dependencies = [
  "backend-commands-sequence-seams",
  "backend-executor-execExpr-seams",
  "backend-executor-execExprInterp-seams",
+ "backend-executor-execSRF-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-nodeAgg",
  "backend-executor-nodeSubplan-seams",
@@ -9892,6 +9893,7 @@ version = "0.0.0"
 dependencies = [
  "mcx",
  "seam-core",
+ "types-core",
  "types-error",
  "types-nodes",
  "types-tuple",

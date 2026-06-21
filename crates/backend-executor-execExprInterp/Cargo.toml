@@ -41,6 +41,12 @@ backend-executor-execExprInterp-seams = { path = "../backend-executor-execExprIn
 
 # Seams into unported owners the interpreter calls.
 backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+# Scalar dispatch of the non-set json/jsonb record functions
+# (json[b]_populate_record / json[b]_to_record / jsonb_populate_record_valid):
+# these reach their worker only through execSRF's record protocol, not the
+# fmgr-core builtin table, so the scalar EEOP_FUNCEXPR step routes them via this
+# seam. Seam crate only (execSRF itself transitively deps this interp crate).
+backend-executor-execSRF-seams = { path = "../backend-executor-execSRF-seams" }
 # AggStateData + AggStatePer* now live in their real owner nodeAgg (relocated out
 # of types-nodes for the logtape registry retire). nodeAgg deps only the SEAM
 # crates of execExpr*/execProcnode etc., not these owner crates, so no cycle.

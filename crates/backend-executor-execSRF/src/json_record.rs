@@ -187,3 +187,128 @@ fn jsonb_populate_recordset<'mcx>(
     let fc = unsafe { reborrow_mcx(fcinfo) };
     backend_utils_adt_jsonfuncs::recordset::jsonb_populate_recordset(mcx, fc)
 }
+
+// ===========================================================================
+//  Scalar-expression entry for the NON-SET record family.
+//
+//  `json[b]_populate_record`, `json[b]_to_record`, and `jsonb_populate_record_valid`
+//  are `proretset => 'f'`: they are also callable as ordinary scalar expressions
+//  (`SELECT json_populate_record(null::jpop, '{...}')`), where the result row
+//  type is resolved from the call's polymorphic argument (`get_call_result_type`
+//  off `flinfo->fn_expr`), NOT from a FROM-clause `AS (col type)` list. The
+//  scalar `EEOP_FUNCEXPR` interpreter step routes these OIDs here instead of the
+//  by-OID fmgr-core builtin table (whose tag-only `resultinfo` ABI frame cannot
+//  carry the live record protocol — the WONTFIX dual-home documented above).
+//
+//  This builds the executor-frame [`FunctionCallInfoBaseData`] the workers
+//  require (a real `FmgrInfo` carrying `fn_oid` + the call node's `fn_expr`, the
+//  `fn_mcxt` per-call arena, the by-value/by-reference split argument frame) from
+//  the interpreter's canonical `Datum` argument vector, then dispatches through
+//  the same `srf_invoke_by_oid` table the FROM-clause path uses. The non-set
+//  `*_record` workers return the single composite row (or SQL NULL) directly as
+//  the `SrfDispatch::Builtin` datum.
+// ===========================================================================
+
+/// `true` iff `foid` is one of the non-set json/jsonb record functions this
+/// module serves as a scalar expression (the interpreter consults this to route
+/// the call here rather than through the fmgr-core builtin table).
+pub fn is_scalar_record_function(foid: Oid) -> bool {
+    matches!(
+        foid,
+        JSON_TO_RECORD
+            | JSONB_TO_RECORD
+            | JSON_POPULATE_RECORD
+            | JSONB_POPULATE_RECORD
+            | JSONB_POPULATE_RECORD_VALID
+    )
+}
+
+/// Convert one interpreter-canonical argument into the executor-frame call
+/// frame's `(NullableDatum, ref_args[i])` split (mirrors fmgr-core's
+/// `datum_to_ref_arg`): a by-value word stays in `args[i].value`; a by-reference
+/// varlena/composite/cstring rides the `ref_args[i]` side channel as the
+/// header-ful image the `srf_arg_*` readers consume.
+fn canon_arg_to_frame<'mcx>(
+    val: &Datum<'mcx>,
+    isnull: bool,
+) -> (types_datum::NullableDatum, Option<types_nodes::fmgr::FmgrArgRef>) {
+    use types_datum::NullableDatum;
+    use types_nodes::fmgr::FmgrArgRef;
+    if isnull {
+        return (NullableDatum::null(), None);
+    }
+    match val {
+        Datum::ByVal(w) => (
+            NullableDatum::value(types_datum::Datum::from_usize(*w)),
+            None,
+        ),
+        Datum::ByRef(bytes) => (
+            NullableDatum::value(types_datum::Datum::from_usize(0)),
+            Some(FmgrArgRef::Varlena(bytes.as_slice().to_vec())),
+        ),
+        // A composite Datum is varlena-shaped: its header-ful disk image is what
+        // `srf_arg_record` reads (`FmgrArgRef::Varlena`), the inverse of
+        // `from_datum_image`.
+        Datum::Composite(t) => (
+            NullableDatum::value(types_datum::Datum::from_usize(0)),
+            Some(FmgrArgRef::Varlena(t.to_datum_image())),
+        ),
+        Datum::Cstring(s) => (
+            NullableDatum::value(types_datum::Datum::from_usize(0)),
+            Some(FmgrArgRef::Cstring(s.clone())),
+        ),
+        Datum::Expanded(_) | Datum::Internal(_) => (
+            NullableDatum::value(types_datum::Datum::from_usize(0)),
+            None,
+        ),
+    }
+}
+
+/// Dispatch a non-set json/jsonb record function as a scalar expression.
+///
+/// `args`/`nulls` are the interpreter's gathered canonical argument vector;
+/// `fn_expr` is the call node `ExecInitFunc` stamped onto the step's `FmgrInfo`
+/// (the polymorphic result-type source). Returns `(result_datum, isnull)` —
+/// the single composite row or SQL NULL.
+pub fn invoke_scalar_record_function<'mcx>(
+    mcx: Mcx<'mcx>,
+    foid: Oid,
+    collation: Oid,
+    args: &[Datum<'mcx>],
+    nulls: &[bool],
+    fn_expr: Option<types_core::fmgr::FnExprErased>,
+) -> PgResult<(Datum<'mcx>, bool)> {
+    let mut flinfo = types_core::fmgr::FmgrInfo::empty();
+    flinfo.fn_oid = foid;
+    flinfo.fn_expr = fn_expr;
+
+    let mut fcinfo: FunctionCallInfoBaseData<'mcx> = FunctionCallInfoBaseData {
+        flinfo: Some(flinfo),
+        context: None,
+        resultinfo: None,
+        fncollation: collation,
+        isnull: false,
+        nargs: args.len() as i16,
+        args: alloc::vec::Vec::with_capacity(args.len()),
+        ref_args: alloc::vec::Vec::with_capacity(args.len()),
+        // The per-call arena the workers charge the composite result / cache to
+        // (C: `fcinfo->flinfo->fn_mcxt`); for a scalar call this is the caller's
+        // per-query context.
+        fn_mcxt: Some(mcx),
+        ..Default::default()
+    };
+    for (i, val) in args.iter().enumerate() {
+        let (nd, refp) = canon_arg_to_frame(val, nulls.get(i).copied().unwrap_or(false));
+        fcinfo.args.push(nd);
+        fcinfo.ref_args.push(refp);
+    }
+
+    let dispatch = crate::srf_invoke_by_oid(foid, &mut fcinfo)?;
+    let isnull = fcinfo.isnull;
+    match dispatch {
+        crate::srf_registry::SrfDispatch::Builtin(d) => Ok((d, isnull)),
+        crate::srf_registry::SrfDispatch::Materialized(_) => Err(types_error::PgError::error(
+            "invoke_scalar_record_function: non-set record function unexpectedly materialized",
+        )),
+    }
+}
