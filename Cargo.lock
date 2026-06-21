@@ -566,8 +566,18 @@ name = "backend-access-common-session"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-session-seams",
+ "backend-access-transam-parallel-rt-seams",
+ "backend-lib-dshash-seams",
+ "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-shm-toc",
+ "backend-utils-cache-typcache-seams",
+ "backend-utils-error",
+ "backend-utils-mmgr-dsa-seams",
+ "backend-utils-mmgr-mcxt-seams",
  "mcx",
+ "types-core",
  "types-error",
+ "types-execparallel",
  "types-storage",
  "types-tuple",
 ]

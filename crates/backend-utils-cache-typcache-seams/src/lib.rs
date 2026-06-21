@@ -36,6 +36,54 @@ seam_core::seam!(
     ) -> bool
 );
 
+seam_core::seam!(
+    /// The import leg of `SharedRecordTypmodRegistryInit` (typcache.c:2230):
+    /// copy each present `RecordCacheArray[typmod].tupdesc` into the DSA area
+    /// (`share_tupledesc`) and insert into the typmod + record tables, and seed
+    /// `*next_typmod` from `NextRecordTypmod`. The table/area/next-typmod
+    /// pointers cross as `usize` (the session owns the DSM storage; typcache
+    /// owns the cache). No-op when the local cache is empty (the common case).
+    pub fn shared_registry_import(
+        record_table: usize,
+        typmod_table: usize,
+        area: usize,
+        next_typmod: usize,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// The precondition check of `SharedRecordTypmodRegistryAttach`
+    /// (typcache.c:2322): assert `NextRecordTypmod == 0` (a fresh worker).
+    pub fn shared_registry_attach_check() -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `find_or_make_matching_shared_tupledesc(tupdesc)` (typcache.c:2943) —
+    /// the attached-registry path. Looks up / inserts a structurally matching
+    /// shared `TupleDesc` in the record table, returning a copy in `mcx` with
+    /// its assigned `tdtypmod`. Table/area/next-typmod pointers cross as `usize`.
+    pub fn find_or_make_matching_shared_tupledesc<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+        record_table: usize,
+        typmod_table: usize,
+        area: usize,
+        next_typmod: usize,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>>
+);
+
+seam_core::seam!(
+    /// The shared-typmod-table read of `lookup_rowtype_tupdesc_internal`
+    /// (typcache.c:1855): look up `typmod` in the attached typmod table and
+    /// return a copy of the shared descriptor in `mcx`, or `None` on miss.
+    pub fn shared_typmod_table_find<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        typmod: i32,
+        typmod_table: usize,
+        area: usize,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>>
+);
+
 // ---------------------------------------------------------------------------
 // Extensions for the `backend-utils-adt-array-typanalyze` unit
 // (`utils/adt/array_typanalyze.c`).

@@ -56,41 +56,111 @@
 #![allow(non_snake_case)]
 
 use std::cell::RefCell;
+use std::sync::atomic::AtomicU32;
 
 use mcx::{Mcx, MemoryContext, PgBox};
-use types_error::PgResult;
-use types_storage::storage::{dsm_handle, DSM_HANDLE_INVALID};
+use types_error::{PgResult, ERROR};
+use backend_utils_error::ereport;
+use types_storage::storage::{dsm_handle, shm_toc_estimator, DSM_HANDLE_INVALID};
+use types_storage::{
+    dshash_table_handle, DsaArea, DshashKeyKind, DshashParameters, DshashTable,
+    LWTRANCHE_PER_SESSION_DSA, LWTRANCHE_PER_SESSION_RECORD_TYPE,
+    LWTRANCHE_PER_SESSION_RECORD_TYPMOD,
+};
+use types_execparallel::{DsmSegmentHandle, SerializeCursor};
 use types_tuple::heaptuple::TupleDescData;
 
-/// `dshash_table *` — the opaque backend-local handle to a shared hash table.
-/// Modeled as the raw pointer the dshash port hands out; `Session` only stores
-/// it (the registry logic lives in `typcache.c`).
-type DshashTablePtr = *mut types_tuple_dshash_placeholder::Never;
+use backend_storage_ipc_dsm_core::dsm::{
+    self, dsm_segment_address, dsm_segment_handle, DsmSegment, DsmSegmentId,
+    DSM_CREATE_NULL_IF_MAXSEGMENTS,
+};
+use backend_storage_ipc_shm_toc::{
+    shm_toc_estimate, shm_toc_estimate_chunk, shm_toc_estimate_keys,
+    shm_toc_initialize_estimator, ShmToc,
+};
+use backend_utils_mmgr_dsa_seams as dsa;
+use backend_utils_mmgr_mcxt_seams::top_memory_context;
+use backend_lib_dshash_seams as dshash;
 
-// We do not depend on `backend-lib-dshash` / `backend-utils-mmgr-dsa` here:
-// `Session` only *holds* the handles, and the four entry points that would
-// dereference them are keystone-blocked and not installed (see module docs).
-// Holding them as raw pointers mirrors the C struct's `dsm_segment *` /
-// `dsa_area *` / `dshash_table *` fields without pulling the substrate crates
-// in for code that cannot yet run.
-mod types_tuple_dshash_placeholder {
-    /// Uninhabited marker: `Session`'s registry/table fields are raw pointers
-    /// that are always NULL on the paths this crate currently serves. The
-    /// pointee type is never named or dereferenced.
-    pub enum Never {}
-}
+/// `SESSION_MAGIC` — magic number for the per-session DSM TOC (session.c:29).
+const SESSION_MAGIC: u64 = 0xabb0fbc9;
+/// `SESSION_DSA_SIZE` — enough to hold a very small registry (session.c:38).
+const SESSION_DSA_SIZE: usize = 0x30000;
+/// `SESSION_KEY_DSA` (session.c:43).
+const SESSION_KEY_DSA: u64 = 0xFFFF_FFFF_FFFF_0001;
+/// `SESSION_KEY_RECORD_TYPMOD_REGISTRY` (session.c:44).
+const SESSION_KEY_RECORD_TYPMOD_REGISTRY: u64 = 0xFFFF_FFFF_FFFF_0002;
 
-/// `struct SharedRecordTypmodRegistry` (typcache.c). Its *layout* is private to
-/// typcache.c; `Session` only stores a pointer to it, and the sole entry point
-/// this crate serves for it is `SharedRecordTypmodRegistryEstimate`, which
-/// returns `sizeof(SharedRecordTypmodRegistry)`. The three members are
-/// `dshash_table_handle record_table_handle`, `dshash_table_handle
-/// typmod_table_handle`, `pg_atomic_uint32 next_typmod`.
+/// `struct SharedRecordTypmodRegistry` (typcache.c:178). Lives in the per-session
+/// DSM segment (a `shm_toc` chunk), shared across leader and workers, so it is
+/// `#[repr(C)]` with a shared atomic `next_typmod`.
 #[repr(C)]
 struct SharedRecordTypmodRegistry {
-    record_table_handle: u64,
-    typmod_table_handle: u64,
-    next_typmod: u32,
+    /// `dshash_table_handle record_table_handle`.
+    record_table_handle: dshash_table_handle,
+    /// `dshash_table_handle typmod_table_handle`.
+    typmod_table_handle: dshash_table_handle,
+    /// `pg_atomic_uint32 next_typmod`.
+    next_typmod: AtomicU32,
+}
+
+/// `struct SharedRecordTableKey` (typcache.c:196) — a record-table key that
+/// holds either a backend-local `TupleDesc *` or a shared `dsa_pointer`. The
+/// custom `DshashKeyKind::Record` callbacks resolve it to a `TupleDesc`. The
+/// layout mirrors the C union+bool exactly: a pointer-sized union followed by a
+/// `bool`, padded to pointer alignment.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SharedRecordTableKey {
+    /// `union { TupleDesc local_tupdesc; dsa_pointer shared_tupdesc; }` — both
+    /// pointer-sized; stored as the raw `u64` bit pattern.
+    u: u64,
+    /// `bool shared`.
+    shared: bool,
+}
+
+/// `struct SharedRecordTableEntry` (typcache.c:211).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SharedRecordTableEntry {
+    key: SharedRecordTableKey,
+}
+
+/// `struct SharedTypmodTableEntry` (typcache.c:220).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SharedTypmodTableEntry {
+    typmod: u32,
+    shared_tupdesc: u64,
+}
+
+/// `srtr_record_table_params` (typcache.c:275): the registry's TupleDesc table,
+/// keyed by a `SharedRecordTableKey` via the custom `Record` callbacks.
+fn srtr_record_table_params() -> DshashParameters {
+    DshashParameters {
+        key_size: core::mem::size_of::<SharedRecordTableKey>(),
+        entry_size: core::mem::size_of::<SharedRecordTableEntry>(),
+        key_kind: DshashKeyKind::Record,
+        tranche_id: LWTRANCHE_PER_SESSION_RECORD_TYPE,
+    }
+}
+
+/// `srtr_typmod_table_params` (typcache.c:285): the registry's typmod table,
+/// keyed by a `uint32` typmod via the built-in binary callbacks.
+fn srtr_typmod_table_params() -> DshashParameters {
+    DshashParameters {
+        key_size: core::mem::size_of::<u32>(),
+        entry_size: core::mem::size_of::<SharedTypmodTableEntry>(),
+        key_kind: DshashKeyKind::Binary,
+        tranche_id: LWTRANCHE_PER_SESSION_RECORD_TYPMOD,
+    }
+}
+
+/// Raw pointer to the registry's `next_typmod` atomic, for the typcache import
+/// seam to seed from `NextRecordTypmod`.
+fn registry_next_typmod_ptr(registry: *mut SharedRecordTypmodRegistry) -> *mut AtomicU32 {
+    // SAFETY: `registry` addresses a live `SharedRecordTypmodRegistry`.
+    unsafe { core::ptr::addr_of_mut!((*registry).next_typmod) }
 }
 
 /// `typedef struct Session` (`access/session.h`).
@@ -104,18 +174,20 @@ struct SharedRecordTypmodRegistry {
 // keystone-blocked (not installed); they are present so the struct stays
 // faithful and the install lands without re-layout when dshash gains a custom
 // key kind.
-#[allow(dead_code)]
 struct Session {
-    /// `dsm_segment *segment` — the session-scoped DSM segment.
-    segment: *mut core::ffi::c_void,
-    /// `dsa_area *area` — the session-scoped DSA area.
-    area: *mut core::ffi::c_void,
-    /// `struct SharedRecordTypmodRegistry *shared_typmod_registry`.
+    /// `dsm_segment *segment` — the session-scoped DSM segment (its id, the
+    /// owned-value substitute for the `dsm_segment *`). `None` until created.
+    segment: Option<DsmSegmentId>,
+    /// `dsa_area *area` — the session-scoped DSA area handle. `None` until
+    /// created. Stored as the `*mut DsaArea` the dshash/dsa seams consume.
+    area: *mut DsaArea,
+    /// `struct SharedRecordTypmodRegistry *shared_typmod_registry` — points into
+    /// the per-session DSM segment.
     shared_typmod_registry: *mut SharedRecordTypmodRegistry,
     /// `dshash_table *shared_record_table`.
-    shared_record_table: DshashTablePtr,
+    shared_record_table: *mut DshashTable,
     /// `dshash_table *shared_typmod_table`.
-    shared_typmod_table: DshashTablePtr,
+    shared_typmod_table: *mut DshashTable,
 }
 
 impl Session {
@@ -123,7 +195,7 @@ impl Session {
     /// (all-NULL) Session.
     const fn zeroed() -> Self {
         Session {
-            segment: core::ptr::null_mut(),
+            segment: None,
             area: core::ptr::null_mut(),
             shared_typmod_registry: core::ptr::null_mut(),
             shared_record_table: core::ptr::null_mut(),
@@ -176,24 +248,214 @@ fn initialize_session() -> PgResult<()> {
 /// parallel leader (`InitializeParallelDSM`) sets `nworkers = 0` and runs the
 /// whole operation itself in backend-private memory — the leader-only path.
 ///
-/// In a single backend `CurrentSession->segment` is always NULL (no segment was
-/// ever created), so the early-return is never taken. Setting up a working
-/// segment requires populating it with a `SharedRecordTypmodRegistry` whose
-/// record/typmod tables are dshash tables keyed by caller-supplied
-/// compare/hash callbacks over the session DSA area — the keystone-blocked path
-/// documented in `SharedRecordTypmodRegistryInit` / `shared_registry_init`
-/// (the dshash substrate has no custom-callback key kind yet). Because that
-/// state cannot be constructed, no usable session segment can be created here:
-/// the faithful outcome is C's sanctioned "lack of resources" return,
-/// `DSM_HANDLE_INVALID`, which the leader handles by falling back to a
-/// leader-only run. When the dshash custom-callback keystone lands, this body
-/// gains the real `dsm_create` + `SharedRecordTypmodRegistryInit` segment-setup
-/// leg (session.c:90-148) and starts returning a live handle.
+/// The segment holds a `shm_toc` with two chunks: the per-session DSA area
+/// (`SESSION_KEY_DSA`) and the shared record-typmod registry
+/// (`SESSION_KEY_RECORD_TYPMOD_REGISTRY`). `SharedRecordTypmodRegistryInit`
+/// builds the registry (its record/typmod dshash tables) over that DSA area and
+/// imports this backend's local `RecordCacheArray`.
 fn get_session_dsm_handle() -> PgResult<dsm_handle> {
-    // CurrentSession->segment is always NULL in a single backend; the segment
-    // setup leg (which requires the keystone-blocked shared typmod registry)
-    // can't produce a usable segment, so report lack of resources.
-    Ok(DSM_HANDLE_INVALID)
+    // If we already created a session-scope segment, return its handle.
+    if let Some(seg_id) = CURRENT_SESSION.with(|s| s.borrow().as_ref().and_then(|x| x.segment)) {
+        return Ok(dsm_segment_handle(seg_id));
+    }
+
+    // dsm/dsa/toc descriptors are allocated in TopMemoryContext (C global), so
+    // they outlive this (possibly short-lived) caller context.
+    let top = top_memory_context::call();
+
+    // Estimate space for the DSA area and the registry header.
+    let mut estimator: shm_toc_estimator = shm_toc_estimator::default();
+    shm_toc_initialize_estimator(&mut estimator);
+    shm_toc_estimate_keys(&mut estimator, 1)?;
+    shm_toc_estimate_chunk(&mut estimator, SESSION_DSA_SIZE)?;
+    let typmod_registry_size = shared_registry_estimate();
+    shm_toc_estimate_keys(&mut estimator, 1)?;
+    shm_toc_estimate_chunk(&mut estimator, typmod_registry_size)?;
+    let size = shm_toc_estimate(&estimator)?;
+
+    // Set up the segment. On max-segments, return INVALID (leader-only fallback).
+    let seg: DsmSegment = match dsm::dsm_create(size, DSM_CREATE_NULL_IF_MAXSEGMENTS, top)? {
+        Some(seg) => seg,
+        None => return Ok(DSM_HANDLE_INVALID),
+    };
+    let seg_id = seg.id();
+    let base = dsm_segment_address(seg_id);
+    let base_nn = core::ptr::NonNull::new(base).expect("dsm segment base is non-null");
+    // SAFETY: `base` addresses `>= size` writable bytes of the fresh segment.
+    let toc = unsafe { ShmToc::create(SESSION_MAGIC, base_nn, size) };
+
+    // Create the per-session DSA area in place.
+    let dsa_space = toc.allocate(SESSION_DSA_SIZE)?;
+    let dsa_cursor = SerializeCursor(dsa_space.as_ptr() as usize);
+    let seg_handle = DsmSegmentHandle(seg_id.as_u64() as usize);
+    let area_handle =
+        dsa::dsa_create_in_place::call(dsa_cursor, SESSION_DSA_SIZE, LWTRANCHE_PER_SESSION_DSA, seg_handle);
+    let area: *mut DsaArea = area_handle.0 as *mut DsaArea;
+    // SAFETY: as above; the DSA chunk lives in the segment.
+    unsafe { toc.insert(SESSION_KEY_DSA, dsa_space)? };
+
+    // Make the segment/area available to the registry init (it reads
+    // CurrentSession->area).
+    CURRENT_SESSION.with(|s| {
+        let mut slot = s.borrow_mut();
+        let sess = slot.as_mut().expect("CurrentSession");
+        sess.segment = Some(seg_id);
+        sess.area = area;
+    });
+
+    // Create the session-scoped shared record typmod registry in place.
+    let registry_space = toc.allocate(typmod_registry_size)?;
+    let registry = registry_space.as_ptr() as *mut SharedRecordTypmodRegistry;
+    // SAFETY: `registry` addresses a fresh `typmod_registry_size`-byte chunk in
+    // the segment; init writes the header and imports the local cache.
+    init_shared_record_typmod_registry(registry, area)?;
+    // SAFETY: as above.
+    unsafe { toc.insert(SESSION_KEY_RECORD_TYPMOD_REGISTRY, registry_space)? };
+
+    // Pin the mapping for the rest of this backend's life.
+    dsa::dsa_pin_mapping::call(area)?;
+    // dsm_pin_mapping consumes the segment value (resowner = NULL).
+    let pinned_id = dsm::dsm_pin_mapping(seg);
+    debug_assert_eq!(pinned_id.as_u64(), seg_id.as_u64());
+
+    Ok(dsm_segment_handle(seg_id))
+}
+
+/// `SharedRecordTypmodRegistryInit(registry, segment, area)` (typcache.c:2197).
+///
+/// Creates the registry's two dshash tables over the session DSA area and
+/// imports this backend's local `RecordCacheArray` (via the typcache-owned
+/// `shared_registry_init` seam, which calls back into `share_tupledesc` /
+/// the record+typmod table inserts). The record table uses the custom
+/// `DshashKeyKind::Record` callbacks (typcache `shared_record_key_*`).
+fn init_shared_record_typmod_registry(
+    registry: *mut SharedRecordTypmodRegistry,
+    area: *mut DsaArea,
+) -> PgResult<()> {
+    // Create the record/typmod tables (empty). The record table's `arg` is the
+    // area (its Record callbacks resolve dsa_pointers); we pass it as the
+    // table's area.
+    let record_table = dshash::dshash_create::call(area, srtr_record_table_params())?;
+    let typmod_table = dshash::dshash_create::call(area, srtr_typmod_table_params())?;
+
+    // SAFETY: `registry` addresses a fresh registry-sized chunk in the segment.
+    unsafe {
+        (*registry).record_table_handle = dshash::dshash_get_hash_table_handle::call(record_table);
+        (*registry).typmod_table_handle = dshash::dshash_get_hash_table_handle::call(typmod_table);
+        core::ptr::addr_of_mut!((*registry).next_typmod).write(AtomicU32::new(0));
+    }
+
+    // Store the tables on the current session BEFORE importing, so the record
+    // table's Record callbacks (which resolve via CurrentSession->area) work.
+    CURRENT_SESSION.with(|s| {
+        let mut slot = s.borrow_mut();
+        let sess = slot.as_mut().expect("CurrentSession");
+        sess.shared_record_table = record_table;
+        sess.shared_typmod_table = typmod_table;
+        sess.shared_typmod_registry = registry;
+    });
+
+    // Import the local RecordCacheArray into the shared tables. The typcache
+    // owner copies each (typmod, tupdesc) into the DSA area (share_tupledesc)
+    // and inserts into both tables, and stores `NextRecordTypmod` into
+    // `registry->next_typmod`. For the common case (no blessed record types)
+    // this is a no-op and the tables stay empty.
+    backend_utils_cache_typcache_seams::shared_registry_import::call(
+        record_table as usize,
+        typmod_table as usize,
+        area as usize,
+        registry_next_typmod_ptr(registry) as usize,
+    )?;
+
+    Ok(())
+}
+
+/// `AttachSession(dsm_handle handle)` (session.c:154) — worker-side: attach to
+/// the leader's per-session DSM segment, its DSA area, and the shared record
+/// typmod registry.
+fn attach_session(handle: dsm_handle) -> PgResult<()> {
+    let top = top_memory_context::call();
+
+    // Attach to the DSM segment.
+    let seg: DsmSegment = match dsm::dsm_attach(handle, top)? {
+        Some(seg) => seg,
+        None => {
+            return Err(ereport(ERROR)
+                .errmsg_internal("could not attach to per-session DSM segment")
+                .into_error())
+        }
+    };
+    let seg_id = seg.id();
+    let base = dsm_segment_address(seg_id);
+    let base_nn = core::ptr::NonNull::new(base).expect("dsm segment base is non-null");
+    // SAFETY: `base` addresses the attached segment's mapped bytes.
+    let toc = match unsafe { ShmToc::attach(SESSION_MAGIC, base_nn) } {
+        Some(toc) => toc,
+        None => {
+            return Err(ereport(ERROR)
+                .errmsg_internal("bad magic number in per-session DSM segment")
+                .into_error())
+        }
+    };
+
+    // Attach to the DSA area.
+    let dsa_space = toc
+        .lookup(SESSION_KEY_DSA, false)?
+        .expect("SESSION_KEY_DSA present");
+    let dsa_cursor = SerializeCursor(dsa_space.as_ptr() as usize);
+    let seg_handle = DsmSegmentHandle(seg_id.as_u64() as usize);
+    let area_handle = dsa::dsa_attach_in_place::call(dsa_cursor, seg_handle);
+    let area: *mut DsaArea = area_handle.0 as *mut DsaArea;
+
+    CURRENT_SESSION.with(|s| {
+        let mut slot = s.borrow_mut();
+        let sess = slot.as_mut().expect("CurrentSession");
+        sess.segment = Some(seg_id);
+        sess.area = area;
+    });
+
+    // Attach to the shared record typmod registry.
+    let registry_space = toc
+        .lookup(SESSION_KEY_RECORD_TYPMOD_REGISTRY, false)?
+        .expect("SESSION_KEY_RECORD_TYPMOD_REGISTRY present");
+    let registry = registry_space.as_ptr() as *mut SharedRecordTypmodRegistry;
+    attach_shared_record_typmod_registry(registry, area)?;
+
+    // Remain attached until end of backend or DetachSession().
+    dsa::dsa_pin_mapping::call(area)?;
+    let _ = dsm::dsm_pin_mapping(seg);
+
+    Ok(())
+}
+
+/// `SharedRecordTypmodRegistryAttach(registry)` (typcache.c:2300) — worker-side:
+/// attach to the registry's two dshash tables (this backend's local cache must
+/// be empty, asserted in the typcache owner).
+fn attach_shared_record_typmod_registry(
+    registry: *mut SharedRecordTypmodRegistry,
+    area: *mut DsaArea,
+) -> PgResult<()> {
+    // SAFETY: `registry` addresses the shared registry header in the segment.
+    let (record_handle, typmod_handle) =
+        unsafe { ((*registry).record_table_handle, (*registry).typmod_table_handle) };
+
+    let record_table =
+        dshash::dshash_attach::call(area, srtr_record_table_params(), record_handle)?;
+    let typmod_table =
+        dshash::dshash_attach::call(area, srtr_typmod_table_params(), typmod_handle)?;
+
+    // Let the typcache owner verify NextRecordTypmod == 0 (its precondition).
+    backend_utils_cache_typcache_seams::shared_registry_attach_check::call()?;
+
+    CURRENT_SESSION.with(|s| {
+        let mut slot = s.borrow_mut();
+        let sess = slot.as_mut().expect("CurrentSession");
+        sess.shared_typmod_registry = registry;
+        sess.shared_record_table = record_table;
+        sess.shared_typmod_table = typmod_table;
+    });
+
+    Ok(())
 }
 
 /// `SharedRecordTypmodRegistryEstimate(void)` (typcache.c:2174).
@@ -231,30 +493,86 @@ fn shared_registry_attached() -> bool {
 /// keeps a loud panic rather than a silent stub. It is unreachable in a single
 /// backend.
 fn find_or_make_matching_shared_tupledesc<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _tupdesc: &TupleDescData<'_>,
+    mcx: Mcx<'mcx>,
+    tupdesc: &TupleDescData<'_>,
 ) -> PgResult<Option<PgBox<'mcx, TupleDescData<'mcx>>>> {
-    // If not even attached, nothing to do.
+    // If not even attached, nothing to do (the only case for non-record-type
+    // queries — including the parallel count(*) common case).
     if !shared_registry_attached() {
         return Ok(None);
     }
 
-    // Attached (parallel) path: dshash record/typmod tables keyed by a
-    // caller-supplied compare/hash over the DSA area. Not expressible over the
-    // current dshash substrate (see module docs). Loud panic, never a stub.
-    panic!(
-        "find_or_make_matching_shared_tupledesc: shared registry attached path \
-         requires dshash custom-callback support (keystone-blocked)"
-    );
+    // Attached (parallel) path: the record/typmod dshash tables are owned by
+    // the session but the share_tupledesc / find logic is typcache's; delegate.
+    let (record_table, typmod_table, area, registry) = CURRENT_SESSION.with(|s| {
+        let b = s.borrow();
+        let sess = b.as_ref().expect("CurrentSession");
+        (
+            sess.shared_record_table as usize,
+            sess.shared_typmod_table as usize,
+            sess.area as usize,
+            sess.shared_typmod_registry as usize,
+        )
+    });
+    backend_utils_cache_typcache_seams::find_or_make_matching_shared_tupledesc::call(
+        mcx,
+        tupdesc,
+        record_table,
+        typmod_table,
+        area,
+        registry_next_typmod_ptr(registry as *mut SharedRecordTypmodRegistry) as usize,
+    )
+}
+
+/// `shared_typmod_table_find(typmod)` — the shared path of
+/// `lookup_rowtype_tupdesc_internal`. Returns a copy of the shared descriptor
+/// for `typmod` in `mcx`, or `None` when not attached / miss. Delegates the
+/// attached-table read to the typcache owner.
+fn shared_typmod_table_find<'mcx>(
+    mcx: Mcx<'mcx>,
+    typmod: i32,
+) -> PgResult<Option<PgBox<'mcx, TupleDescData<'mcx>>>> {
+    if !shared_registry_attached() {
+        return Ok(None);
+    }
+    let (typmod_table, area) = CURRENT_SESSION.with(|s| {
+        let b = s.borrow();
+        let sess = b.as_ref().expect("CurrentSession");
+        (sess.shared_typmod_table as usize, sess.area as usize)
+    });
+    backend_utils_cache_typcache_seams::shared_typmod_table_find::call(
+        mcx,
+        typmod,
+        typmod_table,
+        area,
+    )
+}
+
+/// `DetachSession(void)` (session.c:200) — detach this backend from the session
+/// DSM segment (runs detach hooks) and DSA area.
+fn detach_session() -> PgResult<()> {
+    let (seg, area) = CURRENT_SESSION.with(|s| {
+        let b = s.borrow();
+        let sess = b.as_ref().expect("CurrentSession");
+        (sess.segment, sess.area)
+    });
+    if let Some(seg_id) = seg {
+        // dsm_detach(CurrentSession->segment) — runs detach hooks.
+        dsm::dsm_detach(seg_id)?;
+    }
+    if !area.is_null() {
+        dsa::dsa_detach::call(types_execparallel::DsaAreaHandle(area as usize));
+    }
+    CURRENT_SESSION.with(|s| {
+        let mut b = s.borrow_mut();
+        let sess = b.as_mut().expect("CurrentSession");
+        sess.segment = None;
+        sess.area = core::ptr::null_mut();
+    });
+    Ok(())
 }
 
 /// Install the session seams this crate owns.
-///
-/// Only the two seams whose faithful bodies are expressible over the current
-/// substrate are installed (`initialize_session`, `shared_registry_estimate`).
-/// The four record-table-dependent registry seams are keystone-blocked on
-/// dshash custom-callback support (see module docs) and intentionally keep
-/// their loud default-panic rather than a silent stub.
 pub fn init_seams() {
     backend_access_common_session_seams::initialize_session::set(initialize_session);
     backend_access_common_session_seams::get_session_dsm_handle::set(get_session_dsm_handle);
@@ -263,4 +581,9 @@ pub fn init_seams() {
     backend_access_common_session_seams::find_or_make_matching_shared_tupledesc::set(
         find_or_make_matching_shared_tupledesc,
     );
+    backend_access_common_session_seams::shared_typmod_table_find::set(shared_typmod_table_find);
+    // AttachSession / DetachSession (worker-side session DSM attach), owned by
+    // session.c; installed into the parallel runtime seam surface.
+    backend_access_transam_parallel_rt_seams::attach_session::set(attach_session);
+    backend_access_transam_parallel_rt_seams::detach_session::set(detach_session);
 }
