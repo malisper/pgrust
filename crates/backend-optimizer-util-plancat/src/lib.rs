@@ -940,16 +940,18 @@ fn get_rel_data_width_impl(
 
 /// `get_relation_data_width(relid, attr_widths)` (plancat.c) — external API: open
 /// the relcache entry, then `get_rel_data_width`.
-pub fn get_relation_data_width(relid: Oid, attr_widths: &[i32]) -> PgResult<i32> {
+pub fn get_relation_data_width(relid: Oid, attr_widths: &[i32], min_attr: AttrNumber) -> PgResult<i32> {
     let relcx = mcx::MemoryContext::new("get_relation_data_width relcache");
     let relation = backend_access_table_table::table_open(relcx.mcx(), relid, NoLock)?;
-    // C: `get_rel_data_width(relation, attr_widths)` passes the caller's pointer
-    // straight through; a NULL `attr_widths` means "no cache buffer". The owned
-    // model represents the C NULL as an EMPTY slice, so map empty -> None (rather
-    // than wrapping an empty Vec in Some, which would index out of bounds). A
-    // non-empty caller buffer is threaded through and updated in place.
+    // C: `get_rel_data_width(relation, attr_widths)` is handed the caller's
+    // `rel->attr_widths - rel->min_attr` base-shifted pointer (costsize.c:6330)
+    // and indexes it `attr_widths[attno]` (1-based). The value model passes the
+    // unshifted `rel->attr_widths` and the caller's `min_attr`, and the callee
+    // indexes `attr_widths[attno - min_attr]`. A NULL `attr_widths` (C) is an
+    // EMPTY slice here -> None (rather than wrapping an empty Vec in Some, which
+    // would index out of bounds). A non-empty caller buffer is threaded through
+    // and updated in place.
     let mut widths = attr_widths.to_vec();
-    let min_attr = (FirstLowInvalidHeapAttributeNumber + 1) as AttrNumber;
     let cache: Option<&mut [i32]> = if widths.is_empty() {
         None
     } else {
@@ -1810,8 +1812,8 @@ fn seam_add_function_cost(
     }
 }
 
-fn seam_get_relation_data_width(reloid: Oid, attr_widths: &[i32]) -> u32 {
-    match get_relation_data_width(reloid, attr_widths) {
+fn seam_get_relation_data_width(reloid: Oid, attr_widths: &[i32], min_attr: i16) -> u32 {
+    match get_relation_data_width(reloid, attr_widths, min_attr as AttrNumber) {
         Ok(w) => w as u32,
         Err(e) => panic!("get_relation_data_width: {e:?}"),
     }

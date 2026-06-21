@@ -8892,7 +8892,7 @@ fn plan_cluster_use_sort_impl<'mcx>(
      * set_baserel_size_estimates, just do a quick hack for rows and width.
      */
     // rel->rows = rel->tuples; rel->reltarget->width = get_relation_data_width(tableOid, NULL);
-    let data_width = backend_optimizer_util_plancat::get_relation_data_width(table_oid, &[])?;
+    let data_width = backend_optimizer_util_plancat::get_relation_data_width(table_oid, &[], 1)?;
     let (rel_tuples, rel_pages) = {
         let rel = root.rel_mut(rel_id);
         rel.rows = rel.tuples;

@@ -338,8 +338,14 @@ pub fn set_rel_width<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: 
         let mut wholerow_width: i64 = maxalign(SizeofHeapTupleHeader as i64);
 
         if reloid != 0 {
-            wholerow_width +=
-                cz::get_relation_data_width::call(reloid, &root.rel(rel).attr_widths) as i64;
+            // C: get_relation_data_width(reloid, rel->attr_widths - rel->min_attr)
+            // — pass the unshifted rel cache plus its min_attr so the callee
+            // indexes attr_widths[attno - min_attr] (costsize.c:6330).
+            wholerow_width += cz::get_relation_data_width::call(
+                reloid,
+                &root.rel(rel).attr_widths,
+                min_attr,
+            ) as i64;
         } else {
             let mut i: i32 = 1;
             while i <= max_attr as i32 {

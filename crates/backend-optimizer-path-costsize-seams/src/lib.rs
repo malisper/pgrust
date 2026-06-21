@@ -231,8 +231,13 @@ seam_core::seam!(
     pub fn get_attavgwidth(reloid: Oid, attnum: i16) -> i32
 );
 seam_core::seam!(
-    /// `get_relation_data_width(reloid, attr_widths)` (plancat.c).
-    pub fn get_relation_data_width(reloid: Oid, attr_widths: &[i32]) -> u32
+    /// `get_relation_data_width(reloid, attr_widths)` (plancat.c). C passes a
+    /// base-shifted pointer `rel->attr_widths - rel->min_attr` so the callee
+    /// reads `attr_widths[attno]` by 1-based attno; the value model can't forge a
+    /// negative-offset slice, so the caller's `rel->attr_widths` and its
+    /// `min_attr` are passed and the callee indexes `attr_widths[attno -
+    /// min_attr]`. `min_attr == 1` with an empty slice means "no cache" (C NULL).
+    pub fn get_relation_data_width(reloid: Oid, attr_widths: &[i32], min_attr: i16) -> u32
 );
 seam_core::seam!(
     /// `exprType((Node *) expr)` (nodeFuncs.c).
