@@ -284,6 +284,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ExecInitQual(qual, NULL)` (execExpr.c) — the parent-less variant of
+    /// [`exec_init_qual`]: compile an already-preprocessed implicitly-ANDed
+    /// list of qual clauses into a single `ExprState`, with no enclosing
+    /// `PlanState`. Unlike [`exec_prepare_qual`] this does NOT re-run
+    /// `expression_planner` (the caller — e.g. COPY FROM, whose `whereClause`
+    /// was already const-folded/canonicalized in `DoCopy` — has done the
+    /// planning). A `None`/empty qual compiles to `None` (the always-true C
+    /// `NULL` ExprState). Allocated in `es_query_cxt`; fallible on OOM /
+    /// `ereport(ERROR)`.
+    pub fn exec_init_qual_no_parent<'mcx>(
+        qual: Option<&[types_nodes::primnodes::Expr]>,
+        estate: &mut types_nodes::EStateData<'mcx>,
+    ) -> types_error::PgResult<Option<mcx::PgBox<'mcx, types_nodes::execexpr::ExprState<'mcx>>>>
+);
+
+seam_core::seam!(
     /// `ExecPrepareQual(qual, estate)` (execExpr.c): prepare a standalone qual
     /// (implicitly-ANDed `List` of `Expr`) for execution, with no parent
     /// `PlanState`. C switches to `estate->es_query_cxt`, runs

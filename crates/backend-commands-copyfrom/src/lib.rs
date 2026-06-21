@@ -437,8 +437,6 @@ pub struct CopyFromStateData<'mcx> {
     pub rteperminfos: mcx::PgVec<'mcx, types_nodes::RTEPermissionInfo<'mcx>>,
     /// `bool volatile_defexprs`.
     pub volatile_defexprs: bool,
-    /// `Node *whereClause` — preprocessed WHERE qual (`None` ⇒ no WHERE).
-    pub where_clause: bool,
     /// `bool is_program`.
     pub is_program: bool,
     /// Per physical attribute, the *unplanned* default-value `Expr` returned by
@@ -477,7 +475,7 @@ pub fn BeginCopyFrom<'mcx>(
     filename: Option<&str>,
     is_program: bool,
     data_source_cb: Option<CopyDataSourceCb>,
-    has_where: bool,
+    where_clause: mcx::PgVec<'mcx, types_nodes::primnodes::Expr>,
 ) -> PgResult<CopyFromStateData<'mcx>> {
     let binary = opts.binary;
 
@@ -634,6 +632,8 @@ pub fn BeginCopyFrom<'mcx>(
         relname_only: false,
         cur_attname: None,
         cur_attval: None,
+        where_clause,
+        qualexpr: None,
     };
     // raw_buf starts empty (len 0); we pre-sized the Vec only to mirror the C
     // palloc — the codec tracks the live length via raw_buf_len.
@@ -707,7 +707,6 @@ pub fn BeginCopyFrom<'mcx>(
         range_table,
         rteperminfos,
         volatile_defexprs: false,
-        where_clause: has_where,
         is_program,
         raw_defexprs,
     })
@@ -818,11 +817,6 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
              partition tuple routing) is not yet wired",
         ));
     }
-    if state.where_clause {
-        return Err(unsupported(
-            "CopyFrom: COPY FROM ... WHERE (ExecInitQual/ExecQual) is not yet wired",
-        ));
-    }
 
     // CommandId mycid = GetCurrentCommandId(true);
     let mycid = backend_access_transam_xact_seams::get_current_command_id::call(true)?;
@@ -923,6 +917,26 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         state.cstate.econtext = Some(econtext);
         state.cstate.estate = Some(types_nodes::execnodes::EStateLink::from_ref(estate));
 
+        // if (cstate->whereClause)
+        //     cstate->qualexpr = ExecInitQual(castNode(List, cstate->whereClause),
+        //                                      &mtstate->ps);
+        // (copyfrom.c:983-985). The qual was already preprocessed in DoCopy
+        // (eval_const_expressions + canonicalize_qual + make_ands_implicit), so we
+        // compile it directly with the parent-less ExecInitQual variant — the fake
+        // ModifyTableState C builds only to pass &mtstate->ps is gated here, and
+        // the owned ExecInitQual ignores `parent` anyway (it threads only the
+        // EState back-link).
+        if !state.cstate.where_clause.is_empty() {
+            let qual: mcx::PgVec<'mcx, types_nodes::primnodes::Expr> =
+                core::mem::replace(&mut state.cstate.where_clause, mcx::PgVec::new_in(mcx));
+            state.cstate.qualexpr =
+                backend_executor_execExpr_seams::exec_init_qual_no_parent::call(
+                    Some(&qual[..]),
+                    estate,
+                )?;
+            state.cstate.where_clause = qual;
+        }
+
         let result_oid = relation_alias(estate, rri).rd_id;
 
         // Prepare to catch AFTER triggers (copyfrom.c:960-961). Bumps the
@@ -979,8 +993,22 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
             // Store the values/nulls into the slot (ExecStoreVirtualTuple).
             store_row_into_slot(estate, singleslot, &row)?;
 
-            // (re-)initialize tts_tableOid before constraints.
+            // Constraints and where clause might reference the tableoid column,
+            // so (re-)initialize tts_tableOid before evaluating them.
             estate.slot_mut(singleslot).tts_tableOid = result_oid;
+
+            // if (cstate->whereClause) { econtext->ecxt_scantuple = myslot;
+            //     if (!ExecQual(cstate->qualexpr, econtext)) { ...excluded++;
+            //         continue; } }  (copyfrom.c:1189-1203). Skip rows that don't
+            // match COPY's WHERE clause.
+            if let Some(qualexpr) = state.cstate.qualexpr.as_mut() {
+                estate.ecxt_mut(econtext).ecxt_scantuple = Some(singleslot);
+                if !backend_executor_execExpr_seams::exec_qual::call(
+                    qualexpr, econtext, estate,
+                )? {
+                    continue;
+                }
+            }
 
             // BEFORE ROW INSERT Triggers (copyfrom.c:1324-1331). A BEFORE ROW
             // trigger may modify the slot (in place) or return "do nothing" — in

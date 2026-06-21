@@ -923,7 +923,7 @@ pub fn DoCopy<'mcx>(
     let mut rel: Option<types_rel::Relation<'mcx>> = None;
     let mut relid: Oid = 0; // InvalidOid
     let mut query: Option<RawStmt<'mcx>> = None;
-    let mut where_clause: Option<Expr> = None;
+    let mut where_clause: PgVec<'mcx, Expr> = PgVec::new_in(mcx);
 
     if let Some(relation_node) = stmt.relation.as_deref() {
         // stmt->relation is a RangeVar node.
@@ -942,7 +942,7 @@ pub fn DoCopy<'mcx>(
         let local_temp = relation_is_local_temp(&opened);
 
         // addRangeTableEntryForRelation — adds an RTE + perminfo to pstate.
-        let _nsitem = backend_parser_relation::addRangeTableEntryForRelation(
+        let nsitem = backend_parser_relation::addRangeTableEntryForRelation(
             mcx,
             pstate,
             &opened,
@@ -959,7 +959,11 @@ pub fn DoCopy<'mcx>(
         if stmt.where_clause.is_some() {
             // COPY ... FROM ... WHERE — analyze the qual. (COPY FROM only; the
             // option-validation layer rejects WHERE for COPY TO.)
-            where_clause = analyze_copy_where(mcx, pstate, perminfo_idx, &opened, stmt)?;
+            where_clause = analyze_copy_where(mcx, pstate, nsitem, &opened, stmt)?;
+        } else {
+            // nsitem is only consumed (into the query namespace) on the WHERE
+            // path; drop it otherwise (the RTE/perminfo are already in pstate).
+            let _ = nsitem;
         }
 
         // attnums = CopyGetAttnums(tupDesc, rel, stmt->attlist)
@@ -1090,22 +1094,99 @@ fn relation_is_local_temp(rel: &types_rel::Relation<'_>) -> bool {
 }
 
 /// COPY ... FROM ... WHERE: transform / coerce / collate / fold the qual.
-/// (copy.c:134-191). Only reached on COPY FROM.
+/// (copy.c:134-191). Only reached on COPY FROM. Returns the preprocessed qual
+/// as the implicitly-ANDed list of `Expr` (the C `make_ands_implicit` result,
+/// the `List *` stored on `cstate->whereClause`); an empty list ⇒ no qual.
 fn analyze_copy_where<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    perminfo_idx: usize,
+    nsitem: types_nodes::parsestmt::ParseNamespaceItem<'mcx>,
     rel: &types_rel::Relation<'mcx>,
     stmt: &CopyStmt<'mcx>,
-) -> PgResult<Option<Expr>> {
-    let _ = (mcx, pstate, perminfo_idx, rel, stmt);
-    // COPY FROM WHERE belongs with the COPY FROM driver (Leg C); the full
-    // transform/coerce/collate/pull_varattnos/eval_const/canonicalize/
-    // make_ands_implicit pipeline is exercised only on that path, which itself
-    // walls at BeginCopyFrom. Loudly stop here rather than silently drop a
-    // qual.
-    Err(PgError::error("COPY FROM ... WHERE is not yet supported (copyfrom.c not ported)")
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED))
+) -> PgResult<PgVec<'mcx, Expr>> {
+    use types_nodes::parsestmt::ParseExprKind::EXPR_KIND_COPY_WHERE;
+
+    // add nsitem to query namespace
+    backend_parser_relation::addNSItemToQuery(mcx, pstate, nsitem, false, true, true)?;
+
+    // Transform the raw expression tree.
+    //   whereClause = transformExpr(pstate, stmt->whereClause, EXPR_KIND_COPY_WHERE);
+    let raw = match stmt.where_clause.as_deref() {
+        Some(n) => Some(n.clone_in(mcx)?),
+        None => None,
+    };
+    let transformed =
+        backend_parser_parse_expr_seams::transformExpr::call(pstate, raw, EXPR_KIND_COPY_WHERE)?;
+    let where_clause = transformed
+        .expect("COPY WHERE: transformExpr of a non-NULL raw clause yields a non-NULL Expr");
+
+    // Make sure it yields a boolean result.
+    //   whereClause = coerce_to_boolean(pstate, whereClause, "WHERE");
+    let mut where_clause =
+        backend_parser_coerce::coerce_to_boolean(mcx, Some(pstate), where_clause, "WHERE")?;
+
+    // We have to fix its collations too.
+    //   assign_expr_collations(pstate, whereClause);
+    backend_parser_parse_collate::assign_expr_collations(Some(pstate), &mut where_clause)?;
+
+    // Examine all the columns in the WHERE clause expression.  When the
+    // whole-row reference is present, examine all the columns of the table.
+    //   pull_varattnos(whereClause, 1, &expr_attrs);
+    let mut expr_attrs =
+        backend_optimizer_util_var_seams::pull_varattnos::call(mcx, &where_clause, 1)?;
+    let first_low = FirstLowInvalidHeapAttributeNumber as i32;
+    let whole_row_member = 0 - first_low;
+    if backend_nodes_core::bitmapset::bms_is_member(whole_row_member, expr_attrs.as_deref()) {
+        // expand to all real columns, then drop the whole-row marker
+        expr_attrs = backend_nodes_core::bitmapset::bms_add_range(
+            mcx,
+            expr_attrs,
+            1 - first_low,
+            rel.rd_att.natts as i32 - first_low,
+        )?;
+        expr_attrs =
+            backend_nodes_core::bitmapset::bms_del_member(expr_attrs, whole_row_member);
+    }
+
+    let mut i = -1;
+    loop {
+        i = backend_nodes_core::bitmapset::bms_next_member(expr_attrs.as_deref(), i);
+        if i < 0 {
+            break;
+        }
+        let attno = (i + first_low) as AttrNumber;
+        debug_assert!(attno != 0);
+
+        // Prohibit generated columns in the WHERE clause. Stored generated
+        // columns are not yet computed when the filtering happens; virtual
+        // generated columns are kept consistent with the stored variant.
+        if rel.rd_att.attrs[(attno - 1) as usize].attgenerated != 0 {
+            let colname =
+                backend_utils_cache_lsyscache::attribute::get_attname(mcx, rel.rd_id, attno, false)?
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default();
+            return Err(PgError::error(
+                "generated columns are not supported in COPY FROM WHERE conditions",
+            )
+            .with_sqlstate(ERRCODE_INVALID_COLUMN_REFERENCE)
+            .with_detail(format!("Column \"{colname}\" is a generated column.")));
+        }
+    }
+
+    // whereClause = eval_const_expressions(NULL, whereClause);
+    let where_clause = backend_optimizer_util_clauses::eval_const_expressions(mcx, where_clause)?;
+
+    // whereClause = (Node *) canonicalize_qual((Expr *) whereClause, false);
+    let canon =
+        backend_optimizer_prep_prepqual::canonicalize_qual(mcx, Some(where_clause), false)?;
+
+    // whereClause = (Node *) make_ands_implicit((Expr *) whereClause);
+    let implicit = backend_nodes_core::makefuncs::make_ands_implicit(canon);
+    let mut out: PgVec<'mcx, Expr> = mcx::vec_with_capacity_in(mcx, implicit.len())?;
+    for e in implicit {
+        out.push(e);
+    }
+    Ok(out)
 }
 
 /// The COPY FROM driver leg (copyfrom.c): `BeginCopyFrom` / `CopyFrom` /
@@ -1114,7 +1195,7 @@ fn copy_from_driver<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     rel: &types_rel::Relation<'mcx>,
-    where_clause: Option<Expr>,
+    where_clause: PgVec<'mcx, Expr>,
     stmt: &CopyStmt<'mcx>,
 ) -> PgResult<u64> {
     // ProcessCopyOptions(pstate, &opts, true /* is_from */, options).
@@ -1162,7 +1243,6 @@ fn copy_from_driver<'mcx>(
     }
 
     let file_encoding = fmt.file_encoding;
-    let has_where = where_clause.is_some();
 
     let mut state = backend_commands_copyfrom::BeginCopyFrom(
         mcx,
@@ -1177,7 +1257,7 @@ fn copy_from_driver<'mcx>(
         // DoCopy (the SQL `COPY ... FROM` path) never supplies a programmatic
         // data source — that is the SPI/extension `BeginCopyFrom` entry only.
         None,
-        has_where,
+        where_clause,
     )?;
     let processed = backend_commands_copyfrom::CopyFrom(mcx, &mut state)?;
     backend_commands_copyfrom::EndCopyFrom(state)?;

@@ -29,6 +29,7 @@ backend-parser-relation = { path = "../backend-parser-relation" }
 backend-executor-execMain = { path = "../backend-executor-execMain" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-optimizer-util-vars = { path = "../backend-optimizer-util-vars" }
+backend-optimizer-util-var-seams = { path = "../backend-optimizer-util-var-seams" }
 backend-optimizer-prep-prepqual = { path = "../backend-optimizer-prep-prepqual" }
 backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
 backend-parser-coerce = { path = "../backend-parser-coerce" }

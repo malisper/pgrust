@@ -28,6 +28,7 @@ use types_tuple::backend_access_common_heaptuple::Datum as TupleDatum;
 use types_error::SoftErrorContext;
 use types_fmgr::FmgrInfo;
 use types_nodes::execexpr::ExprState;
+use types_nodes::primnodes::Expr;
 use types_nodes::execnodes::{EStateLink, EcxtId};
 use types_nodes::nodes::NodePtr;
 use types_rel::Relation;
@@ -394,6 +395,18 @@ pub struct CopyParseState<'mcx> {
     pub cur_attname: Option<String>,
     /// `char *cur_attval` — current column value (for error context).
     pub cur_attval: Option<String>,
+
+    /* ---- COPY FROM ... WHERE ---- */
+    /// `Node *whereClause` — the preprocessed WHERE qual as the implicitly-ANDed
+    /// list of `Expr` clauses produced by `make_ands_implicit` in `DoCopy`
+    /// (empty ⇒ the C `whereClause == NULL`, i.e. no WHERE). `CopyFrom` compiles
+    /// this into [`qualexpr`](Self::qualexpr) via `ExecInitQual` and evaluates it
+    /// per row.
+    pub where_clause: PgVec<'mcx, Expr>,
+    /// `ExprState *qualexpr` — the compiled WHERE qual (`None` ⇒ no WHERE),
+    /// produced by `ExecInitQual(whereClause, ...)` at the top of `CopyFrom` and
+    /// evaluated per row with `ExecQual` against the scan slot.
+    pub qualexpr: Option<PgBox<'mcx, ExprState<'mcx>>>,
 }
 
 /// A `[start, end)` byte range into `attribute_buf.data`, the idiomatic stand-in

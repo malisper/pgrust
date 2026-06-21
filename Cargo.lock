@@ -6652,6 +6652,7 @@ dependencies = [
  "backend-nodes-core",
  "backend-optimizer-prep-prepqual",
  "backend-optimizer-util-clauses",
+ "backend-optimizer-util-var-seams",
  "backend-optimizer-util-vars",
  "backend-parser-coerce",
  "backend-parser-parse-collate",
