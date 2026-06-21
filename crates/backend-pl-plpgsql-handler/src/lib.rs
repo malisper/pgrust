@@ -977,6 +977,20 @@ pub fn init_seams() {
         },
     );
 
+    // Install the array-iteration leg of `exec_stmt_foreach_a` (pl_exec.c). The
+    // executor unit is layered below the array/lsyscache owners; the handler
+    // (which depends on backend-utils-adt-arrayfuncs + lsyscache) drives the C
+    // steps `get_element_type` / `DatumGetArrayTypePCopy` / the slice range
+    // check / `array_create_iterator` + the full `array_iterate` loop, and
+    // materializes every element/slice as a `ForeachItem` in iteration order.
+    backend_pl_plpgsql_exec_seams::foreach_iterate_via_array::set(
+        foreach_iterate_via_array_impl,
+    );
+    // `get_element_type` for exec_stmt_foreach_a's loop-variable array-ness check.
+    backend_pl_plpgsql_exec_seams::foreach_get_element_type::set(|typid: types_core::Oid| {
+        backend_utils_cache_lsyscache_seams::get_element_type::call(typid)
+    });
+
     // Install the `exec_stmt_block` EXCEPTION-leg subtransaction entry points
     // (pl_exec.c keystone #215). The executor unit is layered below xact; the
     // handler (top layer) bridges to the now-ported xact subxact engine. These
@@ -1133,6 +1147,173 @@ pub fn init_seams() {
             lookup,
         },
     );
+}
+
+/// The array-iteration leg of `exec_stmt_foreach_a` (pl_exec.c). Given the
+/// already-evaluated FOREACH array's verbatim varlena byte image, its runtime
+/// array type/typmod, and the `slice` dimension, perform the C array + fmgr
+/// substrate steps and materialize every element (`slice == 0`) or sub-array
+/// (`slice > 0`) as a `ForeachItem` in iteration order:
+///
+/// ```c
+/// if (!OidIsValid(get_element_type(arrtype)))
+///     ereport(ERROR, ... "FOREACH expression must yield an array, not type %s" ...);
+/// arr = DatumGetArrayTypePCopy(value);
+/// if (stmt->slice < 0 || stmt->slice > ARR_NDIM(arr))
+///     ereport(ERROR, ... "slice dimension (%d) is out of the valid range 0..%d" ...);
+/// array_iterator = array_create_iterator(arr, stmt->slice, NULL);
+/// if (stmt->slice > 0) { iterator_result_type = arrtype; ... }
+/// else { iterator_result_type = ARR_ELEMTYPE(arr); ... }
+/// while (array_iterate(array_iterator, &value, &isnull)) { ... }
+/// ```
+fn foreach_iterate_via_array_impl(
+    arr_bytes: Vec<u8>,
+    arrtype: types_core::Oid,
+    arrtypmod: i32,
+    slice: i32,
+) -> PgResult<backend_pl_plpgsql_exec_seams::ForeachIterateResult> {
+    use backend_pl_plpgsql_exec_seams::{ForeachItem, ForeachIterateResult};
+    use backend_utils_adt_arrayfuncs::{foundation, sql::ArrayIterateItem};
+
+    let ctx = mcx::MemoryContext::new("plpgsql FOREACH array");
+    let mcx = ctx.mcx();
+
+    // check the type of the expression - must be an array
+    //   if (!OidIsValid(get_element_type(arrtype)))
+    let elem_type =
+        backend_utils_cache_lsyscache_seams::get_element_type::call(arrtype)?.unwrap_or(0);
+    if elem_type == 0 {
+        let tyname = backend_utils_adt_format_type_seams::format_type_be_owned::call(arrtype)
+            .unwrap_or_else(|_| format!("type {arrtype}"));
+        return Err(types_error::PgError::error(format!(
+            "FOREACH expression must yield an array, not type {tyname}"
+        ))
+        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
+    }
+
+    // arr = DatumGetArrayTypePCopy(value); — detoast the on-disk array image into
+    // the working context. `array_create_iterator` reads the detoasted bytes.
+    let arr = backend_access_common_detoast_seams::detoast_attr::call(mcx, &arr_bytes)?;
+    let arr_bytes_detoasted: Vec<u8> = arr.as_slice().to_vec();
+    let ndim = foundation::arr_ndim(&arr);
+
+    // Slice dimension must be less than or equal to array dimension
+    //   if (stmt->slice < 0 || stmt->slice > ARR_NDIM(arr))
+    if slice < 0 || slice > ndim {
+        return Err(types_error::PgError::error(format!(
+            "slice dimension ({slice}) is out of the valid range 0..{ndim}"
+        ))
+        .with_sqlstate(types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR));
+    }
+
+    // Identify iterator result type
+    //   if (stmt->slice > 0) { result = arrtype; } else { result = ARR_ELEMTYPE(arr); }
+    let (result_type, result_typmod) = if slice > 0 {
+        (arrtype, arrtypmod)
+    } else {
+        (foundation::arr_elemtype(&arr), arrtypmod)
+    };
+
+    // The element type metadata (typlen/typbyval/typalign) drives both
+    // `array_create_iterator`'s fetch math and our by-ref element image
+    // extraction below.
+    let mstate = backend_utils_cache_lsyscache_seams::get_typlenbyvalalign::call(elem_type)?;
+    let elem_byval = mstate.typbyval;
+    let elem_typlen = mstate.typlen;
+
+    // array_iterator = array_create_iterator(arr, stmt->slice, NULL);
+    let mut iterator = backend_utils_adt_arrayfuncs::sql::array_create_iterator(
+        mcx,
+        &arr_bytes_detoasted,
+        slice,
+        Some(mstate),
+    )?;
+
+    // while (array_iterate(array_iterator, &value, &isnull)) { ... }
+    let mut items: Vec<ForeachItem> = Vec::new();
+    while let Some(item) =
+        backend_utils_adt_arrayfuncs::sql::array_iterate(mcx, &mut iterator)?
+    {
+        match item {
+            ArrayIterateItem::Scalar { value, isnull } => {
+                if isnull {
+                    items.push(ForeachItem {
+                        value: 0,
+                        isnull: true,
+                        byref: None,
+                    });
+                } else if elem_byval {
+                    // A by-value element: the bare scalar word is the value.
+                    items.push(ForeachItem {
+                        value: value.as_usize(),
+                        isnull: false,
+                        byref: None,
+                    });
+                } else {
+                    // A by-reference element (text/numeric/composite/…): in the
+                    // byte model `array_iterate`'s `fetch_att` returns the element's
+                    // in-buffer OFFSET (not a machine pointer), so slice the
+                    // verbatim element image out of the detoasted array buffer,
+                    // bounded by the element's length convention (VARSIZE_ANY for a
+                    // varlena `typlen == -1`, strlen for a cstring `typlen == -2`,
+                    // `typlen` bytes for a fixed-length-by-ref type). The image
+                    // rides the out-of-band by-ref companion (bare word is 0 then).
+                    let off = value.as_usize();
+                    let img =
+                        foreach_byref_element_image(&arr_bytes_detoasted, off, elem_typlen);
+                    items.push(ForeachItem {
+                        value: 0,
+                        isnull: false,
+                        byref: Some(img),
+                    });
+                }
+            }
+            ArrayIterateItem::Slice(bytes) => {
+                // A freshly built sub-array (slice case): the result is always a
+                // pass-by-reference array varlena. Carry its verbatim image.
+                items.push(ForeachItem {
+                    value: 0,
+                    isnull: false,
+                    byref: Some(bytes.as_slice().to_vec()),
+                });
+            }
+        }
+    }
+
+    Ok(ForeachIterateResult {
+        items,
+        result_type,
+        result_typmod,
+    })
+}
+
+/// Copy a by-reference array element's verbatim byte image out of the detoasted
+/// array `buf` at in-buffer offset `off`. The element's length follows its
+/// `typlen` convention (mirroring `att_addlength_pointer` / fetch_att's by-ref
+/// arm): `typlen == -1` is a varlena (`VARSIZE_ANY`), `typlen == -2` is a
+/// NUL-terminated cstring, and `typlen > 0` is a fixed-length-by-ref blob of
+/// `typlen` bytes. All reads are bounds-clamped against the buffer (a
+/// well-formed array never overruns, but the clamp keeps this safe).
+fn foreach_byref_element_image(buf: &[u8], off: usize, typlen: i16) -> Vec<u8> {
+    if off >= buf.len() {
+        return Vec::new();
+    }
+    let total = if typlen == -1 {
+        // VARSIZE_ANY(DatumGetPointer(src)).
+        backend_utils_adt_arrayfuncs::foundation::varsize_any(buf, off)
+    } else if typlen == -2 {
+        // strlen(cstring) + 1 (include the terminating NUL).
+        buf[off..]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|n| n + 1)
+            .unwrap_or(buf.len() - off)
+    } else {
+        // Fixed-length-by-ref: exactly `typlen` bytes.
+        typlen.max(0) as usize
+    };
+    let end = (off + total).min(buf.len());
+    buf[off..end].to_vec()
 }
 
 #[cfg(test)]

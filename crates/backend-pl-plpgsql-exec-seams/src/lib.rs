@@ -459,3 +459,73 @@ seam_core::seam!(
         elems: std::vec::Vec<Option<std::vec::Vec<u8>>>,
     ) -> PgResult<std::vec::Vec<u8>>
 );
+
+/// One materialized FOREACH-over-array iteration item (`exec_stmt_foreach_a`'s
+/// `array_iterate` loop body input): the value to assign to the loop variable
+/// for this iteration, plus its is-null flag. A pass-by-reference value (a
+/// `text`/`numeric`/… array element, or — in the SLICE case — the freshly built
+/// sub-array) carries its verbatim header-ful varlena byte image in `byref` (the
+/// bare `value` word is `0` then); a by-value element (`int4`/`bool`/…) carries
+/// the scalar word in `value` with `byref == None`.
+#[derive(Clone, Debug)]
+pub struct ForeachItem {
+    pub value: usize,
+    pub isnull: bool,
+    pub byref: Option<std::vec::Vec<u8>>,
+}
+
+/// The materialized result of `exec_stmt_foreach_a`'s array-iteration setup +
+/// `array_iterate` loop (`pl_exec.c`): every iteration's `ForeachItem` (in
+/// order), plus the iterator result type/typmod that
+/// `exec_assign_value(loop_var, value, …, iterator_result_type,
+/// iterator_result_typmod)` uses. Without slicing the result type is the array's
+/// element type; when slicing (`slice > 0`) it is the array type itself.
+#[derive(Clone, Debug)]
+pub struct ForeachIterateResult {
+    pub items: std::vec::Vec<ForeachItem>,
+    pub result_type: Oid,
+    pub result_typmod: int32,
+}
+
+seam_core::seam!(
+    /// `get_element_type(typid)` (`lsyscache.c`) — the element type OID of an
+    /// array type, or `None` (`InvalidOid`). `exec_stmt_foreach_a` uses it to
+    /// check the loop variable's array-ness (`FOREACH ... SLICE loop variable
+    /// must be of an array type` / `FOREACH loop variable must not be of an array
+    /// type`). The executor unit is layered below lsyscache; the handler installs
+    /// it.
+    pub fn foreach_get_element_type(typid: Oid) -> PgResult<Option<Oid>>
+);
+
+seam_core::seam!(
+    /// The array-iteration leg of `exec_stmt_foreach_a` (`pl_exec.c`): given the
+    /// already-evaluated FOREACH array's verbatim varlena byte image (`arr_bytes`,
+    /// from `exec_eval_expr`'s by-ref result), its runtime array type `arrtype` /
+    /// typmod `arrtypmod`, and the `slice` dimension, perform the C steps that
+    /// reach into the array + fmgr substrate:
+    ///
+    /// * `get_element_type(arrtype)` — error "FOREACH expression must yield an
+    ///   array, not type %s" (`ERRCODE_DATATYPE_MISMATCH`) when invalid;
+    /// * `DatumGetArrayTypePCopy(value)` (detoast);
+    /// * the slice range check ("slice dimension (%d) is out of the valid range
+    ///   0..%d", `ERRCODE_ARRAY_SUBSCRIPT_ERROR`);
+    /// * `array_create_iterator(arr, slice, NULL)` + the full `array_iterate`
+    ///   loop, materializing every element (`slice == 0`) or sub-array
+    ///   (`slice > 0`) as a [`ForeachItem`], in iteration order.
+    ///
+    /// The loop-variable array-ness sanity checks (`FOREACH ... SLICE loop
+    /// variable must be of an array type` / `FOREACH loop variable must not be of
+    /// an array type`) are done by the caller (they read the loop variable's
+    /// declared type, which the executor owns). This seam returns the iterator
+    /// result type/typmod so the caller's per-iteration `exec_assign_value` casts
+    /// the element/slice to the loop variable's type exactly as C does.
+    ///
+    /// The executor unit is layered below the array/lsyscache owners; the handler
+    /// (which depends on `backend-utils-adt-arrayfuncs` + lsyscache) installs it.
+    pub fn foreach_iterate_via_array(
+        arr_bytes: std::vec::Vec<u8>,
+        arrtype: Oid,
+        arrtypmod: int32,
+        slice: int32,
+    ) -> PgResult<ForeachIterateResult>
+);

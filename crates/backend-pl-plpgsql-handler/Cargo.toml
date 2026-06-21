@@ -68,5 +68,7 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 types-tuple = { path = "../types-tuple" }
 types-catalog = { path = "../types-catalog" }
 
-# construct_array for the TG_ARGV text[] promise (plpgsql_fulfill_promise).
+# construct_array for the TG_ARGV text[] promise (plpgsql_fulfill_promise);
+# array iteration for exec_stmt_foreach_a (foreach_iterate_via_array).
 backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }

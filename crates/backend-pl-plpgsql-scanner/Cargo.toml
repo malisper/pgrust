@@ -18,6 +18,10 @@ backend-parser-scan-fgram = { path = "../backend-parser-scan-fgram" }
 backend-parser-scan-seams = { path = "../backend-parser-scan-seams" }
 # pg_mbstrlen_with_len (byte-offset -> character cursor for error positions).
 backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
+# pg_strtoint32_safe — re-derive the ICONST integer value (core_yylex's ival is
+# not carried across the CoreToken seam) for K_SLICE / array-subscript ICONST.
+backend-utils-adt-numutils = { path = "../backend-utils-adt-numutils" }
+backend-utils-error = { path = "../backend-utils-error" }
 # plpgsql_parse_word/dblword/tripword (pl_comp.c — not yet ported; via seam).
 backend-pl-plpgsql-comp-seams = { path = "../backend-pl-plpgsql-comp-seams" }
 

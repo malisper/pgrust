@@ -383,6 +383,49 @@ pub fn ereport_foreach_null() -> types_error::PgError {
         .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
 }
 
+/// `ereport(ERROR, ERRCODE_DATATYPE_MISMATCH)` — `FOREACH ... SLICE` loop
+/// variable is not of an array type (`exec_stmt_foreach_a`).
+pub fn ereport_foreach_slice_var_not_array() -> types_error::PgError {
+    types_error::PgError::error(
+        "FOREACH ... SLICE loop variable must be of an array type".to_string(),
+    )
+    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+}
+
+/// `ereport(ERROR, ERRCODE_DATATYPE_MISMATCH)` — non-slicing `FOREACH` loop
+/// variable is of an array type (`exec_stmt_foreach_a`).
+pub fn ereport_foreach_var_is_array() -> types_error::PgError {
+    types_error::PgError::error("FOREACH loop variable must not be of an array type".to_string())
+        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+}
+
+/// `get_element_type(typid)` (lsyscache.c) — the element type OID of an array
+/// type, or `InvalidOid`. Used by `exec_stmt_foreach_a` to check the loop
+/// variable's array-ness. Installed from the handler (lsyscache owner); on a
+/// lookup error treats the type as non-array (the conservative `InvalidOid`,
+/// matching `get_element_type`'s cache-miss return).
+pub fn get_element_type(typid: Oid) -> Oid {
+    crate::exec_seams::foreach_get_element_type::call(typid)
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+}
+
+/// The array-iteration leg of `exec_stmt_foreach_a` (pl_exec.c): drive
+/// `get_element_type` (array type check) / `DatumGetArrayTypePCopy` / the slice
+/// range check / `array_create_iterator` + the full `array_iterate` loop over
+/// the already-evaluated FOREACH array's verbatim varlena byte image, returning
+/// every iteration's value (in order) plus the iterator result type/typmod.
+/// Installed from the handler (array/lsyscache owner).
+pub fn foreach_iterate(
+    arr_bytes: std::vec::Vec<u8>,
+    arrtype: Oid,
+    arrtypmod: int32,
+    slice: int32,
+) -> PgResult<crate::exec_seams::ForeachIterateResult> {
+    crate::exec_seams::foreach_iterate_via_array::call(arr_bytes, arrtype, arrtypmod, slice)
+}
+
 /// `ereport(ERROR, ERRCODE_DATATYPE_MISMATCH)` — RETURN of a non-composite from
 /// a function returning a tuple (`exec_stmt_return`).
 pub fn ereport_return_noncomposite() -> types_error::PgError {

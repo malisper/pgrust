@@ -165,6 +165,14 @@ fn push_stmt_mcontext(estate: &mut PLpgSQL_execstate) {
     estate.stmt_mcontext = None;
 }
 
+/// `pop_stmt_mcontext(estate)` (pl_exec.c) — pop back to the parent statement
+/// context after a nested statement that ran arbitrary code (the matching
+/// restore for [`push_stmt_mcontext`]).
+fn pop_stmt_mcontext(estate: &mut PLpgSQL_execstate) {
+    estate.stmt_mcontext = estate.stmt_mcontext_parent;
+    estate.stmt_mcontext_parent = None;
+}
+
 // ===========================================================================
 // Top-level + block
 // ===========================================================================
@@ -793,26 +801,105 @@ fn exec_stmt_fori(estate: &mut PLpgSQL_execstate, stmt: &PLpgSQL_stmt_fori) -> P
 }
 
 /// `exec_stmt_foreach_a(estate, stmt)` (pl_exec.c) — FOREACH over array
-/// elements/slices. The control shell is real; the array-iteration leg bottoms
-/// out in the array + fmgr substrate (loud).
+/// elements/slices. The control shell is real; the array-iteration leg
+/// (`get_element_type` / `DatumGetArrayTypePCopy` / `array_create_iterator` /
+/// `array_iterate`) is driven through the installed `foreach_iterate_via_array`
+/// seam (the handler owns the array/lsyscache surface).
 fn exec_stmt_foreach_a(
     estate: &mut PLpgSQL_execstate,
     stmt: &PLpgSQL_stmt_foreach_a,
 ) -> PLpgSQL_rc_result {
+    // get the value of the array expression
     let expr = stmt.expr.as_deref().expect("FOREACH has an array expr");
-    let (_value, isnull, _arrtype, _arrtypmod) = seam::exec_eval_expr(estate, expr)?;
+    let (value, isnull, arrtype, arrtypmod) = seam::exec_eval_expr(estate, expr)?;
     if isnull {
         return Err(seam::ereport_foreach_null());
     }
+    // The array's verbatim varlena image rides the by-ref companion (an array is
+    // always a pass-by-reference type, so the bare `value` word is 0). Take it
+    // before `exec_eval_cleanup` discards it.
+    let arr_bytes = estate
+        .last_eval_byref
+        .take()
+        .unwrap_or_else(|| value.as_usize().to_le_bytes().to_vec());
 
     let _stmt_mcontext = get_stmt_mcontext(estate);
     push_stmt_mcontext(estate);
 
-    panic!(
-        "seam not wired: exec_stmt_foreach_a array-iteration leg (pl_exec.c) — \
-         get_element_type / DatumGetArrayTypePCopy / array_create_iterator / \
-         array_iterate / exec_assign_value (array + fmgr substrate)"
-    );
+    // Set up the loop variable and see if it is of an array type.
+    //   loop_var = estate->datums[stmt->varno];
+    //   if (REC || ROW) loop_var_elem_type = InvalidOid;
+    //   else loop_var_elem_type = get_element_type(plpgsql_exec_get_datum_type(...));
+    let loop_var = estate.datums[stmt.varno as usize].clone();
+    let loop_var_elem_type = match datum_dtype(&loop_var) {
+        PLpgSQL_datum_type::PLPGSQL_DTYPE_REC | PLpgSQL_datum_type::PLPGSQL_DTYPE_ROW => INVALID_OID,
+        _ => {
+            let info = plpgsql_exec_get_datum_type_info(&loop_var);
+            seam::get_element_type(info.type_id)
+        }
+    };
+
+    // Sanity-check the loop variable type vs the array-ness of the iteration.
+    //   if (slice > 0 && loop_var_elem_type == InvalidOid) ereport(... must be array);
+    //   if (slice == 0 && loop_var_elem_type != InvalidOid) ereport(... must not be array);
+    if stmt.slice > 0 && loop_var_elem_type == INVALID_OID {
+        pop_stmt_mcontext(estate);
+        return Err(seam::ereport_foreach_slice_var_not_array());
+    }
+    if stmt.slice == 0 && loop_var_elem_type != INVALID_OID {
+        pop_stmt_mcontext(estate);
+        return Err(seam::ereport_foreach_var_is_array());
+    }
+
+    // exec_eval_cleanup releases the array image we already copied above.
+    exec_eval_cleanup(estate);
+
+    // Drive the array + fmgr substrate (get_element_type type check, detoast,
+    // slice range check, array_create_iterator + the full array_iterate loop)
+    // through the installed seam; it returns every iteration's value (in order)
+    // plus the iterator result type/typmod for the per-iteration assignment.
+    let iterate = seam::foreach_iterate(arr_bytes, arrtype, arrtypmod, stmt.slice)?;
+
+    // Iterate over the array elements or slices.
+    let mut found = false;
+    let mut rc = PLpgSQL_rc::PLPGSQL_RC_OK;
+    for item in iterate.items {
+        found = true; // looped at least once
+
+        // Assign current element/slice to the loop variable.
+        //   exec_assign_value(estate, loop_var, value, isnull,
+        //                     iterator_result_type, iterator_result_typmod);
+        exec_assign_value_byref_impl(
+            estate,
+            stmt.varno,
+            Datum::from_usize(item.value),
+            item.byref,
+            item.isnull,
+            iterate.result_type,
+            iterate.result_typmod,
+        )?;
+
+        // Execute the statements.
+        rc = exec_stmts(estate, &stmt.body)?;
+
+        //   LOOP_RC_PROCESSING(stmt->label, break);
+        match loop_rc_processing(estate, stmt.label.as_deref(), rc) {
+            LoopRc::Break(brc) => {
+                rc = brc;
+                break;
+            }
+            LoopRc::Continue(_) => {
+                rc = PLpgSQL_rc::PLPGSQL_RC_OK;
+            }
+        }
+    }
+
+    pop_stmt_mcontext(estate);
+
+    // Set the FOUND variable to indicate whether we looped one or more times.
+    exec_set_found(estate, found);
+
+    Ok(rc)
 }
 
 /// `exec_stmt_exit(estate, stmt)` (pl_exec.c) — EXIT / CONTINUE.

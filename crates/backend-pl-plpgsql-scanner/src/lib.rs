@@ -682,6 +682,25 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
             else if token == PARAM {
                 auxdata.lval.str = Some(yytext.clone());
             }
+            // The core returns ICONST with its int32 value in `core_yystype.ival`,
+            // but the stateless `CoreToken` seam carries only the token's *string*
+            // value (empty for ICONST). Re-derive the integer from the token text
+            // via the same parser the core scanner uses (`pg_strtoint32_safe`,
+            // which understands 0x/0o/0b prefixes and `_` separators) so the
+            // grammar's `yylval.ival` reads (K_SLICE ICONST, array subscripts) get
+            // the value rather than a stale 0.
+            else if token == tokens::ICONST {
+                use backend_utils_error::SoftErrorContext;
+                let mut escontext = SoftErrorContext::new(false);
+                if let Ok(v) = backend_utils_adt_numutils::pg_strtoint32_safe(
+                    &yytext,
+                    Some(&mut escontext),
+                ) {
+                    if !escontext.error_occurred() {
+                        auxdata.lval.ival = v;
+                    }
+                }
+            }
 
             // Reserved-PL-keyword reclassification.
             //

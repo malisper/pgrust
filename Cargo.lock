@@ -14585,6 +14585,7 @@ dependencies = [
 name = "backend-pl-plpgsql-handler"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-transam-xact",
  "backend-catalog-pg-proc-seams",
  "backend-commands-functioncmds-seams",
@@ -14622,6 +14623,8 @@ dependencies = [
  "backend-parser-scan-fgram",
  "backend-parser-scan-seams",
  "backend-pl-plpgsql-comp-seams",
+ "backend-utils-adt-numutils",
+ "backend-utils-error",
  "backend-utils-mb-mbutils-seams",
  "mcx",
  "types-core",
