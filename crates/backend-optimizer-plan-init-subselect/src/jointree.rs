@@ -695,7 +695,7 @@ fn deconstruct_distribute(
         JtNodeKind::RangeTblRef { rtindex } => {
             // Deal with any securityQuals attached to the RTE.
             if root.qual_security_level > 0 {
-                process_security_barrier_quals(root, run, rtindex, item_list, jti);
+                process_security_barrier_quals(root, run, rtindex, item_list, jti)?;
             }
         }
         JtNodeKind::FromExpr { quals } => {
@@ -706,12 +706,12 @@ fn deconstruct_distribute(
             distribute_quals_to_rels(
                 root, run, &lateral, item_list, jti, None, root.qual_security_level, &qualscope,
                 &None, &None, &None, true, false, false, None,
-            );
+            )?;
             // Now process the top-level quals.
             distribute_quals_to_rels(
                 root, run, &quals, item_list, jti, None, root.qual_security_level, &qualscope,
                 &None, &None, &None, true, false, false, None,
-            );
+            )?;
         }
         JtNodeKind::JoinExpr {
             jointype,
@@ -795,7 +795,7 @@ fn deconstruct_distribute(
                 false,
                 false, // not clones
                 if postpone { Some(jti) } else { None },
-            );
+            )?;
 
             // And add the SpecialJoinInfo to join_info_list.
             if let Some(sj) = sjinfo {
@@ -818,7 +818,7 @@ fn process_security_barrier_quals(
     rti: i32,
     item_list: &mut Vec<JoinTreeItem>,
     jti: JtId,
-) {
+) -> types_error::PgResult<()> {
     // rte = root->simple_rte_array[rti]; gather its securityQuals (each element
     // is an implicitly-ANDed list of clauses).
     let rte_id = root.simple_rte_array[rti as usize];
@@ -851,11 +851,12 @@ fn process_security_barrier_quals(
             false,
             false, // not clones
             None,
-        );
+        )?;
         security_level += 1;
     }
     // Assert qual_security_level is higher than anything we just used.
     debug_assert!(security_level <= root.qual_security_level);
+    Ok(())
 }
 
 /// `deconstruct_distribute_oj_quals` (initsplan.c:2226).
@@ -1005,7 +1006,7 @@ fn deconstruct_distribute_oj_quals(
                 has_clone,
                 is_clone,
                 None, // no more postponement
-            );
+            )?;
 
             // Adjust qual nulling bits for next level up, if needed. We don't
             // want sjinfo's own bit, and if above sjinfo we did it already.
@@ -1039,7 +1040,7 @@ fn deconstruct_distribute_oj_quals(
             false,
             false, // not clones
             None,  // no more postponement
-        );
+        )?;
     }
     Ok(())
 }
@@ -1114,7 +1115,7 @@ pub fn distribute_quals_to_rels(
     has_clone: bool,
     is_clone: bool,
     postponed_oj_qual_list: Option<JtId>,
-) {
+) -> types_error::PgResult<()> {
     for clause in clauses {
         crate::quals::distribute_qual_to_rels(
             root,
@@ -1132,6 +1133,7 @@ pub fn distribute_quals_to_rels(
             has_clone,
             is_clone,
             postponed_oj_qual_list,
-        );
+        )?;
     }
+    Ok(())
 }

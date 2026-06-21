@@ -15,10 +15,14 @@
 //! takes `run: &PlannerRun<'_>` alongside `&mut PlannerInfo`, matching the
 //! LOCKED convention used throughout `jointree.rs`.
 //!
-//! `distribute_qual_to_rels` returns `()` (it is driven from `jointree.rs`'s
-//! `distribute_quals_to_rels` loop, which ignores any result, mirroring C's
-//! void return); inner seam calls that return [`PgResult`] are `.expect()`ed
-//! where C `elog(ERROR)`s. `process_implied_equality`/
+//! `distribute_qual_to_rels` returns [`PgResult<()>`] (C returns void but raises
+//! `elog(ERROR)` on the two scope-violation paths — the lateral-postpone failure
+//! and the OJ-scope check). Those map to clean recoverable `Err(PgError)`s rather
+//! than backend-killing panics, matching C-release behavior (the bare
+//! `bms_is_subset(relids, qualscope)` Assert is compiled out under NDEBUG, so C
+//! release only ever reaches the `elog(ERROR)` paths, never aborts). The driving
+//! `distribute_quals_to_rels` loop `?`-propagates. Inner seam calls that return
+//! [`PgResult`] are `.expect()`ed where C `elog(ERROR)`s internally. `process_implied_equality`/
 //! `build_implied_join_equality`/`distribute_restrictinfo_to_rels` are reached
 //! from the EquivalenceClass machinery and the installed eqext seams declare
 //! them returning [`PgResult`], so they `?`-propagate.
@@ -34,7 +38,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use types_core::primitive::{Index, Oid};
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_nodes::primnodes::{Const, Expr, NullTest, NullTestType, OR_EXPR};
 use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
@@ -68,6 +72,12 @@ fn copy_clause_in(run: &PlannerRun<'_>, expr: &Expr) -> Expr {
         .unwrap_or_else(|e| panic!("copy_clause_in: clone_in: {e:?}"))
 }
 
+/// `elog(ERROR, ...)` shorthand — a clean recoverable error (caught at the
+/// backend PG_TRY boundary), NOT a backend-killing panic.
+fn elog_error(msg: impl Into<alloc::string::String>) -> PgError {
+    PgError::error(msg)
+}
+
 /// `distribute_qual_to_rels` (initsplan.c:2545).
 ///
 /// Add clause information to the baserestrictinfo/joininfo lists of the rels
@@ -92,7 +102,7 @@ pub fn distribute_qual_to_rels<'mcx>(
     has_clone: bool,
     is_clone: bool,
     postponed_to: Option<JtId>,
-) {
+) -> PgResult<()> {
     let mut pseudoconstant = false;
 
     // Retrieve all relids mentioned within the clause.
@@ -109,19 +119,25 @@ pub fn distribute_qual_to_rels<'mcx>(
         while let Some(p) = pitem {
             if bms::relids_is_subset::call(&relids, &item_list[p].qualscope) {
                 item_list[p].lateral_clauses.push(copy_clause_in(run, clause));
-                return;
+                return Ok(());
             }
             // We should not be postponing any quals past an outer join.
             debug_assert!(item_list[p].sjinfo.is_none());
             pitem = item_list[p].jti_parent;
         }
-        panic!("failed to postpone qual containing lateral reference");
+        // C: elog(ERROR, ...). Clean recoverable error, not a backend-kill.
+        return Err(elog_error(
+            "failed to postpone qual containing lateral reference",
+        ));
     }
 
     // If it's an outer-join clause, also check that relids is a subset of
     // ojscope. (This should not fail if the syntactic scope check passed.)
     if !bms::relids_is_empty::call(ojscope) && !bms::relids_is_subset::call(&relids, ojscope) {
-        panic!("JOIN qualification cannot refer to other relations");
+        // C: elog(ERROR, ...). Clean recoverable error, not a backend-kill.
+        return Err(elog_error(
+            "JOIN qualification cannot refer to other relations",
+        ));
     }
 
     // If the clause is variable-free, our normal heuristic for pushing it down
@@ -163,7 +179,7 @@ pub fn distribute_qual_to_rels<'mcx>(
         // to postpone handling such clauses, add it to the postponed list.
         if let Some(target) = postponed_to {
             item_list[target].oj_joinclauses.push(copy_clause_in(run, clause));
-            return;
+            return Ok(());
         }
         is_pushed_down = false;
         maybe_equivalence = false;
@@ -179,7 +195,7 @@ pub fn distribute_qual_to_rels<'mcx>(
         // It's possible that this is an IS NULL clause that's redundant with a
         // lower antijoin; if so we can just discard it.
         if check_redundant_nullability_qual(root, clause) {
-            return;
+            return Ok(());
         }
         // Feed qual to the equivalence machinery, if allowed by caller.
         maybe_equivalence = allow_equivalence;
@@ -232,7 +248,7 @@ pub fn distribute_qual_to_rels<'mcx>(
             let jdomain_relids = bms::relids_copy::call(&root.join_domains[jdomain].jd_relids);
             let (kept, ri) = eqext_process_equivalence(root, run, restrictinfo, jdomain_relids);
             if kept {
-                return;
+                return Ok(());
             }
             // EC may have replaced the RestrictInfo node (the `newri` case);
             // continue with the possibly-modified handle.
@@ -255,19 +271,19 @@ pub fn distribute_qual_to_rels<'mcx>(
             {
                 // we have outervar = innervar
                 push_oj_clause_info(root, restrictinfo, sj, OjList::Left);
-                return;
+                return Ok(());
             }
             if bms::relids_is_subset::call(&right_relids, outerjoin_nonnullable)
                 && !bms::relids_overlap::call(&left_relids, outerjoin_nonnullable)
             {
                 // we have innervar = outervar
                 push_oj_clause_info(root, restrictinfo, sj, OjList::Right);
-                return;
+                return Ok(());
             }
             if sj.jointype == JOIN_FULL {
                 // FULL JOIN (above tests cannot match in this case)
                 push_oj_clause_info(root, restrictinfo, sj, OjList::Full);
-                return;
+                return Ok(());
             }
             // nope, so fall through to distribute_restrictinfo_to_rels
         } else {
@@ -279,6 +295,8 @@ pub fn distribute_qual_to_rels<'mcx>(
     // No EC special case applies, so push it into the clause lists.
     distribute_restrictinfo_to_rels(run, root, restrictinfo)
         .expect("distribute_restrictinfo_to_rels");
+
+    Ok(())
 }
 
 /// `process_equivalence(root, &restrictinfo, jdomain)` (equivclass.c) via the
