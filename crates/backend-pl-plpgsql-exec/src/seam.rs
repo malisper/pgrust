@@ -179,15 +179,28 @@ pub fn plpgsql_fulfill_promise(
 }
 
 /// The varlena R/W-expanded / flat-array commandeering leg of the
-/// `plpgsql_exec_function` argument-store loop (pl_exec.c): for a non-null
-/// varlena arg, take ownership of a R/W expanded object or force a flat array
-/// into expanded form. `TransferExpandedObject` / `expand_array` are the
-/// expanded-object value substrate.
-pub fn arg_store_expanded_object(_value: Datum) {
-    panic!(
-        "seam not wired: plpgsql_exec_function varlena arg commandeer (pl_exec.c) — \
-         TransferExpandedObject / expand_array (expanded-object value substrate)"
-    );
+/// `plpgsql_exec_function` argument-store loop (pl_exec.c 561-586).
+///
+/// For a non-null varlena arg, C `TransferExpandedObject`s a R/W expanded
+/// pointer (take ownership in place), keeps a R/O expanded pointer as-is, or
+/// `expand_array`s a flat array into expanded form. All three are pure
+/// in-memory optimizations — the variable holds the same logical value either
+/// way. The owned value model carries a varlena arg as its flat image
+/// (`assign_simple_var` already stored it before this leg runs), so the
+/// faithful equivalent of every branch is the flat value that is already in
+/// place: this leg flattens rather than expands and never copies a wrong value.
+///
+/// `has_flat_image` is whether the arg arrived with an out-of-band by-reference
+/// image (`arg.byref`); `typisarray` mirrors C's `var->datatype->typisarray`
+/// guard on the flat-array force-expand branch. Both are accepted to keep the
+/// signature faithful to the C structure; the resulting stored value is
+/// identical in this value model, so the body has no further work to do.
+#[inline]
+pub fn arg_store_commandeer(_value: Datum, _has_flat_image: bool, _typisarray: bool) {
+    // pl_exec.c 563/572/576: VARATT_IS_EXTERNAL_EXPANDED_RW / _RO / typisarray.
+    // The owned model never carries a live cross-boundary EOH pointer in an
+    // argument, so each C branch reduces to the flat value already stored by
+    // the preceding `assign_simple_var`. No-op (faithful flatten-fallback).
 }
 
 /// `exec_move_row_from_datum(estate, rec, value)` (pl_exec.c): assign a

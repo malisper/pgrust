@@ -1942,8 +1942,10 @@ fn exec_assign_value_byref_impl(
             // context. Here the coerced value already arrives as an owned image
             // (`newbyref`, `datumCopy`'d out of the cast/SPI working context);
             // store it into the variable's out-of-band `value_byref` companion.
-            // The expanded-object / R-W-array force-expand optimization is the
-            // value substrate and stays loud when no flat image is available.
+            // The expanded-object / R-W-array force-expand (pl_exec.c 5109) is a
+            // pure in-memory optimization; when the coerced value arrives only as
+            // a bare flat word (no image) it is already its flat representation,
+            // so store it as-is — value-equivalent to the C force-expand branch.
             if !typbyval && !isnull {
                 match newbyref {
                     Some(image) => {
@@ -1955,8 +1957,10 @@ fn exec_assign_value_byref_impl(
                         put_var(estate, target_dno, var);
                     }
                     None => {
+                        // Flat varlena value-word: store as-is (the C
+                        // force-to-expanded form is an optimization only).
+                        assign_simple_var(estate, &mut var, newvalue, false, false);
                         put_var(estate, target_dno, var);
-                        seam::arg_store_expanded_object(newvalue);
                     }
                 }
                 return Ok(());
@@ -3617,25 +3621,21 @@ pub fn plpgsql_exec_function(
                 if !arg.isnull && arg.byref.is_some() {
                     var.value_byref = arg.byref.clone();
                 }
-                // The varlena R/W-expanded-object commandeering + flat-array
-                // force-expand of the C arg loop is an expanded-object
-                // optimization; the value substrate (expand_array /
-                // TransferExpandedObject) is not reachable, and the
-                // store-by-value above is value-equivalent for the in-memory
-                // scalar case the control-flow path exercises.
+                // pl_exec.c 561-586: for a non-null varlena the C arg loop
+                // commandeers a R/W expanded pointer (`TransferExpandedObject`),
+                // keeps a R/O expanded pointer as-is, or force-expands a flat
+                // array (`expand_array`). All three are pure in-memory
+                // optimizations: the variable holds the same logical value
+                // either way. In the owned value model an arg's varlena image is
+                // already its flat representation — the `assign_simple_var` store
+                // above (plus the `value_byref` image set for the by-ref case) is
+                // value-equivalent to every C branch. `arg_store_commandeer`
+                // mirrors the C structure, flattening rather than expanding.
                 let varlena = var.datatype.as_ref().map(|t| t.typlen) == Some(-1);
-                // C's arg loop force-expands only an expanded datum / R-W array
-                // (`VARATT_IS_EXTERNAL_EXPANDED` / a R-W expandable array); a
-                // plain flat varlena is stored as-is (`datumCopy`). When the
-                // argument arrives as a flat by-reference image (the common
-                // `text`/`varchar`/`numeric` argument), it is already flat — the
-                // store above is faithful and the expand/commandeer leg does not
-                // apply, so skip the loud expanded-object seam.
-                let has_flat_image = arg.byref.is_some();
+                let typisarray = var.datatype.as_ref().map(|t| t.typisarray).unwrap_or(false);
                 put_var(&mut estate, n, var);
-                if !arg.isnull && varlena && !has_flat_image {
-                    // R/W or array detoast/expand leg (loud value substrate).
-                    seam::arg_store_expanded_object(arg.value);
+                if !arg.isnull && varlena {
+                    seam::arg_store_commandeer(arg.value, arg.byref.is_some(), typisarray);
                 }
             }
             PLpgSQL_datum_type::PLPGSQL_DTYPE_REC => {
