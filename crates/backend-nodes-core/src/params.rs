@@ -46,7 +46,8 @@ use std::rc::Rc;
 use mcx::{Mcx, MemoryContext};
 use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 use types_nodes::params::{
-    ParamExternData, ParamListInfo, ParamListInfoData, ParamRef, ParamsErrorCbData, T_Param,
+    ParamExternData, ParamListInfo, ParamListInfoData, ParamRef, ParamsErrorCbData,
+    PARAM_FLAG_CONST, T_Param,
 };
 use types_nodes::primnodes::{Param, PARAM_EXTERN};
 
@@ -146,6 +147,51 @@ pub fn makeParamList(num_params: i32) -> PgResult<ParamListInfoData<'static>> {
 /// The `make_param_list` seam shape: build a fresh, shareable value param list.
 pub fn make_param_list_value(num_params: i32) -> PgResult<ParamListInfo> {
     Ok(Some(Rc::new(makeParamList(num_params)?)))
+}
+
+// ===========================================================================
+// store_param_extern — the Bind-message param-slot writer
+// ===========================================================================
+
+/// Store one external parameter value into a freshly-`makeParamList`'d value
+/// param list slot, mirroring the `params->params[paramno].{value,isnull,pflags,
+/// ptype} = ...` assignment block of `exec_bind_message` (postgres.c:1804).
+///
+/// The Bind message's `value` comes from a type input / receive function and is
+/// allocated in the per-message arena (`'mcx`); the value param list, however,
+/// is backend-lifetime (`ParamListInfoData<'static>`, owned by the portal after
+/// `PortalStart`). C does this copy implicitly by running the input functions
+/// while the current memory context is the portal context; the owned model
+/// instead `datumCopy`s the by-reference payload into the backend-lifetime
+/// [`PARAM_LIST_CONTEXT`] (the same context `copyParamList` uses), so the stored
+/// `Datum<'static>` stays valid for the param list's lifetime. By-value datums
+/// are a word copy; NULL / invalid-type slots are stored as an empty image.
+///
+/// The parameter is marked `PARAM_FLAG_CONST` exactly as C does (so a custom
+/// plan makes full use of the value).
+pub fn store_param_extern<'mcx>(
+    param_li: &mut ParamListInfoData<'static>,
+    paramno: i32,
+    value: &Datum<'mcx>,
+    isnull: bool,
+    ptype: Oid,
+) -> PgResult<()> {
+    // need datumCopy in case it's a pass-by-reference datatype (cf. copyParamList).
+    let owned_value: Datum<'static> = if isnull || !oid_is_valid(ptype) {
+        Datum::null()
+    } else {
+        let (typ_len, typ_byval) = lsyscache_seam::get_typlenbyval::call(ptype)?;
+        datum_seam::datum_copy_v::call(param_list_mcx(), value, typ_byval, typ_len as i32)?
+    };
+
+    let prm = &mut param_li.params[paramno as usize];
+    prm.value = owned_value;
+    prm.isnull = isnull;
+    // We mark the params as CONST. This ensures that any custom plan makes full
+    // use of the parameter values.
+    prm.pflags = PARAM_FLAG_CONST;
+    prm.ptype = ptype;
+    Ok(())
 }
 
 // ===========================================================================

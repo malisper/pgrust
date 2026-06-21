@@ -72,8 +72,10 @@ pub fn init_seams() {
     // tidbitmap family: tbm_add_tuple + the tidbitmap-seams surface.
     tidbitmap::init_seams();
 
-    // params family (nodes/params.c): the canonical `make_param_list` seam.
+    // params family (nodes/params.c): the canonical `make_param_list` seam +
+    // the Bind-message param-slot writer.
     backend_nodes_params_seams::make_param_list::set(params::make_param_list_value);
+    backend_nodes_params_seams::store_param_extern::set(params::store_param_extern);
 
     // read family (nodes/read.c): string_to_node.
     backend_nodes_read_seams::string_to_node::set(read::string_to_node);
