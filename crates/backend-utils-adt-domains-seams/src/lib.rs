@@ -119,6 +119,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// Free every compiled CHECK `ExprState` that was compiled into the given
+    /// "Domain constraints" context — the owned-model rendering of C's
+    /// `MemoryContextDelete(refctx)` reclaiming the `ExprState`s that
+    /// `prep_domain_constraints` palloc'd into `refctx` (via the EState-less
+    /// [`exec_init_expr`]). The executor keeps the compiled `ExprState`s in a
+    /// backend-local registry keyed by [`ExprStateHandle`], outside any
+    /// arena the typcache can see, so the typcache's `delete_domain_ctx`
+    /// (`MemoryContextDelete`) calls this to evict exactly the entries the
+    /// deleted context owns. A context with no compiled CHECK exprstates (only
+    /// NOT NULL constraints, or `need_exprstate == false`) is a no-op.
+    pub fn free_ctx_exprstates(ctx: DomainCtxHandle) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `INJECTION_POINT(name, NULL)` — a no-op unless an injection point is
     /// attached (test harness observation hook).
     pub fn injection_point(name: &str)

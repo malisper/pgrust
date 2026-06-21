@@ -518,6 +518,12 @@ fn set_parent_to_cache_context(ctx: DomainCtxHandle) -> PgResult<()> {
 /// callbacks LIFO (the C `MemoryContextDelete` callback firing), which is how a
 /// ref's `dccref_deletion_callback` releases its refcount.
 fn delete_domain_ctx(ctx: DomainCtxHandle) -> PgResult<()> {
+    // C: MemoryContextDelete(refctx) reclaims everything palloc'd in the
+    // context, including the CHECK `ExprState`s `prep_domain_constraints`
+    // compiled into it. Those live in the executor's backend-local registry
+    // (outside any arena visible here), so signal it to evict the entries this
+    // context owns before dropping the context value.
+    domains_seams::free_ctx_exprstates::call(ctx)?;
     DOMAIN_CTXS.with(|m| m.borrow_mut().remove(&ctx.0));
     Ok(())
 }

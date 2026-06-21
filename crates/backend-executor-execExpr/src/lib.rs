@@ -61,6 +61,7 @@
 //! [`ProjectionInfo`]: types_nodes::execexpr::ProjectionInfo
 
 pub mod execExpr_core;
+pub mod execExpr_domain;
 pub mod execExpr_domain_agg;
 pub mod execExpr_func_subscript;
 pub mod execExpr_json;
@@ -168,5 +169,19 @@ pub fn init_seams() {
     // Its real owner is the executor (execExpr), so install it here.
     backend_optimizer_util_clauses_seams::evaluate_expr_fallback::set(
         execExpr_core::evaluate_expr_fallback,
+    );
+
+    // OUTWARD seams owned by utils/cache/typcache.c + utils/adt/domains.c (the
+    // domain-constraint machinery) but BACKED by the executor: the EState-less
+    // `ExecInitExpr(check_expr, NULL)` that `prep_domain_constraints` runs to
+    // compile each domain CHECK predicate, the standalone-`ExprContext`
+    // `ExecCheck` that `domain_check_input` runs to evaluate a CHECK against a
+    // candidate value, and the `MemoryContextDelete(refctx)` signal that frees
+    // the compiled `ExprState`s a domain context owns. Their real owner is the
+    // executor (execExpr), so install them here onto the domains-seams crate.
+    backend_utils_adt_domains_seams::exec_init_expr::set(execExpr_domain::exec_init_expr);
+    backend_utils_adt_domains_seams::domain_check_exec::set(execExpr_domain::domain_check_exec);
+    backend_utils_adt_domains_seams::free_ctx_exprstates::set(
+        execExpr_domain::free_ctx_exprstates,
     );
 }

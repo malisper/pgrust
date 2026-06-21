@@ -98,3 +98,12 @@ backend-catalog-objectaccess-seams = { path = "../backend-catalog-objectaccess-s
 # TRACK_FUNC_* for the strict×fusage opcode selection (types-acl declared above).
 types-parsenodes = { path = "../types-parsenodes" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+# The domains unit's OUTWARD seams (declared in domains-seams) are the
+# EState-less ExecInitExpr(check_expr, NULL) + standalone-ExprContext ExecCheck
+# the domain-constraint machinery (typcache/domains.c) runs through the
+# executor. Declared there, installed from this executor owner's init_seams()
+# (the executor backs the domain CHECK compile + eval). execExpr_domain.
+backend-utils-adt-domains-seams = { path = "../backend-utils-adt-domains-seams" }
+# MakeExpandedObjectReadOnlyInternal (expandeddatum.c) — domain_check_exec forces
+# a possibly-multiply-read varlena domain value to read-only before ExecCheck.
+backend-utils-adt-misc2-seams = { path = "../backend-utils-adt-misc2-seams" }

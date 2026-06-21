@@ -2312,6 +2312,33 @@ pub fn exec_init_expr_no_parent<'mcx>(
     mcx::alloc_in(mcx, state)
 }
 
+/// `ExecInitExpr(node, NULL)` (execExpr.c) compiled into a **bare
+/// `MemoryContext`** with no owning `EState` — the spine the domain-constraint
+/// `ExecInitExpr(check_expr, NULL)` (utils/cache/typcache.c
+/// `prep_domain_constraints`) needs. Identical opcode emission to
+/// [`exec_init_expr_no_parent`] (`ExecCreateExprSetupSteps` + `ExecInitExprRec`
+/// + `EEOP_DONE_RETURN` + `ExecReadyExpr`), but allocates the program directly
+/// in `mcx` (the C `refctx`) instead of an `estate.es_query_cxt`, and stamps no
+/// `es_link` — a domain CHECK predicate references no Vars/Params/SubPlans (only
+/// the domain test value the econtext supplies at eval time), so no `EState`
+/// back-link is needed at compile time. Returns the compiled state by value (the
+/// domain-constraint registry owns it inside the same `mcx` bundle).
+pub fn compile_standalone_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: &Expr,
+) -> PgResult<ExprState<'mcx>> {
+    let mut state = make_expr_state();
+    state.ext_params = 0;
+    ensure_result_arena(mcx, &mut state)?;
+
+    exec_create_expr_setup_steps(mcx, &mut state, node)?;
+    exec_init_expr_rec(mcx, node, &mut state, STATE_RESULT_CELL)?;
+    expr_eval_push_step(mcx, &mut state, done_return_step(STATE_RESULT_CELL))?;
+    exec_ready_expr(&mut state)?;
+
+    Ok(state)
+}
+
 /// `ExecInitExpr(node, state->parent)` for a window function argument /
 /// aggfilter sub-expression — compiles `node` into its own `ExprState` and
 /// stamps the EState back-link (`es_link`) so a nested SubPlan / param eval can
