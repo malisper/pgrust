@@ -1357,6 +1357,18 @@ fn fc_poly_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<
     Ok(ret_poly(fcinfo, p))
 }
 
+/// `spg_poly_quad_compress` (geo_spgist.c:876): SP-GiST compress support for the
+/// `spgist/poly_ops` opclass -- yields the polygon's bounding box (the lossy box
+/// representation the box-quad tree indexes).  C:
+/// `POLYGON *polygon = PG_GETARG_POLYGON_P(0); box = palloc(sizeof(BOX));
+/// *box = polygon->boundbox; PG_RETURN_BOX_P(box);`
+fn fc_spg_poly_quad_compress(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let polygon = arg_poly(fcinfo, 0);
+    Ok(ret_box(fcinfo, polygon.boundbox))
+}
+
 /// Register the varlena `path`/`polygon` `geo_ops.c` builtins (I/O, comparison,
 /// containment, measurement, arithmetic, conversions) plus every geometric type's
 /// binary `*_send` and `*_recv`. Called from this crate's `init_seams()`. The
@@ -1421,6 +1433,8 @@ pub fn register_geo_ops_path_poly_builtins() {
         builtin(1446, "poly_box", 1, true, false, fc_poly_box),
         builtin(1448, "box_poly", 1, true, false, fc_box_poly),
         builtin(1474, "poly_circle", 1, true, false, fc_poly_circle),
+        // SP-GiST `spgist/poly_ops` compress: polygon -> bounding box.
+        builtin(5011, "spg_poly_quad_compress", 1, true, false, fc_spg_poly_quad_compress),
         // binary `*_send` over all geometric types.
         builtin(2429, "point_send", 1, true, false, fc_point_send),
         builtin(2485, "box_send", 1, true, false, fc_box_send),

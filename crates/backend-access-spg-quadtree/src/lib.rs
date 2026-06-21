@@ -709,6 +709,10 @@ use backend_utils_adt_rangetypes_spgist as range;
 // the typed carriers directly.)
 // ---------------------------------------------------------------------------
 
+/// `F_SPG_BBOX_QUAD_CONFIG` — `spg_bbox_quad_config` (pg_proc.dat oid 5010):
+/// the generic bounding-box quad-tree config shared by the `spgist/poly_ops`
+/// opclass (polygons are lossily indexed by their bounding box).
+pub const F_SPG_BBOX_QUAD_CONFIG: Oid = 5010;
 /// `F_SPG_BOX_QUAD_CONFIG` — `spg_box_quad_config` (pg_proc.dat oid 5012).
 pub const F_SPG_BOX_QUAD_CONFIG: Oid = 5012;
 /// `F_SPG_BOX_QUAD_CHOOSE` — `spg_box_quad_choose` (pg_proc.dat oid 5013).
@@ -795,6 +799,13 @@ fn dispatch_config(
         F_SPG_BOX_QUAD_CONFIG => {
             let mut cfg = boxq::SpgConfigOut::default();
             boxq::spg_box_quad_config(&mut cfg);
+            (cfg.prefixType, cfg.labelType, cfg.leafType, cfg.canReturnData, cfg.longValuesOK)
+        }
+        F_SPG_BBOX_QUAD_CONFIG => {
+            // `spgist/poly_ops` config: a 2-D type lossily represented by its
+            // bounding box (geo_spgist.c spg_bbox_quad_config).
+            let mut cfg = boxq::SpgConfigOut::default();
+            boxq::spg_bbox_quad_config(&mut cfg);
             (cfg.prefixType, cfg.labelType, cfg.leafType, cfg.canReturnData, cfg.longValuesOK)
         }
         _ => return Err(unrecognized_proc(proc_oid, "config")),
