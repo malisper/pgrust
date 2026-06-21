@@ -14,7 +14,7 @@
 seam_core::seam!(
     /// `equal((Node *) a, (Node *) b)` (equalfuncs.c) — structural equality of
     /// two expression sub-trees.
-    pub fn equal_expr<'mcx>(a: &types_nodes::primnodes::Expr<'mcx>, b: &types_nodes::primnodes::Expr<'mcx>) -> bool
+    pub fn equal_expr<'a, 'b>(a: &types_nodes::primnodes::Expr<'a>, b: &types_nodes::primnodes::Expr<'b>) -> bool
 );
 
 seam_core::seam!(

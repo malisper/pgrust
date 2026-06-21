@@ -639,7 +639,7 @@ pub fn get_eclass_for_sort_expr(
 /// children only deep-copy via `clone_in`), e.g. a `var = (correlated subplan)`
 /// equality. Callers that need an owned copy (to move into a new node /
 /// seam-by-value) must use [`em_expr_owned`] with a [`PlannerRun`] mcx.
-pub(crate) fn em_expr_ref(root: &PlannerInfo, em: EmId) -> &Expr {
+pub(crate) fn em_expr_ref(root: &PlannerInfo, em: EmId) -> &Expr<'static> {
     root.node(root.em(em).em_expr)
 }
 
@@ -652,12 +652,12 @@ pub(crate) fn em_expr_owned<'mcx>(
     root: &PlannerInfo,
     run: &PlannerRun<'mcx>,
     em: EmId,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     root.node(root.em(em).em_expr).clone_in(run.mcx())
 }
 
 /// Strip outer `RelabelType`s from an [`Expr`], returning the inner expr.
-pub(crate) fn strip_relabeltypes(mut node: &Expr) -> &Expr {
+pub(crate) fn strip_relabeltypes<'a, 'mcx>(mut node: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
     while let Some(r) = node.as_relabeltype() {
         match r.arg.as_deref() {
             Some(arg) => node = arg,

@@ -616,7 +616,9 @@ fn throw_back_dummy<'mcx>(
     rinfo: RinfoId,
 ) -> PgResult<()> {
     let ri = root.rinfo(rinfo).clone();
-    let bool_true = ec_seam::make_bool_const::call(true, false);
+    // make_bool_const yields a self-contained 'static bool Const; deep-clone it
+    // into the planner-run arena so it threads as Expr<'mcx> into make_restrictinfo.
+    let bool_true = ec_seam::make_bool_const::call(true, false).clone_in(run.mcx())?;
     let dummy = ec_seam::make_restrictinfo::call(
         run.mcx(),
         root,
@@ -877,7 +879,7 @@ fn reconsider_full_join_clause<'mcx>(
 
 /// Resolve a RestrictInfo's clause node to a borrowed [`Expr`] (read-only; a
 /// derived `.clone()` would panic on an owned-subtree child).
-fn em_expr_of_clause(root: &PlannerInfo, rinfo: RinfoId) -> &types_nodes::primnodes::Expr {
+fn em_expr_of_clause(root: &PlannerInfo, rinfo: RinfoId) -> &types_nodes::primnodes::Expr<'static> {
     root.node(root.rinfo(rinfo).clause)
 }
 
