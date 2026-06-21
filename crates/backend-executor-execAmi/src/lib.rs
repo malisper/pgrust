@@ -59,6 +59,7 @@ use backend_executor_nodeSubqueryscan as nodeSubqueryscan;
 use backend_executor_nodeTableFuncscan as nodeTableFuncscan;
 use backend_executor_nodeFunctionscan as nodeFunctionscan;
 use backend_executor_nodeTidscan as nodeTidscan;
+use backend_executor_nodeSamplescan as nodeSamplescan;
 use backend_executor_nodeTidrangescan as nodeTidrangescan;
 use backend_executor_nodeWorktablescan as nodeWorktablescan;
 use backend_executor_nodeUnique as nodeUnique;
@@ -286,6 +287,18 @@ pub fn exec_re_scan<'mcx>(
             }
             // case T_TidScanState: ExecReScanTidScan((TidScanState *) node);
             PlanStateNode::TidScan(m) => nodeTidscan::ExecReScanTidScan(m, estate)?,
+            // case T_SampleScanState: ExecReScanSampleScan((SampleScanState *) node);
+            //
+            // `SampleScanState` lives in `types-samplescan` (ABOVE `types-nodes`),
+            // so the carrier is downcast to the concrete state (tag-checked)
+            // before the node crate's `ExecReScanSampleScan` runs.
+            PlanStateNode::SampleScan(s) => {
+                let sample = types_nodes::samplescanstate_carrier::downcast_sample_scan_state_mut::<
+                    types_samplescan::SampleScanState<'_>,
+                >(&mut **s)
+                .expect("castNode(SampleScanState, node) failed");
+                nodeSamplescan::ExecReScanSampleScan(sample, estate)?
+            }
             // case T_WorkTableScanState: ExecReScanWorkTableScan((WorkTableScanState *) node);
             PlanStateNode::WorkTableScan(m) => {
                 nodeWorktablescan::ExecReScanWorkTableScan(m, estate)?

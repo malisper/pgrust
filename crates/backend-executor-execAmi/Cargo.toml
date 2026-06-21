@@ -55,6 +55,7 @@ backend-executor-nodeSubqueryscan = { path = "../backend-executor-nodeSubquerysc
 backend-executor-nodeTableFuncscan = { path = "../backend-executor-nodeTableFuncscan" }
 backend-executor-nodeFunctionscan = { path = "../backend-executor-nodeFunctionscan" }
 backend-executor-nodeTidscan = { path = "../backend-executor-nodeTidscan" }
+backend-executor-nodeSamplescan = { path = "../backend-executor-nodeSamplescan" }
 backend-executor-nodeTidrangescan = { path = "../backend-executor-nodeTidrangescan" }
 backend-executor-nodeWorktablescan = { path = "../backend-executor-nodeWorktablescan" }
 backend-executor-nodeUnique = { path = "../backend-executor-nodeUnique" }
@@ -66,6 +67,7 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 types-error = { path = "../types-error" }
 types-nodes = { path = "../types-nodes" }
+types-samplescan = { path = "../types-samplescan" }
 
 [dev-dependencies]
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }

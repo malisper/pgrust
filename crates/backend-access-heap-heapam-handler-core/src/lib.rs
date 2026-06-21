@@ -180,6 +180,25 @@ fn heapam_scan_bitmap_next_tuple<'mcx>(
     heapam::scan::heapam_scan_bitmap_next_tuple(mcx, scan, slot)
 }
 
+/// `.scan_sample_next_block = heapam_scan_sample_next_block`.
+fn heapam_scan_sample_next_block<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    scanstate: &mut dyn types_tableam::tableam::SampleScanDriver,
+) -> PgResult<bool> {
+    heapam::scan::heapam_scan_sample_next_block(mcx, scan, scanstate)
+}
+
+/// `.scan_sample_next_tuple = heapam_scan_sample_next_tuple`.
+fn heapam_scan_sample_next_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    scanstate: &mut dyn types_tableam::tableam::SampleScanDriver,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    heapam::scan::heapam_scan_sample_next_tuple(mcx, scan, scanstate, slot)
+}
+
 /// `.scan_end = heap_endscan`.
 fn heapam_scan_end(scan: TableScanDesc<'_>) -> PgResult<()> {
     heapam::scan::heap_endscan(scan)
@@ -714,6 +733,9 @@ pub fn get_heapam_table_am_routine() -> TableAmRoutine {
         scan_analyze_next_tuple: analyze_scan::heapam_scan_analyze_next_tuple,
 
         scan_bitmap_next_tuple: heapam_scan_bitmap_next_tuple,
+
+        scan_sample_next_block: heapam_scan_sample_next_block,
+        scan_sample_next_tuple: heapam_scan_sample_next_tuple,
     }
 }
 

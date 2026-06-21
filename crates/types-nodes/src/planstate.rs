@@ -28,6 +28,7 @@ use crate::nodehash::HashState;
 use crate::execstate_tags::T_HashState;
 use crate::aggstate_carrier::AggStateLive;
 use crate::aggstate_carrier::downcast_agg_state_ref;
+use crate::samplescanstate_carrier::SampleScanStateLive;
 
 /// A plan-state-tree node (`PlanState *` in C). The `NodeTag` is the enum
 /// discriminant. The state tree is context-allocated (C: `makeNode` in the
@@ -101,6 +102,12 @@ pub enum PlanStateNode<'mcx> {
     SeqScan(PgBox<'mcx, crate::nodeseqscan::SeqScanState<'mcx>>),
     /// `T_TidScanState`.
     TidScan(PgBox<'mcx, crate::nodetidscan::TidScanState<'mcx>>),
+    /// `T_SampleScanState`. The concrete `SampleScanState` lives in
+    /// `types-samplescan` (ABOVE this crate), so it is carried as an owned,
+    /// tag-checked erased [`SampleScanStateLive`] trait object rather than a
+    /// direct `PgBox<SampleScanState>` (which would be a crate cycle). See
+    /// [`crate::samplescanstate_carrier`].
+    SampleScan(PgBox<'mcx, dyn SampleScanStateLive<'mcx> + 'mcx>),
     /// `T_TidRangeScanState`.
     TidRangeScan(PgBox<'mcx, crate::nodetidrangescan::TidRangeScanState<'mcx>>),
     /// `T_WorkTableScanState`. The state struct lives in `types-nodes`
@@ -166,6 +173,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::HashJoin(_) => T_HashJoinState,
             PlanStateNode::SeqScan(_) => crate::execstate_tags::T_SeqScanState,
             PlanStateNode::TidScan(_) => crate::nodes::T_TidScanState,
+            PlanStateNode::SampleScan(s) => s.tag(),
             PlanStateNode::TidRangeScan(_) => crate::nodes::T_TidRangeScanState,
             PlanStateNode::WorkTableScan(_) => crate::nodeworktablescan::T_WorkTableScanState,
             PlanStateNode::BitmapHeapScan(_) => crate::execstate_tags::T_BitmapHeapScanState,
@@ -214,6 +222,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::HashJoin(h) => &h.js.ps,
             PlanStateNode::SeqScan(s) => &s.ss.ps,
             PlanStateNode::TidScan(t) => &t.ss.ps,
+            PlanStateNode::SampleScan(s) => s.ps(),
             PlanStateNode::TidRangeScan(t) => &t.ss.ps,
             PlanStateNode::WorkTableScan(w) => &w.ss.ps,
             PlanStateNode::BitmapHeapScan(b) => &b.ss.ps,
@@ -261,6 +270,7 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::HashJoin(h) => &mut h.js.ps,
             PlanStateNode::SeqScan(s) => &mut s.ss.ps,
             PlanStateNode::TidScan(t) => &mut t.ss.ps,
+            PlanStateNode::SampleScan(s) => s.ps_mut(),
             PlanStateNode::TidRangeScan(t) => &mut t.ss.ps,
             PlanStateNode::WorkTableScan(w) => &mut w.ss.ps,
             PlanStateNode::BitmapHeapScan(b) => &mut b.ss.ps,
@@ -382,6 +392,8 @@ impl<'mcx> PlanStateNode<'mcx> {
             PlanStateNode::SeqScan(s) => Some(&s.ss),
             // `TidScanState` begins with a `ScanState`.
             PlanStateNode::TidScan(t) => Some(&t.ss),
+            // `SampleScanState` begins with a `ScanState`.
+            PlanStateNode::SampleScan(s) => Some(s.ss()),
             // `TidRangeScanState` begins with a `ScanState`.
             PlanStateNode::TidRangeScan(t) => Some(&t.ss),
             // `WorkTableScanState` begins with a `ScanState`.

@@ -124,7 +124,7 @@ fn ExecScanFetch<'mcx>(
             // ForeignScan/CustomScan that pushed a join to the remote side. If it
             // is a descendant node in the EPQ recheck plan tree, run the recheck
             // method; otherwise fall through to the access method below.
-            if seam::epq_param_is_member_of_ext_param::call(node)? {
+            if seam::epq_param_is_member_of_ext_param::call(node, estate)? {
                 // The recheck method is responsible not only for rechecking the
                 // scan/join quals but also for storing the correct tuple.
                 if !recheck_mtd(node, estate)? {
@@ -132,17 +132,17 @@ fn ExecScanFetch<'mcx>(
                 }
                 return Ok(!scan_tuple_is_null(node, estate));
             }
-        } else if seam::epq_relsubs_done::call(node, scanrelid - 1)? {
+        } else if seam::epq_relsubs_done::call(node, scanrelid - 1, estate)? {
             // Return empty slot, as either there is no EPQ tuple for this rel or
             // we already returned it.
             seam::exec_clear_scan_tuple::call(node, estate)?;
             return Ok(false);
-        } else if seam::epq_relsubs_slot_present::call(node, scanrelid - 1)? {
+        } else if seam::epq_relsubs_slot_present::call(node, scanrelid - 1, estate)? {
             // Return replacement tuple provided by the EPQ caller.
-            seam::epq_load_relsubs_slot::call(node, scanrelid - 1)?;
+            seam::epq_load_relsubs_slot::call(node, scanrelid - 1, estate)?;
 
             // Mark to remember that we shouldn't return it again.
-            seam::epq_set_relsubs_done::call(node, scanrelid - 1, true)?;
+            seam::epq_set_relsubs_done::call(node, scanrelid - 1, true, estate)?;
 
             // Return empty slot if we haven't got a test tuple.
             if scan_tuple_is_null(node, estate) {
@@ -155,13 +155,13 @@ fn ExecScanFetch<'mcx>(
                 return Ok(false);
             }
             return Ok(true);
-        } else if seam::epq_relsubs_rowmark_present::call(node, scanrelid - 1)? {
+        } else if seam::epq_relsubs_rowmark_present::call(node, scanrelid - 1, estate)? {
             // Fetch and return replacement tuple using a non-locking rowmark.
             //
             // Mark to remember that we shouldn't return more.
-            seam::epq_set_relsubs_done::call(node, scanrelid - 1, true)?;
+            seam::epq_set_relsubs_done::call(node, scanrelid - 1, true, estate)?;
 
-            if !seam::eval_plan_qual_fetch_row_mark::call(node, scanrelid)? {
+            if !seam::eval_plan_qual_fetch_row_mark::call(node, scanrelid, estate)? {
                 return Ok(false);
             }
 
@@ -199,13 +199,13 @@ fn ExecScanExtended<'mcx>(
     // If we have neither a qual to check nor a projection to do, just skip all
     // the overhead and return the raw scan tuple.
     if !has_qual && !has_proj_info {
-        seam::reset_per_tuple_expr_context::call(node)?;
+        seam::reset_per_tuple_expr_context::call(node, estate)?;
         return ExecScanFetch(node, epq_active, access_mtd, recheck_mtd, estate);
     }
 
     // Reset per-tuple memory context to free any expression evaluation storage
     // allocated in the previous tuple cycle.
-    seam::reset_per_tuple_expr_context::call(node)?;
+    seam::reset_per_tuple_expr_context::call(node, estate)?;
 
     // Get a tuple from the access method. Loop until we obtain a tuple that
     // passes the qualification.
@@ -225,7 +225,7 @@ fn ExecScanExtended<'mcx>(
         }
 
         // Place the current tuple into the expr context.
-        seam::set_econtext_scantuple_to_scan_slot::call(node)?;
+        seam::set_econtext_scantuple_to_scan_slot::call(node, estate)?;
 
         // Check that the current tuple satisfies the qual-clause.
         //
@@ -246,7 +246,7 @@ fn ExecScanExtended<'mcx>(
         }
 
         // Tuple fails qual, so free per-tuple memory and try again.
-        seam::reset_per_tuple_expr_context::call(node)?;
+        seam::reset_per_tuple_expr_context::call(node, estate)?;
     }
 }
 
@@ -259,7 +259,7 @@ fn ExecScan<'mcx>(
     recheck_mtd: RecheckMtd,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    let epq_active = seam::es_epq_active_present::call(node)?;
+    let epq_active = seam::es_epq_active_present::call(node, estate)?;
     let has_qual = node.ss.ps.qual.is_some();
     let has_proj_info = node.ss.ps.ps_ProjInfo.is_some();
     ExecScanExtended(
@@ -312,6 +312,7 @@ fn sample_clause<'a, 'mcx>(node: &'a SampleScan<'mcx>) -> Option<&'a TableSample
 /// those references) through [`seam::init_plan_state_links`].
 pub fn ExecInitSampleScan<'mcx>(
     node: &SampleScan<'mcx>,
+    plan_node: &'mcx types_nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<SampleScanState<'mcx>> {
@@ -339,8 +340,13 @@ pub fn ExecInitSampleScan<'mcx>(
         done: false,
     };
 
-    // scanstate->ss.ps.plan = (Plan *) node;  scanstate->ss.ps.state = estate;
-    // scanstate->ss.ps.ExecProcNode = ExecSampleScan;
+    // scanstate->ss.ps.plan = (Plan *) node; The plan back-link aliases the
+    // caller's read-only plan node (the `&Node` the dispatcher holds).
+    scanstate.ss.ps.plan = Some(plan_node);
+    // scanstate->ss.ps.state = estate;
+    // scanstate->ss.ps.ExecProcNode = ExecSampleScan; The ExecProcNode slot is
+    // an `ExecProcNodeMtd` over the central `PlanStateNode`, which this crate
+    // cannot name, so the dispatch crate installs it through this seam.
     seam::init_plan_state_links::call(&mut scanstate, node)?;
 
     // Miscellaneous initialization: create expression context for node.
@@ -363,12 +369,12 @@ pub fn ExecInitSampleScan<'mcx>(
 
     // initialize child expressions
     // scanstate->ss.ps.qual = ExecInitQual(node->scan.plan.qual, scanstate);
-    seam::exec_init_qual::call(&mut scanstate, node)?;
+    seam::exec_init_qual::call(&mut scanstate, node, estate)?;
 
     // scanstate->args = ExecInitExprList(tsc->args, scanstate);
-    seam::exec_init_expr_list::call(&mut scanstate, node)?;
+    seam::exec_init_expr_list::call(&mut scanstate, node, estate)?;
     // scanstate->repeatable = ExecInitExpr(tsc->repeatable, scanstate);
-    seam::exec_init_repeatable_expr::call(&mut scanstate, node)?;
+    seam::exec_init_repeatable_expr::call(&mut scanstate, node, estate)?;
 
     // If we don't have a REPEATABLE clause, select a random seed. We want to do
     // this just once, since the seed shouldn't change over rescans.
@@ -416,14 +422,17 @@ pub fn ExecEndSampleScan<'mcx>(node: &mut SampleScanState<'mcx>) -> PgResult<()>
 }
 
 /// `ExecReScanSampleScan` — rescan the relation.
-pub fn ExecReScanSampleScan<'mcx>(node: &mut SampleScanState<'mcx>) -> PgResult<()> {
+pub fn ExecReScanSampleScan<'mcx>(
+    node: &mut SampleScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     // Remember we need to do BeginSampleScan again (if we did it at all).
     node.begun = false;
     node.done = false;
     node.haveblock = false;
     node.donetuples = 0;
 
-    seam::exec_scan_rescan::call(node)
+    seam::exec_scan_rescan::call(node, estate)
 }
 
 // ===========================================================================
@@ -497,11 +506,11 @@ fn tablesample_init<'mcx>(
     if scanstate.ss_currentScanDesc.is_none() {
         // scanstate->ss.ss_currentScanDesc = table_beginscan_sampling(rel,
         //     es_snapshot, 0, NULL, use_bulkread, allow_sync, use_pagemode);
-        seam::table_beginscan_sampling::call(scanstate, allow_sync)?;
+        seam::table_beginscan_sampling::call(scanstate, allow_sync, estate)?;
     } else {
         // table_rescan_set_params(scan, NULL, use_bulkread, allow_sync,
         //                         use_pagemode);
-        seam::table_rescan_set_params::call(scanstate, allow_sync)?;
+        seam::table_rescan_set_params::call(scanstate, allow_sync, estate)?;
     }
 
     // pfree(params): the per-query context reclaims it at ExecEndNode.
@@ -530,7 +539,7 @@ fn tablesample_getnext<'mcx>(
 
     loop {
         if !scanstate.haveblock {
-            if !seam::table_scan_sample_next_block::call(scanstate)? {
+            if !seam::table_scan_sample_next_block::call(scanstate, estate)? {
                 scanstate.haveblock = false;
                 scanstate.done = true;
 
@@ -560,6 +569,28 @@ fn tablesample_getnext<'mcx>(
 /// `errcode(ERRCODE_OUT_OF_MEMORY)` for an allocation-safety failure.
 fn out_of_memory(what: &str) -> PgError {
     PgError::error(alloc::format!("out of memory ({what})")).with_sqlstate(ERRCODE_OUT_OF_MEMORY)
+}
+
+/// Erase an owned `SampleScanState` into the central
+/// `PlanStateNode::SampleScan` carrier (`PgBox<dyn SampleScanStateLive>`).
+/// `SampleScanState` lives in `types-samplescan` (ABOVE `types-nodes`), so the
+/// enum carries it type-erased; this is the same `into_raw`/`from_raw` unsize
+/// the `erase_agg_state` carrier uses (the `allocator_api2` `PgBox` does not
+/// auto-coerce unsized types on stable). The concrete type is recovered via the
+/// tag-checked `downcast_sample_scan_state_*` helpers.
+pub fn erase_sample_scan_state<'mcx>(
+    boxed: mcx::PgBox<'mcx, SampleScanState<'mcx>>,
+) -> mcx::PgBox<'mcx, dyn types_nodes::samplescanstate_carrier::SampleScanStateLive<'mcx> + 'mcx> {
+    let (ptr, alloc) = mcx::PgBox::into_raw_with_allocator(boxed);
+    // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
+    // attaches the `dyn SampleScanStateLive` vtable (the established erase
+    // pattern, identical to `erase_agg_state`).
+    unsafe {
+        mcx::PgBox::from_raw_in(
+            ptr as *mut (dyn types_nodes::samplescanstate_carrier::SampleScanStateLive<'mcx> + 'mcx),
+            alloc,
+        )
+    }
 }
 
 /// Install every seam this crate owns. Wired into `seams-init::init_all()`.

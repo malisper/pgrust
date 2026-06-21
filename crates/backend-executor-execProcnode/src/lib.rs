@@ -46,6 +46,7 @@ pub mod execProcnode_run_end;
 mod cte_seams;
 mod lockrows_seams;
 mod tidrangescan_seams;
+mod samplescan_seams;
 
 /// Install every seam this unit owns that corresponds to an `execProcnode.c`
 /// function.
@@ -93,4 +94,11 @@ pub fn init_seams() {
     // installs the node's seams here (the `exec_assign_scan_projection_info` and
     // `exec_scan_rescan` seams are installed by execScan, which owns those drivers).
     tidrangescan_seams::init_seams();
+
+    // The SampleScan (TABLESAMPLE) node seams: this dispatch crate owns the
+    // ExecInitSampleScan/ExecProcNode call sites and the execTuples/execUtils/
+    // execExpr/tableam/prng/hash substrate the node reaches, so it installs the
+    // node's seams here (the `exec_assign_scan_projection_info` and
+    // `exec_scan_rescan` seams are installed by execScan, which owns those drivers).
+    samplescan_seams::init_seams();
 }

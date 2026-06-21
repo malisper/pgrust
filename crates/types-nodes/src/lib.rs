@@ -112,6 +112,11 @@ pub mod planstate;
 /// [`planstate::PlanStateNode::Agg`] variant holds (its concrete `AggStateData`
 /// lives in `backend-executor-nodeAgg`, above this crate). See the module docs.
 pub mod aggstate_carrier;
+/// The owned, tag-checked, lifetime-preserving carrier for the
+/// [`planstate::PlanStateNode::SampleScan`] variant (its concrete
+/// `SampleScanState` lives in `types-samplescan`, above this crate). See the
+/// module docs.
+pub mod samplescanstate_carrier;
 pub mod primnodes;
 pub mod querydesc;
 pub mod queryenvironment;

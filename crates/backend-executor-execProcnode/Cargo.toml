@@ -64,6 +64,12 @@ backend-executor-nodeBitmapOr = { path = "../backend-executor-nodeBitmapOr" }
 backend-executor-nodeBitmapHeapscan = { path = "../backend-executor-nodeBitmapHeapscan" }
 backend-executor-nodeTidscan = { path = "../backend-executor-nodeTidscan" }
 backend-executor-nodeTidrangescan = { path = "../backend-executor-nodeTidrangescan" }
+backend-executor-nodeSamplescan = { path = "../backend-executor-nodeSamplescan" }
+backend-executor-nodeSamplescan-seams = { path = "../backend-executor-nodeSamplescan-seams" }
+types-samplescan = { path = "../types-samplescan" }
+pg-prng = { path = "../pg-prng" }
+backend-access-hashfunc = { path = "../backend-access-hashfunc" }
+types-datum = { path = "../types-datum" }
 backend-executor-nodeTidrangescan-seams = { path = "../backend-executor-nodeTidrangescan-seams" }
 backend-executor-nodeWindowAgg = { path = "../backend-executor-nodeWindowAgg" }
 backend-executor-nodeWorktablescan = { path = "../backend-executor-nodeWorktablescan" }

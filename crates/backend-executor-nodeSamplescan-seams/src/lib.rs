@@ -82,9 +82,13 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `ExecScanReScan(&node->ss)` — the C `ExecReScanSampleScan(SampleScanState
-    /// *)` takes only the node; the owner resolves the EState from
-    /// `node->ss.ps.state`.
-    pub fn exec_scan_rescan<'mcx>(node: &mut SampleScanState<'mcx>) -> PgResult<()>
+    /// *)` resolves the EState from `node->ss.ps.state`; in the owned model the
+    /// live `EStateData` is passed explicitly (the back-pointer is not
+    /// dereferenceable to a `&mut` here), mirroring the TidRangeScan seam.
+    pub fn exec_scan_rescan<'mcx>(
+        node: &mut SampleScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<()>
 );
 
 // --- expression compilation ---
@@ -94,6 +98,7 @@ seam_core::seam!(
     pub fn exec_init_qual<'mcx>(
         scanstate: &mut SampleScanState<'mcx>,
         node: &SampleScan<'mcx>,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -103,6 +108,7 @@ seam_core::seam!(
     pub fn exec_init_expr_list<'mcx>(
         scanstate: &mut SampleScanState<'mcx>,
         node: &SampleScan<'mcx>,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -112,6 +118,7 @@ seam_core::seam!(
     pub fn exec_init_repeatable_expr<'mcx>(
         scanstate: &mut SampleScanState<'mcx>,
         node: &SampleScan<'mcx>,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -165,19 +172,22 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `scanstate->ss.ss_currentScanDesc = table_beginscan_sampling(rel,
-    /// es_snapshot, 0, NULL, use_bulkread, allow_sync, use_pagemode)`.
+    /// es_snapshot, 0, NULL, use_bulkread, allow_sync, use_pagemode)`. The
+    /// snapshot and the arena come off the live `EStateData`.
     pub fn table_beginscan_sampling<'mcx>(
         scanstate: &mut SampleScanState<'mcx>,
         allow_sync: bool,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
 seam_core::seam!(
     /// `table_rescan_set_params(scan, NULL, use_bulkread, allow_sync,
-    /// use_pagemode)`.
+    /// use_pagemode)`. The reinit arena comes off the live `EStateData`.
     pub fn table_rescan_set_params<'mcx>(
         scanstate: &mut SampleScanState<'mcx>,
         allow_sync: bool,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -188,9 +198,11 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `table_scan_sample_next_block(scan, scanstate)` — `Ok(true)` when a block
-    /// is available for sampling.
+    /// is available for sampling. `estate` supplies the per-query arena the AM
+    /// reads buffers under.
     pub fn table_scan_sample_next_block<'mcx>(
         scanstate: &mut SampleScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<bool>
 );
 
@@ -214,6 +226,7 @@ seam_core::seam!(
     /// `ResetExprContext(node->ss.ps.ps_ExprContext)`.
     pub fn reset_per_tuple_expr_context<'mcx>(
         node: &mut SampleScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -221,6 +234,7 @@ seam_core::seam!(
     /// `econtext->ecxt_scantuple = node->ss.ss_ScanTupleSlot`.
     pub fn set_econtext_scantuple_to_scan_slot<'mcx>(
         node: &mut SampleScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -266,19 +280,27 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `node->ps.state->es_epq_active != NULL`.
-    pub fn es_epq_active_present<'mcx>(node: &SampleScanState<'mcx>) -> PgResult<bool>
+    pub fn es_epq_active_present<'mcx>(
+        node: &SampleScanState<'mcx>,
+        estate: &EStateData<'mcx>,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(
     /// `bms_is_member(epqstate->epqParam, node->ps.plan->extParam)`.
     pub fn epq_param_is_member_of_ext_param<'mcx>(
         node: &SampleScanState<'mcx>,
+        estate: &EStateData<'mcx>,
     ) -> PgResult<bool>
 );
 
 seam_core::seam!(
     /// `epqstate->relsubs_done[index]`.
-    pub fn epq_relsubs_done<'mcx>(node: &SampleScanState<'mcx>, index: u32) -> PgResult<bool>
+    pub fn epq_relsubs_done<'mcx>(
+        node: &SampleScanState<'mcx>,
+        index: u32,
+        estate: &EStateData<'mcx>,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(
@@ -287,6 +309,7 @@ seam_core::seam!(
         node: &mut SampleScanState<'mcx>,
         index: u32,
         value: bool,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -295,6 +318,7 @@ seam_core::seam!(
     pub fn epq_relsubs_slot_present<'mcx>(
         node: &SampleScanState<'mcx>,
         index: u32,
+        estate: &EStateData<'mcx>,
     ) -> PgResult<bool>
 );
 
@@ -303,6 +327,7 @@ seam_core::seam!(
     pub fn epq_load_relsubs_slot<'mcx>(
         node: &mut SampleScanState<'mcx>,
         index: u32,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -311,6 +336,7 @@ seam_core::seam!(
     pub fn epq_relsubs_rowmark_present<'mcx>(
         node: &SampleScanState<'mcx>,
         index: u32,
+        estate: &EStateData<'mcx>,
     ) -> PgResult<bool>
 );
 
@@ -319,5 +345,6 @@ seam_core::seam!(
     pub fn eval_plan_qual_fetch_row_mark<'mcx>(
         node: &mut SampleScanState<'mcx>,
         scanrelid: u32,
+        estate: &mut EStateData<'mcx>,
     ) -> PgResult<bool>
 );

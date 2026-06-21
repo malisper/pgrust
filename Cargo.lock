@@ -9225,6 +9225,7 @@ dependencies = [
  "backend-executor-nodeProjectSet",
  "backend-executor-nodeRecursiveunion",
  "backend-executor-nodeResult",
+ "backend-executor-nodeSamplescan",
  "backend-executor-nodeSeqscan",
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
@@ -9246,6 +9247,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+ "types-samplescan",
 ]
 
 [[package]]
@@ -9686,6 +9688,7 @@ name = "backend-executor-execProcnode"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
+ "backend-access-hashfunc",
  "backend-access-table-tableam",
  "backend-access-transam-xact",
  "backend-executor-execAmi-seams",
@@ -9727,6 +9730,8 @@ dependencies = [
  "backend-executor-nodeProjectSet",
  "backend-executor-nodeRecursiveunion",
  "backend-executor-nodeResult",
+ "backend-executor-nodeSamplescan",
+ "backend-executor-nodeSamplescan-seams",
  "backend-executor-nodeSeqscan",
  "backend-executor-nodeSetOp",
  "backend-executor-nodeSort",
@@ -9747,12 +9752,15 @@ dependencies = [
  "backend-utils-misc-stack-depth-seams",
  "backend-utils-sort-storage",
  "mcx",
+ "pg-prng",
  "pgrust-trace",
  "seam-core",
  "types-core",
+ "types-datum",
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-samplescan",
  "types-tableam",
  "types-tidbitmap",
  "types-tidrange",
@@ -9932,6 +9940,7 @@ dependencies = [
  "backend-executor-execScan-seams",
  "backend-executor-execTuples-seams",
  "backend-executor-execUtils-seams",
+ "backend-executor-nodeSamplescan-seams",
  "backend-executor-nodeTidrangescan-seams",
  "backend-executor-nodeTidscan-seams",
  "backend-nodes-core-seams",

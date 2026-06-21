@@ -135,11 +135,20 @@ pub fn exec_init_node<'mcx>(
 
         // case T_SampleScan: ExecInitSampleScan(...) (nodeSamplescan.c)
         //
-        // No `SampleScan` Plan variant on the trimmed central `Node` enum (and
-        // `SampleScanState` lives in `types-samplescan`, which depends on
-        // `types-nodes`, so it cannot become a `PlanStateNode` variant without
-        // first relocating it — the central-node keystone). The owner
-        // `ExecInitSampleScan` is ported; a plain SELECT does not use TABLESAMPLE.
+        // `SampleScanState` lives in `types-samplescan` (ABOVE `types-nodes`),
+        // so the `PlanStateNode::SampleScan` variant carries it behind the
+        // owned, tag-checked erased `SampleScanStateLive` carrier (same pattern
+        // as `PlanStateNode::Agg`). The `ExecInitSampleScan` result is boxed
+        // into the per-query context and unsized into that trait object here.
+        ntag::T_SampleScan => {
+            let samplescan = node.expect_samplescan();
+            let s = backend_executor_nodeSamplescan::ExecInitSampleScan(
+                samplescan, node, estate, eflags,
+            )?;
+            let boxed = alloc_in(mcx, s)?;
+            let live = backend_executor_nodeSamplescan::erase_sample_scan_state(boxed);
+            alloc_in(mcx, PlanStateNode::SampleScan(live))?
+        }
 
         // case T_IndexScan: ExecInitIndexScan(...) (nodeIndexscan.c)
         ntag::T_IndexScan => {

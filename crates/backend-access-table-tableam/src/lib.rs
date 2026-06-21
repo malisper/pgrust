@@ -36,8 +36,8 @@ use types_snapshot::snapshot::IsMVCCSnapshot;
 use types_tableam::relscan::{
     ParallelBlockTableScanExt, ParallelBlockTableScanWorkerData, ParallelTableScanDescData,
     TableScanDesc, TableScanDescData, SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC,
-    SO_TEMP_SNAPSHOT, SO_TYPE_ANALYZE, SO_TYPE_BITMAPSCAN, SO_TYPE_SEQSCAN, SO_TYPE_TIDRANGESCAN,
-    SO_TYPE_TIDSCAN,
+    SO_TEMP_SNAPSHOT, SO_TYPE_ANALYZE, SO_TYPE_BITMAPSCAN, SO_TYPE_SAMPLESCAN, SO_TYPE_SEQSCAN,
+    SO_TYPE_TIDRANGESCAN, SO_TYPE_TIDSCAN,
 };
 use types_tableam::scankey::ScanKeyData;
 use types_tableam::tableam::{
@@ -831,6 +831,97 @@ pub fn table_rescan<'mcx>(
 ) -> PgResult<()> {
     let routine = am(&scan.rs_rd);
     (routine.scan_rescan)(mcx, scan, key, false, false, false, false)
+}
+
+/// `table_beginscan_sampling(rel, snapshot, nkeys, key, allow_strat,
+/// allow_sync, allow_pagemode)` (tableam.h inline) — alternative entry point for
+/// setting up a `TableScanDesc` for a TABLESAMPLE scan. Like
+/// `table_beginscan_strat`, but also lets the caller control whether page-mode
+/// visibility checking is used.
+pub fn table_beginscan_sampling<'mcx>(
+    mcx: Mcx<'mcx>,
+    relation: &Relation<'mcx>,
+    snapshot: Option<std::rc::Rc<types_snapshot::SnapshotData>>,
+    nkeys: i32,
+    key: mcx::PgVec<'mcx, ScanKeyData<'mcx>>,
+    allow_strat: bool,
+    allow_sync: bool,
+    allow_pagemode: bool,
+) -> PgResult<TableScanDesc<'mcx>> {
+    let mut flags = SO_TYPE_SAMPLESCAN;
+    if allow_strat {
+        flags |= SO_ALLOW_STRAT;
+    }
+    if allow_sync {
+        flags |= SO_ALLOW_SYNC;
+    }
+    if allow_pagemode {
+        flags |= SO_ALLOW_PAGEMODE;
+    }
+    (am(relation).scan_begin)(mcx, relation, snapshot.map(|s| (*s).clone()), nkeys, key, None, flags)
+}
+
+/// `table_rescan_set_params(scan, key, allow_strat, allow_sync,
+/// allow_pagemode)` (tableam.h inline) — restart a relation scan after changing
+/// params. Allows changing the buffer strategy, syncscan, and pagemode options
+/// before starting a fresh scan.
+pub fn table_rescan_set_params<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    key: Option<&[ScanKeyData<'mcx>]>,
+    allow_strat: bool,
+    allow_sync: bool,
+    allow_pagemode: bool,
+) -> PgResult<()> {
+    let routine = am(&scan.rs_rd);
+    (routine.scan_rescan)(mcx, scan, key, true, allow_strat, allow_sync, allow_pagemode)
+}
+
+/// `table_scan_sample_next_block(scan, scanstate)` (tableam.h inline) — select
+/// the next block of a sample scan. Calls the AM's `scan_sample_next_block`,
+/// which invokes the tablesample method's `NextSampleBlock` callback (if any) or
+/// scans the relation sequentially. Returns `false` when the scan is finished.
+/// `scanstate` crosses as the narrow [`SampleScanDriver`] capability the AM
+/// callback needs (see its docs in `types-tableam`).
+pub fn table_scan_sample_next_block<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    scanstate: &mut dyn types_tableam::tableam::SampleScanDriver,
+) -> PgResult<bool> {
+    // We don't expect direct calls to table_scan_sample_next_block with valid
+    // CheckXidAlive for catalog or regular tables. See detailed comments in
+    // xact.c where these variables are declared.
+    if unexpected_during_logical_decoding() {
+        return Err(elog_error(
+            "unexpected table_scan_sample_next_block call during logical decoding",
+        ));
+    }
+
+    let routine = am(&scan.rs_rd);
+    (routine.scan_sample_next_block)(mcx, scan, scanstate)
+}
+
+/// `table_scan_sample_next_tuple(scan, scanstate, slot)` (tableam.h inline) —
+/// fetch the next sample tuple into `slot`, returning `true` if a visible tuple
+/// was found. `table_scan_sample_next_block` must previously have selected a
+/// block.
+pub fn table_scan_sample_next_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    scan: &mut TableScanDescData<'mcx>,
+    scanstate: &mut dyn types_tableam::tableam::SampleScanDriver,
+    slot: &mut SlotData<'mcx>,
+) -> PgResult<bool> {
+    // We don't expect direct calls to table_scan_sample_next_tuple with valid
+    // CheckXidAlive for catalog or regular tables. See detailed comments in
+    // xact.c where these variables are declared.
+    if unexpected_during_logical_decoding() {
+        return Err(elog_error(
+            "unexpected table_scan_sample_next_tuple call during logical decoding",
+        ));
+    }
+
+    let routine = am(&scan.rs_rd);
+    (routine.scan_sample_next_tuple)(mcx, scan, scanstate, slot)
 }
 
 /// `table_beginscan_tidrange(rel, snapshot, mintid, maxtid)` (tableam.h inline)

@@ -174,6 +174,24 @@ pub fn init_seams() {
     backend_executor_nodeTidrangescan_seams::exec_scan_rescan::set(|tidrangestate, estate| {
         exec_scan_rescan_ss(&mut tidrangestate.ss, estate)
     });
+
+    // The SampleScan (TABLESAMPLE) node carries its own node-owned seam crate.
+    // Like TidRangeScan, its `exec_assign_scan_projection_info` recovers the
+    // scanrelid from the retained plan back-link (`scan_scanrelid`), and its
+    // `exec_scan_rescan` marshals to the same generic `ExecScanReScan` driver.
+    backend_executor_nodeSamplescan_seams::exec_assign_scan_projection_info::set(
+        |samplestate, estate| {
+            let scanrelid = scan_scanrelid(&samplestate.ss);
+            execUtils::exec_assign_scan_projection_info_with_varno::call(
+                &mut samplestate.ss,
+                estate,
+                scanrelid as i32,
+            )
+        },
+    );
+    backend_executor_nodeSamplescan_seams::exec_scan_rescan::set(|samplestate, estate| {
+        exec_scan_rescan_ss(&mut samplestate.ss, estate)
+    });
 }
 
 /// `ExecAssignScanProjectionInfo(node)` (execScan.c) specialized for the
@@ -309,6 +327,7 @@ fn scan_scanrelid(ss: &ScanStateData<'_>) -> u32 {
     };
     match plan.node_tag() {
         ntag::T_SeqScan => plan.as_seqscan().unwrap().scan.scanrelid,
+        ntag::T_SampleScan => plan.as_samplescan().unwrap().scan.scanrelid,
         ntag::T_TidScan => plan.as_tidscan().unwrap().scan.scanrelid,
         ntag::T_TidRangeScan => plan.as_tidrangescan().unwrap().scan.scanrelid,
         ntag::T_IndexScan => plan.as_indexscan().unwrap().scan.scanrelid,

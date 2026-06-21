@@ -381,6 +381,19 @@ pub fn exec_end_node<'mcx>(
         PlanStateNode::TidScan(state) => {
             backend_executor_nodeTidscan::ExecEndTidScan(state)
         }
+        // case T_SampleScanState: ExecEndSampleScan((SampleScanState *) node);
+        //
+        // `SampleScanState` lives in `types-samplescan` (ABOVE `types-nodes`), so
+        // the carrier is downcast to the concrete state (tag-checked) before the
+        // node crate's `ExecEndSampleScan` runs (which closes its own table-AM
+        // scan via seams and takes no `EState`).
+        PlanStateNode::SampleScan(s) => {
+            let sample = types_nodes::samplescanstate_carrier::downcast_sample_scan_state_mut::<
+                types_samplescan::SampleScanState<'_>,
+            >(&mut **s)
+            .expect("castNode(SampleScanState, node) failed");
+            backend_executor_nodeSamplescan::ExecEndSampleScan(sample)
+        }
         // case T_TidRangeScanState: ExecEndTidRangeScan((TidRangeScanState *) node);
         PlanStateNode::TidRangeScan(state) => {
             backend_executor_nodeTidrangescan::ExecEndTidRangeScan(state, estate)

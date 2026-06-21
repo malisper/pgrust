@@ -183,6 +183,50 @@ pub struct BulkInsertStateData {
     pub already_extended_by: u32,
 }
 
+/// The narrow capability the sample-scan table-AM callbacks
+/// (`scan_sample_next_block` / `scan_sample_next_tuple`) need from the
+/// executor's `SampleScanState`. C passes the whole `SampleScanState *` straight
+/// through to the heap handler so it can invoke the tablesample method's
+/// `tsmroutine->NextSampleBlock(scanstate, nblocks)` and
+/// `tsmroutine->NextSampleTuple(scanstate, blockno, maxoffset)` callbacks.
+///
+/// `SampleScanState` lives ABOVE this crate (`types-samplescan` depends on
+/// `types-tableam`), so the vtable cannot name it. Instead the executor side
+/// implements this trait over its `SampleScanState` — calling the node's
+/// `tsmroutine` callbacks — and hands the AM a `&mut dyn SampleScanDriver`. This
+/// is the same closure-across-layers technique [`TableAmRoutine::scan_analyze_next_block`]
+/// uses for the analyze read stream.
+///
+/// The three methods mirror, in order:
+/// * `tsm->NextSampleBlock != NULL` (the `if (tsm->NextSampleBlock)` test),
+/// * `tsm->NextSampleBlock(scanstate, nblocks)` — the C `NextSampleBlock_function`,
+/// * `tsm->NextSampleTuple(scanstate, blockno, maxoffset)` — `NextSampleTuple_function`.
+///
+/// All three are infallible, matching the C callback signatures (which return a
+/// `BlockNumber` / `OffsetNumber` and cannot `ereport`).
+pub trait SampleScanDriver {
+    /// `tsm->NextSampleBlock != NULL` — does the tablesample method drive block
+    /// selection itself (vs. a plain sequential scan over the relation)?
+    fn has_next_sample_block(&self) -> bool;
+
+    /// `tsm->NextSampleBlock(scanstate, nblocks)` — the next block the method
+    /// picks to sample (`InvalidBlockNumber` ends the scan). Only called when
+    /// [`Self::has_next_sample_block`] is `true`.
+    fn next_sample_block(
+        &mut self,
+        nblocks: types_core::primitive::BlockNumber,
+    ) -> types_core::primitive::BlockNumber;
+
+    /// `tsm->NextSampleTuple(scanstate, blockno, maxoffset)` — the next tuple
+    /// offset on `blockno` the method wants checked (an invalid offset, i.e. `0`,
+    /// ends the page).
+    fn next_sample_tuple(
+        &mut self,
+        blockno: types_core::primitive::BlockNumber,
+        maxoffset: types_core::primitive::OffsetNumber,
+    ) -> types_core::primitive::OffsetNumber;
+}
+
 /// `TableAmRoutine` (`access/tableam.h`) — the table-access-method API
 /// vtable, trimmed to the callbacks the dispatch unit (`tableam.c` and the
 /// `tableam.h` wrappers it itself uses) invokes. All of these are required
@@ -503,4 +547,31 @@ pub struct TableAmRoutine {
         rel: &Relation<'mcx>,
         delstate: &mut TmIndexDeleteOp<'mcx>,
     ) -> PgResult<TransactionId>,
+
+    /// `scan_sample_next_block(scan, scanstate)` (`access/tableam.h`) — select
+    /// the next block to sample, leaving it the scan's current page. Calls the
+    /// tablesample method's `NextSampleBlock` callback (when present) or scans
+    /// the relation sequentially, then pins the chosen block (and, in pagemode,
+    /// prunes it / collects visible offsets). Returns `true` when a block was
+    /// selected, `false` when the sample scan is finished. `scanstate` is the
+    /// `SampleScanState *` C passes through; here it crosses as the narrow
+    /// [`SampleScanDriver`] capability (see its docs).
+    pub scan_sample_next_block: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+        scanstate: &mut dyn SampleScanDriver,
+    ) -> PgResult<bool>,
+
+    /// `scan_sample_next_tuple(scan, scanstate, slot)` (`access/tableam.h`) —
+    /// fetch the next sample tuple of the current block into `slot`, returning
+    /// `true` when a visible tuple was found, `false` at end of block. Calls the
+    /// tablesample method's `NextSampleTuple` callback (via `scanstate`) to pick
+    /// candidate offsets and checks each for visibility.
+    /// `scan_sample_next_block` must previously have selected a block.
+    pub scan_sample_next_tuple: for<'mcx> fn(
+        mcx: Mcx<'mcx>,
+        scan: &mut TableScanDescData<'mcx>,
+        scanstate: &mut dyn SampleScanDriver,
+        slot: &mut SlotData<'mcx>,
+    ) -> PgResult<bool>,
 }

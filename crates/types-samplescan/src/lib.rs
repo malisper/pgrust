@@ -137,3 +137,109 @@ pub struct SampleScanState<'mcx> {
     /// `bool done` — exhausted all tuples?
     pub done: bool,
 }
+
+impl core::fmt::Debug for SampleScanState<'_> {
+    // `TableScanDesc` / `Relation` / `TsmRoutine` fn-pointers are not `Debug`;
+    // print only the scalar scan-state fields (enough for the carrier's
+    // panic/debug messages, which is the only consumer).
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SampleScanState")
+            .field("use_bulkread", &self.use_bulkread)
+            .field("use_pagemode", &self.use_pagemode)
+            .field("begun", &self.begun)
+            .field("seed", &self.seed)
+            .field("donetuples", &self.donetuples)
+            .field("haveblock", &self.haveblock)
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
+}
+
+// ===========================================================================
+// SampleScanStateLive carrier impl — `SampleScanState *` rides the central
+// `types_nodes::PlanStateNode::SampleScan` variant as a tag-checked erased
+// trait object (this crate sits ABOVE `types-nodes`, so the dispatch crate
+// cannot name `SampleScanState` directly). The impl lives here to satisfy the
+// orphan rule (the concrete type is local to this crate). Mirrors the
+// `AggStateData` -> `AggStateLive` carrier in `backend-executor-nodeAgg`.
+// ===========================================================================
+
+/// `T_SampleScanState = 404` (nodes/nodetags.h).
+const T_SampleScanState: NodeTag = NodeTag(404);
+
+impl<'mcx> types_nodes::samplescanstate_carrier::SampleScanStateLive<'mcx>
+    for SampleScanState<'mcx>
+{
+    fn sample_scan_state_tag(&self) -> u64 {
+        types_nodes::samplescanstate_carrier::SAMPLE_SCAN_STATE_TAG
+    }
+
+    fn live_type_name(&self) -> &'static str {
+        types_nodes::samplescanstate_carrier::live_type_name_of::<SampleScanState<'mcx>>()
+    }
+
+    fn tag(&self) -> NodeTag {
+        T_SampleScanState
+    }
+
+    fn ps(&self) -> &types_nodes::execnodes::PlanStateData<'mcx> {
+        &self.ss.ps
+    }
+
+    fn ps_mut(&mut self) -> &mut types_nodes::execnodes::PlanStateData<'mcx> {
+        &mut self.ss.ps
+    }
+
+    fn ss(&self) -> &ScanStateData<'mcx> {
+        &self.ss
+    }
+}
+
+impl<'mcx> types_nodes::samplescanstate_carrier::SampleScanStateTagged<'mcx>
+    for SampleScanState<'mcx>
+{
+    const TAG: u64 = types_nodes::samplescanstate_carrier::SAMPLE_SCAN_STATE_TAG;
+}
+
+// ===========================================================================
+// SampleScanDriver impl — the `scanstate` the heap-AM `scan_sample_next_block`
+// / `scan_sample_next_tuple` handlers pass through to the tablesample method's
+// `tsm->NextSampleBlock` / `tsm->NextSampleTuple` callbacks. The heap-AM crate
+// sits BELOW this one and cannot name `SampleScanState`, so it receives the
+// node as `&mut dyn SampleScanDriver`; this impl forwards each method to the
+// node's `tsmroutine` callback (passing the node itself as the C `scanstate`).
+// ===========================================================================
+
+impl<'mcx> types_tableam::tableam::SampleScanDriver for SampleScanState<'mcx> {
+    fn has_next_sample_block(&self) -> bool {
+        self.tsmroutine
+            .as_ref()
+            .expect("SampleScanDriver: node->tsmroutine is NULL")
+            .NextSampleBlock
+            .is_some()
+    }
+
+    fn next_sample_block(&mut self, nblocks: BlockNumber) -> BlockNumber {
+        let f = self
+            .tsmroutine
+            .as_ref()
+            .expect("SampleScanDriver: node->tsmroutine is NULL")
+            .NextSampleBlock
+            .expect("next_sample_block called but tsm->NextSampleBlock is NULL");
+        f(self, nblocks)
+    }
+
+    fn next_sample_tuple(
+        &mut self,
+        blockno: BlockNumber,
+        maxoffset: OffsetNumber,
+    ) -> OffsetNumber {
+        let f = self
+            .tsmroutine
+            .as_ref()
+            .expect("SampleScanDriver: node->tsmroutine is NULL")
+            .NextSampleTuple
+            .expect("next_sample_tuple called but tsm->NextSampleTuple is NULL");
+        f(self, blockno, maxoffset)
+    }
+}

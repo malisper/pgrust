@@ -1615,6 +1615,286 @@ pub fn heapam_scan_bitmap_next_tuple<'mcx>(
     Ok(Some((recheck, lossy_pages, exact_pages)))
 }
 
+// ===========================================================================
+// Sample scan (heapam_handler.c): heapam_scan_sample_next_block /
+// heapam_scan_sample_next_tuple / SampleHeapTupleVisible.
+// ===========================================================================
+
+/// `InvalidOffsetNumber` (`storage/off.h`).
+const InvalidOffsetNumber: OffsetNumber = 0;
+
+/// `OffsetNumberIsValid(offsetNumber)` (`storage/off.h`).
+#[inline]
+fn offset_number_is_valid(offset_number: OffsetNumber) -> bool {
+    offset_number != InvalidOffsetNumber
+}
+
+/// `BlockNumberIsValid(blockNumber)` (`storage/block.h`).
+#[inline]
+fn block_number_is_valid(block_number: BlockNumber) -> bool {
+    block_number != InvalidBlockNumber
+}
+
+/// `heapam_scan_sample_next_block(scan, scanstate)` (heapam_handler.c) — select
+/// the next block to sample (via the tablesample method's `NextSampleBlock`
+/// callback or a sequential scan over the relation), pin it, and (in pagemode)
+/// prune it and collect its visible offsets. Returns `true` when a block was
+/// selected, `false` when the sample scan is finished.
+pub fn heapam_scan_sample_next_block<'mcx>(
+    mcx: Mcx<'mcx>,
+    sscan: &mut TableScanDescData<'mcx>,
+    scanstate: &mut dyn types_tableam::tableam::SampleScanDriver,
+) -> PgResult<bool> {
+    let blockno: BlockNumber;
+
+    // return false immediately if relation is empty
+    if heap_scan(sscan).rs_nblocks == 0 {
+        return Ok(false);
+    }
+
+    // release previous scan buffer, if any
+    {
+        let scan = heap_scan(sscan);
+        if buffer_is_valid(scan.rs_cbuf) {
+            bufmgr_seam::release_buffer::call(scan.rs_cbuf);
+            scan.rs_cbuf = InvalidBuffer;
+        }
+    }
+
+    if scanstate.has_next_sample_block() {
+        blockno = scanstate.next_sample_block(heap_scan(sscan).rs_nblocks);
+    } else {
+        // scanning table sequentially
+
+        if heap_scan(sscan).rs_cblock == InvalidBlockNumber {
+            debug_assert!(!heap_scan(sscan).rs_inited);
+            blockno = heap_scan(sscan).rs_startblock;
+        } else {
+            debug_assert!(heap_scan(sscan).rs_inited);
+
+            let mut next = heap_scan(sscan).rs_cblock + 1;
+
+            if next >= heap_scan(sscan).rs_nblocks {
+                // wrap to beginning of rel, might not have started at 0
+                next = 0;
+            }
+
+            // Report our new scan position for synchronization purposes.
+            //
+            // Note: we do this before checking for end of scan so that the
+            // final state of the position hint is back at the start of the rel.
+            if (sscan.rs_flags & SO_ALLOW_SYNC) != 0 {
+                syncscan_seam::ss_report_location::call(sscan.rs_rd.rd_id, next)?;
+            }
+
+            if next == heap_scan(sscan).rs_startblock {
+                next = InvalidBlockNumber;
+            }
+
+            blockno = next;
+        }
+    }
+
+    heap_scan(sscan).rs_cblock = blockno;
+
+    if !block_number_is_valid(blockno) {
+        heap_scan(sscan).rs_inited = false;
+        return Ok(false);
+    }
+
+    debug_assert!(blockno < heap_scan(sscan).rs_nblocks);
+
+    // Be sure to check for interrupts at least once per page. Checks at higher
+    // code levels won't be able to stop a sample scan that encounters many
+    // pages' worth of consecutive dead tuples.
+    backend_tcop_postgres_seams::check_for_interrupts::call()?;
+
+    // Read page using selected strategy.
+    let strategy = heap_scan(sscan).rs_strategy.clone();
+    let cbuf = bufmgr_seam::read_buffer_with_strategy::call(&sscan.rs_rd, blockno, strategy)?;
+    heap_scan(sscan).rs_cbuf = cbuf;
+
+    // in pagemode, prune the page and determine visible tuple offsets
+    if (sscan.rs_flags & SO_ALLOW_PAGEMODE) != 0 {
+        heap_prepare_pagescan(mcx, sscan)?;
+    }
+
+    heap_scan(sscan).rs_inited = true;
+    Ok(true)
+}
+
+/// `heapam_scan_sample_next_tuple(scan, scanstate, slot)` (heapam_handler.c) —
+/// fetch the next sample tuple of the current block (selected by
+/// [`heapam_scan_sample_next_block`]) into `slot`. Asks the tablesample method
+/// which offsets to check (`scanstate.next_sample_tuple`), tests each for
+/// visibility, and stores the first visible one. Returns `false` at end of
+/// block.
+pub fn heapam_scan_sample_next_tuple<'mcx>(
+    mcx: Mcx<'mcx>,
+    sscan: &mut TableScanDescData<'mcx>,
+    scanstate: &mut dyn types_tableam::tableam::SampleScanDriver,
+    slot: &mut types_nodes::tuptable::SlotData<'mcx>,
+) -> PgResult<bool> {
+    let blockno = heap_scan(sscan).rs_cblock;
+    let pagemode = (sscan.rs_flags & SO_ALLOW_PAGEMODE) != 0;
+    let cbuf = heap_scan(sscan).rs_cbuf;
+    let relid = sscan.rs_rd.rd_id;
+
+    // When not using pagemode, we must lock the buffer during tuple visibility
+    // checks.
+    if !pagemode {
+        bufmgr_seam::lock_buffer::call(cbuf, BUFFER_LOCK_SHARE)?;
+    }
+
+    // page = (Page) BufferGetPage(hscan->rs_cbuf);
+    // all_visible = PageIsAllVisible(page) && !rs_snapshot->takenDuringRecovery;
+    // maxoffset = PageGetMaxOffsetNumber(page);
+    let taken_during_recovery = sscan
+        .rs_snapshot
+        .as_ref()
+        .map(|s| s.takenDuringRecovery)
+        .unwrap_or(false);
+    let mut all_visible = false;
+    let mut maxoffset: OffsetNumber = 0;
+    bufmgr_seam::with_buffer_page::call(cbuf, &mut |page_bytes| {
+        let page = PageRef::new(page_bytes)?;
+        all_visible = PageIsAllVisible(&page) && !taken_during_recovery;
+        maxoffset = PageGetMaxOffsetNumber(&page);
+        Ok(())
+    })?;
+
+    loop {
+        backend_tcop_postgres_seams::check_for_interrupts::call()?;
+
+        // Ask the tablesample method which tuples to check on this page.
+        let tupoffset = scanstate.next_sample_tuple(blockno, maxoffset);
+
+        if offset_number_is_valid(tupoffset) {
+            // Materialize the on-page tuple at `tupoffset`. C aliases t_data into
+            // the pinned page (`tuple = &hscan->rs_ctup`); the owned model reads
+            // the full image under the held pin. A non-normal line pointer is
+            // skipped (`continue`), exactly as in C.
+            let mut produced: Option<FormedTuple<'mcx>> = None;
+            bufmgr_seam::with_buffer_page::call(cbuf, &mut |page_bytes| {
+                let page = PageRef::new(page_bytes)?;
+                let itemid = PageGetItemId(&page, tupoffset)?;
+                if !ItemIdIsNormal(&itemid) {
+                    return Ok(());
+                }
+                let item = PageGetItem(&page, &itemid)?;
+                produced = Some(FormedTuple::read_on_page_full(
+                    mcx,
+                    &item[..ItemIdGetLength(&itemid) as usize],
+                    blockno,
+                    tupoffset,
+                    relid,
+                )?);
+                Ok(())
+            })?;
+
+            // Skip invalid tuple pointers.
+            let mut tuple = match produced {
+                Some(t) => t,
+                None => continue,
+            };
+
+            heap_scan(sscan).rs_ctup = Some(tuple.clone_in(mcx)?);
+
+            let visible = if all_visible {
+                true
+            } else {
+                SampleHeapTupleVisible(mcx, sscan, cbuf, &mut tuple, tupoffset)?
+            };
+
+            // in pagemode, heap_prepare_pagescan did this for us
+            if !pagemode {
+                if let Some(s) = sscan.rs_snapshot.as_ref() {
+                    predicate_seam::heap_check_for_serializable_conflict_out::call(
+                        visible,
+                        relid,
+                        &tuple.tuple,
+                        cbuf,
+                        s,
+                    )?;
+                }
+            }
+
+            // Try next tuple from same page.
+            if !visible {
+                continue;
+            }
+
+            // Found visible tuple, return it.
+            if !pagemode {
+                bufmgr_seam::lock_buffer::call(cbuf, BUFFER_LOCK_UNLOCK)?;
+            }
+
+            exec_store_buffer_heap_tuple(tuple, slot, cbuf)?;
+
+            // Count successfully-fetched tuples as heap fetches.
+            pgstat_seam::pgstat_count_heap_getnext::call(
+                relid,
+                sscan.rs_rd.rd_rel.relisshared,
+                sscan.rs_rd.pgstat_enabled,
+            );
+
+            return Ok(true);
+        } else {
+            // We've exhausted the items on this page; move to the next.
+            if !pagemode {
+                bufmgr_seam::lock_buffer::call(cbuf, BUFFER_LOCK_UNLOCK)?;
+            }
+
+            exec_clear_tuple(slot)?;
+            return Ok(false);
+        }
+    }
+}
+
+/// `SampleHeapTupleVisible(scan, buffer, tuple, tupoffset)` (heapam_handler.c) —
+/// check visibility of the sample tuple. In pagemode, `heap_prepare_pagescan`
+/// already did the visibility checks, so a binary search over the known-sorted
+/// `rs_vistuples[]` array answers; otherwise the tuple is tested individually.
+fn SampleHeapTupleVisible<'mcx>(
+    _mcx: Mcx<'mcx>,
+    sscan: &mut TableScanDescData<'mcx>,
+    buffer: Buffer,
+    tuple: &mut FormedTuple<'mcx>,
+    tupoffset: OffsetNumber,
+) -> PgResult<bool> {
+    if (sscan.rs_flags & SO_ALLOW_PAGEMODE) != 0 {
+        // In pageatatime mode, heap_prepare_pagescan() already did visibility
+        // checks, so just look at the info it left in rs_vistuples[].
+        //
+        // Binary search over the known-sorted array.
+        let scan = heap_scan(sscan);
+        let mut start: u32 = 0;
+        let mut end: u32 = scan.rs_ntuples;
+
+        while start < end {
+            let mid = start + (end - start) / 2;
+            let curoffset = scan.rs_vistuples[mid as usize];
+
+            if tupoffset == curoffset {
+                return Ok(true);
+            } else if tupoffset < curoffset {
+                end = mid;
+            } else {
+                start = mid + 1;
+            }
+        }
+
+        Ok(false)
+    } else {
+        // Otherwise, we have to check the tuple individually. A `None` snapshot
+        // is SnapshotAny: every tuple satisfies it (HeapTupleSatisfiesAny).
+        match sscan.rs_snapshot.as_mut() {
+            Some(s) => HeapTupleSatisfiesVisibility(&mut tuple.tuple, s, buffer),
+            None => Ok(true),
+        }
+    }
+}
+
 /// `ExecClearTuple(slot)` over the payload-bearing slot (the heap-scan vtable
 /// holds the slot directly, not as a pool `SlotId`).
 fn exec_clear_tuple(slot: &mut types_nodes::tuptable::SlotData<'_>) -> PgResult<()> {

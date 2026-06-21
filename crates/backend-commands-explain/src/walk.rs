@@ -965,10 +965,19 @@ pub fn ExplainNode<'es, 'p>(
             show_scan_qual_owned(es, mcx, plan_node, ancestors, tidcond, "TID Cond")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
         }
+        ntag::T_SampleScan => {
+            // explain.c:2004: show_tablesample(((SampleScan *) plan)->tablesample,
+            //   ...); then FALLTHROUGH to SeqScan to print the `Filter` qual.
+            let ss = plan_node.expect_samplescan();
+            if let Some(tsc) = ss.tablesample.as_deref() {
+                show_tablesample(es, mcx, plan_node, ancestors, tsc)?;
+            }
+            show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+        }
         _ => {
-            // The generic `Filter` leg (SeqScan / SampleScan / ValuesScan /
-            // CteScan / NamedTuplestoreScan / WorkTableScan / SubqueryScan /
-            // Gather / Result / etc).
+            // The generic `Filter` leg (SeqScan / ValuesScan / CteScan /
+            // NamedTuplestoreScan / WorkTableScan / SubqueryScan / Gather /
+            // Result / etc).
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
         }
     }
@@ -1317,6 +1326,101 @@ fn show_scan_qual<'es, 'p>(
     )?;
     // ExplainPropertyText(qlabel, exprstr, es);
     fmt::ExplainPropertyText(qlabel, exprstr.as_str(), es)?;
+    Ok(())
+}
+
+/// `show_tablesample(tsc, planstate, ancestors, es)` (explain.c:3018) — show the
+/// TABLESAMPLE method, its parameters, and the REPEATABLE seed for a SampleScan.
+fn show_tablesample<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plan_node: &Node<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+    tsc: &types_nodes::nodesamplescan::TableSampleClause<'p>,
+) -> PgResult<()> {
+    // useprefix = es->rtable_size > 1;
+    let useprefix = es.rtable_size > 1;
+
+    // method_name = get_func_name(tsc->tsmhandler);
+    let method_name = backend_utils_cache_lsyscache::function::get_func_name(mcx, tsc.tsmhandler)?
+        .map(|s| s.as_str().to_string())
+        .unwrap_or_default();
+
+    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let es_pstmt = es
+        .pstmt
+        .as_deref()
+        .expect("EXPLAIN: es->pstmt must be set before deparse");
+
+    // Deparse parameter expressions: params = lappend(params,
+    //   deparse_expression(arg, context, useprefix, false)).
+    let mut params: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    if let Some(args) = tsc.args.as_ref() {
+        for arg in args.iter() {
+            let node = Node::mk_expr(mcx, arg.clone_in(mcx)?)?;
+            let s = ruleutils_s::deparse_expr_for_plan::call(
+                mcx,
+                es_pstmt,
+                &es.rtable_names,
+                &plan_owned,
+                ancestors,
+                &node,
+                useprefix,
+                false,
+            )?;
+            params.push(s.as_str().to_string());
+        }
+    }
+
+    // repeatable = tsc->repeatable ? deparse_expression(...) : NULL;
+    let repeatable: Option<alloc::string::String> = match tsc.repeatable.as_deref() {
+        Some(rep) => {
+            let node = Node::mk_expr(mcx, rep.clone_in(mcx)?)?;
+            let s = ruleutils_s::deparse_expr_for_plan::call(
+                mcx,
+                es_pstmt,
+                &es.rtable_names,
+                &plan_owned,
+                ancestors,
+                &node,
+                useprefix,
+                false,
+            )?;
+            Some(s.as_str().to_string())
+        }
+        None => None,
+    };
+
+    if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
+        // ExplainIndentText(es);
+        // appendStringInfo(es->str, "Sampling: %s (", method_name);
+        fmt::ExplainIndentText(es)?;
+        es.str.try_push_str("Sampling: ")?;
+        es.str.try_push_str(&method_name)?;
+        es.str.try_push_str(" (")?;
+        let mut first = true;
+        for p in params.iter() {
+            if !first {
+                es.str.try_push_str(", ")?;
+            }
+            es.str.try_push_str(p)?;
+            first = false;
+        }
+        es.str.try_push(')')?;
+        if let Some(rep) = repeatable.as_ref() {
+            es.str.try_push_str(" REPEATABLE (")?;
+            es.str.try_push_str(rep)?;
+            es.str.try_push(')')?;
+        }
+        es.str.try_push('\n')?;
+    } else {
+        fmt::ExplainPropertyText("Sampling Method", &method_name, es)?;
+        let refs: alloc::vec::Vec<&str> = params.iter().map(|s| s.as_str()).collect();
+        fmt::ExplainPropertyList("Sampling Parameters", &refs, es)?;
+        if let Some(rep) = repeatable.as_ref() {
+            fmt::ExplainPropertyText("Repeatable Seed", rep, es)?;
+        }
+    }
     Ok(())
 }
 

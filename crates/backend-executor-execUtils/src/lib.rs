@@ -885,6 +885,7 @@ fn scan_scanrelid(ps: &PlanStateData<'_>) -> u32 {
         .unwrap_or_else(|| panic!("scan_scanrelid: ScanState has no plan"));
     match node.node_tag() {
         ntag::T_SeqScan => node.expect_seqscan().scan.scanrelid,
+        ntag::T_SampleScan => node.expect_samplescan().scan.scanrelid,
         ntag::T_TidRangeScan => node.expect_tidrangescan().scan.scanrelid,
         ntag::T_IndexScan => node.expect_indexscan().scan.scanrelid,
         ntag::T_IndexOnlyScan => node.expect_indexonlyscan().scan.scanrelid,
