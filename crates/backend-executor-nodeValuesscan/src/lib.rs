@@ -403,7 +403,11 @@ pub fn ExecInitValuesScan<'mcx>(
             let mut row: mcx::PgVec<'mcx, types_nodes::primnodes::Expr> =
                 mcx::vec_with_capacity_in(mcx, src.len())?;
             for e in src.iter() {
-                row.push(e.clone());
+                // C aliases the plan's expr list (`exprlists[i] = exprs`); here
+                // the node owns its copy in the per-query context. Deep-copy via
+                // clone_in — the derived `Expr::clone` panics on an owned-subtree
+                // child (a VALUES column may be a SubLink/SubPlan).
+                row.push(e.clone_in(mcx)?);
             }
             exprlists.push(row);
             // scanstate->exprstatelists[i] = NULL;  (palloc0 -> empty cell)

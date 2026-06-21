@@ -487,6 +487,16 @@ pub struct OpExpr {
     pub location: i32,
 }
 
+impl OpExpr {
+    /// Deep copy into `mcx` (C: `copyObject` shape). The derived `.clone()` is
+    /// unsafe for an OpExpr whose `args` carry an owned-subtree `Expr` (a
+    /// SubLink/SubPlan/Aggref), which panics; this routes each arg through
+    /// [`Expr::clone_in`].
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<OpExpr> {
+        clone_opexpr(self, mcx)
+    }
+}
+
 /// `ScalarArrayOpExpr` (nodes/primnodes.h) — `scalar op ANY/ALL (array)`,
 /// trimmed to the fields ports consume (the TID-scan node reads only `args`,
 /// via `linitial`/`lsecond`).

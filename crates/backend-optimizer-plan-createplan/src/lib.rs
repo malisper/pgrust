@@ -2345,7 +2345,10 @@ fn create_valuesscan_plan<'mcx>(
         let mut row: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, cols.len())?;
         for col in cols.iter() {
             if let Some(e) = (**col).as_expr() {
-                row.push(e.clone());
+                // copyObject of the VALUES column expr: route through clone_in,
+                // since the derived `Expr::clone` panics on an owned-subtree
+                // child (a column may be a SubLink/SubPlan, e.g. `(select ...)`).
+                row.push(e.clone_in(mcx)?);
             } else {
                 return Err(PgError::error(
                     "create_valuesscan_plan: VALUES column is not an expression",
@@ -5693,7 +5696,8 @@ fn change_plan_targetlist<'mcx>(
 /// variable is always on the left, and mark each `RestrictInfo`'s
 /// `outer_is_left` status. `clauses` is the C `List *` of `RestrictInfo *`
 /// (here [`RinfoId`]s into `rinfo_arena`).
-fn get_switched_clauses(
+fn get_switched_clauses<'mcx>(
+    mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     clauses: &[RinfoId],
     outerrelids: &Relids,
@@ -5702,9 +5706,13 @@ fn get_switched_clauses(
     for &rid in clauses {
         let right_relids = root.rinfo(rid).right_relids.clone();
         let clause_id = root.rinfo(rid).clause;
-        // (OpExpr *) restrictinfo->clause; Assert(is_opclause(clause));
+        // (OpExpr *) restrictinfo->clause; Assert(is_opclause(clause)). C uses the
+        // original clause pointer in the else branch and copyObject() in the
+        // switch branch; here we deep-copy via clone_in either way (the derived
+        // `OpExpr::clone` panics on an owned-subtree arg such as a SubPlan from a
+        // correlated subquery in the join condition).
         let op: OpExpr = match root.node(clause_id) {
-            Expr::OpExpr(op) => op.clone(),
+            Expr::OpExpr(op) => op.clone_in(mcx)?,
             other => {
                 return Err(PgError::error(alloc::format!(
                     "get_switched_clauses: mergeclause/hashclause is not an OpExpr (got {:?})",
@@ -5713,18 +5721,11 @@ fn get_switched_clauses(
             }
         };
         if bms_is_subset_relids(&right_relids, outerrelids) {
-            // Duplicate just enough of the structure to allow commuting the
-            // clause without changing the original list, then commute it.
-            let mut temp = OpExpr {
-                opno: op.opno,
-                opfuncid: InvalidOid,
-                opresulttype: op.opresulttype,
-                opretset: op.opretset,
-                opcollid: op.opcollid,
-                inputcollid: op.inputcollid,
-                args: op.args.clone(),
-                location: op.location,
-            };
+            // `op` is already a fresh deep copy (clone_in above), so we can commute
+            // it in place — no second clone of the SubPlan-bearing args. C resets
+            // opfuncid before re-looking it up in CommuteOpExpr.
+            let mut temp = op;
+            temp.opfuncid = InvalidOid;
             CommuteOpExpr(&mut temp)?;
             t_list.push(Expr::OpExpr(temp));
             root.rinfo_mut(rid).outer_is_left = false;
@@ -6087,7 +6088,7 @@ fn create_hashjoin_plan<'mcx>(
 
     // Rearrange hashclauses so the outer variable is always on the left.
     let outer_relids = root.rel(root.path(outerjoinpath).base().parent).relids.clone();
-    let hashclauses = get_switched_clauses(root, &path_hashclauses, &outer_relids)?;
+    let hashclauses = get_switched_clauses(mcx, root, &path_hashclauses, &outer_relids)?;
 
     // Skew optimization: a single join clause whose outer side is a simple Var.
     let mut skew_table = InvalidOid;
@@ -6133,8 +6134,11 @@ fn create_hashjoin_plan<'mcx>(
             .args
             .get(1)
             .ok_or_else(|| PgError::error("create_hashjoin_plan: hashclause OpExpr has one arg"))?;
-        outer_hashkeys.push(expr_to_node(mcx, outer_arg.clone())?);
-        inner_hashkeys.push(expr_to_node(mcx, inner_arg.clone())?);
+        // The hashclause args may carry context-allocated children (a SubPlan
+        // when the clause is `a = (subselect)`); deep-copy through
+        // `Expr::clone_in` rather than the panicking derived `.clone()`.
+        outer_hashkeys.push(expr_to_node(mcx, outer_arg.clone_in(mcx)?)?);
+        inner_hashkeys.push(expr_to_node(mcx, inner_arg.clone_in(mcx)?)?);
     }
 
     // Build the Hash node over the inner plan.
@@ -6398,7 +6402,7 @@ fn create_mergejoin_plan<'mcx>(
     // Rearrange mergeclauses so the outer variable is always on the left; mark
     // the mergeclause restrictinfos with correct outer_is_left status.
     let outer_relids = root.rel(root.path(outerjoinpath).base().parent).relids.clone();
-    let mergeclauses = get_switched_clauses(root, &path_mergeclauses, &outer_relids)?;
+    let mergeclauses = get_switched_clauses(mcx, root, &path_mergeclauses, &outer_relids)?;
 
     // Create explicit sort nodes for the outer and inner paths if necessary.
     let outerpathkeys: Vec<PathKey> = if !outersortkeys.is_empty() {

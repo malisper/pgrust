@@ -58,7 +58,7 @@ use backend_nodes_core::makefuncs::{make_alias, make_var_from_target_entry};
 use backend_nodes_core::nodefuncs::expression_tree_mutator;
 use mcx::{alloc_in, Mcx, PgBox, PgVec};
 use types_core::primitive::Index;
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_nodes::copy_query::Query;
 use types_nodes::jointype::JoinType;
 use types_nodes::nodes::Node;
@@ -171,9 +171,11 @@ fn convert_VALUES_to_ANY<'mcx>(
         // Prepare an evaluation of the right side of the operator with
         // substitution of the given value.
         // value = convert_testexpr(root, rightop, list_make1(value));
-        let rightop_node = Node::mk_expr(mcx, rightop.clone())?;
+        // Deep-copy via clone_in (the derived `Expr::clone` panics on an
+        // owned-subtree child — rightop/value may carry a nested SubLink/SubPlan).
+        let rightop_node = Node::mk_expr(mcx, rightop.clone_in(mcx)?)?;
         let subst = match value0.as_expr() {
-            Some(e) => alloc::vec![e.clone()],
+            Some(e) => alloc::vec![e.clone_in(mcx)?],
             None => return Ok(None),
         };
         let converted = convert_testexpr(mcx, &rightop_node, &subst)?;
@@ -233,7 +235,13 @@ fn convert_testexpr<'mcx>(
     subst_nodes: &[Expr],
 ) -> PgResult<Node<'mcx>> {
     match testexpr.as_expr() {
-        Some(e) => Ok(Node::mk_expr(mcx, convert_testexpr_mutator(e.clone(), subst_nodes))?),
+        // Deep-copy via clone_in before mutating (the derived `Expr::clone`
+        // panics on an owned-subtree child — the testexpr may carry a nested
+        // SubLink, e.g. a CASE-IN inside an IN test).
+        Some(e) => Ok(Node::mk_expr(
+            mcx,
+            convert_testexpr_mutator(e.clone_in(mcx)?, subst_nodes, mcx)?,
+        )?),
         // The C always passes an expression tree here; an ANY SubLink's testexpr
         // is an OpExpr / BoolExpr, i.e. a `Node::Expr`. Anything else is a
         // malformed parse tree.
@@ -244,8 +252,11 @@ fn convert_testexpr<'mcx>(
     }
 }
 
-/// `convert_testexpr_mutator(node, context)` (subselect.c).
-fn convert_testexpr_mutator(node: Expr, subst_nodes: &[Expr]) -> Expr {
+/// `convert_testexpr_mutator(node, context)` (subselect.c). Fallible because the
+/// substituted node is deep-copied via `clone_in` (C: `copyObject(lfirst(...))`),
+/// which can allocate / OOM — and the derived `Expr::clone` panics on an
+/// owned-subtree subst node (a SubLink/SubPlan).
+fn convert_testexpr_mutator(node: Expr, subst_nodes: &[Expr], mcx: Mcx<'_>) -> PgResult<Expr> {
     if let Expr::Param(param) = &node {
         if param.paramkind == ParamKind::PARAM_SUBLINK {
             // paramid is 1-based; out-of-range is a hard internal error in C.
@@ -255,16 +266,44 @@ fn convert_testexpr_mutator(node: Expr, subst_nodes: &[Expr]) -> Expr {
             }
             // We copy the list item to avoid having doubly-linked substructure
             // in the modified parse tree.
-            return subst_nodes[(id - 1) as usize].clone();
+            return subst_nodes[(id - 1) as usize].clone_in(mcx);
         }
     }
     if let Expr::SubLink(_) = &node {
         // A nested SubLink: do not recurse into it; its PARAM_SUBLINKs belong to
         // the inner SubLink. Return as-is.
-        return node;
+        return Ok(node);
     }
-    let mut f = |child: Expr| convert_testexpr_mutator(child, subst_nodes);
-    expression_tree_mutator(node, &mut f)
+    // No PARAM_SUBLINK / nested-SubLink at this node: the remaining children carry
+    // no substitution sites that could introduce an owned-subtree clone, so the
+    // infallible `expression_tree_mutator` recursion is safe. Any descendant
+    // PARAM_SUBLINK is handled by the recursive call's `clone_in` arm above.
+    let mut caught: Option<PgError> = None;
+    let mut f = |child: Expr| match convert_testexpr_mutator(child, subst_nodes, mcx) {
+        Ok(e) => e,
+        Err(err) => {
+            if caught.is_none() {
+                caught = Some(err);
+            }
+            child_placeholder()
+        }
+    };
+    let out = expression_tree_mutator(node, &mut f);
+    if let Some(err) = caught {
+        return Err(err);
+    }
+    Ok(out)
+}
+
+/// A throwaway node used only to satisfy the infallible
+/// `expression_tree_mutator` signature when a child mutation has already failed;
+/// the error is propagated immediately after, so this value is never observed.
+fn child_placeholder() -> Expr {
+    Expr::CaseTestExpr(types_nodes::primnodes::CaseTestExpr {
+        typeId: types_core::primitive::InvalidOid,
+        typeMod: -1,
+        collation: types_core::primitive::InvalidOid,
+    })
 }
 
 // ===========================================================================
@@ -340,7 +379,11 @@ pub fn convert_ANY_sublink_to_join<'mcx>(
         .testexpr
         .as_deref()
         .expect("convert_ANY_sublink_to_join: ANY SubLink has no testexpr");
-    let testexpr_node = Node::mk_expr(mcx, testexpr_expr.clone())?;
+    // C casts `(Node *) sublink->testexpr` (no copy); here we need an owned Node
+    // for pull_varnos, so deep-copy via clone_in (the derived `Expr::clone`
+    // panics on an owned-subtree child — the testexpr may be a CASE wrapping a
+    // nested SubLink).
+    let testexpr_node = Node::mk_expr(mcx, testexpr_expr.clone_in(mcx)?)?;
     let upper_varnos =
         backend_optimizer_util_vars::var::pull_varnos(Some(root), &testexpr_node);
     if relids_is_empty(&upper_varnos) {

@@ -1039,16 +1039,13 @@ fn find_nonnullable_rels_walker<'mcx>(
         if lsyscache::func_strict::call(expr.funcid)? {
             result = find_nonnullable_rels_list(mcx, &expr.args, false)?;
         }
-    } else if node.is_opexpr() {
-        let mut tmp = node.clone();
-        let opfuncid = {
-            let op = tmp.as_opexpr_mut().expect("is_opexpr");
-            set_opfuncid(op)?;
-            op.opfuncid
-        };
+    } else if let Some(op) = node.as_opexpr() {
+        // Resolve opfuncid without cloning the node — its args may carry an
+        // owned-subtree child (SubPlan/SubLink) whose derived `Expr::clone`
+        // panics. (C's set_opfuncid scribbles the field in place; we read-only.)
+        let opfuncid = backend_nodes_core::nodefuncs::resolved_opfuncid(op.opno, op.opfuncid)?;
         if lsyscache::func_strict::call(opfuncid)? {
-            let args = tmp.as_opexpr().expect("is_opexpr").args.clone();
-            result = find_nonnullable_rels_list(mcx, &args, false)?;
+            result = find_nonnullable_rels_list(mcx, &op.args, false)?;
         }
     } else if let Some(expr) = node.as_scalararrayopexpr() {
         if is_strict_saop(mcx, expr, true)? {

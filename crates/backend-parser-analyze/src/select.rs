@@ -488,15 +488,32 @@ pub fn transformValuesClause<'mcx>(
         colcollations.push(colcoll);
     }
 
-    /* rearrange the coerced expressions into row-organized lists */
+    /*
+     * Rearrange the coerced expressions into row-organized lists. The C
+     * `transformValuesClause` reuses the very same Expr pointers it built into
+     * the per-column lists (no copy), so we move each coerced Expr out of the
+     * column matrix exactly once rather than cloning — the column matrix is dead
+     * after this transpose. Cloning here is wrong: a SubLink (or any node with
+     * context-allocated children) inside a VALUES row has no faithful derived
+     * `.clone()` and would panic.
+     */
     let nrows = stmt.valuesLists.len();
+    let ncols = sublist_length.max(0) as usize;
+    /* per-column draining iterators; rows within a column are in order 0..nrows */
+    let mut col_iters: Vec<std::vec::IntoIter<types_nodes::primnodes::Expr>> = Vec::new();
+    col_iters.try_reserve(ncols).map_err(|_| mcx.oom(0))?;
+    for i in 0..ncols {
+        col_iters.push(core::mem::take(&mut colexprs[i]).into_iter());
+    }
     let mut exprs_lists: mcx::PgVec<'mcx, NodePtr<'mcx>> =
         mcx::vec_with_capacity_in(mcx, nrows)?;
-    for r in 0..nrows {
+    for _ in 0..nrows {
         let mut row: mcx::PgVec<'mcx, NodePtr<'mcx>> =
-            mcx::vec_with_capacity_in(mcx, sublist_length.max(0) as usize)?;
-        for i in 0..(sublist_length.max(0) as usize) {
-            let e = colexprs[i][r].clone();
+            mcx::vec_with_capacity_in(mcx, ncols)?;
+        for ci in col_iters.iter_mut() {
+            let e = ci
+                .next()
+                .expect("VALUES column shorter than row count (length-checked above)");
             row.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?);
         }
         exprs_lists.push(mcx::alloc_in(mcx, Node::mk_list(mcx, row)?)?);

@@ -944,7 +944,7 @@ pub fn final_cost_hashjoin<'mcx>(
 
             if bms_is_subset(&right_relids, &inner_relids) {
                 if right_bucketsize < 0.0 {
-                    let hashkey = get_rightop(root, clause);
+                    let hashkey = get_rightop(run.mcx(), root, clause);
                     let (mcv, bs) =
                         cz::estimate_hash_bucket_stats::call(run, root, hashkey, virtualbuckets)
                             .expect("estimate_hash_bucket_stats");
@@ -957,7 +957,7 @@ pub fn final_cost_hashjoin<'mcx>(
             } else {
                 debug_assert!(bms_is_subset(&left_relids, &inner_relids));
                 if left_bucketsize < 0.0 {
-                    let hashkey = get_leftop(root, clause);
+                    let hashkey = get_leftop(run.mcx(), root, clause);
                     let (mcv, bs) =
                         cz::estimate_hash_bucket_stats::call(run, root, hashkey, virtualbuckets)
                             .expect("estimate_hash_bucket_stats");
@@ -1039,26 +1039,39 @@ pub fn final_cost_hashjoin<'mcx>(
 /// operand (`linitial(op->args)`). Interns the inline `Expr` arg into the
 /// planner node arena and returns its `NodeId` (what `estimate_hash_bucket_stats`'
 /// `examine_variable` looks up stats for).
-fn get_leftop(root: &mut PlannerInfo, clause: types_pathnodes::NodeId) -> types_pathnodes::NodeId {
-    op_arg(root, clause, 0)
+fn get_leftop(
+    mcx: mcx::Mcx<'_>,
+    root: &mut PlannerInfo,
+    clause: types_pathnodes::NodeId,
+) -> types_pathnodes::NodeId {
+    op_arg(mcx, root, clause, 0)
 }
 /// `get_rightop((Expr *) clause)` (nodeFuncs.c) — analogous, `lsecond(op->args)`.
-fn get_rightop(root: &mut PlannerInfo, clause: types_pathnodes::NodeId) -> types_pathnodes::NodeId {
-    op_arg(root, clause, 1)
+fn get_rightop(
+    mcx: mcx::Mcx<'_>,
+    root: &mut PlannerInfo,
+    clause: types_pathnodes::NodeId,
+) -> types_pathnodes::NodeId {
+    op_arg(mcx, root, clause, 1)
 }
 /// Intern `op->args[i]` of the OpExpr `clause` into the node arena.
 fn op_arg(
+    mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     clause: types_pathnodes::NodeId,
     i: usize,
 ) -> types_pathnodes::NodeId {
     use types_nodes::primnodes::Expr;
+    // Deep-copy the operand into the node arena via clone_in (the derived
+    // `Expr::clone` panics on an owned-subtree child — a hash clause operand may
+    // carry a SubPlan, e.g. a correlated scalar subquery in the join condition).
     let arg = match root.node(clause) {
         Expr::OpExpr(op) => op
             .args
             .get(i)
-            .cloned()
-            .expect("get_leftop/get_rightop: OpExpr missing operand"),
+            .expect("get_leftop/get_rightop: OpExpr missing operand")
+            .clone_in(mcx)
+            .expect("get_leftop/get_rightop: clone_in"),
         other => panic!(
             "get_leftop/get_rightop: hash clause is not an OpExpr: {:?}",
             core::mem::discriminant(other)

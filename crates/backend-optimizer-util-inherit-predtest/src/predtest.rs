@@ -79,6 +79,21 @@ fn oid_is_valid(oid: Oid) -> bool {
     oid != InvalidOid
 }
 
+/// Deep-copy an AND/OR component list into `mcx`. The derived `Expr::clone`
+/// panics on an owned-subtree child (a SubPlan/AlternativeSubPlan in an
+/// EXISTS-or qual), so each element is routed through `Expr::clone_in`.
+fn clone_exprs_in<'mcx>(args: Option<&[Expr]>, mcx: Mcx<'mcx>) -> PgResult<Vec<Expr>> {
+    let Some(args) = args else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    out.try_reserve(args.len()).map_err(|_| oom("clone_exprs_in"))?;
+    for e in args {
+        out.push(e.clone_in(mcx)?);
+    }
+    Ok(out)
+}
+
 /// Out-of-memory `PgError` for the owned `Vec` materialisation of AND/OR
 /// component sets (their C analogue pallocs the iterator state / list_copy).
 fn oom(what: &str) -> PgError {
@@ -142,7 +157,7 @@ impl PredIterInfo {
     fn components<'mcx>(&self, mcx: Mcx<'mcx>, clause: &Expr) -> PgResult<Vec<Expr>> {
         match self.kind {
             PredIterKind::Atom => Ok(Vec::new()),
-            PredIterKind::List => Ok(self.list.clone()),
+            PredIterKind::List => clone_exprs_in(Some(self.list.as_slice()), mcx),
             PredIterKind::ArrayConst => arrayconst_components(mcx, clause),
             PredIterKind::ArrayExpr => arrayexpr_components(clause),
         }
@@ -203,7 +218,9 @@ fn arrayconst_components<'mcx>(mcx: Mcx<'mcx>, saop_node: &Expr) -> PgResult<Vec
         .map_err(|_| oom("arrayconst components"))?;
     for (value, isnull) in elems.iter() {
         let elem_const = make_dummy_const(arrayconst, elemtype, lbva, value.clone(), *isnull)?;
-        out.push(make_dummy_saop_opexpr(s, scalar.clone(), elem_const));
+        // clone_in: scalar may carry an owned-subtree child (SubPlan) whose
+        // derived `Expr::clone` panics.
+        out.push(make_dummy_saop_opexpr(s, scalar.clone_in(mcx)?, elem_const));
     }
     Ok(out)
 }
@@ -863,12 +880,12 @@ fn predicate_classify<'mcx>(
     /* Handle normal AND and OR boolean clauses */
     if is_andclause(clause) {
         info.kind = PredIterKind::List;
-        info.list = clause.as_boolexpr().map(|b| b.args.clone()).unwrap_or_default();
+        info.list = clone_exprs_in(clause.as_boolexpr().map(|b| b.args.as_slice()), mcx)?;
         return Ok(PredClass::And);
     }
     if is_orclause(clause) {
         info.kind = PredIterKind::List;
-        info.list = clause.as_boolexpr().map(|b| b.args.clone()).unwrap_or_default();
+        info.list = clone_exprs_in(clause.as_boolexpr().map(|b| b.args.as_slice()), mcx)?;
         return Ok(PredClass::Or);
     }
 

@@ -1752,13 +1752,21 @@ fn make_row_comparison_op<'mcx>(
                 .errposition(parser_errposition(pstate, location))
                 .into_error());
         }
-        if expression_returns_set(Some(&Expr::OpExpr(cmp.clone()))) {
+        // Wrap the OpExpr in an `Expr` for the set-returning check without a
+        // deep clone (the OpExpr's args may carry context-allocated children
+        // that have no faithful derived `.clone()`), then unwrap it back.
+        let cmp_expr = Expr::OpExpr(cmp);
+        if expression_returns_set(Some(&cmp_expr)) {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_DATATYPE_MISMATCH)
                 .errmsg("row comparison operator must not return a set")
                 .errposition(parser_errposition(pstate, location))
                 .into_error());
         }
+        let cmp = match cmp_expr {
+            Expr::OpExpr(op) => op,
+            _ => unreachable!("just constructed Expr::OpExpr"),
+        };
         opexprs.push(cmp);
     }
 

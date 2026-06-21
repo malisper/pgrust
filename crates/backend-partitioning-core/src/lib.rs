@@ -360,9 +360,15 @@ fn make_partition_pruneinfo<'mcx>(
 ) -> PgResult<i32> {
     let mcx = run.mcx();
 
-    // Deref the prunequal clauses to owned Exprs once.
-    let prunequal: Vec<Expr> =
-        prunequal_ids.iter().map(|id| root.node(*id).clone()).collect();
+    // Deref the prunequal clauses to owned Exprs once. The prunequal is the
+    // parent's restriction clauses, which may carry context-allocated children
+    // (e.g. an AlternativeSubPlan / SubPlan inside an `... OR exists(...)`
+    // qual) that have no faithful derived `.clone()`; deep-copy through
+    // `Expr::clone_in` (`copyObject` shape).
+    let prunequal: Vec<Expr> = prunequal_ids
+        .iter()
+        .map(|id| root.node(*id).clone_in(mcx))
+        .collect::<PgResult<Vec<Expr>>>()?;
 
     let simple_rel_array_size = root.simple_rel_array_size;
 
@@ -492,7 +498,12 @@ fn make_partitionedrel_pruneinfo<'mcx>(
     let mut doruntimeprune = false;
     let mut targetpart: Option<RelId> = None;
     // The prunequal may be translated parent->child as we descend; carry it.
-    let mut cur_prunequal: Vec<Expr> = prunequal.to_vec();
+    // Deep-copy through `Expr::clone_in` — a prunequal clause may hold a SubPlan
+    // / AlternativeSubPlan with no faithful derived `.clone()`.
+    let mut cur_prunequal: Vec<Expr> = prunequal
+        .iter()
+        .map(|e| e.clone_in(mcx))
+        .collect::<PgResult<Vec<Expr>>>()?;
 
     let mut i: i32 = 1;
     let rtis: Vec<i32> = partrelids.iter().copied().collect();
@@ -523,7 +534,10 @@ fn make_partitionedrel_pruneinfo<'mcx>(
                     }
                     cur_prunequal = translated;
                 }
-                cur_prunequal.clone()
+                cur_prunequal
+                    .iter()
+                    .map(|e| e.clone_in(mcx))
+                    .collect::<PgResult<Vec<Expr>>>()?
             }
             Some(tp) => {
                 // Sub-partitioned: translate from the target down to this child.
@@ -531,7 +545,7 @@ fn make_partitionedrel_pruneinfo<'mcx>(
                 for cl in cur_prunequal.iter() {
                     translated.push(adjust_appendrel_attrs_multilevel(
                         root,
-                        cl.clone(),
+                        cl.clone_in(mcx)?,
                         subpart,
                         tp,
                     )?);
@@ -546,7 +560,12 @@ fn make_partitionedrel_pruneinfo<'mcx>(
             root,
             subpart,
             mcx,
-            Some(partprunequal.clone()),
+            Some(
+                partprunequal
+                    .iter()
+                    .map(|e| e.clone_in(mcx))
+                    .collect::<PgResult<Vec<Expr>>>()?,
+            ),
         )?;
         let gctx_initial = gen_partprune_steps(&inputs_initial, PartClauseTarget::Initial)?;
         if gctx_initial.contradictory {
@@ -571,7 +590,12 @@ fn make_partitionedrel_pruneinfo<'mcx>(
                 root,
                 subpart,
                 mcx,
-                Some(partprunequal.clone()),
+                Some(
+                    partprunequal
+                        .iter()
+                        .map(|e| e.clone_in(mcx))
+                        .collect::<PgResult<Vec<Expr>>>()?,
+                ),
             )?;
             let gctx_exec = gen_partprune_steps(&inputs_exec, PartClauseTarget::Exec)?;
             if gctx_exec.contradictory {
@@ -867,16 +891,22 @@ fn collect_prune_inputs_with_clauses<'mcx>(
 
     // Deref the partexprs and restriction clauses out of the planner arenas to
     // owned Exprs.
-    let partexprs: Vec<Expr> = partexpr_ids.iter().map(|id| root.node(*id).clone()).collect();
+    let partexprs: Vec<Expr> = partexpr_ids
+        .iter()
+        .map(|id| root.node(*id).clone_in(mcx))
+        .collect::<PgResult<Vec<Expr>>>()?;
+    // The restriction clauses may carry context-allocated children (a SubPlan /
+    // AlternativeSubPlan inside an `... OR exists(...)` qual) with no faithful
+    // derived `.clone()`; deep-copy through `Expr::clone_in` (`copyObject`).
     let clauses: Vec<Expr> = match override_clauses {
         Some(c) => c,
         None => restrict_ids
             .iter()
             .map(|rid| {
                 let clause_id = root.rinfo(*rid).clause;
-                root.node(clause_id).clone()
+                root.node(clause_id).clone_in(mcx)
             })
-            .collect(),
+            .collect::<PgResult<Vec<Expr>>>()?,
     };
 
     // Resolve the relation Oid from the RTE.
@@ -1049,17 +1079,19 @@ fn gen_partprune_steps<'a, 'mcx>(
     // partition (partition_qual is not NIL), the parent's constraint can help
     // prune the default. (partition_qual is NIL for top-level tables, so this is
     // skipped on the common path.)
-    let mut clauses = inputs.clauses.clone();
+    // C borrows the caller's `clauses` list (no copy on the common path); only
+    // the default + partition_qual case does `list_concat_copy`. Borrow directly
+    // — a derived `Vec<Expr>::clone` would deep-`Expr::clone` and panic on an
+    // owned-subtree child (a SubPlan/AlternativeSubPlan in an EXISTS-or qual).
     if context.has_default && context.has_partition_qual {
         // list_concat_copy(clauses, rel->partition_qual). The partition_qual
         // clauses would need to be deref'd; on the common (top-level) path this
         // branch is not taken. When it is, gen_partprune_steps_internal's
         // predicate_refuted_by call handles the default-vs-constraint check.
         // (partition_qual deref deferred to the run-time lane; see crate docs.)
-        let _ = &mut clauses;
     }
 
-    gen_partprune_steps_internal(&mut context, &clauses)?;
+    gen_partprune_steps_internal(&mut context, &inputs.clauses)?;
     Ok(context)
 }
 

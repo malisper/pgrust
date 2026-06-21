@@ -495,7 +495,16 @@ fn examine_subquery_variable<'mcx, 'run>(
             )))
         }
     };
-    let ste_expr = ste.expr.clone();
+    // C borrows `tle->expr` (no copy); we only ever read a plain Var out of it.
+    // Extract the inner Var by value if and only if the target is a simple
+    // current-level Var, avoiding a deep `Expr::clone` (which panics on an
+    // owned-subtree child such as an Aggref/SubLink/SubPlan target expr).
+    let inner_simple_var = ste
+        .expr
+        .as_ref()
+        .and_then(|e| e.as_var())
+        .filter(|v| v.varlevelsup == 0)
+        .cloned();
 
     // DISTINCT: can't use stats; but the only DISTINCT column is unique.
     if !subquery.distinctClause.is_empty() {
@@ -523,11 +532,8 @@ fn examine_subquery_variable<'mcx, 'run>(
     }
 
     // Can only handle a simple Var of subquery's query level.
-    if let Some(inner_var) = ste_expr.as_ref().and_then(|e| e.as_var()) {
-        if inner_var.varlevelsup == 0 {
-            let inner_var = inner_var.clone();
-            examine_simple_variable(mcx, run, subroot, &inner_var, vardata)?;
-        }
+    if let Some(inner_var) = inner_simple_var {
+        examine_simple_variable(mcx, run, subroot, &inner_var, vardata)?;
     }
 
     Ok(())

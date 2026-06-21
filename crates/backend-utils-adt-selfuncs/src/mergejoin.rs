@@ -339,9 +339,11 @@ pub fn mergejoinscansel<'mcx>(
     let mut rightstart = 0.0f64;
     let mut rightend = 1.0f64;
 
-    // Deconstruct the merge clause.
-    let clause_expr = root.node(clause).clone();
-    let op = match &clause_expr {
+    // Deconstruct the merge clause. The merge clause's args may carry
+    // context-allocated children (e.g. a SubPlan when the clause is
+    // `a = (subselect)`), which have no faithful derived `.clone()`; deep-copy
+    // the two args we register through `Expr::clone_in` (`copyObject` shape).
+    let op = match root.node(clause) {
         Expr::OpExpr(op) => op,
         // !is_opclause(clause) — "shouldn't happen"; return the defaults.
         _ => return Ok((leftstart, leftend, rightstart, rightend)),
@@ -349,12 +351,12 @@ pub fn mergejoinscansel<'mcx>(
     let opno = op.opno;
     let collation = op.inputcollid;
     let left = match op.args.first() {
-        Some(l) => l.clone(),
+        Some(l) => l.clone_in(mcx)?,
         None => return Ok((leftstart, leftend, rightstart, rightend)),
     };
     let right = match op.args.get(1) {
         // !right — "shouldn't happen"; return the defaults.
-        Some(r) => r.clone(),
+        Some(r) => r.clone_in(mcx)?,
         None => return Ok((leftstart, leftend, rightstart, rightend)),
     };
 

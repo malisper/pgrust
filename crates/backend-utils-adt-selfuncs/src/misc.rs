@@ -244,7 +244,11 @@ pub(crate) fn estimate_num_groups<'mcx>(
     numdistinct = 1.0;
 
     for &groupexpr_id in group_exprs.iter() {
-        let groupexpr = root.node(groupexpr_id).clone();
+        // C borrows `lfirst(l)` (no copy). We need an owned `Expr` to release the
+        // `root` borrow before the `examine_variable(root, ...)` call below; use
+        // clone_in (the derived `Expr::clone` panics on an owned-subtree child
+        // such as a SubPlan in a correlated grouping column).
+        let groupexpr = root.node(groupexpr_id).clone_in(mcx)?;
 
         // Set-returning functions in grouping columns: compensate by scaling up
         // the end result by the largest SRF rowcount estimate.

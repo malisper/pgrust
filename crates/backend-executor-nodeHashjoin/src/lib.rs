@@ -797,7 +797,10 @@ fn node_list_to_exprs<'mcx>(
     let mut out: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, nodes.len())?;
     for n in nodes {
         match n.as_expr() {
-            Some(e) => out.push(e.clone()),
+            // A hashkey may carry context-allocated children (a SubPlan when
+            // the key is `a = (subselect)`); deep-copy through `Expr::clone_in`
+            // rather than the panicking derived `.clone()`.
+            Some(e) => out.push(e.clone_in(mcx)?),
             None => panic!("hashkeys list element is not an expression node: {n:?}"),
         }
     }
