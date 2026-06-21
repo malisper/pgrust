@@ -9,6 +9,7 @@ name = "backend_access_transam_parallel"
 path = "src/lib.rs"
 
 [dependencies]
+backend-optimizer-plan-planner-seams = { path = "../backend-optimizer-plan-planner-seams" }
 types-core = { path = "../types-core" }
 types-tuple = { path = "../types-tuple" }
 types-error = { path = "../types-error" }

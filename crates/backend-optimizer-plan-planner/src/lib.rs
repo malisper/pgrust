@@ -61,6 +61,7 @@ use types_nodes::nodeindexscan::PlannedStmt;
 use types_nodes::nodes::{ntag, CmdType, Node};
 use types_nodes::execnodes::RowMarkType;
 use types_nodes::primnodes::Expr;
+use types_nodes::TargetEntry;
 use types_nodes::parsenodes::RangeTblEntry;
 use types_nodes::rawnodes::LockClauseStrength;
 
@@ -76,7 +77,7 @@ use types_core::Oid;
 use types_parsenodes::{PROPARALLEL_SAFE, PROPARALLEL_UNSAFE};
 
 use backend_utils_misc_guc_tables::consts::{
-    DEBUG_PARALLEL_OFF, DEFAULT_CURSOR_TUPLE_FRACTION,
+    DEBUG_PARALLEL_OFF, DEBUG_PARALLEL_REGRESS, DEFAULT_CURSOR_TUPLE_FRACTION,
 };
 
 // Cursor-option flags (portalcmds.h).
@@ -235,14 +236,40 @@ fn standard_planner<'mcx>(
 
     // Assess parallel-mode feasibility (C:368-384).
     //
-    // The cheap-test gate (`IsUnderPostmaster`, `max_parallel_workers_per_gather`,
-    // `IsParallelWorker`) is not reachable in this repo, and the query-tree scan
-    // it guards (`max_parallel_hazard(parse)`) has no ported owner (clauses.c
-    // exposes only the internal walker, not the top-level `max_parallel_hazard`).
-    // We faithfully take the C `else` branch — "skip the query tree scan, just
-    // assume it's unsafe" — which is the conservative, always-correct result.
-    glob.max_parallel_hazard = PROPARALLEL_UNSAFE;
-    glob.parallel_mode_ok = false;
+    // C:
+    //   if ((cursorOptions & CURSOR_OPT_PARALLEL_OK) != 0 &&
+    //       IsUnderPostmaster &&
+    //       parse->commandType == CMD_SELECT &&
+    //       !parse->hasModifyingCTE &&
+    //       max_parallel_workers_per_gather > 0 &&
+    //       !IsParallelWorker())
+    //   {
+    //       glob->maxParallelHazard = max_parallel_hazard(parse);
+    //       glob->parallelModeOK = (glob->maxParallelHazard != PROPARALLEL_UNSAFE);
+    //   }
+    //   else { glob->maxParallelHazard = PROPARALLEL_UNSAFE; glob->parallelModeOK = false; }
+    //
+    // `IsParallelWorker()` is owned by `backend-access-transam-parallel`; the
+    // planner reads it through the planner seam (a non-worker / `--single`
+    // backend reports `false`, the seam's unset default, matching C's leader
+    // backend). `max_parallel_hazard(parse)` is the now-ported top-level
+    // whole-query parallel-hazard scan.
+    if (cursor_options & CURSOR_OPT_PARALLEL_OK) != 0
+        && backend_utils_init_small::globals::IsUnderPostmaster()
+        && parse.commandType == CmdType::CMD_SELECT
+        && !parse.hasModifyingCTE
+        && backend_optimizer_path_costsize::max_parallel_workers_per_gather() > 0
+        && !backend_optimizer_plan_planner_seams::is_parallel_worker::call()
+    {
+        // All the cheap tests pass, so scan the query tree.
+        glob.max_parallel_hazard =
+            backend_optimizer_util_clauses::max_parallel_hazard(parse)? as i8;
+        glob.parallel_mode_ok = glob.max_parallel_hazard != PROPARALLEL_UNSAFE;
+    } else {
+        // Skip the query tree scan, just assume it's unsafe.
+        glob.max_parallel_hazard = PROPARALLEL_UNSAFE;
+        glob.parallel_mode_ok = false;
+    }
 
     // glob->parallelModeNeeded (C:403-404).
     glob.parallel_mode_needed =
@@ -300,11 +327,126 @@ fn standard_planner<'mcx>(
         );
     }
 
-    // Debug-only Gather injection (C:465-518) — only runs when
-    // debug_parallel_query != OFF, which is always OFF in this crate (the GUC is
-    // not threaded in). The branch is therefore faithfully dead; we do not build
-    // the test Gather node.
-    debug_assert!(debug_parallel_query() == DEBUG_PARALLEL_OFF);
+    // Optionally add a Gather node for testing parallel-query infrastructure
+    // (C:465-518). This is the `debug_parallel_query` (force-parallel) leg:
+    // when the GUC is `on`/`regress`, the top plan is parallel-safe, and (for
+    // `regress`) it has no initPlans, wrap it in a single-worker single-copy
+    // Gather to exercise the parallel-execution machinery deterministically.
+    //
+    // `top_plan` is parallel-safe only when `glob->parallelModeOK` was set true
+    // above (which requires the cheap-test gate to pass and
+    // `max_parallel_hazard(parse) != PROPARALLEL_UNSAFE`); otherwise this branch
+    // is skipped exactly as in C.
+    {
+        let dpq = debug_parallel_query();
+        // Read the top plan's base (parallel_safe / initPlan presence).
+        let (top_parallel_safe, top_has_initplan) = {
+            let base = top_plan.plan_head();
+            (
+                base.parallel_safe,
+                base.initPlan.as_ref().map(|l| !l.is_empty()).unwrap_or(false),
+            )
+        };
+
+        if dpq != DEBUG_PARALLEL_OFF
+            && top_parallel_safe
+            && (!top_has_initplan || dpq != DEBUG_PARALLEL_REGRESS)
+        {
+            use types_nodes::nodegather::Gather as GatherNode;
+
+            // Read the fields the Gather copies from the subplan, and move its
+            // initPlan list out (C transfers it to the Gather: `gather->plan.initPlan
+            // = top_plan->initPlan; top_plan->initPlan = NIL;`).
+            //
+            // C aliases the subplan's targetlist pointer onto the Gather
+            // (`gather->plan.targetlist = top_plan->targetlist`); the subplan
+            // keeps the same list. In the owned model we deep-copy it (via
+            // `TargetEntry::clone_in`) so the Gather owns its own copy while the
+            // subplan retains its list intact.
+            let sub_targetlist: Option<mcx::PgVec<'mcx, TargetEntry<'mcx>>> = {
+                let base = top_plan.plan_head();
+                match base.targetlist.as_ref() {
+                    Some(tl) => {
+                        let mut out: mcx::PgVec<'mcx, TargetEntry<'mcx>> =
+                            mcx::PgVec::new_in(mcx);
+                        for te in tl.iter() {
+                            out.push(te.clone_in(mcx)?);
+                        }
+                        Some(out)
+                    }
+                    None => None,
+                }
+            };
+            let (sub_startup_cost, sub_total_cost, sub_plan_rows, sub_plan_width, moved_initplan) = {
+                let base = top_plan.plan_head_mut();
+                (
+                    base.startup_cost,
+                    base.total_cost,
+                    base.plan_rows,
+                    base.plan_width,
+                    base.initPlan.take(),
+                )
+            };
+
+            let setup_cost = backend_optimizer_path_costsize::parallel_setup_cost();
+            let tuple_cost = backend_optimizer_path_costsize::parallel_tuple_cost();
+
+            // SS_compute_initplan_cost(gather->plan.initPlan, ...): the moved
+            // initplans' cost is deleted from top_plan (it was double-counted —
+            // already included in the Gather's startup/total via the copy below).
+            // For the simple no-initplan case this is exactly 0.
+            let mut initplan_cost = 0.0_f64;
+            if let Some(list) = moved_initplan.as_ref() {
+                for sp in list.iter() {
+                    initplan_cost += sp.startup_cost + sp.per_call_cost;
+                }
+            }
+
+            // Subtract the initplans' cost from top_plan now (before we move it
+            // under the Gather). C:511-512.
+            {
+                let base = top_plan.plan_head_mut();
+                base.startup_cost = sub_startup_cost - initplan_cost;
+                base.total_cost = sub_total_cost - initplan_cost;
+            }
+
+            let mut gather = GatherNode::default();
+            {
+                let gp = &mut gather.plan;
+                // gather->plan.targetlist = top_plan->targetlist; qual = NIL.
+                gp.targetlist = sub_targetlist;
+                gp.qual = None;
+                // gather->plan.lefttree = top_plan; righttree = NULL.
+                gp.lefttree = Some(mcx::alloc_in(mcx, top_plan)?);
+                gp.righttree = None;
+                // gather->plan.initPlan = top_plan->initPlan (transferred).
+                gp.initPlan = moved_initplan;
+                // Costs (C:506-515): include parallel_setup_cost / parallel_tuple_cost;
+                // the sub costs already include the initplan cost, so they are NOT
+                // re-subtracted on the Gather (the above coding included it here).
+                gp.startup_cost = sub_startup_cost + setup_cost;
+                gp.total_cost = sub_total_cost + setup_cost + tuple_cost * sub_plan_rows;
+                gp.plan_rows = sub_plan_rows;
+                gp.plan_width = sub_plan_width;
+                gp.parallel_aware = false;
+                gp.parallel_safe = false;
+            }
+            gather.num_workers = 1;
+            gather.single_copy = true;
+            gather.invisible = dpq == DEBUG_PARALLEL_REGRESS;
+            // Since this Gather has no parallel-aware descendants to signal to,
+            // we don't need a rescan Param.
+            gather.rescan_param = -1;
+            gather.initParam = None;
+
+            // Use parallel mode for parallel plans (C:516).
+            if let Some(g) = root.glob.as_mut() {
+                g.parallel_mode_needed = true;
+            }
+
+            top_plan = Node::mk_gather(mcx, gather)?;
+        }
+    }
 
     // SS_finalize_plan over subplans + top plan (C:526-537).
     //
@@ -3204,19 +3346,19 @@ fn build_final_paths<'mcx>(
     // Now build the final-output upperrel (C:1868).
     let final_rel = backend_optimizer_util_relnode::fetch_upper_rel(root, UPPERREL_FINAL, &None);
 
-    // consider_parallel propagation (C:1870-1880). current_rel->consider_parallel
-    // is false here (glob.max_parallel_hazard is UNSAFE in this repo), so the
-    // is_parallel_safe(limitOffset/limitCount) checks short-circuit away and
-    // final_rel->consider_parallel stays false. We mirror that exactly without
-    // evaluating the (latent) limit parallel-safety.
+    // consider_parallel propagation (C:1870-1880). If current_rel is
+    // consider_parallel and nothing in the LIMIT clause is parallel-unsafe, the
+    // final_rel can be consider_parallel too.
     if root.rel(current_rel).consider_parallel {
-        // Unreachable here, but kept faithful: would require is_parallel_safe
-        // over parse->limitOffset / limitCount.
-        panic!(
-            "grouping_planner: final_rel consider_parallel propagation needs \
-             is_parallel_safe(limitOffset/limitCount) (planner.c:1877) — \
-             unreachable in this repo (glob is parallel-unsafe)"
-        );
+        let limit_safe = {
+            let parse = run.resolve(root.parse);
+            let off = parse.limitOffset.as_deref();
+            let cnt = parse.limitCount.as_deref();
+            is_opt_expr_parallel_safe(root, off) && is_opt_expr_parallel_safe(root, cnt)
+        };
+        if limit_safe {
+            root.rel_mut(final_rel).consider_parallel = true;
+        }
     }
 
     // If current_rel belongs to a single FDW, so does final_rel (C:1883-1888).
@@ -6016,6 +6158,40 @@ fn is_target_exprs_parallel_safe(root: &PlannerInfo, exprs: &[types_pathnodes::N
         }
     }
     true
+}
+
+/// `is_parallel_safe(root, (Node *) <Expr>)` over a single optional `Expr`
+/// (used by `grouping_planner` on `parse->limitOffset` / `parse->limitCount`).
+/// `None` (no clause) is parallel-safe, matching C's `is_parallel_safe(root,
+/// NULL)` returning `true`.
+fn is_opt_expr_parallel_safe(root: &PlannerInfo, expr: Option<&Expr>) -> bool {
+    let max_hazard: u8 = root
+        .glob
+        .as_ref()
+        .map(|g| g.max_parallel_hazard as u8)
+        .unwrap_or(PROPARALLEL_UNSAFE as u8);
+    let param_exec_empty = root
+        .glob
+        .as_ref()
+        .map(|g| g.param_exec_types.is_empty())
+        .unwrap_or(true);
+
+    let mut safe_param_ids: Vec<i32> = Vec::new();
+    for &ipl in &root.init_plans {
+        if let Some(sp) = root.node(ipl).as_subplan() {
+            for &p in sp.0.setParam.iter() {
+                safe_param_ids.push(p);
+            }
+        }
+    }
+
+    backend_optimizer_util_clauses::is_parallel_safe(
+        max_hazard,
+        param_exec_empty,
+        safe_param_ids,
+        expr,
+    )
+    .unwrap_or(false)
 }
 
 /// `equal((Node *) a, (Node *) b)` over two PathTarget expr handle lists. Used

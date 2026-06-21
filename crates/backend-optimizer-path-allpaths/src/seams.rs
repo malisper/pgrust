@@ -103,24 +103,13 @@ seam_core::seam!(
     /// `limit_needed(rte->subquery)` (planner.c) over a subquery RTE.
     pub fn subquery_limit_needed(root: &PlannerInfo, rti: Index) -> bool
 );
-seam_core::seam!(
-    /// `is_parallel_safe(root, (Node *) rte->functions)` (clauses.c) over a
-    /// function RTE's `RangeTblFunction` list.
-    pub fn rte_functions_parallel_safe(root: &PlannerInfo, rti: Index) -> bool
-);
-seam_core::seam!(
-    /// `is_parallel_safe(root, (Node *) rte->values_lists)` (clauses.c) over a
-    /// VALUES RTE.
-    pub fn rte_values_lists_parallel_safe(root: &PlannerInfo, rti: Index) -> bool
-);
-seam_core::seam!(
-    /// `is_parallel_safe(root, (Node *) rel->baserestrictinfo)` (clauses.c).
-    pub fn rel_baserestrictinfo_parallel_safe(root: &PlannerInfo, rel: RelId) -> bool
-);
-seam_core::seam!(
-    /// `is_parallel_safe(root, (Node *) rel->reltarget->exprs)` (clauses.c).
-    pub fn rel_reltarget_parallel_safe(root: &PlannerInfo, rel: RelId) -> bool
-);
+// NOTE: the per-RTE / per-rel `is_parallel_safe` checks
+// (`rte_functions_parallel_safe` / `rte_values_lists_parallel_safe` /
+// `rel_baserestrictinfo_parallel_safe` / `rel_reltarget_parallel_safe`) are NOT
+// seams: `set_rel_consider_parallel` has the `PlannerRun` in hand, so it
+// resolves the RTE/rel expr fields directly and calls clauses.c's
+// `is_parallel_safe` (the rel cases through the `is_parallel_safe` pathnode
+// seam over node handles; the RTE expr-list cases over the run-arena `Expr`s).
 
 seam_core::seam!(
     /// `partitions_are_ordered(rel->boundinfo, rel->live_parts)` (partbounds.c)

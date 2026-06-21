@@ -83,7 +83,7 @@ pub use grounded::{
     convert_saop_to_hashed_saop, expression_returns_set_rows, find_forced_null_var,
     find_forced_null_vars, find_nonnullable_rels, find_nonnullable_vars, find_window_functions,
     find_window_functions_in_exprs, is_parallel_safe, is_pseudo_constant_clause,
-    is_pseudo_constant_clause_relids, num_relids,
+    is_pseudo_constant_clause_relids, max_parallel_hazard, num_relids,
     pull_paramids, CommuteOpExpr, WindowFuncLists,
 };
 pub use leaf::estimate_array_length;

@@ -216,11 +216,11 @@ pub fn cpu_index_tuple_cost() -> f64 {
     CPU_INDEX_TUPLE_COST_CELL.with(core::cell::Cell::get)
 }
 #[inline]
-pub(crate) fn parallel_tuple_cost() -> f64 {
+pub fn parallel_tuple_cost() -> f64 {
     PARALLEL_TUPLE_COST_CELL.with(core::cell::Cell::get)
 }
 #[inline]
-pub(crate) fn parallel_setup_cost() -> f64 {
+pub fn parallel_setup_cost() -> f64 {
     PARALLEL_SETUP_COST_CELL.with(core::cell::Cell::get)
 }
 #[inline]

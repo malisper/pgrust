@@ -487,13 +487,13 @@ pub fn set_rel_consider_parallel<'mcx>(
             }
         }
         RTE_FUNCTION => {
-            if !rel_functions_parallel_safe(root, rti) {
+            if !rel_functions_parallel_safe(run, root, rti) {
                 return;
             }
         }
         RTE_TABLEFUNC => return, // not parallel safe
         RTE_VALUES => {
-            if !rel_values_parallel_safe(root, rti) {
+            if !rel_values_parallel_safe(run, root, rti) {
                 return;
             }
         }
@@ -844,21 +844,107 @@ fn tablesample_is_parallel_safe(root: &PlannerInfo, rti: Index) -> bool {
 fn subquery_limit_needed(root: &PlannerInfo, rti: Index) -> bool {
     seams::subquery_limit_needed::call(root, rti)
 }
-/// `is_parallel_safe(root, (Node *) rte->functions)` for a function RTE.
-fn rel_functions_parallel_safe(root: &PlannerInfo, rti: Index) -> bool {
-    seams::rte_functions_parallel_safe::call(root, rti)
+/// Extract the `is_parallel_safe` glob inputs from `root` (the global
+/// `maxParallelHazard`, whether any PARAM_EXEC was generated, and the
+/// `safe_param_ids` = setParam ids of every init SubPlan at this level and all
+/// parents). Mirrors clauses.c's `is_parallel_safe` prologue.
+fn parallel_safe_glob_inputs(
+    root: &PlannerInfo,
+) -> (u8, bool, alloc::vec::Vec<i32>) {
+    let glob = root
+        .glob
+        .as_ref()
+        .expect("is_parallel_safe: PlannerInfo.glob is NULL");
+    let max_parallel_hazard_glob = glob.max_parallel_hazard as u8;
+    let param_exec_types_is_empty = glob.param_exec_types.is_empty();
+
+    let mut safe_param_ids: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
+    let mut proot: Option<&PlannerInfo> = Some(root);
+    while let Some(pr) = proot {
+        for &ip in &pr.init_plans {
+            if let Some(sp) = pr.node(ip).as_subplan() {
+                safe_param_ids.extend(sp.0.setParam.iter().copied());
+            }
+        }
+        proot = pr.parent_root.as_deref();
+    }
+    (max_parallel_hazard_glob, param_exec_types_is_empty, safe_param_ids)
 }
-/// `is_parallel_safe(root, (Node *) rte->values_lists)` for a VALUES RTE.
-fn rel_values_parallel_safe(root: &PlannerInfo, rti: Index) -> bool {
-    seams::rte_values_lists_parallel_safe::call(root, rti)
+
+/// `is_parallel_safe(root, (Node *) <Expr>)` over a single borrowed `Expr`,
+/// using clauses.c's hazard walker with `root->glob` state. Used for the RTE
+/// expr-list fields (`values_lists` / `functions`) whose elements live in the
+/// run arena as `Expr`, not as `root` node handles.
+fn expr_is_parallel_safe(root: &PlannerInfo, expr: &types_nodes::primnodes::Expr) -> bool {
+    let (mh, pe, ids) = parallel_safe_glob_inputs(root);
+    backend_optimizer_util_clauses::is_parallel_safe(mh, pe, ids, Some(expr))
+        .expect("is_parallel_safe")
+}
+
+/// `is_parallel_safe(root, (Node *) rte->functions)` for a function RTE.
+/// Walks every `RangeTblFunction`'s `funcexpr` in the RTE's `functions` list.
+fn rel_functions_parallel_safe<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    rti: Index,
+) -> bool {
+    let rte = types_pathnodes::planner_run::planner_rt_fetch(run, root, rti);
+    for fn_node in rte.functions.iter() {
+        // Each element is a RangeTblFunction; check its funcexpr (a Node).
+        if let Some(rtf) = (**fn_node).as_rangetblfunction() {
+            if let Some(fe) = rtf.funcexpr.as_deref() {
+                if let Some(e) = fe.as_expr() {
+                    if !expr_is_parallel_safe(root, e) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+/// `is_parallel_safe(root, (Node *) rte->values_lists)` for a VALUES RTE. Walks
+/// every column expression of every VALUES row.
+fn rel_values_parallel_safe<'mcx>(
+    run: &PlannerRun<'mcx>,
+    root: &PlannerInfo,
+    rti: Index,
+) -> bool {
+    let rte = types_pathnodes::planner_run::planner_rt_fetch(run, root, rti);
+    for row_node in rte.values_lists.iter() {
+        // Each element of values_lists is a List node of column expressions.
+        if let Some(cols) = (**row_node).as_list() {
+            for col in cols.iter() {
+                if let Some(e) = (**col).as_expr() {
+                    if !expr_is_parallel_safe(root, e) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 /// `is_parallel_safe(root, (Node *) rel->baserestrictinfo)`.
 fn baserestrictinfo_parallel_safe(root: &PlannerInfo, rel: RelId) -> bool {
-    seams::rel_baserestrictinfo_parallel_safe::call(root, rel)
+    // Walk each RestrictInfo's clause (a node handle into root).
+    let clause_ids: alloc::vec::Vec<_> = root
+        .rel(rel)
+        .baserestrictinfo
+        .iter()
+        .map(|&rid| root.rinfo(rid).clause)
+        .collect();
+    pathnode::is_parallel_safe::call(root, &clause_ids)
 }
 /// `is_parallel_safe(root, (Node *) rel->reltarget->exprs)`.
 fn reltarget_exprs_parallel_safe(root: &PlannerInfo, rel: RelId) -> bool {
-    seams::rel_reltarget_parallel_safe::call(root, rel)
+    let exprs = root
+        .rel(rel)
+        .reltarget
+        .as_ref()
+        .map(|t| t.exprs.clone())
+        .unwrap_or_default();
+    pathnode::is_parallel_safe::call(root, &exprs)
 }
 
 /// Build the ordinality pathkey for a `WITH ORDINALITY` function scan: the

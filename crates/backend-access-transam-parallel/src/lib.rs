@@ -2210,6 +2210,11 @@ pub fn init_seams() {
     install_fps_driver_seams();
     install_execparallel_support_pcxt_seams();
     install_mmgr_context_seams();
+
+    // planner.c:373 reads `IsParallelWorker()` in the cheap-test gate for
+    // `glob->parallelModeOK`; expose this crate's `is_parallel_worker()` to the
+    // planner through the planner seam (avoids a planner→parallel-executor dep).
+    backend_optimizer_plan_planner_seams::is_parallel_worker::set(is_parallel_worker);
 }
 
 /// Install the `MemoryContextSwitchTo(TopTransactionContext)` / restore pair

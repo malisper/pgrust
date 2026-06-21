@@ -646,6 +646,78 @@ fn max_parallel_hazard_walker(
     })
 }
 
+/// `max_parallel_hazard(parse)` (clauses.c:731).
+///
+/// Top-level whole-query parallel-hazard scan: walk the Query tree (including
+/// subselects via `query_tree_walker`) and return the worst `proparallel`
+/// hazard found (`PROPARALLEL_SAFE` / `_RESTRICTED` / `_UNSAFE`). The planner
+/// uses this to set `glob->parallelModeOK`.
+///
+/// C runs `max_parallel_hazard_walker((Node *) parse, &context)` with
+/// `max_interesting = PROPARALLEL_UNSAFE`. The walker is a `Node` walker; over
+/// the owned model the per-node logic for `Expr`-shaped nodes is the existing
+/// [`max_parallel_hazard_walker`] (function check + the CoerceToDomain /
+/// NextValueExpr / WindowFunc / SubLink / SubPlan / Param arms + `Expr`
+/// recursion), and the `IsA(node, Query)` arm (rowMarks → unsafe, else recurse
+/// via `query_tree_walker`) is added here.
+pub fn max_parallel_hazard(parse: &types_nodes::copy_query::Query) -> PgResult<u8> {
+    let mut context = MaxParallelHazardContext {
+        max_hazard: PROPARALLEL_SAFE,
+        max_interesting: PROPARALLEL_UNSAFE,
+        safe_param_ids: Vec::new(),
+    };
+    let mut err: Option<PgError> = None;
+    max_parallel_hazard_walker_query(parse, &mut context, &mut err);
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(context.max_hazard)
+}
+
+/// The `Node`-level dispatch of `max_parallel_hazard_walker` (clauses.c:826) for
+/// the whole-query scan. The C walker is invoked on a `Node`; in this model a
+/// scanned `Node` is either a `Query` (handled here) or an `Expr` (delegated to
+/// the `Expr`-level [`max_parallel_hazard_walker`]). Returns `true` to abort.
+fn max_parallel_hazard_walker_node(
+    node: &types_nodes::nodes::Node,
+    context: &mut MaxParallelHazardContext,
+    err: &mut Option<PgError>,
+) -> bool {
+    // else if (IsA(node, Query)) { ... } (clauses.c:945)
+    if node.is_query() {
+        return max_parallel_hazard_walker_query(node.expect_query(), context, err);
+    }
+    // Every other Node reached during the scan is an Expr; run the Expr-level
+    // per-node logic (function check + IsA arms + Expr recursion). A Node that
+    // carries no Expr (none occur on this scan path) is a no-op, matching the C
+    // walker falling through to expression_tree_walker on an unhandled node.
+    match node.as_expr() {
+        Some(expr) => max_parallel_hazard_walker(Some(expr), context, err),
+        None => false,
+    }
+}
+
+/// The `IsA(node, Query)` arm of `max_parallel_hazard_walker` (clauses.c:945).
+fn max_parallel_hazard_walker_query(
+    query: &types_nodes::copy_query::Query,
+    context: &mut MaxParallelHazardContext,
+    err: &mut Option<PgError>,
+) -> bool {
+    // SELECT FOR UPDATE/SHARE must be treated as unsafe.
+    if !query.rowMarks.is_empty() {
+        context.max_hazard = PROPARALLEL_UNSAFE;
+        return true;
+    }
+
+    // Recurse into subselects: query_tree_walker(query, walker, context, 0).
+    // The callback is the Node walker, which re-dispatches Query vs Expr.
+    backend_nodes_core::node_walker::query_tree_walker(
+        query,
+        &mut |n| max_parallel_hazard_walker_node(n, context, err),
+        0,
+    )
+}
+
 // ===========================================================================
 // Check clauses for nonstrict functions (clauses.c:991)
 // ===========================================================================

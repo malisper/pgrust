@@ -16,6 +16,7 @@ types-nodes = { path = "../types-nodes" }
 types-pathnodes = { path = "../types-pathnodes" }
 
 # Real, already-landed callees (direct deps — no cycle).
+backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-parallel-rt-seams" }
 backend-optimizer-util-relnode = { path = "../backend-optimizer-util-relnode" }
 backend-optimizer-util-pathnode = { path = "../backend-optimizer-util-pathnode" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }

@@ -16,6 +16,17 @@ use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{PlannerGlobal, PlannerInfo, QueryId};
 
 seam_core::seam!(
+    /// `IsParallelWorker()` (access/parallel.h:60) — `ParallelWorkerNumber >= 0`.
+    /// `standard_planner` (planner.c:373) consults this in the cheap-test gate
+    /// for `glob->parallelModeOK` (we don't try parallel mode inside a parallel
+    /// worker). Owner is `backend-access-transam-parallel`; the planner reads it
+    /// through this seam to avoid depending on the parallel-executor crate.
+    /// When unset (e.g. `postgres --single`) the planner treats it as `false`,
+    /// matching a non-worker backend.
+    pub fn is_parallel_worker() -> bool
+);
+
+seam_core::seam!(
     /// `select_rowmark_type(rte, strength)` (planner.c:2503) — choose the
     /// `RowMarkType` for a relation RTE given a `FOR UPDATE/SHARE` strength.
     /// inherit.c's `expand_single_inheritance_child` re-selects the mark type

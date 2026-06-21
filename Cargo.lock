@@ -3197,6 +3197,7 @@ dependencies = [
  "backend-access-transam-xact-seams",
  "backend-executor-execParallel-support-seams",
  "backend-executor-instrument",
+ "backend-optimizer-plan-planner-seams",
  "backend-postmaster-bgworker-seams",
  "backend-storage-ipc-dsm-core",
  "backend-storage-ipc-latch-seams",
@@ -9401,6 +9402,7 @@ dependencies = [
  "backend-access-heap-heapam-seams",
  "backend-access-table-tableam",
  "backend-access-table-tableam-seams",
+ "backend-access-transam-parallel-rt-seams",
  "backend-access-transam-xact-seams",
  "backend-catalog-aclchk-seams",
  "backend-catalog-catalog",
@@ -12913,6 +12915,7 @@ dependencies = [
 name = "backend-optimizer-plan-small"
 version = "0.0.0"
 dependencies = [
+ "backend-access-transam-parallel-rt-seams",
  "backend-optimizer-path-allpaths",
  "backend-optimizer-path-equivclass",
  "backend-optimizer-plan-init-subselect-seams",

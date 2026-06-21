@@ -361,20 +361,17 @@ pub fn query_planner<'mcx>(
 /// [`debug_parallel_query`].
 const DEBUG_PARALLEL_OFF: i32 = 0;
 
-/// `debug_parallel_query` (GUC, `int`). The backing variable lives in
-/// `planner.c` / `guc.c`, not ported in this wave; it is read through this
-/// accessor. Consulted only on the trivial `RTE_RESULT` path, after
-/// `parallel_mode_ok` and `query_level > 1` have already been ruled out, exactly
-/// as in C (so it is reached only when parallelism is otherwise possible). There
-/// is no silent default: until the GUC backing exists the read loudly panics,
-/// mirroring the absent-subsystem boundary.
+/// `debug_parallel_query` (GUC, `int`). In C the backing `int
+/// debug_parallel_query` lives in `optimizer/plan/planner.c`; in this repo it is
+/// the `debug_parallel_query` GUC slot, read through the shared
+/// `backend-access-transam-parallel-rt-seams::debug_parallel_query` accessor
+/// (installed by `backend-tcop-postgres` from the GUC slot — the same value the
+/// planner's force-parallel Gather leg reads). Consulted only on the trivial
+/// `RTE_RESULT` path, after `parallel_mode_ok` and `query_level > 1` have been
+/// ruled out, exactly as in C.
 #[inline]
 fn debug_parallel_query() -> i32 {
-    panic!(
-        "debug_parallel_query: GUC backing not installed in this wave \
-         (backend/utils/misc/guc + planner.c not ported); reached on the \
-         trivial RTE_RESULT parallel path"
-    );
+    backend_access_transam_parallel_rt_seams::debug_parallel_query::call()
 }
 
 /// `root->parse->jointree` — the `FromExpr` node at the top of the jointree,

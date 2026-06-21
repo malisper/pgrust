@@ -518,20 +518,18 @@ fn ExecutePlan(
         !(query_desc.already_executed || number_tuples != 0) && parallel_mode_needed;
     query_desc.already_executed = true;
 
+    // estate->es_use_parallel_mode = use_parallel_mode;
+    // if (use_parallel_mode) EnterParallelMode();  (C:1696-1698)
     if use_parallel_mode {
-        // estate->es_use_parallel_mode = true; EnterParallelMode();
-        panic!(
-            "execMain ExecutePlan: parallelModeNeeded ⇒ EnterParallelMode()/ExitParallelMode() \
-             (xact parallel owner) not wired — #167 F0d"
-        );
+        backend_access_transam_parallel_rt_seams::enter_parallel_mode::call()?;
     }
 
     let mut current_tuple_count: u64 = 0;
 
-    query_desc.with_estate_and_planstate_mut(|estate, planstate| {
-        // estate->es_direction = direction;  estate->es_use_parallel_mode = false;
+    let run_result = query_desc.with_estate_and_planstate_mut(|estate, planstate| {
+        // estate->es_direction = direction;  estate->es_use_parallel_mode = ...
         estate.es_direction = direction;
-        estate.es_use_parallel_mode = false;
+        estate.es_use_parallel_mode = use_parallel_mode;
 
         let planstate = match planstate {
             Some(ps) => ps,
@@ -607,9 +605,16 @@ fn ExecutePlan(
             procnode::exec_shutdown_node::call(planstate, estate)?;
         }
         Ok(())
-    })?;
+    });
 
-    // if (use_parallel_mode) ExitParallelMode();  (unreachable: guarded above.)
+    // if (use_parallel_mode) ExitParallelMode();  (C:1771-1772). Run it even on
+    // an error from the execution loop so the parallel-mode nesting count is
+    // balanced before the error propagates (the C cleanup path likewise leaves
+    // parallel mode during abort).
+    if use_parallel_mode {
+        backend_access_transam_parallel_rt_seams::exit_parallel_mode::call()?;
+    }
+    run_result?;
     Ok(())
 }
 
