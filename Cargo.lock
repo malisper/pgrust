@@ -7661,6 +7661,7 @@ dependencies = [
 name = "backend-commands-policy"
 version = "0.0.0"
 dependencies = [
+ "backend-access-common-detoast-seams",
  "backend-access-common-heaptuple",
  "backend-access-common-relation",
  "backend-access-common-scankey",

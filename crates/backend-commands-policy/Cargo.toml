@@ -47,6 +47,7 @@ backend-commands-policy-seams = { path = "../backend-commands-policy-seams" }
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 
 # Cross-subsystem externals via their owners' -seams crates.
+backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-catalog-indexing-seams = { path = "../backend-catalog-indexing-seams" }

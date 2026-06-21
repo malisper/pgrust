@@ -281,23 +281,58 @@ fn polroles_to_oids(mcx: Mcx<'_>, polroles: &Datum<'_>) -> PgResult<alloc::vec::
 }
 
 /// `TextDatumGetCString(datum)` — the payload bytes of a `text` varlena as a
-/// `String` (used for the stored `pg_node_tree` quals).
-fn text_datum_to_string(d: &Datum<'_>) -> PgResult<String> {
+/// `String` (used for the stored `pg_node_tree` quals). C expands this to
+/// `text_to_cstring(DatumGetTextPP(datum))`, i.e. `pg_detoast_datum_packed`
+/// (decompress / fetch out-of-line) followed by `VARDATA_ANY` / `VARSIZE_ANY_EXHDR`.
+///
+/// A stored `pg_node_tree` for a policy whose USING qual contains a subquery
+/// runs to a few KB, so it is routinely stored either inline-COMPRESSED or with a
+/// 1-byte SHORT header (and out-of-line for the very largest). The previous
+/// hand-rolled "assume a flat 4-byte header" path returned the raw compressed /
+/// short-header bytes, so `stringToNode` saw the varlena header as its first
+/// token (`unrecognized token`) — which on `ALTER POLICY ... TO role,...` (the
+/// no-qual leg that re-reads the stored qual to rebuild dependencies) aborted the
+/// command and left the new role out of `polroles` / `pg_shdepend`.
+fn text_datum_to_string<'mcx>(mcx: Mcx<'mcx>, d: &Datum<'_>) -> PgResult<String> {
     let bytes = match d {
         Datum::ByRef(b) => b.as_slice(),
         _ => return Err(PgError::error("unexpected by-value Datum in pg_node_tree text")),
     };
-    if bytes.len() < 4 {
+    // DatumGetTextPP(datum): detoast only compressed / out-of-line values,
+    // leaving an inline (short- or 4-byte-header) varlena.
+    let packed =
+        backend_access_common_detoast_seams::pg_detoast_datum_packed::call(mcx, bytes)?;
+    let p = packed.as_slice();
+    if p.is_empty() {
         return Err(PgError::error("malformed text varlena in pg_policy qual"));
     }
-    // VARSIZE - VARHDRSZ; assume a short (1-byte header) is not produced by
-    // CStringGetTextDatum (the C writes a 4-byte header), so read the 4-byte
-    // length word.
-    let word = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    let total = (word >> 2) as usize;
-    let payload = &bytes[4..total.min(bytes.len())];
+    // VARDATA_ANY / VARSIZE_ANY_EXHDR: byte 0's low bit marks a 1-byte SHORT
+    // header (length = byte0 >> 1, payload at offset 1); otherwise a 4-byte
+    // header (length word = u32 >> 2, payload at offset 4).
+    let payload: &[u8] = if (p[0] & 0x01) != 0 {
+        let total = (p[0] >> 1) as usize;
+        if total < VARHDRSZ_SHORT || total > p.len() {
+            return Err(PgError::error("malformed short text varlena in pg_policy qual"));
+        }
+        &p[VARHDRSZ_SHORT..total]
+    } else {
+        if p.len() < VARHDRSZ {
+            return Err(PgError::error("malformed text varlena in pg_policy qual"));
+        }
+        let word = u32::from_ne_bytes([p[0], p[1], p[2], p[3]]);
+        let total = ((word >> 2) as usize).min(p.len());
+        if total < VARHDRSZ {
+            return Err(PgError::error("malformed text varlena in pg_policy qual"));
+        }
+        &p[VARHDRSZ..total]
+    };
     Ok(String::from_utf8_lossy(payload).into_owned())
 }
+
+/// `VARHDRSZ` (varatt.h) — the 4-byte varlena header size.
+const VARHDRSZ: usize = 4;
+/// `VARHDRSZ_SHORT` (varatt.h) — the 1-byte short-header varlena size.
+const VARHDRSZ_SHORT: usize = 1;
 
 /// `RelationGetRelationName(rel)` (rel.h) — `rd_rel->relname` as a string.
 fn rel_name(rel: &Relation<'_>) -> String {
@@ -978,7 +1013,7 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
     if qual.is_none() {
         if let Some(d) = stored_qual_datum.as_ref() {
             // qual = stringToNode(qual_value);
-            let qual_value = text_datum_to_string(d)?;
+            let qual_value = text_datum_to_string(mcx, d)?;
             let node = read_seams::string_to_node::call(mcx, &qual_value)?;
             // Add this rel to the parsestate's rangetable, for dependencies.
             let mut pstate = analyze_seams::make_parsestate::call(mcx, None)?;
@@ -1006,7 +1041,7 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
     let mut with_check_node: Option<Node<'mcx>> = None;
     if with_check_qual.is_none() {
         if let Some(d) = stored_wc_datum.as_ref() {
-            let wc_value = text_datum_to_string(d)?;
+            let wc_value = text_datum_to_string(mcx, d)?;
             let node = read_seams::string_to_node::call(mcx, &wc_value)?;
             let mut pstate = analyze_seams::make_parsestate::call(mcx, None)?;
             let _ = addRangeTableEntryForRelation(
