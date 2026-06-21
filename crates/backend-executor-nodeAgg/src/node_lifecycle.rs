@@ -165,15 +165,23 @@ pub fn fetch_input_tuple<'mcx>(
     // if (!TupIsNull(slot) && aggstate->sort_out)
     //     tuplesort_puttupleslot(aggstate->sort_out, slot);
     //
-    // C's tuplesort_puttupleslot does ExecCopySlotMinimalTuple(slot), which
-    // materializes the FULL tuple regardless of slot type. The owned tuplesort
-    // forms the minimal tuple from slot->tts_values/tts_isnull, so the source
-    // slot must be fully deformed first — a lazily-deformed outer slot
-    // (tts_nvalid < natts, e.g. a SeqScan that only touched the grouping cols)
-    // would otherwise feed stale values for the unread columns (the aggregated
-    // input vars), silently corrupting the re-sorted phase's aggregates.
+    // C's tuplesort_puttupleslot does ExecCopySlotMinimalTuple(slot) =
+    // slot->tts_ops->copy_minimal_tuple(slot). For lazily-deformed physical
+    // slots (heap/buffer/minimal — e.g. a SeqScan that only touched the
+    // grouping cols, tts_nvalid < natts) the per-kind copy materializes from
+    // the stored tuple. The owned tuplesort instead forms the minimal tuple
+    // from slot->tts_values/tts_isnull, so a physical source slot must be fully
+    // deformed first — otherwise the unread columns (the aggregated input vars)
+    // would feed stale values, silently corrupting the re-sorted phase's
+    // aggregates. A VIRTUAL slot, however, is always fully materialized
+    // (Assert(!TTS_EMPTY) only; tts_virtual_copy_minimal_tuple reads
+    // tts_values/tts_isnull directly) and slot_getsomeattrs on it is an error
+    // (tts_virtual_getsomeattrs elogs) — so skip the deform for virtual slots,
+    // mirroring C's per-kind copy_minimal_tuple dispatch.
     if let Some(s) = slot {
-        if aggstate.sort_out.is_some() {
+        if aggstate.sort_out.is_some()
+            && estate.slot_data_mut(s).kind() != types_nodes::TupleSlotKind::Virtual
+        {
             backend_executor_execTuples_seams::slot_getallattrs_by_id::call(estate, s)?;
         }
     }
