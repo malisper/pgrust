@@ -386,18 +386,19 @@ pub fn exec_build_agg_trans<'mcx>(
     nullcheck: bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    let _ = estate;
-
     // state = makeNode(ExprState); state->expr = (Expr *) aggstate;
     // state->parent = &aggstate->ss.ps;  scratch.resvalue=&state->resvalue.
     //
     // The C `state->expr = (Expr *) aggstate` is a debug back-link only; the
     // owned ExprState.expr is an `Option<PgBox<Expr>>` and an AggState is not an
     // Expr node, so the back-link is left unset (it is never dereferenced during
-    // evaluation). `state->parent = &aggstate->ss.ps` is likewise a back-pointer
-    // only — left as the default (None); the agg program never recurses into a
-    // SubPlan that would require `state->parent`.
+    // evaluation). `state->parent = &aggstate->ss.ps` is a back-pointer whose
+    // only runtime use is `state->parent->state` (the EState) when an aggregate
+    // ARGUMENT contains a SubPlan (e.g. `sum((SELECT ...))`); `exec_init_sub_plan_expr`
+    // reaches the EState through `ExprState.es_link`, so stamp it from the
+    // EState the caller passed (the owned-model equivalent of `parent->state`).
     let mut state = make_expr_state(mcx)?;
+    state.es_link = Some(types_nodes::execnodes::EStateLink::from_ref(estate));
     let is_combine = do_aggsplit_combine(aggstate.aggsplit);
 
     // The C reusable `scratch` step lives on the stack and is byte-copied into
@@ -493,7 +494,7 @@ pub fn exec_build_agg_trans<'mcx>(
                 .aggfilter
                 .as_deref()
                 .expect("ExecBuildAggTrans: aggfilter present but NULL")
-                .clone();
+                .clone_in(mcx)?;
             core::exec_init_expr_rec(mcx, &aggfilter, &mut state, STATE_RESULT_CELL)?;
             // and jump out if false
             let scratch = ExprEvalStep {
@@ -517,7 +518,7 @@ pub fn exec_build_agg_trans<'mcx>(
             // source_tle = linitial(pertrans->aggref->args). Clone the (single)
             // source Expr so the read-only borrow does not collide with the
             // &mut state recursion (C uses the node in place).
-            let source_expr = arg_tle_expr_clone(aggstate, transno, 0);
+            let source_expr = arg_tle_expr_clone(aggstate, transno, 0, mcx)?;
 
             if !p.deserialfn_valid {
                 // No deserialization: recurse the source straight into the
@@ -599,7 +600,7 @@ pub fn exec_build_agg_trans<'mcx>(
                 if argno == p.num_trans_inputs {
                     break;
                 }
-                let arg = arg_tle_expr_clone(aggstate, transno, i);
+                let arg = arg_tle_expr_clone(aggstate, transno, i, mcx)?;
                 // Recurse into &trans_fcinfo->args[argno + 1].
                 let arg_cell = new_result_cell(mcx, &mut state)?;
                 core::exec_init_expr_rec(mcx, &arg, &mut state, arg_cell)?;
@@ -612,7 +613,7 @@ pub fn exec_build_agg_trans<'mcx>(
         } else if p.num_inputs == 1 {
             // Non-presorted DISTINCT and/or ORDER BY case, single sort column.
             debug_assert_eq!(p.aggref_args_len, 1);
-            let arg = arg_tle_expr_clone(aggstate, transno, 0);
+            let arg = arg_tle_expr_clone(aggstate, transno, 0, mcx)?;
             // Recurse into &state->resvalue / &state->resnull.
             core::exec_init_expr_rec(mcx, &arg, &mut state, STATE_RESULT_CELL)?;
             // strictnulls = &state->resnull
@@ -1602,8 +1603,16 @@ fn aggref_of<'a, 'mcx>(aggstate: &'a AggStateData<'mcx>, transno: usize) -> &'a 
 /// Clone `pertrans->aggref->args[i]->expr` (the i-th aggregated-argument source
 /// expression). The C uses the node in place (read-only); cloning the small
 /// plan-node subtree sidesteps the read-borrow-vs-`&mut state` conflict in the
-/// recursion.
-fn arg_tle_expr_clone<'mcx>(aggstate: &AggStateData<'mcx>, transno: usize, i: usize) -> Expr {
+/// recursion. The deep copy goes through `Expr::clone_in` (not a shallow
+/// `.clone()`): an aggregate argument can be a `SubLink`-turned-`SubPlan`
+/// (e.g. `sum((SELECT ...))`), whose context-allocated children only the
+/// `clone_in` path can deep-copy — the derived `Clone` panics on them.
+fn arg_tle_expr_clone<'mcx>(
+    aggstate: &AggStateData<'mcx>,
+    transno: usize,
+    i: usize,
+    mcx: Mcx<'mcx>,
+) -> PgResult<Expr> {
     let aggref = aggref_of(aggstate, transno);
     let args = aggref
         .args
@@ -1613,7 +1622,7 @@ fn arg_tle_expr_clone<'mcx>(aggstate: &AggStateData<'mcx>, transno: usize, i: us
         .expr
         .as_deref()
         .expect("ExecBuildAggTrans: aggregated-arg TargetEntry.expr is NULL")
-        .clone()
+        .clone_in(mcx)
 }
 
 /// Allocate a single-element `PgVec<ResultCellId>` (the strict-input-check's

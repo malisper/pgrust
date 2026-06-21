@@ -1494,18 +1494,41 @@ where
         | Expr::SetToDefault(_)
         | Expr::CurrentOfExpr(_)
         | Expr::NextValueExpr(_)
-        | Expr::MergeSupportFunc(_)
-        | Expr::GroupingFunc(_) => {}
+        | Expr::MergeSupportFunc(_) => {}
+        Expr::GroupingFunc(g) => {
+            // C (expression_tree_mutator, T_GroupingFunc): MUTATE(newnode->args, ...).
+            // args is a plain Expr list (GROUP BY column references); cols/refs
+            // are index lists, copied verbatim.
+            mut_vec!(g.args);
+        }
         Expr::WindowFunc(w) => {
             mut_vec!(w.args);
             mut_box!(w.aggfilter);
             mut_vec!(w.runCondition);
         }
-        Expr::Aggref(_) => {
-            // Aggref.args is a TargetEntry list with context-allocated children
-            // (deep-copy goes through TargetEntry::clone_in); the generic
-            // mutator copies the Aggref verbatim, matching callers that handle
-            // aggregates specially before reaching here.
+        Expr::Aggref(a) => {
+            // C (expression_tree_mutator, T_Aggref):
+            //   MUTATE(newnode->aggdirectargs, ...);   // List of Expr
+            //   MUTATE(newnode->args, ...);            // List of TargetEntry
+            //   MUTATE(newnode->aggorder, ...);        // List of SortGroupClause
+            //   MUTATE(newnode->aggdistinct, ...);     // List of SortGroupClause
+            //   MUTATE(newnode->aggfilter, ...);       // Expr
+            // The args/aggdirectargs/aggfilter carry expressions that may contain
+            // SubLinks (e.g. agg((SELECT ...))); process_sublinks_mutator must
+            // descend so they become SubPlans. aggorder/aggdistinct are
+            // SortGroupClause lists (index refs, no embedded Exprs) — mutating
+            // them is a no-op, matching C, so we leave them verbatim.
+            mut_vec!(a.aggdirectargs);
+            // args is a TargetEntry list; the context-allocated `te.expr`
+            // (Option<PgBox<Expr>>) is mutated in place, same shape as
+            // mut_pgbox_opt! over SubPlan.testexpr.
+            for te in a.args.iter_mut() {
+                if let Some(b) = te.expr.as_mut() {
+                    let old = core::mem::replace(&mut **b, Expr::Const(Const::default()));
+                    **b = mutator(old);
+                }
+            }
+            mut_box!(a.aggfilter);
         }
         Expr::SubscriptingRef(s) => {
             mut_vec_opt!(s.refupperindexpr);

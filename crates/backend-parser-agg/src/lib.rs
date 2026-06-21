@@ -458,14 +458,19 @@ fn check_agglevels_and_constraints<'mcx>(
         AggOrGrouping::Agg(agg) => {
             let mut directargs: Vec<Node> = Vec::new();
             for e in agg.aggdirectargs.iter() {
-                directargs.push(Node::mk_expr(mcx, e.clone())?);
+                directargs.push(Node::mk_expr(mcx, e.clone_in(mcx)?)?);
             }
             let mut args: Vec<Node> = Vec::new();
             for te in agg.args.iter() {
                 args.push(Node::mk_target_entry(mcx, te.clone_in(mcx)?)?);
             }
             let filter = match agg.aggfilter.as_deref() {
-                Some(e) => Some(Node::mk_expr(mcx, e.clone())?),
+                // Deep-copy via `Expr::clone_in`, not a shallow `.clone()`: a
+                // FILTER expression can hold a `SubLink` (e.g.
+                // `count(*) FILTER (WHERE y > (SELECT ...))`), whose embedded
+                // owned Query / context-allocated children the derived `Clone`
+                // panics on (mirrors the args TargetEntry clone two lines above).
+                Some(e) => Some(Node::mk_expr(mcx, e.clone_in(mcx)?)?),
                 None => None,
             };
             (directargs, args, filter, agg.location)
@@ -473,7 +478,7 @@ fn check_agglevels_and_constraints<'mcx>(
         AggOrGrouping::Grouping(grp) => {
             let mut args: Vec<Node> = Vec::new();
             for e in grp.args.iter() {
-                args.push(Node::mk_expr(mcx, e.clone())?);
+                args.push(Node::mk_expr(mcx, e.clone_in(mcx)?)?);
             }
             (Vec::new(), args, None, grp.location)
         }
