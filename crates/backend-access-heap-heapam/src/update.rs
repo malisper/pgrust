@@ -715,12 +715,19 @@ pub fn heap_update<'mcx>(
          */
         if need_toast {
             /* Note we always use WAL and FSM during updates */
-            let stored = heap_toast_insert_or_update(mcx, relation, newtup, Some(&oldtup), 0)?;
-            let stored = stored.expect(
-                "heap_toast_insert_or_update returned None when toasting was required",
-            );
-            newtupsize = maxalign(stored.tuple.t_len as usize);
-            toasted = Some(stored);
+            //
+            // heap_toast_insert_or_update returns the original `newtup` (modeled
+            // here as `None`) when no attribute actually needed to be rewritten
+            // — e.g. updating a catalog row whose only external attribute is
+            // unchanged (C heaptoast.c:331 `result_tuple = newtup;`). In that
+            // case `heaptup == newtup`, so we keep `toasted = None` and store
+            // the caller's tuple.
+            if let Some(stored) =
+                heap_toast_insert_or_update(mcx, relation, newtup, Some(&oldtup), 0)?
+            {
+                newtupsize = maxalign(stored.tuple.t_len as usize);
+                toasted = Some(stored);
+            }
         }
 
         /*
