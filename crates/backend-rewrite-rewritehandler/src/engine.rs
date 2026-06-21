@@ -166,20 +166,33 @@ fn process_matched_tle<'mcx>(
         return flat_copy_target_entry(mcx, src_tle);
     };
 
-    let mut src_expr: Expr = src_tle.expr.as_deref().expect("src tle expr").clone();
-    let mut prior_expr: Expr = prior_tle.expr.as_deref().expect("prior tle expr").clone();
+    let mut src_expr: Expr = src_tle.expr.as_deref().expect("src tle expr").clone_in(mcx)?;
+    let mut prior_expr: Expr = prior_tle.expr.as_deref().expect("prior tle expr").clone_in(mcx)?;
 
     // If both are CoerceToDomain over a matching domain, strip and reconstitute.
     let mut coerce_expr: Option<CoerceToDomain> = None;
     if let (Expr::CoerceToDomain(s), Expr::CoerceToDomain(p)) = (&src_expr, &prior_expr) {
         if s.resulttype == p.resulttype {
-            coerce_expr = Some(s.clone());
+            coerce_expr = Some(CoerceToDomain {
+                arg: None,
+                resulttype: s.resulttype,
+                resulttypmod: s.resulttypmod,
+                resultcollid: s.resultcollid,
+                coercionformat: s.coercionformat,
+                location: s.location,
+            });
             let s_arg = match &src_expr {
-                Expr::CoerceToDomain(s) => s.arg.as_deref().cloned(),
+                Expr::CoerceToDomain(s) => match s.arg.as_deref() {
+                    Some(a) => Some(a.clone_in(mcx)?),
+                    None => None,
+                },
                 _ => unreachable!(),
             };
             let p_arg = match &prior_expr {
-                Expr::CoerceToDomain(p) => p.arg.as_deref().cloned(),
+                Expr::CoerceToDomain(p) => match p.arg.as_deref() {
+                    Some(a) => Some(a.clone_in(mcx)?),
+                    None => None,
+                },
                 _ => unreachable!(),
             };
             src_expr = s_arg.ok_or_else(|| elog("CoerceToDomain without arg"))?;
@@ -211,8 +224,8 @@ fn process_matched_tle<'mcx>(
         }
     }
     if !equal_node(
-        &Node::mk_expr(mcx, priorbottom.clone())?,
-        &Node::mk_expr(mcx, src_input.clone())?,
+        &Node::mk_expr(mcx, priorbottom.clone_in(mcx)?)?,
+        &Node::mk_expr(mcx, src_input.clone_in(mcx)?)?,
     ) {
         return Err(PgError::new(
             ERROR,
@@ -226,12 +239,14 @@ fn process_matched_tle<'mcx>(
         Expr::FieldStore(src_fs) => {
             let new_fs = if let Expr::FieldStore(prior_fs) = &prior_expr {
                 // combine the two
-                let mut newvals = prior_fs.newvals.clone();
-                newvals.extend(src_fs.newvals.iter().cloned());
+                let mut newvals = clone_expr_vec(mcx, &prior_fs.newvals)?;
+                for v in src_fs.newvals.iter() {
+                    newvals.push(v.clone_in(mcx)?);
+                }
                 let mut fieldnums = prior_fs.fieldnums.clone();
                 fieldnums.extend(src_fs.fieldnums.iter().copied());
                 FieldStore {
-                    arg: prior_fs.arg.clone(),
+                    arg: clone_opt_box_expr(mcx, &prior_fs.arg)?,
                     newvals,
                     fieldnums,
                     resulttype: prior_fs.resulttype,
@@ -239,18 +254,21 @@ fn process_matched_tle<'mcx>(
             } else {
                 // general case, just nest 'em
                 FieldStore {
-                    arg: Some(Box::new(prior_expr.clone())),
-                    newvals: src_fs.newvals.clone(),
+                    arg: Some(Box::new(prior_expr.clone_in(mcx)?)),
+                    newvals: clone_expr_vec(mcx, &src_fs.newvals)?,
                     fieldnums: src_fs.fieldnums.clone(),
                     resulttype: src_fs.resulttype,
                 }
             };
             Expr::FieldStore(new_fs)
         }
-        Expr::SubscriptingRef(src_sr) => {
+        Expr::SubscriptingRef(_) => {
+            let Expr::SubscriptingRef(src_sr_copy) = src_expr.clone_in(mcx)? else {
+                unreachable!()
+            };
             let new_sr = SubscriptingRef {
-                refexpr: Some(Box::new(prior_expr.clone())),
-                ..src_sr.clone()
+                refexpr: Some(Box::new(prior_expr.clone_in(mcx)?)),
+                ..src_sr_copy
             };
             Expr::SubscriptingRef(new_sr)
         }
@@ -269,6 +287,28 @@ fn process_matched_tle<'mcx>(
     let mut result = flat_copy_target_entry(mcx, src_tle)?;
     result.expr = Some(alloc_in(mcx, newexpr)?);
     Ok(result)
+}
+
+/// Deep-copy a `Vec<Expr>` into `mcx` (C: `copyObject` of a `List *`). Routes
+/// each element through `Expr::clone_in` so an `Aggref`/`SubLink`/`SubPlan`
+/// child is deep-copied rather than hitting the panicking derived `.clone()`.
+fn clone_expr_vec<'mcx>(mcx: Mcx<'mcx>, v: &[Expr]) -> PgResult<Vec<Expr>> {
+    let mut out = Vec::with_capacity(v.len());
+    for e in v {
+        out.push(e.clone_in(mcx)?);
+    }
+    Ok(out)
+}
+
+/// Deep-copy an `Option<Box<Expr>>` into `mcx`.
+fn clone_opt_box_expr<'mcx>(
+    mcx: Mcx<'mcx>,
+    e: &Option<Box<Expr>>,
+) -> PgResult<Option<Box<Expr>>> {
+    match e {
+        Some(b) => Ok(Some(Box::new(b.clone_in(mcx)?))),
+        None => Ok(None),
+    }
 }
 
 /// `get_assignment_input(node)` (rewriteHandler.c:1201) — if node is an
@@ -542,7 +582,10 @@ pub fn rewriteTargetListIU<'mcx>(
             new_tle = None;
         } else if apply_default {
             let new_expr_box = crate::build_column_default(mcx, target_relation, attrno)?;
-            let mut new_expr: Option<Expr> = new_expr_box.map(|b| (*b).clone());
+            let mut new_expr: Option<Expr> = match new_expr_box {
+                Some(b) => Some(b.clone_in(mcx)?),
+                None => None,
+            };
 
             if new_expr.is_none() {
                 // No default: INSERT can omit; UPDATE must set NULL explicitly.
@@ -1384,7 +1427,7 @@ pub fn rewriteRuleAction<'mcx>(
         if parsetree.hasSubLinks && !rule_action.hasSubLinks {
             for tle in rule_action.returningList.iter() {
                 if let Some(e) = tle.expr.as_deref() {
-                    if checkExprHasSubLink(&Node::mk_expr(mcx, e.clone())?) {
+                    if checkExprHasSubLink(&Node::mk_expr(mcx, e.clone_in(mcx)?)?) {
                         rule_action.hasSubLinks = true;
                         break;
                     }
