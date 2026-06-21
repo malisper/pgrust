@@ -40,8 +40,11 @@ use types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, LOCKMODE, NoLock, RowExclusiveLock,
 };
 
+use backend_access_common_heaptuple::heap_deform_tuple;
 use backend_access_common_relation::relation_open;
+use backend_access_common_scankey::ScanKeyInit;
 use backend_access_transam_xact::CommandCounterIncrement;
+use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use backend_catalog_indexing_seams as indexing_seam;
 use backend_catalog_objectaddress::consts::ConstraintRelationId;
 use backend_catalog_pg_inherits::{find_all_inheritors, find_inheritance_children};
@@ -729,7 +732,7 @@ pub(crate) fn QueueFKConstraintValidation<'mcx>(
     conoid: Oid,
     conform: &types_catalog::pg_constraint::FormData_pg_constraint,
     constr_name: &str,
-    _lockmode: LOCKMODE,
+    lockmode: LOCKMODE,
 ) -> PgResult<()> {
     debug_assert_eq!(conform.contype, CONSTRAINT_FOREIGN);
     debug_assert!(!conform.convalidated);
@@ -749,12 +752,96 @@ pub(crate) fn QueueFKConstraintValidation<'mcx>(
         wqueue[tab].constraints.push(newcon);
     }
 
-    // If either end is partitioned, recurse over child constraints.
+    // If the table at either end of the constraint is partitioned, we need to
+    // recurse and handle every unvalidated constraint that is a child of this
+    // constraint (tablecmds.c:13043).
     if fkrel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE
         || backend_utils_cache_lsyscache_seams::get_rel_relkind::call(conform.confrelid)?
             == RELKIND_PARTITIONED_TABLE
     {
-        unported("VALIDATE CONSTRAINT FK recursion over partition child constraints");
+        // ScanKeyInit(&pkey, Anum_pg_constraint_conparentid, BTEqual, F_OIDEQ, con->oid);
+        // pscan = systable_beginscan(conrel, ConstraintParentIndexId, true, NULL, 1, &pkey);
+        let conrel = backend_access_table_table_seams::table_open::call(
+            mcx,
+            ConstraintRelationId,
+            RowExclusiveLock,
+        )?;
+
+        let mut key = ScanKeyData::empty();
+        ScanKeyInit(
+            &mut key,
+            types_catalog::pg_constraint::Anum_pg_constraint_conparentid,
+            BTEqualStrategyNumber,
+            types_core::fmgr::F_OIDEQ,
+            types_tuple::backend_access_common_heaptuple::Datum::from_oid(conoid),
+        )?;
+        let keys = [key];
+
+        let mut scan = backend_access_index_genam_seams::systable_beginscan::call(
+            &conrel,
+            types_catalog::pg_constraint::ConstraintParentIndexId,
+            true,
+            None,
+            &keys,
+        )?;
+
+        // Collect child constraint OIDs first; the recursion below re-opens
+        // pg_constraint (it marks each child validated), so we don't hold the
+        // scan across the recursive calls. We capture convalidated here so we
+        // can skip already-valid subtrees without a re-lookup.
+        let mut children: Vec<(Oid, bool)> = Vec::new();
+        while let Some(tup) =
+            backend_access_index_genam_seams::systable_getnext::call(mcx, scan.desc_mut())?
+        {
+            let cols = heap_deform_tuple(mcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
+            let child_oid = cols
+                [types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1]
+                .0
+                .as_oid();
+            let child_validated = cols
+                [types_catalog::pg_constraint::Anum_pg_constraint_convalidated as usize - 1]
+                .0
+                .as_bool();
+            children.push((child_oid, child_validated));
+        }
+        drop(scan);
+        conrel.close(NoLock)?;
+
+        for (child_oid, child_validated) in children {
+            // If the child constraint has already been validated, no further
+            // action is required for it or its descendants, as they are all
+            // valid.
+            if child_validated {
+                continue;
+            }
+
+            let childcon =
+                backend_utils_cache_syscache_seams::search_constraint_form_by_oid::call(child_oid)?
+                    .ok_or_else(|| {
+                        backend_utils_error::ereport(ERROR)
+                            .errmsg_internal(format!(
+                                "cache lookup failed for constraint {child_oid}"
+                            ))
+                            .into_error()
+                    })?;
+            let childform = childcon.form;
+
+            let childrel = relation_open(mcx, childform.conrelid, lockmode)?;
+
+            // NB: pkrelid is passed as-is during recursion, as it is required
+            // to identify the root referenced table.
+            QueueFKConstraintValidation(
+                mcx,
+                wqueue,
+                &childrel,
+                pkrelid,
+                child_oid,
+                &childform,
+                constr_name,
+                lockmode,
+            )?;
+            childrel.close(NoLock)?;
+        }
     }
 
     // Mark the pg_constraint row as validated.
