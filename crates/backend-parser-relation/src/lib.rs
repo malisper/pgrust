@@ -3983,13 +3983,37 @@ fn isQueryUsingTempRelation_walker(mcx: Mcx<'_>, node: &Node<'_>) -> PgResult<bo
     if let Some(query) = node.as_query() {
         return isQueryUsingTempRelation_walker_query(mcx, query);
     }
-    // C: `return expression_tree_walker(node, walker, context)`. In the owned
-    // model the central `query_tree_walker` (driven from the Query arm below)
-    // already descends into every nested `Query` node (RTE subqueries, sublink
-    // subqueries, CTEs), which are the only nodes this probe acts on — it opens
-    // relations only from a Query's rtable. A non-Query leaf therefore yields no
-    // temp relation directly; its sub-Query recursion is the query walker's job.
-    Ok(false)
+    // C: `return expression_tree_walker(node, walker, context)`. A non-Query leaf
+    // never opens a relation itself (this probe acts only on a Query's rtable),
+    // but its expression children can hold a `SubLink` whose `subselect` is a
+    // nested `Query` (e.g. `WHERE id IN (SELECT ... FROM temp)` /
+    // `WHERE EXISTS (SELECT ... FROM temp)`). `query_tree_walker` hands those
+    // WHERE/HAVING quals to us as bare expression nodes, so we must descend with
+    // `expression_tree_walker` to reach the sublink subquery — without this leg a
+    // view whose only temp reference is inside a sublink is never detected as
+    // temporary (no "will be a temporary view" NOTICE).
+    let mut found = false;
+    let mut err: Option<types_error::PgError> = None;
+    backend_nodes_core::node_walker::expression_tree_walker(node, &mut |child: &Node| {
+        if found || err.is_some() {
+            return true;
+        }
+        match isQueryUsingTempRelation_walker(mcx, child) {
+            Ok(true) => {
+                found = true;
+                true
+            }
+            Ok(false) => false,
+            Err(e) => {
+                err = Some(e);
+                true
+            }
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(found)
 }
 
 fn isQueryUsingTempRelation_walker_query(mcx: Mcx<'_>, query: &Query<'_>) -> PgResult<bool> {
