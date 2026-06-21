@@ -69,7 +69,7 @@ use types_pathnodes::planner_run::PlannerRun;
 use types_pathnodes::{
     JoinDomain, PathId, PathTarget, PlannerGlobal, PlannerInfo, RangeTblEntryId, RelId, Relids,
     UPPERREL_DISTINCT, UPPERREL_FINAL, UPPERREL_GROUP_AGG, UPPERREL_ORDERED,
-    UPPERREL_PARTIAL_DISTINCT, UPPERREL_WINDOW,
+    UPPERREL_PARTIAL_DISTINCT, UPPERREL_PARTIAL_GROUP_AGG, UPPERREL_WINDOW,
 };
 
 use types_core::Oid;
@@ -6262,11 +6262,15 @@ fn create_degenerate_grouping_paths<'mcx>(
     Ok(())
 }
 
-/// The reachable core of `create_ordinary_grouping_paths` (planner.c:4031):
-/// estimate the number of groups and add the final grouping/aggregation paths
-/// (`add_paths_to_grouping_rel`). The partitionwise and partial-aggregation
-/// branches are skipped (input rel is neither partitioned nor parallel-safe on
-/// this path, exactly as the C gating conditions require).
+/// `create_ordinary_grouping_paths` (planner.c:4031): estimate the number of
+/// groups and add the final grouping/aggregation paths (`add_paths_to_grouping_rel`).
+/// Before doing so, generate any possible partially-grouped paths (parallel
+/// partial aggregation), so the final code can consider both parallel and
+/// non-parallel approaches. The partitionwise branch
+/// (`create_partitionwise_grouping_paths`) requires `IS_PARTITIONED_REL(input_rel)`;
+/// on the non-partitioned path here `patype == PARTITIONWISE_AGGREGATE_NONE`
+/// and it is not reached (the upper `enable_partitionwise_aggregate` gate is
+/// computed in `create_grouping_paths`).
 fn create_ordinary_grouping_paths<'mcx>(
     mcx: Mcx<'mcx>,
     run: &mut PlannerRun<'mcx>,
@@ -6299,12 +6303,71 @@ fn create_ordinary_grouping_paths<'mcx>(
             backend_optimizer_util_vars::tlist::grouping_is_hashable(&processed_group_clauses)
         });
 
+    // GROUPING_CAN_PARTIAL_AGG (C create_grouping_paths:3853): can_partial_agg(root).
+    let can_partial = can_partial_agg(run, root);
+
     // cheapest_path = input_rel->cheapest_total_path.
     let cheapest_path = root
         .rel(input_rel)
         .cheapest_total_path
         .ok_or_else(|| PgError::error("create_ordinary_grouping_paths: input rel has no cheapest_total_path"))?;
     let cheapest_rows = root.path(cheapest_path).base().rows;
+
+    // Before generating paths for grouped_rel, generate any possible partially
+    // grouped paths; that way, later code can easily consider both parallel and
+    // non-parallel approaches to grouping (C:4079). The partitionwise-partial
+    // force_rel_creation path requires IS_PARTITIONED_REL(input_rel); on this
+    // non-partitioned path patype == NONE so force_rel_creation = false.
+    //
+    // agg_partial_costs (AGGSPLIT_INITIAL_SERIAL) / agg_final_costs
+    // (AGGSPLIT_FINAL_DESERIAL) correspond to extra->agg_partial_costs /
+    // extra->agg_final_costs, computed lazily by create_partial_grouping_paths
+    // (extra->partial_costs_set). We compute them here and thread both down.
+    let mut partially_grouped_rel: Option<RelId> = None;
+    let mut agg_final_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite> = None;
+    if can_partial {
+        let (agg_partial_costs, agg_final) = if run.resolve(root.parse).hasAggs {
+            let mut p = types_pathnodes::AggClauseCosts::default();
+            backend_optimizer_prep_prepagg::get_agg_clause_costs(
+                root,
+                types_nodes::nodeagg::AGGSPLIT_INITIAL_SERIAL,
+                &mut p,
+            )?;
+            let mut f = types_pathnodes::AggClauseCosts::default();
+            backend_optimizer_prep_prepagg::get_agg_clause_costs(
+                root,
+                types_nodes::nodeagg::AGGSPLIT_FINAL_DESERIAL,
+                &mut f,
+            )?;
+            (agg_clause_costs_to_lite(&p), agg_clause_costs_to_lite(&f))
+        } else {
+            (
+                agg_clause_costs_to_lite(&types_pathnodes::AggClauseCosts::default()),
+                agg_clause_costs_to_lite(&types_pathnodes::AggClauseCosts::default()),
+            )
+        };
+        agg_final_costs = agg_final;
+        partially_grouped_rel = create_partial_grouping_paths(
+            mcx,
+            run,
+            root,
+            grouped_rel,
+            input_rel,
+            can_sort,
+            can_hash,
+            agg_partial_costs,
+            gd.as_deref_mut(),
+            /* force_rel_creation */ false,
+        )?;
+    }
+
+    // Gather any partially grouped partial paths (C:4121).
+    if let Some(pgr) = partially_grouped_rel {
+        if !root.rel(pgr).partial_pathlist.is_empty() {
+            gather_grouping_paths(run, root, pgr)?;
+            backend_optimizer_util_pathnode::set_cheapest(root, pgr)?;
+        }
+    }
 
     // Estimate number of groups (C:4130). For grouping sets this also fills
     // rollup->numGroups, gs->numGroups, and gd->dNumHashGroups in place.
@@ -6317,7 +6380,9 @@ fn create_ordinary_grouping_paths<'mcx>(
         root,
         input_rel,
         grouped_rel,
+        partially_grouped_rel,
         agg_costs,
+        agg_final_costs,
         d_num_groups,
         has_group_clause,
         has_aggs,
@@ -6335,14 +6400,31 @@ fn create_ordinary_grouping_paths<'mcx>(
     Ok(())
 }
 
-/// The reachable core of `add_paths_to_grouping_rel` (planner.c:7113): add the
-/// sorted-input Agg / Group paths over each input path. can_sort is true (an
-/// empty processed_groupClause is trivially sortable, and a GROUP BY only
-/// reaches here when grouping_is_sortable). can_hash is false unless there's a
-/// GROUP BY; the hashed legs and the partially-grouped finalization are skipped
-/// (no partial rel on this path). For each input path we consider its useful
-/// group-key orderings; for the empty group clause that's the single original
-/// (empty) ordering, so make_ordered_path returns the path unchanged.
+/// `can_partial_agg(root)` (planner.c:7785) — determine whether partial grouping
+/// and/or aggregation is possible.
+fn can_partial_agg<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo) -> bool {
+    let parse = run.resolve(root.parse);
+    if !parse.hasAggs && parse.groupClause.is_empty() {
+        // We don't know how to do parallel aggregation unless we have either
+        // some aggregates or a grouping clause.
+        false
+    } else if !parse.groupingSets.is_empty() {
+        // We don't know how to do grouping sets in parallel.
+        false
+    } else if root.hasNonPartialAggs || root.hasNonSerialAggs {
+        // Insufficient support for partial mode.
+        false
+    } else {
+        true
+    }
+}
+
+/// `add_paths_to_grouping_rel` (planner.c:7113): add the sorted-input Agg / Group
+/// paths over each input path, plus Finalize Agg / Group paths over the
+/// partially-grouped rel's paths (parallel partial aggregation), and the hashed
+/// legs. For each input path we consider its useful group-key orderings; for the
+/// empty group clause that's the single original (empty) ordering, so
+/// make_ordered_path returns the path unchanged.
 #[allow(clippy::too_many_arguments)]
 fn add_paths_to_grouping_rel<'mcx>(
     mcx: Mcx<'mcx>,
@@ -6350,7 +6432,9 @@ fn add_paths_to_grouping_rel<'mcx>(
     root: &mut PlannerInfo,
     input_rel: RelId,
     grouped_rel: RelId,
+    partially_grouped_rel: Option<RelId>,
     agg_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
+    agg_final_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
     d_num_groups: f64,
     has_group_clause: bool,
     has_aggs: bool,
@@ -6454,6 +6538,59 @@ fn add_paths_to_grouping_rel<'mcx>(
                 unreachable!("add_paths_to_grouping_rel: no agg and no group clause");
             }
         }
+
+        // Instead of operating directly on the input relation, we can consider
+        // finalizing a partially aggregated path (C:7211).
+        if let Some(pgr) = partially_grouped_rel {
+            let pgr_cheapest = root.rel(pgr).cheapest_total_path;
+            let pgr_paths: Vec<PathId> = root.rel(pgr).pathlist.clone();
+            for path in pgr_paths {
+                let group_pathkeys = root.group_pathkeys.clone();
+                let cheapest = pgr_cheapest.unwrap_or(path);
+                let ordered =
+                    make_ordered_path(root, run, grouped_rel, path, cheapest, group_pathkeys, -1.0)?;
+                let ordered = match ordered {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                if has_aggs {
+                    // Finalize Aggregate over the partially-aggregated path
+                    // (AGGSPLIT_FINAL_DESERIAL, agg_final_costs) (C:7247).
+                    let aggstrategy = if has_group_clause {
+                        types_pathnodes::AGG_SORTED
+                    } else {
+                        types_pathnodes::AGG_PLAIN
+                    };
+                    let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
+                        run,
+                        root,
+                        grouped_rel,
+                        ordered,
+                        target.clone(),
+                        aggstrategy,
+                        types_pathnodes::AGGSPLIT_FINAL_DESERIAL,
+                        root.processed_groupClause.clone(),
+                        having_quals.clone(),
+                        agg_final_costs,
+                        d_num_groups,
+                    )?;
+                    backend_optimizer_util_pathnode::add_path(root, grouped_rel, agg_path)?;
+                } else {
+                    // GROUP BY without aggregation — finalize via GroupPath (C:7263).
+                    let group_path = backend_optimizer_util_pathnode::create::create_group_path(
+                        run,
+                        root,
+                        grouped_rel,
+                        ordered,
+                        root.processed_groupClause.clone(),
+                        having_quals.clone(),
+                        d_num_groups,
+                    )?;
+                    backend_optimizer_util_pathnode::add_path(root, grouped_rel, group_path)?;
+                }
+            }
+        }
     }
 
     if can_hash {
@@ -6496,11 +6633,481 @@ fn add_paths_to_grouping_rel<'mcx>(
             )?;
             backend_optimizer_util_pathnode::add_path(root, grouped_rel, agg_path)?;
         }
+
+        // Generate a Finalize HashAgg Path atop of the cheapest partially
+        // grouped path, assuming there is one (C:7306).
+        if let Some(pgr) = partially_grouped_rel {
+            if !root.rel(pgr).pathlist.is_empty() {
+                if let Some(path) = root.rel(pgr).cheapest_total_path {
+                    let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
+                        run,
+                        root,
+                        grouped_rel,
+                        path,
+                        target.clone(),
+                        types_pathnodes::AGG_HASHED,
+                        types_pathnodes::AGGSPLIT_FINAL_DESERIAL,
+                        root.processed_groupClause.clone(),
+                        having_quals.clone(),
+                        agg_final_costs,
+                        d_num_groups,
+                    )?;
+                    backend_optimizer_util_pathnode::add_path(root, grouped_rel, agg_path)?;
+                }
+            }
+        }
     }
 
-    // The partially-grouped finalization / gather legs are not on this path
-    // (no partial rel; input is neither partitioned nor parallel-safe here).
+    // When partitionwise aggregate is used, we might have fully aggregated paths
+    // in the partial pathlist (Parallel Append of non-partial child paths); gather
+    // them (C:7331).
+    if !root.rel(grouped_rel).partial_pathlist.is_empty() {
+        gather_grouping_paths(run, root, grouped_rel)?;
+    }
+
     Ok(())
+}
+
+/// `create_partial_grouping_paths` (planner.c:7351) — build the
+/// `partially_grouped_rel` (UPPERREL_PARTIAL_GROUP_AGG) and add partially-grouped
+/// regular + partial paths (AGGSPLIT_INITIAL_SERIAL). Returns `None` when no
+/// partial-aggregation input is available and `force_rel_creation` is false. On
+/// the non-partitionwise path, `extra->patype == NONE`, so `cheapest_total_path`
+/// (the partitionwise-partial-only non-partial input) is never set.
+#[allow(clippy::too_many_arguments)]
+fn create_partial_grouping_paths<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    grouped_rel: RelId,
+    input_rel: RelId,
+    can_sort: bool,
+    can_hash: bool,
+    agg_partial_costs: Option<backend_optimizer_util_pathnode_seams::AggClauseCostsLite>,
+    mut gd: Option<&mut GroupingSetsData<'mcx>>,
+    force_rel_creation: bool,
+) -> PgResult<Option<RelId>> {
+    let has_aggs = run.resolve(root.parse).hasAggs;
+
+    // cheapest_total_path is only used when the parent is doing partial
+    // partitionwise aggregation (extra->patype == PARTITIONWISE_AGGREGATE_PARTIAL).
+    // That branch requires IS_PARTITIONED_REL(input_rel); on the non-partitioned
+    // path patype == NONE, so cheapest_total_path stays None (C:7370-7378).
+    let cheapest_total_path: Option<PathId> = None;
+
+    // If parallelism is possible for grouped_rel and the input has partial paths,
+    // consider partially-grouped partial paths (C:7381-7388).
+    let cheapest_partial_path: Option<PathId> =
+        if root.rel(grouped_rel).consider_parallel
+            && !root.rel(input_rel).partial_pathlist.is_empty()
+        {
+            Some(root.rel(input_rel).partial_pathlist[0])
+        } else {
+            None
+        };
+
+    // If we can't partially aggregate either, don't create the rel unless forced
+    // (C:7390-7396).
+    if cheapest_total_path.is_none() && cheapest_partial_path.is_none() && !force_rel_creation {
+        return Ok(None);
+    }
+
+    // Build the partially-grouped upper relation (C:7402).
+    let grouped_relids = root.rel(grouped_rel).relids.clone();
+    let partially_grouped_rel = backend_optimizer_util_relnode::fetch_upper_rel(
+        root,
+        UPPERREL_PARTIAL_GROUP_AGG,
+        &grouped_relids,
+    );
+    {
+        let (cp, rok, serverid, userid, useridiscurrent, has_fdwroutine) = {
+            let g = root.rel(grouped_rel);
+            (
+                g.consider_parallel,
+                g.reloptkind,
+                g.serverid,
+                g.userid,
+                g.useridiscurrent,
+                g.has_fdwroutine,
+            )
+        };
+        let pg = root.rel_mut(partially_grouped_rel);
+        pg.consider_parallel = cp;
+        pg.reloptkind = rok;
+        pg.serverid = serverid;
+        pg.userid = userid;
+        pg.useridiscurrent = useridiscurrent;
+        pg.has_fdwroutine = has_fdwroutine;
+    }
+
+    // reltarget = make_partial_grouping_target(root, grouped_rel->reltarget,
+    // extra->havingQual) (C:7421).
+    let grouped_target = root
+        .rel(grouped_rel)
+        .reltarget
+        .clone()
+        .ok_or_else(|| PgError::error("create_partial_grouping_paths: grouped rel has no reltarget"))?;
+    let partial_target = make_partial_grouping_target(mcx, run, root, &grouped_target)?;
+    let partial_target = Box::new(partial_target);
+    root.rel_mut(partially_grouped_rel).reltarget = Some(partial_target.clone());
+
+    // Estimate number of partial groups (C:7448).
+    let d_num_partial_groups = match cheapest_total_path {
+        Some(p) => {
+            let rows = root.path(p).base().rows;
+            get_number_of_groups(run, root, rows, gd.as_deref_mut())?
+        }
+        None => 0.0,
+    };
+    let d_num_partial_partial_groups = match cheapest_partial_path {
+        Some(p) => {
+            let rows = root.path(p).base().rows;
+            get_number_of_groups(run, root, rows, gd.as_deref_mut())?
+        }
+        None => 0.0,
+    };
+
+    // can_sort over cheapest_total_path (C:7460). cheapest_total_path is None on
+    // this path, so this leg is not reached; ported for completeness via the
+    // partial-path leg below sharing the same structure.
+    if can_sort && cheapest_total_path.is_some() {
+        let ctp = cheapest_total_path.unwrap();
+        let input_paths: Vec<PathId> = root.rel(input_rel).pathlist.clone();
+        for path in input_paths {
+            let group_pathkeys = root.group_pathkeys.clone();
+            let ordered = make_ordered_path(
+                root,
+                run,
+                partially_grouped_rel,
+                path,
+                ctp,
+                group_pathkeys,
+                -1.0,
+            )?;
+            let ordered = match ordered {
+                Some(p) => p,
+                None => continue,
+            };
+            if has_aggs {
+                let aggstrategy = if !root.processed_groupClause.is_empty() {
+                    types_pathnodes::AGG_SORTED
+                } else {
+                    types_pathnodes::AGG_PLAIN
+                };
+                let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
+                    run,
+                    root,
+                    partially_grouped_rel,
+                    ordered,
+                    partial_target.clone(),
+                    aggstrategy,
+                    types_pathnodes::AGGSPLIT_INITIAL_SERIAL,
+                    root.processed_groupClause.clone(),
+                    Vec::new(),
+                    agg_partial_costs,
+                    d_num_partial_groups,
+                )?;
+                backend_optimizer_util_pathnode::add_path(root, partially_grouped_rel, agg_path)?;
+            } else {
+                let group_path = backend_optimizer_util_pathnode::create::create_group_path(
+                    run,
+                    root,
+                    partially_grouped_rel,
+                    ordered,
+                    root.processed_groupClause.clone(),
+                    Vec::new(),
+                    d_num_partial_groups,
+                )?;
+                backend_optimizer_util_pathnode::add_path(root, partially_grouped_rel, group_path)?;
+            }
+        }
+    }
+
+    // Similar logic, but for partial paths -> add_partial_path (C:7521).
+    if can_sort && cheapest_partial_path.is_some() {
+        let cpp = cheapest_partial_path.unwrap();
+        let input_partial_paths: Vec<PathId> = root.rel(input_rel).partial_pathlist.clone();
+        for path in input_partial_paths {
+            let group_pathkeys = root.group_pathkeys.clone();
+            let ordered = make_ordered_path(
+                root,
+                run,
+                partially_grouped_rel,
+                path,
+                cpp,
+                group_pathkeys,
+                -1.0,
+            )?;
+            let ordered = match ordered {
+                Some(p) => p,
+                None => continue,
+            };
+            if has_aggs {
+                let aggstrategy = if !root.processed_groupClause.is_empty() {
+                    types_pathnodes::AGG_SORTED
+                } else {
+                    types_pathnodes::AGG_PLAIN
+                };
+                let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
+                    run,
+                    root,
+                    partially_grouped_rel,
+                    ordered,
+                    partial_target.clone(),
+                    aggstrategy,
+                    types_pathnodes::AGGSPLIT_INITIAL_SERIAL,
+                    root.processed_groupClause.clone(),
+                    Vec::new(),
+                    agg_partial_costs,
+                    d_num_partial_partial_groups,
+                )?;
+                backend_optimizer_util_pathnode::add_partial_path(
+                    root,
+                    partially_grouped_rel,
+                    agg_path,
+                )?;
+            } else {
+                let group_path = backend_optimizer_util_pathnode::create::create_group_path(
+                    run,
+                    root,
+                    partially_grouped_rel,
+                    ordered,
+                    root.processed_groupClause.clone(),
+                    Vec::new(),
+                    d_num_partial_partial_groups,
+                )?;
+                backend_optimizer_util_pathnode::add_partial_path(
+                    root,
+                    partially_grouped_rel,
+                    group_path,
+                )?;
+            }
+        }
+    }
+
+    // Add a partially-grouped HashAgg Path where possible (C:7578).
+    if can_hash && cheapest_total_path.is_some() {
+        let ctp = cheapest_total_path.unwrap();
+        let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
+            run,
+            root,
+            partially_grouped_rel,
+            ctp,
+            partial_target.clone(),
+            types_pathnodes::AGG_HASHED,
+            types_pathnodes::AGGSPLIT_INITIAL_SERIAL,
+            root.processed_groupClause.clone(),
+            Vec::new(),
+            agg_partial_costs,
+            d_num_partial_groups,
+        )?;
+        backend_optimizer_util_pathnode::add_path(root, partially_grouped_rel, agg_path)?;
+    }
+
+    // Now add a partially-grouped HashAgg partial Path where possible (C:7600).
+    if can_hash && cheapest_partial_path.is_some() {
+        let cpp = cheapest_partial_path.unwrap();
+        let agg_path = backend_optimizer_util_pathnode::create::create_agg_path(
+            run,
+            root,
+            partially_grouped_rel,
+            cpp,
+            partial_target.clone(),
+            types_pathnodes::AGG_HASHED,
+            types_pathnodes::AGGSPLIT_INITIAL_SERIAL,
+            root.processed_groupClause.clone(),
+            Vec::new(),
+            agg_partial_costs,
+            d_num_partial_partial_groups,
+        )?;
+        backend_optimizer_util_pathnode::add_partial_path(root, partially_grouped_rel, agg_path)?;
+    }
+
+    // FDW partially-grouped ForeignPaths (C:7615): the FDW GetForeignUpperPaths
+    // hook is not modeled in this build (no FDW is loaded).
+    debug_assert!(!root.rel(partially_grouped_rel).has_fdwroutine);
+
+    Ok(Some(partially_grouped_rel))
+}
+
+/// `gather_grouping_paths(root, rel)` (planner.c:7693) — generate Gather and
+/// Gather Merge paths for a grouped or partially-grouped relation.
+/// `generate_useful_gather_paths` does most of the work; we additionally
+/// consider sorting by the group pathkeys and applying Gather Merge.
+fn gather_grouping_paths<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    rel: RelId,
+) -> PgResult<()> {
+    // Trim off any pathkeys added for ORDER BY / DISTINCT aggregates (C:7704).
+    let groupby_pathkeys: Vec<types_pathnodes::PathKey> = {
+        let gp = &root.group_pathkeys;
+        let n = root.num_groupby_pathkeys as usize;
+        if gp.len() > n {
+            gp[..n].to_vec()
+        } else {
+            gp.clone()
+        }
+    };
+
+    // Gather for unordered paths and Gather Merge for ordered ones (C:7713).
+    backend_optimizer_path_allpaths::generate_useful_gather_paths(root, run, rel, true)?;
+
+    if root.rel(rel).partial_pathlist.is_empty() {
+        return Ok(());
+    }
+    let cheapest_partial_path = root.rel(rel).partial_pathlist[0];
+
+    let partial_paths: Vec<PathId> = root.rel(rel).partial_pathlist.clone();
+    for path in partial_paths {
+        let path_pathkeys = root.path(path).base().pathkeys.clone();
+        let (is_sorted, presorted_keys) =
+            backend_optimizer_path_pathkeys::pathkeys_count_contained_in(
+                &groupby_pathkeys,
+                &path_pathkeys,
+            );
+        if is_sorted {
+            continue;
+        }
+
+        // Sort the cheapest path; incrementally sort partially-sorted paths
+        // (C:7740).
+        if path != cheapest_partial_path
+            && (presorted_keys == 0 || !enable_incremental_sort())
+        {
+            continue;
+        }
+
+        let sorted_path = if presorted_keys == 0 || !enable_incremental_sort() {
+            backend_optimizer_util_pathnode::create::create_sort_path(
+                root,
+                rel,
+                path,
+                groupby_pathkeys.clone(),
+                -1.0,
+            )?
+        } else {
+            backend_optimizer_util_pathnode::create::create_incremental_sort_path(
+                root,
+                run,
+                rel,
+                path,
+                groupby_pathkeys.clone(),
+                presorted_keys,
+                -1.0,
+            )?
+        };
+
+        let total_groups = backend_optimizer_path_costsize::compute_gather_rows(
+            root.path(sorted_path).base(),
+        );
+        let gm_path = backend_optimizer_util_pathnode::create::create_gather_merge_path(
+            root,
+            run,
+            rel,
+            sorted_path,
+            None,
+            groupby_pathkeys.clone(),
+            &None,
+            Some(total_groups),
+        )?;
+        backend_optimizer_util_pathnode::add_path(root, rel, gm_path)?;
+    }
+
+    Ok(())
+}
+
+/// `make_partial_grouping_target(root, grouping_target, havingQual)`
+/// (planner.c:5640) — generate the PathTarget for the output of a partial
+/// aggregate (or partial grouping) node. Emits the same aggregates a regular
+/// aggregate would (plus HAVING aggregates) with the Aggrefs marked partial,
+/// and the Vars/PlaceHolderVars used outside Aggrefs.
+fn make_partial_grouping_target<'mcx>(
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    root: &mut PlannerInfo,
+    grouping_target: &PathTarget,
+) -> PgResult<PathTarget> {
+    let mut partial_target = backend_optimizer_util_vars::tlist::create_empty_pathtarget();
+    let mut non_group_cols: Vec<types_pathnodes::NodeId> = Vec::new();
+
+    let processed_group_clauses: Vec<types_nodes::rawnodes::SortGroupClause> = root
+        .processed_groupClause
+        .iter()
+        .map(|&id| *root.sortgroupclause(id))
+        .collect();
+
+    for (i, &expr) in grouping_target.exprs.iter().enumerate() {
+        let sgref = get_pathtarget_sortgroupref(grouping_target, i);
+        let is_group_col = sgref != 0
+            && !processed_group_clauses.is_empty()
+            && backend_optimizer_util_vars::tlist::get_sortgroupref_clause_noerr(
+                sgref,
+                &processed_group_clauses,
+            )
+            .is_some();
+        if is_group_col {
+            // Grouping column: add as-is so the upper agg can repeat the calcs.
+            backend_optimizer_util_vars::tlist::add_column_to_pathtarget(
+                &mut partial_target,
+                expr,
+                sgref,
+            );
+        } else {
+            // Non-grouping column: remember for pull_var_clause.
+            non_group_cols.push(expr);
+        }
+    }
+
+    // If there's a HAVING clause, we'll need the Vars/Aggrefs it uses too (C:5684).
+    if let Some(hq) = run.resolve(root.parse).havingQual.as_deref() {
+        let cloned = hq.clone_in(mcx)?;
+        non_group_cols.push(root.alloc_node(cloned));
+    }
+
+    // Pull out all the Vars, PlaceHolderVars, and Aggrefs mentioned in
+    // non_group_cols, and add them if not already present (C:5694).
+    let flags = backend_optimizer_util_vars::var::PVC_INCLUDE_AGGREGATES
+        | backend_optimizer_util_vars::var::PVC_RECURSE_WINDOWFUNCS
+        | backend_optimizer_util_vars::var::PVC_INCLUDE_PLACEHOLDERS;
+    let mut non_group_exprs: Vec<types_pathnodes::NodeId> = Vec::new();
+    for &col in &non_group_cols {
+        // node_expr_wrapper deep-copies the input Expr into a scratch context
+        // (a shallow Expr::clone panics on an Aggref).
+        let scratch = mcx::MemoryContext::new("make_partial_grouping_target pull_var_clause");
+        let node = backend_nodes_core::node_walker::node_expr_wrapper(root.node(col), scratch.mcx());
+        let vars = backend_optimizer_util_vars::var::pull_var_clause(mcx, &node, flags)?;
+        for v in vars {
+            non_group_exprs.push(root.alloc_node(v));
+        }
+    }
+    backend_optimizer_util_vars::tlist::add_new_columns_to_pathtarget(
+        root,
+        &mut partial_target,
+        &non_group_exprs,
+    );
+
+    // Adjust Aggrefs to put them in partial mode (C:5705). At this point all
+    // Aggrefs are at the top level of the target list. C flat-copies each Aggref
+    // before marking it to avoid damaging shared trees; we mirror that by
+    // cloning the Aggref node into a fresh arena slot.
+    let target_exprs: Vec<types_pathnodes::NodeId> = partial_target.exprs.clone();
+    for (idx, &expr_id) in target_exprs.iter().enumerate() {
+        let is_aggref = matches!(root.node(expr_id), types_nodes::primnodes::Expr::Aggref(_));
+        if is_aggref {
+            let cloned = root.node(expr_id).clone_in(mcx)?;
+            let new_id = root.alloc_node(cloned);
+            if let types_nodes::primnodes::Expr::Aggref(aggref) = root.node_mut(new_id) {
+                mark_partial_aggref_impl(aggref, types_nodes::nodeagg::AGGSPLIT_INITIAL_SERIAL)?;
+            }
+            partial_target.exprs[idx] = new_id;
+        }
+    }
+
+    // set_pathtarget_cost_width(root, partial_target) (C:5731).
+    backend_optimizer_path_costsize::sizeest::set_pathtarget_cost_width(root, &mut partial_target);
+
+    Ok(partial_target)
 }
 
 /// `estimate_hashagg_tablesize(root, path, agg_costs, dNumGroups)`
