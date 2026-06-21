@@ -230,12 +230,14 @@ fn pathrelids_del_bms(a: &mut PathRelids, b: Option<&Bitmapset>) {
 fn bms_to_expr_relids(a: Option<&Bitmapset>) -> ExprRelids {
     match a {
         None => ExprRelids { words: Vec::new() },
-        Some(bms) => {
-            let mut words: Vec<u64> = bms.words.iter().copied().collect();
-            trim(&mut words);
-            ExprRelids { words }
-        }
+        Some(bms) => bms_to_expr_relids_some(bms),
     }
+}
+
+fn bms_to_expr_relids_some(bms: &Bitmapset) -> ExprRelids {
+    let mut words: Vec<u64> = bms.words.iter().copied().collect();
+    trim(&mut words);
+    ExprRelids { words }
 }
 
 /// `bms_make_singleton(x)` as a [`PathRelids`] for `make_placeholder_expr`.
@@ -2994,8 +2996,13 @@ fn pullup_replace_vars_callback<'mcx>(
                 }
 
                 // Finally, deal with Vars/PHVs of the subquery itself.
-                let subquery_relids = bms_to_expr_relids(rcon.relids.as_deref());
-                add_nulling_relids(&mut newnode, Some(&subquery_relids), &var.varnullingrels, mcx);
+                // C passes rcon->relids directly to add_nulling_relids, where a
+                // NULL relid set means "all level-zero Vars/PHVs" (the
+                // expand_virtual_generated_columns case sets rvcontext.relids =
+                // NULL). Preserve that: None must stay None, not collapse to an
+                // empty set (which would match nothing).
+                let subquery_relids = rcon.relids.as_deref().map(bms_to_expr_relids_some);
+                add_nulling_relids(&mut newnode, subquery_relids.as_ref(), &var.varnullingrels, mcx);
                 // Assert we did put the varnullingrels into the expression.
                 debug_assert!({
                     let after = pull_varnos(Some(root), &newnode);
