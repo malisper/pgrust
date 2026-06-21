@@ -201,10 +201,14 @@ pub fn ExecMergeMatched<'mcx>(
         let any = snapshot_any();
         let mcx = estate.es_query_cxt;
         let slot_ref = estate.slot_data_mut(old_tuple_slot);
+        // if (!table_tuple_fetch_row_version(resultRelInfo->ri_RelationDesc,
+        //                                    tupleid, SnapshotAny,
+        //                                    resultRelInfo->ri_oldTupleSlot))
+        //     elog(ERROR, "failed to fetch the target tuple");
         if !backend_access_table_tableam::table_tuple_fetch_row_version(
             mcx, &rel, &tid, &any, slot_ref,
         )? {
-            return finish(estate, result_rel_info, lockedtid, None);
+            return Err(PgError::error("failed to fetch the target tuple"));
         }
     }
 
