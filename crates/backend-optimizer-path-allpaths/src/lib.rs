@@ -482,7 +482,7 @@ pub fn set_rel_consider_parallel<'mcx>(
         }
         RTE_SUBQUERY => {
             // Subquery-in-FROM is fine, except LIMIT/OFFSET.
-            if subquery_limit_needed(root, rti) {
+            if rte::rte_subquery_limit_needed::call(run, root, rti) {
                 return Ok(());
             }
         }
@@ -841,10 +841,6 @@ fn tablesample_is_parallel_safe(root: &PlannerInfo, rti: Index) -> bool {
     seams::tsm_is_parallel_safe::call(root, rti)
 }
 
-/// `limit_needed(subquery)` over the subquery RTE (limit.c / planner.c).
-fn subquery_limit_needed(root: &PlannerInfo, rti: Index) -> bool {
-    seams::subquery_limit_needed::call(root, rti)
-}
 /// Extract the `is_parallel_safe` glob inputs from `root` (the global
 /// `maxParallelHazard`, whether any PARAM_EXEC was generated, and the
 /// `safe_param_ids` = setParam ids of every init SubPlan at this level and all

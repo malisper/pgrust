@@ -122,6 +122,16 @@ seam_core::seam!(
     pub fn rte_subquery<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> Option<QueryId>
 );
 seam_core::seam!(
+    /// `limit_needed(root->simple_rte_array[rti]->subquery)`
+    /// (allpaths.c `set_rel_consider_parallel`, RTE_SUBQUERY case → planner.c
+    /// `limit_needed`). True when the subquery carries a LIMIT/OFFSET that must
+    /// be enforced (a non-Const, or a Const that is non-null — and, for OFFSET,
+    /// non-zero). Resolved here against the parser-owned `subquery` Query because
+    /// allpaths holds only the opaque RTE handle. `false` when the RTE has no
+    /// subquery.
+    pub fn rte_subquery_limit_needed<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> bool
+);
+seam_core::seam!(
     /// `list_length(root->simple_rte_array[rti]->functions)` — number of
     /// `RangeTblFunction`s in a function RTE (allpaths.c / costsize.c). A length,
     /// not the owned node list (the nodes stay parser-owned).
@@ -369,6 +379,47 @@ pub fn init_seams() {
     });
     rte_relkind::set(|run, root, rti| planner_rt_fetch(run, root, rti).relkind);
     rte_relid::set(|run, root, rti| planner_rt_fetch(run, root, rti).relid);
+    // `limit_needed(rte->subquery)` (planner.c) over the subquery RTE. Faithful
+    // port of planner.c `limit_needed`: a LIMIT/OFFSET forces enforcement when
+    // its clause is a non-Const, or a Const that is non-null (and, for OFFSET,
+    // non-zero). A NULL Const or absent clause does not. `false` when the RTE
+    // carries no subquery.
+    rte_subquery_limit_needed::set(|run, root, rti| {
+        let rte = planner_rt_fetch(run, root, rti);
+        let subquery = match rte.subquery.as_ref() {
+            Some(q) => q,
+            None => return false,
+        };
+
+        // limitCount (planner.c:2766-2777).
+        if let Some(node) = subquery.limitCount.as_deref() {
+            match node.as_const() {
+                Some(c) => {
+                    if !c.constisnull {
+                        return true; // LIMIT with a constant value
+                    }
+                }
+                None => return true, // non-constant LIMIT
+            }
+        }
+
+        // limitOffset (planner.c:2779-2795).
+        if let Some(node) = subquery.limitOffset.as_deref() {
+            match node.as_const() {
+                Some(c) => {
+                    // DatumGetInt64(((Const *) node)->constvalue); a null Const
+                    // reads as 0 (no offset).
+                    let value = if c.constisnull { 0 } else { c.constvalue.as_i64() };
+                    if !c.constisnull && value != 0 {
+                        return true; // OFFSET with a nonzero value
+                    }
+                }
+                None => return true, // non-constant OFFSET
+            }
+        }
+
+        false
+    });
     rte_inh::set(|run, root, rti| planner_rt_fetch(run, root, rti).inh);
     rte_has_security_quals::set(|run, root, rti| {
         !planner_rt_fetch(run, root, rti).securityQuals.is_empty()

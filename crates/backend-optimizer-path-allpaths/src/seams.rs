@@ -93,10 +93,6 @@ seam_core::seam!(
     pub fn tsm_is_parallel_safe(root: &PlannerInfo, rti: Index) -> bool
 );
 
-seam_core::seam!(
-    /// `limit_needed(rte->subquery)` (planner.c) over a subquery RTE.
-    pub fn subquery_limit_needed(root: &PlannerInfo, rti: Index) -> bool
-);
 // NOTE: the per-RTE / per-rel `is_parallel_safe` checks
 // (`rte_functions_parallel_safe` / `rte_values_lists_parallel_safe` /
 // `rel_baserestrictinfo_parallel_safe` / `rel_reltarget_parallel_safe`) are NOT
