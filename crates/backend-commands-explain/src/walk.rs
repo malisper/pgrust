@@ -1183,6 +1183,14 @@ pub fn ExplainNode<'es, 'p>(
             let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
             show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
         }
+        ntag::T_ModifyTable => {
+            // explain.c:2242 / show_modifytable_info (explain.c:4520): the
+            // Target Tables / FDW labeling (labeltargets) and EXPLAIN ANALYZE
+            // path counts are runtime/FDW-only; the ON CONFLICT block (Conflict
+            // Resolution / Conflict Arbiter Indexes / Conflict Filter) is the
+            // plan-shape detail exercised by EXPLAIN of an INSERT ... ON CONFLICT.
+            show_modifytable_info(es, mcx, plan_node, ancestors)?;
+        }
         _ => {}
     }
 
@@ -1539,6 +1547,66 @@ fn show_tablesample<'es, 'p>(
         fmt::ExplainPropertyList("Sampling Parameters", &refs, es)?;
         if let Some(rep) = repeatable.as_ref() {
             fmt::ExplainPropertyText("Repeatable Seed", rep, es)?;
+        }
+    }
+    Ok(())
+}
+
+/// `show_modifytable_info(mtstate, ancestors, es)` (explain.c:4520) — the
+/// ON CONFLICT detail block for a ModifyTable node. The Target Tables labeling,
+/// FDW `ExplainForeignModify`, and EXPLAIN ANALYZE path-count instrumentation
+/// (which require live `ModifyTableState`/`ResultRelInfo`/`FdwRoutine` runtime
+/// state) are not part of this plan-shape slice; this ports the
+/// `node->onConflictAction != ONCONFLICT_NONE` arm — the Conflict Resolution
+/// string, the Conflict Arbiter Indexes list (suppressed for the DO NOTHING
+/// implicit-ignore variant), and the Conflict Filter qual.
+fn show_modifytable_info<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plan_node: &Node<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+) -> PgResult<()> {
+    use types_nodes::nodes::OnConflictAction;
+
+    let node = plan_node.expect_modifytable();
+
+    // explain.c:4632 — gather arbiter index names via get_rel_name.
+    let mut idx_names: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    if let Some(arbiters) = node.arbiterIndexes.as_ref() {
+        for &idx_oid in arbiters.iter() {
+            // C uses the bare get_rel_name (no "?" placeholder fallback here).
+            if let Some(name) = backend_utils_cache_lsyscache::relation::get_rel_name(mcx, idx_oid)? {
+                idx_names.push(alloc::string::String::from(name.as_str()));
+            }
+        }
+    }
+
+    if node.onConflictAction != OnConflictAction::ONCONFLICT_NONE {
+        fmt::ExplainPropertyText(
+            "Conflict Resolution",
+            if node.onConflictAction == OnConflictAction::ONCONFLICT_NOTHING {
+                "NOTHING"
+            } else {
+                "UPDATE"
+            },
+            es,
+        )?;
+
+        // Don't display arbiter indexes at all when the DO NOTHING variant
+        // implicitly ignores all conflicts (idxNames == NIL).
+        if !idx_names.is_empty() {
+            let refs: alloc::vec::Vec<&str> = idx_names.iter().map(|s| s.as_str()).collect();
+            fmt::ExplainPropertyList("Conflict Arbiter Indexes", &refs, es)?;
+        }
+
+        // ON CONFLICT DO UPDATE WHERE qual is specially displayed.
+        if let Some(where_qual) = node.onConflictWhere.as_ref() {
+            if !where_qual.is_empty() {
+                let q = clone_expr_qual(mcx, Some(where_qual))?;
+                show_upper_qual(es, mcx, plan_node, ancestors, q, "Conflict Filter")?;
+                // show_instrumentation_count("Rows Removed by Conflict Filter", ...)
+                // is EXPLAIN-ANALYZE-only instrumentation, not part of this slice.
+            }
         }
     }
     Ok(())
