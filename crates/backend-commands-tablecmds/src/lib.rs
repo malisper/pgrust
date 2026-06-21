@@ -42,6 +42,7 @@ mod at_identity;
 mod at_owner;
 mod at_phase;
 mod create;
+mod domain_validate;
 mod drop;
 mod f1_rename;
 mod helpers;
@@ -189,6 +190,21 @@ pub fn init_seams() {
 
     // --- ProcessUtilitySlow ALTER TABLE arm (utility.c:1270-1331) ---
     backend_tcop_utility_out_seams::alter_table_slow::set(alter_table_slow_arm);
+
+    // ALTER DOMAIN ADD / VALIDATE CONSTRAINT validation scans (typecmds.c).
+    // typecmds declares these OUTWARD seams because the bodies need the executor
+    // (CreateExecutorState/ExecPrepareExpr/ExecEvalExpr + the table-AM scan) and
+    // find_composite_type_dependencies, both reachable here, not in typecmds. The
+    // AlterDomain* drivers call through the seam; we run the body in a fresh
+    // MemoryContext (the caller passes only the domain oid / ccbin, no `mcx`).
+    backend_commands_typecmds_seams::validate_domain_not_null_constraint::set(|domainoid| {
+        let ctx = mcx::MemoryContext::new("validateDomainNotNullConstraint");
+        domain_validate::validate_domain_not_null_constraint(ctx.mcx(), domainoid)
+    });
+    backend_commands_typecmds_seams::validate_domain_check_constraint::set(|domainoid, ccbin| {
+        let ctx = mcx::MemoryContext::new("validateDomainCheckConstraint");
+        domain_validate::validate_domain_check_constraint(ctx.mcx(), domainoid, &ccbin)
+    });
 }
 
 use mcx::Mcx;

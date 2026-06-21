@@ -122,6 +122,12 @@ backend-catalog-objectaddress = { path = "../backend-catalog-objectaddress" }
 # Phase-3 NOT NULL verification scan (the NOT-NULL-only path of ATRewriteTable):
 # full table scan + slot deform.
 backend-executor-execTuples = { path = "../backend-executor-execTuples" }
+# ALTER DOMAIN ADD/VALIDATE CONSTRAINT validation scan (domain_validate.rs):
+# CreateExecutorState / ExecPrepareExpr / ExecEvalExpr / GetPerTupleExprContext.
+backend-executor-execExpr-seams = { path = "../backend-executor-execExpr-seams" }
+backend-executor-execUtils-seams = { path = "../backend-executor-execUtils-seams" }
+# installs the typecmds OUTWARD validate_domain_* seams.
+backend-commands-typecmds-seams = { path = "../backend-commands-typecmds-seams" }
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
 backend-access-table-tableam-seams = { path = "../backend-access-table-tableam-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }

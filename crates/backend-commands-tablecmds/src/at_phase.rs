@@ -2071,7 +2071,7 @@ fn ATRewriteTables<'mcx>(
             crate::at_altertype::find_composite_type_dependencies(
                 mcx,
                 rel.rd_rel.reltype,
-                &rel,
+                Some(&rel),
                 None,
             )?;
             rel.close(NoLock)?;

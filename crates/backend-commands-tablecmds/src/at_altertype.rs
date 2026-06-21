@@ -175,7 +175,7 @@ fn ATColumnChangeRequiresRewrite(expr: &Expr, varattno: AttrNumber) -> PgResult<
 pub(crate) fn find_composite_type_dependencies<'mcx>(
     mcx: Mcx<'mcx>,
     type_oid: Oid,
-    orig_relation: &Relation<'mcx>,
+    orig_relation: Option<&Relation<'mcx>>,
     orig_type_name: Option<&str>,
 ) -> PgResult<()> {
     // since this function recurses, it could be driven to stack overflow
@@ -238,7 +238,12 @@ pub(crate) fn find_composite_type_dependencies<'mcx>(
                     ))
                     .finish(here("find_composite_type_dependencies"))
                     .map(|()| unreachable!());
-            } else if orig_relation.rd_rel.relkind == RELKIND_COMPOSITE_TYPE {
+            }
+            // origTypeName is NULL here, so origRelation is non-NULL (the C
+            // contract: callers pass exactly one of the two).
+            let orig_relation = orig_relation
+                .expect("find_composite_type_dependencies: NULL origRelation with NULL origTypeName");
+            if orig_relation.rd_rel.relkind == RELKIND_COMPOSITE_TYPE {
                 return backend_utils_error::ereport(ERROR)
                     .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg(format!(
@@ -534,7 +539,7 @@ pub fn ATPrepAlterColumnType<'mcx>(
     if !RELKIND_HAS_STORAGE(relkind) || attgenerated == ATTRIBUTE_GENERATED_VIRTUAL {
         // For relations or columns without storage, do this check now. Regular
         // tables will check it later when the table is being rewritten.
-        find_composite_type_dependencies(mcx, rel.rd_rel.reltype, rel, None)?;
+        find_composite_type_dependencies(mcx, rel.rd_rel.reltype, Some(rel), None)?;
     }
 
     // (ReleaseSysCache(tuple) — the FormedTuple drops at end of scope.)
