@@ -622,9 +622,14 @@ fn catcache_scan_single_impl(
     // Read the per-cache scan inputs (reloid, indexoid, scankey template) out of
     // the arena up front. Phase-2 init has already populated cc_skey for all
     // cc_nkeys (the caller ran CatalogCacheInitializeCache before this).
-    let (cc_reloid, cc_indexoid, skey_tmpl) = with_arena(|arena| {
+    let (cc_reloid, cc_indexoid, cc_fastkind, skey_tmpl) = with_arena(|arena| {
         let cache = &arena.caches[cache_idx.0];
-        (cache.cc_reloid, cache.cc_indexoid, skey_template(cache))
+        (
+            cache.cc_reloid,
+            cache.cc_indexoid,
+            cache.cc_fastkind,
+            skey_template(cache),
+        )
     });
 
     // The catalog scan + its result tuples live in a scratch context (C's
@@ -654,10 +659,33 @@ fn catcache_scan_single_impl(
     // key (name/text/oidvector) becomes a `Datum::ByRef` over the payload bytes
     // (the pointer-bearing `Datum` C's scan key already carries), allocated in
     // the scan's scratch context. genam's scankey decode (genam:204) handles both.
+    //
+    // In C the search-key `Datum` the caller passed is already framed for the
+    // type the index opclass compares against (`CStringGetTextDatum`/
+    // `NameGetDatum`/...), so the index AM's comparator (`texteq`/`nameeq`/
+    // `oidvectoreq`, reached via fmgr) reads it correctly. The catcache's owned
+    // `CatKey::ByRef` instead stores the *resolved* in-memory payload the
+    // computational-core fast functions consume (name: NUL-significant bytes;
+    // text: the `VARDATA_ANY` header-less image; oidvector: the `Oid` element
+    // bytes). The catalog scan crosses the fmgr by-ref lane, so each by-reference
+    // argument must be re-framed into the on-disk `Datum` image the index
+    // comparator expects, keyed on the column's `CCFastKind`:
+    //   * Name  -> a raw NAMEDATALEN (64-byte) NUL-padded buffer (NameData), no
+    //     varlena header (`arg_name` reads the fixed buffer; framing it as a
+    //     varlena would make `nameout`/`namecmp` read a stray header byte).
+    //   * Text  -> a 4-byte-header (`VARATT_IS_4B_U`) varlena image so the fmgr
+    //     `texteq` adapter's `VARDATA_ANY` strips the header back to the payload
+    //     (a header-less raw image makes the adapter misread the first data byte
+    //     as a length header and drop bytes -> the scan never matches).
+    //   * OidVector -> already the contiguous `Oid` element image the comparator
+    //     deforms; passed through verbatim.
     for i in 0..(nkeys as usize) {
         cur_skey[i].sk_argument = match &arguments[i] {
             CatKey::Scalar(w) => DatumV::ByVal(w.as_usize()),
-            CatKey::ByRef(bytes) => DatumV::ByRef(mcx::slice_in(scan_mcx, bytes)?),
+            CatKey::ByRef(bytes) => {
+                let image = frame_byref_scankey_arg(cc_fastkind[i], bytes);
+                DatumV::ByRef(mcx::slice_in(scan_mcx, &image)?)
+            }
         };
     }
 
@@ -707,6 +735,51 @@ fn catcache_form_cached_tuple_impl<'mcx>(
     backend_access_common_heaptuple::heap_copytuple_from_disk_image(
         mcx, t_len, ip, t_tableoid, t_data,
     )
+}
+
+/// Re-frame a by-reference catcache search key (the in-memory `CatKey::ByRef`
+/// payload the computational-core fast functions consume) into the on-disk
+/// `Datum` image the catalog index opclass comparator expects across the fmgr
+/// by-ref lane. The framing is determined by the key column's [`CCFastKind`]:
+///
+///  * [`CCFastKind::Name`] — a raw NAMEDATALEN-wide (64-byte) NUL-padded
+///    `NameData` buffer (no varlena header). The stored payload is the
+///    NUL-significant bytes (`<= NAMEDATALEN`); pad it back out to the fixed
+///    width so `nameeq`/`btnamecmp` read a proper `Name`.
+///  * [`CCFastKind::Text`] — a 4-byte-header uncompressed (`VARATT_IS_4B_U`)
+///    varlena image: `SET_VARSIZE(buf, len + VARHDRSZ)` (low two bits `00`,
+///    little/native-endian `(len + VARHDRSZ) << 2`) over the header, then the
+///    payload bytes; `texteq`'s `VARDATA_ANY` strips it back.
+///  * Other kinds (`OidVector` and the scalar kinds, which never reach here as
+///    a `ByRef`) pass through verbatim — the `Oid` element image the
+///    `oidvectoreq` comparator deforms.
+fn frame_byref_scankey_arg(
+    kind: Option<types_cache::backend_utils_cache_catcache::CCFastKind>,
+    bytes: &[u8],
+) -> alloc::vec::Vec<u8> {
+    use types_cache::backend_utils_cache_catcache::CCFastKind;
+    const NAMEDATALEN: usize = 64;
+    const VARHDRSZ: usize = 4;
+    match kind {
+        Some(CCFastKind::Name) => {
+            // Raw fixed-width NameData: copy the significant bytes (capped at
+            // NAMEDATALEN) into a zeroed 64-byte buffer, NUL-padded.
+            let mut buf = alloc::vec![0u8; NAMEDATALEN];
+            let n = bytes.len().min(NAMEDATALEN);
+            buf[..n].copy_from_slice(&bytes[..n]);
+            buf
+        }
+        Some(CCFastKind::Text) => {
+            // 4-byte-header uncompressed varlena: SET_VARSIZE(buf, len+VARHDRSZ).
+            let total = bytes.len() + VARHDRSZ;
+            let tagged = (total as u32) << 2; // VARATT_IS_4B_U: low bits 00.
+            let mut buf = alloc::vec::Vec::with_capacity(total);
+            buf.extend_from_slice(&tagged.to_ne_bytes());
+            buf.extend_from_slice(bytes);
+            buf
+        }
+        _ => bytes.to_vec(),
+    }
 }
 
 /// `memcpy(cur_skey, cache->cc_skey, sizeof(cur_skey))` — the scankey template
