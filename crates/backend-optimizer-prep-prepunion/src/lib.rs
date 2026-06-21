@@ -296,16 +296,69 @@ fn recurse_set_operations<'mcx>(
                 generate_nonunion_paths(mcx, run, root, op, refnames_tlist, p_target_list)?
             };
 
-            // Result-projection stanza (C:296-339). For matched-type set-ops the
-            // pathtarget already matches; the coercion/relabel reprojection is a
-            // not-yet-ported leg.
+            // If necessary, add a Result node to project the caller-requested
+            // output columns (C:296-339). When the set-op's own output tlist
+            // already has the requested types/collations no projection is needed.
             let same_types = tlist_same_datatypes_ids(root, p_target_list, col_types)?;
             let same_colls = tlist_same_collations_ids(root, p_target_list, col_collations)?;
             if !same_types || !same_colls {
-                return Err(PgError::error(String::from(
-                    "recurse_set_operations: set-op result reprojection (apply_projection_to_path \
-                     over a coerced/relabeled tlist) is not yet ported",
-                )));
+                // *pTargetList = generate_setop_tlist(colTypes, colCollations, 0,
+                //                                     false, *pTargetList,
+                //                                     refnames_tlist, &trivial);
+                let mut trivial_tlist = true;
+                let new_tlist = generate_setop_tlist_owned_input(
+                    mcx,
+                    root,
+                    col_types,
+                    col_collations,
+                    0,
+                    false,
+                    p_target_list,
+                    refnames_tlist,
+                    &mut trivial_tlist,
+                )?;
+                *p_target_list = new_tlist;
+                *istrivial_tlist = trivial_tlist;
+
+                // Apply projection to each path / partial path. C builds one
+                // PathTarget and reuses it; we rebuild per path since
+                // `make_pathtarget` is cheap and the seam takes an owned `Box`.
+                let pathlist = root.rel(rel).pathlist.clone();
+                for subpath in pathlist {
+                    let target = Box::new(make_pathtarget(root, p_target_list));
+                    let parent = root.path(subpath).base().parent;
+                    let path =
+                        pathnode::create::apply_projection_to_path(
+                            root, parent, subpath, target,
+                        )?;
+                    if path != subpath {
+                        // lfirst(lc) = path — replace the entry in place.
+                        if let Some(slot) =
+                            root.rel_mut(rel).pathlist.iter_mut().find(|p| **p == subpath)
+                        {
+                            *slot = path;
+                        }
+                    }
+                }
+
+                let partial_pathlist = root.rel(rel).partial_pathlist.clone();
+                for subpath in partial_pathlist {
+                    let target = Box::new(make_pathtarget(root, p_target_list));
+                    let parent = root.path(subpath).base().parent;
+                    // avoid apply_projection_to_path, in case of multiple refs.
+                    let path =
+                        pathnode::create::create_projection_path(
+                            root, parent, subpath, target,
+                        )?;
+                    if let Some(slot) = root
+                        .rel_mut(rel)
+                        .partial_pathlist
+                        .iter_mut()
+                        .find(|p| **p == subpath)
+                    {
+                        *slot = path;
+                    }
+                }
             }
 
             postprocess_setop_rel(root, rel)?;
