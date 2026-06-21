@@ -23,7 +23,7 @@ use backend_nodes_core::multibitmapset as mbms;
 use backend_nodes_core::multibitmapset::MultiBitmapset;
 use backend_nodes_core::nodefuncs::{
     check_functions_in_node_ref, expression_tree_walker, expression_tree_walker as etw,
-    set_opfuncid, set_sa_opfuncid,
+    set_opfuncid,
 };
 
 use backend_optimizer_util_clauses_seams as clauses_seam;
@@ -254,16 +254,18 @@ pub fn expression_returns_set_rows(clause: Option<&Expr>) -> PgResult<f64> {
             return Ok(clamp_row_est(rows));
         }
     }
-    if clause.is_opexpr() {
-        // set_opfuncid needs &mut; clone, mutate the clone, then read opfuncid.
-        let mut tmp = clause.clone();
-        if let Some(expr) = tmp.as_opexpr_mut() {
-            if expr.opretset {
-                set_opfuncid(expr)?;
-                let funcid = expr.opfuncid;
-                let rows = clauses_seam::get_function_rows::call(funcid, clause)?;
-                return Ok(clamp_row_est(rows));
-            }
+    if let Some(expr) = clause.as_opexpr() {
+        if expr.opretset {
+            // C: set_opfuncid((OpExpr *) clause) then reads clause->opfuncid.
+            // A shallow `clause.clone()` to get an owned `&mut` would deep-copy the
+            // OpExpr's `args`, which may carry an `Aggref`/`SubPlan`/`SubLink`
+            // child whose derived `Expr::clone` panics (e.g.
+            // `rank() over (order by sum(a)+sum(b))`). Resolve the funcid by
+            // catalog lookup without mutating/cloning the node — the same
+            // read-only precedent as `find_nonnullable_rels` below.
+            let funcid = backend_nodes_core::nodefuncs::resolved_opfuncid(expr.opno, expr.opfuncid)?;
+            let rows = clauses_seam::get_function_rows::call(funcid, clause)?;
+            return Ok(clamp_row_est(rows));
         }
     }
     Ok(1.0)
@@ -1383,12 +1385,12 @@ pub(crate) fn is_strict_saop<'mcx>(
     expr: &ScalarArrayOpExpr,
     false_ok: bool,
 ) -> PgResult<bool> {
-    // The contained operator must be strict. set_sa_opfuncid needs &mut.
-    let opfuncid = {
-        let mut tmp = expr.clone();
-        set_sa_opfuncid(&mut tmp)?;
-        tmp.opfuncid
-    };
+    // The contained operator must be strict. C's set_sa_opfuncid scribbles
+    // opfuncid in place; cloning the whole node to get an owned `&mut` would
+    // deep-copy `args`, panicking if a child is an `Aggref`/`SubPlan`/`SubLink`
+    // (derived `Expr::clone` traps). Resolve it read-only via catalog lookup,
+    // the same precedent as `expression_returns_set_rows` / `find_nonnullable_rels`.
+    let opfuncid = backend_nodes_core::nodefuncs::resolved_opfuncid(expr.opno, expr.opfuncid)?;
     if !lsyscache::func_strict::call(opfuncid)? {
         return Ok(false);
     }

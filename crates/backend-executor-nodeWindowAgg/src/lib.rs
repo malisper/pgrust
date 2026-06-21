@@ -2829,7 +2829,7 @@ pub fn ExecInitWindowAgg<'mcx>(
                 .wfunc
                 .as_ref()
                 .expect("WindowFuncExprState.wfunc not set");
-            mcx::alloc_in(mcx, (**w).clone())?
+            mcx::alloc_in(mcx, (**w).clone_in(mcx)?)?
         };
         let pf = perfunc_mut(&mut winstate, perfuncno);
         pf.wfunc = Some(wfunc_clone);

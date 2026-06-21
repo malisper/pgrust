@@ -1886,7 +1886,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
 
             // makeNode(WindowFuncExprState); wfstate->wfunc = wfunc.
             let wfstate = types_nodes::nodewindowagg::WindowFuncExprState {
-                wfunc: Some(mcx::alloc_in(mcx, wfunc.clone())?),
+                wfunc: Some(mcx::alloc_in(mcx, wfunc.clone_in(mcx)?)?),
                 args: arg_states,
                 aggfilter: aggfilter_state,
                 // wfuncno is assigned by ExecInitWindowAgg's dedup loop.
@@ -2430,10 +2430,28 @@ pub fn exec_init_expr_no_parent_box<'mcx>(
     node: &Expr,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    let es_link = EStateLink::from_ref(estate);
-    let mut state = exec_init_expr_no_parent(node, estate)?;
-    state.es_link = Some(es_link);
-    Ok(state)
+    // C `ExecInitExpr(node, state->parent)`: a parent IS present, so a nested
+    // SubPlan (e.g. `lead(ten, (SELECT ...)) OVER (...)`) must find the EState
+    // synchronously. The `es_link` back-link must be stamped BEFORE the
+    // `ExecInitExprRec` recursion — `ExecInitSubPlanExpr` reads it during that
+    // recursion (it is the owned-model stand-in for the C `!state->parent`
+    // test). Stamping it after recursion (as a thin wrapper over the
+    // parent-less compile) would make a window-arg SubPlan see `es_link == None`
+    // and wrongly error "SubPlan found with no parent plan". So we inline the
+    // compile here with `es_link` set up front, mirroring `exec_init_expr`.
+    let mcx = estate.es_query_cxt;
+
+    let mut state = make_expr_state();
+    state.es_link = Some(EStateLink::from_ref(estate));
+    state.ext_params = 0;
+    ensure_result_arena(mcx, &mut state)?;
+
+    exec_create_expr_setup_steps(mcx, &mut state, node)?;
+    exec_init_expr_rec(mcx, node, &mut state, STATE_RESULT_CELL)?;
+    expr_eval_push_step(mcx, &mut state, done_return_step(STATE_RESULT_CELL))?;
+    exec_ready_expr(&mut state)?;
+
+    mcx::alloc_in(mcx, state)
 }
 
 /// `ExecInitExprList(wfunc->args, state->parent)` for a window function's

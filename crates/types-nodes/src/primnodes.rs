@@ -979,6 +979,31 @@ pub struct WindowFunc {
     pub location: ParseLoc,
 }
 
+impl WindowFunc {
+    /// Deep-copy this `WindowFunc` into `mcx` (C: `copyObject` over a
+    /// `WindowFunc *`). The derived `.clone()` would shallow-clone the `args` /
+    /// `aggfilter` / `runCondition` child `Expr`s, panicking the moment one of
+    /// them is a `SubPlan` (e.g. `lead(ten, (SELECT ...)) OVER (...)`), because
+    /// `SubPlanExpr::clone` is a deliberate trap. This routes every child
+    /// through the sanctioned [`Expr::clone_in`] path instead. Mirrors the
+    /// `Expr::WindowFunc` arm of `Expr::clone_in`.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<WindowFunc> {
+        Ok(WindowFunc {
+            winfnoid: self.winfnoid,
+            wintype: self.wintype,
+            wincollid: self.wincollid,
+            inputcollid: self.inputcollid,
+            args: clone_vec_expr(&self.args, mcx)?,
+            aggfilter: clone_opt_box_expr(&self.aggfilter, mcx)?,
+            runCondition: clone_vec_expr(&self.runCondition, mcx)?,
+            winref: self.winref,
+            winstar: self.winstar,
+            winagg: self.winagg,
+            location: self.location,
+        })
+    }
+}
+
 /// `MergeSupportFunc` (nodes/primnodes.h) — `MERGE_ACTION()`.
 #[derive(Clone, Copy, Debug)]
 pub struct MergeSupportFunc {
