@@ -65,14 +65,18 @@ pub(crate) fn change_relids_in_node<'mcx>(
     // `(Node *) rinfo->clause` pointer). Taking the value by `mem::replace`
     // avoids a derived `Expr::clone`, which would panic on a context-allocated
     // child (Aggref/SubLink/SubPlan). The opaque `Node` is allocated in `mcx`.
-    let taken = core::mem::replace(root.node_mut(id), Expr::Var(Default::default()));
-    let mut node = Node::mk_expr(mcx, taken)?;
+    let taken: Expr<'static> =
+        core::mem::replace(root.node_mut(id), Expr::Var(Default::default()));
+    // Deep-clone the arena ('static) node into the walk arena `mcx`, mutate, then
+    // re-intern into the planner node arena via `erase_lifetime` (the sanctioned
+    // arena-intern boundary). A move would tie the `'static` arena slot to `'mcx`.
+    let mut node = Node::mk_expr(mcx, taken.clone_in(mcx)?)?;
     ChangeVarNodes(&mut node, ctx.rt_index, ctx.new_index, 0, mcx);
     // ChangeVarNodes never changes the top-level node kind for an Expr input.
     let walked = node
         .into_expr()
         .unwrap_or_else(|| unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"));
-    *root.node_mut(id) = walked;
+    *root.node_mut(id) = walked.erase_lifetime();
     Ok(())
 }
 

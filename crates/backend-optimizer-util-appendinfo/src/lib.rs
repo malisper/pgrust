@@ -265,11 +265,11 @@ fn make_inh_translation_list(
 
 /// `adjust_appendrel_attrs(root, node, nappinfos, appinfos)` (appendinfo.c) —
 /// copy `node` translating parent Vars/rtindexes to the corresponding child.
-pub fn adjust_appendrel_attrs(
+pub fn adjust_appendrel_attrs<'mcx>(
     root: &mut PlannerInfo,
-    node: Expr,
+    node: Expr<'mcx>,
     appinfos: &[AppendRelInfo],
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     adjust_appendrel_attrs_run(None, root, node, appinfos)
 }
 
@@ -282,11 +282,11 @@ pub fn adjust_appendrel_attrs(
 pub fn adjust_appendrel_attrs_run<'mcx>(
     run: Option<&PlannerRun<'mcx>>,
     root: &mut PlannerInfo,
-    node: Expr,
+    node: Expr<'mcx>,
     appinfos: &[AppendRelInfo],
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     debug_assert!(!appinfos.is_empty());
-    let mut pending: Vec<Expr> = Vec::new();
+    let mut pending: Vec<Expr<'mcx>> = Vec::new();
     let result = {
         let mut ctx = AdjustContext {
             root,
@@ -312,11 +312,11 @@ pub fn adjust_appendrel_attrs_run<'mcx>(
 /// the owned lifetime-free [`Expr`] value tree (the value analogue of the C
 /// copy-and-mutate). On a translation error it records into `context.err` and
 /// returns the partially-built node (the driver surfaces the error).
-fn adjust_appendrel_attrs_mutator(
-    node: Expr,
-    context: &mut AdjustContext<'_, '_>,
-    pending: &mut Vec<Expr>,
-) -> Expr {
+fn adjust_appendrel_attrs_mutator<'mcx>(
+    node: Expr<'mcx>,
+    context: &mut AdjustContext<'_, 'mcx>,
+    pending: &mut Vec<Expr<'mcx>>,
+) -> Expr<'mcx> {
     let appinfos = context.appinfos;
 
     match node.expr_tag() {
@@ -361,16 +361,30 @@ fn adjust_appendrel_attrs_mutator(
                     // deep-copy through `clone_in` into the planner-run context
                     // when one is threaded (that path always threads `run`).
                     let src = context.root.node(handle);
-                    let newnode = match (src.as_var().is_some(), context.run) {
-                        (true, _) => src.clone(),
-                        (false, Some(run)) => match src.clone_in(run.mcx()) {
+                    // The Var case rebuilds the (lifetime-free) `Var` directly so
+                    // the result is `'mcx`-valued; the non-Var case (targetlist /
+                    // scan-join path, which always threads `run`) deep-copies into
+                    // the run's `'mcx` context via `clone_in` (the derived
+                    // `Expr::clone` panics on an owned-subtree child such as a
+                    // SubPlan-bearing PHV).
+                    let newnode: Expr<'mcx> = match (src.as_var(), context.run) {
+                        (Some(v), _) => Expr::Var(v.clone()),
+                        (None, Some(run)) => match src.clone_in(run.mcx()) {
                             Ok(n) => n,
                             Err(e) => {
                                 context.err = Some(e);
                                 return Expr::Var(var);
                             }
                         },
-                        (false, None) => src.clone(),
+                        (None, None) => {
+                            // Per appendinfo.c the no-run inheritance/equivclass
+                            // callers never carry a non-Var translated_var here.
+                            context.err = Some(PgError::error(
+                                "adjust_appendrel_attrs: non-Var translated_var \
+                                 reached without a threaded PlannerRun",
+                            ));
+                            return Expr::Var(var);
+                        }
                     };
                     if let Expr::Var(mut newvar) = newnode {
                         newvar.varreturningtype = var.varreturningtype;
@@ -440,11 +454,20 @@ fn adjust_appendrel_attrs_mutator(
                         };
 
                         // fields = copyObject(appinfo->translated_vars);
-                        let mut fields: Vec<Expr> = Vec::with_capacity(appinfo.translated_vars.len());
+                        // Deep-copy into the run's `'mcx` context (this whole-row
+                        // RowExpr branch always has a threaded `run`).
+                        let mut fields: Vec<Expr<'mcx>> =
+                            Vec::with_capacity(appinfo.translated_vars.len());
                         for &handle in appinfo.translated_vars.iter() {
                             // Per the C comment, inheritance dummy NULLs cannot
                             // occur here; a NULL handle would be a planner bug.
-                            fields.push(context.root.node(handle).clone());
+                            match context.root.node(handle).clone_in(run.mcx()) {
+                                Ok(n) => fields.push(n),
+                                Err(e) => {
+                                    context.err = Some(e);
+                                    return Expr::Var(var);
+                                }
+                            }
                         }
 
                         // rte = rt_fetch(appinfo->parent_relid, parse->rtable);
@@ -642,12 +665,12 @@ fn adjust_restrictinfo(
 /// `adjust_appendrel_attrs_multilevel(root, node, childrel, parentrel)`
 /// (appendinfo.c) — apply Var translations down through (possibly multiple)
 /// inheritance levels.
-pub fn adjust_appendrel_attrs_multilevel(
+pub fn adjust_appendrel_attrs_multilevel<'mcx>(
     root: &mut PlannerInfo,
-    node: Expr,
+    node: Expr<'mcx>,
     childrel: RelId,
     parentrel: RelId,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     let mut node = node;
     // Recurse if immediate parent is not the top parent.
     let immediate_parent = root.rel(childrel).parent;
@@ -1306,7 +1329,7 @@ fn rel_name_or_unknown(_root: &PlannerInfo, relid: Oid) -> String {
 
 /// `makeNullConst(consttype, consttypmod, constcollid)` (makefuncs.c) over the
 /// value tree (no `Mcx` needed: a null `Const` never inspects `constvalue`).
-fn make_null_const(consttype: Oid, consttypmod: i32, constcollid: Oid) -> PgResult<Const> {
+fn make_null_const<'mcx>(consttype: Oid, consttypmod: i32, constcollid: Oid) -> PgResult<Const<'mcx>> {
     let (typ_len, typ_byval) = lsyscache::get_typlenbyval::call(consttype)?;
     Ok(Const {
         consttype,
@@ -1460,12 +1483,12 @@ pub fn init_seams() {
 /// `adjust_appendrel_attrs(root, (Node *) node, nappinfos, appinfos)` — the
 /// single-expression equivclass/allpaths consumer. The seam carries the child
 /// rels as `Vec<RelId>`; resolve their AppendRelInfos and translate.
-fn seam_adjust_appendrel_attrs(
-    run: &PlannerRun<'_>,
+fn seam_adjust_appendrel_attrs<'mcx>(
+    run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    node: Expr,
+    node: Expr<'mcx>,
     child_rels: Vec<RelId>,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     let mut appinfos: Vec<AppendRelInfo> = Vec::with_capacity(child_rels.len());
     for cr in child_rels {
         let relids = root.rel(cr).relids.clone();
@@ -1493,8 +1516,8 @@ fn seam_adjust_appendrel_attrs_restrictlist(
 /// expression node (build_child_join_reltarget's per-expr translation).
 fn seam_adjust_appendrel_attrs_node(
     root: &mut PlannerInfo,
-    node: Expr,
+    node: Expr<'static>,
     appinfos: &[AppendRelInfo],
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'static>> {
     adjust_appendrel_attrs(root, node, appinfos)
 }

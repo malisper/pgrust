@@ -932,7 +932,7 @@ fn strip_relabel(mut e: Expr) -> Expr {
 /// expr never contains, so plain `ChangeVarNodes` suffices.
 fn change_expr_relids_standalone<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    expr: &mut Expr,
+    expr: &mut Expr<'mcx>,
     from: i32,
     to: i32,
 ) -> types_error::PgResult<()> {
