@@ -228,13 +228,37 @@ pub fn exec_init_node<'mcx>(
         // case T_NamedTuplestoreScan: ExecInitNamedTuplestoreScan(...)
         //   (nodeNamedtuplestorescan.c)
         //
-        // The owner `ExecInitNamedTuplestoreScan` takes a real
-        // `&mut QueryEnvironment` (the C `estate->es_queryEnv`), but the
-        // `EState.es_queryEnv` field is still modeled as `Opaque` — the
-        // QueryEnvironment / ENR value model is not built. There is no real
-        // `&mut QueryEnvironment` to pass, so this arm cannot be wired
-        // faithfully yet. A plain SELECT never scans an ephemeral named
-        // relation (only trigger transition tables / WITH-tuplestores do).
+        // The owner reads the ENR through the C `estate->es_queryEnv`. In the
+        // owned model that environment lives in the per-backend query-environment
+        // *home* (a thread-local owned by the AFTER-trigger firing code, which
+        // strictly wraps this whole SPI execution — ExecInit/ExecRun/ExecEnd run
+        // inside the trigger call). Borrow the top (innermost) env from the home
+        // and hand it to the node. A NamedTuplestoreScan only appears inside a
+        // trigger function body reading a transition table (OLD/NEW TABLE), so a
+        // live home env is guaranteed present here.
+        ntag::T_NamedTuplestoreScan => {
+            backend_utils_misc_queryenvironment_home::with_top_query_env(|env| {
+                let env = env.ok_or_else(|| {
+                    PgError::error(
+                        "NamedTuplestoreScan with no live query environment (no \
+                         transition-table trigger on the SPI call stack)"
+                            .to_string(),
+                    )
+                })?;
+                // SAFETY: the home owns the env for 'static; the firing code that
+                // pushed it strictly outlives this per-query EState (the trigger
+                // call wraps the entire SPI execution). Reborrow its lifetime down
+                // to 'mcx for this single init. The node only takes a non-owning
+                // raw `reldata` alias from it, which the home keeps live for the
+                // scan's duration.
+                let env: &mut types_nodes::queryenvironment::QueryEnvironment<'mcx> =
+                    unsafe { core::mem::transmute(env) };
+                let s = backend_executor_nodeNamedtuplestorescan::ExecInitNamedTuplestoreScan(
+                    node, estate, eflags, env,
+                )?;
+                Ok::<_, PgError>(alloc_in(mcx, PlanStateNode::NamedTuplestoreScan(s))?)
+            })?
+        }
 
         // case T_WorkTableScan: ExecInitWorkTableScan(...) (nodeWorktablescan.c)
         //

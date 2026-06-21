@@ -52,6 +52,8 @@ backend-executor-nodeBitmapIndexscan = { path = "../backend-executor-nodeBitmapI
 backend-executor-nodeSubqueryscan = { path = "../backend-executor-nodeSubqueryscan" }
 backend-executor-nodeValuesscan = { path = "../backend-executor-nodeValuesscan" }
 backend-executor-nodeCtescan = { path = "../backend-executor-nodeCtescan" }
+backend-executor-nodeNamedtuplestorescan = { path = "../backend-executor-nodeNamedtuplestorescan" }
+backend-utils-misc-queryenvironment-home = { path = "../backend-utils-misc-queryenvironment-home" }
 backend-executor-nodeCustom = { path = "../backend-executor-nodeCustom" }
 backend-executor-nodeGroup = { path = "../backend-executor-nodeGroup" }
 backend-executor-nodeAgg = { path = "../backend-executor-nodeAgg" }

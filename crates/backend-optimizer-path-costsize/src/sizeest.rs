@@ -100,7 +100,7 @@ pub fn set_cte_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerIn
 /// `set_namedtuplestore_size_estimates` (costsize.c:6192).
 pub fn set_namedtuplestore_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) {
     debug_assert!(root.rel(rel).relid > 0);
-    let enrtuples = cz::rte_enrtuples::call(root, rel);
+    let enrtuples = cz::rte_enrtuples::call(run, root, rel);
     root.rel_mut(rel).tuples = enrtuples;
     if root.rel(rel).tuples < 0.0 {
         root.rel_mut(rel).tuples = 1000.0;

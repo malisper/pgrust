@@ -79,6 +79,9 @@ types-datum = { path = "../types-datum" }
 
 # Outward dependency seams (callees whose owners are not yet ported).
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
+# The per-backend query-environment home: an AFTER trigger's transition-table
+# ENRs (OLD/NEW TABLE) are read off it to populate pstate->p_queryEnv.
+backend-utils-misc-queryenvironment-home = { path = "../backend-utils-misc-queryenvironment-home" }
 # Inward seam this crate installs: the CTAS query-jumble + post-parse-analyze
 # preamble (createas.c 244-249). Owned by the queryjumble / post-parse-analyze
 # layer, which lives here.

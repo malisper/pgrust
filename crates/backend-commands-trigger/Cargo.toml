@@ -91,5 +91,9 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-utils-error = { path = "../backend-utils-error" }
 # Transition-table tuplestores (MakeTransitionCaptureState / TransitionTableAddTuple).
 backend-utils-sort-storage = { path = "../backend-utils-sort-storage" }
+# Transition-table ENR registration (SPI_register_trigger_data, owned model) + the
+# per-backend query-environment home the SPI read path borrows.
+backend-utils-misc-queryenvironment = { path = "../backend-utils-misc-queryenvironment" }
+backend-utils-misc-queryenvironment-home = { path = "../backend-utils-misc-queryenvironment-home" }
 # ExecGetChildToRootMap (TransitionTableAddTuple child→root conversion gate).
 backend-executor-execMain-seams = { path = "../backend-executor-execMain-seams" }

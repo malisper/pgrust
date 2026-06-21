@@ -475,8 +475,16 @@ seam_core::seam!(
     ) -> bool
 );
 seam_core::seam!(
-    /// `rte->enrtuples` (set_namedtuplestore_size_estimates).
-    pub fn rte_enrtuples(root: &PlannerInfo, rel: RelId) -> f64
+    /// `rte->enrtuples` (set_namedtuplestore_size_estimates): the AFTER-trigger
+    /// transition-table ENR's tuple estimate. `rel` is the `RelOptInfo` handle;
+    /// the owner resolves it to the RT index (`rel->relid`) and fetches the RTE
+    /// through the planner run, so `run` is threaded (matching the
+    /// `backend-optimizer-rte-seams` RTE-projection contract).
+    pub fn rte_enrtuples<'mcx>(
+        run: &types_pathnodes::planner_run::PlannerRun<'mcx>,
+        root: &PlannerInfo,
+        rel: RelId,
+    ) -> f64
 );
 seam_core::seam!(
     /// `rte->relid` (set_rel_width): the underlying table OID, 0 for a phony rel.

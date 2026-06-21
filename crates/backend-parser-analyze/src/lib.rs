@@ -47,6 +47,27 @@ fn elog_error(msg: impl Into<alloc::string::String>) -> types_error::PgError {
     ereport(ERROR).errmsg_internal(msg.into()).into_error()
 }
 
+/// `pstate->p_queryEnv = queryEnv` — set the parse state's query environment from
+/// the per-backend query-environment home (the live AFTER-trigger transition-table
+/// env, if any). C threads `queryEnv` explicitly through `parse_analyze_*`; the
+/// owned model holds it in a thread-local home (like SPI's other backend globals).
+///
+/// Only the per-ENR **metadata** (name / reliddesc / tupdesc / type / estimate) is
+/// copied into `mcx` via `clone_for_child` — that is the entirety of what parse
+/// analysis reads (ENRs are looked up by name and the RTE is built from the
+/// metadata's tupdesc). The live `reldata` tuplestore is an execution-time
+/// resource read only by the executor, which sources it from the same home.
+fn set_query_env_from_home<'mcx>(mcx: Mcx<'mcx>, pstate: &mut ParseState<'mcx>) -> PgResult<()> {
+    let child = backend_utils_misc_queryenvironment_home::with_top_query_env(|env| match env {
+        Some(env) => env.clone_for_child(mcx).map(Some),
+        None => Ok(None),
+    })?;
+    if let Some(child) = child {
+        pstate.p_queryEnv = Some(PgBox::try_new_in(child, mcx).map_err(|_| mcx.oom(0))?);
+    }
+    Ok(())
+}
+
 /* ===========================================================================
  * Entry points: parse_analyze_*
  * =========================================================================== */
@@ -74,7 +95,9 @@ pub fn parse_analyze_fixedparams<'mcx>(
         backend_parser_small1::setup_parse_fixed_parameters(&mut pstate, param_types);
     }
 
-    // pstate->p_queryEnv = queryEnv;  (milestone callers pass None)
+    // pstate->p_queryEnv = queryEnv;  — sourced from the per-backend home so an
+    // AFTER trigger's transition-table ENRs (OLD/NEW TABLE) resolve by name.
+    set_query_env_from_home(mcx, &mut pstate)?;
 
     let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 
@@ -134,6 +157,11 @@ pub fn parse_analyze_plpgsql_expr<'mcx>(
     // plpgsql_parser_setup(pstate, expr): install the PL/pgSQL parser hooks +
     // ref-hook state.
     backend_parser_parse_expr::setup_parse_plpgsql_expr(&mut pstate, state);
+
+    // pstate->p_queryEnv = queryEnv;  — sourced from the per-backend home so an
+    // AFTER trigger's transition-table ENRs (OLD/NEW TABLE) resolve by name in a
+    // `SELECT * FROM newtab` issued from the trigger function body.
+    set_query_env_from_home(mcx, &mut pstate)?;
 
     let query = transformTopLevelStmt(mcx, &mut pstate, parse_tree)?;
 

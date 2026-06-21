@@ -653,31 +653,41 @@ pub fn after_trigger_execute<'mcx>(
     // observable trigger.c side effect (marking the table-data closed) so the
     // capture machinery's lifecycle is correct; the stores remain owned by the
     // thread-local table-data.
-    let mut uses_old_table = false;
-    let mut uses_new_table = false;
+    // The transition-table environment (OLD/NEW TABLE) the trigger function will
+    // read back via the ENR/QueryEnvironment path. Built below and pushed onto the
+    // per-backend query-environment home for the duration of the trigger call; the
+    // guard pops it and moves the tuplestores back into the query stack on Drop
+    // (success or unwind), mirroring C, where the stores stay owned by the query
+    // level and are freed only at AfterTriggerEndQuery.
+    let mut transition_guard: Option<TransitionEnvGuard> = None;
     if let Some(tref) = evtshared.ats_table {
-        let tgoldtable = rel.triggers[tgindx].tgoldtable.is_some();
-        let tgnewtable = rel.triggers[tgindx].tgnewtable.is_some();
-        if tgoldtable {
-            uses_old_table = true;
+        let tgoldtable_name = rel.triggers[tgindx]
+            .tgoldtable
+            .as_ref()
+            .map(|s| s.as_str().to_string());
+        let tgnewtable_name = rel.triggers[tgindx]
+            .tgnewtable
+            .as_ref()
+            .map(|s| s.as_str().to_string());
+        if tgoldtable_name.is_some() || tgnewtable_name.is_some() {
+            // Mark the table-data closed when first made available (trigger.c:4516):
+            // it can't change anymore; later same-type events go into new tables.
             crate::queue::with_after_triggers(|at| {
                 let qd = tref.query_depth as usize;
                 at.query_stack[qd].tables[tref.index].closed = true;
             });
+            // SPI_register_trigger_data, performed in the owned model by the firing
+            // code (which owns the stores): take the transition tuplestores out of
+            // the query stack, build the ENRs (name = tgoldtable/tgnewtable,
+            // reliddesc = target relation OID, reldata = the store), and push the
+            // env onto the home for the trigger's SPI queries to read.
+            transition_guard = Some(TransitionEnvGuard::install(
+                tref,
+                rel.relid,
+                tgoldtable_name,
+                tgnewtable_name,
+            )?);
         }
-        if tgnewtable {
-            uses_new_table = true;
-            crate::queue::with_after_triggers(|at| {
-                let qd = tref.query_depth as usize;
-                at.query_stack[qd].tables[tref.index].closed = true;
-            });
-        }
-    }
-    if uses_old_table || uses_new_table {
-        // The trigger function will try to read the transition table via the
-        // ENR/QueryEnvironment path, which is not yet wired — fail loudly rather
-        // than run the trigger against an absent transition relation.
-        return Err(transition_table_read_unported());
     }
     // GetUserIdAndSecContext(&save_rolid, ...); if (save_rolid != ats_rolid)
     // SetUserIdAndSecContext(...). The event was queued with ats_rolid =
@@ -758,7 +768,13 @@ pub fn after_trigger_execute<'mcx>(
         newtuple: new_formed,
     });
 
-    let _rettuple = exec_call_trigger_func(trigdata)?;
+    let rettuple = exec_call_trigger_func(trigdata);
+    // Drop the transition-table env guard *after* the trigger call returns: it
+    // pops the env off the home and moves the tuplestores back into the query
+    // stack (restored on both the Ok and Err paths). Held explicitly so the
+    // borrow lives across the fire.
+    drop(transition_guard);
+    let _rettuple = rettuple?;
     Ok(())
 }
 
@@ -2644,6 +2660,144 @@ fn restore_transition_store(target: TransitionTarget, store: types_nodes::Tuples
     });
 }
 
+/// RAII guard for the transition-table query environment (`SPI_register_trigger_data`
+/// in the owned model). On `install` it moves the OLD/NEW transition tuplestores
+/// out of the after-trigger query stack, builds a `'static` `QueryEnvironment`
+/// whose ENRs alias those stores (name = `tgoldtable`/`tgnewtable`, reliddesc =
+/// the target relation OID), and pushes the env onto the per-backend
+/// query-environment **home** so the trigger function's SPI queries
+/// (`SELECT … FROM newtab`) resolve and read it. On `Drop` it pops the env off the
+/// home and moves the stores back into the query stack — restoring the C lifetime
+/// where the stores stay owned by the query level until `AfterTriggerEndQuery`.
+///
+/// The whole trigger call (including the SPI execution that reads the env) is
+/// strictly nested inside the guard's lifetime, so the executor's non-owning
+/// `reldata` alias never outlives the live store.
+struct TransitionEnvGuard {
+    /// The depth at which the env sits on the home (the slot to pop).
+    depth: usize,
+    /// The query-stack targets the stores came from, for the move-back. `None`
+    /// when that direction's transition table is unused.
+    old_target: Option<TransitionTarget>,
+    new_target: Option<TransitionTarget>,
+    /// The self-owned `'static` arena the env's ENR metadata is allocated in;
+    /// dropped after the env (which holds the stores) is reclaimed.
+    _arena: std::boxed::Box<mcx::MemoryContext>,
+}
+
+impl TransitionEnvGuard {
+    fn install(
+        table: crate::queue::TableRef,
+        relid: Oid,
+        old_name: Option<String>,
+        new_name: Option<String>,
+    ) -> PgResult<Self> {
+        // A self-owned 'static context for the env + its ENR metadata. The
+        // tuplestores are already 'static (self-owned hold stores); the metadata
+        // (name strings, list) lives here.
+        let arena = std::boxed::Box::new(mcx::MemoryContext::new("Trigger Transition Env"));
+        // SAFETY: `arena` is heap-pinned (Box) so its address is stable; the env
+        // and its allocations live exactly as long as this guard, which strictly
+        // wraps the trigger call. Treat its handle as 'static for the home.
+        let mcx: mcx::Mcx<'static> = unsafe { core::mem::transmute(arena.mcx()) };
+
+        let mut env = backend_utils_misc_queryenvironment::create_queryEnv(mcx);
+
+        // NEW table first (C SPI_register_trigger_data order), then OLD.
+        let new_target = match new_name {
+            Some(name) => {
+                let target = TransitionTarget { table, is_old: false };
+                register_transition_enr(mcx, &mut env, relid, name, target)?;
+                Some(target)
+            }
+            None => None,
+        };
+        let old_target = match old_name {
+            Some(name) => {
+                let target = TransitionTarget { table, is_old: true };
+                register_transition_enr(mcx, &mut env, relid, name, target)?;
+                Some(target)
+            }
+            None => None,
+        };
+
+        let depth = backend_utils_misc_queryenvironment_home::push_query_env(env);
+        Ok(TransitionEnvGuard {
+            depth,
+            old_target,
+            new_target,
+            _arena: arena,
+        })
+    }
+}
+
+impl Drop for TransitionEnvGuard {
+    fn drop(&mut self) {
+        // Pop our env off the home and move each store back into the query stack.
+        if let Some(mut env) = backend_utils_misc_queryenvironment_home::pop_query_env(self.depth) {
+            // The env's ENRs hold the stores in `reldata`. Drain them in the same
+            // order they were registered (NEW then OLD) and move them back.
+            let mut reldatas = env
+                .namedRelList
+                .drain(..)
+                .map(|enr| enr.reldata)
+                .collect::<Vec<_>>();
+            // reldatas[0] = NEW (if present), then OLD (if present), matching
+            // registration order in `install`.
+            let mut idx = 0;
+            if let Some(target) = self.new_target {
+                if let Some(Some(boxed)) = reldatas.get_mut(idx).map(core::mem::take) {
+                    let store = mcx::PgBox::into_inner(boxed);
+                    restore_transition_store(target, store);
+                }
+                idx += 1;
+            }
+            if let Some(target) = self.old_target {
+                if let Some(Some(boxed)) = reldatas.get_mut(idx).map(core::mem::take) {
+                    let store = mcx::PgBox::into_inner(boxed);
+                    restore_transition_store(target, store);
+                }
+            }
+        }
+    }
+}
+
+/// Build one transition-table ENR (the body of C `SPI_register_trigger_data`'s
+/// per-direction block) and register it in `env`: move the store named by
+/// `target` out of the query stack into the ENR's `reldata`, with metadata
+/// `name`/`reliddesc = relid`/`enrtype = ENR_NAMED_TUPLESTORE`/`enrtuples =
+/// tuplestore_tuple_count`.
+fn register_transition_enr(
+    mcx: mcx::Mcx<'static>,
+    env: &mut types_nodes::queryenvironment::QueryEnvironment<'static>,
+    relid: Oid,
+    name: String,
+    target: TransitionTarget,
+) -> PgResult<()> {
+    let mut store = match take_transition_store(target) {
+        Some(s) => s,
+        // C: a used transition table always has a (possibly empty) store; if it
+        // is somehow absent, skip — the scan would find no ENR and error, which
+        // is the faithful "could not find named tuplestore" outcome.
+        None => return Ok(()),
+    };
+    let enrtuples = backend_utils_sort_storage::tuplestore::tuplestore_tuple_count(&mut store) as f64;
+    let boxed: mcx::PgBox<'static, types_nodes::Tuplestorestate<'static>> =
+        mcx::PgBox::try_new_in(store, mcx).map_err(|_| mcx.oom(0))?;
+    let md = types_nodes::queryenvironment::EphemeralNamedRelationMetadataData {
+        name: Some(mcx::PgString::from_str_in(&name, mcx)?),
+        reliddesc: relid,
+        tupdesc: None,
+        enrtype: types_nodes::queryenvironment::ENR_NAMED_TUPLESTORE,
+        enrtuples,
+    };
+    let enr = types_nodes::queryenvironment::EphemeralNamedRelationData {
+        md,
+        reldata: Some(boxed),
+    };
+    backend_utils_misc_queryenvironment::register_ENR(env, enr)
+}
+
 /// Capture the OLD and/or NEW tuple(s) of one row event into the transition
 /// tuplestores — the head of C `AfterTriggerSaveEvent` (trigger.c:6204-6238).
 /// `oldslot`/`newslot` are real EState slots (or `None`).
@@ -4212,21 +4366,6 @@ fn cross_partition_update_unported() -> PgError {
     PgError::error(
         "AfterTriggerExecute: cross-partition update after-trigger tuple sourcing \
          (AFTER_TRIGGER_CP_UPDATE) is firing-substrate not ported"
-            .to_string(),
-    )
-}
-
-#[cold]
-#[inline(never)]
-#[cold]
-#[inline(never)]
-fn transition_table_read_unported() -> PgError {
-    PgError::error(
-        "AfterTriggerExecute: an AFTER trigger reading a transition table (OLD/NEW \
-         TABLE) requires the QueryEnvironment / Ephemeral-Named-Relation read-back \
-         in the trigger function's language handler (plpgsql/SPI), which is not yet \
-         ported; the transition-tuplestore capture (MakeTransitionCaptureState + \
-         ExecAR*Triggers spooling) runs end-to-end"
             .to_string(),
     )
 }

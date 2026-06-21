@@ -504,6 +504,15 @@ pub fn init_seams() {
         planner_rt_fetch(run, root, rti).relid
     });
 
+    // costsize.c `set_namedtuplestore_size_estimates` — `rte->enrtuples` from a
+    // RelOptInfo handle (the AFTER-trigger transition-table ENR's tuple estimate).
+    // `rel->relid` is the 1-based RT index; project `enrtuples` through the same
+    // owned RTE store.
+    backend_optimizer_path_costsize_seams::rte_enrtuples::set(|run, root, rel| {
+        let rti = root.rel(rel).relid;
+        planner_rt_fetch(run, root, rti).enrtuples
+    });
+
     // costsize.c `cost_samplescan` — `rte->tablesample->tsmhandler` from a
     // RelOptInfo handle. `rel->relid` is the 1-based RT index; navigate the
     // owned `tablesample` clause node through `planner_rt_fetch`.

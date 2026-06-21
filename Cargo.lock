@@ -8456,6 +8456,8 @@ dependencies = [
  "backend-utils-init-small",
  "backend-utils-init-small-seams",
  "backend-utils-misc-guc-tables",
+ "backend-utils-misc-queryenvironment",
+ "backend-utils-misc-queryenvironment-home",
  "backend-utils-sort-storage",
  "backend-utils-time-snapmgr-seams",
  "mcx",
@@ -9702,6 +9704,7 @@ dependencies = [
  "backend-executor-nodeMergeAppend",
  "backend-executor-nodeMergejoin",
  "backend-executor-nodeModifyTable",
+ "backend-executor-nodeNamedtuplestorescan",
  "backend-executor-nodeNestloop",
  "backend-executor-nodeProjectSet",
  "backend-executor-nodeRecursiveunion",
@@ -9722,6 +9725,7 @@ dependencies = [
  "backend-nodes-core-seams",
  "backend-tcop-postgres-seams",
  "backend-utils-init-small-seams",
+ "backend-utils-misc-queryenvironment-home",
  "backend-utils-misc-stack-depth-seams",
  "backend-utils-sort-storage",
  "mcx",
@@ -13795,6 +13799,7 @@ dependencies = [
  "backend-utils-cache-typcache",
  "backend-utils-error",
  "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-misc-queryenvironment-home",
  "backend-utils-misc-stack-depth-seams",
  "mcx",
  "seam-core",
@@ -23299,6 +23304,13 @@ dependencies = [
  "types-nodes",
  "types-storage",
  "types-tuple",
+]
+
+[[package]]
+name = "backend-utils-misc-queryenvironment-home"
+version = "0.0.0"
+dependencies = [
+ "types-nodes",
 ]
 
 [[package]]
