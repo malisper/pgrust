@@ -15,7 +15,7 @@ use crate::ext_seam;
 // pull_var_clause flags (optimizer.h).
 const PVC_RECURSE_AGGREGATES: i32 = 0x0002;
 const PVC_RECURSE_WINDOWFUNCS: i32 = 0x0008;
-const PVC_INCLUDE_PLACEHOLDERS: i32 = 0x0020;
+const PVC_INCLUDE_PLACEHOLDERS: i32 = 0x0010;
 
 /// Convert an [`ExprRelids`] (carried on a `PlaceHolderVar`) into a [`Relids`].
 fn expr_relids_to_relids(er: &ExprRelids) -> Relids {
