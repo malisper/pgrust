@@ -44,6 +44,7 @@ backend-commands-define-seams = { path = "../backend-commands-define-seams" }
 backend-nodes-core = { path = "../backend-nodes-core" }
 backend-nodes-equalfuncs = { path = "../backend-nodes-equalfuncs" }
 backend-parser-relation = { path = "../backend-parser-relation" }
+backend-parser-small1-seams = { path = "../backend-parser-small1-seams" }
 backend-parser-clause = { path = "../backend-parser-clause" }
 backend-parser-parse-collate = { path = "../backend-parser-parse-collate" }
 backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }

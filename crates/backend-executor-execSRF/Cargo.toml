@@ -140,6 +140,11 @@ backend-access-transam-twophase = { path = "../backend-access-transam-twophase" 
 # (acl_ops::aclexplode) + the AclItem image decoder.
 backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 types-acl = { path = "../types-acl" }
+# pg_get_publication_tables(VARIADIC text[]) (OID 6119): the published-table row
+# builder core (build_publication_table_rows seam) + the PublicationTableRow
+# carrier type (pubid, relid, attrs int2vector, qual pg_node_tree).
+backend-catalog-pg-publication-seams = { path = "../backend-catalog-pg-publication-seams" }
+types-catalog = { path = "../types-catalog" }
 
 # pgstatfuncs.c SRF/composite family: the cumulative-stats fetch substrate the
 # materialize/composite-row workers read (pg_stat_get_io/slru/wal/archiver/

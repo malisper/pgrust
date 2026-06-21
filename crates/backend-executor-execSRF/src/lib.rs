@@ -83,6 +83,7 @@ mod pg_get_multixact_members;
 mod pg_get_catalog_foreign_keys;
 mod pg_partition_tree;
 mod pg_event_trigger_dropped_objects;
+mod pg_get_publication_tables;
 mod pg_lock_status;
 mod pg_prepared_xact;
 mod pg_snapshot_xip;
@@ -227,6 +228,9 @@ pub fn init_seams() {
     // `pg_event_trigger_dropped_objects` (OID 3566) — the `sql_drop`
     // event-trigger SRF listing the command's dropped objects.
     pg_event_trigger_dropped_objects::register_pg_event_trigger_dropped_objects();
+    // `pg_get_publication_tables(VARIADIC text[])` (OID 6119) — the published
+    // tables (column lists + row filters) of one or more publications.
+    pg_get_publication_tables::register_pg_get_publication_tables();
     // `pg_snapshot_xip(pg_snapshot)` (OID 5064) — the value-per-call SRF emitting
     // the snapshot's in-progress `xip[]` as `setof xid8` (its value sequence is
     // `backend-utils-adt-xid8funcs::pg_snapshot_xip`).
