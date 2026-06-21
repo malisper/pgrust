@@ -4028,6 +4028,9 @@ fn set_returning_clause_references<'mcx>(
 /// outward seams this crate consumes are installed by their respective owners.
 pub fn init_seams() {
     ext::extract_query_dependencies_value::set(extract_query_dependencies_value);
+    // record_plan_function_dependency(root, funcid): exposed so the clauses.c
+    // SRF/scalar inliners can record the inlined-away function's plan dependency.
+    ext::record_plan_function_dependency::set(record_plan_function_dependency);
 
     // `find_minmax_agg_replacement_param(root, aggref)->paramid` (setrefs.c, via
     // planagg.c's minmax_aggs) consumed by `finalize_primnode`'s Aggref arm

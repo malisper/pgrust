@@ -119,10 +119,28 @@ pub fn inline_set_returning_function<'mcx>(
     }
 
     // The function is an inlinable SQL-language SRF. The body parse / rewrite /
-    // single-SELECT querytree validation core rides the SQL leg seam (the SQL-
-    // function parse/rewrite path is not ported). No C-language SRF reaches
-    // here; a reachable SQL SRF panics loudly in the unported owner.
-    clauses_seam::inline_set_returning_function_sql_body::call(mcx, root, rte, func_oid)
+    // single-SELECT querytree validation + parameter substitution core rides the
+    // SQL leg seam (owned by backend-parser-analyze).
+    let querytree = match clauses_seam::inline_set_returning_function_sql_body::call(
+        mcx, root, rte, func_oid,
+    )? {
+        Some(q) => q,
+        None => return Ok(None),
+    };
+
+    // Since there is now no trace of the function in the plan tree, explicitly
+    // record the plan's dependency on the function (clauses.c:5331).
+    backend_optimizer_plan_setrefs_seams::record_plan_function_dependency::call(root, func_oid)?;
+
+    // Notice if the inserted query adds a dependency on the calling role due to
+    // RLS quals (clauses.c:5337).
+    if querytree.hasRowSecurity {
+        if let Some(glob) = root.glob.as_deref_mut() {
+            glob.depends_on_role = true;
+        }
+    }
+
+    Ok(Some(querytree))
 }
 
 /// Extract the `FuncExpr` from a `RangeTblFunction` node's `funcexpr`, mirroring

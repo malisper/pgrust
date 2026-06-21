@@ -31,6 +31,20 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `record_plan_function_dependency(root, funcid)` (setrefs.c:3559) — record
+    /// the plan's run-time dependency on a function whose call has been removed
+    /// from the plan tree (e.g. a SQL SRF inlined away by
+    /// `inline_set_returning_function`). For a non-pinned `funcid` this appends a
+    /// `PlanInvalItem(PROCOID, hash(funcid))` onto `glob->invalItems`; pinned
+    /// (built-in) functions are skipped. Exposed so the clauses.c SRF/scalar
+    /// inliners can record the dependency without a direct dependency on setrefs.
+    pub fn record_plan_function_dependency(
+        root: &mut types_pathnodes::PlannerInfo,
+        funcid: types_core::Oid,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `IS_DUMMY_REL(fetch_upper_rel(subroot, UPPERREL_FINAL, NULL))`
     /// (`add_rtes_to_flat_rtable`) — is the subquery's final upper rel dummy?
     /// `subroot_index` is the outer RT index; the owner navigates

@@ -64,6 +64,18 @@ backend-parser-driver = { path = "../backend-parser-driver" }
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-optimizer-util-clauses-seams = { path = "../backend-optimizer-util-clauses-seams" }
 
+# The set-returning SQL-function inliner body
+# (clauses.c inline_set_returning_function SQL leg) installed by this crate:
+# the rewriter (pg_rewrite_query / AcquireRewriteLocks), IncrementVarSublevelsUp,
+# get_expr_result_type, BuildDescFromLists, and a Const datum builder. All are
+# cycle-free (none depends on this impl crate).
+backend-rewrite-rewritehandler-seams = { path = "../backend-rewrite-rewritehandler-seams" }
+backend-rewrite-core = { path = "../backend-rewrite-core" }
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+types-pathnodes = { path = "../types-pathnodes" }
+types-datum = { path = "../types-datum" }
+
 # Outward dependency seams (callees whose owners are not yet ported).
 backend-utils-misc-stack-depth-seams = { path = "../backend-utils-misc-stack-depth-seams" }
 # Inward seam this crate installs: the CTAS query-jumble + post-parse-analyze

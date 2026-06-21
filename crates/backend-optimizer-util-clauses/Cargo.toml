@@ -45,3 +45,6 @@ types-acl = { path = "../types-acl" }
 types-catalog = { path = "../types-catalog" }
 backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
+# record_plan_function_dependency for the inlined-away SRF (clauses.c:5331);
+# the setrefs owner installs it (cycle-free: setrefs-seams deps only types-*).
+backend-optimizer-plan-setrefs-seams = { path = "../backend-optimizer-plan-setrefs-seams" }

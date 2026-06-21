@@ -28,6 +28,7 @@ use types_nodes::parsestmt::{ParseState, RawStmt};
 use types_nodes::rawnodes::SelectStmt;
 
 mod inline_sql;
+mod inline_srf;
 mod insert;
 mod locking;
 mod merge;
@@ -874,6 +875,16 @@ pub fn init_seams() {
     // fold crate's contain_* walkers without a cycle.
     backend_optimizer_util_clauses_seams::inline_sql_function::set(
         inline_sql::inline_sql_function,
+    );
+
+    // The set-returning SQL-function inliner body
+    // (clauses.c inline_set_returning_function SQL leg): clauses.c runs the gate
+    // ladder in-crate and rides this seam for the parser-dependent body —
+    // parse/rewrite/validate the single-SELECT body, check_sql_fn_retval, and
+    // substitute the actual call arguments for the body Params. Installed here —
+    // the lowest crate owning the parser + rewriter without a cycle.
+    backend_optimizer_util_clauses_seams::inline_set_returning_function_sql_body::set(
+        inline_srf::inline_set_returning_function_sql_body,
     );
 }
 
