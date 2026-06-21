@@ -18,5 +18,5 @@ seam_core::seam!(
         clause: Option<types_nodes::nodes::Node<'mcx>>,
         expr_kind: types_nodes::parsestmt::ParseExprKind,
         construct_name: &str,
-    ) -> types_error::PgResult<Option<types_nodes::primnodes::Expr>>
+    ) -> types_error::PgResult<Option<types_nodes::primnodes::Expr<'static>>>
 );

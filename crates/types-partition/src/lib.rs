@@ -46,7 +46,7 @@ pub struct PartitionKeyData<'mcx> {
     pub partattrs: PgVec<'mcx, AttrNumber>,
     /// `partexprs` — list of expressions in the partitioning key, one for
     /// each zero-valued `partattrs`.
-    pub partexprs: PgVec<'mcx, types_nodes::Expr>,
+    pub partexprs: PgVec<'mcx, types_nodes::Expr<'static>>,
     /// `partopfamily` — OIDs of operator families.
     pub partopfamily: PgVec<'mcx, Oid>,
     /// `partopcintype` — OIDs of opclass declared input data types.
@@ -91,7 +91,7 @@ pub struct PartrelTupleData<'mcx> {
     /// `partcollation` oidvector values — the per-key collation OIDs.
     pub partcollation: PgVec<'mcx, Oid>,
     /// the processed `partexprs` list (NIL ⇒ empty).
-    pub partexprs: PgVec<'mcx, types_nodes::Expr>,
+    pub partexprs: PgVec<'mcx, types_nodes::Expr<'static>>,
 }
 
 /// Per-partition-key opclass facts resolved from one `pg_opclass` tuple
@@ -167,7 +167,7 @@ impl<'mcx> PartitionKeyData<'mcx> {
     }
 
     /// `get_partition_exprs(key)` (`utils/partcache.h`): `key->partexprs`.
-    pub fn get_partition_exprs(&self) -> &[types_nodes::Expr] {
+    pub fn get_partition_exprs(&self) -> &[types_nodes::Expr<'static>] {
         &self.partexprs
     }
 

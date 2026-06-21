@@ -72,14 +72,14 @@ pub struct BitmapIndexScan<'mcx> {
     /// `bool isshared` — create shared bitmap if set.
     pub isshared: bool,
     /// `List *indexqual` — list of index quals (OpExprs).
-    pub indexqual: Option<PgVec<'mcx, Expr>>,
+    pub indexqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     /// `List *indexqualorig` — the same in original form.
-    pub indexqualorig: Option<PgVec<'mcx, Expr>>,
+    pub indexqualorig: Option<PgVec<'mcx, Expr<'mcx>>>,
 }
 
 impl BitmapIndexScan<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<BitmapIndexScan<'b>> {
-        let clone_exprs = |src: &Option<PgVec<'_, Expr>>| -> PgResult<Option<PgVec<'b, Expr>>> {
+        let clone_exprs = |src: &Option<PgVec<'_, Expr<'_>>>| -> PgResult<Option<PgVec<'b, Expr<'b>>>> {
             match src {
                 Some(list) => {
                     let mut out = vec_with_capacity_in(mcx, list.len())?;

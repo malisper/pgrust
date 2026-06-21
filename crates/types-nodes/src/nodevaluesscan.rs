@@ -29,7 +29,7 @@ pub struct ValuesScan<'mcx> {
     pub scan: Scan<'mcx>,
     /// `List *values_lists` — list of expression lists. Each element is one
     /// VALUES row: a list of the row's column expressions.
-    pub values_lists: PgVec<'mcx, PgVec<'mcx, Expr>>,
+    pub values_lists: PgVec<'mcx, PgVec<'mcx, Expr<'mcx>>>,
 }
 
 impl<'mcx> ValuesScan<'mcx> {
@@ -84,7 +84,7 @@ pub struct ValuesScanState<'mcx> {
     pub rowcontext: Option<EcxtId>,
     /// `List **exprlists` — array (`array_len` long) of per-row expression
     /// lists being evaluated.
-    pub exprlists: PgVec<'mcx, PgVec<'mcx, Expr>>,
+    pub exprlists: PgVec<'mcx, PgVec<'mcx, Expr<'mcx>>>,
     /// `List **exprstatelists` — array (`array_len` long) of per-row expression
     /// state lists. A row's cell is empty (the C `NULL`) until built (eagerly
     /// for SubPlan rows in init, lazily for the rest in `ValuesNext`).

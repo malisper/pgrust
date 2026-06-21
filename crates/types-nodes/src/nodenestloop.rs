@@ -40,12 +40,12 @@ pub const T_NestLoopState: NodeTag = NodeTag(421);
 /// `OUTER_VAR` Var via `fix_upper_expr`. We mirror that by widening the field to
 /// [`Expr`]; by execution it always holds an `Expr::Var(OUTER_VAR)`.
 #[derive(Clone, Debug)]
-pub struct NestLoopParam {
+pub struct NestLoopParam<'mcx> {
     /// `int paramno` — number of the PARAM_EXEC Param to set.
     pub paramno: i32,
     /// `Var *paramval` — outer-relation Var (or, transiently during plan
     /// creation, a PlaceHolderVar) to assign to Param.
-    pub paramval: Expr,
+    pub paramval: Expr<'mcx>,
 }
 
 /// `NestLoop` plan node (nodes/plannodes.h):
@@ -63,7 +63,7 @@ pub struct NestLoop<'mcx> {
     pub join: Join<'mcx>,
     /// `List *nestParams` — list of `NestLoopParam` nodes. An empty vec is the
     /// C `NIL`.
-    pub nestParams: Vec<NestLoopParam>,
+    pub nestParams: Vec<NestLoopParam<'mcx>>,
 }
 
 impl<'mcx> NestLoop<'mcx> {
@@ -72,7 +72,16 @@ impl<'mcx> NestLoop<'mcx> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<NestLoop<'b>> {
         Ok(NestLoop {
             join: self.join.clone_in(mcx)?,
-            nestParams: self.nestParams.clone(),
+            nestParams: {
+                let mut out = alloc::vec::Vec::with_capacity(self.nestParams.len());
+                for p in self.nestParams.iter() {
+                    out.push(NestLoopParam {
+                        paramno: p.paramno,
+                        paramval: p.paramval.clone_in(mcx)?,
+                    });
+                }
+                out
+            },
         })
     }
 }

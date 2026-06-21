@@ -112,7 +112,7 @@ pub struct Query<'mcx> {
     /// Although C types it `Node *`, it only ever holds an expression, so this
     /// is the concretely-typed `Option<PgBox<Expr>>` view (matching `targetList`
     /// and the jointree, which are already concretely typed).
-    pub mergeJoinCondition: Option<PgBox<'mcx, Expr>>,
+    pub mergeJoinCondition: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `List *targetList` — target list (of `TargetEntry`).
     pub targetList: PgVec<'mcx, TargetEntry<'mcx>>,
     /// `OverridingKind override` — OVERRIDING clause.
@@ -136,7 +136,7 @@ pub struct Query<'mcx> {
     pub groupingSets: PgVec<'mcx, NodePtr<'mcx>>,
     /// `Node *havingQual` — qualifications applied to groups. C types it
     /// `Node *`, but it only ever holds an expression; concretely typed here.
-    pub havingQual: Option<PgBox<'mcx, Expr>>,
+    pub havingQual: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `List *windowClause` — a list of `WindowClause`'s.
     pub windowClause: PgVec<'mcx, NodePtr<'mcx>>,
     /// `List *distinctClause` — a list of `SortGroupClause`'s.
@@ -145,10 +145,10 @@ pub struct Query<'mcx> {
     pub sortClause: PgVec<'mcx, NodePtr<'mcx>>,
     /// `Node *limitOffset` — # of result tuples to skip (int8 expr). C types it
     /// `Node *`, but it only ever holds an expression; concretely typed here.
-    pub limitOffset: Option<PgBox<'mcx, Expr>>,
+    pub limitOffset: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `Node *limitCount` — # of result tuples to return (int8 expr). C types it
     /// `Node *`, but it only ever holds an expression; concretely typed here.
-    pub limitCount: Option<PgBox<'mcx, Expr>>,
+    pub limitCount: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `LimitOption limitOption` — limit type.
     pub limitOption: LimitOption,
     /// `List *rowMarks` — a list of `RowMarkClause`'s.
@@ -329,9 +329,9 @@ fn copy_opt_node<'b>(
 /// Deep-copy an `Option<PgBox<Expr>>` (an expression-only `Node *` field) into
 /// `mcx`.
 fn copy_opt_expr<'b>(
-    e: &Option<PgBox<'_, Expr>>,
+    e: &Option<PgBox<'_, Expr<'_>>>,
     mcx: Mcx<'b>,
-) -> PgResult<Option<PgBox<'b, Expr>>> {
+) -> PgResult<Option<PgBox<'b, Expr<'b>>>> {
     match e {
         Some(e) => Ok(Some(mcx::alloc_in(mcx, e.clone_in(mcx)?)?)),
         None => Ok(None),

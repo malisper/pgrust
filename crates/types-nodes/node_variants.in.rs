@@ -326,7 +326,7 @@ pub enum Node<'mcx> {
     /// types (the split Expr/Node model is preserved — `Expr` remains its own
     /// enum, this arm only makes an expression reachable where a `Node` is
     /// expected). Additive: the enum is `#[non_exhaustive]`.
-    Expr(crate::primnodes::Expr),
+    Expr(crate::primnodes::Expr<'mcx>),
     /// `T_List` — a bare `List *` node carried as a `Node *`.
     ///
     /// PostgreSQL parse trees contain `List` nodes directly where a `Node *`

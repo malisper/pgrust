@@ -21,9 +21,9 @@ seam_core::seam!(
     /// Touches only `root->glob`.
     pub fn make_placeholder_expr(
         root: &mut types_pathnodes::PlannerInfo,
-        expr: types_nodes::primnodes::Expr,
+        expr: types_nodes::primnodes::Expr<'static>,
         phrels: types_pathnodes::Relids,
-    ) -> types_nodes::primnodes::PlaceHolderVar
+    ) -> types_nodes::primnodes::PlaceHolderVar<'static>
 );
 
 seam_core::seam!(
@@ -34,6 +34,6 @@ seam_core::seam!(
     /// the `get_typavgwidth` catalog-lookup failure surface.
     pub fn find_placeholder_info(
         root: &mut types_pathnodes::PlannerInfo,
-        phv: &types_nodes::primnodes::PlaceHolderVar,
+        phv: &types_nodes::primnodes::PlaceHolderVar<'static>,
     ) -> types_error::PgResult<types_pathnodes::PhInfoId>
 );

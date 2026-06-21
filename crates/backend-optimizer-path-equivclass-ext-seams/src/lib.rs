@@ -33,61 +33,61 @@ use types_pathnodes::{NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinIn
 
 seam_core::seam!(
     /// `equal(a, b)` (equalfuncs.c) — structural node equality.
-    pub fn equal(a: &Expr, b: &Expr) -> bool
+    pub fn equal(a: &Expr<'static>, b: &Expr<'static>) -> bool
 );
 seam_core::seam!(
     /// `exprType((Node *) expr)` (nodeFuncs.c).
-    pub fn expr_type(expr: &Expr) -> Oid
+    pub fn expr_type(expr: &Expr<'static>) -> Oid
 );
 seam_core::seam!(
     /// `exprTypmod((Node *) expr)` (nodeFuncs.c).
-    pub fn expr_typmod(expr: &Expr) -> i32
+    pub fn expr_typmod(expr: &Expr<'static>) -> i32
 );
 seam_core::seam!(
     /// `exprCollation((Node *) expr)` (nodeFuncs.c).
-    pub fn expr_collation(expr: &Expr) -> Oid
+    pub fn expr_collation(expr: &Expr<'static>) -> Oid
 );
 seam_core::seam!(
     /// `applyRelabelType(arg, rtype, rtypmod, rcollid, rformat, rlocation,
     /// overwrite_ok)` (nodeFuncs.c) — wraps `arg` in a `RelabelType` (or
     /// rewrites an existing one), preserving const-flatness.
     pub fn apply_relabel_type(
-        arg: Expr,
+        arg: Expr<'static>,
         rtype: Oid,
         rtypmod: i32,
         rcollid: Oid,
         rformat: CoercionForm,
         rlocation: i32,
         overwrite_ok: bool,
-    ) -> PgResult<Expr>
+    ) -> PgResult<Expr<'static>>
 );
 
 /* ---- clauses.c / var.c expression analysis ------------------------ */
 
 seam_core::seam!(
     /// `contain_volatile_functions((Node *) expr)` (clauses.c).
-    pub fn contain_volatile_functions(expr: &Expr) -> bool
+    pub fn contain_volatile_functions(expr: &Expr<'static>) -> bool
 );
 seam_core::seam!(
     /// `expression_returns_set((Node *) expr)` (nodeFuncs.c).
-    pub fn expression_returns_set(expr: &Expr) -> bool
+    pub fn expression_returns_set(expr: &Expr<'static>) -> bool
 );
 seam_core::seam!(
     /// `contain_agg_clause((Node *) expr)` (clauses.c).
-    pub fn contain_agg_clause(expr: &Expr) -> bool
+    pub fn contain_agg_clause(expr: &Expr<'static>) -> bool
 );
 seam_core::seam!(
     /// `contain_window_function((Node *) expr)` (clauses.c).
-    pub fn contain_window_function(expr: &Expr) -> bool
+    pub fn contain_window_function(expr: &Expr<'static>) -> bool
 );
 seam_core::seam!(
     /// `is_parallel_safe(root, (Node *) expr)` (clauses.c).
-    pub fn is_parallel_safe(root: &PlannerInfo, expr: &Expr) -> bool
+    pub fn is_parallel_safe(root: &PlannerInfo, expr: &Expr<'static>) -> bool
 );
 seam_core::seam!(
     /// `pull_var_clause((Node *) node, flags)` (var.c) — the Vars/quasi-Vars in
     /// `node`, per the `PVC_*` flags.
-    pub fn pull_var_clause(node: &Expr, flags: i32) -> Vec<Expr>
+    pub fn pull_var_clause(node: &Expr<'static>, flags: i32) -> Vec<Expr<'static>>
 );
 seam_core::seam!(
     /// `pull_var_clause` over a list of expressions (the C
@@ -95,16 +95,16 @@ seam_core::seam!(
     /// (C passes the `List *` by pointer); a by-value `Vec<Expr>` would force the
     /// caller to `.to_vec()`, whose shallow `Expr::clone` panics on an `Aggref`
     /// tlist element (the derived-clone guard) even though the seam only reads.
-    pub fn pull_var_clause_list(nodes: &[Expr], flags: i32) -> Vec<Expr>
+    pub fn pull_var_clause_list(nodes: &[Expr<'static>], flags: i32) -> Vec<Expr<'static>>
 );
 seam_core::seam!(
     /// `pull_varnos(root, (Node *) expr)` (var.c) — the relids referenced in
     /// `expr`.
-    pub fn pull_varnos(root: &PlannerInfo, expr: &Expr) -> Relids
+    pub fn pull_varnos(root: &PlannerInfo, expr: &Expr<'static>) -> Relids
 );
 seam_core::seam!(
     /// `remove_nulling_relids((Node *) node, removable, except)` (var.c).
-    pub fn remove_nulling_relids(node: Expr, removable: Relids, except: Relids) -> Expr
+    pub fn remove_nulling_relids(node: Expr<'static>, removable: Relids, except: Relids) -> Expr<'static>
 );
 
 /* ---- appendrel attr translation (appendinfo.c) -------------------- */
@@ -117,19 +117,19 @@ seam_core::seam!(
     pub fn adjust_appendrel_attrs<'mcx>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        node: Expr,
+        node: Expr<'static>,
         appinfos: Vec<RelId>,
-    ) -> PgResult<Expr>
+    ) -> PgResult<Expr<'static>>
 );
 seam_core::seam!(
     /// `adjust_appendrel_attrs_multilevel(root, (Node *) node, child_rel,
     /// top_parent)` (appendinfo.c) — multi-level Var translation.
     pub fn adjust_appendrel_attrs_multilevel(
         root: &mut PlannerInfo,
-        node: Expr,
+        node: Expr<'static>,
         child_rel: RelId,
         top_parent: Option<RelId>,
-    ) -> PgResult<Expr>
+    ) -> PgResult<Expr<'static>>
 );
 seam_core::seam!(
     /// `(List *) adjust_appendrel_attrs_multilevel(root, (Node *) restrictlist,
@@ -162,7 +162,7 @@ seam_core::seam!(
     pub fn make_restrictinfo(
         mcx: mcx::Mcx<'_>,
         root: &mut PlannerInfo,
-        clause: Expr,
+        clause: Expr<'static>,
         is_pushed_down: bool,
         has_clone: bool,
         is_clone: bool,
@@ -182,8 +182,8 @@ seam_core::seam!(
         root: &mut PlannerInfo,
         opno: Oid,
         collation: Oid,
-        item1: Expr,
-        item2: Expr,
+        item1: Expr<'static>,
+        item2: Expr<'static>,
         qualscope: Relids,
         security_level: Index,
     ) -> PgResult<RinfoId>
@@ -198,8 +198,8 @@ seam_core::seam!(
         root: &mut PlannerInfo,
         opno: Oid,
         collation: Oid,
-        item1: Expr,
-        item2: Expr,
+        item1: Expr<'static>,
+        item2: Expr<'static>,
         qualscope: Relids,
         security_level: Index,
         both_const: bool,
@@ -217,7 +217,7 @@ seam_core::seam!(
     /// `add_vars_to_targetlist(root, vars, where_needed)` (initsplan.c).
     pub fn add_vars_to_targetlist(
         root: &mut PlannerInfo,
-        vars: Vec<Expr>,
+        vars: Vec<Expr<'static>>,
         where_needed: Relids,
     ) -> PgResult<()>
 );
@@ -225,7 +225,7 @@ seam_core::seam!(
     /// `add_vars_to_attr_needed(root, vars, where_needed)` (initsplan.c).
     pub fn add_vars_to_attr_needed(
         root: &mut PlannerInfo,
-        vars: Vec<Expr>,
+        vars: Vec<Expr<'static>>,
         where_needed: Relids,
     ) -> PgResult<()>
 );
@@ -243,12 +243,12 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `makeBoolConst(value, isnull)` (makefuncs.c) — a boolean `Const`.
-    pub fn make_bool_const(value: bool, isnull: bool) -> Expr
+    pub fn make_bool_const(value: bool, isnull: bool) -> Expr<'static>
 );
 seam_core::seam!(
     /// Build the `X IS NOT NULL` `NullTest` over `arg` (the conversion in
     /// `process_equivalence`; `argisrow=false`, `location=-1`).
-    pub fn make_is_not_null(arg: Expr) -> Expr
+    pub fn make_is_not_null(arg: Expr<'static>) -> Expr<'static>
 );
 
 /* ---- TargetEntry inspection (for add_setop_child_rel_equivalences) - */
@@ -259,5 +259,5 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// Read `tle->expr` for a TargetEntry node handle (as a value `Expr`).
-    pub fn target_entry_expr(root: &PlannerInfo, tle: NodeId) -> Expr
+    pub fn target_entry_expr(root: &PlannerInfo, tle: NodeId) -> Expr<'static>
 );

@@ -37,7 +37,7 @@ pub struct Plan<'mcx> {
     /// (`None` = the C `NIL`).
     pub targetlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     /// `List *qual` — implicitly-ANDed qual conditions (`None` = the C `NIL`).
-    pub qual: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    pub qual: Option<PgVec<'mcx, crate::primnodes::Expr<'mcx>>>,
     /// `Cardinality plan_rows` — estimated number of rows this node emits.
     pub plan_rows: f64,
     /// `bool parallel_aware` — engage parallel-aware logic?
@@ -187,13 +187,13 @@ pub struct IndexScan<'mcx> {
     /// `Oid indexid` — OID of index to scan.
     pub indexid: types_core::Oid,
     /// `List *indexqual` — list of index quals (usually OpExprs).
-    pub indexqual: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    pub indexqual: Option<PgVec<'mcx, crate::primnodes::Expr<'mcx>>>,
     /// `List *indexqualorig` — the same in original form.
-    pub indexqualorig: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    pub indexqualorig: Option<PgVec<'mcx, crate::primnodes::Expr<'mcx>>>,
     /// `List *indexorderby` — list of index ORDER BY exprs.
-    pub indexorderby: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    pub indexorderby: Option<PgVec<'mcx, crate::primnodes::Expr<'mcx>>>,
     /// `List *indexorderbyorig` — the same in original form.
-    pub indexorderbyorig: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    pub indexorderbyorig: Option<PgVec<'mcx, crate::primnodes::Expr<'mcx>>>,
     /// `List *indexorderbyops` — OIDs of sort ops for ORDER BY exprs.
     pub indexorderbyops: Option<PgVec<'mcx, types_core::Oid>>,
     /// `ScanDirection indexorderdir` — forward or backward or don't care.
@@ -204,8 +204,8 @@ impl IndexScan<'_> {
     /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
     /// allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<IndexScan<'b>> {
-        let clone_exprs = |src: &Option<PgVec<'_, crate::primnodes::Expr>>|
-            -> PgResult<Option<PgVec<'b, crate::primnodes::Expr>>> {
+        let clone_exprs = |src: &Option<PgVec<'_, crate::primnodes::Expr<'_>>>|
+            -> PgResult<Option<PgVec<'b, crate::primnodes::Expr<'b>>>> {
             match src {
                 Some(list) => {
                     let mut out = vec_with_capacity_in(mcx, list.len())?;
@@ -304,7 +304,7 @@ pub struct TidScan<'mcx> {
     pub scan: Scan<'mcx>,
     /// `List *tidquals` — qual(s) involving CTID = something, or CTID = ANY
     /// (...), or CURRENT OF cursor. `None` = the C `NIL`.
-    pub tidquals: Option<PgVec<'mcx, crate::primnodes::Expr>>,
+    pub tidquals: Option<PgVec<'mcx, crate::primnodes::Expr<'mcx>>>,
 }
 
 impl TidScan<'_> {
@@ -433,7 +433,7 @@ pub struct PlannedStmt<'mcx> {
     /// copied by `standard_planner`). `InitPlan` installs this into
     /// `es_part_prune_infos`. Empty = the C `NIL`. The carrier is `'static`
     /// owned plan data, so it is a plain `Vec` (not arena-bound).
-    pub partPruneInfos: alloc::vec::Vec<crate::partprune_carrier::PartitionPruneInfo>,
+    pub partPruneInfos: alloc::vec::Vec<crate::partprune_carrier::PartitionPruneInfo<'mcx>>,
     /// `List *appendRelations` — flattened `AppendRelInfo` carriers
     /// (`glob->appendRelations`, copied by `standard_planner`). The deparser
     /// (`ruleutils.c` `get_variable`) builds a child-relid-indexed array from
@@ -629,7 +629,13 @@ impl PlannedStmt<'_> {
             transientPlan: self.transientPlan,
             dependsOnRole: self.dependsOnRole,
             invalItems,
-            partPruneInfos: self.partPruneInfos.clone(),
+            partPruneInfos: {
+                let mut out = alloc::vec::Vec::with_capacity(self.partPruneInfos.len());
+                for p in self.partPruneInfos.iter() {
+                    out.push(p.clone_in(mcx)?);
+                }
+                out
+            },
             appendRelations: self.appendRelations.clone(),
         })
     }

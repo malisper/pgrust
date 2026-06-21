@@ -37,7 +37,7 @@ pub struct Result<'mcx> {
     pub plan: crate::nodeindexscan::Plan<'mcx>,
     /// `Node *resconstantqual` — the constant ("one-time") qualification, an
     /// implicitly-ANDed list of clauses (`None` = the C `NULL`).
-    pub resconstantqual: Option<mcx::PgVec<'mcx, Expr>>,
+    pub resconstantqual: Option<mcx::PgVec<'mcx, Expr<'mcx>>>,
 }
 
 impl Result<'_> {

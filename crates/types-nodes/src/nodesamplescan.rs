@@ -35,9 +35,9 @@ pub struct TableSampleClause<'mcx> {
     /// `Oid tsmhandler` — OID of the tablesample handler function.
     pub tsmhandler: Oid,
     /// `List *args` — tablesample argument expression(s). `None` = the C `NIL`.
-    pub args: Option<PgVec<'mcx, Expr>>,
+    pub args: Option<PgVec<'mcx, Expr<'mcx>>>,
     /// `Expr *repeatable` — REPEATABLE expression, or `None` if none.
-    pub repeatable: Option<Box<Expr>>,
+    pub repeatable: Option<Box<Expr<'mcx>>>,
 }
 
 impl Default for TableSampleClause<'_> {
@@ -71,7 +71,10 @@ impl TableSampleClause<'_> {
             type_: self.type_,
             tsmhandler: self.tsmhandler,
             args,
-            repeatable: self.repeatable.clone(),
+            repeatable: match &self.repeatable {
+                Some(r) => Some(alloc::boxed::Box::new(r.clone_in(mcx)?)),
+                None => None,
+            },
         })
     }
 }

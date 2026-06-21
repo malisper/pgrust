@@ -19,8 +19,8 @@ seam_core::seam!(
     /// `Err` carries the catalog-lookup `ereport(ERROR)` surface (the negator
     /// resolution reads `pg_operator`).
     pub fn negate_clause(
-        node: types_nodes::primnodes::Expr,
-    ) -> types_error::PgResult<types_nodes::primnodes::Expr>
+        node: types_nodes::primnodes::Expr<'static>,
+    ) -> types_error::PgResult<types_nodes::primnodes::Expr<'static>>
 );
 
 seam_core::seam!(
@@ -30,7 +30,7 @@ seam_core::seam!(
     /// the catalog-lookup `ereport(ERROR)` surface.
     pub fn canonicalize_qual<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        qual: Option<types_nodes::primnodes::Expr>,
+        qual: Option<types_nodes::primnodes::Expr<'static>>,
         is_check: bool,
-    ) -> types_error::PgResult<Option<types_nodes::primnodes::Expr>>
+    ) -> types_error::PgResult<Option<types_nodes::primnodes::Expr<'static>>>
 );

@@ -89,7 +89,7 @@ pub struct Memoize<'mcx> {
     /// `Oid *collations` — collations for each key.
     pub collations: PgVec<'mcx, Oid>,
     /// `List *param_exprs` — cache keys as exprs containing parameters.
-    pub param_exprs: PgVec<'mcx, Expr>,
+    pub param_exprs: PgVec<'mcx, Expr<'mcx>>,
     /// `bool singlerow` — mark the cache entry complete after the first tuple.
     pub singlerow: bool,
     /// `bool binary_mode` — compare cache keys bit-by-bit vs hash equality ops.

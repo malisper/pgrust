@@ -639,7 +639,7 @@ pub struct PlannerGlobal {
     /// `List *partPruneInfos` — `PartitionPruneInfo` plan-data carriers
     /// registered by `set_plan_references`' `register_partpruneinfo`; the final
     /// list is copied onto `PlannedStmt.partPruneInfos`.
-    pub part_prune_infos: Vec<types_nodes::partprune_carrier::PartitionPruneInfo>,
+    pub part_prune_infos: Vec<types_nodes::partprune_carrier::PartitionPruneInfo<'static>>,
     /// `List *relationOids`.
     pub relation_oids: Vec<Oid>,
     /// `List *invalItems` — `PlanInvalItem`s recorded by
@@ -2052,7 +2052,7 @@ pub struct PlaceHolderInfo {
     /// into base/join rel targetlists. The full node is carried here; the
     /// `ph_var_phexpr`/`ph_var_phrels` handle/relids mirrors below are kept for
     /// the existing join-path consumers (additive).
-    pub ph_var: types_nodes::primnodes::PlaceHolderVar,
+    pub ph_var: types_nodes::primnodes::PlaceHolderVar<'static>,
     /// `ph_var->phexpr` — the represented expression (an expr `Node *`). The
     /// `ph_var` is a `PlaceHolderVar` tree; the join-path layer only reads its
     /// `phexpr`, so just that expr handle is carried.
@@ -2475,7 +2475,7 @@ pub struct PlannerInfo {
     /// indexes this list; `set_plan_references` moves the entries into
     /// `glob->part_prune_infos`.
     #[allow(non_snake_case)]
-    pub partPruneInfos: Vec<types_nodes::partprune_carrier::PartitionPruneInfo>,
+    pub partPruneInfos: Vec<types_nodes::partprune_carrier::PartitionPruneInfo<'static>>,
 
     /* Arenas (owned-tree arena + handle model — not in the C struct). */
     /// Backing store for every [`RelOptInfo`]; a [`RelId`] indexes here.
@@ -2545,7 +2545,7 @@ pub enum ArenaNode {
     /// Dereferencing it via `node`/`node_mut`/… panics.
     Reserved,
     /// An expression node (the original, sole arena payload).
-    Expr(Expr),
+    Expr(Expr<'static>),
     /// A `TargetEntry` node (lifetime-free; child `expr` is an arena handle).
     TargetEntry(TargetEntryNode),
     /// A `ForeignKeyOptInfo` node — `root->fkey_list` stores these as `Node *`
@@ -2714,7 +2714,7 @@ pub struct NestLoopParamNode {
     /// `int paramno` — number of the PARAM_EXEC Param to set.
     pub paramno: i32,
     /// `Var *paramval` — outer-relation Var (or PlaceHolderVar) to assign.
-    pub paramval: types_nodes::primnodes::Expr,
+    pub paramval: types_nodes::primnodes::Expr<'static>,
 }
 
 /// `PlannerParamItem` (nodes/pathnodes.h):
@@ -2964,7 +2964,7 @@ impl PlannerInfo {
     /// opaque `Node *` handle. Node-walking seam owners (var.c / clauses.c)
     /// call this to obtain `&Expr` and recurse.
     #[inline]
-    pub fn node(&self, id: NodeId) -> &Expr {
+    pub fn node(&self, id: NodeId) -> &Expr<'static> {
         match &self.node_arena[id.index()] {
             ArenaNode::Expr(e) => e,
             _ => panic!(
@@ -2975,7 +2975,7 @@ impl PlannerInfo {
     }
     /// Resolve a [`NodeId`] for mutation.
     #[inline]
-    pub fn node_mut(&mut self, id: NodeId) -> &mut Expr {
+    pub fn node_mut(&mut self, id: NodeId) -> &mut Expr<'static> {
         match &mut self.node_arena[id.index()] {
             ArenaNode::Expr(e) => e,
             _ => panic!(
@@ -3284,7 +3284,7 @@ impl PlannerInfo {
     /// stored in the W0''-added `exprs`/`clause`/… fields, giving every such
     /// field a real backing node that the walking seams can dereference.
     #[inline]
-    pub fn alloc_node(&mut self, node: Expr) -> NodeId {
+    pub fn alloc_node(&mut self, node: Expr<'static>) -> NodeId {
         let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::Expr(node));
         id

@@ -513,8 +513,8 @@ fn emit_constructors(
                 "    /// Wrap an already-built `Expr` value as a `Node`. Allocates the\n    \
                  /// opaque representation in `mcx` (fallible).\n    \
                  #[inline]\n    \
-                 pub fn mk_expr(mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr) -> types_error::PgResult<crate::nodes::Node<'mcx>> {\n        \
-                 crate::nodes::Node::new(mcx, crate::node_payload_gen::NodePayload_Expr(payload, core::marker::PhantomData))\n    }\n",
+                 pub fn mk_expr(mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {\n        \
+                 crate::nodes::Node::new(mcx, crate::node_payload_gen::NodePayload_Expr(payload))\n    }\n",
             );
         }
     }
@@ -562,7 +562,7 @@ fn emit_constructors(
              /// through the opaque `Expr` payload, allocating in `mcx` (fallible).\n    \
              #[inline]\n    \
              pub fn mk_{snake}(mcx: mcx::Mcx<'mcx>, payload: {payload_ty}) -> types_error::PgResult<crate::nodes::Node<'mcx>> {{\n        \
-             crate::nodes::Node::new(mcx, crate::node_payload_gen::NodePayload_Expr(crate::primnodes::Expr::{ident}(payload), core::marker::PhantomData))\n    }}\n",
+             crate::nodes::Node::new(mcx, crate::node_payload_gen::NodePayload_Expr(crate::primnodes::Expr::{ident}(payload)))\n    }}\n",
             ident = v.ident,
             snake = to_snake_case(&v.ident),
         ));
@@ -592,9 +592,9 @@ fn parse_node_enum(src: &str) -> Vec<EnumVariant> {
     parse_rust_enum_body(src, "pub enum Node<'mcx> {")
 }
 
-/// Parse `pub enum Expr { Ident(Payload), ... }` from `src/primnodes.rs`.
+/// Parse `pub enum Expr<'mcx> { Ident(Payload), ... }` from `src/primnodes.rs`.
 fn parse_expr_enum(src: &str) -> Vec<EnumVariant> {
-    parse_rust_enum_body(src, "pub enum Expr {")
+    parse_rust_enum_body(src, "pub enum Expr<'mcx> {")
 }
 
 /// Shared one-variant-per-line enum-body parser. Finds the opening header line,
@@ -825,7 +825,7 @@ fn emit_node_accessors(
 
     // `impl Expr { expr_tag }` — exhaustive value match to the NodeTag.
     s.push_str(
-        "impl Expr {\n    \
+        "impl<'mcx> Expr<'mcx> {\n    \
          /// `nodeTag(expr)` — the [`crate::nodes::NodeTag`] discriminant of this\n    \
          /// `Expr` value, matching `nodetags.h` (and the `T_*` arm a consumer\n    \
          /// migrates onto via [`etag`]). The Expr-side mirror of\n    \
@@ -1032,7 +1032,7 @@ fn emit_expr_accessors(
          // `Expr` variant, as enum matches over the CURRENT hand-written enum.\n\
          // Names hand-written in primnodes.rs are skipped (reconcile, don't\n\
          // collide). This is the Expr-side mirror of `impl Node`'s accessors.\n\
-         impl Expr {\n",
+         impl<'mcx> Expr<'mcx> {\n",
     );
 
     let mut emitted: std::collections::BTreeSet<String> = existing.clone();

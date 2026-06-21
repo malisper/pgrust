@@ -28,30 +28,30 @@ use types_pathnodes::{PlannerInfo, RelId, Relids};
 
 seam_core::seam!(
     /// `pull_varnos(root, (Node *) expr)` (var.c) over an arena `&Expr`.
-    pub fn pull_varnos_expr(root: &PlannerInfo, expr: &Expr) -> Relids
+    pub fn pull_varnos_expr(root: &PlannerInfo, expr: &Expr<'static>) -> Relids
 );
 seam_core::seam!(
     /// `pull_var_clause((Node *) expr, flags)` (var.c) over an arena `&Expr`,
     /// returning the collected Var/PlaceHolderVar/Aggref/etc. nodes as owned
     /// `Expr` values.
-    pub fn pull_var_clause_expr(expr: &Expr, flags: i32) -> Vec<Expr>
+    pub fn pull_var_clause_expr(expr: &Expr<'static>, flags: i32) -> Vec<Expr<'static>>
 );
 seam_core::seam!(
     /// `contain_leaked_vars((Node *) clause)` (clauses.c).
-    pub fn contain_leaked_vars(clause: &Expr) -> PgResult<bool>
+    pub fn contain_leaked_vars(clause: &Expr<'static>) -> PgResult<bool>
 );
 seam_core::seam!(
     /// `exprType((Node *) expr)` (nodeFuncs.c) over an arena `&Expr`.
-    pub fn expr_type(expr: &Expr) -> Oid
+    pub fn expr_type(expr: &Expr<'static>) -> Oid
 );
 seam_core::seam!(
     /// `exprTypmod((Node *) expr)` (nodeFuncs.c) over an arena `&Expr`.
-    pub fn expr_typmod(expr: &Expr) -> i32
+    pub fn expr_typmod(expr: &Expr<'static>) -> i32
 );
 seam_core::seam!(
     /// `cost_qual_eval_node(&cost, (Node *) expr, root)` (costsize.c) for a
     /// single expression; returns `(startup, per_tuple)`.
-    pub fn cost_qual_eval_node_expr(root: &PlannerInfo, expr: &Expr) -> (f64, f64)
+    pub fn cost_qual_eval_node_expr(root: &PlannerInfo, expr: &Expr<'static>) -> (f64, f64)
 );
 seam_core::seam!(
     /// `clamp_width_est(tuple_width)` (costsize.c): clamp a 64-bit width estimate
@@ -85,9 +85,9 @@ seam_core::seam!(
 seam_core::seam!(
     /// `add_vars_to_targetlist(root, vars, where_needed)` (var.c). `vars` is a
     /// list of Var/PlaceHolderVar nodes; `where_needed` the relids needing them.
-    pub fn add_vars_to_targetlist(root: &mut PlannerInfo, vars: Vec<Expr>, where_needed: Relids) -> PgResult<()>
+    pub fn add_vars_to_targetlist(root: &mut PlannerInfo, vars: Vec<Expr<'static>>, where_needed: Relids) -> PgResult<()>
 );
 seam_core::seam!(
     /// `add_vars_to_attr_needed(root, vars, where_needed)` (var.c).
-    pub fn add_vars_to_attr_needed(root: &mut PlannerInfo, vars: Vec<Expr>, where_needed: Relids) -> PgResult<()>
+    pub fn add_vars_to_attr_needed(root: &mut PlannerInfo, vars: Vec<Expr<'static>>, where_needed: Relids) -> PgResult<()>
 );

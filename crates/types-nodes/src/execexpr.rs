@@ -715,7 +715,7 @@ pub struct JsonPathVariableState {
 #[derive(Debug)]
 pub struct JsonExprState<'mcx> {
     /// `JsonExpr *jsexpr` — original expression node (owned clone).
-    pub jsexpr: crate::primnodes::JsonExpr,
+    pub jsexpr: crate::primnodes::JsonExpr<'mcx>,
     /// `NullableDatum formatted_expr` — the cell `formatted_expr` evaluates
     /// into; `ExecEvalJsonExprPath` reads its value as the document item.
     pub formatted_expr_cell: ResultCellId,
@@ -1222,7 +1222,7 @@ pub enum ExprEvalStepData<'mcx> {
         finfo: Option<PgBox<'mcx, FmgrInfo>>,
         fcinfo_data: Option<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>>,
         /// `ScalarArrayOpExpr *saop` — original node.
-        saop: Option<PgBox<'mcx, ScalarArrayOpExpr>>,
+        saop: Option<PgBox<'mcx, ScalarArrayOpExpr<'mcx>>>,
         /// The scalar-arg cell: `&fcinfo->args[0].value` /
         /// `&fcinfo->args[0].isnull` — execExpr.c (hashed path) recurses the
         /// scalar directly into `&fcinfo->args[0]`; the array side is
@@ -1239,7 +1239,7 @@ pub enum ExprEvalStepData<'mcx> {
     /// args) plus the original [`XmlExpr`] node it dispatches on.
     XmlExpr {
         /// `XmlExpr *xexpr` — original node, cloned into the step arena.
-        xexpr: crate::primnodes::XmlExpr,
+        xexpr: crate::primnodes::XmlExpr<'mcx>,
         /// Result cells the named-arg (`xexpr.named_args`) sub-steps write.
         named_arg_cells: Option<PgVec<'mcx, ResultCellId>>,
         /// `exprType()` of each named-arg expression (for XMLFOREST/XMLELEMENT).
@@ -1606,7 +1606,7 @@ pub struct ExprState<'mcx> {
     /// `ExprStateEvalFunc evalfunc` — function that evaluates the expression.
     pub evalfunc: Option<ExprStateEvalFunc>,
     /// `Expr *expr` — original expression tree (debugging only).
-    pub expr: Option<PgBox<'mcx, Expr>>,
+    pub expr: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `void *evalfunc_private` — private interpreter scratch (opaque address).
     pub evalfunc_private: usize,
     /// `int steps_len` — number of steps currently (compile-time only).
@@ -1674,7 +1674,7 @@ pub struct ExprState<'mcx> {
     /// not affect `numaggs`/`numtrans` (the owner dedups by `aggno`). `None`
     /// (the C NIL `aggstate->aggs` before any discovery) for every non-Agg
     /// expression.
-    pub found_aggs: Option<PgVec<'mcx, crate::primnodes::Aggref>>,
+    pub found_aggs: Option<PgVec<'mcx, crate::primnodes::Aggref<'mcx>>>,
 
     /// `winstate->funcs = lappend(winstate->funcs, wfstate)` (execExpr.c
     /// T_WindowFunc) — the discovery channel for `WindowFuncExprState`s, the
@@ -1812,7 +1812,7 @@ pub enum ExprDoneCond {
 #[derive(Debug, Default)]
 pub struct SetExprState<'mcx> {
     /// `Expr *expr` — the expression plan node (`FuncExpr`/`OpExpr`).
-    pub expr: Option<PgBox<'mcx, Expr>>,
+    pub expr: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `List *args` — `ExprState`s for the argument expressions.
     pub args: Option<PgVec<'mcx, ExprState<'mcx>>>,
     /// `ExprState *elidedFuncState` — for an inlined ROWS FROM function, the

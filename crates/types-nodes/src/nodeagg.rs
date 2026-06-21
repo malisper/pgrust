@@ -134,7 +134,7 @@ pub struct Aggref<'mcx> {
     /// `List *aggargtypes` — type Oids of direct and aggregated args.
     pub aggargtypes: Option<PgVec<'mcx, Oid>>,
     /// `List *aggdirectargs` — direct arguments, if an ordered-set agg.
-    pub aggdirectargs: Option<PgVec<'mcx, PgBox<'mcx, Expr>>>,
+    pub aggdirectargs: Option<PgVec<'mcx, PgBox<'mcx, Expr<'mcx>>>>,
     /// `List *args` — aggregated arguments and sort expressions (TargetEntry).
     pub args: Option<PgVec<'mcx, PgBox<'mcx, TargetEntry<'mcx>>>>,
     /// `List *aggorder` — ORDER BY (list of SortGroupClause).
@@ -142,7 +142,7 @@ pub struct Aggref<'mcx> {
     /// `List *aggdistinct` — DISTINCT (list of SortGroupClause).
     pub aggdistinct: Option<PgVec<'mcx, SortGroupClauseAgg>>,
     /// `Expr *aggfilter` — FILTER expression, if any.
-    pub aggfilter: Option<PgBox<'mcx, Expr>>,
+    pub aggfilter: Option<PgBox<'mcx, Expr<'mcx>>>,
     /// `bool aggstar` — true if argument list was really `*`.
     pub aggstar: bool,
     /// `bool aggvariadic` — true if variadic arguments combined into array.
@@ -176,7 +176,7 @@ impl<'mcx> Aggref<'mcx> {
     /// them: it deep-copies the args / direct-args / filter into `mcx` and maps
     /// the order/distinct SortGroupClauses field-for-field.
     pub fn from_primnode(
-        src: &crate::primnodes::Aggref,
+        src: &crate::primnodes::Aggref<'mcx>,
         mcx: Mcx<'mcx>,
     ) -> PgResult<Aggref<'mcx>> {
         // List *aggargtypes (Oid list).
@@ -259,7 +259,7 @@ impl<'mcx> Aggref<'mcx> {
             }
         };
         let clone_exprs =
-            |v: &Option<PgVec<'_, PgBox<'_, Expr>>>| -> PgResult<Option<PgVec<'b, PgBox<'b, Expr>>>> {
+            |v: &Option<PgVec<'_, PgBox<'_, Expr<'_>>>>| -> PgResult<Option<PgVec<'b, PgBox<'b, Expr<'b>>>>> {
                 match v {
                     Some(v) => {
                         let mut out = vec_with_capacity_in(mcx, v.len())?;

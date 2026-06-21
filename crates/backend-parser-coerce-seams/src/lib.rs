@@ -108,9 +108,9 @@ seam_core::seam!(
     /// error if it cannot be. Returns the (possibly coerced) expression.
     pub fn coerce_to_boolean<'mcx>(
         pstate: &mut ParseState<'mcx>,
-        node: Expr,
+        node: Expr<'static>,
         construct_name: &str,
-    ) -> PgResult<Expr>
+    ) -> PgResult<Expr<'static>>
 );
 
 seam_core::seam!(
@@ -119,10 +119,10 @@ seam_core::seam!(
     /// construct.
     pub fn coerce_to_specific_type<'mcx>(
         pstate: &mut ParseState<'mcx>,
-        node: Expr,
+        node: Expr<'static>,
         target_type_id: Oid,
         construct_name: &str,
-    ) -> PgResult<Expr>
+    ) -> PgResult<Expr<'static>>
 );
 
 seam_core::seam!(
@@ -132,10 +132,10 @@ seam_core::seam!(
     /// for error text.
     pub fn coerce_to_common_type<'mcx>(
         pstate: &mut ParseState<'mcx>,
-        node: Expr,
+        node: Expr<'static>,
         target_type_id: Oid,
         context: &str,
-    ) -> PgResult<Expr>
+    ) -> PgResult<Expr<'static>>
 );
 
 seam_core::seam!(
@@ -145,10 +145,10 @@ seam_core::seam!(
     /// already-selected common type with no parse state for error location.
     /// Behaves exactly like `coerce_to_common_type` with `pstate == NULL`.
     pub fn coerce_to_common_type_no_pstate<'mcx>(
-        node: Expr,
+        node: Expr<'static>,
         target_type_id: Oid,
         context: &str,
-    ) -> PgResult<Expr>
+    ) -> PgResult<Expr<'static>>
 );
 
 seam_core::seam!(
@@ -160,7 +160,7 @@ seam_core::seam!(
     /// error — the `transformAExprIn` ScalarArrayOp probe).
     pub fn select_common_type<'mcx>(
         pstate: &mut ParseState<'mcx>,
-        exprs: &[Expr],
+        exprs: &[Expr<'static>],
         context: Option<&str>,
     ) -> PgResult<Oid>
 );
@@ -170,7 +170,7 @@ seam_core::seam!(
     /// selected common type actually works for every expression (the
     /// `transformAExprIn` ScalarArrayOp probe). Returns `false` when the type is
     /// unusable (fall through to the boolean tree), without raising.
-    pub fn verify_common_type(common_type: Oid, exprs: &[Expr]) -> PgResult<bool>
+    pub fn verify_common_type(common_type: Oid, exprs: &[Expr<'static>]) -> PgResult<bool>
 );
 
 seam_core::seam!(
@@ -180,14 +180,14 @@ seam_core::seam!(
     /// possible (the C NULL return — the caller raises the cannot-cast error).
     pub fn coerce_to_target_type<'mcx>(
         pstate: &mut ParseState<'mcx>,
-        expr: Expr,
+        expr: Expr<'static>,
         exprtype: Oid,
         targettype: Oid,
         targettypmod: i32,
         ccontext: CoercionContext,
         cformat: CoercionForm,
         location: i32,
-    ) -> PgResult<Option<Expr>>
+    ) -> PgResult<Option<Expr<'static>>>
 );
 
 seam_core::seam!(
@@ -214,14 +214,14 @@ seam_core::seam!(
     /// `Err` carries that `ereport(ERROR)` surface.
     pub fn coerce_type<'mcx>(
         pstate: Option<&mut ParseState<'mcx>>,
-        node: Expr,
+        node: Expr<'static>,
         input_type_id: Oid,
         target_type_id: Oid,
         target_type_mod: i32,
         ccontext: CoercionContext,
         cformat: CoercionForm,
         location: i32,
-    ) -> PgResult<Expr>
+    ) -> PgResult<Expr<'static>>
 );
 
 seam_core::seam!(
@@ -242,7 +242,7 @@ seam_core::seam!(
     /// common typmod across `exprs` once they share `common_type` (the
     /// `unify_hypothetical_args` companion to `select_common_type`). The C
     /// `pstate` argument is unused by the computation, so it is dropped.
-    pub fn select_common_typmod(exprs: &[Expr], common_type: Oid) -> PgResult<i32>
+    pub fn select_common_typmod(exprs: &[Expr<'static>], common_type: Oid) -> PgResult<i32>
 );
 
 seam_core::seam!(
@@ -259,5 +259,5 @@ seam_core::seam!(
         collation: Oid,
         typlen: i32,
         typbyval: bool,
-    ) -> PgResult<types_nodes::primnodes::Expr>
+    ) -> PgResult<types_nodes::primnodes::Expr<'static>>
 );

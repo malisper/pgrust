@@ -67,7 +67,7 @@ pub enum ClauseListEntry {
     /// A `RestrictInfo` element (an index-qual RestrictInfo handle).
     Rinfo(RinfoId),
     /// A bare `Expr *` element (a partial-index predicate clause).
-    Bare(Expr),
+    Bare(Expr<'static>),
 }
 
 seam_core::seam!(
@@ -129,7 +129,7 @@ seam_core::seam!(
     pub fn clause_selectivity_node<'mcx>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        clause: &Expr,
+        clause: &Expr<'static>,
         var_relid: i32,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
@@ -171,7 +171,7 @@ seam_core::seam!(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         operatorid: Oid,
-        args: &[Expr],
+        args: &[Expr<'static>],
         inputcollid: Oid,
         var_relid: i32,
     ) -> PgResult<f64>
@@ -183,7 +183,7 @@ seam_core::seam!(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         operatorid: Oid,
-        args: &[Expr],
+        args: &[Expr<'static>],
         inputcollid: Oid,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
@@ -196,7 +196,7 @@ seam_core::seam!(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         funcid: Oid,
-        args: &[Expr],
+        args: &[Expr<'static>],
         inputcollid: Oid,
         is_join: bool,
         var_relid: i32,
@@ -210,7 +210,7 @@ seam_core::seam!(
     pub fn scalararraysel<'mcx>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        clause: &Expr,
+        clause: &Expr<'static>,
         is_join_clause: bool,
         var_relid: i32,
         jointype: JoinType,
@@ -222,7 +222,7 @@ seam_core::seam!(
     pub fn rowcomparesel<'mcx>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        clause: &Expr,
+        clause: &Expr<'static>,
         var_relid: i32,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
@@ -235,7 +235,7 @@ seam_core::seam!(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         nulltesttype: i32,
-        arg: &Expr,
+        arg: &Expr<'static>,
         var_relid: i32,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
@@ -249,7 +249,7 @@ seam_core::seam!(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         nulltesttype: i32,
-        var: &Expr,
+        var: &Expr<'static>,
         var_relid: i32,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
@@ -262,7 +262,7 @@ seam_core::seam!(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         booltesttype: i32,
-        arg: &Expr,
+        arg: &Expr<'static>,
         var_relid: i32,
         jointype: JoinType,
         sjinfo: Option<&SpecialJoinInfo>,
@@ -274,7 +274,7 @@ seam_core::seam!(
     pub fn boolvarsel<'mcx>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        arg: &Expr,
+        arg: &Expr<'static>,
         var_relid: i32,
     ) -> PgResult<f64>
 );
@@ -285,15 +285,15 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `NumRelids(root, clause)` (clauses.c): count of distinct rels in `clause`.
-    pub fn num_relids(root: &mut PlannerInfo, clause: &Expr) -> PgResult<i32>
+    pub fn num_relids(root: &mut PlannerInfo, clause: &Expr<'static>) -> PgResult<i32>
 );
 seam_core::seam!(
     /// `is_pseudo_constant_clause(clause)` (clauses.c).
-    pub fn is_pseudo_constant_clause(clause: &Expr) -> PgResult<bool>
+    pub fn is_pseudo_constant_clause(clause: &Expr<'static>) -> PgResult<bool>
 );
 seam_core::seam!(
     /// `is_pseudo_constant_clause_relids(clause, relids)` (clauses.c).
-    pub fn is_pseudo_constant_clause_relids(clause: &Expr, relids: &Relids) -> PgResult<bool>
+    pub fn is_pseudo_constant_clause_relids(clause: &Expr<'static>, relids: &Relids) -> PgResult<bool>
 );
 seam_core::seam!(
     /// `estimate_expression_value(root, node)` (clauses.c): fold a node to a
@@ -301,8 +301,8 @@ seam_core::seam!(
     pub fn estimate_expression_value<'mcx>(
         run: &PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        node: &Expr,
-    ) -> PgResult<Expr>
+        node: &Expr<'static>,
+    ) -> PgResult<Expr<'static>>
 );
 
 /* ======================================================================
@@ -366,10 +366,10 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `pull_varnos(root, (Node *) expr)` (var.c) for an inline `&Expr` operand.
-    pub fn pull_varnos_expr(root: &mut PlannerInfo, expr: &Expr) -> Relids
+    pub fn pull_varnos_expr(root: &mut PlannerInfo, expr: &Expr<'static>) -> Relids
 );
 seam_core::seam!(
     /// `contain_volatile_functions((Node *) expr)` (clauses.c) for an inline
     /// `&Expr` operand.
-    pub fn contain_volatile_functions_expr(expr: &Expr) -> bool
+    pub fn contain_volatile_functions_expr(expr: &Expr<'static>) -> bool
 );

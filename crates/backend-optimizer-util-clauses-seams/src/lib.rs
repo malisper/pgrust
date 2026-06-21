@@ -81,7 +81,7 @@ seam_core::seam!(
     /// like any other node. A pure structural predicate, so infallible.
     ///
     /// INWARD: installed by `backend-optimizer-util-clauses::init_seams`.
-    pub fn contain_subplans(clause: &[types_nodes::primnodes::Expr]) -> bool
+    pub fn contain_subplans(clause: &[types_nodes::primnodes::Expr<'static>]) -> bool
 );
 
 // ===========================================================================
@@ -112,7 +112,7 @@ seam_core::seam!(
         inputcollid: Oid,
         args: alloc::vec::Vec<(Datum<'mcx>, bool, Oid)>,
         rettype: Oid,
-        fn_expr: Option<&Expr>,
+        fn_expr: Option<&Expr<'static>>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );
 
@@ -125,11 +125,11 @@ seam_core::seam!(
     /// a fully initialized ExprState; the safe model rides this seam. `Err`
     /// carries the evaluation `ereport(ERROR)`. Owner: executor (execExpr).
     pub fn evaluate_expr_fallback(
-        expr: Expr,
+        expr: Expr<'static>,
         result_type: Oid,
         result_typmod: i32,
         result_collation: Oid,
-    ) -> PgResult<Expr>
+    ) -> PgResult<Expr<'static>>
 );
 
 seam_core::seam!(
@@ -158,10 +158,10 @@ seam_core::seam!(
         result_type: Oid,
         result_collid: Oid,
         input_collid: Oid,
-        args: &[Expr],
+        args: &[Expr<'static>],
         funcvariadic: bool,
         estimate: bool,
-    ) -> PgResult<Option<Expr>>
+    ) -> PgResult<Option<Expr<'static>>>
 );
 
 seam_core::seam!(
@@ -184,7 +184,7 @@ seam_core::seam!(
     /// (`Ok(Some)`), or `Ok(None)` to decline. Reached only for an inlinable
     /// SQL-language SRF after the gate ladder passes. `Err` carries the
     /// parse/analyze `ereport(ERROR)`. Owner: clauses.c SRF-inliner leg.
-    pub fn inline_set_returning_function_core(funcid: Oid) -> PgResult<Option<Expr>>
+    pub fn inline_set_returning_function_core(funcid: Oid) -> PgResult<Option<Expr<'static>>>
 );
 
 seam_core::seam!(
@@ -221,7 +221,7 @@ seam_core::seam!(
     /// `pg_proc.prorows`). `Err` carries the support function's
     /// `ereport(ERROR)`. Owner: `backend-optimizer-util-clauses` (the
     /// support-rows registry; per-function kernels register from their crates).
-    pub fn call_support_rows(prosupport: Oid, funcid: Oid, node: &Expr) -> PgResult<Option<f64>>
+    pub fn call_support_rows(prosupport: Oid, funcid: Oid, node: &Expr<'static>) -> PgResult<Option<f64>>
 );
 
 seam_core::seam!(
@@ -236,7 +236,7 @@ seam_core::seam!(
     pub fn call_support_cost(
         prosupport: Oid,
         funcid: Oid,
-        node: Option<&Expr>,
+        node: Option<&Expr<'static>>,
     ) -> PgResult<Option<(f64, f64)>>
 );
 
@@ -278,17 +278,17 @@ seam_core::seam!(
         result_type: Oid,
         result_collid: Oid,
         input_collid: Oid,
-        args: &[Expr],
+        args: &[Expr<'static>],
         funcvariadic: bool,
         estimate: bool,
-    ) -> PgResult<Option<Expr>>
+    ) -> PgResult<Option<Expr<'static>>>
 );
 
 seam_core::seam!(
     /// `fetch_function_defaults(funcid)` (clauses.c): read and parse the
     /// `pg_proc.proargdefaults` default-expression list. `Err` carries the
     /// catalog/parse `ereport(ERROR)`. Owner: pg_proc / parser.
-    pub fn fetch_function_defaults(funcid: Oid) -> PgResult<alloc::vec::Vec<Expr>>
+    pub fn fetch_function_defaults(funcid: Oid) -> PgResult<alloc::vec::Vec<Expr<'static>>>
 );
 
 seam_core::seam!(
@@ -299,11 +299,11 @@ seam_core::seam!(
     /// possibly-cast argument list. `Err` carries the type-resolution
     /// `ereport(ERROR)`. Owner: parser (parse_coerce).
     pub fn recheck_cast_function_args(
-        args: alloc::vec::Vec<Expr>,
+        args: alloc::vec::Vec<Expr<'static>>,
         result_type: Oid,
         proargtypes: alloc::vec::Vec<Oid>,
         prorettype: Oid,
-    ) -> PgResult<alloc::vec::Vec<Expr>>
+    ) -> PgResult<alloc::vec::Vec<Expr<'static>>>
 );
 
 seam_core::seam!(
@@ -334,7 +334,7 @@ seam_core::seam!(
     /// `pg_proc.prorows` / a support function. Used by
     /// `expression_returns_set_rows`. `Err` carries the catalog/support
     /// `ereport(ERROR)`. Owner: selfuncs / per-function support.
-    pub fn get_function_rows(funcid: Oid, node: &Expr) -> PgResult<f64>
+    pub fn get_function_rows(funcid: Oid, node: &Expr<'static>) -> PgResult<f64>
 );
 
 seam_core::seam!(
@@ -367,7 +367,7 @@ seam_core::seam!(
     /// jsonpath in a `JsonExpr` mutable (references `@`-vars / non-immutable
     /// items)? Used by `contain_mutable_functions`' `JsonExpr` arm. `Err`
     /// carries the catalog `ereport(ERROR)`. Owner: jsonpath adt.
-    pub fn jsp_is_mutable(jsonexpr: &Expr) -> PgResult<bool>
+    pub fn jsp_is_mutable(jsonexpr: &Expr<'static>) -> PgResult<bool>
 );
 
 seam_core::seam!(

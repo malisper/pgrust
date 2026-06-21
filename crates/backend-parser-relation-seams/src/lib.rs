@@ -36,7 +36,7 @@ seam_core::seam!(
         sublevels_up: i32,
         colname: &str,
         location: i32,
-    ) -> types_error::PgResult<Option<types_nodes::primnodes::Expr>>
+    ) -> types_error::PgResult<Option<types_nodes::primnodes::Expr<'static>>>
 );
 
 seam_core::seam!(
