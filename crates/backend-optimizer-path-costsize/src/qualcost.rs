@@ -12,12 +12,13 @@
 //! `RestrictInfo.eval_cost` memoization cache and `set_opfuncid`/`set_sa_opfuncid`
 //! (which fill `opfuncid` from `pg_operator.oprcode` if unset). Both are pure
 //! caches: the cost value computed is identical whether or not they are
-//! persisted. The `cost_qual_eval` wrapper already resolves each
-//! `RestrictInfo.clause` to its expression `NodeId` before calling the walker,
-//! so the `RestrictInfo` arm is never reached through this seam; and we read
-//! `opfuncid` (falling back to `get_opcode(opno)` exactly as `set_opfuncid`
-//! would) without writing it back. The numerically-identical result is a
-//! faithful behavioral port.
+//! persisted. The `RestrictInfo` arm is reached when `order_qual_clauses`
+//! costs a list of bare `RestrictInfo` nodes (createplan.c): we read the
+//! cached `eval_cost` when set and otherwise recompute it over `orclause`/
+//! `clause` (applying the `pseudoconstant` startup fold), without writing the
+//! cache back. Likewise we read `opfuncid` (falling back to `get_opcode(opno)`
+//! exactly as `set_opfuncid` would) without writing it back. The
+//! numerically-identical result is a faithful behavioral port.
 
 use types_core::primitive::{InvalidOid, Oid};
 use types_nodes::primnodes::Expr;
@@ -70,6 +71,39 @@ fn walk<'mcx>(mcx: mcx::Mcx<'mcx>, root: &PlannerInfo, node: &Expr, total: &mut 
     let cpu_operator_cost = crate::cpu_operator_cost();
 
     match node {
+        // RestrictInfo nodes contain an eval_cost field reserved for this
+        // routine's use, so that it's not necessary to evaluate the qual
+        // clause's cost more than once. If the clause's cost hasn't been
+        // computed yet, the field's startup value will contain -1. We read the
+        // cached value when present and otherwise recompute it; because `root`
+        // is borrowed immutably here we cannot persist the cache, but the
+        // recomputed value is numerically identical, so the result is faithful.
+        Expr::RestrictInfo(rref) => {
+            let rinfo = root.rinfo(types_pathnodes::RinfoId::from(*rref));
+            let eval = if rinfo.eval_cost.startup < 0.0 {
+                // For an OR clause, recurse into the marked-up tree so that we
+                // would set the eval_cost for contained RestrictInfos too.
+                let mut loc = QualCost {
+                    startup: 0.0,
+                    per_tuple: 0.0,
+                };
+                let inner = rinfo.orclause.unwrap_or(rinfo.clause);
+                walk(mcx, root, root.node(inner), &mut loc);
+                // If the RestrictInfo is marked pseudoconstant, it will be
+                // tested only once, so treat its cost as all startup cost.
+                if rinfo.pseudoconstant {
+                    loc.startup += loc.per_tuple;
+                    loc.per_tuple = 0.0;
+                }
+                loc
+            } else {
+                rinfo.eval_cost
+            };
+            total.startup += eval.startup;
+            total.per_tuple += eval.per_tuple;
+            // do NOT recurse into children
+            return;
+        }
         // For each operator or function node we charge pg_proc.procost
         // (cpu_operator_cost-scaled inside add_function_cost). Vars, Consts and
         // the boolean operators (AND/OR/NOT, i.e. BoolExpr) are charged zero and
