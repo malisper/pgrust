@@ -7111,6 +7111,7 @@ name = "backend-commands-explain"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-tupdesc",
+ "backend-access-transam-xact-seams",
  "backend-commands-createas-seams",
  "backend-commands-define-seams",
  "backend-commands-explain-format",
@@ -11407,6 +11408,7 @@ dependencies = [
  "backend-rewrite-rewritehandler",
  "backend-tcop-cmdtag",
  "backend-tcop-dest",
+ "backend-tcop-dest-seams",
  "backend-tcop-pquery",
  "backend-tcop-utility-seams",
  "backend-utils-adt-xml-libxml-seams",

@@ -1106,6 +1106,19 @@ pub fn ExplainNode<'es, 'p>(
         _ => {}
     }
 
+    // Show buffer/WAL usage (explain.c:2284-2288). Per-worker buffer/WAL prep
+    // (es->workers_state && verbose) needs PlanState.worker_instrument, which
+    // the trimmed PlanState does not carry; the single-process path emits the
+    // node's own accumulated counters.
+    if let Some(instr) = planstate.ps_head().instrument.as_deref() {
+        if es.buffers {
+            crate::show_buffer_usage(es, &instr.bufusage)?;
+        }
+        if es.wal {
+            crate::details::show_wal_usage(es, &instr.walusage)?;
+        }
+    }
+
     // If partition pruning was done during executor initialization, the number
     // of child plans we'll display below will be less than the number of
     // subplans specified in the plan. Emit "Subplans Removed" to make that less

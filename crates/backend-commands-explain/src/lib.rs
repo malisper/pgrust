@@ -37,6 +37,7 @@ use backend_commands_explain_seams::Bookkeeping;
 use backend_executor_execMain_seams as execmain_s;
 use backend_executor_instrument as instr;
 use backend_utils_time_snapmgr_seams as snapmgr_s;
+use backend_access_transam_xact_seams as xact_s;
 
 pub mod details;
 pub mod driver;
@@ -113,7 +114,7 @@ fn explain_buffer_accounting(bk: &mut Bookkeeping) -> PgResult<()> {
 /// `show_buffer_usage(es, usage)` (explain.c:4084) — show buffer usage details.
 /// Kept in sync with `peek_buffer_usage`. In text format only positive counters
 /// are shown; in structured formats every counter is emitted.
-fn show_buffer_usage(es: &mut ExplainState<'_>, usage: &BufferUsage) -> PgResult<()> {
+pub(crate) fn show_buffer_usage(es: &mut ExplainState<'_>, usage: &BufferUsage) -> PgResult<()> {
     if es.format == ExplainFormat::EXPLAIN_FORMAT_TEXT {
         let has_shared = usage.shared_blks_hit > 0
             || usage.shared_blks_read > 0
@@ -408,6 +409,9 @@ fn explain_one_plan<'mcx>(
         dest,
     )?;
 
+    // double totaltime = 0; (collected across run + cleanup for Execution Time.)
+    let mut totaltime = 0.0f64;
+
     // Execute the plan for statistics if asked for (ANALYZE).
     if es.analyze {
         // dir = (into && into->skipData) ? NoMovement : Forward.
@@ -418,7 +422,8 @@ fn explain_one_plan<'mcx>(
         instr::pgBufferUsage(); // touch — keep import live if analyze path used.
         execmain_s::executor_run::call(&mut query_desc, dir, 0)?;
         execmain_s::executor_finish::call(&mut query_desc)?;
-        // totaltime += elapsed_time(&starttime);  (summary path, gated below.)
+        // We can't run ExecutorEnd 'till we're done printing the stats...
+        totaltime += elapsed_time(&mut starttime);
     }
 
     // dest->rDestroy(dest): the discard receiver has no destroy side effect.
@@ -431,12 +436,12 @@ fn explain_one_plan<'mcx>(
     // Planning buffer/memory usage block: peek_buffer_usage(es, bufusage) ||
     // mem_counters. mem_counters is the es->memory branch (unported, gated at
     // begin); bufusage is the planning buffer usage from `bk`.
-    let _ = (es_buffers, es_memory);
-    let planning_bufusage = if es_buffers { Some(bk.bufusage) } else { None };
-    let peek = planning_bufusage
-        .map(|b| b != BufferUsage::default())
-        .unwrap_or(false);
-    if peek {
+    let _ = es_memory;
+    let planning_bufusage = if es_buffers { Some(&bk.bufusage) } else { None };
+    // peek_buffer_usage(es, bufusage) || mem_counters. In non-text formats the
+    // Planning block always shows (zeros are printed); mem_counters is the
+    // es->memory branch, rejected at begin.
+    if details::peek_buffer_usage(es, planning_bufusage) {
         // ExplainOpenGroup("Planning", "Planning", true, es);
         // show_buffer_usage(es, bufusage); ExplainCloseGroup(...).
         fmt::ExplainOpenGroup("Planning", Some("Planning"), true, es)?;
@@ -460,23 +465,83 @@ fn explain_one_plan<'mcx>(
         fmt::ExplainPropertyFloat("Planning Time", Some("ms"), plantime_ms, 3, es)?;
     }
 
-    // ExplainPrintTriggers / ExplainPrintJITSummary / ExplainPrintSerialize:
-    // trigger stats (ANALYZE), JIT summary (costs), serialize metrics — all
-    // gated. ANALYZE is rejected upstream (ExplainNode panics); JIT/serialize
-    // need unported owners. Skip for the structural slice.
+    // Print info about runtime of triggers (es->analyze). JIT summary
+    // (es->costs) and serialize metrics (es->serialize) need unported owners
+    // (JIT is intentionally COSTS-gated for regression stability anyway, and
+    // SERIALIZE is rejected at the head of this function).
+    if es.analyze {
+        explain_print_triggers(es, &mut query_desc)?;
+    }
 
-    // INSTR_TIME_SET_CURRENT(starttime); ExecutorEnd; FreeQueryDesc;
-    // PopActiveSnapshot();
+    // Close down the query and free resources. Include the time for this in the
+    // total execution time. INSTR_TIME_SET_CURRENT(starttime); ExecutorEnd;
+    // FreeQueryDesc; PopActiveSnapshot();
     portability_instr_time::instr_time_set_current(&mut starttime);
     execmain_s::executor_end::call(&mut query_desc)?;
     execmain_s::free_query_desc::call(query_desc)?;
     snapmgr_s::pop_active_snapshot::call()?;
 
-    // if (es->analyze) CommandCounterIncrement(); — ANALYZE rejected upstream.
+    // if (es->analyze) CommandCounterIncrement();
+    if es.analyze {
+        xact_s::command_counter_increment::call()?;
+    }
 
-    // Execution Time (es->summary && es->analyze) — analyze rejected upstream.
+    totaltime += elapsed_time(&mut starttime);
+
+    // We only report execution time if we actually ran the query (ANALYZE) and
+    // summary reporting is enabled (ANALYZE sets SUMMARY true by default).
+    if es.summary && es.analyze {
+        fmt::ExplainPropertyFloat("Execution Time", Some("ms"), 1000.0 * totaltime, 3, es)?;
+    }
 
     fmt::ExplainCloseGroup("Query", None, true, es)?;
+    Ok(())
+}
+
+/// `elapsed_time(starttime)` (explain.c:1232) — set `endtime` to now, subtract
+/// `*starttime`, return the difference in seconds.
+fn elapsed_time(starttime: &mut instr_time) -> f64 {
+    let mut endtime = instr_time::default();
+    portability_instr_time::instr_time_set_current(&mut endtime);
+    endtime.subtract(*starttime);
+    endtime.get_double()
+}
+
+/// `ExplainPrintTriggers(es, queryDesc)` (explain.c:831) — print info about the
+/// runtime of triggers. Iterates the EState's opened result relations, tuple-
+/// routing result relations, and trigger target relations, reporting each via
+/// `report_triggers`.
+fn explain_print_triggers<'es>(
+    es: &mut ExplainState<'es>,
+    query_desc: &mut types_nodes::querydesc::QueryDesc,
+) -> PgResult<()> {
+    fmt::ExplainOpenGroup("Triggers", Some("Triggers"), false, es)?;
+
+    // show_relname = (list_length(resultrels) > 1 || routerels != NIL ||
+    //                 targrels != NIL);
+    let (show_relname, has_any) = query_desc.work.with(|w| {
+        let e = &w.estate;
+        let show = e.es_opened_result_relations.len() > 1
+            || !e.es_tuple_routing_result_relations.is_empty()
+            || !e.es_trig_target_relations.is_empty();
+        let any = !e.es_opened_result_relations.is_empty()
+            || !e.es_tuple_routing_result_relations.is_empty()
+            || !e.es_trig_target_relations.is_empty();
+        (show, any)
+    });
+
+    // None of the result relations carry the EXPLAIN-ANALYZE trigger
+    // instrumentation array (`ri_TrigInstrument`) in this port, so any relation
+    // actually present here cannot be reported faithfully — surface the missing
+    // owner loudly rather than silently omitting trigger stats.
+    if has_any {
+        let _ = show_relname;
+        panic!(
+            "ExplainPrintTriggers: report_triggers needs ResultRelInfo.ri_TrigInstrument (unported)"
+        );
+    }
+
+    fmt::ExplainCloseGroup("Triggers", Some("Triggers"), false, es)?;
     Ok(())
 }
 
