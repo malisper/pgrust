@@ -88,7 +88,36 @@ fn heap_create_with_catalog_transient_seam<'mcx>(
         Some(reloptions.bytes)
     };
 
-    // OldHeapDesc = RelationGetDescr(OldHeap)
+    // OldHeapDesc = RelationGetDescr(OldHeap).
+    //
+    // C comment (cluster.c make_new_heap): "the NewHeap will not receive any of
+    // the defaults or constraints associated with the OldHeap; we don't need
+    // 'em, and there's no reason to spend cycles inserting them into the
+    // catalogs only to delete them." C achieves that by passing NIL
+    // cooked_constraints — but the OldHeapDesc it hands down still carries
+    // per-attribute `atthasdef`/`atthasmissing` flags, which `AddNewAttributeTuples`
+    // copies verbatim into the transient heap's pg_attribute. With NIL
+    // constraints no pg_attrdef rows are inserted, so a transient heap built from
+    // a relation that has column defaults ends up with `atthasdef=true` and no
+    // matching pg_attrdef record. The port's relcache `AttrDefaultFetch` then
+    // emits a spurious `N pg_attrdef record(s) missing for relation
+    // "pg_temp_..."` WARNING when that transient relation's tuple descriptor is
+    // built. Honor the "no defaults" contract literally: clone OldHeapDesc and
+    // clear the default-bearing flags (and the constraint payload) before
+    // creating the transient heap, so the temp heap's catalog is internally
+    // consistent.
+    let mut transient_desc = old_heap.rd_att.clone_in(mcx)?;
+    for i in 0..(transient_desc.natts as usize) {
+        let attr = transient_desc.attr_mut(i);
+        attr.atthasdef = false;
+        attr.atthasmissing = false;
+    }
+    if let Some(constr) = transient_desc.constr.as_mut() {
+        constr.defval = mcx::PgVec::new_in(mcx);
+        constr.num_defval = 0;
+        constr.missing = mcx::PgVec::new_in(mcx);
+    }
+
     heap_create_with_catalog(
         mcx,
         new_heap_name,
@@ -99,7 +128,7 @@ fn heap_create_with_catalog_transient_seam<'mcx>(
         InvalidOid, /* reloftypeid */
         owner,
         new_access_method,
-        &old_heap.rd_att,
+        &transient_desc,
         RELKIND_RELATION,
         relpersistence,
         false, /* shared_relation: a transient heap is never shared */
