@@ -23,10 +23,13 @@ use alloc::vec::Vec;
 seam_core::seam!(
     /// `GinGetUseFastUpdate(index)` (gin_private.h:34): the index's `fastupdate`
     /// reloption (`GIN_DEFAULT_USE_FASTUPDATE = true` when `rd_options` is NULL).
-    /// Read from the GIN-specific `GinOptions` bytea, which the trimmed relcache
-    /// does not carry — so the owner (`ginutil`, which owns `GinOptions`) resolves
-    /// it. `Err` carries any `ereport(ERROR)`.
-    pub fn gin_get_use_fast_update(index: Oid) -> PgResult<bool>
+    /// Read off the relation's `rd_options` (the GIN-specific `GinOptions` bytea),
+    /// exactly as the C macro reads `relation->rd_options`. Resolved by the owner
+    /// (`ginutil`, which owns the `GinOptions` byte layout). `Err` carries any
+    /// `ereport(ERROR)`.
+    pub fn gin_get_use_fast_update<'mcx>(
+        index: &types_rel::Relation<'mcx>,
+    ) -> PgResult<bool>
 );
 
 seam_core::seam!(

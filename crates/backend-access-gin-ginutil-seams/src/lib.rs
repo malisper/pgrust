@@ -76,19 +76,19 @@ seam_core::seam!(
 seam_core::seam!(
     /// `GinGetUseFastUpdate(index)` (gin_private.h:34) — the index's `fastupdate`
     /// reloption (`GIN_DEFAULT_USE_FASTUPDATE = true` when `rd_options` is NULL).
-    /// Read from the GIN-specific `GinOptions` bytea in `rd_options`, which the
-    /// trimmed relcache does not yet carry; owned by `ginutil` (the `GinOptions`
-    /// owner). Panics loudly until the relcache GinOptions keystone lands.
-    pub fn gin_get_use_fast_update(index: Oid) -> PgResult<bool>
+    /// Read off the relation's `rd_options` (the GIN-specific `GinOptions`
+    /// bytea), exactly as the C macro reads `relation->rd_options`; owned by
+    /// `ginutil` (the `GinOptions` byte-layout owner).
+    pub fn gin_get_use_fast_update<'mcx>(index: &Relation<'mcx>) -> PgResult<bool>
 );
 
 seam_core::seam!(
     /// `GinGetPendingListCleanupSize(index)` (gin_private.h:38) — the index's
     /// `pendingListCleanupSize` reloption (falling back to
-    /// `gin_pending_list_limit` when unset). Read from the `GinOptions` bytea,
-    /// which the trimmed relcache does not yet carry; owned by `ginutil`. Panics
-    /// loudly until the relcache GinOptions keystone lands.
-    pub fn gin_get_pending_list_cleanup_size(index: Oid) -> PgResult<i32>
+    /// `gin_pending_list_limit` when unset or NULL `rd_options`). Read off the
+    /// relation's `rd_options` (the `GinOptions` bytea), exactly as the C macro
+    /// reads `relation->rd_options`; owned by `ginutil`.
+    pub fn gin_get_pending_list_cleanup_size<'mcx>(index: &Relation<'mcx>) -> PgResult<i32>
 );
 
 // ===========================================================================

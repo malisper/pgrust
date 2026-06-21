@@ -546,9 +546,9 @@ fn gininsert_with_state<'mcx>(
     isnull: &[bool],
     ht_ctid: &ItemPointerData,
 ) -> PgResult<bool> {
-    let natts = ginstate.tupdesc.len();
+    let natts = ginstate.natts();
 
-    if backend_access_gin_gininsert_seams::gin_get_use_fast_update::call(ginstate.index)? {
+    if backend_access_gin_gininsert_seams::gin_get_use_fast_update::call(index)? {
         // The fast-update pending-list collect+insert (ginfast.c, F3) has no
         // owner crate yet, so the whole fast path crosses the seam (loud-panic
         // until F3 lands — mirror-PG-and-panic for an unported sibling dep).

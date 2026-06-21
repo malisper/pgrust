@@ -227,9 +227,10 @@ fn set_gin_pending_list_limit(v: i32) {
 }
 
 /// `GinGetUseFastUpdate(index)` (gin_private.h): read the `fastupdate` reloption
-/// from the GIN `GinOptions` bytea. Resolved via the `ginutil`-owned seam (which
-/// owns `GinOptions`); routed here so the gininsert seam contract is fulfilled.
-fn gin_get_use_fast_update(index: Oid) -> PgResult<bool> {
+/// off `index->rd_options` (the GIN `GinOptions` bytea). Resolved via the
+/// `ginutil`-owned seam (which owns the `GinOptions` byte layout); routed here so
+/// the gininsert seam contract is fulfilled.
+fn gin_get_use_fast_update(index: &Relation<'_>) -> PgResult<bool> {
     backend_access_gin_ginutil_seams::gin_get_use_fast_update::call(index)
 }
 
@@ -247,7 +248,7 @@ fn gin_fast_insert<'mcx>(
 ) -> PgResult<()> {
     let ginstate = backend_access_gin_ginutil::initGinState(index, mcx)?;
     let _ = index_oid;
-    let natts = ginstate.tupdesc.len();
+    let natts = ginstate.natts();
 
     let mut collector = GinTupleCollector::default();
     for i in 0..natts {
@@ -1081,7 +1082,7 @@ fn relfilelocator_bytes(index: &Relation<'_>) -> [u8; 12] {
 /// `pendingListCleanupSize` reloption (falling back to `gin_pending_list_limit`),
 /// resolved by `ginutil` (which owns `GinOptions`).
 fn gin_get_pending_list_cleanup_size(index: &Relation<'_>) -> PgResult<i32> {
-    backend_access_gin_ginutil_seams::gin_get_pending_list_cleanup_size::call(index.rd_id)
+    backend_access_gin_ginutil_seams::gin_get_pending_list_cleanup_size::call(index)
 }
 
 fn relation_needs_wal(index: &Relation<'_>) -> bool {

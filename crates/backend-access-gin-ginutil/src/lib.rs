@@ -139,6 +139,58 @@ pub fn init_seams() {
     sx::gin_index_getattr::set(gin_index_getattr_impl);
     sx::gin_get_null_category::set(gin_get_null_category_impl);
     sx::gin_compare_entries::set(gin_compare_entries_impl);
+    sx::gin_get_use_fast_update::set(gin_get_use_fast_update_impl);
+    sx::gin_get_pending_list_cleanup_size::set(gin_get_pending_list_cleanup_size_impl);
+}
+
+/// `GinGetUseFastUpdate(relation)` (gin_private.h:34): read the `fastupdate`
+/// reloption off `relation->rd_options` (the GIN `GinOptions` bytea), defaulting
+/// to `GIN_DEFAULT_USE_FASTUPDATE = true` when `rd_options` is NULL.
+fn gin_get_use_fast_update_impl<'mcx>(index: &Relation<'mcx>) -> PgResult<bool> {
+    // `GIN_DEFAULT_USE_FASTUPDATE`.
+    const GIN_DEFAULT_USE_FASTUPDATE: bool = true;
+    match gin_options_bytes(index) {
+        Some(opts) => {
+            // `((GinOptions *) rd_options)->useFastUpdate` — the `bool` field at
+            // `offsetof(GinOptions, useFastUpdate)`. The serialized varlena keeps
+            // the 4-byte `vl_len_` header, so the offset matches the C struct.
+            let off = core::mem::offset_of!(GinOptions, useFastUpdate);
+            Ok(opts[off] != 0)
+        }
+        None => Ok(GIN_DEFAULT_USE_FASTUPDATE),
+    }
+}
+
+/// `GinGetPendingListCleanupSize(relation)` (gin_private.h:38): read the
+/// `pendingListCleanupSize` reloption off `relation->rd_options`, falling back to
+/// the `gin_pending_list_limit` GUC when `rd_options` is NULL or the reloption is
+/// `-1` (unset).
+fn gin_get_pending_list_cleanup_size_impl<'mcx>(index: &Relation<'mcx>) -> PgResult<i32> {
+    let from_opts = gin_options_bytes(index).and_then(|opts| {
+        // `((GinOptions *) rd_options)->pendingListCleanupSize` — the `int` field
+        // at `offsetof(GinOptions, pendingListCleanupSize)`.
+        let off = core::mem::offset_of!(GinOptions, pendingListCleanupSize);
+        let v = i32::from_ne_bytes([opts[off], opts[off + 1], opts[off + 2], opts[off + 3]]);
+        // C: `... != -1 ? reloption : gin_pending_list_limit`.
+        if v != -1 {
+            Some(v)
+        } else {
+            None
+        }
+    });
+    match from_opts {
+        Some(v) => Ok(v),
+        // `gin_pending_list_limit` (the GUC global, backed by the `ginfast` owner).
+        None => Ok(backend_utils_misc_guc_tables::vars::gin_pending_list_limit.read()),
+    }
+}
+
+/// `(GinOptions *) relation->rd_options` as the serialized varlena byte slice
+/// (the `RdOptions::Bytea` the GIN `amoptions` produced, including its 4-byte
+/// `vl_len_` header so the field offsets match the C struct). `None` is the C
+/// NULL `rd_options`.
+fn gin_options_bytes<'a, 'mcx>(index: &'a Relation<'mcx>) -> Option<&'a [u8]> {
+    index.rd_options.as_ref().and_then(|o| o.bytea())
 }
 
 /// `DatumGetInt32(FunctionCall2Coll(&ginstate->compareFn[attnum-1], collation,

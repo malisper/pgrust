@@ -330,6 +330,17 @@ impl<'mcx> GinState<'mcx> {
             supportCollation: alloc::vec![InvalidOid; n],
         }
     }
+
+    /// `ginstate->origTupdesc->natts` — the index's real number of attributes
+    /// (columns). The per-attribute arrays are sized to `INDEX_MAX_KEYS`
+    /// (mirroring C's fixed-size `[INDEX_MAX_KEYS]` arrays), so their `.len()`
+    /// is NOT the column count; callers that iterate index columns must use this.
+    pub fn natts(&self) -> usize {
+        self.origTupdesc
+            .as_ref()
+            .map(|td| td.natts as usize)
+            .unwrap_or(0)
+    }
 }
 
 // ===========================================================================

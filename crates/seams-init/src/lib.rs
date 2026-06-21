@@ -1115,19 +1115,6 @@ mod recurrence_guard {
         // DELETE each entry as its arm lands.
         ("backend_access_gin_ginutil", "gin_extract_query"),
         ("backend_access_gin_ginutil", "gin_compare_partial"),
-        // DESIGN_DEBT (TD-GIN-RELOPTIONS-KEYSTONE): `gin_get_use_fast_update`
-        // (GinGetUseFastUpdate, gin_private.h:34) and `gin_get_pending_list_cleanup_size`
-        // (GinGetPendingListCleanupSize, gin_private.h:38) read the index's
-        // GIN-specific `GinOptions` bytea out of `rd_options`, which the trimmed
-        // relcache does not yet carry. The ginutil owner (audited, the GinOptions
-        // owner) therefore has no body to install on these ginutil-seams decls —
-        // they panic loudly until the relcache GinOptions keystone lands. (ginfast
-        // installs a separate gininsert-seams copy of `gin_get_use_fast_update`
-        // over an Oid lookup, a duplicate decl; these ginutil-seams copies remain
-        // genuinely uninstalled for the relcache-keystone reason.) DELETE when the
-        // relcache GinOptions keystone lands.
-        ("backend_access_gin_ginutil", "gin_get_pending_list_cleanup_size"),
-        ("backend_access_gin_ginutil", "gin_get_use_fast_update"),
         // (TD-HEAPAM-UNPORTED-DRIVERS RETIRED: the four heapam-seams driver
         //  bodies are now ported + installed by the heap owner
         //  (backend-access-heap-heapam, catalog_drivers.rs):
