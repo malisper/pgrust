@@ -590,9 +590,7 @@ pub fn define_relation_partbound<'mcx>(
 
     // If the default partition exists, its constraint tightens; check its rows.
     if let Some(default_rel) = default_rel.as_ref() {
-        backend_partitioning_partbounds_seams::check_default_partition_contents::call(
-            mcx, &parent, default_rel, bound,
-        )?;
+        check_default_partition_contents(mcx, &parent, default_rel, bound)?;
         default_rel.alias().close(NoLock)?;
     }
 
@@ -601,6 +599,220 @@ pub fn define_relation_partbound<'mcx>(
 
     parent.close(NoLock)?;
     Ok(())
+}
+
+/// `check_default_partition_contents(parent, default_rel, new_spec)`
+/// (partbounds.c) — when a DEFAULT partition already exists and a new partition
+/// is being added, verify the default holds no row that would now belong to the
+/// new partition (its constraint tightens). Faithful port; installed as the
+/// `check_default_partition_contents` seam (it needs the executor's scan +
+/// `ExecCheck`, reachable here via the execMain `validate_default_partition_
+/// contents_scan` seam, plus `map_partition_varattnos` /
+/// `get_proposed_default_constraint` / `PartConstraintImpliedByRelConstraint`).
+pub(crate) fn check_default_partition_contents<'mcx, 's>(
+    mcx: Mcx<'mcx>,
+    parent: &types_rel::Relation<'mcx>,
+    default_rel: &types_rel::Relation<'mcx>,
+    new_spec: &PartitionBoundSpec<'s>,
+) -> PgResult<()> {
+    use types_storage::lock::{AccessExclusiveLock, NoLock};
+    use types_tuple::access::RELKIND_PARTITIONED_TABLE;
+
+    // new_part_constraints = (new_spec->strategy == LIST)
+    //     ? get_qual_for_list(parent, new_spec)
+    //     : get_qual_for_range(parent, new_spec, false);
+    //
+    // get_qual_from_partbound dispatches by the parent key's strategy to exactly
+    // those two generators (new_spec is never DEFAULT/HASH here, so it never
+    // consults the partition desc — pass None).
+    let key = backend_utils_cache_partcache_seams::relation_get_partition_key::call(
+        mcx,
+        parent.alias(),
+    )?
+    .ok_or_else(|| {
+        ereport(ERROR)
+            .errmsg_internal("check_default_partition_contents: parent has no partition key")
+            .into_error()
+    })?;
+    let new_part_constraints =
+        backend_partitioning_partbounds_seams::get_qual_from_partbound::call(
+            mcx,
+            parent.rd_id,
+            &key,
+            new_spec,
+            None,
+        )?;
+
+    // def_part_constraints = get_proposed_default_constraint(new_part_constraints);
+    let mut new_part_vec: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    for n in new_part_constraints.into_iter() {
+        new_part_vec.push(n);
+    }
+    let def_part_constraints =
+        backend_catalog_partition::get_proposed_default_constraint(mcx, new_part_vec)?;
+
+    // Map the Vars in the constraint expression from parent's attnos to
+    // default_rel's.
+    // def_part_constraints = map_partition_varattnos(def_part_constraints, 1,
+    //                                                default_rel, parent);
+    let def_part_constraints = backend_catalog_partition::map_partition_varattnos(
+        mcx,
+        def_part_constraints,
+        1,
+        default_rel,
+        parent,
+    )?;
+
+    // If the existing constraints on the default partition imply that it will
+    // not contain any row that would belong to the new partition, we can avoid
+    // scanning the default partition.
+    if crate::at_attach::PartConstraintImpliedByRelConstraint(mcx, default_rel, &def_part_constraints)?
+    {
+        backend_utils_error::ereport(types_error::DEBUG1)
+            .errmsg_internal(format!(
+                "updated partition constraint for default partition \"{}\" is implied by existing constraints",
+                default_rel.name()
+            ))
+            .finish(here("check_default_partition_contents"))?;
+        return Ok(());
+    }
+
+    // Scan the default partition and its subpartitions, and check for rows that
+    // do not satisfy the revised partition constraints.
+    // if (default_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+    //     all_parts = find_all_inheritors(RelationGetRelid(default_rel),
+    //                                     AccessExclusiveLock, NULL);
+    // else
+    //     all_parts = list_make1_oid(RelationGetRelid(default_rel));
+    let all_parts: Vec<Oid> =
+        if default_rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
+            let (oids, _) = backend_catalog_pg_inherits::find_all_inheritors(
+                mcx,
+                default_rel.rd_id,
+                AccessExclusiveLock,
+                false,
+            )?;
+            oids.into_iter().collect()
+        } else {
+            vec![default_rel.rd_id]
+        };
+
+    let default_relid = default_rel.rd_id;
+    let default_name = default_rel.name().to_string();
+
+    for part_relid in all_parts {
+        // Lock already taken above.
+        if part_relid != default_relid {
+            // part_rel = table_open(part_relid, NoLock);
+            let part_rel = backend_access_common_relation::relation_open(mcx, part_relid, NoLock)?;
+
+            // Map the Vars from default_rel's to the sub-partition's. (C maps the
+            // ANDed constraint; we map the implicit-AND list — equivalent for the
+            // map, which is per-Var. The mapped list feeds the per-partition
+            // implication check and scan.)
+            let mut def_copy: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+            for n in def_part_constraints.iter() {
+                def_copy.push(n.clone_in(mcx)?);
+            }
+            let part_constraint = backend_catalog_partition::map_partition_varattnos(
+                mcx,
+                def_copy,
+                1,
+                &part_rel,
+                default_rel,
+            )?;
+
+            // If the partition constraints on the default partition child imply
+            // that it will not contain any row that would belong to the new
+            // partition, we can avoid scanning the child table.
+            if crate::at_attach::PartConstraintImpliedByRelConstraint(
+                mcx,
+                &part_rel,
+                &def_part_constraints,
+            )? {
+                backend_utils_error::ereport(types_error::DEBUG1)
+                    .errmsg_internal(format!(
+                        "updated partition constraint for default partition \"{}\" is implied by existing constraints",
+                        part_rel.name()
+                    ))
+                    .finish(here("check_default_partition_contents"))?;
+                part_rel.close(NoLock)?;
+                continue;
+            }
+
+            check_default_partition_contents_one(
+                mcx,
+                &default_name,
+                &part_rel,
+                &part_constraint,
+            )?;
+            part_rel.close(NoLock)?;
+        } else {
+            // part_rel = default_rel; partition_constraint = make_ands_explicit(...).
+            check_default_partition_contents_one(
+                mcx,
+                &default_name,
+                default_rel,
+                &def_part_constraints,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// The per-partition leaf-scan leg of `check_default_partition_contents`: skip
+/// non-leaf / foreign-table partitions (warning for the latter), else drive the
+/// executor scan via the `validate_default_partition_contents_scan` seam, which
+/// raises the CHECK_VIOLATION naming `default_name` on the first violating row.
+fn check_default_partition_contents_one<'mcx>(
+    mcx: Mcx<'mcx>,
+    default_name: &str,
+    part_rel: &types_rel::Relation<'mcx>,
+    part_constraint: &[Node<'mcx>],
+) -> PgResult<()> {
+    use types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_RELATION};
+
+    // Only RELKIND_RELATION relations (leaf partitions) need to be scanned.
+    if part_rel.rd_rel.relkind != RELKIND_RELATION {
+        if part_rel.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
+            backend_utils_error::ereport(types_error::WARNING)
+                .errcode(types_error::ERRCODE_CHECK_VIOLATION)
+                .errmsg(format!(
+                    "skipped scanning foreign table \"{}\" which is a partition of default partition \"{}\"",
+                    part_rel.name(),
+                    default_name
+                ))
+                .finish(here("check_default_partition_contents_one"))?;
+        }
+        return Ok(());
+    }
+
+    // partition_constraint = make_ands_explicit(def_part_constraints), then
+    // ExecPrepareExpr + table scan + ExecCheck per row. The execMain seam owns
+    // the EState/scan; collect the implicit-AND list into the Expr slice it
+    // consumes.
+    let mut exprs: Vec<Expr> = Vec::with_capacity(part_constraint.len());
+    for n in part_constraint.iter() {
+        exprs.push(
+            n.as_expr()
+                .cloned()
+                .ok_or_else(|| {
+                    ereport(ERROR)
+                        .errmsg_internal(
+                            "check_default_partition_contents: non-expression in partition constraint",
+                        )
+                        .into_error()
+                })?,
+        );
+    }
+
+    backend_executor_execMain_seams::validate_default_partition_contents_scan::call(
+        mcx,
+        default_name,
+        part_rel.rd_id,
+        &exprs,
+    )
 }
 
 /// The post-partbound clone block of `DefineRelation` (tablecmds.c:1258-1328):

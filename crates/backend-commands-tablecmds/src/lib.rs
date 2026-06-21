@@ -65,6 +65,29 @@ use backend_commands_tablecmds_seams as seam;
 /// land.)
 pub fn init_seams() {
     seam::define_relation::set(create::define_relation);
+    // check_default_partition_contents (partbounds.c): owned here because the
+    // body needs the executor scan + tablecmds' PartConstraintImpliedByRelConstraint
+    // + catalog-partition's qual mappers. The seam carries `RelationData`; the
+    // caller already holds both relations open+locked, so re-open NoLock handles
+    // (a no-op release) to obtain aliasable `Relation`s for the body.
+    backend_partitioning_partbounds_seams::check_default_partition_contents::set(
+        |mcx, parent_data, default_data, new_spec| {
+            use types_storage::lock::NoLock;
+            let parent =
+                backend_access_common_relation::relation_open(mcx, parent_data.rd_id, NoLock)?;
+            let default_rel =
+                backend_access_common_relation::relation_open(mcx, default_data.rd_id, NoLock)?;
+            let r = partbound::check_default_partition_contents(
+                mcx,
+                &parent,
+                &default_rel,
+                new_spec,
+            );
+            default_rel.close(NoLock)?;
+            parent.close(NoLock)?;
+            r
+        },
+    );
     seam::build_desc_for_relation::set(create::build_desc_for_relation);
     // create_ctas_internal (createas.c): owned here because it calls
     // DefineRelation + StoreViewQuery (the latter across view-seams).

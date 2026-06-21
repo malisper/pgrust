@@ -2530,6 +2530,106 @@ pub fn validate_partition_constraint_scan<'mcx>(
     result
 }
 
+/// The per-partition scan leg of `check_default_partition_contents`
+/// (partbounds.c): scan one leaf partition `part_relid` of the default partition
+/// `default_relname` and verify every live row satisfies the revised
+/// default-partition constraint `part_constraint` (already mapped to
+/// `part_relid`'s attribute numbers). On the first violating row, raise
+/// `ereport(ERROR, ERRCODE_CHECK_VIOLATION, "updated partition constraint for
+/// default partition \"%s\" would be violated by some row")`, where `%s` is the
+/// *default* relation's name (matching C — the message names the default, not the
+/// scanned child). Installed as the `validate_default_partition_contents_scan`
+/// seam.
+///
+/// This mirrors [`validate_partition_constraint_scan`] (same throwaway `EState` +
+/// `ExecPrepareCheck` + `table_beginscan` / `ExecCheck` loop); only the
+/// error-message text and the reported relation name differ.
+pub fn validate_default_partition_contents_scan<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    default_relname: &str,
+    part_relid: types_core::primitive::Oid,
+    part_constraint: &[types_nodes::primnodes::Expr],
+) -> PgResult<()> {
+    // NoLock == 0 (lmgr.h LOCKMODE); types-storage is not a dep of this crate.
+    const NoLock: i32 = 0;
+
+    // Nothing to validate (an empty AND-list means TRUE).
+    if part_constraint.is_empty() {
+        return Ok(());
+    }
+
+    // part_rel = table_open(part_relid, NoLock); (caller already holds the lock).
+    let oldrel = backend_access_common_relation::relation_open(mcx, part_relid, NoLock)?;
+    let rel_alias = oldrel.alias();
+
+    // estate = CreateExecutorState(); estate->es_snapshot = GetActiveSnapshot();
+    let mut estate = execUtils::create_executor_state_in(mcx)?;
+    estate.es_snapshot = backend_utils_time_snapmgr_seams::get_active_snapshot::call()?;
+    estate.es_direction = ScanDirection::ForwardScanDirection;
+
+    // partqualstate = ExecPrepareCheck(partition_constraint, estate).
+    let mut owned: alloc::vec::Vec<types_nodes::primnodes::Expr> =
+        alloc::vec::Vec::with_capacity(part_constraint.len());
+    for e in part_constraint {
+        owned.push(e.clone_in(mcx)?);
+    }
+    let mut partqualstate = execExpr::exec_prepare_check(&owned, &mut estate)?;
+
+    // scan slot in the EState pool + per-tuple ExprContext.
+    let tupdesc = Some(mcx::alloc_in(mcx, rel_alias.rd_att.clone_in(mcx)?)?);
+    let callbacks = backend_access_table_tableam::table_slot_callbacks(&rel_alias);
+    let slot_id =
+        backend_executor_execTuples_seams::exec_init_extra_tuple_slot::call(&mut estate, tupdesc, callbacks)?;
+    let econtext = execUtils::MakePerTupleExprContext(&mut estate)?;
+
+    let snapshot = estate
+        .es_snapshot
+        .clone()
+        .expect("validate_default_partition_contents_scan: no active snapshot");
+
+    let result: PgResult<()> = (|| {
+        let mut scan =
+            backend_access_table_tableam_seams::table_beginscan::call(mcx, &rel_alias, snapshot)?;
+
+        loop {
+            backend_tcop_postgres_seams::check_for_interrupts::call()?;
+
+            let got = backend_access_table_tableam_seams::table_scan_getnextslot_direction::call(
+                mcx,
+                &mut scan,
+                estate.es_direction,
+                estate.slot_data_mut(slot_id),
+            )?;
+            if !got {
+                break;
+            }
+
+            // econtext->ecxt_scantuple = slot; if (!ExecCheck(partqualstate,
+            // econtext)) ereport(ERROR, ...).
+            estate.ecxt_mut(econtext).ecxt_scantuple = Some(slot_id);
+            let ok = match partqualstate.as_mut() {
+                Some(state) => execExpr::exec_check(Some(state), econtext, &mut estate)?,
+                None => execExpr::exec_check(None, econtext, &mut estate)?,
+            };
+            if !ok {
+                backend_access_table_tableam::table_endscan(scan)?;
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_CHECK_VIOLATION)
+                    .errmsg(alloc::format!(
+                        "updated partition constraint for default partition \"{default_relname}\" would be violated by some row"
+                    ))
+                    .into_error());
+            }
+        }
+
+        backend_access_table_tableam::table_endscan(scan)?;
+        Ok(())
+    })();
+
+    oldrel.close(NoLock)?;
+    result
+}
+
 /// `ATRewriteTable(tab, OIDNewHeap)` (tablecmds.c) — scan or rewrite one table.
 ///
 /// A rewrite is requested by passing a valid `oid_new_heap` (caller already
@@ -3289,6 +3389,7 @@ pub fn init_seams() {
     seams::exec_partition_check::set(ExecPartitionCheck);
     seams::exec_partition_check_emit_error::set(ExecPartitionCheckEmitError);
     seams::validate_partition_constraint_scan::set(validate_partition_constraint_scan);
+    seams::validate_default_partition_contents_scan::set(validate_default_partition_contents_scan);
     seams::at_rewrite_table_scan::set(at_rewrite_table_scan);
     seams::exec_check_permissions_select::set(exec_check_permissions_select);
     seams::exec_check_one_rel_perms_view::set(exec_check_one_rel_perms_view);

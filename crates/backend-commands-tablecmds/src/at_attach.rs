@@ -26,10 +26,6 @@
 //!     unported — when the parent carries row triggers or foreign keys, a
 //!     `FEATURE_NOT_SUPPORTED` error is raised; when absent these are genuine
 //!     no-ops and attach proceeds.
-//!   * The default-partition recursion of the qual generators
-//!     (`get_qual_for_{range,list}` `is_default`) is unported in partbounds;
-//!     attaching under a parent that already has a DEFAULT partition surfaces a
-//!     precise error from that layer.
 
 #![allow(non_snake_case)]
 

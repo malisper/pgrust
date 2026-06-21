@@ -261,6 +261,25 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// The per-partition scan leg of `check_default_partition_contents`
+    /// (partbounds.c): scan one leaf partition `part_relid` of a default
+    /// partition and verify every live row satisfies the revised default-partition
+    /// `part_constraint` (already mapped to `part_relid`'s attribute numbers). The
+    /// first violating row raises `ereport(ERROR, ERRCODE_CHECK_VIOLATION,
+    /// "updated partition constraint for default partition \"%s\" would be violated
+    /// by some row")`, where `%s` is `default_relname` (the name reported is the
+    /// *default* relation's, not the scanned child's, exactly as C does). An empty
+    /// constraint or empty table is a no-op. Owned by execMain (it builds a
+    /// throwaway `EState` + `ExecPrepareCheck` + scan loop + `ExecCheck`).
+    pub fn validate_default_partition_contents_scan<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        default_relname: &str,
+        part_relid: types_core::primitive::Oid,
+        part_constraint: &[types_nodes::primnodes::Expr],
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
     /// `ATRewriteTable(tab, OIDNewHeap)` (tablecmds.c) — the phase-3
     /// scan-and-rewrite of one table's heap, owned by execMain (it builds an
     /// `EState` + `ExprState`s + scan loop, evaluating the queued cast/USING/
