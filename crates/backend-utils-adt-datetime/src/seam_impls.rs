@@ -336,11 +336,13 @@ pub fn seam_j2date(jd: i32) -> YmdDate {
     YmdDate { year, mon, mday }
 }
 
-/// `ValidateDate(fmask, isjulian, is2digits, bc, tm)` (datetime.c). The
-/// formatting.c consumer never decodes a Julian field (it has no `J`/julian
-/// token path), so `isjulian` is always false at this seam — pass `false`.
+/// `ValidateDate(fmask, isjulian, is2digits, bc, tm)` (datetime.c). The sole
+/// consumer is `do_to_timestamp` (formatting.c), whose call is
+/// `ValidateDate(fmask, true, false, false, tm)` — i.e. `isjulian` is true: by
+/// that point the year (incl. BC/century) is already fully computed and must
+/// not be re-touched by ValidateDate's AD/BC year fix-up.
 pub fn seam_validate_date(fmask: i32, is2digits: bool, bc: bool, tm: &mut pg_tm) -> i32 {
-    crate::decode::ValidateDate(fmask, false, is2digits, bc, tm)
+    crate::decode::ValidateDate(fmask, true, is2digits, bc, tm)
 }
 
 /// `DetermineTimeZoneOffset(tm, tzp)` (datetime.c): resolve under the session

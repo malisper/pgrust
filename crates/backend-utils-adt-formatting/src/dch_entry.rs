@@ -34,6 +34,7 @@ use types_datetime::{
     DATETIME_MIN_JULIAN, DATE_END_JULIAN, JULIAN_MAXMONTH, JULIAN_MAXYEAR, JULIAN_MINMONTH,
     JULIAN_MINYEAR, POSTGRES_EPOCH_JDATE,
 };
+use types_datetime::{DAY, MONTH, YEAR};
 use types_error::{
     ERRCODE_CONFIG_FILE_ERROR, ERRCODE_DATETIME_FIELD_OVERFLOW, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
     ERRCODE_INTERVAL_FIELD_OVERFLOW, ERRCODE_INVALID_DATETIME_FORMAT, ERRCODE_INVALID_PARAMETER_VALUE,
@@ -931,9 +932,9 @@ fn date_out_of_range(date_txt: &[u8]) -> PgError {
 }
 
 // DTK field-mask helpers (datetime.h). DTK_M(t) == 1 << t.
-const YEAR: i32 = 2;
-const MONTH: i32 = 3;
-const DAY: i32 = 4;
+// YEAR/MONTH/DAY token values come from types_datetime (datetime.h: MONTH=1,
+// YEAR=2, DAY=3) and MUST match what ValidateDate() tests, or the field-mask
+// bits set here won't line up with the range checks there.
 #[inline]
 fn dtk_m(t: i32) -> i32 {
     1 << t
