@@ -2718,9 +2718,20 @@ fn qsort_tuple<'mcx>(
             return Ok(());
         }
 
-        // Pivot selection (median of 3, or median of medians for n > 40).
+        // Pivot selection. The C (sort_template.h) only refines the midpoint via
+        // median-of-three when `n > 7`, and via the median-of-medians "ninther"
+        // when `n > 40`; for `n == 7` the bare midpoint `a + n/2` is the pivot.
+        //   pm = a + (n / 2) * es;
+        //   if (n > 7) {
+        //       pl = a; pn = a + (n - 1) * es;
+        //       if (n > 40) { ...ninther... }
+        //       pm = med3(pl, pm, pn);
+        //   }
+        // Hoisting the `med3(pl, pm, pn)` outside the `n > 7` guard changes the
+        // pivot (hence the equal-key partition permutation) for n == 7 — the
+        // smallest size reaching this code, since n < 7 is insertion-sorted.
         let mut pm = a + (n / 2);
-        {
+        if n > 7 {
             let mut pl = a;
             let mut pn = a + (n - 1);
             if n > 40 {

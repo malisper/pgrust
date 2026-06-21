@@ -646,3 +646,105 @@ fn heap_multikey_tiebreak() {
     }
     assert_eq!(out, vec![(1, 5), (1, 8), (2, 1), (2, 4), (2, 9)]);
 }
+
+#[test]
+fn heap_singlekey_tie_order_matches_pg_quicksort() {
+    // A single-key heap sort (ORDER BY four) over the physical row order PG
+    // produces for `SELECT ... FROM tenk1 WHERE unique1 < 10`. The sort is NOT
+    // stable: PG's qsort partitions equal-key runs to a specific permutation
+    // that the regression `.out` encodes. With input order (four payload):
+    //   four = [0, 2, 1, 2, 1, 0, 1, 3, 3, 0]
+    //   pl   = [4, 2, 1, 6, 9, 8, 5, 3, 7, 0]   (unique1, the payload)
+    // PG 18.3's ST_SORT yields per group:
+    //   four=0 -> 0,8,4 ; four=1 -> 5,9,1 ; four=2 -> 6,2 ; four=3 -> 3,7
+    install_begin_seams();
+
+    let mut owned = begin_state(4096, TUPLESORT_NONE, SortVariantKind::Heap).unwrap();
+    owned.with_mut(|state| {
+        let mcx = state.mcx();
+        // Single sort key on col1 (four). nKeys == 1, onlyKey set (no tiebreak).
+        state.base.nKeys = 1;
+        state.base.haveDatum1 = true;
+        state.base.tuples = true;
+        state.base.arg = SortVariantArg::Heap {
+            tupDesc: two_int4_tupdesc(mcx),
+        };
+        let mut k0 = SortSupportData::new(mcx);
+        k0.comparator = Some(SortComparatorId(0));
+        k0.ssup_attno = 1;
+        state.base.sortKeys.push(k0);
+        state.base.onlyKey = Some(0);
+    });
+
+    // Rows: (four, unique1). Physical input order from tenk1 (unique1 < 10).
+    let rows = [
+        (0i64, 4i64),
+        (2, 2),
+        (1, 1),
+        (2, 6),
+        (1, 9),
+        (0, 8),
+        (1, 5),
+        (3, 3),
+        (3, 7),
+        (0, 0),
+    ];
+    for (four, u1) in rows {
+        owned.with_mut(|state| {
+            let mcx = state.mcx();
+            let tupdesc = match &state.base.arg {
+                SortVariantArg::Heap { tupDesc } => tupDesc.clone_in(mcx).unwrap(),
+                _ => unreachable!(),
+            };
+            let values = [Datum::ByVal(four as usize), Datum::ByVal(u1 as usize)];
+            let isnull = [false, false];
+            let mtup = backend_access_common_heaptuple::heap_form_minimal_tuple(
+                mcx, &tupdesc, &values, &isnull, 0,
+            )
+            .unwrap();
+            let stup = SortTuple {
+                tuple: Some(TupleBody::Minimal(mtup)),
+                datum1: Datum::ByVal(four as usize),
+                isnull1: false,
+                srctape: 0,
+            };
+            tuplesort_puttuple_common(state, stup, false, 0).unwrap();
+        });
+    }
+
+    owned.with_mut(|state| tuplesort_performsort(state).unwrap());
+
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    loop {
+        let got: Option<(i64, i64)> = owned.with_mut(|state| {
+            let mcx = state.mcx();
+            let st = tuplesort_gettuple_common(state, true).unwrap()?;
+            let tupdesc = match &state.base.arg {
+                SortVariantArg::Heap { tupDesc } => tupDesc,
+                _ => unreachable!(),
+            };
+            let cols = heap_deform_sort_minimal(mcx, &st, tupdesc).unwrap();
+            Some((cols[0].0.as_usize() as i64, cols[1].0.as_usize() as i64))
+        });
+        match got {
+            None => break,
+            Some(p) => out.push(p),
+        }
+    }
+    // (four, unique1) in PG 18.3 quicksort order.
+    assert_eq!(
+        out,
+        vec![
+            (0, 0),
+            (0, 8),
+            (0, 4),
+            (1, 5),
+            (1, 9),
+            (1, 1),
+            (2, 6),
+            (2, 2),
+            (3, 3),
+            (3, 7),
+        ]
+    );
+}
