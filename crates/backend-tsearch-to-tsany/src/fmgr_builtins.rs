@@ -45,6 +45,17 @@ fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     }
 }
 
+/// `PG_GETARG_JSONB_P(i)`: the full jsonb varlena image (header included). The
+/// jsonb-iteration helpers (`iterate_jsonb_values`, `parse_jsonb_index_flags`)
+/// strip the `VARHDRSZ` header themselves to reach the root container.
+#[inline]
+fn arg_jsonb_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .expect("to_tsany fn: by-ref jsonb arg missing from by-ref lane")
+}
+
 /// Set a header-ful `tsvector`/`tsquery` varlena result on the by-ref lane.
 #[inline]
 fn ret_varlena_image(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
@@ -70,6 +81,74 @@ fn fc_to_tsvector_byid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum>
 fn fc_to_tsvector(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let txt = arg_text(fcinfo, 0).to_vec();
     let img = crate::to_tsvector::to_tsvector(&txt)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+// ---------------------------------------------------------------------------
+// jsonb(_string)_to_tsvector(_byid)
+// ---------------------------------------------------------------------------
+
+fn fc_jsonb_string_to_tsvector_byid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let cfg = arg_oid(fcinfo, 0);
+    let jb = arg_jsonb_image(fcinfo, 1).to_vec();
+    let m = scratch_mcx();
+    let img = crate::to_tsvector::jsonb_string_to_tsvector_byid(m.mcx(), cfg, &jb)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+fn fc_jsonb_string_to_tsvector(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let jb = arg_jsonb_image(fcinfo, 0).to_vec();
+    let m = scratch_mcx();
+    let img = crate::to_tsvector::jsonb_string_to_tsvector(m.mcx(), &jb)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+fn fc_jsonb_to_tsvector_byid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let cfg = arg_oid(fcinfo, 0);
+    let jb = arg_jsonb_image(fcinfo, 1).to_vec();
+    let jb_flags = arg_jsonb_image(fcinfo, 2).to_vec();
+    let m = scratch_mcx();
+    let img = crate::to_tsvector::jsonb_to_tsvector_byid(m.mcx(), cfg, &jb, &jb_flags)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+fn fc_jsonb_to_tsvector(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let jb = arg_jsonb_image(fcinfo, 0).to_vec();
+    let jb_flags = arg_jsonb_image(fcinfo, 1).to_vec();
+    let m = scratch_mcx();
+    let img = crate::to_tsvector::jsonb_to_tsvector(m.mcx(), &jb, &jb_flags)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+// ---------------------------------------------------------------------------
+// json(_string)_to_tsvector(_byid)
+// ---------------------------------------------------------------------------
+
+fn fc_json_string_to_tsvector_byid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let cfg = arg_oid(fcinfo, 0);
+    let json = arg_text(fcinfo, 1).to_vec();
+    let img = crate::to_tsvector::json_string_to_tsvector_byid(cfg, &json)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+fn fc_json_string_to_tsvector(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let json = arg_text(fcinfo, 0).to_vec();
+    let img = crate::to_tsvector::json_string_to_tsvector(&json)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+fn fc_json_to_tsvector_byid(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let cfg = arg_oid(fcinfo, 0);
+    let json = arg_text(fcinfo, 1).to_vec();
+    let jb_flags = arg_jsonb_image(fcinfo, 2).to_vec();
+    let img = crate::to_tsvector::json_to_tsvector_byid(cfg, &json, &jb_flags)?;
+    Ok(ret_varlena_image(fcinfo, img))
+}
+
+fn fc_json_to_tsvector(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    let json = arg_text(fcinfo, 0).to_vec();
+    let jb_flags = arg_jsonb_image(fcinfo, 1).to_vec();
+    let img = crate::to_tsvector::json_to_tsvector(&json, &jb_flags)?;
     Ok(ret_varlena_image(fcinfo, img))
 }
 
@@ -166,6 +245,14 @@ pub fn register_to_tsany_builtins() {
     register_builtins_native([
         builtin(3745, "to_tsvector_byid", 2, fc_to_tsvector_byid),
         builtin(3749, "to_tsvector", 1, fc_to_tsvector),
+        builtin(4211, "jsonb_string_to_tsvector_byid", 2, fc_jsonb_string_to_tsvector_byid),
+        builtin(4209, "jsonb_string_to_tsvector", 1, fc_jsonb_string_to_tsvector),
+        builtin(4214, "jsonb_to_tsvector_byid", 3, fc_jsonb_to_tsvector_byid),
+        builtin(4213, "jsonb_to_tsvector", 2, fc_jsonb_to_tsvector),
+        builtin(4212, "json_string_to_tsvector_byid", 2, fc_json_string_to_tsvector_byid),
+        builtin(4210, "json_string_to_tsvector", 1, fc_json_string_to_tsvector),
+        builtin(4216, "json_to_tsvector_byid", 3, fc_json_to_tsvector_byid),
+        builtin(4215, "json_to_tsvector", 2, fc_json_to_tsvector),
         builtin(3746, "to_tsquery_byid", 2, fc_to_tsquery_byid),
         builtin(3750, "to_tsquery", 1, fc_to_tsquery),
         builtin(3747, "plainto_tsquery_byid", 2, fc_plainto_tsquery_byid),

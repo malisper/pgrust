@@ -18791,6 +18791,7 @@ dependencies = [
  "backend-tsearch-ispell-regis",
  "backend-tsearch-parse",
  "backend-tsearch-parse-seams",
+ "backend-utils-adt-jsonfuncs",
  "backend-utils-adt-tsquery-core",
  "backend-utils-adt-tsvector-core",
  "backend-utils-cache-lsyscache-seams",
