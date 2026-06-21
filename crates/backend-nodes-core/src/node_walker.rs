@@ -751,7 +751,20 @@ fn walk_expr_children_mut<'mcx>(
             // the mutating walk and the re-box stay within a single lifetime.
             let sub_boxed: mcx::PgBox<'mcx, types_nodes::copy_query::Query<'mcx>> =
                 unsafe { core::mem::transmute(sub_boxed) };
-            let q = mcx::PgBox::into_inner(sub_boxed);
+            // Move the `Query` value out of the box WITHOUT running the box's
+            // `deallocate`. `PgBox::into_inner` (and `box_read_payload`) would
+            // call `Mcx::deallocate` against the *allocator captured in the box* —
+            // which for a SubLink built during parse/analysis is a transient
+            // context that may already be gone by the time the planner runs
+            // `flatten_join_alias_vars`. Dereferencing that dangling context
+            // pointer in `deallocate` is the `EXC_BAD_ACCESS` on the
+            // PHV-containing-SubLink lateral-nestloop EXPLAIN. C never pfrees the
+            // sub-Query here (`expression_tree_walker` just WALKs it); arena nodes
+            // are reclaimed wholesale on context reset, so leaking this one box's
+            // backing storage is faithful. `into_raw_with_allocator` decomposes
+            // the box, `ptr::read` moves the value out, and we drop neither the
+            // value (re-boxed below) nor invoke the allocator's `deallocate`.
+            let q = mcx::box_into_inner_leak(sub_boxed);
             let mut sub_node = Node::mk_query(mcx, q)
                 .expect("walk_expr_children_mut: opaque Node alloc failed (OOM)");
             let sub_aborted = walker(&mut sub_node);
@@ -1674,7 +1687,14 @@ pub fn range_table_mutator<'mcx>(
                         // at the wrong level. So wrap the subquery as a
                         // `Node::Query`, invoke the mutator, and store the
                         // (mutated) `Query` back — exactly like C.
-                        let q = mcx::PgBox::into_inner(boxed);
+                        // Move the `Query` value out WITHOUT running the box's
+                        // `deallocate`: the captured allocator may be a transient
+                        // parse/analyze context already gone by mutate time, and
+                        // `into_inner`'s `Mcx::deallocate` would dereference that
+                        // dangling context (`EXC_BAD_ACCESS`). C's MUTATE never
+                        // pfrees here; arena nodes are reclaimed on context reset,
+                        // so leaking this box's storage is faithful.
+                        let q = mcx::box_into_inner_leak(boxed);
                         let mut node = match Node::mk_query(mcx, q) {
                             Ok(n) => n,
                             Err(_) => return false,

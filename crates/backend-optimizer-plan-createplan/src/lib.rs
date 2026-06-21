@@ -460,16 +460,29 @@ pub(crate) fn replace_nestloop_params_mutator(
         if !needs_full_replace {
             // We can't replace the whole PHV, but we might still need to replace
             // Vars or PHVs within its expression, in case it ends up actually
-            // getting evaluated here. Flat-copy the PHV node and then recurse on
-            // its expression.
-            let mut newphv = phv.clone();
-            let phexpr = newphv
+            // getting evaluated here. C does a FLATCOPY (shallow memcpy) of the
+            // PlaceHolderVar and then OVERWRITES newphv->phexpr with the recursive
+            // mutator result, so the original phexpr is moved/reused, never
+            // duplicated. A derived `phv.clone()` here is WRONG: it DEEP-copies
+            // phexpr, and any context-allocated `PgBox<'mcx>` child inside it (a
+            // SubLink's `subselect` Query, a SubPlan, …) is either a panicking
+            // `Clone` (SubLink::clone) or a bitwise pointer copy that creates two
+            // owners of one arena allocation — a double-free when both PHVs drop
+            // (the EXC_BAD_ACCESS in `Mcx::deallocate` on the PHV-containing-SubLink
+            // lateral-nestloop EXPLAIN). Mirror C: consume the owned node, move the
+            // original `phexpr` out (no clone), recurse, and rebuild the PHV with
+            // the other fields carried over verbatim.
+            let mut owned_phv = match node {
+                Expr::PlaceHolderVar(p) => p,
+                _ => unreachable!("node was just matched as PlaceHolderVar"),
+            };
+            let phexpr = owned_phv
                 .phexpr
                 .take()
                 .expect("PlaceHolderVar without phexpr in replace_nestloop_params");
             let new_phexpr = replace_nestloop_params_mutator(mcx, root, *phexpr, err);
-            newphv.phexpr = Some(alloc::boxed::Box::new(new_phexpr));
-            return Expr::PlaceHolderVar(newphv);
+            owned_phv.phexpr = Some(alloc::boxed::Box::new(new_phexpr));
+            return Expr::PlaceHolderVar(owned_phv);
         }
         // Replace the PlaceHolderVar with a nestloop Param.
         match paramassign::replace_nestloop_param_placeholdervar::call(mcx, root, phv) {

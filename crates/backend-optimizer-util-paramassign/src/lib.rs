@@ -146,6 +146,31 @@ fn equal_paramval(a: &Expr, b: &Expr) -> bool {
     }
 }
 
+/// `equal(phv, paramval)` for a borrowed [`PlaceHolderVar`] — same comparison as
+/// [`equal_paramval`]'s PHV/PHV arm, but takes the PHV by reference so callers
+/// need not construct an owned `Expr::PlaceHolderVar(phv.clone())`. A derived
+/// `phv.clone()` is unsound here: it either panics (`SubLink::clone`, when the
+/// PHV's `phexpr` wraps a sub-`SELECT`) or bit-copies a context-allocated
+/// `PgBox<'mcx>` child into a second owner (a double-free against the planner
+/// arena). C's `equal()` never copies its operands.
+fn phv_equal_paramval(phv: &PlaceHolderVar, b: &Expr) -> bool {
+    match b {
+        Expr::PlaceHolderVar(pb) => {
+            let phexpr_eq = match (&phv.phexpr, &pb.phexpr) {
+                (None, None) => true,
+                (Some(ea), Some(eb)) => equal_expr::call(ea, eb),
+                _ => false,
+            };
+            phexpr_eq
+                && phv.phrels.words == pb.phrels.words
+                && phv.phid == pb.phid
+                && phv.phlevelsup == pb.phlevelsup
+                && phv.phnullingrels.words == pb.phnullingrels.words
+        }
+        _ => false,
+    }
+}
+
 /// Borrow an [`ExprRelids`] (the lifetime-free relids carried on a `Var`/`PHV`)
 /// as a [`Relids`] (`Option<Box<Bitmapset>>`) the relnode `relids_*` seams take.
 /// The two share the `{ words }` representation; an all-zero/empty `words` is the
@@ -632,7 +657,7 @@ pub fn replace_nestloop_param_placeholdervar(
     // Is this PHV already listed in root->curOuterParams?
     for lc in root.curOuterParams.clone() {
         let nlp = root.nestloop_param(lc);
-        if equal_paramval(&Expr::PlaceHolderVar(phv.clone()), &nlp.paramval) {
+        if phv_equal_paramval(phv, &nlp.paramval) {
             // Yes, so just make a Param referencing this NLP's slot.
             let info = expr_type_info::call(phv.phexpr.as_deref().expect("PlaceHolderVar::phexpr"))?;
             return Ok(Param {
@@ -716,7 +741,7 @@ pub fn process_subquery_nestloop_params(
                 for lc2 in root.curOuterParams.clone() {
                     let nlp = root.nestloop_param(lc2);
                     if nlp.paramno == pitem.paramId {
-                        debug_assert!(equal_paramval(&Expr::PlaceHolderVar(phv.clone()), &nlp.paramval));
+                        debug_assert!(phv_equal_paramval(&phv, &nlp.paramval));
                         present = true;
                         break;
                     }

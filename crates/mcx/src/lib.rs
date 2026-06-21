@@ -580,6 +580,28 @@ pub fn leak_in<'mcx, T>(b: PgBox<'mcx, T>) -> &'mcx mut T {
     PgBox::leak(b)
 }
 
+/// Move the value out of a [`PgBox`] **without** invoking the box allocator's
+/// `deallocate`, leaking the box's backing storage.
+///
+/// [`PgBox::into_inner`]/[`allocator_api2::boxed::Box::into_inner`] move the value
+/// out *and* call `Mcx::deallocate` against the allocator captured in the box.
+/// That is unsound when the captured allocator is a `MemoryContext` that has
+/// already been reset/freed (e.g. a sub-`Query` carrier built in a transient
+/// parse/analyze context, taken apart later in the planner): `deallocate`
+/// dereferences the dangling context and faults. C never `pfree`s such nodes
+/// individually — they are reclaimed wholesale when their context resets — so
+/// leaking the one box's storage here is the faithful behavior. This decomposes
+/// the box via `into_raw_with_allocator`, `ptr::read`s the value out (a move),
+/// and drops the (possibly dangling) allocator handle without ever calling it.
+pub fn box_into_inner_leak<'mcx, T>(b: PgBox<'mcx, T>) -> T {
+    let (raw, _alloc) = allocator_api2::boxed::Box::into_raw_with_allocator(b);
+    // SAFETY: `raw` is the live, aligned, non-null data pointer just yielded by
+    // `into_raw_with_allocator`; we read the `T` out exactly once and never touch
+    // `raw` again (its storage is leaked, not freed). `_alloc` is a `Copy`-style
+    // `Mcx` reference handle whose drop is a no-op — it is never dereferenced.
+    unsafe { core::ptr::read(raw) }
+}
+
 /// Coerce a sized `PgBox<'mcx, P>` to an unsized `PgBox<'mcx, U>` (a trait
 /// object `dyn Trait`), preserving the context allocator.
 ///
