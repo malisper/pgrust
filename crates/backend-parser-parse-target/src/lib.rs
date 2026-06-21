@@ -52,6 +52,7 @@ use types_nodes::primnodes::{
     SetToDefault, SubLinkType, SubscriptingRef, Var,
 };
 use types_nodes::primnodes::XmlExprOp;
+use types_nodes::primnodes::JsonExprOp;
 use types_nodes::rawnodes::{A_Indirection, ColumnRef, ResTarget};
 use types_parsenodes::CoercionContext;
 
@@ -2135,13 +2136,74 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
                 }
             }
         }
-        // The remaining C cases (T_MergeSupportFunc, T_XmlSerialize, and the
-        // SQL/JSON node family T_JsonParseExpr/T_JsonScalarExpr/
-        // T_JsonSerializeExpr/T_JsonObjectConstructor/T_JsonArrayConstructor/
-        // T_JsonArrayQueryConstructor/T_JsonObjectAgg/T_JsonArrayAgg/
-        // T_JsonFuncExpr) are raw-grammar node kinds not yet modeled in the
-        // `Node` enum, so they are not constructible here and fall through to
-        // the default (strength 0) exactly as an absent node does in C.
+        ntag::T_MergeSupportFunc => {
+            // make MERGE_ACTION() act like a regular function.
+            *name = Some(String::from("merge_action"));
+            return 2;
+        }
+        ntag::T_XmlSerialize => {
+            // make XMLSERIALIZE act like a regular function.
+            *name = Some(String::from("xmlserialize"));
+            return 2;
+        }
+        ntag::T_JsonParseExpr => {
+            // make JSON act like a regular function.
+            *name = Some(String::from("json"));
+            return 2;
+        }
+        ntag::T_JsonScalarExpr => {
+            // make JSON_SCALAR act like a regular function.
+            *name = Some(String::from("json_scalar"));
+            return 2;
+        }
+        ntag::T_JsonSerializeExpr => {
+            // make JSON_SERIALIZE act like a regular function.
+            *name = Some(String::from("json_serialize"));
+            return 2;
+        }
+        ntag::T_JsonObjectConstructor => {
+            // make JSON_OBJECT act like a regular function.
+            *name = Some(String::from("json_object"));
+            return 2;
+        }
+        ntag::T_JsonArrayConstructor | ntag::T_JsonArrayQueryConstructor => {
+            // make JSON_ARRAY act like a regular function.
+            *name = Some(String::from("json_array"));
+            return 2;
+        }
+        ntag::T_JsonObjectAgg => {
+            // make JSON_OBJECTAGG act like a regular function.
+            *name = Some(String::from("json_objectagg"));
+            return 2;
+        }
+        ntag::T_JsonArrayAgg => {
+            // make JSON_ARRAYAGG act like a regular function.
+            *name = Some(String::from("json_arrayagg"));
+            return 2;
+        }
+        ntag::T_JsonFuncExpr => {
+            // make SQL/JSON functions act like a regular function.
+            let jfe = node.expect_jsonfuncexpr();
+            match jfe.op {
+                JsonExprOp::JSON_EXISTS_OP => {
+                    *name = Some(String::from("json_exists"));
+                    return 2;
+                }
+                JsonExprOp::JSON_QUERY_OP => {
+                    *name = Some(String::from("json_query"));
+                    return 2;
+                }
+                JsonExprOp::JSON_VALUE_OP => {
+                    *name = Some(String::from("json_value"));
+                    return 2;
+                }
+                // JSON_TABLE_OP can't happen here (C: elog(ERROR,
+                // "unrecognized JsonExpr op")).
+                JsonExprOp::JSON_TABLE_OP => {
+                    panic!("unrecognized JsonExpr op: {}", jfe.op as i32);
+                }
+            }
+        }
         _ => {}
     }
 
