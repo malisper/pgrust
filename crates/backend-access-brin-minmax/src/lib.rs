@@ -43,7 +43,7 @@ use alloc::format;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_brin::{BrinDesc, BrinOpcInfo, BrinValues, MinmaxOpaque, OpaqueOpcInfo};
-use types_core::primitive::{AttrNumber, Oid};
+use types_core::primitive::{AttrNumber, BlockNumber, Oid};
 use types_error::error::{ERRCODE_INTERNAL_ERROR, ERROR};
 use types_error::PgResult;
 use types_rel::Relation;
@@ -500,6 +500,19 @@ fn dispatch_opcinfo<'mcx>(
     }
 }
 
+/// `BrinGetPagesPerRange(index)` (brin.h): the index's `pages_per_range`
+/// reloption, read from the AM-defined option bytea the relcache carries in
+/// `rd_options` (`RdOptions::Bytea`), else `default`. The `BrinOptions` layout
+/// is `{int32 vl_len_; BlockNumber pagesPerRange; bool autosummarize;}`, so
+/// `pagesPerRange` is the `u32` at byte offset 4. Mirrors
+/// `brin-insert-vacuum::brin_get_pages_per_range`.
+fn brin_get_pages_per_range(index: &Relation<'_>, default: BlockNumber) -> BlockNumber {
+    match index.rd_options.as_ref().and_then(|o| o.bytea()) {
+        Some(b) if b.len() >= 8 => BlockNumber::from_ne_bytes([b[4], b[5], b[6], b[7]]),
+        _ => default,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_addvalue<'mcx>(
     mcx: Mcx<'mcx>,
@@ -521,10 +534,11 @@ fn dispatch_addvalue<'mcx>(
         }
         bloom::F_BRIN_BLOOM_ADD_VALUE => {
             // C `brin_bloom_add_value` reads PG_GET_OPCLASS_OPTIONS() and
-            // BrinGetPagesPerRange(bdesc->bd_index); the relcache trim carries
-            // neither yet, so we pass the behaviour-preserving defaults (the
-            // bloom defaults / BRIN_DEFAULT_PAGES_PER_RANGE) — the same trim-gap
-            // convention as brin-insert-vacuum::brin_get_auto_summarize.
+            // BrinGetPagesPerRange(bdesc->bd_index). The relcache now carries the
+            // BRIN reloptions in rd_options (RdOptions::Bytea), so read the real
+            // pages_per_range; the per-column opclass options
+            // (PG_GET_OPCLASS_OPTIONS, rd_opcoptions) are not yet carried, so opts
+            // stays None (bloom defaults).
             bloom::brin_bloom_add_value(
                 mcx,
                 bdesc,
@@ -532,16 +546,16 @@ fn dispatch_addvalue<'mcx>(
                 value,
                 isnull,
                 collation,
-                bloom::PAGES_PER_RANGE_DEFAULT,
+                brin_get_pages_per_range(index, bloom::PAGES_PER_RANGE_DEFAULT),
                 None,
             )
         }
         mmm::F_BRIN_MINMAX_MULTI_ADD_VALUE => {
             // C `brin_minmax_multi_add_value` reads PG_GET_OPCLASS_OPTIONS()
-            // (values_per_range) and BrinGetPagesPerRange(bd_index); the relcache
-            // trim carries neither yet, so we pass the behaviour-preserving
-            // defaults (opts = None -> 32, BRIN_DEFAULT_PAGES_PER_RANGE) — the
-            // same trim-gap convention as bloom.
+            // (values_per_range) and BrinGetPagesPerRange(bd_index). The relcache
+            // now carries the BRIN reloptions, so read the real pages_per_range;
+            // the per-column opclass options are not yet carried, so opts stays
+            // None (values_per_range default 32).
             mmm::brin_minmax_multi_add_value(
                 mcx,
                 bdesc,
@@ -550,7 +564,7 @@ fn dispatch_addvalue<'mcx>(
                 isnull,
                 collation,
                 None,
-                mmm::PAGES_PER_RANGE_DEFAULT,
+                brin_get_pages_per_range(index, mmm::PAGES_PER_RANGE_DEFAULT),
             )
         }
         _ => unported_opclass("AddValue", oid),
