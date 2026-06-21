@@ -3504,12 +3504,98 @@ fn exec_ar_delete_triggers_impl<'mcx>(
         tc,
     )
 }
+/// `ExecIRDeleteTriggers(estate, relinfo, trigtuple)` (trigger.c:2849) — fire the
+/// INSTEAD OF DELETE row triggers on a view.  Unlike the BEFORE-ROW path there is
+/// no on-disk tuple, no locking and no `GetTupleForTrigger`/EPQ: the OLD row is
+/// the `trigtuple` handed in by the rewriter/executor.  We force-store it into the
+/// trigger OLD slot, then run each matching ROW / INSTEAD / DELETE trigger.  A
+/// trigger returning NULL suppresses the delete (`Ok(false)`); a non-NULL return
+/// is ignored (C frees it; the owned model drops it).
 fn exec_ir_delete_triggers_impl<'mcx>(
-    _estate: &mut EStateData<'mcx>,
-    _relinfo: types_nodes::RriId,
-    _trigtuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    trigtuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
 ) -> PgResult<bool> {
-    front_half("ExecIRDeleteTriggers", 2849)
+    use types_catalog::pg_trigger::{
+        TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_ROW,
+    };
+
+    let mcx = estate.es_query_cxt;
+
+    // The IR firing path always passes a real OLD tuple (the view row).
+    let trigtuple =
+        trigtuple.expect("ExecIRDeleteTriggers: INSTEAD OF DELETE needs a trigtuple");
+
+    // TupleTableSlot *slot = ExecGetTriggerOldSlot(estate, relinfo);
+    let oldslot = backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
+
+    // LocTriggerData.tg_event = TRIGGER_EVENT_DELETE | ROW | INSTEAD;
+    let tg_event = TRIGGER_EVENT_DELETE | TRIGGER_EVENT_ROW | TRIGGER_EVENT_INSTEAD;
+
+    // ExecForceStoreHeapTuple(trigtuple, slot, false);
+    backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+        estate,
+        oldslot,
+        trigtuple.clone_in(mcx)?,
+        false,
+    )?;
+
+    let numtriggers = {
+        let rri = estate.result_rel(relinfo);
+        match rri.ri_TrigDesc.as_ref() {
+            Some(td) => td.triggers.len(),
+            None => return Ok(true),
+        }
+    };
+
+    for i in 0..numtriggers {
+        let (tgtype, tgenabled, tgoid, has_qual, tgnattr) = {
+            let trig = &estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[i];
+            (trig.tgtype, trig.tgenabled, trig.tgoid, trig.tgqual.is_some(), trig.tgnattr)
+        };
+
+        // if (!TRIGGER_TYPE_MATCHES(tgtype, ROW, INSTEAD, DELETE)) continue;
+        if !TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_ROW, TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_DELETE)
+        {
+            continue;
+        }
+        // if (!TriggerEnabled(estate, relinfo, trigger, tg_event, NULL, slot, NULL))
+        //   continue;
+        if !trigger_enabled(
+            estate,
+            relinfo,
+            i,
+            tgenabled,
+            tgnattr,
+            has_qual,
+            tg_event,
+            /* oldslot */ Some(oldslot),
+            /* newslot */ None,
+        )? {
+            continue;
+        }
+
+        // rettuple = ExecCallTriggerFunc(...); tg_trigslot = slot, tg_trigtuple =
+        // trigtuple; no NEW row on a DELETE.
+        let returned = fire_row_modify_trigger(
+            estate,
+            relinfo,
+            i,
+            tgoid,
+            tg_event,
+            oldslot,
+            &trigtuple,
+            /* new */ None,
+        )?;
+
+        // if (rettuple == NULL) return false;  /* Delete was suppressed */
+        // else if (rettuple != trigtuple) heap_freetuple(rettuple);  (owned: dropped)
+        if returned.is_none() {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 // ---- ROW UPDATE (trigger.c:2972-3215) ----
@@ -3829,13 +3915,130 @@ fn epq_recheck_unported() -> PgError {
          clean-lock (TM_Ok) BEFORE-ROW UPDATE/DELETE path runs end-to-end",
     )
 }
+/// `ExecIRUpdateTriggers(estate, relinfo, trigtuple, newslot)` (trigger.c:3215) —
+/// fire the INSTEAD OF UPDATE row triggers on a view.  Like the IR-DELETE path
+/// there is no on-disk tuple, no lock and no `GetTupleForTrigger`/EPQ: the OLD row
+/// is the `trigtuple` handed in, the proposed NEW row is in `newslot`.  We
+/// force-store the OLD tuple into the trigger OLD slot, then run each matching
+/// ROW / INSTEAD / UPDATE trigger, threading the NEW tuple through and applying a
+/// returned-modified tuple back into `newslot`.  A trigger returning NULL means
+/// "do nothing" (`Ok(false)`).
 fn exec_ir_update_triggers_impl<'mcx>(
-    _estate: &mut EStateData<'mcx>,
-    _relinfo: types_nodes::RriId,
-    _trigtuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
-    _newslot: types_nodes::SlotId,
+    estate: &mut EStateData<'mcx>,
+    relinfo: types_nodes::RriId,
+    trigtuple: Option<types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>>,
+    newslot: types_nodes::SlotId,
 ) -> PgResult<bool> {
-    front_half("ExecIRUpdateTriggers", 3215)
+    use types_catalog::pg_trigger::{
+        TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_ROW, TRIGGER_TYPE_UPDATE,
+    };
+
+    let mcx = estate.es_query_cxt;
+
+    let trigtuple =
+        trigtuple.expect("ExecIRUpdateTriggers: INSTEAD OF UPDATE needs a trigtuple");
+
+    // TupleTableSlot *oldslot = ExecGetTriggerOldSlot(estate, relinfo);
+    let oldslot = backend_commands_trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
+
+    // LocTriggerData.tg_event = TRIGGER_EVENT_UPDATE | ROW | INSTEAD;
+    let tg_event = TRIGGER_EVENT_UPDATE | TRIGGER_EVENT_ROW | TRIGGER_EVENT_INSTEAD;
+
+    // ExecForceStoreHeapTuple(trigtuple, oldslot, false);
+    backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+        estate,
+        oldslot,
+        trigtuple.clone_in(mcx)?,
+        false,
+    )?;
+
+    let numtriggers = {
+        let rri = estate.result_rel(relinfo);
+        match rri.ri_TrigDesc.as_ref() {
+            Some(td) => td.triggers.len(),
+            None => return Ok(true),
+        }
+    };
+
+    // newtuple == NULL until first materialized (ExecFetchSlotHeapTuple(newslot)).
+    let mut newtuple: Option<
+        types_tuple::backend_access_common_heaptuple::FormedTuple<'mcx>,
+    > = None;
+
+    for i in 0..numtriggers {
+        let (tgtype, tgenabled, tgoid, has_qual, tgnattr) = {
+            let trig = &estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[i];
+            (trig.tgtype, trig.tgenabled, trig.tgoid, trig.tgqual.is_some(), trig.tgnattr)
+        };
+
+        // if (!TRIGGER_TYPE_MATCHES(tgtype, ROW, INSTEAD, UPDATE)) continue;
+        if !TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_ROW, TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_UPDATE)
+        {
+            continue;
+        }
+        // if (!TriggerEnabled(estate, relinfo, trigger, tg_event, NULL, oldslot, newslot))
+        //   continue;
+        if !trigger_enabled(
+            estate,
+            relinfo,
+            i,
+            tgenabled,
+            tgnattr,
+            has_qual,
+            tg_event,
+            /* oldslot */ Some(oldslot),
+            /* newslot */ Some(newslot),
+        )? {
+            continue;
+        }
+
+        // if (!newtuple) newtuple = ExecFetchSlotHeapTuple(newslot, true, &should_free);
+        if newtuple.is_none() {
+            let sd = estate.slot_data_mut(newslot);
+            let (formed, _should_free) =
+                backend_executor_execTuples_seams::exec_fetch_slot_heap_tuple::call(mcx, sd, true)?;
+            newtuple = Some(formed);
+        }
+        // oldtuple = newtuple — the NEW row handed to this trigger as tg_newtuple.
+        let oldtuple = newtuple.clone().unwrap();
+
+        // newtuple = ExecCallTriggerFunc(...); tg_trigslot = oldslot,
+        // tg_trigtuple = trigtuple [OLD], tg_newslot = newslot, tg_newtuple = newtuple.
+        let returned = fire_row_modify_trigger(
+            estate,
+            relinfo,
+            i,
+            tgoid,
+            tg_event,
+            oldslot,
+            &trigtuple,
+            Some((newslot, &oldtuple)),
+        )?;
+
+        match returned {
+            // newtuple == NULL  ->  "do nothing".
+            None => return Ok(false),
+            Some(rt) => {
+                if formed_tuple_same(&rt, &oldtuple) {
+                    // newtuple == oldtuple — row unchanged; keep it cached.
+                    newtuple = Some(rt);
+                } else {
+                    // newtuple != oldtuple — the trigger modified the NEW row.
+                    // ExecForceStoreHeapTuple(newtuple, newslot, false);
+                    backend_executor_execTuples_seams::exec_force_store_formed_heap_tuple::call(
+                        estate,
+                        newslot,
+                        rt.clone_in(mcx)?,
+                        false,
+                    )?;
+                    // signal tuple should be re-fetched if used.
+                    newtuple = None;
+                }
+            }
+        }
+    }
+
+    Ok(true)
 }
 fn exec_ar_update_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
