@@ -28,7 +28,7 @@ use types_error::PgResult;
 use types_nodes::execexpr::{
     ExprEvalOp, ExprEvalRowtypeCache, ExprEvalStep, ExprEvalStepData, ExprSetupInfo, ExprState,
     ProjectionInfo, ResultCell, ResultCellId, VarReturningType, EEO_FLAG_HAS_NEW, EEO_FLAG_HAS_OLD,
-    EEO_FLAG_IS_QUAL, STATE_RESULT_CELL,
+    EEO_FLAG_IS_QUAL, EEO_FLAG_NEW_IS_NULL, EEO_FLAG_OLD_IS_NULL, STATE_RESULT_CELL,
 };
 use types_nodes::execnodes::PlanStateData;
 use types_nodes::nodehashjoin::HashJoinState;
@@ -180,7 +180,17 @@ fn expr_setup_walker(node: &Expr, info: &mut ExprSetupInfo) {
                 OUTER_VAR => {
                     info.last_attnums.last_outer = info.last_attnums.last_outer.max(attnum)
                 }
-                _ => info.last_attnums.last_scan = info.last_attnums.last_scan.max(attnum),
+                _ => match variable.varreturningtype {
+                    VrtKind::VAR_RETURNING_DEFAULT => {
+                        info.last_attnums.last_scan = info.last_attnums.last_scan.max(attnum)
+                    }
+                    VrtKind::VAR_RETURNING_OLD => {
+                        info.last_attnums.last_old = info.last_attnums.last_old.max(attnum)
+                    }
+                    VrtKind::VAR_RETURNING_NEW => {
+                        info.last_attnums.last_new = info.last_attnums.last_new.max(attnum)
+                    }
+                },
             }
         }
         // Pure-leaf nodes — no child expressions to descend.
@@ -204,6 +214,13 @@ fn expr_setup_walker(node: &Expr, info: &mut ExprSetupInfo) {
             descend_opt(node.expect_convertrowtypeexpr().arg.as_deref(), info)
         }
         etag::T_FieldSelect => descend_opt(node.expect_fieldselect().arg.as_deref(), info),
+        etag::T_ReturningExpr => descend_opt(
+            node.as_returningexpr()
+                .expect("ReturningExpr")
+                .retexpr
+                .as_deref(),
+            info,
+        ),
         etag::T_NamedArgExpr => descend_opt(node.expect_namedargexpr().arg.as_deref(), info),
         etag::T_NullTest => descend_opt(node.expect_nulltest().arg.as_deref(), info),
         etag::T_BooleanTest => descend_opt(node.expect_booleantest().arg.as_deref(), info),
@@ -302,6 +319,8 @@ fn exec_push_expr_setup_steps<'mcx>(
         (ExprEvalOp::EEOP_INNER_FETCHSOME, last.last_inner),
         (ExprEvalOp::EEOP_OUTER_FETCHSOME, last.last_outer),
         (ExprEvalOp::EEOP_SCAN_FETCHSOME, last.last_scan),
+        (ExprEvalOp::EEOP_OLD_FETCHSOME, last.last_old),
+        (ExprEvalOp::EEOP_NEW_FETCHSOME, last.last_new),
     ] {
         if last_var > 0 {
             let mut scratch = ExprEvalStep {
@@ -406,7 +425,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 d: ExprEvalStepData::Var {
                     attnum: 0,
                     vartype: variable.vartype,
-                    varreturningtype: VarReturningType::VAR_RETURNING_DEFAULT,
+                    varreturningtype: variable.varreturningtype,
                 },
             };
 
@@ -425,10 +444,13 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             } else if variable.varattno <= 0 {
                 // system column
                 set_var_payload(&mut scratch, variable.varattno as i32, variable.vartype);
+                if let ExprEvalStepData::Var { varreturningtype, .. } = &mut scratch.d {
+                    *varreturningtype = variable.varreturningtype;
+                }
                 scratch.opcode = match variable.varno {
                     INNER_VAR => ExprEvalOp::EEOP_INNER_SYSVAR,
                     OUTER_VAR => ExprEvalOp::EEOP_OUTER_SYSVAR,
-                    _ => sysvar_opcode_for(state, VrtKind::VAR_RETURNING_DEFAULT),
+                    _ => sysvar_opcode_for(state, variable.varreturningtype),
                 };
             } else {
                 // regular user column
@@ -437,10 +459,13 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                     variable.varattno as i32 - 1,
                     variable.vartype,
                 );
+                if let ExprEvalStepData::Var { varreturningtype, .. } = &mut scratch.d {
+                    *varreturningtype = variable.varreturningtype;
+                }
                 scratch.opcode = match variable.varno {
                     INNER_VAR => ExprEvalOp::EEOP_INNER_VAR,
                     OUTER_VAR => ExprEvalOp::EEOP_OUTER_VAR,
-                    _ => var_opcode_for(state, VrtKind::VAR_RETURNING_DEFAULT),
+                    _ => var_opcode_for(state, variable.varreturningtype),
                 };
             }
             expr_eval_push_step(mcx, state, scratch)?;
@@ -1936,9 +1961,52 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             "execExpr-core: InferenceElem is a planner-only unique-index inference node, never \
              compiled"
         ),
-        etag::T_ReturningExpr => panic!(
-            "execExpr-core: ReturningExpr compilation is owned by execExpr_modify"
-        ),
+        // ----- T_ReturningExpr -----
+        etag::T_ReturningExpr => {
+            let rexpr = node
+                .as_returningexpr()
+                .expect("ReturningExpr");
+
+            // Skip expression evaluation if OLD/NEW row doesn't exist.
+            let nullflag = if rexpr.retold {
+                EEO_FLAG_OLD_IS_NULL
+            } else {
+                EEO_FLAG_NEW_IS_NULL
+            };
+            let scratch = ExprEvalStep {
+                opcode: ExprEvalOp::EEOP_RETURNINGEXPR,
+                resvalue: resv,
+                resnull: resv,
+                d: ExprEvalStepData::ReturningExpr {
+                    nullflag,
+                    jumpdone: -1, // set below
+                },
+            };
+            expr_eval_push_step(mcx, state, scratch)?;
+            let retstep = (state.steps_len - 1) as usize;
+
+            // Steps to evaluate expression to return.
+            let retexpr = rexpr
+                .retexpr
+                .as_deref()
+                .expect("ReturningExpr.retexpr present");
+            exec_init_expr_rec(mcx, retexpr, state, resv)?;
+
+            // Jump target used if OLD/NEW row doesn't exist.
+            let target = state.steps_len;
+            let steps = state.steps.as_mut().expect("returningexpr steps");
+            if let ExprEvalStepData::ReturningExpr { jumpdone, .. } = &mut steps[retstep].d {
+                *jumpdone = target;
+            }
+
+            // Update ExprState flags.
+            if rexpr.retold {
+                state.flags |= EEO_FLAG_HAS_OLD;
+            } else {
+                state.flags |= EEO_FLAG_HAS_NEW;
+            }
+            Ok(())
+        }
         // #[non_exhaustive] guard.
         _ => panic!("execExpr-core: ExecInitExprRec — unhandled Expr node kind"),
     }
@@ -2488,17 +2556,25 @@ pub fn exec_build_projection_info_impl<'mcx>(
 
         if is_safe_var {
             let v = variable.unwrap();
+            // INDEX_VAR handled by default case. The C switches on
+            // variable->varreturningtype (DEFAULT/OLD/NEW) to pick
+            // ASSIGN_SCAN_VAR / ASSIGN_OLD_VAR / ASSIGN_NEW_VAR (setting
+            // EEO_FLAG_HAS_OLD/NEW), so OLD/NEW columns read from the OLD/NEW
+            // tuple slot rather than the scan slot.
             let opcode = match v.varno {
                 INNER_VAR => ExprEvalOp::EEOP_ASSIGN_INNER_VAR,
                 OUTER_VAR => ExprEvalOp::EEOP_ASSIGN_OUTER_VAR,
-                // INDEX_VAR handled by default case. The C switches on
-                // variable->varreturningtype (DEFAULT/OLD/NEW) to pick
-                // ASSIGN_SCAN_VAR / ASSIGN_OLD_VAR / ASSIGN_NEW_VAR (setting
-                // EEO_FLAG_HAS_OLD/NEW). The trimmed keystone `Var` carries no
-                // `varreturningtype` field, so — exactly as the non-assign Var
-                // arm in `exec_init_expr_rec` does — this is always the DEFAULT
-                // (SCAN) case.
-                _ => ExprEvalOp::EEOP_ASSIGN_SCAN_VAR,
+                _ => match v.varreturningtype {
+                    VrtKind::VAR_RETURNING_DEFAULT => ExprEvalOp::EEOP_ASSIGN_SCAN_VAR,
+                    VrtKind::VAR_RETURNING_OLD => {
+                        state.flags |= EEO_FLAG_HAS_OLD;
+                        ExprEvalOp::EEOP_ASSIGN_OLD_VAR
+                    }
+                    VrtKind::VAR_RETURNING_NEW => {
+                        state.flags |= EEO_FLAG_HAS_NEW;
+                        ExprEvalOp::EEOP_ASSIGN_NEW_VAR
+                    }
+                },
             };
             let scratch = ExprEvalStep {
                 opcode,

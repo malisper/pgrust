@@ -278,15 +278,9 @@ pub struct ExprEvalRowtypeCache {
 }
 
 /// `VarReturningType` (nodes/primnodes.h) — return old/new/default value of a
-/// `Var` in RETURNING/MERGE. Mirrored here (it is forward-referenced by the
-/// `var` step payload) until primnodes carries it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum VarReturningType {
-    VAR_RETURNING_DEFAULT,
-    VAR_RETURNING_OLD,
-    VAR_RETURNING_NEW,
-}
+/// `Var` in RETURNING/MERGE. Re-exported from `primnodes` (the canonical home);
+/// the `var` step payload forward-references it.
+pub use crate::primnodes::VarReturningType;
 
 /// `CompareType` (nodes/cmptype.h) — abstract comparison result requested of a
 /// `RowCompare`. Canonically defined in `types_tableam::amapi`; re-exported here
@@ -1985,6 +1979,10 @@ pub struct LastAttnumInfo {
     pub last_outer: AttrNumber,
     /// highest attnum referenced from the scan slot
     pub last_scan: AttrNumber,
+    /// highest attnum referenced from the RETURNING OLD slot
+    pub last_old: AttrNumber,
+    /// highest attnum referenced from the RETURNING NEW slot
+    pub last_new: AttrNumber,
 }
 
 /// `ExprSetupInfo` (execExpr.c) — collected info that

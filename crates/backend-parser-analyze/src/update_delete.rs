@@ -12,12 +12,13 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgVec};
 use types_acl::acl::{ACL_DELETE, ACL_UPDATE};
-use types_error::PgResult;
+use backend_utils_error::ereport;
+use types_error::{PgResult, ERRCODE_DUPLICATE_ALIAS, ERRCODE_SYNTAX_ERROR, ERROR};
 use types_nodes::copy_query::Query;
 use types_nodes::nodes::CmdType;
 use types_nodes::parsestmt::{ParseExprKind, ParseState};
 use types_nodes::primnodes::VarReturningType;
-use types_nodes::rawnodes::{DeleteStmt, ResTarget, UpdateStmt};
+use types_nodes::rawnodes::{DeleteStmt, ResTarget, ReturningOptionKind, UpdateStmt};
 
 use crate::select::opt_node_to_owned;
 use crate::{cte_vec_to_nodes, elog_error, opt_expr_to_node};
@@ -484,13 +485,72 @@ pub(crate) fn transformReturningClause<'mcx>(
 
     let save_nslen = pstate.p_namespace.len();
 
-    // Scan RETURNING WITH(...) options for OLD/NEW alias names. A present
-    // ReturningOption requires a typed node that the grammar conversion does
-    // not yet produce; loudly reject rather than silently ignore.
-    if !rc.options.is_empty() {
-        return Err(elog_error(
-            "RETURNING WITH (OLD/NEW AS ...) is not yet ported (analyze.c:2659)",
-        ));
+    // Scan RETURNING WITH(...) options for OLD/NEW alias names. Complain if
+    // there is any conflict with existing relations.
+    for opt_node in rc.options.iter() {
+        let option = opt_node.as_ref().as_returningoption().ok_or_else(|| {
+            elog_error("RETURNING WITH option is not a ReturningOption node")
+        })?;
+        let value = option
+            .value
+            .as_ref()
+            .ok_or_else(|| elog_error("ReturningOption has no value"))?;
+        match option.option {
+            ReturningOptionKind::Old => {
+                if qry.returningOldAlias.is_some() {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_SYNTAX_ERROR)
+                        .errmsg("OLD cannot be specified multiple times")
+                        .errposition(backend_parser_small1::parser_errposition(
+                            pstate,
+                            option.location,
+                        ))
+                        .into_error());
+                }
+                qry.returningOldAlias = Some(value.clone_in(mcx)?);
+            }
+            ReturningOptionKind::New => {
+                if qry.returningNewAlias.is_some() {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_SYNTAX_ERROR)
+                        .errmsg("NEW cannot be specified multiple times")
+                        .errposition(backend_parser_small1::parser_errposition(
+                            pstate,
+                            option.location,
+                        ))
+                        .into_error());
+                }
+                qry.returningNewAlias = Some(value.clone_in(mcx)?);
+            }
+        }
+
+        if backend_parser_relation::refnameNamespaceItem(
+            pstate,
+            None,
+            value.as_str(),
+            -1,
+            false,
+        )?
+        .is_some()
+        {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_DUPLICATE_ALIAS)
+                .errmsg(alloc::format!(
+                    "table name \"{}\" specified more than once",
+                    value.as_str()
+                ))
+                .errposition(backend_parser_small1::parser_errposition(
+                    pstate,
+                    option.location,
+                ))
+                .into_error());
+        }
+
+        let returning_type = match option.option {
+            ReturningOptionKind::Old => VarReturningType::VAR_RETURNING_OLD,
+            ReturningOptionKind::New => VarReturningType::VAR_RETURNING_NEW,
+        };
+        addNSItemForReturning(mcx, pstate, value.as_str(), returning_type)?;
     }
 
     // If OLD/NEW alias names weren't explicitly specified, use "old"/"new"
