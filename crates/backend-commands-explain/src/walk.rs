@@ -1152,31 +1152,6 @@ pub fn ExplainNode<'es, 'p>(
         .unwrap_or(false);
     let haschildren = has_init || has_outer || has_inner || has_members || has_sub;
 
-    // Append/MergeAppend run-time pruning report (explain.c:2305-2344): if the
-    // AppendState/MergeAppendState ended up with fewer live subplans than the
-    // plan's original child list, some were removed by run-time pruning. Emit
-    // "Subplans Removed: N" as a property of THIS (parent) node, before the
-    // Plans sub-group opens — it cannot live inside the Plans group.
-    match plan_node.node_tag() {
-        ntag::T_Append => {
-            let nplans = planstate
-                .member_input_states()
-                .map(|m| m.len())
-                .unwrap_or(0) as i32;
-            let nchildren = plan_node.expect_append().appendplans.len() as i32;
-            ExplainMissingMembers(nplans, nchildren, es)?;
-        }
-        ntag::T_MergeAppend => {
-            let nplans = planstate
-                .member_input_states()
-                .map(|m| m.len())
-                .unwrap_or(0) as i32;
-            let nchildren = plan_node.expect_mergeappend().mergeplans.len() as i32;
-            ExplainMissingMembers(nplans, nchildren, es)?;
-        }
-        _ => {}
-    }
-
     // ancestors = lcons(plan, ancestors): prepend this Plan node (cloned into
     // the 'es formatting arena, matching es->pstmt) for the children's deparse,
     // so PARAM_EXEC / OUTER_VAR resolution can reach this node as an ancestor.
@@ -1700,23 +1675,6 @@ fn ExplainMemberNodes<'es, 'p>(
     //     ExplainNode(planstates[j], ancestors, "Member", NULL, es);
     for child in planstates {
         ExplainNode(es, mcx, child, ancestors, Some("Member"), None)?;
-    }
-    Ok(())
-}
-
-/// `ExplainMissingMembers(nplans, nchildren, es)` (explain.c:4759) — report
-/// about any run-time-pruned subnodes of an Append/MergeAppend node. `nplans`
-/// is the number of live subplans, `nchildren` the original number in the
-/// plan. Emit "Subplans Removed" when some were pruned (always emitted in
-/// non-text formats so the property is present).
-#[allow(non_snake_case)]
-fn ExplainMissingMembers<'es>(
-    nplans: i32,
-    nchildren: i32,
-    es: &mut ExplainState<'es>,
-) -> PgResult<()> {
-    if nplans < nchildren || es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT {
-        fmt::ExplainPropertyInteger("Subplans Removed", None, (nchildren - nplans) as i64, es)?;
     }
     Ok(())
 }
