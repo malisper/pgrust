@@ -23911,6 +23911,18 @@ name = "common-ryu"
 version = "0.0.0"
 
 [[package]]
+name = "common-saslprep"
+version = "0.0.0"
+dependencies = [
+ "backend-libpq-auth-scram-seams",
+ "common-unicode-norm-bitfields",
+ "common-wchar",
+ "mcx",
+ "types-error",
+ "types-wchar",
+]
+
+[[package]]
 name = "common-scram-common"
 version = "0.0.0"
 dependencies = [
@@ -25047,6 +25059,7 @@ dependencies = [
  "common-md5",
  "common-pglz",
  "common-prng-base64",
+ "common-saslprep",
  "common-scram-common",
  "common-string",
  "common-unicode-category",

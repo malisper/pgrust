@@ -637,6 +637,7 @@ pub fn init_all() {
     common_ip::init_seams();
     common_pglz::init_seams();
     common_prng_base64::init_seams();
+    common_saslprep::init_seams();
     common_scram_common::init_seams();
     common_string::init_seams();
     interfaces_libpq_legacy_pqsignal::init_seams();

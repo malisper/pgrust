@@ -625,6 +625,7 @@ common-ip = { path = "../common-ip" }
 common-unicode-category = { path = "../common-unicode-category" }
 common-pglz = { path = "../common-pglz" }
 common-prng-base64 = { path = "../common-prng-base64" }
+common-saslprep = { path = "../common-saslprep" }
 common-scram-common = { path = "../common-scram-common" }
 common-string = { path = "../common-string" }
 interfaces-libpq-fe = { path = "../interfaces-libpq-fe" }
