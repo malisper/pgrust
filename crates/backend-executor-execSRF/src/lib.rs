@@ -107,6 +107,7 @@ pub fn init_seams() {
     seams::exec_make_table_function_result::set(ExecMakeTableFunctionResult);
     seams::exec_init_function_result_set::set(ExecInitFunctionResultSet);
     seams::exec_make_function_result_set::set(ExecMakeFunctionResultSet);
+    seams::restart_set_expr_state::set(RestartSetExprState);
     seams::is_scalar_record_function::set(json_record::is_scalar_record_function);
     seams::invoke_scalar_record_function::set(json_record::invoke_scalar_record_function);
     // The executor-frame `fmgrtab` analogue for the int4/int8 generate_series
@@ -1452,6 +1453,53 @@ fn ExecMakeFunctionResultSet<'mcx>(
 
         return Ok((result, result_isnull, this_isdone));
     }
+}
+
+/// `RestartSetExprState(fcache)` — reset a [`SetExprState`] that may have been
+/// abandoned mid value-per-call series (e.g. a tSRF cut short by an enclosing
+/// LIMIT), so a subsequent rescan re-evaluates it from the start.
+///
+/// This is the owned-model equivalent of the cleanup C performs through the
+/// `ExprContext` shutdown callback that `init_MultiFuncCall` registers on
+/// `rsi->econtext`. In C, `ExecReScan` calls `ReScanExprContext(node->
+/// ps_ExprContext)` before the node-specific rescan, which fires
+/// `shutdown_MultiFuncCall` for every SRF that left a `FuncCallContext` in
+/// `flinfo->fn_extra`; that resets `fn_extra` to NULL so the next call is a
+/// fresh `SRF_IS_FIRSTCALL()`. The owned model cannot register that bare-`fn`
+/// callback (the cross-call `fn_extra` lives on the owned call frame, which the
+/// callback cannot name — see `init_MultiFuncCall`), so the rescanning node
+/// (nodeProjectSet) drives the same teardown directly through this function for
+/// each of its SRF elements.
+///
+/// It mirrors `shutdown_MultiFuncCall` (tear down any leftover multi-call
+/// context bound to `fn_extra`), ends any partially-drained materialize-mode
+/// `funcResultStore`, and clears `setArgsValid` so the next call re-evaluates the
+/// function arguments. A SetExprState that ran to completion (`fn_extra` already
+/// NULL, no `funcResultStore`, `setArgsValid` false) is left untouched.
+pub fn RestartSetExprState<'mcx>(fcache: &mut SetExprState<'mcx>) -> PgResult<()> {
+    // Tear down any leftover value-per-call cross-call context: the C ExprContext
+    // shutdown callback (`shutdown_MultiFuncCall`) unbinds `flinfo->fn_extra` and
+    // deletes the SRF multi-call context. `end_MultiFuncCall` performs exactly
+    // that teardown off the owned `fn_extra` channel.
+    if let Some(fcinfo) = fcache.fcinfo.as_deref_mut() {
+        if fcinfo.fn_extra.is_some() {
+            backend_utils_fmgr_funcapi_seams::end_MultiFuncCall::call(fcinfo)?;
+        }
+    }
+
+    // End any partially-drained materialize-mode tuplestore (C frees it when the
+    // store is exhausted in ExecMakeFunctionResultSet; an abandoned one must be
+    // released here so the rescan starts clean).
+    if let Some(store) = fcache.funcResultStore.take() {
+        backend_utils_sort_storage_seams::tuplestore_end::call(store);
+    }
+    fcache.funcResultSlot = None;
+
+    // Forget any half-collected arguments so the next call re-evaluates them
+    // (C: setArgsValid is only meaningful while a series is in flight).
+    fcache.setArgsValid = false;
+
+    Ok(())
 }
 
 // ===========================================================================
