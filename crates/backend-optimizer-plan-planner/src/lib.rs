@@ -4701,10 +4701,38 @@ fn exprs_equal_by_value(root: &PlannerInfo, a: types_pathnodes::NodeId, b: types
     backend_nodes_equalfuncs_seams::equal_expr::call(root.node(a), root.node(b))
 }
 
-/// `equal(a, b)` over two arena handle lists (`List *` of equal length whose
-/// elements compare by value), used by `optimize_window_clauses`'s duplicate
-/// check for `partitionClause`/`orderClause`.
-fn node_lists_equal(
+/// Recursively rewrite every `WindowFunc` whose `winref == from` to `winref =
+/// to` within an owned `Expr` tree.
+///
+/// In C, `wflists->windowFuncs[winref]` aliases the same `WindowFunc` structs
+/// that live in `parse->targetList`, so `optimize_window_clauses` updating
+/// `wfunc->winref` in place (planner.c:5925-5930) is automatically reflected in
+/// the targetlist (and `setrefs.c` then does no winref rewriting). The arena
+/// port interns `wflists.window_funcs` as deep copies, breaking that aliasing,
+/// so after a window-clause merge we must rewrite the `processed_tlist` (and
+/// other) WindowFunc trees explicitly.
+fn rewrite_windowfunc_winref(node: Expr, from: u32, to: u32) -> Expr {
+    use backend_nodes_core::nodefuncs::expression_tree_mutator;
+    // expression_tree_mutator is single-level (it invokes the closure on each
+    // immediate child); self-recurse the closure to reach nested WindowFuncs.
+    let mut out = expression_tree_mutator(node, &mut |child| {
+        rewrite_windowfunc_winref(child, from, to)
+    });
+    if let Expr::WindowFunc(w) = &mut out {
+        if w.winref == from {
+            w.winref = to;
+        }
+    }
+    out
+}
+
+/// `equal(a, b)` over two `partitionClause`/`orderClause` arena handle lists,
+/// used by `optimize_window_clauses`'s duplicate check. These lists hold
+/// `SortGroupClause` handles (interned via `alloc_sortgroupclause`), NOT `Expr`
+/// handles, so they must be resolved as `SortGroupClause`s and compared by value
+/// — mirroring C's node-type-dispatched `equal()` landing on
+/// `_equalSortGroupClause`, not `_equalExpr`.
+fn sortgroupclause_lists_equal(
     root: &PlannerInfo,
     a: &[types_pathnodes::NodeId],
     b: &[types_pathnodes::NodeId],
@@ -4712,9 +4740,11 @@ fn node_lists_equal(
     if a.len() != b.len() {
         return false;
     }
-    a.iter()
-        .zip(b.iter())
-        .all(|(&x, &y)| exprs_equal_by_value(root, x, y))
+    let av: alloc::vec::Vec<types_nodes::rawnodes::SortGroupClause> =
+        a.iter().map(|&id| *root.sortgroupclause(id)).collect();
+    let bv: alloc::vec::Vec<types_nodes::rawnodes::SortGroupClause> =
+        b.iter().map(|&id| *root.sortgroupclause(id)).collect();
+    backend_nodes_equalfuncs_seams::equal_sortgroupclause_list::call(&av, &bv)
 }
 
 /// `equal(a, b)` over two optional arena handles (`Node *` that may be NULL),
@@ -4781,8 +4811,8 @@ fn optimize_window_reuse_duplicate(
 
         // Perform the same duplicate check that is done in
         // transformWindowFuncCall.
-        if node_lists_equal(root, &wc_part, &e_part)
-            && node_lists_equal(root, &wc_ord, &e_ord)
+        if sortgroupclause_lists_equal(root, &wc_part, &e_part)
+            && sortgroupclause_lists_equal(root, &wc_ord, &e_ord)
             && wc_frame == e_frame
             && opt_nodes_equal(root, wc_start, e_start)
             && opt_nodes_equal(root, wc_end, e_end)
@@ -4796,6 +4826,20 @@ fn optimize_window_reuse_duplicate(
                 } else {
                     panic!("optimize_window_clauses: windowFuncs entry is not a WindowFunc");
                 }
+            }
+            // The `wfa.window_funcs` handles are deep copies of the targetlist
+            // WindowFuncs (build_window_func_lists_arena), so the in-place winref
+            // update above does NOT reach `processed_tlist`. C relies on pointer
+            // aliasing here; the arena port must rewrite the targetlist trees
+            // explicitly so createplan/executor see the merged winref.
+            let tlist_ids: alloc::vec::Vec<types_pathnodes::NodeId> = root.processed_tlist.clone();
+            for te_id in tlist_ids {
+                let expr_id = root.targetentry(te_id).expr;
+                let taken = core::mem::replace(
+                    root.node_mut(expr_id),
+                    Expr::Const(types_nodes::primnodes::Const::default()),
+                );
+                *root.node_mut(expr_id) = rewrite_windowfunc_winref(taken, winref, e_winref);
             }
             // list_concat(existing, wc); wc->list = NIL.
             wfa.window_funcs[other_winref as usize].extend(moved);
