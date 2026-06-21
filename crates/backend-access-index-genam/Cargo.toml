@@ -26,6 +26,7 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-heap-heapam-seams = { path = "../backend-access-heap-heapam-seams" }
+backend-access-heap-heapam-handler-dml-seams = { path = "../backend-access-heap-heapam-handler-dml-seams" }
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }

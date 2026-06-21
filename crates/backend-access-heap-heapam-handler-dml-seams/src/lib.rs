@@ -25,6 +25,7 @@ use types_tableam::tableam::{
     TU_UpdateIndexes,
 };
 use types_storage::RelFileLocator;
+use types_snapshot::SnapshotData;
 use types_tuple::heaptuple::ItemPointerData;
 
 seam_core::seam!(
@@ -170,4 +171,19 @@ seam_core::seam!(
         flags: u8,
         tmfd: &mut TM_FailureData,
     ) -> PgResult<TM_Result>
+);
+
+seam_core::seam!(
+    /// `heapam_tuple_satisfies_snapshot(rel, slot, snapshot)`
+    /// (heapam_handler.c): the heap AM's `tuple_satisfies_snapshot` table-AM
+    /// callback. `slot` is a `BufferHeapTupleTableSlot` holding a pinned heap
+    /// tuple; the provider takes a SHARE lock on the slot's buffer, calls
+    /// `HeapTupleSatisfiesVisibility` against `snapshot`, then drops the lock.
+    /// Used by `systable_recheck_tuple` (genam) under a fresh catalog snapshot.
+    /// Owned by `backend-access-heap-heapam-handler-dml`.
+    pub fn heapam_tuple_satisfies_snapshot<'mcx>(
+        rel: &Relation<'mcx>,
+        slot: &mut SlotData<'mcx>,
+        snapshot: &mut SnapshotData,
+    ) -> PgResult<bool>
 );

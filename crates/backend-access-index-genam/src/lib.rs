@@ -68,6 +68,7 @@ use types_tableam::relscan::{IndexScanDesc, TableScanDesc};
 use types_tuple::backend_access_common_heaptuple::FormedTuple;
 
 use backend_access_index_genam_seams as seam;
+use backend_access_heap_heapam_handler_dml_seams as heapam_handler_dml;
 use backend_access_index_indexam as indexam;
 use backend_access_table_tableam as tableam;
 use backend_access_common_relation_seams as relation_seams;
@@ -533,17 +534,21 @@ fn systable_recheck_tuple(sysscan: &mut SysScanDescData) -> PgResult<bool> {
     let live = live_of(sysscan);
 
     // freshsnap = RegisterSnapshot(GetCatalogSnapshot(RelationGetRelid(heap_rel)));
-    let freshsnap =
+    let mut freshsnap =
         snapmgr::register_snapshot::call(snapmgr::get_catalog_snapshot::call(live.heap_rel.rd_id)?)?;
 
     // result = table_tuple_satisfies_snapshot(heap_rel, slot, freshsnap);
     //
-    // table_tuple_satisfies_snapshot dispatches to the heap AM provider
-    // (tableam.h `satisfies_snapshot`, heapam_handler.c, unported / bufmgr-
-    // gated) — the sanctioned mirror-and-panic for the one unported dep. The
-    // surrounding recheck logic (fresh catalog snapshot register/unregister +
-    // concurrent-abort) is real.
-    let result = table_tuple_satisfies_snapshot(&live.heap_rel, &live.slot, &freshsnap)?;
+    // `table_tuple_satisfies_snapshot` (tableam.h inline) dispatches to the
+    // heap AM provider `heapam_tuple_satisfies_snapshot` (heapam_handler.c),
+    // which locks the slot's buffer SHARE, runs `HeapTupleSatisfiesVisibility`
+    // against the fresh catalog snapshot, then drops the lock. The surrounding
+    // recheck logic (register/unregister + concurrent-abort) is real here.
+    let result = heapam_handler_dml::heapam_tuple_satisfies_snapshot::call(
+        &live.heap_rel,
+        &mut live.slot,
+        &mut freshsnap,
+    )?;
 
     // UnregisterSnapshot(freshsnap);
     snapmgr::unregister_snapshot::call(freshsnap);
@@ -551,23 +556,6 @@ fn systable_recheck_tuple(sysscan: &mut SysScanDescData) -> PgResult<bool> {
     handle_concurrent_abort()?;
 
     Ok(result)
-}
-
-/// `table_tuple_satisfies_snapshot(rel, slot, snapshot)` (tableam.h inline) —
-/// dispatches to the heap AM's visibility check. The table-AM provider
-/// (heapam_handler.c) is unported, so there is no value-typed body to call;
-/// mirror-pg-and-panic for the unported dependency. The `tableam.c` owner does
-/// not expose this wrapper yet (no consumer needed it before genam), so genam
-/// names the gap directly.
-fn table_tuple_satisfies_snapshot(
-    _rel: &Relation<'_>,
-    _slot: &SlotData<'_>,
-    _snapshot: &SnapshotData,
-) -> PgResult<bool> {
-    panic!(
-        "table_tuple_satisfies_snapshot: heap AM visibility provider \
-         (heapam_handler.c) is not yet ported (bufmgr-gated)"
-    )
 }
 
 /// `systable_endscan(sysscan)`.

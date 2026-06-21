@@ -18,3 +18,4 @@ types-nodes = { path = "../types-nodes" }
 types-tableam = { path = "../types-tableam" }
 types-tuple = { path = "../types-tuple" }
 types-storage = { path = "../types-storage" }
+types-snapshot = { path = "../types-snapshot" }

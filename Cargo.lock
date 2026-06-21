@@ -1627,6 +1627,7 @@ dependencies = [
  "types-error",
  "types-nodes",
  "types-rel",
+ "types-snapshot",
  "types-storage",
  "types-tableam",
  "types-tuple",
@@ -2014,6 +2015,7 @@ version = "0.0.0"
 dependencies = [
  "backend-access-common-heaptuple",
  "backend-access-common-relation-seams",
+ "backend-access-heap-heapam-handler-dml-seams",
  "backend-access-heap-heapam-seams",
  "backend-access-index-genam-seams",
  "backend-access-index-indexam",

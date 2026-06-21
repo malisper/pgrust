@@ -52,6 +52,9 @@ use backend_access_heap_heapam_visibility::htup::{
     HeapTupleHeaderGetXmin, HeapTupleHeaderIsSpeculative, ItemPointerEquals, SpecTokenOffsetNumber,
 };
 use backend_access_heap_heapam_visibility::HeapTupleHeaderGetUpdateXid;
+use backend_access_heap_heapam_visibility::HeapTupleSatisfiesVisibility;
+use types_snapshot::SnapshotData;
+use types_storage::buf::{BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
 use backend_executor_execTuples_seams as slot_seam;
 use backend_storage_buffer_bufmgr_seams as bufmgr_seam;
 use backend_storage_page::{
@@ -633,6 +636,55 @@ fn heapam_relation_set_new_filelocator(
     Ok((freeze_xid, minmulti))
 }
 
+/// `heapam_tuple_satisfies_snapshot(rel, slot, snapshot)` (heapam_handler.c):
+///
+/// ```c
+/// BufferHeapTupleTableSlot *bslot = (BufferHeapTupleTableSlot *) slot;
+/// Assert(TTS_IS_BUFFERTUPLE(slot));
+/// Assert(BufferIsValid(bslot->buffer));
+/// LockBuffer(bslot->buffer, BUFFER_LOCK_SHARE);
+/// res = HeapTupleSatisfiesVisibility(bslot->base.tuple, snapshot, bslot->buffer);
+/// LockBuffer(bslot->buffer, BUFFER_LOCK_UNLOCK);
+/// return res;
+/// ```
+///
+/// We need buffer pin and lock to call `HeapTupleSatisfiesVisibility`. Caller
+/// (genam `systable_recheck_tuple`) holds the pin, but not the lock.
+fn heapam_tuple_satisfies_snapshot(
+    _rel: &Relation<'_>,
+    slot: &mut SlotData<'_>,
+    snapshot: &mut SnapshotData,
+) -> PgResult<bool> {
+    // (BufferHeapTupleTableSlot *) slot; Assert(TTS_IS_BUFFERTUPLE(slot)).
+    let bslot = match slot {
+        SlotData::BufferHeap(b) => b,
+        _ => {
+            return Err(PgError::error(
+                "heapam_tuple_satisfies_snapshot: slot is not a buffer-heap slot",
+            ))
+        }
+    };
+
+    // Assert(BufferIsValid(bslot->buffer)).
+    let buffer = bslot.buffer;
+
+    // LockBuffer(bslot->buffer, BUFFER_LOCK_SHARE).
+    bufmgr_seam::lock_buffer::call(buffer, BUFFER_LOCK_SHARE)?;
+
+    // res = HeapTupleSatisfiesVisibility(bslot->base.tuple, snapshot, bslot->buffer).
+    let res = {
+        let tuple = bslot.base.tuple.as_mut().ok_or_else(|| {
+            PgError::error("heapam_tuple_satisfies_snapshot: buffer slot holds no heap tuple")
+        })?;
+        HeapTupleSatisfiesVisibility(&mut tuple.tuple, snapshot, buffer)
+    };
+
+    // LockBuffer(bslot->buffer, BUFFER_LOCK_UNLOCK).
+    bufmgr_seam::lock_buffer::call(buffer, BUFFER_LOCK_UNLOCK)?;
+
+    res
+}
+
 // ===========================================================================
 // init_seams
 // ===========================================================================
@@ -650,4 +702,5 @@ pub fn init_seams() {
     sx::heapam_tuple_update::set(heapam_tuple_update);
     sx::heapam_tuple_lock::set(heapam_tuple_lock);
     sx::heapam_relation_set_new_filelocator::set(heapam_relation_set_new_filelocator);
+    sx::heapam_tuple_satisfies_snapshot::set(heapam_tuple_satisfies_snapshot);
 }
