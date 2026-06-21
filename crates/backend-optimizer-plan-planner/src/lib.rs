@@ -1827,7 +1827,7 @@ fn pqe_flatten_group_exprs<'mcx>(
         if let Some(e) = expr_opt {
             let node = Node::mk_expr(mcx, e)?;
             let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
-                mcx, &mut *root, &ctx_query, node,
+                mcx, Some(&mut *root), &ctx_query, node,
             )?;
             if let Some(ne) = flattened.into_expr() {
                 run.resolve_mut(root.parse).targetList[t].expr =
@@ -1844,8 +1844,8 @@ fn pqe_flatten_group_exprs<'mcx>(
     if let Some(e) = having_opt {
         let node = Node::mk_expr(mcx, e)?;
         let flattened = backend_optimizer_util_vars::flatten::flatten_group_exprs(
-            mcx, &mut *root, &ctx_query, node,
-        )?;
+                mcx, Some(&mut *root), &ctx_query, node,
+            )?;
         if let Some(ne) = flattened.into_expr() {
             run.resolve_mut(root.parse).havingQual = Some(mcx::alloc_in(mcx, ne)?);
         }

@@ -510,7 +510,10 @@ use types_pathnodes::PlannerInfo;
 /// (for `mark_nullable_by_grouping`) plus the `query` whose range table holds
 /// the RTE_GROUP entry.
 struct FlattenGroupCtx<'a, 'mcx> {
-    root: &'a mut PlannerInfo,
+    // C `context.root` is NULL for the ruleutils.c deparse and
+    // check_output_expressions() use-cases (root is only needed to preserve
+    // varnullingrels, which those callers don't care about).
+    root: Option<&'a mut PlannerInfo>,
     query: &'a Query<'mcx>,
     sublevels_up: i32,
     possible_sublink: bool,
@@ -525,7 +528,7 @@ struct FlattenGroupCtx<'a, 'mcx> {
 /// is the targetList/havingQual (an expression or list of expressions).
 pub fn flatten_group_exprs<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &mut PlannerInfo,
+    root: Option<&mut PlannerInfo>,
     query: &Query<'mcx>,
     mut node: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
@@ -540,6 +543,24 @@ pub fn flatten_group_exprs<'mcx>(
     };
     flatten_group_exprs_mutator(mcx, &mut node, &mut context)?;
     Ok(node)
+}
+
+/// Seam shim for the `root == NULL` use-cases (ruleutils.c deparse and
+/// check_output_expressions()). Clones the input node into `mcx`, runs the
+/// flattener with a NULL root, and returns the result boxed. Installed into
+/// `backend_utils_adt_ruleutils_seams::flatten_group_exprs`.
+fn seam_flatten_group_exprs<'mcx>(
+    mcx: Mcx<'mcx>,
+    query: &Query<'mcx>,
+    node: &Node<'mcx>,
+) -> PgResult<mcx::PgBox<'mcx, Node<'mcx>>> {
+    let owned = node.clone_in(mcx)?;
+    let flattened = flatten_group_exprs(mcx, None, query, owned)?;
+    mcx::alloc_in(mcx, flattened)
+}
+
+pub(crate) fn init_seams() {
+    backend_utils_adt_ruleutils_seams::flatten_group_exprs::set(seam_flatten_group_exprs);
 }
 
 fn flatten_group_exprs_mutator<'mcx>(
@@ -603,7 +624,13 @@ fn flatten_group_exprs_mutator<'mcx>(
         }
 
         // Lastly, add any varnullingrels to the replacement expression.
-        *node = mark_nullable_by_grouping(mcx, context.root, context.query, newvar, &var)?;
+        *node = mark_nullable_by_grouping(
+            mcx,
+            context.root.as_deref_mut(),
+            context.query,
+            newvar,
+            &var,
+        )?;
         Ok(())
     } else if inner_tag == 2 {
         let agglevelsup = match node.as_expr() {
@@ -720,12 +747,18 @@ fn generic_recurse<'mcx>(
 /// replacement is returned unchanged.
 fn mark_nullable_by_grouping<'mcx>(
     mcx: Mcx<'mcx>,
-    root: &mut PlannerInfo,
+    root: Option<&mut PlannerInfo>,
     query: &Query<'mcx>,
     mut newnode: Node<'mcx>,
     oldvar: &Var,
 ) -> PgResult<Node<'mcx>> {
-    // C: if (root == NULL) return newnode; — root is always non-NULL here.
+    // C: if (root == NULL) return newnode; — the ruleutils.c deparse and
+    // check_output_expressions() callers pass root == NULL and don't need
+    // varnullingrels preserved.
+    let root = match root {
+        Some(r) => r,
+        None => return Ok(newnode),
+    };
     if expr_relids::is_empty(&oldvar.varnullingrels) {
         return Ok(newnode); // nothing to do
     }

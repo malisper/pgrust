@@ -13678,6 +13678,7 @@ dependencies = [
  "backend-optimizer-util-var-seams",
  "backend-rewrite-core",
  "backend-rewrite-rewritemanip-seams",
+ "backend-utils-adt-ruleutils-seams",
  "mcx",
  "types-core",
  "types-error",

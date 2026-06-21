@@ -437,33 +437,58 @@ pub fn get_query_def<'mcx>(
 /// `flatten_group_exprs(NULL, query, (Node *) query->targetList)` +
 /// `flatten_group_exprs(NULL, query, query->havingQual)` (ruleutils.c
 /// 5644-5650). Reached only when `query->hasGroupRTE` (a query that went
-/// through grouping-set planning). The owner (optimizer var.c
-/// `flatten_group_exprs`) is unported as a whole unit, and the targetlist is
-/// passed as a `List *` node which our value-typed `PgVec<TargetEntry>` carrier
-/// does not project to — so this is a seam-and-panic that names both call
-/// sites. The common deparse path (no GROUP RTE) never reaches it.
+/// through grouping-set planning). Replaces the GROUP-output Vars in the
+/// targetlist and havingQual with the underlying grouping expressions, via the
+/// optimizer var.c `flatten_group_exprs` owner seam (`root == NULL`).
+///
+/// C passes the whole `targetList` `List*` through the flattener in one call;
+/// the owned model carries the target list as `PgVec<TargetEntry>`, so we flatten
+/// each `TargetEntry.expr` individually. The flattener never replaces a whole
+/// `TargetEntry` node — only the Vars inside each expression — so per-`expr`
+/// flattening is behavior-equivalent to flattening the List. The `query` snapshot
+/// is captured once up front (the flattener reads its `rtable`/`groupexprs`),
+/// before any in-place mutation.
 fn flatten_group_exprs_targetlist<'mcx>(
     mcx: Mcx<'mcx>,
     query: &mut Query<'mcx>,
 ) -> PgResult<()> {
-    // Mirror C's havingQual rewrite shape (the targetList List* carrier is the
-    // contract-divergent half); the seam owner is unported, so this panics
-    // precisely rather than silently skipping the targetlist flattening.
     let snapshot = query.clone_in(mcx)?;
-    let hq = query
-        .havingQual
-        .as_deref()
-        .map(|e| -> PgResult<_> { Ok(Node::mk_expr(mcx, e.clone_in(mcx)?)?) })
-        .transpose()?
-        .unwrap_or(Node::mk_list(mcx, PgVec::new_in(mcx))?);
-    let boxed = mcx::alloc_in(mcx, hq)?;
-    let _ = backend_utils_adt_ruleutils_seams::flatten_group_exprs::call(mcx, &snapshot, &boxed)?;
-    // (Unreachable: the seam owner is unported and panics. Kept to wire the
-    // faithful call shape — flatten_group_exprs over the targetList List* is the
-    // companion call the owner installs alongside.)
-    Err(deferred(
-        "get_query_def hasGroupRTE (flatten_group_exprs over targetList List*; optimizer var.c + List-carrier)",
-    ))
+
+    // targetList: flatten each TargetEntry's expression.
+    let ntargets = query.targetList.len();
+    for t in 0..ntargets {
+        let expr_opt: Option<Expr> = match query.targetList[t].expr.as_deref() {
+            Some(e) => Some(e.clone_in(mcx)?),
+            None => None,
+        };
+        if let Some(e) = expr_opt {
+            let node = Node::mk_expr(mcx, e)?;
+            let boxed = mcx::alloc_in(mcx, node)?;
+            let flattened =
+                backend_utils_adt_ruleutils_seams::flatten_group_exprs::call(mcx, &snapshot, &boxed)?;
+            if let Some(ne) = (*flattened).clone_in(mcx)?.into_expr() {
+                query.targetList[t].expr = Some(mcx::alloc_in(mcx, ne)?);
+            }
+        }
+    }
+
+    // havingQual: flatten the HAVING expression, if present.
+    let having_opt: Option<Expr> = match query.havingQual.as_deref() {
+        Some(e) => Some(e.clone_in(mcx)?),
+        None => None,
+    };
+    if let Some(e) = having_opt {
+        let node = Node::mk_expr(mcx, e)?;
+        let boxed = mcx::alloc_in(mcx, node)?;
+        let flattened =
+            backend_utils_adt_ruleutils_seams::flatten_group_exprs::call(mcx, &snapshot, &boxed)?;
+        query.havingQual = match (*flattened).clone_in(mcx)?.into_expr() {
+            Some(ne) => Some(mcx::alloc_in(mcx, ne)?),
+            None => None,
+        };
+    }
+
+    Ok(())
 }
 
 /* -------------------------------------------------------------------------- *

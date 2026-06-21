@@ -38,12 +38,15 @@
 //!   (`make_placeholder_expr` / `pull_varnos_of_level`) is unreachable and the C
 //!   `elog(ERROR, "unsupported join alias expression")` else-arm is preserved.
 //! * `flatten_group_exprs` and `mark_nullable_by_grouping` — the group-expr
-//!   *mutator* sibling — stay unported (a *different* entry, called only with a
-//!   real `root`): they require `make_placeholder_expr` (placeholder.c),
-//!   `get_relids_in_jointree` (prepjointree.c), and the `contain_*` /
-//!   `expression_returns_set` predicates (clauses.c), none of which has a
-//!   consumer in this repo yet. (The src-idiomatic reference likewise deferred
-//!   this sibling.)
+//!   *mutator* sibling — are **ported now** in [`flatten`]. The non-NULL-`root`
+//!   planner call (`pqe_flatten_group_exprs`) preserves `varnullingrels` via
+//!   `make_placeholder_expr` (placeholder.c) / `get_relids_in_jointree`
+//!   (prepjointree.c) / the `contain_*` / `expression_returns_set` predicates
+//!   (clauses.c). The NULL-`root` deparse / `check_output_expressions()` use-case
+//!   installs the `flatten_group_exprs` seam (declared in
+//!   `backend-utils-adt-ruleutils-seams`): with `root == NULL`,
+//!   `mark_nullable_by_grouping` returns the node unchanged (faithful to the C
+//!   `if (root == NULL) return newnode`).
 //! * The `split_pathtarget_at_srfs*` SRF-leveling family + `split_pathtarget_*`
 //!   walkers + `make_pathtarget_from_tlist` — these read `root->parse`'s
 //!   `hasGroupRTE`/`groupingSets` and need `set_pathtarget_cost_width`
@@ -86,4 +89,8 @@ pub fn init_seams() {
     backend_optimizer_util_relnode_ext_seams::create_empty_pathtarget::set(
         tlist::create_empty_pathtarget,
     );
+    // `flatten_group_exprs` lives in optimizer/util/var.c (this owner); ruleutils.c
+    // (deparse) and check_output_expressions() call it with root == NULL through
+    // the ruleutils-seams crate across the cycle.
+    flatten::init_seams();
 }
