@@ -14,13 +14,20 @@
 //!  * `have_libxml`           <- the `NO_XML_SUPPORT()` condition (true here)
 //!
 //! Error handling: xml.c installs a structured libxml error handler via
-//! `pg_xml_init`. Here we mirror the *observable* contract (a libxml failure
-//! becomes a `PgError` with the matching SQLSTATE) by checking the documented
-//! return values (NULL doc / -1 result codes) rather than by re-publishing the
-//! collected diagnostic text — the diagnostic buffering is an internal detail
-//! the seams do not surface. We DO suppress libxml's default stderr printing and
-//! block external entity loading (`xmlSetExternalEntityLoader`) exactly as
+//! `pg_xml_init` that buffers diagnostics into a `PgXmlErrorContext` and, on
+//! failure, attaches them as the ereport `errdetail`. We port that here
+//! (`xml_error_handler`/`pg_xml_init`/`xml_ereport` + a thread-local
+//! `XmlErrCtx`): a libxml failure becomes a `PgError` carrying the same
+//! `DETAIL: line N: <message>` text and the same `err_occurred` escalation
+//! (load-bearing — libxml can return a non-NULL doc while having raised a
+//! namespace error, and C escalates on `err_occurred`). We also block external
+//! entity loading (`xmlSetExternalEntityLoader`) exactly as
 //! `pg_xml_init`/`xmlPgEntityLoader` do, so parses are sandboxed identically.
+//! Not reproduced: the source-line/caret context lines C appends via
+//! `xmlParserPrintFileContext` (its libxml generic-error callback is
+//! C-variadic, undefinable in stable Rust) and the immediate `WARNING`/`NOTICE`
+//! channel for sub-error-level libxml messages — both are libxml-binding gaps,
+//! noted at `xml_error_handler`.
 
 use core::ffi::{c_char, c_int, c_uchar, c_void};
 
@@ -259,6 +266,259 @@ unsafe fn xmlFree(p: *mut c_void) {
 type xmlStructuredErrorFunc = unsafe extern "C" fn(user_data: *mut c_void, error: *mut c_void);
 
 /* ===================================================================== *
+ *  libxml2 structured-error capture — port of `xml_errorHandler`,
+ *  `pg_xml_init`, and `xml_ereport` (xml.c). PostgreSQL installs a
+ *  structured error handler that buffers libxml diagnostics into a
+ *  `PgXmlErrorContext` and, on failure, attaches the collected text as the
+ *  ereport `errdetail`. We mirror that here so a libxml error becomes a
+ *  `PgError` carrying the same `DETAIL: line N: <message>` text and the same
+ *  `err_occurred` escalation (the latter is load-bearing: libxml can return a
+ *  non-NULL document while still having raised a namespace error, and C escalates
+ *  on `err_occurred`, not just on a NULL result).
+ *
+ *  Not reproduced: the two source-line/caret context lines that C appends via
+ *  `xmlParserPrintFileContext`. That helper drives libxml's *generic* error
+ *  callback, which has a C-variadic signature `(void*, const char*, ...)` that
+ *  cannot be defined in stable Rust (and reading the parser-context input buffer
+ *  directly would require hardcoding the offset of `input` inside the opaque,
+ *  version-variable `xmlParserCtxt`). Those context lines remain a libxml-binding
+ *  gap; the message/detail text and the pass/fail escalation are faithful.
+ * ===================================================================== */
+
+/// Prefix of libxml2's public `struct _xmlError` (`xmlerror.h`), through the
+/// fields `xml_errorHandler` reads. ABI-stable across libxml2 2.x, like the
+/// other struct prefixes this crate reads.
+#[repr(C)]
+struct xmlErrorHdr {
+    domain: c_int,
+    code: c_int,
+    message: *mut c_char,
+    level: c_int,
+    file: *mut c_char,
+    line: c_int,
+    str1: *mut c_char,
+    str2: *mut c_char,
+    str3: *mut c_char,
+    int1: c_int,
+    int2: c_int,
+    ctxt: *mut c_void,
+    node: *mut c_void,
+}
+
+// `xmlErrorDomain` values used by `xml_errorHandler`.
+const XML_FROM_NONE: c_int = 0;
+const XML_FROM_PARSER: c_int = 1;
+const XML_FROM_NAMESPACE: c_int = 3;
+const XML_FROM_IO: c_int = 13;
+const XML_FROM_MEMORY: c_int = 15;
+
+// `xmlErrorLevel` values.
+const XML_ERR_WARNING: c_int = 1;
+const XML_ERR_ERROR: c_int = 2;
+
+// `xmlParserErrors` codes the handler special-cases.
+const XML_ERR_NOT_WELL_BALANCED: c_int = 85;
+const XML_WAR_UNDECLARED_ENTITY: c_int = 98;
+const XML_WAR_NS_URI: c_int = 202;
+const XML_WAR_NS_URI_RELATIVE: c_int = 203;
+const XML_ERR_NS_DECL_ERROR: c_int = 35;
+const XML_WAR_NS_COLUMN: c_int = 204;
+const XML_NS_ERR_XML_NAMESPACE: c_int = 200;
+const XML_NS_ERR_UNDEFINED_NAMESPACE: c_int = 201;
+const XML_NS_ERR_QNAME: c_int = 205;
+const XML_NS_ERR_ATTRIBUTE_REDEFINED: c_int = 206;
+const XML_NS_ERR_EMPTY: c_int = 207;
+
+// `XML_ELEMENT_NODE` (tree.h) — the only node type whose `name` we read.
+const XML_ELEMENT_NODE: c_int = 1;
+
+// `PgXmlStrictness` (utils/xml.h) — the strictness argument to `pg_xml_init`.
+const PG_XML_STRICTNESS_WELLFORMED: i32 = 1;
+const PG_XML_STRICTNESS_ALL: i32 = 2;
+
+/// Per-backend libxml error context — the fields of `PgXmlErrorContext`
+/// (`utils/xml.h`) that `xml_errorHandler`/`xml_ereport` use. Thread-local
+/// because it is per-backend state, never shared across threads (AGENTS.md).
+struct XmlErrCtx {
+    strictness: i32,
+    err_occurred: bool,
+    err_buf: String,
+}
+
+std::thread_local! {
+    static XML_ERR_CTX: std::cell::RefCell<XmlErrCtx> = const {
+        std::cell::RefCell::new(XmlErrCtx {
+            strictness: 0,
+            err_occurred: false,
+            err_buf: String::new(),
+        })
+    };
+}
+
+/// Append a line separator the way C's `appendStringInfoLineSeparator` does:
+/// strip trailing newlines, then add one `\n` if the buffer is non-empty.
+fn append_line_separator(buf: &mut String) {
+    while buf.ends_with('\n') {
+        buf.pop();
+    }
+    if !buf.is_empty() {
+        buf.push('\n');
+    }
+}
+
+/// Port of `xml_errorHandler` (xml.c). Buffers the libxml diagnostic into the
+/// thread-local error context, applying the same domain/level normalization and
+/// strictness filtering, and sets `err_occurred` for errors at `XML_ERR_ERROR`+.
+unsafe extern "C" fn xml_error_handler(_user_data: *mut c_void, error: *mut c_void) {
+    let err = error as *const xmlErrorHdr;
+    if err.is_null() {
+        return;
+    }
+    let code = (*err).code;
+    let mut domain = (*err).domain;
+    let mut level = (*err).level;
+
+    // Older/newer libxml versions report some errors differently; compensate
+    // exactly as xml.c does.
+    match code {
+        XML_WAR_NS_URI => {
+            level = XML_ERR_ERROR;
+            domain = XML_FROM_NAMESPACE;
+        }
+        XML_ERR_NS_DECL_ERROR
+        | XML_WAR_NS_URI_RELATIVE
+        | XML_WAR_NS_COLUMN
+        | XML_NS_ERR_XML_NAMESPACE
+        | XML_NS_ERR_UNDEFINED_NAMESPACE
+        | XML_NS_ERR_QNAME
+        | XML_NS_ERR_ATTRIBUTE_REDEFINED
+        | XML_NS_ERR_EMPTY => {
+            domain = XML_FROM_NAMESPACE;
+        }
+        _ => {}
+    }
+
+    let strictness = XML_ERR_CTX.with(|c| c.borrow().strictness);
+    let already_occurred = XML_ERR_CTX.with(|c| c.borrow().err_occurred);
+
+    // Decide whether to act on the error or not (xml.c domain switch).
+    match domain {
+        XML_FROM_PARSER => {
+            // Suppress XML_ERR_NOT_WELL_BALANCED once we already logged an error
+            // (cross-version libxml2 behavior compensation).
+            if code == XML_ERR_NOT_WELL_BALANCED && already_occurred {
+                return;
+            }
+            // fall through to the accept-regardless block below.
+            if code == XML_WAR_UNDECLARED_ENTITY {
+                return;
+            }
+        }
+        XML_FROM_NONE | XML_FROM_MEMORY | XML_FROM_IO => {
+            if code == XML_WAR_UNDECLARED_ENTITY {
+                return;
+            }
+        }
+        _ => {
+            // Ignore error if only doing a well-formedness check.
+            if strictness == PG_XML_STRICTNESS_WELLFORMED {
+                return;
+            }
+        }
+    }
+
+    // Prepare the error message (xml.c errorBuf).
+    let mut msg = String::new();
+    let line = (*err).line;
+    if line > 0 {
+        msg.push_str(&format!("line {line}: "));
+    }
+    // element name, when the error node is an element node.
+    let node = (*err).node;
+    if !node.is_null() && node_type(node as *mut xmlNode) == XML_ELEMENT_NODE {
+        let name = (*(node as *const xmlNodeHdr)).name;
+        if !name.is_null() {
+            let nm = xmlchar_to_vec(name);
+            msg.push_str(&format!("element {}: ", String::from_utf8_lossy(&nm)));
+        }
+    }
+    if !(*err).message.is_null() {
+        // `message` is a plain `char*`; `xmlchar_to_vec` reads to the NUL, which
+        // is correct for both `char*` and `xmlChar*`.
+        let m = xmlchar_to_vec((*err).message as *const c_uchar);
+        msg.push_str(&String::from_utf8_lossy(&m));
+    } else {
+        msg.push_str("(no message provided)");
+    }
+    // (xmlParserPrintFileContext context lines intentionally omitted — see note.)
+    while msg.ends_with('\n') {
+        msg.pop();
+    }
+
+    const PG_XML_STRICTNESS_LEGACY_LOCAL: i32 = 0;
+    if strictness == PG_XML_STRICTNESS_LEGACY_LOCAL {
+        XML_ERR_CTX.with(|c| {
+            let mut c = c.borrow_mut();
+            append_line_separator(&mut c.err_buf);
+            c.err_buf.push_str(&msg);
+        });
+        return;
+    }
+
+    if level >= XML_ERR_ERROR {
+        XML_ERR_CTX.with(|c| {
+            let mut c = c.borrow_mut();
+            append_line_separator(&mut c.err_buf);
+            c.err_buf.push_str(&msg);
+            c.err_occurred = true;
+        });
+    } else if level >= XML_ERR_WARNING {
+        // Warnings/notices report immediately. We have no ereport(WARNING)
+        // channel from inside the FFI callback; surface them on stderr-free,
+        // recording into the buffer is wrong (it would become a DETAIL). PG
+        // emits a real WARNING here. We approximate by dropping the warning
+        // text (the WARNING line is a libxml-binding gap, same family as the
+        // file-context lines), keeping err_occurred unset so the parse still
+        // succeeds, matching the not-an-error outcome.
+    } else {
+        // notice: dropped, as above.
+    }
+}
+
+/// Reset the thread-local error context for a fresh operation, recording the
+/// strictness level — port of `pg_xml_init(strictness)`'s context allocation.
+fn xml_err_reset(strictness: i32) {
+    XML_ERR_CTX.with(|c| {
+        let mut c = c.borrow_mut();
+        c.strictness = strictness;
+        c.err_occurred = false;
+        c.err_buf.clear();
+    });
+}
+
+/// True if a libxml error was buffered since the last [`xml_err_reset`] —
+/// port of reading `xmlerrcxt->err_occurred`.
+fn xml_err_occurred() -> bool {
+    XML_ERR_CTX.with(|c| c.borrow().err_occurred)
+}
+
+/// The buffered libxml diagnostic text (the `errdetail` payload), empty if none.
+fn xml_err_detail() -> String {
+    XML_ERR_CTX.with(|c| c.borrow().err_buf.clone())
+}
+
+/// Build the `PgError` for a failed libxml operation, attaching the buffered
+/// libxml diagnostics as `errdetail` — port of `xml_ereport`.
+fn xml_ereport(msg: &str, sqlstate: types_error::SqlState) -> PgError {
+    let detail = xml_err_detail();
+    let mut e = PgError::error(msg.to_string()).with_sqlstate(sqlstate);
+    if !detail.is_empty() {
+        e = e.with_detail(detail);
+    }
+    e
+}
+
+/* ===================================================================== *
  *  xmlNode / xmlDoc / xmlXPathObject field accessors.
  *
  *  libxml2's public structs ARE part of its stable ABI, but we only need a
@@ -428,18 +688,15 @@ unsafe extern "C" fn pg_entity_loader(
     core::ptr::null_mut()
 }
 
-/// Silence libxml's default stderr error printing. `pg_xml_init` installs a
-/// structured handler that buffers diagnostics into PostgreSQL's error context;
-/// we install a no-op structured handler (the seams surface failures via return
-/// values), which also suppresses libxml's default stderr output.
-unsafe extern "C" fn silent_structured_error(_ud: *mut c_void, _err: *mut c_void) {}
-
-/// `pg_xml_init`: one-time parser init + install our sandboxing handlers.
-/// Idempotent; cheap to call before each operation as xml.c does.
-unsafe fn pg_xml_init() {
+/// `pg_xml_init(strictness)`: parser init + install our sandboxing handlers and
+/// the structured error handler that buffers diagnostics into the thread-local
+/// error context (port of xml.c `pg_xml_init`). Resets the per-operation error
+/// state; `strictness` selects which libxml message domains are captured.
+unsafe fn pg_xml_init(strictness: i32) {
     xmlInitParser();
     xmlSetExternalEntityLoader(Some(pg_entity_loader));
-    xmlSetStructuredErrorFunc(core::ptr::null_mut(), Some(silent_structured_error));
+    xmlSetStructuredErrorFunc(core::ptr::null_mut(), Some(xml_error_handler));
+    xml_err_reset(strictness);
 }
 
 /* ===================================================================== *
@@ -465,7 +722,7 @@ fn xml_parse_libxml(
     _encoding: i32,
 ) -> PgResult<core::result::Result<bool, PgError>> {
     unsafe {
-        pg_xml_init();
+        pg_xml_init(PG_XML_STRICTNESS_WELLFORMED);
 
         // Decide document vs content (xml.c: parse_xml_decl + xml_doctype_in_content,
         // both ported in the owner crate as pure helpers).
@@ -508,14 +765,20 @@ fn xml_parse_libxml(
                 b"UTF-8\0".as_ptr() as *const c_char,
                 options,
             );
-            let result = if doc.is_null() {
+            // C: `if (doc == NULL || xmlerrcxt->err_occurred)` — libxml can
+            // return a non-NULL doc while having raised an error, so we must
+            // honor err_occurred, not just the NULL result.
+            let result = if doc.is_null() || xml_err_occurred() {
                 let (code, msg) = match xmloption_arg {
                     XmlOptionType::XMLOPTION_DOCUMENT => {
                         (ERRCODE_INVALID_XML_DOCUMENT, "invalid XML document")
                     }
                     _ => (ERRCODE_INVALID_XML_CONTENT, "invalid XML content"),
                 };
-                Ok(Err(PgError::error(msg.to_string()).with_sqlstate(code)))
+                if !doc.is_null() {
+                    xmlFreeDoc(doc);
+                }
+                Ok(Err(xml_ereport(msg, code)))
             } else {
                 xmlFreeDoc(doc);
                 Ok(Ok(true))
@@ -549,9 +812,8 @@ fn xml_parse_libxml(
                     chunk.as_ptr() as *const c_uchar,
                     &mut nodes,
                 );
-                if rc != 0 {
-                    Ok(Err(PgError::error("invalid XML content".to_string())
-                        .with_sqlstate(ERRCODE_INVALID_XML_CONTENT)))
+                if rc != 0 || xml_err_occurred() {
+                    Ok(Err(xml_ereport("invalid XML content", ERRCODE_INVALID_XML_CONTENT)))
                 } else {
                     Ok(Ok(true))
                 }
@@ -590,7 +852,7 @@ fn serialize_with_options(
     _encoding: i32,
 ) -> PgResult<Vec<u8>> {
     unsafe {
-        pg_xml_init();
+        pg_xml_init(PG_XML_STRICTNESS_ALL);
 
         // Parse (preserve_whitespace = !indent), tracking doc vs content.
         let preserve_whitespace = !indent;
@@ -792,7 +1054,7 @@ fn build_element(
     content: Vec<String>,
 ) -> PgResult<Vec<u8>> {
     unsafe {
-        pg_xml_init();
+        pg_xml_init(PG_XML_STRICTNESS_ALL);
         let buf = xmlBufferCreate();
         if buf.is_null() {
             return Err(oom("could not allocate xmlBuffer"));
@@ -836,7 +1098,7 @@ fn build_element(
 /// C BYTEAOID arm of `map_sql_value_to_xml_value` (xml.c:2615) — base64/binhex.
 fn encode_binary(bytes: &[u8], binary: XmlBinaryType) -> PgResult<String> {
     unsafe {
-        pg_xml_init();
+        pg_xml_init(PG_XML_STRICTNESS_ALL);
         let buf = xmlBufferCreate();
         if buf.is_null() {
             return Err(oom("could not allocate xmlBuffer"));
@@ -883,7 +1145,7 @@ fn xpath_eval(
     database_encoding: i32,
 ) -> PgResult<Vec<Vec<u8>>> {
     unsafe {
-        pg_xml_init();
+        pg_xml_init(PG_XML_STRICTNESS_ALL);
 
         // In a UTF8 database, skip any leading xml declaration (xml.c).
         const PG_UTF8: i32 = 6;
@@ -906,10 +1168,16 @@ fn xpath_eval(
             core::ptr::null(),
             0,
         );
-        if doc.is_null() {
+        // C `xpath_internal`: `if (doc == NULL || xmlerrcxt->err_occurred)`.
+        if doc.is_null() || xml_err_occurred() {
+            if !doc.is_null() {
+                xmlFreeDoc(doc);
+            }
             xmlFreeParserCtxt(ctxt);
-            return Err(PgError::error("could not parse XML document".to_string())
-                .with_sqlstate(ERRCODE_INVALID_XML_DOCUMENT));
+            return Err(xml_ereport(
+                "could not parse XML document",
+                ERRCODE_INVALID_XML_DOCUMENT,
+            ));
         }
 
         let xpathctx = xmlXPathNewContext(doc);
