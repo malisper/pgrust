@@ -320,6 +320,15 @@ fn explain_pre_scan_node<'es, 'p>(
             acc = explain_pre_scan_node(mcx, child, acc)?;
         }
     }
+    // planstate_tree_walker (nodeFuncs.c:4777) walks a SubqueryScan's sub-plan
+    // via SubqueryScanState->subplan, which is NOT lefttree/righttree. Without
+    // this recursion the inner scan's scanrelid is never added to rels_used, so
+    // its RTE gets no display name and Vars resolving to it lose the alias prefix
+    // (e.g. window.sql's WindowAgg-under-SubqueryScan EXPLAINs dropped
+    // `empsalary.` on Window:/Sort Key: lines).
+    if let Some(subplan) = planstate.subquery_subplan_state() {
+        acc = explain_pre_scan_node(mcx, subplan, acc)?;
+    }
 
     Ok(acc)
 }
