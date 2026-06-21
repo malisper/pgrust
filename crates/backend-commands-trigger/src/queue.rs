@@ -99,15 +99,60 @@ pub struct SetConstraintState {
     pub trigstates: Vec<SetConstraintTriggerData>,
 }
 
+/// `CmdType` (`nodes/nodes.h`) — the subset the statement-trigger dedup keys on.
+///
+/// Mirrors the C enum's `CMD_UPDATE = 1, CMD_INSERT, CMD_DELETE` ordinals so the
+/// `(relid, cmdType)` table key matches the C `GetAfterTriggersTableData` lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum CmdType {
+    Update = 1,
+    Insert = 2,
+    Delete = 3,
+}
+
+/// `AfterTriggersTableData` (`commands/trigger.c:3925`) — the per-(relation,
+/// command) bookkeeping that `before_stmt_triggers_fired` and
+/// `cancel_prior_stmt_triggers` use to deduplicate statement-level triggers
+/// across nested invocations on the same relation+operation.
+///
+/// The transition-table tuplestores (`old_tuplestore`/`new_tuplestore`/`storeslot`)
+/// are firing substrate and never filled by the reachable path; only the
+/// statement-trigger dedup state is ported.  The C `after_trig_events`
+/// (saved events-list head/tail) is realized in the owned model as the saved
+/// *length* of the query level's events Vec at the point statement triggers were
+/// last queued — the insertion point `cancel_prior_stmt_triggers` rescans from.
+#[derive(Clone, Debug)]
+pub struct TableData {
+    /// `Oid relid` — the relation this table-data is for.
+    pub relid: Oid,
+    /// `CmdType cmdType` — the command (INSERT/UPDATE/DELETE).
+    pub cmd_type: CmdType,
+    /// `bool closed` — true once the table-data is closed for new tuples.
+    pub closed: bool,
+    /// `bool before_trig_done` — BEFORE STATEMENT triggers already fired.
+    pub before_trig_done: bool,
+    /// `bool after_trig_done` — AFTER STATEMENT triggers already queued.
+    pub after_trig_done: bool,
+    /// Saved length of the query level's `events.events` Vec at the point AFTER
+    /// STATEMENT triggers were last queued (the owned analogue of C's saved
+    /// `after_trig_events` head/tail). `cancel_prior_stmt_triggers` rescans from
+    /// here to mark the prior statement's AS events DONE.
+    pub after_trig_events_len: usize,
+}
+
 /// `AfterTriggersQueryData` (`commands/trigger.c`) — per-query-level data.
 ///
-/// `fdw_tuplestore`/`tables` (the transition/FDW subsidiary storage that
-/// `AfterTriggerFreeQuery` releases) are firing-substrate; the reachable queue
-/// never fills them, but `closed`-style teardown is a no-op `Drop` here.
+/// `fdw_tuplestore` (the FDW subsidiary storage that `AfterTriggerFreeQuery`
+/// releases) is firing-substrate; the reachable queue never fills it, but
+/// `closed`-style teardown is a no-op `Drop` here.  `tables` holds the
+/// statement-trigger dedup state (`AfterTriggersTableData` list).
 #[derive(Clone, Debug, Default)]
 pub struct QueryLevel {
     /// `AfterTriggerEventList events` — events queued by this query level.
     pub events: EventList,
+    /// `List *tables` — `AfterTriggersTableData` per (relation, command).
+    pub tables: Vec<TableData>,
     /// `true` once this query level's array slot has been initialized (mirrors
     /// `AfterTriggerEnlargeQueryState` zeroing of new slots).
     pub initialized: bool,
@@ -248,6 +293,135 @@ pub fn after_trigger_add_event(
 }
 
 // ---------------------------------------------------------------------------
+// GetAfterTriggersTableData (trigger.c:3925) — find/create the per-(relation,
+// command) statement-trigger bookkeeping for the current query level.
+// ---------------------------------------------------------------------------
+
+/// `GetAfterTriggersTableData(Oid relid, CmdType cmdType)` (trigger.c:3925) —
+/// look up (or create) the `AfterTriggersTableData` for `relid`+`cmd_type` at the
+/// current query depth.  Returns the index into the current query level's
+/// `tables` Vec.
+///
+/// The C function only matches table-data that is not yet `closed`; a closed
+/// entry (its transition tables already handed off) forces a fresh one so a new
+/// batch of statement triggers can be queued.  The transition-table fields are
+/// firing substrate and unused here.
+fn get_after_triggers_table_data(at: &mut AfterTriggers, relid: Oid, cmd_type: CmdType) -> usize {
+    let qd = at.query_depth as usize;
+    let tables = &at.query_stack[qd].tables;
+    for (i, t) in tables.iter().enumerate() {
+        if t.relid == relid && t.cmd_type == cmd_type && !t.closed {
+            return i;
+        }
+    }
+    at.query_stack[qd].tables.push(TableData {
+        relid,
+        cmd_type,
+        closed: false,
+        before_trig_done: false,
+        after_trig_done: false,
+        after_trig_events_len: 0,
+    });
+    at.query_stack[qd].tables.len() - 1
+}
+
+// ---------------------------------------------------------------------------
+// before_stmt_triggers_fired (trigger.c:2360) — BEFORE-STATEMENT dedup.
+// ---------------------------------------------------------------------------
+
+/// `before_stmt_triggers_fired(Oid relid, CmdType cmdType)` (trigger.c:2360) —
+/// returns whether BEFORE STATEMENT triggers have already fired for this
+/// relation+command at the current query level, and marks them as fired.
+///
+/// `Err` if called outside a query (`query_depth < 0`).
+pub fn before_stmt_triggers_fired(relid: Oid, cmd_type: CmdType) -> Result<bool, ()> {
+    with_after_triggers(|at| {
+        // Check state, like AfterTriggerSaveEvent.
+        if at.query_depth < 0 {
+            return Err(());
+        }
+        // Be sure we have enough space to record events at this query depth.
+        after_trigger_enlarge_query_state(at);
+        let idx = get_after_triggers_table_data(at, relid, cmd_type);
+        let qd = at.query_depth as usize;
+        let table = &mut at.query_stack[qd].tables[idx];
+        let result = table.before_trig_done;
+        table.before_trig_done = true;
+        Ok(result)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// cancel_prior_stmt_triggers (trigger.c:3964) — mark prior AS events DONE.
+// ---------------------------------------------------------------------------
+
+/// `cancel_prior_stmt_triggers(Oid relid, CmdType cmdType, int tgevent)`
+/// (trigger.c:3964) — when AFTER STATEMENT triggers are queued for a second time
+/// on the same relation+command at this query level (because more tuples got
+/// entered after the first batch fired), mark the prior batch's AS events DONE so
+/// only the latest statement-trigger queue fires.
+///
+/// In the owned model the C saved events head/tail is the saved length of the
+/// query level's events Vec (`after_trig_events_len`); we rescan from there to
+/// the end, stopping at the first event that isn't an AS trigger for this
+/// relation+operation, and clear its IN_PROGRESS / set DONE.
+pub fn cancel_prior_stmt_triggers(relid: Oid, cmd_type: CmdType, tgevent: u32) {
+    use types_nodes::trigger::TRIGGER_EVENT_OPMASK;
+    // TRIGGER_EVENT_ROW / TRIGGER_EVENT_BEFORE bit positions (trigger.h).
+    const TRIGGER_EVENT_ROW: u32 = 1 << 2;
+    const TRIGGER_EVENT_TIMINGMASK: u32 = (1 << 3) | (1 << 4); // BEFORE | INSTEAD
+    const TRIGGER_EVENT_BEFORE: u32 = 1 << 3;
+
+    with_after_triggers(|at| {
+        let idx = get_after_triggers_table_data(at, relid, cmd_type);
+        let qd = at.query_depth as usize;
+        let after_done = at.query_stack[qd].tables[idx].after_trig_done;
+        if after_done {
+            let start = at.query_stack[qd].tables[idx].after_trig_events_len;
+            // Walk events from the saved insertion point; the shared records are
+            // read by offset bits so resolve via shared_of.
+            let n = at.query_stack[qd].events.events.len();
+            let mut i = start;
+            while i < n {
+                let (ats_relid, ats_event) = {
+                    let ql = &at.query_stack[qd];
+                    let ev = &ql.events.events[i];
+                    let sh = ql.events.shared_of(ev);
+                    (sh.ats_relid, sh.ats_event)
+                };
+                // Exit when we reach events that aren't AS triggers for this rel.
+                if ats_relid != relid {
+                    break;
+                }
+                if (ats_event & TRIGGER_EVENT_OPMASK) != tgevent {
+                    break;
+                }
+                // TRIGGER_FIRED_FOR_STATEMENT: ROW bit clear.
+                if (ats_event & TRIGGER_EVENT_ROW) != 0 {
+                    break;
+                }
+                // TRIGGER_FIRED_AFTER: timing bits (BEFORE|INSTEAD) clear.
+                if (ats_event & TRIGGER_EVENT_TIMINGMASK) != 0 {
+                    let _ = TRIGGER_EVENT_BEFORE;
+                    break;
+                }
+                // OK, mark it DONE.
+                let ev = &mut at.query_stack[qd].events.events[i];
+                ev.ate_flags &= !AFTER_TRIGGER_IN_PROGRESS;
+                ev.ate_flags |= AFTER_TRIGGER_DONE;
+                i += 1;
+            }
+        }
+        // In any case, save current insertion point for next time.
+        let qd = at.query_depth as usize;
+        let cur_len = at.query_stack[qd].events.events.len();
+        let table = &mut at.query_stack[qd].tables[idx];
+        table.after_trig_done = true;
+        table.after_trig_events_len = cur_len;
+    });
+}
+
+// ---------------------------------------------------------------------------
 // afterTriggerRestoreEventList (trigger.c:4225) — truncate-to-saved-length.
 // ---------------------------------------------------------------------------
 
@@ -305,6 +479,7 @@ pub fn after_trigger_enlarge_query_state(at: &mut AfterTriggers) {
     while at.query_stack.len() < want {
         at.query_stack.push(QueryLevel {
             events: EventList::default(),
+            tables: Vec::new(),
             initialized: true,
         });
     }

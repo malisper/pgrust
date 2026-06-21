@@ -1007,19 +1007,186 @@ fn exec_bs_insert_triggers_impl(estate: &mut EStateData<'_>, relinfo: types_node
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_insert_before_statement) {
         return Ok(());
     }
-    front_half("ExecBSInsertTriggers", 2402)
+    exec_before_statement_triggers(
+        estate,
+        relinfo,
+        crate::queue::CmdType::Insert,
+        types_catalog::pg_trigger::TRIGGER_TYPE_INSERT,
+        TRIGGER_EVENT_INSERT,
+    )
 }
 fn exec_bs_update_triggers_impl(estate: &mut EStateData<'_>, relinfo: types_nodes::RriId) -> PgResult<()> {
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_update_before_statement) {
         return Ok(());
     }
-    front_half("ExecBSUpdateTriggers", 2896)
+    exec_before_statement_triggers(
+        estate,
+        relinfo,
+        crate::queue::CmdType::Update,
+        types_catalog::pg_trigger::TRIGGER_TYPE_UPDATE,
+        TRIGGER_EVENT_UPDATE,
+    )
 }
 fn exec_bs_delete_triggers_impl(estate: &mut EStateData<'_>, relinfo: types_nodes::RriId) -> PgResult<()> {
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_delete_before_statement) {
         return Ok(());
     }
-    front_half("ExecBSDeleteTriggers", 2631)
+    exec_before_statement_triggers(
+        estate,
+        relinfo,
+        crate::queue::CmdType::Delete,
+        types_catalog::pg_trigger::TRIGGER_TYPE_DELETE,
+        TRIGGER_EVENT_DELETE,
+    )
+}
+
+/// Shared body of `ExecBSInsertTriggers` / `ExecBSUpdateTriggers` /
+/// `ExecBSDeleteTriggers` (trigger.c:2402/2896/2631) — fire the BEFORE STATEMENT
+/// FOR EACH STATEMENT triggers.  These take no tuple (`tg_trigtuple`/`tg_trigslot`
+/// are NULL); a statement trigger cannot have a WHEN clause and must not return a
+/// value.
+///
+/// `tg_event_op` is the per-command `TRIGGER_TYPE_*` match bit; `tg_event_bit` is
+/// the `TRIGGER_EVENT_*` opcode placed (with `TRIGGER_EVENT_BEFORE`, no
+/// `TRIGGER_EVENT_ROW`) into `LocTriggerData.tg_event`.
+fn exec_before_statement_triggers(
+    estate: &mut EStateData<'_>,
+    relinfo: types_nodes::RriId,
+    cmd_type: crate::queue::CmdType,
+    tg_event_op: i16,
+    tg_event_bit: u32,
+) -> PgResult<()> {
+    use types_catalog::pg_trigger::{
+        TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_STATEMENT,
+    };
+
+    // no-op if we already fired BS triggers in this context.
+    let rel_oid = estate
+        .result_rel(relinfo)
+        .ri_RelationDesc
+        .as_ref()
+        .map(|r| r.rd_id)
+        .expect("ExecBS*Triggers: ResultRelInfo has no relation");
+    let already = crate::queue::before_stmt_triggers_fired(rel_oid, cmd_type).map_err(|()| {
+        PgError::error("before_stmt_triggers_fired() called outside of query".to_string())
+    })?;
+    if already {
+        return Ok(());
+    }
+
+    // LocTriggerData.tg_event = TRIGGER_EVENT_<OP> | TRIGGER_EVENT_BEFORE;
+    let tg_event = tg_event_bit | TRIGGER_EVENT_BEFORE;
+
+    let numtriggers = match estate.result_rel(relinfo).ri_TrigDesc.as_ref() {
+        Some(td) => td.triggers.len(),
+        None => return Ok(()),
+    };
+
+    for i in 0..numtriggers {
+        let (tgtype, tgenabled, tgnattr, has_qual) = {
+            let trig = &estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[i];
+            (trig.tgtype, trig.tgenabled, trig.tgnattr, trig.tgqual.is_some())
+        };
+        // if (!TRIGGER_TYPE_MATCHES(tgtype, STATEMENT, BEFORE, <op>)) continue;
+        if !TRIGGER_TYPE_MATCHES(tgtype, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_BEFORE, tg_event_op) {
+            continue;
+        }
+        // if (!TriggerEnabled(estate, relinfo, trigger, tg_event, NULL, NULL, NULL))
+        //   continue;   (no slots for a statement trigger.)
+        if !trigger_enabled(
+            estate, relinfo, i, tgenabled, tgnattr, has_qual, tg_event,
+            /* oldslot */ None, /* newslot */ None,
+        )? {
+            continue;
+        }
+
+        // newtuple = ExecCallTriggerFunc(&LocTriggerData, ...);
+        let returned = fire_statement_trigger(estate, relinfo, i, tg_event)?;
+
+        // if (newtuple) ereport(ERROR, "BEFORE STATEMENT trigger cannot return a value");
+        if returned {
+            return Err(PgError::error(
+                "BEFORE STATEMENT trigger cannot return a value".to_string(),
+            )
+            .with_sqlstate(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED));
+        }
+    }
+    Ok(())
+}
+
+/// Fire one BEFORE STATEMENT trigger: build a tuple-less `TriggerData`, call the
+/// function, and report whether it returned a non-null value (which is a protocol
+/// violation for a statement trigger).
+fn fire_statement_trigger(
+    estate: &mut EStateData<'_>,
+    relinfo: types_nodes::RriId,
+    tgindx: usize,
+    tg_event: u32,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+
+    // tg_trigger = &(trigdesc->triggers[tgindx]) — cloned into the query context.
+    let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
+        let trig = &estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[tgindx];
+        let cloned = trig.clone_in(mcx)?;
+        let boxed: mcx::PgBox<'_, Trigger<'_>> =
+            mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
+        // SAFETY: allocated in mcx (= es_query_cxt); the side-channel that borrows
+        // it is installed/dropped within this call.
+        unsafe { core::mem::transmute(boxed) }
+    };
+
+    // tg_relation = relinfo->ri_RelationDesc — aliased for the call's duration.
+    let tg_relation: types_rel::Relation<'static> = {
+        let rel = estate
+            .result_rel(relinfo)
+            .ri_RelationDesc
+            .as_ref()
+            .expect("ExecBS*Triggers: ResultRelInfo has no relation");
+        let aliased = rel.alias();
+        // SAFETY: query-context lifetime extension; released at the call's end.
+        unsafe {
+            core::mem::transmute::<types_rel::Relation<'_>, types_rel::Relation<'static>>(aliased)
+        }
+    };
+    let slots_relation: types_rel::Relation<'static> = {
+        let rel = estate.result_rel(relinfo).ri_RelationDesc.as_ref().unwrap();
+        let aliased = rel.alias();
+        unsafe {
+            core::mem::transmute::<types_rel::Relation<'_>, types_rel::Relation<'static>>(aliased)
+        }
+    };
+
+    let trigdata = TriggerData {
+        type_: T_TriggerData,
+        tg_event,
+        tg_relation: Some(tg_relation),
+        tg_trigtuple: None,
+        tg_newtuple: None,
+        tg_trigger: Some(trigger_box),
+        tg_trigslot: None,
+        tg_newslot: None,
+        tg_oldtable: None,
+        tg_newtable: None,
+        tg_updatedcols: None,
+    };
+
+    // Install the slots side-channel with the relation only (no NEW/OLD tuple):
+    // the trigger-language handler reads `tg_relation` (for the descriptor) off
+    // this channel even for a statement trigger; the per-row tuple accessors are
+    // never reached because a statement trigger has no NEW/OLD row.
+    let _slots_guard = CurrentSlotsGuard::install(CurrentTriggerSlots {
+        relation: slots_relation,
+        trigtuple: None,
+        newtuple: None,
+    });
+
+    let result = exec_call_trigger_func(trigdata)?;
+    // result is a HeapTuple-pointer Datum in C; here the PL handler deposits any
+    // returned row on the BEFORE_TRIGGER_RESULT channel.  A statement trigger
+    // returning a value is a protocol error, reported by the caller.
+    let returned = decode_before_trigger_result(mcx, result)?;
+    Ok(returned.is_some())
 }
 
 fn exec_as_insert_triggers_impl(
@@ -1031,7 +1198,12 @@ fn exec_as_insert_triggers_impl(
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_insert_after_statement) {
         return Ok(());
     }
-    front_half("ExecASInsertTriggers", 2453)
+    if _tc.is_some() {
+        return Err(transition_table_unported());
+    }
+    // AfterTriggerSaveEvent(estate, relinfo, NULL, NULL, TRIGGER_EVENT_INSERT,
+    //                       false, NULL, NULL, NIL, NULL, transition_capture, false);
+    after_trigger_save_event_stmt(estate, relinfo, TRIGGER_EVENT_INSERT, crate::queue::CmdType::Insert)
 }
 fn exec_as_update_triggers_impl(
     estate: &mut EStateData<'_>,
@@ -1041,7 +1213,10 @@ fn exec_as_update_triggers_impl(
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_update_after_statement) {
         return Ok(());
     }
-    front_half("ExecASUpdateTriggers", 2954)
+    if _tc.is_some() {
+        return Err(transition_table_unported());
+    }
+    after_trigger_save_event_stmt(estate, relinfo, TRIGGER_EVENT_UPDATE, crate::queue::CmdType::Update)
 }
 fn exec_as_delete_triggers_impl(
     estate: &mut EStateData<'_>,
@@ -1051,7 +1226,10 @@ fn exec_as_delete_triggers_impl(
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_delete_after_statement) {
         return Ok(());
     }
-    front_half("ExecASDeleteTriggers", 2682)
+    if _tc.is_some() {
+        return Err(transition_table_unported());
+    }
+    after_trigger_save_event_stmt(estate, relinfo, TRIGGER_EVENT_DELETE, crate::queue::CmdType::Delete)
 }
 
 // ---- TRUNCATE STATEMENT (tablecmds.c ExecuteTruncateGuts + trigger.c) ----
@@ -2061,6 +2239,118 @@ fn after_trigger_save_event<'mcx>(
         });
     }
     let _ = &mut new_event;
+    Ok(())
+}
+
+/// `AfterTriggerSaveEvent(...)` (trigger.c:6169) for the STATEMENT-level
+/// (`row_trigger == false`) path — the AFTER STATEMENT trigger queue leg.
+///
+/// A statement-level event carries no tuple: both ctids are invalid, the flag is
+/// `AFTER_TRIGGER_1CTID`, the level is `TRIGGER_TYPE_STATEMENT`, and
+/// `cancel_prior_stmt_triggers` is run to retire any prior batch of AS events for
+/// this relation+command at this query level.  A statement trigger has no WHEN
+/// clause, so the WHEN-qual leg is unreachable here.
+fn after_trigger_save_event_stmt(
+    estate: &mut EStateData<'_>,
+    relinfo: types_nodes::RriId,
+    event: u32,
+    cmd_type: crate::queue::CmdType,
+) -> PgResult<()> {
+    use types_catalog::pg_trigger::{
+        TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_MATCHES,
+        TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_UPDATE,
+    };
+    use types_nodes::trigger::{
+        AFTER_TRIGGER_1CTID, AFTER_TRIGGER_DEFERRABLE, AFTER_TRIGGER_INITDEFERRED,
+    };
+    const TRIGGER_EVENT_DELETE: u32 = 1;
+    const TRIGGER_EVENT_UPDATE: u32 = 2;
+
+    // if (afterTriggers.query_depth < 0) elog(ERROR, "... outside of query");
+    let query_depth = with_after_triggers(|at| at.query_depth);
+    if query_depth < 0 {
+        return Err(PgError::error(
+            "AfterTriggerSaveEvent() called outside of query".to_string(),
+        ));
+    }
+    with_after_triggers(|at| crate::queue::after_trigger_enlarge_query_state(at));
+
+    let rel_oid = estate
+        .result_rel(relinfo)
+        .ri_RelationDesc
+        .as_ref()
+        .map(|r| r.rd_id)
+        .expect("AfterTriggerSaveEvent: ResultRelInfo has no relation");
+
+    // tgtype_event + cancel_prior_stmt_triggers per command.
+    let tgtype_event = match event {
+        TRIGGER_EVENT_INSERT => TRIGGER_TYPE_INSERT,
+        TRIGGER_EVENT_DELETE => TRIGGER_TYPE_DELETE,
+        TRIGGER_EVENT_UPDATE => TRIGGER_TYPE_UPDATE,
+        other => {
+            return Err(PgError::error(format!(
+                "invalid after-trigger event code: {other}"
+            )));
+        }
+    };
+    // ItemPointerSetInvalid on both ctids; cancel any prior AS batch.
+    crate::queue::cancel_prior_stmt_triggers(rel_oid, cmd_type, event & TRIGGER_EVENT_OPMASK);
+
+    let new_event = types_nodes::trigger::AfterTriggerEventData {
+        ate_flags: AFTER_TRIGGER_1CTID,
+        ate_ctid1: ItemPointerData::default(),
+        ate_ctid2: ItemPointerData::default(),
+        ate_src_part: INVALID_OID,
+        ate_dst_part: INVALID_OID,
+    };
+
+    let user_id = backend_utils_init_miscinit::GetUserId();
+
+    // for (i = 0; i < trigdesc->numtriggers; i++) — match STATEMENT/AFTER/<op>.
+    let trigs: Vec<(Oid, bool, bool)> = {
+        let rri = estate.result_rel(relinfo);
+        let trigdesc = rri
+            .ri_TrigDesc
+            .as_ref()
+            .expect("AfterTriggerSaveEvent: ri_TrigDesc is NULL but stmt event reached save");
+        let mut out = Vec::new();
+        for trig in trigdesc.triggers.iter() {
+            if !TRIGGER_TYPE_MATCHES(trig.tgtype, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_AFTER, tgtype_event)
+            {
+                continue;
+            }
+            // A statement trigger has no WHEN clause; TriggerEnabled reduces to the
+            // replication-role / tgenabled check.
+            if !trigger_enabled_no_qual(trig.tgenabled) {
+                continue;
+            }
+            out.push((trig.tgoid, trig.tgdeferrable, trig.tginitdeferred));
+        }
+        out
+    };
+
+    let qd = query_depth as usize;
+    for (tgoid, tgdeferrable, tginitdeferred) in trigs {
+        let new_shared = SharedRecord {
+            // row_trigger == false: no TRIGGER_EVENT_ROW bit.
+            ats_event: (event & TRIGGER_EVENT_OPMASK)
+                | (if tgdeferrable { AFTER_TRIGGER_DEFERRABLE } else { 0 })
+                | (if tginitdeferred { AFTER_TRIGGER_INITDEFERRED } else { 0 }),
+            ats_tgoid: tgoid,
+            ats_relid: rel_oid,
+            ats_rolid: user_id,
+            ats_firing_id: 0,
+            ats_modifiedcols: None,
+            ats_has_table: false,
+        };
+        with_after_triggers(|at| {
+            crate::queue::after_trigger_add_event(
+                &mut at.query_stack[qd].events,
+                new_event,
+                &new_shared,
+            );
+        });
+    }
     Ok(())
 }
 
