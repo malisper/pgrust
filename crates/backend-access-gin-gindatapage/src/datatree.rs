@@ -189,7 +189,15 @@ pub fn GinDataLeafPageGetItems(page: &[u8], advance_past: ItemPointerData) -> Ve
         let mut seg_off = 0usize;
         let mut len = pl.len();
 
-        if types_tuple::heaptuple::item_pointer_is_valid(&advance_past) {
+        // Skip to the segment containing advancePast+1. In C, `seg` begins at the
+        // posting-list area and `next = GinNextPostingListSegment(seg)` is computed
+        // before the loop test; when the area is empty (`len == 0`, `seg == endptr`),
+        // the loop test `(Pointer) next < endptr` is immediately false so the body
+        // never runs and `len` stays 0. The byte slice here is trimmed to exactly
+        // the posting-list area (unlike C's page-wide pointer), so guard on a
+        // non-empty area before reading a segment header to avoid an out-of-slice
+        // read that C never performs.
+        if types_tuple::heaptuple::item_pointer_is_valid(&advance_past) && !pl.is_empty() {
             let mut next_off = seg_off + size_of_segment(&pl[seg_off..]);
             while next_off < pl.len()
                 && ginCompareItemPointers(&read_posting_list_first(&pl[next_off..]), &advance_past)

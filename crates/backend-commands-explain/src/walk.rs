@@ -863,8 +863,24 @@ pub fn ExplainNode<'es, 'p>(
             // plan->qual -> "Filter".
             let is = plan_node.expect_indexscan();
             show_scan_qual(es, mcx, plan_node, ancestors, is.indexqualorig.as_ref(), "Index Cond")?;
+            if is.indexqualorig.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Index Recheck",
+                    2,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
             show_scan_qual(es, mcx, plan_node, ancestors, is.indexorderbyorig.as_ref(), "Order By")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
             show_indexsearches_info(es, planstate)?;
         }
         ntag::T_IndexOnlyScan => {
@@ -872,8 +888,30 @@ pub fn ExplainNode<'es, 'p>(
             // plan->qual -> "Filter".
             let ios = plan_node.expect_indexonlyscan();
             show_scan_qual(es, mcx, plan_node, ancestors, ios.indexqual.as_ref(), "Index Cond")?;
+            if ios.recheckqual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Index Recheck",
+                    2,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
             show_scan_qual(es, mcx, plan_node, ancestors, ios.indexorderby.as_ref(), "Order By")?;
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
+            // explain.c:1983: ANALYZE → "Heap Fetches" = instrument->ntuples2.
+            if es.analyze {
+                if let Some(instr) = planstate.ps_head().instrument.as_deref() {
+                    fmt::ExplainPropertyFloat("Heap Fetches", None, instr.ntuples2, 0, es)?;
+                }
+            }
             show_indexsearches_info(es, planstate)?;
         }
         ntag::T_BitmapIndexScan => {
@@ -886,7 +924,23 @@ pub fn ExplainNode<'es, 'p>(
             // bitmapqualorig -> "Recheck Cond"; plan->qual -> "Filter".
             let bhs = plan_node.expect_bitmapheapscan();
             show_scan_qual(es, mcx, plan_node, ancestors, Some(&bhs.bitmapqualorig), "Recheck Cond")?;
+            if !bhs.bitmapqualorig.is_empty() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Index Recheck",
+                    2,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
+            if plan.qual.is_some() {
+                crate::details::show_instrumentation_count(
+                    es,
+                    "Rows Removed by Filter",
+                    1,
+                    planstate.ps_head().instrument.as_deref(),
+                )?;
+            }
         }
         ntag::T_TableFuncScan => {
             // explain.c:2089-2095: verbose-only show_expression((Node *)
