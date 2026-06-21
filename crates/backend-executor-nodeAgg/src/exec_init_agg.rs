@@ -1565,7 +1565,7 @@ fn exec_init_direct_args<'mcx>(
     // ExecInitExprList(aggref->aggdirectargs, parent): clone the direct-arg
     // exprs into owned Exprs first (so the `aggs_prim` borrow ends before the
     // mutable `aggstate` calls below), then build the Option<&Expr> list.
-    let owned_args: PgVec<'mcx, types_nodes::primnodes::Expr> = {
+    let owned_args: PgVec<'mcx, types_nodes::primnodes::Expr<'mcx>> = {
         let prim = &aggstate
             .aggs_prim
             .as_ref()
@@ -1576,7 +1576,7 @@ fn exec_init_direct_args<'mcx>(
         }
         v
     };
-    let nodes: PgVec<'mcx, Option<&types_nodes::primnodes::Expr>> = {
+    let nodes: PgVec<'mcx, Option<&types_nodes::primnodes::Expr<'mcx>>> = {
         let mut v = vec_with_capacity_in(mcx, owned_args.len())?;
         for e in owned_args.iter() {
             v.push(Some(e));

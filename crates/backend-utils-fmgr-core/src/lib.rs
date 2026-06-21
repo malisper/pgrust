@@ -2289,10 +2289,10 @@ fn fmgr_info_resolve(mcx: Mcx<'_>, function_id: Oid) -> PgResult<types_core::fmg
 /// the bare `Node *`; the owned model shares the node through the refcounted
 /// erased box. The downcast type used by the readers below is exactly this
 /// `types_nodes::primnodes::Expr`.
-fn fmgr_info_set_expr_seam<'mcx>(
+fn fmgr_info_set_expr_seam<'mcx, 'e>(
     mcx: mcx::Mcx<'mcx>,
     finfo: &mut types_core::fmgr::FmgrInfo,
-    expr: &types_nodes::primnodes::Expr<'mcx>,
+    expr: &types_nodes::primnodes::Expr<'e>,
 ) -> types_error::PgResult<()> {
     // clone_in: the call node may be an OpExpr/FuncExpr carrying an Aggref (a
     // HAVING qual operator), whose context-allocated TargetEntry args a bare

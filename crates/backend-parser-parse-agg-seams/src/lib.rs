@@ -87,9 +87,9 @@ seam_core::seam!(
 seam_core::seam!(
     /// `get_aggregate_argtypes(aggref, inputTypes)` (parse_agg.c) — the actual
     /// argument-type OIDs of an aggregate call.
-    pub fn get_aggregate_argtypes<'mcx>(
+    pub fn get_aggregate_argtypes<'mcx, 'a>(
         mcx: Mcx<'mcx>,
-        aggref: &Aggref<'static>,
+        aggref: &Aggref<'a>,
     ) -> PgResult<PgVec<'mcx, Oid>>
 );
 
