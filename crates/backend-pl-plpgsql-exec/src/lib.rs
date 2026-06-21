@@ -183,7 +183,10 @@ pub fn exec_toplevel_block(
     estate: &mut PLpgSQL_execstate,
     block: &PLpgSQL_stmt_block,
 ) -> PLpgSQL_rc_result {
-    estate.err_stmt = None;
+    estate.err_stmt = Some(types_plpgsql::ErrStmtMark {
+        lineno: block.lineno,
+        typename: "statement block",
+    });
     seam::check_for_interrupts();
     let rc = exec_stmt_block(estate, block)?;
     estate.err_stmt = None;
@@ -203,7 +206,10 @@ fn exec_stmt_block(
 
     for i in 0..(block.n_initvars as usize) {
         let n = block.initvarnos[i];
-        estate.err_var = Some(n as u64);
+        // C points err_var at the variable so the callback can report its
+        // declaration line (`err_var->lineno`); the owned model carries the
+        // lineno directly.
+        estate.err_var = Some(datum_lineno(&estate.datums[n as usize]));
 
         // The set of dtypes handled here must match plpgsql_add_initdatums().
         match datum_dtype(&estate.datums[n as usize]) {
@@ -327,6 +333,9 @@ fn exec_stmt_block_with_exceptions(
     // killing the backend (the `revalidate_bug` ANALYZE-then-div-by-zero case).
     let oldowner = exec_seams::current_resource_owner::call();
 
+    // C: `estate->err_text = "during statement block entry"` before the subxact.
+    estate.err_text = Some(mem::sdup("during statement block entry"));
+
     // BeginInternalSubTransaction(NULL) + remember the caller context / owner.
     begin_internal_subtransaction(estate)?;
 
@@ -345,6 +354,10 @@ fn exec_stmt_block_with_exceptions(
     // still propagates to the handler boundary's catch exactly as before, it just
     // no longer skips the rollback. The normal catchable-error path remains the
     // `Err` match below; this `catch_unwind` never inspects or swallows the panic.
+    // C clears err_text to NULL inside the PG_TRY, right before exec_stmts, so a
+    // statement error reports its own `line N at <stmt>` context (not the block
+    // entry/init phrase).
+    estate.err_text = None;
     let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         exec_stmts(estate, &block.body)
     }));
@@ -371,6 +384,16 @@ fn exec_stmt_block_with_exceptions(
             Ok(rc)
         }
         Err(edata) => {
+            // C captures the error data (CopyErrorData) at report time, which
+            // runs `plpgsql_exec_error_callback` while err_stmt still points at
+            // the failing statement — so the caught error carries this frame's
+            // context line. Freeze it onto `edata` here (err_stmt is still at the
+            // innermost failing statement, the restore having been suppressed in
+            // exec_stmts): a re-thrown error (`RAISE;`) then reports with the
+            // original line, and the entry-point boundary won't re-attach.
+            let fn_signature = estate.fn_signature.clone();
+            let edata = attach_plpgsql_context(edata, estate, &fn_signature);
+
             // PG_CATCH: roll back the subtransaction, restore the SPI
             // connection, then look for a matching exception handler.
             rollback_and_release_current_subtransaction(estate)?;
@@ -549,6 +572,162 @@ fn assign_text_var(
 // exec_stmts dispatch
 // ===========================================================================
 
+/// `plpgsql_exec_error_callback(arg)` (pl_exec.c) — build the one PL/pgSQL
+/// error-context line for the currently-executing function/statement.
+///
+/// C installs this on `error_context_stack` for the duration of an exec
+/// invocation; the owned model (docs/query-lifecycle-raii.md) instead attaches
+/// the same text on error propagation at the exec entry-point boundary. The
+/// estate carries exactly the fields the callback reads: `err_var` (a DECLARE
+/// line), `err_stmt` (the current statement's line + type name), and `err_text`
+/// (a phrase for function entry/exit-style places not tied to a statement).
+/// Attach the PL/pgSQL error-context line to a propagating error, exactly once
+/// per error (C's `error_context_stack` runs each frame's callback once at
+/// report time; a re-thrown error already carries its context). Builds the line
+/// from the estate's err_* state captured at the moment of failure.
+pub(crate) fn attach_plpgsql_context(
+    mut e: types_error::PgError,
+    estate: &PLpgSQL_execstate,
+    fn_signature: &str,
+) -> types_error::PgError {
+    if e.plpgsql_context_attached {
+        return e;
+    }
+    e.add_context_line(plpgsql_exec_error_context(estate, fn_signature));
+    e.plpgsql_context_attached = true;
+    e
+}
+
+pub(crate) fn plpgsql_exec_error_context(
+    estate: &PLpgSQL_execstate,
+    fn_signature: &str,
+) -> String {
+    // If err_var is set, report the variable's declaration line. Otherwise, if
+    // err_stmt is set, report the err_stmt's line. Otherwise (function
+    // entry/exit) there is no line number.
+    let err_lineno = if let Some(lineno) = estate.err_var {
+        lineno
+    } else if let Some(mark) = estate.err_stmt {
+        mark.lineno
+    } else {
+        0
+    };
+
+    if let Some(err_text) = estate.err_text.as_deref() {
+        if err_lineno > 0 {
+            format!("PL/pgSQL function {fn_signature} line {err_lineno} {err_text}")
+        } else {
+            format!("PL/pgSQL function {fn_signature} {err_text}")
+        }
+    } else if let (Some(mark), true) = (estate.err_stmt, err_lineno > 0) {
+        format!(
+            "PL/pgSQL function {fn_signature} line {err_lineno} at {}",
+            mark.typename
+        )
+    } else {
+        format!("PL/pgSQL function {fn_signature}")
+    }
+}
+
+/// `plpgsql_stmt_typename(stmt)` (pl_funcs.c) — the human-readable statement
+/// type name used in the PL/pgSQL error context line.
+fn stmt_typename(stmt: &PLpgSQL_stmt) -> &'static str {
+    match stmt {
+        PLpgSQL_stmt::Block(_) => "statement block",
+        PLpgSQL_stmt::Assign(_) => "assignment",
+        PLpgSQL_stmt::If(_) => "IF",
+        PLpgSQL_stmt::Case(_) => "CASE",
+        PLpgSQL_stmt::Loop(_) => "LOOP",
+        PLpgSQL_stmt::While(_) => "WHILE",
+        PLpgSQL_stmt::Fori(_) => "FOR with integer loop variable",
+        PLpgSQL_stmt::Fors(_) => "FOR over SELECT rows",
+        PLpgSQL_stmt::Forc(_) => "FOR over cursor",
+        PLpgSQL_stmt::ForeachA(_) => "FOREACH over array",
+        PLpgSQL_stmt::Exit(s) => {
+            if s.is_exit {
+                "EXIT"
+            } else {
+                "CONTINUE"
+            }
+        }
+        PLpgSQL_stmt::Return(_) => "RETURN",
+        PLpgSQL_stmt::ReturnNext(_) => "RETURN NEXT",
+        PLpgSQL_stmt::ReturnQuery(_) => "RETURN QUERY",
+        PLpgSQL_stmt::Raise(_) => "RAISE",
+        PLpgSQL_stmt::Assert(_) => "ASSERT",
+        PLpgSQL_stmt::Execsql(_) => "SQL statement",
+        PLpgSQL_stmt::Dynexecute(_) => "EXECUTE",
+        PLpgSQL_stmt::Dynfors(_) => "FOR over EXECUTE statement",
+        PLpgSQL_stmt::Getdiag(s) => {
+            if s.is_stacked {
+                "GET STACKED DIAGNOSTICS"
+            } else {
+                "GET DIAGNOSTICS"
+            }
+        }
+        PLpgSQL_stmt::Open(_) => "OPEN",
+        PLpgSQL_stmt::Fetch(s) => {
+            if s.is_move {
+                "MOVE"
+            } else {
+                "FETCH"
+            }
+        }
+        PLpgSQL_stmt::Close(_) => "CLOSE",
+        PLpgSQL_stmt::Perform(_) => "PERFORM",
+        PLpgSQL_stmt::Call(s) => {
+            if s.is_call {
+                "CALL"
+            } else {
+                "DO"
+            }
+        }
+        PLpgSQL_stmt::Commit(_) => "COMMIT",
+        PLpgSQL_stmt::Rollback(_) => "ROLLBACK",
+    }
+}
+
+/// The `lineno` of a statement (every `PLpgSQL_stmt_*` carries one).
+fn stmt_lineno(stmt: &PLpgSQL_stmt) -> int32 {
+    match stmt {
+        PLpgSQL_stmt::Block(s) => s.lineno,
+        PLpgSQL_stmt::Assign(s) => s.lineno,
+        PLpgSQL_stmt::If(s) => s.lineno,
+        PLpgSQL_stmt::Case(s) => s.lineno,
+        PLpgSQL_stmt::Loop(s) => s.lineno,
+        PLpgSQL_stmt::While(s) => s.lineno,
+        PLpgSQL_stmt::Fori(s) => s.lineno,
+        PLpgSQL_stmt::Fors(s) => s.lineno,
+        PLpgSQL_stmt::Forc(s) => s.lineno,
+        PLpgSQL_stmt::ForeachA(s) => s.lineno,
+        PLpgSQL_stmt::Exit(s) => s.lineno,
+        PLpgSQL_stmt::Return(s) => s.lineno,
+        PLpgSQL_stmt::ReturnNext(s) => s.lineno,
+        PLpgSQL_stmt::ReturnQuery(s) => s.lineno,
+        PLpgSQL_stmt::Raise(s) => s.lineno,
+        PLpgSQL_stmt::Assert(s) => s.lineno,
+        PLpgSQL_stmt::Execsql(s) => s.lineno,
+        PLpgSQL_stmt::Dynexecute(s) => s.lineno,
+        PLpgSQL_stmt::Dynfors(s) => s.lineno,
+        PLpgSQL_stmt::Getdiag(s) => s.lineno,
+        PLpgSQL_stmt::Open(s) => s.lineno,
+        PLpgSQL_stmt::Fetch(s) => s.lineno,
+        PLpgSQL_stmt::Close(s) => s.lineno,
+        PLpgSQL_stmt::Perform(s) => s.lineno,
+        PLpgSQL_stmt::Call(s) => s.lineno,
+        PLpgSQL_stmt::Commit(s) => s.lineno,
+        PLpgSQL_stmt::Rollback(s) => s.lineno,
+    }
+}
+
+/// Build the `err_stmt` marker for a statement.
+fn err_stmt_mark(stmt: &PLpgSQL_stmt) -> types_plpgsql::ErrStmtMark {
+    types_plpgsql::ErrStmtMark {
+        lineno: stmt_lineno(stmt),
+        typename: stmt_typename(stmt),
+    }
+}
+
 /// `exec_stmts(estate, stmts)` (pl_exec.c) — iterate over a list of statements
 /// as long as their return code is OK.
 fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL_rc_result {
@@ -562,12 +741,17 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
     }
 
     for stmt in stmts {
-        estate.err_stmt = None;
+        estate.err_stmt = Some(err_stmt_mark(stmt));
         seam::check_for_interrupts();
 
-        // On an `Err` from a statement, restore the err_stmt marker (C's
-        // PG_FINALLY-equivalent housekeeping in the unwind path) before
-        // propagating, so a containing EXCEPTION block sees the saved marker.
+        // On an `Err`, do NOT restore the err_stmt marker: C's
+        // `plpgsql_exec_error_callback` fires at `ereport` time (before any
+        // unwinding restores err_stmt), so it observes the innermost failing
+        // statement. The owned model attaches that context at the exec
+        // entry-point boundary AFTER unwinding, so err_stmt must be LEFT at the
+        // innermost failing statement here. (If a containing EXCEPTION handler
+        // catches the error, it re-enters `exec_stmts`, which overwrites
+        // err_stmt before any later failure — so leaving it set is safe.)
         let rc = match (|| match stmt {
             PLpgSQL_stmt::Block(b) => exec_stmt_block(estate, b),
             PLpgSQL_stmt::Assign(s) => exec_stmt_assign(estate, s),
@@ -599,7 +783,8 @@ fn exec_stmts(estate: &mut PLpgSQL_execstate, stmts: &[PLpgSQL_stmt]) -> PLpgSQL
         })() {
             Ok(rc) => rc,
             Err(e) => {
-                estate.err_stmt = save_estmt;
+                // err_stmt intentionally left at the innermost failing
+                // statement (see comment above).
                 return Err(e);
             }
         };
@@ -3186,6 +3371,7 @@ pub fn plpgsql_estate_setup(
 ) -> PLpgSQL_execstate {
     PLpgSQL_execstate {
         func: None, // opaque back-ref; the comp↔exec handle is set when needed
+        fn_signature: func.fn_signature.clone(),
         trigdata: None,
         evtrigdata: None,
 
@@ -3287,6 +3473,13 @@ pub fn plpgsql_exec_function(
     estate.procedure_resowner = procedure_resowner;
     estate.atomic = atomic;
 
+    // Run the body under an error-context attach boundary: any error that
+    // propagates out gets the `plpgsql_exec_error_callback` context line, built
+    // from the estate's err_var/err_stmt/err_text at the moment of failure
+    // (docs/query-lifecycle-raii.md — attach-on-propagation replaces C's
+    // `error_context_stack` push). The closure captures `estate` by mutable
+    // reference; the borrow ends on return, so the err_* state is then readable.
+    let body = (|| -> types_error::PgResult<FunctionResult> {
     // Make local execution copies of all the datums.
     estate.err_text = Some(mem::sdup("during initialization of execution state"));
     copy_plpgsql_datums(&mut estate, func);
@@ -3429,6 +3622,9 @@ pub fn plpgsql_exec_function(
     // as the estate drops; the SPI Proc context / shared econtext are owned by
     // the caller's SPI bracket).
     Ok(result)
+    })();
+
+    body.map_err(|e| attach_plpgsql_context(e, &estate, &func.fn_signature))
 }
 
 /// `plpgsql_exec_trigger(func, trigdata)` (pl_exec.c) — the DML-trigger
@@ -3456,6 +3652,10 @@ pub fn plpgsql_exec_event_trigger(
     // event/tag rides commands/event_trigger.c's CURRENT_EVENT_TRIGGER side-channel).
     estate.evtrigdata = Some(types_plpgsql::EventTriggerData(0));
 
+    // Run the body under the error-context attach boundary (see
+    // plpgsql_exec_function): any propagating error gets the PL/pgSQL context
+    // line built from the estate's err_* state at the moment of failure.
+    let body = (|| -> types_error::PgResult<()> {
     // Make local execution copies of all the datums.
     estate.err_text = Some(crate::mem::sdup("during initialization of execution state"));
     copy_plpgsql_datums(&mut estate, func);
@@ -3483,6 +3683,9 @@ pub fn plpgsql_exec_event_trigger(
     exec_eval_cleanup(&mut estate);
 
     Ok(())
+    })();
+
+    body.map_err(|e| attach_plpgsql_context(e, &estate, &func.fn_signature))
 }
 
 // ===========================================================================
@@ -3580,6 +3783,17 @@ fn with_execstate_datum<R>(
 // ===========================================================================
 // Small datum-shape helpers (pure inspection of the owned data model)
 // ===========================================================================
+
+/// The declaration line of a datum (`PLpgSQL_variable.lineno`). ROW/RECFIELD
+/// also carry a lineno; used for the err_var error-context report.
+fn datum_lineno(d: &PLpgSQL_datum) -> int32 {
+    match d {
+        PLpgSQL_datum::Var(v) => v.lineno,
+        PLpgSQL_datum::Row(r) => r.lineno,
+        PLpgSQL_datum::Rec(r) => r.lineno,
+        PLpgSQL_datum::Recfield(_) => 0,
+    }
+}
 
 /// The dtype tag of a datum (distinguishing VAR vs PROMISE via the `promise`
 /// field, matching the C `dtype` discriminator).

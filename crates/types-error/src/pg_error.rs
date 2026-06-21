@@ -71,6 +71,13 @@ pub struct PgError {
     pub column_name: Option<String>,
     pub datatype_name: Option<String>,
     pub constraint_name: Option<String>,
+    /// Set once the PL/pgSQL executor has attached its `plpgsql_exec_error_callback`
+    /// context line for the function frame that first reported this error. C's
+    /// `error_context_stack` runs each frame's callback exactly once at report
+    /// time and a re-thrown error (`RAISE;`) carries the already-built context;
+    /// this flag reproduces that "attach once, then frozen" behavior in the
+    /// attach-on-propagation model (it is NOT printed and not part of equality).
+    pub plpgsql_context_attached: bool,
 }
 
 impl PgError {
@@ -99,6 +106,7 @@ impl PgError {
             column_name: None,
             datatype_name: None,
             constraint_name: None,
+            plpgsql_context_attached: false,
         }
     }
 

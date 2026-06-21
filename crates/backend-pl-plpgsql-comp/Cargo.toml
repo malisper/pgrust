@@ -38,6 +38,8 @@ backend-utils-cache-syscache-seams = { path = "../backend-utils-cache-syscache-s
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 # format_type_be (utils/adt/format_type.c) for diagnostics.
 backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type-seams" }
+# format_procedure (utils/adt/regproc.c) — fn_signature for the error-context line.
+backend-utils-adt-regproc-seams = { path = "../backend-utils-adt-regproc-seams" }
 # quote_identifier (utils/adt/ruleutils.c) — pl_gram.y's cursor-arg list uses it.
 backend-utils-adt-ruleutils-seams = { path = "../backend-utils-adt-ruleutils-seams" }
 # cached_function_compile driver (utils/cache/funccache.c) — plpgsql_compile entry.

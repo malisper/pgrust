@@ -512,7 +512,10 @@ pub fn plpgsql_exec_trigger_impl(
     crate::erh_table::clear();
     crate::erh_table::restore_all(saved_erh);
 
-    body
+    // Attach the PL/pgSQL error-context line built from the estate's err_*
+    // state at the moment of failure (C's plpgsql_exec_error_callback; see
+    // plpgsql_exec_function).
+    body.map_err(|e| crate::attach_plpgsql_context(e, &estate, &func.fn_signature))
 }
 
 /// Populate a REC variable from the firing trigger's OLD/NEW slot tuple.

@@ -14627,6 +14627,7 @@ dependencies = [
  "backend-pl-plpgsql-gram",
  "backend-pl-plpgsql-scanner",
  "backend-utils-adt-format-type-seams",
+ "backend-utils-adt-regproc-seams",
  "backend-utils-adt-ruleutils-seams",
  "backend-utils-cache-funccache-seams",
  "backend-utils-cache-lsyscache-seams",

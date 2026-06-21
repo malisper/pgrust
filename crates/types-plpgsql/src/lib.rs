@@ -1078,11 +1078,24 @@ pub struct PLpgSQL_function {
     pub cur_estate: Option<u64>,
 }
 
+/// The error-context data the `plpgsql_exec_error_callback` reads off the
+/// currently-executing statement (`estate->err_stmt`): its source line and the
+/// `plpgsql_stmt_typename` of its command type.
+#[derive(Debug, Clone, Copy)]
+pub struct ErrStmtMark {
+    pub lineno: int32,
+    pub typename: &'static str,
+}
+
 /// Runtime execution data (`PLpgSQL_execstate`).
 #[derive(Debug, Clone)]
 pub struct PLpgSQL_execstate {
     /// function being executed (`func`) — opaque back-reference.
     pub func: Option<u64>,
+    /// the executing function's printable signature (`func->fn_signature`),
+    /// carried directly so the error-context line can be built without
+    /// dereferencing the opaque `func` back-reference.
+    pub fn_signature: String,
 
     pub trigdata: Option<TriggerData>,        // if regular trigger
     pub evtrigdata: Option<EventTriggerData>, // if event trigger
@@ -1155,10 +1168,13 @@ pub struct PLpgSQL_execstate {
     pub eval_econtext: Option<ExprContext>, // for executing simple expressions
 
     // status information for error context reporting:
-    /// current stmt (`err_stmt`). Opaque back-reference into the parse tree.
-    pub err_stmt: Option<u64>,
-    /// current variable, if in a DECLARE section (`err_var`).
-    pub err_var: Option<u64>,
+    /// current stmt (`err_stmt`). The owned model can't hold a live pointer into
+    /// the parse tree, so it carries the data `plpgsql_exec_error_callback`
+    /// reads off the statement: its source line number and its type name.
+    pub err_stmt: Option<ErrStmtMark>,
+    /// current variable's declaration line, if in a DECLARE section (`err_var`);
+    /// C reports `estate->err_var->lineno`.
+    pub err_var: Option<int32>,
     pub err_text: Option<String>, // additional state info
 
     pub plugin_info: Option<u64>, // reserved for use by optional plugin

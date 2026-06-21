@@ -1740,7 +1740,15 @@ pub fn plpgsql_compile_from_source(facts: &ProcCompileFacts) -> PgResult<PLpgSQL
     set_check_syntax(facts.for_validator);
 
     let mut function = new_zeroed_function();
-    function.fn_signature = facts.proname.clone();
+    // C: `function->fn_signature = format_procedure(fcinfo->flinfo->fn_oid)` —
+    // the function's printable name with its IN-argument type list, used in the
+    // PL/pgSQL error-context line. Build it in a transient context and copy the
+    // owned String into the function (which outlives the temp context).
+    function.fn_signature = {
+        let ctx = mcx::MemoryContext::new("PL/pgSQL fn_signature");
+        let s = backend_utils_adt_regproc_seams::format_procedure::call(ctx.mcx(), facts.fn_oid)?;
+        s.as_str().to_string()
+    };
     function.fn_oid = facts.fn_oid;
     function.fn_input_collation = facts.fn_input_collation;
     function.out_param_varno = -1;
