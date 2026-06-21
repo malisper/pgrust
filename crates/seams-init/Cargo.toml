@@ -207,6 +207,7 @@ backend-commands-seclabel = { path = "../backend-commands-seclabel" }
 backend-commands-sequence = { path = "../backend-commands-sequence" }
 backend-commands-tablespace = { path = "../backend-commands-tablespace" }
 backend-commands-trigger = { path = "../backend-commands-trigger" }
+backend-commands-constraint = { path = "../backend-commands-constraint" }
 backend-commands-tsearchcmds = { path = "../backend-commands-tsearchcmds" }
 backend-catalog-pg-ts = { path = "../backend-catalog-pg-ts" }
 backend-tsearch-dict-init-dispatch = { path = "../backend-tsearch-dict-init-dispatch" }

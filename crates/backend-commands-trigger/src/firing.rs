@@ -4049,13 +4049,11 @@ fn after_trigger_end_sub_xact_impl(is_commit: bool) -> PgResult<()> {
 ///
 /// The empty-queue fast path (`events->head == NULL`) is the common case — at
 /// transaction commit with no deferred events queued this is a no-op, exactly
-/// as in C. That path is ported faithfully. When the queue is *non-empty* the C
-/// loop pushes the transaction snapshot and runs the firing cycle against a
-/// `NULL` `EState`; in this tree `afterTriggerInvokeEvents` requires an
-/// `&mut EStateData` and there is no `PushActiveSnapshot` seam reachable from
-/// this crate, so the deferred-firing leg stays a loud, 1:1-named boundary until
-/// the commit-time per-query `EState` + active-snapshot substrate lands. (A
-/// fresh boot never queues deferred events, so it never reaches that leg.)
+/// as in C. When the queue is non-empty the C loop pushes the transaction
+/// snapshot and runs the firing cycle against a `NULL` `EState`; here the cycle
+/// runs through [`fire_global_event_cycle`] on a throwaway per-query `EState`
+/// (mirror of C's `NULL` estate — the firing path uses it only for
+/// `es_query_cxt`).
 fn after_trigger_fire_deferred_impl() -> PgResult<()> {
     // Assert(afterTriggers.query_depth == -1) — must not be inside a query.
     debug_assert_eq!(with_after_triggers(|at| at.query_depth), -1);
@@ -4068,16 +4066,124 @@ fn after_trigger_fire_deferred_impl() -> PgResult<()> {
         return Ok(());
     }
 
-    // events->head != NULL: PushActiveSnapshot(GetTransactionSnapshot()) and run
-    // the firing cycle. This commit-time leg needs the active-snapshot push and a
-    // per-query EState that are not reachable from this crate's bare seam; keep
-    // it loud rather than silently dropping queued deferred triggers.
-    Err(PgError::error(
-        "AfterTriggerFireDeferred (trigger.c:5287): firing queued DEFERRED triggers at \
-         commit needs PushActiveSnapshot(GetTransactionSnapshot()) + a per-query EState for \
-         the afterTriggerInvokeEvents cycle, not yet ported"
-            .to_string(),
-    ))
+    // events->head != NULL: PushActiveSnapshot(GetTransactionSnapshot()) eagerly
+    // (the C FireDeferred path pushes unconditionally when the queue is
+    // non-empty), run the firing cycle, then PopActiveSnapshot(). delete_ok =
+    // true (FireDeferred runs at top-of-commit, never inside a subxact).
+    let ctx = mcx::MemoryContext::new("AfterTriggerFireDeferred");
+    fire_global_event_cycle(
+        ctx.mcx(),
+        /* immediate_only */ false,
+        /* delete_ok */ true,
+        /* lazy_snapshot */ false,
+    )
+}
+
+/// The shared firing cycle of `AfterTriggerFireDeferred` (trigger.c:5287) and
+/// the retroactive-firing tail of `AfterTriggerSetState` (trigger.c:6027): run
+/// `afterTriggerMarkEvents` / `afterTriggerInvokeEvents` over the *global*
+/// deferred event list (`afterTriggers.events`, at `query_depth == -1`) under a
+/// pushed transaction snapshot.
+///
+/// `immediate_only` is passed to `afterTriggerMarkEvents`: `false` for
+/// FireDeferred (fire everything left), `true` for SET CONSTRAINTS ... IMMEDIATE
+/// (fire only the events whose constraint just became immediate).
+///
+/// `delete_ok` is passed to `afterTriggerInvokeEvents`: `true` at top
+/// transaction level (events may be discarded once fired), `false` inside a
+/// subtransaction (the subxact may roll back, so keep them).
+///
+/// `lazy_snapshot` controls *when* the transaction snapshot is pushed.
+/// FireDeferred pushes eagerly before the loop (`lazy_snapshot == false`);
+/// SET CONSTRAINTS pushes only on the first iteration that actually marks an
+/// event to fire (`lazy_snapshot == true`), so `BEGIN; SET CONSTRAINTS ...; SET
+/// TRANSACTION ISOLATION LEVEL SERIALIZABLE;` still works.
+///
+/// The C cycle runs against a `NULL` `EState`; the ported
+/// `afterTriggerInvokeEvents` reads only `estate.es_query_cxt`, so a throwaway
+/// `EState` allocated in `mcx` is the faithful stand-in.
+fn fire_global_event_cycle(
+    mcx: Mcx<'_>,
+    immediate_only: bool,
+    delete_ok: bool,
+    lazy_snapshot: bool,
+) -> PgResult<()> {
+    let mut estate: mcx::PgBox<'_, EStateData<'_>> =
+        backend_executor_execUtils_seams::create_executor_state::call(mcx)?;
+
+    let mut snapshot_pushed = false;
+
+    // Eager push (FireDeferred): PushActiveSnapshot(GetTransactionSnapshot())
+    // before the loop, unconditionally (the caller already verified the queue is
+    // non-empty).
+    if !lazy_snapshot {
+        backend_utils_time_snapmgr_seams::push_active_snapshot_transaction::call()?;
+        snapshot_pushed = true;
+    }
+
+    // while (afterTriggerMarkEvents(events, NULL, immediate_only)) { ... }
+    let result = (|| -> PgResult<()> {
+        loop {
+            let mut events = with_after_triggers(|at| std::mem::take(&mut at.events));
+            let found = after_trigger_mark_events(&mut events, None, immediate_only);
+            with_after_triggers(|at| at.events = events);
+
+            if !found {
+                break;
+            }
+
+            // Lazy push (SET CONSTRAINTS): only now that we know an event must
+            // fire do we establish the snapshot.
+            if lazy_snapshot && !snapshot_pushed {
+                backend_utils_time_snapmgr_seams::push_active_snapshot_transaction::call()?;
+                snapshot_pushed = true;
+            }
+
+            let firing_id = with_after_triggers(|at| {
+                let id = at.firing_counter;
+                at.firing_counter += 1;
+                id
+            });
+
+            // Take the list to fire; a deferred trigger function may itself
+            // perform DML whose own AfterTriggerEndQuery promotes new deferred
+            // events back onto afterTriggers.events while we hold the taken list,
+            // so re-append anything that arrived, exactly as AfterTriggerEndQuery
+            // does for its query-level list.
+            let mut events = with_after_triggers(|at| std::mem::take(&mut at.events));
+            let fire_result =
+                after_trigger_invoke_events(&mut events, firing_id, &mut estate, delete_ok);
+            with_after_triggers(|at| {
+                let appended = std::mem::take(&mut at.events);
+                for ev in appended.events {
+                    let sidx = (ev.ate_flags & AFTER_TRIGGER_OFFSET) as usize;
+                    if let Some(shared) = appended.shared.get(sidx).cloned() {
+                        crate::queue::after_trigger_add_event(&mut events, ev, &shared);
+                    }
+                }
+                at.events = events;
+            });
+            let all_fired = fire_result?;
+            if all_fired {
+                break;
+            }
+        }
+        Ok(())
+    })();
+
+    // if (snap_pushed) PopActiveSnapshot(); — pop on both the Ok and Err paths so
+    // the active-snapshot stack is balanced when an error propagates out.
+    if snapshot_pushed {
+        let pop = backend_utils_time_snapmgr_seams::pop_active_snapshot::call();
+        result?;
+        pop?;
+    } else {
+        result?;
+    }
+
+    // FreeExecutorState(estate);
+    backend_executor_execUtils_seams::free_executor_state::call(estate)?;
+    Ok(())
 }
 
 // ===========================================================================
@@ -4238,23 +4344,21 @@ fn after_trigger_set_state<'mcx, 'n>(
     // deferred events retroactively. A SET ... DEFERRED can't convert any unfired
     // event to immediate, so nothing to do in that case.
     if !stmt.deferred {
-        let has_events = with_after_triggers(|at| !at.events.events.is_empty());
-        if has_events {
-            // The retroactive firing cycle pushes the transaction snapshot and
-            // runs afterTriggerMarkEvents/afterTriggerInvokeEvents against a NULL
-            // EState. In this tree afterTriggerInvokeEvents requires an
-            // &mut EStateData and there is no reachable PushActiveSnapshot seam
-            // (identical boundary to AfterTriggerFireDeferred); keep it loud
-            // rather than silently dropping the now-immediate events. A SET
-            // CONSTRAINTS issued before any deferred event is queued (the common
-            // case) takes the empty-queue path above and returns cleanly.
-            return Err(PgError::error(
-                "AfterTriggerSetState (trigger.c:6027): retroactively firing now-immediate \
-                 deferred triggers needs PushActiveSnapshot(GetTransactionSnapshot()) + a \
-                 per-query EState for the afterTriggerInvokeEvents cycle, not yet ported"
-                    .to_string(),
-            ));
-        }
+        // Scan the previously-deferred events and fire any that just became
+        // immediate. immediate_only = true (only fire the now-immediate ones),
+        // delete_ok = !IsSubTransaction() (can't discard if a subxact may roll
+        // back), and the transaction snapshot is pushed lazily — only on the
+        // first iteration that actually marks an event to fire, so
+        // `BEGIN; SET CONSTRAINTS ...; SET TRANSACTION ISOLATION LEVEL
+        // SERIALIZABLE; ...` still works (the C `snapshot_set` guard).
+        let delete_ok =
+            !backend_access_transam_xact_seams::is_sub_transaction::call();
+        fire_global_event_cycle(
+            mcx,
+            /* immediate_only */ true,
+            delete_ok,
+            /* lazy_snapshot */ true,
+        )?;
     }
 
     Ok(())

@@ -95,6 +95,15 @@ use backend_executor_execUtils as execUtils;
 use backend_catalog_index_seams as index_seams;
 use backend_commands_trigger_seams as trigger;
 
+mod fmgr_builtins;
+
+/// Register this crate's fmgr built-in (`unique_key_recheck`, OID 1250). This
+/// crate installs no cross-crate seams; the name `init_seams` matches the
+/// workspace convention so `seams-init` can aggregate it with one line.
+pub fn init_seams() {
+    fmgr_builtins::register_constraint_builtins();
+}
+
 // ---------------------------------------------------------------------------
 // Trigger event bit predicates (commands/trigger.h). These mirror the C macros
 // exactly; they operate on the `TriggerEvent` (`uint32`) from `tg_event`.

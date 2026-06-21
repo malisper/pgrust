@@ -21,8 +21,10 @@ types-tableam = { path = "../types-tableam" }
 types-snapshot = { path = "../types-snapshot" }
 types-storage = { path = "../types-storage" }
 types-ri-triggers = { path = "../types-ri-triggers" }
+types-fmgr = { path = "../types-fmgr" }
 
 backend-utils-error = { path = "../backend-utils-error" }
+backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 
 # Ported owners called directly (acyclic: nothing depends on constraint).
 backend-access-table-tableam = { path = "../backend-access-table-tableam" }
