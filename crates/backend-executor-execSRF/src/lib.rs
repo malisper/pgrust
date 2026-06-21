@@ -87,6 +87,9 @@ mod pg_lock_status;
 mod pg_prepared_xact;
 mod pg_snapshot_xip;
 mod aclexplode;
+mod pg_stat_get_io;
+mod pg_stat_get_slru;
+mod pgstat_composite_srf;
 mod shmem_numa_srf;
 mod system_srf;
 pub use srf_registry::{register_srf, srf_invoke_by_oid, srf_is_registered};
@@ -223,6 +226,17 @@ pub fn init_seams() {
     // is_grantable bool)` row per set privilege bit (its per-bit expansion core
     // is `backend-utils-adt-acl::acl_ops::aclexplode`).
     aclexplode::register_aclexplode();
+    // The pgstatfuncs.c cumulative-statistics SRF / composite-row family:
+    // `pg_stat_get_io` (OID 6214, the `pg_stat_io` view) materializes the 20-col
+    // per-(BackendType,IOObject,IOContext) IO snapshot; `pg_stat_get_slru` (OID
+    // 2306, `pg_stat_slru`) the 9-col per-SLRU rows; and the single-composite-row
+    // `pg_stat_get_wal`/`pg_stat_get_archiver`/`pg_stat_get_replication_slot`/
+    // `pg_stat_get_subscription_stats` (OIDs 1136/3195/6169/6231) build their own
+    // descriptor + `heap_form_tuple`. All read the now-ported pgstat fetch
+    // substrate (pgstat_fetch_stat_io/slru/wal/archiver/replslot/subscription).
+    pg_stat_get_io::register_pg_stat_get_io();
+    pg_stat_get_slru::register_pg_stat_get_slru();
+    pgstat_composite_srf::register_pgstat_composite_srfs();
     // `pg_options_to_table(text[])` (OID 2289) and `pg_prepared_statement()` (OID
     // 2510) — the materialize-mode system SRFs whose `(mcx, fcinfo)` bodies drive
     // `InitMaterializedSRF`/`materialized_srf_putvalues` themselves (cores in

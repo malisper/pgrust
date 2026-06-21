@@ -141,6 +141,24 @@ backend-access-transam-twophase = { path = "../backend-access-transam-twophase" 
 backend-utils-adt-acl = { path = "../backend-utils-adt-acl" }
 types-acl = { path = "../types-acl" }
 
+# pgstatfuncs.c SRF/composite family: the cumulative-stats fetch substrate the
+# materialize/composite-row workers read (pg_stat_get_io/slru/wal/archiver/
+# replication_slot/subscription_stats), plus GetBackendTypeDesc for the IO
+# backend_type column.
+backend-utils-activity-pgstat-io = { path = "../backend-utils-activity-pgstat-io" }
+backend-utils-activity-pgstat-slru = { path = "../backend-utils-activity-pgstat-slru" }
+backend-utils-activity-pgstat-wal = { path = "../backend-utils-activity-pgstat-wal" }
+backend-utils-activity-pgstat-replslot = { path = "../backend-utils-activity-pgstat-replslot" }
+backend-utils-activity-pgstat-subscription = { path = "../backend-utils-activity-pgstat-subscription" }
+backend-utils-activity-small = { path = "../backend-utils-activity-small" }
+backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+# record_from_values: the BlessTupleDesc + heap_form_tuple + HeapTupleGetDatum
+# composite-Datum builder the single-row pg_stat_get_* functions return through.
+backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
+types-pgstat = { path = "../types-pgstat" }
+# CONFLICT_NUM_TYPES (subscription conflict counters).
+types-replication = { path = "../types-replication" }
+
 # Shared type stack + allocator + error.
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 backend-utils-error = { path = "../backend-utils-error" }
