@@ -506,10 +506,17 @@ fn check_agglevels_and_constraints<'mcx>(
     }
     cur.p_hasAggs = true;
 
-    // Is the aggregate/grouping in a valid place?
+    // Is the aggregate/grouping in a valid place? C (parse_agg.c:351-364) reads
+    // `pstate->p_expr_kind` AFTER walking `pstate` up to the agg's own level
+    // (`while (min_varlevel-- > 0) pstate = pstate->parentParseState`), so the
+    // constraint check applies to the level the aggregate BELONGS to, not the
+    // level it is written at. Read the kind off the walked-up `cur`, not the
+    // original innermost `pstate` — otherwise an outer-level aggregate written
+    // inside a FROM sub-SELECT (e.g. `t, lateral (select max(t.x) from u)`)
+    // escapes the EXPR_KIND_FROM_SUBSELECT error.
     let mut err: Option<&'static str> = None;
     let mut errkind = false;
-    let kind = pstate.p_expr_kind;
+    let kind = cur.p_expr_kind;
     use ParseExprKind::*;
     match kind {
         EXPR_KIND_NONE => {

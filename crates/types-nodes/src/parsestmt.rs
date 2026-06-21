@@ -716,6 +716,18 @@ impl<'mcx> ParseState<'mcx> {
             None => None,
         };
 
+        // p_expr_kind is part of the spine an outer-level aggregate's constraint
+        // check reads through `parentParseState`. `check_agglevels_and_constraints`
+        // (parse_agg.c) walks `pstate` up `agglevelsup` levels and then reads the
+        // walked-up level's `p_expr_kind` to decide whether the aggregate sits in
+        // a forbidden place (e.g. EXPR_KIND_FROM_SUBSELECT for an aggregate whose
+        // Vars belong to the level recursing into a FROM sub-SELECT). In C the
+        // back-pointer reaches the live outer pstate (whose p_expr_kind is set by
+        // transformRangeSubselect); the owned model resolves through this clone,
+        // so the field must be carried or the check sees EXPR_KIND_NONE and the
+        // error is missed. Read-only at the ancestor level, so no merge-back.
+        out.p_expr_kind = self.p_expr_kind;
+
         // Hooks (fn pointers carrying the `'mcx` lifetime) are not re-lifetimed
         // into the cloned ancestor; `make_parsestate` copies them onto the child
         // directly, and hook dispatch happens at the child's own level.

@@ -905,10 +905,53 @@ pub fn ExplainNode<'es, 'p>(
             }
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
         }
+        ntag::T_NestLoop => {
+            // explain.c:2158: join.joinqual -> "Join Filter"; plan->qual -> "Filter".
+            let nl = plan_node.expect_nestloop();
+            let jq = clone_expr_qual(mcx, nl.join.joinqual.as_ref())?;
+            show_upper_qual(es, mcx, plan_node, ancestors, jq, "Join Filter")?;
+            let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
+            show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
+        }
+        ntag::T_MergeJoin => {
+            // explain.c:2169: mergeclauses -> "Merge Cond"; join.joinqual ->
+            // "Join Filter"; plan->qual -> "Filter".
+            let mj = plan_node.expect_mergejoin();
+            let mut mc = alloc::vec::Vec::with_capacity(mj.mergeclauses.len());
+            for e in mj.mergeclauses.iter() {
+                mc.push(e.clone_in(mcx)?);
+            }
+            show_upper_qual(es, mcx, plan_node, ancestors, mc, "Merge Cond")?;
+            let jq = clone_expr_qual(mcx, mj.join.joinqual.as_ref())?;
+            show_upper_qual(es, mcx, plan_node, ancestors, jq, "Join Filter")?;
+            let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
+            show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
+        }
+        ntag::T_HashJoin => {
+            // explain.c:2182: hashclauses -> "Hash Cond"; join.joinqual ->
+            // "Join Filter"; plan->qual -> "Filter".
+            let hj = plan_node.expect_hashjoin();
+            let mut hc = alloc::vec::Vec::new();
+            if let Some(hcl) = hj.hashclauses.as_ref() {
+                hc.reserve(hcl.len());
+                for n in hcl.iter() {
+                    let e = n
+                        .as_expr()
+                        .expect("EXPLAIN: hashclause node is not an Expr")
+                        .clone_in(mcx)?;
+                    hc.push(e);
+                }
+            }
+            show_upper_qual(es, mcx, plan_node, ancestors, hc, "Hash Cond")?;
+            let jq = clone_expr_qual(mcx, hj.join.joinqual.as_ref())?;
+            show_upper_qual(es, mcx, plan_node, ancestors, jq, "Join Filter")?;
+            let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
+            show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
+        }
         _ => {
             // The generic `Filter` leg (SeqScan / SampleScan / ValuesScan /
             // CteScan / NamedTuplestoreScan / WorkTableScan / SubqueryScan /
-            // Gather / joins / Result / etc).
+            // Gather / Result / etc).
             show_scan_qual(es, mcx, plan_node, ancestors, plan.qual.as_ref(), "Filter")?;
         }
     }
@@ -1258,6 +1301,61 @@ fn show_scan_qual<'es, 'p>(
     // ExplainPropertyText(qlabel, exprstr, es);
     fmt::ExplainPropertyText(qlabel, exprstr.as_str(), es)?;
     Ok(())
+}
+
+/// `show_upper_qual(qual, qlabel, ...)` (explain.c:2554) — show a qualifier
+/// expression for an upper-level (join / agg / result / window) plan node. Same
+/// make_ands_explicit + deparse as `show_scan_qual`, but with the upper-node
+/// prefix rule `useprefix = es->rtable_size > 1 || es->verbose`.
+fn show_upper_qual<'es, 'p>(
+    es: &mut ExplainState<'es>,
+    mcx: Mcx<'es>,
+    plan_node: &Node<'p>,
+    ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
+    exprs: alloc::vec::Vec<types_nodes::primnodes::Expr>,
+    qlabel: &str,
+) -> PgResult<()> {
+    if exprs.is_empty() {
+        return Ok(());
+    }
+    let anded = backend_nodes_core::makefuncs::make_ands_explicit(exprs);
+    let node = Node::mk_expr(mcx, anded)?;
+
+    let useprefix = es.rtable_size > 1 || es.verbose;
+
+    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let es_pstmt = es
+        .pstmt
+        .as_deref()
+        .expect("EXPLAIN: es->pstmt must be set before deparse");
+    let exprstr = ruleutils_s::deparse_expr_for_plan::call(
+        mcx,
+        es_pstmt,
+        &es.rtable_names,
+        &plan_owned,
+        ancestors,
+        &node,
+        useprefix,
+        false,
+    )?;
+    fmt::ExplainPropertyText(qlabel, exprstr.as_str(), es)?;
+    Ok(())
+}
+
+/// Clone a `PgVec<Expr>` qual list into the deparse arena (clone_in for SubPlan/
+/// Aggref children). Returns an empty vec for `None`.
+fn clone_expr_qual<'es>(
+    mcx: Mcx<'es>,
+    qual: Option<&PgVec<'_, types_nodes::primnodes::Expr>>,
+) -> PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr>> {
+    let mut out = alloc::vec::Vec::new();
+    if let Some(q) = qual {
+        out.reserve(q.len());
+        for e in q.iter() {
+            out.push(e.clone_in(mcx)?);
+        }
+    }
+    Ok(out)
 }
 
 /// `show_indexsearches_info(planstate, es)` (explain.c:3837) — show the total

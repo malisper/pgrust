@@ -9712,13 +9712,24 @@ pub fn init_seams() {
     // non-NULL result (the only NULL fall-out is the empty-input fast path).
     backend_optimizer_plan_init_subselect_ext_seams::preprocess_phv_expression::set(
         |root, run, expr| {
-            // No outer Query node is threaded into this PHV seam; if root.hasJoinRTEs
-            // is set, preprocess_expression returns an Err (LATERAL-PHV join-alias
-            // flattening through this entry point is not wired). The common
-            // (non-join-RTE) PHV path is unaffected.
+            // C: preprocess_phv_expression(root, expr) = preprocess_expression(root,
+            // expr, EXPRKIND_PHV), and preprocess_expression reads root->parse for
+            // flatten_join_alias_vars when root->hasJoinRTEs. Thread the outer Query
+            // (root->parse, cloned into the run arena as the immutable context node)
+            // exactly as preprocess_query_expressions does, so upper-level LATERAL
+            // PlaceHolderVars over a query with join RTEs flatten their join-alias
+            // Vars correctly instead of erroring.
             let mcx = run.mcx();
-            Ok(preprocess_expression(mcx, root, run, None, Some(expr), EXPRKIND_PHV)?
-                .expect("preprocess_expression of a non-NULL PHV expr is non-NULL"))
+            let outer_query: Option<Node<'_>> = if root.hasJoinRTEs {
+                Some(Node::mk_query(mcx, run.resolve(root.parse).clone_in(mcx)?)?)
+            } else {
+                None
+            };
+            let outer_query_ref = outer_query.as_ref();
+            Ok(
+                preprocess_expression(mcx, root, run, outer_query_ref, Some(expr), EXPRKIND_PHV)?
+                    .expect("preprocess_expression of a non-NULL PHV expr is non-NULL"),
+            )
         },
     );
 
