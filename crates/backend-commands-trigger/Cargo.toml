@@ -82,4 +82,5 @@ backend-storage-lmgr-lmgr = { path = "../backend-storage-lmgr-lmgr" }
 backend-tcop-utility-out-seams = { path = "../backend-tcop-utility-out-seams" }
 backend-utils-cache-lsyscache = { path = "../backend-utils-cache-lsyscache" }
 backend-utils-init-miscinit = { path = "../backend-utils-init-miscinit" }
+backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-seams" }
 backend-utils-error = { path = "../backend-utils-error" }

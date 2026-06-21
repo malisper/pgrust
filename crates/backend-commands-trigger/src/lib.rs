@@ -29,6 +29,7 @@
 
 pub mod alter_constr;
 pub mod create;
+pub mod enable_disable;
 pub mod firing;
 pub mod fmgr_builtins;
 pub mod queue;

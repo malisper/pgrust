@@ -1802,6 +1802,9 @@ fn catalog_tuple_update_pg_trigger(
     if let Some(d) = fields.tginitdeferred {
         set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_trigger_tginitdeferred, Datum::from_bool(d));
     }
+    if let Some(c) = fields.tgenabled {
+        set_col(&mut values, &mut nulls, &mut replaces, pt::Anum_pg_trigger_tgenabled, Datum::from_char(c));
+    }
     modify_and_update(mcx, &r, &oldtup, &values, &nulls, &replaces)
 }
 

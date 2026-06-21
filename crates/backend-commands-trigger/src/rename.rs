@@ -333,6 +333,7 @@ fn renametrig_internal<'mcx>(
         tgname: Some(namestrcpy_image(newname)),
         tgdeferrable: None,
         tginitdeferred: None,
+        tgenabled: None,
     };
     indexing::catalog_tuple_update_pg_trigger::call(tgrel, trigtup.tuple.t_self, &fields)?;
 

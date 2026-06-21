@@ -184,4 +184,9 @@ pub struct TriggerFieldUpdate {
     /// `tginitdeferred` — set by `AlterConstrTriggerDeferrability`. `None` when
     /// the mutator does not touch deferrability.
     pub tginitdeferred: Option<bool>,
+    /// `tgenabled` — set by `EnableDisableTrigger` (ALTER TABLE
+    /// ENABLE/DISABLE [ REPLICA | ALWAYS ] TRIGGER). One of the
+    /// `TRIGGER_FIRES_*` / `TRIGGER_DISABLED` codes. `None` when the mutator
+    /// does not touch the firing config.
+    pub tgenabled: Option<i8>,
 }

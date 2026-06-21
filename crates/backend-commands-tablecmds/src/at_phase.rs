@@ -1061,7 +1061,11 @@ pub(crate) fn ATPrepCmd<'mcx>(
                 rel,
                 ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
             )?;
-            unported("ENABLE/DISABLE TRIGGER variants");
+            // Set up recursion for phase 2; no other prep needed.
+            if recurse {
+                cmd.recurse = true;
+            }
+            pass = AT_PASS_MISC;
         }
         AT_EnableRowSecurity | AT_DisableRowSecurity | AT_ForceRowSecurity
         | AT_NoForceRowSecurity => {
@@ -1667,7 +1671,45 @@ fn ATExecCmd<'mcx>(
         }
         AT_EnableTrig | AT_EnableAlwaysTrig | AT_EnableReplicaTrig | AT_DisableTrig
         | AT_EnableTrigAll | AT_DisableTrigAll | AT_EnableTrigUser | AT_DisableTrigUser => {
-            unported("ENABLE/DISABLE TRIGGER (EnableDisableTrigger)")
+            // ATExecEnableDisableTrigger(rel, cmd->name, fires_when,
+            //                            skip_system, cmd->recurse, lockmode)
+            // (tablecmds.c:5558-5602). The fires_when char + skip_system flag +
+            // trigger-name-vs-NULL depend on the subcommand variant.
+            use types_catalog::pg_trigger::{
+                TRIGGER_DISABLED, TRIGGER_FIRES_ALWAYS, TRIGGER_FIRES_ON_ORIGIN,
+                TRIGGER_FIRES_ON_REPLICA,
+            };
+            // (trigname_is_used, fires_when, skip_system)
+            let (use_name, fires_when, skip_system) = match cmd.subtype {
+                AT_EnableTrig => (true, TRIGGER_FIRES_ON_ORIGIN, false),
+                AT_EnableAlwaysTrig => (true, TRIGGER_FIRES_ALWAYS, false),
+                AT_EnableReplicaTrig => (true, TRIGGER_FIRES_ON_REPLICA, false),
+                AT_DisableTrig => (true, TRIGGER_DISABLED, false),
+                AT_EnableTrigAll => (false, TRIGGER_FIRES_ON_ORIGIN, false),
+                AT_DisableTrigAll => (false, TRIGGER_DISABLED, false),
+                AT_EnableTrigUser => (false, TRIGGER_FIRES_ON_ORIGIN, true),
+                AT_DisableTrigUser => (false, TRIGGER_DISABLED, true),
+                _ => unreachable!(),
+            };
+            let trigname = if use_name {
+                Some(
+                    cmd.name
+                        .as_ref()
+                        .map(|s| s.as_str())
+                        .expect("ENABLE/DISABLE TRIGGER name requires a trigger name"),
+                )
+            } else {
+                None
+            };
+            backend_commands_trigger::enable_disable::ATExecEnableDisableTrigger(
+                mcx,
+                rel,
+                trigname,
+                fires_when,
+                skip_system,
+                cmd.recurse,
+                lockmode,
+            )?;
         }
         AT_EnableRule | AT_EnableAlwaysRule | AT_EnableReplicaRule | AT_DisableRule => {
             // ATExecEnableDisableRule(rel, cmd->name, fires_when, lockmode)

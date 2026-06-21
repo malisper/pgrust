@@ -91,6 +91,7 @@ pub fn AlterConstrTriggerDeferrability(
             tgname: None,
             tgdeferrable: Some(deferrable),
             tginitdeferred: Some(initdeferred),
+            tgenabled: None,
         };
         indexing::catalog_tuple_update_pg_trigger::call(&tgrel, tgtuple.tuple.t_self, &fields)?;
 
