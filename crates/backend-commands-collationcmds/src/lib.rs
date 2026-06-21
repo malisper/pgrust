@@ -59,7 +59,9 @@ use backend_commands_collationcmds_seams::CollationCreateArgs;
 use backend_commands_define_seams::DefElemArg;
 
 use backend_access_transam_xact_seams::command_counter_increment;
-use backend_catalog_aclchk_seams::{aclcheck_error, object_aclcheck};
+use backend_catalog_aclchk_seams::{
+    aclcheck_error, object_aclcheck,
+};
 use backend_utils_adt_pg_locale_seams::{get_collation_actual_version, pg_newlocale_from_collation};
 use backend_utils_init_miscinit_seams::{get_user_id, is_binary_upgrade, superuser};
 use backend_utils_mb_mbutils_seams::{get_database_encoding, get_database_encoding_name};
@@ -182,7 +184,7 @@ pub fn DefineCollation<'mcx>(
     names: &[Option<String>],
     parameters: &[Node],
     if_not_exists: bool,
-    source_text: Option<&str>,
+    source: Option<&str>,
 ) -> PgResult<ObjectAddress> {
     let mut fromEl: Option<&DefElem> = None;
     let mut localeEl: Option<&DefElem> = None;
@@ -253,21 +255,16 @@ pub fn DefineCollation<'mcx>(
             return ereport(ERROR)
                 .errcode(ERRCODE_SYNTAX_ERROR)
                 .errmsg(format!("collation attribute \"{defname}\" not recognized"))
-                .errposition(seam::parser_errposition::call(source_text, defel.location))
+                .errposition(seam::parser_errposition::call(source.map(|s| s.to_string()), defel.location))
                 .finish(here("DefineCollation"))
                 .map(|()| unreachable!("ereport(ERROR) always yields an Err"));
         };
         if defelp.is_some() {
-            // C: errorConflictingDefElem(defel, pstate) —
-            //   ereport(ERROR, errcode(SYNTAX_ERROR),
-            //           errmsg("conflicting or redundant options"),
-            //           parser_errposition(pstate, defel->location));
-            // The aclchk `error_conflicting_def_elem` seam drops the location, so
-            // emit the same error here with the DefElem's source position attached.
+            /* errorConflictingDefElem(defel, pstate) [define.c] */
             return ereport(ERROR)
                 .errcode(ERRCODE_SYNTAX_ERROR)
                 .errmsg("conflicting or redundant options")
-                .errposition(seam::parser_errposition::call(source_text, defel.location))
+                .errposition(seam::parser_errposition::call(source.map(|s| s.to_string()), defel.location))
                 .finish(here("DefineCollation"))
                 .map(|()| unreachable!("ereport(ERROR) always yields an Err"));
         }

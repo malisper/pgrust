@@ -89,6 +89,19 @@ thread_local! {
     /// The saved-plan registry: `SpiPlanPtr.0 - 1` indexes into it (0 is the C
     /// NULL `SPIPlanPtr` sentinel). A plan is removed by `SPI_freeplan`.
     static PLANS: RefCell<Vec<Option<SpiPlan>>> = const { RefCell::new(Vec::new()) };
+
+    /// `SPI_tuptable` — the most-recently-executed query's result. C overwrites
+    /// this global on every execute, so the RI violation reporter's
+    /// `SPI_tuptable->vals[0]` read sees the *last* query's rows, not some other
+    /// retained plan's. (Scanning every plan's `last_result` instead would pick a
+    /// stale prior plan when several were executed — e.g. a per-row FK trigger
+    /// check before the bulk `RI_Initial_Check`.)
+    static LAST_SPI_RESULT: RefCell<Option<SpiResult>> = const { RefCell::new(None) };
+}
+
+/// Record the most-recent execute's result as the current `SPI_tuptable`.
+fn set_last_spi_result(result: Option<SpiResult>) {
+    LAST_SPI_RESULT.with(|r| *r.borrow_mut() = result);
 }
 
 fn plan_register(plan: SpiPlan) -> SpiPlanPtr {
@@ -315,6 +328,7 @@ pub fn spi_execute_snapshot<'mcx>(
 
     set_spi_processed(my_processed);
     set_spi_result(my_res);
+    set_last_spi_result(last_result.clone());
     with_plan(plan, |p| p.last_result = last_result)?;
 
     Ok(SpiExecResult {
@@ -544,18 +558,15 @@ pub fn spi_first_row_columns<'mcx>(
     mcx: Mcx<'mcx>,
     attnums: &[i16],
 ) -> PgResult<PgVec<'mcx, ResultColumn<'mcx>>> {
-    // Read the most-recently-executed plan's first row. The RI reporter calls
-    // this immediately after the failing execute, so the last plan executed is
-    // the one whose result it wants. Find it by scanning for the carrier whose
-    // `last_result` is set; RI only ever has one in flight.
-    let row = PLANS.with(|r| {
-        let reg = r.borrow();
-        for slot in reg.iter().flatten() {
-            if let Some(res) = &slot.last_result {
-                return Some((res.columns.clone(), res.rows.first().cloned()));
-            }
-        }
-        None
+    // Read the most-recently-executed query's first row from `SPI_tuptable`
+    // (C reads `SPI_tuptable->vals[0]`). Using the global last-result — rather
+    // than scanning every retained plan — is essential when several queries ran
+    // before the report (e.g. a per-row FK trigger check ahead of the bulk
+    // `RI_Initial_Check`), since the scan would pick a stale prior plan's rows.
+    let row = LAST_SPI_RESULT.with(|r| {
+        r.borrow()
+            .as_ref()
+            .map(|res| (res.columns.clone(), res.rows.first().cloned()))
     });
 
     let mut out: PgVec<'mcx, ResultColumn<'mcx>> = PgVec::new_in(mcx);

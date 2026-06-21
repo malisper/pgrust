@@ -1086,8 +1086,8 @@ fn parser_errposition_seam(pstate: &ParseState<'_>, location: i32) -> PgResult<i
 pub fn init_seams() {
     backend_parser_small1_seams::parser_errposition::set(parser_errposition_seam);
     // collationcmds.c (DefineCollation) calls `parser_errposition(pstate,
-    // defel->location)` (parse_node.c). The installer carries the active query
-    // string (`pstate->p_sourcetext`) so the seam reproduces the full C body:
+    // location)` (parse_node.c). The caller threads the active query string
+    // (`pstate->p_sourcetext`) so the seam reproduces the full C body:
     //   if (location < 0) return 0;
     //   if (p_sourcetext == NULL) return 0;
     //   pos = pg_mbstrlen_with_len(p_sourcetext, location) + 1;

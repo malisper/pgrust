@@ -217,9 +217,7 @@ pub fn assign_query_collations<'mcx>(
     // `expr` is the independent subexpression the C `T_List` branch of
     // assign_query_collations_walker hands to assign_list_collations.
     for te in query.targetList.iter_mut() {
-        if let Some(expr) = te.expr.as_deref_mut() {
-            assign_query_collations_walker_expr(pstate, expr)?;
-        }
+        assign_targetentry_collations(pstate, te)?;
     }
     for wco in query.withCheckOptions.iter_mut() {
         assign_query_collations_walker_node(pstate, wco)?;
@@ -234,9 +232,7 @@ pub fn assign_query_collations<'mcx>(
         assign_query_collations_walker_expr(pstate, mjc)?;
     }
     for te in query.returningList.iter_mut() {
-        if let Some(expr) = te.expr.as_deref_mut() {
-            assign_query_collations_walker_expr(pstate, expr)?;
-        }
+        assign_targetentry_collations(pstate, te)?;
     }
     if let Some(jt) = query.jointree.as_deref_mut() {
         assign_fromexpr_collations(pstate, jt)?;
@@ -339,6 +335,35 @@ fn assign_query_collations_walker_expr<'mcx>(
 ) -> PgResult<()> {
     let mut context = AssignCollationsContext::fresh(pstate);
     assign_collations_walker_expr(expr, &mut context)
+}
+
+/// Process a `TargetEntry` exactly as the C `assign_collations_walker`
+/// `T_TargetEntry` arm (parse_collate.c:421-446): the entry's single child
+/// bubbles its state, and an indeterminate (CONFLICT) collation on a sort/group
+/// target (`ressortgroupref != 0`) throws eagerly so the error carries a syntax
+/// pointer rather than failing in a comparison function at runtime.
+///
+/// `query_tree_walker` hands each `TargetEntry` *node* (not its bare expr) to
+/// the walker, so this arm is reached for every target-list member; processing
+/// only `te.expr` would skip the eager throw entirely.
+fn assign_targetentry_collations<'p, 'mcx, 'te>(
+    pstate: Option<&'p ParseState<'mcx>>,
+    te: &mut types_nodes::primnodes::TargetEntry<'te>,
+) -> PgResult<()> {
+    // Fresh top-level context, matching `assign_expr_collations(pstate, tle)`.
+    let mut loccontext = AssignCollationsContext::fresh(pstate);
+    if let Some(expr) = te.expr.as_deref_mut() {
+        assign_collations_walker_expr(expr, &mut loccontext)?;
+    }
+    if loccontext.strength == COLLATE_CONFLICT && te.ressortgroupref != 0 {
+        return Err(implicit_conflict_error(
+            pstate,
+            loccontext.collation,
+            loccontext.collation2,
+            loccontext.location2,
+        )?);
+    }
+    Ok(())
 }
 
 /// `assign_list_collations()` (parse_collate.c:154): mark all nodes in a list of
@@ -580,8 +605,8 @@ fn assign_collations_walker_expr(
             collation = ce.collOid;
             debug_assert!(OidIsValid(collation));
             strength = COLLATE_EXPLICIT;
-            // `CollateExpr.location` is trimmed (model-wide rule 3) → -1.
-            location = -1;
+            // location = ((CollateExpr *) node)->location;
+            location = ce.location;
         }
         Expr::FieldSelect(_) => {
             // For FieldSelect, the result has the field's declared collation,
@@ -1019,22 +1044,17 @@ fn assign_aggregate_collations(
     // Plain aggregates have no direct args
     debug_assert!(aggref.aggdirectargs.is_empty());
 
-    // Process aggregated args, holding resjunk ones at arm's length. C recurses
-    // to each TargetEntry (so the T_TargetEntry arm runs); in this model
-    // `aggref.args` is `Vec<TargetEntry>` whose single child is `tle.expr`. The
-    // T_TargetEntry arm's only observable effects are (a) bubbling the child's
-    // state and (b) the sort/group eager throw — which is dead here (trimmed
-    // ressortgroupref). So walking `tle.expr` directly is equivalent to walking
-    // the TargetEntry: deref-and-walk the inner Expr (the prompt's adaptation;
-    // TargetEntry is not cloned — its Aggref-bearing exprs would panic on clone).
+    // Process aggregated args, holding resjunk (sort-only) ones at arm's length.
+    // C hands each TargetEntry *node* to the walker so the T_TargetEntry arm
+    // runs: the resjunk sort columns go through `assign_expr_collations(pstate,
+    // tle)` (fresh context + the eager sort/group conflict throw via
+    // `ressortgroupref`), the regular ones share `loccontext`.
+    let pstate = loccontext.pstate;
     for tle in aggref.args.iter_mut() {
-        let resjunk = tle.resjunk;
-        if let Some(e) = tle.expr.as_deref_mut() {
-            if resjunk {
-                assign_expr_collations_ctx(loccontext, e)?;
-            } else {
-                assign_collations_walker_expr(e, loccontext)?;
-            }
+        if tle.resjunk {
+            assign_targetentry_collations(pstate, tle)?;
+        } else if let Some(e) = tle.expr.as_deref_mut() {
+            assign_collations_walker_expr(e, loccontext)?;
         }
     }
     Ok(())
@@ -1057,15 +1077,18 @@ fn assign_ordered_set_collations(
     // Direct args, if any, are normal children of the Aggref node.
     assign_collations_list_walker(&mut aggref.aggdirectargs, loccontext)?;
 
-    // Process aggregated args appropriately (walking `tle.expr`, see
-    // assign_aggregate_collations for why the inner Expr is walked directly).
+    // Process aggregated args appropriately: when there can be more than one
+    // sort column each is an independent sort target handled by
+    // `assign_expr_collations(pstate, tle)` (fresh context + the TargetEntry
+    // eager-throw), otherwise the single column shares `loccontext`.
+    let pstate = loccontext.pstate;
     for tle in aggref.args.iter_mut() {
-        if let Some(e) = tle.expr.as_deref_mut() {
-            if merge_sort_collations {
+        if merge_sort_collations {
+            if let Some(e) = tle.expr.as_deref_mut() {
                 assign_collations_walker_expr(e, loccontext)?;
-            } else {
-                assign_expr_collations_ctx(loccontext, e)?;
             }
+        } else {
+            assign_targetentry_collations(pstate, tle)?;
         }
     }
     Ok(())

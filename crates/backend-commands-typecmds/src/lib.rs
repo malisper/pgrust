@@ -3354,7 +3354,7 @@ pub fn DefineDomain<'mcx>(
     type_name: &TypeName,
     coll_clause: Option<&[String]>,
     constraints: &[RichNode],
-    source_text: Option<&str>,
+    source: Option<&str>,
 ) -> PgResult<ObjectAddress> {
     /* Convert list of names to a name and namespace */
     let names_nl = as_namelist(domainname);
@@ -3443,14 +3443,13 @@ pub fn DefineDomain<'mcx>(
 
     /* Complain if COLLATE is applied to an uncollatable type */
     if OidIsValid(domaincoll) && !OidIsValid(baseColl) {
-        // C: parser_errposition(pstate, stmt->typeName->location)
         return ereport(ERROR)
             .errcode(ERRCODE_DATATYPE_MISMATCH)
             .errmsg(format!(
                 "collations are not supported by type {}",
                 format_type_be(basetypeoid)?
             ))
-            .errposition(parser_errposition_src(source_text, type_name.location))
+            .errposition(parser_errposition_src(source, type_name.location))
             .finish(errloc(810, "DefineDomain"))
             .map(|()| unreachable!());
     }
@@ -4943,7 +4942,7 @@ fn define_enum_seam<'mcx>(mcx: Mcx<'mcx>, stmt: &RichNode<'mcx>) -> PgResult<Obj
 /// `DefineRange`'s port does not consult it.
 fn define_range_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let crs = match stmt.as_createrangestmt() {
@@ -5123,8 +5122,8 @@ fn decode_name_list(defnames: &[types_nodes::nodes::NodePtr<'_>]) -> Vec<Option<
 /// Outward-seam adapter for `DefineDomain(pstate, (CreateDomainStmt *) stmt)`
 /// (utility.c `ProcessUtilitySlow`): decode the `CreateDomainStmt`'s qualified
 /// name, base `TypeName`, optional `COLLATE` clause, and constraint list, then
-/// run the ported [`DefineDomain`] body. `pstate->p_sourcetext` is threaded so
-/// the uncollatable-type COLLATE error reports the base type's source position.
+/// run the ported [`DefineDomain`] body, threading `pstate->p_sourcetext` so the
+/// uncollatable-type error carries `parser_errposition(pstate, typeName->location)`.
 fn define_domain_seam<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,

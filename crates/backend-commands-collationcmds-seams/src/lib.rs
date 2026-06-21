@@ -51,13 +51,15 @@ pub struct CollationRow {
 }
 
 seam_core::seam!(
-    /// `parser_errposition(pstate, location)` (parse_node.c): map a byte
-    /// `location` in the query source to the 1-based character `errposition`
-    /// cursor offset (`pg_mbstrlen_with_len(p_sourcetext, location) + 1`).
-    /// collationcmds forwards `defel->location` plus the active query string
-    /// (`pstate->p_sourcetext`) here for the "attribute not recognized" syntax
-    /// error and the conflicting-option error.
-    pub fn parser_errposition(source: Option<&str>, location: i32) -> i32
+    /// `parser_errposition(pstate, location)` (parse_node.c): map a parse
+    /// `location` to the `errposition` cursor offset. collationcmds forwards
+    /// `defel->location` here for the "attribute not recognized" and
+    /// "conflicting or redundant options" syntax errors. `source` is the active
+    /// query string (`pstate->p_sourcetext`); the full C body is
+    ///   if (location < 0) return 0;
+    ///   if (p_sourcetext == NULL) return 0;
+    ///   pos = pg_mbstrlen_with_len(p_sourcetext, location) + 1;
+    pub fn parser_errposition(source: Option<String>, location: i32) -> i32
 );
 
 seam_core::seam!(
