@@ -2625,11 +2625,39 @@ fn get_windowfunc_expr_helper(
         }
         Ok(())
     } else {
-        // EXPLAIN case: scan the namespace stack for a matching WindowAgg plan
-        // node and print its winname — needs deparse_namespace.plan (#159).
-        Err(deferred(
-            "get_windowfunc_expr OVER (EXPLAIN WindowAgg namespace scan; deparse_namespace.plan / #159)",
-        ))
+        // EXPLAIN case: search the namespace stack for a matching WindowAgg
+        // node (probably it's always the first entry), and print winname.
+        // C: foreach(l, context->namespaces) { dpns; if (dpns->plan &&
+        //    IsA(dpns->plan, WindowAgg)) { wagg = ...; if (wagg->winref ==
+        //    wfunc->winref) { append quote_identifier(wagg->winname); break; } } }
+        let mut found = false;
+        // Resolve the winname first (immutable borrow of context.namespaces),
+        // then emit it, so the later &mut context append doesn't alias.
+        let mut winname: Option<PgString<'_>> = None;
+        for dpns in context.namespaces.iter() {
+            if let Some(plan) = dpns.plan.as_deref() {
+                if let Some(wagg) = plan.as_windowagg() {
+                    if wagg.winref == w.winref {
+                        found = true;
+                        if let Some(name) = wagg.winname.as_deref() {
+                            winname = Some(quote_identifier(mcx, name)?);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if found {
+            if let Some(q) = winname {
+                str_(context, q.as_str())?;
+            }
+            Ok(())
+        } else {
+            Err(elog_error(format!(
+                "could not find window clause for winref {}",
+                w.winref
+            )))
+        }
     }
 }
 
