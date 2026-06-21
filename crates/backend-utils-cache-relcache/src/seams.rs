@@ -1738,10 +1738,67 @@ fn assume_new_relfilelocator(relid: Oid) -> PgResult<()> {
 }
 
 fn swap_relfilelocator_subids(r1: Oid, r2: Oid) -> PgResult<()> {
-    // `swap_relation_files` (cluster.c) tells the relcache both relations took
-    // new relfilelocators this transaction.
-    assume_new_relfilelocator(r1)?;
-    assume_new_relfilelocator(r2)?;
+    // `swap_relation_files` (cluster.c):
+    //
+    //   rel1 = relation_open(r1, NoLock);
+    //   rel2 = relation_open(r2, NoLock);
+    //   rel2->rd_createSubid = rel1->rd_createSubid;
+    //   rel2->rd_newRelfilelocatorSubid = rel1->rd_newRelfilelocatorSubid;
+    //   rel2->rd_firstRelfilelocatorSubid = rel1->rd_firstRelfilelocatorSubid;
+    //   RelationAssumeNewRelfilelocator(rel1);
+    //   relation_close(rel1, NoLock);
+    //   relation_close(rel2, NoLock);
+    //
+    // Recognize that rel1's relfilenumber (swapped from rel2) is new in this
+    // subtransaction. The rel2 storage (swapped from rel1) may or may not be new.
+    //
+    // The owned-model wrinkle: in C `relation_open` builds/pins the entry in the
+    // relcache; only then are the `rd_*Subid` fields reachable. The new heap
+    // (`r2` here, the transient CLUSTER work table) is not necessarily resident
+    // in the cell map at this point, so we must open (build+pin) both relations
+    // first — exactly as C does — before touching their entries. Previously this
+    // seam called `assume_new_relfilelocator` directly on bare OIDs, which (a)
+    // erroneously assumed-new on BOTH r1 and r2 (C does rel1 only), (b) skipped
+    // the rel1->rel2 subid copy, and (c) errored with "no open relation" when r2
+    // was not already resident — the VACUUM FULL / CLUSTER crash regression.
+    let rel1 = crate::core_entry_store::RelationIdGetRelation(r1)?;
+    if rel1 == types_core::InvalidOid {
+        return Err(crate::core_entry_store::relcache_open_failed(r1));
+    }
+    let rel2 = crate::core_entry_store::RelationIdGetRelation(r2)?;
+    if rel2 == types_core::InvalidOid {
+        // Release rel1's pin before erroring out.
+        let _ = crate::core_entry_store::RelationClose(rel1);
+        return Err(crate::core_entry_store::relcache_open_failed(r2));
+    }
+
+    // rel2->rd_*Subid = rel1->rd_*Subid;
+    let (create_subid, new_subid, first_subid) =
+        crate::core_entry_store::with_relation(rel1, |r| {
+            (
+                r.rd_createSubid,
+                r.rd_newRelfilelocatorSubid,
+                r.rd_firstRelfilelocatorSubid,
+            )
+        })?;
+    crate::core_entry_store::with_relation_mut(rel2, |r| {
+        r.rd_createSubid = create_subid;
+        r.rd_newRelfilelocatorSubid = new_subid;
+        r.rd_firstRelfilelocatorSubid = first_subid;
+    })?;
+
+    // RelationAssumeNewRelfilelocator(rel1) — rel1 only.
+    let assume_res = assume_new_relfilelocator(r1);
+
+    // relation_close(rel1, NoLock); relation_close(rel2, NoLock):
+    // release the pins taken by RelationIdGetRelation above (always, even on the
+    // assume-new error path).
+    let close1 = crate::core_entry_store::RelationClose(rel1);
+    let close2 = crate::core_entry_store::RelationClose(rel2);
+
+    assume_res?;
+    close1?;
+    close2?;
     Ok(())
 }
 

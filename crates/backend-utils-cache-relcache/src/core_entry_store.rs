@@ -236,6 +236,15 @@ fn relcache_missing(oid: Oid) -> PgError {
         .into_error()
 }
 
+/// `relation_open` failing to build/find a relation: the C
+/// `relation_open(relid, NoLock)` path elogs `ERROR "could not open relation
+/// with OID %u"` when `RelationIdGetRelation` returns NULL.
+pub(crate) fn relcache_open_failed(oid: Oid) -> PgError {
+    ereport(ERROR)
+        .errmsg_internal(format!("could not open relation with OID {oid}"))
+        .into_error()
+}
+
 /* ==========================================================================
  * RelationRef — the RAII pin guard (the held-pointer analog).
  *
