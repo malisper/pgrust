@@ -170,6 +170,12 @@ pub const PARAMETER_ACL_RELATION_ID: Oid = 6243;
 /// `ReplicationOriginRelationId` — `pg_replication_origin`
 /// (`pg_replication_origin_d.h`).
 pub const REPLICATION_ORIGIN_RELATION_ID: Oid = 6000;
+/// `Anum_pg_replication_origin_roident` (`pg_replication_origin_d.h`).
+pub const ANUM_PG_REPLICATION_ORIGIN_ROIDENT: i16 = 1;
+/// `Anum_pg_replication_origin_roname` (`pg_replication_origin_d.h`).
+pub const ANUM_PG_REPLICATION_ORIGIN_RONAME: i16 = 2;
+/// `Natts_pg_replication_origin` (`pg_replication_origin_d.h`).
+pub const NATTS_PG_REPLICATION_ORIGIN: usize = 2;
 /// `DescriptionRelationId` — `pg_description` (`pg_description_d.h`).
 pub const DESCRIPTION_RELATION_ID: Oid = 2609;
 /// `DescriptionObjIndexId` — `pg_description_o_c_o_index` (`pg_description_d.h`).

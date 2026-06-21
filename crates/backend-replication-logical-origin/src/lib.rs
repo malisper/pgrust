@@ -68,6 +68,7 @@ use types_error::{
 use types_storage::{LWTRANCHE_REPLICATION_ORIGIN_STATE, LW_EXCLUSIVE, LW_SHARED};
 use types_wal::rmgr::XLogReaderState;
 
+pub mod catalog_extern;
 pub mod checkpoint_file;
 pub mod core;
 pub mod fmgr_builtins;
@@ -1358,6 +1359,24 @@ pub fn init_seams() {
     // StartupReplicationOrigin).
     sx::checkpoint_write::set(checkpoint_file::checkpoint_write);
     sx::checkpoint_read::set(checkpoint_file::checkpoint_read);
+
+    // The pg_replication_origin catalog mutation/lookup machinery (origin.c's
+    // replorigin_create dirty-scan+insert, replorigin_by_name/by_oid syscache
+    // lookups, replorigin_drop_by_name's tuple delete). The heap / genam /
+    // syscache / indexing / xact substrate is ported, so this crate owns them.
+    sx::create_catalog_insert::set(catalog_extern::create_catalog_insert);
+    sx::syscache_roident_by_name::set(catalog_extern::syscache_roident_by_name);
+    sx::syscache_roname_by_oid::set(catalog_extern::syscache_roname_by_oid);
+    sx::drop_open_relation::set(catalog_extern::drop_open_relation);
+    sx::drop_tuple_exists::set(catalog_extern::drop_tuple_exists);
+    sx::drop_delete_tuple::set(catalog_extern::drop_delete_tuple);
+    sx::drop_close_relation_keep_unlocked::set(catalog_extern::drop_close_relation_keep_unlocked);
+    sx::drop_close_relation_nolock::set(catalog_extern::drop_close_relation_nolock);
+
+    // The transaction/recovery predicates origin.c checks before mutating
+    // (replorigin_check_prerequisites / the create+drop Asserts). Owners ported.
+    sx::RecoveryInProgress::set(catalog_extern::recovery_in_progress);
+    sx::IsTransactionState::set(catalog_extern::is_transaction_state);
     // `int max_active_replication_origins` (origin.c GUC, boot 10) — install the
     // guc-tables slot over this crate's backing mirror accessors.
     backend_utils_misc_guc_tables::vars::max_active_replication_origins.install(
