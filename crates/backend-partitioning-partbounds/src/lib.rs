@@ -302,7 +302,9 @@ fn partition_hbound_cmp(modulus1: i32, remainder1: i32, modulus2: i32, remainder
 
 /// `lfirst_node(Const, c)` — borrow a `Const` out of a `listdatums` node. C
 /// asserts the node is a `Const`; a mismatch is a caller/parser bug.
-fn const_from_node<'a>(node: &'a Node<'_>) -> PgResult<&'a types_nodes::primnodes::Const> {
+fn const_from_node<'a, 'b>(
+    node: &'a Node<'b>,
+) -> PgResult<&'a types_nodes::primnodes::Const<'b>> {
     node.as_const()
         .ok_or_else(|| elog_error("partition list bound spec datum is not a Const"))
 }

@@ -101,8 +101,8 @@ pub fn init_seams() {
 fn convert_VALUES_to_ANY<'mcx>(
     mcx: Mcx<'mcx>,
     _root: &PlannerInfo,
-    sublink: &SubLink,
-) -> PgResult<Option<Expr>> {
+    sublink: &SubLink<'mcx>,
+) -> PgResult<Option<Expr<'mcx>>> {
     // `testexpr = (Node *) sublink->testexpr`, `values = (Query *) sublink->subselect`.
     let testexpr = match sublink.testexpr.as_deref() {
         Some(t) => t,

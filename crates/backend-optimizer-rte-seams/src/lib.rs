@@ -183,7 +183,7 @@ seam_core::seam!(
         run: &PlannerRun<'mcx>,
         root: &PlannerInfo,
         rti: Index,
-    ) -> types_error::PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr>>
+    ) -> types_error::PgResult<alloc::vec::Vec<types_nodes::primnodes::Expr<'mcx>>>
 );
 seam_core::seam!(
     /// `root->simple_rte_array[rti]->tablefunc != NULL` — does this RTE carry a

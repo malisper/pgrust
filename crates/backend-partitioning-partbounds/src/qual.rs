@@ -95,13 +95,13 @@ fn is_polymorphic_type(typid: Oid) -> bool {
 /// Wrap a freshly built `Expr` as a `Node` (the implicit-AND list element type
 /// the qual seam returns; the elements are always `Expr` leaves), allocating the
 /// opaque node in `mcx`.
-fn node<'mcx>(mcx: Mcx<'mcx>, e: Expr) -> PgResult<Node<'mcx>> {
+fn node<'mcx>(mcx: Mcx<'mcx>, e: Expr<'mcx>) -> PgResult<Node<'mcx>> {
     Node::mk_expr(mcx, e)
 }
 
 /// Extract the `Const` carried by a `PartitionRangeDatum`/`spec->listdatums`
 /// node pointer (a `Node::Expr(Expr::Const)`), cloned into `mcx`.
-fn const_of<'mcx>(mcx: Mcx<'mcx>, n: &Node<'_>) -> PgResult<Const> {
+fn const_of<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Const<'mcx>> {
     let _ = mcx;
     // `Const` carries no arena lifetime (its `constvalue` is `Datum<'static>`),
     // so the derived `Clone` is a faithful `copyObject(Const)`.
@@ -124,9 +124,9 @@ fn make_partition_op_expr<'mcx>(
     key: &PartitionKeyData<'_>,
     keynum: usize,
     strategy: u16,
-    arg1: Expr,
-    arg2_elems: MakeOpArg,
-) -> PgResult<Option<Expr>> {
+    arg1: Expr<'mcx>,
+    arg2_elems: MakeOpArg<'mcx>,
+) -> PgResult<Option<Expr<'mcx>>> {
     // operoid = get_partition_operator(key, keynum, strategy, &need_relabel);
     let (operoid, need_relabel) = get_partition_operator(key, keynum, strategy)?;
 
@@ -230,9 +230,9 @@ fn make_partition_op_expr<'mcx>(
 
 /// Argument carrier for `make_partition_op_expr` (a single Expr for RANGE, a
 /// list of Const elems for LIST).
-enum MakeOpArg {
-    Single(Expr),
-    Elems(Vec<Expr>),
+enum MakeOpArg<'mcx> {
+    Single(Expr<'mcx>),
+    Elems(Vec<Expr<'mcx>>),
 }
 
 /// `get_partition_operator(key, col, strategy, &need_relabel)` (partbounds.c:3832).
@@ -272,7 +272,7 @@ fn key_col<'mcx>(
     key: &PartitionKeyData<'_>,
     keynum: usize,
     partexprs_idx: &mut usize,
-) -> PgResult<Expr> {
+) -> PgResult<Expr<'mcx>> {
     if key.partattrs[keynum] != 0 {
         Ok(Expr::Var(make_var(
             1,
@@ -295,7 +295,7 @@ fn key_col<'mcx>(
 
 /// `get_range_nulltest(key)` (partbounds.c:4676) — one `IS NOT NULL` per key
 /// column.
-fn get_range_nulltest<'mcx>(mcx: Mcx<'mcx>, key: &PartitionKeyData<'_>) -> PgResult<Vec<Expr>> {
+fn get_range_nulltest<'mcx>(mcx: Mcx<'mcx>, key: &PartitionKeyData<'_>) -> PgResult<Vec<Expr<'mcx>>> {
     let mut result = Vec::new();
     let mut partexprs_idx = 0usize;
     for i in 0..(key.partnatts as usize) {
@@ -314,7 +314,7 @@ fn get_qual_for_hash<'mcx>(
     parent_relid: Oid,
     key: &PartitionKeyData<'_>,
     spec: &PartitionBoundSpec<'_>,
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'mcx>>> {
     // Fixed arguments: the parent relation OID, the modulus, and the remainder,
     // all as immutable Const nodes.
     //
@@ -412,7 +412,7 @@ fn get_qual_for_list<'mcx>(
     key: &PartitionKeyData<'_>,
     spec: &PartitionBoundSpec<'_>,
     parent_partdesc: Option<&PartitionDescData<'_>>,
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'mcx>>> {
     // Only single-column list partitioning is supported.
     debug_assert!(key.partnatts == 1);
 
@@ -536,7 +536,7 @@ fn get_range_key_properties<'mcx>(
     ldatum: &PartitionRangeDatum<'_>,
     udatum: &PartitionRangeDatum<'_>,
     partexprs_idx: &mut usize,
-) -> PgResult<(Expr, Option<Const>, Option<Const>)> {
+) -> PgResult<(Expr<'mcx>, Option<Const<'mcx>>, Option<Const<'mcx>>)> {
     let key_col = key_col(mcx, key, keynum, partexprs_idx)?;
 
     let lower_val = if ldatum.kind == PartitionRangeDatumKind::Value {
@@ -574,7 +574,7 @@ fn get_qual_for_range<'mcx>(
     spec: &PartitionBoundSpec<'_>,
     for_default: bool,
     parent_partdesc: Option<&PartitionDescData<'_>>,
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'mcx>>> {
     if spec.is_default {
         // The default range partition holds everything NOT contained in the
         // non-default siblings: OR each sibling's constraint, AND in the
@@ -883,7 +883,7 @@ pub fn get_qual_from_partbound<'mcx>(
     key: &PartitionKeyData<'_>,
     spec: &PartitionBoundSpec<'_>,
     parent_partdesc: Option<&PartitionDescData<'_>>,
-) -> PgResult<Vec<Expr>> {
+) -> PgResult<Vec<Expr<'mcx>>> {
     match key.strategy {
         PartitionStrategy::Hash => get_qual_for_hash(mcx, parent_relid, key, spec),
         PartitionStrategy::List => get_qual_for_list(mcx, key, spec, parent_partdesc),
