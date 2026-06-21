@@ -196,11 +196,13 @@ pub fn finalize_aggregate<'mcx>(
             let _agg_ctx_guard = types_fmgr::fmgr::AggCallContextGuard::install(
                 types_fmgr::fmgr::RawAggContextLink { data, vtable },
             );
+            let finalfn_expr = peragg.finalfn.fn_expr.clone();
             let (result, isnull, surviving_arg0) = invoke_finalfn(
                 peragg.finalfn_oid,
                 agg_collation,
                 final_args,
                 final_arg_isnull,
+                finalfn_expr,
                 estate,
             )?;
             // C `PG_GETARG_*(0)` does not consume the transition value: a finalfn
@@ -375,6 +377,7 @@ fn invoke_finalfn<'mcx>(
     collation: Oid,
     args: alloc::vec::Vec<Datum<'mcx>>,
     arg_isnull: alloc::vec::Vec<bool>,
+    fn_expr: Option<types_core::fmgr::FnExprErased>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool, Option<Datum<'mcx>>)> {
     let mcx = estate.es_query_cxt;
@@ -395,13 +398,18 @@ fn invoke_finalfn<'mcx>(
     // handle), so the seam body's momentary re-derived `&mut` does not alias.
     let estate_link = crate::transition::estate_raw_link(estate);
     let _estate_guard = types_fmgr::fmgr::EStateCallContextGuard::install(estate_link);
+    // C: `pertrans->finalfn_fcinfo->flinfo` is `&peragg->finalfn`, onto which
+    // `setup_peragg` ran `fmgr_info_set_expr((Node*) finalfnexpr, ...)`. Thread
+    // that call node so a polymorphic finalfn reads its declared result type
+    // (`get_fn_expr_rettype`, e.g. `range_agg_finalfn` resolving the result
+    // multirange OID). The by-OID re-dispatch drops it otherwise.
     backend_utils_fmgr_fmgr_seams::function_call_finalfn_owned::call(
         mcx,
         finalfn_oid,
         collation,
         args,
         arg_isnull,
-        None,
+        fn_expr,
     )
 }
 

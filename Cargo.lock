@@ -20389,6 +20389,7 @@ name = "backend-utils-adt-multirangetypes"
 version = "0.0.0"
 dependencies = [
  "backend-access-common-detoast",
+ "backend-executor-nodeAgg-aggapi-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-adt-format-type-seams",
  "backend-utils-adt-multirangetypes-seams",
@@ -20811,6 +20812,7 @@ version = "0.0.0"
 dependencies = [
  "allocator-api2",
  "backend-access-common-detoast-seams",
+ "backend-executor-nodeAgg-aggapi-seams",
  "backend-nodes-core",
  "backend-optimizer-path-costsize",
  "backend-optimizer-util-clauses",

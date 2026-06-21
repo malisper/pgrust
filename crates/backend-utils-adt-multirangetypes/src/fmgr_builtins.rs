@@ -26,13 +26,15 @@
 //! its 4-byte `VARHDRSZ` header, symmetric on the arg and result lanes — mirrors
 //! the sibling `rangetypes` `fmgr_builtins` convention exactly.
 
+use backend_executor_nodeAgg_aggapi_seams as aggapi;
 use backend_utils_adt_rangetypes_seams as range_seams;
-use backend_utils_fmgr_core::get_fn_expr_rettype;
+use backend_utils_cache_lsyscache_seams as lsyscache_seams;
+use backend_utils_fmgr_core::{get_fn_expr_argtype, get_fn_expr_rettype};
 use mcx::{Mcx, MemoryContext};
 use types_cache::typcache::TypeCacheEntry;
 use types_core::primitive::Oid;
 use types_datum::Datum;
-use types_error::PgResult;
+use types_error::{PgError, PgResult};
 use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative, RefPayload};
 use types_rangetypes::{MultirangeTypeP, RangeTypeP};
 
@@ -815,6 +817,232 @@ fn fc_range_merge_from_multirange(fcinfo: &mut FunctionCallInfoBaseData) -> PgRe
 }
 
 // ---------------------------------------------------------------------------
+// aggregates (range_agg / multirange_agg / multirange_intersect_agg).
+//
+// `range_agg_transfn` / `multirange_agg_transfn` carry an `internal` transition
+// state across calls — C's `ArrayBuildState` of accumulated range Datums. Here
+// it rides the canonical `RefPayload::Internal(Box<dyn Any>)` arm (like
+// `jsonb_agg` / `array_agg`): nodeAgg moves the box in/out of the call frame.
+// Because the boxed state must be `'static` (it outlives any per-call scratch
+// `Mcx`), it owns SERIALIZED range varlena IMAGES (`Vec<Vec<u8>>`), not
+// `'mcx`-bound `RangeTypeP`s. Each transfn deserializes the incoming range,
+// re-serializes it to an owned image, and pushes it; the finalfn rebuilds the
+// member `RangeTypeP`s into a scratch context and assembles the multirange.
+//
+// `multirange_intersect_agg_transfn` is a STRICT aggregate whose transition
+// state is the running `anymultirange` VALUE itself (not `internal`), so it
+// rides the ordinary by-ref Varlena lane (args[0] = running state, args[1] =
+// next multirange) and needs no `internal` box.
+//
+// All three first call `AggCheckCallContext` (the nodeAgg seam) and error out
+// when not invoked as an aggregate, exactly as in C.
+// ---------------------------------------------------------------------------
+
+/// C's `ArrayBuildState` of accumulated range Datums, rendered as owned
+/// serialized `RangeType` varlena images so the box is `'static`. `rngtypoid`
+/// is the (element) range type OID resolved from the call once on the first
+/// call (C: `initArrayResult(rngtypoid, ...)`); it is informational here since
+/// the finalfn re-resolves the result multirange OID via `get_fn_expr_rettype`.
+struct RangeAggState {
+    images: Vec<Vec<u8>>,
+}
+
+/// `AggCheckCallContext(fcinfo, &aggContext)` — error with `who` when not in an
+/// aggregate context (C: `elog(ERROR, "... called in non-aggregate context")`).
+fn require_agg_context(fcinfo: &FunctionCallInfoBaseData, who: &str) -> PgResult<()> {
+    let (code, _aggcontext) = aggapi::agg_check_call_context::call(fcinfo);
+    if code != aggapi::AGG_CONTEXT_AGGREGATE {
+        return Err(PgError::error(format!(
+            "{who} called in non-aggregate context"
+        )));
+    }
+    Ok(())
+}
+
+/// `PG_ARGISNULL(i)`.
+#[inline]
+fn arg_isnull(fcinfo: &FunctionCallInfoBaseData, i: usize) -> bool {
+    fcinfo.arg(i).map(|d| d.isnull).unwrap_or(true)
+}
+
+/// Take the `internal` [`RangeAggState`] box out of `args[0]` (C:
+/// `(ArrayBuildState *) PG_GETARG_POINTER(0)`); `None` is `PG_ARGISNULL(0)`,
+/// the first call (`initArrayResult`).
+fn take_range_agg_state(fcinfo: &mut FunctionCallInfoBaseData) -> Option<Box<RangeAggState>> {
+    if arg_isnull(fcinfo, 0) {
+        return None;
+    }
+    match fcinfo.take_ref_arg(0) {
+        Some(RefPayload::Internal(b)) => Some(
+            b.downcast::<RangeAggState>()
+                .unwrap_or_else(|_| panic!("range_agg fn: args[0] is not a RangeAggState")),
+        ),
+        Some(other) => panic!("range_agg fn: args[0] is not an internal state ({other:?})"),
+        None => None,
+    }
+}
+
+/// `PG_RETURN_POINTER(state)` — hand the transition state back as `internal`.
+fn ret_range_agg_state(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    state: Box<RangeAggState>,
+) -> Datum {
+    fcinfo.set_ref_result(RefPayload::Internal(state));
+    Datum::null()
+}
+
+/// `PG_RETURN_NULL()`.
+fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
+    fcinfo.set_result_null(true);
+    Datum::null()
+}
+
+/// `range_agg_transfn(internal, anyrange) -> internal` (oid 4299)
+/// (multirangetypes.c:1341): accumulate one range into the array-build state.
+fn fc_range_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    require_agg_context(fcinfo, "range_agg_transfn")?;
+
+    let rngtypoid = get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 1);
+    if !lsyscache_seams::type_is_range::call(rngtypoid)? {
+        return Err(PgError::error("range_agg must be called with a range"));
+    }
+
+    let mut state = take_range_agg_state(fcinfo).unwrap_or_else(|| {
+        Box::new(RangeAggState { images: Vec::new() })
+    });
+
+    // skip NULLs
+    if !arg_isnull(fcinfo, 1) {
+        // The incoming range is a serialized varlena image on the by-ref lane;
+        // own a copy directly (it is already the canonical RangeType form C
+        // would `accumArrayResult` by datumCopy).
+        let image = fcinfo
+            .ref_arg(1)
+            .and_then(|p| p.as_varlena())
+            .expect("range_agg_transfn: by-ref `range` arg missing from by-ref lane");
+        state.images.push(image.to_vec());
+    }
+
+    Ok(ret_range_agg_state(fcinfo, state))
+}
+
+/// `multirange_agg_transfn(internal, anymultirange) -> internal` (oid 6225)
+/// (multirangetypes.c:1413): accumulate every member range of a multirange.
+fn fc_multirange_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    require_agg_context(fcinfo, "multirange_agg_transfn")?;
+
+    let mltrngtypoid = get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 1);
+    if !lsyscache_seams::type_is_multirange::call(mltrngtypoid)? {
+        // C: elog(ERROR, "range_agg must be called with a multirange")
+        return Err(PgError::error("range_agg must be called with a multirange"));
+    }
+
+    let mut state = take_range_agg_state(fcinfo).unwrap_or_else(|| {
+        Box::new(RangeAggState { images: Vec::new() })
+    });
+
+    // skip NULLs
+    if !arg_isnull(fcinfo, 1) {
+        let m = scratch_mcx();
+        let mcx = m.mcx();
+        let current = getarg_multirange(fcinfo, mcx, 1)?;
+        let rangetyp = rangetyp_for_mltrng(mltrngtypoid)?;
+        let ranges = crate::serialize_core::multirange_deserialize(mcx, &rangetyp, current)?;
+        if ranges.is_empty() {
+            // Add an empty range so we get an empty result (not a null result).
+            let empty = range_seams::make_empty_range::call(mcx, &rangetyp)?;
+            state.images.push(range_image(empty));
+        } else {
+            for r in ranges {
+                state.images.push(range_image(r));
+            }
+        }
+    }
+
+    Ok(ret_range_agg_state(fcinfo, state))
+}
+
+/// Read the complete `RangeType` varlena image at a `RangeTypeP` into an owned
+/// `Vec<u8>` (for the `'static` array-build state).
+fn range_image(r: RangeTypeP<'_>) -> Vec<u8> {
+    // SAFETY: `r.ptr` heads a plain 4B RangeType varlena alive for this read.
+    unsafe { mr_word_to_result_bytes(Datum::from_usize(r.ptr as usize)) }
+}
+
+/// `range_agg_finalfn(internal, anyrange) -> anymultirange` (oid 4300)
+/// `multirange_agg_finalfn(internal, anymultirange) -> anymultirange` (6226):
+/// (multirangetypes.c:1373): assemble the accumulated ranges into a multirange.
+/// Both share one finalfn body (C: `range_agg_finalfn` is the aggfinalfn of
+/// both `range_agg` and `range_agg`/`multirange_agg`).
+fn fc_range_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    require_agg_context(fcinfo, "range_agg_finalfn")?;
+
+    let state = match take_range_agg_state(fcinfo) {
+        // This shouldn't be possible, but just in case....
+        None => return Ok(ret_null(fcinfo)),
+        Some(s) => s,
+    };
+
+    // Also return NULL if we had zero inputs, like other aggregates.
+    if state.images.is_empty() {
+        return Ok(ret_null(fcinfo));
+    }
+
+    let mltrngtypoid = get_fn_expr_rettype(fcinfo.flinfo.as_deref());
+    let rangetyp = rangetyp_for_mltrng(mltrngtypoid)?;
+
+    let m = scratch_mcx();
+    let mcx = m.mcx();
+
+    // Rebuild the member RangeTypeP handles from the owned images.
+    let mut ranges: Vec<RangeTypeP<'_>> = Vec::with_capacity(state.images.len());
+    for image in &state.images {
+        let word = mr_bytes_to_arg_word(mcx, image)?;
+        ranges.push(range_seams::datum_get_range_type_p::call(mcx, word)?);
+    }
+
+    let out = crate::setops_ordering_agg::range_agg_finalfn(mcx, mltrngtypoid, &rangetyp, &ranges)?;
+    Ok(match out {
+        None => ret_null(fcinfo),
+        Some(mr) => ret_multirange(fcinfo, mr),
+    })
+}
+
+/// `multirange_intersect_agg_transfn(anymultirange, anymultirange)
+/// -> anymultirange` (oid 4388) (multirangetypes.c:1466): fold a multirange into
+/// the running intersection. STRICT — both args are non-null and the running
+/// state is the multirange value itself (no `internal` box).
+fn fc_multirange_intersect_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
+    require_agg_context(fcinfo, "multirange_intersect_agg_transfn")?;
+
+    let mltrngtypoid = get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 1);
+    if !lsyscache_seams::type_is_multirange::call(mltrngtypoid)? {
+        return Err(PgError::error(
+            "range_intersect_agg must be called with a multirange",
+        ));
+    }
+
+    let m = scratch_mcx();
+    let mcx = m.mcx();
+    let rangetyp = rangetyp_for_mltrng(mltrngtypoid)?;
+
+    // strictness ensures these are non-null
+    let result = getarg_multirange(fcinfo, mcx, 0)?;
+    let current = getarg_multirange(fcinfo, mcx, 1)?;
+
+    let out = crate::setops_ordering_agg::multirange_intersect_agg_transfn(
+        mcx,
+        &rangetyp,
+        Some(result),
+        Some(current),
+    )?;
+    Ok(match out {
+        Some(mr) => ret_multirange(fcinfo, mr),
+        None => ret_null(fcinfo),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Registration.
 // ---------------------------------------------------------------------------
 
@@ -844,10 +1072,15 @@ fn builtin(
 /// OIDs/nargs/strict/retset transcribed exactly from `pg_proc.dat`; all are
 /// `proisstrict => 't'` default and none `proretset`.
 ///
+/// The aggregate transition/final fns (`range_agg_transfn` 4299 /
+/// `range_agg_finalfn` 4300 / `multirange_intersect_agg_transfn` 4388 /
+/// `multirange_agg_transfn` 6225 / `multirange_agg_finalfn` 6226) ARE registered
+/// here: they consume the installed `agg_check_call_context` nodeAgg seam and
+/// carry their `internal` `ArrayBuildState` as an owned `'static` image box. They
+/// are `proisstrict => 'f'` (the transition state arg may be NULL on the first
+/// call), except `multirange_intersect_agg_transfn` (`'t'`, strict).
+///
 /// NOT registered here (genuinely keystone-gated, not this lever):
-/// - `multirange_intersect_agg_transfn` / `range_agg_*` / `multirange_agg_transfn`
-///   aggregate fns (4299/4300/4388/6225/6226): need the `AggCheckCallContext`
-///   call-context channel (#324/#335), absent from the `types_fmgr` frame.
 /// - `multirange_unnest` (1293): a set-returning function (`proretset`); the fmgr
 ///   boundary (`fn(&mut fcinfo) -> Datum`) cannot express the ValuePerCall SRF
 ///   protocol. Its kernel is fully ported; only the SRF surface is gated.
@@ -935,6 +1168,15 @@ pub fn register_multirangetypes_builtins() {
         builtin(4271, "multirange_minus", 2, true, false, fc_multirange_minus),
         builtin(4272, "multirange_intersect", 2, true, false, fc_multirange_intersect),
         builtin(4228, "range_merge_from_multirange", 1, true, false, fc_range_merge_from_multirange),
+        // aggregates. The transition fns are non-strict (state arg may be NULL on
+        // the first call); the intersect transfn is strict. Final fns are non-strict.
+        builtin(4299, "range_agg_transfn", 2, false, false, fc_range_agg_transfn),
+        builtin(4300, "range_agg_finalfn", 2, false, false, fc_range_agg_finalfn),
+        builtin(6225, "multirange_agg_transfn", 2, false, false, fc_multirange_agg_transfn),
+        // OID 6226's proname is `multirange_agg_finalfn` but its prosrc (the C
+        // `fmgr_builtins[]` key) is the SHARED `range_agg_finalfn` symbol.
+        builtin(6226, "range_agg_finalfn", 2, false, false, fc_range_agg_finalfn),
+        builtin(4388, "multirange_intersect_agg_transfn", 2, true, false, fc_multirange_intersect_agg_transfn),
         // hash -> int4 / int8.
         builtin(4278, "hash_multirange", 1, true, false, fc_hash_multirange),
         builtin(

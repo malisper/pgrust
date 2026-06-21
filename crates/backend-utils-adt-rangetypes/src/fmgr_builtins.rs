@@ -267,6 +267,19 @@ fc_range_result!(
     2usize
 );
 
+/// `range_intersect_agg_transfn(anyrange, anyrange) -> anyrange` (oid 4401): the
+/// aggregate transition fn folding a range into the running intersection. Strict
+/// (`proisstrict => 't'`), so both the running state and the next range are
+/// non-null; it stages both `range` args and returns the result range — the same
+/// shape as `range_intersect`, so the `fc_range_result!` macro applies. The
+/// kernel calls the installed `agg_check_call_context` seam to verify it is being
+/// invoked as an aggregate.
+fc_range_result!(
+    fc_range_intersect_agg_transfn,
+    crate::range_fmgr_boundary::range_intersect_agg_transfn,
+    2usize
+);
+
 // --- canonicalization (anyrange) -> anyrange -------------------------------
 // The result range type is the SAME as the input's (read off the arg range's
 // own header OID, not `flinfo->fn_expr`), so these need no planned call frame.
@@ -381,10 +394,12 @@ fn builtin(
 /// transcribed exactly from `pg_proc.dat`; all of these are `proisstrict => 't'`
 /// default and none `proretset`.
 ///
+/// `range_intersect_agg_transfn` (4401) IS registered here: it consumes the
+/// installed `agg_check_call_context` nodeAgg seam and rides the ordinary by-ref
+/// range lane (its transition state is the running `anyrange` value, not an
+/// `internal` box).
+///
 /// NOT registered here (genuinely keystone-gated, not this lever):
-/// - `range_intersect_agg_transfn` (3978): aggregate transition fn — needs the
-///   `AggCheckCallContext` call-context channel (#324/#335), absent from the
-///   `types_fmgr` frame.
 /// - `range_sortsupport` (6391) / `range_typanalyze` (3916): take an `internal`
 ///   (`SortSupport` / `VacAttrStats`) executor-owned scratch struct, not
 ///   expressible on the by-ref boundary.
@@ -446,6 +461,8 @@ pub fn register_rangetypes_builtins() {
         builtin(3867, "range_union", 2, true, false, fc_range_union),
         builtin(3868, "range_intersect", 2, true, false, fc_range_intersect),
         builtin(3869, "range_minus", 2, true, false, fc_range_minus),
+        // aggregate transition fn (strict): range intersection.
+        builtin(4401, "range_intersect_agg_transfn", 2, true, false, fc_range_intersect_agg_transfn),
         builtin(4057, "range_merge", 2, true, false, fc_range_merge),
         // hash -> int4 / int8.
         builtin(3902, "hash_range", 1, true, false, fc_hash_range),

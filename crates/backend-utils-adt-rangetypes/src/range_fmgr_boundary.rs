@@ -692,10 +692,10 @@ pub fn range_intersect_agg_transfn<'mcx>(
     // if (!AggCheckCallContext(fcinfo, &aggContext))
     //     elog(ERROR, "range_intersect_agg_transfn called in non-aggregate context");
     //
-    // AggCheckCallContext is owned by backend-executor-nodeAgg (over the owned
-    // `types_nodes` call frame, not the `types_fmgr` one this boundary carries);
-    // no compatible seam exists yet, so route through the owner with a loud
-    // panic until that unit lands (seam-and-panic for an unported dep).
+    // `AggCheckCallContext` is owned by backend-executor-nodeAgg and exposed via
+    // the installed `agg_check_call_context` seam (over the `types_fmgr` call
+    // frame, whose aggstate back-reference the executor deposits before the
+    // transfn runs).
     if !agg_check_call_context(fcinfo) {
         return Err(PgError::error(
             "range_intersect_agg_transfn called in non-aggregate context",
@@ -722,15 +722,15 @@ pub fn range_intersect_agg_transfn<'mcx>(
     }
 }
 
-/// `AggCheckCallContext(fcinfo, &aggContext)` — owned by backend-executor-nodeAgg.
-/// The `types_fmgr` call frame this boundary carries holds no AggState
-/// back-reference, so the check cannot be answered here; route to the owner
-/// (loud panic until nodeAgg exposes a compatible seam).
-fn agg_check_call_context(_fcinfo: &FunctionCallInfoBaseData) -> bool {
-    panic!(
-        "backend_executor_nodeAgg::AggCheckCallContext: unported neighbor — \
-         range_intersect_agg_transfn needs the aggregate call-context check"
-    );
+/// `AggCheckCallContext(fcinfo, &aggContext) != 0` — whether the function is
+/// being called as an aggregate transition/final function. Routes through the
+/// installed `agg_check_call_context` nodeAgg seam (the executor deposits the
+/// aggstate back-reference on the `types_fmgr` frame before the transfn runs);
+/// `true` when the context code is `AGG_CONTEXT_AGGREGATE`.
+fn agg_check_call_context(fcinfo: &FunctionCallInfoBaseData) -> bool {
+    let (code, _aggcontext) =
+        backend_executor_nodeAgg_aggapi_seams::agg_check_call_context::call(fcinfo);
+    code == backend_executor_nodeAgg_aggapi_seams::AGG_CONTEXT_AGGREGATE
 }
 
 /// `type_is_range(typid)` — owned by utils/cache/lsyscache.c. Routes through
