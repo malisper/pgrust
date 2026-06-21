@@ -825,6 +825,23 @@ seam_core::seam!(
     ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
 );
 
+seam_core::seam!(
+    /// `ExecFetchSlotMinimalTuple(slot, &shouldFree)` (execTuples.c) as the
+    /// boundary flat byte image (the shm_mq transport form), for a *standalone*
+    /// [`SlotData`] rather than an `es_tupleTable` `SlotId`. This is the form the
+    /// tcop-dest router's `receiveSlot(mcx, state, slot: &mut SlotData)` vtable
+    /// boundary needs: the parallel-worker tuple-queue `DestReceiver`
+    /// (`tqueueReceiveSlot`) is dispatched with the live payload-bearing
+    /// `&mut SlotData` directly (the vtable carries no `EState`), so it cannot use
+    /// the `SlotId`-pool form [`exec_fetch_slot_minimal_tuple_copy`]. Returns the
+    /// `MinimalTuple`'s contiguous C byte image (the flat blob, `t_len` first)
+    /// that `shm_mq_send` ships verbatim, allocated in `mcx`. Fallible on OOM.
+    pub fn exec_fetch_slot_minimal_tuple_copy_standalone<'mcx>(
+        mcx: mcx::Mcx<'mcx>,
+        slot: &mut types_nodes::SlotData<'mcx>,
+    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+);
+
 // ===========================================================================
 // Standalone-slot forms (a slot made by `MakeSingleTupleTableSlot`, held as a
 // payload-bearing `SlotData` outside `es_tupleTable`). The incremental-sort

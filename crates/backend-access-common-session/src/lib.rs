@@ -276,30 +276,38 @@ fn get_session_dsm_handle() -> PgResult<dsm_handle> {
     // reaches the executor (the prior `unrecognized token`/`stringToNode`
     // deserialization gap is gone).
     //
-    // BUT the worker still cannot FINISH the query — THREE further downstream
-    // keystones remain (each crashes the worker → postmaster reinit):
-    //   1. tqueue DestReceiver is not bridged into the tcop-dest router. The
-    //      worker's `QueryDesc.dest` is a `types_execparallel::DestReceiverHandle`
-    //      into tqueue's OWN registry, but the executor dispatches `receiveSlot`
-    //      through the `backend-tcop-dest` registry (different handle space). The
-    //      tqueue `tqueueReceiveSlot`/`tqueueStartupReceiver`/`tqueueShutdownReceiver`
-    //      are ported but never registered via `backend_tcop_dest::register_dest_receiver`.
-    //      Bridging needs a `&mut SlotData`-only minimal-tuple-copy form (the dest
-    //      vtable `receiveSlot(mcx, state, slot)` boundary carries no `EState`, but
-    //      tqueue's send path needs `exec_fetch_slot_minimal_tuple_copy(mcx,estate,
-    //      SlotId)`). This is the next deep blocker (parallel tuple-transport leg).
+    // The tqueue DEST-BRIDGE leg (formerly blocker 1) is now CLEARED: tqueue's
+    // `CreateTupleQueueDestReceiver` registers its three callbacks into the single
+    // `backend-tcop-dest` router via `register_dest_receiver` (mirroring copyto's
+    // `CreateCopyDestReceiver`), and `tqueueReceiveSlot` materializes the slot's
+    // `MinimalTuple` through the new `&mut SlotData`-only
+    // `exec_fetch_slot_minimal_tuple_copy_standalone` seam (the dest vtable's
+    // `receiveSlot(mcx, state, slot)` boundary carries no `EState`). Verified
+    // empirically: with this early return removed, the worker forks, joins,
+    // restores the snapshot, deserializes the plan, reaches the executor, and now
+    // gets PAST the dest layer — it crashes later, in `ProcArrayAdd` (below).
+    //
+    // BUT the worker still cannot FINISH the query — TWO further downstream
+    // keystones remain (each crashes the worker → postmaster reinit), both of the
+    // fork-COW shared-memory class (the worker reads process-local copies of
+    // PGPROC fields the leader renumbered in real shmem):
+    //   1. `ProcArrayAdd` shift-loop `pgxactoff == index-1` debug_assert
+    //      (procarray/membership.rs:113): the worker reads a following PGPROC's
+    //      `pgxactoff` from fork-COW process-local memory, which does not reflect
+    //      the shared procarray renumber (observed `left:0, right:1`). This is the
+    //      CURRENT wall in dev builds (masked under release where asserts are off).
+    //      Fix = promote PGPROC.pgxactoff (and the dense ProcGlobal xids/subxid/
+    //      statusFlags arrays it renumbers) into genuine shmem, the same promotion
+    //      done for lockGroupLeader / xmin / databaseId / statusFlags.
     //   2. `relation_open` `CheckRelationLockedByMe` assert: the worker scans the
     //      base rel without the heavyweight lock the assert expects (lock-group
     //      lock acquired by the leader is not reflected in the worker's local lock
     //      view at the `relation_open` boundary).
-    //   3. `ProcArrayAdd` shift-loop `pgxactoff == index-1` debug_assert: the
-    //      worker's procarray insert ordering vs the shared pgxactoff renumber is
-    //      inconsistent (intermittent; masked under release where asserts are off,
-    //      then (1) is the real wall).
     // With a valid handle, parallel-eligible queries therefore still crash.
     // Returning INVALID restores the known-good leader-only behavior (correct
-    // results, no crash). Delete this early return ONLY together with the tqueue
-    // dest-bridge + lock/procarray fixes, gated on a crash-free parallel smoke.
+    // results, no crash). Delete this early return ONLY together with the
+    // procarray-pgxactoff + lock fork-COW fixes, gated on a crash-free parallel
+    // smoke. (The tqueue dest-bridge it formerly also waited on has LANDED.)
     return Ok(DSM_HANDLE_INVALID);
 
     // If we already created a session-scope segment, return its handle.

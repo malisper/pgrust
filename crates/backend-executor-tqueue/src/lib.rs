@@ -82,7 +82,7 @@ mod registry {
     use core::cell::RefCell;
 
     use super::{TQueueDestReceiver, TupleQueueReader};
-    use types_execparallel::{DestReceiverHandle, TupleQueueReaderHandle};
+    use types_execparallel::TupleQueueReaderHandle;
 
     struct Receivers {
         slots: alloc::vec::Vec<Option<TQueueDestReceiver>>,
@@ -94,23 +94,32 @@ mod registry {
                 slots: alloc::vec::Vec::new(),
             }
         }
-        fn insert(&mut self, r: TQueueDestReceiver) -> DestReceiverHandle {
+        /// Park the receiver and return its registry token (a 1-based `u64`).
+        /// This token is the `state` value the [`TQueueDestReceiver`] is
+        /// registered into the tcop-dest router with — the owned-model stand-in
+        /// for C's `(TQueueDestReceiver *) self` downcast.
+        fn insert(&mut self, r: TQueueDestReceiver) -> u64 {
             if let Some(i) = self.slots.iter().position(Option::is_none) {
                 self.slots[i] = Some(r);
-                DestReceiverHandle(i + 1)
+                (i + 1) as u64
             } else {
                 self.slots.push(Some(r));
-                DestReceiverHandle(self.slots.len())
+                self.slots.len() as u64
             }
         }
-        fn idx(h: DestReceiverHandle) -> usize {
-            debug_assert!(h.0 >= 1, "DestReceiverHandle 0 is the NULL sentinel");
-            h.0 - 1
+        fn idx(token: u64) -> usize {
+            debug_assert!(token >= 1, "tqueue receiver token 0 is the NULL sentinel");
+            (token - 1) as usize
         }
-        fn take(&mut self, h: DestReceiverHandle) -> TQueueDestReceiver {
-            self.slots[Self::idx(h)]
+        fn get_mut(&mut self, token: u64) -> &mut TQueueDestReceiver {
+            self.slots[Self::idx(token)]
+                .as_mut()
+                .expect("live tqueue DestReceiver token")
+        }
+        fn take(&mut self, token: u64) -> TQueueDestReceiver {
+            self.slots[Self::idx(token)]
                 .take()
-                .expect("live tqueue DestReceiver id")
+                .expect("live tqueue DestReceiver token")
         }
     }
 
@@ -154,11 +163,17 @@ mod registry {
         static READERS: RefCell<Readers> = const { RefCell::new(Readers::new()) };
     }
 
-    pub(super) fn insert_receiver(r: TQueueDestReceiver) -> DestReceiverHandle {
+    pub(super) fn insert_receiver(r: TQueueDestReceiver) -> u64 {
         RECEIVERS.with(|c| c.borrow_mut().insert(r))
     }
-    pub(super) fn take_receiver(h: DestReceiverHandle) -> TQueueDestReceiver {
-        RECEIVERS.with(|c| c.borrow_mut().take(h))
+    pub(super) fn with_receiver_mut<R>(
+        token: u64,
+        f: impl FnOnce(&mut TQueueDestReceiver) -> R,
+    ) -> R {
+        RECEIVERS.with(|c| f(c.borrow_mut().get_mut(token)))
+    }
+    pub(super) fn take_receiver(token: u64) -> TQueueDestReceiver {
+        RECEIVERS.with(|c| c.borrow_mut().take(token))
     }
 
     pub(super) fn insert_reader(r: TupleQueueReader) -> TupleQueueReaderHandle {
@@ -179,10 +194,14 @@ mod registry {
 /// (`tqueue.c`) — receive a tuple from the query and send it to the designated
 /// `shm_mq`. Returns `true` if successful, `false` if the `shm_mq` has been
 /// detached.
+///
+/// Dispatched through the tcop-dest router's `receiveSlot(mcx, state, slot)`
+/// vtable boundary, which carries the live payload-bearing `&mut SlotData`
+/// directly (no `EState`); the `MinimalTuple` materialization therefore uses the
+/// standalone slot-only fetch form (`exec_fetch_slot_minimal_tuple_copy_standalone`).
 pub fn tqueueReceiveSlot<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    estate: &mut types_nodes::EStateData<'mcx>,
-    slot: types_nodes::SlotId,
+    slot: &mut types_nodes::SlotData<'mcx>,
     self_: &mut TQueueDestReceiver,
 ) -> PgResult<bool> {
     // Send the tuple itself.
@@ -194,9 +213,10 @@ pub fn tqueueReceiveSlot<'mcx>(
     // tuple's contiguous C byte image (the flat blob, `tuple->t_len` bytes —
     // exactly what C hands `shm_mq_send`); the C `should_free` / `pfree(tuple)`
     // bookkeeping is internal to the execTuples owner.
-    let data = backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(
-        mcx, estate, slot,
-    )?;
+    let data =
+        backend_executor_execTuples_seams::exec_fetch_slot_minimal_tuple_copy_standalone::call(
+            mcx, slot,
+        )?;
 
     let queue = self_.queue.expect("tqueueReceiveSlot: queue is NULL");
     // shm_mq_send takes an owned global-heap Vec; copy the flat blob out of mcx.
@@ -248,19 +268,88 @@ pub fn tqueueDestroyReceiver(mut self_: TQueueDestReceiver) {
     drop(self_);
 }
 
+// ===========================================================================
+// tcop-dest router vtable for the TupleQueue DestReceiver.
+//
+// `CreateTupleQueueDestReceiver` registers these three callbacks into the single
+// tcop-dest router (mirroring copyto's `CreateCopyDestReceiver`), so the
+// executor's `dest->receiveSlot` dispatch (`dest_receive_slot`) reaches
+// `tqueueReceiveSlot`. The router threads the per-receiver `state` token — the
+// `RECEIVERS` registry token (C's `(TQueueDestReceiver *) self` stand-in) — back
+// to each callback; the callbacks recover the live `TQueueDestReceiver` from the
+// registry by that token.
+// ===========================================================================
+
+/// `tqueueStartupReceiver` as the router `rStartup` slot — does nothing.
+fn tqueue_router_startup(
+    _mcx: mcx::Mcx<'_>,
+    state: u64,
+    operation: types_nodes::nodes::CmdType,
+    _typeinfo: &types_tuple::heaptuple::TupleDescData<'_>,
+) -> PgResult<()> {
+    registry::with_receiver_mut(state, |r| tqueueStartupReceiver(r, operation as i32));
+    Ok(())
+}
+
+/// `tqueueReceiveSlot` as the router `receiveSlot` slot. Recovers the live
+/// `TQueueDestReceiver` from the `RECEIVERS` registry by the `state` token and
+/// sends the slot's `MinimalTuple` to the `shm_mq`.
+fn tqueue_router_receive_slot<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    state: u64,
+    slot: &mut types_nodes::SlotData<'mcx>,
+) -> PgResult<bool> {
+    // The receiver's only per-receiver state is its `queue` handle; copy it out
+    // so the registry borrow does not span the `shm_mq_send` re-entry (which
+    // does not touch this receiver's registry slot).
+    let queue = registry::with_receiver_mut(state, |r| r.queue);
+    let mut self_ = TQueueDestReceiver {
+        mydest: CommandDest::TupleQueue,
+        queue,
+    };
+    tqueueReceiveSlot(mcx, slot, &mut self_)
+}
+
+/// `tqueueShutdownReceiver` as the router `rShutdown` slot — detach from the
+/// queue if still attached, then clear `queue` (`tqueue->queue = NULL`).
+fn tqueue_router_shutdown(_mcx: mcx::Mcx<'_>, state: u64) -> PgResult<()> {
+    registry::with_receiver_mut(state, tqueueShutdownReceiver);
+    Ok(())
+}
+
 /// `DestReceiver *CreateTupleQueueDestReceiver(shm_mq_handle *handle)`
 /// (`tqueue.c`) — create a `DestReceiver` that writes tuples to a tuple queue.
 ///
 /// C `palloc0`s the receiver, sets the four callbacks and
 /// `pub.mydest = DestTupleQueue`, and `self->queue = handle`. Here the owned
-/// receiver is parked in the registry and named by the returned id; the
-/// callbacks are the module's `tqueue*` functions, dispatched by the dest layer.
+/// receiver is parked in this crate's `RECEIVERS` registry (which holds the
+/// per-receiver mutable `queue` state across the run, matching the C
+/// `tqueue->queue = NULL` on shutdown), and its three dispatch callbacks are
+/// registered into the *single* tcop-dest router via `register_dest_receiver`
+/// (mirroring copyto). The router's `state` token is the `RECEIVERS` registry
+/// token — C's `(TQueueDestReceiver *) self` stand-in. The returned handle is the
+/// router's `DestReceiver *` id, the same one the executor's `dest->receiveSlot`
+/// dispatch resolves; it is carried as a `types_execparallel::DestReceiverHandle`
+/// (the parallel-executor's home for the live `DestReceiver *`).
 pub fn CreateTupleQueueDestReceiver(handle: ShmMqAttachHandle) -> DestReceiverHandle {
     let self_ = TQueueDestReceiver {
         mydest: CommandDest::TupleQueue,
         queue: Some(handle),
     };
-    registry::insert_receiver(self_)
+    let token = registry::insert_receiver(self_);
+    let router_handle = backend_tcop_dest::register_dest_receiver(
+        CommandDest::TupleQueue,
+        backend_tcop_dest::ReceiverVtable {
+            rStartup: tqueue_router_startup,
+            receiveSlot: tqueue_router_receive_slot,
+            rShutdown: tqueue_router_shutdown,
+        },
+        token,
+    );
+    // The parallel-executor `DestReceiverHandle` (types_execparallel) and the
+    // executor's `dest.h` `DestReceiverHandle` (types_nodes::parsestmt) name the
+    // same live `DestReceiver *`; carry the router id across the home boundary.
+    DestReceiverHandle(router_handle.0 as usize)
 }
 
 /// `TupleQueueReader *CreateTupleQueueReader(shm_mq_handle *handle)`
@@ -336,8 +425,13 @@ fn create_tuple_queue_dest_receiver_seam(handle: ShmMqAttachHandle) -> DestRecei
 
 fn receiver_destroy_seam(receiver: DestReceiverHandle) {
     // `receiver->rDestroy(receiver)`: for a TupleQueue receiver, that is
-    // `tqueueDestroyReceiver`.
-    let self_ = registry::take_receiver(receiver);
+    // `tqueueDestroyReceiver`. The `receiver` is the tcop-dest router id (the
+    // live `DestReceiver *`); recover its `state` token (this crate's `RECEIVERS`
+    // registry token, the `(TQueueDestReceiver *) self` stand-in) and take the
+    // owned receiver out of the registry.
+    let router_handle = types_nodes::parsestmt::DestReceiverHandle(receiver.0 as u64);
+    let token = backend_tcop_dest::dest_receiver_state_token(router_handle);
+    let self_ = registry::take_receiver(token);
     tqueueDestroyReceiver(self_);
 }
 

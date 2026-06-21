@@ -574,6 +574,23 @@ fn seam_exec_fetch_slot_minimal_tuple_copy<'mcx>(
     }
 }
 
+/// Seam `exec_fetch_slot_minimal_tuple_copy_standalone` — the same boundary flat
+/// byte image as [`seam_exec_fetch_slot_minimal_tuple_copy`], but over a
+/// standalone `&mut SlotData` (the tcop-dest `receiveSlot` vtable boundary, which
+/// carries no `EState` — used by the parallel-worker tuple-queue `DestReceiver`).
+fn seam_exec_fetch_slot_minimal_tuple_copy_standalone<'mcx>(
+    mcx: Mcx<'mcx>,
+    slot: &mut types_nodes::SlotData<'mcx>,
+) -> PgResult<mcx::PgVec<'mcx, u8>> {
+    let (mtup, _should_free) = crate::slot_store_fetch::ExecFetchSlotMinimalTuple(mcx, slot)?;
+    use backend_access_common_heaptuple::flat::MinimalTupleFlatError;
+    match backend_access_common_heaptuple::flat::minimal_tuple_to_flat(mcx, &mtup) {
+        Ok(blob) => Ok(blob),
+        Err(MinimalTupleFlatError::Pg(err)) => Err(err),
+        Err(other) => panic!("minimal_tuple_to_flat on a slot tuple failed: {other:?}"),
+    }
+}
+
 // ===========================================================================
 //  Slot-payload op seams over the pool's `SlotData` (the body already exists in
 //  `slot_store_fetch` / `slot_deform`; these adapters resolve the `SlotId` to
@@ -1036,6 +1053,9 @@ pub fn init_seams() {
     seams::exec_copy_slot_minimal_tuple_extra::set(seam_exec_copy_slot_minimal_tuple_extra);
     seams::exec_fetch_slot_minimal_tuple::set(seam_exec_fetch_slot_minimal_tuple);
     seams::exec_fetch_slot_minimal_tuple_copy::set(seam_exec_fetch_slot_minimal_tuple_copy);
+    seams::exec_fetch_slot_minimal_tuple_copy_standalone::set(
+        seam_exec_fetch_slot_minimal_tuple_copy_standalone,
+    );
     // ExecTypeFromTL is fully owned + implemented in this crate's
     // exectype_tupoutput family (no pool-payload / Plan-model dependency), so
     // its seam is installed here.

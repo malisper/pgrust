@@ -23,3 +23,8 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-executor-tqueue-seams = { path = "../backend-executor-tqueue-seams" }
 backend-storage-ipc-shm-mq-seams = { path = "../backend-storage-ipc-shm-mq-seams" }
 backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+# The TupleQueue DestReceiver registers its vtable into the single tcop-dest
+# router (mirroring copyto's `CreateCopyDestReceiver`), so the executor's
+# `dest->receiveSlot` dispatch reaches `tqueueReceiveSlot`. (No cycle:
+# backend-tcop-dest depends only on owner *-seams crates, not on tqueue.)
+backend-tcop-dest = { path = "../backend-tcop-dest" }
