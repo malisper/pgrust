@@ -110,6 +110,79 @@ seam_core::seam!(
     ) -> PgResult<Vec<Vec<u8>>>
 );
 
+// ---------------------------------------------------------------------------
+// XMLTABLE table-builder routines (xml.c `XmlTable*`, `#ifdef USE_LIBXML`).
+//
+// C stores the per-scan `XmlTableBuilderData` (libxml parser ctxt, parsed doc,
+// XPath context, compiled row/column expressions, the current node-set object
+// and row cursor) in `TableFuncScanState->opaque`. The libxml object lifecycle
+// is wholly internal to this provider, and a TableFuncScan node always runs to
+// completion (filling a tuplestore in one pass) before any other executor node
+// runs — exactly the invariant `XmlTableInitOpaque`'s comment relies on — so
+// the provider holds the builder state in a per-backend thread-local set by
+// `xmltable_init_opaque` and cleared by `xmltable_destroy_opaque`. These seams
+// are therefore parameter-only.
+// ---------------------------------------------------------------------------
+
+seam_core::seam!(
+    /// C: `XmlTableInitOpaque(state, natts)` — allocate the builder state and
+    /// the libxml parser context, sized for `natts` columns.
+    pub fn xmltable_init_opaque(natts: i32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// C: `XmlTableSetDocument(state, value)` — install the input document.
+    /// `xml_image` is the `xml_out_internal` text of the `xmltype` value (the
+    /// encoding-stripped serialized form, the consumer crate renders it).
+    pub fn xmltable_set_document(xml_image: &[u8]) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// C: `XmlTableSetNamespace(state, name, uri)`.
+    pub fn xmltable_set_namespace(name: Option<&str>, uri: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// C: `XmlTableSetRowFilter(state, path)` — compile the row-filter XPath.
+    pub fn xmltable_set_row_filter(path: &str) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// C: `XmlTableSetColumnFilter(state, path, colnum)` — compile a column XPath.
+    pub fn xmltable_set_column_filter(path: &str, colnum: i32) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// C: `XmlTableFetchRow(state)` — advance the row cursor; `false` at end.
+    pub fn xmltable_fetch_row() -> PgResult<bool>
+);
+
+seam_core::seam!(
+    /// C: `XmlTableGetValue(state, colnum, typid, typmod, &isnull)` reduced to
+    /// its libxml core: evaluate the column XPath against the current row node
+    /// and return the textual value to feed the column's input function, or
+    /// `None` when the result is empty (the C `*isnull = true`). The
+    /// `InputFunctionCall` is owned by the executor (it holds `in_functions`/
+    /// `typioparams`), so the provider returns the cstring, not the Datum.
+    ///
+    /// `is_xml` is `typid == XMLOID` (selects the XML-serialization arms of the
+    /// node-set and string cases); `is_numeric_category` is
+    /// `get_type_category_preferred(typid).0 == TYPCATEGORY_NUMERIC` (the
+    /// XPATH_BOOLEAN arm casts boolean→number→string when the target is numeric),
+    /// both resolved by the consumer crate which owns the catalog lookups.
+    pub fn xmltable_get_value(
+        colnum: i32,
+        is_xml: bool,
+        is_numeric_category: bool,
+    ) -> PgResult<Option<String>>
+);
+
+seam_core::seam!(
+    /// C: `XmlTableDestroyOpaque(state)` — free all libxml resources and clear
+    /// the builder state.
+    pub fn xmltable_destroy_opaque() -> PgResult<()>
+);
+
 // ===========================================================================
 // 2. syscache + catalog + fmgr seams
 // ===========================================================================

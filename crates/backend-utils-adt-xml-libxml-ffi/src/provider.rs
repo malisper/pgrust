@@ -32,8 +32,9 @@
 use core::ffi::{c_char, c_int, c_uchar, c_void};
 
 use types_error::{
-    PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_ARGUMENT_FOR_XQUERY,
-    ERRCODE_INVALID_XML_CONTENT, ERRCODE_INVALID_XML_DOCUMENT, ERRCODE_OUT_OF_MEMORY,
+    PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_ARGUMENT_FOR_XQUERY, ERRCODE_INVALID_XML_CONTENT,
+    ERRCODE_INVALID_XML_DOCUMENT, ERRCODE_OUT_OF_MEMORY,
 };
 use types_nodes::primnodes::XmlOptionType;
 use types_xml::XmlBinaryType;
@@ -245,6 +246,10 @@ extern "C" {
     ) -> *mut xmlXPathObject;
     fn xmlXPathFreeObject(obj: *mut xmlXPathObject);
     fn xmlXPathCastNodeToString(node: *mut xmlNode) -> *mut c_uchar;
+    fn xmlXPathCastNodeSetToString(ns: *mut xmlNodeSet) -> *mut c_uchar;
+    fn xmlXPathCastBooleanToString(val: c_int) -> *mut c_uchar;
+    fn xmlXPathCastBooleanToNumber(val: c_int) -> f64;
+    fn xmlXPathCastNumberToString(val: f64) -> *mut c_uchar;
 
     // entity loader sandboxing (pg_xml_init / xmlPgEntityLoader)
     fn xmlSetExternalEntityLoader(f: Option<xmlExternalEntityLoader>);
@@ -1413,6 +1418,434 @@ fn get_utf8_char(utf8: &[u8]) -> PgResult<i32> {
 }
 
 /* ===================================================================== *
+ *  XMLTABLE table builder — port of xml.c `XmlTable*` (`#ifdef USE_LIBXML`).
+ *
+ *  C stores `XmlTableBuilderData` in `TableFuncScanState->opaque`; a
+ *  TableFuncScan always runs to completion (single pass into a tuplestore)
+ *  before any other node, so the builder state is held in a per-backend
+ *  thread-local here (set by InitOpaque, cleared by DestroyOpaque). Raw libxml
+ *  pointers stay internal to this provider, exactly as in C.
+ * ===================================================================== */
+
+/// Prefix of `struct _xmlXPathContext` (xpath.h) up through `node`, the only
+/// field xml.c writes (`xpathcxt->node = cur`). `doc` then `node` are the first
+/// two pointer fields and stable across libxml2 2.x.
+#[repr(C)]
+struct xmlXPathContextHdr {
+    doc: *mut xmlDoc,
+    node: *mut xmlNode,
+}
+
+#[inline]
+unsafe fn xpathctx_set_node(ctx: *mut xmlXPathContext, node: *mut xmlNode) {
+    (*(ctx as *mut xmlXPathContextHdr)).node = node;
+}
+
+/// Per-scan XMLTABLE builder state — the libxml half of C's
+/// `XmlTableBuilderData` (the `magic`/`natts` bookkeeping is implicit: the
+/// thread-local being `Some` is the magic check, and `xpathscomp.len()` is
+/// `natts`).
+struct XmlTableBuilderData {
+    /// `xmlParserCtxtPtr ctxt`
+    ctxt: *mut xmlParserCtxt,
+    /// `xmlDocPtr doc`
+    doc: *mut xmlDoc,
+    /// `xmlXPathContextPtr xpathcxt`
+    xpathcxt: *mut xmlXPathContext,
+    /// `xmlXPathCompExprPtr xpathcomp` — the compiled row filter.
+    xpathcomp: *mut xmlXPathCompExpr,
+    /// `xmlXPathObjectPtr xpathobj` — the row-filter result node set.
+    xpathobj: *mut xmlXPathObject,
+    /// `xmlXPathCompExprPtr *xpathscomp` — one compiled XPath per column.
+    xpathscomp: Vec<*mut xmlXPathCompExpr>,
+    /// `long int row_count` — 1-based cursor into the row node set.
+    row_count: i64,
+}
+
+thread_local! {
+    /// `TableFuncScanState->opaque` — at most one live XMLTABLE scan per backend
+    /// (the single-pass invariant the C `XmlTableInitOpaque` comment relies on).
+    static XMLTABLE_BUILDER: std::cell::RefCell<Option<XmlTableBuilderData>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// C `GetXmlTableBuilderPrivateData` — the magic check, here the thread-local
+/// presence check. The closure runs with the builder borrowed mutably.
+fn with_xtcxt<R>(
+    fname: &str,
+    f: impl FnOnce(&mut XmlTableBuilderData) -> PgResult<R>,
+) -> PgResult<R> {
+    XMLTABLE_BUILDER.with(|b| {
+        let mut b = b.borrow_mut();
+        match b.as_mut() {
+            Some(xt) => f(xt),
+            None => Err(PgError::error(format!(
+                "{fname} called with invalid TableFuncScanState"
+            ))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR)),
+        }
+    })
+}
+
+/// C `XmlTableInitOpaque` (xml.c:4683).
+fn xmltable_init_opaque(natts: i32) -> PgResult<()> {
+    unsafe {
+        pg_xml_init(PG_XML_STRICTNESS_ALL);
+        xmlInitParser();
+
+        let ctxt = xmlNewParserCtxt();
+        if ctxt.is_null() || xml_err_occurred() {
+            if !ctxt.is_null() {
+                xmlFreeParserCtxt(ctxt);
+            }
+            return Err(xml_ereport(
+                "could not allocate parser context",
+                ERRCODE_OUT_OF_MEMORY,
+            ));
+        }
+
+        let xtcxt = XmlTableBuilderData {
+            ctxt,
+            doc: core::ptr::null_mut(),
+            xpathcxt: core::ptr::null_mut(),
+            xpathcomp: core::ptr::null_mut(),
+            xpathobj: core::ptr::null_mut(),
+            xpathscomp: vec![core::ptr::null_mut(); natts.max(0) as usize],
+            row_count: 0,
+        };
+        XMLTABLE_BUILDER.with(|b| {
+            // A leftover builder would mean a prior scan was not torn down; the
+            // single-pass invariant forbids it, but destroy it defensively.
+            if let Some(old) = b.borrow_mut().take() {
+                xmltable_free_resources(old);
+            }
+            *b.borrow_mut() = Some(xtcxt);
+        });
+        Ok(())
+    }
+}
+
+/// C `XmlTableSetDocument` (xml.c:4731). `xml_image` is `xml_out_internal`'s
+/// encoding-stripped serialization (produced by the consumer crate).
+fn xmltable_set_document(xml_image: &[u8]) -> PgResult<()> {
+    with_xtcxt("XmlTableSetDocument", |xtcxt| unsafe {
+        let doc = xmlCtxtReadMemory(
+            xtcxt.ctxt,
+            xml_image.as_ptr() as *const c_char,
+            xml_image.len() as c_int,
+            core::ptr::null(),
+            core::ptr::null(),
+            0,
+        );
+        if doc.is_null() || xml_err_occurred() {
+            if !doc.is_null() {
+                xmlFreeDoc(doc);
+            }
+            return Err(xml_ereport(
+                "could not parse XML document",
+                ERRCODE_INVALID_XML_DOCUMENT,
+            ));
+        }
+        let xpathcxt = xmlXPathNewContext(doc);
+        if xpathcxt.is_null() || xml_err_occurred() {
+            if !xpathcxt.is_null() {
+                xmlXPathFreeContext(xpathcxt);
+            }
+            xmlFreeDoc(doc);
+            return Err(xml_ereport(
+                "could not allocate XPath context",
+                ERRCODE_OUT_OF_MEMORY,
+            ));
+        }
+        // xpathcxt->node = (xmlNodePtr) doc;
+        xpathctx_set_node(xpathcxt, doc as *mut xmlNode);
+
+        xtcxt.doc = doc;
+        xtcxt.xpathcxt = xpathcxt;
+        Ok(())
+    })
+}
+
+/// C `XmlTableSetNamespace` (xml.c:4788).
+fn xmltable_set_namespace(name: Option<&str>, uri: &str) -> PgResult<()> {
+    // if (name == NULL) ereport(... "DEFAULT namespace is not supported").
+    let name = match name {
+        Some(n) => n,
+        None => {
+            return Err(PgError::error("DEFAULT namespace is not supported".to_string())
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
+        }
+    };
+    with_xtcxt("XmlTableSetNamespace", |xtcxt| unsafe {
+        let n = cstr(name.as_bytes());
+        let u = cstr(uri.as_bytes());
+        if xmlXPathRegisterNs(
+            xtcxt.xpathcxt,
+            n.as_ptr() as *const c_uchar,
+            u.as_ptr() as *const c_uchar,
+        ) != 0
+        {
+            return Err(xml_ereport(
+                "could not set XML namespace",
+                ERRCODE_INVALID_ARGUMENT_FOR_XQUERY,
+            ));
+        }
+        Ok(())
+    })
+}
+
+/// C `XmlTableSetRowFilter` (xml.c:4814).
+fn xmltable_set_row_filter(path: &str) -> PgResult<()> {
+    if path.is_empty() {
+        return Err(
+            PgError::error("row path filter must not be empty string".to_string())
+                .with_sqlstate(ERRCODE_INVALID_ARGUMENT_FOR_XQUERY),
+        );
+    }
+    with_xtcxt("XmlTableSetRowFilter", |xtcxt| unsafe {
+        let xstr = cstr(path.as_bytes());
+        let comp = xmlXPathCtxtCompile(xtcxt.xpathcxt, xstr.as_ptr() as *const c_uchar);
+        if comp.is_null() || xml_err_occurred() {
+            return Err(xml_ereport(
+                "invalid XPath expression",
+                ERRCODE_INVALID_ARGUMENT_FOR_XQUERY,
+            ));
+        }
+        xtcxt.xpathcomp = comp;
+        Ok(())
+    })
+}
+
+/// C `XmlTableSetColumnFilter` (xml.c:4846).
+fn xmltable_set_column_filter(path: &str, colnum: i32) -> PgResult<()> {
+    if path.is_empty() {
+        return Err(
+            PgError::error("column path filter must not be empty string".to_string())
+                .with_sqlstate(ERRCODE_INVALID_ARGUMENT_FOR_XQUERY),
+        );
+    }
+    with_xtcxt("XmlTableSetColumnFilter", |xtcxt| unsafe {
+        let xstr = cstr(path.as_bytes());
+        let comp = xmlXPathCtxtCompile(xtcxt.xpathcxt, xstr.as_ptr() as *const c_uchar);
+        if comp.is_null() || xml_err_occurred() {
+            return Err(xml_ereport(
+                "invalid XPath expression",
+                ERRCODE_INVALID_ARGUMENT_FOR_XQUERY,
+            ));
+        }
+        xtcxt.xpathscomp[colnum as usize] = comp;
+        Ok(())
+    })
+}
+
+/// C `XmlTableFetchRow` (xml.c:4881).
+fn xmltable_fetch_row() -> PgResult<bool> {
+    with_xtcxt("XmlTableFetchRow", |xtcxt| unsafe {
+        // xmlSetStructuredErrorFunc(xtCxt->xmlerrcxt, xml_errorHandler) — our
+        // handler is process-global (thread-local context), already installed by
+        // pg_xml_init; re-assert it as C does.
+        xmlSetStructuredErrorFunc(core::ptr::null_mut(), Some(xml_error_handler));
+
+        if xtcxt.xpathobj.is_null() {
+            xtcxt.xpathobj = xmlXPathCompiledEval(xtcxt.xpathcomp, xtcxt.xpathcxt);
+            if xtcxt.xpathobj.is_null() || xml_err_occurred() {
+                return Err(xml_ereport(
+                    "could not create XPath object",
+                    ERRCODE_INVALID_ARGUMENT_FOR_XQUERY,
+                ));
+            }
+            xtcxt.row_count = 0;
+        }
+
+        let hdr = &*(xtcxt.xpathobj as *const xmlXPathObjectHdr);
+        if hdr.type_ == XPATH_NODESET && !hdr.nodesetval.is_null() {
+            let ns = &*(hdr.nodesetval as *const xmlNodeSetHdr);
+            let prev = xtcxt.row_count;
+            xtcxt.row_count += 1;
+            if prev < ns.node_nr as i64 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+}
+
+/// C `XmlTableGetValue` (xml.c:4926), reduced to its libxml core: evaluate the
+/// column XPath against the current row node and return the textual value (or
+/// `None` for the C `*isnull = true`). `InputFunctionCall` stays in the executor.
+fn xmltable_get_value(
+    colnum: i32,
+    is_xml: bool,
+    is_numeric_category: bool,
+) -> PgResult<Option<String>> {
+    with_xtcxt("XmlTableGetValue", |xtcxt| unsafe {
+        xmlSetStructuredErrorFunc(core::ptr::null_mut(), Some(xml_error_handler));
+
+        debug_assert!(!xtcxt.xpathobj.is_null());
+        debug_assert!(!xtcxt.xpathscomp[colnum as usize].is_null());
+
+        // cur = nodesetval->nodeTab[row_count - 1]; xpathcxt->node = cur;
+        let obj_hdr = &*(xtcxt.xpathobj as *const xmlXPathObjectHdr);
+        let ns = &*(obj_hdr.nodesetval as *const xmlNodeSetHdr);
+        let cur = *ns.node_tab.add((xtcxt.row_count - 1) as usize);
+        xpathctx_set_node(xtcxt.xpathcxt, cur);
+
+        let xpathobj = xmlXPathCompiledEval(xtcxt.xpathscomp[colnum as usize], xtcxt.xpathcxt);
+        if xpathobj.is_null() || xml_err_occurred() {
+            if !xpathobj.is_null() {
+                xmlXPathFreeObject(xpathobj);
+            }
+            return Err(xml_ereport(
+                "could not create XPath object",
+                ERRCODE_INVALID_ARGUMENT_FOR_XQUERY,
+            ));
+        }
+
+        let result = xmltable_value_from_xpathobj(xpathobj, is_xml, is_numeric_category);
+        xmlXPathFreeObject(xpathobj);
+        result
+    })
+}
+
+/// The four-case value extraction in `XmlTableGetValue`'s `PG_TRY` body.
+unsafe fn xmltable_value_from_xpathobj(
+    xpathobj: *mut xmlXPathObject,
+    is_xml: bool,
+    is_numeric_category: bool,
+) -> PgResult<Option<String>> {
+    let hdr = &*(xpathobj as *const xmlXPathObjectHdr);
+    match hdr.type_ {
+        XPATH_NODESET => {
+            let count = if hdr.nodesetval.is_null() {
+                0
+            } else {
+                (*(hdr.nodesetval as *const xmlNodeSetHdr)).node_nr
+            };
+            if hdr.nodesetval.is_null() || count == 0 {
+                // *isnull = true
+                Ok(None)
+            } else if is_xml {
+                // Concatenate serialized values.
+                let ns = &*(hdr.nodesetval as *const xmlNodeSetHdr);
+                let mut buf: Vec<u8> = Vec::new();
+                for i in 0..count {
+                    let node = *ns.node_tab.add(i as usize);
+                    buf.extend_from_slice(&xml_xmlnodetoxmltype(node)?);
+                }
+                Ok(Some(string_from_utf8_lossy_owned(buf)))
+            } else {
+                // For non-XML: one node => content; more than one => error.
+                if count > 1 {
+                    return Err(PgError::error(
+                        "more than one value returned by column XPath expression".to_string(),
+                    )
+                    .with_sqlstate(ERRCODE_CARDINALITY_VIOLATION));
+                }
+                let str = xmlXPathCastNodeSetToString(hdr.nodesetval);
+                let v = if str.is_null() {
+                    String::new()
+                } else {
+                    let s = string_from_utf8_lossy_owned(xmlchar_to_vec(str));
+                    xmlFree(str as *mut c_void);
+                    s
+                };
+                Ok(Some(v))
+            }
+        }
+        XPATH_STRING => {
+            // Content should be escaped when the target will be XML.
+            let raw = xmlchar_to_vec(hdr.stringval);
+            let v = if is_xml {
+                string_from_utf8_lossy_owned(owner::escape_xml(&raw))
+            } else {
+                string_from_utf8_lossy_owned(raw)
+            };
+            Ok(Some(v))
+        }
+        XPATH_BOOLEAN => {
+            // Allow implicit casting from boolean to numbers.
+            let str = if !is_numeric_category {
+                xmlXPathCastBooleanToString(hdr.boolval)
+            } else {
+                xmlXPathCastNumberToString(xmlXPathCastBooleanToNumber(hdr.boolval))
+            };
+            let v = if str.is_null() {
+                String::new()
+            } else {
+                let s = string_from_utf8_lossy_owned(xmlchar_to_vec(str));
+                xmlFree(str as *mut c_void);
+                s
+            };
+            Ok(Some(v))
+        }
+        XPATH_NUMBER => {
+            let str = xmlXPathCastNumberToString(hdr.floatval);
+            let v = if str.is_null() {
+                String::new()
+            } else {
+                let s = string_from_utf8_lossy_owned(xmlchar_to_vec(str));
+                xmlFree(str as *mut c_void);
+                s
+            };
+            Ok(Some(v))
+        }
+        other => Err(PgError::error(format!("unexpected XPath object type {other}"))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR)),
+    }
+}
+
+/// Decode libxml UTF-8 output bytes into an owned `String`. libxml always emits
+/// UTF-8; a malformed byte would be a libxml bug, so a lossy decode is the safe
+/// faithful choice (the executor's InputFunctionCall re-validates per type).
+fn string_from_utf8_lossy_owned(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    }
+}
+
+/// C `XmlTableDestroyOpaque` (xml.c:5078) — free libxml resources and clear the
+/// builder state.
+fn xmltable_destroy_opaque() -> PgResult<()> {
+    XMLTABLE_BUILDER.with(|b| {
+        if let Some(xt) = b.borrow_mut().take() {
+            unsafe {
+                xmlSetStructuredErrorFunc(core::ptr::null_mut(), Some(xml_error_handler));
+            }
+            xmltable_free_resources(xt);
+        }
+    });
+    Ok(())
+}
+
+/// The resource-freeing tail shared by `XmlTableDestroyOpaque` and the defensive
+/// re-init cleanup (the libxml-free sequence of xml.c:5078).
+fn xmltable_free_resources(xt: XmlTableBuilderData) {
+    unsafe {
+        for comp in &xt.xpathscomp {
+            if !comp.is_null() {
+                xmlXPathFreeCompExpr(*comp);
+            }
+        }
+        if !xt.xpathobj.is_null() {
+            xmlXPathFreeObject(xt.xpathobj);
+        }
+        if !xt.xpathcomp.is_null() {
+            xmlXPathFreeCompExpr(xt.xpathcomp);
+        }
+        if !xt.xpathcxt.is_null() {
+            xmlXPathFreeContext(xt.xpathcxt);
+        }
+        if !xt.doc.is_null() {
+            xmlFreeDoc(xt.doc);
+        }
+        if !xt.ctxt.is_null() {
+            xmlFreeParserCtxt(xt.ctxt);
+        }
+    }
+}
+
+/* ===================================================================== *
  *  Install.
  * ===================================================================== */
 pub fn install() {
@@ -1425,4 +1858,12 @@ pub fn install() {
     seams::build_element::set(build_element);
     seams::encode_binary::set(encode_binary);
     seams::xpath_eval::set(xpath_eval);
+    seams::xmltable_init_opaque::set(xmltable_init_opaque);
+    seams::xmltable_set_document::set(xmltable_set_document);
+    seams::xmltable_set_namespace::set(xmltable_set_namespace);
+    seams::xmltable_set_row_filter::set(xmltable_set_row_filter);
+    seams::xmltable_set_column_filter::set(xmltable_set_column_filter);
+    seams::xmltable_fetch_row::set(xmltable_fetch_row);
+    seams::xmltable_get_value::set(xmltable_get_value);
+    seams::xmltable_destroy_opaque::set(xmltable_destroy_opaque);
 }

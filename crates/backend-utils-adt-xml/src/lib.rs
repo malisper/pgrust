@@ -2810,47 +2810,85 @@ pub fn xml_is_well_formed_content(data: &[u8]) -> PgResult<bool> {
 // internal to it).
 // ===========================================================================
 
-/// C `GetXmlTableBuilderPrivateData` (xml.c:4657, static).
-pub fn GetXmlTableBuilderPrivateData() -> PgResult<()> {
-    Err(no_xml_support())
-}
+/// `TYPCATEGORY_NUMERIC` (pg_type.h) — the column-XPath BOOLEAN result casts
+/// boolean→number→string when the target column type is in this category.
+const TYPCATEGORY_NUMERIC: u8 = b'N';
 
 /// C `XmlTableInitOpaque` (xml.c:4683, static; `XmlTableRoutine.InitOpaque`).
-pub fn XmlTableInitOpaque(_natts: i32) -> PgResult<()> {
-    Err(no_xml_support())
+pub fn XmlTableInitOpaque(natts: i32) -> PgResult<()> {
+    if !seam::have_libxml::call() {
+        return Err(no_xml_support());
+    }
+    seam::xmltable_init_opaque::call(natts)
 }
 
 /// C `XmlTableSetDocument` (xml.c:4731, static; `XmlTableRoutine.SetDocument`).
-pub fn XmlTableSetDocument(_value: Datum) -> PgResult<()> {
-    Err(no_xml_support())
+///
+/// C does `str = xml_out_internal(DatumGetXmlP(value), 0)` to obtain the
+/// encoding-stripped document text, then `xmlCtxtReadMemory` on it. The
+/// `xml_out_internal` rendering is pure in-crate work; the libxml parse is the
+/// seam. `xml_image` is the document's `xmltype` varlena payload.
+pub fn XmlTableSetDocument(xml_image: &[u8]) -> PgResult<()> {
+    if !seam::have_libxml::call() {
+        return Err(no_xml_support());
+    }
+    let str = xml_out_internal(xml_image, 0)?;
+    seam::xmltable_set_document::call(&str)
 }
 
 /// C `XmlTableSetNamespace` (xml.c:4788, static; `XmlTableRoutine.SetNamespace`).
-pub fn XmlTableSetNamespace(_name: Option<&str>, _uri: &str) -> PgResult<()> {
-    Err(no_xml_support())
+pub fn XmlTableSetNamespace(name: Option<&str>, uri: &str) -> PgResult<()> {
+    if !seam::have_libxml::call() {
+        return Err(no_xml_support());
+    }
+    seam::xmltable_set_namespace::call(name, uri)
 }
 
 /// C `XmlTableSetRowFilter` (xml.c:4814, static; `XmlTableRoutine.SetRowFilter`).
-pub fn XmlTableSetRowFilter(_path: &str) -> PgResult<()> {
-    Err(no_xml_support())
+pub fn XmlTableSetRowFilter(path: &str) -> PgResult<()> {
+    if !seam::have_libxml::call() {
+        return Err(no_xml_support());
+    }
+    seam::xmltable_set_row_filter::call(path)
 }
 
 /// C `XmlTableSetColumnFilter` (xml.c:4846, static; `...SetColumnFilter`).
-pub fn XmlTableSetColumnFilter(_path: &str, _colnum: i32) -> PgResult<()> {
-    Err(no_xml_support())
+pub fn XmlTableSetColumnFilter(path: &str, colnum: i32) -> PgResult<()> {
+    if !seam::have_libxml::call() {
+        return Err(no_xml_support());
+    }
+    seam::xmltable_set_column_filter::call(path, colnum)
 }
 
 /// C `XmlTableFetchRow` (xml.c:4881, static; `XmlTableRoutine.FetchRow`).
 pub fn XmlTableFetchRow() -> PgResult<bool> {
-    Err(no_xml_support())
+    if !seam::have_libxml::call() {
+        return Err(no_xml_support());
+    }
+    seam::xmltable_fetch_row::call()
 }
 
-/// C `XmlTableGetValue` (xml.c:4926, static; `XmlTableRoutine.GetValue`).
-pub fn XmlTableGetValue(_colnum: i32, _typid: Oid, _typmod: i32) -> PgResult<(Datum, bool)> {
-    Err(no_xml_support())
+/// C `XmlTableGetValue` (xml.c:4926, static; `XmlTableRoutine.GetValue`), minus
+/// the trailing `InputFunctionCall` (owned by the executor, which holds
+/// `in_functions`/`typioparams`). Returns the column's textual value, or `None`
+/// for the C `*isnull = true`. The `get_type_category_preferred` lookup — needed
+/// only for the XPATH_BOOLEAN cast — is resolved here and passed to the provider.
+pub fn XmlTableGetValue(colnum: i32, typid: Oid) -> PgResult<Option<String>> {
+    if !seam::have_libxml::call() {
+        return Err(no_xml_support());
+    }
+    let is_xml = typid == XMLOID;
+    // C calls get_type_category_preferred unconditionally before the PG_TRY; we
+    // mirror that (the provider only consults it in the BOOLEAN arm).
+    let (typcategory, _typispreferred) = lsc::get_type_category_preferred::call(typid)?;
+    let is_numeric_category = typcategory == TYPCATEGORY_NUMERIC;
+    seam::xmltable_get_value::call(colnum, is_xml, is_numeric_category)
 }
 
 /// C `XmlTableDestroyOpaque` (xml.c:5078, static; `...DestroyOpaque`).
 pub fn XmlTableDestroyOpaque() -> PgResult<()> {
-    Err(no_xml_support())
+    if !seam::have_libxml::call() {
+        return Err(no_xml_support());
+    }
+    seam::xmltable_destroy_opaque::call()
 }

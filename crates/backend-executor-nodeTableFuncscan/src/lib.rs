@@ -160,10 +160,21 @@ fn routine_set_document<'mcx>(
     value: Datum<'mcx>,
 ) -> PgResult<()> {
     match kind {
-        // The XML provider errors before reading the document, so the seam's
-        // `Datum` (a `types_tuple` value) is not forwarded; a future libxml
-        // provider takes the value through its own internal context.
-        TableFuncRoutineKind::XmlTable => xml::XmlTableSetDocument(types_datum::Datum::null()),
+        // C: XmlTableSetDocument(state, value) — `value` is the xmltype document
+        // Datum (a varlena). C does `str = xml_out_internal(DatumGetXmlP(value),
+        // 0)`, where `xml_out_internal` starts from `text_to_cstring((text *) x)`
+        // — the detoasted, VARHDRSZ-stripped payload. The by-reference Datum here
+        // carries the verbatim (header-ful, possibly short-header/compressed)
+        // varlena image, so resolve its flat payload via `text_to_cstring_v`
+        // before the xml crate renders it through `xml_out_internal`/libxml.
+        TableFuncRoutineKind::XmlTable => {
+            let per_table = state
+                .perTableCxt
+                .as_ref()
+                .expect("XmlTableRoutine: perTableCxt not initialized");
+            let payload = varlena::text_to_cstring_v::call(per_table.mcx(), &value)?;
+            xml::XmlTableSetDocument(payload.as_bytes())
+        }
         // C: `JsonTableSetDocument` (jsonpath_exec.c:4238) —
         // `DatumGetJsonbP(value)` then evaluate the root row pattern. The
         // document is the input jsonb varlena bytes.
@@ -267,11 +278,29 @@ fn routine_get_value<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     match kind {
-        // The XML provider errors before producing a value, so its
-        // `types_datum::Datum` return never needs bridging to the seam's
-        // `types_tuple` `Datum`.
+        // C: result = InputFunctionCall(&state->in_functions[colnum],
+        //                cstr, state->typioparams[colnum], typmod);
+        // The xml/libxml provider produces the column's textual value (or None =
+        // *isnull); the executor owns in_functions/typioparams and runs the input
+        // function — exactly where the colfilter eval also lives.
         TableFuncRoutineKind::XmlTable => {
-            xml::XmlTableGetValue(colnum, typid, typmod).map(|(_d, isnull)| (Datum::null(), isnull))
+            let cstr = xml::XmlTableGetValue(colnum, typid)?;
+            match cstr {
+                None => Ok((Datum::null(), true)),
+                Some(s) => {
+                    let mcx = estate.es_query_cxt;
+                    let in_funcid = state.in_functions[colnum as usize].fn_oid;
+                    let typioparam = state.typioparams[colnum as usize];
+                    let d = fmgr::input_function_call::call(
+                        mcx,
+                        in_funcid,
+                        Some(s.as_str()),
+                        typioparam,
+                        typmod,
+                    )?;
+                    Ok((d, false))
+                }
+            }
         }
         // C: `JsonTableGetValue` (jsonpath_exec.c:4452).
         TableFuncRoutineKind::JsonbTable => {
