@@ -692,6 +692,15 @@ pub fn init_seams() {
             if let Some(v) = report.schema {
                 b = b.err_generic_string(types_error::PG_DIAG_SCHEMA_NAME, v)?;
             }
+            // errcontext(): the PL/pgSQL error-context line for a non-ERROR
+            // report, supplied by the executor (the ERROR path attaches its own
+            // context on propagation). C's error_context_stack callbacks add
+            // this at report time for every elevel.
+            if let Some(ctx) = report.context {
+                if !ctx.is_empty() {
+                    b = b.errcontext_msg(ctx);
+                }
+            }
             b.finish(ErrorLocation {
                 filename: None,
                 lineno: 0,
