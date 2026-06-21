@@ -435,6 +435,14 @@ pub fn plpgsql_exec_trigger_impl(
         } else if fired_by_update(tg_event) {
             set_record_from_slot(&mut estate, new_varno, TupleTableSlotRef(SLOT_NEW))?;
             set_record_from_slot(&mut estate, old_varno, TupleTableSlotRef(SLOT_TRIG))?;
+
+            // In a BEFORE trigger, stored generated columns are not computed
+            // yet, so make them null in the NEW row. (Only needed in the UPDATE
+            // branch; in the INSERT case they are already null, but in UPDATE the
+            // field still contains the old value.) (pl_exec.c:1004)
+            if fired_before(tg_event) {
+                null_stored_generated_in_new(&mut estate, new_varno)?;
+            }
         } else if fired_by_delete(tg_event) {
             set_record_from_slot(&mut estate, old_varno, TupleTableSlotRef(SLOT_TRIG))?;
         } else {
@@ -519,6 +527,78 @@ pub fn plpgsql_exec_trigger_impl(
 }
 
 /// Populate a REC variable from the firing trigger's OLD/NEW slot tuple.
+/// Null out every STORED generated column in the NEW record (rec_new), for a
+/// BEFORE UPDATE row trigger. The generated values are recomputed by the
+/// executor only after the trigger runs, but the projected UPDATE new tuple
+/// still carries the column's old value, so the trigger would otherwise see a
+/// stale value instead of NULL. (pl_exec.c:1012-1022,
+/// `expanded_record_set_field_internal` per STORED generated attribute.)
+fn null_stored_generated_in_new(
+    estate: &mut PLpgSQL_execstate,
+    new_dno: int32,
+) -> types_error::PgResult<()> {
+    if new_dno < 0 {
+        return Ok(());
+    }
+    let handle = match &estate.datums[new_dno as usize] {
+        PLpgSQL_datum::Rec(rec) => rec.erh.as_ref().map(|h| h.0).unwrap_or(0),
+        _ => panic!("null_stored_generated_in_new: datum {new_dno} is not a REC"),
+    };
+    if handle == 0 {
+        return Ok(());
+    }
+
+    // Collect the 1-based attnums of STORED generated columns off the firing
+    // relation's descriptor (tupdesc = RelationGetDescr(trigdata->tg_relation)).
+    // Early-out unless tupdesc->constr->has_generated_stored, mirroring C.
+    let gen_attnums: Vec<i32> = crate::with_query_mcx(|mcx| {
+        let rel = trig::tg_relation::call(mcx, TRIG_CURRENT)?;
+        let tupdesc = &rel.rd_att;
+        let has_gen = tupdesc
+            .constr
+            .as_ref()
+            .map(|c| c.has_generated_stored)
+            .unwrap_or(false);
+        if !has_gen {
+            return Ok::<Vec<i32>, types_error::PgError>(Vec::new());
+        }
+        let mut v = Vec::new();
+        for i in 0..tupdesc.natts as usize {
+            if tupdesc.attr(i).attgenerated
+                == types_tuple::access::ATTRIBUTE_GENERATED_STORED
+            {
+                v.push((i + 1) as i32);
+            }
+        }
+        Ok(v)
+    })?;
+
+    if gen_attnums.is_empty() {
+        return Ok(());
+    }
+
+    crate::with_query_mcx(|_mcx| {
+        let r = crate::erh_table::with_erh_mut(handle, |emcx, erh| {
+            for &fnumber in &gen_attnums {
+                er::expanded_record_set_field_internal(
+                    emcx,
+                    erh,
+                    fnumber,
+                    RichDatum::null(),
+                    true,  /* isnull */
+                    false, /* expand_external */
+                    false, /* check_constraints */
+                )?;
+            }
+            Ok::<(), types_error::PgError>(())
+        });
+        if let Some(res) = r {
+            res?;
+        }
+        Ok::<(), types_error::PgError>(())
+    })
+}
+
 fn set_record_from_slot(
     estate: &mut PLpgSQL_execstate,
     rec_dno: int32,

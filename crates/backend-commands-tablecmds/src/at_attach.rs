@@ -1147,6 +1147,11 @@ fn MergeAttributesIntoExisting<'mcx>(
                 .errmsg(format!(
                     "column \"{parent_attname}\" inherits from generated column of different kind"
                 ))
+                .errdetail(format!(
+                    "Parent column is {}, child column is {}.",
+                    if parent_att.attgenerated == b's' as i8 { "STORED" } else { "VIRTUAL" },
+                    if child_attgenerated == b's' as i8 { "STORED" } else { "VIRTUAL" }
+                ))
                 .into_error());
         }
 

@@ -275,6 +275,10 @@ fn check_nested_generated_walker(
                             .errdetail(
                                 "A generated column cannot reference another generated column.",
                             )
+                            .errposition(backend_parser_small1::parser_errposition(
+                                pstate,
+                                var.location,
+                            ))
                             .into_error();
                         *err.borrow_mut() = Some(e);
                         return true;
@@ -294,6 +298,10 @@ fn check_nested_generated_walker(
                     .errdetail(
                         "This would cause the generated column to depend on its own value.",
                     )
+                    .errposition(backend_parser_small1::parser_errposition(
+                        pstate,
+                        var.location,
+                    ))
                     .into_error();
                 *err.borrow_mut() = Some(e);
                 return true;

@@ -941,11 +941,15 @@ fn transform_trigger_when<'mcx>(
                 if !pt::TRIGGER_FOR_ROW(tgtype) {
                     return when_obj_def_err(
                         "statement trigger's WHEN condition cannot reference column values",
+                        &pstate,
+                        var.location,
                     );
                 }
                 if pt::TRIGGER_FOR_INSERT(tgtype) {
                     return when_obj_def_err(
                         "INSERT trigger's WHEN condition cannot reference OLD values",
+                        &pstate,
+                        var.location,
                     );
                 }
                 // system columns are okay here
@@ -954,17 +958,25 @@ fn transform_trigger_when<'mcx>(
                 if !pt::TRIGGER_FOR_ROW(tgtype) {
                     return when_obj_def_err(
                         "statement trigger's WHEN condition cannot reference column values",
+                        &pstate,
+                        var.location,
                     );
                 }
                 if pt::TRIGGER_FOR_DELETE(tgtype) {
                     return when_obj_def_err(
                         "DELETE trigger's WHEN condition cannot reference NEW values",
+                        &pstate,
+                        var.location,
                     );
                 }
                 if var.varattno < 0 && trigger_for_before(tgtype) {
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
                         .errmsg("BEFORE trigger's WHEN condition cannot reference NEW system columns")
+                        .errposition(backend_parser_small1::parser_errposition(
+                            &pstate,
+                            var.location,
+                        ))
                         .into_error());
                 }
                 if trigger_for_before(tgtype) && var.varattno == 0 {
@@ -974,6 +986,10 @@ fn transform_trigger_when<'mcx>(
                                 .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                                 .errmsg("BEFORE trigger's WHEN condition cannot reference NEW generated columns")
                                 .errdetail("A whole-row reference is used and the table contains generated columns.")
+                                .errposition(backend_parser_small1::parser_errposition(
+                                    &pstate,
+                                    var.location,
+                                ))
                                 .into_error());
                         }
                     }
@@ -986,6 +1002,10 @@ fn transform_trigger_when<'mcx>(
                             .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                             .errmsg("BEFORE trigger's WHEN condition cannot reference NEW generated columns")
                             .errdetail(format!("Column \"{colname}\" is a generated column."))
+                            .errposition(backend_parser_small1::parser_errposition(
+                                &pstate,
+                                var.location,
+                            ))
                             .into_error());
                     }
                 }
@@ -1014,10 +1034,15 @@ fn transform_trigger_when<'mcx>(
     })
 }
 
-fn when_obj_def_err<'a>(msg: &str) -> PgResult<WhenTransform<'a>> {
+fn when_obj_def_err<'a>(
+    msg: &str,
+    pstate: &types_nodes::parsestmt::ParseState<'_>,
+    location: i32,
+) -> PgResult<WhenTransform<'a>> {
     Err(ereport(ERROR)
         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
         .errmsg(msg.to_string())
+        .errposition(backend_parser_small1::parser_errposition(pstate, location))
         .into_error())
 }
 
