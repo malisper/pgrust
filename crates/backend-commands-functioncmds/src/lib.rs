@@ -64,6 +64,52 @@ pub fn init_seams() {
     // ProcessUtilitySlow dispatch target (utility.c): CREATE TRANSFORM. The
     // ported body consumes the rich `CreateTransformStmt` directly.
     backend_tcop_utility_out_seams::create_transform::set(create_transform_seam);
+
+    // ProcessUtilitySlow dispatch target (utility.c): ALTER FUNCTION/PROCEDURE/
+    // ROUTINE. Decode the rich statement into the flat parsenodes form the ported
+    // `AlterFunction` body consumes.
+    backend_tcop_utility_out_seams::alter_function::set(alter_function_seam);
+}
+
+/// Outward-seam adapter for `AlterFunction(pstate, stmt)` (utility.c
+/// `ProcessUtilitySlow` `T_AlterFunctionStmt`): decode the rich
+/// `AlterFunctionStmt` into the flat [`types_parsenodes::AlterFunctionStmt`] and
+/// run the ported [`ddl_core::AlterFunction`] body. `pstate` is threaded for
+/// parity; `AlterFunction` re-derives what it needs.
+fn alter_function_seam<'mcx>(
+    _mcx: mcx::Mcx<'mcx>,
+    _pstate: &mut types_nodes::parsestmt::ParseState<'mcx>,
+    stmt: &types_nodes::nodes::Node<'mcx>,
+) -> types_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+    use backend_parser_parse_type::rich_node_to_parse;
+    use types_error::PgError;
+
+    let afs = match stmt.as_alterfunctionstmt() {
+        Some(s) => s,
+        None => {
+            return Err(PgError::error(
+                "alter_function_seam: statement is not an AlterFunctionStmt",
+            ))
+        }
+    };
+
+    let func = match afs.func.as_deref() {
+        Some(n) => Some(Box::new(rich_node_to_parse(n)?)),
+        None => None,
+    };
+
+    let mut actions: Vec<types_parsenodes::Node> = Vec::with_capacity(afs.actions.len());
+    for n in afs.actions.iter() {
+        actions.push(rich_node_to_parse(n)?);
+    }
+
+    let pn = types_parsenodes::AlterFunctionStmt {
+        objtype: afs.objtype as i32,
+        func,
+        actions,
+    };
+
+    ddl_core::AlterFunction(&pn)
 }
 
 /// Outward-seam adapter for `CreateTransform(stmt)` (utility.c
