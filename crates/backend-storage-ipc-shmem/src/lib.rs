@@ -857,6 +857,9 @@ pub fn init_seams() {
     backend_storage_ipc_shmem_seams::shmem_alloc_unlocked::set(|size| {
         ShmemAllocUnlocked(size).map(|p| p.as_ptr())
     });
+    backend_storage_ipc_shmem_seams::shmem_alloc::set(|size| {
+        ShmemAlloc(size).map(|p| p.as_ptr())
+    });
 
     fmgr_builtins::register_backend_storage_ipc_shmem_builtins();
 }

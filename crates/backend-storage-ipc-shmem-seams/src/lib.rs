@@ -63,6 +63,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `ShmemAlloc(Size size)` (shmem.c) — allocate a cache-line-aligned chunk
+    /// from the main shared-memory segment under the `ShmemLock` spinlock
+    /// (`ShmemAllocRaw`). Unlike `ShmemInitStruct` this touches NEITHER the
+    /// `ShmemIndex` hashtable NOR any LWLock, so it is safe to call from
+    /// `CreateLWLocks` while the `MainLWLockArray` is still being built (the C
+    /// `ShmemAlloc(LWLockShmemSize())` allocator). Returns the raw address
+    /// (genuinely shared memory, opacity inherited). `Err` carries the C
+    /// out-of-shared-memory `ereport(ERROR)`.
+    pub fn shmem_alloc(size: Size) -> PgResult<*mut u8>
+);
+
+seam_core::seam!(
     /// `ShmemAllocUnlocked(Size size)` (shmem.c) — allocate a max-aligned
     /// chunk from the main shared-memory segment without taking `ShmemLock`.
     /// Used only for allocations that must happen before `ShmemLock` is ready

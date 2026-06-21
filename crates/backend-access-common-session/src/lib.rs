@@ -339,6 +339,30 @@ fn get_session_dsm_handle() -> PgResult<dsm_handle> {
     // MAP_SHARED segment via `ShmemInitStruct` (same idiom as the PGPROC arrays
     // and this commit's ProcSignal slots) — a large, separate keystone. Until it
     // lands, returning INVALID keeps the known-good leader-only behavior.
+    //
+    // UPDATE (LWLock shmem keystone landed): `MainLWLockArray` is now in genuine
+    // MAP_SHARED memory (CreateLWLocks allocates via the new `shmem_alloc` seam,
+    // NOT `ShmemInitStruct` — the latter takes ShmemIndexLock, a MainLWLockArray
+    // lock, which cannot exist while that very array is being built). VERIFIED
+    // empirically with this early return REMOVED: real parallel `count(*) FROM
+    // tenk1` now passes ProcArrayAdd (the `pgxactoff == index-1` debug_assert is
+    // GONE — leader + workers mutually exclude on ProcArrayLock) and returns the
+    // correct 10000 with two real fork(2) workers, promptly. The plan shape is
+    // the exact PG18.3 Finalize/Gather/Partial/ParallelSeqScan.
+    //
+    // Three downstream walls remain (so the revert stays for now — they are NOT
+    // the LWLock keystone, which is cleared):
+    //   1. Worker procarray-slot cleanup leak: after a few parallel queries the
+    //      workers' PGPROC slots are not released, so new workers hit
+    //      `FATAL: sorry, too many clients already` → `parallel worker failed
+    //      to initialize`. (worker shmem-exit / ProcArrayRemove detach gap.)
+    //   2. EXPLAIN ANALYZE only: the worker-side per-PlanState instrumentation
+    //      accumulation into the DSM `SharedExecutorInstrumentation` is not yet
+    //      modeled (execParallel.rs:1283 honest panic — pre-existing residual,
+    //      not on the plain count(*) path).
+    //   3. An intermittent `RefCell already borrowed` in the parallel-context
+    //      teardown (parallel/lib.rs:321 `with_globals`) under some teardown
+    //      timing (re-entrant `with_globals`).
     return Ok(DSM_HANDLE_INVALID);
 
     // If we already created a session-scope segment, return its handle.

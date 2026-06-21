@@ -290,12 +290,21 @@ impl LWLockWaitList {
 /// of waiting PGPROCs. Shmem-resident and concurrently accessed, so (like its
 /// atomic `state`) it is neither `Copy` nor `Clone` — a copied lock would be a
 /// different lock.
+#[repr(C)]
 #[derive(Debug, Default)]
 pub struct LWLock {
     pub tranche: uint16,
     pub state: pg_atomic_uint32,
     pub waiters: LWLockWaitList,
 }
+
+// SAFETY: an `LWLock` lives in the genuine MAP_SHARED segment (allocated by
+// `CreateLWLocks` via `ShmemInitStruct`) and is shared across `fork(2)`
+// children. Its `state` word is an atomic; its `waiters` proclist head is an
+// `UnsafeCell` whose access is serialized by the `LW_FLAG_LOCKED` spinlock bit
+// in `state` (lwlock.c's wait-list protocol) — all valid to share across
+// processes in MAP_SHARED memory.
+unsafe impl Sync for LWLock {}
 
 /// `LWLOCK_PADDED_SIZE` (`storage/lwlock.h`) — `PG_CACHE_LINE_SIZE`.
 pub const LWLOCK_PADDED_SIZE: usize = 128;
@@ -304,7 +313,7 @@ pub const LWLOCK_PADDED_SIZE: usize = 128;
 /// pad to `LWLOCK_PADDED_SIZE`, so each lock in an array sits on its own
 /// cache line. The alignment attribute reproduces both the size and the
 /// placement guarantee.
-#[repr(align(128))]
+#[repr(C, align(128))]
 #[derive(Debug, Default)]
 pub struct LWLockPadded {
     pub lock: LWLock,

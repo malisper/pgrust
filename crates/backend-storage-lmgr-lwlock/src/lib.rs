@@ -402,14 +402,47 @@ pub fn LWLockShmemSize() -> PgResult<Size> {
 /// Process view of the main LWLock array: the owned stand-in for lwlock.c's
 /// `MainLWLockArray` pointer plus the named-tranche placement metadata
 /// (`NamedLWLockTrancheArray`).
+///
+/// `MainLWLockArray` is a genuine cross-process shared-memory array. A parallel
+/// worker is a real `fork(2)` child that must mutually exclude with its leader
+/// (and every other backend) on `ProcArrayLock` and every other LWLock — so the
+/// lock words MUST live in the real MAP_SHARED segment, not in a process-local
+/// `Vec` (whose heap buffer is fork-COW: each process would get a private copy
+/// of every `LWLock.state` word and the locks would no longer exclude). The
+/// array is therefore allocated by `CreateLWLocks` via `ShmemInitStruct`
+/// (`shmem_init_struct` seam) and `LWLockTable` only holds the shared base
+/// pointer and the slot count (mirroring the C `MainLWLockArray` pointer). The
+/// pointer is inherited verbatim across `fork(2)` in the COW [`MAIN_LWLOCKS`]
+/// `OnceLock`, and because it addresses MAP_SHARED (not COW) memory every
+/// child sees the SAME lock words and mutually excludes on them.
+///
+/// `named_tranches` is read-only placement metadata, written once by the
+/// postmaster in `InitializeLWLocks` and only ever read afterward; its
+/// fork-COW copy stays physically shared (never dirtied) and identical in every
+/// child, so it remains a process-local `Vec`.
 pub struct LWLockTable {
-    locks: Vec<LWLockPadded>,
+    /// Base of the `MainLWLockArray` slot array in the MAP_SHARED segment.
+    locks_ptr: *const LWLockPadded,
+    /// Number of slots (`NUM_FIXED_LWLOCKS + NumLWLocksForNamedTranches()`).
+    locks_len: usize,
     named_tranches: Vec<NamedLWLockTrancheRange>,
 }
 
+// SAFETY: `locks_ptr` addresses a `[LWLockPadded]` in the genuine MAP_SHARED
+// segment. Each `LWLock` is `Sync` (atomic `state`; `waiters` `UnsafeCell`
+// guarded by the `LW_FLAG_LOCKED` spinlock bit). `named_tranches` is read-only
+// after `CreateLWLocks`. The raw pointer is only ever turned into shared `&`
+// references, exactly as C shares the `MainLWLockArray` pointer across fork.
+unsafe impl Sync for LWLockTable {}
+// SAFETY: see `Sync` — the raw pointer addresses the shared MAP_SHARED segment,
+// valid in every process; moving the carrier between threads is sound.
+unsafe impl Send for LWLockTable {}
+
 impl LWLockTable {
     pub fn locks(&self) -> &[LWLockPadded] {
-        &self.locks
+        // SAFETY: `locks_ptr`/`locks_len` describe a live `[LWLockPadded]` in
+        // the shared segment, allocated for the lifetime of the cluster.
+        unsafe { core::slice::from_raw_parts(self.locks_ptr, self.locks_len) }
     }
 
     pub fn named_tranches(&self) -> &[NamedLWLockTrancheRange] {
@@ -417,16 +450,14 @@ impl LWLockTable {
     }
 
     pub fn lock(&self, index: usize) -> Option<&LWLock> {
-        self.locks.get(index).map(|slot| &slot.lock)
+        self.locks().get(index).map(|slot| &slot.lock)
     }
 }
 
 /// The published `MainLWLockArray` global (lwlock.c) plus the named-tranche
-/// placement metadata. The array lives in main shared memory, which in the
-/// threaded-server model is process memory shared by every backend thread —
-/// legitimately cross-thread state. (`LWLockTable` is `Sync`: the lock state
-/// words are atomics and the `waiters` proclists are `UnsafeCell`s guarded by
-/// the `LW_FLAG_LOCKED` wait-list spinlock.)
+/// placement metadata. The `locks` themselves live in the genuine MAP_SHARED
+/// segment (see [`LWLockTable`]); this `OnceLock` holds only the shared base
+/// pointer + count and the read-only named-tranche metadata.
 static MAIN_LWLOCKS: std::sync::OnceLock<LWLockTable> = std::sync::OnceLock::new();
 
 /// `&MainLWLockArray[offset].lock` — panics loudly (like an uninstalled seam)
@@ -512,28 +543,55 @@ pub fn CreateLWLocks(mcx: Mcx<'_>, is_under_postmaster: bool) -> PgResult<&'stat
     let table = if !is_under_postmaster {
         let total_locks = (NUM_FIXED_LWLOCKS + NumLWLocksForNamedTranches()) as usize;
 
-        // Validate the shmem reservation math (C: ShmemAlloc(LWLockShmemSize())).
-        let _space_locks = LWLockShmemSize()?;
+        // Allocate space (C: `ptr = ShmemAlloc(LWLockShmemSize())`). This must
+        // use `ShmemAlloc` (the `ShmemLock`-spinlock bump allocator), NOT
+        // `ShmemInitStruct` — `ShmemInitStruct` takes `ShmemIndexLock` (a
+        // MainLWLockArray lock), which does not yet exist while we are building
+        // that very array (a `MainLWLockArray not published` cycle). `ShmemAlloc`
+        // touches only the `ShmemLock` spinlock, exactly as C relies on here.
+        let space_locks = LWLockShmemSize()?;
+        let raw = shmem::shmem_alloc::call(space_locks)?;
 
-        // Allocate space.
-        let mut locks: Vec<LWLockPadded> = Vec::new();
-        locks
-            .try_reserve_exact(total_locks)
-            .map_err(|_| mcx.oom(total_locks * core::mem::size_of::<LWLockPadded>()))?;
-        locks.resize_with(total_locks, LWLockPadded::default);
+        // Leave room for the dynamic-allocation tranche counter (C stores an
+        // `int` just before the first LWLock), then align the LWLock array to
+        // `LWLOCK_PADDED_SIZE`. `LWLockShmemSize` reserved
+        // `sizeof(int) + LWLOCK_PADDED_SIZE` of slack for exactly this.
+        // SAFETY: `raw` addresses `space_locks` writable bytes in shmem; the
+        // offsetting stays within that reservation (the slack guarantees the
+        // `total_locks` padded slots fit after alignment).
+        let base = unsafe {
+            let p = raw.add(core::mem::size_of::<i32>());
+            let pad = LWLOCK_PADDED_SIZE - (p as usize) % LWLOCK_PADDED_SIZE;
+            p.add(pad) as *mut LWLockPadded
+        };
+
+        // Lay out and zero every slot. `LWLockPadded::default` is the
+        // all-zero/initial-state lock; `LWLockInitialize` (inside
+        // `InitializeLWLocks`) then sets each lock's tranche/initial state.
+        // SAFETY: `base` addresses `total_locks` writable, properly-aligned
+        // `LWLockPadded` slots in shmem; each is written exactly once.
+        for i in 0..total_locks {
+            unsafe { core::ptr::write(base.add(i), LWLockPadded::default()) };
+        }
 
         // Initialize the dynamic-allocation counter for tranches, which in C
         // is stored just before the first LWLock. (Like C, no spinlock: only
         // the postmaster runs at this point.)
         LWLOCK_COUNTER.store(LWTRANCHE_FIRST_USER_DEFINED, Ordering::Relaxed);
 
-        // Initialize all LWLocks.
-        let named_tranches = InitializeLWLocks(mcx, &mut locks)?;
+        // Initialize all LWLocks over the shared array.
+        // SAFETY: `base`/`total_locks` describe the live shared slot array, not
+        // aliased by anyone else during this single-process postmaster init.
+        let locks_slice = unsafe { core::slice::from_raw_parts_mut(base, total_locks) };
+        let named_tranches = InitializeLWLocks(mcx, locks_slice)?;
 
-        // Publish the table: this is the shmem segment backends attach to.
+        // Publish the table: only the shared base pointer + count + the
+        // read-only placement metadata. The lock words themselves are in the
+        // MAP_SHARED segment that forked backends inherit.
         if MAIN_LWLOCKS
             .set(LWLockTable {
-                locks,
+                locks_ptr: base,
+                locks_len: total_locks,
                 named_tranches,
             })
             .is_err()
@@ -542,7 +600,11 @@ pub fn CreateLWLocks(mcx: Mcx<'_>, is_under_postmaster: bool) -> PgResult<&'stat
         }
         MAIN_LWLOCKS.get().expect("just published")
     } else {
-        // A forked backend attaches to the postmaster-initialized array.
+        // A forked backend attaches to the postmaster-initialized array. The
+        // COW `MAIN_LWLOCKS` OnceLock is inherited already-set, and its
+        // `locks_ptr` addresses the genuine MAP_SHARED segment (NOT a COW copy),
+        // so the inherited table is already correct — every backend sees the
+        // SAME lock words and mutually excludes on them.
         MAIN_LWLOCKS.get().expect(
             "CreateLWLocks(is_under_postmaster) before the postmaster created MainLWLockArray",
         )
@@ -636,7 +698,7 @@ pub fn GetNamedLWLockTranche<'a>(
     match range {
         Some(range) => {
             let (start, len) = (range.start, range.len);
-            Ok(&table.locks[start..start + len])
+            Ok(&table.locks()[start..start + len])
         }
         None => {
             elog(ERROR, "requested tranche is not registered")?;

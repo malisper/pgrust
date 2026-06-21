@@ -63,6 +63,18 @@ fn install_seams() {
     });
     shmem::shmem_lock_acquire::set(|| {});
     shmem::shmem_lock_release::set(|| {});
+    // Mock `ShmemAlloc`: hand back a fresh zeroed, 128-byte-aligned
+    // (`LWLOCK_PADDED_SIZE`) leaked buffer of the requested size (the
+    // `CreateLWLocks` allocation path; leaked for the process lifetime like
+    // genuine shmem).
+    shmem::shmem_alloc::set(|size| {
+        use std::alloc::{alloc_zeroed, Layout};
+        let layout = Layout::from_size_align(size.max(1), LWLOCK_PADDED_SIZE).unwrap();
+        // SAFETY: nonzero size.
+        let ptr = unsafe { alloc_zeroed(layout) };
+        assert!(!ptr.is_null(), "lwlock test ShmemAlloc OOM");
+        Ok(ptr)
+    });
 
     globals::hold_interrupts::set(|| {});
     globals::resume_interrupts::set(|| {});
