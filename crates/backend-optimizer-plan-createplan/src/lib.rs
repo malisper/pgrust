@@ -5028,7 +5028,9 @@ fn cmdtype_path_to_node(op: types_pathnodes::CmdType) -> types_nodes::nodes::Cmd
         types_pathnodes::CMD_INSERT => N::CMD_INSERT,
         types_pathnodes::CMD_DELETE => N::CMD_DELETE,
         types_pathnodes::CMD_MERGE => N::CMD_MERGE,
-        _ => N::CMD_UTILITY,
+        types_pathnodes::CMD_UTILITY => N::CMD_UTILITY,
+        types_pathnodes::CMD_NOTHING => N::CMD_NOTHING,
+        _ => N::CMD_UNKNOWN,
     }
 }
 

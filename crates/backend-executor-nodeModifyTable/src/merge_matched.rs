@@ -92,15 +92,20 @@ fn eval_merge_join_condition<'mcx>(
     rri: RriId,
     econtext: types_nodes::EcxtId,
 ) -> PgResult<bool> {
-    let mut cond = estate
-        .result_rel(rri)
-        .ri_MergeJoinCondition
-        .as_ref()
-        .map(|c| (**c).clone());
-    match cond.as_mut() {
+    // The compiled join condition `ExprState` lives on the pooled `ResultRelInfo`
+    // and cannot be borrowed `&mut` while `estate` is also borrowed `&mut`, nor
+    // `.clone()`d (a compiled `ExprState` carries a context-allocated step program
+    // with no copyObject). So MOVE it out (leaving `None`), evaluate it through the
+    // execExpr owner seam, and restore it before returning — faithfully mirroring
+    // C aliasing `resultRelInfo->ri_MergeJoinCondition` into `ExecQual`. A `NULL`
+    // condition is always-true (transform_MERGE_to_join).
+    let mut cond = estate.result_rel_mut(rri).ri_MergeJoinCondition.take();
+    let result = match cond.as_mut() {
         Some(state) => backend_executor_execExpr_seams::exec_qual::call(state, econtext, estate),
         None => Ok(true),
-    }
+    };
+    estate.result_rel_mut(rri).ri_MergeJoinCondition = cond;
+    result
 }
 
 /// `ExecMergeMatched(context, resultRelInfo, tupleid, oldtuple, canSetTag,
