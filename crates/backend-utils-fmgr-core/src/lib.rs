@@ -1703,20 +1703,28 @@ pub fn oid_send_function_call(mcx: Mcx<'_>, function_id: Oid, val: Datum) -> PgR
 /// in `ref_args[0]`. `args[1..2]` are the by-value `typioparam`/`typmod`.
 fn init_io3_ref(
     flinfo: FmgrInfo,
-    arg0_ref: RefPayload,
+    arg0_ref: Option<RefPayload>,
     typioparam: Oid,
     typmod: i32,
 ) -> FunctionCallInfoBaseData {
+    // C: a NULL input string is `PG_ARGISNULL(0)` for the (non-strict) callee —
+    // `domain_in`/`domain_recv` rely on this to return a NULL domain value after
+    // running their NOT NULL / CHECK constraints. A `None` ref payload therefore
+    // marks arg0 as a SQL NULL with no by-ref image, not a present empty string.
+    let arg0 = match arg0_ref {
+        Some(_) => NullableDatum::value(Datum::null()),
+        None => NullableDatum::null(),
+    };
     let mut fcinfo = init_fcinfo(
         Some(flinfo),
         InvalidOid,
         vec![
-            NullableDatum::value(Datum::null()),
+            arg0,
             NullableDatum::value(objectid_get_datum(typioparam)),
             NullableDatum::value(int32_get_datum(typmod)),
         ],
     );
-    fcinfo.ref_args = vec![Some(arg0_ref), None, None];
+    fcinfo.ref_args = vec![arg0_ref, None, None];
     fcinfo.debug_assert_ref_null_consistency();
     fcinfo
 }
@@ -1773,7 +1781,7 @@ pub fn input_function_call_typed<'mcx>(
         return Ok(FmgrOut::ByVal(canon_byval(Datum::null())));
     }
     let fn_oid = flinfo.fn_oid;
-    let arg_ref = RefPayload::Cstring(input.unwrap_or("").to_string());
+    let arg_ref = input.map(|s| RefPayload::Cstring(s.to_string()));
     let mut fcinfo = init_io3_ref(flinfo, arg_ref, typioparam, typmod);
     let result = function_call_invoke(mcx, res, &mut fcinfo)?;
     let isnull = fcinfo.result_is_null();
@@ -1806,7 +1814,7 @@ pub fn input_function_call_safe_typed<'mcx>(
         return Ok(Some(FmgrOut::ByVal(canon_byval(Datum::null()))));
     }
     let fn_oid = flinfo.fn_oid;
-    let arg_ref = RefPayload::Cstring(input.unwrap_or("").to_string());
+    let arg_ref = input.map(|s| RefPayload::Cstring(s.to_string()));
     let mut fcinfo = init_io3_ref(flinfo, arg_ref, typioparam, typmod);
     // C `InputFunctionCallSafe`: install the soft-error sink on the frame
     // (`fcinfo->context = (Node *) escontext`) and call the input function with
@@ -1880,7 +1888,7 @@ pub fn receive_function_call_typed<'mcx>(
         return Ok(FmgrOut::ByVal(canon_byval(Datum::null())));
     }
     let fn_oid = flinfo.fn_oid;
-    let arg_ref = RefPayload::Varlena(buf.unwrap_or(&[]).to_vec());
+    let arg_ref = buf.map(|b| RefPayload::Varlena(b.to_vec()));
     let mut fcinfo = init_io3_ref(flinfo, arg_ref, typioparam, typmod);
     let result = function_call_invoke(mcx, res, &mut fcinfo)?;
     let isnull = fcinfo.result_is_null();

@@ -1284,6 +1284,13 @@ fn fc_domain_in(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<
     let typmod = if arg_is_null(fcinfo, 2) { -1 } else { arg_i32(fcinfo, 2) };
     let m = scratch_mcx();
     let value = crate::domains::domain_in(m.mcx(), string.as_deref(), domain_type, typmod)?;
+    // C: if (string == NULL) PG_RETURN_NULL(); else PG_RETURN_DATUM(value);
+    // domain_in is not strict: a NULL input string yields a NULL domain value
+    // (after the NOT NULL / CHECK constraints have run in domain_check_input),
+    // never the base input function's result.
+    if string.is_none() {
+        return Ok(ret_null(fcinfo));
+    }
     Ok(ret_value_datum(fcinfo, value))
 }
 
@@ -1297,7 +1304,8 @@ fn fc_domain_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResul
     }
     let domain_type = arg_oid(fcinfo, 1);
     let typmod = if arg_is_null(fcinfo, 2) { -1 } else { arg_i32(fcinfo, 2) };
-    let buf: Vec<u8> = if arg_is_null(fcinfo, 0) {
+    let buf_is_null = arg_is_null(fcinfo, 0);
+    let buf: Vec<u8> = if buf_is_null {
         Vec::new()
     } else {
         fcinfo
@@ -1308,6 +1316,10 @@ fn fc_domain_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResul
     };
     let m = scratch_mcx();
     let value = crate::domains::domain_recv(m.mcx(), &buf, domain_type, typmod)?;
+    // C: if (buf == NULL) PG_RETURN_NULL(); else PG_RETURN_DATUM(value);
+    if buf_is_null {
+        return Ok(ret_null(fcinfo));
+    }
     Ok(ret_value_datum(fcinfo, value))
 }
 
