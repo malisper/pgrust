@@ -1156,7 +1156,10 @@ pub fn init_seams() {
         }
         let has_nulls = nulls.iter().any(|&n| n);
         let dims = [datums.len() as i32];
-        let lbs = [1i32];
+        // For historical reasons TG_ARGV[] subscripts start at zero, not one
+        // (pl_exec.c PLPGSQL_PROMISE_TG_ARGV: lbs[0] = 0); that is exactly why
+        // C builds it with construct_md_array rather than construct_array.
+        let lbs = [0i32];
         let arr = backend_utils_adt_arrayfuncs::construct::construct_md_array(
             mcx,
             &datums,

@@ -469,11 +469,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
-    /// `construct_array(elems, n, TEXTOID, -1, false, TYPALIGN_INT)` over the
-    /// trigger's textual arguments — build the `TG_ARGV` `text[]` value. Each
-    /// element is `Some(bytes)` for a present argument (server-encoded text) or
-    /// `None` for a NULL element. Returns the verbatim header-ful array varlena
-    /// byte image (the by-ref lane carries it).
+    /// `construct_md_array(elems, NULL, 1, {nelems}, {0}, TEXTOID, -1, false,
+    /// TYPALIGN_INT)` over the trigger's textual arguments — build the `TG_ARGV`
+    /// `text[]` value. The lower bound is 0 (not 1): for historical reasons
+    /// TG_ARGV[] subscripts start at zero, which is why C uses construct_md_array
+    /// here rather than construct_array. Each element is `Some(bytes)` for a
+    /// present argument (server-encoded text) or `None` for a NULL element.
+    /// Returns the verbatim header-ful array varlena byte image (the by-ref lane
+    /// carries it).
     pub fn construct_text_array_datum(
         elems: std::vec::Vec<Option<std::vec::Vec<u8>>>,
     ) -> PgResult<std::vec::Vec<u8>>
