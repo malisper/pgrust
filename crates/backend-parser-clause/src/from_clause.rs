@@ -49,7 +49,7 @@
 //!   * F3b: `transformRangeTableFunc` (XMLTABLE), `transformJsonTable`.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, Mcx, PgVec};
@@ -60,6 +60,7 @@ use types_error::{
     ERRCODE_INVALID_TABLESAMPLE_ARGUMENT, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
+use types_error::error::ERRCODE_DUPLICATE_ALIAS;
 use backend_utils_error::ereport;
 
 use types_acl::acl::AclMode;
@@ -76,7 +77,16 @@ use types_nodes::parsestmt::{
 };
 use types_nodes::nodesamplescan::TableSampleClause;
 use types_nodes::primnodes::{
-    AND_EXPR, CoercionForm, Expr, TableFunc, TFT_XMLTABLE, Var, VarReturningType,
+    AND_EXPR, CaseTestExpr, CoercionForm, Expr, JsonTablePathScan, JsonTableSiblingJoin, TableFunc,
+    TFT_JSON_TABLE, TFT_XMLTABLE, Var, VarReturningType,
+};
+use types_nodes::rawexprnodes::{
+    JsonFuncExpr, JsonOutput, JsonTable, JsonTableColumn, JsonTablePathSpec,
+    JsonValueExpr as RawJsonValueExpr,
+};
+use types_nodes::primnodes::{
+    JsonBehaviorType, JsonEncoding, JsonExprOp, JsonFormatType, JsonReturning, JsonTableColumnType,
+    JsonWrapper, JsonQuotes,
 };
 use types_nodes::rawnodes::{
     A_Expr_Kind, Alias, JoinExpr, RangeFunction, RangeSubselect, RangeTableFunc,
@@ -85,7 +95,9 @@ use types_nodes::rawnodes::{
 
 use types_parsenodes::CoercionContext;
 
-use backend_nodes_core::makefuncs::{make_a_expr, make_func_call, make_relabel_type, make_var};
+use backend_nodes_core::makefuncs::{
+    make_a_expr, make_const, make_func_call, make_json_format, make_relabel_type, make_var,
+};
 use backend_nodes_core::nodefuncs::{expr_collation, expr_location, expr_type, expr_typmod};
 
 use backend_optimizer_util_vars::var::contain_vars_of_level;
@@ -128,6 +140,9 @@ const VAR_RETURNING_DEFAULT: VarReturningType = VarReturningType::VAR_RETURNING_
 
 /// `TSM_HANDLEROID` (catalog/pg_type_d.h) — the OID of the `tsm_handler` type.
 const TSM_HANDLEROID: Oid = 3310;
+
+/// `JSONPATHOID` (catalog/pg_type_d.h) — the OID of the `jsonpath` type.
+const JSONPATHOID: Oid = 4072;
 
 /// `RELKIND_RELATION` (catalog/pg_class.h).
 const RELKIND_RELATION: i8 = b'r' as i8;
@@ -1020,6 +1035,683 @@ fn transformRangeTableFunc<'mcx>(
 }
 
 // ===========================================================================
+// transformJsonTable — parse_jsontable.c (JSON_TABLE())
+// ===========================================================================
+
+/// `JsonTableParseContext` (parse_jsontable.c) — context threaded through the
+/// JSON_TABLE column-transformation helpers. `pstate`/`jt`/`tf` are passed
+/// explicitly (not embedded) so the borrow checker can keep `tf`/the column
+/// vectors mutable while `jt` is only read; `pathNames`/`pathNameId` carry the
+/// shared name-uniqueness state.
+struct JsonTableParseContext {
+    /// `int pathNameId` — path-name id counter.
+    pathNameId: i32,
+    /// `List *pathNames` — list of all path and column names.
+    pathNames: Vec<String>,
+}
+
+/// `isCompositeType(typid)` (parse_jsontable.c) — true for the types JSON_TABLE
+/// handles with `JSON_QUERY()` rather than `JSON_VALUE()`.
+fn isCompositeType(typid: Oid) -> PgResult<bool> {
+    use types_parsenodes::{TYPTYPE_COMPOSITE, TYPTYPE_DOMAIN};
+    use types_tuple::heaptuple::{JSONBOID, JSONOID};
+    use types_tuple::heaptuple::RECORDOID;
+
+    let typtype = lsyscache::get_typtype::call(typid)? as i8;
+    let type_is_array = lsyscache::get_element_type::call(typid)?.is_some();
+
+    Ok(typid == JSONOID
+        || typid == JSONBOID
+        || typid == RECORDOID
+        || type_is_array
+        || typtype == TYPTYPE_COMPOSITE
+        // domain over one of the above?
+        || (typtype == TYPTYPE_DOMAIN
+            && isCompositeType(lsyscache::get_base_type::call(typid)?)?))
+}
+
+/// `LookupPathOrColumnName(cxt, name)` (parse_jsontable.c) — true if `name` is
+/// already present in the shared name list.
+fn LookupPathOrColumnName(cxt: &JsonTableParseContext, name: &str) -> bool {
+    cxt.pathNames.iter().any(|n| n == name)
+}
+
+/// `generateJsonTablePathName(cxt)` (parse_jsontable.c) — generate a fresh unique
+/// JSON_TABLE path name and record it in the shared list.
+fn generateJsonTablePathName(cxt: &mut JsonTableParseContext) -> String {
+    let name = format!("json_table_path_{}", cxt.pathNameId);
+    cxt.pathNameId += 1;
+    cxt.pathNames.push(name.clone());
+    name
+}
+
+/// `CheckDuplicateColumnOrPathNames(cxt, columns)` (parse_jsontable.c) — recurse
+/// over the column definitions checking that no column / path name is duplicated.
+fn CheckDuplicateColumnOrPathNames<'mcx>(
+    pstate: &ParseState<'mcx>,
+    cxt: &mut JsonTableParseContext,
+    columns: &[NodePtr<'mcx>],
+) -> PgResult<()> {
+    for col in columns.iter() {
+        let jtc: &JsonTableColumn<'mcx> = col.expect_jsontablecolumn();
+
+        if jtc.coltype == JsonTableColumnType::JTC_NESTED {
+            let pathspec = jtc
+                .pathspec
+                .as_deref()
+                .ok_or_else(|| elog_error("CheckDuplicateColumnOrPathNames: NESTED without pathspec"))?;
+            if let Some(name) = pathspec.name.as_deref() {
+                let name_s = name.to_string();
+                if LookupPathOrColumnName(cxt, &name_s) {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_DUPLICATE_ALIAS)
+                        .errmsg(format!(
+                            "duplicate JSON_TABLE column or path name: {name_s}"
+                        ))
+                        .errposition(errpos(pstate, pathspec.name_location))
+                        .into_error());
+                }
+                cxt.pathNames.push(name_s);
+            }
+
+            CheckDuplicateColumnOrPathNames(pstate, cxt, &jtc.columns)?;
+        } else {
+            let name = jtc
+                .name
+                .as_deref()
+                .ok_or_else(|| elog_error("CheckDuplicateColumnOrPathNames: column without name"))?
+                .to_string();
+            if LookupPathOrColumnName(cxt, &name) {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_DUPLICATE_ALIAS)
+                    .errmsg(format!("duplicate JSON_TABLE column or path name: {name}"))
+                    .errposition(errpos(pstate, jtc.location))
+                    .into_error());
+            }
+            cxt.pathNames.push(name);
+        }
+    }
+    Ok(())
+}
+
+/// `makeJsonTablePathScan(pathspec, errorOnError, colMin, colMax, childplan)`
+/// (parse_jsontable.c) — build a `JsonTablePathScan` plan node carrying the
+/// jsonpath `Const` value, the path name, and the covered-column range. The
+/// trivial C `JsonTablePath` wrapper is collapsed into the scan's `path`/`name`.
+fn makeJsonTablePathScan<'mcx>(
+    mcx: Mcx<'mcx>,
+    pathspec: &JsonTablePathSpec<'mcx>,
+    errorOnError: bool,
+    colMin: i32,
+    colMax: i32,
+    childplan: Option<Node<'mcx>>,
+) -> PgResult<Node<'mcx>> {
+    use types_tuple::Datum;
+
+    // Assert(IsA(pathspec->string, A_Const));
+    // pathstring = castNode(A_Const, pathspec->string)->val.sval.sval;
+    let string_node = pathspec
+        .string
+        .as_deref()
+        .ok_or_else(|| elog_error("makeJsonTablePathScan: pathspec->string is NULL"))?;
+    let a_const = string_node.expect_a_const();
+    let val = a_const
+        .val
+        .as_deref()
+        .ok_or_else(|| elog_error("makeJsonTablePathScan: A_Const has no value"))?;
+    let pathstring = str_val(val)
+        .ok_or_else(|| elog_error("makeJsonTablePathScan: A_Const value is not a String"))?;
+
+    // value = makeConst(JSONPATHOID, -1, InvalidOid, -1,
+    //                   DirectFunctionCall1(jsonpath_in, CStringGetDatum(pathstring)),
+    //                   false, false);
+    // jsonpath_in returns the flattened on-disk jsonpath image, which already
+    // carries its own 4-byte varlena length header (SET_VARSIZE) — pass it
+    // through as the by-reference Const value verbatim (no re-wrapping).
+    let image = backend_utils_adt_jsonpath::jsonpath_in(mcx, pathstring.as_bytes(), None)?
+        .ok_or_else(|| elog_error("makeJsonTablePathScan: jsonpath_in returned NULL"))?;
+    let value_datum: Datum<'mcx> = Datum::ByRef(image);
+    let value = make_const(
+        mcx,
+        JSONPATHOID,
+        -1,
+        InvalidOid,
+        -1,
+        value_datum,
+        false,
+        false,
+    )?;
+    let value_node = Node::mk_const(mcx, value)?;
+
+    let name = match pathspec.name.as_deref() {
+        Some(n) => Some(mcx::PgString::from_str_in(&n.to_string(), mcx)?),
+        None => None,
+    };
+
+    let child = match childplan {
+        Some(c) => Some(alloc_in(mcx, c)?),
+        None => None,
+    };
+
+    Node::mk_json_table_path_scan(
+        mcx,
+        JsonTablePathScan {
+            path: alloc_in(mcx, value_node)?,
+            name,
+            errorOnError,
+            child,
+            colMin,
+            colMax,
+        },
+    )
+}
+
+/// `makeJsonTableSiblingJoin(lplan, rplan)` (parse_jsontable.c) — build a
+/// `JsonTableSiblingJoin` plan node that UNIONs the rows of its two children.
+fn makeJsonTableSiblingJoin<'mcx>(
+    mcx: Mcx<'mcx>,
+    lplan: Node<'mcx>,
+    rplan: Node<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    Node::mk_json_table_sibling_join(
+        mcx,
+        JsonTableSiblingJoin {
+            lplan: alloc_in(mcx, lplan)?,
+            rplan: alloc_in(mcx, rplan)?,
+        },
+    )
+}
+
+/// `transformJsonTableColumn(jtc, contextItemExpr, passingArgs)`
+/// (parse_jsontable.c) — turn a JSON_TABLE column definition into a raw
+/// `JsonFuncExpr` (`JSON_VALUE`/`JSON_QUERY`/`JSON_EXISTS`). The `coltype` passed
+/// here already reflects the JTC_REGULAR→JTC_FORMATTED promotion the caller did.
+fn transformJsonTableColumn<'mcx>(
+    mcx: Mcx<'mcx>,
+    coltype: JsonTableColumnType,
+    jtc: &JsonTableColumn<'mcx>,
+    context_item_expr: Node<'mcx>,
+    passing_args: &[NodePtr<'mcx>],
+) -> PgResult<JsonFuncExpr<'mcx>> {
+    let op = if coltype == JsonTableColumnType::JTC_REGULAR {
+        JsonExprOp::JSON_VALUE_OP
+    } else if coltype == JsonTableColumnType::JTC_EXISTS {
+        JsonExprOp::JSON_EXISTS_OP
+    } else {
+        JsonExprOp::JSON_QUERY_OP
+    };
+
+    // Pass the column name so any runtime JsonExpr errors can print it.
+    let jtc_name = jtc
+        .name
+        .as_deref()
+        .ok_or_else(|| elog_error("transformJsonTableColumn: column without name"))?
+        .to_string();
+    let column_name = mcx::PgString::from_str_in(&jtc_name, mcx)?;
+
+    // context_item = makeJsonValueExpr((Expr *) contextItemExpr, NULL,
+    //                                  makeJsonFormat(JS_FORMAT_DEFAULT,
+    //                                                 JS_ENC_DEFAULT, -1));
+    // The raw JsonFuncExpr.context_item carries the RAW JsonValueExpr (a Node*
+    // raw_expr), so build it directly rather than via make_json_value_expr (which
+    // yields the cooked, Box<Expr> form).
+    let context_item = RawJsonValueExpr {
+        raw_expr: Some(alloc_in(mcx, context_item_expr)?),
+        formatted_expr: None,
+        format: Some(make_json_format(
+            JsonFormatType::JS_FORMAT_DEFAULT,
+            JsonEncoding::JS_ENC_DEFAULT,
+            -1,
+        )),
+    };
+
+    // pathspec
+    let pathspec: NodePtr<'mcx> = if let Some(ps) = jtc.pathspec.as_deref() {
+        let string = ps
+            .string
+            .as_deref()
+            .ok_or_else(|| elog_error("transformJsonTableColumn: pathspec->string is NULL"))?;
+        alloc_in(mcx, string.clone_in(mcx)?)?
+    } else {
+        // Construct default path as '$."column_name"'.
+        let mut path: PgVec<'mcx, u8> = PgVec::new_in(mcx);
+        path.try_reserve(2).map_err(|_| mcx.oom(0))?;
+        path.push(b'$');
+        path.push(b'.');
+        backend_utils_adt_json::escape_json(&mut path, jtc_name.as_bytes())?;
+        let path_str = String::from_utf8_lossy(path.as_slice()).into_owned();
+        make_string_const(mcx, &path_str, -1)?
+    };
+
+    // output = makeNode(JsonOutput); output->typeName = jtc->typeName;
+    //          output->returning = makeNode(JsonReturning);
+    //          output->returning->format = jtc->format;
+    let returning = JsonReturning {
+        format: jtc.format,
+        typid: InvalidOid,
+        typmod: 0,
+    };
+    let output = JsonOutput {
+        type_name: match jtc.type_name.as_deref() {
+            Some(t) => Some(alloc_in(mcx, t.clone_in(mcx)?)?),
+            None => None,
+        },
+        returning: Some(returning),
+    };
+
+    let mut passing: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+    passing
+        .try_reserve(passing_args.len())
+        .map_err(|_| mcx.oom(0))?;
+    for a in passing_args.iter() {
+        passing.push(alloc_in(mcx, a.clone_in(mcx)?)?);
+    }
+
+    Ok(JsonFuncExpr {
+        op,
+        column_name: Some(column_name),
+        context_item: Some(alloc_in(mcx, context_item)?),
+        pathspec: Some(pathspec),
+        passing,
+        output: Some(alloc_in(mcx, output)?),
+        on_empty: match jtc.on_empty.as_deref() {
+            Some(b) => Some(alloc_in(mcx, b.clone_in(mcx)?)?),
+            None => None,
+        },
+        on_error: match jtc.on_error.as_deref() {
+            Some(b) => Some(alloc_in(mcx, b.clone_in(mcx)?)?),
+            None => None,
+        },
+        wrapper: jtc.wrapper,
+        quotes: jtc.quotes,
+        location: jtc.location,
+    })
+}
+
+/// `makeStringConst(str, location)` (gram.y / makefuncs.c) — build an `A_Const`
+/// string literal `Node`, returned as a raw `Node`.
+fn make_string_const<'mcx>(
+    mcx: Mcx<'mcx>,
+    s: &str,
+    location: i32,
+) -> PgResult<NodePtr<'mcx>> {
+    let str_node = Node::mk_string(
+        mcx,
+        types_nodes::value::StringNode {
+            sval: mcx::PgString::from_str_in(s, mcx)?,
+        },
+    )?;
+    let a_const = types_nodes::rawnodes::A_Const {
+        val: Some(alloc_in(mcx, str_node)?),
+        isnull: false,
+        location,
+    };
+    alloc_in(mcx, Node::mk_a_const(mcx, a_const)?)
+}
+
+/// `transformJsonTableColumns(cxt, columns, passingArgs, pathspec)`
+/// (parse_jsontable.c) — transform the (non-nested) columns of one scope, append
+/// their `JsonExpr` nodes to `tf`, recurse into nested columns, and return the
+/// `JsonTablePathScan` plan that supplies the source row.
+fn transformJsonTableColumns<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    cxt: &mut JsonTableParseContext,
+    jt: &JsonTable<'mcx>,
+    tf: &mut TableFunc<'mcx>,
+    columns: &[NodePtr<'mcx>],
+    passing_args: &[NodePtr<'mcx>],
+    pathspec: &JsonTablePathSpec<'mcx>,
+) -> PgResult<Node<'mcx>> {
+    let mut ordinality_found = false;
+    let error_on_error = match jt.on_error.as_deref() {
+        Some(b) => b.expect_jsonbehavior().btype == JsonBehaviorType::JSON_BEHAVIOR_ERROR,
+        None => false,
+    };
+
+    // contextItemTypid = exprType(tf->docexpr);
+    let context_item_typid = {
+        let docexpr = tf
+            .docexpr
+            .as_deref()
+            .ok_or_else(|| elog_error("transformJsonTableColumns: tf->docexpr is NULL"))?;
+        expr_type(Some(docexpr))?
+    };
+
+    // Start of column range.
+    let col_min = tf.colvalexprs.as_ref().map_or(0, |v| v.len()) as i32;
+
+    for col in columns.iter() {
+        let rawc: &JsonTableColumn<'mcx> = col.expect_jsontablecolumn();
+
+        // The effective coltype: JTC_REGULAR may be promoted to JTC_FORMATTED.
+        let mut eff_coltype = rawc.coltype;
+
+        if rawc.coltype != JsonTableColumnType::JTC_NESTED {
+            let name = rawc
+                .name
+                .as_deref()
+                .ok_or_else(|| elog_error("transformJsonTableColumns: column without name"))?
+                .to_string();
+            let colnames = tf
+                .colnames
+                .get_or_insert_with(|| PgVec::new_in(mcx));
+            colnames.try_reserve(1).map_err(|_| mcx.oom(0))?;
+            colnames.push(mcx::PgString::from_str_in(&name, mcx)?);
+        }
+
+        let typid: Oid;
+        let typmod: i32;
+        let mut typcoll: Oid = InvalidOid;
+        let colexpr: Option<Expr>;
+
+        match rawc.coltype {
+            JsonTableColumnType::JTC_FOR_ORDINALITY => {
+                if ordinality_found {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_SYNTAX_ERROR)
+                        .errmsg("only one FOR ORDINALITY column is allowed")
+                        .errposition(errpos(pstate, rawc.location))
+                        .into_error());
+                }
+                ordinality_found = true;
+                colexpr = None;
+                typid = types_core::catalog::INT4OID;
+                typmod = -1;
+            }
+            JsonTableColumnType::JTC_REGULAR
+            | JsonTableColumnType::JTC_FORMATTED
+            | JsonTableColumnType::JTC_EXISTS => {
+                if rawc.coltype == JsonTableColumnType::JTC_REGULAR {
+                    let (id, md) = {
+                        let tn = rawc.type_name.as_deref().ok_or_else(|| {
+                            elog_error("transformJsonTableColumns: JTC_REGULAR without typeName")
+                        })?;
+                        let tn_pn = backend_parser_parse_type::raw_typename_to_parse(tn)?;
+                        typenameTypeIdAndMod(mcx, Some(&*pstate), &tn_pn)?
+                    };
+                    // Promote to JTC_FORMATTED if the type is better handled by
+                    // JSON_QUERY() or non-default WRAPPER/QUOTES is specified.
+                    if isCompositeType(id)?
+                        || rawc.quotes != JsonQuotes::JS_QUOTES_UNSPEC
+                        || rawc.wrapper != JsonWrapper::JSW_UNSPEC
+                    {
+                        eff_coltype = JsonTableColumnType::JTC_FORMATTED;
+                    }
+                    let _ = (id, md);
+                }
+
+                // param = makeNode(CaseTestExpr) with the context item type.
+                let param = Expr::CaseTestExpr(CaseTestExpr {
+                    collation: InvalidOid,
+                    typeId: context_item_typid,
+                    typeMod: -1,
+                });
+                let param_node = Node::mk_expr(mcx, param)?;
+
+                let jfe = transformJsonTableColumn(
+                    mcx,
+                    eff_coltype,
+                    rawc,
+                    param_node,
+                    passing_args,
+                )?;
+                let jfe_node = Node::mk_json_func_expr(mcx, jfe)?;
+
+                let mut ce = transformExpr(
+                    pstate,
+                    Some(jfe_node),
+                    ParseExprKind::EXPR_KIND_FROM_FUNCTION,
+                )?
+                .ok_or_else(|| {
+                    elog_error("transformJsonTableColumns: column transformed to NULL")
+                })?;
+                assign_expr_collations(Some(pstate), &mut ce)?;
+
+                typid = expr_type(Some(&ce))?;
+                typmod = expr_typmod(Some(&ce))?;
+                typcoll = expr_collation(Some(&ce))?;
+                colexpr = Some(ce);
+            }
+            JsonTableColumnType::JTC_NESTED => {
+                continue;
+            }
+        }
+
+        let coltypes = tf.coltypes.get_or_insert_with(|| PgVec::new_in(mcx));
+        coltypes.try_reserve(1).map_err(|_| mcx.oom(0))?;
+        coltypes.push(typid);
+        let coltypmods = tf.coltypmods.get_or_insert_with(|| PgVec::new_in(mcx));
+        coltypmods.try_reserve(1).map_err(|_| mcx.oom(0))?;
+        coltypmods.push(typmod);
+        let colcollations = tf.colcollations.get_or_insert_with(|| PgVec::new_in(mcx));
+        colcollations.try_reserve(1).map_err(|_| mcx.oom(0))?;
+        colcollations.push(typcoll);
+        let colvalexprs = tf.colvalexprs.get_or_insert_with(|| PgVec::new_in(mcx));
+        colvalexprs.try_reserve(1).map_err(|_| mcx.oom(0))?;
+        colvalexprs.push(match colexpr {
+            Some(e) => Some(alloc_in(mcx, e)?),
+            None => None,
+        });
+    }
+
+    // End of column range.
+    let cur_len = tf.colvalexprs.as_ref().map_or(0, |v| v.len()) as i32;
+    let (col_min, col_max) = if cur_len == col_min {
+        // No columns in this Scan beside the nested ones.
+        (-1, -1)
+    } else {
+        (col_min, cur_len - 1)
+    };
+
+    // Recursively transform nested columns.
+    let childplan =
+        transformJsonTableNestedColumns(mcx, pstate, cxt, jt, tf, passing_args, columns)?;
+
+    // Create a "parent" scan responsible for all columns handled above.
+    makeJsonTablePathScan(mcx, pathspec, error_on_error, col_min, col_max, childplan)
+}
+
+/// `transformJsonTableNestedColumns(cxt, passingArgs, columns)`
+/// (parse_jsontable.c) — recurse into the NESTED COLUMNS clauses, combining their
+/// plans with sibling joins (a UNION of their row sets).
+fn transformJsonTableNestedColumns<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    cxt: &mut JsonTableParseContext,
+    jt: &JsonTable<'mcx>,
+    tf: &mut TableFunc<'mcx>,
+    passing_args: &[NodePtr<'mcx>],
+    columns: &[NodePtr<'mcx>],
+) -> PgResult<Option<Node<'mcx>>> {
+    let mut plan: Option<Node<'mcx>> = None;
+
+    for col in columns.iter() {
+        let jtc: &JsonTableColumn<'mcx> = col.expect_jsontablecolumn();
+
+        if jtc.coltype != JsonTableColumnType::JTC_NESTED {
+            continue;
+        }
+
+        // jtc->pathspec->name == NULL → generate one.
+        // `jtc` is borrowed from the (immutable) `columns` slice, so the C
+        // in-place mutation of `pathspec->name` is reproduced by cloning the
+        // pathspec and filling in a generated name when absent (the cloned spec
+        // is what the scan stores; the generated name is also recorded in the
+        // shared list by CheckDuplicateColumnOrPathNames-time generation).
+        let pathspec_src = jtc
+            .pathspec
+            .as_deref()
+            .ok_or_else(|| elog_error("transformJsonTableNestedColumns: NESTED without pathspec"))?;
+        let mut pathspec = pathspec_src.clone_in(mcx)?;
+        if pathspec.name.is_none() {
+            let gen = generateJsonTablePathName(cxt);
+            pathspec.name = Some(mcx::PgString::from_str_in(&gen, mcx)?);
+        }
+
+        let nested = transformJsonTableColumns(
+            mcx,
+            pstate,
+            cxt,
+            jt,
+            tf,
+            &jtc.columns,
+            passing_args,
+            &pathspec,
+        )?;
+
+        plan = Some(match plan {
+            Some(p) => makeJsonTableSiblingJoin(mcx, p, nested)?,
+            None => nested,
+        });
+    }
+
+    Ok(plan)
+}
+
+/// Transform a raw `JsonTable` into a `TableFunc` and add it as a range-table
+/// entry. 1:1 port of `transformJsonTable` (parse_jsontable.c).
+fn transformJsonTable<'mcx>(
+    mcx: Mcx<'mcx>,
+    pstate: &mut ParseState<'mcx>,
+    jt: &JsonTable<'mcx>,
+) -> PgResult<ParseNamespaceItem<'mcx>> {
+    let root_path_src = jt
+        .pathspec
+        .as_deref()
+        .ok_or_else(|| elog_error("transformJsonTable: jt->pathspec is NULL"))?;
+
+    // if (jt->on_error && btype not ERROR/EMPTY/EMPTY_ARRAY) ereport.
+    if let Some(oe) = jt.on_error.as_deref() {
+        let b = oe.expect_jsonbehavior();
+        if b.btype != JsonBehaviorType::JSON_BEHAVIOR_ERROR
+            && b.btype != JsonBehaviorType::JSON_BEHAVIOR_EMPTY
+            && b.btype != JsonBehaviorType::JSON_BEHAVIOR_EMPTY_ARRAY
+        {
+            return Err(ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!("invalid {} behavior", "ON ERROR"))
+                .errdetail(
+                    "Only EMPTY [ ARRAY ] or ERROR is allowed in the top-level ON ERROR clause.",
+                )
+                .errposition(errpos(pstate, b.location))
+                .into_error());
+        }
+    }
+
+    let mut cxt = JsonTableParseContext {
+        pathNameId: 0,
+        pathNames: Vec::new(),
+    };
+
+    // The root pathspec's name (generate one if absent). The owned model takes a
+    // working copy of the root pathspec so it can fill in a generated name (the C
+    // mutates rootPathSpec->name in place).
+    let mut root_path = root_path_src.clone_in(mcx)?;
+    if root_path.name.is_none() {
+        let gen = generateJsonTablePathName(&mut cxt);
+        root_path.name = Some(mcx::PgString::from_str_in(&gen, mcx)?);
+    } else {
+        // cxt.pathNames = list_make1(rootPathSpec->name)
+        cxt.pathNames
+            .push(root_path.name.as_deref().unwrap().to_string());
+    }
+    CheckDuplicateColumnOrPathNames(pstate, &mut cxt, &jt.columns)?;
+
+    // Make lateral_only names of this level visible.
+    debug_assert!(!pstate.p_lateral_active);
+    pstate.p_lateral_active = true;
+
+    let mut tf = TableFunc::default();
+    tf.functype = TFT_JSON_TABLE;
+
+    // Build the dummy JSON_TABLE_OP JsonFuncExpr and transform it into docexpr.
+    let jfe = JsonFuncExpr {
+        op: JsonExprOp::JSON_TABLE_OP,
+        column_name: None,
+        context_item: match jt.context_item.as_deref() {
+            Some(c) => Some(alloc_in(mcx, c.clone_in(mcx)?)?),
+            None => None,
+        },
+        // jfe->pathspec = (Node *) rootPathSpec->string;
+        pathspec: match root_path.string.as_deref() {
+            Some(s) => Some(alloc_in(mcx, s.clone_in(mcx)?)?),
+            None => None,
+        },
+        passing: {
+            let mut v: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
+            v.try_reserve(jt.passing.len()).map_err(|_| mcx.oom(0))?;
+            for a in jt.passing.iter() {
+                v.push(alloc_in(mcx, a.clone_in(mcx)?)?);
+            }
+            v
+        },
+        output: None,
+        on_empty: None,
+        on_error: match jt.on_error.as_deref() {
+            Some(b) => Some(alloc_in(mcx, b.clone_in(mcx)?)?),
+            None => None,
+        },
+        wrapper: JsonWrapper::JSW_UNSPEC,
+        quotes: JsonQuotes::JS_QUOTES_UNSPEC,
+        location: jt.location,
+    };
+    let jfe_node = Node::mk_json_func_expr(mcx, jfe)?;
+    let docexpr = transformExpr(
+        pstate,
+        Some(jfe_node),
+        ParseExprKind::EXPR_KIND_FROM_FUNCTION,
+    )?
+    .ok_or_else(|| elog_error("transformJsonTable: docexpr transformed to NULL"))?;
+    tf.docexpr = Some(alloc_in(mcx, docexpr)?);
+
+    // Create the row-pattern plan (also fills tf->colvalexprs etc.).
+    let plan = transformJsonTableColumns(
+        mcx,
+        pstate,
+        &mut cxt,
+        jt,
+        &mut tf,
+        &jt.columns,
+        &jt.passing,
+        &root_path,
+    )?;
+    tf.plan = Some(alloc_in(mcx, plan)?);
+
+    // tf->passingvalexprs = copyObject(((JsonExpr *) tf->docexpr)->passing_values);
+    {
+        let je = tf
+            .docexpr
+            .as_deref()
+            .ok_or_else(|| elog_error("transformJsonTable: tf->docexpr is NULL"))?
+            .as_jsonexpr()
+            .ok_or_else(|| elog_error("transformJsonTable: tf->docexpr is not a JsonExpr"))?;
+        let mut pv: PgVec<'mcx, mcx::PgBox<'mcx, Expr>> = PgVec::new_in(mcx);
+        pv.try_reserve(je.passing_values.len())
+            .map_err(|_| mcx.oom(0))?;
+        for e in je.passing_values.iter() {
+            pv.push(alloc_in(mcx, e.clone_in(mcx)?)?);
+        }
+        tf.passingvalexprs = Some(pv);
+    }
+
+    tf.ordinalitycol = -1;
+    tf.location = jt.location;
+
+    pstate.p_lateral_active = false;
+
+    // Mark LATERAL if requested or if there are lateral cross-references.
+    let tf_node = Node::mk_table_func(mcx, tf)?;
+    let is_lateral = jt.lateral || contain_vars_of_level(&tf_node, 0);
+    let tf_back = tf_node
+        .into_tablefunc()
+        .ok_or_else(|| elog_error("transformJsonTable: not a TableFunc node"))?;
+
+    let alias = copy_opt_alias(mcx, jt.alias.as_deref())?;
+    addRangeTableEntryForTableFunc(mcx, pstate, tf_back, alias, is_lateral, true)
+}
+
+// ===========================================================================
 // transformRangeTableSample — parse_clause.c:685
 // ===========================================================================
 
@@ -1249,6 +1941,14 @@ fn transformFromClauseItem<'mcx>(
         ntag::T_RangeTableFunc => {
             let rtf = n.expect_rangetablefunc();
             let nsitem = transformRangeTableFunc(mcx, pstate, rtf)?;
+            let rtindex = nsitem.p_rtindex;
+            let namespace = alloc::vec![nsitem];
+            let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex })?;
+            Ok((rtr, namespace))
+        }
+        ntag::T_JsonTable => {
+            let jt = n.expect_jsontable();
+            let nsitem = transformJsonTable(mcx, pstate, jt)?;
             let rtindex = nsitem.p_rtindex;
             let namespace = alloc::vec![nsitem];
             let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex })?;

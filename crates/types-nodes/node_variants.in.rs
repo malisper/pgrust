@@ -294,6 +294,10 @@ pub enum Node<'mcx> {
     JsonTable(crate::rawexprnodes::JsonTable<'mcx>),
     /// `T_JsonTableColumn` (raw).
     JsonTableColumn(crate::rawexprnodes::JsonTableColumn<'mcx>),
+    /// `T_JsonTablePathScan` — a JSON_TABLE path-scan plan node (`tf->plan`).
+    JsonTablePathScan(crate::primnodes::JsonTablePathScan<'mcx>),
+    /// `T_JsonTableSiblingJoin` — a JSON_TABLE sibling-join plan node.
+    JsonTableSiblingJoin(crate::primnodes::JsonTableSiblingJoin<'mcx>),
     // --- value nodes (nodes/value.h) — leaf literals ---
     // The lexer/grammar emits these `Value`-family leaves (`A_Const.val`,
     // operator-name `list_make1(makeString(name))`, etc.) as `Node *`, so they

@@ -13775,6 +13775,8 @@ dependencies = [
  "backend-parser-target-seams",
  "backend-rewrite-rewritemanip-seams",
  "backend-utils-adt-format-type",
+ "backend-utils-adt-json",
+ "backend-utils-adt-jsonpath",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
  "backend-utils-error",

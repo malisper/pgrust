@@ -278,6 +278,35 @@ pub(crate) fn out_table_func(
     write_location_field(buf, "location", n.location, wl);
 }
 
+/// `_outJsonTablePathScan` (outfuncs.funcs.c) — the `JsonTablePlan` leaf. The C
+/// `path` is a `JsonTablePath` node (`Const *value; char *name;`); this port
+/// collapses it into the `path` (the `Const` value node) + `name` fields, so we
+/// serialize those two directly in place of the wrapper.
+pub(crate) fn out_json_table_path_scan(
+    buf: &mut String,
+    n: &types_nodes::primnodes::JsonTablePathScan<'_>,
+    wl: bool,
+) {
+    buf.push_str("JSONTABLEPATHSCAN");
+    crate::write_node_field(buf, "path", Some(&n.path), wl);
+    crate::write_string_field(buf, "name", n.name.as_ref().map(|s| s.as_str()));
+    crate::write_bool_field(buf, "errorOnError", n.errorOnError);
+    crate::write_node_field(buf, "child", n.child.as_deref(), wl);
+    crate::write_int_field(buf, "colMin", n.colMin);
+    crate::write_int_field(buf, "colMax", n.colMax);
+}
+
+/// `_outJsonTableSiblingJoin` (outfuncs.funcs.c) — the sibling-join plan.
+pub(crate) fn out_json_table_sibling_join(
+    buf: &mut String,
+    n: &types_nodes::primnodes::JsonTableSiblingJoin<'_>,
+    wl: bool,
+) {
+    buf.push_str("JSONTABLESIBLINGJOIN");
+    crate::write_node_field(buf, "lplan", Some(&n.lplan), wl);
+    crate::write_node_field(buf, "rplan", Some(&n.rplan), wl);
+}
+
 // ===========================================================================
 // _outQuery
 // ===========================================================================
@@ -1213,6 +1242,8 @@ pub(crate) fn try_out(buf: &mut String, node: &Node<'_>, wl: bool) -> bool {
         ntag::T_A_Const => { let n = node.expect_a_const(); framed(buf, |b| out_a_const(b, n, wl)) },
 
         ntag::T_TableFunc => { let n = node.expect_tablefunc(); framed(buf, |b| out_table_func(b, n, wl)) },
+        ntag::T_JsonTablePathScan => { let n = node.expect_jsontablepathscan(); framed(buf, |b| out_json_table_path_scan(b, n, wl)) },
+        ntag::T_JsonTableSiblingJoin => { let n = node.expect_jsontablesiblingjoin(); framed(buf, |b| out_json_table_sibling_join(b, n, wl)) },
 
         ntag::T_CommonTableExpr => { let n = node.expect_commontableexpr(); framed(buf, |b| out_common_table_expr(b, n, wl)) },
 

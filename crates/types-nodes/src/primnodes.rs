@@ -346,6 +346,77 @@ fn clone_copy_list<'b, T: Copy>(
     }
 }
 
+/// `JsonTablePathScan` (nodes/primnodes.h) — a `JsonTablePlan` leaf that
+/// evaluates a JSON path against the document row and supplies the source row for
+/// the columns it covers. Built by `makeJsonTablePathScan` (parse_jsontable.c).
+///
+/// The C `JsonTablePlan plan;` abstract base (carrying only the `NodeTag`) is
+/// implicit here: this is a `Node`-enum variant, so its tag IS its identity. The
+/// trivial C `JsonTablePath` wrapper (`Const *value; char *name;`) is collapsed
+/// into the `path` (the `Const` jsonpath value node) + `name` fields, exactly the
+/// minimal faithful shape the executor reads.
+#[derive(Debug)]
+pub struct JsonTablePathScan<'mcx> {
+    /// `JsonTablePath *path` (collapsed) → `Const *value` — the jsonpath value,
+    /// a `Const` of type `jsonpath` built by `make_const` over the
+    /// `DirectFunctionCall1(jsonpath_in, ...)` image.
+    pub path: PgBox<'mcx, crate::nodes::Node<'mcx>>,
+    /// `JsonTablePath *path` (collapsed) → `char *name` — the path name.
+    pub name: Option<PgString<'mcx>>,
+    /// `bool errorOnError` — ERROR/EMPTY ON ERROR behavior; only significant in
+    /// the plan for the top-level path.
+    pub errorOnError: bool,
+    /// `JsonTablePlan *child` — plan(s) for nested columns, if any.
+    pub child: Option<PgBox<'mcx, crate::nodes::Node<'mcx>>>,
+    /// `int colMin` — 0-based index in `TableFunc.colvalexprs` of the first
+    /// column covered by this plan (-1 if all columns are nested).
+    pub colMin: i32,
+    /// `int colMax` — 0-based index of the last column covered by this plan
+    /// (-1 if all columns are nested).
+    pub colMax: i32,
+}
+
+impl JsonTablePathScan<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<JsonTablePathScan<'b>> {
+        Ok(JsonTablePathScan {
+            path: alloc_in(mcx, self.path.clone_in(mcx)?)?,
+            name: match &self.name {
+                Some(s) => Some(s.clone_in(mcx)?),
+                None => None,
+            },
+            errorOnError: self.errorOnError,
+            child: match &self.child {
+                Some(c) => Some(alloc_in(mcx, c.clone_in(mcx)?)?),
+                None => None,
+            },
+            colMin: self.colMin,
+            colMax: self.colMax,
+        })
+    }
+}
+
+/// `JsonTableSiblingJoin` (nodes/primnodes.h) — a `JsonTablePlan` that performs a
+/// "sibling join" (a UNION of the row sets) of two nested-column plans. Built by
+/// `makeJsonTableSiblingJoin` (parse_jsontable.c).
+#[derive(Debug)]
+pub struct JsonTableSiblingJoin<'mcx> {
+    /// `JsonTablePlan *lplan` — the left child plan.
+    pub lplan: PgBox<'mcx, crate::nodes::Node<'mcx>>,
+    /// `JsonTablePlan *rplan` — the right child plan.
+    pub rplan: PgBox<'mcx, crate::nodes::Node<'mcx>>,
+}
+
+impl JsonTableSiblingJoin<'_> {
+    /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying allocates.
+    pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<JsonTableSiblingJoin<'b>> {
+        Ok(JsonTableSiblingJoin {
+            lplan: alloc_in(mcx, self.lplan.clone_in(mcx)?)?,
+            rplan: alloc_in(mcx, self.rplan.clone_in(mcx)?)?,
+        })
+    }
+}
+
 /// `Relids` (nodes/bitmapset.h: `Bitmapset *`) for the lifetime-free expression
 /// tree — a planner relation-id set carried by a [`Var`]/[`PlaceHolderVar`].
 ///

@@ -55,5 +55,7 @@ backend-access-tablesample-core-seams = { path = "../backend-access-tablesample-
 backend-utils-cache-lsyscache-seams = { path = "../backend-utils-cache-lsyscache-seams" }
 backend-nodes-equalfuncs-seams = { path = "../backend-nodes-equalfuncs-seams" }
 backend-nodes-copyfuncs-seams = { path = "../backend-nodes-copyfuncs-seams" }
+backend-utils-adt-jsonpath = { path = "../backend-utils-adt-jsonpath" }
+backend-utils-adt-json = { path = "../backend-utils-adt-json" }
 
 [dev-dependencies]
