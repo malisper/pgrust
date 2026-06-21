@@ -638,7 +638,9 @@ pub fn init_seams() {
     s::guc_array_reset::set(guc_array::GUCArrayReset);
     // `ApplySetting` processes all options at PGC_SUSET (the right to insert was
     // checked at insert time) with GUC_ACTION_SET — both baked into the seam.
-    s::process_guc_array::set(|a, source| guc_array::ProcessGUCArray(a, PGC_SUSET, source));
+    s::process_guc_array::set(|a, source| {
+        guc_array::ProcessGUCArray(a, PGC_SUSET, source, GUC_ACTION_SET)
+    });
 
     // --- RestrictSearchPath (guc.c:2246; mis-homed seam re-homed here). ---
     s::restrict_search_path::set(restrict_search_path);
@@ -778,7 +780,12 @@ pub fn init_seams() {
                         } else {
                             types_guc::PGC_USERSET
                         };
-                        guc_array::ProcessGUCArray(set_items, context, types_guc::PGC_S_SESSION)?;
+                        guc_array::ProcessGUCArray(
+                            set_items,
+                            context,
+                            types_guc::PGC_S_SESSION,
+                            GUC_ACTION_SAVE,
+                        )?;
                     }
                 }
             }
