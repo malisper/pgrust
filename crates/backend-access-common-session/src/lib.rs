@@ -253,8 +253,26 @@ fn initialize_session() -> PgResult<()> {
 /// (`SESSION_KEY_RECORD_TYPMOD_REGISTRY`). `SharedRecordTypmodRegistryInit`
 /// builds the registry (its record/typmod dshash tables) over that DSA area and
 /// imports this backend's local `RecordCacheArray`.
+#[allow(unreachable_code)]
 fn get_session_dsm_handle() -> PgResult<dsm_handle> {
+    // TEMPORARY (2026-06-21): force the leader-only path by returning INVALID.
+    //
+    // The session-DSM substrate below (segment + shm_toc + DSA + shared
+    // record-typmod registry) is complete and correct, BUT the parallel
+    // WORKER-LAUNCH / TEARDOWN path is not yet finished: with a valid handle,
+    // `InitializeParallelDSM` proceeds past the `nworkers=0` fallback, registers
+    // dynamic bgworkers that either never fork or never exit cleanly, and the
+    // leader then HANGS in parallel-worker teardown (`WaitForParallelWorkersToExit`)
+    // — even after a statement_timeout cancel. That wedges every parallel-eligible
+    // query (verified: a forced parallel count/hash-join leaves 5 stuck backends
+    // and never returns). Returning INVALID restores the known-good leader-only
+    // behavior (correct results, no hang). Re-enable (delete this early return)
+    // ONLY together with the worker fork+teardown port, gated on a hang-free
+    // parallel smoke test. See memory: session-progress parallel section.
+    return Ok(DSM_HANDLE_INVALID);
+
     // If we already created a session-scope segment, return its handle.
+    #[allow(unreachable_code)]
     if let Some(seg_id) = CURRENT_SESSION.with(|s| s.borrow().as_ref().and_then(|x| x.segment)) {
         return Ok(dsm_segment_handle(seg_id));
     }
