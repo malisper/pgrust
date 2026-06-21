@@ -125,6 +125,7 @@ use backend_nodes_core::nodefuncs::expr_collation;
 use backend_nodes_core::bitmapset::bms_union;
 use backend_nodes_equalfuncs_seams::equal_expr as equal_expr_seam;
 use backend_optimizer_path_equivclass_seams as equivclass;
+use backend_optimizer_path_equivclass_ext_seams as equivclass_ext;
 use backend_optimizer_plan_createplan_seams as cp_seam;
 use backend_optimizer_util_joininfo::restrictinfo::{
     extract_actual_clauses, extract_actual_join_clauses, get_actual_clauses,
@@ -2707,6 +2708,69 @@ fn create_samplescan_plan<'mcx>(
     let scan_clauses = extract_actual_clauses(root, &scan_clauses, false);
     // Replace any outer-relation variables with nestloop params.
     let qpqual = build_scan_qual(mcx, root, &scan_clauses, has_param_info)?;
+
+    // ADJUST_CHILD_ATTRS of the TABLESAMPLE clause (pathnode.c:4465-4477,
+    // reparameterize_path_by_child). When this SampleScan path is parameterized
+    // by a partitioned outer relation, its lateral references in the tablesample
+    // args/repeatable name the topmost parent rel; translate them down to the
+    // child rel actually present in the path's required-outer set so the
+    // subsequent replace_nestloop_params matches the child nestloop params (and
+    // EXPLAIN shows the child alias, like PostgreSQL). C does this in-place on
+    // the shared child RTE during reparameterization; we do it on the cloned tsc
+    // at consumption, which has the same effect without threading a mutable
+    // planner-run store through the whole create_plan spine.
+    if has_param_info {
+        let req_outer = root
+            .path(best_path)
+            .base()
+            .param_info
+            .as_deref()
+            .map(|ppi| ppi.ppi_req_outer.clone())
+            .unwrap_or(None);
+        // For each "other member" (partition child) rel whose relids overlap the
+        // required-outer set, translate the tsc's expressions from that child's
+        // top parent down to the child (mirrors ADJUST_CHILD_ATTRS, which keys on
+        // child_rel + child_rel->top_parent).
+        let child_targets: Vec<(RelId, RelId)> = {
+            let mut v: Vec<(RelId, RelId)> = Vec::new();
+            for slot in root.simple_rel_array.iter() {
+                if let Some(rid) = *slot {
+                    if is_other_rel(root, rid) {
+                        if let Some(top_parent) = root.rel(rid).top_parent {
+                            if relnode::relids_overlap::call(&root.rel(rid).relids, &req_outer) {
+                                v.push((rid, top_parent));
+                            }
+                        }
+                    }
+                }
+            }
+            v
+        };
+        if !child_targets.is_empty() {
+            if let Some(args) = tsc.args.take() {
+                let mut new_args: PgVec<'mcx, Expr> = vec_with_capacity_in(mcx, args.len())?;
+                for e in args.into_iter() {
+                    let mut e = e;
+                    for &(child, top_parent) in &child_targets {
+                        e = equivclass_ext::adjust_appendrel_attrs_multilevel::call(
+                            root, e, child, Some(top_parent),
+                        )?;
+                    }
+                    new_args.push(e);
+                }
+                tsc.args = Some(new_args);
+            }
+            if let Some(rep) = tsc.repeatable.take() {
+                let mut e = *rep;
+                for &(child, top_parent) in &child_targets {
+                    e = equivclass_ext::adjust_appendrel_attrs_multilevel::call(
+                        root, e, child, Some(top_parent),
+                    )?;
+                }
+                tsc.repeatable = Some(alloc::boxed::Box::new(e));
+            }
+        }
+    }
 
     // The TableSampleClause args / repeatable could contain nestloop params, too.
     if has_param_info {

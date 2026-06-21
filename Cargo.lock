@@ -12816,6 +12816,7 @@ dependencies = [
  "backend-nodes-equalfuncs-seams",
  "backend-optimizer-path-costsize-seams",
  "backend-optimizer-path-equivclass",
+ "backend-optimizer-path-equivclass-ext-seams",
  "backend-optimizer-path-equivclass-seams",
  "backend-optimizer-plan-createplan-seams",
  "backend-optimizer-plan-init-subselect-ext-seams",
